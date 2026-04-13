@@ -310,6 +310,12 @@ impl RendezvousMediator {
                     Ok(register_pk_response::Result::UUID_MISMATCH) => {
                         self.handle_uuid_mismatch(sink).await?;
                     }
+                    Ok(register_pk_response::Result::LICENSE_MISMATCH) => {
+                        log::error!("Authentication failed for {}", self.host);
+                    }
+                    Ok(register_pk_response::Result::PEER_LIMIT_REACHED) => {
+                        log::error!("Peer record limit reached on {}", self.host);
+                    }
                     _ => {
                         log::error!("unknown RegisterPkResponse");
                     }
@@ -694,11 +700,13 @@ impl RendezvousMediator {
         let pk = Config::get_key_pair().1;
         let uuid = hbb_common::get_uuid();
         let id = Config::get_id();
+        let licence_key = crate::get_key(true).await;
         msg_out.set_register_pk(RegisterPk {
             id,
             uuid: uuid.into(),
             pk: pk.into(),
             no_register_device: Config::no_register_device(),
+            licence_key,
             ..Default::default()
         });
         socket.send(&msg_out).await?;
@@ -742,9 +750,11 @@ impl RendezvousMediator {
         );
         let mut msg_out = Message::new();
         let serial = Config::get_serial();
+        let licence_key = crate::get_key(true).await;
         msg_out.set_register_peer(RegisterPeer {
             id,
             serial,
+            licence_key,
             ..Default::default()
         });
         socket.send(&msg_out).await?;

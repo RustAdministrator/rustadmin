@@ -163,105 +163,131 @@ class NetworkStatusPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Obx(() {
-      final mode = stateGlobal.networkMode.value;
-      final label = stateGlobal.networkModeLabel.value;
-      final detail = stateGlobal.networkModeDetail.value;
-      final trustPhrase = stateGlobal.networkModeTrustPhrase.value;
-      final directEndpoints =
-          stateGlobal.networkModeDirectEndpoints.toList(growable: false);
-      final pairingRequired = stateGlobal.networkModePairingRequired.value;
-      final directAccessValue = directEndpoints.join(', ');
-      final color = colorForNetworkMode(mode);
-      final secondaryTextColor =
-          Theme.of(context).textTheme.bodySmall?.color?.withOpacity(0.75);
-      Widget buildStatusLine(
-        String label,
-        String value, {
-        bool copyable = false,
-        bool ellipsize = false,
-      }) {
-        return Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: Text(
-                '$label: $value',
-                maxLines: ellipsize ? 1 : null,
-                overflow:
-                    ellipsize ? TextOverflow.ellipsis : TextOverflow.visible,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      color: secondaryTextColor,
-                    ),
-              ),
-            ),
-            if (copyable)
-              IconButton(
-                onPressed: () => copyNetworkStatusValue(value),
-                icon: const Icon(Icons.copy_rounded, size: 15),
-                visualDensity: VisualDensity.compact,
-                splashRadius: 16,
-                constraints: const BoxConstraints(
-                  minWidth: 24,
-                  minHeight: 24,
-                ),
-                tooltip: 'Copy',
-                padding: EdgeInsets.zero,
-              ),
-          ],
-        );
-      }
+      return NetworkStatusPanelBody(
+        mode: stateGlobal.networkMode.value,
+        label: stateGlobal.networkModeLabel.value,
+        detail: stateGlobal.networkModeDetail.value,
+        trustPhrase: stateGlobal.networkModeTrustPhrase.value,
+        directEndpoints:
+            stateGlobal.networkModeDirectEndpoints.toList(growable: false),
+        pairingRequired: stateGlobal.networkModePairingRequired.value,
+        lanDiscoveryLabel: translate(stateGlobal.lanDiscoveryModeLabel.value),
+      );
+    });
+  }
+}
 
-      return Column(
+class NetworkStatusPanelBody extends StatelessWidget {
+  final String mode;
+  final String label;
+  final String detail;
+  final String trustPhrase;
+  final List<String> directEndpoints;
+  final bool pairingRequired;
+  final String lanDiscoveryLabel;
+
+  const NetworkStatusPanelBody({
+    super.key,
+    required this.mode,
+    required this.label,
+    required this.detail,
+    required this.trustPhrase,
+    required this.directEndpoints,
+    required this.pairingRequired,
+    required this.lanDiscoveryLabel,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final directAccessValue = directEndpoints.join(', ');
+    final color = colorForNetworkMode(mode);
+    final secondaryTextColor =
+        Theme.of(context).textTheme.bodySmall?.color?.withOpacity(0.75);
+
+    Widget buildStatusLine(
+      String label,
+      String value, {
+      bool copyable = false,
+      bool ellipsize = false,
+    }) {
+      return Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-            decoration: BoxDecoration(
-              color: color.withOpacity(0.14),
-              borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: color.withOpacity(0.4)),
-            ),
+          Expanded(
             child: Text(
-              label,
+              '$label: $value',
+              maxLines: ellipsize ? 1 : null,
+              overflow:
+                  ellipsize ? TextOverflow.ellipsis : TextOverflow.visible,
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: color,
-                    fontWeight: FontWeight.w700,
+                    color: secondaryTextColor,
                   ),
             ),
           ),
-          const SizedBox(height: 8),
-          buildStatusLine(
-            'LAN discovery',
-            translate(stateGlobal.lanDiscoveryModeLabel.value),
-          ),
-          if (trustPhrase.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            buildStatusLine('Trust phrase', trustPhrase, copyable: true),
-          ],
-          if (mode == 'local_only' || pairingRequired) ...[
-            const SizedBox(height: 4),
-            buildStatusLine(
-              'Pairing passphrase',
-              pairingRequired ? 'Required' : 'Disabled',
+          if (copyable)
+            IconButton(
+              onPressed: () => copyNetworkStatusValue(value),
+              icon: const Icon(Icons.copy_rounded, size: 15),
+              visualDensity: VisualDensity.compact,
+              splashRadius: 16,
+              constraints: const BoxConstraints(
+                minWidth: 24,
+                minHeight: 24,
+              ),
+              tooltip: 'Copy',
+              padding: EdgeInsets.zero,
             ),
-          ],
-          if (directAccessValue.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            buildStatusLine(
-              'Direct access',
-              directAccessValue,
-              copyable: true,
-            ),
-          ],
-          if (detail.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            buildStatusLine('Endpoint', detail, ellipsize: true),
-          ],
-          const SizedBox(height: 14),
-          Divider(height: 1),
         ],
       );
-    });
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: color.withOpacity(0.14),
+            borderRadius: BorderRadius.circular(6),
+            border: Border.all(color: color.withOpacity(0.4)),
+          ),
+          child: Text(
+            label,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: color,
+                  fontWeight: FontWeight.w700,
+                ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        buildStatusLine('LAN discovery', lanDiscoveryLabel),
+        if (trustPhrase.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          buildStatusLine('Trust phrase', trustPhrase, copyable: true),
+        ],
+        if (mode == 'local_only' || pairingRequired) ...[
+          const SizedBox(height: 4),
+          buildStatusLine(
+            'Pairing passphrase',
+            pairingRequired ? 'Required' : 'Disabled',
+          ),
+        ],
+        if (directAccessValue.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          buildStatusLine(
+            'Direct access',
+            directAccessValue,
+            copyable: true,
+          ),
+        ],
+        if (detail.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          buildStatusLine('Endpoint', detail, ellipsize: true),
+        ],
+        const SizedBox(height: 14),
+        const Divider(height: 1),
+      ],
+    );
   }
 }
 

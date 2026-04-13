@@ -1508,11 +1508,13 @@ async fn check_id(
     )
     .await
     {
+        let licence_key = crate::get_key(true).await;
         let mut msg_out = Message::new();
         msg_out.set_register_pk(RegisterPk {
             old_id,
             id,
             uuid,
+            licence_key,
             ..Default::default()
         });
         let mut ok = false;
@@ -1537,6 +1539,12 @@ async fn check_id(
                             }
                             Ok(register_pk_response::Result::SERVER_ERROR) => {
                                 return "Server error";
+                            }
+                            Ok(register_pk_response::Result::LICENSE_MISMATCH) => {
+                                return "Key mismatch";
+                            }
+                            Ok(register_pk_response::Result::PEER_LIMIT_REACHED) => {
+                                return "Peer record limit reached";
                             }
                             Ok(register_pk_response::Result::INVALID_ID_FORMAT) => {
                                 return INVALID_FORMAT;
@@ -1675,4 +1683,62 @@ pub fn is_remote_modify_enabled_by_control_permissions() -> Option<bool> {
     *IS_REMOTE_MODIFY_ENABLED_BY_CONTROL_PERMISSIONS
         .lock()
         .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hbb_common::{
+        config::{DiscoveryPeer, LanPeers, PeerConfig},
+        sodiumoxide::{base64, crypto::sign},
+    };
+    use std::{collections::HashMap, sync::Mutex};
+    use uuid::Uuid;
+
+    static TEST_UI_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_get_lan_peers_hides_identity_until_trusted() {
+        let _guard = TEST_UI_LOCK.lock().unwrap();
+        let peer_id = format!("ui-lan-peer-{}", Uuid::new_v4());
+        let saved_peers = LanPeers::load().peers;
+        let (sign_pk, _) = sign::gen_keypair();
+
+        LanPeers::store(&[DiscoveryPeer {
+            id: peer_id.clone(),
+            sign_pk: base64::encode(&sign_pk.0, base64::Variant::Original),
+            username: "alice".to_owned(),
+            hostname: "workstation".to_owned(),
+            platform: "Linux".to_owned(),
+            online: true,
+            ip_mac: HashMap::from([("192.168.10.5".to_owned(), "".to_owned())]),
+        }]);
+        PeerConfig::remove(&peer_id);
+
+        let peers = get_lan_peers();
+        assert_eq!(peers.len(), 1);
+        let peer = &peers[0];
+        assert_eq!(peer.get("trusted").map(String::as_str), Some("false"));
+        assert_eq!(peer.get("username").map(String::as_str), Some(""));
+        assert_eq!(peer.get("hostname").map(String::as_str), Some(""));
+        assert_eq!(peer.get("platform").map(String::as_str), Some(""));
+        let expected_endpoint =
+            format!("192.168.10.5:{}", crate::common::get_direct_access_port());
+        assert_eq!(
+            peer.get("endpoint").map(String::as_str),
+            Some(expected_endpoint.as_str())
+        );
+        assert!(!peer.get("trust_phrase").unwrap_or(&"".to_owned()).is_empty());
+
+        crate::common::pin_trusted_peer_signing_key(&peer_id, &peer_id, &sign_pk.0).unwrap();
+        let peers = get_lan_peers();
+        let peer = &peers[0];
+        assert_eq!(peer.get("trusted").map(String::as_str), Some("true"));
+        assert_eq!(peer.get("username").map(String::as_str), Some("alice"));
+        assert_eq!(peer.get("hostname").map(String::as_str), Some("workstation"));
+        assert_eq!(peer.get("platform").map(String::as_str), Some("Linux"));
+
+        LanPeers::store(&saved_peers);
+        PeerConfig::remove(&peer_id);
+    }
 }

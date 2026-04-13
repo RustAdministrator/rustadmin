@@ -1,0 +1,5 @@
+Name: libunwind
+Description: local pkg-config shim for RustDesk Linux builds
+Version: 1
+Libs: -lunwind
+Cflags:

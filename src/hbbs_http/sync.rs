@@ -327,3 +327,59 @@ fn handle_config_options(config_options: HashMap<String, String>) {
 pub fn is_pro() -> bool {
     PRO.lock().unwrap().clone()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{collections::HashMap, sync::Mutex};
+
+    static TEST_SYNC_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_is_protected_remote_option_includes_security_trust_settings() {
+        assert!(is_protected_remote_option(keys::OPTION_LAN_DISCOVERY_MODE));
+        assert!(is_protected_remote_option(
+            keys::OPTION_DIRECT_ACCESS_PAIRING_PASSPHRASE
+        ));
+        assert!(is_protected_remote_option(keys::OPTION_PEER_PAIRING_PASSPHRASE));
+        assert!(is_protected_remote_option(
+            keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST
+        ));
+    }
+
+    #[test]
+    fn test_handle_config_options_ignores_protected_remote_security_settings() {
+        let _guard = TEST_SYNC_LOCK.lock().unwrap();
+        let saved = Config::get_options();
+        Config::set_option(
+            keys::OPTION_LAN_DISCOVERY_MODE.to_owned(),
+            "trusted-only".to_owned(),
+        );
+        Config::set_option(
+            keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST.to_owned(),
+            "N".to_owned(),
+        );
+
+        handle_config_options(HashMap::from([
+            (
+                keys::OPTION_LAN_DISCOVERY_MODE.to_owned(),
+                "off".to_owned(),
+            ),
+            (
+                keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST.to_owned(),
+                "".to_owned(),
+            ),
+        ]));
+
+        assert_eq!(
+            Config::get_option(keys::OPTION_LAN_DISCOVERY_MODE),
+            "trusted-only"
+        );
+        assert_eq!(
+            Config::get_option(keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST),
+            "N"
+        );
+
+        Config::set_options(saved);
+    }
+}
