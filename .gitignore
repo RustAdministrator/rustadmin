@@ -4,6 +4,13 @@
 .idea
 .DS_Store
 .env
+# local build helpers
+.local/
+.cargo/config.local.toml
+pkgconfig/*.local.pc
+libs/magnum-opus/.cargo-ok
+libs/magnum-opus/.git/
+
 libsciter-gtk.so
 src/ui/inline.rs
 extractor
