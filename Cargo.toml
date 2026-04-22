@@ -41,6 +41,7 @@ unix-file-copy-paste = [
     "clipboard/unix-file-copy-paste",
 ]
 screencapturekit = ["cpal/screencapturekit"]
+flutter_rust_bridge = ["dep:flutter_rust_bridge"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -68,7 +69,7 @@ num_cpus = "1.15"
 bytes = { version = "1.4", features = ["serde"] }
 default-net = "0.14"
 wol-rs = "1.0"
-flutter_rust_bridge = { version = "=1.80", features = ["uuid"], optional = true}
+flutter_rust_bridge = { version = "=1.80.1", features = ["uuid"], optional = true }
 errno = "0.3"
 rdev = { git = "https://github.com/rustdesk-org/rdev" }
 url = { version = "2.3", features = ["serde"] }
@@ -214,6 +215,9 @@ libxdo-sys = { path = "libs/libxdo-sys-stub" }
 
 [patch."https://github.com/rustdesk-org/magnum-opus"]
 magnum-opus = { path = "libs/magnum-opus" }
+
+[patch."https://github.com/rustdesk-org/hwcodec"]
+hwcodec = { path = "../hwcodec" }
 
 [package.metadata.winres]
 LegalCopyright = "Copyright © 2025 Purslane Ltd. All rights reserved."

@@ -1,0 +1,809 @@
+[ +573 ms] Unable to locate an Android SDK.
+[   +9 ms] Artifact Instance of 'MaterialFonts' is not required, skipping update.
+[        ] Artifact Instance of 'GradleWrapper' is not required, skipping update.
+[        ] Artifact Instance of 'AndroidGenSnapshotArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'AndroidInternalBuildArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'IOSEngineArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'FlutterWebSdk' is not required, skipping update.
+[   +1 ms] Artifact Instance of 'LegacyCanvasKitRemover' is not required, skipping update.
+[        ] Artifact Instance of 'FlutterSdk' is not required, skipping update.
+[        ] Artifact Instance of 'WindowsEngineArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'MacOSEngineArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'LinuxEngineArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'LinuxFuchsiaSDKArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'MacOSFuchsiaSDKArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'FlutterRunnerSDKArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'FlutterRunnerDebugSymbols' is not required, skipping update.
+[        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'FontSubsetArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'PubDependencies' is not required, skipping update.
+[  +11 ms] Artifact Instance of 'AndroidGenSnapshotArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'AndroidInternalBuildArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'IOSEngineArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'FlutterWebSdk' is not required, skipping update.
+[        ] Artifact Instance of 'FlutterEngineStamp' is not required, skipping update.
+[        ] Artifact Instance of 'LegacyCanvasKitRemover' is not required, skipping update.
+[   +2 ms] Artifact Instance of 'WindowsEngineArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'MacOSEngineArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'LinuxEngineArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'LinuxFuchsiaSDKArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'MacOSFuchsiaSDKArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'FlutterRunnerSDKArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'FlutterRunnerDebugSymbols' is not required, skipping update.
+[  +47 ms] Artifact Instance of 'MaterialFonts' is not required, skipping update.
+[        ] Artifact Instance of 'GradleWrapper' is not required, skipping update.
+[        ] Artifact Instance of 'AndroidGenSnapshotArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'AndroidInternalBuildArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'IOSEngineArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'FlutterWebSdk' is not required, skipping update.
+[        ] Artifact Instance of 'FlutterEngineStamp' is not required, skipping update.
+[        ] Artifact Instance of 'LegacyCanvasKitRemover' is not required, skipping update.
+[        ] Artifact Instance of 'FlutterSdk' is not required, skipping update.
+[   +2 ms] Artifact Instance of 'MacOSEngineArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'LinuxEngineArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'LinuxFuchsiaSDKArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'MacOSFuchsiaSDKArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'FlutterRunnerSDKArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'FlutterRunnerDebugSymbols' is not required, skipping update.
+[        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'FontSubsetArtifacts' is not required, skipping update.
+[        ] Artifact Instance of 'PubDependencies' is not required, skipping update.
+[  +17 ms] Skipping pub get: version match.
+[ +144 ms] Found plugin window_size at F:\GH\flutter-pub-cache-win\git\flutter-desktop-embedding-eb3964990cf19629c89ff8cb4a37640c7b3d5601\plugins\window_size\
+[  +11 ms] Found plugin window_manager at F:\GH\flutter-pub-cache-win\git\window_manager-85789bfe6e4cfaf4ecc00c52857467fdb7f26879\
+[   +1 ms] Found plugin screen_retriever at F:\GH\flutter-pub-cache-win\hosted\pub.dev\screen_retriever-0.1.9\
+[   +5 ms] Found plugin wakelock_plus at F:\GH\flutter-pub-cache-win\hosted\pub.dev\wakelock_plus-1.1.4\
+[   +7 ms] Found plugin package_info_plus at F:\GH\flutter-pub-cache-win\hosted\pub.dev\package_info_plus-4.2.0\
+[   +8 ms] Found plugin url_launcher_ios at F:\GH\flutter-pub-cache-win\hosted\pub.dev\url_launcher_ios-6.4.1\
+[   +5 ms] Found plugin url_launcher at F:\GH\flutter-pub-cache-win\hosted\pub.dev\url_launcher-6.3.2\
+[   +1 ms] Found plugin url_launcher_windows at F:\GH\flutter-pub-cache-win\hosted\pub.dev\url_launcher_windows-3.1.5\
+[   +1 ms] Found plugin url_launcher_web at F:\GH\flutter-pub-cache-win\hosted\pub.dev\url_launcher_web-2.4.2\
+[   +1 ms] Found plugin url_launcher_macos at F:\GH\flutter-pub-cache-win\hosted\pub.dev\url_launcher_macos-3.2.5\
+[   +1 ms] Found plugin url_launcher_linux at F:\GH\flutter-pub-cache-win\hosted\pub.dev\url_launcher_linux-3.2.2\
+[   +1 ms] Found plugin url_launcher_android at F:\GH\flutter-pub-cache-win\hosted\pub.dev\url_launcher_android-6.3.29\
+[   +1 ms] Found plugin uni_links_desktop at F:\GH\flutter-pub-cache-win\hosted\pub.dev\uni_links_desktop-0.1.7\
+[   +2 ms] Found plugin uni_links at F:\GH\flutter-pub-cache-win\git\uni_links-f416118d843a7e9ed117c7bb7bdc2deda5a9e86f\uni_links\
+[   +1 ms] Found plugin uni_links_web at F:\GH\flutter-pub-cache-win\hosted\pub.dev\uni_links_web-0.1.0\
+[   +6 ms] Found plugin texture_rgba_renderer at F:\GH\flutter-pub-cache-win\git\flutter_texture_rgba_renderer-42797e0f03141dc2b585f76c64a13974508058b4\
+[   +1 ms] Found plugin sqflite at F:\GH\flutter-pub-cache-win\hosted\pub.dev\sqflite-2.2.0\
+[   +7 ms] Found plugin qr_code_scanner at F:\GH\flutter-pub-cache-win\hosted\pub.dev\qr_code_scanner-1.0.1\
+[   +6 ms] Found plugin path_provider at F:\GH\flutter-pub-cache-win\hosted\pub.dev\path_provider-2.1.5\
+[   +2 ms] Found plugin path_provider_windows at F:\GH\flutter-pub-cache-win\hosted\pub.dev\path_provider_windows-2.3.0\
+[   +4 ms] Found plugin path_provider_linux at F:\GH\flutter-pub-cache-win\hosted\pub.dev\path_provider_linux-2.2.1\
+[   +2 ms] Found plugin path_provider_foundation at F:\GH\flutter-pub-cache-win\hosted\pub.dev\path_provider_foundation-2.6.0\
+[   +6 ms] Found plugin path_provider_android at F:\GH\flutter-pub-cache-win\hosted\pub.dev\path_provider_android-2.3.1\
+[   +1 ms] Found plugin jni_flutter at F:\GH\flutter-pub-cache-win\hosted\pub.dev\jni_flutter-1.0.1\
+[   +1 ms] Found plugin jni at F:\GH\flutter-pub-cache-win\hosted\pub.dev\jni-1.0.0\
+[   +3 ms] Found plugin image_picker at F:\GH\flutter-pub-cache-win\hosted\pub.dev\image_picker-1.2.1\
+[   +1 ms] Found plugin image_picker_windows at F:\GH\flutter-pub-cache-win\hosted\pub.dev\image_picker_windows-0.2.2\
+[   +3 ms] Found plugin file_selector_windows at F:\GH\flutter-pub-cache-win\hosted\pub.dev\file_selector_windows-0.9.3+5\
+[   +2 ms] Found plugin image_picker_macos at F:\GH\flutter-pub-cache-win\hosted\pub.dev\image_picker_macos-0.2.2+1\
+[   +1 ms] Found plugin file_selector_macos at F:\GH\flutter-pub-cache-win\hosted\pub.dev\file_selector_macos-0.9.5\
+[   +1 ms] Found plugin image_picker_linux at F:\GH\flutter-pub-cache-win\hosted\pub.dev\image_picker_linux-0.2.2\
+[   +1 ms] Found plugin file_selector_linux at F:\GH\flutter-pub-cache-win\hosted\pub.dev\file_selector_linux-0.9.4\
+[   +1 ms] Found plugin image_picker_ios at F:\GH\flutter-pub-cache-win\hosted\pub.dev\image_picker_ios-0.8.13+6\
+[   +1 ms] Found plugin image_picker_for_web at F:\GH\flutter-pub-cache-win\hosted\pub.dev\image_picker_for_web-3.1.1\
+[   +1 ms] Found plugin image_picker_android at F:\GH\flutter-pub-cache-win\hosted\pub.dev\image_picker_android-0.8.13+16\
+[   +1 ms] Found plugin flutter_plugin_android_lifecycle at F:\GH\flutter-pub-cache-win\hosted\pub.dev\flutter_plugin_android_lifecycle-2.0.17\
+[  +16 ms] Found plugin flutter_keyboard_visibility at F:\GH\flutter-pub-cache-win\hosted\pub.dev\flutter_keyboard_visibility-5.4.1\
+[   +1 ms] Found plugin flutter_keyboard_visibility_windows at F:\GH\flutter-pub-cache-win\hosted\pub.dev\flutter_keyboard_visibility_windows-1.0.0\
+[   +2 ms] Found plugin flutter_keyboard_visibility_web at F:\GH\flutter-pub-cache-win\hosted\pub.dev\flutter_keyboard_visibility_web-2.0.0\
+[   +1 ms] Found plugin flutter_keyboard_visibility_macos at F:\GH\flutter-pub-cache-win\hosted\pub.dev\flutter_keyboard_visibility_macos-1.0.0\
+[   +1 ms] Found plugin flutter_keyboard_visibility_linux at F:\GH\flutter-pub-cache-win\hosted\pub.dev\flutter_keyboard_visibility_linux-1.0.0\
+[   +1 ms] Found plugin flutter_gpu_texture_renderer at F:\GH\flutter-pub-cache-win\git\flutter_gpu_texture_renderer-08a471bb8ceccdd50483c81cdfa8b81b07b14b87\
+[   +1 ms] Found plugin flutter_custom_cursor at F:\GH\flutter-pub-cache-win\hosted\pub.dev\flutter_custom_cursor-0.0.4\
+[   +5 ms] Found plugin file_picker at F:\GH\flutter-pub-cache-win\hosted\pub.dev\file_picker-10.3.10\
+[   +1 ms] Found plugin external_path at F:\GH\flutter-pub-cache-win\hosted\pub.dev\external_path-1.0.3\
+[   +5 ms] Found plugin device_info_plus at F:\GH\flutter-pub-cache-win\hosted\pub.dev\device_info_plus-9.1.2\
+[   +2 ms] Found plugin desktop_multi_window at F:\GH\flutter-pub-cache-win\git\rustdesk_desktop_multi_window-b47e8385e5a75d38319ad706a64b0ead3108b093\
+[   +1 ms] Found plugin desktop_drop at F:\GH\flutter-pub-cache-win\hosted\pub.dev\desktop_drop-0.4.4\
+[   +3 ms] Found plugin video_player at F:\GH\flutter-pub-cache-win\hosted\pub.dev\video_player-2.11.1\
+[   +1 ms] Found plugin video_player_web at F:\GH\flutter-pub-cache-win\hosted\pub.dev\video_player_web-2.4.0\
+[   +2 ms] Found plugin video_player_avfoundation at F:\GH\flutter-pub-cache-win\hosted\pub.dev\video_player_avfoundation-2.9.4\
+[   +1 ms] Found plugin video_player_android at F:\GH\flutter-pub-cache-win\hosted\pub.dev\video_player_android-2.9.5\
+[ +117 ms] Found plugin window_size at F:\GH\flutter-pub-cache-win\git\flutter-desktop-embedding-eb3964990cf19629c89ff8cb4a37640c7b3d5601\plugins\window_size\
+[   +1 ms] Found plugin window_manager at F:\GH\flutter-pub-cache-win\git\window_manager-85789bfe6e4cfaf4ecc00c52857467fdb7f26879\
+[   +1 ms] Found plugin screen_retriever at F:\GH\flutter-pub-cache-win\hosted\pub.dev\screen_retriever-0.1.9\
+[   +2 ms] Found plugin wakelock_plus at F:\GH\flutter-pub-cache-win\hosted\pub.dev\wakelock_plus-1.1.4\
+[   +2 ms] Found plugin package_info_plus at F:\GH\flutter-pub-cache-win\hosted\pub.dev\package_info_plus-4.2.0\
+[   +5 ms] Found plugin url_launcher_ios at F:\GH\flutter-pub-cache-win\hosted\pub.dev\url_launcher_ios-6.4.1\
+[   +2 ms] Found plugin url_launcher at F:\GH\flutter-pub-cache-win\hosted\pub.dev\url_launcher-6.3.2\
+[   +1 ms] Found plugin url_launcher_windows at F:\GH\flutter-pub-cache-win\hosted\pub.dev\url_launcher_windows-3.1.5\
+[   +1 ms] Found plugin url_launcher_web at F:\GH\flutter-pub-cache-win\hosted\pub.dev\url_launcher_web-2.4.2\
+[        ] Found plugin url_launcher_macos at F:\GH\flutter-pub-cache-win\hosted\pub.dev\url_launcher_macos-3.2.5\
+[   +1 ms] Found plugin url_launcher_linux at F:\GH\flutter-pub-cache-win\hosted\pub.dev\url_launcher_linux-3.2.2\
+[   +1 ms] Found plugin url_launcher_android at F:\GH\flutter-pub-cache-win\hosted\pub.dev\url_launcher_android-6.3.29\
+[   +1 ms] Found plugin uni_links_desktop at F:\GH\flutter-pub-cache-win\hosted\pub.dev\uni_links_desktop-0.1.7\
+[   +2 ms] Found plugin uni_links at F:\GH\flutter-pub-cache-win\git\uni_links-f416118d843a7e9ed117c7bb7bdc2deda5a9e86f\uni_links\
+[   +1 ms] Found plugin uni_links_web at F:\GH\flutter-pub-cache-win\hosted\pub.dev\uni_links_web-0.1.0\
+[   +3 ms] Found plugin texture_rgba_renderer at F:\GH\flutter-pub-cache-win\git\flutter_texture_rgba_renderer-42797e0f03141dc2b585f76c64a13974508058b4\
+[   +1 ms] Found plugin sqflite at F:\GH\flutter-pub-cache-win\hosted\pub.dev\sqflite-2.2.0\
+[   +5 ms] Found plugin qr_code_scanner at F:\GH\flutter-pub-cache-win\hosted\pub.dev\qr_code_scanner-1.0.1\
+[   +4 ms] Found plugin path_provider at F:\GH\flutter-pub-cache-win\hosted\pub.dev\path_provider-2.1.5\
+[        ] Found plugin path_provider_windows at F:\GH\flutter-pub-cache-win\hosted\pub.dev\path_provider_windows-2.3.0\
+[   +2 ms] Found plugin path_provider_linux at F:\GH\flutter-pub-cache-win\hosted\pub.dev\path_provider_linux-2.2.1\
+[   +1 ms] Found plugin path_provider_foundation at F:\GH\flutter-pub-cache-win\hosted\pub.dev\path_provider_foundation-2.6.0\
+[   +4 ms] Found plugin path_provider_android at F:\GH\flutter-pub-cache-win\hosted\pub.dev\path_provider_android-2.3.1\
+[        ] Found plugin jni_flutter at F:\GH\flutter-pub-cache-win\hosted\pub.dev\jni_flutter-1.0.1\
+[        ] Found plugin jni at F:\GH\flutter-pub-cache-win\hosted\pub.dev\jni-1.0.0\
+[   +1 ms] Found plugin image_picker at F:\GH\flutter-pub-cache-win\hosted\pub.dev\image_picker-1.2.1\
+[   +1 ms] Found plugin image_picker_windows at F:\GH\flutter-pub-cache-win\hosted\pub.dev\image_picker_windows-0.2.2\
+[   +2 ms] Found plugin file_selector_windows at F:\GH\flutter-pub-cache-win\hosted\pub.dev\file_selector_windows-0.9.3+5\
+[   +1 ms] Found plugin image_picker_macos at F:\GH\flutter-pub-cache-win\hosted\pub.dev\image_picker_macos-0.2.2+1\
+[        ] Found plugin file_selector_macos at F:\GH\flutter-pub-cache-win\hosted\pub.dev\file_selector_macos-0.9.5\
+[   +1 ms] Found plugin image_picker_linux at F:\GH\flutter-pub-cache-win\hosted\pub.dev\image_picker_linux-0.2.2\
+[        ] Found plugin file_selector_linux at F:\GH\flutter-pub-cache-win\hosted\pub.dev\file_selector_linux-0.9.4\
+[        ] Found plugin image_picker_ios at F:\GH\flutter-pub-cache-win\hosted\pub.dev\image_picker_ios-0.8.13+6\
+[        ] Found plugin image_picker_for_web at F:\GH\flutter-pub-cache-win\hosted\pub.dev\image_picker_for_web-3.1.1\
+[   +1 ms] Found plugin image_picker_android at F:\GH\flutter-pub-cache-win\hosted\pub.dev\image_picker_android-0.8.13+16\
+[        ] Found plugin flutter_plugin_android_lifecycle at F:\GH\flutter-pub-cache-win\hosted\pub.dev\flutter_plugin_android_lifecycle-2.0.17\
+[  +12 ms] Found plugin flutter_keyboard_visibility at F:\GH\flutter-pub-cache-win\hosted\pub.dev\flutter_keyboard_visibility-5.4.1\
+[   +1 ms] Found plugin flutter_keyboard_visibility_windows at F:\GH\flutter-pub-cache-win\hosted\pub.dev\flutter_keyboard_visibility_windows-1.0.0\
+[   +1 ms] Found plugin flutter_keyboard_visibility_web at F:\GH\flutter-pub-cache-win\hosted\pub.dev\flutter_keyboard_visibility_web-2.0.0\
+[   +1 ms] Found plugin flutter_keyboard_visibility_macos at F:\GH\flutter-pub-cache-win\hosted\pub.dev\flutter_keyboard_visibility_macos-1.0.0\
+[        ] Found plugin flutter_keyboard_visibility_linux at F:\GH\flutter-pub-cache-win\hosted\pub.dev\flutter_keyboard_visibility_linux-1.0.0\
+[   +1 ms] Found plugin flutter_gpu_texture_renderer at F:\GH\flutter-pub-cache-win\git\flutter_gpu_texture_renderer-08a471bb8ceccdd50483c81cdfa8b81b07b14b87\
+[        ] Found plugin flutter_custom_cursor at F:\GH\flutter-pub-cache-win\hosted\pub.dev\flutter_custom_cursor-0.0.4\
+[   +4 ms] Found plugin file_picker at F:\GH\flutter-pub-cache-win\hosted\pub.dev\file_picker-10.3.10\
+[   +1 ms] Found plugin external_path at F:\GH\flutter-pub-cache-win\hosted\pub.dev\external_path-1.0.3\
+[   +5 ms] Found plugin device_info_plus at F:\GH\flutter-pub-cache-win\hosted\pub.dev\device_info_plus-9.1.2\
+[   +1 ms] Found plugin desktop_multi_window at F:\GH\flutter-pub-cache-win\git\rustdesk_desktop_multi_window-b47e8385e5a75d38319ad706a64b0ead3108b093\
+[   +1 ms] Found plugin desktop_drop at F:\GH\flutter-pub-cache-win\hosted\pub.dev\desktop_drop-0.4.4\
+[   +3 ms] Found plugin video_player at F:\GH\flutter-pub-cache-win\hosted\pub.dev\video_player-2.11.1\
+[        ] Found plugin video_player_web at F:\GH\flutter-pub-cache-win\hosted\pub.dev\video_player_web-2.4.0\
+[   +1 ms] Found plugin video_player_avfoundation at F:\GH\flutter-pub-cache-win\hosted\pub.dev\video_player_avfoundation-2.9.4\
+[        ] Found plugin video_player_android at F:\GH\flutter-pub-cache-win\hosted\pub.dev\video_player_android-2.9.5\
+[  +24 ms] Generating F:\GH\rustdesk\rustdesk-client\flutter\android\app\src\main\java\io\flutter\plugins\GeneratedPluginRegistrant.java
+[  +12 ms] Skipping generating GeneratedPluginRegistrant.java because it is up-to-date.
+[   +5 ms] Skipping generating generated_plugin_registrant.h because it is up-to-date.
+[   +1 ms] Skipping generating generated_plugin_registrant.cc because it is up-to-date.
+[   +1 ms] Skipping generating generated_plugins.cmake because it is up-to-date.
+[   +1 ms] Skipping generating generated_plugin_registrant.h because it is up-to-date.
+[   +1 ms] Skipping generating generated_plugin_registrant.cc because it is up-to-date.
+[   +1 ms] Skipping generating generated_plugins.cmake because it is up-to-date.
+[   +2 ms] Skipping generating GeneratedPluginRegistrant.h because it is up-to-date.
+[   +1 ms] Skipping generating GeneratedPluginRegistrant.m because it is up-to-date.
+[   +1 ms] Skipping generating GeneratedPluginRegistrant.swift because it is up-to-date.
+[  +45 ms] executing: C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe -format json -products * -utf8 -latest -version 16 -requires Microsoft.VisualStudio.Workload.NativeDesktop Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.VC.CMake.Project
+[ +163 ms] Exit code 0 from: C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe -format json -products * -utf8 -latest -version 16 -requires Microsoft.VisualStudio.Workload.NativeDesktop Microsoft.VisualStudio.Component.VC.Tools.x86.x64 Microsoft.VisualStudio.Component.VC.CMake.Project
+[        ] [
+             {
+               "instanceId": "3b7fe1ae",
+               "installDate": "2022-06-02T02:31:41Z",
+               "installationName": "VisualStudio/17.14.30+37203.1",
+               "installationPath": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community",
+               "installationVersion": "17.14.37203.1",
+               "productId": "Microsoft.VisualStudio.Product.Community",
+               "productPath": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\Common7\\IDE\\devenv.exe",
+               "state": 4294967295,
+               "isComplete": true,
+               "isLaunchable": true,
+               "isPrerelease": false,
+               "isRebootRequired": false,
+               "displayName": "Visual Studio Community 2022",
+               "description": "蟄ｦ逕溘√が繝ｼ繝励Φ繧ｽ繝ｼ繧ｹ縺ｮ蜈ｱ蜷御ｽ懈・閠・∝倶ｺｺ逕ｨ縺ｮ辟｡譁吶〒蠑ｷ蜉帙↑ IDE",
+               "channelId": "VisualStudio.17.Release",
+               "channelUri": "https://aka.ms/vs/17/release/channel",
+               "enginePath": "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\resources\\app\\ServiceHub\\Services\\Microsoft.VisualStudio.Setup.Service",
+               "installedChannelId": "VisualStudio.17.Release",
+               "installedChannelUri": "https://aka.ms/vs/17/release/channel",
+               "releaseNotes": "https://docs.microsoft.com/en-us/visualstudio/releases/2022/release-notes-v17.14#17.14.30",
+               "resolvedInstallationPath": "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community",
+               "thirdPartyNotices": "https://go.microsoft.com/fwlink/?LinkId=661288",
+               "updateDate": "2026-04-15T07:02:37.0481339Z",
+               "catalog": {
+                 "buildBranch": "d17.14",
+                 "buildVersion": "17.14.37203.1",
+                 "id": "VisualStudio/17.14.30+37203.1",
+                 "localBuild": "build-lab",
+                 "manifestName": "VisualStudio",
+                 "manifestType": "installer",
+                 "productDisplayVersion": "17.14.30",
+                 "productLine": "Dev17",
+                 "productLineVersion": "2022",
+                 "productMilestone": "RTW",
+                 "productMilestoneIsPreRelease": "False",
+                 "productName": "Visual Studio",
+                 "productPatchVersion": "30",
+                 "productPreReleaseMilestoneSuffix": "1.0",
+                 "productSemanticVersion": "17.14.30+37203.1",
+                 "requiredEngineVersion": "3.14.2086.54749"
+               },
+               "properties": {
+                 "appLocalWPF": "false",
+                 "campaignId": "2030:b685ae8c-9b44-45af-bd21-4348dfd61a06",
+                 "channelManifestId": "VisualStudio.17.Release/17.14.30+37203.1",
+                 "nickname": "",
+                 "setupEngineFilePath": "C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\setup.exe"
+               }
+             }
+           ]
+[   +5 ms] Building Windows application...
+[   +2 ms] executing: C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe -S F:\GH\rustdesk\rustdesk-client\flutter\windows -B F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64 -G Visual Studio 17 2022 -A x64 -DFLUTTER_TARGET_PLATFORM=windows-x64
+[ +171 ms] -- Selecting Windows SDK version 10.0.26100.0 to target Windows 10.0.26200.
+[ +118 ms] -- rustdesk lib build type: $<IF:$<CONFIG:Debug>,debug,release>
+[        ] -- rustdesk lib path: F:/GH/rustdesk-target-win/$<IF:$<CONFIG:Debug>,debug,release>/librustdesk.dll
+[        ] -- Configuring done (0.1s)
+[ +654 ms] -- Generating done (0.6s)
+[   +5 ms] -- Build files have been written to: F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64
+[  +15 ms] executing: C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe --build F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64 --config Release --target INSTALL --verbose
+[ +232 ms] Change Dir: 'F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64'
+[        ] Run Build Command(s): "C:/Program Files/Microsoft Visual Studio/2022/Community/MSBuild/Current/Bin/amd64/MSBuild.exe" INSTALL.vcxproj /p:Configuration=Release /p:Platform=x64 /p:VisualStudioVersion=17.0 /v:n
+[ +272 ms] MSBuild version 17.14.40+3e7442088 for .NET Framework
+[ +364 ms] Build started 2026/04/21 18:01:32.
+[+1303 ms] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj" on node 1 (default targets).
+[        ] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj" (1) is building "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\ZERO_CHECK.vcxproj" (2) on node 1 (default targets).
+[        ] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[  +19 ms] InitializeBuildStatus:
+[        ]   Creating "x64\Release\ZERO_CHECK\ZERO_CHECK.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+[   +1 ms]   Touching "x64\Release\ZERO_CHECK\ZERO_CHECK.tlog\unsuccessfulbuild".
+[  +70 ms] CustomBuild:
+[        ]   All outputs are up-to-date.
+[ +202 ms]   1>Checking Build System
+[ +241 ms] FinalizeBuildStatus:
+[        ]   Deleting file "x64\Release\ZERO_CHECK\ZERO_CHECK.tlog\unsuccessfulbuild".
+[        ]   Touching "x64\Release\ZERO_CHECK\ZERO_CHECK.tlog\ZERO_CHECK.lastbuildstate".
+[  +10 ms] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\ZERO_CHECK.vcxproj" (default targets).
+[ +146 ms] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj" (1) is building "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\ALL_BUILD.vcxproj" (3) on node 1 (default targets).
+[        ] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\ALL_BUILD.vcxproj" (3) is building "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\desktop_drop\desktop_drop_plugin.vcxproj" (4) on node 1 (default targets).
+[        ] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\desktop_drop\desktop_drop_plugin.vcxproj" (4) is building "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\flutter\flutter_assemble.vcxproj" (5) on node 1 (default targets).
+[        ] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[   +1 ms] InitializeBuildStatus:
+[        ]   Creating "x64\Release\flutter_assemble\flutter_assemble.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+[        ]   Touching "x64\Release\flutter_assemble\flutter_assemble.tlog\unsuccessfulbuild".
+[   +8 ms] CustomBuild:
+[        ]   "The build of 'F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\CMakeFiles\b81b6c19428f552dbff2a13679af0679\flutter_assemble.rule' depends on 'F:\GH\RUSTDESK\RUSTDESK-CLIENT\FLUTTER\WINDOWS\FLUTTER\EPHEMERAL\FLUTTER_WINDOWS.DLL' which is produced by the build of 'F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\CMakeFiles\36148bcd931b0112bb79d34d58951b1e\flutter_windows.dll.rule'. The items cannot be built in parallel."
+[ +123 ms]   Generating F:/GH/rustdesk/rustdesk-client/flutter/windows/flutter/ephemeral/flutter_windows.dll, F:/GH/rustdesk/rustdesk-client/flutter/windows/flutter/ephemeral/flutter_export.h, F:/GH/rustdesk/rustdesk-client/flutter/windows/flutter/ephemeral/flutter_windows.h, F:/GH/rustdesk/rustdesk-client/flutter/windows/flutter/ephemeral/flutter_messenger.h, F:/GH/rustdesk/rustdesk-client/flutter/windows/flutter/ephemeral/flutter_plugin_registrar.h, F:/GH/rustdesk/rustdesk-client/flutter/windows/flutter/ephemeral/flutter_texture_registrar.h, F:/GH/rustdesk/rustdesk-client/flutter/windows/flutter/ephemeral/cpp_client_wrapper/core_implementations.cc, F:/GH/rustdesk/rustdesk-client/flutter/windows/flutter/ephemeral/cpp_client_wrapper/standard_codec.cc, F:/GH/rustdesk/rustdesk-client/flutter/windows/flutter/ephemeral/cpp_client_wrapper/plugin_registrar.cc, F:/GH/rustdesk/rustdesk-client/flutter/windows/flutter/ephemeral/cpp_client_wrapper/flutter_engine.cc, F:/GH/rustdesk/rustdesk-client/flutter/windows/flutter/ephemeral/cpp_client_wrapper/flutter_view_controller.cc, _phony_
+[+3455 ms]   [ +646 ms] Unable to locate an Android SDK.
+[   +2 ms]   [  +10 ms] Artifact Instance of 'MaterialFonts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'GradleWrapper' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'AndroidGenSnapshotArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'AndroidInternalBuildArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'IOSEngineArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'FlutterWebSdk' is not required, skipping update.
+[        ]   [   +1 ms] Artifact Instance of 'LegacyCanvasKitRemover' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'FlutterSdk' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'WindowsEngineArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'MacOSEngineArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'LinuxEngineArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'LinuxFuchsiaSDKArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'MacOSFuchsiaSDKArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'FlutterRunnerSDKArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'FlutterRunnerDebugSymbols' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'FontSubsetArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'PubDependencies' is not required, skipping update.
+[  +10 ms]   [  +10 ms] Artifact Instance of 'AndroidGenSnapshotArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'AndroidInternalBuildArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'IOSEngineArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'FlutterWebSdk' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'FlutterEngineStamp' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'LegacyCanvasKitRemover' is not required, skipping update.
+[        ]   [   +2 ms] Artifact Instance of 'WindowsEngineArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'MacOSEngineArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'LinuxEngineArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'LinuxFuchsiaSDKArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'MacOSFuchsiaSDKArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'FlutterRunnerSDKArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'FlutterRunnerDebugSymbols' is not required, skipping update.
+[  +68 ms]   [  +67 ms] Artifact Instance of 'MaterialFonts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'GradleWrapper' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'AndroidGenSnapshotArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'AndroidInternalBuildArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'IOSEngineArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'FlutterWebSdk' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'FlutterEngineStamp' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'LegacyCanvasKitRemover' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'FlutterSdk' is not required, skipping update.
+[   +1 ms]   [   +2 ms] Artifact Instance of 'MacOSEngineArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'LinuxEngineArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'LinuxFuchsiaSDKArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'MacOSFuchsiaSDKArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'FlutterRunnerSDKArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'FlutterRunnerDebugSymbols' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'IosUsbArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'FontSubsetArtifacts' is not required, skipping update.
+[        ]   [        ] Artifact Instance of 'PubDependencies' is not required, skipping update.
+[  +15 ms]   [  +15 ms] Initializing file store
+[  +25 ms]   [  +25 ms] Done initializing file store
+[ +109 ms]   [ +109 ms] Skipping target: dart_build
+[   +1 ms]   [   +2 ms] Skipping target: gen_dart_plugin_registrant
+[+2794 ms]   [+2794 ms] Skipping target: unpack_windows
+[        ]   [   +1 ms] Skipping target: install_code_assets
+[        ]   [        ] Skipping target: gen_localizations
+[+1845 ms]   [+1845 ms] Skipping target: kernel_snapshot_program
+[  +87 ms]   [  +86 ms] Skipping target: aot_elf_release
+[  +76 ms]   [  +76 ms] Skipping target: windows_aot_bundle
+[  +21 ms]   [  +21 ms] invalidated build due to missing files: F:\GH\rustdesk\rustdesk-client\flutter\DOES_NOT_EXIST_RERUN_FOR_WILDCARD949171692
+[ +160 ms]   [ +159 ms] release_bundle_windows-x64_assets: Starting due to {InvalidatedReasonKind.inputMissing: The following inputs were missing: F:\GH\rustdesk\rustdesk-client\flutter\DOES_NOT_EXIST_RERUN_FOR_WILDCARD949171692}
+[ +380 ms]   [ +379 ms] Manifest contained wildcard assets. Inserting missing file into build graph to force rerun. for more information see #56466.
+[  +70 ms]   [  +71 ms] shaderc command: [F:\GH\flutter-win\bin\cache\artifacts\engine\windows-x64\impellerc.exe, --sksl, --runtime-stage-gles, --runtime-stage-gles3, --runtime-stage-vulkan, --iplr, --sl=F:\GH\rustdesk\rustdesk-client\flutter\build\flutter_assets\shaders/ink_sparkle.frag, --spirv=F:\GH\rustdesk\rustdesk-client\flutter\build\flutter_assets\shaders/ink_sparkle.frag.spirv, --input=F:\GH\flutter-win\packages\flutter\lib\src\material\shaders\ink_sparkle.frag, --input-type=frag, --include=F:\GH\flutter-win\packages\flutter\lib\src\material\shaders, --include=F:\GH\flutter-win\bin\cache\artifacts\engine\windows-x64\shader_lib]
+[   +2 ms]   [   +2 ms] shaderc command: [F:\GH\flutter-win\bin\cache\artifacts\engine\windows-x64\impellerc.exe, --sksl, --runtime-stage-gles, --runtime-stage-gles3, --runtime-stage-vulkan, --iplr, --sl=F:\GH\rustdesk\rustdesk-client\flutter\build\flutter_assets\shaders/stretch_effect.frag, --spirv=F:\GH\rustdesk\rustdesk-client\flutter\build\flutter_assets\shaders/stretch_effect.frag.spirv, --input=F:\GH\flutter-win\packages\flutter\lib\src\material\shaders\stretch_effect.frag, --input-type=frag, --include=F:\GH\flutter-win\packages\flutter\lib\src\material\shaders, --include=F:\GH\flutter-win\bin\cache\artifacts\engine\windows-x64\shader_lib]
+[+1005 ms]   [+1005 ms] release_bundle_windows-x64_assets: Complete
+[  +50 ms]   [  +51 ms] Persisting file store
+[  +22 ms]   [  +22 ms] Done persisting file store
+[  +37 ms]   [  +37 ms] build succeeded.
+[        ]   [        ] "flutter assemble" took 6,793ms.
+[   +6 ms]   [   +6 ms] Running 1 shutdown hook
+[        ]   [        ] Shutdown hooks complete
+[        ]   [        ] exiting with code 0
+[ +126 ms] FinalizeBuildStatus:
+[        ]   Deleting file "x64\Release\flutter_assemble\flutter_assemble.tlog\unsuccessfulbuild".
+[        ]   Touching "x64\Release\flutter_assemble\flutter_assemble.tlog\flutter_assemble.lastbuildstate".
+[   +1 ms] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\flutter\flutter_assemble.vcxproj" (default targets).
+[  +34 ms] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\desktop_drop\desktop_drop_plugin.vcxproj" (4) is building "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\flutter\flutter_wrapper_plugin.vcxproj" (6) on node 1 (default targets).
+[        ] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[   +2 ms] InitializeBuildStatus:
+[        ]   Creating "flutter_wrapper_plugin.dir\Release\flutter_.F7051B83.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+[        ]   Touching "flutter_wrapper_plugin.dir\Release\flutter_.F7051B83.tlog\unsuccessfulbuild".
+[   +2 ms] CustomBuild:
+[        ]   All outputs are up-to-date.
+[  +21 ms] VcpkgTripletSelection:
+[        ]   Using triplet "x64-windows" from "F:\VCPKG\installed\x64-windows\"
+[        ]   Using normalized configuration "Release"
+[        ] VcpkgCheckManifestRoot:
+[        ]   The vcpkg manifest was disabled, but we found a manifest file in F:\GH\rustdesk\rustdesk-client\. You may want to enable vcpkg manifests in your properties page or pass /p:VcpkgEnableManifest=true to the msbuild invocation.
+[  +57 ms] ClCompile:
+[        ]   All outputs are up-to-date.
+[  +36 ms] Lib:
+[        ]   All outputs are up-to-date.
+[   +2 ms]   flutter_wrapper_plugin.vcxproj -> F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\flutter\Release\flutter_wrapper_plugin.lib
+[  +22 ms] FinalizeBuildStatus:
+[        ]   Deleting file "flutter_wrapper_plugin.dir\Release\flutter_.F7051B83.tlog\unsuccessfulbuild".
+[        ]   Touching "flutter_wrapper_plugin.dir\Release\flutter_.F7051B83.tlog\flutter_wrapper_plugin.lastbuildstate".
+[   +1 ms] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\flutter\flutter_wrapper_plugin.vcxproj" (default targets).
+[  +12 ms] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[   +2 ms] InitializeBuildStatus:
+[        ]   Creating "desktop_drop_plugin.dir\Release\desktop_.3582499D.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+[        ]   Touching "desktop_drop_plugin.dir\Release\desktop_.3582499D.tlog\unsuccessfulbuild".
+[   +3 ms] CustomBuild:
+[        ]   All outputs are up-to-date.
+[   +5 ms] VcpkgTripletSelection:
+[        ]   Using triplet "x64-windows" from "F:\VCPKG\installed\x64-windows\"
+[        ]   Using normalized configuration "Release"
+[        ] VcpkgCheckManifestRoot:
+[        ]   The vcpkg manifest was disabled, but we found a manifest file in F:\GH\rustdesk\rustdesk-client\. You may want to enable vcpkg manifests in your properties page or pass /p:VcpkgEnableManifest=true to the msbuild invocation.
+[   +6 ms] ClCompile:
+[        ]   All outputs are up-to-date.
+[  +31 ms] Link:
+[        ]   All outputs are up-to-date.
+[   +3 ms]   desktop_drop_plugin.vcxproj -> F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\desktop_drop\Release\desktop_drop_plugin.dll
+[  +20 ms] FinalizeBuildStatus:
+[        ]   Deleting file "desktop_drop_plugin.dir\Release\desktop_.3582499D.tlog\unsuccessfulbuild".
+[        ]   Touching "desktop_drop_plugin.dir\Release\desktop_.3582499D.tlog\desktop_drop_plugin.lastbuildstate".
+[   +1 ms] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\desktop_drop\desktop_drop_plugin.vcxproj" (default targets).
+[  +65 ms] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\ALL_BUILD.vcxproj" (3) is building "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\desktop_multi_window\desktop_multi_window_plugin.vcxproj" (7) on node 1 (default targets).
+[        ] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\desktop_multi_window\desktop_multi_window_plugin.vcxproj" (7) is building "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\flutter\flutter_wrapper_app.vcxproj" (8) on node 1 (default targets).
+[        ] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[   +2 ms] InitializeBuildStatus:
+[        ]   Creating "flutter_wrapper_app.dir\Release\flutter_.27116D44.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+[        ]   Touching "flutter_wrapper_app.dir\Release\flutter_.27116D44.tlog\unsuccessfulbuild".
+[   +3 ms] CustomBuild:
+[        ]   All outputs are up-to-date.
+[   +4 ms] VcpkgTripletSelection:
+[        ]   Using triplet "x64-windows" from "F:\VCPKG\installed\x64-windows\"
+[        ]   Using normalized configuration "Release"
+[        ] VcpkgCheckManifestRoot:
+[        ]   The vcpkg manifest was disabled, but we found a manifest file in F:\GH\rustdesk\rustdesk-client\. You may want to enable vcpkg manifests in your properties page or pass /p:VcpkgEnableManifest=true to the msbuild invocation.
+[   +7 ms] ClCompile:
+[        ]   All outputs are up-to-date.
+[   +5 ms] Lib:
+[        ]   All outputs are up-to-date.
+[        ]   flutter_wrapper_app.vcxproj -> F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\flutter\Release\flutter_wrapper_app.lib
+[  +10 ms] FinalizeBuildStatus:
+[        ]   Deleting file "flutter_wrapper_app.dir\Release\flutter_.27116D44.tlog\unsuccessfulbuild".
+[        ]   Touching "flutter_wrapper_app.dir\Release\flutter_.27116D44.tlog\flutter_wrapper_app.lastbuildstate".
+[   +1 ms] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\flutter\flutter_wrapper_app.vcxproj" (default targets).
+[  +36 ms] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\desktop_multi_window\desktop_multi_window_plugin.vcxproj" (7) is building "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\texture_rgba_renderer\texture_rgba_renderer_plugin.vcxproj" (9) on node 1 (default targets).
+[        ] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[   +2 ms] InitializeBuildStatus:
+[        ]   Creating "texture_rgba_renderer_plugin.dir\Release\texture_.46E792C3.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+[        ]   Touching "texture_rgba_renderer_plugin.dir\Release\texture_.46E792C3.tlog\unsuccessfulbuild".
+[   +3 ms] CustomBuild:
+[        ]   All outputs are up-to-date.
+[   +4 ms] VcpkgTripletSelection:
+[        ]   Using triplet "x64-windows" from "F:\VCPKG\installed\x64-windows\"
+[        ]   Using normalized configuration "Release"
+[        ] VcpkgCheckManifestRoot:
+[        ]   The vcpkg manifest was disabled, but we found a manifest file in F:\GH\rustdesk\rustdesk-client\. You may want to enable vcpkg manifests in your properties page or pass /p:VcpkgEnableManifest=true to the msbuild invocation.
+[  +15 ms] ClCompile:
+[        ]   All outputs are up-to-date.
+[   +8 ms] Link:
+[        ]   All outputs are up-to-date.
+[        ]   texture_rgba_renderer_plugin.vcxproj -> F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\texture_rgba_renderer\Release\texture_rgba_renderer_plugin.dll
+[  +11 ms] FinalizeBuildStatus:
+[        ]   Deleting file "texture_rgba_renderer_plugin.dir\Release\texture_.46E792C3.tlog\unsuccessfulbuild".
+[        ]   Touching "texture_rgba_renderer_plugin.dir\Release\texture_.46E792C3.tlog\texture_rgba_renderer_plugin.lastbuildstate".
+[   +1 ms] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\texture_rgba_renderer\texture_rgba_renderer_plugin.vcxproj" (default targets).
+[  +38 ms] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\desktop_multi_window\desktop_multi_window_plugin.vcxproj" (7) is building "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\url_launcher_windows\url_launcher_windows_plugin.vcxproj" (10) on node 1 (default targets).
+[        ] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[   +2 ms] InitializeBuildStatus:
+[        ]   Creating "url_launcher_windows_plugin.dir\Release\url_laun.58AE9AB0.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+[        ]   Touching "url_launcher_windows_plugin.dir\Release\url_laun.58AE9AB0.tlog\unsuccessfulbuild".
+[   +3 ms] CustomBuild:
+[        ]   All outputs are up-to-date.
+[   +4 ms] VcpkgTripletSelection:
+[        ]   Using triplet "x64-windows" from "F:\VCPKG\installed\x64-windows\"
+[        ]   Using normalized configuration "Release"
+[        ] VcpkgCheckManifestRoot:
+[        ]   The vcpkg manifest was disabled, but we found a manifest file in F:\GH\rustdesk\rustdesk-client\. You may want to enable vcpkg manifests in your properties page or pass /p:VcpkgEnableManifest=true to the msbuild invocation.
+[   +8 ms] ClCompile:
+[        ]   All outputs are up-to-date.
+[   +9 ms] Link:
+[        ]   All outputs are up-to-date.
+[        ]   url_launcher_windows_plugin.vcxproj -> F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\url_launcher_windows\Release\url_launcher_windows_plugin.dll
+[  +13 ms] FinalizeBuildStatus:
+[        ]   Deleting file "url_launcher_windows_plugin.dir\Release\url_laun.58AE9AB0.tlog\unsuccessfulbuild".
+[        ]   Touching "url_launcher_windows_plugin.dir\Release\url_laun.58AE9AB0.tlog\url_launcher_windows_plugin.lastbuildstate".
+[   +1 ms] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\url_launcher_windows\url_launcher_windows_plugin.vcxproj" (default targets).
+[  +33 ms] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\desktop_multi_window\desktop_multi_window_plugin.vcxproj" (7) is building "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\window_size\window_size_plugin.vcxproj" (11) on node 1 (default targets).
+[        ] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[   +2 ms] InitializeBuildStatus:
+[        ]   Creating "window_size_plugin.dir\Release\window_s.B3446921.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+[        ]   Touching "window_size_plugin.dir\Release\window_s.B3446921.tlog\unsuccessfulbuild".
+[   +3 ms] CustomBuild:
+[        ]   All outputs are up-to-date.
+[  +10 ms] VcpkgTripletSelection:
+[        ]   Using triplet "x64-windows" from "F:\VCPKG\installed\x64-windows\"
+[        ]   Using normalized configuration "Release"
+[        ] VcpkgCheckManifestRoot:
+[        ]   The vcpkg manifest was disabled, but we found a manifest file in F:\GH\rustdesk\rustdesk-client\. You may want to enable vcpkg manifests in your properties page or pass /p:VcpkgEnableManifest=true to the msbuild invocation.
+[   +6 ms] ClCompile:
+[        ]   All outputs are up-to-date.
+[   +7 ms] Link:
+[        ]   All outputs are up-to-date.
+[        ]   window_size_plugin.vcxproj -> F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\window_size\Release\window_size_plugin.dll
+[   +9 ms] FinalizeBuildStatus:
+[        ]   Deleting file "window_size_plugin.dir\Release\window_s.B3446921.tlog\unsuccessfulbuild".
+[        ]   Touching "window_size_plugin.dir\Release\window_s.B3446921.tlog\window_size_plugin.lastbuildstate".
+[   +1 ms] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\window_size\window_size_plugin.vcxproj" (default targets).
+[  +11 ms] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[   +5 ms] InitializeBuildStatus:
+[        ]   Creating "desktop_multi_window_plugin.dir\Release\desktop_.1DFD8A09.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+[        ]   Touching "desktop_multi_window_plugin.dir\Release\desktop_.1DFD8A09.tlog\unsuccessfulbuild".
+[   +3 ms] CustomBuild:
+[        ]   All outputs are up-to-date.
+[  +11 ms] VcpkgTripletSelection:
+[        ]   Using triplet "x64-windows" from "F:\VCPKG\installed\x64-windows\"
+[        ]   Using normalized configuration "Release"
+[        ] VcpkgCheckManifestRoot:
+[        ]   The vcpkg manifest was disabled, but we found a manifest file in F:\GH\rustdesk\rustdesk-client\. You may want to enable vcpkg manifests in your properties page or pass /p:VcpkgEnableManifest=true to the msbuild invocation.
+[   +9 ms] ClCompile:
+[        ]   All outputs are up-to-date.
+[   +8 ms] ResourceCompile:
+[        ]   All outputs are up-to-date.
+[  +16 ms] Link:
+[        ]   All outputs are up-to-date.
+[        ]   desktop_multi_window_plugin.vcxproj -> F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\desktop_multi_window\Release\desktop_multi_window_plugin.dll
+[  +12 ms] FinalizeBuildStatus:
+[        ]   Deleting file "desktop_multi_window_plugin.dir\Release\desktop_.1DFD8A09.tlog\unsuccessfulbuild".
+[        ]   Touching "desktop_multi_window_plugin.dir\Release\desktop_.1DFD8A09.tlog\desktop_multi_window_plugin.lastbuildstate".
+[   +1 ms] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\desktop_multi_window\desktop_multi_window_plugin.vcxproj" (default targets).
+[  +39 ms] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\ALL_BUILD.vcxproj" (3) is building "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\file_selector_windows\file_selector_windows_plugin.vcxproj" (12) on node 1 (default targets).
+[        ] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[   +2 ms] InitializeBuildStatus:
+[        ]   Creating "file_selector_windows_plugin.dir\Release\file_sel.ADF06C1C.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+[        ]   Touching "file_selector_windows_plugin.dir\Release\file_sel.ADF06C1C.tlog\unsuccessfulbuild".
+[   +3 ms] CustomBuild:
+[        ]   All outputs are up-to-date.
+[   +5 ms] VcpkgTripletSelection:
+[        ]   Using triplet "x64-windows" from "F:\VCPKG\installed\x64-windows\"
+[        ]   Using normalized configuration "Release"
+[        ] VcpkgCheckManifestRoot:
+[        ]   The vcpkg manifest was disabled, but we found a manifest file in F:\GH\rustdesk\rustdesk-client\. You may want to enable vcpkg manifests in your properties page or pass /p:VcpkgEnableManifest=true to the msbuild invocation.
+[   +8 ms] ClCompile:
+[        ]   All outputs are up-to-date.
+[   +8 ms] Link:
+[        ]   All outputs are up-to-date.
+[        ]   file_selector_windows_plugin.vcxproj -> F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\file_selector_windows\Release\file_selector_windows_plugin.dll
+[  +13 ms] FinalizeBuildStatus:
+[        ]   Deleting file "file_selector_windows_plugin.dir\Release\file_sel.ADF06C1C.tlog\unsuccessfulbuild".
+[        ]   Touching "file_selector_windows_plugin.dir\Release\file_sel.ADF06C1C.tlog\file_selector_windows_plugin.lastbuildstate".
+[   +1 ms] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\file_selector_windows\file_selector_windows_plugin.vcxproj" (default targets).
+[  +33 ms] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\ALL_BUILD.vcxproj" (3) is building "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\flutter_custom_cursor\flutter_custom_cursor_plugin.vcxproj" (13) on node 1 (default targets).
+[        ] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[   +2 ms] InitializeBuildStatus:
+[        ]   Creating "flutter_custom_cursor_plugin.dir\Release\flutter_.9C97EFBB.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+[        ]   Touching "flutter_custom_cursor_plugin.dir\Release\flutter_.9C97EFBB.tlog\unsuccessfulbuild".
+[   +3 ms] CustomBuild:
+[        ]   All outputs are up-to-date.
+[  +10 ms] VcpkgTripletSelection:
+[        ]   Using triplet "x64-windows" from "F:\VCPKG\installed\x64-windows\"
+[        ]   Using normalized configuration "Release"
+[        ] VcpkgCheckManifestRoot:
+[        ]   The vcpkg manifest was disabled, but we found a manifest file in F:\GH\rustdesk\rustdesk-client\. You may want to enable vcpkg manifests in your properties page or pass /p:VcpkgEnableManifest=true to the msbuild invocation.
+[   +6 ms] ClCompile:
+[        ]   All outputs are up-to-date.
+[   +7 ms] Link:
+[        ]   All outputs are up-to-date.
+[        ]   flutter_custom_cursor_plugin.vcxproj -> F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\flutter_custom_cursor\Release\flutter_custom_cursor_plugin.dll
+[   +9 ms] FinalizeBuildStatus:
+[        ]   Deleting file "flutter_custom_cursor_plugin.dir\Release\flutter_.9C97EFBB.tlog\unsuccessfulbuild".
+[        ]   Touching "flutter_custom_cursor_plugin.dir\Release\flutter_.9C97EFBB.tlog\flutter_custom_cursor_plugin.lastbuildstate".
+[   +1 ms] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\flutter_custom_cursor\flutter_custom_cursor_plugin.vcxproj" (default targets).
+[  +36 ms] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\ALL_BUILD.vcxproj" (3) is building "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\flutter_gpu_texture_renderer\flutter_gpu_texture_renderer_plugin.vcxproj" (14) on node 1 (default targets).
+[        ] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[   +2 ms] InitializeBuildStatus:
+[        ]   Creating "flutter_gpu_texture_renderer_plugin.dir\Release\flutter_.9C35530C.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+[        ]   Touching "flutter_gpu_texture_renderer_plugin.dir\Release\flutter_.9C35530C.tlog\unsuccessfulbuild".
+[   +2 ms] CustomBuild:
+[        ]   All outputs are up-to-date.
+[   +4 ms] VcpkgTripletSelection:
+[        ]   Using triplet "x64-windows" from "F:\VCPKG\installed\x64-windows\"
+[        ]   Using normalized configuration "Release"
+[        ] VcpkgCheckManifestRoot:
+[        ]   The vcpkg manifest was disabled, but we found a manifest file in F:\GH\rustdesk\rustdesk-client\. You may want to enable vcpkg manifests in your properties page or pass /p:VcpkgEnableManifest=true to the msbuild invocation.
+[   +7 ms] ClCompile:
+[        ]   All outputs are up-to-date.
+[   +8 ms] Link:
+[        ]   All outputs are up-to-date.
+[   +3 ms]   flutter_gpu_texture_renderer_plugin.vcxproj -> F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\flutter_gpu_texture_renderer\Release\flutter_gpu_texture_renderer_plugin.dll
+[   +9 ms] FinalizeBuildStatus:
+[        ]   Deleting file "flutter_gpu_texture_renderer_plugin.dir\Release\flutter_.9C35530C.tlog\unsuccessfulbuild".
+[        ]   Touching "flutter_gpu_texture_renderer_plugin.dir\Release\flutter_.9C35530C.tlog\flutter_gpu_texture_renderer_plugin.lastbuildstate".
+[   +1 ms] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\flutter_gpu_texture_renderer\flutter_gpu_texture_renderer_plugin.vcxproj" (default targets).
+[  +34 ms] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\ALL_BUILD.vcxproj" (3) is building "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\jni\shared\jni.vcxproj" (15) on node 1 (default targets).
+[        ] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[   +2 ms] InitializeBuildStatus:
+[        ]   Creating "jni.dir\Release\jni.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+[   +1 ms]   Touching "jni.dir\Release\jni.tlog\unsuccessfulbuild".
+[   +4 ms] CustomBuild:
+[        ]   All outputs are up-to-date.
+[ +134 ms]   Building Custom Rule F:/GH/rustdesk/rustdesk-client/flutter/windows/flutter/ephemeral/.plugin_symlinks/jni/src/CMakeLists.txt
+[ +144 ms] VcpkgTripletSelection:
+[        ]   Using triplet "x64-windows" from "F:\VCPKG\installed\x64-windows\"
+[        ]   Using normalized configuration "Release"
+[        ] VcpkgCheckManifestRoot:
+[        ]   The vcpkg manifest was disabled, but we found a manifest file in F:\GH\rustdesk\rustdesk-client\. You may want to enable vcpkg manifests in your properties page or pass /p:VcpkgEnableManifest=true to the msbuild invocation.
+[  +12 ms] ClCompile:
+[        ]   All outputs are up-to-date.
+[  +17 ms]   C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\HostX64\x64\CL.exe /c /I"C:\Program Files\Java\jdk-12.0.1\include" /I"C:\Program Files\Java\jdk-12.0.1\include\win32" /I"F:\VCPKG\installed\x64-windows\include" /nologo /W3 /WX- /diagnostics:column /O2 /Ob2 /D _WINDLL /D _UNICODE /D UNICODE /D WIN32 /D _WINDOWS /D NDEBUG /D DART_SHARED_LIB /D UNICODE /D _UNICODE /D "CMAKE_INTDIR=\"Release\"" /D jni_EXPORTS /MT /GS /fp:precise /Zc:wchar_t /Zc:forScope /Zc:inline /Fo"jni.dir\Release\\" /Fd"jni.dir\Release\vc143.pdb" /external:W3 /Gd /TC /errorReport:queue "F:\GH\rustdesk\rustdesk-client\flutter\windows\flutter\ephemeral\.plugin_symlinks\jni\src\dartjni.c" "F:\GH\rustdesk\rustdesk-client\flutter\windows\flutter\ephemeral\.plugin_symlinks\jni\src\third_party\global_jni_env.c" "F:\GH\rustdesk\rustdesk-client\flutter\windows\flutter\ephemeral\.plugin_symlinks\jni\src\include\dart_api_dl.c"
+[ +420 ms]   dartjni.c
+[ +362 ms]   global_jni_env.c
+[ +335 ms]   dart_api_dl.c
+[  +38 ms]   Generating Code...
+[ +280 ms] Link:
+[        ]   C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\HostX64\x64\link.exe /ERRORREPORT:QUEUE /OUT:"F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\jni\shared\Release\dartjni.dll" /INCREMENTAL:NO /NOLOGO /LIBPATH:"F:\VCPKG\installed\x64-windows\lib" /LIBPATH:"F:\VCPKG\installed\x64-windows\lib\manual-link" "C:\Program Files\Java\jdk-12.0.1\lib\jvm.lib" kernel32.lib user32.lib gdi32.lib winspool.lib shell32.lib ole32.lib oleaut32.lib uuid.lib comdlg32.lib advapi32.lib "F:\VCPKG\installed\x64-windows\lib\*.lib" /MANIFEST /MANIFESTUAC:"level='asInvoker' uiAccess='false'" /manifest:embed /PDB:"F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64/plugins/jni/shared/Release/dartjni.pdb" /SUBSYSTEM:CONSOLE /TLBID:1 /DYNAMICBASE /NXCOMPAT /IMPLIB:"F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64/plugins/jni/shared/Release/dartjni.lib" /MACHINE:X64  /machine:x64 /DLL jni.dir\Release\dartjni.obj
+[        ]   jni.dir\Release\global_jni_env.obj
+[        ]   jni.dir\Release\dart_api_dl.obj
+[ +279 ms]      Creating library F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64/plugins/jni/shared/Release/dartjni.lib and object F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64/plugins/jni/shared/Release/dartjni.exp
+[ +365 ms]   jni.vcxproj -> F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\jni\shared\Release\dartjni.dll
+[  +12 ms] AppLocalFromInstalled:
+[        ]   pwsh.exe -ExecutionPolicy Bypass -noprofile -File "F:\VCPKG\scripts\buildsystems\msbuild\applocal.ps1" "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\jni\shared\Release\dartjni.dll" "F:\VCPKG\installed\x64-windows\bin" "jni.dir\Release\jni.tlog\jni.write.1u.tlog" "jni.dir\Release\vcpkg.applocal.log"
+[+1641 ms] FinalizeBuildStatus:
+[        ]   Deleting file "jni.dir\Release\jni.tlog\unsuccessfulbuild".
+[        ]   Touching "jni.dir\Release\jni.tlog\jni.lastbuildstate".
+[   +1 ms] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\jni\shared\jni.vcxproj" (default targets).
+[  +78 ms] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\ALL_BUILD.vcxproj" (3) is building "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\runner\rustdesk.vcxproj" (16) on node 1 (default targets).
+[        ] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\runner\rustdesk.vcxproj" (16) is building "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\screen_retriever\screen_retriever_plugin.vcxproj" (17) on node 1 (default targets).
+[        ] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[   +2 ms] InitializeBuildStatus:
+[        ]   Creating "screen_retriever_plugin.dir\Release\screen_r.8B2E9799.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+[        ]   Touching "screen_retriever_plugin.dir\Release\screen_r.8B2E9799.tlog\unsuccessfulbuild".
+[   +3 ms] CustomBuild:
+[        ]   All outputs are up-to-date.
+[   +4 ms] VcpkgTripletSelection:
+[        ]   Using triplet "x64-windows" from "F:\VCPKG\installed\x64-windows\"
+[        ]   Using normalized configuration "Release"
+[        ] VcpkgCheckManifestRoot:
+[        ]   The vcpkg manifest was disabled, but we found a manifest file in F:\GH\rustdesk\rustdesk-client\. You may want to enable vcpkg manifests in your properties page or pass /p:VcpkgEnableManifest=true to the msbuild invocation.
+[   +8 ms] ClCompile:
+[        ]   All outputs are up-to-date.
+[  +11 ms] Link:
+[        ]   All outputs are up-to-date.
+[        ]   screen_retriever_plugin.vcxproj -> F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\screen_retriever\Release\screen_retriever_plugin.dll
+[  +17 ms] FinalizeBuildStatus:
+[        ]   Deleting file "screen_retriever_plugin.dir\Release\screen_r.8B2E9799.tlog\unsuccessfulbuild".
+[        ]   Touching "screen_retriever_plugin.dir\Release\screen_r.8B2E9799.tlog\screen_retriever_plugin.lastbuildstate".
+[   +1 ms] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\screen_retriever\screen_retriever_plugin.vcxproj" (default targets).
+[  +33 ms] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\runner\rustdesk.vcxproj" (16) is building "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\uni_links_desktop\uni_links_desktop_plugin.vcxproj" (18) on node 1 (default targets).
+[        ] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[   +2 ms] InitializeBuildStatus:
+[        ]   Creating "uni_links_desktop_plugin.dir\Release\uni_link.C107B4F3.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+[        ]   Touching "uni_links_desktop_plugin.dir\Release\uni_link.C107B4F3.tlog\unsuccessfulbuild".
+[   +3 ms] CustomBuild:
+[        ]   All outputs are up-to-date.
+[  +10 ms] VcpkgTripletSelection:
+[        ]   Using triplet "x64-windows" from "F:\VCPKG\installed\x64-windows\"
+[        ]   Using normalized configuration "Release"
+[        ] VcpkgCheckManifestRoot:
+[        ]   The vcpkg manifest was disabled, but we found a manifest file in F:\GH\rustdesk\rustdesk-client\. You may want to enable vcpkg manifests in your properties page or pass /p:VcpkgEnableManifest=true to the msbuild invocation.
+[   +8 ms] ClCompile:
+[        ]   All outputs are up-to-date.
+[   +8 ms] Link:
+[        ]   All outputs are up-to-date.
+[        ]   uni_links_desktop_plugin.vcxproj -> F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\uni_links_desktop\Release\uni_links_desktop_plugin.dll
+[   +9 ms] FinalizeBuildStatus:
+[        ]   Deleting file "uni_links_desktop_plugin.dir\Release\uni_link.C107B4F3.tlog\unsuccessfulbuild".
+[        ]   Touching "uni_links_desktop_plugin.dir\Release\uni_link.C107B4F3.tlog\uni_links_desktop_plugin.lastbuildstate".
+[   +1 ms] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\uni_links_desktop\uni_links_desktop_plugin.vcxproj" (default targets).
+[  +36 ms] Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\runner\rustdesk.vcxproj" (16) is building "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\window_manager\window_manager_plugin.vcxproj" (19) on node 1 (default targets).
+[        ] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[   +2 ms] InitializeBuildStatus:
+[        ]   Creating "window_manager_plugin.dir\Release\window_m.38CA68BA.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+[        ]   Touching "window_manager_plugin.dir\Release\window_m.38CA68BA.tlog\unsuccessfulbuild".
+[   +3 ms] CustomBuild:
+[        ]   All outputs are up-to-date.
+[   +4 ms] VcpkgTripletSelection:
+[        ]   Using triplet "x64-windows" from "F:\VCPKG\installed\x64-windows\"
+[        ]   Using normalized configuration "Release"
+[        ] VcpkgCheckManifestRoot:
+[        ]   The vcpkg manifest was disabled, but we found a manifest file in F:\GH\rustdesk\rustdesk-client\. You may want to enable vcpkg manifests in your properties page or pass /p:VcpkgEnableManifest=true to the msbuild invocation.
+[   +8 ms] ClCompile:
+[        ]   All outputs are up-to-date.
+[   +9 ms] Link:
+[        ]   All outputs are up-to-date.
+[        ]   window_manager_plugin.vcxproj -> F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\window_manager\Release\window_manager_plugin.dll
+[  +13 ms] FinalizeBuildStatus:
+[        ]   Deleting file "window_manager_plugin.dir\Release\window_m.38CA68BA.tlog\unsuccessfulbuild".
+[        ]   Touching "window_manager_plugin.dir\Release\window_m.38CA68BA.tlog\window_manager_plugin.lastbuildstate".
+[   +1 ms] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\plugins\window_manager\window_manager_plugin.vcxproj" (default targets).
+[  +14 ms] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[   +2 ms] InitializeBuildStatus:
+[        ]   Creating "rustdesk.dir\Release\rustdesk.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+[        ]   Touching "rustdesk.dir\Release\rustdesk.tlog\unsuccessfulbuild".
+[   +2 ms] CustomBuild:
+[        ]   All outputs are up-to-date.
+[  +25 ms] VcpkgTripletSelection:
+[        ]   Using triplet "x64-windows" from "F:\VCPKG\installed\x64-windows\"
+[        ]   Using normalized configuration "Release"
+[        ] VcpkgCheckManifestRoot:
+[        ]   The vcpkg manifest was disabled, but we found a manifest file in F:\GH\rustdesk\rustdesk-client\. You may want to enable vcpkg manifests in your properties page or pass /p:VcpkgEnableManifest=true to the msbuild invocation.
+[  +10 ms] ClCompile:
+[        ]   All outputs are up-to-date.
+[   +4 ms] ResourceCompile:
+[        ]   All outputs are up-to-date.
+[  +11 ms] Link:
+[        ]   All outputs are up-to-date.
+[        ]   rustdesk.vcxproj -> F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\runner\Release\rustdesk.exe
+[  +13 ms] FinalizeBuildStatus:
+[        ]   Deleting file "rustdesk.dir\Release\rustdesk.tlog\unsuccessfulbuild".
+[        ]   Touching "rustdesk.dir\Release\rustdesk.tlog\rustdesk.lastbuildstate".
+[   +1 ms] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\runner\rustdesk.vcxproj" (default targets).
+[   +9 ms] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[   +2 ms] InitializeBuildStatus:
+[        ]   Creating "x64\Release\ALL_BUILD\ALL_BUILD.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+[        ]   Touching "x64\Release\ALL_BUILD\ALL_BUILD.tlog\unsuccessfulbuild".
+[   +3 ms] CustomBuild:
+[        ]   All outputs are up-to-date.
+[ +121 ms]   Building Custom Rule F:/GH/rustdesk/rustdesk-client/flutter/windows/CMakeLists.txt
+[ +145 ms] FinalizeBuildStatus:
+[        ]   Deleting file "x64\Release\ALL_BUILD\ALL_BUILD.tlog\unsuccessfulbuild".
+[        ]   Touching "x64\Release\ALL_BUILD\ALL_BUILD.tlog\ALL_BUILD.lastbuildstate".
+[   +1 ms] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\ALL_BUILD.vcxproj" (default targets).
+[   +7 ms] PrepareForBuild:
+[        ]   Structured output is enabled. The formatting of compiler diagnostics will reflect the error hierarchy. See https://aka.ms/cpp/structured-output for more details.
+[   +2 ms] InitializeBuildStatus:
+[        ]   Touching "x64\Release\INSTALL\INSTALL.tlog\unsuccessfulbuild".
+[ +129 ms] CustomBuild:
+[        ]   1>
+[  +60 ms] PostBuildEvent:
+[        ]   setlocal
+[        ]   "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DBUILD_TYPE=Release -P cmake_install.cmake
+[        ]   if %errorlevel% neq 0 goto :cmEnd
+[        ]   :cmEnd
+[        ]   endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+[        ]   :cmErrorLevel
+[        ]   exit /b %1
+[        ]   :cmDone
+[        ]   if %errorlevel% neq 0 goto :VCEnd
+[        ]   :VCEnd
+[ +203 ms]   -- Install configuration: "Release"
+[  +11 ms]   -- Up-to-date: F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64/runner/Release/data/icudtl.dat
+[        ]   -- Up-to-date: F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64/runner/Release/flutter_windows.dll
+[   +1 ms]   -- Up-to-date: F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64/runner/Release/desktop_drop_plugin.dll
+[        ]   -- Up-to-date: F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64/runner/Release/desktop_multi_window_plugin.dll
+[        ]   -- Up-to-date: F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64/runner/Release/file_selector_windows_plugin.dll
+[        ]   -- Up-to-date: F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64/runner/Release/flutter_custom_cursor_plugin.dll
+[        ]   -- Up-to-date: F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64/runner/Release/flutter_gpu_texture_renderer_plugin.dll
+[        ]   -- Up-to-date: F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64/runner/Release/screen_retriever_plugin.dll
+[        ]   -- Up-to-date: F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64/runner/Release/texture_rgba_renderer_plugin.dll
+[   +1 ms]   -- Up-to-date: F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64/runner/Release/uni_links_desktop_plugin.dll
+[        ]   -- Up-to-date: F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64/runner/Release/url_launcher_windows_plugin.dll
+[        ]   -- Up-to-date: F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64/runner/Release/window_manager_plugin.dll
+[   +1 ms]   -- Up-to-date: F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64/runner/Release/window_size_plugin.dll
+[   +1 ms]   -- Installing: F:/GH/rustdesk/rustdesk-client/flutter/build/windows/x64/runner/Release/dartjni.dll
+[  +12 ms]   CMake Error at cmake_install.cmake:310 (file):
+[        ]     file INSTALL cannot find
+[        ]     "F:/GH/rustdesk-target-win/release/librustdesk.dll": No error.
+[  +32 ms] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: The command "setlocal [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[   +1 ms] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DBUILD_TYPE=Release -P cmake_install.cmake [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: if %errorlevel% neq 0 goto :cmEnd [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: :cmEnd [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: :cmErrorLevel [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: exit /b %1 [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: :cmDone [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: if %errorlevel% neq 0 goto :VCEnd [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: :VCEnd" exited with code 1. [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ] Done Building Project "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj" (default targets) -- FAILED.
+[  +27 ms] Build FAILED.
+[   +4 ms] "F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj" (default target) (1) ->
+[        ] (PostBuildEvent target) -> 
+[        ]   C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: The command "setlocal [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" -DBUILD_TYPE=Release -P cmake_install.cmake [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: if %errorlevel% neq 0 goto :cmEnd [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: :cmEnd [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: :cmErrorLevel [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: exit /b %1 [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: :cmDone [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: if %errorlevel% neq 0 goto :VCEnd [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ] C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Microsoft\VC\v170\Microsoft.CppCommon.targets(166,5): error MSB3073: :VCEnd" exited with code 1. [F:\GH\rustdesk\rustdesk-client\flutter\build\windows\x64\INSTALL.vcxproj]
+[        ]     0 Warning(s)
+[        ]     1 Error(s)
+[        ] Time Elapsed 00:00:18.78
+[  +43 ms] Building Windows application... (completed in 20.6s)
+[        ] "flutter windows" took 21,534ms.
+[   +7 ms] Build process failed.
+[        ] 
+           #0      throwToolExit (package:flutter_tools/src/base/common.dart:34:3)
+           #1      _runBuild (package:flutter_tools/src/windows/build_windows.dart:262:5)
+           <asynchronous suspension>
+           #2      buildWindows (package:flutter_tools/src/windows/build_windows.dart:118:5)
+           <asynchronous suspension>
+           #3      BuildWindowsCommand.runCommand (package:flutter_tools/src/commands/build_windows.dart:72:5)
+           <asynchronous suspension>
+           #4      FlutterCommand.run.<anonymous closure> (package:flutter_tools/src/runner/flutter_command.dart:1590:27)
+           <asynchronous suspension>
+           #5      AppContext.run.<anonymous closure> (package:flutter_tools/src/base/context.dart:154:19)
+           <asynchronous suspension>
+           #6      CommandRunner.runCommand (package:args/command_runner.dart:212:13)
+           <asynchronous suspension>
+           #7      FlutterCommandRunner.runCommand.<anonymous closure> (package:flutter_tools/src/runner/flutter_command_runner.dart:496:9)
+           <asynchronous suspension>
+           #8      AppContext.run.<anonymous closure> (package:flutter_tools/src/base/context.dart:154:19)
+           <asynchronous suspension>
+           #9      FlutterCommandRunner.runCommand (package:flutter_tools/src/runner/flutter_command_runner.dart:431:5)
+           <asynchronous suspension>
+           #10     FlutterCommandRunner.run.<anonymous closure> (package:flutter_tools/src/runner/flutter_command_runner.dart:307:33)
+           <asynchronous suspension>
+           #11     run.<anonymous closure>.<anonymous closure> (package:flutter_tools/runner.dart:104:11)
+           <asynchronous suspension>
+           #12     AppContext.run.<anonymous closure> (package:flutter_tools/src/base/context.dart:154:19)
+           <asynchronous suspension>
+           #13     main (package:flutter_tools/executable.dart:103:3)
+           <asynchronous suspension>
+
+
+[        ] Running 1 shutdown hook
+[        ] Shutdown hooks complete
+[        ] exiting with code 1

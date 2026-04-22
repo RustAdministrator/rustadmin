@@ -103,7 +103,14 @@ endif()
 # flutter_rust_bridge
 set(RUSTDESK_LIB_BUILD_TYPE $<IF:$<CONFIG:Debug>,debug,release>)
 message(STATUS "rustdesk lib build type: ${RUSTDESK_LIB_BUILD_TYPE}")
-set(RUSTDESK_LIB "../../target/${RUSTDESK_LIB_BUILD_TYPE}/librustdesk.dll")
+if(DEFINED ENV{CARGO_TARGET_DIR} AND NOT "$ENV{CARGO_TARGET_DIR}" STREQUAL "")
+  file(TO_CMAKE_PATH "$ENV{CARGO_TARGET_DIR}" RUSTDESK_TARGET_DIR)
+else()
+  set(RUSTDESK_TARGET_DIR "../../target")
+endif()
+set(RUSTDESK_LIB
+    "${RUSTDESK_TARGET_DIR}/${RUSTDESK_LIB_BUILD_TYPE}/librustdesk.dll")
+message(STATUS "rustdesk lib path: ${RUSTDESK_LIB}")
 install(FILES "${RUSTDESK_LIB}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
 COMPONENT Runtime RENAME librustdesk.dll)
 
