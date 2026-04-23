@@ -6,6 +6,8 @@ use std::{
 
 #[cfg(target_os = "linux")]
 const LOCAL_CODEC_ROOT_ENV: &str = "RUSTDESK_LINUX_CODEC_ROOT";
+#[cfg(target_os = "macos")]
+const LOCAL_CODEC_ROOT_ENV: &str = "RUSTDESK_MACOS_CODEC_ROOT";
 #[cfg(target_os = "windows")]
 const LOCAL_CODEC_ROOT_ENV: &str = "RUSTDESK_WINDOWS_CODEC_ROOT";
 #[cfg(target_os = "windows")]
@@ -19,7 +21,7 @@ fn pkg_config_name(name: &str) -> &str {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn local_codec_root() -> Option<PathBuf> {
     println!("cargo:rerun-if-env-changed={LOCAL_CODEC_ROOT_ENV}");
     if let Some(path) = env::var_os(LOCAL_CODEC_ROOT_ENV) {
@@ -29,7 +31,10 @@ fn local_codec_root() -> Option<PathBuf> {
     let manifest_dir = env::var_os("CARGO_MANIFEST_DIR")?;
     let manifest_dir = Path::new(&manifest_dir);
     let repo_root = manifest_dir.ancestors().nth(2)?;
+    #[cfg(target_os = "linux")]
     let repo_local_root = repo_root.join(".local").join("linux-codecs");
+    #[cfg(target_os = "macos")]
+    let repo_local_root = repo_root.join(".local").join("macos-codecs");
     println!("cargo:rerun-if-changed={}", repo_local_root.display());
     repo_local_root.exists().then_some(repo_local_root)
 }
@@ -69,7 +74,7 @@ fn local_codec_roots() -> Vec<PathBuf> {
     roots
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn local_codec_lib_name(name: &str) -> &str {
     match name {
         "libyuv" => "yuv",
@@ -77,13 +82,25 @@ fn local_codec_lib_name(name: &str) -> &str {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn local_codec_header(include_dir: &Path, name: &str) -> PathBuf {
     match name {
         "libyuv" => include_dir.join("libyuv").join("convert.h"),
         "libvpx" => include_dir.join("vpx").join("vpx_encoder.h"),
         "aom" => include_dir.join("aom").join("aom.h"),
         _ => PathBuf::new(),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn local_codec_shared_lib_ext() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        "so"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "dylib"
     }
 }
 
@@ -97,7 +114,7 @@ fn local_codec_header(include_dir: &Path, name: &str) -> PathBuf {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn link_local_codec_root(name: &str) -> Option<Vec<PathBuf>> {
     let root = local_codec_root()?;
     let include_dir = root.join("include");
@@ -109,7 +126,7 @@ fn link_local_codec_root(name: &str) -> Option<Vec<PathBuf>> {
     let lib_dir = root.join("lib");
     let lib_name = local_codec_lib_name(name);
     let static_lib = lib_dir.join(format!("lib{lib_name}.a"));
-    let shared_lib = lib_dir.join(format!("lib{lib_name}.so"));
+    let shared_lib = lib_dir.join(format!("lib{lib_name}.{}", local_codec_shared_lib_ext()));
     if !static_lib.exists() && !shared_lib.exists() {
         return None;
     }
@@ -313,6 +330,11 @@ fn find_package(name: &str) -> Vec<PathBuf> {
     }
 
     #[cfg(target_os = "windows")]
+    if let Some(include_paths) = link_local_codec_root(name) {
+        return include_paths;
+    }
+
+    #[cfg(target_os = "macos")]
     if let Some(include_paths) = link_local_codec_root(name) {
         return include_paths;
     }

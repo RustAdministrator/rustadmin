@@ -5,12 +5,14 @@ use std::{
 
 #[cfg(target_os = "linux")]
 const LOCAL_CODEC_ROOT_ENV: &str = "RUSTDESK_LINUX_CODEC_ROOT";
+#[cfg(target_os = "macos")]
+const LOCAL_CODEC_ROOT_ENV: &str = "RUSTDESK_MACOS_CODEC_ROOT";
 #[cfg(target_os = "windows")]
 const LOCAL_CODEC_ROOT_ENV: &str = "RUSTDESK_WINDOWS_CODEC_ROOT";
 #[cfg(target_os = "windows")]
 const CMAKE_PREFIX_PATH_ENV: &str = "CMAKE_PREFIX_PATH";
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn local_codec_root() -> Option<PathBuf> {
     println!("cargo:rerun-if-env-changed={LOCAL_CODEC_ROOT_ENV}");
     if let Some(path) = env::var_os(LOCAL_CODEC_ROOT_ENV) {
@@ -20,7 +22,10 @@ fn local_codec_root() -> Option<PathBuf> {
     let manifest_dir = env::var_os("CARGO_MANIFEST_DIR")?;
     let manifest_dir = Path::new(&manifest_dir);
     let repo_root = manifest_dir.ancestors().nth(2)?;
+    #[cfg(target_os = "linux")]
     let repo_local_root = repo_root.join(".local").join("linux-codecs");
+    #[cfg(target_os = "macos")]
+    let repo_local_root = repo_root.join(".local").join("macos-codecs");
     println!("cargo:rerun-if-changed={}", repo_local_root.display());
     repo_local_root.exists().then_some(repo_local_root)
 }
@@ -83,7 +88,7 @@ fn normalize_include_paths(mut include_paths: Vec<PathBuf>) -> Vec<PathBuf> {
     include_paths
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn link_local_codec_root(name: &str) -> Option<Vec<PathBuf>> {
     let root = local_codec_root()?;
     let include_dir = root.join("include");
@@ -94,7 +99,10 @@ fn link_local_codec_root(name: &str) -> Option<Vec<PathBuf>> {
 
     let lib_dir = root.join("lib");
     let static_lib = lib_dir.join(format!("lib{name}.a"));
+    #[cfg(target_os = "linux")]
     let shared_lib = lib_dir.join(format!("lib{name}.so"));
+    #[cfg(target_os = "macos")]
+    let shared_lib = lib_dir.join(format!("lib{name}.dylib"));
     if !static_lib.exists() && !shared_lib.exists() {
         return None;
     }
@@ -265,6 +273,11 @@ fn find_package(name: &str) -> Vec<PathBuf> {
 #[cfg(not(all(target_os = "linux", feature = "linux-pkg-config")))]
 fn find_package(name: &str) -> Vec<PathBuf> {
     #[cfg(target_os = "windows")]
+    if let Some(include_paths) = link_local_codec_root(name) {
+        return include_paths;
+    }
+
+    #[cfg(target_os = "macos")]
     if let Some(include_paths) = link_local_codec_root(name) {
         return include_paths;
     }

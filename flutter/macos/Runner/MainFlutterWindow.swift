@@ -8,7 +8,6 @@ import desktop_drop
 import device_info_plus
 import flutter_custom_cursor
 import package_info_plus
-import path_provider_foundation
 import screen_retriever
 import sqflite
 // import tray_manager
@@ -57,7 +56,6 @@ class MainFlutterWindow: NSWindow {
             DeviceInfoPlusMacosPlugin.register(with: controller.registrar(forPlugin: "DeviceInfoPlusMacosPlugin"))
             FlutterCustomCursorPlugin.register(with: controller.registrar(forPlugin: "FlutterCustomCursorPlugin"))
             FPPPackageInfoPlusPlugin.register(with: controller.registrar(forPlugin: "FPPPackageInfoPlusPlugin"))
-            PathProviderPlugin.register(with: controller.registrar(forPlugin: "PathProviderPlugin"))
             SqflitePlugin.register(with: controller.registrar(forPlugin: "SqflitePlugin"))
             // TrayManagerPlugin.register(with: controller.registrar(forPlugin: "TrayManagerPlugin"))
             UniLinksDesktopPlugin.register(with: controller.registrar(forPlugin: "UniLinksDesktopPlugin"))
