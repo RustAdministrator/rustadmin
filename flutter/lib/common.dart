@@ -2438,6 +2438,17 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
     id = uri.path.substring("/new/".length);
   } else if (uri.authority == "config") {
     if (isAndroid || isIOS) {
+      final allowDeepLinkServerSettings =
+          bind.mainGetBuildinOption(key: kOptionAllowDeepLinkServerSettings) ==
+              'Y';
+      if (!allowDeepLinkServerSettings) {
+        debugPrint(
+            "Ignore rustdesk://config because $kOptionAllowDeepLinkServerSettings is not enabled.");
+        Timer(Duration(seconds: 1), () {
+          showToast(translate('Failed'));
+        });
+        return null;
+      }
       final config = uri.path.substring("/".length);
       // add a timer to make showToast work
       Timer(Duration(seconds: 1), () {
@@ -2447,6 +2458,16 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
     return null;
   } else if (uri.authority == "password") {
     if (isAndroid || isIOS) {
+      final allowDeepLinkPassword =
+          bind.mainGetBuildinOption(key: kOptionAllowDeepLinkPassword) == 'Y';
+      if (!allowDeepLinkPassword) {
+        debugPrint(
+            "Ignore rustdesk://password because $kOptionAllowDeepLinkPassword is not enabled.");
+        Timer(Duration(seconds: 1), () {
+          showToast(translate('Failed'));
+        });
+        return null;
+      }
       final password = uri.path.substring("/".length);
       if (password.isNotEmpty) {
         Timer(Duration(seconds: 1), () async {
