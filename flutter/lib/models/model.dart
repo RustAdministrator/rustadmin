@@ -1007,8 +1007,7 @@ class FfiModel with ChangeNotifier {
     dialogManager.show(
       tag: '$sessionId-confirm-peer-trust',
       (setState, close, context) {
-        final phraseConfirmed =
-            !invalidTrustPayload &&
+        final phraseConfirmed = !invalidTrustPayload &&
             normalizePhrase(controller.text) == normalizedTrustPhrase;
 
         void reject() {
@@ -2261,7 +2260,8 @@ class ImageModel with ChangeNotifier {
 enum ScrollStyle {
   scrollbar(kRemoteScrollStyleBar),
   scrollauto(kRemoteScrollStyleAuto),
-  scrolledge(kRemoteScrollStyleEdge);
+  scrolledge(kRemoteScrollStyleEdge),
+  scrolledgeaccel(kRemoteScrollStyleEdgeAcceleration);
 
   const ScrollStyle(this.stringValue);
 
@@ -2279,6 +2279,8 @@ enum ScrollStyle {
         return scrollauto;
       case 'scrolledge':
         return scrolledge;
+      case 'scrolledgeaccel':
+        return scrolledgeaccel;
     }
 
     if (fallbackValue != null) {
@@ -2301,6 +2303,8 @@ enum ScrollStyle {
         return scrollauto;
       case kRemoteScrollStyleEdge:
         return scrolledge;
+      case kRemoteScrollStyleEdgeAcceleration:
+        return scrolledgeaccel;
     }
 
     if (fallbackValue != null) {
@@ -2391,12 +2395,14 @@ enum EdgeScrollState {
 
 class EdgeScrollFallbackState {
   final CanvasModel _owner;
+  static const double _kEdgeAccelerationMaxSpeedPxPerSecond = 1800.0;
 
   late Ticker _ticker;
 
   Duration _lastTotalElapsed = Duration.zero;
   bool _nextEventIsFirst = true;
   Vector2 _encroachment = Vector2.zero();
+  Vector2 _edgeAccelerationFactor = Vector2.zero();
 
   EdgeScrollFallbackState(this._owner, TickerProvider tickerProvider) {
     _ticker = tickerProvider.createTicker(emitTick);
@@ -2406,20 +2412,35 @@ class EdgeScrollFallbackState {
     _encroachment = encroachment;
   }
 
+  void setEdgeAccelerationFactor(Vector2 factor) {
+    _edgeAccelerationFactor = factor;
+  }
+
   void emitTick(Duration totalElapsed) {
     if (_nextEventIsFirst) {
       _lastTotalElapsed = totalElapsed;
       _nextEventIsFirst = false;
     } else {
       final thisTickElapsed = totalElapsed - _lastTotalElapsed;
+      if (_owner.scrollStyle == ScrollStyle.scrolledgeaccel) {
+        final seconds =
+            thisTickElapsed.inMicroseconds / Duration.microsecondsPerSecond;
+        final delta = _edgeAccelerationFactor *
+            (_kEdgeAccelerationMaxSpeedPxPerSecond * seconds);
+        if (!_owner.performEdgeScroll(delta)) {
+          stop();
+        } else {
+          _owner.syncRemoteCursorAfterViewportScroll();
+        }
+      } else {
+        const double kFrameTime = 1000.0 / 60.0;
+        const double kSpeedFactor = 0.1;
 
-      const double kFrameTime = 1000.0 / 60.0;
-      const double kSpeedFactor = 0.1;
+        var delta = _encroachment *
+            (kSpeedFactor * thisTickElapsed.inMilliseconds / kFrameTime);
 
-      var delta = _encroachment *
-          (kSpeedFactor * thisTickElapsed.inMilliseconds / kFrameTime);
-
-      _owner.performEdgeScroll(delta);
+        _owner.performEdgeScroll(delta);
+      }
 
       _lastTotalElapsed = totalElapsed;
     }
@@ -2438,6 +2459,9 @@ class EdgeScrollFallbackState {
 }
 
 class CanvasModel with ChangeNotifier {
+  static const double _kEdgeAccelerationMinFactor = 0.0;
+  static const double _kEdgeAccelerationMaxFactor = 1.0;
+
   // image offset of canvas
   double _x = 0;
   // image offset of canvas
@@ -2465,6 +2489,7 @@ class CanvasModel with ChangeNotifier {
   EdgeScrollState _edgeScrollState = EdgeScrollState.inactive;
   // fallback strategy for when Bump Mouse isn't available
   late EdgeScrollFallbackState _edgeScrollFallbackState;
+  bool _edgeScrollFallbackInitialized = false;
   // to avoid hammering a non-functional Bump Mouse
   bool _bumpMouseIsWorking = true;
   ViewStyle _lastViewStyle = ViewStyle.defaultViewStyle();
@@ -2666,6 +2691,7 @@ class CanvasModel with ChangeNotifier {
 
     _scrollStyle =
         style != null ? ScrollStyle.fromString(style) : ScrollStyle.scrollauto;
+    cancelEdgeScroll();
 
     if (_scrollStyle != ScrollStyle.scrollauto) {
       _resetScroll();
@@ -2774,6 +2800,7 @@ class CanvasModel with ChangeNotifier {
 
   void initializeEdgeScrollFallback(TickerProvider tickerProvider) {
     _edgeScrollFallbackState = EdgeScrollFallbackState(this, tickerProvider);
+    _edgeScrollFallbackInitialized = true;
   }
 
   void disableEdgeScroll() {
@@ -2786,8 +2813,12 @@ class CanvasModel with ChangeNotifier {
   }
 
   void cancelEdgeScroll() {
-    _edgeScrollFallbackState.stop();
+    if (_edgeScrollFallbackInitialized) {
+      _edgeScrollFallbackState.stop();
+    }
   }
+
+  bool get _usesEdgeAcceleration => _scrollStyle == ScrollStyle.scrolledgeaccel;
 
   (Vector2, Vector2) getScrollInfo() {
     final scrollPixel = Vector2(
@@ -2802,7 +2833,8 @@ class CanvasModel with ChangeNotifier {
   }
 
   void edgeScrollMouse(double x, double y) async {
-    if ((_edgeScrollState == EdgeScrollState.inactive) ||
+    if (!_edgeScrollFallbackInitialized ||
+        (_edgeScrollState == EdgeScrollState.inactive) ||
         (size.width == 0 || size.height == 0) ||
         !(_horizontal.hasClients || _vertical.hasClients)) {
       return;
@@ -2841,7 +2873,22 @@ class CanvasModel with ChangeNotifier {
       dyOffset = y - (size.height - _edgeScrollEdgeThickness);
     }
 
-    var encroachment = Vector2(dxOffset, dyOffset);
+    final encroachment = Vector2(dxOffset, dyOffset);
+
+    if (_usesEdgeAcceleration) {
+      final edgeAccelerationFactor = _computeEdgeAccelerationFactor(
+        x: x,
+        y: y,
+      );
+      if (edgeAccelerationFactor.length2 == 0) {
+        _edgeScrollFallbackState.stop();
+      } else {
+        _edgeScrollFallbackState
+            .setEdgeAccelerationFactor(edgeAccelerationFactor);
+        _edgeScrollFallbackState.start();
+      }
+      return;
+    }
 
     var (scrollPixel, max) = getScrollInfo();
 
@@ -2877,12 +2924,72 @@ class CanvasModel with ChangeNotifier {
     }
   }
 
-  void performEdgeScroll(Vector2 delta) {
+  Vector2 _computeEdgeAccelerationFactor({
+    required double x,
+    required double y,
+  }) {
+    final (scrollPixel, max) = getScrollInfo();
+    final thickness = _edgeScrollEdgeThickness.toDouble();
+
+    double axisFactor({
+      required double position,
+      required double viewportExtent,
+      required double scrollPosition,
+      required double scrollMax,
+    }) {
+      if (position < thickness) {
+        if (scrollPosition <= 0) {
+          return 0.0;
+        }
+        return -(((thickness - position) / thickness)
+            .clamp(
+              _kEdgeAccelerationMinFactor,
+              _kEdgeAccelerationMaxFactor,
+            )
+            .toDouble());
+      }
+      if (position >= viewportExtent - thickness) {
+        if (scrollPosition >= scrollMax) {
+          return 0.0;
+        }
+        return ((position - (viewportExtent - thickness)) / thickness)
+            .clamp(
+              _kEdgeAccelerationMinFactor,
+              _kEdgeAccelerationMaxFactor,
+            )
+            .toDouble();
+      }
+      return 0.0;
+    }
+
+    return Vector2(
+      axisFactor(
+        position: x,
+        viewportExtent: size.width,
+        scrollPosition: scrollPixel.x,
+        scrollMax: max.x,
+      ),
+      axisFactor(
+        position: y,
+        viewportExtent: size.height,
+        scrollPosition: scrollPixel.y,
+        scrollMax: max.y,
+      ),
+    );
+  }
+
+  bool performEdgeScroll(Vector2 delta) {
     var (scrollPixel, max) = getScrollInfo();
+    final previousX = scrollPixel.x;
+    final previousY = scrollPixel.y;
 
     scrollPixel += delta;
 
     scrollPixel.clamp(Vector2.zero(), max);
+
+    if (scrollPixel.x == previousX && scrollPixel.y == previousY) {
+      return false;
+    }
 
     var scrollPixelPercent = scrollPixel.clone();
 
@@ -2893,6 +3000,11 @@ class CanvasModel with ChangeNotifier {
     pushScrollPositionToUI(scrollPixel.x, scrollPixel.y);
 
     notifyListeners();
+    return true;
+  }
+
+  void syncRemoteCursorAfterViewportScroll() {
+    parent.target?.inputModel.refreshMousePosAfterViewportScroll();
   }
 
   panX(double dx) {

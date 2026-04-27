@@ -1974,6 +1974,8 @@ class _DisplayState extends State<_Display> {
     }
 
     final groupValue = bind.mainGetUserDefaultOption(key: kOptionScrollStyle);
+    final usesEdgeThickness = groupValue == kRemoteScrollStyleEdge ||
+        groupValue == kRemoteScrollStyleEdgeAcceleration;
 
     onEdgeScrollEdgeThicknessChanged(double value) async {
       await bind.mainSetUserDefaultOption(
@@ -1998,8 +2000,13 @@ class _DisplayState extends State<_Display> {
             groupValue: groupValue,
             label: 'ScrollEdge',
             onChanged: isOptFixed ? null : onChanged),
+        _Radio(context,
+            value: kRemoteScrollStyleEdgeAcceleration,
+            groupValue: groupValue,
+            label: 'ScrollEdgeAcceleration',
+            onChanged: isOptFixed ? null : onChanged),
         Offstage(
-            offstage: groupValue != kRemoteScrollStyleEdge,
+            offstage: !usesEdgeThickness,
             child: EdgeThicknessControl(
               value: double.tryParse(bind.mainGetUserDefaultOption(
                       key: kOptionEdgeScrollEdgeThickness)) ??

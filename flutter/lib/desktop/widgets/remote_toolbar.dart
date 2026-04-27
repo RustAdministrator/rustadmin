@@ -40,14 +40,19 @@ class ToolbarImagePointerState {
 }
 
 typedef ToolbarImagePointerHandler = void Function(ToolbarImagePointerState);
+typedef ToolbarWindowPointerHandler = void Function(Offset? position);
 
 class _ToolbarMenuLifecycleScope extends InheritedWidget {
   final VoidCallback onMenuOpen;
   final VoidCallback onMenuClose;
+  final VoidCallback onMenuPointerEnter;
+  final VoidCallback onMenuPointerExit;
 
   const _ToolbarMenuLifecycleScope({
     required this.onMenuOpen,
     required this.onMenuClose,
+    required this.onMenuPointerEnter,
+    required this.onMenuPointerExit,
     required super.child,
   });
 
@@ -58,7 +63,9 @@ class _ToolbarMenuLifecycleScope extends InheritedWidget {
   @override
   bool updateShouldNotify(_ToolbarMenuLifecycleScope oldWidget) {
     return onMenuOpen != oldWidget.onMenuOpen ||
-        onMenuClose != oldWidget.onMenuClose;
+        onMenuClose != oldWidget.onMenuClose ||
+        onMenuPointerEnter != oldWidget.onMenuPointerEnter ||
+        onMenuPointerExit != oldWidget.onMenuPointerExit;
   }
 }
 
@@ -302,6 +309,8 @@ class RemoteToolbar extends StatefulWidget {
   final Function(int) onEnterOrLeaveImageCleaner;
   final Function(int, ToolbarImagePointerHandler) onImagePointerStateSetter;
   final Function(int) onImagePointerStateCleaner;
+  final Function(int, ToolbarWindowPointerHandler) onWindowPointerStateSetter;
+  final Function(int) onWindowPointerStateCleaner;
   final Function(VoidCallback) setRemoteState;
 
   RemoteToolbar({
@@ -313,6 +322,8 @@ class RemoteToolbar extends StatefulWidget {
     required this.onEnterOrLeaveImageCleaner,
     required this.onImagePointerStateSetter,
     required this.onImagePointerStateCleaner,
+    required this.onWindowPointerStateSetter,
+    required this.onWindowPointerStateCleaner,
     required this.setRemoteState,
   }) : super(key: key);
 
@@ -322,11 +333,11 @@ class RemoteToolbar extends StatefulWidget {
 
 class _RemoteToolbarState extends State<RemoteToolbar> {
   Timer? _autoHideTimer;
-  bool _isCursorOverImage = false;
   bool _isCursorOverToolbar = false;
+  int _menuHoverDepth = 0;
   bool _visible = true;
   bool _wasSessionHidden = false;
-  Offset? _lastImagePointer;
+  Offset? _lastWindowPointer;
   final _fractionX = 0.5.obs;
   final _dragging = false.obs;
   final _menuController = flutter_widgets.MenuController();
@@ -350,9 +361,8 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       await WindowController.fromWindowId(windowId).minimize();
 
   bool get _isInRevealZone =>
-      _isCursorOverImage &&
-      _lastImagePointer != null &&
-      _lastImagePointer!.dy <= widget.state.revealZonePx;
+      _lastWindowPointer != null &&
+      _lastWindowPointer!.dy <= widget.state.revealZonePx;
 
   void _cancelAutoHide() {
     _autoHideTimer?.cancel();
@@ -360,6 +370,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   }
 
   bool get _menuIsOpen => _menuController.isOpen;
+  bool get _isCursorOverMenu => _menuHoverDepth > 0;
 
   void _closeMenus() {
     _menuController.close();
@@ -371,8 +382,13 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   }
 
   void _handleMenuClosed() {
+    _menuHoverDepth = 0;
     if (!mounted || hide.value) return;
-    if (pin || _isCursorOverToolbar || _isInRevealZone || _menuIsOpen) {
+    if (pin ||
+        _isCursorOverToolbar ||
+        _isCursorOverMenu ||
+        _isInRevealZone ||
+        _menuIsOpen) {
       _cancelAutoHide();
       _setVisible(true);
       return;
@@ -398,6 +414,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     if (scheduleHide &&
         !pin &&
         !_isCursorOverToolbar &&
+        !_isCursorOverMenu &&
         !_isInRevealZone &&
         !_menuIsOpen &&
         _dragging.isFalse) {
@@ -414,6 +431,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
         if (!mounted) return;
         if (!pin &&
             !_isCursorOverToolbar &&
+            !_isCursorOverMenu &&
             !_isInRevealZone &&
             !_menuIsOpen &&
             _dragging.isFalse) {
@@ -426,18 +444,37 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   void _handleToolbarPointerEnter() {
     _isCursorOverToolbar = true;
     _cancelAutoHide();
+    widget.ffi.canvasModel.cancelEdgeScroll();
   }
 
   void _handleToolbarPointerExit() {
     _isCursorOverToolbar = false;
-    if (!pin && !_isInRevealZone && !_menuIsOpen) {
+    if (!pin && !_isCursorOverMenu && !_isInRevealZone && !_menuIsOpen) {
       _scheduleAutoHide();
     }
   }
 
-  void _handleImagePointerState(ToolbarImagePointerState state) {
-    _isCursorOverImage = state.insideImage;
-    _lastImagePointer = state.insideImage ? state.localPosition : null;
+  void _handleMenuPointerEnter() {
+    _menuHoverDepth += 1;
+    _cancelAutoHide();
+    widget.ffi.canvasModel.cancelEdgeScroll();
+  }
+
+  void _handleMenuPointerExit() {
+    if (_menuHoverDepth > 0) {
+      _menuHoverDepth -= 1;
+    }
+    if (!pin &&
+        !_isCursorOverToolbar &&
+        !_isCursorOverMenu &&
+        !_isInRevealZone &&
+        !_menuIsOpen) {
+      _scheduleAutoHide();
+    }
+  }
+
+  void _handleWindowPointerState(Offset? position) {
+    _lastWindowPointer = position;
 
     if (hide.value) return;
 
@@ -451,7 +488,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       return;
     }
 
-    if (!_isCursorOverImage) {
+    if (_lastWindowPointer == null) {
       if (!pin && !_isCursorOverToolbar) {
         _scheduleAutoHide();
       }
@@ -477,16 +514,9 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       widget.state.init(widget.ffi.sessionId);
     });
 
-    widget.onEnterOrLeaveImageSetter(identityHashCode(this), (enter) {
-      if (enter) {
-        _isCursorOverImage = true;
-      } else {
-        _isCursorOverImage = false;
-      }
-    });
-    widget.onImagePointerStateSetter(
+    widget.onWindowPointerStateSetter(
       identityHashCode(this),
-      _handleImagePointerState,
+      _handleWindowPointerState,
     );
   }
 
@@ -496,6 +526,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     _closeMenus();
     widget.onEnterOrLeaveImageCleaner(identityHashCode(this));
     widget.onImagePointerStateCleaner(identityHashCode(this));
+    widget.onWindowPointerStateCleaner(identityHashCode(this));
     super.dispose();
   }
 
@@ -539,6 +570,8 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
                 child: _ToolbarMenuLifecycleScope(
                   onMenuOpen: _handleMenuOpened,
                   onMenuClose: _handleMenuClosed,
+                  onMenuPointerEnter: _handleMenuPointerEnter,
+                  onMenuPointerExit: _handleMenuPointerExit,
                   child: flutter_widgets.RawMenuAnchorGroup(
                     controller: _menuController,
                     child: currentShape,
@@ -1332,6 +1365,8 @@ class _DisplayMenuState extends State<_DisplayMenu> {
       if (!visible) return Offstage();
       final groupValue = data['scrollStyle'] as String;
       final edgeScrollEdgeThickness = data['edgeScrollEdgeThickness'] as int;
+      final usesEdgeThickness = groupValue == kRemoteScrollStyleEdge ||
+          groupValue == kRemoteScrollStyleEdgeAcceleration;
 
       onChangeScrollStyle(String? value) async {
         if (value == null) return;
@@ -1358,7 +1393,7 @@ class _DisplayMenuState extends State<_DisplayMenu> {
               onChanged: widget.ffi.canvasModel.imageOverflow.value
                   ? (value) => onChangeScrollStyle(value)
                   : null,
-              closeOnActivate: groupValue != kRemoteScrollStyleEdge,
+              closeOnActivate: !usesEdgeThickness,
               ffi: widget.ffi,
             ),
             RdoMenuButton<String>(
@@ -1368,7 +1403,7 @@ class _DisplayMenuState extends State<_DisplayMenu> {
               onChanged: widget.ffi.canvasModel.imageOverflow.value
                   ? (value) => onChangeScrollStyle(value)
                   : null,
-              closeOnActivate: groupValue != kRemoteScrollStyleEdge,
+              closeOnActivate: !usesEdgeThickness,
               ffi: widget.ffi,
             ),
             if (!isWeb) ...[
@@ -1382,8 +1417,18 @@ class _DisplayMenuState extends State<_DisplayMenu> {
                     : null,
                 ffi: widget.ffi,
               ),
+              RdoMenuButton<String>(
+                child: Text(translate('ScrollEdgeAcceleration')),
+                value: kRemoteScrollStyleEdgeAcceleration,
+                groupValue: groupValue,
+                closeOnActivate: false,
+                onChanged: widget.ffi.canvasModel.imageOverflow.value
+                    ? (value) => onChangeScrollStyle(value)
+                    : null,
+                ffi: widget.ffi,
+              ),
               Offstage(
-                  offstage: groupValue != kRemoteScrollStyleEdge,
+                  offstage: !usesEdgeThickness,
                   child: EdgeThicknessControl(
                     value: edgeScrollEdgeThickness.toDouble(),
                     onChanged: onChangeEdgeScrollEdgeThickness,
@@ -2662,7 +2707,7 @@ class _IconSubmenuButtonState extends State<_IconSubmenuButton> {
                         child: icon))),
             menuChildren: widget
                 .menuChildrenGetter(this)
-                .map((e) => _buildPointerTrackWidget(e, widget.ffi))
+                .map((e) => _buildPointerTrackWidget(context, e, widget.ffi))
                 .toList()));
     return MenuBar(children: [
       button.marginSymmetric(
@@ -2689,7 +2734,9 @@ class _SubmenuButton extends StatelessWidget {
       key: key,
       child: child,
       menuChildren:
-          menuChildren.map((e) => _buildPointerTrackWidget(e, ffi)).toList(),
+          menuChildren
+              .map((e) => _buildPointerTrackWidget(context, e, ffi))
+              .toList(),
       menuStyle: _ToolbarTheme.defaultMenuStyle(context),
     );
   }
@@ -3014,12 +3061,15 @@ class InputModeMenu {
 
 _menuDismissCallback(FFI ffi) => ffi.inputModel.refreshMousePos();
 
-Widget _buildPointerTrackWidget(Widget child, FFI? ffi) {
+Widget _buildPointerTrackWidget(BuildContext context, Widget child, FFI? ffi) {
+  final menuLifecycle = _ToolbarMenuLifecycleScope.maybeOf(context);
   return Listener(
     onPointerHover: (PointerHoverEvent e) => {
       if (ffi != null) {ffi.inputModel.lastMousePos = e.position}
     },
     child: MouseRegion(
+      onEnter: (_) => menuLifecycle?.onMenuPointerEnter(),
+      onExit: (_) => menuLifecycle?.onMenuPointerExit(),
       child: child,
     ),
   );
@@ -3038,7 +3088,7 @@ class EdgeThicknessControl extends StatelessWidget {
   }) : super(key: key);
 
   static const double kMin = 20;
-  static const double kMax = 150;
+  static const double kMax = 300;
 
   @override
   Widget build(BuildContext context) {

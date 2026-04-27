@@ -406,7 +406,8 @@ class InputModel {
   bool get isViewCamera => parent.target!.connType == ConnType.viewCamera;
   int get trackpadSpeed => _trackpadSpeed;
   bool get useEdgeScroll =>
-      parent.target!.canvasModel.scrollStyle == ScrollStyle.scrolledge;
+      parent.target!.canvasModel.scrollStyle == ScrollStyle.scrolledge ||
+      parent.target!.canvasModel.scrollStyle == ScrollStyle.scrolledgeaccel;
 
   /// Check if the connected server supports relative mouse mode.
   bool get isRelativeMouseModeSupported => _relativeMouse.isSupported;
@@ -1492,6 +1493,21 @@ class InputModel {
         'buttons': 0,
         'type': _kMouseEventMove,
       }, lastMousePos, edgeScroll: useEdgeScroll);
+
+  void refreshMousePosAfterViewportScroll() {
+    if (isViewOnly || isViewCamera || !keyboardPerm) {
+      return;
+    }
+    handleMouse(
+      {
+        'buttons': 0,
+        'type': _kMouseEventMove,
+      },
+      lastMousePos,
+      moveCanvas: false,
+      edgeScroll: false,
+    );
+  }
 
   void tryMoveEdgeOnExit(Offset pos) => handleMouse(
         {

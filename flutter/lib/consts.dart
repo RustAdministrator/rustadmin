@@ -396,6 +396,9 @@ const kRemoteScrollStyleBar = 'scrollbar';
 /// [kRemoteScrollStyleEdge] Scroll image auto at edges.
 const kRemoteScrollStyleEdge = 'scrolledge';
 
+/// [kRemoteScrollStyleEdgeAcceleration] Auto-scroll image while the cursor stays in an edge zone.
+const kRemoteScrollStyleEdgeAcceleration = 'scrolledgeaccel';
+
 /// [kScrollModeDefault] Mouse or touchpad, the default scroll mode.
 const kScrollModeDefault = 'default';
 

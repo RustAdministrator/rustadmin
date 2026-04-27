@@ -88,6 +88,8 @@ class _ViewCameraPageState extends State<ViewCameraPage>
   Function(bool)? _onEnterOrLeaveImage4Toolbar;
   int? _instanceIdOnImagePointerState4Toolbar;
   ToolbarImagePointerHandler? _onImagePointerState4Toolbar;
+  int? _instanceIdOnWindowPointerState4Toolbar;
+  ToolbarWindowPointerHandler? _onWindowPointerState4Toolbar;
 
   late FFI _ffi;
 
@@ -282,47 +284,68 @@ class _ViewCameraPageState extends State<ViewCameraPage>
               _onImagePointerState4Toolbar = null;
             }
           },
+          onWindowPointerStateSetter: (id, func) {
+            _instanceIdOnWindowPointerState4Toolbar = id;
+            _onWindowPointerState4Toolbar = func;
+          },
+          onWindowPointerStateCleaner: (id) {
+            if (_instanceIdOnWindowPointerState4Toolbar == id) {
+              _instanceIdOnWindowPointerState4Toolbar = null;
+              _onWindowPointerState4Toolbar = null;
+            }
+          },
           setRemoteState: setState,
         );
 
     bodyWidget() {
-      return Stack(
-        children: [
-          Container(
-            color: kColorCanvas,
-            child: getBodyForDesktop(context),
-          ),
-          Stack(
-            children: [
-              _ffi.ffiModel.pi.isSet.isTrue &&
-                      _ffi.ffiModel.waitForFirstImage.isTrue
-                  ? emptyOverlay()
-                  : () {
-                      if (!_ffi.ffiModel.isPeerAndroid) {
-                        return Offstage();
-                      } else {
-                        return Obx(() => Offstage(
-                              offstage: _ffi.dialogManager
-                                  .mobileActionsOverlayVisible.isFalse,
-                              child: Overlay(initialEntries: [
-                                makeMobileActionsOverlayEntry(
-                                  () => _ffi.dialogManager
-                                      .setMobileActionsOverlayVisible(false),
-                                  ffi: _ffi,
-                                )
-                              ]),
-                            ));
-                      }
-                    }(),
-              // Use Overlay to enable rebuild every time on menu button click.
-              _ffi.ffiModel.pi.isSet.isTrue
-                  ? Overlay(
-                      initialEntries: [OverlayEntry(builder: remoteToolbar)])
-                  : remoteToolbar(context),
-              _ffi.ffiModel.pi.isSet.isFalse ? emptyOverlay() : Offstage(),
-            ],
-          ),
-        ],
+      return MouseRegion(
+        onEnter: (evt) {
+          _onWindowPointerState4Toolbar?.call(evt.localPosition);
+        },
+        onHover: (evt) {
+          _onWindowPointerState4Toolbar?.call(evt.localPosition);
+        },
+        onExit: (_) {
+          _onWindowPointerState4Toolbar?.call(null);
+        },
+        child: Stack(
+          children: [
+            Container(
+              color: kColorCanvas,
+              child: getBodyForDesktop(context),
+            ),
+            Stack(
+              children: [
+                _ffi.ffiModel.pi.isSet.isTrue &&
+                        _ffi.ffiModel.waitForFirstImage.isTrue
+                    ? emptyOverlay()
+                    : () {
+                        if (!_ffi.ffiModel.isPeerAndroid) {
+                          return Offstage();
+                        } else {
+                          return Obx(() => Offstage(
+                                offstage: _ffi.dialogManager
+                                    .mobileActionsOverlayVisible.isFalse,
+                                child: Overlay(initialEntries: [
+                                  makeMobileActionsOverlayEntry(
+                                    () => _ffi.dialogManager
+                                        .setMobileActionsOverlayVisible(false),
+                                    ffi: _ffi,
+                                  )
+                                ]),
+                              ));
+                        }
+                      }(),
+                // Use Overlay to enable rebuild every time on menu button click.
+                _ffi.ffiModel.pi.isSet.isTrue
+                    ? Overlay(
+                        initialEntries: [OverlayEntry(builder: remoteToolbar)])
+                    : remoteToolbar(context),
+                _ffi.ffiModel.pi.isSet.isFalse ? emptyOverlay() : Offstage(),
+              ],
+            ),
+          ],
+        ),
       );
     }
 
