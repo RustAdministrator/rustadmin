@@ -1,182 +1,208 @@
-<p align="center">
-  <img src="res/logo-header.svg" alt="RustDesk - Your remote desktop"><br>
-  <a href="#raw-steps-to-build">Build</a> •
-  <a href="#how-to-build-with-docker">Docker</a> •
-  <a href="#file-structure">Structure</a> •
-  <a href="#snapshot">Snapshot</a><br>
-  [<a href="docs/README-UA.md">Українська</a>] | [<a href="docs/README-CS.md">česky</a>] | [<a href="docs/README-ZH.md">中文</a>] | [<a href="docs/README-HU.md">Magyar</a>] | [<a href="docs/README-ES.md">Español</a>] | [<a href="docs/README-FA.md">فارسی</a>] | [<a href="docs/README-FR.md">Français</a>] | [<a href="docs/README-DE.md">Deutsch</a>] | [<a href="docs/README-PL.md">Polski</a>] | [<a href="docs/README-ID.md">Indonesian</a>] | [<a href="docs/README-FI.md">Suomi</a>] | [<a href="docs/README-ML.md">മലയാളം</a>] | [<a href="docs/README-JP.md">日本語</a>] | [<a href="docs/README-NL.md">Nederlands</a>] | [<a href="docs/README-IT.md">Italiano</a>] | [<a href="docs/README-RU.md">Русский</a>] | [<a href="docs/README-PTBR.md">Português (Brasil)</a>] | [<a href="docs/README-EO.md">Esperanto</a>] | [<a href="docs/README-KR.md">한국어</a>] | [<a href="docs/README-AR.md">العربي</a>] | [<a href="docs/README-VN.md">Tiếng Việt</a>] | [<a href="docs/README-DA.md">Dansk</a>] | [<a href="docs/README-GR.md">Ελληνικά</a>] | [<a href="docs/README-TR.md">Türkçe</a>] | [<a href="docs/README-NO.md">Norsk</a>] | [<a href="docs/README-RO.md">Română</a>]<br>
-  <b>We need your help to translate this README, <a href="https://github.com/rustdesk/rustdesk/tree/master/src/lang">RustDesk UI</a> and <a href="https://github.com/rustdesk/doc.rustdesk.com">RustDesk Doc</a> to your native language</b>
-</p>
+# RustAdmin
 
-> [!Caution]
-> **Misuse Disclaimer:** <br>
-> The developers of RustDesk do not condone or support any unethical or illegal use of this software. Misuse, such as unauthorized access, control or invasion of privacy, is strictly against our guidelines. The authors are not responsible for any misuse of the application.
+**RustAdmin** is an experimental fork of [RustDesk](https://github.com/rustdesk/rustdesk) focused on self-hosted remote administration, local networks, and VPN-first deployments.
 
+The project keeps RustDesk’s open-source foundation while exploring a stricter security posture, safer defaults, better administrative workflows, and improved desktop usability.
 
-Chat with us: [Discord](https://discord.gg/nDceKgxnkV) | [Twitter](https://twitter.com/rustdesk) | [Reddit](https://www.reddit.com/r/rustdesk) | [YouTube](https://www.youtube.com/@rustdesk)
+> [!IMPORTANT]
+> This project is not affiliated with or endorsed by the RustDesk project. RustAdmin is a fork and retains upstream RustDesk components, protocol concepts, build system parts, and licensing obligations.
 
-[![RustDesk Server Pro](https://img.shields.io/badge/RustDesk%20Server%20Pro-Advanced%20Features-blue)](https://rustdesk.com/pricing.html)
+## Project direction
 
-Yet another remote desktop solution, written in Rust. Works out of the box with no configuration required. You have full control of your data, with no concerns about security. You can use our rendezvous/relay server, [set up your own](https://rustdesk.com/server), or [write your own rendezvous/relay server](https://github.com/rustdesk/rustdesk-server-demo).
+RustAdmin is aimed primarily at environments where the operator controls the network path:
 
-![image](https://user-images.githubusercontent.com/71636191/171661982-430285f0-2e12-4b1d-9957-4a58e375304d.png)
+* local networks
+* site-to-site VPNs
+* private WireGuard / OpenVPN / IPsec links
+* self-hosted rendezvous and relay infrastructure
+* small teams, labs, workshops, and private administration setups
 
-RustDesk welcomes contribution from everyone. See [CONTRIBUTING.md](docs/CONTRIBUTING.md) for help getting started.
+The main development priorities are:
 
-[**FAQ**](https://github.com/rustdesk/rustdesk/wiki/FAQ)
+* **Security-first defaults** — reduce unsafe remote configuration changes and avoid trusting unverified network hints.
+* **Self-hosting** — prefer deployments where the administrator controls rendezvous, relay, API, and access policy.
+* **Local/VPN operation** — improve behavior for private address ranges and trusted internal networks.
+* **Quality and maintainability** — keep changes reviewable, tested, and limited to meaningful behavior changes.
+* **Usability for administrators** — improve first-run setup, connection status visibility, toolbar behavior, scaling controls, and desktop workflows.
 
-[**BINARY DOWNLOAD**](https://github.com/rustdesk/rustdesk/releases)
+## Misuse disclaimer
 
-[**NIGHTLY BUILD**](https://github.com/rustdesk/rustdesk/releases/tag/nightly)
+RustAdmin is remote administration software. It must only be used on systems you own, administer, or have explicit permission to access.
 
-[<img src="https://f-droid.org/badge/get-it-on.png"
-    alt="Get it on F-Droid"
-    height="80">](https://f-droid.org/en/packages/com.carriez.flutter_hbb)
-[<img src="https://flathub.org/api/badge?svg&locale=en"
-    alt="Get it on Flathub"
-    height="80">](https://flathub.org/apps/com.rustdesk.RustDesk)
+The developers do not condone or support unauthorized access, covert control, privacy invasion, credential theft, malware deployment, or any other unethical or illegal use. The authors are not responsible for misuse of this software.
 
-## Dependencies
+## Current fork changes
 
-Desktop versions use Flutter or Sciter (deprecated) for GUI, this tutorial is for Sciter only, since it is easier and more friendly to start. Check out our [CI](https://github.com/rustdesk/rustdesk/blob/master/.github/workflows/flutter-build.yml) for building Flutter version.
+RustAdmin currently contains upstream RustDesk code plus fork-specific work in the following areas:
 
-Please download Sciter dynamic library yourself.
+* safer handling of rendezvous-provided peer address hints
+* broader protection of security-sensitive remote configuration options
+* relay server resolution fixes before relay creation
+* first-run wizard and clearer initial setup flow
+* improved network status panel layout
+* toolbar auto-hide settings and toolbar behavior prototyping
+* edge-acceleration scrolling and pointer tracking improvements
+* custom scale presets in the desktop toolbar
+* cross-platform local build wrappers for Linux, Windows, and macOS
+* macOS build, entitlement, and codesigning workflow improvements
 
-[Windows](https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.win/x64/sciter.dll) |
-[Linux](https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.lnx/x64/libsciter-gtk.so) |
-[macOS](https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.osx/libsciter.dylib)
+This list describes the current development direction and may change as the fork evolves.
 
-## Raw Steps to build
+## Recommended deployment model
 
-- Prepare your Rust development env and C++ build env
+For security-focused use, RustAdmin should normally be deployed with:
 
-- Install [vcpkg](https://github.com/microsoft/vcpkg), and set `VCPKG_ROOT` env variable correctly
+1. a self-hosted rendezvous/relay server,
+2. access through LAN or VPN whenever possible,
+3. restricted firewall exposure,
+4. pinned and reviewed client configuration,
+5. strong authentication and approval settings,
+6. logging and monitoring appropriate for the environment.
 
-  - Windows: vcpkg install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
-  - Linux/macOS: vcpkg install libvpx libyuv opus aom
+Public internet exposure should be treated as a higher-risk deployment model and should be reviewed carefully.
 
-- run `cargo run`
+## Build
 
-## [Build](https://rustdesk.com/docs/en/dev/build/)
+RustAdmin inherits much of the RustDesk build system. The modern desktop UI is Flutter-based; the older Sciter UI is legacy/deprecated.
 
-## How to Build on Linux
-
-### Ubuntu 18 (Debian 10)
-
-```sh
-sudo apt install -y zip g++ gcc git curl wget nasm yasm libgtk-3-dev clang libxcb-randr0-dev libxdo-dev \
-        libxfixes-dev libxcb-shape0-dev libxcb-xfixes0-dev libasound2-dev libpulse-dev cmake make \
-        libclang-dev ninja-build libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libpam0g-dev
-```
-
-### openSUSE Tumbleweed
+### Clone
 
 ```sh
-sudo zypper install gcc-c++ git curl wget nasm yasm gcc gtk3-devel clang libxcb-devel libXfixes-devel cmake alsa-lib-devel gstreamer-devel gstreamer-plugins-base-devel xdotool-devel pam-devel
+git clone --recurse-submodules https://github.com/RustAdministrator/rustadmin.git
+cd rustadmin
 ```
 
-### Fedora 28 (CentOS 8)
+If the repository was cloned without submodules:
 
 ```sh
-sudo yum -y install gcc-c++ git curl wget nasm yasm gcc gtk3-devel clang libxcb-devel libxdo-devel libXfixes-devel pulseaudio-libs-devel cmake alsa-lib-devel gstreamer1-devel gstreamer1-plugins-base-devel pam-devel
+git submodule update --init --recursive
 ```
 
-### Arch (Manjaro)
+### Common requirements
 
-```sh
-sudo pacman -Syu --needed unzip git cmake gcc curl wget yasm nasm zip make pkg-config clang gtk3 xdotool libxcb libxfixes alsa-lib pipewire
-```
+You need a working Rust toolchain and platform build tools.
 
-### Install vcpkg
-
-```sh
-git clone https://github.com/microsoft/vcpkg
-cd vcpkg
-git checkout 2023.04.15
-cd ..
-vcpkg/bootstrap-vcpkg.sh
-export VCPKG_ROOT=$HOME/vcpkg
-vcpkg/vcpkg install libvpx libyuv opus aom
-```
-
-### Fix libvpx (For Fedora)
-
-```sh
-cd vcpkg/buildtrees/libvpx/src
-cd *
-./configure
-sed -i 's/CFLAGS+=-I/CFLAGS+=-fPIC -I/g' Makefile
-sed -i 's/CXXFLAGS+=-I/CXXFLAGS+=-fPIC -I/g' Makefile
-make
-cp libvpx.a $HOME/vcpkg/installed/x64-linux/lib/
-cd
-```
-
-### Build
+Install Rust:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
-git clone --recurse-submodules https://github.com/rustdesk/rustdesk
-cd rustdesk
-mkdir -p target/debug
-wget https://raw.githubusercontent.com/c-smile/sciter-sdk/master/bin.lnx/x64/libsciter-gtk.so
-mv libsciter-gtk.so target/debug
-VCPKG_ROOT=$HOME/vcpkg cargo run
+source "$HOME/.cargo/env"
 ```
 
-## How to build with Docker
-
-Begin by cloning the repository and building the Docker container:
+Install `vcpkg` dependencies:
 
 ```sh
-git clone https://github.com/rustdesk/rustdesk
-cd rustdesk
-git submodule update --init --recursive
-docker build -t "rustdesk-builder" .
+git clone https://github.com/microsoft/vcpkg "$HOME/vcpkg"
+cd "$HOME/vcpkg"
+git checkout 2023.04.15
+./bootstrap-vcpkg.sh
+export VCPKG_ROOT="$HOME/vcpkg"
+"$VCPKG_ROOT/vcpkg" install libvpx libyuv opus aom
 ```
 
-Then, each time you need to build the application, run the following command:
+On Windows, use the appropriate triplets, for example:
+
+```powershell
+vcpkg install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
+```
+
+### Flutter desktop build
+
+The fork includes platform wrappers that help avoid stale Flutter metadata when switching between Linux, Windows, and macOS from the same checkout.
+
+Linux:
 
 ```sh
-docker run --rm -it -v $PWD:/home/user/rustdesk -v rustdesk-git-cache:/home/user/.cargo/git -v rustdesk-registry-cache:/home/user/.cargo/registry -e PUID="$(id -u)" -e PGID="$(id -g)" rustdesk-builder
+scripts/build_linux.sh
 ```
 
-Note that the first build may take longer before dependencies are cached, subsequent builds will be faster. Additionally, if you need to specify different arguments to the build command, you may do so at the end of the command in the `<OPTIONAL-ARGS>` position. For instance, if you wanted to build an optimized release version, you would run the command above followed by `--release`. The resulting executable will be available in the target folder on your system, and can be run with:
+Windows PowerShell:
+
+```powershell
+.\scripts\build_windows.ps1
+```
+
+macOS:
 
 ```sh
-target/debug/rustdesk
+scripts/build_macos.sh
 ```
 
-Or, if you're running a release executable:
+Use the script options documented in `scripts/README.md` for custom Flutter paths, codec roots, clean builds, hardware codec toggles, and toolbar lab runs.
+
+### Legacy Sciter build
+
+The legacy Sciter path is kept for compatibility with upstream RustDesk, but new desktop UI work should generally target Flutter.
 
 ```sh
-target/release/rustdesk
+cargo run
 ```
 
-Please ensure that you run these commands from the root of the RustDesk repository, or the application may not find the required resources. Also note that other cargo subcommands such as `install` or `run` are not currently supported via this method as they would install or run the program inside the container instead of the host.
+For the legacy UI, the Sciter dynamic library may be required in the expected target directory.
 
-## File Structure
+## Development notes
 
-- **[libs/hbb_common](https://github.com/rustdesk/rustdesk/tree/master/libs/hbb_common)**: video codec, config, tcp/udp wrapper, protobuf, fs functions for file transfer, and some other utility functions
-- **[libs/scrap](https://github.com/rustdesk/rustdesk/tree/master/libs/scrap)**: screen capture
-- **[libs/enigo](https://github.com/rustdesk/rustdesk/tree/master/libs/enigo)**: platform specific keyboard/mouse control
-- **[libs/clipboard](https://github.com/rustdesk/rustdesk/tree/master/libs/clipboard)**: file copy and paste implementation for Windows, Linux, macOS.
-- **[src/ui](https://github.com/rustdesk/rustdesk/tree/master/src/ui)**: obsolete Sciter UI (deprecated)
-- **[src/server](https://github.com/rustdesk/rustdesk/tree/master/src/server)**: audio/clipboard/input/video services, and network connections
-- **[src/client.rs](https://github.com/rustdesk/rustdesk/tree/master/src/client.rs)**: start a peer connection
-- **[src/rendezvous_mediator.rs](https://github.com/rustdesk/rustdesk/tree/master/src/rendezvous_mediator.rs)**: Communicate with [rustdesk-server](https://github.com/rustdesk/rustdesk-server), wait for remote direct (TCP hole punching) or relayed connection
-- **[src/platform](https://github.com/rustdesk/rustdesk/tree/master/src/platform)**: platform specific code
-- **[flutter](https://github.com/rustdesk/rustdesk/tree/master/flutter)**: Flutter code for desktop and mobile
-- **[flutter/web/js](https://github.com/rustdesk/rustdesk/tree/master/flutter/web/v1/js)**: JavaScript for Flutter web client
+Useful commands:
+
+```sh
+cargo test
+cd flutter && flutter test
+python3 build.py --flutter
+python3 build.py --flutter --release
+```
+
+Hardware codec and platform-specific features may require additional SDKs, libraries, or driver components.
+
+## Project structure
+
+* `src/` — main Rust application code
+* `src/server/` — audio, clipboard, input, video services, and network connections
+* `src/client.rs` — peer connection handling
+* `src/rendezvous_mediator.rs` — rendezvous and relay connection flow
+* `src/platform/` — platform-specific code
+* `src/ui/` — legacy Sciter UI
+* `flutter/` — Flutter UI for desktop and mobile
+* `flutter/lib/desktop/` — desktop UI
+* `flutter/lib/mobile/` — mobile UI
+* `flutter/lib/common/` — shared Flutter UI and helpers
+* `libs/hbb_common/` — shared protocol, configuration, networking, protobuf, file transfer, and utility code
+* `libs/scrap/` — screen capture
+* `libs/enigo/` — keyboard and mouse control
+* `libs/clipboard/` — cross-platform clipboard support
+* `scripts/` — local platform build wrappers
+* `prototyping/` — isolated UI experiments, including the toolbar lab
+
+## Security and configuration work
+
+This fork is actively exploring stricter behavior around remote configuration and connection hints. In particular, security-sensitive options such as rendezvous/relay/API settings, ICE/websocket/TLS fallback settings, direct access settings, trust and approval controls, whitelist options, and related values should not be casually overwritten by remote configuration.
+
+Rendezvous-provided peer hints should be validated before use. Unsafe, loopback, link-local, multicast, or otherwise inappropriate peer addresses should be ignored or cause fallback to safer connection paths.
+
+## Attribution
+
+RustAdmin is based on [RustDesk](https://github.com/rustdesk/rustdesk), an AGPL-licensed open-source remote desktop project written in Rust.
+
+Many components, design concepts, dependencies, protocol elements, and build workflows originate from RustDesk and its contributors. RustAdmin keeps this attribution and remains subject to the applicable upstream licenses.
+
+## License
+
+This project follows the upstream licensing model and is distributed under the AGPL-3.0 license unless otherwise noted in individual files or dependencies.
+
+See `LICENCE` for details.
+
+## Contributing
+
+Contributions should follow these principles:
+
+* keep security-sensitive changes explicit and reviewable,
+* avoid broad formatting-only diffs,
+* prefer tests for behavior changes,
+* do not introduce unsafe defaults,
+* document deployment assumptions clearly,
+* keep upstream attribution intact.
+
+Before opening large changes, consider starting with an issue or discussion describing the intended behavior and threat model.
 
 ## Screenshots
 
-![Connection Manager](https://github.com/rustdesk/rustdesk/assets/28412477/db82d4e7-c4bc-4823-8e6f-6af7eadf7651)
-
-![Connected to a Windows PC](https://github.com/rustdesk/rustdesk/assets/28412477/9baa91e9-3362-4d06-aa1a-7518edcbd7ea)
-
-![File Transfer](https://github.com/rustdesk/rustdesk/assets/28412477/39511ad3-aa9a-4f8c-8947-1cce286a46ad)
-
-![TCP Tunneling](https://github.com/rustdesk/rustdesk/assets/28412477/78e8708f-e87e-4570-8373-1360033ea6c5)
-
+RustDesk-specific screenshots and store badges have intentionally been removed from this README. Add RustAdmin-specific screenshots only after the UI branding and behavior shown in the images match this fork.
