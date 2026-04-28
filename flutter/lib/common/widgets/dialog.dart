@@ -1918,8 +1918,10 @@ void showConfirmSwitchSidesDialog(
 customImageQualityDialog(SessionID sessionId, String id, FFI ffi) async {
   double initQuality = kDefaultQuality;
   double initFps = kDefaultFps;
+  String initFpsMode = kCustomFpsModeAdaptive;
   bool qualitySet = false;
   bool fpsSet = false;
+  bool fpsModeSet = false;
 
   bool? direct;
   try {
@@ -1932,16 +1934,30 @@ customImageQualityDialog(SessionID sessionId, String id, FFI ffi) async {
       (await bind.mainIsUsingPublicServer() && direct != true) ||
           versionCmp(ffi.ffiModel.pi.version, '1.2.2') < 0;
 
-  setCustomValues({double? quality, double? fps}) async {
-    debugPrint("setCustomValues quality:$quality, fps:$fps");
+  int fpsForMode(double fps, String mode) {
+    final value = fps.toInt();
+    return mode == kCustomFpsModeFixed ? -value : value;
+  }
+
+  setCustomValues({double? quality, double? fps, String? fpsMode}) async {
+    debugPrint("setCustomValues quality:$quality, fps:$fps, fpsMode:$fpsMode");
     if (quality != null) {
       qualitySet = true;
       await bind.sessionSetCustomImageQuality(
           sessionId: sessionId, value: quality.toInt());
     }
+    if (fpsMode != null) {
+      fpsModeSet = true;
+      initFpsMode =
+          fpsMode == kCustomFpsModeFixed ? fpsMode : kCustomFpsModeAdaptive;
+      await bind.sessionPeerOption(
+          sessionId: sessionId, name: kOptionCustomFpsMode, value: initFpsMode);
+    }
     if (fps != null) {
       fpsSet = true;
-      await bind.sessionSetCustomFps(sessionId: sessionId, fps: fps.toInt());
+      initFps = fps;
+      await bind.sessionSetCustomFps(
+          sessionId: sessionId, fps: fpsForMode(initFps, initFpsMode));
     }
     if (!qualitySet) {
       qualitySet = true;
@@ -1951,7 +1967,12 @@ customImageQualityDialog(SessionID sessionId, String id, FFI ffi) async {
     if (!hideFps && !fpsSet) {
       fpsSet = true;
       await bind.sessionSetCustomFps(
-          sessionId: sessionId, fps: initFps.toInt());
+          sessionId: sessionId, fps: fpsForMode(initFps, initFpsMode));
+    }
+    if (!hideFps && !fpsModeSet) {
+      fpsModeSet = true;
+      await bind.sessionPeerOption(
+          sessionId: sessionId, name: kOptionCustomFpsMode, value: initFpsMode);
     }
   }
 
@@ -1971,19 +1992,26 @@ customImageQualityDialog(SessionID sessionId, String id, FFI ffi) async {
   }
   // fps
   final fpsOption =
-      await bind.sessionGetOption(sessionId: sessionId, arg: 'custom-fps');
+      await bind.sessionGetOption(sessionId: sessionId, arg: kOptionCustomFps);
   initFps = fpsOption == null
       ? kDefaultFps
       : double.tryParse(fpsOption) ?? kDefaultFps;
   if (initFps < kMinFps || initFps > kMaxFps) {
     initFps = kDefaultFps;
   }
+  final fpsModeOption = await bind.sessionGetOption(
+      sessionId: sessionId, arg: kOptionCustomFpsMode);
+  initFpsMode = fpsModeOption == kCustomFpsModeFixed
+      ? kCustomFpsModeFixed
+      : kCustomFpsModeAdaptive;
 
   final content = customImageQualityWidget(
       initQuality: initQuality,
       initFps: initFps,
+      initFpsMode: initFpsMode,
       setQuality: (v) => setCustomValues(quality: v),
       setFps: (v) => setCustomValues(fps: v),
+      setFpsMode: (v) => setCustomValues(fpsMode: v, fps: initFps),
       showFps: !hideFps,
       showMoreQuality: !hideMoreQuality);
   msgBoxCommon(ffi.dialogManager, 'Custom Image Quality', content, [btnClose]);

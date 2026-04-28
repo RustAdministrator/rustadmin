@@ -9,8 +9,10 @@ import 'package:get/get.dart';
 customImageQualityWidget(
     {required double initQuality,
     required double initFps,
+    required String initFpsMode,
     required Function(double)? setQuality,
     required Function(double)? setFps,
+    required Function(String)? setFpsMode,
     required bool showFps,
     required bool showMoreQuality}) {
   if (initQuality < kMinQuality ||
@@ -22,6 +24,10 @@ customImageQualityWidget(
   }
   final qualityValue = initQuality.obs;
   final fpsValue = initFps.obs;
+  final fpsModeValue = (initFpsMode == kCustomFpsModeFixed
+          ? initFpsMode
+          : kCustomFpsModeAdaptive)
+      .obs;
 
   final RxBool moreQualityChecked = RxBool(qualityValue.value > kMaxQuality);
   final debouncerQuality = Debouncer<double>(
@@ -112,44 +118,83 @@ customImageQualityWidget(
               ],
             )),
       if (showFps)
-        Obx(() => Row(
-              children: [
-                Expanded(
-                  flex: 3,
-                  child: Slider(
-                    value: fpsValue.value,
-                    min: kMinFps,
-                    max: kMaxFps,
-                    divisions: ((kMaxFps - kMinFps) / 5).round(),
-                    onChanged: setFps == null
-                        ? null
-                        : (double value) async {
-                            fpsValue.value = value;
-                            debouncerFps.value = value;
-                          },
-                  ),
-                ),
-                Expanded(
-                    flex: 1,
-                    child: Text(
-                      '${fpsValue.value.round()}',
-                      style: const TextStyle(fontSize: 15),
-                    )),
-                Expanded(
-                    flex: 2,
-                    child: Text(
-                      translate('FPS'),
-                      style: const TextStyle(fontSize: 15),
-                    ))
-              ],
-            )),
+        Column(
+          children: [
+            Obx(() => Row(
+                  children: [
+                    Expanded(
+                      flex: 3,
+                      child: Slider(
+                        value: fpsValue.value,
+                        min: kMinFps,
+                        max: kMaxFps,
+                        divisions: ((kMaxFps - kMinFps) / 5).round(),
+                        onChanged: setFps == null
+                            ? null
+                            : (double value) async {
+                                fpsValue.value = value;
+                                debouncerFps.value = value;
+                              },
+                      ),
+                    ),
+                    Expanded(
+                        flex: 1,
+                        child: Text(
+                          '${fpsValue.value.round()}',
+                          style: const TextStyle(fontSize: 15),
+                        )),
+                    Expanded(
+                        flex: 2,
+                        child: Text(
+                          translate('FPS'),
+                          style: const TextStyle(fontSize: 15),
+                        ))
+                  ],
+                )),
+            Obx(() => Row(
+                  children: [
+                    Expanded(
+                        flex: 1,
+                        child: Text(
+                          translate('FPS mode'),
+                          style: const TextStyle(fontSize: 15),
+                        )),
+                    Expanded(
+                      flex: 3,
+                      child: DropdownButton<String>(
+                        value: fpsModeValue.value,
+                        isExpanded: true,
+                        onChanged: setFpsMode == null
+                            ? null
+                            : (String? value) {
+                                if (value == null) return;
+                                fpsModeValue.value = value;
+                                setFpsMode(value);
+                              },
+                        items: [
+                          DropdownMenuItem(
+                            value: kCustomFpsModeAdaptive,
+                            child: Text(translate('Adaptive FPS cap')),
+                          ),
+                          DropdownMenuItem(
+                            value: kCustomFpsModeFixed,
+                            child: Text(translate('Fixed FPS')),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                )),
+          ],
+        ),
     ],
   );
 }
 
 customImageQualitySetting() {
   final qualityKey = 'custom_image_quality';
-  final fpsKey = 'custom-fps';
+  final fpsKey = kOptionCustomFps;
+  final fpsModeKey = kOptionCustomFpsMode;
 
   final initQuality =
       (double.tryParse(bind.mainGetUserDefaultOption(key: qualityKey)) ??
@@ -159,10 +204,13 @@ customImageQualitySetting() {
       (double.tryParse(bind.mainGetUserDefaultOption(key: fpsKey)) ??
           kDefaultFps);
   final isFpsFixed = isOptionFixed(fpsKey);
+  final initFpsMode = bind.mainGetUserDefaultOption(key: fpsModeKey);
+  final isFpsModeFixed = isOptionFixed(fpsModeKey);
 
   return customImageQualityWidget(
       initQuality: initQuality,
       initFps: initFps,
+      initFpsMode: initFpsMode,
       setQuality: isQuanlityFixed
           ? null
           : (v) {
@@ -173,6 +221,11 @@ customImageQualitySetting() {
           ? null
           : (v) {
               bind.mainSetUserDefaultOption(key: fpsKey, value: v.toString());
+            },
+      setFpsMode: isFpsModeFixed
+          ? null
+          : (v) {
+              bind.mainSetUserDefaultOption(key: fpsModeKey, value: v);
             },
       showFps: true,
       showMoreQuality: true);

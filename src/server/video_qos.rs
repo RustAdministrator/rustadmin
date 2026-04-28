@@ -90,6 +90,7 @@ impl UserDelay {
 struct UserData {
     auto_adjust_fps: Option<u32>, // reserve for compatibility
     custom_fps: Option<u32>,
+    fixed_fps: Option<u32>,
     quality: Option<(i64, Quality)>, // (time, quality)
     delay: UserDelay,
     record: bool,
@@ -199,11 +200,44 @@ impl VideoQoS {
 
     pub fn user_custom_fps(&mut self, id: i32, fps: u32) {
         if fps < MIN_FPS || fps > MAX_FPS {
+            log::warn!("custom_fps adaptive ignored: user_id={id}, invalid_fps={fps}");
             return;
         }
         if let Some(user) = self.users.get_mut(&id) {
             user.custom_fps = Some(fps);
+            user.fixed_fps = None;
+        } else {
+            log::warn!("custom_fps adaptive ignored: unknown_user_id={id}, fps={fps}");
+            return;
         }
+        let previous_fps = self.fps;
+        self.adjust_fps();
+        log::info!(
+            "custom_fps adaptive applied: user_id={id}, fps={fps}, previous_active_fps={}, active_fps={}",
+            previous_fps,
+            self.fps
+        );
+    }
+
+    pub fn user_fixed_fps(&mut self, id: i32, fps: u32) {
+        if fps < MIN_FPS || fps > MAX_FPS {
+            log::warn!("custom_fps fixed ignored: user_id={id}, invalid_fps={fps}");
+            return;
+        }
+        if let Some(user) = self.users.get_mut(&id) {
+            user.custom_fps = Some(fps);
+            user.fixed_fps = Some(fps);
+        } else {
+            log::warn!("custom_fps fixed ignored: unknown_user_id={id}, fps={fps}");
+            return;
+        }
+        let previous_fps = self.fps;
+        self.adjust_fps();
+        log::info!(
+            "custom_fps fixed applied: user_id={id}, fps={fps}, previous_active_fps={}, active_fps={}",
+            previous_fps,
+            self.fps
+        );
     }
 
     pub fn user_auto_adjust_fps(&mut self, id: i32, fps: u32) {
@@ -378,7 +412,20 @@ impl VideoQoS {
     }
 
     #[inline]
+    fn locked_fps(&self) -> Option<u32> {
+        self.users
+            .iter()
+            .filter_map(|(_, u)| u.fixed_fps)
+            .min()
+            .map(|fps| fps.clamp(MIN_FPS, MAX_FPS))
+    }
+
+    #[inline]
     fn highest_fps(&self) -> u32 {
+        if let Some(fps) = self.locked_fps() {
+            return fps;
+        }
+
         let user_fps = |u: &UserData| {
             let mut fps = u.custom_fps.unwrap_or(FPS);
             if let Some(auto_adjust_fps) = u.auto_adjust_fps {
@@ -509,6 +556,11 @@ impl VideoQoS {
 
     // Adjust fps based on network delay and user response time
     fn adjust_fps(&mut self) {
+        if let Some(fps) = self.locked_fps() {
+            self.fps = fps;
+            return;
+        }
+
         let highest_fps = self.highest_fps();
         // Get minimum fps from all users
         let mut fps = self

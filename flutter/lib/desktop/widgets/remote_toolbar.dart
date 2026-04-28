@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -340,7 +341,13 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   Offset? _lastWindowPointer;
   final _fractionX = 0.5.obs;
   final _dragging = false.obs;
+  final _toolbarKey = GlobalKey();
   final _menuController = flutter_widgets.MenuController();
+  Offset _toolbarDragStartPointer = Offset.zero;
+  Size _toolbarDragSize = Size.zero;
+  double _toolbarDragStartFraction = 0.5;
+  double _dragLeft = 0.0;
+  double _dragRight = 1.0;
 
   int get windowId => stateGlobal.windowId;
 
@@ -374,6 +381,66 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
 
   void _closeMenus() {
     _menuController.close();
+  }
+
+  void _initDragBounds() {
+    final confLeft = double.tryParse(
+        bind.mainGetLocalOption(key: kOptionRemoteMenubarDragLeft));
+    if (confLeft == null) {
+      bind.mainSetLocalOption(
+          key: kOptionRemoteMenubarDragLeft, value: _dragLeft.toString());
+    } else {
+      _dragLeft = confLeft;
+    }
+
+    final confRight = double.tryParse(
+        bind.mainGetLocalOption(key: kOptionRemoteMenubarDragRight));
+    if (confRight == null) {
+      bind.mainSetLocalOption(
+          key: kOptionRemoteMenubarDragRight, value: _dragRight.toString());
+    } else {
+      _dragRight = confRight;
+    }
+  }
+
+  void _startToolbarDrag(DragStartDetails details) {
+    final renderObj = _toolbarKey.currentContext?.findRenderObject();
+    if (renderObj is RenderBox) {
+      _toolbarDragSize = renderObj.size;
+    } else {
+      _toolbarDragSize = Size.zero;
+    }
+    _toolbarDragStartPointer = details.globalPosition;
+    _toolbarDragStartFraction = _fractionX.value;
+    _closeMenus();
+    _cancelAutoHide();
+    _setVisible(true);
+    _dragging.value = true;
+  }
+
+  void _updateToolbarDrag(BuildContext context, DragUpdateDetails details) {
+    final mediaSize = MediaQueryData.fromView(View.of(context)).size;
+    final range = math.max(1.0, mediaSize.width - _toolbarDragSize.width);
+    final dx = details.globalPosition.dx - _toolbarDragStartPointer.dx;
+    _fractionX.value = (_toolbarDragStartFraction + dx / range)
+        .clamp(_dragLeft, _dragRight)
+        .toDouble();
+  }
+
+  void _endToolbarDrag() {
+    bind.sessionPeerOption(
+      sessionId: widget.ffi.sessionId,
+      name: 'remote-menubar-drag-x',
+      value: _fractionX.value.toString(),
+    );
+    _dragging.value = false;
+    if (!pin &&
+        !_isCursorOverToolbar &&
+        !_isCursorOverMenu &&
+        !_isInRevealZone &&
+        !_menuIsOpen) {
+      _scheduleAutoHide();
+    }
   }
 
   void _handleMenuOpened() {
@@ -503,6 +570,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   @override
   initState() {
     super.initState();
+    _initDragBounds();
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       _fractionX.value = double.tryParse(await bind.sessionGetOption(
@@ -552,9 +620,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
           ? _buildToolbar(context)
           : _buildDraggableCollapse(context);
       return Align(
-        alignment: collapse.isFalse
-            ? Alignment.topCenter
-            : FractionalOffset(_fractionX.value, 0),
+        alignment: FractionalOffset(_fractionX.value, 0),
         child: IgnorePointer(
           ignoring: !_visible,
           child: AnimatedSlide(
@@ -611,6 +677,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
 
   Widget _buildToolbar(BuildContext context) {
     final List<Widget> toolbarItems = [];
+    toolbarItems.add(_buildExpandedDragHandle(context));
     toolbarItems.add(_PinMenu(state: widget.state));
     if (!isWebDesktop) {
       toolbarItems.add(_MobileActionMenu(ffi: widget.ffi));
@@ -652,6 +719,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     toolbarItems.add(_CloseMenu(id: widget.id, ffi: widget.ffi));
     final toolbarBorderRadius = BorderRadius.all(Radius.circular(4.0));
     return Material(
+      key: _toolbarKey,
       elevation: _ToolbarTheme.elevation,
       shadowColor: MyTheme.color(context).shadow,
       borderRadius: toolbarBorderRadius,
@@ -676,6 +744,32 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
               toolbarBorderRadius),
         ),
       ),
+    );
+  }
+
+  Widget _buildExpandedDragHandle(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.move,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onHorizontalDragStart: _startToolbarDrag,
+        onHorizontalDragUpdate: (details) =>
+            _updateToolbarDrag(context, details),
+        onHorizontalDragEnd: (_) => _endToolbarDrag(),
+        onHorizontalDragCancel: _endToolbarDrag,
+        child: SizedBox(
+          width: _ToolbarTheme.buttonSize,
+          height: _ToolbarTheme.buttonSize,
+          child: Icon(
+            Icons.drag_indicator,
+            size: 20,
+            color: MyTheme.color(context).drag_indicator,
+          ),
+        ),
+      ),
+    ).marginSymmetric(
+      horizontal: _ToolbarTheme.buttonHMargin,
+      vertical: _ToolbarTheme.buttonVMargin,
     );
   }
 

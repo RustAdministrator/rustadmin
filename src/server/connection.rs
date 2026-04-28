@@ -3921,11 +3921,26 @@ impl Connection {
                     .user_image_quality(self.inner.id(), image_quality);
             }
         }
-        if o.custom_fps > 0 {
-            video_service::VIDEO_QOS
-                .lock()
-                .unwrap()
-                .user_custom_fps(self.inner.id(), o.custom_fps as _);
+        if o.custom_fps != 0 {
+            let fps = o.custom_fps.checked_abs().unwrap_or(i32::MAX) as u32;
+            let mut video_qos = video_service::VIDEO_QOS.lock().unwrap();
+            if o.custom_fps < 0 {
+                log::info!(
+                    "custom_fps fixed request received: user_id={}, fps={}, wire={}",
+                    self.inner.id(),
+                    fps,
+                    o.custom_fps
+                );
+                video_qos.user_fixed_fps(self.inner.id(), fps);
+            } else {
+                log::info!(
+                    "custom_fps adaptive request received: user_id={}, fps={}, wire={}",
+                    self.inner.id(),
+                    fps,
+                    o.custom_fps
+                );
+                video_qos.user_custom_fps(self.inner.id(), fps);
+            }
         }
         if let Some(q) = o.supported_decoding.clone().take() {
             scrap::codec::Encoder::update(scrap::codec::EncodingUpdate::Update(self.inner.id(), q));

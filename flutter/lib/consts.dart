@@ -82,6 +82,8 @@ const String kOptionViewStyle = "view_style";
 const String kOptionScrollStyle = "scroll_style";
 const String kOptionEdgeScrollEdgeThickness = "edge-scroll-edge-thickness";
 const String kOptionImageQuality = "image_quality";
+const String kOptionCustomFps = "custom-fps";
+const String kOptionCustomFpsMode = "custom-fps-mode";
 const String kOptionOpenNewConnInTabs = "enable-open-new-connections-in-tabs";
 const String kOptionTextureRender = "use-texture-render";
 const String kOptionD3DRender = "allow-d3d-render";
@@ -416,6 +418,9 @@ const kRemoteImageQualityLow = 'low';
 
 /// [kRemoteImageQualityCustom] Custom image quality.
 const kRemoteImageQualityCustom = 'custom';
+
+const kCustomFpsModeAdaptive = 'adaptive';
+const kCustomFpsModeFixed = 'fixed';
 
 const kIgnoreDpi = true;
 

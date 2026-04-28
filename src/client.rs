@@ -2477,7 +2477,14 @@ impl LoginConfigHandler {
                 if !allow_more && custom_fps > 30 {
                     custom_fps = 30;
                 }
-                msg.custom_fps = custom_fps;
+                let fixed_fps = self.get_option(keys::OPTION_CUSTOM_FPS_MODE) == "fixed";
+                msg.custom_fps = if fixed_fps { -custom_fps } else { custom_fps };
+                log::info!(
+                    "custom_fps initial option send: mode={}, fps={}, wire={}",
+                    if fixed_fps { "fixed" } else { "adaptive" },
+                    custom_fps,
+                    msg.custom_fps
+                );
                 *self.custom_fps.lock().unwrap() = Some(custom_fps as _);
             }
         }
@@ -2669,21 +2676,29 @@ impl LoginConfigHandler {
     /// * `fps` - The given fps.
     /// * `save_config` - Save the config.
     pub fn set_custom_fps(&mut self, fps: i32, save_config: bool) -> Message {
+        let custom_fps = fps.checked_abs().unwrap_or(30).clamp(5, 120);
+        let wire_custom_fps = if fps < 0 { -custom_fps } else { custom_fps };
         let mut misc = Misc::new();
         misc.set_option(OptionMessage {
-            custom_fps: fps,
+            custom_fps: wire_custom_fps,
             ..Default::default()
         });
+        log::info!(
+            "custom_fps option send: mode={}, fps={}, wire={}",
+            if fps < 0 { "fixed" } else { "adaptive" },
+            custom_fps,
+            wire_custom_fps
+        );
         let mut msg_out = Message::new();
         msg_out.set_misc(misc);
         if save_config {
             let mut config = self.load_config();
             config
                 .options
-                .insert("custom-fps".to_owned(), fps.to_string());
+                .insert("custom-fps".to_owned(), custom_fps.to_string());
             self.save_config(config);
         }
-        *self.custom_fps.lock().unwrap() = Some(fps as _);
+        *self.custom_fps.lock().unwrap() = Some(custom_fps as _);
         msg_out
     }
 

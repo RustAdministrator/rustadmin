@@ -283,5 +283,8 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("password-hidden-tip", "Permanent password is set (hidden)."),
         ("preset-password-in-use-tip", "Preset password is currently in use."),
         ("ScrollEdgeAcceleration", "Edge acceleration"),
+        ("FPS mode", "FPS mode"),
+        ("Adaptive FPS cap", "Adaptive FPS cap"),
+        ("Fixed FPS", "Fixed FPS"),
     ].iter().cloned().collect();
 }
