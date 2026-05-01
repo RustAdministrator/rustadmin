@@ -13,7 +13,10 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 #[cfg(not(windows))]
-use std::{fs::File, io::prelude::*};
+use std::{
+    fs::{File, OpenOptions},
+    io::prelude::*,
+};
 
 #[cfg(all(feature = "flutter", feature = "plugin_framework"))]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -396,6 +399,47 @@ pub enum Data {
     FileTransferEnabledState(Option<bool>),
 }
 
+#[cfg(windows)]
+fn ipc_allows_everyone_create(postfix: &str) -> bool {
+    // The Windows service pipe is intentionally reachable from the user session so
+    // installed clients can request service actions. Normal per-user IPC uses the
+    // process default DACL instead of an Everyone ACL.
+    postfix == crate::POSTFIX_SERVICE
+}
+
+#[cfg(not(windows))]
+fn set_ipc_path_permissions(path: &str, mode: u32) -> ResultType<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let meta = std::fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink() {
+        bail!("refusing to chmod symlink IPC path '{}'", path);
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn remove_ipc_path(postfix: &str) {
+    let path = Config::ipc_path(postfix);
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            log::warn!("Refusing to remove symlink IPC path '{}'", path);
+        }
+        Ok(_) => {
+            if let Err(err) = std::fs::remove_file(&path) {
+                if err.kind() != std::io::ErrorKind::NotFound {
+                    log::warn!("Failed to remove IPC path '{}': {}", path, err);
+                }
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            log::warn!("Failed to inspect IPC path '{}': {}", path, err);
+        }
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 pub async fn start(postfix: &str) -> ResultType<()> {
     let mut incoming = new_listener(postfix).await?;
@@ -433,18 +477,24 @@ pub async fn new_listener(postfix: &str) -> ResultType<Incoming> {
     #[cfg(not(any(windows, target_os = "android", target_os = "ios")))]
     check_pid(postfix).await;
     let mut endpoint = Endpoint::new(path.clone());
-    match SecurityAttributes::allow_everyone_create() {
-        Ok(attr) => endpoint.set_security_attributes(attr),
-        Err(err) => log::error!("Failed to set ipc{} security: {}", postfix, err),
-    };
+    #[cfg(not(windows))]
+    endpoint.set_security_attributes(SecurityAttributes::empty().set_mode(0o600)?);
+    #[cfg(windows)]
+    if ipc_allows_everyone_create(postfix) {
+        match SecurityAttributes::allow_everyone_create() {
+            Ok(attr) => endpoint.set_security_attributes(attr),
+            Err(err) => log::error!("Failed to set ipc{} security: {}", postfix, err),
+        };
+    }
     match endpoint.incoming() {
         Ok(incoming) => {
             log::info!("Started ipc{} server at path: {}", postfix, &path);
             #[cfg(not(windows))]
             {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o0777)).ok();
-                write_pid(postfix);
+                set_ipc_path_permissions(&path, 0o600)?;
+                if let Err(err) = write_pid(postfix) {
+                    log::warn!("Failed to write ipc{} pid file: {}", postfix, err);
+                }
             }
             Ok(incoming)
         }
@@ -550,7 +600,7 @@ async fn handle(data: Data, stream: &mut Connection) {
                 if crate::is_main() {
                     // below part is for main windows can be reopen during rustdesk installation and installing service from UI
                     // this make new ipc server (domain socket) can be created.
-                    std::fs::remove_file(&Config::ipc_path("")).ok();
+                    remove_ipc_path("");
                     #[cfg(target_os = "linux")]
                     {
                         hbb_common::sleep((crate::platform::SERVICE_INTERVAL * 2) as f32 / 1000.0)
@@ -1059,19 +1109,29 @@ async fn check_pid(postfix: &str) {
     // if not remove old ipc file, the new ipc creation will fail
     // if we remove a ipc file, but the old ipc process is still running,
     // new connection to the ipc will connect to new ipc, old connection to old ipc still keep alive
-    std::fs::remove_file(&Config::ipc_path(postfix)).ok();
+    remove_ipc_path(postfix);
 }
 
 #[inline]
 #[cfg(not(windows))]
-fn write_pid(postfix: &str) {
+fn write_pid(postfix: &str) -> ResultType<()> {
     let path = get_pid_file(postfix);
-    if let Ok(mut file) = File::create(&path) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o0777)).ok();
-        file.write_all(&std::process::id().to_string().into_bytes())
-            .ok();
+    if let Ok(meta) = std::fs::symlink_metadata(&path) {
+        if meta.file_type().is_symlink() {
+            bail!("refusing to write symlink IPC pid file '{}'", path);
+        }
     }
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    set_ipc_path_permissions(&path, 0o600)?;
+    file.write_all(&std::process::id().to_string().into_bytes())?;
+    Ok(())
 }
 
 pub struct ConnectionTmpl<T> {
