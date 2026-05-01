@@ -145,11 +145,15 @@ For the legacy UI, the Sciter dynamic library may be required in the expected ta
 Useful commands:
 
 ```sh
-cargo test
+cargo test --lib -- --test-threads=1
 cd flutter && flutter test
 python3 build.py --flutter
 python3 build.py --flutter --release
 ```
+
+Some Rust client tests mutate process-wide config or inspect local system state.
+Use the serial `cargo test --lib -- --test-threads=1` command for the full
+client library suite; running it in parallel can produce false failures.
 
 Hardware codec and platform-specific features may require additional SDKs, libraries, or driver components.
 

@@ -129,7 +129,10 @@ pub fn core_main() -> Option<Vec<String>> {
     }
     if args.len() > 0 {
         if args[0] == "--version" {
-            println!("{}", crate::VERSION);
+            println!("{}", crate::FULL_VERSION);
+            return None;
+        } else if args[0] == "--revision" {
+            println!("{}", crate::RUSTADMIN_REVISION);
             return None;
         } else if args[0] == "--build-date" {
             println!("{}", crate::BUILD_DATE);

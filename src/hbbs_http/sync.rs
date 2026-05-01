@@ -345,6 +345,9 @@ mod tests {
     use super::*;
     use std::{collections::HashMap, sync::Mutex};
 
+    // These tests mutate process-wide Config state. Run the full client
+    // library suite with `-- --test-threads=1`; this module lock only
+    // protects tests inside this module.
     static TEST_SYNC_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]

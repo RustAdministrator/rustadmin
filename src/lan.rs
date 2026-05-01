@@ -233,6 +233,9 @@ mod tests {
     use std::sync::Mutex;
     use uuid::Uuid;
 
+    // These tests mutate process-wide Config state and inspect local LAN/system
+    // behavior. Run the full client library suite with `-- --test-threads=1`;
+    // this module lock only protects tests inside this module.
     static TEST_LAN_LOCK: Mutex<()> = Mutex::new(());
 
     fn make_ping(

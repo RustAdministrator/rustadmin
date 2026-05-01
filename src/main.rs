@@ -47,7 +47,7 @@ fn main() {
        -s, --server=[] 'Start server'",
     );
     let matches = App::new("rustdesk")
-        .version(crate::VERSION)
+        .version(crate::FULL_VERSION)
         .author("Purslane Ltd<info@rustdesk.com>")
         .about("RustDesk command line tool")
         .args_from_usage(&args)

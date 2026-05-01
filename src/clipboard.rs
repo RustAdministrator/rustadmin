@@ -3,13 +3,14 @@ use arboard::{ClipboardData, ClipboardFormat};
 use hbb_common::{bail, log, message_proto::*, ResultType};
 use std::{
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub const CLIPBOARD_NAME: &'static str = "clipboard";
 #[cfg(feature = "unix-file-copy-paste")]
 pub const FILE_CLIPBOARD_NAME: &'static str = "file-clipboard";
 pub const CLIPBOARD_INTERVAL: u64 = 333;
+const LOCAL_CLIPBOARD_PROTECT_DUR: Duration = Duration::from_secs(5);
 
 // This format is used to store the flag in the clipboard.
 const RUSTDESK_CLIPBOARD_OWNER_FORMAT: &'static str = "dyn.com.rustdesk.owner";
@@ -20,6 +21,7 @@ const CLIPBOARD_FORMAT_EXCEL_XML_SPREADSHEET: &'static str = "XML Spreadsheet";
 #[cfg(not(target_os = "android"))]
 lazy_static::lazy_static! {
     static ref ARBOARD_MTX: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
+    static ref CLIPBOARD_TIMING: Arc<Mutex<ClipboardTiming>> = Arc::new(Mutex::new(ClipboardTiming::default()));
     // cache the clipboard msg
     static ref LAST_MULTI_CLIPBOARDS: Arc<Mutex<MultiClipboards>> = Arc::new(Mutex::new(MultiClipboards::new()));
     // For updating in server and getting content in cm.
@@ -35,6 +37,70 @@ const CLIPBOARD_GET_MAX_RETRY: usize = 3;
 const CLIPBOARD_GET_RETRY_INTERVAL_DUR: Duration = Duration::from_millis(33);
 
 #[cfg(not(target_os = "android"))]
+#[derive(Default)]
+struct ClipboardTiming {
+    last_local_change_at: Option<Instant>,
+    last_remote_apply_at: Option<Instant>,
+}
+
+#[cfg(not(target_os = "android"))]
+impl ClipboardTiming {
+    fn mark_local_change(&mut self, now: Instant) {
+        self.last_local_change_at = Some(now);
+    }
+
+    fn mark_remote_apply(&mut self, now: Instant) {
+        self.last_remote_apply_at = Some(now);
+    }
+
+    fn should_defer_remote_update(&self, now: Instant) -> bool {
+        let Some(local_change_at) = self.last_local_change_at else {
+            return false;
+        };
+        if self
+            .last_remote_apply_at
+            .is_some_and(|remote_apply_at| local_change_at <= remote_apply_at)
+        {
+            return false;
+        }
+        now.saturating_duration_since(local_change_at) < LOCAL_CLIPBOARD_PROTECT_DUR
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn mark_local_clipboard_change(side: ClipboardSide) {
+    CLIPBOARD_TIMING
+        .lock()
+        .unwrap()
+        .mark_local_change(Instant::now());
+    log::debug!("Observed local {} clipboard change", side);
+}
+
+#[cfg(not(target_os = "android"))]
+fn mark_remote_clipboard_applied(side: ClipboardSide) {
+    CLIPBOARD_TIMING
+        .lock()
+        .unwrap()
+        .mark_remote_apply(Instant::now());
+    log::debug!("Applied remote clipboard on {}", side);
+}
+
+#[cfg(not(target_os = "android"))]
+fn should_defer_remote_clipboard_update(side: ClipboardSide) -> bool {
+    let defer = CLIPBOARD_TIMING
+        .lock()
+        .unwrap()
+        .should_defer_remote_update(Instant::now());
+    if defer {
+        log::debug!(
+            "Skip updating {} clipboard because the local clipboard changed recently",
+            side
+        );
+    }
+    defer
+}
+
+#[cfg(not(target_os = "android"))]
 const SUPPORTED_FORMATS: &[ClipboardFormat] = &[
     ClipboardFormat::Text,
     ClipboardFormat::Html,
@@ -47,6 +113,166 @@ const SUPPORTED_FORMATS: &[ClipboardFormat] = &[
     ClipboardFormat::Special(CLIPBOARD_FORMAT_EXCEL_XML_SPREADSHEET),
     ClipboardFormat::Special(RUSTDESK_CLIPBOARD_OWNER_FORMAT),
 ];
+
+#[cfg(target_os = "windows")]
+mod platform_clipboard {
+    use hbb_common::{bail, log, ResultType};
+    use std::{ffi::OsStr, os::windows::ffi::OsStrExt, ptr::null_mut, thread, time::Duration};
+    use winapi::um::winuser::{
+        CloseClipboard, EnumClipboardFormats, GetClipboardFormatNameW, IsClipboardFormatAvailable,
+        OpenClipboard, RegisterClipboardFormatW,
+    };
+
+    const CF_TEXT: u32 = 1;
+    const CF_BITMAP: u32 = 2;
+    const CF_METAFILEPICT: u32 = 3;
+    const CF_TIFF: u32 = 6;
+    const CF_OEMTEXT: u32 = 7;
+    const CF_DIB: u32 = 8;
+    const CF_PALETTE: u32 = 9;
+    const CF_UNICODETEXT: u32 = 13;
+    const CF_ENHMETAFILE: u32 = 14;
+    const CF_HDROP: u32 = 15;
+    const CF_LOCALE: u32 = 16;
+    const CF_DIBV5: u32 = 17;
+
+    const SAFE_REGISTERED_FORMATS: &[&str] = &[
+        "HTML Format",
+        "Rich Text Format",
+        "text/richtext",
+        "image/png",
+        "PNG",
+        "image/svg+xml",
+        super::CLIPBOARD_FORMAT_EXCEL_XML_SPREADSHEET,
+        super::RUSTDESK_CLIPBOARD_OWNER_FORMAT,
+        "CanIncludeInClipboardHistory",
+        "CanUploadToCloudClipboard",
+        "ExcludeClipboardContentFromMonitorProcessing",
+    ];
+
+    struct ClipboardGuard;
+
+    impl Drop for ClipboardGuard {
+        fn drop(&mut self) {
+            // Safety: ClipboardGuard is only constructed after OpenClipboard succeeds.
+            unsafe {
+                CloseClipboard();
+            }
+        }
+    }
+
+    fn wide_z(value: &str) -> Vec<u16> {
+        OsStr::new(value).encode_wide().chain(Some(0)).collect()
+    }
+
+    fn open_clipboard() -> ResultType<ClipboardGuard> {
+        for _ in 0..5 {
+            // Safety: Passing a null HWND opens the clipboard for the current task.
+            if unsafe { OpenClipboard(null_mut()) } != 0 {
+                return Ok(ClipboardGuard);
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        bail!("clipboard is occupied");
+    }
+
+    fn registered_id(name: &str) -> u32 {
+        let name = wide_z(name);
+        // Safety: wide_z returns a valid null-terminated UTF-16 string.
+        unsafe { RegisterClipboardFormatW(name.as_ptr()) }
+    }
+
+    fn registered_name(format: u32) -> Option<String> {
+        let mut name = [0u16; 256];
+        // Safety: name is a writable UTF-16 buffer and len matches its capacity.
+        let len = unsafe { GetClipboardFormatNameW(format, name.as_mut_ptr(), name.len() as i32) };
+        if len <= 0 {
+            None
+        } else {
+            Some(String::from_utf16_lossy(&name[..len as usize]))
+        }
+    }
+
+    fn is_safe_registered_name(name: &str) -> bool {
+        SAFE_REGISTERED_FORMATS
+            .iter()
+            .any(|safe| safe.eq_ignore_ascii_case(name))
+    }
+
+    fn is_safe_predefined(format: u32) -> bool {
+        matches!(
+            format,
+            CF_TEXT
+                | CF_BITMAP
+                | CF_OEMTEXT
+                | CF_DIB
+                | CF_PALETTE
+                | CF_UNICODETEXT
+                | CF_LOCALE
+                | CF_DIBV5
+        )
+    }
+
+    fn is_risky_format(format: u32) -> bool {
+        if matches!(
+            format,
+            CF_HDROP | CF_METAFILEPICT | CF_TIFF | CF_ENHMETAFILE
+        ) {
+            return true;
+        }
+        if is_safe_predefined(format) {
+            return false;
+        }
+        registered_name(format)
+            .as_deref()
+            .map(|name| !is_safe_registered_name(name))
+            .unwrap_or(true)
+    }
+
+    fn contains_risky_formats() -> ResultType<bool> {
+        let _clipboard = open_clipboard()?;
+        let mut format = 0;
+        loop {
+            // Safety: the clipboard is open for the lifetime of _clipboard.
+            format = unsafe { EnumClipboardFormats(format) };
+            if format == 0 {
+                break;
+            }
+            if is_risky_format(format) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn has_rustdesk_owner() -> bool {
+        let format = registered_id(super::RUSTDESK_CLIPBOARD_OWNER_FORMAT);
+        // Safety: IsClipboardFormatAvailable accepts a registered format id without
+        // requiring the clipboard to be opened by this process.
+        format != 0 && unsafe { IsClipboardFormatAvailable(format) != 0 }
+    }
+
+    pub fn has_risky_formats() -> bool {
+        match contains_risky_formats() {
+            Ok(has_risky) => has_risky,
+            Err(e) => {
+                log::debug!("Failed to inspect clipboard formats: {}", e);
+                false
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+mod platform_clipboard {
+    pub fn has_rustdesk_owner() -> bool {
+        false
+    }
+
+    pub fn has_risky_formats() -> bool {
+        false
+    }
+}
 
 #[cfg(not(target_os = "android"))]
 pub fn check_clipboard(
@@ -61,6 +287,7 @@ pub fn check_clipboard(
     match ctx2.get(side, force) {
         Ok(content) => {
             if !content.is_empty() {
+                mark_local_clipboard_change(side);
                 let mut msg = Message::new();
                 let clipboards = proto::create_multi_clipboards(content);
                 msg.set_multi_clipboards(clipboards.clone());
@@ -206,6 +433,9 @@ fn update_clipboard_(multi_clipboards: Vec<Clipboard>, side: ClipboardSide) {
 
 #[cfg(not(target_os = "android"))]
 fn do_update_clipboard_(mut to_update_data: Vec<ClipboardData>, side: ClipboardSide) {
+    if should_defer_remote_clipboard_update(side) {
+        return;
+    }
     let mut ctx = CLIPBOARD_CTX.lock().unwrap();
     if ctx.is_none() {
         match ClipboardContext::new() {
@@ -226,6 +456,7 @@ fn do_update_clipboard_(mut to_update_data: Vec<ClipboardData>, side: ClipboardS
         if let Err(e) = ctx.set(&to_update_data) {
             log::debug!("Failed to set clipboard: {}", e);
         } else {
+            mark_remote_clipboard_applied(side);
             log::debug!("{} updated on {}", CLIPBOARD_NAME, side);
         }
     }
@@ -313,6 +544,13 @@ impl ClipboardContext {
     }
 
     pub fn get(&mut self, side: ClipboardSide, force: bool) -> ResultType<Vec<ClipboardData>> {
+        if platform_clipboard::has_risky_formats() {
+            log::debug!(
+                "Skip synchronizing clipboard on {} because it contains unsupported native formats",
+                side
+            );
+            return Ok(vec![]);
+        }
         let data = self.get_formats_filter(SUPPORTED_FORMATS, side, force)?;
         // We have a separate service named `file-clipboard` to handle file copy-paste.
         // We need to read the file urls because file copy may set the other clipboard formats such as text.
@@ -378,6 +616,9 @@ impl ClipboardContext {
 
     fn set(&mut self, data: &[ClipboardData]) -> ResultType<()> {
         let _lock = ARBOARD_MTX.lock().unwrap();
+        if platform_clipboard::has_risky_formats() && !platform_clipboard::has_rustdesk_owner() {
+            bail!("refusing to overwrite clipboard with unsupported native formats");
+        }
         self.inner.set_formats(data)?;
         Ok(())
     }
@@ -475,7 +716,11 @@ pub fn get_current_clipboard_msg(
     let mut multi_clipboards = LAST_MULTI_CLIPBOARDS.lock().unwrap();
     if multi_clipboards.clipboards.is_empty() {
         let mut ctx = ClipboardContext::new().ok()?;
-        *multi_clipboards = proto::create_multi_clipboards(ctx.get(side, true).ok()?);
+        let content = ctx.get(side, true).ok()?;
+        if !content.is_empty() {
+            mark_local_clipboard_change(side);
+        }
+        *multi_clipboards = proto::create_multi_clipboards(content);
     }
     if multi_clipboards.clipboards.is_empty() {
         return None;
@@ -529,6 +774,42 @@ impl std::fmt::Display for ClipboardSide {
             ClipboardSide::Host => write!(f, "host"),
             ClipboardSide::Client => write!(f, "client"),
         }
+    }
+}
+
+#[cfg(all(test, not(target_os = "android")))]
+mod clipboard_timing_tests {
+    use super::*;
+
+    #[test]
+    fn recent_local_change_defers_remote_update() {
+        let now = Instant::now();
+        let mut timing = ClipboardTiming::default();
+
+        timing.mark_local_change(now - Duration::from_secs(1));
+
+        assert!(timing.should_defer_remote_update(now));
+    }
+
+    #[test]
+    fn expired_local_change_allows_remote_update() {
+        let now = Instant::now();
+        let mut timing = ClipboardTiming::default();
+
+        timing.mark_local_change(now - LOCAL_CLIPBOARD_PROTECT_DUR - Duration::from_secs(1));
+
+        assert!(!timing.should_defer_remote_update(now));
+    }
+
+    #[test]
+    fn remote_apply_after_local_change_allows_next_remote_update() {
+        let now = Instant::now();
+        let mut timing = ClipboardTiming::default();
+
+        timing.mark_local_change(now - Duration::from_secs(2));
+        timing.mark_remote_apply(now - Duration::from_secs(1));
+
+        assert!(!timing.should_defer_remote_update(now));
     }
 }
 
@@ -604,11 +885,7 @@ mod proto {
     fn special_to_proto(d: Vec<u8>, s: String) -> Clipboard {
         let compressed = compress_func(&d);
         let compress = compressed.len() < d.len();
-        let content = if compress {
-            compressed
-        } else {
-            s.bytes().collect::<Vec<u8>>()
-        };
+        let content = if compress { compressed } else { d };
         Clipboard {
             compress,
             content: content.into(),
@@ -698,6 +975,21 @@ mod proto {
                 msg.set_clipboard(c.clone());
                 msg
             })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn special_clipboard_keeps_uncompressed_payload() {
+            let payload = vec![0x01];
+            let clipboard = special_to_proto(payload.clone(), "dyn.test.owner".to_owned());
+
+            assert!(!clipboard.compress);
+            assert_eq!(clipboard.content.as_ref(), payload.as_slice());
+            assert_eq!(clipboard.special_name, "dyn.test.owner");
+        }
     }
 }
 

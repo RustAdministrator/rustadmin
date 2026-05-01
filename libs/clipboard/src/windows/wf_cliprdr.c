@@ -213,7 +213,7 @@ struct wf_clipboard
 
 	// This flag is not really needed,
 	// but we can use it to double confirm that files can only be pasted after `Ctrl+C`.
-	// Not sure `is_file_descriptor_from_remote()` is engough to check all cases on all Windows.
+	// Not sure `is_file_descriptor_from_remote()` is enough to check all cases on all Windows.
 	BOOL copied;
 
 	size_t map_size;
@@ -269,7 +269,7 @@ static UINT cliprdr_send_request_filecontents(wfClipboard *clipboard, UINT32 con
 											  ULONG index, UINT32 flag, DWORD positionhigh,
 											  DWORD positionlow, ULONG request);
 
-static BOOL is_file_descriptor_from_remote();
+static BOOL is_file_descriptor_from_remote(wfClipboard *clipboard);
 static BOOL is_set_by_instance(wfClipboard *clipboard);
 
 static void CliprdrDataObject_Delete(CliprdrDataObject *instance);
@@ -2881,7 +2881,7 @@ wf_cliprdr_server_file_contents_request(CliprdrClientContext *context,
 	// if connections are in the same process.
 	// But if connections are in different processes, it is not easy to notify the other process.
 	// So we just ignore the request from `C` in this case.
-	if (is_set_by_instance(clipboard) || is_file_descriptor_from_remote()) {
+	if (is_set_by_instance(clipboard) || is_file_descriptor_from_remote(clipboard)) {
 		rc = ERROR_INTERNAL_ERROR;
 		goto exit;
 	}
@@ -3149,9 +3149,15 @@ BOOL is_set_by_instance(wfClipboard *clipboard)
 	return FALSE;
 }
 
-BOOL is_file_descriptor_from_remote()
+BOOL is_file_descriptor_from_remote(wfClipboard *clipboard)
 {
 	UINT fsid = 0;
+	if (!clipboard)
+		return FALSE;
+	if (!clipboard->data_obj)
+		return FALSE;
+	if (S_OK != OleIsCurrentClipboard(clipboard->data_obj))
+		return FALSE;
 	if (IsClipboardFormatAvailable(CF_HDROP)) {
 		return FALSE;
 	}
@@ -3235,7 +3241,7 @@ BOOL wf_cliprdr_uninit(wfClipboard *clipboard, CliprdrClientContext *cliprdr)
 	/* discard all contexts in clipboard */
 	if (try_open_clipboard(clipboard->hwnd))
 	{
-		if (is_set_by_instance(clipboard) || is_file_descriptor_from_remote())
+		if (is_set_by_instance(clipboard) || is_file_descriptor_from_remote(clipboard))
 		{
 			if (!EmptyClipboard())
 			{
@@ -3357,7 +3363,7 @@ BOOL wf_do_empty_cliprdr(wfClipboard *clipboard)
 			break;
 		}
 
-		if (is_file_descriptor_from_remote())
+		if (is_file_descriptor_from_remote(clipboard))
 		{
 			if (!EmptyClipboard())
 			{

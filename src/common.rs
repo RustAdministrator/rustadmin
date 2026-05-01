@@ -4168,6 +4168,8 @@ mod tests {
 
     #[test]
     fn test_resolve_trusted_relay_server_prefers_explicit_override() {
+        // Mutates process-wide Config state. Run the full client library suite
+        // with `-- --test-threads=1` to avoid races with other config tests.
         struct RestoreRelayServer(String);
 
         impl Drop for RestoreRelayServer {
@@ -4190,6 +4192,8 @@ mod tests {
 
     #[test]
     fn test_resolve_trusted_relay_server_ignores_server_supplied_override() {
+        // Mutates process-wide Config state. Run the full client library suite
+        // with `-- --test-threads=1` to avoid races with other config tests.
         struct RestoreRelayServer(String);
 
         impl Drop for RestoreRelayServer {
