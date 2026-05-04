@@ -9,6 +9,7 @@ Environment overrides:
   RUSTDESK_FLUTTER_ROOT       Flutter SDK root. Default: first flutter in PATH
   RUSTDESK_MACOS_CODEC_ROOT   Native dependency prefix. Optional
   RUSTDESK_MACOS_SIGN_IDENTITY  Signing identity to use for the app bundle. Optional
+  RUSTDESK_MACOS_XCODE_SIGN_IDENTITY Signing identity passed to Xcode. Optional
   RUSTDESK_MACOS_DEVELOPMENT_TEAM Development team to pass to Xcode. Optional
   RUSTDESK_MACOS_ADHOC_SIGN   Set to 1 to force ad-hoc signing fallback. Default: 0
   PUB_CACHE                   Dart package cache. Default: $HOME/.pub-cache-rustdesk-macos
@@ -94,6 +95,16 @@ if [[ "$adhoc_sign" == "1" ]]; then
   release_entitlements="$flutter_dir/macos/Runner/ReleaseAdhoc.entitlements"
 fi
 
+xcode_sign_identity="${RUSTDESK_MACOS_XCODE_SIGN_IDENTITY:-}"
+if [[ -z "$xcode_sign_identity" && -n "${RUSTDESK_MACOS_SIGN_IDENTITY:-}" ]]; then
+  case "$RUSTDESK_MACOS_SIGN_IDENTITY" in
+    "Apple Development:"*) xcode_sign_identity="Apple Development" ;;
+    "Developer ID Application:"*) xcode_sign_identity="Developer ID Application" ;;
+    "Mac Developer:"*) xcode_sign_identity="Mac Developer" ;;
+    *) xcode_sign_identity="$RUSTDESK_MACOS_SIGN_IDENTITY" ;;
+  esac
+fi
+
 host_arch="$(uname -m)"
 if [[ "$host_arch" == "arm64" || "$host_arch" == "x86_64" ]]; then
   (
@@ -109,8 +120,10 @@ if [[ "$host_arch" == "arm64" || "$host_arch" == "x86_64" ]]; then
     if [[ -n "${RUSTDESK_MACOS_DEVELOPMENT_TEAM:-}" ]]; then
       xcodebuild_args+=("DEVELOPMENT_TEAM=$RUSTDESK_MACOS_DEVELOPMENT_TEAM")
     fi
-    if [[ -n "${RUSTDESK_MACOS_SIGN_IDENTITY:-}" ]]; then
-      xcodebuild_args+=("CODE_SIGN_IDENTITY=$RUSTDESK_MACOS_SIGN_IDENTITY")
+    if [[ "$adhoc_sign" != "1" && -n "${RUSTDESK_MACOS_SIGN_IDENTITY:-}" ]]; then
+      xcodebuild_args+=("CODE_SIGNING_ALLOWED=NO")
+    elif [[ -n "$xcode_sign_identity" ]]; then
+      xcodebuild_args+=("CODE_SIGN_IDENTITY=$xcode_sign_identity")
     fi
     xcodebuild "${xcodebuild_args[@]}" build
   )

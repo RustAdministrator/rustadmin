@@ -967,6 +967,8 @@ class OverlayDialogManager {
   bool existing(String tag) {
     return _dialogs.keys.contains(tag);
   }
+
+  bool get hasOpenDialogs => _dialogs.isNotEmpty;
 }
 
 makeMobileActionsOverlayEntry(VoidCallback? onHide, {FFI? ffi}) {

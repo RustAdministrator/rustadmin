@@ -10,8 +10,8 @@ const LOCAL_CODEC_ROOT_ENV: &str = "RUSTDESK_LINUX_CODEC_ROOT";
 const LOCAL_CODEC_ROOT_ENV: &str = "RUSTDESK_MACOS_CODEC_ROOT";
 #[cfg(target_os = "windows")]
 const LOCAL_CODEC_ROOT_ENV: &str = "RUSTDESK_WINDOWS_CODEC_ROOT";
-#[cfg(target_os = "windows")]
 const CMAKE_PREFIX_PATH_ENV: &str = "CMAKE_PREFIX_PATH";
+const IOS_CODEC_ROOT_ENV: &str = "RUSTDESK_IOS_CODEC_ROOT";
 
 #[cfg(all(target_os = "linux", feature = "linux-pkg-config"))]
 fn pkg_config_name(name: &str) -> &str {
@@ -21,22 +21,71 @@ fn pkg_config_name(name: &str) -> &str {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn local_codec_root() -> Option<PathBuf> {
-    println!("cargo:rerun-if-env-changed={LOCAL_CODEC_ROOT_ENV}");
-    if let Some(path) = env::var_os(LOCAL_CODEC_ROOT_ENV) {
-        return Some(PathBuf::from(path));
+fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if paths.iter().all(|existing| existing != &path) {
+        paths.push(path);
+    }
+}
+
+fn push_prefix_candidate(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    push_unique_path(paths, path.clone());
+
+    if let Some(parent) = path.parent() {
+        if path.file_name().and_then(|name| name.to_str()) == Some("include")
+            || path.file_name().and_then(|name| name.to_str()) == Some("lib")
+        {
+            push_unique_path(paths, parent.to_path_buf());
+        }
     }
 
-    let manifest_dir = env::var_os("CARGO_MANIFEST_DIR")?;
-    let manifest_dir = Path::new(&manifest_dir);
-    let repo_root = manifest_dir.ancestors().nth(2)?;
-    #[cfg(target_os = "linux")]
-    let repo_local_root = repo_root.join(".local").join("linux-codecs");
+    for ancestor in path.ancestors() {
+        if ancestor.join("include").is_dir() && ancestor.join("lib").is_dir() {
+            push_unique_path(paths, ancestor.to_path_buf());
+            break;
+        }
+    }
+}
+
+fn push_prefix_path_list(paths: &mut Vec<PathBuf>, value: &std::ffi::OsStr) {
+    for raw_path in value.to_string_lossy().split([':', ';']) {
+        if !raw_path.is_empty() {
+            push_prefix_candidate(paths, PathBuf::from(raw_path));
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn local_codec_roots() -> Vec<PathBuf> {
+    println!("cargo:rerun-if-env-changed={LOCAL_CODEC_ROOT_ENV}");
+    let mut roots = Vec::new();
+
+    if let Some(path) = env::var_os(LOCAL_CODEC_ROOT_ENV) {
+        push_prefix_candidate(&mut roots, PathBuf::from(path));
+    }
+
     #[cfg(target_os = "macos")]
-    let repo_local_root = repo_root.join(".local").join("macos-codecs");
-    println!("cargo:rerun-if-changed={}", repo_local_root.display());
-    repo_local_root.exists().then_some(repo_local_root)
+    {
+        println!("cargo:rerun-if-env-changed={CMAKE_PREFIX_PATH_ENV}");
+        if let Some(paths) = env::var_os(CMAKE_PREFIX_PATH_ENV) {
+            push_prefix_path_list(&mut roots, &paths);
+        }
+    }
+
+    if let Some(manifest_dir) = env::var_os("CARGO_MANIFEST_DIR") {
+        let manifest_dir = Path::new(&manifest_dir);
+        if let Some(repo_root) = manifest_dir.ancestors().nth(2) {
+            #[cfg(target_os = "linux")]
+            let repo_local_root = repo_root.join(".local").join("linux-codecs");
+            #[cfg(target_os = "macos")]
+            let repo_local_root = repo_root.join(".local").join("macos-codecs");
+            println!("cargo:rerun-if-changed={}", repo_local_root.display());
+            if repo_local_root.exists() {
+                push_prefix_candidate(&mut roots, repo_local_root);
+            }
+        }
+    }
+
+    roots
 }
 
 #[cfg(target_os = "windows")]
@@ -116,29 +165,83 @@ fn local_codec_header(include_dir: &Path, name: &str) -> PathBuf {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn link_local_codec_root(name: &str) -> Option<Vec<PathBuf>> {
-    let root = local_codec_root()?;
-    let include_dir = root.join("include");
-    let header = local_codec_header(&include_dir, name);
-    if !header.exists() {
-        return None;
+    for root in local_codec_roots() {
+        let include_dir = root.join("include");
+        let header = local_codec_header(&include_dir, name);
+        if !header.exists() {
+            continue;
+        }
+
+        let lib_dir = root.join("lib");
+        let lib_name = local_codec_lib_name(name);
+        let static_lib = lib_dir.join(format!("lib{lib_name}.a"));
+        let shared_lib = lib_dir.join(format!("lib{lib_name}.{}", local_codec_shared_lib_ext()));
+        if !static_lib.exists() && !shared_lib.exists() {
+            continue;
+        }
+
+        println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        if static_lib.exists() {
+            println!("cargo:rustc-link-lib=static={lib_name}");
+        } else {
+            println!("cargo:rustc-link-lib={lib_name}");
+        }
+        println!("cargo:include={}", include_dir.display());
+        return Some(vec![include_dir]);
     }
 
-    let lib_dir = root.join("lib");
-    let lib_name = local_codec_lib_name(name);
-    let static_lib = lib_dir.join(format!("lib{lib_name}.a"));
-    let shared_lib = lib_dir.join(format!("lib{lib_name}.{}", local_codec_shared_lib_ext()));
-    if !static_lib.exists() && !shared_lib.exists() {
-        return None;
+    None
+}
+
+fn ios_codec_roots() -> Vec<PathBuf> {
+    println!("cargo:rerun-if-env-changed={IOS_CODEC_ROOT_ENV}");
+    let mut roots = Vec::new();
+
+    if let Some(path) = env::var_os(IOS_CODEC_ROOT_ENV) {
+        push_prefix_candidate(&mut roots, PathBuf::from(path));
     }
 
-    println!("cargo:rustc-link-search=native={}", lib_dir.display());
-    if static_lib.exists() {
+    println!("cargo:rerun-if-env-changed={CMAKE_PREFIX_PATH_ENV}");
+    if let Some(paths) = env::var_os(CMAKE_PREFIX_PATH_ENV) {
+        push_prefix_path_list(&mut roots, &paths);
+    }
+
+    if let Some(manifest_dir) = env::var_os("CARGO_MANIFEST_DIR") {
+        let manifest_dir = Path::new(&manifest_dir);
+        if let Some(repo_root) = manifest_dir.ancestors().nth(2) {
+            let repo_local_root = repo_root.join(".local").join("ios-codecs");
+            println!("cargo:rerun-if-changed={}", repo_local_root.display());
+            if repo_local_root.exists() {
+                push_prefix_candidate(&mut roots, repo_local_root);
+            }
+        }
+    }
+
+    roots
+}
+
+fn link_ios_codec_root(name: &str) -> Option<Vec<PathBuf>> {
+    for root in ios_codec_roots() {
+        let include_dir = root.join("include");
+        let header = local_codec_header(&include_dir, name);
+        if !header.exists() {
+            continue;
+        }
+
+        let lib_dir = root.join("lib");
+        let lib_name = local_codec_lib_name(name);
+        let static_lib = lib_dir.join(format!("lib{lib_name}.a"));
+        if !static_lib.exists() {
+            continue;
+        }
+
+        println!("cargo:rustc-link-search=native={}", lib_dir.display());
         println!("cargo:rustc-link-lib=static={lib_name}");
-    } else {
-        println!("cargo:rustc-link-lib={lib_name}");
+        println!("cargo:include={}", include_dir.display());
+        return Some(vec![include_dir]);
     }
-    println!("cargo:include={}", include_dir.display());
-    Some(vec![include_dir])
+
+    None
 }
 
 #[cfg(target_os = "windows")]
@@ -312,6 +415,19 @@ fn link_homebrew_m1(name: &str) -> PathBuf {
 /// If building for linux and feature "linux-pkg-config" is enabled, will try to use pkg-config
 /// unless check fails (e.g. NO_PKG_CONFIG_libyuv=1)
 fn find_package(name: &str) -> Vec<PathBuf> {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+    if target_os == "ios" {
+        if let Some(include_paths) = link_ios_codec_root(name) {
+            return include_paths;
+        }
+        panic!(
+            "Couldn't find iOS codec root for '{}'. Set {} or {} to an iOS codec prefix, or create .local/ios-codecs in the repository.",
+            name,
+            IOS_CODEC_ROOT_ENV,
+            CMAKE_PREFIX_PATH_ENV
+        );
+    }
+
     let no_pkg_config_var_name = format!("NO_PKG_CONFIG_{name}");
     println!("cargo:rerun-if-env-changed={no_pkg_config_var_name}");
     if cfg!(all(target_os = "linux", feature = "linux-pkg-config")) {

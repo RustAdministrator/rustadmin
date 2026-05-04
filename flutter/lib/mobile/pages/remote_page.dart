@@ -177,6 +177,13 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
       );
 
   void onSoftKeyboardChanged(bool visible) {
+    if (gFFI.dialogManager.hasOpenDialogs) {
+      _timer?.cancel();
+      _iosKeyboardWorkaroundTimer?.cancel();
+      _iosKeyboardWorkaroundTimer = null;
+      return;
+    }
+
     if (!visible) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
       // [pi.version.isNotEmpty] -> check ready or not, avoid login without soft-keyboard
