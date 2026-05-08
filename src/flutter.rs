@@ -1479,6 +1479,13 @@ pub fn send_clipboard_msg(msg: Message, _is_file: bool) {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
+pub fn send_debug_msg(msg: Message) {
+    for s in sessions::get_sessions() {
+        s.send(Data::Message(msg.clone()));
+    }
+}
+
 // Server Side
 #[cfg(not(any(target_os = "ios")))]
 pub mod connection_manager {

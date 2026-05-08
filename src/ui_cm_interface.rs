@@ -604,7 +604,12 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                 }
                                 #[cfg(target_os = "windows")]
                                 Data::ClipboardNonFile(_) => {
-                                    match crate::clipboard::check_clipboard_cm() {
+                                    let clipboard_result = crate::clipboard::check_clipboard_cm();
+                                    let debug_lines = crate::clipboard::take_clipboard_debug_lines();
+                                    if !debug_lines.is_empty() {
+                                        allow_err!(self.stream.send(&Data::ClipboardDebug(debug_lines)).await);
+                                    }
+                                    match clipboard_result {
                                         Ok(multi_clipoards) => {
                                             let mut raw_contents = bytes::BytesMut::new();
                                             let mut main_data = vec![];

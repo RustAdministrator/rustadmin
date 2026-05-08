@@ -1,6 +1,12 @@
 #[cfg(not(target_os = "android"))]
 use arboard::{ClipboardData, ClipboardFormat};
+#[cfg(not(target_os = "android"))]
+use hbb_common::config::{keys, LocalConfig};
 use hbb_common::{bail, log, message_proto::*, ResultType};
+#[cfg(not(target_os = "android"))]
+use std::collections::VecDeque;
+#[cfg(not(target_os = "android"))]
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -11,7 +17,14 @@ pub const CLIPBOARD_NAME: &'static str = "clipboard";
 pub const FILE_CLIPBOARD_NAME: &'static str = "file-clipboard";
 pub const CLIPBOARD_INTERVAL: u64 = 333;
 const LOCAL_CLIPBOARD_QUIET_DUR: Duration = Duration::from_millis(750);
+#[cfg(not(target_os = "android"))]
 const CLIPBOARD_DEBUG_ENV: &str = "RUSTDESK_CLIPBOARD_DEBUG";
+#[cfg(not(target_os = "android"))]
+const CLIPBOARD_DEBUG_CATEGORY: &str = "clipboard";
+#[cfg(not(target_os = "android"))]
+const CLIPBOARD_DEBUG_MAX_EVENTS: usize = 64;
+#[cfg(not(target_os = "android"))]
+const CLIPBOARD_DEBUG_MAX_LINE: usize = 1200;
 
 // This format is used to store the flag in the clipboard.
 const RUSTDESK_CLIPBOARD_OWNER_FORMAT: &'static str = "dyn.com.rustdesk.owner";
@@ -99,6 +112,7 @@ lazy_static::lazy_static! {
     // The clipboard content is owned by the server and passed to the clients when requested.
     // Plain text is the only exception, it does not require the server to be present.
     static ref CLIPBOARD_CTX: Arc<Mutex<Option<ClipboardContext>>> = Arc::new(Mutex::new(None));
+    static ref CLIPBOARD_DEBUG_EVENTS: Arc<Mutex<VecDeque<String>>> = Arc::new(Mutex::new(VecDeque::new()));
 }
 
 #[cfg(not(target_os = "android"))]
@@ -149,6 +163,7 @@ pub(crate) fn mark_local_clipboard_change(side: ClipboardSide) {
         .unwrap()
         .mark_local_change(Instant::now());
     log::debug!("Observed local {} clipboard change", side);
+    emit_clipboard_debug(format!("observed-local-change side={side}"));
 }
 
 #[cfg(not(target_os = "android"))]
@@ -158,6 +173,11 @@ fn mark_remote_clipboard_applied(side: ClipboardSide) {
         .unwrap()
         .mark_remote_apply(Instant::now());
     log::debug!("Applied remote clipboard on {}", side);
+}
+
+#[cfg(not(target_os = "android"))]
+fn clear_cached_clipboard() {
+    *LAST_MULTI_CLIPBOARDS.lock().unwrap() = MultiClipboards::new();
 }
 
 #[cfg(not(target_os = "android"))]
@@ -198,6 +218,11 @@ fn is_opaque_native_format_name(name: &str) -> bool {
         .any(|pattern| contains_ignore_ascii_case(name, pattern))
 }
 
+#[cfg(any(test, target_os = "windows"))]
+fn is_windows_opaque_registered_format_name(name: &str) -> bool {
+    is_opaque_native_format_name(name)
+}
+
 #[cfg(any(test, target_os = "macos", target_os = "linux"))]
 fn is_risky_native_format_name(name: &str) -> bool {
     if is_safe_registered_format_name(name) {
@@ -217,8 +242,32 @@ fn should_preserve_native_format_name(name: &str) -> bool {
     is_opaque_native_format_name(name) || is_risky_native_format_name(name)
 }
 
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+fn contains_rustdesk_owner_format_name(names: &[String]) -> bool {
+    names
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(RUSTDESK_CLIPBOARD_OWNER_FORMAT))
+}
+
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+fn contains_preserved_native_format_name(names: &[String]) -> bool {
+    names
+        .iter()
+        .any(|name| should_preserve_native_format_name(name))
+}
+
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+fn contains_external_preserved_native_format_name(names: &[String]) -> bool {
+    !contains_rustdesk_owner_format_name(names) && contains_preserved_native_format_name(names)
+}
+
 #[cfg(not(target_os = "android"))]
 fn clipboard_debug_enabled() -> bool {
+    clipboard_debug_env_enabled() || clipboard_debug_exchange_enabled()
+}
+
+#[cfg(not(target_os = "android"))]
+fn clipboard_debug_env_enabled() -> bool {
     std::env::var(CLIPBOARD_DEBUG_ENV)
         .map(|value| {
             matches!(
@@ -228,6 +277,116 @@ fn clipboard_debug_enabled() -> bool {
         })
         .unwrap_or(false)
 }
+
+#[cfg(not(target_os = "android"))]
+fn clipboard_debug_exchange_enabled() -> bool {
+    LocalConfig::get_bool_option(keys::OPTION_ALLOW_CLIPBOARD_DEBUG)
+}
+
+#[cfg(not(target_os = "android"))]
+fn truncate_clipboard_debug_line(mut line: String) -> String {
+    if line.len() <= CLIPBOARD_DEBUG_MAX_LINE {
+        return line;
+    }
+    let mut end = CLIPBOARD_DEBUG_MAX_LINE;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    line.truncate(end);
+    line.push_str("...");
+    line
+}
+
+#[cfg(not(target_os = "android"))]
+fn push_clipboard_debug_line(line: String) {
+    if !clipboard_debug_exchange_enabled() {
+        return;
+    }
+    let mut queue = CLIPBOARD_DEBUG_EVENTS.lock().unwrap();
+    if queue.len() == CLIPBOARD_DEBUG_MAX_EVENTS {
+        queue.pop_front();
+    }
+    queue.push_back(line);
+}
+
+#[cfg(not(target_os = "android"))]
+fn emit_clipboard_debug(line: String) {
+    if !clipboard_debug_enabled() {
+        return;
+    }
+    let line = truncate_clipboard_debug_line(line);
+    log::warn!("[clipboard-debug] {line}");
+    push_clipboard_debug_line(line);
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn queue_clipboard_debug_lines(lines: Vec<String>) {
+    if !clipboard_debug_exchange_enabled() {
+        return;
+    }
+    for line in lines {
+        push_clipboard_debug_line(truncate_clipboard_debug_line(line));
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn take_clipboard_debug_lines() -> Vec<String> {
+    if !clipboard_debug_exchange_enabled() {
+        CLIPBOARD_DEBUG_EVENTS.lock().unwrap().clear();
+        return Vec::new();
+    }
+    CLIPBOARD_DEBUG_EVENTS.lock().unwrap().drain(..).collect()
+}
+
+#[cfg(not(target_os = "android"))]
+fn clipboard_debug_timestamp_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or_default()
+}
+
+#[cfg(not(target_os = "android"))]
+fn make_clipboard_debug_message(text: String) -> Message {
+    let mut misc = Misc::new();
+    misc.set_debug_event(DebugEvent {
+        category: CLIPBOARD_DEBUG_CATEGORY.to_owned(),
+        text,
+        timestamp_ms: clipboard_debug_timestamp_ms(),
+        ..Default::default()
+    });
+    let mut msg = Message::new();
+    msg.set_misc(misc);
+    msg
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn take_clipboard_debug_messages() -> Vec<Message> {
+    take_clipboard_debug_lines()
+        .into_iter()
+        .map(make_clipboard_debug_message)
+        .collect()
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn log_remote_debug_event(event: DebugEvent) {
+    if !clipboard_debug_enabled() {
+        return;
+    }
+    if event.category != CLIPBOARD_DEBUG_CATEGORY {
+        return;
+    }
+    let text = truncate_clipboard_debug_line(event.text);
+    log::warn!(
+        "[clipboard-debug][remote] category={} timestamp_ms={} {}",
+        event.category,
+        event.timestamp_ms,
+        text
+    );
+}
+
+#[cfg(target_os = "android")]
+pub fn log_remote_debug_event(_event: DebugEvent) {}
 
 #[cfg(not(target_os = "android"))]
 fn debug_clipboard_data(label: &str, side: ClipboardSide, data: &[ClipboardData]) {
@@ -264,21 +423,11 @@ fn debug_clipboard_data(label: &str, side: ClipboardSide, data: &[ClipboardData]
         };
         items.push(item);
     }
-    log::warn!(
-        "[clipboard-debug] {label} side={side} data_count={} data=[{}]",
+    emit_clipboard_debug(format!(
+        "{label} side={side} data_count={} data=[{}]",
         data.len(),
         items.join(", ")
-    );
-}
-
-#[cfg(not(target_os = "android"))]
-fn plain_text_clipboard_data(data: &[ClipboardData]) -> Option<Vec<ClipboardData>> {
-    data.iter().find_map(|item| match item {
-        ClipboardData::Text(text) if !text.is_empty() => {
-            Some(vec![ClipboardData::Text(text.clone())])
-        }
-        _ => None,
-    })
+    ));
 }
 
 #[cfg(not(target_os = "android"))]
@@ -286,9 +435,6 @@ const SUPPORTED_FORMATS: &[ClipboardFormat] = &[
     ClipboardFormat::Text,
     ClipboardFormat::Html,
     ClipboardFormat::Rtf,
-    ClipboardFormat::ImageRgba,
-    ClipboardFormat::ImagePng,
-    ClipboardFormat::ImageSvg,
     #[cfg(feature = "unix-file-copy-paste")]
     ClipboardFormat::FileUrl,
     ClipboardFormat::Special(CLIPBOARD_FORMAT_EXCEL_XML_SPREADSHEET),
@@ -411,15 +557,15 @@ mod platform_clipboard {
         }
         registered_name(format)
             .as_deref()
-            .map(|name| {
-                !super::is_safe_registered_format_name(name)
-                    || super::is_opaque_native_format_name(name)
-            })
+            .map(super::is_windows_opaque_registered_format_name)
             .unwrap_or(true)
     }
 
-    fn contains_opaque_native_formats() -> ResultType<bool> {
+    fn contains_external_opaque_native_formats() -> ResultType<bool> {
         let _clipboard = open_clipboard()?;
+        let owner_format = registered_id(super::RUSTDESK_CLIPBOARD_OWNER_FORMAT);
+        let mut has_owner = false;
+        let mut has_opaque = false;
         let mut format = 0;
         loop {
             // Safety: the clipboard is open for the lifetime of _clipboard.
@@ -427,11 +573,14 @@ mod platform_clipboard {
             if format == 0 {
                 break;
             }
+            if owner_format != 0 && format == owner_format {
+                has_owner = true;
+            }
             if is_opaque_native_format(format) {
-                return Ok(true);
+                has_opaque = true;
             }
         }
-        Ok(false)
+        Ok(has_opaque && !has_owner)
     }
 
     pub fn debug_dump_clipboard_formats(reason: &str) {
@@ -457,15 +606,16 @@ mod platform_clipboard {
                         is_opaque_native_format(format)
                     ));
                 }
-                log::warn!(
-                    "[clipboard-debug] {reason} owner_marker={} opaque={} formats=[{}]",
-                    has_rustdesk_owner(),
-                    formats.iter().any(|item| item.ends_with("opaque=true")),
+                let has_owner = has_rustdesk_owner();
+                let opaque = formats.iter().any(|item| item.ends_with("opaque=true"));
+                super::emit_clipboard_debug(format!(
+                    "{reason} owner_marker={has_owner} opaque={opaque} external_opaque={} formats=[{}]",
+                    opaque && !has_owner,
                     formats.join(", ")
-                );
+                ));
             }
             Err(e) => {
-                log::warn!("[clipboard-debug] {reason} failed to open clipboard: {e}");
+                super::emit_clipboard_debug(format!("{reason} failed to open clipboard: {e}"));
             }
         }
     }
@@ -477,18 +627,14 @@ mod platform_clipboard {
         format != 0 && unsafe { IsClipboardFormatAvailable(format) != 0 }
     }
 
-    pub fn has_opaque_native_formats() -> bool {
-        match contains_opaque_native_formats() {
+    pub fn has_external_opaque_native_formats() -> bool {
+        match contains_external_opaque_native_formats() {
             Ok(has_opaque) => has_opaque,
             Err(e) => {
                 log::debug!("Failed to inspect clipboard formats: {}", e);
                 false
             }
         }
-    }
-
-    pub fn has_external_opaque_native_formats() -> bool {
-        has_opaque_native_formats()
     }
 }
 
@@ -564,9 +710,9 @@ mod platform_clipboard {
 
     fn contains_external_opaque_native_formats() -> ResultType<bool> {
         let names = pasteboard_type_names()?;
-        Ok(names
-            .iter()
-            .any(|name| super::should_preserve_native_format_name(name)))
+        Ok(super::contains_external_preserved_native_format_name(
+            &names,
+        ))
     }
 
     pub fn debug_dump_clipboard_formats(reason: &str) {
@@ -575,19 +721,18 @@ mod platform_clipboard {
         }
         match pasteboard_type_names() {
             Ok(names) => {
-                let has_owner = names
-                    .iter()
-                    .any(|name| name.eq_ignore_ascii_case(super::RUSTDESK_CLIPBOARD_OWNER_FORMAT));
-                let opaque = names
-                    .iter()
-                    .any(|name| super::should_preserve_native_format_name(name));
-                log::warn!(
-                    "[clipboard-debug] {reason} owner_marker={has_owner} opaque={opaque} types=[{}]",
+                let has_owner = super::contains_rustdesk_owner_format_name(&names);
+                let opaque = super::contains_preserved_native_format_name(&names);
+                super::emit_clipboard_debug(format!(
+                    "{reason} owner_marker={has_owner} opaque={opaque} external_opaque={} types=[{}]",
+                    opaque && !has_owner,
                     names.join(", ")
-                );
+                ));
             }
             Err(e) => {
-                log::warn!("[clipboard-debug] {reason} failed to inspect macOS clipboard: {e}");
+                super::emit_clipboard_debug(format!(
+                    "{reason} failed to inspect macOS clipboard: {e}"
+                ));
             }
         }
     }
@@ -735,9 +880,9 @@ mod platform_clipboard {
 
     fn contains_external_opaque_native_formats() -> ResultType<bool> {
         let names = clipboard_type_names()?;
-        Ok(names
-            .iter()
-            .any(|name| super::should_preserve_native_format_name(name)))
+        Ok(super::contains_external_preserved_native_format_name(
+            &names,
+        ))
     }
 
     pub fn debug_dump_clipboard_formats(reason: &str) {
@@ -746,19 +891,18 @@ mod platform_clipboard {
         }
         match clipboard_type_names() {
             Ok(names) => {
-                let has_owner = names
-                    .iter()
-                    .any(|name| name.eq_ignore_ascii_case(super::RUSTDESK_CLIPBOARD_OWNER_FORMAT));
-                let opaque = names
-                    .iter()
-                    .any(|name| super::should_preserve_native_format_name(name));
-                log::warn!(
-                    "[clipboard-debug] {reason} owner_marker={has_owner} opaque={opaque} types=[{}]",
+                let has_owner = super::contains_rustdesk_owner_format_name(&names);
+                let opaque = super::contains_preserved_native_format_name(&names);
+                super::emit_clipboard_debug(format!(
+                    "{reason} owner_marker={has_owner} opaque={opaque} external_opaque={} types=[{}]",
+                    opaque && !has_owner,
                     names.join(", ")
-                );
+                ));
             }
             Err(e) => {
-                log::warn!("[clipboard-debug] {reason} failed to inspect Linux clipboard: {e}");
+                super::emit_clipboard_debug(format!(
+                    "{reason} failed to inspect Linux clipboard: {e}"
+                ));
             }
         }
     }
@@ -1051,27 +1195,27 @@ impl ClipboardContext {
     }
 
     pub fn get(&mut self, side: ClipboardSide, force: bool) -> ResultType<Vec<ClipboardData>> {
-        let data = self.get_formats_filter(SUPPORTED_FORMATS, side, force)?;
-        debug_clipboard_data("get-supported-formats", side, &data);
         #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
         {
+            // Inspect native format names before reading payloads. Some apps delay-render
+            // vector clipboard data, and reading fallbacks can disturb their native clipboard.
             platform_clipboard::debug_dump_clipboard_formats("get-before-native-guard");
             if platform_clipboard::has_external_opaque_native_formats() {
-                if let Some(text_data) = plain_text_clipboard_data(&data) {
-                    log::debug!(
-                        "Transferring only plain text from {} clipboard because it also contains opaque native formats",
-                        side
-                    );
-                    return Ok(text_data);
-                }
                 mark_local_clipboard_change(side);
+                clear_cached_clipboard();
                 log::debug!(
                     "Skip transferring {} clipboard because it contains opaque native formats",
                     side
                 );
+                emit_clipboard_debug(format!(
+                    "skip-transfer side={side} reason=opaque-native-formats"
+                ));
                 return Ok(vec![]);
             }
         }
+
+        let data = self.get_formats_filter(SUPPORTED_FORMATS, side, force)?;
+        debug_clipboard_data("get-supported-formats", side, &data);
         // We have a separate service named `file-clipboard` to handle file copy-paste.
         // We need to read the file urls because file copy may set the other clipboard formats such as text.
         #[cfg(feature = "unix-file-copy-paste")]
@@ -1376,6 +1520,23 @@ mod clipboard_timing_tests {
     }
 
     #[test]
+    fn eager_clipboard_formats_do_not_materialize_images() {
+        assert!(SUPPORTED_FORMATS
+            .iter()
+            .any(|format| matches!(format, ClipboardFormat::Text)));
+        assert!(SUPPORTED_FORMATS
+            .iter()
+            .any(|format| matches!(format, ClipboardFormat::Html)));
+        assert!(SUPPORTED_FORMATS
+            .iter()
+            .any(|format| matches!(format, ClipboardFormat::Rtf)));
+        assert!(!SUPPORTED_FORMATS.iter().any(|format| matches!(
+            format,
+            ClipboardFormat::ImageRgba | ClipboardFormat::ImagePng | ClipboardFormat::ImageSvg
+        )));
+    }
+
+    #[test]
     fn risky_desktop_native_formats_are_preserved() {
         for name in [
             "application/vnd.oasis.opendocument.text",
@@ -1393,27 +1554,32 @@ mod clipboard_timing_tests {
     }
 
     #[test]
-    fn plain_text_clipboard_data_extracts_text_only() {
-        let data = vec![
-            ClipboardData::Html("<b>secret</b>".to_owned()),
-            ClipboardData::Text("secret".to_owned()),
-            ClipboardData::Special(("Native Private Format".to_owned(), vec![1, 2, 3])),
-        ];
-
-        let text_data = plain_text_clipboard_data(&data).unwrap();
-
-        assert_eq!(text_data.len(), 1);
-        assert!(matches!(&text_data[0], ClipboardData::Text(text) if text == "secret"));
+    fn windows_editor_private_text_metadata_is_not_opaque() {
+        assert!(!is_windows_opaque_registered_format_name(
+            "sublime-text-extra"
+        ));
+        assert!(is_windows_opaque_registered_format_name(
+            "Adobe Illustrator Document"
+        ));
     }
 
     #[test]
-    fn plain_text_clipboard_data_rejects_data_without_text() {
-        let data = vec![
-            ClipboardData::Html("<b>secret</b>".to_owned()),
-            ClipboardData::Special(("Native Private Format".to_owned(), vec![1, 2, 3])),
+    fn opaque_native_formats_take_precedence_over_text_fallbacks() {
+        let names = vec!["text/plain".to_owned(), "application/pdf".to_owned()];
+
+        assert!(contains_external_preserved_native_format_name(&names));
+    }
+
+    #[test]
+    fn rustdesk_owned_formats_are_not_external_opaque() {
+        let names = vec![
+            RUSTDESK_CLIPBOARD_OWNER_FORMAT.to_owned(),
+            "public.pdf".to_owned(),
         ];
 
-        assert!(plain_text_clipboard_data(&data).is_none());
+        assert!(contains_rustdesk_owner_format_name(&names));
+        assert!(contains_preserved_native_format_name(&names));
+        assert!(!contains_external_preserved_native_format_name(&names));
     }
 }
 

@@ -8,6 +8,7 @@ Usage: scripts/build_linux.sh [--clean] [--hwcodec] [--skip-cargo]
 Environment overrides:
   RUSTDESK_FLUTTER_ROOT       Flutter SDK root. Default: /mnt/f/GH/flutter
   RUSTDESK_LINUX_CODEC_ROOT   Native dependency prefix. Default: .local/linux-codecs, then /mnt/f/UBc/Release
+  RUSTADMIN_LINUX_DIST_DIR    Release zip output dir. Default: rustdesk-client/dist/linux
   PUB_CACHE                   Dart package cache. Default: /mnt/f/GH/flutter-pub-cache-linux
   CARGO_TARGET_DIR            Cargo output dir. Default: /mnt/f/GH/rustdesk-target-linux
 USAGE
@@ -58,8 +59,67 @@ if [[ ! -e "$deps_root" ]]; then
   echo "Set RUSTDESK_LINUX_CODEC_ROOT." >&2
   exit 1
 fi
+if ! command -v zip >/dev/null 2>&1; then
+  echo "zip was not found. Install it with: sudo apt install zip" >&2
+  exit 1
+fi
 
 mkdir -p "$PUB_CACHE" "$CARGO_TARGET_DIR"
+
+read_version_info() {
+  local revision_file="$repo_root/../hbb_common/rustadmin_revision.txt"
+
+  version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$repo_root/Cargo.toml" | head -n 1)"
+  if [[ -z "$version" ]]; then
+    echo "Could not read package version from $repo_root/Cargo.toml" >&2
+    exit 1
+  fi
+  if [[ ! -f "$revision_file" ]]; then
+    echo "Missing RustAdmin revision file: $revision_file" >&2
+    exit 1
+  fi
+  revision="$(tr -d '[:space:]' < "$revision_file")"
+  if [[ -z "$revision" ]]; then
+    echo "RustAdmin revision file is empty: $revision_file" >&2
+    exit 1
+  fi
+  archive_name="RustAdmin_Release_${version}.${revision}.zip"
+}
+
+generate_version_file() {
+  local version_file="$repo_root/src/version.rs"
+
+  cat > "$version_file" <<EOF
+#[allow(dead_code)]
+pub const VERSION: &str = "$version";
+#[allow(dead_code)]
+pub const RUSTADMIN_REVISION: &str = "$revision";
+#[allow(dead_code)]
+pub const FULL_VERSION: &str = "$version rev $revision";
+#[allow(dead_code)]
+pub const BUILD_DATE: &str = "$(date '+%Y-%m-%d %H:%M')";
+EOF
+}
+
+package_release_zip() {
+  local bundle_dir="$flutter_dir/build/linux/x64/release/bundle"
+  local dist_dir="${RUSTADMIN_LINUX_DIST_DIR:-$repo_root/dist/linux}"
+  local archive_path="$dist_dir/$archive_name"
+
+  if [[ ! -d "$bundle_dir" ]]; then
+    echo "Linux bundle was not found at $bundle_dir" >&2
+    exit 1
+  fi
+
+  mkdir -p "$dist_dir"
+  rm -f "$archive_path"
+  (cd "$bundle_dir" && zip -qr "$archive_path" .)
+
+  echo "Linux archive:"
+  echo "$archive_path"
+}
+
+read_version_info
 
 package_config="$flutter_dir/.dart_tool/package_config.json"
 if [[ "$clean" -eq 1 ]] ||
@@ -77,10 +137,13 @@ if [[ "$hwcodec" -eq 1 ]]; then
 fi
 
 if [[ "$skip_cargo" -eq 0 ]]; then
+  generate_version_file
   (cd "$repo_root" && cargo build --features "$features" --lib --release)
 fi
 
 (cd "$flutter_dir" && flutter build linux --release)
 
 echo "Linux bundle:"
-echo "$flutter_dir/build/linux/x64/release/bundle"
+bundle_dir="$flutter_dir/build/linux/x64/release/bundle"
+echo "$bundle_dir"
+package_release_zip

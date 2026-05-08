@@ -4,9 +4,9 @@ use crate::{
     ui_interface::{get_local_option, set_local_option},
 };
 use bytes::Bytes;
-use parity_tokio_ipc::{Connection as Conn, ConnectionClient as ConnClient, Endpoint, Incoming};
 #[cfg(windows)]
 use parity_tokio_ipc::SecurityAttributes;
+use parity_tokio_ipc::{Connection as Conn, ConnectionClient as ConnClient, Endpoint, Incoming};
 use serde_derive::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -273,6 +273,8 @@ pub enum Data {
     ClipboardFileEnabled(bool),
     #[cfg(target_os = "windows")]
     ClipboardNonFile(Option<(String, Vec<ClipboardNonFile>)>),
+    #[cfg(target_os = "windows")]
+    ClipboardDebug(Vec<String>),
     PrivacyModeState((i32, PrivacyModeState, String)),
     TestRendezvousServer,
     #[cfg(not(any(target_os = "android", target_os = "ios")))]

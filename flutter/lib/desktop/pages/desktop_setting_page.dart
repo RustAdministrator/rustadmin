@@ -606,6 +606,14 @@ class _GeneralState extends State<_General> {
         },
       ));
     }
+    if (!isWeb) {
+      children.add(_OptionCheckBox(
+        context,
+        'Clipboard debug diagnostics',
+        kOptionAllowClipboardDebug,
+        isServer: false,
+      ));
+    }
     return _Card(title: 'Other', children: children);
   }
 

@@ -88,6 +88,9 @@ fn run(sp: EmptyExtraFieldService) -> ResultType<()> {
                 if let Some(msg) = handler.get_clipboard_msg() {
                     sp.send(msg);
                 }
+                for msg in crate::clipboard::take_clipboard_debug_messages() {
+                    sp.send(msg);
+                }
             }
             Ok(CallbackResult::Stop) => {
                 log::debug!("Clipboard listener stopped");
@@ -212,6 +215,9 @@ impl Handler {
         if let Some(stream) = &mut self.stream {
             loop {
                 match rt.block_on(stream.next_timeout(800))? {
+                    Some(Data::ClipboardDebug(lines)) => {
+                        crate::clipboard::queue_clipboard_debug_lines(lines);
+                    }
                     Some(Data::ClipboardNonFile(Some((err, mut contents)))) => {
                         if !err.is_empty() {
                             bail!("{}", err);

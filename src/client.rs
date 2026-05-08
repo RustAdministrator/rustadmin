@@ -1536,6 +1536,7 @@ impl ClientClipboardHandler {
                     self.send_msg(msg, false);
                 }
             }
+            self.send_debug_messages();
         }
     }
 
@@ -1543,6 +1544,12 @@ impl ClientClipboardHandler {
     #[cfg(feature = "flutter")]
     fn send_msg(&self, msg: Message, _is_file: bool) {
         crate::flutter::send_clipboard_msg(msg, _is_file);
+    }
+
+    #[inline]
+    #[cfg(feature = "flutter")]
+    fn send_debug_msg(&self, msg: Message) {
+        crate::flutter::send_debug_msg(msg);
     }
 
     #[cfg(not(feature = "flutter"))]
@@ -1570,6 +1577,19 @@ impl ClientClipboardHandler {
                 }
             }
             let _ = ctx.tx.send(Data::Message(msg));
+        }
+    }
+
+    #[cfg(not(feature = "flutter"))]
+    fn send_debug_msg(&self, msg: Message) {
+        if let Some(ctx) = &self.client_clip_ctx {
+            let _ = ctx.tx.send(Data::Message(msg));
+        }
+    }
+
+    fn send_debug_messages(&self) {
+        for msg in crate::clipboard::take_clipboard_debug_messages() {
+            self.send_debug_msg(msg);
         }
     }
 }

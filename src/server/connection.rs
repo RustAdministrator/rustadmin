@@ -3185,6 +3185,9 @@ impl Connection {
                         self.chat_unanswered = true;
                         self.update_auto_disconnect_timer();
                     }
+                    Some(misc::Union::DebugEvent(event)) => {
+                        crate::clipboard::log_remote_debug_event(event);
+                    }
                     Some(misc::Union::Option(o)) => {
                         self.update_options(&o).await;
                     }
