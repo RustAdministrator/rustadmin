@@ -106,3 +106,7 @@ All configurations or options are under `../hbb_common/src/config.rs` file, 4 ty
 - Do not run repository-wide formatters or reflow unrelated code unless the
   user explicitly asks for formatting.
 - Keep diffs limited to semantic changes required for the task.
+- When making code changes, bump `../hbb_common/rustadmin_revision.txt` by one
+  so release archives and runtime version reporting get a new RustAdmin
+  revision number. Documentation-only changes do not require a revision bump
+  unless the user asks for one.
