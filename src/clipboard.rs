@@ -125,15 +125,27 @@ const CLIPBOARD_GET_RETRY_INTERVAL_DUR: Duration = Duration::from_millis(33);
 struct ClipboardTiming {
     last_local_change_at: Option<Instant>,
     last_remote_apply_at: Option<Instant>,
+    last_external_opaque_signature: Option<String>,
 }
 
 #[cfg(not(target_os = "android"))]
 impl ClipboardTiming {
     fn mark_local_change(&mut self, now: Instant) {
+        self.last_external_opaque_signature = None;
         self.last_local_change_at = Some(now);
     }
 
+    fn mark_external_opaque_change(&mut self, signature: &str, now: Instant) -> bool {
+        if self.last_external_opaque_signature.as_deref() == Some(signature) {
+            return false;
+        }
+        self.last_external_opaque_signature = Some(signature.to_owned());
+        self.last_local_change_at = Some(now);
+        true
+    }
+
     fn mark_remote_apply(&mut self, now: Instant) {
+        self.last_external_opaque_signature = None;
         self.last_remote_apply_at = Some(now);
     }
 
@@ -154,6 +166,22 @@ impl ClipboardTiming {
             None
         }
     }
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn mark_local_external_opaque_clipboard_change(
+    side: ClipboardSide,
+    signature: &str,
+) -> bool {
+    let changed = CLIPBOARD_TIMING
+        .lock()
+        .unwrap()
+        .mark_external_opaque_change(signature, Instant::now());
+    if changed {
+        log::debug!("Observed local {} opaque clipboard change", side);
+        emit_clipboard_debug(format!("observed-local-change side={side} kind=opaque"));
+    }
+    changed
 }
 
 #[cfg(not(target_os = "android"))]
@@ -256,9 +284,27 @@ fn contains_preserved_native_format_name(names: &[String]) -> bool {
         .any(|name| should_preserve_native_format_name(name))
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+#[cfg(test)]
 fn contains_external_preserved_native_format_name(names: &[String]) -> bool {
     !contains_rustdesk_owner_format_name(names) && contains_preserved_native_format_name(names)
+}
+
+#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+fn external_preserved_native_formats_signature(names: &[String]) -> Option<String> {
+    if contains_rustdesk_owner_format_name(names) {
+        return None;
+    }
+    let mut preserved = names
+        .iter()
+        .filter(|name| should_preserve_native_format_name(name))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if preserved.is_empty() {
+        return None;
+    }
+    preserved.sort_unstable();
+    preserved.dedup();
+    Some(preserved.join("|"))
 }
 
 #[cfg(not(target_os = "android"))]
@@ -446,8 +492,8 @@ mod platform_clipboard {
     use hbb_common::{bail, log, ResultType};
     use std::{ffi::OsStr, os::windows::ffi::OsStrExt, ptr::null_mut, thread, time::Duration};
     use winapi::um::winuser::{
-        CloseClipboard, EnumClipboardFormats, GetClipboardFormatNameW, IsClipboardFormatAvailable,
-        OpenClipboard, RegisterClipboardFormatW,
+        CloseClipboard, EnumClipboardFormats, GetClipboardFormatNameW, GetClipboardSequenceNumber,
+        IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW,
     };
 
     const CF_TEXT: u32 = 1;
@@ -561,11 +607,11 @@ mod platform_clipboard {
             .unwrap_or(true)
     }
 
-    fn contains_external_opaque_native_formats() -> ResultType<bool> {
+    fn external_opaque_native_signature() -> ResultType<Option<String>> {
         let _clipboard = open_clipboard()?;
         let owner_format = registered_id(super::RUSTDESK_CLIPBOARD_OWNER_FORMAT);
         let mut has_owner = false;
-        let mut has_opaque = false;
+        let mut opaque_formats = Vec::new();
         let mut format = 0;
         loop {
             // Safety: the clipboard is open for the lifetime of _clipboard.
@@ -577,10 +623,20 @@ mod platform_clipboard {
                 has_owner = true;
             }
             if is_opaque_native_format(format) {
-                has_opaque = true;
+                opaque_formats.push(format_name(format));
             }
         }
-        Ok(has_opaque && !has_owner)
+        if has_owner || opaque_formats.is_empty() {
+            return Ok(None);
+        }
+        opaque_formats.sort_unstable();
+        opaque_formats.dedup();
+        // Safety: The call has no parameters and only reads the OS clipboard generation.
+        let sequence = unsafe { GetClipboardSequenceNumber() };
+        Ok(Some(format!(
+            "windows:{sequence}:{}",
+            opaque_formats.join("|")
+        )))
     }
 
     pub fn debug_dump_clipboard_formats(reason: &str) {
@@ -627,12 +683,12 @@ mod platform_clipboard {
         format != 0 && unsafe { IsClipboardFormatAvailable(format) != 0 }
     }
 
-    pub fn has_external_opaque_native_formats() -> bool {
-        match contains_external_opaque_native_formats() {
-            Ok(has_opaque) => has_opaque,
+    pub fn external_opaque_native_clipboard_signature() -> Option<String> {
+        match external_opaque_native_signature() {
+            Ok(signature) => signature,
             Err(e) => {
                 log::debug!("Failed to inspect clipboard formats: {}", e);
-                false
+                None
             }
         }
     }
@@ -708,11 +764,23 @@ mod platform_clipboard {
         Ok(names)
     }
 
-    fn contains_external_opaque_native_formats() -> ResultType<bool> {
+    fn pasteboard_change_count() -> ResultType<isize> {
+        unsafe {
+            // Safety: generalPasteboard is an AppKit singleton and does not require ownership.
+            let pasteboard = NSPasteboard::generalPasteboard(nil);
+            if pasteboard == nil {
+                bail!("failed to get macOS general pasteboard");
+            }
+            // Safety: changeCount only reads the pasteboard generation counter.
+            Ok(NSPasteboard::changeCount(pasteboard) as isize)
+        }
+    }
+
+    fn external_opaque_native_signature() -> ResultType<Option<String>> {
         let names = pasteboard_type_names()?;
-        Ok(super::contains_external_preserved_native_format_name(
-            &names,
-        ))
+        let change_count = pasteboard_change_count()?;
+        Ok(super::external_preserved_native_formats_signature(&names)
+            .map(|signature| format!("macos:{change_count}:{signature}")))
     }
 
     pub fn debug_dump_clipboard_formats(reason: &str) {
@@ -737,12 +805,12 @@ mod platform_clipboard {
         }
     }
 
-    pub fn has_external_opaque_native_formats() -> bool {
-        match contains_external_opaque_native_formats() {
-            Ok(has_opaque) => has_opaque,
+    pub fn external_opaque_native_clipboard_signature() -> Option<String> {
+        match external_opaque_native_signature() {
+            Ok(signature) => signature,
             Err(e) => {
                 log::debug!("Failed to inspect macOS clipboard types: {}", e);
-                false
+                None
             }
         }
     }
@@ -878,11 +946,9 @@ mod platform_clipboard {
         x11_type_names()
     }
 
-    fn contains_external_opaque_native_formats() -> ResultType<bool> {
+    fn external_opaque_native_signature() -> ResultType<Option<String>> {
         let names = clipboard_type_names()?;
-        Ok(super::contains_external_preserved_native_format_name(
-            &names,
-        ))
+        Ok(super::external_preserved_native_formats_signature(&names))
     }
 
     pub fn debug_dump_clipboard_formats(reason: &str) {
@@ -907,12 +973,12 @@ mod platform_clipboard {
         }
     }
 
-    pub fn has_external_opaque_native_formats() -> bool {
-        match contains_external_opaque_native_formats() {
-            Ok(has_opaque) => has_opaque,
+    pub fn external_opaque_native_clipboard_signature() -> Option<String> {
+        match external_opaque_native_signature() {
+            Ok(signature) => signature,
             Err(e) => {
                 log::debug!("Failed to inspect Linux clipboard types: {}", e);
-                false
+                None
             }
         }
     }
@@ -1200,8 +1266,10 @@ impl ClipboardContext {
             // Inspect native format names before reading payloads. Some apps delay-render
             // vector clipboard data, and reading fallbacks can disturb their native clipboard.
             platform_clipboard::debug_dump_clipboard_formats("get-before-native-guard");
-            if platform_clipboard::has_external_opaque_native_formats() {
-                mark_local_clipboard_change(side);
+            if let Some(signature) =
+                platform_clipboard::external_opaque_native_clipboard_signature()
+            {
+                mark_local_external_opaque_clipboard_change(side, &signature);
                 clear_cached_clipboard();
                 log::debug!(
                     "Skip transferring {} clipboard because it contains opaque native formats",
@@ -1482,6 +1550,86 @@ mod clipboard_timing_tests {
     }
 
     #[test]
+    fn repeated_same_opaque_clipboard_does_not_refresh_local_change() {
+        let start = Instant::now();
+        let mut timing = ClipboardTiming::default();
+
+        assert!(timing.mark_external_opaque_change("opaque:illustrator:1", start));
+        assert!(!timing.mark_external_opaque_change(
+            "opaque:illustrator:1",
+            start + Duration::from_millis(500)
+        ));
+
+        assert!(timing
+            .remote_update_delay(start + LOCAL_CLIPBOARD_QUIET_DUR + Duration::from_millis(1))
+            .is_none());
+    }
+
+    #[test]
+    fn different_opaque_clipboard_starts_new_quiet_window() {
+        let start = Instant::now();
+        let mut timing = ClipboardTiming::default();
+
+        assert!(timing.mark_external_opaque_change("opaque:illustrator:1", start));
+        assert!(timing.mark_external_opaque_change(
+            "opaque:illustrator:2",
+            start + Duration::from_millis(500)
+        ));
+
+        assert!(timing
+            .remote_update_delay(start + LOCAL_CLIPBOARD_QUIET_DUR + Duration::from_millis(1))
+            .is_some());
+    }
+
+    #[test]
+    fn stable_opaque_clipboard_allows_later_remote_safe_update() {
+        let start = Instant::now();
+        let mut timing = ClipboardTiming::default();
+
+        assert!(timing.mark_external_opaque_change("opaque:illustrator:1", start));
+        assert!(!timing.mark_external_opaque_change(
+            "opaque:illustrator:1",
+            start + Duration::from_millis(300)
+        ));
+        assert!(!timing.mark_external_opaque_change(
+            "opaque:illustrator:1",
+            start + Duration::from_millis(600)
+        ));
+
+        assert!(timing
+            .remote_update_delay(start + LOCAL_CLIPBOARD_QUIET_DUR + Duration::from_millis(1))
+            .is_none());
+    }
+
+    #[test]
+    fn remote_apply_clears_opaque_signature_for_future_local_copy() {
+        let start = Instant::now();
+        let mut timing = ClipboardTiming::default();
+
+        assert!(timing.mark_external_opaque_change("opaque:illustrator:1", start));
+        timing.mark_remote_apply(start + LOCAL_CLIPBOARD_QUIET_DUR + Duration::from_millis(1));
+
+        assert!(timing.mark_external_opaque_change(
+            "opaque:illustrator:1",
+            start + LOCAL_CLIPBOARD_QUIET_DUR + Duration::from_millis(10)
+        ));
+    }
+
+    #[test]
+    fn normal_local_change_clears_opaque_signature_for_future_local_copy() {
+        let start = Instant::now();
+        let mut timing = ClipboardTiming::default();
+
+        assert!(timing.mark_external_opaque_change("opaque:illustrator:1", start));
+        timing.mark_local_change(start + LOCAL_CLIPBOARD_QUIET_DUR + Duration::from_millis(1));
+
+        assert!(timing.mark_external_opaque_change(
+            "opaque:illustrator:1",
+            start + LOCAL_CLIPBOARD_QUIET_DUR + Duration::from_millis(10)
+        ));
+    }
+
+    #[test]
     fn adobe_vector_formats_are_opaque() {
         for name in [
             "Adobe Illustrator Document",
@@ -1571,6 +1719,21 @@ mod clipboard_timing_tests {
     }
 
     #[test]
+    fn opaque_native_signature_ignores_safe_fallbacks() {
+        let names = vec![
+            "text/plain".to_owned(),
+            "application/pdf".to_owned(),
+            "HTML Format".to_owned(),
+            "com.adobe.illustrator.aicb".to_owned(),
+        ];
+
+        assert_eq!(
+            external_preserved_native_formats_signature(&names).as_deref(),
+            Some("application/pdf|com.adobe.illustrator.aicb")
+        );
+    }
+
+    #[test]
     fn rustdesk_owned_formats_are_not_external_opaque() {
         let names = vec![
             RUSTDESK_CLIPBOARD_OWNER_FORMAT.to_owned(),
@@ -1580,6 +1743,7 @@ mod clipboard_timing_tests {
         assert!(contains_rustdesk_owner_format_name(&names));
         assert!(contains_preserved_native_format_name(&names));
         assert!(!contains_external_preserved_native_format_name(&names));
+        assert!(external_preserved_native_formats_signature(&names).is_none());
     }
 }
 
