@@ -144,6 +144,25 @@ class ToolbarState {
         min: kMinRemoteToolbarHideDelayMs,
         max: kMaxRemoteToolbarHideDelayMs,
       );
+  int get pinnedDimOpacityPercent => _getToolbarIntDefault(
+        kOptionRemoteToolbarPinnedOpacityPercent,
+        defaultValue: kDefaultRemoteToolbarPinnedOpacityPercent,
+        min: kMinRemoteToolbarPinnedOpacityPercent,
+        max: kMaxRemoteToolbarPinnedOpacityPercent,
+      );
+  double get pinnedDimOpacity => pinnedDimOpacityPercent.toDouble() / 100.0;
+  int get pinnedDimDelayMs => _getToolbarIntDefault(
+        kOptionRemoteToolbarPinnedDimDelayMs,
+        defaultValue: kDefaultRemoteToolbarPinnedDimDelayMs,
+        min: kMinRemoteToolbarPinnedDimDelayMs,
+        max: kMaxRemoteToolbarPinnedDimDelayMs,
+      );
+  int get pinnedDimDurationMs => _getToolbarIntDefault(
+        kOptionRemoteToolbarPinnedDimDurationMs,
+        defaultValue: kDefaultRemoteToolbarPinnedDimDurationMs,
+        min: kMinRemoteToolbarPinnedDimDurationMs,
+        max: kMaxRemoteToolbarPinnedDimDurationMs,
+      );
 
   /// Initialize all toolbar states from session options.
   /// This should be called once when the toolbar is first created.
@@ -465,9 +484,14 @@ class RemoteToolbar extends StatefulWidget {
 
 class _RemoteToolbarState extends State<RemoteToolbar> {
   Timer? _autoHideTimer;
+  Timer? _pinnedDimTimer;
+  Timer? _globalOptionTimer;
+  Worker? _pinWorker;
   bool _isCursorOverToolbar = false;
   int _menuHoverDepth = 0;
   bool _visible = true;
+  double _toolbarOpacity = 1.0;
+  Duration _toolbarOpacityDuration = const Duration(milliseconds: 180);
   bool _wasSessionHidden = false;
   Offset? _lastWindowPointer;
   final _fractionX = 0.5.obs;
@@ -479,6 +503,15 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   double _toolbarDragStartFraction = 0.5;
   double _dragLeft = 0.0;
   double _dragRight = 1.0;
+  int? _lastRevealZonePx;
+  int? _lastHideDelayMs;
+  int? _lastPinnedDimOpacityPercent;
+  int? _lastPinnedDimDelayMs;
+  int? _lastPinnedDimDurationMs;
+  String? _lastDefaultScrollStyle;
+  int? _lastDefaultEdgeScrollEdgeThickness;
+  int? _lastDefaultTrackpadSpeed;
+  bool _refreshingGlobalOptions = false;
 
   int get windowId => stateGlobal.windowId;
 
@@ -507,8 +540,95 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     _autoHideTimer = null;
   }
 
+  void _cancelPinnedDim() {
+    _pinnedDimTimer?.cancel();
+    _pinnedDimTimer = null;
+  }
+
+  void _cancelGlobalOptionRefresh() {
+    _globalOptionTimer?.cancel();
+    _globalOptionTimer = null;
+  }
+
   bool get _menuIsOpen => _menuController.isOpen;
   bool get _isCursorOverMenu => _menuHoverDepth > 0;
+  bool get _shouldDimPinnedToolbar =>
+      pin &&
+      _visible &&
+      !_isCursorOverToolbar &&
+      !_isCursorOverMenu &&
+      !_menuIsOpen &&
+      _dragging.isFalse;
+
+  int _getDefaultEdgeScrollEdgeThickness() {
+    return _parseToolbarIntOption(
+      bind.mainGetUserDefaultOption(key: kOptionEdgeScrollEdgeThickness),
+      defaultValue: 100,
+      min: EdgeThicknessControl.kMin.round(),
+      max: EdgeThicknessControl.kMax.round(),
+    );
+  }
+
+  int _getDefaultTrackpadSpeed() {
+    return _parseToolbarIntOption(
+      bind.mainGetUserDefaultOption(key: kKeyTrackpadSpeed),
+      defaultValue: kDefaultTrackpadSpeed,
+      min: kMinTrackpadSpeed,
+      max: kMaxTrackpadSpeed,
+    );
+  }
+
+  String _getDefaultScrollStyle() {
+    final value = bind.mainGetUserDefaultOption(key: kOptionScrollStyle);
+    switch (value) {
+      case kRemoteScrollStyleBar:
+      case kRemoteScrollStyleEdge:
+      case kRemoteScrollStyleEdgeAcceleration:
+        return value;
+      default:
+        return kRemoteScrollStyleAuto;
+    }
+  }
+
+  bool _refreshGlobalOptionSnapshot() {
+    final revealZonePx = widget.state.revealZonePx;
+    final hideDelayMs = widget.state.hideDelayMs;
+    final pinnedDimOpacityPercent = widget.state.pinnedDimOpacityPercent;
+    final pinnedDimDelayMs = widget.state.pinnedDimDelayMs;
+    final pinnedDimDurationMs = widget.state.pinnedDimDurationMs;
+    final defaultScrollStyle = _getDefaultScrollStyle();
+    final defaultEdgeScrollEdgeThickness = _getDefaultEdgeScrollEdgeThickness();
+    final defaultTrackpadSpeed = _getDefaultTrackpadSpeed();
+
+    final changed = _lastRevealZonePx != null &&
+        (_lastRevealZonePx != revealZonePx ||
+            _lastHideDelayMs != hideDelayMs ||
+            _lastPinnedDimOpacityPercent != pinnedDimOpacityPercent ||
+            _lastPinnedDimDelayMs != pinnedDimDelayMs ||
+            _lastPinnedDimDurationMs != pinnedDimDurationMs ||
+            _lastDefaultScrollStyle != defaultScrollStyle ||
+            _lastDefaultEdgeScrollEdgeThickness !=
+                defaultEdgeScrollEdgeThickness ||
+            _lastDefaultTrackpadSpeed != defaultTrackpadSpeed);
+
+    _lastRevealZonePx = revealZonePx;
+    _lastHideDelayMs = hideDelayMs;
+    _lastPinnedDimOpacityPercent = pinnedDimOpacityPercent;
+    _lastPinnedDimDelayMs = pinnedDimDelayMs;
+    _lastPinnedDimDurationMs = pinnedDimDurationMs;
+    _lastDefaultScrollStyle = defaultScrollStyle;
+    _lastDefaultEdgeScrollEdgeThickness = defaultEdgeScrollEdgeThickness;
+    _lastDefaultTrackpadSpeed = defaultTrackpadSpeed;
+    return changed;
+  }
+
+  void _startGlobalOptionRefresh() {
+    _refreshGlobalOptionSnapshot();
+    _globalOptionTimer = Timer.periodic(
+      const Duration(milliseconds: 1000),
+      (_) => _handleGlobalOptionsMaybeChanged(),
+    );
+  }
 
   bool _shouldOpenVerticalMenusLeft(BuildContext context) {
     if (!widget.state.vertical.value) {
@@ -562,6 +682,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     _toolbarDragStartFraction = _fractionX.value;
     _closeMenus();
     _cancelAutoHide();
+    _showPinnedToolbarOpaque();
     _setVisible(true);
     _dragging.value = true;
   }
@@ -582,8 +703,11 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       value: _fractionX.value.toString(),
     );
     _dragging.value = false;
-    if (!pin &&
-        !_isCursorOverToolbar &&
+    if (pin) {
+      if (_shouldDimPinnedToolbar) {
+        _schedulePinnedDim();
+      }
+    } else if (!_isCursorOverToolbar &&
         !_isCursorOverMenu &&
         !_isInRevealZone &&
         !_menuIsOpen) {
@@ -593,6 +717,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
 
   void _handleMenuOpened() {
     _cancelAutoHide();
+    _showPinnedToolbarOpaque();
     _setVisible(true);
   }
 
@@ -606,6 +731,9 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
         _menuIsOpen) {
       _cancelAutoHide();
       _setVisible(true);
+      if (pin && _shouldDimPinnedToolbar) {
+        _schedulePinnedDim();
+      }
       return;
     }
     if (_visible) {
@@ -620,11 +748,16 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     }
     setState(() {
       _visible = value;
+      if (!value) {
+        _toolbarOpacity = 1.0;
+        _toolbarOpacityDuration = const Duration(milliseconds: 180);
+      }
     });
   }
 
   void _showCurrentShape({bool scheduleHide = true}) {
     _cancelAutoHide();
+    _showPinnedToolbarOpaque();
     _setVisible(true);
     if (scheduleHide &&
         !pin &&
@@ -640,6 +773,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   void _scheduleAutoHide() {
     if (pin || !_visible || _dragging.isTrue || _menuIsOpen) return;
     _autoHideTimer?.cancel();
+    _cancelPinnedDim();
     _autoHideTimer = Timer(
       Duration(milliseconds: widget.state.hideDelayMs),
       () {
@@ -656,15 +790,148 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     );
   }
 
+  void _setToolbarOpacity(double opacity, Duration duration) {
+    final nextOpacity = opacity.clamp(0.0, 1.0).toDouble();
+    if (!mounted) return;
+    if (_toolbarOpacity == nextOpacity && _toolbarOpacityDuration == duration) {
+      return;
+    }
+    setState(() {
+      _toolbarOpacity = nextOpacity;
+      _toolbarOpacityDuration = duration;
+    });
+  }
+
+  void _showPinnedToolbarOpaque() {
+    _cancelPinnedDim();
+    _setToolbarOpacity(1.0, const Duration(milliseconds: 180));
+  }
+
+  void _schedulePinnedDim() {
+    if (!_shouldDimPinnedToolbar) return;
+    if (_pinnedDimTimer?.isActive == true ||
+        _toolbarOpacity <= widget.state.pinnedDimOpacity) {
+      return;
+    }
+    _pinnedDimTimer = Timer(
+      Duration(milliseconds: widget.state.pinnedDimDelayMs),
+      () {
+        _pinnedDimTimer = null;
+        if (!_shouldDimPinnedToolbar) return;
+        _setToolbarOpacity(
+          widget.state.pinnedDimOpacity,
+          Duration(milliseconds: widget.state.pinnedDimDurationMs),
+        );
+      },
+    );
+  }
+
+  void _handlePinChanged(bool pinned) {
+    if (!mounted) return;
+    if (pinned) {
+      _cancelAutoHide();
+      _setVisible(true);
+      if (_shouldDimPinnedToolbar) {
+        _schedulePinnedDim();
+      } else {
+        _showPinnedToolbarOpaque();
+      }
+      return;
+    }
+
+    _showPinnedToolbarOpaque();
+    if (!_isCursorOverToolbar &&
+        !_isCursorOverMenu &&
+        !_isInRevealZone &&
+        !_menuIsOpen) {
+      _scheduleAutoHide();
+    }
+  }
+
+  Future<void> _handleGlobalOptionsMaybeChanged() async {
+    if (_refreshingGlobalOptions || !mounted) return;
+    _refreshingGlobalOptions = true;
+    try {
+      final previousScrollStyle = _lastDefaultScrollStyle;
+      final previousEdgeScrollEdgeThickness =
+          _lastDefaultEdgeScrollEdgeThickness;
+      final previousTrackpadSpeed = _lastDefaultTrackpadSpeed;
+      if (!_refreshGlobalOptionSnapshot()) {
+        return;
+      }
+
+      if (pin) {
+        if (_shouldDimPinnedToolbar) {
+          _cancelPinnedDim();
+          if (_toolbarOpacity < 1.0) {
+            _setToolbarOpacity(
+              widget.state.pinnedDimOpacity,
+              const Duration(milliseconds: 180),
+            );
+          } else {
+            _schedulePinnedDim();
+          }
+        } else {
+          _showPinnedToolbarOpaque();
+        }
+      } else {
+        _cancelAutoHide();
+        _handleWindowPointerState(_lastWindowPointer);
+      }
+
+      if (previousScrollStyle != null &&
+          widget.ffi.canvasModel.scrollStyle.stringValue ==
+              previousScrollStyle &&
+          _lastDefaultScrollStyle != previousScrollStyle) {
+        await bind.sessionSetScrollStyle(
+          sessionId: widget.ffi.sessionId,
+          value: _lastDefaultScrollStyle!,
+        );
+        await widget.ffi.canvasModel.updateScrollStyle();
+      }
+
+      if (previousEdgeScrollEdgeThickness != null &&
+          widget.ffi.canvasModel.edgeScrollEdgeThickness ==
+              previousEdgeScrollEdgeThickness &&
+          _lastDefaultEdgeScrollEdgeThickness !=
+              previousEdgeScrollEdgeThickness) {
+        await bind.sessionSetEdgeScrollEdgeThickness(
+          sessionId: widget.ffi.sessionId,
+          value: _lastDefaultEdgeScrollEdgeThickness!,
+        );
+        widget.ffi.canvasModel.updateEdgeScrollEdgeThickness(
+          _lastDefaultEdgeScrollEdgeThickness!,
+        );
+      }
+
+      if (previousTrackpadSpeed != null &&
+          widget.ffi.inputModel.trackpadSpeed == previousTrackpadSpeed &&
+          _lastDefaultTrackpadSpeed != previousTrackpadSpeed) {
+        await bind.sessionSetTrackpadSpeed(
+          sessionId: widget.ffi.sessionId,
+          value: _lastDefaultTrackpadSpeed!,
+        );
+        await widget.ffi.inputModel.updateTrackpadSpeed();
+      }
+    } finally {
+      _refreshingGlobalOptions = false;
+    }
+  }
+
   void _handleToolbarPointerEnter() {
     _isCursorOverToolbar = true;
     _cancelAutoHide();
+    _showPinnedToolbarOpaque();
     widget.ffi.canvasModel.cancelEdgeScroll();
   }
 
   void _handleToolbarPointerExit() {
     _isCursorOverToolbar = false;
-    if (!pin && !_isCursorOverMenu && !_isInRevealZone && !_menuIsOpen) {
+    if (pin) {
+      if (!_isCursorOverMenu && !_menuIsOpen) {
+        _schedulePinnedDim();
+      }
+    } else if (!_isCursorOverMenu && !_isInRevealZone && !_menuIsOpen) {
       _scheduleAutoHide();
     }
   }
@@ -672,6 +939,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   void _handleMenuPointerEnter() {
     _menuHoverDepth += 1;
     _cancelAutoHide();
+    _showPinnedToolbarOpaque();
     widget.ffi.canvasModel.cancelEdgeScroll();
   }
 
@@ -679,8 +947,11 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     if (_menuHoverDepth > 0) {
       _menuHoverDepth -= 1;
     }
-    if (!pin &&
-        !_isCursorOverToolbar &&
+    if (pin) {
+      if (_shouldDimPinnedToolbar) {
+        _schedulePinnedDim();
+      }
+    } else if (!_isCursorOverToolbar &&
         !_isCursorOverMenu &&
         !_isInRevealZone &&
         !_menuIsOpen) {
@@ -698,13 +969,15 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       return;
     }
 
-    if (_isInRevealZone) {
+    if (!pin && _isInRevealZone) {
       _showCurrentShape(scheduleHide: false);
       return;
     }
 
     if (_lastWindowPointer == null) {
-      if (!pin && !_isCursorOverToolbar) {
+      if (pin && !_isCursorOverToolbar) {
+        _schedulePinnedDim();
+      } else if (!pin && !_isCursorOverToolbar) {
         _scheduleAutoHide();
       }
       return;
@@ -712,6 +985,8 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
 
     if (_visible && !pin && !_isCursorOverToolbar) {
       _scheduleAutoHide();
+    } else if (_visible && pin && !_isCursorOverToolbar) {
+      _schedulePinnedDim();
     }
   }
 
@@ -719,6 +994,8 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   initState() {
     super.initState();
     _initDragBounds();
+    _startGlobalOptionRefresh();
+    _pinWorker = ever<bool>(widget.state._pin, _handlePinChanged);
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       _fractionX.value = double.tryParse(await bind.sessionGetOption(
@@ -739,6 +1016,9 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   @override
   dispose() {
     _cancelAutoHide();
+    _cancelPinnedDim();
+    _cancelGlobalOptionRefresh();
+    _pinWorker?.dispose();
     _closeMenus();
     widget.onEnterOrLeaveImageCleaner(identityHashCode(this));
     widget.onImagePointerStateCleaner(identityHashCode(this));
@@ -757,12 +1037,17 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       if (hide.value) {
         _wasSessionHidden = true;
         _cancelAutoHide();
+        _cancelPinnedDim();
+        _toolbarOpacity = 1.0;
+        _toolbarOpacityDuration = const Duration(milliseconds: 180);
         _closeMenus();
         return const SizedBox.shrink();
       }
       if (_wasSessionHidden) {
         _wasSessionHidden = false;
         _visible = true;
+        _toolbarOpacity = 1.0;
+        _toolbarOpacityDuration = const Duration(milliseconds: 180);
       }
       final currentShape = collapse.isFalse
           ? _buildToolbar(context)
@@ -776,8 +1061,10 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
             curve: Curves.easeOutCubic,
             offset: _visible ? Offset.zero : const Offset(0, -1.15),
             child: AnimatedOpacity(
-              duration: const Duration(milliseconds: 180),
-              opacity: _visible ? 1 : 0,
+              duration: _visible
+                  ? _toolbarOpacityDuration
+                  : const Duration(milliseconds: 180),
+              opacity: _visible ? _toolbarOpacity : 0,
               child: MouseRegion(
                 onEnter: (_) => _handleToolbarPointerEnter(),
                 onExit: (_) => _handleToolbarPointerExit(),

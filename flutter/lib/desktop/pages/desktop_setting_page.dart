@@ -2075,6 +2075,24 @@ class _DisplayState extends State<_Display> {
       min: kMinRemoteToolbarHideDelayMs,
       max: kMaxRemoteToolbarHideDelayMs,
     );
+    final pinnedOpacityPercent = _toolbarOptionValue(
+      kOptionRemoteToolbarPinnedOpacityPercent,
+      defaultValue: kDefaultRemoteToolbarPinnedOpacityPercent,
+      min: kMinRemoteToolbarPinnedOpacityPercent,
+      max: kMaxRemoteToolbarPinnedOpacityPercent,
+    );
+    final pinnedDimDelayMs = _toolbarOptionValue(
+      kOptionRemoteToolbarPinnedDimDelayMs,
+      defaultValue: kDefaultRemoteToolbarPinnedDimDelayMs,
+      min: kMinRemoteToolbarPinnedDimDelayMs,
+      max: kMaxRemoteToolbarPinnedDimDelayMs,
+    );
+    final pinnedDimDurationMs = _toolbarOptionValue(
+      kOptionRemoteToolbarPinnedDimDurationMs,
+      defaultValue: kDefaultRemoteToolbarPinnedDimDurationMs,
+      min: kMinRemoteToolbarPinnedDimDurationMs,
+      max: kMaxRemoteToolbarPinnedDimDurationMs,
+    );
 
     return _Card(title: 'Toolbar auto-hide', children: [
       _IntegerSettingSlider(
@@ -2103,6 +2121,48 @@ class _DisplayState extends State<_Display> {
           value,
           min: kMinRemoteToolbarHideDelayMs,
           max: kMaxRemoteToolbarHideDelayMs,
+        ),
+      ),
+      _IntegerSettingSlider(
+        label: 'Pinned toolbar opacity',
+        value: pinnedOpacityPercent,
+        min: kMinRemoteToolbarPinnedOpacityPercent,
+        max: kMaxRemoteToolbarPinnedOpacityPercent,
+        unit: '%',
+        enabled: !isOptionFixed(kOptionRemoteToolbarPinnedOpacityPercent),
+        onChanged: (value) => _setToolbarOptionValue(
+          kOptionRemoteToolbarPinnedOpacityPercent,
+          value,
+          min: kMinRemoteToolbarPinnedOpacityPercent,
+          max: kMaxRemoteToolbarPinnedOpacityPercent,
+        ),
+      ),
+      _IntegerSettingSlider(
+        label: 'Pinned toolbar dim delay',
+        value: pinnedDimDelayMs,
+        min: kMinRemoteToolbarPinnedDimDelayMs,
+        max: kMaxRemoteToolbarPinnedDimDelayMs,
+        unit: 'ms',
+        enabled: !isOptionFixed(kOptionRemoteToolbarPinnedDimDelayMs),
+        onChanged: (value) => _setToolbarOptionValue(
+          kOptionRemoteToolbarPinnedDimDelayMs,
+          value,
+          min: kMinRemoteToolbarPinnedDimDelayMs,
+          max: kMaxRemoteToolbarPinnedDimDelayMs,
+        ),
+      ),
+      _IntegerSettingSlider(
+        label: 'Pinned toolbar dim duration',
+        value: pinnedDimDurationMs,
+        min: kMinRemoteToolbarPinnedDimDurationMs,
+        max: kMaxRemoteToolbarPinnedDimDurationMs,
+        unit: 'ms',
+        enabled: !isOptionFixed(kOptionRemoteToolbarPinnedDimDurationMs),
+        onChanged: (value) => _setToolbarOptionValue(
+          kOptionRemoteToolbarPinnedDimDurationMs,
+          value,
+          min: kMinRemoteToolbarPinnedDimDurationMs,
+          max: kMaxRemoteToolbarPinnedDimDurationMs,
         ),
       ),
     ]);

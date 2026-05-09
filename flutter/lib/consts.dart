@@ -153,12 +153,27 @@ const String kOptionRemoteMenubarDragLeft = "remote-menubar-drag-left";
 const String kOptionRemoteMenubarDragRight = "remote-menubar-drag-right";
 const String kOptionRemoteToolbarRevealZonePx = "remote-toolbar-reveal-zone-px";
 const String kOptionRemoteToolbarHideDelayMs = "remote-toolbar-hide-delay-ms";
+const String kOptionRemoteToolbarPinnedOpacityPercent =
+    "remote-toolbar-pinned-opacity-percent";
+const String kOptionRemoteToolbarPinnedDimDelayMs =
+    "remote-toolbar-pinned-dim-delay-ms";
+const String kOptionRemoteToolbarPinnedDimDurationMs =
+    "remote-toolbar-pinned-dim-duration-ms";
 const int kDefaultRemoteToolbarRevealZonePx = 36;
 const int kMinRemoteToolbarRevealZonePx = 8;
 const int kMaxRemoteToolbarRevealZonePx = 160;
 const int kDefaultRemoteToolbarHideDelayMs = 300;
 const int kMinRemoteToolbarHideDelayMs = 0;
 const int kMaxRemoteToolbarHideDelayMs = 2000;
+const int kDefaultRemoteToolbarPinnedOpacityPercent = 20;
+const int kMinRemoteToolbarPinnedOpacityPercent = 1;
+const int kMaxRemoteToolbarPinnedOpacityPercent = 100;
+const int kDefaultRemoteToolbarPinnedDimDelayMs = 1000;
+const int kMinRemoteToolbarPinnedDimDelayMs = 0;
+const int kMaxRemoteToolbarPinnedDimDelayMs = 5000;
+const int kDefaultRemoteToolbarPinnedDimDurationMs = 3000;
+const int kMinRemoteToolbarPinnedDimDurationMs = 0;
+const int kMaxRemoteToolbarPinnedDimDurationMs = 10000;
 const String kOptionHideAbTagsPanel = "hideAbTagsPanel";
 const String kOptionRemoteMenubarState = "remoteMenubarState";
 const String kOptionPeerSorting = "peer-sorting";
