@@ -631,21 +631,30 @@ pub fn session_handle_flutter_raw_key_event(
     }
 }
 
-// SyncReturn<()> is used to make sure enter() and leave() are executed in the sequence this function is called.
-//
 // If the cursor jumps between remote page of two connections, leave view and enter view will be called.
 // session_enter_or_leave() will be called then.
-// As rust is multi-thread, it is possible that enter() is called before leave().
-// This will cause the keyboard input to take no effect.
+// As Rust is multi-threaded, enter() can be called before leave().
+// The Rust-side grab ownership state filters stale transitions.
 pub fn session_enter_or_leave(_session_id: SessionID, _enter: bool) -> SyncReturn<()> {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     if let Some(session) = sessions::get_session_by_session_id(&_session_id) {
         let keyboard_mode = session.get_keyboard_mode();
+        // Use the full per-window UUID (not lc.session_id which is per-connection)
+        // so that two windows viewing the same peer get distinct grab owners.
+        let window_id = _session_id.as_u128();
         if _enter {
             set_cur_session_id_(_session_id, &keyboard_mode);
-            session.enter(keyboard_mode);
+            crate::keyboard::client::change_grab_status(
+                crate::common::GrabState::Run,
+                &keyboard_mode,
+                window_id,
+            );
         } else {
-            session.leave(keyboard_mode);
+            crate::keyboard::client::change_grab_status(
+                crate::common::GrabState::Wait,
+                &keyboard_mode,
+                window_id,
+            );
         }
     }
     SyncReturn(())
@@ -2187,7 +2196,7 @@ pub fn cm_elevate_portable(conn_id: i32) {
 }
 
 pub fn cm_switch_back(conn_id: i32) {
-    #[cfg(not(any(target_os = "ios")))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     crate::ui_cm_interface::switch_back(conn_id);
 }
 

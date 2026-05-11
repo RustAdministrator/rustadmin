@@ -185,9 +185,13 @@ pub mod client {
 pub mod service {
     use super::*;
     use hbb_common::lazy_static;
+    #[cfg(target_os = "linux")]
+    use parity_tokio_ipc::Connection as RawIpcConnection;
     use scrap::wayland::{
         pipewire::RDP_SESSION_INFO, remote_desktop_portal::OrgFreedesktopPortalRemoteDesktop,
     };
+    #[cfg(target_os = "linux")]
+    use std::os::unix::io::AsRawFd;
     use std::{collections::HashMap, sync::Mutex};
 
     lazy_static::lazy_static! {
@@ -915,6 +919,45 @@ pub mod service {
         });
     }
 
+    #[cfg(test)]
+    fn uinput_postfix_accepts_data(postfix: &str, data: &Data) -> bool {
+        if postfix == IPC_POSTFIX_KEYBOARD {
+            matches!(data, Data::Keyboard(_))
+        } else if postfix == IPC_POSTFIX_MOUSE {
+            matches!(data, Data::Mouse(_))
+        } else if postfix == IPC_POSTFIX_CONTROL {
+            matches!(data, Data::Control(_))
+        } else {
+            false
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn authorize_uinput_peer(postfix: &str, stream: &RawIpcConnection) -> bool {
+        if !hbb_common::config::is_service_ipc_postfix(postfix) {
+            return true;
+        }
+        let peer_uid = ipc::peer_uid_from_fd(stream.as_raw_fd());
+        let active_uid = ipc::active_uid();
+        let authorized =
+            peer_uid.is_some_and(|uid| ipc::is_allowed_service_peer_uid(uid, active_uid));
+        if !authorized {
+            crate::ipc::log_rejected_uinput_connection(postfix, peer_uid, active_uid);
+            return false;
+        }
+        if let Err(err) =
+            ipc::ensure_peer_executable_matches_current_by_fd(stream.as_raw_fd(), postfix)
+        {
+            log::warn!(
+                "Rejected connection on protected uinput ipc channel due to executable mismatch: postfix={}, err={}",
+                postfix,
+                err
+            );
+            return false;
+        }
+        true
+    }
+
     /// Start uinput service.
     async fn start_service<F: FnOnce(ipc::Connection) + Copy>(postfix: &str, handler: F) {
         match new_listener(postfix).await {
@@ -922,6 +965,10 @@ pub mod service {
                 while let Some(result) = incoming.next().await {
                     match result {
                         Ok(stream) => {
+                            #[cfg(target_os = "linux")]
+                            if !authorize_uinput_peer(postfix, &stream) {
+                                continue;
+                            }
                             log::debug!("Got new connection of uinput ipc {}", postfix);
                             handler(Connection::new(stream));
                         }
@@ -966,6 +1013,43 @@ pub mod service {
     }
     pub fn stop_service_control() {
         log::info!("stop uinput control service");
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_uinput_postfixes_are_service_scoped() {
+            assert!(hbb_common::config::is_service_ipc_postfix(
+                IPC_POSTFIX_KEYBOARD
+            ));
+            assert!(hbb_common::config::is_service_ipc_postfix(
+                IPC_POSTFIX_MOUSE
+            ));
+            assert!(hbb_common::config::is_service_ipc_postfix(
+                IPC_POSTFIX_CONTROL
+            ));
+        }
+
+        #[test]
+        fn test_uinput_postfix_protocol_isolation() {
+            let keyboard = Data::Keyboard(DataKeyboard::KeyClick(enigo::Key::Return));
+            let mouse = Data::Mouse(DataMouse::MoveRelative(1, 1));
+            let control = Data::Control(ipc::DataControl::Resolution {
+                minx: 0,
+                maxx: 1,
+                miny: 0,
+                maxy: 1,
+            });
+
+            assert!(uinput_postfix_accepts_data(IPC_POSTFIX_KEYBOARD, &keyboard));
+            assert!(!uinput_postfix_accepts_data(IPC_POSTFIX_KEYBOARD, &mouse));
+            assert!(uinput_postfix_accepts_data(IPC_POSTFIX_MOUSE, &mouse));
+            assert!(!uinput_postfix_accepts_data(IPC_POSTFIX_MOUSE, &control));
+            assert!(uinput_postfix_accepts_data(IPC_POSTFIX_CONTROL, &control));
+            assert!(!uinput_postfix_accepts_data(IPC_POSTFIX_CONTROL, &keyboard));
+        }
     }
 }
 

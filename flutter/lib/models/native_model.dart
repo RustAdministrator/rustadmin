@@ -54,13 +54,21 @@ class PlatformFFI {
 
   static void setByName(String name, [String value = '']) {}
 
+  @visibleForTesting
+  void initForTest(RustdeskImpl ffiBind, {String appType = kAppTypeMain}) {
+    assert(isTest);
+    _appType = appType;
+    _ffiBind = ffiBind;
+  }
+
   static Future<String> getVersion() async {
     PackageInfo packageInfo = await PackageInfo.fromPlatform();
     return packageInfo.version;
   }
 
   bool registerEventHandler(
-      String eventName, String handlerName, HandleEvent handler, {bool replace = false}) {
+      String eventName, String handlerName, HandleEvent handler,
+      {bool replace = false}) {
     debugPrint('registerEventHandler $eventName $handlerName');
     var handlers = _eventHandlers[eventName];
     if (handlers == null) {
