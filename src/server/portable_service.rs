@@ -1510,22 +1510,28 @@ pub mod client {
     }
 
     pub fn create_capturer(
-        current_display: usize,
+        _current_display: usize,
         display: scrap::Display,
         portable_service_running: bool,
     ) -> ResultType<Box<dyn TraitCapturer>> {
         if portable_service_running != RUNNING.lock().unwrap().clone() {
             log::info!("portable service status mismatch");
         }
+        // WARNING: Be extremely careful changing the portable primary-display path.
+        // RustAdmin 2.0.1.81 regressed here after upstream IPC changes restored
+        // CapturerPortable for the primary display: non-primary monitors worked, but
+        // the primary monitor stayed on "Waiting for an Image". Keep the primary
+        // display on dxgi|gdi unless a Windows portable-mode smoke test proves a
+        // replacement path works for the primary monitor.
         if portable_service_running && display.is_primary() {
-            log::info!("Create shared memory capturer");
-            return Ok(Box::new(CapturerPortable::new(current_display)));
-        } else {
-            log::debug!("Create capturer dxgi|gdi");
-            return Ok(Box::new(
-                Capturer::new(display).with_context(|| "Failed to create capturer")?,
-            ));
+            log::warn!(
+                "Portable mode primary display: bypass shared memory capturer, use dxgi|gdi"
+            );
         }
+        log::debug!("Create capturer dxgi|gdi");
+        Ok(Box::new(
+            Capturer::new(display).with_context(|| "Failed to create capturer")?,
+        ))
     }
 
     pub fn get_cursor_info(pci: PCURSORINFO) -> BOOL {

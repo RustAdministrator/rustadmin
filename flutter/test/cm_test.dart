@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/pages/server_page.dart';
@@ -173,6 +174,21 @@ Widget _buildConnectionCardTestApp(Client client) {
   );
 }
 
+Future<void> _disposeCmTestWidget(WidgetTester tester) async {
+  await tester.pumpWidget(const SizedBox.shrink());
+  await tester.pump();
+  VisibilityDetectorController.instance.notifyNow();
+}
+
+void _clearDesktopListeners() {
+  for (final listener in windowManager.listeners) {
+    windowManager.removeListener(listener);
+  }
+  for (final listener in DesktopMultiWindow.listeners) {
+    DesktopMultiWindow.removeListener(listener);
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   VisibilityDetectorController.instance.updateInterval = Duration.zero;
@@ -187,6 +203,8 @@ void main() {
   });
 
   tearDown(() {
+    VisibilityDetectorController.instance.notifyNow();
+    _clearDesktopListeners();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_windowManagerChannel, null);
     Get.reset();
@@ -201,6 +219,7 @@ void main() {
     expect(find.text('UserBBBBB'), findsWidgets);
     expect(find.text('UserC'), findsWidgets);
     expect(find.text('UserDDDDDDDDDDDd'), findsWidgets);
+    await _disposeCmTestWidget(tester);
   });
 
   testWidgets('renders a disconnected connection card', (tester) async {
@@ -211,5 +230,6 @@ void main() {
     expect(find.text('(123123123)'), findsOneWidget);
     expect(find.text('Disconnected'), findsOneWidget);
     expect(find.text('Close'), findsOneWidget);
+    await _disposeCmTestWidget(tester);
   });
 }

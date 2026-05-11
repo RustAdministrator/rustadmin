@@ -1113,7 +1113,7 @@ async fn connect_with_path(ms_timeout: u64, path: &str) -> ResultType<Connection
 }
 
 #[cfg(windows)]
-pub(crate) fn generate_ipc_token() -> ResultType<String> {
+pub(crate) fn generate_one_time_ipc_token() -> ResultType<String> {
     use hbb_common::rand::{rngs::OsRng, RngCore as _};
     use std::fmt::Write as _;
 
