@@ -102,6 +102,9 @@ class ServerModel with ChangeNotifier {
 
   setTemporaryPasswordLength(String length) async {
     await bind.mainSetOption(key: "temporary-password-length", value: length);
+    if (_temporaryPasswordLength != length) {
+      await bind.mainUpdateTemporaryPassword();
+    }
   }
 
   setApproveMode(String mode) async {
@@ -118,6 +121,7 @@ class ServerModel with ChangeNotifier {
   switchAllowNumericOneTimePassword() async {
     await mainSetBoolOption(
         kOptionAllowNumericOneTimePassword, !_allowNumericOneTimePassword);
+    await bind.mainUpdateTemporaryPassword();
   }
 
   TextEditingController get serverId => _serverId;
@@ -269,9 +273,7 @@ class ServerModel with ChangeNotifier {
       update = true;
     }
     if (_temporaryPasswordLength != temporaryPasswordLength) {
-      if (_temporaryPasswordLength.isNotEmpty) {
-        bind.mainUpdateTemporaryPassword();
-      }
+      // Polling must not rotate the displayed one-time password.
       _temporaryPasswordLength = temporaryPasswordLength;
       update = true;
     }

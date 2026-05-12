@@ -186,6 +186,53 @@ struct Session {
     last_recv_time: Arc<Mutex<Instant>>,
     random_password: String,
     tfa: bool,
+    auth_kind: SessionAuthKind,
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum SessionAuthKind {
+    Unknown,
+    OneTimePassword,
+    UnattendedPassword,
+    ClickApproval,
+}
+
+impl Default for SessionAuthKind {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+impl SessionAuthKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::OneTimePassword => "one-time-password",
+            Self::UnattendedPassword => "unattended-password",
+            Self::ClickApproval => "click-approval",
+        }
+    }
+
+    fn allows_privacy_mode(self) -> bool {
+        self == Self::UnattendedPassword
+    }
+
+    fn is_unattended_access(self) -> bool {
+        self == Self::UnattendedPassword
+    }
+}
+
+fn privacy_mode_policy_denial_reason(
+    auth_kind: SessionAuthKind,
+    enable_privacy_mode_value: &str,
+) -> Option<&'static str> {
+    if !auth_kind.allows_privacy_mode() {
+        return Some("Privacy mode is available only for unattended access sessions.");
+    }
+    if enable_privacy_mode_value != "Y" {
+        return Some("Privacy mode is disabled on this device.");
+    }
+    None
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -294,6 +341,7 @@ pub struct Connection {
     start_cm_ipc_para: Option<StartCmIpcPara>,
     auto_disconnect_timer: Option<(Instant, u64)>,
     authed_conn_id: Option<self::raii::AuthedConnID>,
+    session_auth_kind: SessionAuthKind,
     file_remove_log_control: FileRemoveLogControl,
     last_supported_encoding: Option<SupportedEncoding>,
     services_subed: bool,
@@ -483,6 +531,7 @@ impl Connection {
             }),
             auto_disconnect_timer: None,
             authed_conn_id: None,
+            session_auth_kind: SessionAuthKind::Unknown,
             file_remove_log_control: FileRemoveLogControl::new(id),
             last_supported_encoding: None,
             services_subed: false,
@@ -578,6 +627,7 @@ impl Connection {
                 Some(data) = rx_from_cm.recv() => {
                     match data {
                         ipc::Data::Authorize => {
+                            conn.session_auth_kind = SessionAuthKind::ClickApproval;
                             conn.require_2fa.take();
                             if !conn.send_logon_response_and_keep_alive().await {
                                 break;
@@ -1473,6 +1523,7 @@ impl Connection {
             self.inner.id(),
             auth_conn_type,
             self.session_key(),
+            self.session_auth_kind,
             self.tx_from_authed.clone(),
             self.lr.clone(),
         ));
@@ -2080,12 +2131,27 @@ impl Connection {
         state.failures = 0;
     }
 
+    fn update_or_insert_session_auth(
+        &mut self,
+        auth_kind: SessionAuthKind,
+        password: Option<String>,
+        tfa: Option<bool>,
+    ) {
+        self.session_auth_kind = auth_kind;
+        raii::AuthedConnID::update_or_insert_session(
+            self.session_key(),
+            password,
+            tfa,
+            Some(auth_kind),
+        );
+    }
+
     fn validate_password(&mut self, allow_permanent_password: bool) -> bool {
         if password::temporary_enabled() {
             let password = password::temporary_password();
             if self.validate_password_plain(&password) {
-                raii::AuthedConnID::update_or_insert_session(
-                    self.session_key(),
+                self.update_or_insert_session_auth(
+                    SessionAuthKind::OneTimePassword,
                     Some(password),
                     Some(false),
                 );
@@ -2106,6 +2172,11 @@ impl Connection {
             if !local_storage.is_empty() {
                 if self.validate_password_storage(&local_storage) {
                     print_fallback();
+                    self.update_or_insert_session_auth(
+                        SessionAuthKind::UnattendedPassword,
+                        None,
+                        None,
+                    );
                     return true;
                 }
             } else {
@@ -2117,6 +2188,11 @@ impl Connection {
                     .unwrap_or_default();
                 if !hard.is_empty() && self.validate_password_plain(&hard) {
                     print_fallback();
+                    self.update_or_insert_session_auth(
+                        SessionAuthKind::UnattendedPassword,
+                        None,
+                        None,
+                    );
                     return true;
                 }
             }
@@ -2140,6 +2216,7 @@ impl Connection {
                 && (tfa && session.tfa
                     || !tfa && self.validate_password_plain(&session.random_password))
             {
+                self.session_auth_kind = session.auth_kind;
                 log::info!("is recent session");
                 return true;
             }
@@ -2497,7 +2574,10 @@ impl Connection {
                     if res {
                         self.update_failure(failure, true, 1);
                         self.require_2fa.take();
-                        raii::AuthedConnID::set_session_2fa(self.session_key());
+                        raii::AuthedConnID::set_session_2fa(
+                            self.session_key(),
+                            self.session_auth_kind,
+                        );
                         if !self.send_logon_response_and_keep_alive().await {
                             return false;
                         }
@@ -3822,6 +3902,13 @@ impl Connection {
         }
     }
 
+    fn privacy_mode_policy_denial_reason(&self) -> Option<&'static str> {
+        privacy_mode_policy_denial_reason(
+            self.session_auth_kind,
+            &Config::get_option(keys::OPTION_ENABLE_PRIVACY_MODE),
+        )
+    }
+
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     fn change_resolution(&mut self, d: Option<usize>, r: &Resolution) {
         if self.keyboard {
@@ -4177,6 +4264,21 @@ impl Connection {
     }
 
     async fn turn_on_privacy(&mut self, impl_key: String) {
+        if let Some(reason) = self.privacy_mode_policy_denial_reason() {
+            log::warn!(
+                "Privacy mode denied: conn={}, auth_kind={}, reason={}",
+                self.inner.id,
+                self.session_auth_kind.as_str(),
+                reason
+            );
+            let msg_out = crate::common::make_privacy_mode_msg_with_details(
+                back_notification::PrivacyModeState::PrvOnFailed,
+                reason.to_owned(),
+                impl_key,
+            );
+            self.send(msg_out).await;
+            return;
+        }
         let msg_out = if !privacy_mode::is_privacy_mode_supported() {
             crate::common::make_privacy_mode_msg_with_details(
                 back_notification::PrivacyModeState::PrvNotSupported,
@@ -5490,8 +5592,27 @@ pub struct AuthedConn {
     pub conn_id: i32,
     pub conn_type: AuthConnType,
     pub session_key: SessionKey,
+    pub auth_kind: SessionAuthKind,
     pub sender: mpsc::UnboundedSender<Data>,
     pub printer: bool,
+}
+
+fn should_block_rustadmin_gui_for_remote_auth_kinds(
+    auth_kinds: impl IntoIterator<Item = SessionAuthKind>,
+) -> bool {
+    auth_kinds
+        .into_iter()
+        .any(|auth_kind| !auth_kind.is_unattended_access())
+}
+
+pub fn should_block_rustadmin_gui_for_active_sessions() -> bool {
+    let authed_conns = AUTHED_CONNS.lock().unwrap();
+    should_block_rustadmin_gui_for_remote_auth_kinds(
+        authed_conns
+            .iter()
+            .filter(|c| c.conn_type == AuthConnType::Remote)
+            .map(|c| c.auth_kind),
+    )
 }
 
 mod raii {
@@ -5523,6 +5644,7 @@ mod raii {
             conn_id: i32,
             conn_type: AuthConnType,
             session_key: SessionKey,
+            auth_kind: SessionAuthKind,
             sender: mpsc::UnboundedSender<Data>,
             lr: LoginRequest,
         ) -> Self {
@@ -5533,6 +5655,7 @@ mod raii {
                 conn_id,
                 conn_type,
                 session_key,
+                auth_kind,
                 sender,
                 printer,
             });
@@ -5617,6 +5740,7 @@ mod raii {
             key: SessionKey,
             password: Option<String>,
             tfa: Option<bool>,
+            auth_kind: Option<SessionAuthKind>,
         ) {
             let mut lock = SESSIONS.lock().unwrap();
             let session = lock.get_mut(&key);
@@ -5627,23 +5751,28 @@ mod raii {
                 if let Some(tfa) = tfa {
                     session.tfa = tfa;
                 }
+                if let Some(auth_kind) = auth_kind {
+                    session.auth_kind = auth_kind;
+                }
             } else {
                 lock.insert(
                     key,
                     Session {
                         random_password: password.unwrap_or_default(),
                         tfa: tfa.unwrap_or_default(),
+                        auth_kind: auth_kind.unwrap_or_default(),
                         last_recv_time: Arc::new(Mutex::new(Instant::now())),
                     },
                 );
             }
         }
 
-        pub fn set_session_2fa(key: SessionKey) {
+        pub fn set_session_2fa(key: SessionKey, auth_kind: SessionAuthKind) {
             let mut lock = SESSIONS.lock().unwrap();
             let session = lock.get_mut(&key);
             if let Some(session) = session {
                 session.tfa = true;
+                session.auth_kind = auth_kind;
             } else {
                 lock.insert(
                     key,
@@ -5651,6 +5780,7 @@ mod raii {
                         last_recv_time: Arc::new(Mutex::new(Instant::now())),
                         random_password: "".to_owned(),
                         tfa: true,
+                        auth_kind,
                     },
                 );
             }
@@ -5771,5 +5901,59 @@ mod test {
         assert!(Ipv6Addr::from_str("::1").is_ok());
         assert!(Ipv6Addr::from_str("127.0.0.1").is_err());
         assert!(Ipv6Addr::from_str("0").is_err());
+    }
+
+    #[test]
+    fn privacy_mode_policy_requires_unattended_access() {
+        assert_eq!(
+            privacy_mode_policy_denial_reason(SessionAuthKind::OneTimePassword, "Y"),
+            Some("Privacy mode is available only for unattended access sessions.")
+        );
+        assert_eq!(
+            privacy_mode_policy_denial_reason(SessionAuthKind::ClickApproval, "Y"),
+            Some("Privacy mode is available only for unattended access sessions.")
+        );
+        assert_eq!(
+            privacy_mode_policy_denial_reason(SessionAuthKind::Unknown, "Y"),
+            Some("Privacy mode is available only for unattended access sessions.")
+        );
+    }
+
+    #[test]
+    fn privacy_mode_policy_requires_explicit_enable_for_unattended_access() {
+        assert_eq!(
+            privacy_mode_policy_denial_reason(SessionAuthKind::UnattendedPassword, ""),
+            Some("Privacy mode is disabled on this device.")
+        );
+        assert_eq!(
+            privacy_mode_policy_denial_reason(SessionAuthKind::UnattendedPassword, "N"),
+            Some("Privacy mode is disabled on this device.")
+        );
+        assert_eq!(
+            privacy_mode_policy_denial_reason(SessionAuthKind::UnattendedPassword, "Y"),
+            None
+        );
+    }
+
+    #[test]
+    fn rustadmin_gui_block_policy_keeps_support_sessions_protected() {
+        assert!(!should_block_rustadmin_gui_for_remote_auth_kinds([]));
+        assert!(!should_block_rustadmin_gui_for_remote_auth_kinds([
+            SessionAuthKind::UnattendedPassword,
+            SessionAuthKind::UnattendedPassword,
+        ]));
+        assert!(should_block_rustadmin_gui_for_remote_auth_kinds([
+            SessionAuthKind::OneTimePassword
+        ]));
+        assert!(should_block_rustadmin_gui_for_remote_auth_kinds([
+            SessionAuthKind::ClickApproval
+        ]));
+        assert!(should_block_rustadmin_gui_for_remote_auth_kinds([
+            SessionAuthKind::Unknown
+        ]));
+        assert!(should_block_rustadmin_gui_for_remote_auth_kinds([
+            SessionAuthKind::UnattendedPassword,
+            SessionAuthKind::OneTimePassword,
+        ]));
     }
 }

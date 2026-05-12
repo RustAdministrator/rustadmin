@@ -5,7 +5,7 @@
 //! CreateProcessAsUserW when the ConPTY is created by a different user (SYSTEM service).
 //!
 //! Architecture:
-//! ```
+//! ```text
 //! SYSTEM Service (terminal_service.rs)
 //!     |
 //!     +-- CreateProcessAsUserW --> Terminal Helper (this module, runs as user)

@@ -3234,6 +3234,11 @@ Future<bool> canBeBlocked() async {
     // so it should never be blocked by a remote session.
     return false;
   }
+  final shouldBlockBySessionPolicy = await bind.mainGetCommon(
+      key: "should-block-rustadmin-gui-for-active-sessions");
+  if (shouldBlockBySessionPolicy == "false") {
+    return false;
+  }
   // First check control permission
   final controlPermission = await bind.mainGetCommon(
       key: "is-remote-modify-enabled-by-control-permissions");
