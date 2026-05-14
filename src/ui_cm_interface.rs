@@ -186,6 +186,8 @@ pub trait InvokeUiCM: Send + Clone + 'static + Sized {
 
     fn new_message(&self, id: i32, text: String);
 
+    fn permission_request(&self, id: i32, request_id: u64, name: String, enabled: bool);
+
     fn change_theme(&self, dark: String);
 
     fn change_language(&self);
@@ -398,6 +400,26 @@ pub fn switch_permission(id: i32, name: String, enabled: bool) {
 }
 
 #[inline]
+#[cfg(not(any(target_os = "ios")))]
+#[cfg_attr(not(feature = "flutter"), allow(dead_code))]
+pub fn respond_permission_request(
+    id: i32,
+    request_id: u64,
+    name: String,
+    enabled: bool,
+    approved: bool,
+) {
+    if let Some(client) = CLIENTS.read().unwrap().get(&id) {
+        allow_err!(client.tx.send(Data::PermissionRequestResult {
+            request_id,
+            name,
+            enabled,
+            approved,
+        }));
+    };
+}
+
+#[inline]
 #[cfg(target_os = "android")]
 pub fn switch_permission_all(name: String, enabled: bool) {
     for (_, client) in CLIENTS.read().unwrap().iter() {
@@ -532,6 +554,9 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                 }
                                 Data::ChatMessage { text } => {
                                     self.cm.new_message(self.conn_id, text);
+                                }
+                                Data::PermissionRequest { request_id, name, enabled } => {
+                                    self.cm.permission_request(self.conn_id, request_id, name, enabled);
                                 }
                                 Data::FS(mut fs) => {
                                     if let ipc::FS::WriteBlock { id, file_num, data: _, compressed } = fs {

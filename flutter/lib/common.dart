@@ -383,7 +383,7 @@ class MyTheme {
     dialogTheme: DialogThemeData(
       elevation: 15,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(18.0),
+        borderRadius: BorderRadius.circular(8.0),
         side: BorderSide(
           width: 1,
           color: grayBg,
@@ -423,7 +423,7 @@ class MyTheme {
             style: TextButton.styleFrom(
               splashFactory: NoSplash.splashFactory,
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(18.0),
+                borderRadius: BorderRadius.circular(8.0),
               ),
             ),
           )
@@ -481,7 +481,7 @@ class MyTheme {
     dialogTheme: DialogThemeData(
       elevation: 15,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(18.0),
+        borderRadius: BorderRadius.circular(8.0),
         side: BorderSide(
           width: 1,
           color: Color(0xFF24252B),
@@ -526,7 +526,7 @@ class MyTheme {
               disabledForegroundColor: Colors.white70,
               foregroundColor: Colors.white70,
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(18.0),
+                borderRadius: BorderRadius.circular(8.0),
               ),
             ),
           )
@@ -741,7 +741,7 @@ Future<void> windowOnTop(int? id) async {
   }
 }
 
-typedef DialogBuilder = CustomAlertDialog Function(
+typedef DialogBuilder = Widget Function(
     StateSetter setState, void Function([dynamic]) close, BuildContext context);
 
 class Dialog<T> {
@@ -3025,9 +3025,15 @@ class ServerConfig {
   late String relayServer;
   late String apiServer;
   late String key;
+  bool? useIdRelayServer;
 
-  ServerConfig(
-      {String? idServer, String? relayServer, String? apiServer, String? key}) {
+  ServerConfig({
+    String? idServer,
+    String? relayServer,
+    String? apiServer,
+    String? key,
+    this.useIdRelayServer,
+  }) {
     this.idServer = idServer?.trim() ?? '';
     this.relayServer = relayServer?.trim() ?? '';
     this.apiServer = apiServer?.trim() ?? '';
@@ -3051,6 +3057,7 @@ class ServerConfig {
     relayServer = json['relay'] ?? '';
     apiServer = json['api'] ?? '';
     key = json['key'] ?? '';
+    useIdRelayServer = null;
   }
 
   /// encode to shared string
@@ -3072,7 +3079,11 @@ class ServerConfig {
       : idServer = options['custom-rendezvous-server'] ?? "",
         relayServer = options['relay-server'] ?? "",
         apiServer = options['api-server'] ?? "",
-        key = options['key'] ?? "";
+        key = options['key'] ?? "",
+        useIdRelayServer = option2bool(
+          kOptionAllowIdRelayServer,
+          options[kOptionAllowIdRelayServer] ?? "",
+        );
 }
 
 Widget dialogButton(String text,
@@ -3719,6 +3730,11 @@ Future<bool> setServerConfig(
     }
   }
   final oldApiServer = await bind.mainGetApiServer();
+  final useIdRelayServer = config.useIdRelayServer;
+
+  if (useIdRelayServer == false) {
+    await mainSetBoolOption(kOptionAllowIdRelayServer, false);
+  }
 
   // should set one by one
   await bind.mainSetOption(
@@ -3726,6 +3742,9 @@ Future<bool> setServerConfig(
   await bind.mainSetOption(key: 'relay-server', value: config.relayServer);
   await bind.mainSetOption(key: 'api-server', value: config.apiServer);
   await bind.mainSetOption(key: 'key', value: config.key);
+  if (useIdRelayServer == true) {
+    await mainSetBoolOption(kOptionAllowIdRelayServer, true);
+  }
   final newApiServer = await bind.mainGetApiServer();
   if (oldApiServer.isNotEmpty &&
       oldApiServer != newApiServer &&
@@ -3870,14 +3889,11 @@ Widget loadLogo() {
 }
 
 Widget loadIcon(double size) {
-  return Image.asset('assets/icon.png',
-      width: size,
-      height: size,
-      errorBuilder: (ctx, error, stackTrace) => SvgPicture.asset(
-            'assets/icon.svg',
-            width: size,
-            height: size,
-          ));
+  return SvgPicture.asset(
+    'assets/icon.svg',
+    width: size,
+    height: size,
+  );
 }
 
 var imcomingOnlyHomeSize = Size(280, 300);
@@ -4324,8 +4340,7 @@ Widget? buildAvatarWidget({
       width: size,
       height: size,
       fit: BoxFit.cover,
-      errorBuilder: (_, __, ___) =>
-          fallback ?? SizedBox.shrink(),
+      errorBuilder: (_, __, ___) => fallback ?? SizedBox.shrink(),
     ),
   );
 }

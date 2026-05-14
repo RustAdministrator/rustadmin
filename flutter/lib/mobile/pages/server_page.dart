@@ -817,7 +817,7 @@ class PaddingCard extends StatelessWidget {
         width: double.maxFinite,
         child: Card(
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(13),
+            borderRadius: BorderRadius.circular(8.0),
           ),
           margin: const EdgeInsets.fromLTRB(12.0, 10.0, 12.0, 0),
           child: Padding(

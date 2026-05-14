@@ -402,6 +402,23 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Message(msg_out));
     }
 
+    pub fn request_permission(&self, name: String) {
+        let mut request_id = hbb_common::rand::random::<u64>();
+        if request_id == 0 {
+            request_id = 1;
+        }
+        let mut misc = Misc::new();
+        misc.set_session_permission_request(SessionPermissionRequest {
+            request_id,
+            name,
+            enabled: true,
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_misc(misc);
+        self.send(Data::Message(msg_out));
+    }
+
     pub fn get_toggle_option(&self, name: String) -> bool {
         self.lc.read().unwrap().get_toggle_option(&name)
     }

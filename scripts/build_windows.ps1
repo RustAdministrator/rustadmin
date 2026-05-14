@@ -154,6 +154,9 @@ finally {
     Pop-Location
 }
 
+$StaleRuntimeIcon = Join-Path $FlutterDir "build\windows\x64\runner\Release\data\flutter_assets\assets\icon.ico"
+Remove-Item -Force $StaleRuntimeIcon -ErrorAction SilentlyContinue
+
 Write-Host "Windows bundle:"
 $BundleDir = Join-Path $FlutterDir "build\windows\x64\runner\Release"
 Write-Host $BundleDir

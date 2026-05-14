@@ -1831,7 +1831,7 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
         onTap: onTap,
         trailing: trailing,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: BorderRadius.circular(8.0),
         ),
         contentPadding: EdgeInsets.symmetric(horizontal: 16),
         minLeadingWidth: 0,
@@ -1873,6 +1873,13 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
                   title: 'ID/Relay Server',
                   onTap: () => showServerSettings(gFFI.dialogManager, setState),
                 ),
+              if (!hideServer) divider,
+              if (!hideServer)
+                switchWidget(
+                    Icons.cloud_sync_outlined,
+                    'Use ID/Relay Server',
+                    'When off, saved ID, relay and API servers are kept but RustAdmin will not connect to them.',
+                    kOptionAllowIdRelayServer),
               if (!hideProxy && !hideServer) divider,
               if (!hideProxy)
                 listTile(
@@ -2390,7 +2397,7 @@ class _AccountState extends State<_Account> {
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
               color: Theme.of(context).colorScheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(10),
+              borderRadius: BorderRadius.circular(8.0),
             ),
             child: Builder(builder: (context) {
               final avatarWidget = _buildUserAvatar();

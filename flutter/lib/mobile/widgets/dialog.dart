@@ -6,6 +6,7 @@ import 'package:flutter_hbb/common/widgets/toolbar.dart';
 import 'package:get/get.dart';
 
 import '../../common.dart';
+import '../../consts.dart';
 import '../../models/platform_model.dart';
 
 void _showSuccess() {
@@ -74,6 +75,9 @@ void showServerSettingsWithValue(
   final relayCtrl = TextEditingController(text: serverConfig.relayServer);
   final apiCtrl = TextEditingController(text: serverConfig.apiServer);
   final keyCtrl = TextEditingController(text: serverConfig.key);
+  final useIdRelayServer = (serverConfig.useIdRelayServer ??
+          await mainGetBoolOption(kOptionAllowIdRelayServer))
+      .obs;
 
   RxString idServerMsg = ''.obs;
   RxString relayServerMsg = ''.obs;
@@ -98,7 +102,8 @@ void showServerSettingsWithValue(
               idServer: idCtrl.text.trim(),
               relayServer: relayCtrl.text.trim(),
               apiServer: apiCtrl.text.trim(),
-              key: keyCtrl.text.trim()));
+              key: keyCtrl.text.trim(),
+              useIdRelayServer: useIdRelayServer.value));
       setState(() {
         isInProgress = false;
       });
@@ -155,6 +160,14 @@ void showServerSettingsWithValue(
           child: Obx(() => Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(translate('Use ID/Relay Server')),
+                    value: useIdRelayServer.value,
+                    onChanged: isOptionFixed(kOptionAllowIdRelayServer)
+                        ? null
+                        : (value) => useIdRelayServer.value = value,
+                  ),
                   buildField(translate('ID Server'), idCtrl, idServerMsg.value,
                       autofocus: true),
                   SizedBox(height: 8),

@@ -172,26 +172,72 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
         connToken: connToken);
   }
 
+  requestPermission(String name) {
+    bind.sessionRequestPermission(sessionId: sessionId, name: name);
+    showToast(translate('Permission request sent'));
+  }
+
+  requestOrConnect(String requestName, VoidCallback connect) {
+    final permissionRequestMode = perms['clipboard'] == false ||
+        perms['audio'] == false ||
+        perms['file'] == false ||
+        perms['restart'] == false ||
+        perms['recording'] == false;
+    if (!permissionRequestMode || perms[requestName] == true) {
+      connect();
+    } else {
+      requestPermission(requestName);
+    }
+  }
+
+  addPermissionRequest(String name, String label) {
+    if (perms[name] == false) {
+      v.add(TTextMenu(
+          child: Text('${translate('Request')} ${translate(label)}'),
+          onPressed: () => requestPermission(name)));
+    }
+  }
+
   if (isDefaultConn && isDesktop) {
+    addPermissionRequest('clipboard', 'clipboard');
+    addPermissionRequest('audio', 'audio');
+    addPermissionRequest('file', 'file copy and paste');
+    addPermissionRequest('restart', 'remote restart');
+    addPermissionRequest('recording', 'session recording');
+    if (isWindows) {
+      addPermissionRequest('block_input', 'blocking local input');
+    }
     v.add(
       TTextMenu(
-          child: Text(translate('Transfer file')),
-          onPressed: () => connectWithToken(isFileTransfer: true)),
+          child: Text(translate(perms['file_transfer'] == true
+              ? 'Transfer file'
+              : 'Request file transfer')),
+          onPressed: () => requestOrConnect(
+              'file_transfer', () => connectWithToken(isFileTransfer: true))),
     );
     v.add(
       TTextMenu(
-          child: Text(translate('View camera')),
-          onPressed: () => connectWithToken(isViewCamera: true)),
+          child: Text(translate(perms['view_camera'] == true
+              ? 'View camera'
+              : 'Request camera access')),
+          onPressed: () => requestOrConnect(
+              'view_camera', () => connectWithToken(isViewCamera: true))),
     );
     v.add(
       TTextMenu(
-          child: Text('${translate('Terminal')} (beta)'),
-          onPressed: () => connectWithToken(isTerminal: true)),
+          child: Text(perms['terminal'] == true
+              ? '${translate('Terminal')} (beta)'
+              : translate('Request terminal')),
+          onPressed: () => requestOrConnect(
+              'terminal', () => connectWithToken(isTerminal: true))),
     );
     v.add(
       TTextMenu(
-          child: Text(translate('TCP tunneling')),
-          onPressed: () => connectWithToken(isTcpTunneling: true)),
+          child: Text(translate(perms['port_forward'] == true
+              ? 'TCP tunneling'
+              : 'Request TCP tunneling')),
+          onPressed: () => requestOrConnect(
+              'port_forward', () => connectWithToken(isTcpTunneling: true))),
     );
   }
   // note

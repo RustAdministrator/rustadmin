@@ -49,7 +49,7 @@ void showPeerSelectionDialog(
                 height: 50.0,
                 decoration: BoxDecoration(
                     color: Theme.of(context).highlightColor,
-                    borderRadius: BorderRadius.circular(12.0)),
+                    borderRadius: BorderRadius.circular(8.0)),
                 padding: EdgeInsets.symmetric(horizontal: 16.0, vertical: 4.0),
                 margin: EdgeInsets.symmetric(vertical: 4.0),
                 child: Row(

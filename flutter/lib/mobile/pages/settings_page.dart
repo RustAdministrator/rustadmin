@@ -84,6 +84,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   var _enableRecordSession = false;
   var _enableHardwareCodec = false;
   var _allowWebSocket = false;
+  var _allowIdRelayServer = false;
   var _autoRecordIncomingSession = false;
   var _autoRecordOutgoingSession = false;
   var _allowAutoDisconnect = false;
@@ -128,6 +129,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
     _enableHardwareCodec = option2bool(kOptionEnableHwcodec,
         bind.mainGetOptionSync(key: kOptionEnableHwcodec));
     _allowWebSocket = mainGetBoolOptionSync(kOptionAllowWebSocket);
+    _allowIdRelayServer = mainGetBoolOptionSync(kOptionAllowIdRelayServer);
     _allowInsecureTlsFallback =
         mainGetBoolOptionSync(kOptionAllowInsecureTLSFallback);
     _allowUnverifiedPeerTrust =
@@ -812,9 +814,29 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                 onPressed: (context) {
                   showServerSettings(gFFI.dialogManager, (callback) async {
                     _isUsingPublicServer = await bind.mainIsUsingPublicServer();
+                    _allowIdRelayServer =
+                        await mainGetBoolOption(kOptionAllowIdRelayServer);
                     setState(callback);
                   });
                 }),
+          if (!disabledSettings && !_hideNetwork && !_hideServer)
+            SettingsTile.switchTile(
+              title: Text(translate('Use ID/Relay Server')),
+              initialValue: _allowIdRelayServer,
+              onToggle: isOptionFixed(kOptionAllowIdRelayServer)
+                  ? null
+                  : (v) async {
+                      await mainSetBoolOption(kOptionAllowIdRelayServer, v);
+                      final newValue =
+                          await mainGetBoolOption(kOptionAllowIdRelayServer);
+                      final usingPublicServer =
+                          await bind.mainIsUsingPublicServer();
+                      setState(() {
+                        _allowIdRelayServer = newValue;
+                        _isUsingPublicServer = usingPublicServer;
+                      });
+                    },
+            ),
           if (!_hideNetwork && !_hideProxy)
             SettingsTile(
                 title: Text(translate('Socks5/Http(s) Proxy')),

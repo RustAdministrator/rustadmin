@@ -13,45 +13,12 @@ namespace {
 
 constexpr const wchar_t kWindowClassName[] = L"FLUTTER_RUNNER_WIN32_WINDOW";
 
+#ifndef ICON_SMALL2
+constexpr WPARAM ICON_SMALL2 = 2;
+#endif
+
 // The number of Win32Window objects that currently exist.
 static int g_active_window_count = 0;
-
-// Static variable to hold the custom icon (needs cleanup on exit)
-static HICON g_custom_icon_ = nullptr;
-
-// Try to load icon from data\flutter_assets\assets\icon.ico if it exists.
-// Returns nullptr if the file doesn't exist or can't be loaded.
-HICON LoadCustomIcon() {
-  if (g_custom_icon_ != nullptr) {
-    return g_custom_icon_;
-  }
-  wchar_t exe_path[MAX_PATH];
-  if (!GetModuleFileNameW(nullptr, exe_path, MAX_PATH)) {
-    return nullptr;
-  }
-
-  std::wstring icon_path = exe_path;
-  size_t last_slash = icon_path.find_last_of(L"\\/");
-  if (last_slash == std::wstring::npos) {
-    return nullptr;
-  }
-
-  icon_path = icon_path.substr(0, last_slash + 1);
-  icon_path += L"data\\flutter_assets\\assets\\icon.ico";
-
-  // Check file attributes - reject if missing, directory, or reparse point (symlink/junction)
-  DWORD file_attr = GetFileAttributesW(icon_path.c_str());
-  if (file_attr == INVALID_FILE_ATTRIBUTES ||
-      (file_attr & FILE_ATTRIBUTE_DIRECTORY) ||
-      (file_attr & FILE_ATTRIBUTE_REPARSE_POINT)) {
-    return nullptr;
-  }
-
-  g_custom_icon_ = (HICON)LoadImageW(
-      nullptr, icon_path.c_str(), IMAGE_ICON, 0, 0,
-      LR_LOADFROMFILE | LR_DEFAULTSIZE);
-  return g_custom_icon_;
-}
 
 using EnableNonClientDpiScaling = BOOL __stdcall(HWND hwnd);
 
@@ -75,6 +42,25 @@ void EnableFullDpiSupportIfAvailable(HWND hwnd) {
     enable_non_client_dpi_scaling(hwnd);
     FreeLibrary(user32_module);
   }
+}
+
+HICON LoadRustAdminIcon(int width, int height) {
+  return static_cast<HICON>(LoadImage(GetModuleHandle(nullptr),
+                                      MAKEINTRESOURCE(IDI_APP_ICON),
+                                      IMAGE_ICON, width, height, LR_SHARED));
+}
+
+void SetRustAdminWindowIcons(HWND window) {
+  auto big_icon = reinterpret_cast<LPARAM>(
+      LoadRustAdminIcon(GetSystemMetrics(SM_CXICON),
+                        GetSystemMetrics(SM_CYICON)));
+  auto small_icon = reinterpret_cast<LPARAM>(
+      LoadRustAdminIcon(GetSystemMetrics(SM_CXSMICON),
+                        GetSystemMetrics(SM_CYSMICON)));
+
+  SendMessage(window, WM_SETICON, ICON_BIG, big_icon);
+  SendMessage(window, WM_SETICON, ICON_SMALL, small_icon);
+  SendMessage(window, WM_SETICON, ICON_SMALL2, small_icon);
 }
 
 }  // namespace
@@ -112,27 +98,22 @@ WindowClassRegistrar* WindowClassRegistrar::instance_ = nullptr;
 
 const wchar_t* WindowClassRegistrar::GetWindowClass() {
   if (!class_registered_) {
-    WNDCLASS window_class{};
+    WNDCLASSEX window_class{};
+    window_class.cbSize = sizeof(WNDCLASSEX);
     window_class.hCursor = LoadCursor(nullptr, IDC_ARROW);
     window_class.lpszClassName = kWindowClassName;
     window_class.style = CS_HREDRAW | CS_VREDRAW;
     window_class.cbClsExtra = 0;
     window_class.cbWndExtra = 0;
     window_class.hInstance = GetModuleHandle(nullptr);
-    
-    // Try to load icon from data\flutter_assets\assets\icon.ico if it exists
-    HICON custom_icon = LoadCustomIcon();
-    if (custom_icon != nullptr) {
-      window_class.hIcon = custom_icon;
-    } else {
-      window_class.hIcon =
-          LoadIcon(window_class.hInstance, MAKEINTRESOURCE(IDI_APP_ICON));
-    }
-    
+    window_class.hIcon = LoadRustAdminIcon(GetSystemMetrics(SM_CXICON),
+                                           GetSystemMetrics(SM_CYICON));
+    window_class.hIconSm = LoadRustAdminIcon(GetSystemMetrics(SM_CXSMICON),
+                                             GetSystemMetrics(SM_CYSMICON));
     window_class.hbrBackground = 0;
     window_class.lpszMenuName = nullptr;
     window_class.lpfnWndProc = Win32Window::WndProc;
-    RegisterClass(&window_class);
+    RegisterClassEx(&window_class);
     class_registered_ = true;
   }
   return kWindowClassName;
@@ -141,12 +122,6 @@ const wchar_t* WindowClassRegistrar::GetWindowClass() {
 void WindowClassRegistrar::UnregisterWindowClass() {
   UnregisterClass(kWindowClassName, nullptr);
   class_registered_ = false;
-  
-  // Clean up the custom icon if it was loaded
-  if (g_custom_icon_ != nullptr) {
-    DestroyIcon(g_custom_icon_);
-    g_custom_icon_ = nullptr;
-  }
 }
 
 Win32Window::Win32Window() {
@@ -182,6 +157,8 @@ bool Win32Window::CreateAndShow(const std::wstring& title,
     return false;
   }
 
+  SetRustAdminWindowIcons(window);
+
   if (!showOnTaskBar) {
     // hide from taskbar
     HRESULT hr;
@@ -195,7 +172,14 @@ bool Win32Window::CreateAndShow(const std::wstring& title,
     hr = pTaskbarList->Release();
   }
 
-  return OnCreate();
+  auto created = OnCreate();
+  if (created) {
+    // Flutter/window setup may touch the native window after CreateWindow.
+    // Re-apply both caption icon slots so the Windows titlebar does not fall
+    // back to stale or generated icons.
+    SetRustAdminWindowIcons(window);
+  }
+  return created;
 }
 
 static void trySetWindowForeground(HWND window) {

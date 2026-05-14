@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:collection/collection.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/main.dart';
 import 'package:flutter_hbb/mobile/pages/settings_page.dart';
@@ -22,6 +24,27 @@ const kLoginDialogTag = "LOGIN";
 const kUseTemporaryPassword = "use-temporary-password";
 const kUsePermanentPassword = "use-permanent-password";
 const kUseBothPasswords = "use-both-passwords";
+
+class PermissionRequestPrompt {
+  const PermissionRequestPrompt({
+    required this.client,
+    required this.requestId,
+    required this.name,
+    required this.enabled,
+    required this.title,
+    required this.risk,
+  });
+
+  final Client client;
+  final String requestId;
+  final String name;
+  final bool enabled;
+  final String title;
+  final String risk;
+
+  bool matches(PermissionRequestPrompt other) =>
+      client.id == other.client.id && requestId == other.requestId;
+}
 
 class ServerModel with ChangeNotifier {
   bool _isStart = false; // Android MainService status
@@ -47,6 +70,8 @@ class ServerModel with ChangeNotifier {
   final tabController = DesktopTabController(tabType: DesktopTabType.cm);
 
   final List<Client> _clients = [];
+  final List<PermissionRequestPrompt> _permissionRequests = [];
+  bool? _permissionRequestPreviousAlwaysOnTop;
 
   Timer? cmHiddenTimer;
 
@@ -129,6 +154,9 @@ class ServerModel with ChangeNotifier {
   TextEditingController get serverPasswd => _serverPasswd;
 
   List<Client> get clients => _clients;
+
+  PermissionRequestPrompt? get permissionRequest =>
+      _permissionRequests.firstOrNull;
 
   final controller = ScrollController();
 
@@ -633,6 +661,144 @@ class ServerModel with ChangeNotifier {
     );
   }
 
+  String _permissionRequestTitle(String name) {
+    switch (name) {
+      case 'clipboard':
+        return 'Clipboard';
+      case 'audio':
+        return 'Audio';
+      case 'file':
+        return 'File copy and paste';
+      case 'file_transfer':
+        return 'File transfer';
+      case 'restart':
+        return 'Remote restart';
+      case 'recording':
+        return 'Session recording';
+      case 'block_input':
+        return 'Block local input';
+      case 'port_forward':
+        return 'TCP tunneling';
+      case 'view_camera':
+        return 'View camera';
+      case 'terminal':
+        return 'Terminal';
+      default:
+        return 'Permission';
+    }
+  }
+
+  String _permissionRequestRisk(String name) {
+    switch (name) {
+      case 'clipboard':
+        return 'The remote user can read and write clipboard data during this session.';
+      case 'audio':
+        return 'The remote user can receive audio from this device during this session.';
+      case 'file':
+        return 'The remote user can use file copy and paste during this session.';
+      case 'file_transfer':
+        return 'The remote user can browse, upload, download, rename, and delete files through the file-transfer tool.';
+      case 'restart':
+        return 'The remote user can restart this computer.';
+      case 'recording':
+        return 'The remote user can record the remote-support session.';
+      case 'block_input':
+        return 'The remote user can block the local keyboard and mouse.';
+      case 'port_forward':
+        return 'The remote user can create a TCP tunnel to a service on this computer or network.';
+      case 'view_camera':
+        return 'The remote user can view a camera connected to this device.';
+      case 'terminal':
+        return 'The remote user can run shell commands on this computer.';
+      default:
+        return 'The remote user is requesting an additional permission for this session.';
+    }
+  }
+
+  void handlePermissionRequest(Map<String, dynamic> evt) {
+    final id = int.tryParse(evt['id']?.toString() ?? '');
+    final requestId = evt['request_id']?.toString() ?? '';
+    final name = evt['permission_name']?.toString() ?? '';
+    final enabled = evt['enabled']?.toString() == 'true';
+    if (id == null || requestId.isEmpty || name.isEmpty || !enabled) {
+      return;
+    }
+    final client = _clients.firstWhereOrNull((c) => c.id == id);
+    if (client == null) {
+      return;
+    }
+
+    if (_permissionRequests
+        .any((r) => r.client.id == client.id && r.requestId == requestId)) {
+      return;
+    }
+
+    if (desktopType == DesktopType.cm) {
+      Future.delayed(Duration.zero, _raisePermissionRequestWindow);
+    }
+    _permissionRequests.add(PermissionRequestPrompt(
+      client: client,
+      requestId: requestId,
+      name: name,
+      enabled: enabled,
+      title:
+          '${translate('Allow')} ${translate(_permissionRequestTitle(name))}?',
+      risk: translate(_permissionRequestRisk(name)),
+    ));
+    notifyListeners();
+  }
+
+  void respondPermissionRequest(PermissionRequestPrompt request, bool approved) {
+    final index = _permissionRequests.indexWhere((r) => r.matches(request));
+    if (index < 0) {
+      return;
+    }
+    bind.cmRespondPermissionRequest(
+        connId: request.client.id,
+        requestId: request.requestId,
+        name: request.name,
+        enabled: request.enabled,
+        approved: approved);
+    _permissionRequests.removeAt(index);
+    if (_permissionRequests.isEmpty) {
+      _restorePermissionRequestWindowTop();
+    }
+    notifyListeners();
+  }
+
+  Future<void> _raisePermissionRequestWindow() async {
+    await windowOnTop(null);
+    if (!isDesktop) {
+      return;
+    }
+    try {
+      _permissionRequestPreviousAlwaysOnTop ??=
+          await windowManager.isAlwaysOnTop();
+      if (_permissionRequestPreviousAlwaysOnTop == false) {
+        await windowManager.setAlwaysOnTop(true);
+      }
+    } catch (e) {
+      debugPrint('Failed to set permission request always-on-top: $e');
+    }
+  }
+
+  Future<void> _restorePermissionRequestWindowTop() async {
+    if (!isDesktop) {
+      _permissionRequestPreviousAlwaysOnTop = null;
+      return;
+    }
+    final previous = _permissionRequestPreviousAlwaysOnTop;
+    _permissionRequestPreviousAlwaysOnTop = null;
+    if (previous != false) {
+      return;
+    }
+    try {
+      await windowManager.setAlwaysOnTop(false);
+    } catch (e) {
+      debugPrint('Failed to restore permission request always-on-top: $e');
+    }
+  }
+
   showClientDialog(Client client, String title, String contentTitle,
       String content, VoidCallback onCancel, VoidCallback onSubmit) {
     parent.target?.dialogManager.show((setState, close, context) {
@@ -792,6 +958,142 @@ class ServerModel with ChangeNotifier {
     } else {
       WakelockManager.disable(_wakelockKey);
     }
+  }
+}
+
+class PermissionRequestOverlay extends StatefulWidget {
+  const PermissionRequestOverlay({
+    Key? key,
+    required this.client,
+    required this.title,
+    required this.risk,
+    required this.onDecline,
+    required this.onAllow,
+  }) : super(key: key);
+
+  final Client client;
+  final String title;
+  final String risk;
+  final VoidCallback onDecline;
+  final VoidCallback onAllow;
+
+  @override
+  State<PermissionRequestOverlay> createState() =>
+      _PermissionRequestOverlayState();
+}
+
+class _PermissionRequestOverlayState extends State<PermissionRequestOverlay> {
+  final FocusScopeNode _scopeNode = FocusScopeNode();
+  bool _tabTapped = false;
+
+  @override
+  void dispose() {
+    _scopeNode.dispose();
+    super.dispose();
+  }
+
+  KeyEventResult _handleKey(FocusNode node, RawKeyEvent key) {
+    if (key.logicalKey == LogicalKeyboardKey.escape) {
+      if (key is RawKeyDownEvent) {
+        widget.onDecline();
+      }
+      return KeyEventResult.handled;
+    }
+    if (!_tabTapped &&
+        (key.logicalKey == LogicalKeyboardKey.enter ||
+            key.logicalKey == LogicalKeyboardKey.numpadEnter)) {
+      if (key is RawKeyDownEvent) {
+        widget.onAllow();
+      }
+      return KeyEventResult.handled;
+    }
+    if (key.logicalKey == LogicalKeyboardKey.tab) {
+      if (key is RawKeyDownEvent) {
+        _scopeNode.nextFocus();
+        _tabTapped = true;
+      }
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_scopeNode.hasFocus) {
+        _scopeNode.requestFocus();
+      }
+    });
+
+    final theme = Theme.of(context);
+    return FocusScope(
+      node: _scopeNode,
+      autofocus: true,
+      onKey: _handleKey,
+      child: Material(
+        key: const ValueKey('permission-request-overlay'),
+        color: theme.colorScheme.surface,
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 18),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(Icons.warning_amber_sharp,
+                        color: Colors.redAccent, size: 28),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        widget.title,
+                        style: theme.textTheme.titleMedium
+                            ?.copyWith(fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                Expanded(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        ClientInfo(widget.client),
+                        const Divider(height: 24),
+                        Text(
+                          widget.risk,
+                          style: theme.textTheme.bodyMedium
+                              ?.copyWith(height: 1.35),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  height: 40,
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Expanded(
+                        child: dialogButton('Decline',
+                            onPressed: widget.onDecline, isOutline: true),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: dialogButton('Allow', onPressed: widget.onAllow),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

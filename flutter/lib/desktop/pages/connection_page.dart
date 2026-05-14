@@ -65,10 +65,14 @@ class NetworkModeInfo {
 Future<NetworkModeInfo> loadNetworkModeInfo() async {
   Future<NetworkModeInfo> fallbackFromOptions({String trustPhrase = ''}) async {
     final usingPublicServer = await bind.mainIsUsingPublicServer();
-    final apiServer = await bind.mainGetApiServer();
-    final rendezvousServer =
-        await bind.mainGetOption(key: 'custom-rendezvous-server');
-    final relayServer = await bind.mainGetOption(key: 'relay-server');
+    final useIdRelayServer = option2bool(kOptionAllowIdRelayServer,
+        await bind.mainGetOption(key: kOptionAllowIdRelayServer));
+    final apiServer = useIdRelayServer ? await bind.mainGetApiServer() : '';
+    final rendezvousServer = useIdRelayServer
+        ? await bind.mainGetOption(key: 'custom-rendezvous-server')
+        : '';
+    final relayServer =
+        useIdRelayServer ? await bind.mainGetOption(key: 'relay-server') : '';
     final directAccessEnabled = option2bool(kOptionDirectServer,
         await bind.mainGetOption(key: kOptionDirectServer));
     final pairingRequired =

@@ -369,6 +369,12 @@ pub fn session_toggle_privacy_mode(session_id: SessionID, impl_key: String, on: 
     }
 }
 
+pub fn session_request_permission(session_id: SessionID, name: String) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.request_permission(name);
+    }
+}
+
 pub fn session_get_flutter_option(session_id: SessionID, k: String) -> Option<String> {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         Some(session.get_flutter_option(k))
@@ -1019,8 +1025,10 @@ pub fn main_set_option(key: String, value: String) {
     let is_allow_tls_fallback = key.eq(config::keys::OPTION_ALLOW_INSECURE_TLS_FALLBACK);
     if is_allow_tls_fallback
         || key.eq("custom-rendezvous-server")
+        || key.eq(config::keys::OPTION_ALLOW_ID_RELAY_SERVER)
         || key.eq(config::keys::OPTION_ALLOW_WEBSOCKET)
         || key.eq(config::keys::OPTION_DISABLE_UDP)
+        || key.eq(config::keys::OPTION_RELAY_SERVER)
         || key.eq("api-server")
     {
         if is_allow_tls_fallback {
@@ -2184,6 +2192,21 @@ pub fn cm_get_click_time() -> f64 {
 pub fn cm_switch_permission(conn_id: i32, name: String, enabled: bool) {
     #[cfg(not(any(target_os = "ios")))]
     crate::ui_cm_interface::switch_permission(conn_id, name, enabled)
+}
+
+pub fn cm_respond_permission_request(
+    conn_id: i32,
+    request_id: String,
+    name: String,
+    enabled: bool,
+    approved: bool,
+) {
+    #[cfg(not(any(target_os = "ios")))]
+    if let Ok(request_id) = request_id.parse::<u64>() {
+        crate::ui_cm_interface::respond_permission_request(
+            conn_id, request_id, name, enabled, approved,
+        )
+    }
 }
 
 pub fn cm_can_elevate() -> SyncReturn<bool> {

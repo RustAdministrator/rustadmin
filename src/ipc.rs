@@ -291,6 +291,17 @@ pub enum Data {
         name: String,
         enabled: bool,
     },
+    PermissionRequest {
+        request_id: u64,
+        name: String,
+        enabled: bool,
+    },
+    PermissionRequestResult {
+        request_id: u64,
+        name: String,
+        enabled: bool,
+        approved: bool,
+    },
     SystemInfo(Option<String>),
     ClickTime(i64),
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -611,6 +622,8 @@ pub struct CheckIfRestart {
     ws: String,
     disable_udp: String,
     allow_insecure_tls_fallback: String,
+    allow_id_relay_server: String,
+    relay_server: String,
     api_server: String,
 }
 
@@ -626,6 +639,8 @@ impl CheckIfRestart {
             allow_insecure_tls_fallback: Config::get_option(
                 config::keys::OPTION_ALLOW_INSECURE_TLS_FALLBACK,
             ),
+            allow_id_relay_server: Config::get_option(config::keys::OPTION_ALLOW_ID_RELAY_SERVER),
+            relay_server: Config::get_option(config::keys::OPTION_RELAY_SERVER),
             api_server: Config::get_option("api-server"),
         }
     }
@@ -642,6 +657,9 @@ impl Drop for CheckIfRestart {
             || self.rendezvous_servers != Config::get_rendezvous_servers()
             || self.ws != Config::get_option(OPTION_ALLOW_WEBSOCKET)
             || self.disable_udp != Config::get_option(config::keys::OPTION_DISABLE_UDP)
+            || self.allow_id_relay_server
+                != Config::get_option(config::keys::OPTION_ALLOW_ID_RELAY_SERVER)
+            || self.relay_server != Config::get_option(config::keys::OPTION_RELAY_SERVER)
             || self.api_server != Config::get_option("api-server")
         {
             if allow_insecure_tls_fallback_changed {

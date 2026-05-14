@@ -715,9 +715,11 @@ pub async fn get_rendezvous_server(ms_timeout: u64) -> (String, Vec<String>, boo
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     let (mut a, mut b) = get_rendezvous_server_(ms_timeout).await;
     #[cfg(windows)]
-    if let Ok(lic) = crate::platform::get_license_from_exe_name() {
-        if !lic.host.is_empty() {
-            a = lic.host;
+    if Config::allow_id_relay_server() {
+        if let Ok(lic) = crate::platform::get_license_from_exe_name() {
+            if !lic.host.is_empty() {
+                a = lic.host;
+            }
         }
     }
     let mut b: Vec<String> = b
@@ -941,7 +943,11 @@ pub fn resolve_trusted_relay_server(
     rendezvous_server: &str,
     provided_by_rendezvous_server: &str,
 ) -> String {
-    let configured_relay_server = Config::get_option(keys::OPTION_RELAY_SERVER);
+    let configured_relay_server = if Config::allow_id_relay_server() {
+        Config::get_option(keys::OPTION_RELAY_SERVER)
+    } else {
+        String::new()
+    };
     if !configured_relay_server.is_empty() {
         return check_port(configured_relay_server, RELAY_PORT);
     }
@@ -1083,6 +1089,9 @@ pub fn is_setup(name: &str) -> bool {
 }
 
 pub fn get_custom_rendezvous_server(custom: String) -> String {
+    if !Config::allow_id_relay_server() {
+        return "".to_owned();
+    }
     #[cfg(windows)]
     if let Ok(lic) = crate::platform::windows::get_license_from_exe_name() {
         if !lic.host.is_empty() {
@@ -1105,6 +1114,9 @@ pub fn get_custom_rendezvous_server(custom: String) -> String {
 #[inline]
 pub fn get_api_server(api: String, custom: String) -> String {
     if Config::no_register_device() {
+        return "".to_owned();
+    }
+    if !Config::allow_id_relay_server() {
         return "".to_owned();
     }
     let mut res = get_api_server_(api, custom);
@@ -1204,7 +1216,11 @@ pub struct DirectPublicKeyPayload {
 
 pub fn get_network_mode_info() -> NetworkModeInfo {
     let rendezvous_server = Config::get_rendezvous_server();
-    let relay_server = get_option(keys::OPTION_RELAY_SERVER);
+    let relay_server = if Config::allow_id_relay_server() {
+        get_option(keys::OPTION_RELAY_SERVER)
+    } else {
+        String::new()
+    };
     let api_server = get_effective_api_server();
     let trust_phrase = fingerprint_to_trust_phrase(&crate::ui_interface::get_fingerprint());
     let direct_endpoints = get_direct_access_endpoints();
@@ -4144,20 +4160,32 @@ mod tests {
 
     #[test]
     fn test_get_tcp_proxy_addr_normalizes_bare_ipv6_host() {
-        struct RestoreCustomRendezvousServer(String);
+        struct RestoreServerOptions {
+            custom_rendezvous_server: String,
+            allow_id_relay_server: String,
+        }
 
-        impl Drop for RestoreCustomRendezvousServer {
+        impl Drop for RestoreServerOptions {
             fn drop(&mut self) {
                 Config::set_option(
                     keys::OPTION_CUSTOM_RENDEZVOUS_SERVER.to_string(),
-                    self.0.clone(),
+                    self.custom_rendezvous_server.clone(),
+                );
+                Config::set_option(
+                    keys::OPTION_ALLOW_ID_RELAY_SERVER.to_string(),
+                    self.allow_id_relay_server.clone(),
                 );
             }
         }
 
-        let _restore = RestoreCustomRendezvousServer(Config::get_option(
-            keys::OPTION_CUSTOM_RENDEZVOUS_SERVER,
-        ));
+        let _restore = RestoreServerOptions {
+            custom_rendezvous_server: Config::get_option(keys::OPTION_CUSTOM_RENDEZVOUS_SERVER),
+            allow_id_relay_server: Config::get_option(keys::OPTION_ALLOW_ID_RELAY_SERVER),
+        };
+        Config::set_option(
+            keys::OPTION_ALLOW_ID_RELAY_SERVER.to_string(),
+            "Y".to_string(),
+        );
         Config::set_option(
             keys::OPTION_CUSTOM_RENDEZVOUS_SERVER.to_string(),
             "1:2".to_string(),
@@ -4170,15 +4198,32 @@ mod tests {
     fn test_resolve_trusted_relay_server_prefers_explicit_override() {
         // Mutates process-wide Config state. Run the full client library suite
         // with `-- --test-threads=1` to avoid races with other config tests.
-        struct RestoreRelayServer(String);
+        struct RestoreRelayOptions {
+            relay_server: String,
+            allow_id_relay_server: String,
+        }
 
-        impl Drop for RestoreRelayServer {
+        impl Drop for RestoreRelayOptions {
             fn drop(&mut self) {
-                Config::set_option(keys::OPTION_RELAY_SERVER.to_string(), self.0.clone());
+                Config::set_option(
+                    keys::OPTION_RELAY_SERVER.to_string(),
+                    self.relay_server.clone(),
+                );
+                Config::set_option(
+                    keys::OPTION_ALLOW_ID_RELAY_SERVER.to_string(),
+                    self.allow_id_relay_server.clone(),
+                );
             }
         }
 
-        let _restore = RestoreRelayServer(Config::get_option(keys::OPTION_RELAY_SERVER));
+        let _restore = RestoreRelayOptions {
+            relay_server: Config::get_option(keys::OPTION_RELAY_SERVER),
+            allow_id_relay_server: Config::get_option(keys::OPTION_ALLOW_ID_RELAY_SERVER),
+        };
+        Config::set_option(
+            keys::OPTION_ALLOW_ID_RELAY_SERVER.to_string(),
+            "Y".to_string(),
+        );
         Config::set_option(
             keys::OPTION_RELAY_SERVER.to_string(),
             "relay.override.example".to_string(),
@@ -4208,6 +4253,86 @@ mod tests {
         assert_eq!(
             resolve_trusted_relay_server("hbbs.example.com:21116", "attacker.example.com:29999"),
             "hbbs.example.com:21117"
+        );
+    }
+
+    #[test]
+    fn test_network_mode_ignores_saved_servers_until_enabled() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+
+        struct RestoreNetworkOptions {
+            allow_id_relay_server: String,
+            custom_rendezvous_server: String,
+            relay_server: String,
+            api_server: String,
+            direct_server: String,
+        }
+
+        impl Drop for RestoreNetworkOptions {
+            fn drop(&mut self) {
+                Config::set_option(
+                    keys::OPTION_ALLOW_ID_RELAY_SERVER.to_string(),
+                    self.allow_id_relay_server.clone(),
+                );
+                Config::set_option(
+                    keys::OPTION_CUSTOM_RENDEZVOUS_SERVER.to_string(),
+                    self.custom_rendezvous_server.clone(),
+                );
+                Config::set_option(
+                    keys::OPTION_RELAY_SERVER.to_string(),
+                    self.relay_server.clone(),
+                );
+                Config::set_option(keys::OPTION_API_SERVER.to_string(), self.api_server.clone());
+                Config::set_option(
+                    keys::OPTION_DIRECT_SERVER.to_string(),
+                    self.direct_server.clone(),
+                );
+            }
+        }
+
+        let _restore = RestoreNetworkOptions {
+            allow_id_relay_server: Config::get_option(keys::OPTION_ALLOW_ID_RELAY_SERVER),
+            custom_rendezvous_server: Config::get_option(keys::OPTION_CUSTOM_RENDEZVOUS_SERVER),
+            relay_server: Config::get_option(keys::OPTION_RELAY_SERVER),
+            api_server: Config::get_option(keys::OPTION_API_SERVER),
+            direct_server: Config::get_option(keys::OPTION_DIRECT_SERVER),
+        };
+
+        Config::set_option(
+            keys::OPTION_ALLOW_ID_RELAY_SERVER.to_string(),
+            "N".to_string(),
+        );
+        Config::set_option(
+            keys::OPTION_CUSTOM_RENDEZVOUS_SERVER.to_string(),
+            "127.0.0.1".to_string(),
+        );
+        Config::set_option(
+            keys::OPTION_RELAY_SERVER.to_string(),
+            "127.0.0.1:21117".to_string(),
+        );
+        Config::set_option(
+            keys::OPTION_API_SERVER.to_string(),
+            "http://127.0.0.1:21114".to_string(),
+        );
+        Config::set_option(keys::OPTION_DIRECT_SERVER.to_string(), "N".to_string());
+
+        let disabled = get_network_mode_info();
+        assert_eq!(disabled.mode, "not_configured");
+        assert!(disabled.detail.is_empty());
+        assert!(!using_public_server());
+        assert!(get_effective_api_server().is_empty());
+
+        Config::set_option(
+            keys::OPTION_ALLOW_ID_RELAY_SERVER.to_string(),
+            "Y".to_string(),
+        );
+
+        let enabled = get_network_mode_info();
+        assert_eq!(enabled.mode, "private_server");
+        assert_eq!(enabled.detail, format!("127.0.0.1:{RENDEZVOUS_PORT}"));
+        assert_eq!(
+            get_effective_api_server(),
+            format!("http://127.0.0.1:{}", RENDEZVOUS_PORT - 2)
         );
     }
 

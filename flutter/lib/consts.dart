@@ -226,6 +226,7 @@ const String kOptionHideHelpCards = "hide-help-cards";
 const String kOptionAllowDeepLinkPassword = "allow-deep-link-password";
 const String kOptionAllowDeepLinkServerSettings =
     "allow-deep-link-server-settings";
+const String kOptionAllowIdRelayServer = "allow-id-relay-server";
 
 const String kOptionToggleViewOnly = "view-only";
 const String kOptionToggleShowMyCursor = "show-my-cursor";

@@ -67,6 +67,7 @@ class _TestRustdeskImpl implements RustdeskImpl {
       case #cmCheckClickTime:
       case #cmCloseConnection:
       case #cmRemoveDisconnectedConnection:
+      case #cmRespondPermissionRequest:
       case #cmSwitchPermission:
       case #mainCheckMouseTime:
       case #mainSetLocalOption:
@@ -143,6 +144,7 @@ void _seedConnectionManagerClients() {
 
 Widget _buildTestApp() {
   return GetMaterialApp(
+    navigatorKey: globalKey,
     debugShowCheckedModeBanner: false,
     theme: MyTheme.lightTheme,
     darkTheme: MyTheme.darkTheme,
@@ -159,6 +161,7 @@ Widget _buildTestApp() {
 
 Widget _buildConnectionCardTestApp(Client client) {
   return GetMaterialApp(
+    navigatorKey: globalKey,
     debugShowCheckedModeBanner: false,
     theme: MyTheme.lightTheme,
     home: ChangeNotifierProvider.value(
@@ -230,6 +233,44 @@ void main() {
     expect(find.text('(123123123)'), findsOneWidget);
     expect(find.text('Disconnected'), findsOneWidget);
     expect(find.text('Close'), findsOneWidget);
+    await _disposeCmTestWidget(tester);
+  });
+
+  testWidgets('renders permission request below connection toolbar',
+      (tester) async {
+    await tester.pumpWidget(_buildTestApp());
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+
+    gFFI.serverModel.handlePermissionRequest({
+      'id': '0',
+      'request_id': '42',
+      'permission_name': 'clipboard',
+      'enabled': 'true',
+    });
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 1));
+
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.byKey(const ValueKey('permission-request-overlay')),
+        findsOneWidget);
+    expect(find.text('Allow Clipboard?'), findsOneWidget);
+    expect(
+        find.text(
+            'The remote user can read and write clipboard data during this session.'),
+        findsOneWidget);
+
+    final decline = find.widgetWithText(OutlinedButton, 'Decline');
+    final allow = find.widgetWithText(ElevatedButton, 'Allow');
+    expect(decline, findsOneWidget);
+    expect(allow, findsOneWidget);
+    expect(tester.getRect(decline).center.dy, tester.getRect(allow).center.dy);
+    expect(
+        tester
+            .getTopLeft(find.byKey(const ValueKey('permission-request-overlay')))
+            .dy,
+        greaterThanOrEqualTo(kDesktopRemoteTabBarHeight));
+
     await _disposeCmTestWidget(tester);
   });
 }

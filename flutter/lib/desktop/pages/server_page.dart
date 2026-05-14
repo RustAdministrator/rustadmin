@@ -255,9 +255,28 @@ class ConnectionManagerState extends State<ConnectionManager>
                                     mask: false,
                                   ))),
                   ]);
+                  final permissionRequest = serverModel.permissionRequest;
                   return Container(
                     color: Theme.of(context).scaffoldBackgroundColor,
-                    child: row,
+                    child: Stack(
+                      children: [
+                        row,
+                        if (permissionRequest != null)
+                          Positioned.fill(
+                            child: PermissionRequestOverlay(
+                              client: permissionRequest.client,
+                              title: permissionRequest.title,
+                              risk: permissionRequest.risk,
+                              onDecline: () =>
+                                  serverModel.respondPermissionRequest(
+                                      permissionRequest, false),
+                              onAllow: () =>
+                                  serverModel.respondPermissionRequest(
+                                      permissionRequest, true),
+                            ),
+                          ),
+                      ],
+                    ),
                   );
                 },
               ),
@@ -442,7 +461,7 @@ class _CmHeaderState extends State<_CmHeader>
     super.build(context);
     return Container(
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(10.0),
+        borderRadius: BorderRadius.circular(8.0),
         gradient: LinearGradient(
           begin: Alignment.topRight,
           end: Alignment.bottomLeft,
@@ -584,7 +603,7 @@ class _CmHeaderState extends State<_CmHeader>
       alignment: Alignment.center,
       decoration: BoxDecoration(
         color: str2color(client.name),
-        borderRadius: BorderRadius.circular(15.0),
+        borderRadius: BorderRadius.circular(8.0),
       ),
       child: Text(
         client.name.isNotEmpty ? client.name[0] : '?',
@@ -617,7 +636,7 @@ class _PrivilegeBoardState extends State<_PrivilegeBoard> {
       child: Container(
         decoration: BoxDecoration(
           color: enabled ? MyTheme.accent : Colors.grey[700],
-          borderRadius: BorderRadius.circular(10.0),
+          borderRadius: BorderRadius.circular(8.0),
         ),
         padding: EdgeInsets.all(8.0),
         child: InkWell(
@@ -649,7 +668,7 @@ class _PrivilegeBoardState extends State<_PrivilegeBoard> {
       margin: EdgeInsets.all(5.0),
       padding: EdgeInsets.all(5.0),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(10.0),
+        borderRadius: BorderRadius.circular(8.0),
         color: Theme.of(context).colorScheme.background,
         boxShadow: [
           BoxShadow(
@@ -1108,7 +1127,7 @@ class _CmControlPanel extends StatelessWidget {
         ),
       );
     }
-    final borderRadius = BorderRadius.circular(10.0);
+    final borderRadius = BorderRadius.circular(8.0);
     final btn = Container(
       height: 28,
       decoration: BoxDecoration(

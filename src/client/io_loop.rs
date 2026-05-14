@@ -89,6 +89,14 @@ struct ParsedPeerInfo {
     support_terminal: bool,
 }
 
+fn session_permission_response_msgbox_type(approved: bool) -> &'static str {
+    if approved {
+        "custom-nocancel-success"
+    } else {
+        "custom-nocancel-error"
+    }
+}
+
 impl ParsedPeerInfo {
     fn is_support_virtual_display(&self) -> bool {
         self.is_installed
@@ -1796,6 +1804,33 @@ impl<T: InvokeUiSession> Remote<T> {
                             _ => {}
                         }
                     }
+                    Some(misc::Union::SessionPermissionResponse(r)) => {
+                        if r.approved
+                            && matches!(
+                                r.name.as_str(),
+                                "file_transfer" | "port_forward" | "view_camera" | "terminal"
+                            )
+                        {
+                            self.handler.set_permission(&r.name, true);
+                        }
+                        let text = if r.approved {
+                            if matches!(
+                                r.name.as_str(),
+                                "file_transfer" | "port_forward" | "view_camera" | "terminal"
+                            ) {
+                                "Permission approved. Open the requested tool again.".to_owned()
+                            } else {
+                                "Permission approved.".to_owned()
+                            }
+                        } else if r.reason.is_empty() {
+                            "Permission request declined.".to_owned()
+                        } else {
+                            r.reason
+                        };
+                        let msgtype = session_permission_response_msgbox_type(r.approved);
+                        self.handler
+                            .msgbox(msgtype, "Permission request", &text, "");
+                    }
                     Some(misc::Union::SwitchDisplay(s)) => {
                         self.handler.handle_peer_switch_display(&s);
                         if let Some(thread) = self.video_threads.get_mut(&(s.display as usize)) {
@@ -2495,5 +2530,16 @@ impl Drop for VideoThread {
     fn drop(&mut self) {
         // since channels are buffered, messages sent before the disconnect will still be properly received.
         *self.discard_queue.write().unwrap() = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_permission_response_msgbox_type;
+
+    #[test]
+    fn permission_response_dialogs_do_not_close_session_on_ok() {
+        assert!(session_permission_response_msgbox_type(true).contains("custom"));
+        assert!(session_permission_response_msgbox_type(false).contains("custom"));
     }
 }

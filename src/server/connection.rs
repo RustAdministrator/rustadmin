@@ -32,7 +32,10 @@ use hbb_common::{
     fs::{self, can_enable_overwrite_detection, JobType},
     futures::{SinkExt, StreamExt},
     get_time, get_version_number,
-    message_proto::{option_message::BoolOption, permission_info::Permission},
+    message_proto::{
+        option_message::BoolOption, permission_info::Permission, SessionPermissionRequest,
+        SessionPermissionResponse,
+    },
     password_security::{self as password, ApproveMode},
     sha2::{Digest, Sha256},
     sleep, timeout,
@@ -51,7 +54,7 @@ use serde_json::{json, value::Value};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use std::sync::atomic::Ordering;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     net::Ipv6Addr,
     num::NonZeroI64,
     path::PathBuf,
@@ -187,6 +190,13 @@ struct Session {
     random_password: String,
     tfa: bool,
     auth_kind: SessionAuthKind,
+    grants: SessionPermissionGrants,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SessionPermissionGrants {
+    permissions: HashSet<String>,
+    connection_types: HashSet<String>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -220,6 +230,10 @@ impl SessionAuthKind {
     fn is_unattended_access(self) -> bool {
         self == Self::UnattendedPassword
     }
+
+    fn is_low_permission_support(self) -> bool {
+        !self.is_unattended_access()
+    }
 }
 
 fn privacy_mode_policy_denial_reason(
@@ -235,12 +249,85 @@ fn privacy_mode_policy_denial_reason(
     None
 }
 
+fn switch_permission_from_name(name: &str) -> Option<Permission> {
+    match name {
+        "keyboard" => Some(Permission::Keyboard),
+        "clipboard" => Some(Permission::Clipboard),
+        "audio" => Some(Permission::Audio),
+        "file" => Some(Permission::File),
+        "restart" => Some(Permission::Restart),
+        "recording" => Some(Permission::Recording),
+        "block_input" => Some(Permission::BlockInput),
+        _ => None,
+    }
+}
+
+fn low_permission_default(name: &str, current: bool) -> bool {
+    match name {
+        // Low-permission support sessions still allow basic interactive help.
+        "keyboard" => current,
+        _ => false,
+    }
+}
+
+fn session_default_permission(auth_kind: SessionAuthKind, name: &str, current: bool) -> bool {
+    if auth_kind.is_unattended_access() {
+        current
+    } else {
+        low_permission_default(name, current)
+    }
+}
+
+#[cfg(test)]
+fn switch_permission_policy_denial_reason(
+    auth_kind: SessionAuthKind,
+    name: &str,
+    enabled: bool,
+) -> Option<&'static str> {
+    switch_permission_policy_denial_reason_with_grant(auth_kind, name, enabled, false)
+}
+
+fn switch_permission_policy_denial_reason_with_grant(
+    auth_kind: SessionAuthKind,
+    name: &str,
+    enabled: bool,
+    has_grant: bool,
+) -> Option<&'static str> {
+    if !enabled
+        || auth_kind.is_unattended_access()
+        || low_permission_default(name, true)
+        || has_grant
+    {
+        return None;
+    }
+    Some("Permission upgrades require local approval for this session.")
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 struct StartCmIpcPara {
     rx_to_cm: mpsc::UnboundedReceiver<ipc::Data>,
     tx_from_cm: mpsc::UnboundedSender<ipc::Data>,
     rx_desktop_ready: mpsc::Receiver<()>,
     tx_cm_stream_ready: mpsc::Sender<()>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingPermissionRequest {
+    name: String,
+    enabled: bool,
+    requested_at: Instant,
+}
+
+fn pending_permission_response_values<'a>(
+    pending: &'a PendingPermissionRequest,
+    response_name: &str,
+    response_enabled: bool,
+) -> (&'a str, bool, bool) {
+    (
+        pending.name.as_str(),
+        pending.enabled,
+        pending.name != response_name || pending.enabled != response_enabled,
+    )
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -250,6 +337,72 @@ pub enum AuthConnType {
     PortForward,
     ViewCamera,
     Terminal,
+}
+
+#[cfg(test)]
+fn connection_policy_denial_reason(
+    auth_kind: SessionAuthKind,
+    conn_type: AuthConnType,
+) -> Option<&'static str> {
+    connection_policy_denial_reason_with_grant(auth_kind, conn_type, false)
+}
+
+fn connection_policy_denial_reason_with_grant(
+    auth_kind: SessionAuthKind,
+    conn_type: AuthConnType,
+    has_grant: bool,
+) -> Option<&'static str> {
+    if !auth_kind.is_low_permission_support() || has_grant {
+        return None;
+    }
+    match conn_type {
+        AuthConnType::Remote => None,
+        AuthConnType::FileTransfer => {
+            Some("File transfer requires local approval for this session.")
+        }
+        AuthConnType::PortForward => Some("IP tunneling requires local approval for this session."),
+        AuthConnType::ViewCamera => {
+            Some("Camera viewing requires local approval for this session.")
+        }
+        AuthConnType::Terminal => Some("Terminal access requires local approval for this session."),
+    }
+}
+
+fn connection_type_grant_name(conn_type: AuthConnType) -> &'static str {
+    match conn_type {
+        AuthConnType::Remote => "remote",
+        AuthConnType::FileTransfer => "file_transfer",
+        AuthConnType::PortForward => "port_forward",
+        AuthConnType::ViewCamera => "view_camera",
+        AuthConnType::Terminal => "terminal",
+    }
+}
+
+fn permission_request_connection_type(name: &str) -> Option<AuthConnType> {
+    match name {
+        "file_transfer" => Some(AuthConnType::FileTransfer),
+        "port_forward" => Some(AuthConnType::PortForward),
+        "view_camera" => Some(AuthConnType::ViewCamera),
+        "terminal" => Some(AuthConnType::Terminal),
+        _ => None,
+    }
+}
+
+fn permission_request_label(name: &str) -> &'static str {
+    match name {
+        "keyboard" => "keyboard and mouse control",
+        "clipboard" => "clipboard access",
+        "audio" => "audio",
+        "file" => "file copy and paste",
+        "file_transfer" => "file transfer",
+        "restart" => "remote restart",
+        "recording" => "session recording",
+        "block_input" => "blocking local input",
+        "port_forward" => "TCP tunneling",
+        "view_camera" => "camera viewing",
+        "terminal" => "terminal access",
+        _ => "permission",
+    }
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -369,6 +522,7 @@ pub struct Connection {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     terminal_user_token: Option<TerminalUserToken>,
     terminal_generic_service: Option<Box<GenericService>>,
+    pending_permission_requests: HashMap<u64, PendingPermissionRequest>,
 }
 
 impl ConnInner {
@@ -547,6 +701,7 @@ impl Connection {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             terminal_user_token: None,
             terminal_generic_service: None,
+            pending_permission_requests: HashMap::new(),
         };
         let addr = hbb_common::try_into_v4(addr);
         if !conn.on_open(addr).await {
@@ -663,74 +818,36 @@ impl Connection {
                         }
                         ipc::Data::SwitchPermission{name, enabled} => {
                             log::info!("Change permission {} -> {}", name, enabled);
-                            if &name == "keyboard" {
-                                conn.keyboard = enabled;
-                                conn.send_permission(Permission::Keyboard, enabled).await;
-                                if let Some(s) = conn.server.upgrade() {
-                                    s.write().unwrap().subscribe(
-                                        super::clipboard_service::NAME,
-                                        conn.inner.clone(), conn.can_sub_clipboard_service());
-                                    #[cfg(feature = "unix-file-copy-paste")]
-                                    s.write().unwrap().subscribe(
-                                        super::clipboard_service::FILE_NAME,
-                                        conn.inner.clone(),
-                                        conn.can_sub_file_clipboard_service(),
-                                    );
-                                    s.write().unwrap().subscribe(
-                                        NAME_CURSOR,
-                                        conn.inner.clone(), enabled || conn.show_remote_cursor);
+                            if let Some(reason) = switch_permission_policy_denial_reason_with_grant(
+                                conn.session_auth_kind,
+                                &name,
+                                enabled,
+                                conn.session_permission_granted(&name),
+                            ) {
+                                log::warn!(
+                                    "Denied permission change {} -> {} for {} session: {}",
+                                    name,
+                                    enabled,
+                                    conn.session_auth_kind.as_str(),
+                                    reason
+                                );
+                                if let Some(permission) = switch_permission_from_name(&name) {
+                                    conn.send_permission(permission, false).await;
                                 }
-                            } else if &name == "clipboard" {
-                                conn.clipboard = enabled;
-                                conn.send_permission(Permission::Clipboard, enabled).await;
-                                if let Some(s) = conn.server.upgrade() {
-                                    s.write().unwrap().subscribe(
-                                        super::clipboard_service::NAME,
-                                        conn.inner.clone(), conn.can_sub_clipboard_service());
-                                }
-                            } else if &name == "audio" {
-                                conn.audio = enabled;
-                                conn.send_permission(Permission::Audio, enabled).await;
-                                if conn.authorized {
-                                    if let Some(s) = conn.server.upgrade() {
-                                        if conn.is_authed_view_camera_conn() {
-                                            if conn.voice_calling || !conn.audio_enabled() {
-                                                s.write().unwrap().subscribe(
-                                                    super::audio_service::NAME,
-                                                    conn.inner.clone(), conn.audio_enabled());
-                                            }
-                                        } else {
-                                            s.write().unwrap().subscribe(
-                                                super::audio_service::NAME,
-                                                conn.inner.clone(), conn.audio_enabled());
-                                        }
-                                    }
-                                }
-                            } else if &name == "file" {
-                                conn.file = enabled;
-                                conn.send_permission(Permission::File, enabled).await;
-                                #[cfg(feature = "unix-file-copy-paste")]
-                                if !enabled {
-                                    conn.try_empty_file_clipboard();
-                                }
-                                #[cfg(feature = "unix-file-copy-paste")]
-                                if let Some(s) = conn.server.upgrade() {
-                                    s.write().unwrap().subscribe(
-                                        super::clipboard_service::FILE_NAME,
-                                        conn.inner.clone(),
-                                        conn.can_sub_file_clipboard_service(),
-                                    );
-                                }
-                            } else if &name == "restart" {
-                                conn.restart = enabled;
-                                conn.send_permission(Permission::Restart, enabled).await;
-                            } else if &name == "recording" {
-                                conn.recording = enabled;
-                                conn.send_permission(Permission::Recording, enabled).await;
-                            } else if &name == "block_input" {
-                                conn.block_input = enabled;
-                                conn.send_permission(Permission::BlockInput, enabled).await;
+                                continue;
                             }
+                            conn.apply_switch_permission(&name, enabled).await;
+                        }
+                        ipc::Data::PermissionRequestResult {
+                            request_id,
+                            name,
+                            enabled,
+                            approved,
+                        } => {
+                            conn.handle_permission_request_result(
+                                request_id, name, enabled, approved,
+                            )
+                            .await;
                         }
                         ipc::Data::RawMessage(bytes) => {
                             allow_err!(conn.stream.send_raw(bytes).await);
@@ -1247,6 +1364,393 @@ impl Connection {
         self.send(msg_out).await;
     }
 
+    async fn send_session_permission_response(
+        &mut self,
+        request_id: u64,
+        name: String,
+        enabled: bool,
+        approved: bool,
+        reason: &str,
+    ) {
+        let mut misc = Misc::new();
+        misc.set_session_permission_response(SessionPermissionResponse {
+            request_id,
+            name,
+            enabled,
+            approved,
+            reason: reason.to_owned(),
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_misc(misc);
+        self.send(msg_out).await;
+    }
+
+    fn local_permission_enabled_for_request(&self, name: &str) -> bool {
+        let option = match name {
+            "keyboard" => keys::OPTION_ENABLE_KEYBOARD,
+            "clipboard" => keys::OPTION_ENABLE_CLIPBOARD,
+            "audio" => keys::OPTION_ENABLE_AUDIO,
+            "file" | "file_transfer" => keys::OPTION_ENABLE_FILE_TRANSFER,
+            "restart" => keys::OPTION_ENABLE_REMOTE_RESTART,
+            "recording" => keys::OPTION_ENABLE_RECORD_SESSION,
+            "block_input" => keys::OPTION_ENABLE_BLOCK_INPUT,
+            "port_forward" => keys::OPTION_ENABLE_TUNNEL,
+            "view_camera" => keys::OPTION_ENABLE_CAMERA,
+            "terminal" => keys::OPTION_ENABLE_TERMINAL,
+            _ => return false,
+        };
+        Self::permission(option, &self.control_permissions)
+    }
+
+    fn permission_request_denial_reason(&self, name: &str) -> Option<&'static str> {
+        if name == "privacy_mode" {
+            return Some("Privacy mode is available only for unattended access sessions.");
+        }
+        if switch_permission_from_name(name).is_none()
+            && permission_request_connection_type(name).is_none()
+        {
+            return Some("Unknown permission requested.");
+        }
+        if !self.local_permission_enabled_for_request(name) {
+            return Some("Permission is disabled on this device.");
+        }
+        None
+    }
+
+    fn session_permission_granted(&self, name: &str) -> bool {
+        SESSIONS
+            .lock()
+            .unwrap()
+            .get(&self.session_key())
+            .map(|s| s.grants.permissions.contains(name))
+            .unwrap_or(false)
+    }
+
+    fn session_connection_granted(&self, conn_type: AuthConnType) -> bool {
+        let grant_name = connection_type_grant_name(conn_type);
+        SESSIONS
+            .lock()
+            .unwrap()
+            .get(&self.session_key())
+            .map(|s| s.grants.connection_types.contains(grant_name))
+            .unwrap_or(false)
+    }
+
+    fn grant_session_permission(&self, name: &str) {
+        if let Some(session) = SESSIONS.lock().unwrap().get_mut(&self.session_key()) {
+            session.grants.permissions.insert(name.to_owned());
+        }
+    }
+
+    fn grant_session_connection(&self, conn_type: AuthConnType) {
+        if let Some(session) = SESSIONS.lock().unwrap().get_mut(&self.session_key()) {
+            session
+                .grants
+                .connection_types
+                .insert(connection_type_grant_name(conn_type).to_owned());
+        }
+    }
+
+    async fn apply_switch_permission(&mut self, name: &str, enabled: bool) {
+        if name == "keyboard" {
+            self.keyboard = enabled;
+            self.send_permission(Permission::Keyboard, enabled).await;
+            if let Some(s) = self.server.upgrade() {
+                s.write().unwrap().subscribe(
+                    super::clipboard_service::NAME,
+                    self.inner.clone(),
+                    self.can_sub_clipboard_service(),
+                );
+                #[cfg(feature = "unix-file-copy-paste")]
+                s.write().unwrap().subscribe(
+                    super::clipboard_service::FILE_NAME,
+                    self.inner.clone(),
+                    self.can_sub_file_clipboard_service(),
+                );
+                s.write().unwrap().subscribe(
+                    NAME_CURSOR,
+                    self.inner.clone(),
+                    enabled || self.show_remote_cursor,
+                );
+            }
+        } else if name == "clipboard" {
+            self.clipboard = enabled;
+            self.send_permission(Permission::Clipboard, enabled).await;
+            if let Some(s) = self.server.upgrade() {
+                s.write().unwrap().subscribe(
+                    super::clipboard_service::NAME,
+                    self.inner.clone(),
+                    self.can_sub_clipboard_service(),
+                );
+            }
+        } else if name == "audio" {
+            self.audio = enabled;
+            self.send_permission(Permission::Audio, enabled).await;
+            if self.authorized {
+                if let Some(s) = self.server.upgrade() {
+                    if self.is_authed_view_camera_conn() {
+                        if self.voice_calling || !self.audio_enabled() {
+                            s.write().unwrap().subscribe(
+                                super::audio_service::NAME,
+                                self.inner.clone(),
+                                self.audio_enabled(),
+                            );
+                        }
+                    } else {
+                        s.write().unwrap().subscribe(
+                            super::audio_service::NAME,
+                            self.inner.clone(),
+                            self.audio_enabled(),
+                        );
+                    }
+                }
+            }
+        } else if name == "file" {
+            self.file = enabled;
+            self.send_permission(Permission::File, enabled).await;
+            #[cfg(feature = "unix-file-copy-paste")]
+            if !enabled {
+                self.try_empty_file_clipboard();
+            }
+            #[cfg(feature = "unix-file-copy-paste")]
+            if let Some(s) = self.server.upgrade() {
+                s.write().unwrap().subscribe(
+                    super::clipboard_service::FILE_NAME,
+                    self.inner.clone(),
+                    self.can_sub_file_clipboard_service(),
+                );
+            }
+        } else if name == "restart" {
+            self.restart = enabled;
+            self.send_permission(Permission::Restart, enabled).await;
+        } else if name == "recording" {
+            self.recording = enabled;
+            self.send_permission(Permission::Recording, enabled).await;
+        } else if name == "block_input" {
+            self.block_input = enabled;
+            self.send_permission(Permission::BlockInput, enabled).await;
+        }
+    }
+
+    fn cleanup_pending_permission_requests(&mut self) {
+        self.pending_permission_requests
+            .retain(|_, r| r.requested_at.elapsed() < Duration::from_secs(120));
+    }
+
+    async fn approve_permission_request(&mut self, request_id: u64, name: String, enabled: bool) {
+        if let Some(conn_type) = permission_request_connection_type(&name) {
+            self.grant_session_connection(conn_type);
+        } else if switch_permission_from_name(&name).is_some() {
+            self.grant_session_permission(&name);
+            self.apply_switch_permission(&name, enabled).await;
+        }
+        self.send_session_permission_response(request_id, name, enabled, true, "")
+            .await;
+    }
+
+    async fn deny_permission_request(
+        &mut self,
+        request_id: u64,
+        name: String,
+        enabled: bool,
+        reason: &str,
+    ) {
+        self.send_session_permission_response(request_id, name, enabled, false, reason)
+            .await;
+    }
+
+    async fn handle_session_permission_request(&mut self, request: SessionPermissionRequest) {
+        self.cleanup_pending_permission_requests();
+        let name = request.name;
+        let enabled = request.enabled;
+        let request_id = request.request_id;
+        if request_id == 0 {
+            return;
+        }
+        if !enabled {
+            self.deny_permission_request(
+                request_id,
+                name,
+                enabled,
+                "Only enabling permissions can be requested.",
+            )
+            .await;
+            return;
+        }
+        if let Some(reason) = self.permission_request_denial_reason(&name) {
+            self.deny_permission_request(request_id, name, enabled, reason)
+                .await;
+            return;
+        }
+
+        let needs_approval = if let Some(conn_type) = permission_request_connection_type(&name) {
+            connection_policy_denial_reason_with_grant(
+                self.session_auth_kind,
+                conn_type,
+                self.session_connection_granted(conn_type),
+            )
+            .is_some()
+        } else {
+            switch_permission_policy_denial_reason_with_grant(
+                self.session_auth_kind,
+                &name,
+                enabled,
+                self.session_permission_granted(&name),
+            )
+            .is_some()
+        };
+
+        if !needs_approval {
+            self.approve_permission_request(request_id, name, enabled)
+                .await;
+            return;
+        }
+
+        if self.pending_permission_requests.len() >= 16 {
+            self.deny_permission_request(
+                request_id,
+                name,
+                enabled,
+                "Too many pending permission requests.",
+            )
+            .await;
+            return;
+        }
+        if self.pending_permission_requests.contains_key(&request_id) {
+            self.deny_permission_request(
+                request_id,
+                name,
+                enabled,
+                "Permission request id is already pending.",
+            )
+            .await;
+            return;
+        }
+        self.pending_permission_requests.insert(
+            request_id,
+            PendingPermissionRequest {
+                name: name.clone(),
+                enabled,
+                requested_at: Instant::now(),
+            },
+        );
+        log::info!(
+            "Forwarding permission request {} ({}) from {} session to local user",
+            request_id,
+            permission_request_label(&name),
+            self.session_auth_kind.as_str()
+        );
+        self.send_to_cm(ipc::Data::PermissionRequest {
+            request_id,
+            name,
+            enabled,
+        });
+    }
+
+    async fn handle_permission_request_result(
+        &mut self,
+        request_id: u64,
+        name: String,
+        enabled: bool,
+        approved: bool,
+    ) {
+        self.cleanup_pending_permission_requests();
+        let pending = self.pending_permission_requests.remove(&request_id);
+        let Some(pending) = pending else {
+            log::warn!("Ignoring unknown permission request result {}", request_id);
+            return;
+        };
+        let (pending_name, pending_enabled, metadata_mismatch) =
+            pending_permission_response_values(&pending, &name, enabled);
+        let pending_name = pending_name.to_owned();
+        if metadata_mismatch {
+            log::warn!(
+                "Permission request result metadata mismatch for {}: expected {} -> {}, got {} -> {}",
+                request_id,
+                pending_name,
+                pending_enabled,
+                name,
+                enabled
+            );
+        }
+        if pending.requested_at.elapsed() >= Duration::from_secs(120) {
+            self.deny_permission_request(
+                request_id,
+                pending_name,
+                pending_enabled,
+                "Permission request expired.",
+            )
+            .await;
+            return;
+        }
+        if !approved {
+            self.deny_permission_request(
+                request_id,
+                pending_name,
+                pending_enabled,
+                "Permission request declined.",
+            )
+            .await;
+            return;
+        }
+        if let Some(reason) = self.permission_request_denial_reason(&pending_name) {
+            self.deny_permission_request(request_id, pending_name, pending_enabled, reason)
+                .await;
+            return;
+        }
+        self.approve_permission_request(request_id, pending_name, pending_enabled)
+            .await;
+    }
+
+    fn apply_session_permission_defaults(&mut self) -> Vec<(Permission, bool)> {
+        let mut changed = Vec::new();
+        macro_rules! apply {
+            ($name:literal, $field:ident, $permission:expr) => {{
+                let allowed =
+                    session_default_permission(self.session_auth_kind, $name, self.$field);
+                if self.$field != allowed {
+                    self.$field = allowed;
+                    changed.push(($permission, allowed));
+                }
+            }};
+        }
+
+        apply!("keyboard", keyboard, Permission::Keyboard);
+        apply!("clipboard", clipboard, Permission::Clipboard);
+        apply!("audio", audio, Permission::Audio);
+        apply!("file", file, Permission::File);
+        apply!("restart", restart, Permission::Restart);
+        apply!("recording", recording, Permission::Recording);
+        apply!("block_input", block_input, Permission::BlockInput);
+        changed
+    }
+
+    async fn send_permission_updates(&mut self, updates: Vec<(Permission, bool)>) {
+        for (permission, enabled) in updates {
+            self.send_permission(permission, enabled).await;
+        }
+    }
+
+    fn session_connection_policy_denial_reason(&self) -> Option<&'static str> {
+        let conn_type = if self.file_transfer.is_some() {
+            AuthConnType::FileTransfer
+        } else if self.port_forward_socket.is_some() || !self.port_forward_address.is_empty() {
+            AuthConnType::PortForward
+        } else if self.view_camera {
+            AuthConnType::ViewCamera
+        } else if self.terminal {
+            AuthConnType::Terminal
+        } else {
+            AuthConnType::Remote
+        };
+        connection_policy_denial_reason_with_grant(
+            self.session_auth_kind,
+            conn_type,
+            self.session_connection_granted(conn_type),
+        )
+    }
+
     async fn check_privacy_mode_on(&mut self) -> bool {
         if privacy_mode::is_in_privacy_mode() {
             self.send_login_error("Someone turns on privacy mode, exit")
@@ -1504,6 +2008,30 @@ impl Connection {
             // Keep the connection alive so the client can continue with 2FA.
             return true;
         }
+        if let Some(reason) = self.session_connection_policy_denial_reason() {
+            log::warn!(
+                "Denied {} connection for {} session: {}",
+                if self.file_transfer.is_some() {
+                    "file-transfer"
+                } else if self.port_forward_socket.is_some()
+                    || !self.port_forward_address.is_empty()
+                {
+                    "port-forward"
+                } else if self.view_camera {
+                    "view-camera"
+                } else if self.terminal {
+                    "terminal"
+                } else {
+                    "remote"
+                },
+                self.session_auth_kind.as_str(),
+                reason
+            );
+            self.send_login_error(reason).await;
+            sleep(1.).await;
+            return false;
+        }
+        let permission_updates = self.apply_session_permission_defaults();
         if !self.connect_port_forward_if_needed().await {
             return false;
         }
@@ -1629,6 +2157,7 @@ impl Connection {
             res.set_peer_info(pi);
             msg_out.set_login_response(res);
             self.send(msg_out).await;
+            self.send_permission_updates(permission_updates).await;
             return true;
         }
         #[cfg(target_os = "linux")]
@@ -1777,6 +2306,7 @@ impl Connection {
         let mut msg_out = Message::new();
         msg_out.set_login_response(res);
         self.send(msg_out).await;
+        self.send_permission_updates(permission_updates).await;
         if let Some(o) = self.options_in_login.take() {
             self.update_options(&o).await;
         }
@@ -1941,6 +2471,11 @@ impl Connection {
     }
 
     fn try_start_cm(&mut self, peer_id: String, name: String, authorized: bool) {
+        let cm_auth_kind = if authorized {
+            self.session_auth_kind
+        } else {
+            SessionAuthKind::ClickApproval
+        };
         self.send_to_cm(ipc::Data::Login {
             id: self.inner.id(),
             is_file_transfer: self.file_transfer.is_some(),
@@ -1951,14 +2486,14 @@ impl Connection {
             name,
             avatar: self.lr.avatar.clone(),
             authorized,
-            keyboard: self.keyboard,
-            clipboard: self.clipboard,
-            audio: self.audio,
-            file: self.file,
-            file_transfer_enabled: self.file,
-            restart: self.restart,
-            recording: self.recording,
-            block_input: self.block_input,
+            keyboard: session_default_permission(cm_auth_kind, "keyboard", self.keyboard),
+            clipboard: session_default_permission(cm_auth_kind, "clipboard", self.clipboard),
+            audio: session_default_permission(cm_auth_kind, "audio", self.audio),
+            file: session_default_permission(cm_auth_kind, "file", self.file),
+            file_transfer_enabled: session_default_permission(cm_auth_kind, "file", self.file),
+            restart: session_default_permission(cm_auth_kind, "restart", self.restart),
+            recording: session_default_permission(cm_auth_kind, "recording", self.recording),
+            block_input: session_default_permission(cm_auth_kind, "block_input", self.block_input),
             from_switch: self.from_switch,
         });
     }
@@ -3268,6 +3803,9 @@ impl Connection {
                     }
                     Some(misc::Union::TogglePrivacyMode(t)) => {
                         self.toggle_privacy_mode(t).await;
+                    }
+                    Some(misc::Union::SessionPermissionRequest(request)) => {
+                        self.handle_session_permission_request(request).await;
                     }
                     Some(misc::Union::ChatMessage(c)) => {
                         self.send_to_cm(ipc::Data::ChatMessage { text: c.text });
@@ -5762,6 +6300,7 @@ mod raii {
                         tfa: tfa.unwrap_or_default(),
                         auth_kind: auth_kind.unwrap_or_default(),
                         last_recv_time: Arc::new(Mutex::new(Instant::now())),
+                        grants: SessionPermissionGrants::default(),
                     },
                 );
             }
@@ -5781,6 +6320,7 @@ mod raii {
                         random_password: "".to_owned(),
                         tfa: true,
                         auth_kind,
+                        grants: SessionPermissionGrants::default(),
                     },
                 );
             }
@@ -5933,6 +6473,176 @@ mod test {
             privacy_mode_policy_denial_reason(SessionAuthKind::UnattendedPassword, "Y"),
             None
         );
+    }
+
+    #[test]
+    fn low_permission_defaults_allow_only_interactive_help() {
+        assert!(session_default_permission(
+            SessionAuthKind::OneTimePassword,
+            "keyboard",
+            true
+        ));
+        assert!(!session_default_permission(
+            SessionAuthKind::OneTimePassword,
+            "keyboard",
+            false
+        ));
+        for name in [
+            "clipboard",
+            "audio",
+            "file",
+            "restart",
+            "recording",
+            "block_input",
+        ] {
+            assert!(!session_default_permission(
+                SessionAuthKind::OneTimePassword,
+                name,
+                true
+            ));
+            assert!(!session_default_permission(
+                SessionAuthKind::ClickApproval,
+                name,
+                true
+            ));
+            assert!(session_default_permission(
+                SessionAuthKind::UnattendedPassword,
+                name,
+                true
+            ));
+        }
+    }
+
+    #[test]
+    fn low_permission_sessions_cannot_directly_upgrade_sensitive_permissions() {
+        assert_eq!(
+            switch_permission_policy_denial_reason(
+                SessionAuthKind::OneTimePassword,
+                "clipboard",
+                true
+            ),
+            Some("Permission upgrades require local approval for this session.")
+        );
+        assert_eq!(
+            switch_permission_policy_denial_reason(SessionAuthKind::ClickApproval, "file", true),
+            Some("Permission upgrades require local approval for this session.")
+        );
+        assert_eq!(
+            switch_permission_policy_denial_reason(SessionAuthKind::Unknown, "block_input", true),
+            Some("Permission upgrades require local approval for this session.")
+        );
+        assert_eq!(
+            switch_permission_policy_denial_reason(
+                SessionAuthKind::OneTimePassword,
+                "clipboard",
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            switch_permission_policy_denial_reason(
+                SessionAuthKind::OneTimePassword,
+                "keyboard",
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            switch_permission_policy_denial_reason(
+                SessionAuthKind::UnattendedPassword,
+                "clipboard",
+                true
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn approved_low_permission_sessions_can_upgrade_requested_permissions() {
+        assert_eq!(
+            switch_permission_policy_denial_reason_with_grant(
+                SessionAuthKind::OneTimePassword,
+                "clipboard",
+                true,
+                true,
+            ),
+            None
+        );
+        assert_eq!(
+            switch_permission_policy_denial_reason_with_grant(
+                SessionAuthKind::ClickApproval,
+                "block_input",
+                true,
+                true,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn low_permission_sessions_require_approval_for_sensitive_connection_types() {
+        for conn_type in [
+            AuthConnType::FileTransfer,
+            AuthConnType::PortForward,
+            AuthConnType::ViewCamera,
+            AuthConnType::Terminal,
+        ] {
+            assert!(
+                connection_policy_denial_reason(SessionAuthKind::OneTimePassword, conn_type)
+                    .is_some()
+            );
+            assert!(
+                connection_policy_denial_reason(SessionAuthKind::ClickApproval, conn_type)
+                    .is_some()
+            );
+            assert_eq!(
+                connection_policy_denial_reason(SessionAuthKind::UnattendedPassword, conn_type),
+                None
+            );
+        }
+        assert_eq!(
+            connection_policy_denial_reason(SessionAuthKind::OneTimePassword, AuthConnType::Remote),
+            None
+        );
+    }
+
+    #[test]
+    fn approved_low_permission_sessions_can_open_sensitive_connection_types() {
+        for conn_type in [
+            AuthConnType::FileTransfer,
+            AuthConnType::PortForward,
+            AuthConnType::ViewCamera,
+            AuthConnType::Terminal,
+        ] {
+            assert_eq!(
+                connection_policy_denial_reason_with_grant(
+                    SessionAuthKind::OneTimePassword,
+                    conn_type,
+                    true,
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            permission_request_connection_type("terminal"),
+            Some(AuthConnType::Terminal)
+        );
+        assert_eq!(permission_request_connection_type("clipboard"), None);
+    }
+
+    #[test]
+    fn permission_request_result_uses_host_pending_metadata() {
+        let pending = PendingPermissionRequest {
+            name: "clipboard".to_owned(),
+            enabled: true,
+            requested_at: Instant::now(),
+        };
+        let (name, enabled, mismatch) =
+            pending_permission_response_values(&pending, "terminal", false);
+
+        assert_eq!(name, "clipboard");
+        assert!(enabled);
+        assert!(mismatch);
     }
 
     #[test]

@@ -24,7 +24,8 @@ if ([string]::IsNullOrWhiteSpace($CargoTargetDir)) {
     $CargoTargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $Drive "GH\rustdesk-target-win" }
 }
 if ([string]::IsNullOrWhiteSpace($FlutterRoot)) {
-    $FlutterRoot = if ($env:RUSTDESK_FLUTTER_ROOT) { $env:RUSTDESK_FLUTTER_ROOT } else { "" }
+    $DefaultFlutterRoot = Join-Path $Drive "GH\flutter-win"
+    $FlutterRoot = if ($env:RUSTDESK_FLUTTER_ROOT) { $env:RUSTDESK_FLUTTER_ROOT } elseif (Test-Path (Join-Path $DefaultFlutterRoot "bin\flutter.bat")) { $DefaultFlutterRoot } else { "" }
 }
 
 $env:PUB_CACHE = $PubCache

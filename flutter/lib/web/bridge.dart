@@ -210,6 +210,11 @@ class RustdeskImpl {
         ]));
   }
 
+  Future<void> sessionRequestPermission(
+      {required UuidValue sessionId, required String name, dynamic hint}) {
+    throw UnimplementedError("sessionRequestPermission");
+  }
+
   Future<String?> sessionGetFlutterOption(
       {required UuidValue sessionId, required String k, dynamic hint}) {
     return Future(
@@ -1400,6 +1405,16 @@ class RustdeskImpl {
       required bool enabled,
       dynamic hint}) {
     throw UnimplementedError("cmSwitchPermission");
+  }
+
+  Future<void> cmRespondPermissionRequest(
+      {required int connId,
+      required String requestId,
+      required String name,
+      required bool enabled,
+      required bool approved,
+      dynamic hint}) {
+    throw UnimplementedError("cmRespondPermissionRequest");
   }
 
   bool cmCanElevate({dynamic hint}) {

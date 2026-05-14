@@ -79,7 +79,7 @@ class _AddressBookState extends State<AddressBook> {
             offstage: hideAbTagsPanel.value,
             child: Container(
               decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(8.0),
                   border: Border.all(
                       color: Theme.of(context).colorScheme.background)),
               child: Container(
