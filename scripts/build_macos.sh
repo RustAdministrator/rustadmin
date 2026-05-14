@@ -8,6 +8,11 @@ Usage: scripts/build_macos.sh [--clean] [--hwcodec] [--screencapturekit] [--skip
 Environment overrides:
   RUSTDESK_FLUTTER_ROOT       Flutter SDK root. Default: first flutter in PATH
   RUSTDESK_SKIP_BRIDGE_GEN    Set to 1 to skip flutter_rust_bridge codegen. Default: 0
+  RUSTDESK_FORCE_BRIDGE_GEN   Set to 1 to regenerate bridge files even if current. Default: 0
+  RUSTDESK_VERBOSE_BRIDGE_GEN Set to 1 to print bridge generator output on success. Default: 0
+  RUSTDESK_BRIDGE_LLVM_COMPILER_OPTS
+                              Extra clang opts for bridge codegen.
+                              Default: -Wno-nullability-completeness
   RUSTDESK_MACOS_CODEC_ROOT   Native dependency prefix. Optional
   RUSTDESK_MACOS_SIGN_IDENTITY  Signing identity to use for the app bundle. Optional
   RUSTDESK_MACOS_XCODE_SIGN_IDENTITY Signing identity passed to Xcode. Optional
@@ -42,6 +47,9 @@ default_codec_root="$repo_root/.local/macos-codecs"
 app_bundle="$flutter_dir/build/macos/Build/Products/Release/RustDesk.app"
 adhoc_sign="${RUSTDESK_MACOS_ADHOC_SIGN:-0}"
 skip_bridge_gen="${RUSTDESK_SKIP_BRIDGE_GEN:-0}"
+force_bridge_gen="${RUSTDESK_FORCE_BRIDGE_GEN:-0}"
+verbose_bridge_gen="${RUSTDESK_VERBOSE_BRIDGE_GEN:-0}"
+bridge_llvm_compiler_opts="${RUSTDESK_BRIDGE_LLVM_COMPILER_OPTS:--Wno-nullability-completeness}"
 
 if [[ -n "${RUSTDESK_FLUTTER_ROOT:-}" ]]; then
   export PATH="$RUSTDESK_FLUTTER_ROOT/bin:$PATH"
@@ -138,6 +146,27 @@ generate_bridge_files() {
     return
   fi
 
+  local bridge_input="$repo_root/src/flutter_ffi.rs"
+  local bridge_outputs=(
+    "$flutter_dir/lib/generated_bridge.dart"
+    "$flutter_dir/macos/Runner/bridge_generated.h"
+    "$repo_root/src/bridge_generated.rs"
+  )
+  if [[ "$force_bridge_gen" != "1" ]]; then
+    local current=1
+    local output
+    for output in "${bridge_outputs[@]}"; do
+      if [[ ! -f "$output" || "$output" -ot "$bridge_input" ]]; then
+        current=0
+        break
+      fi
+    done
+    if [[ "$current" == "1" ]]; then
+      echo "flutter_rust_bridge files are current."
+      return
+    fi
+  fi
+
   local bridge_codegen
   bridge_codegen="$(command -v flutter_rust_bridge_codegen || true)"
   if [[ -z "$bridge_codegen" && -x "$HOME/.cargo/bin/flutter_rust_bridge_codegen" ]]; then
@@ -154,10 +183,26 @@ EOF
   fi
 
   echo "Generating flutter_rust_bridge files..."
-  "$bridge_codegen" \
-    --rust-input "$repo_root/src/flutter_ffi.rs" \
+  local bridge_log
+  bridge_log="$(mktemp "${TMPDIR:-/tmp}/rustdesk-bridge-gen.XXXXXX.log")"
+  bridge_codegen_args=(
+    --rust-input "$bridge_input" \
     --dart-output "$flutter_dir/lib/generated_bridge.dart" \
     --c-output "$flutter_dir/macos/Runner/bridge_generated.h"
+  )
+  if [[ -n "$bridge_llvm_compiler_opts" ]]; then
+    bridge_codegen_args+=(--llvm-compiler-opts="$bridge_llvm_compiler_opts")
+  fi
+  if "$bridge_codegen" "${bridge_codegen_args[@]}" >"$bridge_log" 2>&1; then
+    if [[ "$verbose_bridge_gen" == "1" ]]; then
+      cat "$bridge_log"
+    fi
+    rm -f "$bridge_log"
+  else
+    cat "$bridge_log" >&2
+    rm -f "$bridge_log"
+    exit 1
+  fi
 }
 
 package_config="$flutter_dir/.dart_tool/package_config.json"
