@@ -120,6 +120,34 @@ Final bundle:
 flutter/build/macos/Build/Products/Release
 ```
 
+Package, sign, and optionally notarize a distribution DMG:
+
+```bash
+SKIP_NOTARY=1 \
+SIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
+scripts/package_macos.sh
+```
+
+For notarization with an existing `notarytool` keychain profile:
+
+```bash
+SIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
+NOTARY_PROFILE="rustdesk-notary" \
+scripts/package_macos.sh
+```
+
+Portable notarization without storing credentials:
+
+```bash
+SIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
+NOTARY_APPLE_ID=developer@example.com \
+NOTARY_TEAM_ID=TEAMID \
+scripts/package_macos.sh
+```
+
+If `NOTARY_PASSWORD` is omitted, `xcrun notarytool` prompts for the
+app-specific password. The script does not store credentials.
+
 ## Do Not Distribute
 
 Do not ship or commit platform build state:
