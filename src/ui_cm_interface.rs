@@ -264,6 +264,18 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
             .unwrap()
             .retain(|_, c| !(c.disconnected && c.peer_id == client.peer_id));
         CLIENTS.write().unwrap().insert(id, client.clone());
+        log::info!(
+            "Connection manager added connection {}: authorized={}, permissions: keyboard={}, clipboard={}, audio={}, file={}, restart={}, recording={}, block_input={}",
+            id,
+            authorized,
+            keyboard,
+            clipboard,
+            audio,
+            file,
+            restart,
+            recording,
+            block_input
+        );
         self.ui_handler.add_connection(&client);
     }
 

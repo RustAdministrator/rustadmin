@@ -1751,7 +1751,11 @@ impl<T: InvokeUiSession> Remote<T> {
                         crate::clipboard::log_remote_debug_event(event);
                     }
                     Some(misc::Union::PermissionInfo(p)) => {
-                        log::info!("Change permission {:?} -> {}", p.permission, p.enabled);
+                        log::info!(
+                            "Host permission update received: {:?} -> {}",
+                            p.permission,
+                            p.enabled
+                        );
                         // https://github.com/rustdesk/rustdesk/issues/3703#issuecomment-1474734754
                         match p.permission.enum_value() {
                             Ok(Permission::Keyboard) => {
@@ -1805,6 +1809,14 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
                     }
                     Some(misc::Union::SessionPermissionResponse(r)) => {
+                        log::info!(
+                            "Host permission request response: request_id={}, name={}, enabled={}, approved={}, reason={}",
+                            r.request_id,
+                            r.name,
+                            r.enabled,
+                            r.approved,
+                            r.reason
+                        );
                         if r.approved
                             && matches!(
                                 r.name.as_str(),

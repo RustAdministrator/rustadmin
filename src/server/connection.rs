@@ -3,7 +3,7 @@ use super::{input_service::*, *};
 use crate::clipboard::try_empty_clipboard_files;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::clipboard::{update_clipboard, ClipboardSide};
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
 use crate::clipboard_file::*;
 #[cfg(target_os = "android")]
 use crate::keyboard::client::map_key_to_control_key;
@@ -268,6 +268,14 @@ fn low_permission_default(name: &str, current: bool) -> bool {
         "keyboard" => current,
         _ => false,
     }
+}
+
+fn file_clipboard_allowed(
+    clipboard_enabled: bool,
+    file_transfer_enabled: bool,
+    one_way_file_transfer: &str,
+) -> bool {
+    clipboard_enabled && file_transfer_enabled && one_way_file_transfer != "Y"
 }
 
 fn session_default_permission(auth_kind: SessionAuthKind, name: &str, current: bool) -> bool {
@@ -783,6 +791,11 @@ impl Connection {
                     match data {
                         ipc::Data::Authorize => {
                             conn.session_auth_kind = SessionAuthKind::ClickApproval;
+                            log::info!(
+                                "Connection {} approved by local user as {} session",
+                                conn.inner.id(),
+                                conn.session_auth_kind.as_str()
+                            );
                             conn.require_2fa.take();
                             if !conn.send_logon_response_and_keep_alive().await {
                                 break;
@@ -855,6 +868,13 @@ impl Connection {
                         #[cfg(target_os = "windows")]
                         ipc::Data::ClipboardFile(clip) => {
                             if !conn.is_remote() {
+                                continue;
+                            }
+                            if !conn.can_sub_file_clipboard_service() {
+                                log::warn!(
+                                    "Blocked clipboard file message to peer for {} session",
+                                    conn.session_auth_kind.as_str()
+                                );
                                 continue;
                             }
                             match clip {
@@ -1545,6 +1565,13 @@ impl Connection {
             self.grant_session_permission(&name);
             self.apply_switch_permission(&name, enabled).await;
         }
+        log::info!(
+            "Approved permission request {}: {} -> {} for {} session",
+            request_id,
+            name,
+            enabled,
+            self.session_auth_kind.as_str()
+        );
         self.send_session_permission_response(request_id, name, enabled, true, "")
             .await;
     }
@@ -1556,6 +1583,14 @@ impl Connection {
         enabled: bool,
         reason: &str,
     ) {
+        log::warn!(
+            "Denied permission request {}: {} -> {} for {} session: {}",
+            request_id,
+            name,
+            enabled,
+            self.session_auth_kind.as_str(),
+            reason
+        );
         self.send_session_permission_response(request_id, name, enabled, false, reason)
             .await;
     }
@@ -1703,27 +1738,36 @@ impl Connection {
             .await;
     }
 
-    fn apply_session_permission_defaults(&mut self) -> Vec<(Permission, bool)> {
-        let mut changed = Vec::new();
+    fn apply_session_permission_defaults(&mut self) {
         macro_rules! apply {
-            ($name:literal, $field:ident, $permission:expr) => {{
+            ($name:literal, $field:ident) => {{
                 let allowed =
                     session_default_permission(self.session_auth_kind, $name, self.$field);
                 if self.$field != allowed {
                     self.$field = allowed;
-                    changed.push(($permission, allowed));
                 }
             }};
         }
 
-        apply!("keyboard", keyboard, Permission::Keyboard);
-        apply!("clipboard", clipboard, Permission::Clipboard);
-        apply!("audio", audio, Permission::Audio);
-        apply!("file", file, Permission::File);
-        apply!("restart", restart, Permission::Restart);
-        apply!("recording", recording, Permission::Recording);
-        apply!("block_input", block_input, Permission::BlockInput);
-        changed
+        apply!("keyboard", keyboard);
+        apply!("clipboard", clipboard);
+        apply!("audio", audio);
+        apply!("file", file);
+        apply!("restart", restart);
+        apply!("recording", recording);
+        apply!("block_input", block_input);
+    }
+
+    fn effective_permission_updates(&self) -> Vec<(Permission, bool)> {
+        vec![
+            (Permission::Keyboard, self.keyboard),
+            (Permission::Clipboard, self.clipboard),
+            (Permission::Audio, self.audio),
+            (Permission::File, self.file),
+            (Permission::Restart, self.restart),
+            (Permission::Recording, self.recording),
+            (Permission::BlockInput, self.block_input),
+        ]
     }
 
     async fn send_permission_updates(&mut self, updates: Vec<(Permission, bool)>) {
@@ -2031,7 +2075,20 @@ impl Connection {
             sleep(1.).await;
             return false;
         }
-        let permission_updates = self.apply_session_permission_defaults();
+        self.apply_session_permission_defaults();
+        let permission_updates = self.effective_permission_updates();
+        log::info!(
+            "Authorized connection {} as {} session, effective permissions: keyboard={}, clipboard={}, audio={}, file={}, restart={}, recording={}, block_input={}",
+            self.inner.id(),
+            self.session_auth_kind.as_str(),
+            self.keyboard,
+            self.clipboard,
+            self.audio,
+            self.file,
+            self.restart,
+            self.recording,
+            self.block_input
+        );
         if !self.connect_port_forward_if_needed().await {
             return false;
         }
@@ -2463,11 +2520,13 @@ impl Connection {
         self.file && self.enable_file_transfer
     }
 
-    #[cfg(feature = "unix-file-copy-paste")]
+    #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
     fn can_sub_file_clipboard_service(&self) -> bool {
-        self.clipboard_enabled()
-            && self.file_transfer_enabled()
-            && crate::get_builtin_option(keys::OPTION_ONE_WAY_FILE_TRANSFER) != "Y"
+        file_clipboard_allowed(
+            self.clipboard_enabled(),
+            self.file_transfer_enabled(),
+            &crate::get_builtin_option(keys::OPTION_ONE_WAY_FILE_TRANSFER),
+        )
     }
 
     fn try_start_cm(&mut self, peer_id: String, name: String, authorized: bool) {
@@ -3421,6 +3480,13 @@ impl Connection {
                 }
                 #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
                 Some(message::Union::Cliprdr(clip)) => {
+                    if !self.can_sub_file_clipboard_service() {
+                        log::warn!(
+                            "Blocked clipboard file message from peer for {} session",
+                            self.session_auth_kind.as_str()
+                        );
+                        return true;
+                    }
                     if let Some(cliprdr::Union::Files(files)) = &clip.union {
                         self.post_file_audit(
                             FileAuditType::RemoteReceive,
@@ -6511,6 +6577,14 @@ mod test {
                 true
             ));
         }
+    }
+
+    #[test]
+    fn file_clipboard_requires_clipboard_and_file_permissions() {
+        assert!(file_clipboard_allowed(true, true, "N"));
+        assert!(!file_clipboard_allowed(false, true, "N"));
+        assert!(!file_clipboard_allowed(true, false, "N"));
+        assert!(!file_clipboard_allowed(true, true, "Y"));
     }
 
     #[test]
