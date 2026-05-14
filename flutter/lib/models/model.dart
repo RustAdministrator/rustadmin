@@ -56,6 +56,23 @@ typedef HandleMsgBox = Function(Map<String, dynamic> evt, String id);
 typedef ReconnectHandle = Function(OverlayDialogManager, SessionID, bool);
 final _constSessionId = Uuid().v4obj();
 
+const kRustAdminDefaultSessionPermissions = <String, bool>{
+  'keyboard': true,
+  'clipboard': false,
+  'audio': false,
+  'file': false,
+  'restart': false,
+  'recording': false,
+  'block_input': false,
+  'file_transfer': false,
+  'port_forward': false,
+  'view_camera': false,
+  'terminal': false,
+};
+
+Map<String, bool> rustAdminDefaultSessionPermissions() =>
+    Map<String, bool>.of(kRustAdminDefaultSessionPermissions);
+
 class CachedPeerData {
   Map<String, dynamic> updatePrivacyMode = {};
   Map<String, dynamic> peerInfo = {};
@@ -144,6 +161,7 @@ class FfiModel with ChangeNotifier {
   Map<String, bool> get permissions => _permissions;
   setPermissions(Map<String, bool> permissions) {
     _permissions.clear();
+    _permissions.addAll(kRustAdminDefaultSessionPermissions);
     _permissions.addAll(permissions);
   }
 
@@ -300,6 +318,7 @@ class FfiModel with ChangeNotifier {
   clearPermissions() {
     _inputBlocked = false;
     _permissions.clear();
+    _permissions.addAll(kRustAdminDefaultSessionPermissions);
   }
 
   handleCachedPeerData(CachedPeerData data, String peerId) async {

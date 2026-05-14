@@ -7,6 +7,7 @@ import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/pages/server_page.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
 import 'package:flutter_hbb/generated_bridge.dart';
+import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -196,6 +197,26 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   VisibilityDetectorController.instance.updateInterval = Duration.zero;
 
+  test('RustAdmin default viewer permissions fail closed', () {
+    final permissions = rustAdminDefaultSessionPermissions();
+
+    expect(permissions['keyboard'], isTrue);
+    for (final name in [
+      'clipboard',
+      'audio',
+      'file',
+      'restart',
+      'recording',
+      'block_input',
+      'file_transfer',
+      'port_forward',
+      'view_camera',
+      'terminal',
+    ]) {
+      expect(permissions[name], isFalse, reason: name);
+    }
+  });
+
   setUp(() async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
@@ -267,7 +288,8 @@ void main() {
     expect(tester.getRect(decline).center.dy, tester.getRect(allow).center.dy);
     expect(
         tester
-            .getTopLeft(find.byKey(const ValueKey('permission-request-overlay')))
+            .getTopLeft(
+                find.byKey(const ValueKey('permission-request-overlay')))
             .dy,
         greaterThanOrEqualTo(kDesktopRemoteTabBarHeight));
 
