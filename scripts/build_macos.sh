@@ -7,6 +7,7 @@ Usage: scripts/build_macos.sh [--clean] [--hwcodec] [--screencapturekit] [--skip
 
 Environment overrides:
   RUSTDESK_FLUTTER_ROOT       Flutter SDK root. Default: first flutter in PATH
+  RUSTDESK_SKIP_BRIDGE_GEN    Set to 1 to skip flutter_rust_bridge codegen. Default: 0
   RUSTDESK_MACOS_CODEC_ROOT   Native dependency prefix. Optional
   RUSTDESK_MACOS_SIGN_IDENTITY  Signing identity to use for the app bundle. Optional
   RUSTDESK_MACOS_XCODE_SIGN_IDENTITY Signing identity passed to Xcode. Optional
@@ -40,6 +41,7 @@ flutter_dir="$repo_root/flutter"
 default_codec_root="$repo_root/.local/macos-codecs"
 app_bundle="$flutter_dir/build/macos/Build/Products/Release/RustDesk.app"
 adhoc_sign="${RUSTDESK_MACOS_ADHOC_SIGN:-0}"
+skip_bridge_gen="${RUSTDESK_SKIP_BRIDGE_GEN:-0}"
 
 if [[ -n "${RUSTDESK_FLUTTER_ROOT:-}" ]]; then
   export PATH="$RUSTDESK_FLUTTER_ROOT/bin:$PATH"
@@ -130,6 +132,34 @@ pub const BUILD_DATE: &str = "$(date '+%Y-%m-%d %H:%M')";
 EOF
 }
 
+generate_bridge_files() {
+  if [[ "$skip_bridge_gen" == "1" ]]; then
+    echo "Skipping flutter_rust_bridge generation because RUSTDESK_SKIP_BRIDGE_GEN=1."
+    return
+  fi
+
+  local bridge_codegen
+  bridge_codegen="$(command -v flutter_rust_bridge_codegen || true)"
+  if [[ -z "$bridge_codegen" && -x "$HOME/.cargo/bin/flutter_rust_bridge_codegen" ]]; then
+    bridge_codegen="$HOME/.cargo/bin/flutter_rust_bridge_codegen"
+  fi
+  if [[ -z "$bridge_codegen" ]]; then
+    cat >&2 <<'EOF'
+flutter_rust_bridge_codegen was not found.
+Install it with:
+  cargo install flutter_rust_bridge_codegen --version 1.80.1 --features uuid
+or set RUSTDESK_SKIP_BRIDGE_GEN=1 if the generated files are already current.
+EOF
+    exit 1
+  fi
+
+  echo "Generating flutter_rust_bridge files..."
+  "$bridge_codegen" \
+    --rust-input "$repo_root/src/flutter_ffi.rs" \
+    --dart-output "$flutter_dir/lib/generated_bridge.dart" \
+    --c-output "$flutter_dir/macos/Runner/bridge_generated.h"
+}
+
 package_config="$flutter_dir/.dart_tool/package_config.json"
 if [[ "$clean" -eq 1 ]] ||
    [[ ! -f "$package_config" ]] ||
@@ -139,6 +169,8 @@ if [[ "$clean" -eq 1 ]] ||
 fi
 
 (cd "$flutter_dir" && flutter pub get)
+
+generate_bridge_files
 
 features="flutter"
 if [[ "$hwcodec" -eq 1 ]]; then
