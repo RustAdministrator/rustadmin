@@ -259,7 +259,7 @@ class UpdateProgressState extends State<UpdateProgress> {
     return LinearProgressIndicator(
       value: _isExtracting.isTrue ? null : getValue(),
       minHeight: 20,
-      borderRadius: BorderRadius.circular(5),
+      borderRadius: BorderRadius.circular(4.0),
       backgroundColor: Colors.grey[300],
       valueColor: const AlwaysStoppedAnimation<Color>(Colors.blue),
     );

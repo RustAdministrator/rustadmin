@@ -1516,6 +1516,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                   minHeight: _kSettingRowMinHeight,
                 ),
                 Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Flexible(
                       child: Tooltip(
@@ -1533,13 +1534,29 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                         ),
                       ),
                     ),
-                    ElevatedButton(
-                      onPressed: enabled && !locked
-                          ? () {
-                              managePairedViewersDialog();
-                            }
-                          : null,
-                      child: Text(translate('Manage paired viewers')),
+                    SizedBox(
+                      width: 220,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          ElevatedButton(
+                            onPressed: enabled && !locked
+                                ? () {
+                                    managePairedViewersDialog();
+                                  }
+                                : null,
+                            child: Text(translate('Manage paired viewers')),
+                          ).marginOnly(bottom: 8),
+                          OutlinedButton(
+                            onPressed: enabled && !locked
+                                ? () {
+                                    manageKnownHostsDialog();
+                                  }
+                                : null,
+                            child: Text(translate('Manage known hosts')),
+                          ),
+                        ],
+                      ),
                     )
                   ],
                 ),
@@ -1831,7 +1848,7 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
         onTap: onTap,
         trailing: trailing,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8.0),
+          borderRadius: BorderRadius.circular(4.0),
         ),
         contentPadding: EdgeInsets.symmetric(horizontal: 16),
         minLeadingWidth: 0,
@@ -2397,7 +2414,7 @@ class _AccountState extends State<_Account> {
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
               color: Theme.of(context).colorScheme.surfaceContainerHighest,
-              borderRadius: BorderRadius.circular(8.0),
+              borderRadius: BorderRadius.circular(4.0),
             ),
             child: Builder(builder: (context) {
               final avatarWidget = _buildUserAvatar();

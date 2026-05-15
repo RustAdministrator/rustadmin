@@ -596,7 +596,7 @@ class _RelativeMouseModeHint extends StatelessWidget {
         margin: const EdgeInsets.only(right: 8),
         decoration: BoxDecoration(
           color: Colors.orange.withOpacity(0.2),
-          borderRadius: BorderRadius.circular(4),
+          borderRadius: BorderRadius.circular(4.0),
           border: Border.all(color: Colors.orange.withOpacity(0.5)),
         ),
         child: Row(

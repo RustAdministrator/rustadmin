@@ -101,7 +101,7 @@ class _ToolbarLabPageState extends State<ToolbarLabPage> {
                     child: IgnorePointer(
                       child: DecoratedBox(
                         decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(26),
+                          borderRadius: BorderRadius.circular(4.0),
                           border: Border.all(
                             color: scheme.primary.withValues(alpha: 0.28),
                           ),
@@ -301,8 +301,8 @@ class _ToolbarLabPageState extends State<ToolbarLabPage> {
     final toolbarRect = _toolbarRect(_shape);
     final expanded = _shape == ToolbarLabShape.expanded;
     final borderRadius = expanded
-        ? const BorderRadius.all(Radius.circular(4))
-        : const BorderRadius.vertical(bottom: Radius.circular(5));
+        ? const BorderRadius.all(Radius.circular(4.0))
+        : const BorderRadius.vertical(bottom: Radius.circular(4.0));
 
     return Positioned(
       left: toolbarRect.left,
@@ -948,7 +948,7 @@ class _MockMonitorCard extends StatelessWidget {
       aspectRatio: 16 / 10,
       child: Container(
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(28),
+          borderRadius: BorderRadius.circular(4.0),
           border: Border.all(
             color: isDark
                 ? Colors.white.withValues(alpha: 0.08)

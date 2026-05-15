@@ -605,7 +605,7 @@ void showOptions(
               height: 40,
               decoration: BoxDecoration(
                   border: Border.all(color: Theme.of(context).hintColor),
-                  borderRadius: BorderRadius.circular(2),
+                  borderRadius: BorderRadius.circular(2.0),
                   color: i == cur ? numBgSelected : null),
               child: Center(
                   child: Text((i + 1).toString(),

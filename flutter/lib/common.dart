@@ -294,6 +294,21 @@ class MyTheme {
   // TextButton
   // Value is used to calculate "dialog.actionsPadding"
   static const double mobileTextButtonPaddingLR = 20;
+  static const double desktopButtonTargetHeight = 34.0;
+  // VisualDensity.compact subtracts 8 px from button constraints on desktop.
+  static const double desktopButtonMinimumHeight =
+      desktopButtonTargetHeight + 8.0;
+  static const TextStyle desktopButtonTextStyle = TextStyle(
+    fontSize: 16.0,
+    height: 1.0,
+    leadingDistribution: TextLeadingDistribution.even,
+  );
+  static const TextStyle desktopButtonTextStyleBold = TextStyle(
+    fontSize: 16.0,
+    fontWeight: FontWeight.bold,
+    height: 1.0,
+    leadingDistribution: TextLeadingDistribution.even,
+  );
 
   // TextButton on mobile needs a fixed padding, otherwise small buttons
   // like "OK" has a larger left/right padding.
@@ -301,7 +316,7 @@ class MyTheme {
     style: TextButton.styleFrom(
       padding: EdgeInsets.symmetric(horizontal: mobileTextButtonPaddingLR),
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8.0),
+        borderRadius: BorderRadius.circular(4.0),
       ),
     ),
   );
@@ -383,7 +398,7 @@ class MyTheme {
     dialogTheme: DialogThemeData(
       elevation: 15,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8.0),
+        borderRadius: BorderRadius.circular(4.0),
         side: BorderSide(
           width: 1,
           color: grayBg,
@@ -397,7 +412,7 @@ class MyTheme {
             filled: true,
             isDense: true,
             border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
+              borderRadius: BorderRadius.circular(4.0),
             ),
           )
         : null,
@@ -421,9 +436,11 @@ class MyTheme {
     textButtonTheme: (isDesktop || isWebDesktop)
         ? TextButtonThemeData(
             style: TextButton.styleFrom(
+              textStyle: desktopButtonTextStyle,
+              minimumSize: const Size(64, desktopButtonMinimumHeight),
               splashFactory: NoSplash.splashFactory,
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8.0),
+                borderRadius: BorderRadius.circular(4.0),
               ),
             ),
           )
@@ -431,8 +448,10 @@ class MyTheme {
     elevatedButtonTheme: ElevatedButtonThemeData(
       style: ElevatedButton.styleFrom(
         backgroundColor: MyTheme.accent,
+        textStyle: desktopButtonTextStyle,
+        minimumSize: const Size(64, desktopButtonMinimumHeight),
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8.0),
+          borderRadius: BorderRadius.circular(4.0),
         ),
       ),
     ),
@@ -440,8 +459,10 @@ class MyTheme {
       style: OutlinedButton.styleFrom(
         backgroundColor: grayBg,
         foregroundColor: Colors.black87,
+        textStyle: desktopButtonTextStyle,
+        minimumSize: const Size(64, desktopButtonMinimumHeight),
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8.0),
+          borderRadius: BorderRadius.circular(4.0),
         ),
       ),
     ),
@@ -461,7 +482,7 @@ class MyTheme {
               color: (isDesktop || isWebDesktop)
                   ? Color(0xFFECECEC)
                   : Colors.transparent),
-          borderRadius: BorderRadius.all(Radius.circular(8.0)),
+          borderRadius: BorderRadius.all(Radius.circular(4.0)),
         )),
   ).copyWith(
     extensions: <ThemeExtension<dynamic>>[
@@ -481,7 +502,7 @@ class MyTheme {
     dialogTheme: DialogThemeData(
       elevation: 15,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(8.0),
+        borderRadius: BorderRadius.circular(4.0),
         side: BorderSide(
           width: 1,
           color: Color(0xFF24252B),
@@ -495,7 +516,7 @@ class MyTheme {
             filled: true,
             isDense: true,
             border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
+              borderRadius: BorderRadius.circular(4.0),
             ),
           )
         : null,
@@ -522,11 +543,13 @@ class MyTheme {
     textButtonTheme: (isDesktop || isWebDesktop)
         ? TextButtonThemeData(
             style: TextButton.styleFrom(
+              textStyle: desktopButtonTextStyleBold,
+              minimumSize: const Size(64, desktopButtonMinimumHeight),
               splashFactory: NoSplash.splashFactory,
               disabledForegroundColor: Colors.white70,
               foregroundColor: Colors.white70,
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(8.0),
+                borderRadius: BorderRadius.circular(4.0),
               ),
             ),
           )
@@ -537,8 +560,10 @@ class MyTheme {
         foregroundColor: Colors.white,
         disabledForegroundColor: Colors.white70,
         disabledBackgroundColor: Colors.white10,
+        textStyle: desktopButtonTextStyleBold,
+        minimumSize: const Size(64, desktopButtonMinimumHeight),
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8.0),
+          borderRadius: BorderRadius.circular(4.0),
         ),
       ),
     ),
@@ -548,8 +573,10 @@ class MyTheme {
         side: BorderSide(color: Colors.white12, width: 0.5),
         disabledForegroundColor: Colors.white70,
         foregroundColor: Colors.white70,
+        textStyle: desktopButtonTextStyleBold,
+        minimumSize: const Size(64, desktopButtonMinimumHeight),
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8.0),
+          borderRadius: BorderRadius.circular(4.0),
         ),
       ),
     ),
@@ -568,7 +595,7 @@ class MyTheme {
     popupMenuTheme: PopupMenuThemeData(
         shape: RoundedRectangleBorder(
       side: BorderSide(color: Colors.white24),
-      borderRadius: BorderRadius.all(Radius.circular(8.0)),
+      borderRadius: BorderRadius.all(Radius.circular(4.0)),
     )),
   ).copyWith(
     extensions: <ThemeExtension<dynamic>>[
@@ -638,7 +665,8 @@ extension ParseToString on ThemeMode {
 }
 
 final ButtonStyle flatButtonStyle = TextButton.styleFrom(
-  minimumSize: Size(0, 36),
+  textStyle: MyTheme.desktopButtonTextStyle,
+  minimumSize: const Size(0, MyTheme.desktopButtonMinimumHeight),
   padding: EdgeInsets.symmetric(horizontal: 16.0, vertical: 10.0),
   shape: const RoundedRectangleBorder(
     borderRadius: BorderRadius.all(Radius.circular(2.0)),
@@ -1025,7 +1053,7 @@ void showToast(String text,
               decoration: BoxDecoration(
                 color: MyTheme.color(context).toastBg,
                 borderRadius: const BorderRadius.all(
-                  Radius.circular(20),
+                  Radius.circular(4.0),
                 ),
               ),
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 5),
@@ -3796,7 +3824,7 @@ class ComboBox extends StatelessWidget {
               : MyTheme.border,
         ),
         borderRadius:
-            BorderRadius.circular(8), //border raiuds of dropdown button
+            BorderRadius.circular(4.0), //border raiuds of dropdown button
       ),
       height: 42, // should be the height of a TextField
       child: Obx(() => DropdownButton<String>(

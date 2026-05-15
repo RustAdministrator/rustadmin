@@ -617,7 +617,7 @@ Future<bool?> loginDialog() async {
             ),
             onTap: onDialogCancel,
             hoverColor: Colors.red,
-            borderRadius: BorderRadius.circular(5),
+            borderRadius: BorderRadius.circular(4.0),
           ),
         ).marginOnly(top: 10, right: 15),
       ],

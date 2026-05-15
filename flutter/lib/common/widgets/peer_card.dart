@@ -1520,7 +1520,7 @@ Widget getOnline(double rightPadding, bool online) {
 Widget build_more(BuildContext context, {bool invert = false}) {
   final RxBool hover = false.obs;
   return InkWell(
-      borderRadius: BorderRadius.circular(8.0),
+      borderRadius: BorderRadius.circular(4.0),
       onTap: () {},
       onHover: (value) => hover.value = value,
       child: Obx(() => CircleAvatar(

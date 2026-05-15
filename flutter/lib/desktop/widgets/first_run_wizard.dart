@@ -452,7 +452,7 @@ class _FirstRunWizardDialogState extends State<FirstRunWizardDialog> {
           padding: const EdgeInsets.all(12),
           decoration: BoxDecoration(
             color: Theme.of(context).colorScheme.surfaceVariant.withOpacity(0.4),
-            borderRadius: BorderRadius.circular(8.0),
+            borderRadius: BorderRadius.circular(4.0),
           ),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -545,7 +545,7 @@ class _FirstRunWizardDialogState extends State<FirstRunWizardDialog> {
         const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
       ),
       shape: WidgetStatePropertyAll(
-        RoundedRectangleBorder(borderRadius: BorderRadius.circular(8.0)),
+        RoundedRectangleBorder(borderRadius: BorderRadius.circular(4.0)),
       ),
     );
     return Dialog(
@@ -705,7 +705,7 @@ class _WizardCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(8.0),
+        borderRadius: BorderRadius.circular(4.0),
         border: Border.all(color: Theme.of(context).dividerColor.withOpacity(0.4)),
       ),
       child: Row(

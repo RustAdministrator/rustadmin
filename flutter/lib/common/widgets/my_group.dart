@@ -62,7 +62,7 @@ class _MyGroupState extends State<MyGroup> {
       children: [
         Container(
           decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(8.0),
+              borderRadius: BorderRadius.circular(4.0),
               border:
                   Border.all(color: Theme.of(context).colorScheme.background)),
           child: Container(
@@ -98,7 +98,7 @@ class _MyGroupState extends State<MyGroup> {
       children: [
         Container(
           decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(6),
+              borderRadius: BorderRadius.circular(4.0),
               border:
                   Border.all(color: Theme.of(context).colorScheme.background)),
           child: Container(
@@ -250,7 +250,7 @@ class _MyGroupState extends State<MyGroup> {
                       padding: EdgeInsets.symmetric(horizontal: 3, vertical: 1),
                       decoration: BoxDecoration(
                           color: colorMe.withAlpha(20),
-                          borderRadius: BorderRadius.all(Radius.circular(2)),
+                          borderRadius: BorderRadius.all(Radius.circular(2.0)),
                           border: Border.all(color: colorMe.withAlpha(100))),
                       child: Text(
                         translate('Me'),

@@ -314,7 +314,7 @@ class ScamWarningDialogState extends State<ScamWarningDialog> {
 
     return AlertDialog(
       content: ClipRRect(
-        borderRadius: BorderRadius.circular(20.0),
+        borderRadius: BorderRadius.circular(4.0),
         child: SingleChildScrollView(
           child: Container(
             decoration: BoxDecoration(
@@ -817,7 +817,7 @@ class PaddingCard extends StatelessWidget {
         width: double.maxFinite,
         child: Card(
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8.0),
+            borderRadius: BorderRadius.circular(4.0),
           ),
           margin: const EdgeInsets.fromLTRB(12.0, 10.0, 12.0, 0),
           child: Padding(

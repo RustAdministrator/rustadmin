@@ -79,7 +79,7 @@ class _AddressBookState extends State<AddressBook> {
             offstage: hideAbTagsPanel.value,
             child: Container(
               decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(8.0),
+                  borderRadius: BorderRadius.circular(4.0),
                   border: Border.all(
                       color: Theme.of(context).colorScheme.background)),
               child: Container(
@@ -117,7 +117,7 @@ class _AddressBookState extends State<AddressBook> {
             offstage: hideAbTagsPanel.value,
             child: Container(
               decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(6),
+                  borderRadius: BorderRadius.circular(4.0),
                   border: Border.all(
                       color: Theme.of(context).colorScheme.background)),
               child: Container(
@@ -283,7 +283,7 @@ class _AddressBookState extends State<AddressBook> {
               hintText: translate('Search'),
               hintStyle: const TextStyle(fontSize: 12),
               border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: BorderRadius.circular(4.0),
               ),
             ),
           ).workaroundFreezeLinuxMint(),
@@ -787,7 +787,7 @@ class AddressBookTag extends StatelessWidget {
                 color: tags.contains(name)
                     ? gFFI.abModel.getCurrentAbTagColor(name)
                     : Theme.of(context).colorScheme.background,
-                borderRadius: BorderRadius.circular(4)),
+                borderRadius: BorderRadius.circular(4.0)),
             margin: const EdgeInsets.symmetric(horizontal: 4.0, vertical: 4.0),
             padding: const EdgeInsets.symmetric(vertical: 2.0, horizontal: 6.0),
             child: IntrinsicWidth(

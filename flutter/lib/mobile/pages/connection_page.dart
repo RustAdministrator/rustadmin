@@ -155,7 +155,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
         child: Ink(
           decoration: BoxDecoration(
             color: Theme.of(context).cardColor,
-            borderRadius: BorderRadius.all(Radius.circular(13)),
+            borderRadius: BorderRadius.all(Radius.circular(4.0)),
           ),
           child: Row(
             children: <Widget>[
@@ -295,7 +295,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
                                 ],
                               ),
                               child: ClipRRect(
-                                  borderRadius: BorderRadius.circular(5),
+                                  borderRadius: BorderRadius.circular(4.0),
                                   child: Material(
                                       elevation: 4,
                                       child: ConstrainedBox(

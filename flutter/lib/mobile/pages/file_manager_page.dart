@@ -729,7 +729,7 @@ class BottomSheetBody extends StatelessWidget {
             alignment: Alignment.centerLeft,
             decoration: BoxDecoration(
                 color: MyTheme.accent50,
-                borderRadius: BorderRadius.vertical(top: Radius.circular(10))),
+                borderRadius: BorderRadius.vertical(top: Radius.circular(4.0))),
             child: Padding(
               padding: EdgeInsets.symmetric(horizontal: 15),
               child: Row(

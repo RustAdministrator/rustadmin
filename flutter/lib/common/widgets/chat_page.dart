@@ -116,7 +116,7 @@ class ChatPage extends StatelessWidget implements PageShape {
                         fillColor: Theme.of(context).colorScheme.background,
                         contentPadding: EdgeInsets.all(10),
                         border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8.0),
+                          borderRadius: BorderRadius.circular(4.0),
                           borderSide: const BorderSide(
                             width: 1,
                             style: BorderStyle.solid,

@@ -1,8 +1,11 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/widgets/dialog.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/pages/server_page.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
@@ -30,7 +33,21 @@ final testClients = [
     ..disconnected = true,
 ];
 
+bool _testShouldBlockRustAdminGuiForActiveSessions = false;
+String _testKnownHostsJson = '';
+Map<String, Map<String, String>> _testPeerOptions = {};
+
 class _TestRustdeskImpl implements RustdeskImpl {
+  String _mainGetCommon(String key) {
+    if (key == 'should-block-rustadmin-gui-for-active-sessions') {
+      return _testShouldBlockRustAdminGuiForActiveSessions ? 'true' : 'false';
+    }
+    if (key == 'is-remote-modify-enabled-by-control-permissions') {
+      return '';
+    }
+    return '';
+  }
+
   @override
   dynamic noSuchMethod(Invocation invocation) {
     switch (invocation.memberName) {
@@ -43,10 +60,24 @@ class _TestRustdeskImpl implements RustdeskImpl {
       case #mainGetOptionsSync:
       case #mainGetPeerOptionSync:
       case #mainGetBuildinOption:
+      case #mainGetCommonSync:
       case #mainGetAppNameSync:
       case #mainUriPrefixSync:
       case #getLocalFlutterOption:
+        if (invocation.memberName == #mainGetCommonSync) {
+          final key = invocation.namedArguments[#key] as String;
+          return _mainGetCommon(key);
+        }
         return '';
+      case #mainGetCommon:
+        final key = invocation.namedArguments[#key] as String;
+        return Future<String>.value(_mainGetCommon(key));
+      case #mainGetPeerOption:
+        final id = invocation.namedArguments[#id] as String;
+        final key = invocation.namedArguments[#key] as String;
+        return Future<String>.value(_testPeerOptions[id]?[key] ?? '');
+      case #mainLoadRecentPeersForAb:
+        return Future<String>.value(_testKnownHostsJson);
       case #mainGetPeerSync:
         return '{"info":{}}';
       case #isIncomingOnly:
@@ -71,6 +102,7 @@ class _TestRustdeskImpl implements RustdeskImpl {
       case #cmRespondPermissionRequest:
       case #cmSwitchPermission:
       case #mainCheckMouseTime:
+      case #mainLoadRecentPeers:
       case #mainSetLocalOption:
       case #setLocalFlutterOption:
         return Future<void>.value();
@@ -124,6 +156,9 @@ Future<void> _initConnectionManagerTest() async {
   isTest = true;
   desktopType = DesktopType.cm;
   Get.testMode = true;
+  _testShouldBlockRustAdminGuiForActiveSessions = false;
+  _testKnownHostsJson = '';
+  _testPeerOptions = {};
   platformFFI.initForTest(_TestRustdeskImpl());
   await initGlobalFFI();
 }
@@ -217,6 +252,49 @@ void main() {
     }
   });
 
+  test('known hosts expose password, pinned key, and pairing memory', () async {
+    isTest = true;
+    platformFFI.initForTest(_TestRustdeskImpl());
+    _testKnownHostsJson = jsonEncode([
+      {
+        'id': 'peer-b',
+        'hostname': 'beta',
+        'platform': 'Linux',
+        'hash': '',
+      },
+      {
+        'id': 'peer-a',
+        'alias': 'Alias A',
+        'username': 'alice',
+        'hostname': 'alpha',
+        'platform': 'Windows',
+        'hash': 'saved',
+      },
+    ]);
+    _testPeerOptions = {
+      'peer-a': {
+        KnownHost.pinnedSigningKey: 'pinned',
+        KnownHost.directPairingConfirmed: '123',
+      },
+      'peer-b': {
+        KnownHost.rendezvousPairingConfirmed: '456',
+      },
+    };
+
+    final hosts = await KnownHost.get();
+
+    expect(hosts.map((host) => host.id), ['peer-a', 'peer-b']);
+    expect(hosts.first.displayName, 'Alias A');
+    expect(hosts.first.userAndHost, 'alice@alpha');
+    expect(hosts.first.hasPassword, isTrue);
+    expect(hosts.first.hasPinnedKey, isTrue);
+    expect(hosts.first.hasDirectPairingMemory, isTrue);
+    expect(hosts.first.hasRendezvousPairingMemory, isFalse);
+    expect(hosts.last.hasPassword, isFalse);
+    expect(hosts.last.hasPinnedKey, isFalse);
+    expect(hosts.last.hasRendezvousPairingMemory, isTrue);
+  });
+
   setUp(() async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
@@ -232,6 +310,14 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_windowManagerChannel, null);
     Get.reset();
+  });
+
+  test('remote CM modification cannot bypass active support-session block', () {
+    expect(allowRemoteCMModification(), isTrue);
+
+    _testShouldBlockRustAdminGuiForActiveSessions = true;
+
+    expect(allowRemoteCMModification(), isFalse);
   });
 
   testWidgets('renders seeded connection-manager clients', (tester) async {
