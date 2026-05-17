@@ -1113,17 +1113,23 @@ class _CmControlPanel extends StatelessWidget {
     assert(!(onClick == null && onTapDown == null));
     Widget textWidget;
     if (icon != null) {
-      textWidget = Text(
-        translate(text),
-        style: MyTheme.desktopButtonTextStyle.copyWith(color: textColor),
-        textAlign: TextAlign.center,
-      );
-    } else {
-      textWidget = Expanded(
+      textWidget = Transform.translate(
+        offset: const Offset(0, MyTheme.desktopButtonContentOffsetY),
         child: Text(
           translate(text),
           style: MyTheme.desktopButtonTextStyle.copyWith(color: textColor),
           textAlign: TextAlign.center,
+        ),
+      );
+    } else {
+      textWidget = Expanded(
+        child: Transform.translate(
+          offset: const Offset(0, MyTheme.desktopButtonContentOffsetY),
+          child: Text(
+            translate(text),
+            style: MyTheme.desktopButtonTextStyle.copyWith(color: textColor),
+            textAlign: TextAlign.center,
+          ),
         ),
       );
     }

@@ -295,6 +295,8 @@ class MyTheme {
   // Value is used to calculate "dialog.actionsPadding"
   static const double mobileTextButtonPaddingLR = 20;
   static const double desktopButtonTargetHeight = 34.0;
+  static const double desktopButtonContentOffsetY = -2.5;
+  static const double desktopButtonIconOffsetY = 1.0;
   // VisualDensity.compact subtracts 8 px from button constraints on desktop.
   static const double desktopButtonMinimumHeight =
       desktopButtonTargetHeight + 8.0;
@@ -309,6 +311,21 @@ class MyTheme {
     height: 1.0,
     leadingDistribution: TextLeadingDistribution.even,
   );
+
+  static Widget desktopButtonForegroundBuilder(
+      BuildContext context, Set<WidgetState> states, Widget? child) {
+    return Transform.translate(
+      offset: const Offset(0, desktopButtonContentOffsetY),
+      child: child,
+    );
+  }
+
+  static Widget desktopButtonIcon(Widget icon) {
+    return Transform.translate(
+      offset: const Offset(0, desktopButtonIconOffsetY),
+      child: icon,
+    );
+  }
 
   // TextButton on mobile needs a fixed padding, otherwise small buttons
   // like "OK" has a larger left/right padding.
@@ -438,6 +455,7 @@ class MyTheme {
             style: TextButton.styleFrom(
               textStyle: desktopButtonTextStyle,
               minimumSize: const Size(64, desktopButtonMinimumHeight),
+              foregroundBuilder: desktopButtonForegroundBuilder,
               splashFactory: NoSplash.splashFactory,
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(4.0),
@@ -450,6 +468,7 @@ class MyTheme {
         backgroundColor: MyTheme.accent,
         textStyle: desktopButtonTextStyle,
         minimumSize: const Size(64, desktopButtonMinimumHeight),
+        foregroundBuilder: desktopButtonForegroundBuilder,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(4.0),
         ),
@@ -461,6 +480,7 @@ class MyTheme {
         foregroundColor: Colors.black87,
         textStyle: desktopButtonTextStyle,
         minimumSize: const Size(64, desktopButtonMinimumHeight),
+        foregroundBuilder: desktopButtonForegroundBuilder,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(4.0),
         ),
@@ -545,6 +565,7 @@ class MyTheme {
             style: TextButton.styleFrom(
               textStyle: desktopButtonTextStyleBold,
               minimumSize: const Size(64, desktopButtonMinimumHeight),
+              foregroundBuilder: desktopButtonForegroundBuilder,
               splashFactory: NoSplash.splashFactory,
               disabledForegroundColor: Colors.white70,
               foregroundColor: Colors.white70,
@@ -562,6 +583,7 @@ class MyTheme {
         disabledBackgroundColor: Colors.white10,
         textStyle: desktopButtonTextStyleBold,
         minimumSize: const Size(64, desktopButtonMinimumHeight),
+        foregroundBuilder: desktopButtonForegroundBuilder,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(4.0),
         ),
@@ -575,6 +597,7 @@ class MyTheme {
         foregroundColor: Colors.white70,
         textStyle: desktopButtonTextStyleBold,
         minimumSize: const Size(64, desktopButtonMinimumHeight),
+        foregroundBuilder: desktopButtonForegroundBuilder,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(4.0),
         ),
@@ -667,6 +690,7 @@ extension ParseToString on ThemeMode {
 final ButtonStyle flatButtonStyle = TextButton.styleFrom(
   textStyle: MyTheme.desktopButtonTextStyle,
   minimumSize: const Size(0, MyTheme.desktopButtonMinimumHeight),
+  foregroundBuilder: MyTheme.desktopButtonForegroundBuilder,
   padding: EdgeInsets.symmetric(horizontal: 16.0, vertical: 10.0),
   shape: const RoundedRectangleBorder(
     borderRadius: BorderRadius.all(Radius.circular(2.0)),
@@ -3121,6 +3145,7 @@ Widget dialogButton(String text,
     TextStyle? style,
     ButtonStyle? buttonStyle}) {
   if (isDesktop || isWebDesktop) {
+    final desktopIcon = icon == null ? null : MyTheme.desktopButtonIcon(icon);
     if (isOutline) {
       return icon == null
           ? OutlinedButton(
@@ -3128,7 +3153,7 @@ Widget dialogButton(String text,
               child: Text(translate(text), style: style),
             )
           : OutlinedButton.icon(
-              icon: icon,
+              icon: desktopIcon!,
               onPressed: onPressed,
               label: Text(translate(text), style: style),
             );
@@ -3140,7 +3165,7 @@ Widget dialogButton(String text,
               child: Text(translate(text), style: style),
             )
           : ElevatedButton.icon(
-              icon: icon,
+              icon: desktopIcon!,
               style: ElevatedButton.styleFrom(elevation: 0).merge(buttonStyle),
               onPressed: onPressed,
               label: Text(translate(text), style: style),
