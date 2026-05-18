@@ -71,6 +71,7 @@ lazy_static::lazy_static! {
     static ref ASYNC_HTTP_STATUS : Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
     static ref TEMPORARY_PASSWD : Arc<Mutex<String>> = Arc::new(Mutex::new("".to_owned()));
     static ref IS_REMOTE_MODIFY_ENABLED_BY_CONTROL_PERMISSIONS : Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+    static ref SHOULD_BLOCK_RUSTADMIN_GUI_FOR_ACTIVE_SESSIONS : Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1352,6 +1353,9 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                             Ok(Some(ipc::Data::ControlPermissionsRemoteModify(v))) => {
                                 *IS_REMOTE_MODIFY_ENABLED_BY_CONTROL_PERMISSIONS.lock().unwrap() = v;
                             }
+                            Ok(Some(ipc::Data::ShouldBlockRustAdminGuiForActiveSessions(v))) => {
+                                *SHOULD_BLOCK_RUSTADMIN_GUI_FOR_ACTIVE_SESSIONS.lock().unwrap() = v;
+                            }
                             #[cfg(target_os = "windows")]
                             Ok(Some(ipc::Data::FileTransferEnabledState(v))) => {
                                 if let Some(enabled) = v {
@@ -1375,6 +1379,7 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                         c.send(&ipc::Data::Config(("temporary-password".to_owned(), None))).await.ok();
                         #[cfg(feature = "flutter")]
                         c.send(&ipc::Data::VideoConnCount(None)).await.ok();
+                        c.send(&ipc::Data::ShouldBlockRustAdminGuiForActiveSessions(None)).await.ok();
                         c.send(&ipc::Data::ControlPermissionsRemoteModify(None)).await.ok();
                         #[cfg(target_os = "windows")]
                         c.send(&ipc::Data::FileTransferEnabledState(None)).await.ok();
@@ -1706,6 +1711,12 @@ pub fn max_encrypt_len() -> usize {
 
 pub fn is_remote_modify_enabled_by_control_permissions() -> Option<bool> {
     *IS_REMOTE_MODIFY_ENABLED_BY_CONTROL_PERMISSIONS
+        .lock()
+        .unwrap()
+}
+
+pub fn should_block_rustadmin_gui_for_active_sessions() -> Option<bool> {
+    *SHOULD_BLOCK_RUSTADMIN_GUI_FOR_ACTIVE_SESSIONS
         .lock()
         .unwrap()
 }

@@ -3300,6 +3300,9 @@ Future<bool> canBeBlocked() async {
   }
   final shouldBlockBySessionPolicy = await bind.mainGetCommon(
       key: "should-block-rustadmin-gui-for-active-sessions");
+  if (shouldBlockBySessionPolicy == "true") {
+    return true;
+  }
   if (shouldBlockBySessionPolicy == "false") {
     return false;
   }

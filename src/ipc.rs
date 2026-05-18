@@ -456,6 +456,7 @@ pub enum Data {
     SocksWs(Option<Box<(Option<config::Socks5Server>, String)>>),
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     Whiteboard((String, crate::whiteboard::CustomEvent)),
+    ShouldBlockRustAdminGuiForActiveSessions(Option<bool>),
     ControlPermissionsRemoteModify(Option<bool>),
     #[cfg(target_os = "windows")]
     FileTransferEnabledState(Option<bool>),
@@ -1097,6 +1098,14 @@ async fn handle(data: Data, stream: &mut Connection) {
             allow_err!(
                 stream
                     .send(&Data::ControlPermissionsRemoteModify(state))
+                    .await
+            );
+        }
+        Data::ShouldBlockRustAdminGuiForActiveSessions(_) => {
+            let state = crate::server::should_block_rustadmin_gui_for_active_sessions();
+            allow_err!(
+                stream
+                    .send(&Data::ShouldBlockRustAdminGuiForActiveSessions(Some(state)))
                     .await
             );
         }

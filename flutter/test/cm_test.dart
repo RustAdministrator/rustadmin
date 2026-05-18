@@ -34,6 +34,7 @@ final testClients = [
 ];
 
 bool _testShouldBlockRustAdminGuiForActiveSessions = false;
+String _testRemoteModifyControlPermission = '';
 String _testKnownHostsJson = '';
 Map<String, Map<String, String>> _testPeerOptions = {};
 
@@ -43,7 +44,7 @@ class _TestRustdeskImpl implements RustdeskImpl {
       return _testShouldBlockRustAdminGuiForActiveSessions ? 'true' : 'false';
     }
     if (key == 'is-remote-modify-enabled-by-control-permissions') {
-      return '';
+      return _testRemoteModifyControlPermission;
     }
     return '';
   }
@@ -72,6 +73,15 @@ class _TestRustdeskImpl implements RustdeskImpl {
       case #mainGetCommon:
         final key = invocation.namedArguments[#key] as String;
         return Future<String>.value(_mainGetCommon(key));
+      case #mainGetOption:
+        final key = invocation.namedArguments[#key] as String;
+        if (key == kOptionAccessMode) {
+          return Future<String>.value('full');
+        }
+        if (key == kOptionAllowRemoteConfigModification) {
+          return Future<String>.value('Y');
+        }
+        return Future<String>.value('');
       case #mainGetPeerOption:
         final id = invocation.namedArguments[#id] as String;
         final key = invocation.namedArguments[#key] as String;
@@ -157,6 +167,7 @@ Future<void> _initConnectionManagerTest() async {
   desktopType = DesktopType.cm;
   Get.testMode = true;
   _testShouldBlockRustAdminGuiForActiveSessions = false;
+  _testRemoteModifyControlPermission = '';
   _testKnownHostsJson = '';
   _testPeerOptions = {};
   platformFFI.initForTest(_TestRustdeskImpl());
@@ -318,6 +329,18 @@ void main() {
     _testShouldBlockRustAdminGuiForActiveSessions = true;
 
     expect(allowRemoteCMModification(), isFalse);
+  });
+
+  test('active support-session policy blocks settings unlocks', () async {
+    expect(await canBeBlocked(), isFalse);
+
+    _testShouldBlockRustAdminGuiForActiveSessions = true;
+
+    expect(await canBeBlocked(), isTrue);
+
+    _testRemoteModifyControlPermission = 'true';
+
+    expect(await canBeBlocked(), isTrue);
   });
 
   testWidgets('renders seeded connection-manager clients', (tester) async {

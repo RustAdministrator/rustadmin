@@ -2825,7 +2825,9 @@ pub fn main_get_common(key: String) -> String {
         }
         .to_string();
     } else if key == "should-block-rustadmin-gui-for-active-sessions" {
-        return crate::server::should_block_rustadmin_gui_for_active_sessions().to_string();
+        return ui_interface::should_block_rustadmin_gui_for_active_sessions()
+            .unwrap_or_else(crate::server::should_block_rustadmin_gui_for_active_sessions)
+            .to_string();
     } else if key == "has-gnome-shortcuts-inhibitor-permission" {
         #[cfg(target_os = "linux")]
         return crate::platform::linux::has_gnome_shortcuts_inhibitor_permission().to_string();
