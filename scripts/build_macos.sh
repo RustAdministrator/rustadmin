@@ -107,6 +107,13 @@ sync_macos_rust_artifacts() {
   fi
 }
 
+clean_flutter_hook_locks() {
+  local hooks_dir="$flutter_dir/.dart_tool/hooks_runner/shared"
+  if [[ -d "$hooks_dir" ]]; then
+    find "$hooks_dir" -name .lock -type f -delete
+  fi
+}
+
 generate_version_file() {
   local version
   local revision
@@ -248,6 +255,7 @@ if [[ -z "$xcode_sign_identity" && -n "${RUSTDESK_MACOS_SIGN_IDENTITY:-}" ]]; th
 fi
 
 host_arch="$(uname -m)"
+clean_flutter_hook_locks
 if [[ "$host_arch" == "arm64" || "$host_arch" == "x86_64" ]]; then
   (
     cd "$flutter_dir"
