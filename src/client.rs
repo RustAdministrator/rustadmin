@@ -151,6 +151,40 @@ pub(crate) struct ClientClipboardContext {
 /// Client of the remote desktop.
 pub struct Client;
 
+struct PendingPeerTrust {
+    fingerprint: String,
+    trust_phrase: String,
+    replace_existing_pin: bool,
+}
+
+impl PendingPeerTrust {
+    fn new(pk: &[u8], replace_existing_pin: bool) -> Self {
+        let fingerprint = crate::common::pk_to_fingerprint(pk.to_vec());
+        let trust_phrase = crate::common::fingerprint_to_trust_phrase(&fingerprint);
+        Self {
+            fingerprint,
+            trust_phrase,
+            replace_existing_pin,
+        }
+    }
+}
+
+fn pending_peer_trust_from_status(
+    status: crate::common::TrustedPeerSigningKeyStatus,
+    pk: &[u8],
+) -> Option<PendingPeerTrust> {
+    match status {
+        crate::common::TrustedPeerSigningKeyStatus::Trusted => None,
+        crate::common::TrustedPeerSigningKeyStatus::Missing => {
+            Some(PendingPeerTrust::new(pk, false))
+        }
+        crate::common::TrustedPeerSigningKeyStatus::Changed { .. }
+        | crate::common::TrustedPeerSigningKeyStatus::InvalidPinnedKey { .. } => {
+            Some(PendingPeerTrust::new(pk, true))
+        }
+    }
+}
+
 #[cfg(not(target_os = "ios"))]
 struct ClipboardState {
     #[cfg(feature = "flutter")]
@@ -889,26 +923,34 @@ impl Client {
                 if secure_id.id != peer_id {
                     bail!("Handshake failed: peer id mismatch");
                 }
-                let mut pending_trust = if crate::common::needs_trusted_peer_signing_key(
-                    peer_id,
-                    peer_config_id,
+                let mut pending_trust = pending_peer_trust_from_status(
+                    crate::common::trusted_peer_signing_key_status(
+                        peer_id,
+                        peer_config_id,
+                        option_pk.as_deref().unwrap_or_default(),
+                    )?,
                     option_pk.as_deref().unwrap_or_default(),
-                )? {
-                    let fingerprint = crate::common::pk_to_fingerprint(pk.to_vec());
-                    let trust_phrase = crate::common::fingerprint_to_trust_phrase(&fingerprint);
-                    Some((fingerprint, trust_phrase))
-                } else {
-                    None
-                };
-                if let Some((fingerprint, trust_phrase)) = pending_trust.as_ref() {
+                );
+                if let Some(pending) = pending_trust.as_ref() {
                     if !secure_id.pairing_required {
+                        if pending.replace_existing_pin {
+                            bail!(
+                                "Handshake failed: trusted peer key changed or is invalid; rendezvous pairing passphrase is required to repair trust"
+                            );
+                        }
                         if !crate::common::allow_unverified_peer_trust() {
                             bail!(
                                 "Handshake failed: first secure contact requires a trusted peer key or rendezvous pairing passphrase. Enable 'Allow unverified peer trust' to allow legacy first-contact trust"
                             );
                         }
                         interface
-                            .confirm_peer_trust(peer, peer_id, fingerprint, trust_phrase, false)
+                            .confirm_peer_trust(
+                                peer,
+                                peer_id,
+                                &pending.fingerprint,
+                                &pending.trust_phrase,
+                                false,
+                            )
                             .await?;
                         crate::common::pin_trusted_peer_signing_key(peer_id, peer_config_id, &pk)?;
                         pending_trust = None;
@@ -1006,9 +1048,12 @@ impl Client {
                         }
                     }
                 }
-                if let Some((fingerprint, trust_phrase)) = pending_trust.take() {
-                    let _ = (fingerprint, trust_phrase);
-                    crate::common::pin_trusted_peer_signing_key(peer_id, peer_config_id, &pk)?;
+                if pending_trust.take().is_some() {
+                    crate::common::trust_peer_signing_key_after_pairing(
+                        peer_id,
+                        peer_config_id,
+                        &pk,
+                    )?;
                 }
                 if pairing_was_proven && initiator_signed_id.is_some() {
                     crate::common::set_confirmed_rendezvous_paired_viewer(peer_config_id, true);
@@ -1043,26 +1088,34 @@ impl Client {
                 if peer_id.is_empty() {
                     bail!("Handshake failed: empty peer id");
                 }
-                let mut pending_trust = if crate::common::needs_trusted_peer_signing_key(
-                    &peer_id,
-                    peer_config_id,
+                let mut pending_trust = pending_peer_trust_from_status(
+                    crate::common::trusted_peer_signing_key_status(
+                        &peer_id,
+                        peer_config_id,
+                        &sign_pk,
+                    )?,
                     &sign_pk,
-                )? {
-                    let fingerprint = crate::common::pk_to_fingerprint(sign_pk.to_vec());
-                    let trust_phrase = crate::common::fingerprint_to_trust_phrase(&fingerprint);
-                    Some((fingerprint, trust_phrase))
-                } else {
-                    None
-                };
-                if let Some((fingerprint, trust_phrase)) = pending_trust.as_ref() {
+                );
+                if let Some(pending) = pending_trust.as_ref() {
                     if !direct_id.pairing_required {
+                        if pending.replace_existing_pin {
+                            bail!(
+                                "Handshake failed: trusted peer key changed or is invalid; local or rendezvous pairing passphrase is required to repair trust"
+                            );
+                        }
                         if !crate::common::allow_unverified_peer_trust() {
                             bail!(
-                                "Handshake failed: first direct secure contact requires a trusted peer key or local pairing passphrase. Enable 'Allow unverified peer trust' to allow legacy first-contact trust"
+                                "Handshake failed: first direct secure contact requires a trusted peer key or local/rendezvous pairing passphrase. Enable 'Allow unverified peer trust' to allow legacy first-contact trust"
                             );
                         }
                         interface
-                            .confirm_peer_trust(peer, &peer_id, fingerprint, trust_phrase, true)
+                            .confirm_peer_trust(
+                                peer,
+                                &peer_id,
+                                &pending.fingerprint,
+                                &pending.trust_phrase,
+                                true,
+                            )
                             .await?;
                         crate::common::pin_trusted_peer_signing_key(
                             &peer_id,
@@ -1165,9 +1218,8 @@ impl Client {
                         }
                     }
                 }
-                if let Some((fingerprint, trust_phrase)) = pending_trust.take() {
-                    let _ = (fingerprint, trust_phrase);
-                    crate::common::pin_trusted_peer_signing_key(
+                if pending_trust.take().is_some() {
+                    crate::common::trust_peer_signing_key_after_pairing(
                         &peer_id,
                         peer_config_id,
                         &sign_pk,
@@ -5100,7 +5152,7 @@ mod security_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains(
-            "first direct secure contact requires a trusted peer key or local pairing passphrase"
+            "first direct secure contact requires a trusted peer key or local/rendezvous pairing passphrase"
         ));
         handle.abort();
         PeerConfig::remove(&peer_config_id);
@@ -5111,7 +5163,7 @@ mod security_tests {
     }
 
     #[tokio::test]
-    async fn test_secure_direct_connection_with_pairing_pins_and_rejects_changed_key() {
+    async fn test_secure_direct_connection_with_pairing_repairs_changed_key() {
         let _guard = TEST_CLIENT_SECURITY_LOCK.lock().unwrap();
         let saved_allow = Config::get_option(keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST);
         let peer_id = format!("direct-peer-{}", Uuid::new_v4());
@@ -5157,17 +5209,58 @@ mod security_tests {
         let mut changed_conn = connect_tcp_local(changed_addr.clone(), None, CONNECT_TIMEOUT)
             .await
             .unwrap();
-        let err = Client::secure_direct_connection(
+        let pk = Client::secure_direct_connection(
             &changed_addr,
             &peer_config_id,
             &mut changed_conn,
             interface,
         )
         .await
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("peer identity changed"));
-        changed_handle.abort();
+        .unwrap();
+        assert_eq!(pk, changed_sign_pk.0.to_vec());
+        assert!(
+            crate::common::has_trusted_peer_signing_key(&peer_config_id, &changed_sign_pk.0)
+                .unwrap()
+        );
+        changed_handle.await.unwrap().unwrap();
+
+        PeerConfig::remove(&peer_config_id);
+        Config::set_option(
+            keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST.to_owned(),
+            saved_allow,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_secure_direct_connection_rejects_changed_key_without_pairing() {
+        let _guard = TEST_CLIENT_SECURITY_LOCK.lock().unwrap();
+        let saved_allow = Config::get_option(keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST);
+        let peer_id = format!("direct-peer-{}", Uuid::new_v4());
+        let peer_config_id = format!("direct-config-{}", Uuid::new_v4());
+        let (trusted_sign_pk, _) = sign::gen_keypair();
+        let (changed_sign_pk, changed_sign_sk) = sign::gen_keypair();
+
+        Config::set_option(
+            keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST.to_owned(),
+            "N".to_owned(),
+        );
+        crate::common::pin_trusted_peer_signing_key(&peer_id, &peer_config_id, &trusted_sign_pk.0)
+            .unwrap();
+
+        let interface = TestInterface::new(&peer_config_id, None);
+        let (addr, handle) =
+            spawn_direct_handshake_peer(peer_id, changed_sign_pk.0, changed_sign_sk, None)
+                .await
+                .unwrap();
+        let mut conn = connect_tcp_local(addr.clone(), None, CONNECT_TIMEOUT)
+            .await
+            .unwrap();
+        let err = Client::secure_direct_connection(&addr, &peer_config_id, &mut conn, interface)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pairing passphrase is required to repair trust"));
+        handle.abort();
 
         PeerConfig::remove(&peer_config_id);
         Config::set_option(
@@ -5448,7 +5541,7 @@ mod security_tests {
     }
 
     #[tokio::test]
-    async fn test_secure_connection_with_pairing_pins_and_rejects_changed_key() {
+    async fn test_secure_connection_with_pairing_repairs_changed_key() {
         let _guard = TEST_CLIENT_SECURITY_LOCK.lock().unwrap();
         let saved_allow = Config::get_option(keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST);
         let saved_remember = Config::get_option(keys::OPTION_REMEMBER_PAIRED_VIEWERS);
@@ -5511,7 +5604,7 @@ mod security_tests {
         let mut changed_conn = connect_tcp_local(changed_addr.clone(), None, CONNECT_TIMEOUT)
             .await
             .unwrap();
-        let err = Client::secure_connection(
+        let pk = Client::secure_connection(
             &peer_id,
             &peer_id,
             &peer_config_id,
@@ -5521,10 +5614,14 @@ mod security_tests {
             &mut changed_conn,
         )
         .await
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("peer identity changed"));
-        changed_handle.abort();
+        .unwrap()
+        .unwrap();
+        assert_eq!(pk, changed_sign_pk.0.to_vec());
+        assert!(
+            crate::common::has_trusted_peer_signing_key(&peer_config_id, &changed_sign_pk.0)
+                .unwrap()
+        );
+        changed_handle.await.unwrap().unwrap();
 
         PeerConfig::remove(&peer_config_id);
         Config::clear_paired_viewers();

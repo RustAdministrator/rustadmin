@@ -1224,7 +1224,7 @@ pub fn get_network_mode_info() -> NetworkModeInfo {
     let api_server = get_effective_api_server();
     let trust_phrase = fingerprint_to_trust_phrase(&crate::ui_interface::get_fingerprint());
     let direct_endpoints = get_direct_access_endpoints();
-    let pairing_required = has_direct_access_pairing_passphrase();
+    let pairing_required = has_effective_direct_access_pairing_passphrase();
     let detail = if !rendezvous_server.is_empty() {
         rendezvous_server
     } else if !relay_server.is_empty() {
@@ -1285,6 +1285,19 @@ pub fn has_direct_access_pairing_passphrase() -> bool {
 #[inline]
 pub fn get_peer_pairing_passphrase() -> String {
     Config::get_option(keys::OPTION_PEER_PAIRING_PASSPHRASE)
+}
+
+pub fn get_effective_direct_access_pairing_passphrase() -> String {
+    let direct = get_direct_access_pairing_passphrase();
+    if !direct.is_empty() {
+        return direct;
+    }
+    get_peer_pairing_passphrase()
+}
+
+#[inline]
+pub fn has_effective_direct_access_pairing_passphrase() -> bool {
+    !get_effective_direct_access_pairing_passphrase().is_empty()
 }
 
 #[inline]
@@ -2291,6 +2304,19 @@ fn decode_pinned_peer_signing_key(value: &str) -> ResultType<Vec<u8>> {
         .map_err(|e| anyhow!("Handshake failed: invalid pinned peer signing key: {e}"))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustedPeerSigningKeyStatus {
+    Trusted,
+    Missing,
+    Changed {
+        expected_fingerprint: String,
+        actual_fingerprint: String,
+    },
+    InvalidPinnedKey {
+        reason: String,
+    },
+}
+
 fn validate_pinned_peer_signing_key(pinned_key: Option<&String>, pk: &[u8]) -> ResultType<bool> {
     let Some(pinned_key) = pinned_key.filter(|v| !v.is_empty()) else {
         return Ok(true);
@@ -2304,6 +2330,47 @@ fn validate_pinned_peer_signing_key(pinned_key: Option<&String>, pk: &[u8]) -> R
         );
     }
     Ok(false)
+}
+
+fn pinned_peer_signing_key_status(
+    pinned_key: Option<&String>,
+    pk: &[u8],
+) -> TrustedPeerSigningKeyStatus {
+    let Some(pinned_key) = pinned_key.filter(|v| !v.is_empty()) else {
+        return TrustedPeerSigningKeyStatus::Missing;
+    };
+    let expected = match decode_pinned_peer_signing_key(pinned_key) {
+        Ok(expected) => expected,
+        Err(e) => {
+            return TrustedPeerSigningKeyStatus::InvalidPinnedKey {
+                reason: e.to_string(),
+            };
+        }
+    };
+    if expected == pk {
+        return TrustedPeerSigningKeyStatus::Trusted;
+    }
+    TrustedPeerSigningKeyStatus::Changed {
+        expected_fingerprint: pk_to_fingerprint(expected),
+        actual_fingerprint: pk_to_fingerprint(pk.to_vec()),
+    }
+}
+
+fn trusted_peer_signing_key_status_error(
+    status: TrustedPeerSigningKeyStatus,
+) -> Option<hbb_common::anyhow::Error> {
+    match status {
+        TrustedPeerSigningKeyStatus::Trusted | TrustedPeerSigningKeyStatus::Missing => None,
+        TrustedPeerSigningKeyStatus::Changed {
+            expected_fingerprint,
+            actual_fingerprint,
+        } => Some(anyhow!(
+            "Handshake failed: peer identity changed (expected {}, got {})",
+            expected_fingerprint,
+            actual_fingerprint
+        )),
+        TrustedPeerSigningKeyStatus::InvalidPinnedKey { reason } => Some(anyhow!("{reason}")),
+    }
 }
 
 fn validate_bootstrap_trusted_peer_signing_key(trusted_key: &str, pk: &[u8]) -> ResultType<()> {
@@ -2323,21 +2390,39 @@ fn validate_bootstrap_trusted_peer_signing_key(trusted_key: &str, pk: &[u8]) -> 
     Ok(())
 }
 
-pub fn needs_trusted_peer_signing_key(
+pub fn trusted_peer_signing_key_status(
     peer_id: &str,
     peer_config_id: &str,
     pk: &[u8],
-) -> ResultType<bool> {
+) -> ResultType<TrustedPeerSigningKeyStatus> {
     if pk.is_empty() {
         bail!("Handshake failed: empty peer signing key");
     }
     let bootstrap_key = Config::get_bootstrap_trusted_peer_key(peer_id);
     if !bootstrap_key.is_empty() {
         validate_bootstrap_trusted_peer_signing_key(&bootstrap_key, pk)?;
-        return Ok(false);
+        return Ok(TrustedPeerSigningKeyStatus::Trusted);
     }
     let config = PeerConfig::load(peer_config_id);
-    validate_pinned_peer_signing_key(config.options.get(PEER_OPTION_PINNED_SIGNING_KEY), pk)
+    Ok(pinned_peer_signing_key_status(
+        config.options.get(PEER_OPTION_PINNED_SIGNING_KEY),
+        pk,
+    ))
+}
+
+pub fn needs_trusted_peer_signing_key(
+    peer_id: &str,
+    peer_config_id: &str,
+    pk: &[u8],
+) -> ResultType<bool> {
+    match trusted_peer_signing_key_status(peer_id, peer_config_id, pk)? {
+        TrustedPeerSigningKeyStatus::Trusted => Ok(false),
+        TrustedPeerSigningKeyStatus::Missing => Ok(true),
+        status => match trusted_peer_signing_key_status_error(status) {
+            Some(err) => Err(err),
+            None => Ok(false),
+        },
+    }
 }
 
 pub fn pin_trusted_peer_signing_key(
@@ -2357,23 +2442,14 @@ pub fn pin_trusted_peer_signing_key(
 }
 
 pub fn has_trusted_peer_signing_key(peer_id: &str, pk: &[u8]) -> ResultType<bool> {
-    if pk.is_empty() {
-        bail!("Handshake failed: empty peer signing key");
+    match trusted_peer_signing_key_status(peer_id, peer_id, pk)? {
+        TrustedPeerSigningKeyStatus::Trusted => Ok(true),
+        TrustedPeerSigningKeyStatus::Missing => Ok(false),
+        status => match trusted_peer_signing_key_status_error(status) {
+            Some(err) => Err(err),
+            None => Ok(false),
+        },
     }
-    let bootstrap_key = Config::get_bootstrap_trusted_peer_key(peer_id);
-    if !bootstrap_key.is_empty() {
-        validate_bootstrap_trusted_peer_signing_key(&bootstrap_key, pk)?;
-        return Ok(true);
-    }
-    let config = PeerConfig::load(peer_id);
-    let Some(pinned_key) = config.options.get(PEER_OPTION_PINNED_SIGNING_KEY) else {
-        return Ok(false);
-    };
-    if pinned_key.is_empty() {
-        return Ok(false);
-    }
-    validate_pinned_peer_signing_key(Some(pinned_key), pk)?;
-    Ok(true)
 }
 
 pub fn needs_pinned_peer_signing_key(peer_config_id: &str, pk: &[u8]) -> ResultType<bool> {
@@ -2398,6 +2474,40 @@ pub fn pin_peer_signing_key(peer_config_id: &str, pk: &[u8]) -> ResultType<()> {
         );
         config.store(peer_config_id);
         log::info!("Pinned peer signing key for {}", peer_config_id);
+    }
+    Ok(())
+}
+
+pub fn trust_peer_signing_key_after_pairing(
+    peer_id: &str,
+    peer_config_id: &str,
+    pk: &[u8],
+) -> ResultType<()> {
+    if pk.is_empty() {
+        bail!("Handshake failed: empty peer signing key");
+    }
+    let bootstrap_key = Config::get_bootstrap_trusted_peer_key(peer_id);
+    if !bootstrap_key.is_empty() {
+        validate_bootstrap_trusted_peer_signing_key(&bootstrap_key, pk)?;
+        return Ok(());
+    }
+    let mut config = PeerConfig::load(peer_config_id);
+    let encoded = encode_pinned_peer_signing_key(pk);
+    let previous = config.options.get(PEER_OPTION_PINNED_SIGNING_KEY);
+    if previous.map(|value| value.as_str()) != Some(encoded.as_str()) {
+        let had_previous = previous.filter(|value| !value.is_empty()).is_some();
+        config
+            .options
+            .insert(PEER_OPTION_PINNED_SIGNING_KEY.to_owned(), encoded);
+        config.store(peer_config_id);
+        if had_previous {
+            log::warn!(
+                "Replaced pinned peer signing key for {} after successful pairing",
+                peer_config_id
+            );
+        } else {
+            log::info!("Pinned peer signing key for {}", peer_config_id);
+        }
     }
     Ok(())
 }
@@ -4528,6 +4638,51 @@ mod tests {
     }
 
     #[test]
+    fn test_trusted_peer_signing_key_status_reports_repairable_pin_errors() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let peer_id = format!("trusted-peer-{}", Uuid::new_v4());
+        let trusted_pk = [7u8; 32];
+        let changed_pk = [8u8; 32];
+        PeerConfig::remove(&peer_id);
+
+        assert_eq!(
+            trusted_peer_signing_key_status(&peer_id, &peer_id, &trusted_pk).unwrap(),
+            TrustedPeerSigningKeyStatus::Missing
+        );
+
+        pin_trusted_peer_signing_key(&peer_id, &peer_id, &trusted_pk).unwrap();
+        assert_eq!(
+            trusted_peer_signing_key_status(&peer_id, &peer_id, &trusted_pk).unwrap(),
+            TrustedPeerSigningKeyStatus::Trusted
+        );
+        match trusted_peer_signing_key_status(&peer_id, &peer_id, &changed_pk).unwrap() {
+            TrustedPeerSigningKeyStatus::Changed {
+                expected_fingerprint,
+                actual_fingerprint,
+            } => {
+                assert_eq!(expected_fingerprint, pk_to_fingerprint(trusted_pk.to_vec()));
+                assert_eq!(actual_fingerprint, pk_to_fingerprint(changed_pk.to_vec()));
+            }
+            status => panic!("unexpected status: {status:?}"),
+        }
+
+        let mut config = PeerConfig::load(&peer_id);
+        config.options.insert(
+            PEER_OPTION_PINNED_SIGNING_KEY.to_owned(),
+            "not-base64".to_owned(),
+        );
+        config.store(&peer_id);
+        match trusted_peer_signing_key_status(&peer_id, &peer_id, &changed_pk).unwrap() {
+            TrustedPeerSigningKeyStatus::InvalidPinnedKey { reason } => {
+                assert!(reason.contains("invalid pinned peer signing key"));
+            }
+            status => panic!("unexpected status: {status:?}"),
+        }
+
+        PeerConfig::remove(&peer_id);
+    }
+
+    #[test]
     fn test_validate_bootstrap_trusted_peer_signing_key() {
         let pk = vec![1u8, 2, 3, 4];
         let encoded = encode_pinned_peer_signing_key(&pk);
@@ -4851,6 +5006,50 @@ mod tests {
 
         Config::set_option(keys::OPTION_LAN_DISCOVERY_MODE.to_owned(), saved_mode);
         Config::set_option(keys::OPTION_ENABLE_LAN_DISCOVERY.to_owned(), saved_legacy);
+    }
+
+    #[test]
+    fn test_effective_direct_pairing_passphrase_falls_back_to_peer_pairing() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+        let saved_direct = Config::get_option(keys::OPTION_DIRECT_ACCESS_PAIRING_PASSPHRASE);
+        let saved_peer = Config::get_option(keys::OPTION_PEER_PAIRING_PASSPHRASE);
+
+        Config::set_option(
+            keys::OPTION_DIRECT_ACCESS_PAIRING_PASSPHRASE.to_owned(),
+            "direct-secret".to_owned(),
+        );
+        Config::set_option(
+            keys::OPTION_PEER_PAIRING_PASSPHRASE.to_owned(),
+            "peer-secret".to_owned(),
+        );
+        assert_eq!(
+            get_effective_direct_access_pairing_passphrase(),
+            "direct-secret"
+        );
+        assert!(has_effective_direct_access_pairing_passphrase());
+
+        Config::set_option(
+            keys::OPTION_DIRECT_ACCESS_PAIRING_PASSPHRASE.to_owned(),
+            "".to_owned(),
+        );
+        assert_eq!(
+            get_effective_direct_access_pairing_passphrase(),
+            "peer-secret"
+        );
+        assert!(has_effective_direct_access_pairing_passphrase());
+
+        Config::set_option(
+            keys::OPTION_PEER_PAIRING_PASSPHRASE.to_owned(),
+            "".to_owned(),
+        );
+        assert_eq!(get_effective_direct_access_pairing_passphrase(), "");
+        assert!(!has_effective_direct_access_pairing_passphrase());
+
+        Config::set_option(
+            keys::OPTION_DIRECT_ACCESS_PAIRING_PASSPHRASE.to_owned(),
+            saved_direct,
+        );
+        Config::set_option(keys::OPTION_PEER_PAIRING_PASSPHRASE.to_owned(), saved_peer);
     }
 
     #[test]

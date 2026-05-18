@@ -246,7 +246,9 @@ async fn create_tcp_connection_with_mode(
         let mut msg_out = Message::new();
         let (our_pk_b, our_sk_b) = box_::gen_keypair();
         let pairing_passphrase = match handshake_mode {
-            HandshakeMode::Direct => crate::common::get_direct_access_pairing_passphrase(),
+            HandshakeMode::Direct => {
+                crate::common::get_effective_direct_access_pairing_passphrase()
+            }
             HandshakeMode::Rendezvous => crate::common::get_peer_pairing_passphrase(),
             HandshakeMode::Disabled => String::new(),
         };
