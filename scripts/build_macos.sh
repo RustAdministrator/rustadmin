@@ -184,7 +184,7 @@ EOF
 
   echo "Generating flutter_rust_bridge files..."
   local bridge_log
-  bridge_log="$(mktemp "${TMPDIR:-/tmp}/rustdesk-bridge-gen.XXXXXX.log")"
+  bridge_log="$(mktemp "${TMPDIR:-/tmp}/rustdesk-bridge-gen.log.XXXXXX")"
   bridge_codegen_args=(
     --rust-input "$bridge_input" \
     --dart-output "$flutter_dir/lib/generated_bridge.dart" \
@@ -227,7 +227,7 @@ fi
 
 if [[ "$skip_cargo" -eq 0 ]]; then
   generate_version_file
-  (cd "$repo_root" && MACOSX_DEPLOYMENT_TARGET=10.15 cargo build --features "$features" --release)
+  (cd "$repo_root" && MACOSX_DEPLOYMENT_TARGET=10.15 cargo build --features "$features" --release -vv)
 fi
 
 sync_macos_rust_artifacts
