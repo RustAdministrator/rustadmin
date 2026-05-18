@@ -125,6 +125,12 @@ try {
     Invoke-TestStep "RustAdmin GUI block policy tests" $ClientRoot "cargo" @(
         "test", "--no-default-features", "--features", $Features, "rustadmin_gui_block_policy"
     )
+    Invoke-TestStep "low-permission support policy tests" $ClientRoot "cargo" @(
+        "test", "--no-default-features", "--features", $Features, "low_permission"
+    )
+    Invoke-TestStep "elevation permission policy tests" $ClientRoot "cargo" @(
+        "test", "--no-default-features", "--features", $Features, "elevation_policy_requires_unattended_access"
+    )
     Invoke-TestStep "IPC enum size contract" $ClientRoot "cargo" @(
         "test", "--no-default-features", "--features", $Features, "ipc::test::verify_ffi_enum_data_size"
     )

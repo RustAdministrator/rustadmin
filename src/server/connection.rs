@@ -249,6 +249,15 @@ fn privacy_mode_policy_denial_reason(
     None
 }
 
+#[cfg(windows)]
+fn elevation_policy_denial_reason(auth_kind: SessionAuthKind) -> Option<&'static str> {
+    if auth_kind.is_unattended_access() {
+        None
+    } else {
+        Some("Elevation requests are available only for unattended access sessions.")
+    }
+}
+
 fn switch_permission_from_name(name: &str) -> Option<Permission> {
     match name {
         "keyboard" => Some(Permission::Keyboard),
@@ -284,6 +293,20 @@ fn session_default_permission(auth_kind: SessionAuthKind, name: &str, current: b
     } else {
         low_permission_default(name, current)
     }
+}
+
+fn should_block_remote_control_for_permission_prompt(
+    auth_kind: SessionAuthKind,
+    has_active_pending_prompt: bool,
+) -> bool {
+    auth_kind.is_low_permission_support() && has_active_pending_prompt
+}
+
+fn should_reject_additional_permission_request(
+    auth_kind: SessionAuthKind,
+    has_active_pending_prompt: bool,
+) -> bool {
+    auth_kind.is_low_permission_support() && has_active_pending_prompt
 }
 
 #[cfg(test)]
@@ -325,6 +348,8 @@ struct PendingPermissionRequest {
     enabled: bool,
     requested_at: Instant,
 }
+
+const PENDING_PERMISSION_REQUEST_TIMEOUT_SECS: u64 = 120;
 
 fn pending_permission_response_values<'a>(
     pending: &'a PendingPermissionRequest,
@@ -1554,8 +1579,23 @@ impl Connection {
     }
 
     fn cleanup_pending_permission_requests(&mut self) {
-        self.pending_permission_requests
-            .retain(|_, r| r.requested_at.elapsed() < Duration::from_secs(120));
+        self.pending_permission_requests.retain(|_, r| {
+            r.requested_at.elapsed() < Duration::from_secs(PENDING_PERMISSION_REQUEST_TIMEOUT_SECS)
+        });
+    }
+
+    fn has_active_pending_permission_request(&self) -> bool {
+        self.pending_permission_requests.values().any(|request| {
+            request.requested_at.elapsed()
+                < Duration::from_secs(PENDING_PERMISSION_REQUEST_TIMEOUT_SECS)
+        })
+    }
+
+    fn should_block_remote_control_for_permission_prompt(&self) -> bool {
+        should_block_remote_control_for_permission_prompt(
+            self.session_auth_kind,
+            self.has_active_pending_permission_request(),
+        )
     }
 
     async fn approve_permission_request(&mut self, request_id: u64, name: String, enabled: bool) {
@@ -1642,6 +1682,19 @@ impl Connection {
             return;
         }
 
+        if should_reject_additional_permission_request(
+            self.session_auth_kind,
+            self.has_active_pending_permission_request(),
+        ) {
+            self.deny_permission_request(
+                request_id,
+                name,
+                enabled,
+                "Another permission request is already pending.",
+            )
+            .await;
+            return;
+        }
         if self.pending_permission_requests.len() >= 16 {
             self.deny_permission_request(
                 request_id,
@@ -3250,6 +3303,12 @@ impl Connection {
                     if self.is_authed_view_camera_conn() {
                         return true;
                     }
+                    // Low-permission sessions allow support input, but local permission prompts
+                    // must be answered only from the controlled machine.
+                    if self.should_block_remote_control_for_permission_prompt() {
+                        self.update_auto_disconnect_timer();
+                        return true;
+                    }
                     #[cfg(any(target_os = "android", target_os = "ios"))]
                     if let Err(e) = call_main_service_pointer_input("mouse", me.mask, me.x, me.y) {
                         log::debug!("call_main_service_pointer_input fail:{}", e);
@@ -3287,6 +3346,10 @@ impl Connection {
                 }
                 Some(message::Union::PointerDeviceEvent(pde)) => {
                     if self.is_authed_view_camera_conn() {
+                        return true;
+                    }
+                    if self.should_block_remote_control_for_permission_prompt() {
+                        self.update_auto_disconnect_timer();
                         return true;
                     }
                     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -3329,6 +3392,10 @@ impl Connection {
                 #[cfg(any(target_os = "android"))]
                 Some(message::Union::KeyEvent(mut me)) => {
                     if self.is_authed_view_camera_conn() {
+                        return true;
+                    }
+                    if self.should_block_remote_control_for_permission_prompt() {
+                        self.update_auto_disconnect_timer();
                         return true;
                     }
                     let key = match me.mode.enum_value() {
@@ -3384,6 +3451,10 @@ impl Connection {
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 Some(message::Union::KeyEvent(me)) => {
                     if self.is_authed_view_camera_conn() {
+                        return true;
+                    }
+                    if self.should_block_remote_control_for_permission_prompt() {
+                        self.update_auto_disconnect_timer();
                         return true;
                     }
                     if self.peer_keyboard_enabled() {
@@ -4402,7 +4473,15 @@ impl Connection {
     #[cfg(windows)]
     async fn handle_elevation_request(&mut self, para: portable_client::StartPara) {
         let mut err;
-        if !self.keyboard {
+        if let Some(reason) = elevation_policy_denial_reason(self.session_auth_kind) {
+            err = reason.to_string();
+            log::warn!(
+                "Elevation denied: conn={}, auth_kind={}, reason={}",
+                self.inner.id,
+                self.session_auth_kind.as_str(),
+                reason
+            );
+        } else if !self.keyboard {
             err = "No permission".to_string();
         } else {
             err = "No need to elevate".to_string();
@@ -6717,6 +6796,67 @@ mod test {
         assert_eq!(name, "clipboard");
         assert!(enabled);
         assert!(mismatch);
+    }
+
+    #[test]
+    fn low_permission_prompt_blocks_remote_control_until_resolved() {
+        assert!(should_block_remote_control_for_permission_prompt(
+            SessionAuthKind::OneTimePassword,
+            true
+        ));
+        assert!(should_block_remote_control_for_permission_prompt(
+            SessionAuthKind::ClickApproval,
+            true
+        ));
+        assert!(should_block_remote_control_for_permission_prompt(
+            SessionAuthKind::Unknown,
+            true
+        ));
+        assert!(!should_block_remote_control_for_permission_prompt(
+            SessionAuthKind::UnattendedPassword,
+            true
+        ));
+        assert!(!should_block_remote_control_for_permission_prompt(
+            SessionAuthKind::OneTimePassword,
+            false
+        ));
+    }
+
+    #[test]
+    fn low_permission_sessions_allow_only_one_pending_prompt() {
+        assert!(should_reject_additional_permission_request(
+            SessionAuthKind::OneTimePassword,
+            true
+        ));
+        assert!(should_reject_additional_permission_request(
+            SessionAuthKind::ClickApproval,
+            true
+        ));
+        assert!(!should_reject_additional_permission_request(
+            SessionAuthKind::UnattendedPassword,
+            true
+        ));
+        assert!(!should_reject_additional_permission_request(
+            SessionAuthKind::OneTimePassword,
+            false
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn elevation_policy_requires_unattended_access() {
+        assert_eq!(
+            elevation_policy_denial_reason(SessionAuthKind::OneTimePassword),
+            Some("Elevation requests are available only for unattended access sessions.")
+        );
+        assert_eq!(
+            elevation_policy_denial_reason(SessionAuthKind::ClickApproval),
+            Some("Elevation requests are available only for unattended access sessions.")
+        );
+        assert_eq!(
+            elevation_policy_denial_reason(SessionAuthKind::UnattendedPassword),
+            None
+        );
     }
 
     #[test]
