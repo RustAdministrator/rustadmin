@@ -1533,6 +1533,17 @@ pub mod connection_manager {
             );
         }
 
+        fn permission_update(&self, id: i32, name: String, enabled: bool) {
+            self.push_event(
+                "permission_update",
+                &[
+                    ("id", &id.to_string()),
+                    ("permission_name", &name),
+                    ("enabled", &enabled.to_string()),
+                ],
+            );
+        }
+
         fn permission_request(&self, id: i32, request_id: u64, name: String, enabled: bool) {
             self.push_event(
                 "permission_request",

@@ -52,6 +52,10 @@ impl InvokeUiCM for SciterHandler {
         self.call("newMessage", &make_args!(id, text));
     }
 
+    fn permission_update(&self, id: i32, name: String, enabled: bool) {
+        self.call("permissionUpdate", &make_args!(id, name, enabled));
+    }
+
     fn permission_request(&self, id: i32, request_id: u64, name: String, enabled: bool) {
         self.call(
             "permissionRequest",

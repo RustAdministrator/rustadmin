@@ -105,63 +105,49 @@ class Body: Reactor.Component
     event click $(icon.keyboard) (e) {
         var { cid, connection } = this;
         checkClickTime(function() {
-            connection.keyboard = !connection.keyboard;
-            body.update();
-            handler.switch_permission(cid, "keyboard", connection.keyboard);
+            handler.switch_permission(cid, "keyboard", !connection.keyboard);
         });
     }
 
     event click $(icon.clipboard) {
         var { cid, connection } = this;
         checkClickTime(function() {
-            connection.clipboard = !connection.clipboard;
-            body.update();
-            handler.switch_permission(cid, "clipboard", connection.clipboard);
+            handler.switch_permission(cid, "clipboard", !connection.clipboard);
         });
     }
 
     event click $(icon.audio) {
         var { cid, connection } = this;
         checkClickTime(function() {
-            connection.audio = !connection.audio;
-            body.update();
-            handler.switch_permission(cid, "audio", connection.audio);
+            handler.switch_permission(cid, "audio", !connection.audio);
         });
     }
 
     event click $(icon.file) {
         var { cid, connection } = this;
         checkClickTime(function() {
-            connection.file = !connection.file;
-            body.update();
-            handler.switch_permission(cid, "file", connection.file);
+            handler.switch_permission(cid, "file", !connection.file);
         });
     }
 
     event click $(icon.restart) {
         var { cid, connection } = this;
         checkClickTime(function() {
-            connection.restart = !connection.restart;
-            body.update();
-            handler.switch_permission(cid, "restart", connection.restart);
+            handler.switch_permission(cid, "restart", !connection.restart);
         });
     }
 
     event click $(icon.recording) {
         var { cid, connection } = this;
         checkClickTime(function() {
-            connection.recording = !connection.recording;
-            body.update();
-            handler.switch_permission(cid, "recording", connection.recording);
+            handler.switch_permission(cid, "recording", !connection.recording);
         });
     }
 
     event click $(icon.block_input) {
         var { cid, connection } = this;
         checkClickTime(function() {
-            connection.block_input = !connection.block_input;
-            body.update();
-            handler.switch_permission(cid, "block_input", connection.block_input);
+            handler.switch_permission(cid, "block_input", !connection.block_input);
         });
     }
 
@@ -368,14 +354,52 @@ function bring_to_top(idx=-1) {
     }
 }
 
-handler.addConnection = function(id, is_file_transfer, is_view_camera, is_terminal, port_forward, peer_id, name, avatar, authorized, keyboard, clipboard, audio, file, restart, recording, block_input) {
-    stdout.println("new connection #" + id + ": " + peer_id);
+function findConnection(id) {
     var conn;
     connections.map(function(c) {
         if (c.id == id) conn = c;
     });
+    return conn;
+}
+
+function setConnectionPermission(conn, name, enabled) {
+    if (name == "keyboard") {
+        conn.keyboard = enabled;
+    } else if (name == "clipboard") {
+        conn.clipboard = enabled;
+    } else if (name == "audio") {
+        conn.audio = enabled;
+    } else if (name == "file") {
+        conn.file = enabled;
+    } else if (name == "restart") {
+        conn.restart = enabled;
+    } else if (name == "recording") {
+        conn.recording = enabled;
+    } else if (name == "block_input") {
+        conn.block_input = enabled;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+function updateConnectionSnapshot(conn, authorized, keyboard, clipboard, audio, file, restart, recording, block_input) {
+    conn.authorized = authorized;
+    conn.keyboard = keyboard;
+    conn.clipboard = clipboard;
+    conn.audio = audio;
+    conn.file = file;
+    conn.restart = restart;
+    conn.recording = recording;
+    conn.block_input = block_input;
+    conn.disconnected = false;
+}
+
+handler.addConnection = function(id, is_file_transfer, is_view_camera, is_terminal, port_forward, peer_id, name, avatar, authorized, keyboard, clipboard, audio, file, restart, recording, block_input) {
+    stdout.println("new connection #" + id + ": " + peer_id);
+    var conn = findConnection(id);
     if (conn) {
-        conn.authorized = authorized;
+        updateConnectionSnapshot(conn, authorized, keyboard, clipboard, audio, file, restart, recording, block_input);
         update();
         return;
     }
@@ -408,6 +432,14 @@ handler.addConnection = function(id, is_file_transfer, is_view_camera, is_termin
         self.timer(3s, function() {
             setWindowState(View.WINDOW_MINIMIZED);
         });
+    }
+}
+
+handler.permissionUpdate = function(id, name, enabled) {
+    var conn = findConnection(id);
+    if (!conn) return;
+    if (setConnectionPermission(conn, name, enabled)) {
+        update();
     }
 }
 

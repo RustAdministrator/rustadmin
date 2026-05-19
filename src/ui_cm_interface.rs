@@ -186,6 +186,8 @@ pub trait InvokeUiCM: Send + Clone + 'static + Sized {
 
     fn new_message(&self, id: i32, text: String);
 
+    fn permission_update(&self, id: i32, name: String, enabled: bool);
+
     fn permission_request(&self, id: i32, request_id: u64, name: String, enabled: bool);
 
     fn change_theme(&self, dark: String);
@@ -211,6 +213,29 @@ impl<T: InvokeUiCM> DerefMut for ConnectionManager<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.ui_handler
     }
+}
+
+fn set_client_permission(client: &mut Client, name: &str, enabled: bool) -> bool {
+    match name {
+        "keyboard" => client.keyboard = enabled,
+        "clipboard" => client.clipboard = enabled,
+        "audio" => client.audio = enabled,
+        "file" => client.file = enabled,
+        "restart" => client.restart = enabled,
+        "recording" => client.recording = enabled,
+        "block_input" => client.block_input = enabled,
+        _ => return false,
+    }
+    true
+}
+
+fn update_client_permission(id: i32, name: &str, enabled: bool) -> bool {
+    CLIENTS
+        .write()
+        .unwrap()
+        .get_mut(&id)
+        .map(|client| set_client_permission(client, name, enabled))
+        .unwrap_or(false)
 }
 
 impl<T: InvokeUiCM> ConnectionManager<T> {
@@ -566,6 +591,11 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                 }
                                 Data::ChatMessage { text } => {
                                     self.cm.new_message(self.conn_id, text);
+                                }
+                                Data::PermissionUpdate { name, enabled } => {
+                                    if update_client_permission(self.conn_id, &name, enabled) {
+                                        self.cm.permission_update(self.conn_id, name, enabled);
+                                    }
                                 }
                                 Data::PermissionRequest { request_id, name, enabled } => {
                                     self.cm.permission_request(self.conn_id, request_id, name, enabled);

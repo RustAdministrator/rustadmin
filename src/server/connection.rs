@@ -1498,7 +1498,7 @@ impl Connection {
     }
 
     async fn apply_switch_permission(&mut self, name: &str, enabled: bool) {
-        if name == "keyboard" {
+        let applied = if name == "keyboard" {
             self.keyboard = enabled;
             self.send_permission(Permission::Keyboard, enabled).await;
             if let Some(s) = self.server.upgrade() {
@@ -1519,6 +1519,7 @@ impl Connection {
                     enabled || self.show_remote_cursor,
                 );
             }
+            true
         } else if name == "clipboard" {
             self.clipboard = enabled;
             self.send_permission(Permission::Clipboard, enabled).await;
@@ -1529,6 +1530,7 @@ impl Connection {
                     self.can_sub_clipboard_service(),
                 );
             }
+            true
         } else if name == "audio" {
             self.audio = enabled;
             self.send_permission(Permission::Audio, enabled).await;
@@ -1551,6 +1553,7 @@ impl Connection {
                     }
                 }
             }
+            true
         } else if name == "file" {
             self.file = enabled;
             self.send_permission(Permission::File, enabled).await;
@@ -1566,15 +1569,27 @@ impl Connection {
                     self.can_sub_file_clipboard_service(),
                 );
             }
+            true
         } else if name == "restart" {
             self.restart = enabled;
             self.send_permission(Permission::Restart, enabled).await;
+            true
         } else if name == "recording" {
             self.recording = enabled;
             self.send_permission(Permission::Recording, enabled).await;
+            true
         } else if name == "block_input" {
             self.block_input = enabled;
             self.send_permission(Permission::BlockInput, enabled).await;
+            true
+        } else {
+            false
+        };
+        if applied {
+            self.send_to_cm(ipc::Data::PermissionUpdate {
+                name: name.to_owned(),
+                enabled,
+            });
         }
     }
 

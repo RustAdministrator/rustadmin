@@ -573,13 +573,15 @@ class ServerModel with ChangeNotifier {
   void addConnection(Map<String, dynamic> evt) {
     try {
       final client = Client.fromJson(jsonDecode(evt["client"]));
+      var activeClient = client;
       if (client.authorized) {
         parent.target?.dialogManager.dismissByTag(getLoginDialogTag(client.id));
         final index = _clients.indexWhere((c) => c.id == client.id);
         if (index < 0) {
           _clients.add(client);
         } else {
-          _clients[index].authorized = true;
+          _clients[index].updateFrom(client);
+          activeClient = _clients[index];
         }
       } else {
         if (_clients.any((c) => c.id == client.id)) {
@@ -587,7 +589,7 @@ class ServerModel with ChangeNotifier {
         }
         _clients.add(client);
       }
-      _addTab(client);
+      _addTab(activeClient);
       // remove disconnected
       final index_disconnected = _clients
           .indexWhere((c) => c.disconnected && c.peerId == client.peerId);
@@ -604,6 +606,26 @@ class ServerModel with ChangeNotifier {
       if (isAndroid) androidUpdatekeepScreenOn();
     } catch (e) {
       debugPrint("Failed to call loginRequest,error:$e");
+    }
+  }
+
+  void updateClientPermission(Map<String, dynamic> evt) {
+    try {
+      final id = int.tryParse(evt['id']?.toString() ?? '');
+      final name = evt['permission_name']?.toString() ?? '';
+      final enabled = evt['enabled']?.toString() == 'true';
+      if (id == null || name.isEmpty) {
+        return;
+      }
+      final index = _clients.indexWhere((client) => client.id == id);
+      if (index < 0) {
+        return;
+      }
+      if (_clients[index].setPermission(name, enabled)) {
+        notifyListeners();
+      }
+    } catch (e) {
+      debugPrint("updateClientPermission failed: $e");
     }
   }
 
@@ -748,7 +770,8 @@ class ServerModel with ChangeNotifier {
     notifyListeners();
   }
 
-  void respondPermissionRequest(PermissionRequestPrompt request, bool approved) {
+  void respondPermissionRequest(
+      PermissionRequestPrompt request, bool approved) {
     final index = _permissionRequests.indexWhere((r) => r.matches(request));
     if (index < 0) {
       return;
@@ -1131,6 +1154,63 @@ class Client {
 
   Client(this.id, this.authorized, this.isFileTransfer, this.isViewCamera,
       this.name, this.peerId, this.keyboard, this.clipboard, this.audio);
+
+  void updateFrom(Client other) {
+    authorized = other.authorized;
+    isFileTransfer = other.isFileTransfer;
+    isViewCamera = other.isViewCamera;
+    isTerminal = other.isTerminal;
+    portForward = other.portForward;
+    name = other.name;
+    avatar = other.avatar;
+    peerId = other.peerId;
+    keyboard = other.keyboard;
+    clipboard = other.clipboard;
+    audio = other.audio;
+    file = other.file;
+    restart = other.restart;
+    recording = other.recording;
+    blockInput = other.blockInput;
+    disconnected = other.disconnected;
+    fromSwitch = other.fromSwitch;
+    inVoiceCall = other.inVoiceCall;
+    incomingVoiceCall = other.incomingVoiceCall;
+  }
+
+  bool setPermission(String name, bool enabled) {
+    switch (name) {
+      case 'keyboard':
+        if (keyboard == enabled) return false;
+        keyboard = enabled;
+        return true;
+      case 'clipboard':
+        if (clipboard == enabled) return false;
+        clipboard = enabled;
+        return true;
+      case 'audio':
+        if (audio == enabled) return false;
+        audio = enabled;
+        return true;
+      case 'file':
+        if (file == enabled) return false;
+        file = enabled;
+        return true;
+      case 'restart':
+        if (restart == enabled) return false;
+        restart = enabled;
+        return true;
+      case 'recording':
+        if (recording == enabled) return false;
+        recording = enabled;
+        return true;
+      case 'block_input':
+        if (blockInput == enabled) return false;
+        blockInput = enabled;
+        return true;
+      default:
+        return false;
+    }
+  }
 
   Client.fromJson(Map<String, dynamic> json) {
     id = json['id'];
