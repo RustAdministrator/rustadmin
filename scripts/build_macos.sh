@@ -108,9 +108,9 @@ sync_macos_rust_artifacts() {
 }
 
 clean_flutter_hook_locks() {
-  local hooks_dir="$flutter_dir/.dart_tool/hooks_runner/shared"
+  local hooks_dir="$flutter_dir/.dart_tool/hooks_runner"
   if [[ -d "$hooks_dir" ]]; then
-    find "$hooks_dir" -name .lock -type f -delete
+    rm -rf "$hooks_dir"
   fi
 }
 
@@ -260,12 +260,16 @@ if [[ "$host_arch" == "arm64" || "$host_arch" == "x86_64" ]]; then
   (
     cd "$flutter_dir"
     flutter build macos --release --config-only
+    clean_flutter_hook_locks
     xcodebuild_args=(
       -workspace macos/Runner.xcworkspace
       -scheme Runner
       -configuration Release
       -derivedDataPath build/macos
       -destination "platform=macOS,arch=$host_arch"
+      -jobs 1
+      ARCHS="$host_arch"
+      ONLY_ACTIVE_ARCH=YES
     )
     if [[ -n "${RUSTDESK_MACOS_DEVELOPMENT_TEAM:-}" ]]; then
       xcodebuild_args+=("DEVELOPMENT_TEAM=$RUSTDESK_MACOS_DEVELOPMENT_TEAM")
