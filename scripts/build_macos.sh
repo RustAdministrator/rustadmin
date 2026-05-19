@@ -44,6 +44,7 @@ done
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 flutter_dir="$repo_root/flutter"
 default_codec_root="$repo_root/.local/macos-codecs"
+home_codec_root="$HOME/MO/Release"
 app_bundle="$flutter_dir/build/macos/Build/Products/Release/RustDesk.app"
 adhoc_sign="${RUSTDESK_MACOS_ADHOC_SIGN:-0}"
 skip_bridge_gen="${RUSTDESK_SKIP_BRIDGE_GEN:-0}"
@@ -70,6 +71,8 @@ xcode_service="$xcode_rust_release_dir/service"
 if [[ -z "${RUSTDESK_MACOS_CODEC_ROOT:-}" ]]; then
   if [[ -d "$default_codec_root" ]]; then
     export RUSTDESK_MACOS_CODEC_ROOT="$default_codec_root"
+  elif [[ -d "$home_codec_root/include" && -d "$home_codec_root/lib" ]]; then
+    export RUSTDESK_MACOS_CODEC_ROOT="$home_codec_root"
   elif [[ -n "${CMAKE_PREFIX_PATH:-}" ]]; then
     export RUSTDESK_MACOS_CODEC_ROOT="${CMAKE_PREFIX_PATH%%:*}"
   fi
