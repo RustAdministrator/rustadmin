@@ -703,9 +703,6 @@ class _PrivilegeBoardState extends State<_PrivilegeBoard> {
                               connId: client.id,
                               name: "audio",
                               enabled: enabled);
-                          setState(() {
-                            client.audio = enabled;
-                          });
                         },
                         translate('Enable audio'),
                       ),
@@ -717,9 +714,6 @@ class _PrivilegeBoardState extends State<_PrivilegeBoard> {
                               connId: client.id,
                               name: "recording",
                               enabled: enabled);
-                          setState(() {
-                            client.recording = enabled;
-                          });
                         },
                         translate('Enable recording session'),
                       ),
@@ -733,9 +727,6 @@ class _PrivilegeBoardState extends State<_PrivilegeBoard> {
                               connId: client.id,
                               name: "keyboard",
                               enabled: enabled);
-                          setState(() {
-                            client.keyboard = enabled;
-                          });
                         },
                         translate('Enable keyboard/mouse'),
                       ),
@@ -747,9 +738,6 @@ class _PrivilegeBoardState extends State<_PrivilegeBoard> {
                               connId: client.id,
                               name: "clipboard",
                               enabled: enabled);
-                          setState(() {
-                            client.clipboard = enabled;
-                          });
                         },
                         translate('Enable clipboard'),
                       ),
@@ -761,9 +749,6 @@ class _PrivilegeBoardState extends State<_PrivilegeBoard> {
                               connId: client.id,
                               name: "audio",
                               enabled: enabled);
-                          setState(() {
-                            client.audio = enabled;
-                          });
                         },
                         translate('Enable audio'),
                       ),
@@ -775,9 +760,6 @@ class _PrivilegeBoardState extends State<_PrivilegeBoard> {
                               connId: client.id,
                               name: "file",
                               enabled: enabled);
-                          setState(() {
-                            client.file = enabled;
-                          });
                         },
                         translate('Enable file copy and paste'),
                       ),
@@ -789,9 +771,6 @@ class _PrivilegeBoardState extends State<_PrivilegeBoard> {
                               connId: client.id,
                               name: "restart",
                               enabled: enabled);
-                          setState(() {
-                            client.restart = enabled;
-                          });
                         },
                         translate('Enable remote restart'),
                       ),
@@ -803,9 +782,6 @@ class _PrivilegeBoardState extends State<_PrivilegeBoard> {
                               connId: client.id,
                               name: "recording",
                               enabled: enabled);
-                          setState(() {
-                            client.recording = enabled;
-                          });
                         },
                         translate('Enable recording session'),
                       ),
@@ -819,9 +795,6 @@ class _PrivilegeBoardState extends State<_PrivilegeBoard> {
                                 connId: client.id,
                                 name: "block_input",
                                 enabled: enabled);
-                            setState(() {
-                              client.blockInput = enabled;
-                            });
                           },
                           translate('Enable blocking user input'),
                         )

@@ -179,12 +179,13 @@ void _seedConnectionManagerClients() {
   serverModel.clients.clear();
   serverModel.tabController.clear();
   for (final client in testClients) {
-    serverModel.clients.add(client);
+    final seededClient = Client.fromJson(client.toJson());
+    serverModel.clients.add(seededClient);
     serverModel.tabController.add(TabInfo(
-      key: client.id.toString(),
-      label: client.name,
+      key: seededClient.id.toString(),
+      label: seededClient.name,
       closable: false,
-      page: buildConnectionCard(client),
+      page: buildConnectionCard(seededClient),
     ));
   }
 }
@@ -364,6 +365,87 @@ void main() {
     expect(find.text('Disconnected'), findsOneWidget);
     expect(find.text('Close'), findsOneWidget);
     await _disposeCmTestWidget(tester);
+  });
+
+  testWidgets('connection permission icons follow authoritative CM updates',
+      (tester) async {
+    final client = Client(
+      10,
+      true,
+      false,
+      false,
+      'SupportUser',
+      '991122334',
+      true,
+      false,
+      false,
+    );
+    gFFI.serverModel.clients
+      ..clear()
+      ..add(client);
+
+    await tester.pumpWidget(_buildConnectionCardTestApp(client));
+    await tester.pump();
+
+    expect(find.byTooltip('Enable clipboard: OFF'), findsOneWidget);
+    expect(find.byTooltip('Enable clipboard: ON'), findsNothing);
+
+    gFFI.serverModel.updateClientPermission({
+      'id': '10',
+      'permission_name': 'clipboard',
+      'enabled': 'true',
+    });
+    await tester.pump();
+
+    expect(find.byTooltip('Enable clipboard: OFF'), findsNothing);
+    expect(find.byTooltip('Enable clipboard: ON'), findsOneWidget);
+
+    await _disposeCmTestWidget(tester);
+  });
+
+  test('authorized connection refresh updates existing CM permission snapshot',
+      () {
+    final existing = Client(
+      20,
+      false,
+      false,
+      false,
+      'PendingUser',
+      '551122334',
+      true,
+      false,
+      false,
+    );
+    gFFI.serverModel.clients
+      ..clear()
+      ..add(existing);
+    gFFI.serverModel.hideCm = true;
+
+    final authorized = Client(
+      20,
+      true,
+      false,
+      false,
+      'PendingUser',
+      '551122334',
+      true,
+      true,
+      true,
+    )
+      ..file = true
+      ..restart = true
+      ..recording = true
+      ..blockInput = true;
+
+    gFFI.serverModel.addConnection({'client': jsonEncode(authorized.toJson())});
+
+    expect(existing.authorized, isTrue);
+    expect(existing.clipboard, isTrue);
+    expect(existing.audio, isTrue);
+    expect(existing.file, isTrue);
+    expect(existing.restart, isTrue);
+    expect(existing.recording, isTrue);
+    expect(existing.blockInput, isTrue);
   });
 
   testWidgets('renders permission request below connection toolbar',

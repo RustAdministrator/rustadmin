@@ -291,6 +291,10 @@ pub enum Data {
         name: String,
         enabled: bool,
     },
+    PermissionUpdate {
+        name: String,
+        enabled: bool,
+    },
     PermissionRequest {
         request_id: u64,
         name: String,
