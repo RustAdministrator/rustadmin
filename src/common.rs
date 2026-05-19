@@ -1413,11 +1413,23 @@ pub fn is_safe_rendezvous_peer_hint(addr: SocketAddr, is_local_hint: bool) -> bo
 }
 
 #[inline]
-fn format_direct_access_endpoint(ip: IpAddr, port: i32) -> String {
+pub fn format_direct_access_endpoint(ip: IpAddr, port: i32) -> String {
     match ip {
         IpAddr::V4(ip) => format!("{ip}:{port}"),
         IpAddr::V6(ip) => format!("[{ip}]:{port}"),
     }
+}
+
+pub fn direct_access_endpoint_for_peer_ip(endpoints: &[String], peer_ip: IpAddr) -> Option<String> {
+    let peer_ip = hbb_common::try_into_v4(SocketAddr::new(peer_ip, 0)).ip();
+    endpoints.iter().find_map(|endpoint| {
+        let addr = endpoint.parse::<SocketAddr>().ok()?;
+        let addr = hbb_common::try_into_v4(addr);
+        if addr.port() == 0 || addr.ip() != peer_ip {
+            return None;
+        }
+        Some(format_direct_access_endpoint(addr.ip(), addr.port() as i32))
+    })
 }
 
 pub fn get_direct_access_endpoints() -> Vec<String> {
@@ -1581,7 +1593,8 @@ fn tcp_proxy_log_target(url: &str) -> String {
 
 #[inline]
 fn get_tcp_proxy_addr() -> String {
-    check_port(Config::get_rendezvous_server(), RENDEZVOUS_PORT)
+    socket_client::check_port_non_empty(Config::get_rendezvous_server(), RENDEZVOUS_PORT)
+        .unwrap_or_default()
 }
 
 /// Send an HTTP request via the rendezvous server's TCP proxy using protobuf.
@@ -4305,6 +4318,44 @@ mod tests {
     }
 
     #[test]
+    fn test_get_tcp_proxy_addr_stays_empty_without_rendezvous_server() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+
+        struct RestoreServerOptions {
+            custom_rendezvous_server: String,
+            allow_id_relay_server: String,
+        }
+
+        impl Drop for RestoreServerOptions {
+            fn drop(&mut self) {
+                Config::set_option(
+                    keys::OPTION_CUSTOM_RENDEZVOUS_SERVER.to_string(),
+                    self.custom_rendezvous_server.clone(),
+                );
+                Config::set_option(
+                    keys::OPTION_ALLOW_ID_RELAY_SERVER.to_string(),
+                    self.allow_id_relay_server.clone(),
+                );
+            }
+        }
+
+        let _restore = RestoreServerOptions {
+            custom_rendezvous_server: Config::get_option(keys::OPTION_CUSTOM_RENDEZVOUS_SERVER),
+            allow_id_relay_server: Config::get_option(keys::OPTION_ALLOW_ID_RELAY_SERVER),
+        };
+        Config::set_option(
+            keys::OPTION_ALLOW_ID_RELAY_SERVER.to_string(),
+            "N".to_string(),
+        );
+        Config::set_option(
+            keys::OPTION_CUSTOM_RENDEZVOUS_SERVER.to_string(),
+            "".to_string(),
+        );
+
+        assert_eq!(get_tcp_proxy_addr(), "");
+    }
+
+    #[test]
     fn test_resolve_trusted_relay_server_prefers_explicit_override() {
         // Mutates process-wide Config state. Run the full client library suite
         // with `-- --test-threads=1` to avoid races with other config tests.
@@ -5110,6 +5161,34 @@ mod tests {
         assert_eq!(
             format_direct_access_endpoint(IpAddr::V6("fd00::5".parse().unwrap()), 21118),
             "[fd00::5]:21118"
+        );
+    }
+
+    #[test]
+    fn test_direct_access_endpoint_for_peer_ip_prefers_observed_peer_ip() {
+        let endpoints = vec![
+            "10.0.0.5:21118".to_owned(),
+            "192.168.10.5:21118".to_owned(),
+            "[fd00::5]:21118".to_owned(),
+        ];
+
+        assert_eq!(
+            direct_access_endpoint_for_peer_ip(
+                &endpoints,
+                "192.168.10.5".parse::<IpAddr>().unwrap(),
+            ),
+            Some("192.168.10.5:21118".to_owned())
+        );
+        assert_eq!(
+            direct_access_endpoint_for_peer_ip(&endpoints, "fd00::5".parse::<IpAddr>().unwrap()),
+            Some("[fd00::5]:21118".to_owned())
+        );
+        assert_eq!(
+            direct_access_endpoint_for_peer_ip(
+                &endpoints,
+                "192.168.10.6".parse::<IpAddr>().unwrap(),
+            ),
+            None
         );
     }
 

@@ -1531,6 +1531,8 @@ impl<T: InvokeUiSession> Session<T> {
                                     let mut misc = Misc::new();
                                     misc.set_switch_sides_request(SwitchSidesRequest {
                                         uuid: Bytes::from(uuid.as_bytes().to_vec()),
+                                        direct_endpoints:
+                                            crate::common::get_direct_access_endpoints(),
                                         ..Default::default()
                                     });
                                     let mut msg_out = Message::new();

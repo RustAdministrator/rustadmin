@@ -1473,6 +1473,10 @@ pub async fn change_id_shared_(id: String, old_id: String) -> &'static str {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     let rendezvous_servers = Config::get_rendezvous_servers();
 
+    if rendezvous_servers.is_empty() {
+        return "No rendezvous server configured";
+    }
+
     let mut futs = Vec::new();
     let err: Arc<Mutex<&str>> = Default::default();
     for rendezvous_server in rendezvous_servers {

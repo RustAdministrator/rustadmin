@@ -1939,6 +1939,36 @@ impl Connection {
         );
     }
 
+    #[cfg(feature = "flutter")]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn switch_sides_connect_target(
+        &self,
+        request: &hbb_common::message_proto::SwitchSidesRequest,
+    ) -> String {
+        if let Ok(peer_ip) = self.ip.split('%').next().unwrap_or(&self.ip).parse() {
+            if let Some(endpoint) = crate::common::direct_access_endpoint_for_peer_ip(
+                &request.direct_endpoints,
+                peer_ip,
+            ) {
+                log::info!("switch sides route: direct endpoint {}", endpoint);
+                return endpoint;
+            }
+            if !Config::allow_id_relay_server() {
+                let port = crate::common::get_direct_access_port();
+                if port > 0 && port <= u16::MAX as i32 {
+                    let endpoint = crate::common::format_direct_access_endpoint(peer_ip, port);
+                    log::warn!(
+                        "switch sides route: inferred direct endpoint {} from observed peer IP",
+                        endpoint
+                    );
+                    return endpoint;
+                }
+            }
+        }
+        log::info!("switch sides route: rendezvous id {}", self.lr.my_id);
+        self.lr.my_id.clone()
+    }
+
     fn post_conn_audit(&self, v: Value) {
         if self.server_audit_conn.is_empty() {
             return;
@@ -4036,11 +4066,12 @@ impl Connection {
                                 self.lr.my_id.clone(),
                                 uuid.clone(),
                             );
+                            let connect_target = self.switch_sides_connect_target(&s);
                             crate::run_me(vec![
-                                "--connect",
-                                &self.lr.my_id,
-                                "--switch_uuid",
-                                uuid.to_string().as_ref(),
+                                "--connect".to_owned(),
+                                connect_target,
+                                "--switch_uuid".to_owned(),
+                                uuid.to_string(),
                             ])
                             .ok();
                             self.on_close("switch sides", false).await;

@@ -300,6 +300,33 @@ impl Client {
         }
     }
 
+    fn resolve_explicit_rendezvous_server(
+        other_server: &str,
+    ) -> ResultType<(String, Vec<String>, bool)> {
+        if !Config::allow_id_relay_server() {
+            bail!("ID/Relay server routes are disabled");
+        }
+        if other_server.trim().is_empty() {
+            bail!("No ID/Relay server route specified");
+        }
+        if other_server == PUBLIC_SERVER {
+            let mut servers = Config::get_bootstrap_rendezvous_servers()
+                .into_iter()
+                .filter(|server| !server.trim().is_empty());
+            let rendezvous_server = servers
+                .next()
+                .and_then(|server| {
+                    hbb_common::socket_client::check_port_non_empty(&server, RENDEZVOUS_PORT)
+                })
+                .ok_or_else(|| anyhow!("No bootstrap rendezvous server configured"))?;
+            return Ok((rendezvous_server, servers.collect(), true));
+        }
+        let rendezvous_server =
+            hbb_common::socket_client::check_port_non_empty(other_server, RENDEZVOUS_PORT)
+                .ok_or_else(|| anyhow!("No ID/Relay server route specified"))?;
+        Ok((rendezvous_server, Vec::new(), true))
+    }
+
     /// Start a new connection.
     async fn _start(
         peer: &str,
@@ -356,25 +383,17 @@ impl Client {
         }
 
         let other_server = interface.get_lch().read().unwrap().other_server.clone();
-        let (peer, other_server, key, token) = if let Some((a, b, c)) = other_server.as_ref() {
-            (a.as_ref(), b.as_ref(), c.as_ref(), "")
+        let (peer, key, token) = if let Some((a, _, c)) = other_server.as_ref() {
+            (a.as_ref(), c.as_ref(), "")
         } else {
-            (peer, "", key, token)
+            (peer, key, token)
         };
-        let (rendezvous_server, servers, contained) = if other_server.is_empty() {
-            crate::get_rendezvous_server(1_000).await
-        } else {
-            if other_server == PUBLIC_SERVER {
-                let mut servers = Config::get_bootstrap_rendezvous_servers().into_iter();
-                let rendezvous_server = servers
-                    .next()
-                    .map(|server| check_port(&server, RENDEZVOUS_PORT))
-                    .ok_or_else(|| anyhow!("No bootstrap rendezvous server configured"))?;
-                (rendezvous_server, servers.collect(), true)
+        let (rendezvous_server, servers, contained) =
+            if let Some((_, server, _)) = other_server.as_ref() {
+                Self::resolve_explicit_rendezvous_server(server)?
             } else {
-                (check_port(other_server, RENDEZVOUS_PORT), Vec::new(), true)
-            }
-        };
+                crate::get_rendezvous_server(1_000).await
+            };
         if rendezvous_server.is_empty() {
             bail!("No rendezvous server configured");
         }
@@ -2261,6 +2280,7 @@ impl LoginConfigHandler {
         conn_token: Option<String>,
     ) {
         let mut id = id;
+        self.other_server = None;
         if id.contains("@") {
             let mut v = id.split("@");
             let raw_id: &str = v.next().unwrap_or_default();
@@ -3134,9 +3154,19 @@ impl LoginConfigHandler {
         let my_id = Config::get_id_or(crate::DEVICE_ID.lock().unwrap().clone());
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         let my_id = Config::get_id();
-        let (my_id, pure_id) = if let Some((id, _, _)) = self.other_server.as_ref() {
-            let server = Config::get_rendezvous_server();
-            (format!("{my_id}@{server}"), id.clone())
+        let (my_id, pure_id) = if let Some((id, server, _)) = self.other_server.as_ref() {
+            let server = if server == PUBLIC_SERVER {
+                Config::get_rendezvous_server()
+            } else {
+                server.clone()
+            };
+            let my_id = if server.is_empty() {
+                log::warn!("Omitting empty ID/Relay server from login identity");
+                my_id
+            } else {
+                format!("{my_id}@{server}")
+            };
+            (my_id, id.clone())
         } else {
             (my_id, self.id.clone())
         };
@@ -5126,6 +5156,52 @@ mod security_tests {
             Ok(())
         });
         Ok((addr.to_string(), signed_id_pk, handle))
+    }
+
+    #[test]
+    fn test_explicit_rendezvous_route_requires_id_relay_switch() {
+        let _guard = TEST_CLIENT_SECURITY_LOCK.lock().unwrap();
+
+        struct RestoreRouteOptions {
+            allow_id_relay_server: String,
+        }
+
+        impl Drop for RestoreRouteOptions {
+            fn drop(&mut self) {
+                Config::set_option(
+                    keys::OPTION_ALLOW_ID_RELAY_SERVER.to_owned(),
+                    self.allow_id_relay_server.clone(),
+                );
+            }
+        }
+
+        let _restore = RestoreRouteOptions {
+            allow_id_relay_server: Config::get_option(keys::OPTION_ALLOW_ID_RELAY_SERVER),
+        };
+
+        Config::set_option(
+            keys::OPTION_ALLOW_ID_RELAY_SERVER.to_owned(),
+            "N".to_owned(),
+        );
+        let err = Client::resolve_explicit_rendezvous_server("hbbs.example.test")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ID/Relay server routes are disabled"));
+
+        Config::set_option(
+            keys::OPTION_ALLOW_ID_RELAY_SERVER.to_owned(),
+            "Y".to_owned(),
+        );
+        let err = Client::resolve_explicit_rendezvous_server("  ")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("No ID/Relay server route specified"));
+
+        let (server, alternates, contained) =
+            Client::resolve_explicit_rendezvous_server("hbbs.example.test").unwrap();
+        assert_eq!(server, format!("hbbs.example.test:{RENDEZVOUS_PORT}"));
+        assert!(alternates.is_empty());
+        assert!(contained);
     }
 
     #[tokio::test]
