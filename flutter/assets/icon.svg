@@ -1,4 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg id="RustAdmin" data-name="RustAdmin" xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-  <polygon fill="#ff5000" points="224 56 200 32 59.96 32 32 64 32 224 80 224 80 176 144 176 144 128 80 128 80 80 176 80 176 224 224 224 224 176 200 152 224 128 224 56"/>
+<svg id="RustAdmin" xmlns="http://www.w3.org/2000/svg" version="1.1" viewBox="0 0 256 256">
+  <defs>
+    <style>
+      .st0 {
+        fill: #ff5000;
+      }
+    </style>
+  </defs>
+  <polygon class="st0" points="224 64 192 32 64 32 32 64 32 224 80 224 80 176 144 176 144 128 80 128 80 80 176 80 176 224 224 224 224 176 200 152 224 128 224 64"/>
 </svg>
