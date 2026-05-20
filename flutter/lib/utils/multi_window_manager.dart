@@ -230,6 +230,8 @@ class RustDeskMultiWindowManager {
     bool? isRDP,
     bool? isSharedPassword,
     String? connToken,
+    String? sessionId,
+    String? pendingCachedPeerData,
   }) async {
     var params = {
       "type": type.index,
@@ -249,13 +251,19 @@ class RustDeskMultiWindowManager {
     if (connToken != null) {
       params['connToken'] = connToken;
     }
+    if (sessionId != null) {
+      params['session_id'] = sessionId;
+    }
+    if (pendingCachedPeerData != null) {
+      params['pending_cached_peer_data'] = pendingCachedPeerData;
+    }
     final msg = jsonEncode(params);
 
     // separate window for file transfer is not supported
     bool openInTabs = type != WindowType.RemoteDesktop ||
         mainGetLocalBoolOptionSync(kOptionOpenNewConnInTabs);
 
-    if (windows.length > 1 || !openInTabs) {
+    if (sessionId == null && (windows.length > 1 || !openInTabs)) {
       for (final windowId in windows) {
         if (await DesktopMultiWindow.invokeMethod(
             windowId, kWindowEventActiveSession, remoteId)) {
@@ -273,6 +281,8 @@ class RustDeskMultiWindowManager {
     bool? isSharedPassword,
     String? switchUuid,
     bool? forceRelay,
+    String? sessionId,
+    String? pendingCachedPeerData,
   }) async {
     return await newSession(
       WindowType.RemoteDesktop,
@@ -283,6 +293,8 @@ class RustDeskMultiWindowManager {
       forceRelay: forceRelay,
       switchUuid: switchUuid,
       isSharedPassword: isSharedPassword,
+      sessionId: sessionId,
+      pendingCachedPeerData: pendingCachedPeerData,
     );
   }
 

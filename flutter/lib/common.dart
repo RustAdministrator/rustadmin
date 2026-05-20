@@ -766,6 +766,9 @@ closeConnection({String? id}) {
       Navigator.popUntil(globalKey.currentContext!, ModalRoute.withName("/"));
       stateGlobal.isInMainPage = true;
     } else {
+      if (PreAuthRemoteDesktopManager.instance.closeIfPending(id: id)) {
+        return;
+      }
       final controller = Get.find<DesktopTabController>();
       controller.closeBy(id);
     }
@@ -790,6 +793,125 @@ Future<void> windowOnTop(int? id) async {
       ..focus()
       ..show();
     rustDeskWinManager.call(WindowType.Main, kWindowEventShow, {"id": id});
+  }
+}
+
+class PreAuthRemoteDesktopManager {
+  PreAuthRemoteDesktopManager._();
+
+  static final instance = PreAuthRemoteDesktopManager._();
+
+  FFI? _ffi;
+  String? _peerId;
+  bool _openingRemoteWindow = false;
+  bool _handedOff = false;
+
+  bool closeIfPending({String? id}) {
+    if (_ffi == null) {
+      return false;
+    }
+    if (id != null && id != _peerId) {
+      return false;
+    }
+    unawaited(closePending());
+    return true;
+  }
+
+  Future<void> closePending() async {
+    final ffi = _ffi;
+    if (ffi == null) {
+      return;
+    }
+    final closeSession = !_handedOff;
+    _ffi = null;
+    _peerId = null;
+    _openingRemoteWindow = false;
+    _handedOff = false;
+    ffi.onAuthenticated = null;
+    ffi.dialogManager.dismissAll();
+    await ffi.close(closeSession: closeSession);
+  }
+
+  Future<void> start(
+    String id, {
+    String? password,
+    bool? isSharedPassword,
+    String? switchUuid,
+    bool? forceRelay,
+  }) async {
+    await closePending();
+
+    final ffi = FFI(null);
+    _ffi = ffi;
+    _peerId = id;
+    _openingRemoteWindow = false;
+    _handedOff = false;
+    ffi.onAuthenticated = (authenticatedFfi, peerId) async {
+      await _openRemoteWindow(
+        authenticatedFfi,
+        peerId,
+        password: password,
+        isSharedPassword: isSharedPassword,
+        switchUuid: switchUuid,
+        forceRelay: forceRelay,
+      );
+    };
+
+    await windowOnTop(null);
+    ffi.dialogManager.showLoading(
+      translate('Connecting...'),
+      onCancel: () => closeIfPending(id: id),
+    );
+    ffi.start(
+      id,
+      password: password,
+      isSharedPassword: isSharedPassword,
+      switchUuid: switchUuid,
+      forceRelay: forceRelay,
+    );
+  }
+
+  Future<void> _openRemoteWindow(
+    FFI ffi,
+    String peerId, {
+    String? password,
+    bool? isSharedPassword,
+    String? switchUuid,
+    bool? forceRelay,
+  }) async {
+    if (!identical(_ffi, ffi) || _openingRemoteWindow || _handedOff) {
+      return;
+    }
+
+    _openingRemoteWindow = true;
+    final sessionId = ffi.sessionId.toString();
+    final cachedPeerData = ffi.ffiModel.cachedPeerData.toString();
+    try {
+      await rustDeskWinManager.newRemoteDesktop(
+        peerId,
+        password: password,
+        isSharedPassword: isSharedPassword,
+        switchUuid: switchUuid,
+        forceRelay: forceRelay,
+        sessionId: sessionId,
+        pendingCachedPeerData: cachedPeerData,
+      );
+      if (!identical(_ffi, ffi)) {
+        return;
+      }
+      _handedOff = true;
+      _ffi = null;
+      _peerId = null;
+      _openingRemoteWindow = false;
+      ffi.onAuthenticated = null;
+      ffi.dialogManager.dismissAll();
+      await ffi.close(closeSession: false);
+      _handedOff = false;
+    } catch (e) {
+      _openingRemoteWindow = false;
+      debugPrint('Failed to open authenticated remote window: $e');
+      rethrow;
+    }
   }
 }
 
@@ -2434,7 +2556,7 @@ bool handleUriLink({List<String>? cmdArgs, Uri? uri, String? uriString}) {
     switch (type) {
       case UriLinkType.remoteDesktop:
         Future.delayed(Duration.zero, () {
-          rustDeskWinManager.newRemoteDesktop(id!,
+          PreAuthRemoteDesktopManager.instance.start(id!,
               password: password,
               switchUuid: switchUuid,
               forceRelay: forceRelay);
@@ -2643,7 +2765,7 @@ connectMainDesktop(String id,
         connToken: connToken,
         forceRelay: forceRelay);
   } else {
-    await rustDeskWinManager.newRemoteDesktop(id,
+    await PreAuthRemoteDesktopManager.instance.start(id,
         password: password,
         isSharedPassword: isSharedPassword,
         forceRelay: forceRelay);

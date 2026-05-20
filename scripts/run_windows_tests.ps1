@@ -152,7 +152,11 @@ try {
 
     if (!$SkipFlutter) {
         $FlutterCommand = Resolve-FlutterCommand
-        Invoke-TestStep "Flutter tests" $FlutterDir $FlutterCommand @("test")
+        # `.dart_tool/package_config.json` is platform/cache specific. Regenerate
+        # it here so WSL/Linux Flutter runs cannot leave Windows tests pointing
+        # at `/mnt/...` package paths.
+        Invoke-TestStep "Flutter pub get" $FlutterDir $FlutterCommand @("pub", "get")
+        Invoke-TestStep "Flutter tests" $FlutterDir $FlutterCommand @("test", "-r", "expanded")
     }
 }
 finally {

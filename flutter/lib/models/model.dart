@@ -1756,6 +1756,10 @@ class FfiModel with ChangeNotifier {
 
     if (!isCache) {
       tryUseAllMyDisplaysForTheRemoteSession(peerId);
+      final onAuthenticated = parent.target?.onAuthenticated;
+      if (onAuthenticated != null) {
+        await onAuthenticated(parent.target!, peerId);
+      }
     }
   }
 
@@ -4053,6 +4057,7 @@ class FFI {
   var version = '';
   var connType = ConnType.defaultConn;
   var closed = false;
+  Future<void> Function(FFI ffi, String peerId)? onAuthenticated;
 
   /// dialogManager use late to ensure init after main page binding [globalKey]
   late final dialogManager = OverlayDialogManager();
@@ -4141,6 +4146,8 @@ class FFI {
     int? tabWindowId,
     int? display,
     List<int>? displays,
+    bool attachExisting = false,
+    String? cachedPeerData,
   }) {
     closed = false;
     if (isMobile) mobileReset();
@@ -4171,7 +4178,7 @@ class FFI {
     final isNewPeer = tabWindowId == null;
     // If tabWindowId != null, this session is a "tab -> window" one.
     // Else this session is a new one.
-    if (isNewPeer) {
+    if (isNewPeer && !attachExisting) {
       // ignore: unused_local_variable
       final addRes = bind.sessionAddSync(
         sessionId: sessionId,
@@ -4241,6 +4248,18 @@ class FFI {
     }
 
     final cb = ffiModel.startEventListener(sessionId, id);
+    Future<void> handleCachedSessionData(String cachedData) async {
+      final data = CachedPeerData.fromString(cachedData);
+      if (data == null) {
+        debugPrint('Unreachable, the cached data cannot be decoded.');
+        return;
+      }
+      ffiModel.setPermissions(data.permissions);
+      await ffiModel.handleCachedPeerData(data, id);
+      await sessionRefreshVideo(sessionId, ffiModel.pi);
+      await bind.sessionRequestNewDisplayInitMsgs(
+          sessionId: sessionId, display: ffiModel.pi.currentDisplay);
+    }
 
     imageModel.updateUserTextureRender();
     final hasGpuTextureRender = bind.mainHasGpuTextureRender();
@@ -4260,16 +4279,7 @@ class FFI {
             debugPrint('Unreachable, the cached data is empty.');
             return;
           }
-          final data = CachedPeerData.fromString(cachedData);
-          if (data == null) {
-            debugPrint('Unreachable, the cached data cannot be decoded.');
-            return;
-          }
-          ffiModel.setPermissions(data.permissions);
-          await ffiModel.handleCachedPeerData(data, id);
-          await sessionRefreshVideo(sessionId, ffiModel.pi);
-          await bind.sessionRequestNewDisplayInitMsgs(
-              sessionId: sessionId, display: ffiModel.pi.currentDisplay);
+          await handleCachedSessionData(cachedData);
         });
         isToNewWindowNotified.value = true;
       }
@@ -4321,6 +4331,11 @@ class FFI {
     });
     // every instance will bind a stream
     this.id = id;
+    if (cachedPeerData != null) {
+      Future.delayed(Duration.zero, () async {
+        await handleCachedSessionData(cachedPeerData);
+      });
+    }
   }
 
   void onEvent2UIRgba() async {
