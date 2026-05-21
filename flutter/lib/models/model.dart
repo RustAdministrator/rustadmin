@@ -70,6 +70,16 @@ const kRustAdminDefaultSessionPermissions = <String, bool>{
   'terminal': false,
 };
 
+const _kInitialSessionPermissionNames = <String>{
+  'keyboard',
+  'clipboard',
+  'audio',
+  'file',
+  'restart',
+  'recording',
+  'block_input',
+};
+
 Map<String, bool> rustAdminDefaultSessionPermissions() =>
     Map<String, bool>.of(kRustAdminDefaultSessionPermissions);
 
@@ -147,6 +157,10 @@ class FfiModel with ChangeNotifier {
   Timer? waitForImageTimer;
   RxBool waitForFirstImage = true.obs;
   bool isRefreshing = false;
+  bool _authenticatedHandoffPeerInfoReady = false;
+  bool _authenticatedHandoffNotified = false;
+  final _receivedInitialPermissions = <String>{};
+  Timer? _authenticatedHandoffFallbackTimer;
 
   Timer? timerScreenshot;
 
@@ -234,11 +248,18 @@ class FfiModel with ChangeNotifier {
   updatePermission(Map<String, dynamic> evt, String id) {
     // Track previous keyboard permission to detect revocation.
     final hadKeyboardPerm = _permissions['keyboard'] != false;
+    final updatedPermissions = <String>[];
 
     evt.forEach((k, v) {
       if (k == 'name' || k.isEmpty) return;
       _permissions[k] = v == 'true';
+      if (_kInitialSessionPermissionNames.contains(k)) {
+        updatedPermissions.add(k);
+      }
     });
+    if (updatedPermissions.isNotEmpty) {
+      _receivedInitialPermissions.addAll(updatedPermissions);
+    }
     // Only inited at remote page
     if (parent.target?.connType == ConnType.defaultConn) {
       KeyboardEnabledState.find(id).value = _permissions['keyboard'] != false;
@@ -257,6 +278,7 @@ class FfiModel with ChangeNotifier {
 
     debugPrint('updatePermission: $_permissions');
     notifyListeners();
+    _tryNotifyAuthenticatedHandoff(id);
   }
 
   bool get keyboard => _permissions['keyboard'] != false;
@@ -270,6 +292,11 @@ class FfiModel with ChangeNotifier {
     _timer = null;
     clearPermissions();
     waitForImageTimer?.cancel();
+    _authenticatedHandoffFallbackTimer?.cancel();
+    _authenticatedHandoffFallbackTimer = null;
+    _authenticatedHandoffPeerInfoReady = false;
+    _authenticatedHandoffNotified = false;
+    _receivedInitialPermissions.clear();
     timerScreenshot?.cancel();
   }
 
@@ -339,6 +366,34 @@ class FfiModel with ChangeNotifier {
       updateLastCursorId(data.lastCursorId);
       handleCursorId(data.lastCursorId);
     }
+  }
+
+  void _tryNotifyAuthenticatedHandoff(String peerId,
+      {bool allowPartialPermissions = false}) {
+    final ffi = parent.target;
+    final onAuthenticated = ffi?.onAuthenticated;
+    if (ffi == null ||
+        onAuthenticated == null ||
+        _authenticatedHandoffNotified ||
+        !_authenticatedHandoffPeerInfoReady) {
+      return;
+    }
+    if (!allowPartialPermissions &&
+        !_receivedInitialPermissions
+            .containsAll(_kInitialSessionPermissionNames)) {
+      return;
+    }
+    if (allowPartialPermissions &&
+        !_receivedInitialPermissions
+            .containsAll(_kInitialSessionPermissionNames)) {
+      debugPrint(
+          'Opening authenticated remote window with partial permission snapshot: $_receivedInitialPermissions');
+    }
+    _authenticatedHandoffNotified = true;
+    _authenticatedHandoffFallbackTimer?.cancel();
+    _authenticatedHandoffFallbackTimer = null;
+    ffi.onAuthenticated = null;
+    unawaited(onAuthenticated(ffi, peerId));
   }
 
   // todo: why called by two position
@@ -1281,7 +1336,7 @@ class FfiModel with ChangeNotifier {
         void onReset() {
           () async {
             try {
-              final ok = await bind.sessionResetPeerTrust(sessionId: sessionId);
+              final ok = bind.sessionResetPeerTrust(sessionId: sessionId);
               if (!ok) {
                 showToast('Failed to reset peer trust');
                 return;
@@ -1786,10 +1841,20 @@ class FfiModel with ChangeNotifier {
     notifyListeners();
 
     if (!isCache) {
-      tryUseAllMyDisplaysForTheRemoteSession(peerId);
       final onAuthenticated = parent.target?.onAuthenticated;
       if (onAuthenticated != null) {
-        await onAuthenticated(parent.target!, peerId);
+        _authenticatedHandoffPeerInfoReady = true;
+        _authenticatedHandoffFallbackTimer?.cancel();
+        _authenticatedHandoffFallbackTimer =
+            Timer(const Duration(milliseconds: 500), () {
+          _tryNotifyAuthenticatedHandoff(
+            peerId,
+            allowPartialPermissions: true,
+          );
+        });
+        _tryNotifyAuthenticatedHandoff(peerId);
+      } else {
+        tryUseAllMyDisplaysForTheRemoteSession(peerId);
       }
     }
   }
@@ -1943,7 +2008,11 @@ class FfiModel with ChangeNotifier {
   updateLastCursorId(Map<String, dynamic> evt) {
     // int.parse(evt['id']) may cause FormatException
     // Unhandled Exception: FormatException: Positive input exceeds the limit of integer 18446744071749110741
-    parent.target?.cursorModel.id = evt['id'];
+    final id = evt['id']?.toString();
+    if (id == null || id.isEmpty) {
+      return;
+    }
+    parent.target?.cursorModel.id = id;
   }
 
   handleCursorId(Map<String, dynamic> evt) {
@@ -3250,7 +3319,7 @@ class CursorData {
     required this.width,
     required this.height,
   })  : hotx = hotxOrigin * scale,
-        hoty = hotxOrigin * scale;
+        hoty = hotyOrigin * scale;
 
   int _doubleToInt(double v) => (v * 10e6).round().toInt();
 
@@ -3259,7 +3328,7 @@ class CursorData {
     if (scale != 1.0) {
       // Update data if scale changed.
       final tgtWidth = (width * scale).toInt();
-      final tgtHeight = (width * scale).toInt();
+      final tgtHeight = (height * scale).toInt();
       if (tgtWidth < kMinCursorSize || tgtHeight < kMinCursorSize) {
         double sw = kMinCursorSize.toDouble() / width;
         double sh = kMinCursorSize.toDouble() / height;
@@ -3798,7 +3867,10 @@ class CursorModel with ChangeNotifier {
   }
 
   updateCursorData(Map<String, dynamic> evt) async {
-    final id = evt['id'];
+    final id = evt['id']?.toString();
+    if (id == null || id.isEmpty) {
+      return;
+    }
     final hotx = double.parse(evt['hotx']);
     final hoty = double.parse(evt['hoty']);
     final width = int.parse(evt['width']);
@@ -3873,11 +3945,23 @@ class CursorModel with ChangeNotifier {
       }
       return true;
     } else {
+      if (_image != null || _cache != null) {
+        _image = null;
+        _cache = null;
+        _hotx = 0;
+        _hoty = 0;
+        notifyListeners();
+      }
       return false;
     }
   }
 
   updateCursorId(Map<String, dynamic> evt) {
+    final id = evt['id']?.toString();
+    if (id == null || id.isEmpty) {
+      return;
+    }
+    _id = id;
     if (!_updateCurData()) {
       debugPrint(
           'WARNING: updateCursorId $_id, cache is ${_cache == null ? "null" : "not null"}. without notifyListeners()');
@@ -3924,7 +4008,7 @@ class CursorModel with ChangeNotifier {
 
   clear() {
     _x = -10000;
-    _x = -10000;
+    _y = -10000;
     _image = null;
     _firstUpdateMouseTime = null;
     gotMouseControl = true;
@@ -3941,6 +4025,7 @@ class CursorModel with ChangeNotifier {
       debugPrint("deleting cursor with key $k");
       deleteCustomCursor(k);
     }
+    _cacheKeys.clear();
     resetSystemCursor();
   }
 
@@ -4279,7 +4364,10 @@ class FFI {
     }
 
     final cb = ffiModel.startEventListener(sessionId, id);
-    Future<void> handleCachedSessionData(String cachedData) async {
+    Future<void> handleCachedSessionData(
+      String cachedData, {
+      bool runAuthenticatedSetup = false,
+    }) async {
       final data = CachedPeerData.fromString(cachedData);
       if (data == null) {
         debugPrint('Unreachable, the cached data cannot be decoded.');
@@ -4290,6 +4378,9 @@ class FFI {
       await sessionRefreshVideo(sessionId, ffiModel.pi);
       await bind.sessionRequestNewDisplayInitMsgs(
           sessionId: sessionId, display: ffiModel.pi.currentDisplay);
+      if (runAuthenticatedSetup && connType == ConnType.defaultConn) {
+        unawaited(ffiModel.tryUseAllMyDisplaysForTheRemoteSession(id));
+      }
     }
 
     imageModel.updateUserTextureRender();
@@ -4364,7 +4455,10 @@ class FFI {
     this.id = id;
     if (cachedPeerData != null) {
       Future.delayed(Duration.zero, () async {
-        await handleCachedSessionData(cachedPeerData);
+        await handleCachedSessionData(
+          cachedPeerData,
+          runAuthenticatedSetup: attachExisting && tabWindowId == null,
+        );
       });
     }
   }
@@ -4404,7 +4498,8 @@ class FFI {
   }
 
   /// Close the remote session.
-  Future<void> close({bool closeSession = true}) async {
+  Future<void> close(
+      {bool closeSession = true, bool saveCanvasConfig = true}) async {
     closed = true;
     chatModel.close();
     // Close all terminal models
@@ -4412,7 +4507,7 @@ class FFI {
       model.dispose();
     }
     _terminalModels.clear();
-    if (imageModel.image != null && !isWebDesktop) {
+    if (saveCanvasConfig && imageModel.image != null && !isWebDesktop) {
       await setCanvasConfig(
           sessionId,
           cursorModel.x,

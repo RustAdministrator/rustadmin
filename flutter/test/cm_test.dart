@@ -15,6 +15,7 @@ import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:get/get.dart';
+import 'package:image/image.dart' as img2;
 import 'package:provider/provider.dart';
 import 'package:visibility_detector/visibility_detector.dart';
 import 'package:window_manager/window_manager.dart';
@@ -305,6 +306,27 @@ void main() {
     expect(hosts.last.hasPassword, isFalse);
     expect(hosts.last.hasPinnedKey, isFalse);
     expect(hosts.last.hasRendezvousPairingMemory, isTrue);
+  });
+
+  test('cursor cache data keeps independent height and y hotspot', () {
+    final cursor = CursorData(
+      peerId: 'peer-a',
+      id: 'cursor-a',
+      image: img2.Image(width: 12, height: 24),
+      scale: 1.0,
+      data: null,
+      hotxOrigin: 3,
+      hotyOrigin: 7,
+      width: 12,
+      height: 24,
+    );
+
+    expect(cursor.hotx, 3);
+    expect(cursor.hoty, 7);
+
+    expect(cursor.updateGetKey(2.0), 'peer-a_cursor-a_240000000_480000000');
+    expect(cursor.hotx, 6);
+    expect(cursor.hoty, 14);
   });
 
   setUp(() async {

@@ -829,7 +829,7 @@ class PreAuthRemoteDesktopManager {
     _handedOff = false;
     ffi.onAuthenticated = null;
     ffi.dialogManager.dismissAll();
-    await ffi.close(closeSession: closeSession);
+    await ffi.close(closeSession: closeSession, saveCanvasConfig: false);
   }
 
   Future<void> start(
@@ -839,6 +839,10 @@ class PreAuthRemoteDesktopManager {
     String? switchUuid,
     bool? forceRelay,
   }) async {
+    if (await rustDeskWinManager.activateRemoteDesktop(id)) {
+      await closePending();
+      return;
+    }
     await closePending();
 
     final ffi = FFI(null);
@@ -905,12 +909,15 @@ class PreAuthRemoteDesktopManager {
       _openingRemoteWindow = false;
       ffi.onAuthenticated = null;
       ffi.dialogManager.dismissAll();
-      await ffi.close(closeSession: false);
+      await ffi.close(closeSession: false, saveCanvasConfig: false);
       _handedOff = false;
     } catch (e) {
       _openingRemoteWindow = false;
       debugPrint('Failed to open authenticated remote window: $e');
-      rethrow;
+      if (identical(_ffi, ffi)) {
+        await closePending();
+      }
+      showToast(translate('Failed'));
     }
   }
 }
