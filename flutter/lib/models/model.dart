@@ -1054,18 +1054,29 @@ class FfiModel with ChangeNotifier {
           if (value.isEmpty) {
             return const SizedBox.shrink();
           }
+          final baseStyle = Theme.of(context).textTheme.bodyMedium ??
+              DefaultTextStyle.of(context).style;
+          final valueStyle = label == 'Endpoint'
+              ? baseStyle.copyWith(
+                  color: Colors.amber.shade700,
+                  decoration: TextDecoration.none,
+                )
+              : baseStyle.copyWith(decoration: TextDecoration.none);
           return Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: SelectionArea(
               child: RichText(
                 text: TextSpan(
-                  style: DefaultTextStyle.of(context).style,
+                  style: baseStyle.copyWith(decoration: TextDecoration.none),
                   children: [
                     TextSpan(
                       text: '$label: ',
-                      style: const TextStyle(fontWeight: FontWeight.w600),
+                      style: baseStyle.copyWith(
+                        fontWeight: FontWeight.w600,
+                        decoration: TextDecoration.none,
+                      ),
                     ),
-                    TextSpan(text: value),
+                    TextSpan(text: value, style: valueStyle),
                   ],
                 ),
               ),
@@ -1130,7 +1141,14 @@ class FfiModel with ChangeNotifier {
     final peerId = (details['peer_id'] ?? '').toString();
     final direct = details['direct'] == true;
     final controller = TextEditingController();
-    bool obscure = true;
+    final obscure = true.obs;
+    final hasPassphrase = false.obs;
+    controller.addListener(() {
+      final value = controller.text.isNotEmpty;
+      if (hasPassphrase.value != value) {
+        hasPassphrase.value = value;
+      }
+    });
     bool submitting = false;
     dialogManager.show(
       tag: '$sessionId-input-pairing-passphrase',
@@ -1166,18 +1184,29 @@ class FfiModel with ChangeNotifier {
           if (value.isEmpty) {
             return const SizedBox.shrink();
           }
+          final baseStyle = Theme.of(context).textTheme.bodyMedium ??
+              DefaultTextStyle.of(context).style;
+          final valueStyle = label == 'Endpoint'
+              ? baseStyle.copyWith(
+                  color: Colors.amber.shade700,
+                  decoration: TextDecoration.none,
+                )
+              : baseStyle.copyWith(decoration: TextDecoration.none);
           return Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: SelectionArea(
               child: RichText(
                 text: TextSpan(
-                  style: DefaultTextStyle.of(context).style,
+                  style: baseStyle.copyWith(decoration: TextDecoration.none),
                   children: [
                     TextSpan(
                       text: '$label: ',
-                      style: const TextStyle(fontWeight: FontWeight.w600),
+                      style: baseStyle.copyWith(
+                        fontWeight: FontWeight.w600,
+                        decoration: TextDecoration.none,
+                      ),
                     ),
-                    TextSpan(text: value),
+                    TextSpan(text: value, style: valueStyle),
                   ],
                 ),
               ),
@@ -1200,23 +1229,22 @@ class FfiModel with ChangeNotifier {
               ).marginOnly(bottom: 12),
               buildLine(direct ? 'Endpoint' : 'Peer', peer),
               buildLine('Peer ID', peerId),
-              TextField(
-                controller: controller,
-                autofocus: true,
-                obscureText: obscure,
-                autocorrect: false,
-                maxLength: bind.mainMaxEncryptLen(),
-                onChanged: (_) => setState(() {}),
-                decoration: InputDecoration(
-                  labelText: direct
-                      ? 'Pairing passphrase'
-                      : 'Rendezvous pairing passphrase',
-                  suffixIcon: IconButton(
-                    onPressed: () => setState(() {
-                      obscure = !obscure;
-                    }),
-                    icon: Icon(
-                      obscure ? Icons.visibility_off : Icons.visibility,
+              Obx(
+                () => TextField(
+                  controller: controller,
+                  autofocus: true,
+                  obscureText: obscure.value,
+                  autocorrect: false,
+                  maxLength: bind.mainMaxEncryptLen(),
+                  decoration: InputDecoration(
+                    labelText: direct
+                        ? 'Pairing passphrase'
+                        : 'Rendezvous pairing passphrase',
+                    suffixIcon: IconButton(
+                      onPressed: () => obscure.value = !obscure.value,
+                      icon: Icon(
+                        obscure.value ? Icons.visibility_off : Icons.visibility,
+                      ),
                     ),
                   ),
                 ),
@@ -1225,12 +1253,14 @@ class FfiModel with ChangeNotifier {
           ),
           actions: [
             dialogButton('Cancel', onPressed: cancel, isOutline: true),
-            dialogButton(
-              'Continue',
-              onPressed: controller.text.isEmpty ? null : submit,
+            Obx(
+              () => dialogButton(
+                'Continue',
+                onPressed: hasPassphrase.value ? submit : null,
+              ),
             ),
           ],
-          onSubmit: controller.text.isEmpty ? null : submit,
+          onSubmit: submit,
           onCancel: cancel,
         );
       },

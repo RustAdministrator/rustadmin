@@ -60,7 +60,7 @@ function Test-StaleFlutterMetadata {
 
 function Get-RustAdminVersionInfo {
     $CargoToml = Join-Path $RepoRoot "Cargo.toml"
-    $RevisionFile = Join-Path (Split-Path $RepoRoot -Parent) "hbb_common\rustadmin_revision.txt"
+    $RevisionFile = Join-Path $RepoRoot "rustadmin_revision.txt"
 
     $Version = $null
     foreach ($Line in Get-Content $CargoToml) {

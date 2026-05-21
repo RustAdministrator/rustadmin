@@ -67,7 +67,7 @@ fi
 mkdir -p "$PUB_CACHE" "$CARGO_TARGET_DIR"
 
 read_version_info() {
-  local revision_file="$repo_root/../hbb_common/rustadmin_revision.txt"
+  local revision_file="$repo_root/rustadmin_revision.txt"
 
   version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$repo_root/Cargo.toml" | head -n 1)"
   if [[ -z "$version" ]]; then

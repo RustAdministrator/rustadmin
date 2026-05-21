@@ -120,7 +120,7 @@ clean_flutter_hook_locks() {
 generate_version_file() {
   local version
   local revision
-  local revision_file="$repo_root/../hbb_common/rustadmin_revision.txt"
+  local revision_file="$repo_root/rustadmin_revision.txt"
   local version_file="$repo_root/src/version.rs"
 
   version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$repo_root/Cargo.toml" | head -n 1)"
