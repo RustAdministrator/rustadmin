@@ -369,6 +369,7 @@ Future<String> changePairingPassphrase(
               obscureText: obscure.value,
               autocorrect: false,
               maxLength: bind.mainMaxEncryptLen(),
+              selectAllOnFocus: false,
               decoration: InputDecoration(
                 hintText: translate('Optional'),
                 suffixIcon: Row(

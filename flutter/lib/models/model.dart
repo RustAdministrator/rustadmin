@@ -1010,6 +1010,10 @@ class FfiModel with ChangeNotifier {
 
   void showPeerTrustDialog(
       SessionID sessionId, OverlayDialogManager dialogManager, String text) {
+    final dialogTag = '$sessionId-confirm-peer-trust';
+    if (dialogManager.hasDialog(dialogTag)) {
+      return;
+    }
     Map<String, dynamic> details = const {};
     try {
       final decoded = jsonDecode(text);
@@ -1028,7 +1032,7 @@ class FfiModel with ChangeNotifier {
     final normalizedTrustPhrase = normalizePhrase(trustPhrase);
     final invalidTrustPayload = normalizedTrustPhrase.isEmpty;
     dialogManager.show(
-      tag: '$sessionId-confirm-peer-trust',
+      tag: dialogTag,
       (setState, close, context) {
         final phraseConfirmed = !invalidTrustPayload &&
             normalizePhrase(controller.text) == normalizedTrustPhrase;
@@ -1130,6 +1134,10 @@ class FfiModel with ChangeNotifier {
 
   void showPairingPassphraseDialog(
       SessionID sessionId, OverlayDialogManager dialogManager, String text) {
+    final dialogTag = '$sessionId-input-pairing-passphrase';
+    if (dialogManager.hasDialog(dialogTag)) {
+      return;
+    }
     Map<String, dynamic> details = const {};
     try {
       final decoded = jsonDecode(text);
@@ -1141,17 +1149,10 @@ class FfiModel with ChangeNotifier {
     final peerId = (details['peer_id'] ?? '').toString();
     final direct = details['direct'] == true;
     final controller = TextEditingController();
-    final obscure = true.obs;
-    final hasPassphrase = false.obs;
-    controller.addListener(() {
-      final value = controller.text.isNotEmpty;
-      if (hasPassphrase.value != value) {
-        hasPassphrase.value = value;
-      }
-    });
+    bool obscure = true;
     bool submitting = false;
     dialogManager.show(
-      tag: '$sessionId-input-pairing-passphrase',
+      tag: dialogTag,
       (setState, close, context) {
         void cancel() {
           () async {
@@ -1229,22 +1230,24 @@ class FfiModel with ChangeNotifier {
               ).marginOnly(bottom: 12),
               buildLine(direct ? 'Endpoint' : 'Peer', peer),
               buildLine('Peer ID', peerId),
-              Obx(
-                () => TextField(
-                  controller: controller,
-                  autofocus: true,
-                  obscureText: obscure.value,
-                  autocorrect: false,
-                  maxLength: bind.mainMaxEncryptLen(),
-                  decoration: InputDecoration(
-                    labelText: direct
-                        ? 'Pairing passphrase'
-                        : 'Rendezvous pairing passphrase',
-                    suffixIcon: IconButton(
-                      onPressed: () => obscure.value = !obscure.value,
-                      icon: Icon(
-                        obscure.value ? Icons.visibility_off : Icons.visibility,
-                      ),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                obscureText: obscure,
+                autocorrect: false,
+                maxLength: bind.mainMaxEncryptLen(),
+                selectAllOnFocus: false,
+                onChanged: (_) => setState(() {}),
+                decoration: InputDecoration(
+                  labelText: direct
+                      ? 'Pairing passphrase'
+                      : 'Rendezvous pairing passphrase',
+                  suffixIcon: IconButton(
+                    onPressed: () => setState(() {
+                      obscure = !obscure;
+                    }),
+                    icon: Icon(
+                      obscure ? Icons.visibility_off : Icons.visibility,
                     ),
                   ),
                 ),
@@ -1253,14 +1256,12 @@ class FfiModel with ChangeNotifier {
           ),
           actions: [
             dialogButton('Cancel', onPressed: cancel, isOutline: true),
-            Obx(
-              () => dialogButton(
-                'Continue',
-                onPressed: hasPassphrase.value ? submit : null,
-              ),
+            dialogButton(
+              'Continue',
+              onPressed: controller.text.isEmpty ? null : submit,
             ),
           ],
-          onSubmit: submit,
+          onSubmit: controller.text.isEmpty ? null : submit,
           onCancel: cancel,
         );
       },
