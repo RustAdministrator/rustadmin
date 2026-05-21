@@ -963,8 +963,7 @@ class _ImagePaintState extends State<ImagePaint> {
 
   MouseCursor _buildCustomCursor(BuildContext context, double scale) {
     final cursor = Provider.of<CursorModel>(context);
-    final cache = cursor.cache ?? preDefaultCursor.cache;
-    return buildCursorOfCache(cursor, scale, cache);
+    return buildCursorOfCache(cursor, scale, cursor.cache);
   }
 
   MouseCursor _buildDisabledCursor(BuildContext context, double scale) {
@@ -1080,14 +1079,11 @@ class CursorPaint extends StatelessWidget {
   Widget build(BuildContext context) {
     final m = Provider.of<CursorModel>(context);
     final c = Provider.of<CanvasModel>(context);
+    if (m.image == null) {
+      return const SizedBox.shrink();
+    }
     double hotx = m.hotx;
     double hoty = m.hoty;
-    if (m.image == null) {
-      if (preDefaultCursor.image != null) {
-        hotx = preDefaultCursor.image!.width / 2;
-        hoty = preDefaultCursor.image!.height / 2;
-      }
-    }
 
     double cx = c.x;
     double cy = c.y;
@@ -1121,7 +1117,7 @@ class CursorPaint extends StatelessWidget {
 
     return CustomPaint(
       painter: ImagePainter(
-        image: m.image ?? preDefaultCursor.image,
+        image: m.image,
         x: x,
         y: y,
         scale: scale,

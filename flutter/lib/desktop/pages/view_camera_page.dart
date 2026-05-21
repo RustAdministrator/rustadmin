@@ -684,8 +684,7 @@ class _ImagePaintState extends State<ImagePaint> {
 
   MouseCursor _buildCustomCursor(BuildContext context, double scale) {
     final cursor = Provider.of<CursorModel>(context);
-    final cache = cursor.cache ?? preDefaultCursor.cache;
-    return buildCursorOfCache(cursor, scale, cache);
+    return buildCursorOfCache(cursor, scale, cursor.cache);
   }
 
   MouseCursor _buildDisabledCursor(BuildContext context, double scale) {

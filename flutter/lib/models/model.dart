@@ -369,7 +369,7 @@ class FfiModel with ChangeNotifier {
   }
 
   void _tryNotifyAuthenticatedHandoff(String peerId,
-      {bool allowPartialPermissions = false}) {
+      {bool allowPartialSnapshot = false}) {
     final ffi = parent.target;
     final onAuthenticated = ffi?.onAuthenticated;
     if (ffi == null ||
@@ -378,22 +378,44 @@ class FfiModel with ChangeNotifier {
         !_authenticatedHandoffPeerInfoReady) {
       return;
     }
-    if (!allowPartialPermissions &&
+    if (!allowPartialSnapshot &&
         !_receivedInitialPermissions
             .containsAll(_kInitialSessionPermissionNames)) {
       return;
     }
-    if (allowPartialPermissions &&
+    if (allowPartialSnapshot &&
         !_receivedInitialPermissions
             .containsAll(_kInitialSessionPermissionNames)) {
       debugPrint(
           'Opening authenticated remote window with partial permission snapshot: $_receivedInitialPermissions');
+    }
+    if (!_initialCursorReadyForAuthenticatedHandoff()) {
+      if (!allowPartialSnapshot) {
+        return;
+      }
+      debugPrint(
+          'Opening authenticated remote window before initial cursor data was received.');
     }
     _authenticatedHandoffNotified = true;
     _authenticatedHandoffFallbackTimer?.cancel();
     _authenticatedHandoffFallbackTimer = null;
     ffi.onAuthenticated = null;
     unawaited(onAuthenticated(ffi, peerId));
+  }
+
+  // Cursor data can arrive after peer_info and permissions. Wait for it during
+  // pre-auth handoff so the attached desktop window does not render fallback.
+  bool _initialCursorReadyForAuthenticatedHandoff() {
+    final ffi = parent.target;
+    if (ffi == null || ffi.connType != ConnType.defaultConn) {
+      return true;
+    }
+    if (_pi.cursorEmbedded || _pi.isWayland) {
+      return true;
+    }
+    return cachedPeerData.cursorDataList.isNotEmpty ||
+        ffi.cursorModel.image != null ||
+        ffi.cursorModel.cache != null;
   }
 
   // todo: why called by two position
@@ -420,7 +442,7 @@ class FfiModel with ChangeNotifier {
         handleSwitchDisplay(evt, sessionId, peerId);
       } else if (name == 'cursor_data') {
         updateLastCursorId(evt);
-        await handleCursorData(evt);
+        await handleCursorData(evt, peerId: peerId);
       } else if (name == 'cursor_id') {
         updateLastCursorId(evt);
         handleCursorId(evt);
@@ -1849,7 +1871,7 @@ class FfiModel with ChangeNotifier {
             Timer(const Duration(milliseconds: 500), () {
           _tryNotifyAuthenticatedHandoff(
             peerId,
-            allowPartialPermissions: true,
+            allowPartialSnapshot: true,
           );
         });
         _tryNotifyAuthenticatedHandoff(peerId);
@@ -2020,9 +2042,12 @@ class FfiModel with ChangeNotifier {
     parent.target?.cursorModel.updateCursorId(evt);
   }
 
-  handleCursorData(Map<String, dynamic> evt) async {
+  handleCursorData(Map<String, dynamic> evt, {String? peerId}) async {
     cachedPeerData.cursorDataList.add(evt);
     await parent.target?.cursorModel.updateCursorData(evt);
+    if (peerId != null) {
+      _tryNotifyAuthenticatedHandoff(peerId);
+    }
   }
 
   /// Handle the peer info synchronization event based on [evt].
