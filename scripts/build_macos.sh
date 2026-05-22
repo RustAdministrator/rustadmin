@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/build_macos.sh [--clean] [--hwcodec] [--screencapturekit] [--skip-cargo]
+Usage: scripts/build_macos.sh [--clean] [--hwcodec] [--screencapturekit] [--skip-cargo] [--sign-only]
 
 Environment overrides:
   RUSTDESK_FLUTTER_ROOT       Flutter SDK root. Default: first flutter in PATH
@@ -28,6 +28,7 @@ clean=0
 hwcodec=0
 screencapturekit=0
 skip_cargo=0
+sign_only=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,6 +36,7 @@ while [[ $# -gt 0 ]]; do
     --hwcodec) hwcodec=1 ;;
     --screencapturekit) screencapturekit=1 ;;
     --skip-cargo) skip_cargo=1 ;;
+    --sign-only) sign_only=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -110,12 +112,89 @@ sync_macos_rust_artifacts() {
   fi
 }
 
-clean_flutter_hook_locks() {
+clean_flutter_build_state() {
   local hooks_dir="$flutter_dir/.dart_tool/hooks_runner"
+  local flutter_build_dir="$flutter_dir/.dart_tool/flutter_build"
   if [[ -d "$hooks_dir" ]]; then
     rm -rf "$hooks_dir"
   fi
+  if [[ -d "$flutter_build_dir" ]]; then
+    rm -rf "$flutter_build_dir"
+  fi
 }
+
+codesign_code() {
+  local path="$1"
+  local -a codesign_args=(
+    --force
+    --sign "$sign_identity"
+    --options runtime
+  )
+
+  if [[ "$sign_identity" != "-" ]]; then
+    codesign_args+=(--timestamp)
+  fi
+
+  echo "Signing: $path"
+  codesign "${codesign_args[@]}" "$path"
+}
+
+codesign_app_bundle() {
+  local -a codesign_args=(
+    --force
+    --sign "$sign_identity"
+    --options runtime
+  )
+
+  if [[ "$sign_identity" != "-" ]]; then
+    codesign_args+=(--timestamp)
+  fi
+
+  codesign_args+=(--entitlements "$release_entitlements")
+
+  echo "Signing app bundle: $app_bundle"
+  codesign "${codesign_args[@]}" "$app_bundle"
+}
+
+sign_macos_app_contents() {
+  local main_executable_name
+  local main_executable
+  local path
+
+  main_executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
+    "$app_bundle/Contents/Info.plist" 2>/dev/null || true)"
+  main_executable="$app_bundle/Contents/MacOS/$main_executable_name"
+
+  while IFS= read -r -d '' path; do
+    codesign_code "$path"
+  done < <(find "$app_bundle/Contents" -type f \
+    \( -name "*.dylib" -o -name "*.so" \) -print0)
+
+  if [[ -d "$app_bundle/Contents/MacOS" ]]; then
+    while IFS= read -r -d '' path; do
+      if [[ -n "$main_executable_name" && "$path" == "$main_executable" ]]; then
+        continue
+      fi
+      if [[ -x "$path" ]]; then
+        codesign_code "$path"
+      fi
+    done < <(find "$app_bundle/Contents/MacOS" -maxdepth 1 -type f -print0)
+  fi
+
+  while IFS= read -r -d '' path; do
+    codesign_code "$path"
+  done < <(find "$app_bundle/Contents" -depth -type d \
+    \( -name "*.app" -o -name "*.appex" -o -name "*.bundle" -o \
+       -name "*.framework" -o -name "*.systemextension" -o -name "*.xpc" \) \
+    -print0)
+
+  codesign_app_bundle
+}
+
+release_entitlements="$flutter_dir/macos/Runner/Release.entitlements"
+if [[ "$adhoc_sign" == "1" ]]; then
+  release_entitlements="$flutter_dir/macos/Runner/ReleaseAdhoc.entitlements"
+fi
 
 generate_version_file() {
   local version
@@ -215,82 +294,79 @@ EOF
   fi
 }
 
-package_config="$flutter_dir/.dart_tool/package_config.json"
-if [[ "$clean" -eq 1 ]] ||
-   [[ ! -f "$package_config" ]] ||
-   grep -Eq 'file:///mnt/|file:///home/|flutter-win|\\' "$package_config" 2>/dev/null; then
-  echo "Refreshing macOS Flutter metadata..."
-  rm -rf "$flutter_dir/.dart_tool" "$flutter_dir/.flutter-plugins-dependencies" "$flutter_dir/build/macos"
-fi
+if [[ "$sign_only" -eq 0 ]]; then
+  package_config="$flutter_dir/.dart_tool/package_config.json"
+  if [[ "$clean" -eq 1 ]] ||
+     [[ ! -f "$package_config" ]] ||
+     grep -Eq 'file:///mnt/|file:///home/|flutter-win|\\' "$package_config" 2>/dev/null; then
+    echo "Refreshing macOS Flutter metadata..."
+    rm -rf "$flutter_dir/.dart_tool" "$flutter_dir/.flutter-plugins-dependencies" "$flutter_dir/build/macos"
+  fi
 
-(cd "$flutter_dir" && flutter pub get)
+  (cd "$flutter_dir" && flutter pub get)
 
-generate_bridge_files
+  generate_bridge_files
 
-features="flutter"
-if [[ "$hwcodec" -eq 1 ]]; then
-  features="$features hwcodec"
-fi
-if [[ "$screencapturekit" -eq 1 ]]; then
-  features="$features screencapturekit"
-fi
+  features="flutter"
+  if [[ "$hwcodec" -eq 1 ]]; then
+    features="$features hwcodec"
+  fi
+  if [[ "$screencapturekit" -eq 1 ]]; then
+    features="$features screencapturekit"
+  fi
 
-if [[ "$skip_cargo" -eq 0 ]]; then
-  generate_version_file
-  (cd "$repo_root" && MACOSX_DEPLOYMENT_TARGET=10.15 cargo build --features "$features" --release -vv)
-fi
+  if [[ "$skip_cargo" -eq 0 ]]; then
+    generate_version_file
+    (cd "$repo_root" && MACOSX_DEPLOYMENT_TARGET=10.15 cargo build --features "$features" --release -vv)
+  fi
 
-sync_macos_rust_artifacts
+  sync_macos_rust_artifacts
 
-release_entitlements="$flutter_dir/macos/Runner/Release.entitlements"
-if [[ "$adhoc_sign" == "1" ]]; then
-  release_entitlements="$flutter_dir/macos/Runner/ReleaseAdhoc.entitlements"
-fi
+  xcode_sign_identity="${RUSTDESK_MACOS_XCODE_SIGN_IDENTITY:-}"
+  if [[ -z "$xcode_sign_identity" && -n "${RUSTDESK_MACOS_SIGN_IDENTITY:-}" ]]; then
+    case "$RUSTDESK_MACOS_SIGN_IDENTITY" in
+      "Apple Development:"*) xcode_sign_identity="Apple Development" ;;
+      "Developer ID Application:"*) xcode_sign_identity="Developer ID Application" ;;
+      "Mac Developer:"*) xcode_sign_identity="Mac Developer" ;;
+      *) xcode_sign_identity="$RUSTDESK_MACOS_SIGN_IDENTITY" ;;
+    esac
+  fi
 
-xcode_sign_identity="${RUSTDESK_MACOS_XCODE_SIGN_IDENTITY:-}"
-if [[ -z "$xcode_sign_identity" && -n "${RUSTDESK_MACOS_SIGN_IDENTITY:-}" ]]; then
-  case "$RUSTDESK_MACOS_SIGN_IDENTITY" in
-    "Apple Development:"*) xcode_sign_identity="Apple Development" ;;
-    "Developer ID Application:"*) xcode_sign_identity="Developer ID Application" ;;
-    "Mac Developer:"*) xcode_sign_identity="Mac Developer" ;;
-    *) xcode_sign_identity="$RUSTDESK_MACOS_SIGN_IDENTITY" ;;
-  esac
-fi
-
-host_arch="$(uname -m)"
-clean_flutter_hook_locks
-if [[ "$host_arch" == "arm64" || "$host_arch" == "x86_64" ]]; then
-  (
-    cd "$flutter_dir"
-    flutter build macos --release --config-only
-    clean_flutter_hook_locks
-    xcodebuild_args=(
-      -workspace macos/Runner.xcworkspace
-      -scheme Runner
-      -configuration Release
-      -derivedDataPath build/macos
-      -destination "platform=macOS,arch=$host_arch"
-      -jobs 1
-      ARCHS="$host_arch"
-      ONLY_ACTIVE_ARCH=YES
+  host_arch="$(uname -m)"
+  clean_flutter_build_state
+  if [[ "$host_arch" == "arm64" || "$host_arch" == "x86_64" ]]; then
+    (
+      cd "$flutter_dir"
+      flutter build macos --release --config-only
+      clean_flutter_build_state
+      xcodebuild_args=(
+        -workspace macos/Runner.xcworkspace
+        -scheme Runner
+        -configuration Release
+        -derivedDataPath build/macos
+        -destination "platform=macOS,arch=$host_arch"
+        -jobs 1
+        ARCHS="$host_arch"
+        ONLY_ACTIVE_ARCH=YES
+      )
+      if [[ -n "${RUSTDESK_MACOS_DEVELOPMENT_TEAM:-}" ]]; then
+        xcodebuild_args+=("DEVELOPMENT_TEAM=$RUSTDESK_MACOS_DEVELOPMENT_TEAM")
+      fi
+      if [[ "$adhoc_sign" != "1" && -n "${RUSTDESK_MACOS_SIGN_IDENTITY:-}" ]]; then
+        xcodebuild_args+=("CODE_SIGNING_ALLOWED=NO")
+      elif [[ -n "$xcode_sign_identity" ]]; then
+        xcodebuild_args+=("CODE_SIGN_IDENTITY=$xcode_sign_identity")
+      fi
+      xcodebuild "${xcodebuild_args[@]}" build
     )
-    if [[ -n "${RUSTDESK_MACOS_DEVELOPMENT_TEAM:-}" ]]; then
-      xcodebuild_args+=("DEVELOPMENT_TEAM=$RUSTDESK_MACOS_DEVELOPMENT_TEAM")
-    fi
-    if [[ "$adhoc_sign" != "1" && -n "${RUSTDESK_MACOS_SIGN_IDENTITY:-}" ]]; then
-      xcodebuild_args+=("CODE_SIGNING_ALLOWED=NO")
-    elif [[ -n "$xcode_sign_identity" ]]; then
-      xcodebuild_args+=("CODE_SIGN_IDENTITY=$xcode_sign_identity")
-    fi
-    xcodebuild "${xcodebuild_args[@]}" build
-  )
-else
-  (cd "$flutter_dir" && flutter build macos --release)
-fi
+  else
+    (cd "$flutter_dir" && flutter build macos --release)
+  fi
 
-if [[ -f "$xcode_service" ]]; then
-  cp -f "$xcode_service" \
-    "$app_bundle/Contents/MacOS/"
+  if [[ -f "$xcode_service" ]]; then
+    cp -f "$xcode_service" \
+      "$app_bundle/Contents/MacOS/"
+  fi
 fi
 
 if [[ "$adhoc_sign" == "1" ]]; then
@@ -310,9 +386,13 @@ EOF
   fi
 fi
 
-codesign --force --deep --sign "$sign_identity" --options runtime \
-  --entitlements "$release_entitlements" \
-  "$app_bundle"
+if [[ ! -d "$app_bundle" ]]; then
+  echo "App bundle does not exist: $app_bundle" >&2
+  exit 1
+fi
+
+sign_macos_app_contents
+codesign --verify --deep --strict --verbose=4 "$app_bundle"
 
 echo "macOS bundle:"
 echo "$flutter_dir/build/macos/Build/Products/Release"
