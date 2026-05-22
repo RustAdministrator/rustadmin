@@ -103,6 +103,10 @@ const OPAQUE_NATIVE_FORMAT_PATTERNS: &[&str] = &[
 
 #[cfg(any(test, target_os = "windows"))]
 const WINDOWS_OPAQUE_REGISTERED_FORMATS: &[&str] = &[
+    "CF_HDROP",
+    "CF_METAFILEPICT",
+    "CF_TIFF",
+    "CF_ENHMETAFILE",
     "DataObject",
     "Object Descriptor",
     "Ole Private Data",
@@ -261,11 +265,42 @@ fn is_opaque_native_format_name(name: &str) -> bool {
 }
 
 #[cfg(any(test, target_os = "windows"))]
-fn is_windows_opaque_registered_format_name(name: &str) -> bool {
-    WINDOWS_OPAQUE_REGISTERED_FORMATS
-        .iter()
-        .any(|opaque| opaque.eq_ignore_ascii_case(name))
+fn is_windows_opaque_format_name(name: &str) -> bool {
+    name.starts_with("format#")
+        || WINDOWS_OPAQUE_REGISTERED_FORMATS
+            .iter()
+            .any(|opaque| opaque.eq_ignore_ascii_case(name))
         || is_opaque_native_format_name(name)
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn is_windows_opaque_registered_format_name(name: &str) -> bool {
+    is_windows_opaque_format_name(name)
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_external_opaque_signature_from_format_names(
+    sequence: u32,
+    has_owner: bool,
+    names: &[String],
+) -> Option<String> {
+    if has_owner {
+        return None;
+    }
+    if names.is_empty() {
+        return Some(format!("windows:{sequence}:empty-format-list"));
+    }
+    let mut opaque_formats = names
+        .iter()
+        .filter(|name| is_windows_opaque_format_name(name))
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    if opaque_formats.is_empty() {
+        return None;
+    }
+    opaque_formats.sort_unstable();
+    opaque_formats.dedup();
+    Some(format!("windows:{sequence}:{}", opaque_formats.join("|")))
 }
 
 #[cfg(any(test, target_os = "macos", target_os = "linux"))]
@@ -628,7 +663,7 @@ mod platform_clipboard {
         let _clipboard = open_clipboard()?;
         let owner_format = registered_id(super::RUSTDESK_CLIPBOARD_OWNER_FORMAT);
         let mut has_owner = false;
-        let mut opaque_formats = Vec::new();
+        let mut format_names = Vec::new();
         let mut format = 0;
         loop {
             // Safety: the clipboard is open for the lifetime of _clipboard.
@@ -636,24 +671,19 @@ mod platform_clipboard {
             if format == 0 {
                 break;
             }
+            let name = format_name(format);
             if owner_format != 0 && format == owner_format {
                 has_owner = true;
             }
-            if is_opaque_native_format(format) {
-                opaque_formats.push(format_name(format));
-            }
+            format_names.push(name);
         }
-        if has_owner || opaque_formats.is_empty() {
-            return Ok(None);
-        }
-        opaque_formats.sort_unstable();
-        opaque_formats.dedup();
         // Safety: The call has no parameters and only reads the OS clipboard generation.
         let sequence = unsafe { GetClipboardSequenceNumber() };
-        Ok(Some(format!(
-            "windows:{sequence}:{}",
-            opaque_formats.join("|")
-        )))
+        Ok(super::windows_external_opaque_signature_from_format_names(
+            sequence,
+            has_owner,
+            &format_names,
+        ))
     }
 
     pub fn debug_dump_clipboard_formats(reason: &str) {
@@ -681,9 +711,9 @@ mod platform_clipboard {
                 }
                 let has_owner = has_rustdesk_owner();
                 let opaque = formats.iter().any(|item| item.ends_with("opaque=true"));
+                let external_opaque = (opaque || formats.is_empty()) && !has_owner;
                 super::emit_clipboard_debug(format!(
-                    "{reason} owner_marker={has_owner} opaque={opaque} external_opaque={} formats=[{}]",
-                    opaque && !has_owner,
+                    "{reason} owner_marker={has_owner} opaque={opaque} external_opaque={external_opaque} formats=[{}]",
                     formats.join(", ")
                 ));
             }
@@ -1734,6 +1764,9 @@ mod clipboard_timing_tests {
     #[test]
     fn windows_ole_private_formats_are_opaque() {
         for name in [
+            "CF_METAFILEPICT",
+            "CF_TIFF",
+            "CF_ENHMETAFILE",
             "DataObject",
             "Object Descriptor",
             "Ole Private Data",
@@ -1747,6 +1780,30 @@ mod clipboard_timing_tests {
         ] {
             assert!(is_windows_opaque_registered_format_name(name), "{name}");
         }
+    }
+
+    #[test]
+    fn windows_empty_external_format_list_is_opaque() {
+        assert_eq!(
+            windows_external_opaque_signature_from_format_names(42, false, &[]).as_deref(),
+            Some("windows:42:empty-format-list")
+        );
+        assert!(windows_external_opaque_signature_from_format_names(42, true, &[]).is_none());
+    }
+
+    #[test]
+    fn windows_opaque_signature_keeps_only_unsafe_formats() {
+        let names = vec![
+            "CF_UNICODETEXT".to_owned(),
+            "DataObject".to_owned(),
+            "Ole Private Data".to_owned(),
+            "HTML Format".to_owned(),
+        ];
+
+        assert_eq!(
+            windows_external_opaque_signature_from_format_names(7, false, &names).as_deref(),
+            Some("windows:7:DataObject|Ole Private Data")
+        );
     }
 
     #[test]
