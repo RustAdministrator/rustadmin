@@ -101,6 +101,20 @@ const OPAQUE_NATIVE_FORMAT_PATTERNS: &[&str] = &[
     "eps",
 ];
 
+#[cfg(any(test, target_os = "windows"))]
+const WINDOWS_OPAQUE_REGISTERED_FORMATS: &[&str] = &[
+    "DataObject",
+    "Object Descriptor",
+    "Ole Private Data",
+    "Embed Source",
+    "Embedded Object",
+    "Link Source",
+    "Link Source Descriptor",
+    "Native",
+    "OwnerLink",
+    "System.Drawing.Bitmap",
+];
+
 #[cfg(not(target_os = "android"))]
 lazy_static::lazy_static! {
     static ref ARBOARD_MTX: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
@@ -248,7 +262,10 @@ fn is_opaque_native_format_name(name: &str) -> bool {
 
 #[cfg(any(test, target_os = "windows"))]
 fn is_windows_opaque_registered_format_name(name: &str) -> bool {
-    is_opaque_native_format_name(name)
+    WINDOWS_OPAQUE_REGISTERED_FORMATS
+        .iter()
+        .any(|opaque| opaque.eq_ignore_ascii_case(name))
+        || is_opaque_native_format_name(name)
 }
 
 #[cfg(any(test, target_os = "macos", target_os = "linux"))]
@@ -1706,9 +1723,30 @@ mod clipboard_timing_tests {
         assert!(!is_windows_opaque_registered_format_name(
             "sublime-text-extra"
         ));
+        assert!(!is_windows_opaque_registered_format_name(
+            "DataObjectAttributes"
+        ));
         assert!(is_windows_opaque_registered_format_name(
             "Adobe Illustrator Document"
         ));
+    }
+
+    #[test]
+    fn windows_ole_private_formats_are_opaque() {
+        for name in [
+            "DataObject",
+            "Object Descriptor",
+            "Ole Private Data",
+            "Embed Source",
+            "Embedded Object",
+            "Link Source",
+            "Link Source Descriptor",
+            "Native",
+            "OwnerLink",
+            "System.Drawing.Bitmap",
+        ] {
+            assert!(is_windows_opaque_registered_format_name(name), "{name}");
+        }
     }
 
     #[test]

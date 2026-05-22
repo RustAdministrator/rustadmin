@@ -55,6 +55,19 @@ function Resolve-FlutterCommand {
 
 $Results = New-Object System.Collections.Generic.List[object]
 
+function ConvertTo-StepLogName {
+    param(
+        [string]$Name
+    )
+
+    $safeName = $Name -replace '[^A-Za-z0-9._-]+', '-'
+    $safeName = $safeName.Trim('-').ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($safeName)) {
+        return "step"
+    }
+    return $safeName
+}
+
 function Invoke-TestStep {
     param(
         [string]$Name,
@@ -66,20 +79,44 @@ function Invoke-TestStep {
     Write-Host ""
     Write-Host "==> $Name" -ForegroundColor Cyan
     Write-Host "    $Command $($Arguments -join ' ')" -ForegroundColor DarkGray
+    $stepNumber = $Results.Count + 1
+    $stepLogName = "{0:00}-{1}.log" -f $stepNumber, (ConvertTo-StepLogName $Name)
+    $stepLogPath = Join-Path $StepLogDir $stepLogName
+    Write-Host "    Step log: $stepLogPath" -ForegroundColor DarkGray
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     Push-Location $WorkingDirectory
+    $output = @()
+    $oldErrorActionPreference = $ErrorActionPreference
+    $hasNativePreference = Test-Path Variable:\PSNativeCommandUseErrorActionPreference
+    $oldNativePreference = $null
     try {
-        & $Command @Arguments
+        $ErrorActionPreference = "Continue"
+        if ($hasNativePreference) {
+            $oldNativePreference = $PSNativeCommandUseErrorActionPreference
+            $PSNativeCommandUseErrorActionPreference = $false
+        }
+        $output = & $Command @Arguments *>&1
         $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
     }
     catch {
-        Write-Host $_.Exception.Message -ForegroundColor Red
+        $output += $_
         $exitCode = 1
     }
     finally {
+        if ($hasNativePreference) {
+            $PSNativeCommandUseErrorActionPreference = $oldNativePreference
+        }
+        $ErrorActionPreference = $oldErrorActionPreference
         Pop-Location
         $sw.Stop()
+    }
+
+    $outputText = @($output | ForEach-Object { $_.ToString() })
+    if ($outputText.Count -eq 0) {
+        "" | Set-Content -Encoding UTF8 -Path $stepLogPath
+    } else {
+        $outputText | Set-Content -Encoding UTF8 -Path $stepLogPath
     }
 
     $status = if ($exitCode -eq 0) { "PASS" } else { "FAIL" }
@@ -88,7 +125,15 @@ function Invoke-TestStep {
         Status = $status
         ExitCode = $exitCode
         Seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+        Log = $stepLogPath
     })
+
+    if ($exitCode -ne 0) {
+        Write-Host "    Failed step log tail:" -ForegroundColor Red
+        Get-Content -Path $stepLogPath -Tail 80 | ForEach-Object {
+            Write-Host "    $_" -ForegroundColor Red
+        }
+    }
 
     if ($exitCode -ne 0 -and $StopOnFailure) {
         throw "Stopping after failed step: $Name"
@@ -97,7 +142,10 @@ function Invoke-TestStep {
 
 $LogDir = Join-Path $ClientRoot "target\windows-test-logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-$TranscriptPath = Join-Path $LogDir ("windows-tests-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+$RunStamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$TranscriptPath = Join-Path $LogDir ("windows-tests-{0}.log" -f $RunStamp)
+$StepLogDir = Join-Path $LogDir ("windows-tests-{0}-steps" -f $RunStamp)
+New-Item -ItemType Directory -Force -Path $StepLogDir | Out-Null
 $TranscriptStarted = $false
 try {
     Start-Transcript -Path $TranscriptPath | Out-Null
@@ -162,11 +210,20 @@ try {
 finally {
     Write-Host ""
     Write-Host "Windows validation summary" -ForegroundColor Cyan
-    $Results | Format-Table -AutoSize
+    $Results | Select-Object Step, Status, ExitCode, Seconds | Format-Table -AutoSize
+    $FailedInFinally = @($Results | Where-Object { $_.Status -ne "PASS" })
+    if ($FailedInFinally.Count -gt 0) {
+        Write-Host ""
+        Write-Host "Failed step logs:" -ForegroundColor Red
+        foreach ($item in $FailedInFinally) {
+            Write-Host (" - {0}: {1}" -f $item.Step, $item.Log) -ForegroundColor Red
+        }
+    }
     if ($TranscriptStarted) {
         Stop-Transcript | Out-Null
         Write-Host "Log: $TranscriptPath"
     }
+    Write-Host "Step logs: $StepLogDir"
 }
 
 $Failed = @($Results | Where-Object { $_.Status -ne "PASS" })

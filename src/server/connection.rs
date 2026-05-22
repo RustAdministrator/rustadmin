@@ -287,6 +287,10 @@ fn file_clipboard_allowed(
     clipboard_enabled && file_transfer_enabled && one_way_file_transfer != "Y"
 }
 
+fn text_clipboard_allowed(clipboard_enabled: bool, keyboard_enabled: bool) -> bool {
+    clipboard_enabled && keyboard_enabled
+}
+
 fn session_default_permission(auth_kind: SessionAuthKind, name: &str, current: bool) -> bool {
     if auth_kind.is_unattended_access() {
         current
@@ -2604,9 +2608,13 @@ impl Connection {
 
     #[inline]
     fn can_sub_clipboard_service(&self) -> bool {
-        self.clipboard_enabled()
-            && self.peer_keyboard_enabled()
+        text_clipboard_allowed(self.clipboard_enabled(), self.peer_keyboard_enabled())
             && crate::get_builtin_option(keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION) != "Y"
+    }
+
+    #[inline]
+    fn can_apply_remote_clipboard(&self) -> bool {
+        text_clipboard_allowed(self.clipboard_enabled(), self.peer_keyboard_enabled())
     }
 
     fn audio_enabled(&self) -> bool {
@@ -3559,7 +3567,7 @@ impl Connection {
                     self.update_auto_disconnect_timer();
                 }
                 Some(message::Union::Clipboard(cb)) => {
-                    if self.clipboard {
+                    if self.can_apply_remote_clipboard() {
                         #[cfg(not(any(target_os = "android", target_os = "ios")))]
                         update_clipboard(vec![cb], ClipboardSide::Host);
                         // ios as the controlled side is actually not supported for now.
@@ -3584,15 +3592,32 @@ impl Connection {
                         }
                         #[cfg(target_os = "android")]
                         crate::clipboard::handle_msg_clipboard(cb);
+                    } else {
+                        log::warn!(
+                            "Blocked clipboard update from peer for {} session",
+                            self.session_auth_kind.as_str()
+                        );
                     }
                 }
                 Some(message::Union::MultiClipboards(_mcb)) => {
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                    if self.clipboard {
+                    if self.can_apply_remote_clipboard() {
                         update_clipboard(_mcb.clipboards, ClipboardSide::Host);
+                    } else {
+                        log::warn!(
+                            "Blocked multi-clipboard update from peer for {} session",
+                            self.session_auth_kind.as_str()
+                        );
                     }
                     #[cfg(target_os = "android")]
-                    crate::clipboard::handle_msg_multi_clipboards(_mcb);
+                    if self.can_apply_remote_clipboard() {
+                        crate::clipboard::handle_msg_multi_clipboards(_mcb);
+                    } else {
+                        log::warn!(
+                            "Blocked multi-clipboard update from peer for {} session",
+                            self.session_auth_kind.as_str()
+                        );
+                    }
                 }
                 #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
                 Some(message::Union::Cliprdr(clip)) => {
@@ -6710,6 +6735,14 @@ mod test {
         assert!(!file_clipboard_allowed(false, true, "N"));
         assert!(!file_clipboard_allowed(true, false, "N"));
         assert!(!file_clipboard_allowed(true, true, "Y"));
+    }
+
+    #[test]
+    fn text_clipboard_requires_clipboard_and_keyboard_permissions() {
+        assert!(text_clipboard_allowed(true, true));
+        assert!(!text_clipboard_allowed(false, true));
+        assert!(!text_clipboard_allowed(true, false));
+        assert!(!text_clipboard_allowed(false, false));
     }
 
     #[test]
