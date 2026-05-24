@@ -242,6 +242,36 @@ fn remote_clipboard_update_delay(side: ClipboardSide) -> Option<Duration> {
     delay
 }
 
+#[cfg(not(target_os = "android"))]
+fn should_block_remote_update_for_opaque_signature(signature: Option<&str>) -> bool {
+    signature.is_some()
+}
+
+#[cfg(not(target_os = "android"))]
+fn should_skip_remote_clipboard_update(side: ClipboardSide, phase: &str) -> bool {
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    {
+        let signature = platform_clipboard::external_opaque_native_clipboard_signature();
+        if !should_block_remote_update_for_opaque_signature(signature.as_deref()) {
+            return false;
+        }
+        if let Some(signature) = signature {
+            mark_local_external_opaque_clipboard_change(side, &signature);
+        }
+        log::debug!(
+            "Skip applying remote {} clipboard because local clipboard contains opaque native formats",
+            side
+        );
+        emit_clipboard_debug(format!(
+            "skip-remote-apply side={side} phase={phase} reason=opaque-native-formats"
+        ));
+        return true;
+    }
+
+    #[allow(unreachable_code)]
+    false
+}
+
 #[cfg(any(test, target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn contains_ignore_ascii_case(value: &str, needle: &str) -> bool {
     value
@@ -1190,6 +1220,9 @@ fn update_clipboard_(multi_clipboards: Vec<Clipboard>, side: ClipboardSide) {
 
 #[cfg(not(target_os = "android"))]
 fn do_update_clipboard_(mut to_update_data: Vec<ClipboardData>, side: ClipboardSide) {
+    if should_skip_remote_clipboard_update(side, "before-delay") {
+        return;
+    }
     if let Some(delay) = remote_clipboard_update_delay(side) {
         std::thread::sleep(delay);
         if remote_clipboard_update_delay(side).is_some() {
@@ -1197,6 +1230,9 @@ fn do_update_clipboard_(mut to_update_data: Vec<ClipboardData>, side: ClipboardS
                 "Skip delayed {} clipboard update because a newer local clipboard change was observed",
                 side
             );
+            return;
+        }
+        if should_skip_remote_clipboard_update(side, "after-delay") {
             return;
         }
     }
@@ -1597,6 +1633,17 @@ mod clipboard_timing_tests {
     }
 
     #[test]
+    fn opaque_local_clipboard_blocks_remote_apply_even_after_quiet_window() {
+        assert!(should_block_remote_update_for_opaque_signature(Some(
+            "windows:42:DataObject|Ole Private Data"
+        )));
+        assert!(should_block_remote_update_for_opaque_signature(Some(
+            "windows:43:empty-format-list"
+        )));
+        assert!(!should_block_remote_update_for_opaque_signature(None));
+    }
+
+    #[test]
     fn repeated_same_opaque_clipboard_does_not_refresh_local_change() {
         let start = Instant::now();
         let mut timing = ClipboardTiming::default();
@@ -1629,7 +1676,7 @@ mod clipboard_timing_tests {
     }
 
     #[test]
-    fn stable_opaque_clipboard_allows_later_remote_safe_update() {
+    fn stable_opaque_clipboard_does_not_refresh_quiet_window() {
         let start = Instant::now();
         let mut timing = ClipboardTiming::default();
 
