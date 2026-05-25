@@ -21,7 +21,7 @@ use hbb_common::{
     anyhow::anyhow,
     bail, log,
     message_proto::{DisplayInfo, Resolution},
-    sysinfo::{Pid, Process, ProcessRefreshKind, System},
+    sysinfo::{Pid, Process, ProcessExt, ProcessRefreshKind, System, SystemExt},
 };
 use include_dir::{include_dir, Dir};
 use objc::rc::autoreleasepool;
@@ -1183,25 +1183,41 @@ pub fn elevate(args: Vec<&str>, prompt: &str) -> ResultType<bool> {
     }
 }
 
-pub struct WakeLock(Option<keepawake::AwakeHandle>);
+pub struct WakeLock {
+    handle: Option<keepawake::KeepAwake>,
+    display: bool,
+    idle: bool,
+    sleep: bool,
+}
 
 impl WakeLock {
     pub fn new(display: bool, idle: bool, sleep: bool) -> Self {
-        WakeLock(
-            keepawake::Builder::new()
-                .display(display)
-                .idle(idle)
-                .sleep(sleep)
-                .create()
-                .ok(),
-        )
+        Self {
+            handle: Self::create_handle(display, idle, sleep),
+            display,
+            idle,
+            sleep,
+        }
     }
 
     pub fn set_display(&mut self, display: bool) -> ResultType<()> {
-        self.0
-            .as_mut()
-            .map(|h| h.set_display(display))
-            .ok_or(anyhow!("no AwakeHandle"))?
+        if self.display == display {
+            return Ok(());
+        }
+        let handle =
+            Self::create_handle(display, self.idle, self.sleep).ok_or(anyhow!("no KeepAwake"))?;
+        self.handle = Some(handle);
+        self.display = display;
+        Ok(())
+    }
+
+    fn create_handle(display: bool, idle: bool, sleep: bool) -> Option<keepawake::KeepAwake> {
+        keepawake::Builder::default()
+            .display(display)
+            .idle(idle)
+            .sleep(sleep)
+            .create()
+            .ok()
     }
 }
 

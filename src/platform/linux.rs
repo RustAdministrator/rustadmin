@@ -1921,12 +1921,12 @@ mod desktop {
     }
 }
 
-pub struct WakeLock(Option<keepawake::AwakeHandle>);
+pub struct WakeLock(Option<keepawake::KeepAwake>);
 
 impl WakeLock {
     pub fn new(display: bool, idle: bool, sleep: bool) -> Self {
         WakeLock(
-            keepawake::Builder::new()
+            keepawake::Builder::default()
                 .display(display)
                 .idle(idle)
                 .sleep(sleep)

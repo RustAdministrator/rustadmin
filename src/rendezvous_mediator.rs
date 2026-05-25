@@ -42,12 +42,22 @@ static SHOULD_EXIT: AtomicBool = AtomicBool::new(false);
 static MANUAL_RESTARTED: AtomicBool = AtomicBool::new(false);
 static SENT_REGISTER_PK: AtomicBool = AtomicBool::new(false);
 
-#[derive(Clone)]
 pub struct RendezvousMediator {
     addr: TargetAddr<'static>,
     host: String,
     host_prefix: String,
     keep_alive: i32,
+}
+
+impl Clone for RendezvousMediator {
+    fn clone(&self) -> Self {
+        Self {
+            addr: self.addr.to_owned(),
+            host: self.host.clone(),
+            host_prefix: self.host_prefix.clone(),
+            keep_alive: self.keep_alive,
+        }
+    }
 }
 
 impl RendezvousMediator {
@@ -176,7 +186,7 @@ impl RendezvousMediator {
         log::info!("start udp: {host}");
         let (mut socket, mut addr) = new_udp_for(&host, CONNECT_TIMEOUT).await?;
         let mut rz = Self {
-            addr: addr.clone(),
+            addr: addr.to_owned(),
             host: host.clone(),
             host_prefix: Self::get_host_prefix(&host),
             keep_alive: crate::DEFAULT_KEEP_ALIVE,
@@ -264,7 +274,7 @@ impl RendezvousMediator {
                                     // old UDP socket not work any more after network recover
                                     if let Some((s, new_addr)) = socket_client::rebind_udp_for(&rz.host).await? {
                                         socket = s;
-                                        rz.addr = new_addr.clone();
+                                        rz.addr = new_addr.to_owned();
                                         addr = new_addr;
                                     }
                                     last_dns_check = Instant::now();

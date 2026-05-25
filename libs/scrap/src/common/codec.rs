@@ -34,7 +34,7 @@ use hbb_common::{
         supported_decoding::PreferCodec, video_frame, Chroma, CodecAbility, EncodedVideoFrames,
         SupportedDecoding, SupportedEncoding, VideoFrame,
     },
-    sysinfo::System,
+    sysinfo::{System, SystemExt},
     ResultType,
 };
 
@@ -990,7 +990,7 @@ pub fn codec_thread_num(limit: usize) -> usize {
     }
     #[cfg(not(windows))]
     {
-        s.refresh_cpu_usage();
+        s.refresh_cpu();
         // https://man7.org/linux/man-pages/man3/getloadavg.3.html
         let avg = s.load_average();
         info = format!("cpu loadavg: {}", avg.one);

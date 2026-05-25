@@ -884,7 +884,7 @@ pub fn hostname() -> String {
 
 #[inline]
 pub fn get_sysinfo() -> serde_json::Value {
-    use hbb_common::sysinfo::System;
+    use hbb_common::sysinfo::{CpuExt, System, SystemExt};
     let mut system = System::new();
     system.refresh_memory();
     system.refresh_cpu();
@@ -2675,7 +2675,7 @@ pub fn check_process(arg: &str, mut same_uid: bool) -> bool {
         log::warn!("Can not get other process's command line arguments on macos without root");
         same_uid = true;
     }
-    use hbb_common::sysinfo::System;
+    use hbb_common::sysinfo::{ProcessExt, System, SystemExt};
     let mut sys = System::new();
     sys.refresh_processes();
     let mut path = std::env::current_exe().unwrap_or_default();

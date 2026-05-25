@@ -13,6 +13,8 @@ use hbb_common::{
 use pam;
 use std::{
     collections::HashMap,
+    ffi::{CStr, CString},
+    os::raw::{c_char, c_int, c_void},
     os::unix::process::CommandExt,
     path::Path,
     process::{Child, Command},
@@ -27,6 +29,256 @@ use std::{
 lazy_static::lazy_static! {
     static ref DESKTOP_RUNNING: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
     static ref DESKTOP_MANAGER: Arc<Mutex<Option<DesktopManager>>> = Arc::new(Mutex::new(None));
+}
+
+struct PamCredentials {
+    username: String,
+    password: String,
+}
+
+struct PamSession<'a> {
+    handle: &'a mut pam::PamHandle,
+    _credentials: Box<PamCredentials>,
+    is_authenticated: bool,
+    has_open_session: bool,
+    last_code: pam::PamReturnCode,
+}
+
+impl<'a> PamSession<'a> {
+    fn with_password(service: &str, username: &str, password: &str) -> pam::PamResult<Self> {
+        let mut credentials = Box::new(PamCredentials {
+            username: username.to_owned(),
+            password: password.to_owned(),
+        });
+        let conv = pam::ffi::pam_conv {
+            conv: Some(pam_converse),
+            appdata_ptr: &mut *credentials as *mut PamCredentials as *mut c_void,
+        };
+        let handle = pam::start(service, None, &conv)?;
+        Ok(Self {
+            handle,
+            _credentials: credentials,
+            is_authenticated: false,
+            has_open_session: false,
+            last_code: pam::PamReturnCode::Success,
+        })
+    }
+
+    fn authenticate(&mut self) -> pam::PamResult<()> {
+        let code = pam::authenticate(self.handle, pam::PamFlag::None);
+        self.check(code)?;
+        self.is_authenticated = true;
+        let code = pam::acct_mgmt(self.handle, pam::PamFlag::None);
+        self.check(code).or_else(|_| self.reset())
+    }
+
+    fn set_item(&mut self, item_type: pam::PamItemType, item: &str) -> pam::PamResult<()> {
+        let item = CString::new(item).map_err(|_| pam::PamError(pam::PamReturnCode::Buf_Err))?;
+        let code = unsafe {
+            // SAFETY: `item` is a NUL-terminated C string that remains alive for this call.
+            // Linux-PAM copies item data for string item types such as PAM_TTY.
+            pam::ffi::pam_set_item(
+                self.handle,
+                item_type as c_int,
+                item.as_ptr() as *const c_void,
+            )
+        }
+        .into();
+        self.check(code)
+    }
+
+    fn open_session(&mut self) -> pam::PamResult<()> {
+        if !self.is_authenticated {
+            return Err(pam::PamReturnCode::Perm_Denied.into());
+        }
+
+        let code = pam::setcred(self.handle, pam::PamFlag::Establish_Cred);
+        self.check(code).or_else(|_| self.reset())?;
+        let code = pam::open_session(self.handle, false);
+        self.check(code).or_else(|_| self.reset())?;
+        let code = pam::setcred(self.handle, pam::PamFlag::Reinitialize_Cred);
+        self.check(code).or_else(|_| self.reset())?;
+        self.has_open_session = true;
+        self.initialize_environment()?;
+        Ok(())
+    }
+
+    fn initialize_environment(&mut self) -> pam::PamResult<()> {
+        let username = self.get_user()?;
+        let user =
+            get_user_by_name(&username).ok_or(pam::PamError(pam::PamReturnCode::User_Unknown))?;
+        let name = user
+            .name()
+            .to_str()
+            .ok_or(pam::PamError(pam::PamReturnCode::System_Err))?;
+        let home = user
+            .home_dir()
+            .to_str()
+            .ok_or(pam::PamError(pam::PamReturnCode::System_Err))?;
+        let shell = user
+            .shell()
+            .to_str()
+            .ok_or(pam::PamError(pam::PamReturnCode::System_Err))?;
+
+        self.set_env("USER", name)?;
+        self.set_env("LOGNAME", name)?;
+        self.set_env("HOME", home)?;
+        self.set_env("PWD", home)?;
+        self.set_env("SHELL", shell)?;
+        Ok(())
+    }
+
+    fn get_user(&mut self) -> pam::PamResult<String> {
+        pam::get_item(self.handle, pam::PamItemType::User).and_then(|result| {
+            let ptr = result as *const c_void as *const c_char;
+            if ptr.is_null() {
+                return Err(pam::PamError(pam::PamReturnCode::System_Err));
+            }
+            let username = unsafe {
+                // SAFETY: PAM returns a valid NUL-terminated PAM_USER string for this item.
+                CStr::from_ptr(ptr)
+            };
+            username
+                .to_str()
+                .map(|username| username.to_owned())
+                .map_err(|_| pam::PamError(pam::PamReturnCode::System_Err))
+        })
+    }
+
+    fn set_env(&mut self, key: &str, value: &str) -> pam::PamResult<()> {
+        std::env::set_var(key, value);
+        if pam::getenv(self.handle, key).is_ok() {
+            pam::putenv(self.handle, &format!("{key}={value}"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn check(&mut self, code: pam::PamReturnCode) -> pam::PamResult<()> {
+        self.last_code = code;
+        if code == pam::PamReturnCode::Success {
+            Ok(())
+        } else {
+            Err(code.into())
+        }
+    }
+
+    fn reset(&mut self) -> pam::PamResult<()> {
+        pam::setcred(self.handle, pam::PamFlag::Delete_Cred);
+        self.is_authenticated = false;
+        Err(self.last_code.into())
+    }
+}
+
+impl Drop for PamSession<'_> {
+    fn drop(&mut self) {
+        if self.has_open_session {
+            pam::close_session(self.handle, false);
+        }
+        let code = pam::setcred(self.handle, pam::PamFlag::Delete_Cred);
+        pam::end(self.handle, code);
+    }
+}
+
+unsafe extern "C" fn pam_converse(
+    num_msg: c_int,
+    msg: *mut *const pam::PamMessage,
+    out_resp: *mut *mut pam::PamResponse,
+    appdata_ptr: *mut c_void,
+) -> c_int {
+    if num_msg <= 0 || msg.is_null() || out_resp.is_null() || appdata_ptr.is_null() {
+        return pam::PamReturnCode::Conv_Err as c_int;
+    }
+
+    let resp = unsafe {
+        // SAFETY: Allocates a zeroed PAM response array with `num_msg` entries.
+        libc::calloc(num_msg as usize, std::mem::size_of::<pam::PamResponse>())
+            as *mut pam::PamResponse
+    };
+    if resp.is_null() {
+        return pam::PamReturnCode::Buf_Err as c_int;
+    }
+
+    let credentials = unsafe {
+        // SAFETY: `appdata_ptr` was created from a live `PamCredentials` box in `with_password`.
+        &mut *(appdata_ptr as *mut PamCredentials)
+    };
+    let mut result = pam::PamReturnCode::Success;
+
+    for i in 0..num_msg as isize {
+        let message_ptr = unsafe {
+            // SAFETY: PAM supplied an array of `num_msg` message pointers.
+            *msg.offset(i)
+        };
+        if message_ptr.is_null() {
+            result = pam::PamReturnCode::Conv_Err;
+            break;
+        }
+        let message = unsafe {
+            // SAFETY: Null was checked above and PAM owns this message for the callback duration.
+            &*message_ptr
+        };
+        let response = unsafe {
+            // SAFETY: `resp` has `num_msg` entries allocated by `calloc`.
+            &mut *resp.offset(i)
+        };
+        let text = match pam::PamMessageStyle::from(message.msg_style) {
+            pam::PamMessageStyle::Prompt_Echo_On => &credentials.username,
+            pam::PamMessageStyle::Prompt_Echo_Off => &credentials.password,
+            pam::PamMessageStyle::Text_Info => continue,
+            pam::PamMessageStyle::Error_Msg => {
+                if !message.msg.is_null() {
+                    let message = unsafe {
+                        // SAFETY: PAM error messages are NUL-terminated strings for this callback.
+                        CStr::from_ptr(message.msg)
+                    };
+                    log::warn!("[PAM ERROR] {}", message.to_string_lossy());
+                }
+                result = pam::PamReturnCode::Conv_Err;
+                break;
+            }
+        };
+
+        let Ok(text) = CString::new(text.as_str()) else {
+            result = pam::PamReturnCode::Buf_Err;
+            break;
+        };
+        response.resp = unsafe {
+            // SAFETY: `text` is a valid C string and `strdup` allocates the PAM-owned response.
+            libc::strdup(text.as_ptr())
+        };
+        if response.resp.is_null() {
+            result = pam::PamReturnCode::Buf_Err;
+            break;
+        }
+    }
+
+    if result == pam::PamReturnCode::Success {
+        unsafe {
+            // SAFETY: `out_resp` was checked for null and PAM expects ownership of `resp`.
+            *out_resp = resp;
+        }
+    } else {
+        for i in 0..num_msg as isize {
+            let response = unsafe {
+                // SAFETY: `resp` has `num_msg` entries allocated by `calloc`.
+                &mut *resp.offset(i)
+            };
+            if !response.resp.is_null() {
+                unsafe {
+                    // SAFETY: response strings were allocated with `strdup` above.
+                    libc::free(response.resp as *mut c_void);
+                }
+            }
+        }
+        unsafe {
+            // SAFETY: `resp` was allocated with `calloc` above and is not returned to PAM.
+            libc::free(resp as *mut c_void);
+            *out_resp = std::ptr::null_mut();
+        }
+    }
+
+    result as c_int
 }
 
 #[derive(Debug)]
@@ -250,11 +502,9 @@ impl DesktopManager {
     fn try_start_x_session(&mut self, username: &str, password: &str) -> ResultType<()> {
         match get_user_by_name(username) {
             Some(userinfo) => {
-                let mut client = pam::Client::with_password(&pam_get_service_name())?;
-                client
-                    .conversation_mut()
-                    .set_credentials(username, password);
-                match client.authenticate() {
+                let mut session =
+                    PamSession::with_password(&pam_get_service_name(), username, password)?;
+                match session.authenticate() {
                     Ok(_) => {
                         if self.is_running() {
                             return Ok(());
@@ -383,14 +633,10 @@ impl DesktopManager {
         password: String,
         envs: HashMap<&str, String>,
     ) -> ResultType<()> {
-        let mut client = pam::Client::with_password(&pam_get_service_name())?;
-        client
-            .conversation_mut()
-            .set_credentials(&username, &password);
-        client.authenticate()?;
-
-        client.set_item(pam::PamItemType::TTY, &Self::display_from_num(display_num))?;
-        client.open_session()?;
+        let mut session = PamSession::with_password(&pam_get_service_name(), &username, &password)?;
+        session.authenticate()?;
+        session.set_item(pam::PamItemType::TTY, &Self::display_from_num(display_num))?;
+        session.open_session()?;
 
         // fixme: FreeBSD kernel needs to login here.
         // see: https://github.com/neutrinolabs/xrdp/blob/a64573b596b5fb07ca3a51590c5308d621f7214e/sesman/session.c#L556

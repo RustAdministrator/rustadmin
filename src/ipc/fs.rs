@@ -649,7 +649,9 @@ pub(crate) async fn check_pid(postfix: &str) -> bool {
     let pid_file = std::path::PathBuf::from(get_pid_file(postfix));
     if let Some(pid) = read_pid_file_secure(&pid_file) {
         if pid > 0 {
-            let mut sys = hbb_common::sysinfo::System::new();
+            use hbb_common::sysinfo::{ProcessExt, System, SystemExt};
+
+            let mut sys = System::new();
             sys.refresh_processes();
             if let Some(p) = sys.process(pid.into()) {
                 if let Some(current) = sys.process((std::process::id() as usize).into()) {

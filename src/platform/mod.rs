@@ -30,7 +30,7 @@ pub mod gtk_sudo;
     not(all(target_os = "windows", not(target_pointer_width = "64"))),
     not(any(target_os = "android", target_os = "ios"))
 ))]
-use hbb_common::sysinfo::System;
+use hbb_common::sysinfo::{ProcessExt, System, SystemExt};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use hbb_common::{message_proto::CursorData, sysinfo::Pid, ResultType};
 use std::sync::{Arc, Mutex};
@@ -92,14 +92,39 @@ pub const PA_SAMPLE_RATE: u32 = 48000;
 
 #[cfg(target_os = "android")]
 #[derive(Default)]
-pub struct WakeLock(Option<android_wakelock::WakeLock>);
+pub struct WakeLock {
+    _guard: Option<android_wakelock::Guard<'static>>,
+    _lock: Option<Box<android_wakelock::WakeLock>>,
+}
 
 #[cfg(target_os = "android")]
 impl WakeLock {
     pub fn new(tag: &str) -> Self {
         let tag = format!("{}:{tag}", crate::get_app_name());
         match android_wakelock::partial(tag) {
-            Ok(lock) => Self(Some(lock)),
+            Ok(lock) => {
+                let lock = Box::new(lock);
+                match lock.acquire() {
+                    Ok(guard) => {
+                        let guard = unsafe {
+                            // SAFETY: `guard` borrows data inside `lock`, and the boxed lock is
+                            // stored in the same struct. Field order drops `_guard` before `_lock`.
+                            std::mem::transmute::<
+                                android_wakelock::Guard<'_>,
+                                android_wakelock::Guard<'static>,
+                            >(guard)
+                        };
+                        Self {
+                            _guard: Some(guard),
+                            _lock: Some(lock),
+                        }
+                    }
+                    Err(e) => {
+                        hbb_common::log::error!("Failed to acquire wakelock: {e:?}");
+                        Self::default()
+                    }
+                }
+            }
             Err(e) => {
                 hbb_common::log::error!("Failed to get wakelock: {e:?}");
                 Self::default()
