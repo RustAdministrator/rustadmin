@@ -32,7 +32,6 @@ use std::{
     sync::{atomic::Ordering, Arc, Mutex},
     time::{Duration, Instant},
 };
-use wallpaper;
 #[cfg(not(debug_assertions))]
 use winapi::um::libloaderapi::{LoadLibraryExW, LOAD_LIBRARY_SEARCH_USER_DIRS};
 use winapi::{
@@ -3839,7 +3838,7 @@ impl WallPaperRemover {
             Ok(old_path) => old_path,
             Err(e) => {
                 log::info!("Failed to get recent wallpaper: {:?}, use fallback", e);
-                wallpaper::get().map_err(|e| anyhow!(e.to_string()))?
+                Self::get_wallpaper()?
             }
         };
         Self::set_wallpaper(None)?;
@@ -3852,7 +3851,8 @@ impl WallPaperRemover {
     }
 
     pub fn support() -> bool {
-        wallpaper::get().is_ok() || !Self::get_recent_wallpaper().unwrap_or_default().is_empty()
+        Self::get_wallpaper().is_ok()
+            || !Self::get_recent_wallpaper().unwrap_or_default().is_empty()
     }
 
     fn get_recent_wallpaper() -> ResultType<String> {
@@ -3876,14 +3876,57 @@ impl WallPaperRemover {
     }
 
     fn need_remove() -> bool {
-        if let Ok(wallpaper) = wallpaper::get() {
+        if let Ok(wallpaper) = Self::get_wallpaper() {
             return !wallpaper.is_empty();
         }
         false
     }
 
+    fn get_wallpaper() -> ResultType<String> {
+        let mut buffer = [0u16; 260];
+        // SAFETY: SPI_GETDESKWALLPAPER writes at most uiParam UTF-16 code units into
+        // the caller-provided buffer. The buffer is valid for the duration of the call.
+        let ok = unsafe {
+            SystemParametersInfoW(
+                SPI_GETDESKWALLPAPER,
+                buffer.len() as u32,
+                buffer.as_mut_ptr() as *mut c_void,
+                0,
+            )
+        } == 1;
+        if ok {
+            Ok(String::from_utf16(&buffer)?
+                .trim_end_matches('\0')
+                .to_owned())
+        } else {
+            Err(std::io::Error::last_os_error().into())
+        }
+    }
+
     fn set_wallpaper(path: Option<String>) -> ResultType<()> {
-        wallpaper::set_from_path(&path.unwrap_or_default()).map_err(|e| anyhow!(e.to_string()))
+        use std::os::windows::ffi::OsStrExt;
+
+        let path = path.unwrap_or_default();
+        let wide_path = std::ffi::OsStr::new(&path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<u16>>();
+        // SAFETY: wide_path is NUL-terminated and remains alive for the whole
+        // SystemParametersInfoW call. Flags are 0 to preserve the fork behavior:
+        // clear/restore the active wallpaper without updating the user's profile.
+        let ok = unsafe {
+            SystemParametersInfoW(
+                SPI_SETDESKWALLPAPER,
+                0,
+                wide_path.as_ptr() as *mut c_void,
+                0,
+            )
+        } == 1;
+        if ok {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error().into())
+        }
     }
 }
 

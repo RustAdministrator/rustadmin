@@ -2,9 +2,7 @@ use super::{gtk_sudo, CursorData, ResultType};
 use desktop::Desktop;
 pub use hbb_common::platform::linux::*;
 use hbb_common::{
-    allow_err,
-    anyhow::anyhow,
-    bail,
+    allow_err, bail,
     config::{keys::OPTION_ALLOW_LINUX_HEADLESS, Config},
     libc::{c_char, c_int, c_long, c_uint, c_ulong, c_void},
     log,
@@ -24,7 +22,6 @@ use std::{
     time::{Duration, Instant},
 };
 use terminfo::{capability as cap, Database};
-use wallpaper;
 
 pub const PA_SAMPLE_RATE: u32 = 48000;
 static mut UNMODIFIED: bool = true;
@@ -2092,16 +2089,132 @@ pub struct WallPaperRemover {
     old_path_dark: Option<String>, // ubuntu 22.04 light/dark theme have different uri
 }
 
+fn is_gnome_wallpaper_desktop(desktop: &str) -> bool {
+    desktop.contains("GNOME") || desktop == "Unity" || desktop == "Pantheon"
+}
+
+fn command_stdout(command: &str, args: &[&str]) -> ResultType<String> {
+    let output = Command::new(command).args(args).output()?;
+    if !output.status.success() {
+        bail!(
+            "{} {:?} failed with status {:?}",
+            command,
+            args,
+            output.status.code()
+        );
+    }
+    Ok(String::from_utf8(output.stdout)?)
+}
+
+fn gsettings_wallpaper_uri(key: &str) -> ResultType<String> {
+    let raw = command_stdout("gsettings", &["get", "org.gnome.desktop.background", key])?;
+    let mut uri = raw.trim();
+    if (uri.starts_with('\'') && uri.ends_with('\''))
+        || (uri.starts_with('"') && uri.ends_with('"'))
+    {
+        uri = &uri[1..uri.len().saturating_sub(1)];
+    }
+    Ok(uri.strip_prefix("file://").unwrap_or(uri).to_owned())
+}
+
+fn gvariant_string(value: &str) -> String {
+    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+fn set_gsettings_wallpaper_uri(key: &str, path: &str) -> ResultType<()> {
+    let uri = gvariant_string(&format!("file://{}", path));
+    let status = Command::new("gsettings")
+        .args(["set", "org.gnome.desktop.background", key, &uri])
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!(
+            "gsettings set {} failed with status {:?}",
+            key,
+            status.code()
+        )
+    }
+}
+
+fn xfce_wallpaper_properties(key: &str) -> ResultType<Vec<String>> {
+    let stdout = command_stdout("xfconf-query", &["--channel", "xfce4-desktop", "--list"])?;
+    let props = stdout
+        .lines()
+        .filter(|line| line.ends_with(key))
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    if props.is_empty() {
+        bail!("no XFCE wallpaper properties ending with {}", key);
+    }
+    Ok(props)
+}
+
+fn xfce_wallpaper_path() -> ResultType<String> {
+    let props = xfce_wallpaper_properties("last-image")?;
+    Ok(command_stdout(
+        "xfconf-query",
+        &["--channel", "xfce4-desktop", "--property", &props[0]],
+    )?
+    .trim()
+    .to_owned())
+}
+
+fn set_xfce_wallpaper_path(path: &str) -> ResultType<()> {
+    for prop in xfce_wallpaper_properties("last-image")? {
+        let status = Command::new("xfconf-query")
+            .args([
+                "--channel",
+                "xfce4-desktop",
+                "--property",
+                prop.as_str(),
+                "--set",
+                path,
+            ])
+            .status()?;
+        if !status.success() {
+            bail!(
+                "xfconf-query set {} failed with status {:?}",
+                prop,
+                status.code()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn wallpaper_path() -> ResultType<String> {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    if is_gnome_wallpaper_desktop(&desktop) {
+        return gsettings_wallpaper_uri("picture-uri");
+    }
+    if desktop.as_str() == "XFCE" {
+        return xfce_wallpaper_path();
+    }
+    bail!("unsupported desktop for wallpaper removal: {}", desktop)
+}
+
+fn set_wallpaper_path(path: &str) -> ResultType<()> {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    if is_gnome_wallpaper_desktop(&desktop) {
+        return set_gsettings_wallpaper_uri("picture-uri", path);
+    }
+    if desktop.as_str() == "XFCE" {
+        return set_xfce_wallpaper_path(path);
+    }
+    bail!("unsupported desktop for wallpaper removal: {}", desktop)
+}
+
 impl WallPaperRemover {
     pub fn new() -> ResultType<Self> {
         let start = std::time::Instant::now();
-        let old_path = wallpaper::get().map_err(|e| anyhow!(e.to_string()))?;
-        let old_path_dark = wallpaper::get_dark().ok();
+        let old_path = wallpaper_path()?;
+        let old_path_dark = gsettings_wallpaper_uri("picture-uri-dark").ok();
         if old_path.is_empty() && old_path_dark.clone().unwrap_or_default().is_empty() {
             bail!("already solid color");
         }
-        wallpaper::set_from_path("").map_err(|e| anyhow!(e.to_string()))?;
-        wallpaper::set_dark_from_path("").ok();
+        set_wallpaper_path("")?;
+        set_gsettings_wallpaper_uri("picture-uri-dark", "").ok();
         log::info!(
             "created wallpaper remover,  old_path: {:?}, old_path_dark: {:?}, elapsed: {:?}",
             old_path,
@@ -2116,8 +2229,8 @@ impl WallPaperRemover {
 
     pub fn support() -> bool {
         let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-        if wallpaper::gnome::is_compliant(&desktop) || desktop.as_str() == "XFCE" {
-            return wallpaper::get().is_ok();
+        if is_gnome_wallpaper_desktop(&desktop) || desktop.as_str() == "XFCE" {
+            return wallpaper_path().is_ok();
         }
         false
     }
@@ -2125,10 +2238,12 @@ impl WallPaperRemover {
 
 impl Drop for WallPaperRemover {
     fn drop(&mut self) {
-        allow_err!(wallpaper::set_from_path(&self.old_path).map_err(|e| anyhow!(e.to_string())));
+        allow_err!(set_wallpaper_path(&self.old_path));
         if let Some(old_path_dark) = &self.old_path_dark {
-            allow_err!(wallpaper::set_dark_from_path(old_path_dark.as_str())
-                .map_err(|e| anyhow!(e.to_string())));
+            allow_err!(set_gsettings_wallpaper_uri(
+                "picture-uri-dark",
+                old_path_dark.as_str()
+            ));
         }
     }
 }
