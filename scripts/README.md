@@ -86,6 +86,12 @@ Toolbar lab:
 scripts/run_toolbar_lab_linux.sh
 ```
 
+Validation tests:
+
+```bash
+scripts/run_linux_tests.sh
+```
+
 Final bundle:
 
 ```text
@@ -112,6 +118,12 @@ Toolbar lab:
 
 ```bash
 scripts/run_toolbar_lab_macos.sh
+```
+
+Validation tests:
+
+```bash
+scripts/run_macos_tests.sh
 ```
 
 Final bundle:
@@ -173,3 +185,20 @@ Common options:
 
 - Linux/macOS: `--clean`, `--skip-cargo`, `--device DEVICE`, `-- ...extra flutter run args`
 - Windows: `-Clean`, `-SkipCargo`, `-Device windows`, `-HwCodec`, plus extra trailing `flutter run` args
+
+## Validation Runners
+
+The Linux/macOS test runners mirror `scripts/run_windows_tests.ps1`: each step
+writes a dedicated log under `target/<platform>-test-logs/`, then prints a final
+summary table.
+
+Common options:
+
+- `--flutter-root PATH`
+- `--pub-cache PATH`
+- `--cargo-target-dir PATH`
+- `--features flutter,use_dasp`
+- `--skip-full-client`
+- `--skip-hbb-common`
+- `--skip-flutter`
+- `--stop-on-failure`
