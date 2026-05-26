@@ -10,6 +10,8 @@ Options:
   --flutter-root PATH       Flutter SDK root. Also read from RUSTDESK_FLUTTER_ROOT.
   --pub-cache PATH          Dart package cache. Also read from PUB_CACHE.
   --cargo-target-dir PATH   Cargo output directory. Also read from CARGO_TARGET_DIR.
+  --codec-root PATH         Native dependency prefix for macOS. Also read from
+                            RUSTDESK_MACOS_CODEC_ROOT or CMAKE_PREFIX_PATH.
   --features LIST           Cargo features. Default: flutter,use_dasp.
   --skip-full-client        Skip the full serial rustdesk-client cargo test step.
   --skip-hbb-common         Skip hbb_common test steps.
@@ -54,6 +56,7 @@ flutter_dir="$client_root/flutter"
 flutter_root=""
 pub_cache=""
 cargo_target_dir=""
+codec_root=""
 features="${RUSTDESK_TEST_FEATURES:-flutter,use_dasp}"
 skip_full_client=0
 skip_hbb_common=0
@@ -94,6 +97,17 @@ while [[ $# -gt 0 ]]; do
       ;;
     --cargo-target-dir=*)
       cargo_target_dir="${1#*=}"
+      ;;
+    --codec-root)
+      if [[ $# -lt 2 ]]; then
+        echo "Missing value for --codec-root" >&2
+        exit 2
+      fi
+      codec_root="$2"
+      shift
+      ;;
+    --codec-root=*)
+      codec_root="${1#*=}"
       ;;
     --features)
       if [[ $# -lt 2 ]]; then
@@ -165,6 +179,25 @@ fi
 
 export PUB_CACHE="$pub_cache"
 export CARGO_TARGET_DIR="$cargo_target_dir"
+
+if [[ "$platform" == "macos" ]]; then
+  default_codec_root="$client_root/.local/macos-codecs"
+  if [[ -z "$codec_root" ]]; then
+    if [[ -n "${RUSTDESK_MACOS_CODEC_ROOT:-}" ]]; then
+      codec_root="$RUSTDESK_MACOS_CODEC_ROOT"
+    elif [[ -n "${CMAKE_PREFIX_PATH:-}" ]]; then
+      codec_root="${CMAKE_PREFIX_PATH%%:*}"
+    elif [[ -d "$default_codec_root" ]]; then
+      codec_root="$default_codec_root"
+    fi
+  fi
+
+  if [[ -n "$codec_root" ]]; then
+    export RUSTDESK_MACOS_CODEC_ROOT="$codec_root"
+    export CMAKE_PREFIX_PATH="$codec_root:${CMAKE_PREFIX_PATH:-}"
+    export PKG_CONFIG_PATH="$codec_root/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+  fi
+fi
 
 if [[ "$platform" == "linux" && -z "${LIBCLANG_PATH:-}" && -d /usr/lib/llvm-18/lib ]]; then
   export LIBCLANG_PATH=/usr/lib/llvm-18/lib
@@ -335,6 +368,9 @@ printf 'Flutter dir: %s\n' "$flutter_dir"
 printf 'Features:    %s\n' "$features"
 printf 'Pub cache:   %s\n' "$PUB_CACHE"
 printf 'Target dir:  %s\n' "$CARGO_TARGET_DIR"
+if [[ "$platform" == "macos" && -n "${RUSTDESK_MACOS_CODEC_ROOT:-}" ]]; then
+  printf 'Codec root:  %s\n' "$RUSTDESK_MACOS_CODEC_ROOT"
+fi
 if [[ -n "${LIBCLANG_PATH:-}" ]]; then
   printf 'LIBCLANG:    %s\n' "$LIBCLANG_PATH"
 fi
