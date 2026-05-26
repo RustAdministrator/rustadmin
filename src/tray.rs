@@ -51,6 +51,7 @@ fn make_tray() -> hbb_common::ResultType<()> {
     let icon = tray_icon::Icon::from_rgba(icon_rgba, icon_width, icon_height)
         .context("Failed to open icon")?;
 
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut event_loop = EventLoopBuilder::new().build();
 
     let tray_menu = Menu::new();
@@ -138,6 +139,22 @@ fn make_tray() -> hbb_common::ResultType<()> {
         *control_flow = ControlFlow::WaitUntil(
             std::time::Instant::now() + std::time::Duration::from_millis(100),
         );
+
+        #[cfg(target_os = "macos")]
+        match &event {
+            tao::event::Event::Opened { urls } => {
+                for url in urls {
+                    let url = url.to_string();
+                    log::debug!("URL received: {}", url);
+                    std::thread::spawn(move || crate::handle_url_scheme(url));
+                }
+            }
+            tao::event::Event::Reopen { .. } => {
+                log::debug!("Handling macOS application reopen event");
+                std::thread::spawn(move || crate::handle_url_scheme(String::new()));
+            }
+            _ => {}
+        }
 
         if let tao::event::Event::NewEvents(tao::event::StartCause::Init) = event {
             // for fixing https://github.com/rustdesk/rustdesk/discussions/10210#discussioncomment-14600745
