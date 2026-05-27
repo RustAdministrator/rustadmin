@@ -2144,6 +2144,390 @@ mod clipboard_timing_tests {
     }
 }
 
+#[cfg(all(test, target_os = "windows"))]
+mod clipboard_windows_integration_tests {
+    use super::*;
+    use std::{
+        ffi::OsStr,
+        os::windows::ffi::OsStrExt,
+        ptr::{copy_nonoverlapping, null, null_mut},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Mutex as StdMutex,
+        },
+        thread,
+        time::Duration,
+    };
+    use winapi::{
+        shared::{
+            minwindef::{LPARAM, LRESULT, UINT, WPARAM},
+            windef::HWND,
+        },
+        um::{
+            libloaderapi::GetModuleHandleW,
+            winbase::{GlobalAlloc, GlobalFree, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
+            winuser::{
+                CloseClipboard, CreateWindowExW, DefWindowProcW, DestroyWindow, EmptyClipboard,
+                IsClipboardFormatAvailable, OpenClipboard, RegisterClassW,
+                RegisterClipboardFormatW, SetClipboardData, HWND_MESSAGE, WM_RENDERALLFORMATS,
+                WM_RENDERFORMAT, WNDCLASSW,
+            },
+        },
+    };
+
+    const CF_UNICODETEXT: UINT = 13;
+    const WINDOWS_CLIPBOARD_INTEGRATION_ENV: &str = "RUSTDESK_CLIPBOARD_INTEGRATION_TESTS";
+    static TEST_MUTEX: StdMutex<()> = StdMutex::new(());
+    static RENDER_REQUESTS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "system" fn delayed_render_window_proc(
+        hwnd: HWND,
+        msg: UINT,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if msg == WM_RENDERFORMAT || msg == WM_RENDERALLFORMATS {
+            RENDER_REQUESTS.fetch_add(1, Ordering::SeqCst);
+        }
+        // Safety: Parameters are forwarded unchanged from the system callback.
+        unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+    }
+
+    struct TestWindow {
+        hwnd: HWND,
+    }
+
+    impl TestWindow {
+        fn new() -> Result<Self, String> {
+            let class_name = wide_z("RustDeskClipboardIntegrationWindow");
+            // Safety: GetModuleHandleW accepts a null module name for the current process.
+            let instance = unsafe { GetModuleHandleW(null()) };
+            if instance.is_null() {
+                return Err("GetModuleHandleW failed".to_owned());
+            }
+            let wnd_class = WNDCLASSW {
+                style: 0,
+                lpfnWndProc: Some(delayed_render_window_proc),
+                cbClsExtra: 0,
+                cbWndExtra: 0,
+                hInstance: instance,
+                hIcon: null_mut(),
+                hCursor: null_mut(),
+                hbrBackground: null_mut(),
+                lpszMenuName: null(),
+                lpszClassName: class_name.as_ptr(),
+            };
+            // Safety: wnd_class points to valid data for the duration of the call.
+            unsafe {
+                RegisterClassW(&wnd_class);
+            }
+            // Safety: The class was registered above or already existed from another test.
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    0,
+                    class_name.as_ptr(),
+                    class_name.as_ptr(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    HWND_MESSAGE,
+                    null_mut(),
+                    instance,
+                    null_mut(),
+                )
+            };
+            if hwnd.is_null() {
+                Err("CreateWindowExW failed".to_owned())
+            } else {
+                Ok(Self { hwnd })
+            }
+        }
+    }
+
+    impl Drop for TestWindow {
+        fn drop(&mut self) {
+            // Safety: hwnd was returned by CreateWindowExW and is owned by TestWindow.
+            unsafe {
+                DestroyWindow(self.hwnd);
+            }
+        }
+    }
+
+    struct ClipboardOpenGuard;
+
+    impl ClipboardOpenGuard {
+        fn open(owner: HWND) -> Result<Self, String> {
+            for _ in 0..20 {
+                // Safety: owner is a valid test window handle for these tests.
+                if unsafe { OpenClipboard(owner) } != 0 {
+                    return Ok(Self);
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err("OpenClipboard failed".to_owned())
+        }
+    }
+
+    impl Drop for ClipboardOpenGuard {
+        fn drop(&mut self) {
+            // Safety: ClipboardOpenGuard is only constructed after OpenClipboard succeeds.
+            unsafe {
+                CloseClipboard();
+            }
+        }
+    }
+
+    struct ClipboardFixture {
+        window: TestWindow,
+    }
+
+    impl ClipboardFixture {
+        fn new() -> Result<Self, String> {
+            Ok(Self {
+                window: TestWindow::new()?,
+            })
+        }
+
+        fn set_formats(
+            &self,
+            text: Option<&str>,
+            data_format_names: &[&str],
+            delayed_format_names: &[&str],
+        ) -> Result<(), String> {
+            let _clipboard = ClipboardOpenGuard::open(self.window.hwnd)?;
+            // Safety: The clipboard is open and owned by the test window.
+            if unsafe { EmptyClipboard() } == 0 {
+                return Err("EmptyClipboard failed".to_owned());
+            }
+            if let Some(text) = text {
+                set_unicode_text(text)?;
+            }
+            for name in data_format_names {
+                set_registered_data_format(name, b"RustDesk clipboard integration wrapper")?;
+            }
+            for name in delayed_format_names {
+                set_delayed_format(name)?;
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for ClipboardFixture {
+        fn drop(&mut self) {
+            if let Ok(_clipboard) = ClipboardOpenGuard::open(self.window.hwnd) {
+                // Safety: The clipboard is open and owned by the test window.
+                unsafe {
+                    EmptyClipboard();
+                }
+                let _ = set_unicode_text("RustDesk clipboard integration test completed.");
+            }
+        }
+    }
+
+    fn wide_z(value: &str) -> Vec<u16> {
+        OsStr::new(value).encode_wide().chain(Some(0)).collect()
+    }
+
+    fn integration_enabled() -> bool {
+        std::env::var(WINDOWS_CLIPBOARD_INTEGRATION_ENV)
+            .map(|value| {
+                matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "y"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    fn skip_if_disabled() -> bool {
+        if integration_enabled() {
+            false
+        } else {
+            eprintln!(
+                "skipping Windows clipboard integration test; set {WINDOWS_CLIPBOARD_INTEGRATION_ENV}=1"
+            );
+            true
+        }
+    }
+
+    fn register_clipboard_format(name: &str) -> Result<UINT, String> {
+        let name = wide_z(name);
+        // Safety: wide_z returns a valid null-terminated UTF-16 string.
+        let format = unsafe { RegisterClipboardFormatW(name.as_ptr()) };
+        if format == 0 {
+            Err("RegisterClipboardFormatW failed".to_owned())
+        } else {
+            Ok(format)
+        }
+    }
+
+    fn set_unicode_text(text: &str) -> Result<(), String> {
+        let data = wide_z(text);
+        let bytes = data.len() * std::mem::size_of::<u16>();
+        // Safety: GlobalAlloc is called with a non-zero size and GMEM_MOVEABLE,
+        // as required by SetClipboardData for CF_UNICODETEXT.
+        let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) };
+        if handle.is_null() {
+            return Err("GlobalAlloc failed".to_owned());
+        }
+        // Safety: handle was allocated by GlobalAlloc and is lockable.
+        let ptr = unsafe { GlobalLock(handle) } as *mut u16;
+        if ptr.is_null() {
+            // Safety: handle has not been transferred to the clipboard.
+            unsafe {
+                GlobalFree(handle);
+            }
+            return Err("GlobalLock failed".to_owned());
+        }
+        // Safety: ptr points to a writable global allocation of at least bytes.
+        unsafe {
+            copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+            GlobalUnlock(handle);
+        }
+        // Safety: The clipboard is open, and ownership of handle transfers on success.
+        let result = unsafe { SetClipboardData(CF_UNICODETEXT, handle as _) };
+        if result.is_null() {
+            // Safety: SetClipboardData failed, so ownership was not transferred.
+            unsafe {
+                GlobalFree(handle);
+            }
+            Err("SetClipboardData(CF_UNICODETEXT) failed".to_owned())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn set_registered_data_format(name: &str, bytes: &[u8]) -> Result<(), String> {
+        if bytes.is_empty() {
+            return Err(format!("SetClipboardData({name}) requires non-empty data"));
+        }
+        let format = register_clipboard_format(name)?;
+        // Safety: GlobalAlloc is called with a non-zero size and GMEM_MOVEABLE,
+        // as required by SetClipboardData for movable clipboard memory.
+        let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) };
+        if handle.is_null() {
+            return Err("GlobalAlloc failed".to_owned());
+        }
+        // Safety: handle was allocated by GlobalAlloc and is lockable.
+        let ptr = unsafe { GlobalLock(handle) } as *mut u8;
+        if ptr.is_null() {
+            // Safety: handle has not been transferred to the clipboard.
+            unsafe {
+                GlobalFree(handle);
+            }
+            return Err("GlobalLock failed".to_owned());
+        }
+        // Safety: ptr points to a writable global allocation of at least bytes.len().
+        unsafe {
+            copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+            GlobalUnlock(handle);
+        }
+        // Safety: The clipboard is open, and ownership of handle transfers on success.
+        let result = unsafe { SetClipboardData(format, handle as _) };
+        if result.is_null() {
+            // Safety: SetClipboardData failed, so ownership was not transferred.
+            unsafe {
+                GlobalFree(handle);
+            }
+            Err(format!("SetClipboardData({name}) failed"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn set_delayed_format(name: &str) -> Result<(), String> {
+        let format = register_clipboard_format(name)?;
+        // Safety: Passing a null handle requests delayed rendering for this format.
+        unsafe {
+            SetClipboardData(format, null_mut());
+        }
+        // Safety: IsClipboardFormatAvailable only checks format registration state.
+        if unsafe { IsClipboardFormatAvailable(format) } == 0 {
+            Err(format!("SetClipboardData({name}) failed"))
+        } else {
+            Ok(())
+        }
+    }
+
+    #[test]
+    #[ignore = "mutates the real Windows clipboard; set RUSTDESK_CLIPBOARD_INTEGRATION_TESTS=1"]
+    fn text_with_ole_wrappers_is_read_as_text() -> Result<(), String> {
+        if skip_if_disabled() {
+            return Ok(());
+        }
+        let _guard = TEST_MUTEX.lock().unwrap();
+        RENDER_REQUESTS.store(0, Ordering::SeqCst);
+        let fixture = ClipboardFixture::new()?;
+        let text = "RustDesk clipboard integration text";
+
+        fixture.set_formats(Some(text), &["DataObject", "Ole Private Data"], &[])?;
+
+        assert!(platform_clipboard::external_opaque_native_clipboard_signature().is_none());
+        let mut ctx = ClipboardContext::new().map_err(|e| e.to_string())?;
+        let data = ctx
+            .get(ClipboardSide::Client, false)
+            .map_err(|e| e.to_string())?;
+
+        assert!(data
+            .iter()
+            .any(|item| matches!(item, ClipboardData::Text(value) if value == text)));
+        assert_eq!(RENDER_REQUESTS.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "mutates the real Windows clipboard; set RUSTDESK_CLIPBOARD_INTEGRATION_TESTS=1"]
+    fn delayed_ole_wrappers_with_text_fallback_are_not_opaque_without_rendering(
+    ) -> Result<(), String> {
+        if skip_if_disabled() {
+            return Ok(());
+        }
+        let _guard = TEST_MUTEX.lock().unwrap();
+        RENDER_REQUESTS.store(0, Ordering::SeqCst);
+        let fixture = ClipboardFixture::new()?;
+
+        fixture.set_formats(
+            Some("RustDesk delayed wrapper text fallback"),
+            &[],
+            &["DataObject", "Ole Private Data"],
+        )?;
+
+        assert!(platform_clipboard::external_opaque_native_clipboard_signature().is_none());
+        assert_eq!(RENDER_REQUESTS.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "mutates the real Windows clipboard; set RUSTDESK_CLIPBOARD_INTEGRATION_TESTS=1"]
+    fn delayed_illustrator_formats_are_blocked_without_rendering() -> Result<(), String> {
+        if skip_if_disabled() {
+            return Ok(());
+        }
+        let _guard = TEST_MUTEX.lock().unwrap();
+        RENDER_REQUESTS.store(0, Ordering::SeqCst);
+        let fixture = ClipboardFixture::new()?;
+
+        fixture.set_formats(
+            Some("Illustrator text fallback"),
+            &[],
+            &[
+                "DataObject",
+                "Encapsulated PostScript",
+                "Adobe Illustrator 30.4",
+                "Portable Document Format",
+                "Adobe Illustrator PGF 14.0",
+                "Ole Private Data",
+            ],
+        )?;
+
+        assert!(platform_clipboard::external_opaque_native_clipboard_signature().is_some());
+        assert_eq!(RENDER_REQUESTS.load(Ordering::SeqCst), 0);
+        Ok(())
+    }
+}
+
 pub use proto::get_msg_if_not_support_multi_clip;
 mod proto {
     #[cfg(not(target_os = "android"))]

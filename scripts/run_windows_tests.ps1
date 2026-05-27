@@ -6,6 +6,7 @@ param(
     [switch]$SkipFullClient,
     [switch]$SkipHbbCommon,
     [switch]$SkipFlutter,
+    [switch]$ClipboardIntegration,
     [switch]$StopOnFailure
 )
 
@@ -163,6 +164,7 @@ try {
     Write-Host "Features:    $Features"
     Write-Host "Pub cache:   $env:PUB_CACHE"
     Write-Host "Target dir:  $env:CARGO_TARGET_DIR"
+    Write-Host "Clipboard integration: $ClipboardIntegration"
 
     Invoke-TestStep "rustdesk-client cargo check" $ClientRoot "cargo" @(
         "check", "--no-default-features", "--features", $Features
@@ -187,6 +189,20 @@ try {
         Invoke-TestStep "rustdesk-client full serial tests" $ClientRoot "cargo" @(
             "test", "--no-default-features", "--features", $Features, "--", "--test-threads=1"
         )
+    }
+
+    if ($ClipboardIntegration) {
+        $oldClipboardIntegration = $env:RUSTDESK_CLIPBOARD_INTEGRATION_TESTS
+        try {
+            $env:RUSTDESK_CLIPBOARD_INTEGRATION_TESTS = "1"
+            Invoke-TestStep "Windows clipboard integration tests" $ClientRoot "cargo" @(
+                "test", "--no-default-features", "--features", $Features,
+                "clipboard_windows_integration_tests", "--", "--ignored", "--test-threads=1"
+            )
+        }
+        finally {
+            $env:RUSTDESK_CLIPBOARD_INTEGRATION_TESTS = $oldClipboardIntegration
+        }
     }
 
     if (!$SkipHbbCommon) {
