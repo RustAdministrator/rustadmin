@@ -1108,42 +1108,193 @@ pub fn get_pa_source_name(desc: &str) -> String {
 }
 
 pub fn get_pa_sources() -> Vec<(String, String)> {
-    use pulsectl::controllers::*;
-    let mut out = Vec::new();
-    match SourceController::create() {
-        Ok(mut handler) => {
-            if let Ok(devices) = handler.list_devices() {
-                for dev in devices.clone() {
-                    out.push((
-                        dev.name.unwrap_or("".to_owned()),
-                        dev.description.unwrap_or("".to_owned()),
-                    ));
-                }
-            }
-        }
+    match pulse_sources::list_sources() {
+        Ok(sources) => sources,
         Err(err) => {
             log::error!("Failed to get_pa_sources: {:?}", err);
+            Vec::new()
         }
     }
-    out
 }
 
 pub fn get_default_pa_source() -> Option<(String, String)> {
-    use pulsectl::controllers::*;
-    match SourceController::create() {
-        Ok(mut handler) => {
-            if let Ok(dev) = handler.get_default_device() {
-                return Some((
-                    dev.name.unwrap_or("".to_owned()),
-                    dev.description.unwrap_or("".to_owned()),
-                ));
-            }
-        }
+    match pulse_sources::default_source() {
+        Ok(source) => source,
         Err(err) => {
             log::error!("Failed to get_pa_source: {:?}", err);
+            None
         }
     }
-    None
+}
+
+mod pulse_sources {
+    use hbb_common::{anyhow::anyhow, ResultType};
+    use pulse::{
+        callbacks::ListResult,
+        context::{introspect, Context},
+        mainloop::standard::{IterateResult, Mainloop},
+        operation::{Operation, State},
+        proplist::Proplist,
+    };
+    use std::{cell::RefCell, ops::Deref, rc::Rc};
+
+    pub fn list_sources() -> ResultType<Vec<(String, String)>> {
+        let mut client = PulseSourceClient::connect("RustDeskSourceList")?;
+        client.list_sources()
+    }
+
+    pub fn default_source() -> ResultType<Option<(String, String)>> {
+        let mut client = PulseSourceClient::connect("RustDeskDefaultSource")?;
+        client.default_source()
+    }
+
+    struct PulseSourceClient {
+        mainloop: Rc<RefCell<Mainloop>>,
+        context: Rc<RefCell<Context>>,
+        introspect: introspect::Introspector,
+    }
+
+    impl PulseSourceClient {
+        fn connect(name: &str) -> ResultType<Self> {
+            let mut proplist = Proplist::new()
+                .ok_or_else(|| anyhow!("Failed to create PulseAudio property list"))?;
+            proplist
+                .set_str(pulse::proplist::properties::APPLICATION_NAME, name)
+                .map_err(|err| anyhow!("Failed to set PulseAudio application name: {:?}", err))?;
+
+            let mainloop =
+                Rc::new(RefCell::new(Mainloop::new().ok_or_else(|| {
+                    anyhow!("Failed to create PulseAudio mainloop")
+                })?));
+            let context = Rc::new(RefCell::new(
+                Context::new_with_proplist(mainloop.borrow().deref(), name, &proplist)
+                    .ok_or_else(|| anyhow!("Failed to create PulseAudio context"))?,
+            ));
+            context
+                .borrow_mut()
+                .connect(None, pulse::context::FlagSet::NOFLAGS, None)
+                .map_err(|err| anyhow!("Failed to connect PulseAudio context: {:?}", err))?;
+            let introspect = context.borrow_mut().introspect();
+
+            let mut client = Self {
+                mainloop,
+                context,
+                introspect,
+            };
+            client.wait_until_ready()?;
+            Ok(client)
+        }
+
+        fn wait_until_ready(&mut self) -> ResultType<()> {
+            loop {
+                self.iterate("connect")?;
+                match self.context.borrow().get_state() {
+                    pulse::context::State::Ready => return Ok(()),
+                    pulse::context::State::Failed | pulse::context::State::Terminated => {
+                        return Err(anyhow!("PulseAudio context failed or terminated"));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        fn iterate(&mut self, action: &str) -> ResultType<()> {
+            match self.mainloop.borrow_mut().iterate(false) {
+                IterateResult::Err(err) => Err(anyhow!(
+                    "PulseAudio mainloop failed during {}: {:?}",
+                    action,
+                    err
+                )),
+                IterateResult::Success(_) => Ok(()),
+                IterateResult::Quit(_) => {
+                    Err(anyhow!("PulseAudio mainloop quit during {}", action))
+                }
+            }
+        }
+
+        fn wait_for_operation<G: ?Sized>(&mut self, op: Operation<G>) -> ResultType<()> {
+            loop {
+                self.iterate("operation")?;
+                match op.get_state() {
+                    State::Done => return Ok(()),
+                    State::Running => {}
+                    State::Cancelled => return Err(anyhow!("PulseAudio operation was cancelled")),
+                }
+            }
+        }
+
+        fn list_sources(&mut self) -> ResultType<Vec<(String, String)>> {
+            let sources = Rc::new(RefCell::new(Vec::new()));
+            let sources_ref = sources.clone();
+            let op = self.introspect.get_source_info_list(move |source_list| {
+                if let ListResult::Item(item) = source_list {
+                    sources_ref.borrow_mut().push(source_pair(item));
+                }
+            });
+            self.wait_for_operation(op)?;
+            let result = std::mem::take(&mut *sources.borrow_mut());
+            Ok(result)
+        }
+
+        fn default_source(&mut self) -> ResultType<Option<(String, String)>> {
+            let Some(default_name) = self.default_source_name()? else {
+                return Ok(None);
+            };
+            match self.source_by_name(&default_name)? {
+                Some(source) => Ok(Some(source)),
+                None => Ok(Some((default_name, String::new()))),
+            }
+        }
+
+        fn default_source_name(&mut self) -> ResultType<Option<String>> {
+            let source_name = Rc::new(RefCell::new(None));
+            let source_name_ref = source_name.clone();
+            let op = self.introspect.get_server_info(move |info| {
+                *source_name_ref.borrow_mut() = info
+                    .default_source_name
+                    .as_ref()
+                    .map(std::string::ToString::to_string);
+            });
+            self.wait_for_operation(op)?;
+            let result = source_name.borrow_mut().take();
+            Ok(result)
+        }
+
+        fn source_by_name(&mut self, name: &str) -> ResultType<Option<(String, String)>> {
+            let source = Rc::new(RefCell::new(None));
+            let source_ref = source.clone();
+            let op = self
+                .introspect
+                .get_source_info_by_name(name, move |source_info| {
+                    if let ListResult::Item(item) = source_info {
+                        *source_ref.borrow_mut() = Some(source_pair(item));
+                    }
+                });
+            self.wait_for_operation(op)?;
+            let result = source.borrow_mut().take();
+            Ok(result)
+        }
+    }
+
+    impl Drop for PulseSourceClient {
+        fn drop(&mut self) {
+            self.context.borrow_mut().disconnect();
+            self.mainloop.borrow_mut().quit(pulse::def::Retval(0));
+        }
+    }
+
+    fn source_pair(info: &introspect::SourceInfo<'_>) -> (String, String) {
+        (
+            info.name
+                .as_ref()
+                .map(std::string::ToString::to_string)
+                .unwrap_or_default(),
+            info.description
+                .as_ref()
+                .map(std::string::ToString::to_string)
+                .unwrap_or_default(),
+        )
+    }
 }
 
 pub fn lock_screen() {
