@@ -17,6 +17,8 @@ pub const CLIPBOARD_NAME: &'static str = "clipboard";
 pub const FILE_CLIPBOARD_NAME: &'static str = "file-clipboard";
 pub const CLIPBOARD_INTERVAL: u64 = 333;
 const LOCAL_CLIPBOARD_QUIET_DUR: Duration = Duration::from_millis(750);
+#[cfg(target_os = "windows")]
+const WINDOWS_LOCAL_CLIPBOARD_READ_DEBOUNCE_DUR: Duration = Duration::from_millis(120);
 #[cfg(not(target_os = "android"))]
 const CLIPBOARD_DEBUG_ENV: &str = "RUSTDESK_CLIPBOARD_DEBUG";
 #[cfg(not(target_os = "android"))]
@@ -101,7 +103,7 @@ const OPAQUE_NATIVE_FORMAT_PATTERNS: &[&str] = &[
     "eps",
 ];
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(any(test, target_os = "windows", target_os = "macos", target_os = "linux"))]
 const WINDOWS_OPAQUE_REGISTERED_FORMATS: &[&str] = &[
     "CF_HDROP",
     "CF_METAFILEPICT",
@@ -118,6 +120,25 @@ const WINDOWS_OPAQUE_REGISTERED_FORMATS: &[&str] = &[
     "OwnerLink",
     "System.Drawing.Bitmap",
 ];
+
+#[cfg(any(test, target_os = "windows"))]
+const WINDOWS_TEXT_FALLBACK_FORMATS: &[&str] = &[
+    "CF_UNICODETEXT",
+    "CF_TEXT",
+    "CF_OEMTEXT",
+    "TEXT",
+    "UTF8_STRING",
+    "STRING",
+    "HTML Format",
+    "Rich Text Format",
+    "text/plain",
+    "text/plain;charset=utf-8",
+    "text/html",
+    "text/markdown",
+];
+
+#[cfg(any(test, target_os = "windows"))]
+const WINDOWS_TEXT_OLE_WRAPPER_FORMATS: &[&str] = &["DataObject", "Ole Private Data"];
 
 #[cfg(not(target_os = "android"))]
 lazy_static::lazy_static! {
@@ -243,29 +264,89 @@ fn remote_clipboard_update_delay(side: ClipboardSide) -> Option<Duration> {
 }
 
 #[cfg(not(target_os = "android"))]
-fn should_block_remote_update_for_opaque_signature(signature: Option<&str>) -> bool {
-    signature.is_some()
+fn remote_special_format_block_reason(name: &str) -> Option<&'static str> {
+    #[cfg(any(test, target_os = "windows", target_os = "macos", target_os = "linux"))]
+    {
+        if name.eq_ignore_ascii_case(CLIPBOARD_FORMAT_EXCEL_XML_SPREADSHEET)
+            || name.eq_ignore_ascii_case(RUSTDESK_CLIPBOARD_OWNER_FORMAT)
+        {
+            return None;
+        }
+        if is_windows_opaque_registered_format_name(name)
+            || should_preserve_native_format_name(name)
+        {
+            return Some("opaque-native-format");
+        }
+        return Some("unknown-special-format");
+    }
+
+    #[cfg(not(any(test, target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        if name.eq_ignore_ascii_case(CLIPBOARD_FORMAT_EXCEL_XML_SPREADSHEET)
+            || name.eq_ignore_ascii_case(RUSTDESK_CLIPBOARD_OWNER_FORMAT)
+        {
+            None
+        } else {
+            Some("unknown-special-format")
+        }
+    }
 }
 
 #[cfg(not(target_os = "android"))]
-fn should_skip_remote_clipboard_update(side: ClipboardSide, phase: &str) -> bool {
+fn remote_clipboard_data_block_reason(data: &[ClipboardData]) -> Option<&'static str> {
+    for item in data {
+        match item {
+            ClipboardData::Special((name, _)) => {
+                if let Some(reason) = remote_special_format_block_reason(name) {
+                    return Some(reason);
+                }
+            }
+            ClipboardData::Unsupported | ClipboardData::None => {
+                return Some("unsupported-format");
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "android"))]
+fn is_rustdesk_owner_clipboard_data(data: &ClipboardData) -> bool {
+    matches!(
+        data,
+        ClipboardData::Special((name, _)) if name.eq_ignore_ascii_case(RUSTDESK_CLIPBOARD_OWNER_FORMAT)
+    )
+}
+
+#[cfg(not(target_os = "android"))]
+fn remove_remote_owner_markers(data: &mut Vec<ClipboardData>) {
+    data.retain(|item| !is_rustdesk_owner_clipboard_data(item));
+}
+
+#[cfg(not(target_os = "android"))]
+fn should_skip_remote_clipboard_update(
+    data: &[ClipboardData],
+    side: ClipboardSide,
+    phase: &str,
+) -> bool {
+    if let Some(reason) = remote_clipboard_data_block_reason(data) {
+        log::debug!(
+            "Skip applying remote {} clipboard because the payload contains {}",
+            side,
+            reason
+        );
+        emit_clipboard_debug(format!(
+            "skip-remote-apply side={side} phase={phase} reason={reason}"
+        ));
+        return true;
+    }
+
     #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
     {
         let signature = platform_clipboard::external_opaque_native_clipboard_signature();
-        if !should_block_remote_update_for_opaque_signature(signature.as_deref()) {
-            return false;
-        }
         if let Some(signature) = signature {
             mark_local_external_opaque_clipboard_change(side, &signature);
         }
-        log::debug!(
-            "Skip applying remote {} clipboard because local clipboard contains opaque native formats",
-            side
-        );
-        emit_clipboard_debug(format!(
-            "skip-remote-apply side={side} phase={phase} reason=opaque-native-formats"
-        ));
-        return true;
     }
 
     #[allow(unreachable_code)]
@@ -294,7 +375,7 @@ fn is_opaque_native_format_name(name: &str) -> bool {
         .any(|pattern| contains_ignore_ascii_case(name, pattern))
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(any(test, target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn is_windows_opaque_format_name(name: &str) -> bool {
     name.starts_with("format#")
         || WINDOWS_OPAQUE_REGISTERED_FORMATS
@@ -303,9 +384,31 @@ fn is_windows_opaque_format_name(name: &str) -> bool {
         || is_opaque_native_format_name(name)
 }
 
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(any(test, target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn is_windows_opaque_registered_format_name(name: &str) -> bool {
     is_windows_opaque_format_name(name)
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn is_windows_text_fallback_format_name(name: &str) -> bool {
+    WINDOWS_TEXT_FALLBACK_FORMATS
+        .iter()
+        .any(|text| text.eq_ignore_ascii_case(name))
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn is_windows_text_ole_wrapper_format_name(name: &str) -> bool {
+    WINDOWS_TEXT_OLE_WRAPPER_FORMATS
+        .iter()
+        .any(|wrapper| wrapper.eq_ignore_ascii_case(name))
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_opaque_formats_are_only_text_ole_wrappers(opaque_formats: &[&str]) -> bool {
+    !opaque_formats.is_empty()
+        && opaque_formats
+            .iter()
+            .all(|name| is_windows_text_ole_wrapper_format_name(name))
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -330,10 +433,17 @@ fn windows_external_opaque_signature_from_format_names(
     }
     opaque_formats.sort_unstable();
     opaque_formats.dedup();
+    if names
+        .iter()
+        .any(|name| is_windows_text_fallback_format_name(name))
+        && windows_opaque_formats_are_only_text_ole_wrappers(&opaque_formats)
+    {
+        return None;
+    }
     Some(format!("windows:{sequence}:{}", opaque_formats.join("|")))
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+#[cfg(any(test, target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn is_risky_native_format_name(name: &str) -> bool {
     if is_safe_registered_format_name(name) {
         return false;
@@ -347,19 +457,19 @@ fn is_risky_native_format_name(name: &str) -> bool {
         || contains_ignore_ascii_case(name, "libreoffice")
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+#[cfg(any(test, target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn should_preserve_native_format_name(name: &str) -> bool {
     is_opaque_native_format_name(name) || is_risky_native_format_name(name)
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+#[cfg(any(test, target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn contains_rustdesk_owner_format_name(names: &[String]) -> bool {
     names
         .iter()
         .any(|name| name.eq_ignore_ascii_case(RUSTDESK_CLIPBOARD_OWNER_FORMAT))
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+#[cfg(any(test, target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn contains_preserved_native_format_name(names: &[String]) -> bool {
     names
         .iter()
@@ -371,7 +481,7 @@ fn contains_external_preserved_native_format_name(names: &[String]) -> bool {
     !contains_rustdesk_owner_format_name(names) && contains_preserved_native_format_name(names)
 }
 
-#[cfg(any(test, target_os = "macos", target_os = "linux"))]
+#[cfg(any(test, target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn external_preserved_native_formats_signature(names: &[String]) -> Option<String> {
     if contains_rustdesk_owner_format_name(names) {
         return None;
@@ -724,6 +834,7 @@ mod platform_clipboard {
             Ok(_clipboard) => {
                 let mut format = 0;
                 let mut formats = Vec::new();
+                let mut format_names = Vec::new();
                 loop {
                     // Safety: the clipboard is open for the lifetime of _clipboard.
                     format = unsafe { EnumClipboardFormats(format) };
@@ -731,6 +842,7 @@ mod platform_clipboard {
                         break;
                     }
                     let name = format_name(format);
+                    format_names.push(name.clone());
                     formats.push(format!(
                         "{}:{}:safe={}:opaque={}",
                         format,
@@ -741,7 +853,12 @@ mod platform_clipboard {
                 }
                 let has_owner = has_rustdesk_owner();
                 let opaque = formats.iter().any(|item| item.ends_with("opaque=true"));
-                let external_opaque = (opaque || formats.is_empty()) && !has_owner;
+                let external_opaque = super::windows_external_opaque_signature_from_format_names(
+                    0,
+                    has_owner,
+                    &format_names,
+                )
+                .is_some();
                 super::emit_clipboard_debug(format!(
                     "{reason} owner_marker={has_owner} opaque={opaque} external_opaque={external_opaque} formats=[{}]",
                     formats.join(", ")
@@ -1220,19 +1337,19 @@ fn update_clipboard_(multi_clipboards: Vec<Clipboard>, side: ClipboardSide) {
 
 #[cfg(not(target_os = "android"))]
 fn do_update_clipboard_(mut to_update_data: Vec<ClipboardData>, side: ClipboardSide) {
-    if should_skip_remote_clipboard_update(side, "before-delay") {
+    if should_skip_remote_clipboard_update(&to_update_data, side, "before-delay") {
         return;
     }
     if let Some(delay) = remote_clipboard_update_delay(side) {
         std::thread::sleep(delay);
+        if should_skip_remote_clipboard_update(&to_update_data, side, "after-delay") {
+            return;
+        }
         if remote_clipboard_update_delay(side).is_some() {
             log::debug!(
                 "Skip delayed {} clipboard update because a newer local clipboard change was observed",
                 side
             );
-            return;
-        }
-        if should_skip_remote_clipboard_update(side, "after-delay") {
             return;
         }
     }
@@ -1249,6 +1366,10 @@ fn do_update_clipboard_(mut to_update_data: Vec<ClipboardData>, side: ClipboardS
         }
     }
     if let Some(ctx) = ctx.as_mut() {
+        remove_remote_owner_markers(&mut to_update_data);
+        if to_update_data.is_empty() {
+            return;
+        }
         to_update_data.push(ClipboardData::Special((
             RUSTDESK_CLIPBOARD_OWNER_FORMAT.to_owned(),
             side.get_owner_data(),
@@ -1344,6 +1465,14 @@ impl ClipboardContext {
     }
 
     pub fn get(&mut self, side: ClipboardSide, force: bool) -> ResultType<Vec<ClipboardData>> {
+        #[cfg(target_os = "windows")]
+        if !force {
+            // Windows apps such as Illustrator can publish delayed-render clipboard
+            // formats shortly after an empty clipboard-change notification. Do not
+            // inspect the clipboard while the owner is still assembling native data.
+            std::thread::sleep(WINDOWS_LOCAL_CLIPBOARD_READ_DEBOUNCE_DUR);
+        }
+
         #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
         {
             // Inspect native format names before reading payloads. Some apps delay-render
@@ -1581,7 +1710,11 @@ impl ClipboardSide {
         if data.len() == 0 {
             return false;
         }
-        data[0] & 0b11 != 0
+        let owner_bit = match self {
+            ClipboardSide::Host => 0b01,
+            ClipboardSide::Client => 0b10,
+        };
+        data[0] & owner_bit != 0
     }
 }
 
@@ -1633,14 +1766,86 @@ mod clipboard_timing_tests {
     }
 
     #[test]
-    fn opaque_local_clipboard_blocks_remote_apply_even_after_quiet_window() {
-        assert!(should_block_remote_update_for_opaque_signature(Some(
-            "windows:42:DataObject|Ole Private Data"
-        )));
-        assert!(should_block_remote_update_for_opaque_signature(Some(
-            "windows:43:empty-format-list"
-        )));
-        assert!(!should_block_remote_update_for_opaque_signature(None));
+    fn remote_text_can_replace_local_opaque_clipboard() {
+        let data = vec![ClipboardData::Text("remote text".to_owned())];
+
+        assert!(remote_clipboard_data_block_reason(&data).is_none());
+    }
+
+    #[test]
+    fn remote_opaque_special_format_is_not_applied() {
+        let data = vec![ClipboardData::Special((
+            "Ole Private Data".to_owned(),
+            vec![0x01, 0x02],
+        ))];
+
+        assert_eq!(
+            remote_clipboard_data_block_reason(&data),
+            Some("opaque-native-format")
+        );
+    }
+
+    #[test]
+    fn remote_unknown_special_format_is_not_applied() {
+        let data = vec![ClipboardData::Special((
+            "private-editor-state".to_owned(),
+            vec![0x01],
+        ))];
+
+        assert_eq!(
+            remote_clipboard_data_block_reason(&data),
+            Some("unknown-special-format")
+        );
+    }
+
+    #[test]
+    fn remote_safe_special_format_can_be_applied() {
+        let data = vec![ClipboardData::Special((
+            CLIPBOARD_FORMAT_EXCEL_XML_SPREADSHEET.to_owned(),
+            b"<Workbook/>".to_vec(),
+        ))];
+
+        assert!(remote_clipboard_data_block_reason(&data).is_none());
+    }
+
+    #[test]
+    fn remote_registered_special_format_is_not_applied() {
+        for name in [
+            "text/html",
+            "image/png",
+            "Chromium Web Custom MIME Data Format",
+        ] {
+            let data = vec![ClipboardData::Special((name.to_owned(), vec![0x01]))];
+
+            assert_eq!(
+                remote_clipboard_data_block_reason(&data),
+                Some("unknown-special-format"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_owner_marker_is_stripped_before_local_apply() {
+        let mut data = vec![
+            ClipboardData::Text("remote text".to_owned()),
+            ClipboardData::Special((RUSTDESK_CLIPBOARD_OWNER_FORMAT.to_owned(), vec![0b11])),
+        ];
+
+        remove_remote_owner_markers(&mut data);
+
+        assert_eq!(data.len(), 1);
+        assert!(matches!(&data[0], ClipboardData::Text(text) if text == "remote text"));
+    }
+
+    #[test]
+    fn remote_unsupported_format_is_not_applied() {
+        let data = vec![ClipboardData::Unsupported];
+
+        assert_eq!(
+            remote_clipboard_data_block_reason(&data),
+            Some("unsupported-format")
+        );
     }
 
     #[test]
@@ -1721,6 +1926,16 @@ mod clipboard_timing_tests {
             "opaque:illustrator:1",
             start + LOCAL_CLIPBOARD_QUIET_DUR + Duration::from_millis(10)
         ));
+    }
+
+    #[test]
+    fn owner_marker_is_side_specific_for_multi_hop_clipboard() {
+        assert!(ClipboardSide::Host.is_owner(&ClipboardSide::Host.get_owner_data()));
+        assert!(!ClipboardSide::Host.is_owner(&ClipboardSide::Client.get_owner_data()));
+        assert!(ClipboardSide::Client.is_owner(&ClipboardSide::Client.get_owner_data()));
+        assert!(!ClipboardSide::Client.is_owner(&ClipboardSide::Host.get_owner_data()));
+        assert!(!ClipboardSide::Host.is_owner(&[]));
+        assert!(!ClipboardSide::Client.is_owner(&[]));
     }
 
     #[test]
@@ -1839,7 +2054,7 @@ mod clipboard_timing_tests {
     }
 
     #[test]
-    fn windows_opaque_signature_keeps_only_unsafe_formats() {
+    fn windows_text_with_generic_ole_wrappers_is_not_opaque() {
         let names = vec![
             "CF_UNICODETEXT".to_owned(),
             "DataObject".to_owned(),
@@ -1847,9 +2062,49 @@ mod clipboard_timing_tests {
             "HTML Format".to_owned(),
         ];
 
+        assert!(windows_external_opaque_signature_from_format_names(7, false, &names).is_none());
+    }
+
+    #[test]
+    fn windows_qt_text_with_ole_wrappers_is_not_opaque() {
+        let names = vec![
+            "DataObject".to_owned(),
+            "CF_UNICODETEXT".to_owned(),
+            "CF_TEXT".to_owned(),
+            "HTML Format".to_owned(),
+            "text/markdown".to_owned(),
+            "application/vnd.oasis.opendocument.text".to_owned(),
+            "Ole Private Data".to_owned(),
+            "CF_LOCALE".to_owned(),
+            "CF_OEMTEXT".to_owned(),
+        ];
+
+        assert!(windows_external_opaque_signature_from_format_names(8, false, &names).is_none());
+    }
+
+    #[test]
+    fn windows_text_ole_wrappers_without_text_fallback_are_opaque() {
+        let names = vec!["DataObject".to_owned(), "Ole Private Data".to_owned()];
+
         assert_eq!(
-            windows_external_opaque_signature_from_format_names(7, false, &names).as_deref(),
-            Some("windows:7:DataObject|Ole Private Data")
+            windows_external_opaque_signature_from_format_names(9, false, &names).as_deref(),
+            Some("windows:9:DataObject|Ole Private Data")
+        );
+    }
+
+    #[test]
+    fn windows_vector_formats_remain_opaque_even_with_text_fallbacks() {
+        let names = vec![
+            "CF_UNICODETEXT".to_owned(),
+            "DataObject".to_owned(),
+            "Ole Private Data".to_owned(),
+            "Adobe Illustrator Document".to_owned(),
+            "HTML Format".to_owned(),
+        ];
+
+        assert_eq!(
+            windows_external_opaque_signature_from_format_names(10, false, &names).as_deref(),
+            Some("windows:10:Adobe Illustrator Document|DataObject|Ole Private Data")
         );
     }
 
