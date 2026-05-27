@@ -58,13 +58,16 @@ flutter\build\windows\x64\runner\Release
 
 ## Linux
 
-Default layout:
+The Linux wrapper discovers Flutter from `PATH`, or from
+`RUSTDESK_FLUTTER_ROOT` when set. Native codec dependencies can come from
+system `pkg-config` packages, from `RUSTDESK_LINUX_CODEC_ROOT`, or from the
+repo-local `.local/linux-codecs` prefix.
 
-```text
-/mnt/f/GH/flutter
-/mnt/f/GH/flutter-pub-cache-linux
-/mnt/f/GH/rustdesk-target-linux
-.local/linux-codecs, or /mnt/f/UBc/Release
+Common system packages on Debian/Ubuntu:
+
+```bash
+sudo apt install pkg-config libgtk-3-dev libpam0g-dev libclang-dev \
+  libyuv-dev libvpx-dev libaom-dev libopus-dev
 ```
 
 Run:
@@ -76,7 +79,10 @@ scripts/build_linux.sh
 Optional:
 
 ```bash
-RUSTDESK_LINUX_CODEC_ROOT=/mnt/f/DVS/linux scripts/build_linux.sh --clean
+RUSTDESK_FLUTTER_ROOT=/path/to/flutter \
+RUSTDESK_LINUX_CODEC_ROOT=/path/to/codec-prefix \
+scripts/build_linux.sh --clean
+
 scripts/build_linux.sh --hwcodec
 ```
 
