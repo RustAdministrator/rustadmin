@@ -180,6 +180,9 @@ impl SessionPermissionConfig {
         *self.server_clipboard_enabled.read().unwrap()
             && *self.server_keyboard_enabled.read().unwrap()
             && !self.lc.read().unwrap().disable_clipboard.v
+            && crate::clipboard::is_local_to_remote_clipboard_allowed(
+                crate::clipboard::ClipboardSide::Client,
+            )
     }
 
     #[cfg(feature = "unix-file-copy-paste")]
@@ -433,6 +436,9 @@ impl<T: InvokeUiSession> Session<T> {
         *self.server_clipboard_enabled.read().unwrap()
             && *self.server_keyboard_enabled.read().unwrap()
             && !self.lc.read().unwrap().disable_clipboard.v
+            && crate::clipboard::is_local_to_remote_clipboard_allowed(
+                crate::clipboard::ClipboardSide::Client,
+            )
     }
 
     #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]

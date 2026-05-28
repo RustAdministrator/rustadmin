@@ -2609,12 +2609,13 @@ impl Connection {
     #[inline]
     fn can_sub_clipboard_service(&self) -> bool {
         text_clipboard_allowed(self.clipboard_enabled(), self.peer_keyboard_enabled())
-            && crate::get_builtin_option(keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION) != "Y"
+            && crate::clipboard::is_local_to_remote_clipboard_allowed(ClipboardSide::Host)
     }
 
     #[inline]
     fn can_apply_remote_clipboard(&self) -> bool {
         text_clipboard_allowed(self.clipboard_enabled(), self.peer_keyboard_enabled())
+            && crate::clipboard::is_remote_to_local_clipboard_allowed(ClipboardSide::Host)
     }
 
     fn audio_enabled(&self) -> bool {

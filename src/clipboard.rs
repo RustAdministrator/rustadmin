@@ -1,7 +1,8 @@
 #[cfg(not(target_os = "android"))]
 use arboard::{ClipboardData, ClipboardFormat};
 #[cfg(not(target_os = "android"))]
-use hbb_common::config::{keys, LocalConfig};
+use hbb_common::config::LocalConfig;
+use hbb_common::config::{keys, Config};
 use hbb_common::{bail, log, message_proto::*, ResultType};
 #[cfg(not(target_os = "android"))]
 use std::collections::VecDeque;
@@ -27,6 +28,72 @@ const CLIPBOARD_DEBUG_CATEGORY: &str = "clipboard";
 const CLIPBOARD_DEBUG_MAX_EVENTS: usize = 64;
 #[cfg(not(target_os = "android"))]
 const CLIPBOARD_DEBUG_MAX_LINE: usize = 1200;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClipboardDirectionPolicy {
+    Both,
+    LocalToRemote,
+    RemoteToLocal,
+    Off,
+}
+
+impl ClipboardDirectionPolicy {
+    fn from_option_value(value: &str) -> Self {
+        let value = value.trim();
+        if value.is_empty()
+            || value.eq_ignore_ascii_case("N")
+            || value.eq_ignore_ascii_case("both")
+            || value.eq_ignore_ascii_case("bidirectional")
+            || value.eq_ignore_ascii_case("all")
+        {
+            return Self::Both;
+        }
+        if value.eq_ignore_ascii_case("local-to-remote")
+            || value.eq_ignore_ascii_case("local_to_remote")
+            || value.eq_ignore_ascii_case("send")
+            || value.eq_ignore_ascii_case("send-only")
+            || value.eq_ignore_ascii_case("outbound")
+        {
+            return Self::LocalToRemote;
+        }
+        if value.eq_ignore_ascii_case("Y")
+            || value.eq_ignore_ascii_case("yes")
+            || value.eq_ignore_ascii_case("true")
+            || value == "1"
+            || value.eq_ignore_ascii_case("remote-to-local")
+            || value.eq_ignore_ascii_case("remote_to_local")
+            || value.eq_ignore_ascii_case("receive")
+            || value.eq_ignore_ascii_case("receive-only")
+            || value.eq_ignore_ascii_case("inbound")
+        {
+            return Self::RemoteToLocal;
+        }
+        if value.eq_ignore_ascii_case("off")
+            || value.eq_ignore_ascii_case("none")
+            || value.eq_ignore_ascii_case("disabled")
+        {
+            return Self::Off;
+        }
+        Self::Off
+    }
+
+    fn allows_local_to_remote(self) -> bool {
+        matches!(self, Self::Both | Self::LocalToRemote)
+    }
+
+    fn allows_remote_to_local(self) -> bool {
+        matches!(self, Self::Both | Self::RemoteToLocal)
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Both => "both",
+            Self::LocalToRemote => "local-to-remote",
+            Self::RemoteToLocal => "remote-to-local",
+            Self::Off => "off",
+        }
+    }
+}
 
 // This format is used to store the flag in the clipboard.
 const RUSTDESK_CLIPBOARD_OWNER_FORMAT: &'static str = "dyn.com.rustdesk.owner";
@@ -240,6 +307,7 @@ fn mark_remote_clipboard_applied(side: ClipboardSide) {
         .unwrap()
         .mark_remote_apply(Instant::now());
     log::debug!("Applied remote clipboard on {}", side);
+    emit_clipboard_debug(format!("remote-apply-accepted side={side}"));
 }
 
 #[cfg(not(target_os = "android"))]
@@ -261,6 +329,65 @@ fn remote_clipboard_update_delay(side: ClipboardSide) -> Option<Duration> {
         );
     }
     delay
+}
+
+pub(crate) fn clipboard_direction_policy_for_side(side: ClipboardSide) -> ClipboardDirectionPolicy {
+    match side {
+        ClipboardSide::Host => {
+            let built_in = crate::get_builtin_option(keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION);
+            let value = if built_in.is_empty() {
+                Config::get_option(keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION)
+            } else {
+                built_in
+            };
+            ClipboardDirectionPolicy::from_option_value(&value)
+        }
+        ClipboardSide::Client => client_clipboard_direction_policy(),
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn client_clipboard_direction_policy() -> ClipboardDirectionPolicy {
+    let local = LocalConfig::get_option(keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION);
+    let value = if local.is_empty() {
+        Config::get_option(keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION)
+    } else {
+        local
+    };
+    ClipboardDirectionPolicy::from_option_value(&value)
+}
+
+#[cfg(target_os = "android")]
+fn client_clipboard_direction_policy() -> ClipboardDirectionPolicy {
+    ClipboardDirectionPolicy::from_option_value(&Config::get_option(
+        keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION,
+    ))
+}
+
+pub(crate) fn is_local_to_remote_clipboard_allowed(side: ClipboardSide) -> bool {
+    clipboard_direction_policy_for_side(side).allows_local_to_remote()
+}
+
+pub(crate) fn is_remote_to_local_clipboard_allowed(side: ClipboardSide) -> bool {
+    clipboard_direction_policy_for_side(side).allows_remote_to_local()
+}
+
+#[cfg(not(target_os = "android"))]
+fn emit_clipboard_direction_skip(
+    action: &str,
+    side: ClipboardSide,
+    policy: ClipboardDirectionPolicy,
+) {
+    log::debug!(
+        "Skip {} {} clipboard because direction policy is {}",
+        action,
+        side,
+        policy.as_str()
+    );
+    emit_clipboard_debug(format!(
+        "skip-{action} side={side} reason=direction-policy policy={}",
+        policy.as_str()
+    ));
 }
 
 #[cfg(not(target_os = "android"))]
@@ -329,6 +456,12 @@ fn should_skip_remote_clipboard_update(
     side: ClipboardSide,
     phase: &str,
 ) -> bool {
+    let direction_policy = clipboard_direction_policy_for_side(side);
+    if !direction_policy.allows_remote_to_local() {
+        emit_clipboard_direction_skip("remote-apply", side, direction_policy);
+        return true;
+    }
+
     if let Some(reason) = remote_clipboard_data_block_reason(data) {
         log::debug!(
             "Skip applying remote {} clipboard because the payload contains {}",
@@ -345,7 +478,10 @@ fn should_skip_remote_clipboard_update(
     {
         let signature = platform_clipboard::external_opaque_native_clipboard_signature();
         if let Some(signature) = signature {
-            mark_local_external_opaque_clipboard_change(side, &signature);
+            let signature_changed = mark_local_external_opaque_clipboard_change(side, &signature);
+            emit_clipboard_debug(format!(
+                "remote-apply-will-replace-local-opaque side={side} phase={phase} signature_changed={signature_changed}"
+            ));
         }
     }
 
@@ -1184,6 +1320,12 @@ pub fn check_clipboard(
     side: ClipboardSide,
     force: bool,
 ) -> Option<Message> {
+    let direction_policy = clipboard_direction_policy_for_side(side);
+    if !direction_policy.allows_local_to_remote() {
+        emit_clipboard_direction_skip("local-read", side, direction_policy);
+        return None;
+    }
+
     if ctx.is_none() {
         *ctx = ClipboardContext::new().ok();
     }
@@ -1306,6 +1448,12 @@ pub fn try_empty_clipboard_files(side: ClipboardSide, conn_id: i32) {
 
 #[cfg(target_os = "windows")]
 pub fn check_clipboard_cm() -> ResultType<MultiClipboards> {
+    let direction_policy = clipboard_direction_policy_for_side(ClipboardSide::Host);
+    if !direction_policy.allows_local_to_remote() {
+        emit_clipboard_direction_skip("local-read", ClipboardSide::Host, direction_policy);
+        return Ok(MultiClipboards::new());
+    }
+
     let mut ctx = CLIPBOARD_CTX.lock().unwrap();
     if ctx.is_none() {
         match ClipboardContext::new() {
@@ -1350,6 +1498,9 @@ fn do_update_clipboard_(mut to_update_data: Vec<ClipboardData>, side: ClipboardS
                 "Skip delayed {} clipboard update because a newer local clipboard change was observed",
                 side
             );
+            emit_clipboard_debug(format!(
+                "skip-remote-apply side={side} phase=after-delay reason=newer-local-change"
+            ));
             return;
         }
     }
@@ -1488,7 +1639,7 @@ impl ClipboardContext {
                     side
                 );
                 emit_clipboard_debug(format!(
-                    "skip-transfer side={side} reason=opaque-native-formats"
+                    "native-clipboard-preserved side={side} action=skip-transfer reason=opaque-native-formats"
                 ));
                 return Ok(vec![]);
             }
@@ -1659,6 +1810,12 @@ pub fn get_current_clipboard_msg(
     peer_platform: &str,
     side: ClipboardSide,
 ) -> Option<Message> {
+    let direction_policy = clipboard_direction_policy_for_side(side);
+    if !direction_policy.allows_local_to_remote() {
+        emit_clipboard_direction_skip("initial-local-read", side, direction_policy);
+        return None;
+    }
+
     let mut multi_clipboards = LAST_MULTI_CLIPBOARDS.lock().unwrap();
     if multi_clipboards.clipboards.is_empty() {
         let mut ctx = ClipboardContext::new().ok()?;
@@ -1936,6 +2093,41 @@ mod clipboard_timing_tests {
         assert!(!ClipboardSide::Client.is_owner(&ClipboardSide::Host.get_owner_data()));
         assert!(!ClipboardSide::Host.is_owner(&[]));
         assert!(!ClipboardSide::Client.is_owner(&[]));
+    }
+
+    #[test]
+    fn clipboard_direction_policy_defaults_to_bidirectional() {
+        for value in ["", "N", "both", "bidirectional", "all"] {
+            let policy = ClipboardDirectionPolicy::from_option_value(value);
+            assert_eq!(policy, ClipboardDirectionPolicy::Both, "{value}");
+            assert!(policy.allows_local_to_remote(), "{value}");
+            assert!(policy.allows_remote_to_local(), "{value}");
+        }
+    }
+
+    #[test]
+    fn legacy_one_way_clipboard_policy_is_remote_to_local() {
+        for value in ["Y", "yes", "true", "1", "remote-to-local", "receive-only"] {
+            let policy = ClipboardDirectionPolicy::from_option_value(value);
+            assert_eq!(policy, ClipboardDirectionPolicy::RemoteToLocal, "{value}");
+            assert!(!policy.allows_local_to_remote(), "{value}");
+            assert!(policy.allows_remote_to_local(), "{value}");
+        }
+    }
+
+    #[test]
+    fn clipboard_direction_policy_supports_send_only_and_off() {
+        let local_to_remote = ClipboardDirectionPolicy::from_option_value("local-to-remote");
+        assert_eq!(local_to_remote, ClipboardDirectionPolicy::LocalToRemote);
+        assert!(local_to_remote.allows_local_to_remote());
+        assert!(!local_to_remote.allows_remote_to_local());
+
+        for value in ["off", "none", "disabled", "invalid"] {
+            let policy = ClipboardDirectionPolicy::from_option_value(value);
+            assert_eq!(policy, ClipboardDirectionPolicy::Off, "{value}");
+            assert!(!policy.allows_local_to_remote(), "{value}");
+            assert!(!policy.allows_remote_to_local(), "{value}");
+        }
     }
 
     #[test]
