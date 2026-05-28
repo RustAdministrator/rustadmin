@@ -76,6 +76,19 @@ Run:
 scripts/build_linux.sh
 ```
 
+By default this builds the Flutter bundle and a release zip under `dist/linux`.
+To build a Debian package instead:
+
+```bash
+scripts/build_linux.sh --deb
+```
+
+To build both:
+
+```bash
+scripts/build_linux.sh --package all
+```
+
 Optional:
 
 ```bash
@@ -102,6 +115,13 @@ Final bundle:
 
 ```text
 flutter/build/linux/x64/release/bundle
+```
+
+Linux package outputs:
+
+```text
+dist/linux/*.zip
+dist/linux/*.deb
 ```
 
 ## macOS

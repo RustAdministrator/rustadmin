@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/build_linux.sh [--clean] [--hwcodec] [--skip-cargo]
+Usage: scripts/build_linux.sh [--clean] [--hwcodec] [--skip-cargo] [--package zip|deb|all] [--deb]
 
 Environment overrides:
   RUSTDESK_FLUTTER_ROOT       Flutter SDK root. Default: flutter found in PATH,
@@ -28,6 +28,7 @@ USAGE
 clean=0
 hwcodec=0
 skip_cargo=0
+package_mode="zip"
 skip_bridge_gen="${RUSTDESK_SKIP_BRIDGE_GEN:-0}"
 force_bridge_gen="${RUSTDESK_FORCE_BRIDGE_GEN:-0}"
 verbose_bridge_gen="${RUSTDESK_VERBOSE_BRIDGE_GEN:-0}"
@@ -39,6 +40,19 @@ while [[ $# -gt 0 ]]; do
     --clean) clean=1 ;;
     --hwcodec) hwcodec=1 ;;
     --skip-cargo) skip_cargo=1 ;;
+    --deb) package_mode="deb" ;;
+    --package)
+      shift
+      if [[ $# -eq 0 ]]; then
+        echo "--package requires one of: zip, deb, all." >&2
+        usage
+        exit 2
+      fi
+      case "$1" in
+        zip|deb|all) package_mode="$1" ;;
+        *) echo "Unknown package mode: $1" >&2; usage; exit 2 ;;
+      esac
+      ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -149,6 +163,11 @@ if ! command -v flutter >/dev/null 2>&1; then
 fi
 if ! command -v zip >/dev/null 2>&1; then
   echo "zip was not found. Install it with: sudo apt install zip" >&2
+  exit 1
+fi
+if [[ "$package_mode" == "deb" || "$package_mode" == "all" ]] &&
+   ! command -v dpkg-deb >/dev/null 2>&1; then
+  echo "dpkg-deb was not found. Install it with: sudo apt install dpkg-dev" >&2
   exit 1
 fi
 if ! command -v pkg-config >/dev/null 2>&1; then
@@ -355,6 +374,34 @@ package_release_zip() {
   echo "$archive_path"
 }
 
+package_release_deb() {
+  local bundle_dir="$flutter_dir/build/linux/x64/release/bundle"
+  local dist_dir="${RUSTADMIN_LINUX_DIST_DIR:-$repo_root/dist/linux}"
+  local deb_version="${version}.${revision}"
+
+  if [[ ! -d "$bundle_dir" ]]; then
+    echo "Linux bundle was not found at $bundle_dir" >&2
+    exit 1
+  fi
+
+  local -a python_cmd
+  if command -v uv >/dev/null 2>&1; then
+    python_cmd=(uv run python3)
+  else
+    python_cmd=(python3)
+  fi
+  if ! command -v "${python_cmd[0]}" >/dev/null 2>&1; then
+    echo "Python was not found. Install python3 or uv." >&2
+    exit 1
+  fi
+
+  "${python_cmd[@]}" "$repo_root/scripts/package_linux.py" deb \
+    --repo-root "$repo_root" \
+    --bundle "$bundle_dir" \
+    --output "$dist_dir" \
+    --version "$deb_version"
+}
+
 read_version_info
 
 package_config="$flutter_dir/.dart_tool/package_config.json"
@@ -385,4 +432,15 @@ fi
 echo "Linux bundle:"
 bundle_dir="$flutter_dir/build/linux/x64/release/bundle"
 echo "$bundle_dir"
-package_release_zip
+case "$package_mode" in
+  zip)
+    package_release_zip
+    ;;
+  deb)
+    package_release_deb
+    ;;
+  all)
+    package_release_zip
+    package_release_deb
+    ;;
+esac
