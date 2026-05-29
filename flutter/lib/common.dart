@@ -1865,6 +1865,52 @@ bool isLanDiscoveryModeFixed() {
       isOptionFixed(kOptionEnableLanDiscovery);
 }
 
+String normalizeClipboardDirectionPolicy(String value) {
+  switch (value.trim().toLowerCase()) {
+    case '':
+    case 'n':
+    case kClipboardDirectionBoth:
+    case 'bidirectional':
+    case 'all':
+      return kClipboardDirectionBoth;
+    case kClipboardDirectionLocalToRemote:
+    case 'local_to_remote':
+    case 'send':
+    case 'send-only':
+    case 'outbound':
+      return kClipboardDirectionLocalToRemote;
+    case 'y':
+    case 'yes':
+    case 'true':
+    case '1':
+    case kClipboardDirectionRemoteToLocal:
+    case 'remote_to_local':
+    case 'receive':
+    case 'receive-only':
+    case 'inbound':
+      return kClipboardDirectionRemoteToLocal;
+    case kClipboardDirectionOff:
+    case 'none':
+    case 'disabled':
+      return kClipboardDirectionOff;
+    default:
+      return kClipboardDirectionOff;
+  }
+}
+
+String clipboardDirectionPolicyLabel(String policy) {
+  switch (normalizeClipboardDirectionPolicy(policy)) {
+    case kClipboardDirectionLocalToRemote:
+      return 'Send clipboard to peer only';
+    case kClipboardDirectionRemoteToLocal:
+      return 'Receive clipboard from peer only';
+    case kClipboardDirectionOff:
+      return 'Disabled';
+    default:
+      return 'Bidirectional';
+  }
+}
+
 Future<void> ensureInitialClientDefaults() async {
   if (!isOptionFixed(kOptionDirectServer) &&
       (await bind.mainGetOption(key: kOptionDirectServer)).isEmpty) {

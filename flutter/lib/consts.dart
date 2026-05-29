@@ -118,6 +118,11 @@ const String kOptionEnableKeyboard = "enable-keyboard";
 // "Settings -> Security -> Permissions"
 const String kOptionEnableRemotePrinter = "enable-remote-printer";
 const String kOptionEnableClipboard = "enable-clipboard";
+const String kOptionClipboardDirection = "one-way-clipboard-redirection";
+const String kClipboardDirectionBoth = "both";
+const String kClipboardDirectionLocalToRemote = "local-to-remote";
+const String kClipboardDirectionRemoteToLocal = "remote-to-local";
+const String kClipboardDirectionOff = "off";
 const String kOptionEnableFileTransfer = "enable-file-transfer";
 const String kOptionEnableAudio = "enable-audio";
 const String kOptionEnableCamera = "enable-camera";

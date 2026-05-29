@@ -1059,6 +1059,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                   enabled: enabled, fakeValue: fakeValue),
             _OptionCheckBox(context, 'Enable clipboard', kOptionEnableClipboard,
                 enabled: enabled, fakeValue: fakeValue),
+            clipboardDirectionPolicy(context, enabled, fakeValue),
             _OptionCheckBox(
                 context, 'Enable file transfer', kOptionEnableFileTransfer,
                 enabled: enabled, fakeValue: fakeValue),
@@ -1090,6 +1091,43 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
     }
 
     return tmpWrapper();
+  }
+
+  Widget clipboardDirectionPolicy(
+      BuildContext context, bool enabled, bool? fakeValue) {
+    final keys = <String>[
+      kClipboardDirectionBoth,
+      kClipboardDirectionLocalToRemote,
+      kClipboardDirectionRemoteToLocal,
+      kClipboardDirectionOff,
+    ];
+    final values =
+        keys.map(clipboardDirectionPolicyLabel).map(translate).toList();
+    final currentPolicy = normalizeClipboardDirectionPolicy(
+      bind.mainGetOptionSync(key: kOptionClipboardDirection),
+    );
+    final clipboardEnabled =
+        fakeValue ?? mainGetBoolOptionSync(kOptionEnableClipboard);
+    final isEnabled = enabled &&
+        fakeValue == null &&
+        clipboardEnabled &&
+        !isOptionFixed(kOptionClipboardDirection);
+
+    return _SubLabeledWidget(
+      context,
+      'Clipboard direction',
+      ComboBox(
+        enabled: isEnabled,
+        keys: keys,
+        values: values,
+        initialKey: currentPolicy,
+        onChanged: (key) async {
+          await bind.mainSetOption(key: kOptionClipboardDirection, value: key);
+          setState(() {});
+        },
+      ),
+      enabled: isEnabled,
+    );
   }
 
   Widget password(BuildContext context) {
