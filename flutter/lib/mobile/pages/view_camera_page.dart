@@ -631,6 +631,8 @@ void showOptions(
   List<TRadioMenu<String>> imageQualityRadios =
       await toolbarImageQuality(context, id, gFFI);
   List<TRadioMenu<String>> codecRadios = await toolbarCodec(context, id, gFFI);
+  List<TRadioMenu<String>> clipboardRadios =
+      await toolbarClipboardDirection(gFFI);
   List<TToggleMenu> displayToggles =
       await toolbarDisplayToggle(context, id, gFFI);
 
@@ -641,6 +643,8 @@ void showOptions(
         (imageQualityRadios.isNotEmpty ? imageQualityRadios[0].groupValue : '')
             .obs;
     var codec = (codecRadios.isNotEmpty ? codecRadios[0].groupValue : '').obs;
+    var clipboard =
+        (clipboardRadios.isNotEmpty ? clipboardRadios[0].groupValue : '').obs;
     final radios = [
       for (var e in viewStyleRadios)
         Obx(() => getRadio<String>(
@@ -678,6 +682,18 @@ void showOptions(
                   }
                 : null)),
       if (codecRadios.isNotEmpty) const Divider(color: MyTheme.border),
+      for (var e in clipboardRadios)
+        Obx(() => getRadio<String>(
+            e.child,
+            e.value,
+            clipboard.value,
+            e.onChanged != null
+                ? (v) {
+                    e.onChanged?.call(v);
+                    if (v != null) clipboard.value = v;
+                  }
+                : null)),
+      if (clipboardRadios.isNotEmpty) const Divider(color: MyTheme.border),
     ];
 
     final rxToggleValues = displayToggles.map((e) => e.value.obs).toList();

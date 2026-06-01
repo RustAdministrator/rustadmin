@@ -2157,18 +2157,37 @@ class _DisplayMenuState extends State<_DisplayMenu> {
 
   toggles() {
     return futureBuilder(
-        future: toolbarDisplayToggle(context, id, ffi),
+        future: Future.wait([
+          toolbarClipboardDirection(ffi),
+          toolbarDisplayToggle(context, id, ffi),
+        ]),
         hasData: (data) {
-          final v = data as List<TToggleMenu>;
-          if (v.isEmpty) return Offstage();
-          return Column(
-              children: v
-                  .map((e) => CkbMenuButton(
-                      value: e.value,
-                      onChanged: e.onChanged,
-                      child: e.child,
-                      ffi: ffi))
-                  .toList());
+          final clipboard = data[0] as List<TRadioMenu<String>>;
+          final toggles = data[1] as List<TToggleMenu>;
+          if (clipboard.isEmpty && toggles.isEmpty) return Offstage();
+          return Column(children: [
+            if (clipboard.isNotEmpty)
+              _SubmenuButton(
+                ffi: widget.ffi,
+                child: Text(translate('Clipboard')),
+                menuChildren: clipboard
+                    .map((e) => RdoMenuButton<String>(
+                          value: e.value,
+                          groupValue: e.groupValue,
+                          onChanged: e.onChanged,
+                          child: e.child,
+                          ffi: ffi,
+                        ))
+                    .toList(),
+              ),
+            ...toggles
+                .map((e) => CkbMenuButton(
+                    value: e.value,
+                    onChanged: e.onChanged,
+                    child: e.child,
+                    ffi: ffi))
+                .toList(),
+          ]);
         });
   }
 }

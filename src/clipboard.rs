@@ -38,7 +38,7 @@ pub(crate) enum ClipboardDirectionPolicy {
 }
 
 impl ClipboardDirectionPolicy {
-    fn from_option_value(value: &str) -> Self {
+    pub(crate) fn from_option_value(value: &str) -> Self {
         let value = value.trim();
         if value.is_empty()
             || value.eq_ignore_ascii_case("N")
@@ -77,12 +77,21 @@ impl ClipboardDirectionPolicy {
         Self::Off
     }
 
-    fn allows_local_to_remote(self) -> bool {
+    pub(crate) fn allows_local_to_remote(self) -> bool {
         matches!(self, Self::Both | Self::LocalToRemote)
     }
 
-    fn allows_remote_to_local(self) -> bool {
+    pub(crate) fn allows_remote_to_local(self) -> bool {
         matches!(self, Self::Both | Self::RemoteToLocal)
+    }
+
+    pub(crate) fn as_option_value(self) -> &'static str {
+        match self {
+            Self::Both => "both",
+            Self::LocalToRemote => "local-to-remote",
+            Self::RemoteToLocal => "remote-to-local",
+            Self::Off => "off",
+        }
     }
 
     fn as_str(self) -> &'static str {
@@ -93,6 +102,12 @@ impl ClipboardDirectionPolicy {
             Self::Off => "off",
         }
     }
+}
+
+pub(crate) fn clipboard_direction_policy_from_option_value(
+    value: &str,
+) -> ClipboardDirectionPolicy {
+    ClipboardDirectionPolicy::from_option_value(value)
 }
 
 // This format is used to store the flag in the clipboard.
@@ -454,9 +469,9 @@ fn remove_remote_owner_markers(data: &mut Vec<ClipboardData>) {
 fn should_skip_remote_clipboard_update(
     data: &[ClipboardData],
     side: ClipboardSide,
+    direction_policy: ClipboardDirectionPolicy,
     phase: &str,
 ) -> bool {
-    let direction_policy = clipboard_direction_policy_for_side(side);
     if !direction_policy.allows_remote_to_local() {
         emit_clipboard_direction_skip("remote-apply", side, direction_policy);
         return true;
@@ -1320,10 +1335,12 @@ pub fn check_clipboard(
     side: ClipboardSide,
     force: bool,
 ) -> Option<Message> {
-    let direction_policy = clipboard_direction_policy_for_side(side);
-    if !direction_policy.allows_local_to_remote() {
-        emit_clipboard_direction_skip("local-read", side, direction_policy);
-        return None;
+    if matches!(side, ClipboardSide::Host) {
+        let direction_policy = clipboard_direction_policy_for_side(side);
+        if !direction_policy.allows_local_to_remote() {
+            emit_clipboard_direction_skip("local-read", side, direction_policy);
+            return None;
+        }
     }
 
     if ctx.is_none() {
@@ -1394,7 +1411,11 @@ pub fn check_clipboard_files(
 pub fn update_clipboard_files(files: Vec<String>, side: ClipboardSide) {
     if !files.is_empty() {
         std::thread::spawn(move || {
-            do_update_clipboard_(vec![ClipboardData::FileUrl(files)], side);
+            do_update_clipboard_(
+                vec![ClipboardData::FileUrl(files)],
+                side,
+                clipboard_direction_policy_for_side(side),
+            );
         });
     }
 }
@@ -1475,22 +1496,36 @@ pub fn check_clipboard_cm() -> ResultType<MultiClipboards> {
 }
 
 #[cfg(not(target_os = "android"))]
-fn update_clipboard_(multi_clipboards: Vec<Clipboard>, side: ClipboardSide) {
+fn update_clipboard_(
+    multi_clipboards: Vec<Clipboard>,
+    side: ClipboardSide,
+    direction_policy: ClipboardDirectionPolicy,
+) {
     let to_update_data = proto::from_multi_clipboards(multi_clipboards);
     if to_update_data.is_empty() {
         return;
     }
-    do_update_clipboard_(to_update_data, side);
+    do_update_clipboard_(to_update_data, side, direction_policy);
 }
 
 #[cfg(not(target_os = "android"))]
-fn do_update_clipboard_(mut to_update_data: Vec<ClipboardData>, side: ClipboardSide) {
-    if should_skip_remote_clipboard_update(&to_update_data, side, "before-delay") {
+fn do_update_clipboard_(
+    mut to_update_data: Vec<ClipboardData>,
+    side: ClipboardSide,
+    direction_policy: ClipboardDirectionPolicy,
+) {
+    if should_skip_remote_clipboard_update(&to_update_data, side, direction_policy, "before-delay")
+    {
         return;
     }
     if let Some(delay) = remote_clipboard_update_delay(side) {
         std::thread::sleep(delay);
-        if should_skip_remote_clipboard_update(&to_update_data, side, "after-delay") {
+        if should_skip_remote_clipboard_update(
+            &to_update_data,
+            side,
+            direction_policy,
+            "after-delay",
+        ) {
             return;
         }
         if remote_clipboard_update_delay(side).is_some() {
@@ -1536,8 +1571,21 @@ fn do_update_clipboard_(mut to_update_data: Vec<ClipboardData>, side: ClipboardS
 
 #[cfg(not(target_os = "android"))]
 pub fn update_clipboard(multi_clipboards: Vec<Clipboard>, side: ClipboardSide) {
+    update_clipboard_with_direction(
+        multi_clipboards,
+        side,
+        clipboard_direction_policy_for_side(side),
+    );
+}
+
+#[cfg(not(target_os = "android"))]
+pub(crate) fn update_clipboard_with_direction(
+    multi_clipboards: Vec<Clipboard>,
+    side: ClipboardSide,
+    direction_policy: ClipboardDirectionPolicy,
+) {
     std::thread::spawn(move || {
-        update_clipboard_(multi_clipboards, side);
+        update_clipboard_(multi_clipboards, side, direction_policy);
     });
 }
 
@@ -1810,10 +1858,12 @@ pub fn get_current_clipboard_msg(
     peer_platform: &str,
     side: ClipboardSide,
 ) -> Option<Message> {
-    let direction_policy = clipboard_direction_policy_for_side(side);
-    if !direction_policy.allows_local_to_remote() {
-        emit_clipboard_direction_skip("initial-local-read", side, direction_policy);
-        return None;
+    if matches!(side, ClipboardSide::Host) {
+        let direction_policy = clipboard_direction_policy_for_side(side);
+        if !direction_policy.allows_local_to_remote() {
+            emit_clipboard_direction_skip("initial-local-read", side, direction_policy);
+            return None;
+        }
     }
 
     let mut multi_clipboards = LAST_MULTI_CLIPBOARDS.lock().unwrap();

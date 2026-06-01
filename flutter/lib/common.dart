@@ -1911,6 +1911,20 @@ String clipboardDirectionPolicyLabel(String policy) {
   }
 }
 
+List<String> clipboardDirectionMenuKeys() {
+  return [
+    kClipboardDirectionOff,
+    kClipboardDirectionRemoteToLocal,
+    kClipboardDirectionLocalToRemote,
+    kClipboardDirectionBoth,
+  ];
+}
+
+String sessionClipboardDirectionToggleValue(String policy) {
+  return '$kSessionToggleClipboardDirectionPrefix'
+      '${normalizeClipboardDirectionPolicy(policy)}';
+}
+
 Future<void> ensureInitialClientDefaults() async {
   if (!isOptionFixed(kOptionDirectServer) &&
       (await bind.mainGetOption(key: kOptionDirectServer)).isEmpty) {

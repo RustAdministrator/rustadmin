@@ -25,6 +25,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Set your own password", ""),
         ("Enable keyboard/mouse", ""),
         ("Enable clipboard", ""),
+        ("Clipboard", ""),
         ("Clipboard direction", ""),
         ("Bidirectional", ""),
         ("Send clipboard to peer only", ""),

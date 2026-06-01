@@ -3,7 +3,7 @@ use crate::keyboard::input_source::{change_input_source, get_cur_session_input_s
 #[cfg(target_os = "linux")]
 use crate::platform::linux::is_x11;
 use crate::{
-    client::file_trait::FileManager,
+    client::{self, file_trait::FileManager},
     common::{make_fd_to_json, make_vec_fd_to_json},
     flutter::{
         self, session_add, session_add_existed, session_start_, sessions, try_sync_peer_option,
@@ -352,7 +352,10 @@ pub fn session_toggle_option(session_id: SessionID, value: String) {
         try_sync_peer_option(&session, &session_id, &value, None);
     }
     #[cfg(not(target_os = "ios"))]
-    if sessions::get_session_by_session_id(&session_id).is_some() && value == "disable-clipboard" {
+    if sessions::get_session_by_session_id(&session_id).is_some()
+        && (value == "disable-clipboard"
+            || value.starts_with(client::CLIPBOARD_DIRECTION_TOGGLE_PREFIX))
+    {
         crate::flutter::update_text_clipboard_required();
     }
     #[cfg(feature = "unix-file-copy-paste")]

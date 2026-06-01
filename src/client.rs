@@ -131,6 +131,7 @@ pub const SCRAP_OTHER_VERSION_OR_X11_REQUIRED: &str = "wayland-requires-higher-l
 pub const SCRAP_XDP_PORTAL_UNAVAILABLE: &str = "xdp-portal-unavailable";
 pub const SCRAP_X11_REQUIRED: &str = "x11 expected";
 pub const SCRAP_X11_REF_URL: &str = "https://rustdesk.com/docs/en/manual/linux/#x11-required";
+pub const CLIPBOARD_DIRECTION_TOGGLE_PREFIX: &str = "clipboard-direction:";
 
 #[cfg(not(target_os = "linux"))]
 pub const AUDIO_BUFFER_MS: usize = 3000;
@@ -2564,7 +2565,29 @@ impl LoginConfigHandler {
     pub fn toggle_option(&mut self, name: String) -> Option<Message> {
         let mut option = OptionMessage::default();
         let mut config = self.load_config();
-        if name == "show-remote-cursor" {
+        if let Some(direction) = name.strip_prefix(CLIPBOARD_DIRECTION_TOGGLE_PREFIX) {
+            let direction =
+                crate::clipboard::clipboard_direction_policy_from_option_value(direction);
+            config.options.insert(
+                keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION.to_owned(),
+                direction.as_option_value().to_owned(),
+            );
+            let disable_clipboard =
+                !direction.allows_local_to_remote() && !direction.allows_remote_to_local();
+            let disable_changed = config.disable_clipboard.v != disable_clipboard;
+            config.disable_clipboard.v = disable_clipboard;
+            if disable_changed {
+                option.disable_clipboard = (if disable_clipboard {
+                    BoolOption::Yes
+                } else {
+                    BoolOption::No
+                })
+                .into();
+            } else {
+                self.save_config(config);
+                return None;
+            }
+        } else if name == "show-remote-cursor" {
             config.show_remote_cursor.v = !config.show_remote_cursor.v;
             option.show_remote_cursor = (if config.show_remote_cursor.v {
                 BoolOption::Yes
@@ -2990,6 +3013,22 @@ impl LoginConfigHandler {
         } else {
             "".to_owned()
         }
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub(crate) fn clipboard_direction_policy(&self) -> crate::clipboard::ClipboardDirectionPolicy {
+        let value = self.get_option(keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION);
+        if value.is_empty() {
+            return crate::clipboard::clipboard_direction_policy_for_side(
+                crate::clipboard::ClipboardSide::Client,
+            );
+        }
+        crate::clipboard::clipboard_direction_policy_from_option_value(&value)
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub(crate) fn is_local_to_remote_clipboard_allowed(&self) -> bool {
+        self.clipboard_direction_policy().allows_local_to_remote()
     }
 
     #[inline]

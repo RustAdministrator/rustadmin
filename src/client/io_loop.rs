@@ -1,5 +1,5 @@
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-use crate::clipboard::{update_clipboard, ClipboardSide};
+use crate::clipboard::{update_clipboard_with_direction, ClipboardSide};
 #[cfg(not(any(target_os = "ios")))]
 use crate::{audio_service, clipboard::CLIPBOARD_INTERVAL, ConnInner, CLIENT_SERVER};
 use crate::{
@@ -1392,18 +1392,20 @@ impl<T: InvokeUiSession> Remote<T> {
                             }
 
                             #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                            if self.handler.lc.read().unwrap().sync_init_clipboard.v {
+                            if self.handler.lc.read().unwrap().sync_init_clipboard.v
+                                && self
+                                    .handler
+                                    .get_permission_config()
+                                    .is_text_clipboard_required()
+                            {
                                 if let Some(msg_out) = crate::clipboard::get_current_clipboard_msg(
                                     &peer_version,
                                     &peer_platform,
                                     crate::clipboard::ClipboardSide::Client,
                                 ) {
                                     let sender = self.sender.clone();
-                                    let permission_config = self.handler.get_permission_config();
                                     tokio::spawn(async move {
-                                        if permission_config.is_text_clipboard_required() {
-                                            sender.send(Data::Message(msg_out)).ok();
-                                        }
+                                        sender.send(Data::Message(msg_out)).ok();
                                     });
                                 }
                             }
@@ -1444,10 +1446,22 @@ impl<T: InvokeUiSession> Remote<T> {
                     self.handler.set_cursor_position(cp);
                 }
                 Some(message::Union::Clipboard(cb)) => {
+                    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                    {
+                        let clipboard_policy =
+                            self.handler.lc.read().unwrap().clipboard_direction_policy();
+                        if clipboard_policy.allows_remote_to_local()
+                            && !self.handler.lc.read().unwrap().disable_clipboard.v
+                        {
+                            update_clipboard_with_direction(
+                                vec![cb],
+                                ClipboardSide::Client,
+                                clipboard_policy,
+                            );
+                        }
+                    }
+                    #[cfg(target_os = "ios")]
                     if !self.handler.lc.read().unwrap().disable_clipboard.v {
-                        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                        update_clipboard(vec![cb], ClipboardSide::Client);
-                        #[cfg(target_os = "ios")]
                         {
                             let content = if cb.compress {
                                 hbb_common::compress::decompress(&cb.content)
@@ -1458,15 +1472,29 @@ impl<T: InvokeUiSession> Remote<T> {
                                 self.handler.clipboard(content);
                             }
                         }
-                        #[cfg(target_os = "android")]
+                    }
+                    #[cfg(target_os = "android")]
+                    if !self.handler.lc.read().unwrap().disable_clipboard.v {
                         crate::clipboard::handle_msg_clipboard(cb);
                     }
                 }
                 Some(message::Union::MultiClipboards(_mcb)) => {
+                    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                    {
+                        let clipboard_policy =
+                            self.handler.lc.read().unwrap().clipboard_direction_policy();
+                        if clipboard_policy.allows_remote_to_local()
+                            && !self.handler.lc.read().unwrap().disable_clipboard.v
+                        {
+                            update_clipboard_with_direction(
+                                _mcb.clipboards,
+                                ClipboardSide::Client,
+                                clipboard_policy,
+                            );
+                        }
+                    }
+                    #[cfg(target_os = "android")]
                     if !self.handler.lc.read().unwrap().disable_clipboard.v {
-                        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                        update_clipboard(_mcb.clipboards, ClipboardSide::Client);
-                        #[cfg(target_os = "android")]
                         crate::clipboard::handle_msg_multi_clipboards(_mcb);
                     }
                 }

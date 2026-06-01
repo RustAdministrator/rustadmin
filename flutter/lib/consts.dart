@@ -119,6 +119,7 @@ const String kOptionEnableKeyboard = "enable-keyboard";
 const String kOptionEnableRemotePrinter = "enable-remote-printer";
 const String kOptionEnableClipboard = "enable-clipboard";
 const String kOptionClipboardDirection = "one-way-clipboard-redirection";
+const String kSessionToggleClipboardDirectionPrefix = "clipboard-direction:";
 const String kClipboardDirectionBoth = "both";
 const String kClipboardDirectionLocalToRemote = "local-to-remote";
 const String kClipboardDirectionRemoteToLocal = "remote-to-local";

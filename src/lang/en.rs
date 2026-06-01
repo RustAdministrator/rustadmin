@@ -112,6 +112,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Off", "Off"),
         ("Trusted Peers Only", "Trusted Peers Only"),
         ("Standard", "Standard"),
+        ("Clipboard", "Clipboard"),
         ("Clipboard direction", "Clipboard direction"),
         ("Bidirectional", "Bidirectional"),
         ("Send clipboard to peer only", "Send clipboard to peer only"),

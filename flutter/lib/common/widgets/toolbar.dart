@@ -696,23 +696,7 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
             : null,
         child: Text(translate('Enable file copy and paste'))));
   }
-  // disable clipboard
-  if (isDefaultConn && ffiModel.keyboard && perms['clipboard'] != false) {
-    final enabled = !ffiModel.viewOnly;
-    final option = 'disable-clipboard';
-    var value =
-        bind.sessionGetToggleOptionSync(sessionId: sessionId, arg: option);
-    if (ffiModel.viewOnly) value = true;
-    v.add(TToggleMenu(
-        value: value,
-        onChanged: enabled
-            ? (value) {
-                if (value == null) return;
-                bind.sessionToggleOption(sessionId: sessionId, value: option);
-              }
-            : null,
-        child: Text(translate('Disable clipboard'))));
-  }
+  // Clipboard direction is exposed as a radio submenu in the desktop toolbar.
   // lock after session end
   if (isDefaultConn && ffiModel.keyboard && !ffiModel.isPeerAndroid) {
     final enabled = !ffiModel.viewOnly;
@@ -796,6 +780,47 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
         child: Text(translate('View Mode'))));
   }
   return v;
+}
+
+Future<List<TRadioMenu<String>>> toolbarClipboardDirection(FFI ffi) async {
+  final ffiModel = ffi.ffiModel;
+  final perms = ffiModel.permissions;
+  final sessionId = ffi.sessionId;
+  final isDefaultConn = ffi.connType == ConnType.defaultConn;
+  if (!isDefaultConn || !ffiModel.keyboard || perms['clipboard'] == false) {
+    return [];
+  }
+
+  final disabled = ffiModel.viewOnly ||
+      bind.sessionGetToggleOptionSync(
+          sessionId: sessionId, arg: 'disable-clipboard');
+  final sessionPolicy = await bind.sessionGetOption(
+        sessionId: sessionId,
+        arg: kOptionClipboardDirection,
+      ) ??
+      '';
+  final currentPolicy = disabled
+      ? kClipboardDirectionOff
+      : normalizeClipboardDirectionPolicy(sessionPolicy.isEmpty
+          ? bind.mainGetLocalOption(key: kOptionClipboardDirection)
+          : sessionPolicy);
+  final enabled = !ffiModel.viewOnly;
+  return clipboardDirectionMenuKeys()
+      .map((key) => TRadioMenu<String>(
+            value: key,
+            groupValue: currentPolicy,
+            onChanged: enabled
+                ? (value) {
+                    if (value == null) return;
+                    bind.sessionToggleOption(
+                      sessionId: sessionId,
+                      value: sessionClipboardDirectionToggleValue(value),
+                    );
+                  }
+                : null,
+            child: Text(translate(clipboardDirectionPolicyLabel(key))),
+          ))
+      .toList();
 }
 
 var togglePrivacyModeTime = DateTime.now().subtract(const Duration(hours: 1));
