@@ -2997,11 +2997,12 @@ pub fn get_clipboards_msg(client: bool) -> Option<Message> {
 }
 
 // We need this mod to notify multiple subscribers when the clipboard changes.
-// Because only one clipboard master(listener) can trigger the clipboard change event multiple listeners are created on Linux(x11).
-// https://github.com/rustdesk-org/clipboard-master/blob/4fb62e5b62fb6350d82b571ec7ba94b3cd466695/src/master/x11.rs#L226
+// A single platform clipboard listener fans out change events to all RustAdmin
+// subscribers. Linux Wayland uses the local adapter; other platforms use
+// upstream clipboard-master.
 #[cfg(not(target_os = "android"))]
 pub mod clipboard_listener {
-    use clipboard_master::{CallbackResult, ClipboardHandler, Master, Shutdown};
+    use clipboard_master::{CallbackResult, ClipboardHandler, Master, Shutdown as MasterShutdown};
     use hbb_common::{bail, log, ResultType};
     use std::{
         collections::HashMap,
@@ -3013,6 +3014,22 @@ pub mod clipboard_listener {
 
     lazy_static::lazy_static! {
         pub static ref CLIPBOARD_LISTENER: Arc<Mutex<ClipboardListener>> = Default::default();
+    }
+
+    enum ListenerShutdown {
+        Master(MasterShutdown),
+        #[cfg(target_os = "linux")]
+        Wayland(crate::clipboard_wayland_listener::Shutdown),
+    }
+
+    impl ListenerShutdown {
+        fn signal(self) {
+            match self {
+                Self::Master(shutdown) => shutdown.signal(),
+                #[cfg(target_os = "linux")]
+                Self::Wayland(shutdown) => shutdown.signal(),
+            }
+        }
     }
 
     struct Handler {
@@ -3045,7 +3062,7 @@ pub mod clipboard_listener {
     #[derive(Default)]
     pub struct ClipboardListener {
         subscribers: Arc<Mutex<HashMap<String, Sender<CallbackResult>>>>,
-        handle: Option<(Shutdown, JoinHandle<()>)>,
+        handle: Option<(ListenerShutdown, JoinHandle<()>)>,
     }
 
     pub fn subscribe(name: String, tx: Sender<CallbackResult>) -> ResultType<()> {
@@ -3063,7 +3080,7 @@ pub mod clipboard_listener {
                 subscribers: listener_lock.subscribers.clone(),
             };
             let (tx_start_res, rx_start_res) = channel();
-            let h = start_clipboard_master_thread(handler, tx_start_res);
+            let h = start_clipboard_listener_thread(handler, tx_start_res);
             let shutdown = match rx_start_res.recv() {
                 Ok((Some(s), _)) => s,
                 Ok((None, err)) => {
@@ -3103,15 +3120,37 @@ pub mod clipboard_listener {
         log::info!("Clipboard listener unsubscribed: {}", name);
     }
 
+    fn start_clipboard_listener_thread(
+        handler: impl ClipboardHandler + Send + 'static,
+        tx_start_res: Sender<(Option<ListenerShutdown>, String)>,
+    ) -> JoinHandle<()> {
+        #[cfg(target_os = "linux")]
+        {
+            if crate::clipboard_wayland_listener::should_use_wayland_listener() {
+                return crate::clipboard_wayland_listener::start_thread(handler, move |result| {
+                    let start_result = match result {
+                        Ok(shutdown) => (Some(ListenerShutdown::Wayland(shutdown)), String::new()),
+                        Err(error) => (None, error),
+                    };
+                    tx_start_res.send(start_result).ok();
+                });
+            }
+        }
+        start_clipboard_master_thread(handler, tx_start_res)
+    }
+
     fn start_clipboard_master_thread(
         handler: impl ClipboardHandler + Send + 'static,
-        tx_start_res: Sender<(Option<Shutdown>, String)>,
+        tx_start_res: Sender<(Option<ListenerShutdown>, String)>,
     ) -> JoinHandle<()> {
         // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getmessage#:~:text=The%20window%20must%20belong%20to%20the%20current%20thread.
         let h = std::thread::spawn(move || match Master::new(handler) {
             Ok(mut master) => {
                 tx_start_res
-                    .send((Some(master.shutdown_channel()), "".to_owned()))
+                    .send((
+                        Some(ListenerShutdown::Master(master.shutdown_channel())),
+                        "".to_owned(),
+                    ))
                     .ok();
                 log::debug!("Clipboard listener started");
                 if let Err(err) = master.run() {

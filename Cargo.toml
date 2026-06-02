@@ -100,7 +100,7 @@ clipboard = { path = "libs/clipboard" }
 ctrlc = "3.2"
 # arboard = { version = "3.4", features = ["wayland-data-control"] }
 arboard = { git = "https://github.com/rustdesk-org/arboard", features = ["wayland-data-control"] }
-clipboard-master = { git = "https://github.com/rustdesk-org/clipboard-master" }
+clipboard-master = "=4.0.0"
 portable-pty = { git = "https://github.com/rustdesk-org/wezterm", branch = "rustdesk/pty_based_0.8.1", package = "portable-pty" }
 
 system_shutdown = "4.0"
@@ -190,6 +190,9 @@ pam = "=0.8.0"
 x11-clipboard = {git="https://github.com/clslaid/x11-clipboard", branch = "feat/store-batch", optional = true}
 x11rb =  {version = "0.12", features = ["all-extensions"], optional = true}
 x11rb_clipboard = { package = "x11rb", version = "0.13" }
+wayland-client = "0.31.4"
+wayland-protocols = { version = "0.32.2", default-features = false, features = ["unstable", "client"] }
+wayland-protocols-wlr = { version = "0.3.2", default-features = false, features = ["client"] }
 wl-clipboard-rs = "0.9"
 percent-encoding = {version = "2.3", optional = true}
 once_cell = {version = "1.18", optional = true}

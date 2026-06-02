@@ -42,6 +42,8 @@ mod auth_2fa;
 pub mod cli;
 #[cfg(not(target_os = "ios"))]
 mod clipboard;
+#[cfg(target_os = "linux")]
+mod clipboard_wayland_listener;
 #[cfg(not(any(target_os = "android", target_os = "ios", feature = "cli")))]
 pub mod core_main;
 mod custom_server;
