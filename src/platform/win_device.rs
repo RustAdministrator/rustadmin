@@ -13,15 +13,14 @@ use winapi::{
         minwindef::{BOOL, DWORD, FALSE, MAX_PATH, PBOOL, TRUE},
         ntdef::{HANDLE, LPCWSTR, NULL},
         windef::HWND,
-        winerror::{ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_ITEMS},
+        winerror::{ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_DATA, ERROR_NO_MORE_ITEMS},
     },
     um::{
-        cfgmgr32::MAX_DEVICE_ID_LEN,
         fileapi::{CreateFileW, OPEN_EXISTING},
         handleapi::{CloseHandle, INVALID_HANDLE_VALUE},
         ioapiset::DeviceIoControl,
         setupapi::*,
-        winnt::{GENERIC_READ, GENERIC_WRITE},
+        winnt::{GENERIC_READ, GENERIC_WRITE, REG_MULTI_SZ, REG_SZ},
     },
 };
 
@@ -198,26 +197,89 @@ unsafe fn is_same_hardware_id(
     devinfo_data: &mut SP_DEVINFO_DATA,
     hardware_id: &str,
 ) -> Result<bool, DeviceError> {
-    let mut cur_hardware_id = [0u16; MAX_DEVICE_ID_LEN];
+    let mut property_type: DWORD = 0;
+    let mut required_size: DWORD = 0;
     if SetupDiGetDeviceRegistryPropertyW(
         **dev_info,
         devinfo_data,
         SPDRP_HARDWAREID,
+        &mut property_type,
         null_mut(),
-        cur_hardware_id.as_mut_ptr() as _,
-        cur_hardware_id.len() as _,
-        null_mut(),
+        0,
+        &mut required_size,
     ) == FALSE
     {
-        return Err(DeviceError::new_api_last_err(
-            "SetupDiGetDeviceRegistryPropertyW",
-        ));
+        let err = io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(code) if code == ERROR_INVALID_DATA as i32 => return Ok(false),
+            Some(code) if code == ERROR_INSUFFICIENT_BUFFER as i32 && required_size > 0 => {}
+            _ => {
+                return Err(DeviceError::WinApiLastErr(
+                    "SetupDiGetDeviceRegistryPropertyW".to_string(),
+                    err,
+                ));
+            }
+        }
     }
 
-    let cur_hardware_id = String::from_utf16_lossy(&cur_hardware_id)
-        .trim_end_matches(char::from(0))
-        .to_string();
-    Ok(cur_hardware_id == hardware_id)
+    if required_size == 0 {
+        return Ok(false);
+    }
+
+    loop {
+        let wide_len = required_size as usize / std::mem::size_of::<u16>();
+        let mut cur_hardware_ids = vec![0u16; wide_len + 1];
+        let mut actual_type: DWORD = 0;
+        let mut actual_size = required_size;
+        if SetupDiGetDeviceRegistryPropertyW(
+            **dev_info,
+            devinfo_data,
+            SPDRP_HARDWAREID,
+            &mut actual_type,
+            cur_hardware_ids.as_mut_ptr() as _,
+            (cur_hardware_ids.len() * std::mem::size_of::<u16>()) as _,
+            &mut actual_size,
+        ) == FALSE
+        {
+            let err = io::Error::last_os_error();
+            match err.raw_os_error() {
+                Some(code) if code == ERROR_INVALID_DATA as i32 => return Ok(false),
+                Some(code)
+                    if code == ERROR_INSUFFICIENT_BUFFER as i32 && actual_size > required_size =>
+                {
+                    required_size = actual_size;
+                    continue;
+                }
+                _ => {
+                    return Err(DeviceError::WinApiLastErr(
+                        "SetupDiGetDeviceRegistryPropertyW".to_string(),
+                        err,
+                    ));
+                }
+            }
+        }
+
+        if !is_hardware_id_property_type(actual_type) {
+            return Ok(false);
+        }
+
+        let actual_wide_len = actual_size as usize / std::mem::size_of::<u16>();
+        return Ok(hardware_id_list_contains(
+            &cur_hardware_ids[..actual_wide_len.min(cur_hardware_ids.len())],
+            hardware_id,
+        ));
+    }
+}
+
+fn is_hardware_id_property_type(property_type: DWORD) -> bool {
+    property_type == REG_SZ || property_type == REG_MULTI_SZ
+}
+
+fn hardware_id_list_contains(cur_hardware_ids: &[u16], hardware_id: &str) -> bool {
+    cur_hardware_ids
+        .split(|c| *c == 0)
+        .filter(|s| !s.is_empty())
+        .any(|s| String::from_utf16_lossy(s).eq_ignore_ascii_case(hardware_id))
 }
 
 pub unsafe fn uninstall_driver(
@@ -247,10 +309,11 @@ pub unsafe fn uninstall_driver(
     };
 
     let mut device_index = 0;
+    let mut removed_count = 0;
     loop {
         if SetupDiEnumDeviceInfo(*dev_info, device_index, &mut devinfo_data) == FALSE {
             let err = io::Error::last_os_error();
-            if err.raw_os_error() == Some(ERROR_NO_MORE_ITEMS as _) {
+            if err.raw_os_error() == Some(ERROR_NO_MORE_ITEMS as i32) {
                 break;
             }
             return Err(DeviceError::WinApiLastErr(
@@ -272,6 +335,7 @@ pub unsafe fn uninstall_driver(
             _ => {}
         }
 
+        log::info!("Removing device with hardware id {}", hardware_id);
         let mut remove_device_params = SP_REMOVEDEVICE_PARAMS {
             ClassInstallHeader: SP_CLASSINSTALL_HEADER {
                 cbSize: std::mem::size_of::<SP_CLASSINSTALL_HEADER>() as _,
@@ -322,10 +386,63 @@ pub unsafe fn uninstall_driver(
             }
         }
 
+        removed_count += 1;
         device_index += 1;
     }
 
+    if removed_count == 0 {
+        log::warn!(
+            "No device with hardware id {} was found during driver uninstall",
+            hardware_id
+        );
+    } else {
+        log::info!(
+            "Removed {} device(s) with hardware id {} during driver uninstall",
+            removed_count,
+            hardware_id
+        );
+    }
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hardware_id_list_contains;
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    #[test]
+    fn hardware_id_list_contains_reg_sz() {
+        let mut ids = wide("usbmmidd");
+        ids.push(0);
+
+        assert!(hardware_id_list_contains(&ids, "usbmmidd"));
+    }
+
+    #[test]
+    fn hardware_id_list_contains_reg_multi_sz() {
+        let mut ids = wide("first");
+        ids.push(0);
+        ids.extend(wide("USBMMIDD"));
+        ids.push(0);
+        ids.push(0);
+
+        assert!(hardware_id_list_contains(&ids, "usbmmidd"));
+    }
+
+    #[test]
+    fn hardware_id_list_rejects_missing_id() {
+        let mut ids = wide("first");
+        ids.push(0);
+        ids.extend(wide("second"));
+        ids.push(0);
+        ids.push(0);
+
+        assert!(!hardware_id_list_contains(&ids, "usbmmidd"));
+    }
 }
 
 pub unsafe fn device_io_control(
@@ -398,7 +515,7 @@ unsafe fn get_device_path(interface_guid: &GUID) -> Result<Vec<u16>, DeviceError
     ) == FALSE
     {
         let err = io::Error::last_os_error();
-        if err.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as _) {
+        if err.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32) {
             return Err(DeviceError::WinApiLastErr(
                 "SetupDiGetDeviceInterfaceDetailW".to_string(),
                 err,
