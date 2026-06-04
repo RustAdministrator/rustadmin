@@ -3,8 +3,13 @@ param(
     [string]$DepsRoot = "",
     [string]$CargoTargetDir = "",
     [string]$PubCache = "",
+    [string]$BridgeLlvmPath = "",
+    [string]$BridgeLlvmCompilerOpts = "",
     [switch]$NoHwCodec,
-    [switch]$Clean
+    [switch]$Clean,
+    [switch]$SkipBridgeGen,
+    [switch]$ForceBridgeGen,
+    [switch]$VerboseBridgeGen
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,6 +48,16 @@ $env:CMAKE_PREFIX_PATH = $DepsRoot
 $env:RUSTDESK_WINDOWS_CODEC_ROOT = $DepsRoot
 
 New-Item -ItemType Directory -Force -Path $PubCache, $CargoTargetDir | Out-Null
+
+$SkipBridgeGenEffective = $SkipBridgeGen -or ($env:RUSTDESK_SKIP_BRIDGE_GEN -eq "1")
+$ForceBridgeGenEffective = $ForceBridgeGen -or ($env:RUSTDESK_FORCE_BRIDGE_GEN -eq "1")
+$VerboseBridgeGenEffective = $VerboseBridgeGen -or ($env:RUSTDESK_VERBOSE_BRIDGE_GEN -eq "1")
+if ([string]::IsNullOrWhiteSpace($BridgeLlvmPath)) {
+    $BridgeLlvmPath = $env:RUSTDESK_BRIDGE_LLVM_PATH
+}
+if ([string]::IsNullOrWhiteSpace($BridgeLlvmCompilerOpts)) {
+    $BridgeLlvmCompilerOpts = $env:RUSTDESK_BRIDGE_LLVM_COMPILER_OPTS
+}
 
 function Test-StaleFlutterMetadata {
     $PackageConfig = Join-Path $FlutterDir ".dart_tool\package_config.json"
@@ -85,6 +100,161 @@ function Get-RustAdminVersionInfo {
         Version = $Version
         Revision = $Revision
         ArchiveName = "RustAdmin_Release_$Version.$Revision.zip"
+    }
+}
+
+function Test-BridgeLlvmRoot {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+    return Test-Path (Join-Path $Path "bin\libclang.dll")
+}
+
+function Add-BridgeLlvmCandidate {
+    param(
+        [System.Collections.Generic.List[string]]$Candidates,
+        [string]$Path
+    )
+
+    if (![string]::IsNullOrWhiteSpace($Path) -and !$Candidates.Contains($Path)) {
+        $Candidates.Add($Path)
+    }
+}
+
+function Resolve-BridgeLlvmPath {
+    param([string]$RequestedPath)
+
+    if (![string]::IsNullOrWhiteSpace($RequestedPath)) {
+        if (!(Test-BridgeLlvmRoot $RequestedPath)) {
+            throw "libclang.dll was not found under '$RequestedPath\bin'. Pass -BridgeLlvmPath to an LLVM root that contains bin\libclang.dll."
+        }
+        return (Resolve-Path $RequestedPath).Path
+    }
+
+    $Candidates = [System.Collections.Generic.List[string]]::new()
+    Add-BridgeLlvmCandidate $Candidates $env:LLVM_PATH
+    if (![string]::IsNullOrWhiteSpace($env:LIBCLANG_PATH)) {
+        Add-BridgeLlvmCandidate $Candidates $env:LIBCLANG_PATH
+        if (Test-Path (Join-Path $env:LIBCLANG_PATH "libclang.dll")) {
+            Add-BridgeLlvmCandidate $Candidates (Split-Path $env:LIBCLANG_PATH -Parent)
+        }
+    }
+
+    $KnownDrives = @("C:", "D:", $Drive) | Where-Object { ![string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+    foreach ($RootDrive in $KnownDrives) {
+        Add-BridgeLlvmCandidate $Candidates (Join-Path $RootDrive "Program Files\LLVM")
+        Add-BridgeLlvmCandidate $Candidates (Join-Path $RootDrive "msys64\mingw64")
+        foreach ($VsVersion in @("18", "17")) {
+            foreach ($VsEdition in @("Community", "Professional", "Enterprise", "BuildTools")) {
+                Add-BridgeLlvmCandidate $Candidates (Join-Path $RootDrive "Program Files\Microsoft Visual Studio\$VsVersion\$VsEdition\VC\Tools\Llvm\x64")
+            }
+        }
+    }
+
+    foreach ($Candidate in $Candidates) {
+        if (Test-BridgeLlvmRoot $Candidate) {
+            return (Resolve-Path $Candidate).Path
+        }
+    }
+
+    return ""
+}
+
+function Resolve-BridgeCodegen {
+    $Command = Get-Command "flutter_rust_bridge_codegen.exe" -ErrorAction SilentlyContinue
+    if (!$Command) {
+        $Command = Get-Command "flutter_rust_bridge_codegen" -ErrorAction SilentlyContinue
+    }
+    if ($Command) {
+        return $Command.Source
+    }
+
+    $CandidateRoots = @($env:USERPROFILE, $env:HOME) | Where-Object { ![string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+    foreach ($CandidateRoot in $CandidateRoots) {
+        foreach ($Name in @("flutter_rust_bridge_codegen.exe", "flutter_rust_bridge_codegen")) {
+            $Candidate = Join-Path $CandidateRoot ".cargo\bin\$Name"
+            if (Test-Path $Candidate) {
+                return $Candidate
+            }
+        }
+    }
+
+    throw @"
+flutter_rust_bridge_codegen was not found.
+Install it with:
+  cargo install flutter_rust_bridge_codegen --version 1.80.1 --features uuid
+or pass -SkipBridgeGen if the generated files are already current.
+"@
+}
+
+function Test-BridgeFilesCurrent {
+    param(
+        [string]$BridgeInput,
+        [string[]]$BridgeOutputs
+    )
+
+    if (!(Test-Path $BridgeInput)) {
+        throw "Bridge Rust input was not found at '$BridgeInput'."
+    }
+
+    $InputTimestamp = (Get-Item $BridgeInput).LastWriteTimeUtc
+    foreach ($Output in $BridgeOutputs) {
+        if (!(Test-Path $Output)) {
+            return $false
+        }
+        if ((Get-Item $Output).LastWriteTimeUtc -lt $InputTimestamp) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Invoke-BridgeGeneration {
+    if ($SkipBridgeGenEffective) {
+        Write-Host "Skipping flutter_rust_bridge generation because RUSTDESK_SKIP_BRIDGE_GEN=1 or -SkipBridgeGen was passed."
+        return
+    }
+
+    $BridgeInput = Join-Path $RepoRoot "src\flutter_ffi.rs"
+    $BridgeOutputs = @(
+        (Join-Path $FlutterDir "lib\generated_bridge.dart"),
+        (Join-Path $FlutterDir "lib\generated_bridge.freezed.dart"),
+        (Join-Path $RepoRoot "src\bridge_generated.rs"),
+        (Join-Path $RepoRoot "src\bridge_generated.io.rs")
+    )
+    if (!$ForceBridgeGenEffective -and (Test-BridgeFilesCurrent $BridgeInput $BridgeOutputs)) {
+        Write-Host "flutter_rust_bridge files are current."
+        return
+    }
+
+    $BridgeCodegen = Resolve-BridgeCodegen
+    $ResolvedBridgeLlvmPath = Resolve-BridgeLlvmPath $BridgeLlvmPath
+    $BridgeArgs = @(
+        "--rust-input", $BridgeInput,
+        "--dart-output", (Join-Path $FlutterDir "lib\generated_bridge.dart")
+    )
+    if (![string]::IsNullOrWhiteSpace($ResolvedBridgeLlvmPath)) {
+        $BridgeArgs += @("--llvm-path", $ResolvedBridgeLlvmPath)
+    }
+    if (![string]::IsNullOrWhiteSpace($BridgeLlvmCompilerOpts)) {
+        $BridgeArgs += "--llvm-compiler-opts=$BridgeLlvmCompilerOpts"
+    }
+
+    Write-Host "Generating flutter_rust_bridge files..."
+    $Output = & $BridgeCodegen @BridgeArgs *>&1
+    $ExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
+    if ($VerboseBridgeGenEffective -or $ExitCode -ne 0) {
+        $Output | ForEach-Object { Write-Host $_ }
+    }
+    if ($ExitCode -ne 0) {
+        throw "flutter_rust_bridge_codegen failed with exit code $ExitCode."
+    }
+    foreach ($OutputPath in $BridgeOutputs) {
+        if (!(Test-Path $OutputPath)) {
+            throw "flutter_rust_bridge generation did not create '$OutputPath'."
+        }
     }
 }
 
@@ -135,6 +305,8 @@ try {
 finally {
     Pop-Location
 }
+
+Invoke-BridgeGeneration
 
 $Features = if ($NoHwCodec) { "flutter" } else { "flutter,hwcodec" }
 

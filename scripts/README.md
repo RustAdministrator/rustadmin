@@ -43,6 +43,27 @@ Optional overrides:
 
 Use `-NoHwCodec` to build without the `hwcodec` feature.
 Use `-Clean` to force-refresh Flutter metadata and Windows build intermediates.
+The Windows build and validation scripts set `RUSTDESK_WINDOWS_CODEC_ROOT` and
+`CMAKE_PREFIX_PATH` from `-DepsRoot`, so clean machines do not fall back to an
+incomplete Visual Studio vcpkg prefix.
+
+The scripts also generate `flutter_rust_bridge` files when they are missing or
+older than `src/flutter_ffi.rs`. Install the generator once:
+
+```powershell
+cargo install flutter_rust_bridge_codegen --version 1.80.1 --features uuid
+```
+
+If `ffigen` cannot find `libclang.dll`, pass an LLVM root that contains
+`bin\libclang.dll`:
+
+```powershell
+.\scripts\build_windows.ps1 `
+  -BridgeLlvmPath "D:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\Llvm\x64"
+```
+
+Use `-SkipBridgeGen` when generated files are already current and the generator
+is not installed. Use `-ForceBridgeGen` to regenerate them anyway.
 
 Toolbar lab:
 
