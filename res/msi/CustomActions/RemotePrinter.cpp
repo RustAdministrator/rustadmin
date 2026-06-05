@@ -19,8 +19,8 @@ namespace RemotePrinter
 #define HRESULT_ERR_ELEMENT_NOT_FOUND 0x80070490
 
     LPCWCH RD_DRIVER_INF_PATH = L"drivers\\RustDeskPrinterDriver\\RustDeskPrinterDriver.inf";
-    LPCWCH RD_PRINTER_PORT = L"RustDesk Printer";
-    LPCWCH RD_PRINTER_NAME = L"RustDesk Printer";
+    LPCWCH RD_PRINTER_PORT = L"RustAdmin Printer";
+    LPCWCH RD_PRINTER_NAME = L"RustAdmin Printer";
     LPCWCH RD_PRINTER_DRIVER_NAME = L"RustDesk v4 Printer Driver";
     LPCWCH XCV_MONITOR_LOCAL_PORT = L",XcvMonitor Local Port";
 
@@ -240,7 +240,7 @@ namespace RemotePrinter
 
     BOOL deletePrinterDriver(LPCWSTR name)
     {
-        // If the printer is used after the spooler service is started. E.g., printing a document through RustDesk Printer.
+        // If the printer is used after the spooler service is started. E.g., printing a document through RustAdmin Printer.
         // `DeletePrinterDriverExW()` may fail with `ERROR_PRINTER_DRIVER_IN_USE`(3001, 0xBB9).
         // We can only ignore this error for now.
         // Though restarting the spooler service is a solution, it's not a good idea to restart the service.

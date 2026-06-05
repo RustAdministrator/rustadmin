@@ -1453,13 +1453,13 @@ showSetOSPassword(
   Function()? closeCallback,
 ) async {
   final controller = TextEditingController();
-  osPassword ??=
+  final initialOsPassword = osPassword ??
       await bind.sessionGetOption(sessionId: sessionId, arg: 'os-password') ??
-          '';
+      '';
   var autoLogin =
       await bind.sessionGetOption(sessionId: sessionId, arg: 'auto-login') !=
           '';
-  controller.text = osPassword;
+  controller.text = initialOsPassword;
   dialogManager.show((setState, close, context) {
     closeWithCallback([dynamic]) {
       close();

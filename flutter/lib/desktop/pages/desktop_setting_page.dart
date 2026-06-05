@@ -1460,11 +1460,14 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
               isOptionFixed(kOptionDirectAccessPairingPassphrase);
           final isRememberPairedViewersFixed =
               isOptionFixed(kOptionRememberPairedViewers);
-          return Offstage(
-            offstage: !enabled,
-            child: Column(
-              children: [
-                _SubLabeledWidget(
+          final showPairingPassphrase =
+              enabled || pairingPassphrase.isNotEmpty || isPairingOptFixed;
+          final canEditPairingPassphrase = !locked && !isPairingOptFixed;
+          return Column(
+            children: [
+              Offstage(
+                offstage: !enabled,
+                child: _SubLabeledWidget(
                   context,
                   'Port',
                   Row(children: [
@@ -1504,6 +1507,8 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                   ]),
                   enabled: enabled && !locked && !isOptFixed,
                 ),
+              ),
+              if (showPairingPassphrase)
                 _SubLabeledWidget(
                   context,
                   'Local pairing passphrase',
@@ -1517,13 +1522,13 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                           style: TextStyle(
                             color: disabledTextColor(
                               context,
-                              enabled && !locked && !isPairingOptFixed,
+                              canEditPairingPassphrase,
                             ),
                           ),
                         ),
                       ),
                       ElevatedButton(
-                        onPressed: enabled && !locked && !isPairingOptFixed
+                        onPressed: canEditPairingPassphrase
                             ? () async {
                                 await changeDirectAccessPairingPassphrase(
                                     pairingPassphrase);
@@ -1534,9 +1539,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                             pairingPassphrase.isEmpty ? 'Set' : 'Change')),
                       ).marginOnly(right: 8),
                       OutlinedButton(
-                        onPressed: enabled &&
-                                !locked &&
-                                !isPairingOptFixed &&
+                        onPressed: canEditPairingPassphrase &&
                                 pairingPassphrase.isNotEmpty
                             ? () async {
                                 await bind.mainSetOption(
@@ -1549,11 +1552,13 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                       ),
                     ],
                   ),
-                  enabled: enabled && !locked && !isPairingOptFixed,
+                  enabled: canEditPairingPassphrase,
                   leftMargin: _kCheckBoxLeftMargin,
                   minHeight: _kSettingRowMinHeight,
                 ),
-                Row(
+              Offstage(
+                offstage: !enabled,
+                child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Flexible(
@@ -1598,8 +1603,8 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                     )
                   ],
                 ),
-              ],
-            ),
+              ),
+            ],
           );
         }
 
@@ -2799,7 +2804,8 @@ class _AboutState extends State<_About> {
                         .marginSymmetric(vertical: 4.0)),
               InkWell(
                   onTap: () {
-                    launchUrlString('https://github.com/RustAdministrator/rustadmin');
+                    launchUrlString(
+                        'https://github.com/RustAdministrator/rustadmin');
                   },
                   child: Text(
                     translate('Privacy Statement'),
@@ -2807,7 +2813,8 @@ class _AboutState extends State<_About> {
                   ).marginSymmetric(vertical: 4.0)),
               InkWell(
                   onTap: () {
-                    launchUrlString('https://github.com/RustAdministrator/rustadmin');
+                    launchUrlString(
+                        'https://github.com/RustAdministrator/rustadmin');
                   },
                   child: Text(
                     translate('Website'),
@@ -3048,7 +3055,7 @@ Widget _Radio<T>(BuildContext context,
     {required T value,
     required T groupValue,
     required String label,
-    required Function(T value)? onChanged,
+    required FutureOr<void> Function(T value)? onChanged,
     bool autoNewLine = true}) {
   final onChange2 = onChanged != null
       ? (T? value) {

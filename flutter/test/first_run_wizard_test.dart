@@ -41,7 +41,7 @@ void main() {
     await tester.tap(find.text('Open'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Welcome to RustDesk'), findsOneWidget);
+    expect(find.text('Welcome to RustAdmin'), findsOneWidget);
     expect(find.text('Show on next start'), findsOneWidget);
 
     await tester.tap(find.text('Next'));
@@ -117,5 +117,62 @@ void main() {
     expect(result!.lanDiscoveryMode, kLanDiscoveryModeStandard);
     expect(result!.localPairingPassphrase, 'already-set');
     expect(result!.showOnNextStart, isTrue);
+  });
+
+  testWidgets('local pairing passphrase depends on direct access',
+      (tester) async {
+    FirstRunWizardSettings? result;
+
+    await tester.pumpWidget(buildTestApp(
+      Builder(
+        builder: (context) => Center(
+          child: ElevatedButton(
+            onPressed: () async {
+              result = await showFirstRunWizardDialog(
+                context: context,
+                initialSettings: const FirstRunWizardSettings(
+                  directAccessEnabled: false,
+                  lanDiscoveryMode: kLanDiscoveryModeOff,
+                  localPairingPassphrase: 'stored-local-pairing',
+                  showOnNextStart: true,
+                ),
+                directAccessFixed: false,
+                lanDiscoveryFixed: false,
+                localPairingFixed: false,
+              );
+            },
+            child: const Text('Open'),
+          ),
+        ),
+      ),
+    ));
+
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Next'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Next'));
+    await tester.pumpAndSettle();
+
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.enabled, isFalse);
+    expect(
+      find.text('Enable direct local/VPN access to require local pairing.'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Next'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Ready to apply'), findsOneWidget);
+    expect(find.text('Configured'), findsOneWidget);
+
+    await tester.tap(find.text('Finish'));
+    await tester.pumpAndSettle();
+
+    expect(result, isNotNull);
+    expect(result!.directAccessEnabled, isFalse);
+    expect(result!.localPairingPassphrase, 'stored-local-pairing');
   });
 }

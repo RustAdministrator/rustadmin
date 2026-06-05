@@ -18,6 +18,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$RequiredBridgeCodegenVersion = "1.80.1"
+$BridgeClassName = "Rustdesk"
 $ClientRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $WorkspaceRoot = Split-Path $ClientRoot -Parent
 $HbbCommonRoot = Join-Path $WorkspaceRoot "hbb_common"
@@ -240,9 +242,32 @@ function Resolve-BridgeCodegen {
     throw @"
 flutter_rust_bridge_codegen was not found.
 Install it with:
-  cargo install flutter_rust_bridge_codegen --version 1.80.1 --features uuid
+  cargo install flutter_rust_bridge_codegen --version $RequiredBridgeCodegenVersion --features uuid --locked --force
 or pass -SkipBridgeGen if the generated files are already current.
 "@
+}
+
+function Assert-BridgeCodegenVersion {
+    param([string]$BridgeCodegen)
+
+    $VersionOutput = & $BridgeCodegen --version 2>&1
+    $ExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
+    $VersionText = ($VersionOutput | Out-String).Trim()
+    if ($ExitCode -ne 0) {
+        throw "Failed to run '$BridgeCodegen --version' with exit code $ExitCode. Output: $VersionText"
+    }
+    if ($VersionText -notmatch "\b$([regex]::Escape($RequiredBridgeCodegenVersion))\b") {
+        throw @"
+flutter_rust_bridge_codegen version mismatch.
+Found:    $VersionText
+Expected: $RequiredBridgeCodegenVersion
+Binary:   $BridgeCodegen
+Install the pinned generator with:
+  cargo install flutter_rust_bridge_codegen --version $RequiredBridgeCodegenVersion --features uuid --locked --force
+or pass -SkipBridgeGen if the generated files are already current.
+"@
+    }
+    return $VersionText
 }
 
 function Get-BridgeInput {
@@ -277,6 +302,10 @@ function Test-BridgeFilesCurrent {
             return $false
         }
     }
+    $GeneratedDart = $BridgeOutputs[0]
+    if (!((Get-Content $GeneratedDart -Raw).Contains("class $($BridgeClassName)Impl"))) {
+        return $false
+    }
     return $true
 }
 
@@ -292,10 +321,12 @@ function Test-BridgeGenerationRequired {
 
 function Invoke-BridgeGenerationStep {
     $BridgeCodegen = Resolve-BridgeCodegen
+    $BridgeCodegenVersion = Assert-BridgeCodegenVersion $BridgeCodegen
     $ResolvedBridgeLlvmPath = Resolve-BridgeLlvmPath $BridgeLlvmPath
     $BridgeArgs = @(
         "--rust-input", (Get-BridgeInput),
-        "--dart-output", (Join-Path $FlutterDir "lib\generated_bridge.dart")
+        "--dart-output", (Join-Path $FlutterDir "lib\generated_bridge.dart"),
+        "--class-name", $BridgeClassName
     )
     if (![string]::IsNullOrWhiteSpace($ResolvedBridgeLlvmPath)) {
         $BridgeArgs += @("--llvm-path", $ResolvedBridgeLlvmPath)
@@ -304,6 +335,7 @@ function Invoke-BridgeGenerationStep {
         $BridgeArgs += "--llvm-compiler-opts=$BridgeLlvmCompilerOpts"
     }
 
+    Write-Host "Using flutter_rust_bridge_codegen: $BridgeCodegen ($BridgeCodegenVersion)"
     if ($VerboseBridgeGenEffective) {
         Write-Host "Bridge LLVM path: $ResolvedBridgeLlvmPath"
     }

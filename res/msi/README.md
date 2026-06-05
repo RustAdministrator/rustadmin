@@ -1,4 +1,4 @@
-# RustDesk msi project
+# RustAdmin MSI project
 
 Use Visual Studio 2022 to compile this project.
 
@@ -6,7 +6,7 @@ This project is mainly derived from <https://github.com/MediaPortal/MediaPortal-
 
 ## Steps
 
-1. `python preprocess.py`, see `python preprocess.py -h` for help.
+1. `python preprocess.py`, see `python preprocess.py -h` for help. RustAdmin is the default app name.
 2. Build the .sln solution.
 
 Run `msiexec /i package.msi /l*v install.log` to record the log.

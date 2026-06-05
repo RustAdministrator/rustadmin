@@ -51,7 +51,7 @@ The scripts also generate `flutter_rust_bridge` files when they are missing or
 older than `src/flutter_ffi.rs`. Install the generator once:
 
 ```powershell
-cargo install flutter_rust_bridge_codegen --version 1.80.1 --features uuid
+cargo install flutter_rust_bridge_codegen --version 1.80.1 --features uuid --locked --force
 ```
 
 If `ffigen` cannot find `libclang.dll`, pass an LLVM root that contains
