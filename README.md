@@ -35,10 +35,15 @@ The developers do not condone or support unauthorized access, covert control, pr
 
 RustAdmin currently contains upstream RustDesk code plus fork-specific work in the following areas:
 
+* RustAdmin application identity, package identifiers, installer names, and release archive naming
 * safer handling of rendezvous-provided peer address hints
 * broader protection of security-sensitive remote configuration options
 * relay server resolution fixes before relay creation
 * first-run wizard and clearer initial setup flow
+* authenticated LAN discovery modes, including trusted-peers-only discovery
+* local and rendezvous pairing passphrases for first secure contact
+* paired-viewer and known-host management for local/VPN trust lifecycle control
+* preservation of encrypted pairing settings when migrating from portable to installed Windows runs
 * improved network status panel layout
 * toolbar auto-hide settings and toolbar behavior prototyping
 * edge-acceleration scrolling and pointer tracking improvements
