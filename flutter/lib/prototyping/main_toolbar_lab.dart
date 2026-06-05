@@ -19,7 +19,7 @@ Future<void> main() async {
     final options = WindowOptions(
       size: const Size(1500, 920),
       center: true,
-      title: 'RustDesk Toolbar Lab',
+      title: 'RustAdmin Toolbar Lab',
       backgroundColor: Colors.transparent,
       titleBarStyle: TitleBarStyle.hidden,
     );
@@ -41,7 +41,7 @@ class ToolbarLabApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'RustDesk Toolbar Lab',
+      title: 'RustAdmin Toolbar Lab',
       themeMode: ThemeMode.system,
       theme: MyTheme.lightTheme,
       darkTheme: MyTheme.darkTheme,

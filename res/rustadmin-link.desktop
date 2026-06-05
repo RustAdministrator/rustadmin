@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=RustAdmin
+NoDisplay=true
+MimeType=x-scheme-handler/rustadmin;
+TryExec=rustadmin
+Exec=rustadmin %u
+Icon=rustadmin
+Terminal=false
+Type=Application
+StartupNotify=false
+StartupWMClass=rustadmin

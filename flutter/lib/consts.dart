@@ -280,7 +280,7 @@ const String kKeyReverseMouseWheel = "reverse_mouse_wheel";
 const String kMsgboxTextWaitingForImage = 'Connected, waiting for image...';
 
 // the executable name of the portable version
-const String kEnvPortableExecutable = "RUSTDESK_APPNAME";
+const String kEnvPortableExecutable = "RUSTADMIN_APPNAME";
 
 const Color kColorWarn = Color.fromARGB(255, 245, 133, 59);
 const Color kColorCanvas = Colors.black;

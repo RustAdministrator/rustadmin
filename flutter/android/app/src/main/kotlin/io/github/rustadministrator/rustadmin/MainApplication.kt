@@ -1,4 +1,4 @@
-package com.carriez.flutter_hbb
+package io.github.rustadministrator.rustadmin
 
 import android.app.Application
 import android.util.Log

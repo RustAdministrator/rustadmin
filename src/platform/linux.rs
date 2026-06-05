@@ -1139,12 +1139,12 @@ mod pulse_sources {
     use std::{cell::RefCell, ops::Deref, rc::Rc};
 
     pub fn list_sources() -> ResultType<Vec<(String, String)>> {
-        let mut client = PulseSourceClient::connect("RustDeskSourceList")?;
+        let mut client = PulseSourceClient::connect("RustAdminSourceList")?;
         client.list_sources()
     }
 
     pub fn default_source() -> ResultType<Option<(String, String)>> {
-        let mut client = PulseSourceClient::connect("RustDeskDefaultSource")?;
+        let mut client = PulseSourceClient::connect("RustAdminDefaultSource")?;
         client.default_source()
     }
 

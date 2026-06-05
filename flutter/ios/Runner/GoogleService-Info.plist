@@ -13,9 +13,9 @@
 	<key>PLIST_VERSION</key>
 	<string>1</string>
 	<key>BUNDLE_ID</key>
-	<string>com.carriez.flutterHbb</string>
+	<string>io.github.rustadministrator.rustadmin</string>
 	<key>PROJECT_ID</key>
-	<string>rustdesk</string>
+	<string>rustadmin</string>
 	<key>STORAGE_BUCKET</key>
 	<string>rustdesk.appspot.com</string>
 	<key>IS_ADS_ENABLED</key>

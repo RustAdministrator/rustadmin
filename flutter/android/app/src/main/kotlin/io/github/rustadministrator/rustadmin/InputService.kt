@@ -1,4 +1,4 @@
-package com.carriez.flutter_hbb
+package io.github.rustadministrator.rustadmin
 
 /**
  * Handle remote input and dispatch android gesture

@@ -2698,7 +2698,7 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
               'Y';
       if (!allowDeepLinkServerSettings) {
         debugPrint(
-            "Ignore rustdesk://config because $kOptionAllowDeepLinkServerSettings is not enabled.");
+            "Ignore rustadmin://config because $kOptionAllowDeepLinkServerSettings is not enabled.");
         Timer(Duration(seconds: 1), () {
           showToast(translate('Failed'));
         });
@@ -2717,7 +2717,7 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
           bind.mainGetBuildinOption(key: kOptionAllowDeepLinkPassword) == 'Y';
       if (!allowDeepLinkPassword) {
         debugPrint(
-            "Ignore rustdesk://password because $kOptionAllowDeepLinkPassword is not enabled.");
+            "Ignore rustadmin://password because $kOptionAllowDeepLinkPassword is not enabled.");
         Timer(Duration(seconds: 1), () {
           showToast(translate('Failed'));
         });
@@ -2740,9 +2740,9 @@ List<String>? urlLinkToCmdArgs(Uri uri) {
   } else if (uri.authority.length > 2 &&
       (uri.path.length <= 1 ||
           (uri.path == '/r' || uri.path.startsWith('/r@')))) {
-    // rustdesk://<connect-id>
-    // rustdesk://<connect-id>/r
-    // rustdesk://<connect-id>/r@<server>
+    // rustadmin://<connect-id>
+    // rustadmin://<connect-id>/r
+    // rustadmin://<connect-id>/r@<server>
     command = '--connect';
     id = uri.authority;
     if (uri.path.length > 1) {
@@ -3190,7 +3190,7 @@ Future<void> onActiveWindowChanged() async {
     } catch (err) {
       debugPrintStack(label: "$err");
     } finally {
-      debugPrint("Start closing RustDesk...");
+      debugPrint("Start closing RustAdmin...");
       await windowManager.setPreventClose(false);
       await windowManager.close();
       if (isMacOS) {
@@ -4099,7 +4099,7 @@ Widget loadPowered(BuildContext context) {
     cursor: SystemMouseCursors.click,
     child: GestureDetector(
       onTap: () {
-        launchUrl(Uri.parse('https://rustdesk.com'));
+        launchUrl(Uri.parse('https://github.com/RustAdministrator/rustadmin'));
       },
       child: Opacity(
           opacity: 0.5,
@@ -4306,7 +4306,7 @@ get defaultOptionAccessMode => isCustomClient ? 'custom' : '';
 get defaultOptionApproveMode => isCustomClient ? 'password-click' : '';
 
 bool whitelistNotEmpty() {
-  // https://rustdesk.com/docs/en/self-host/client-configuration/advanced-settings/#whitelist
+  // https://github.com/RustAdministrator/rustadmin/docs/en/self-host/client-configuration/advanced-settings/#whitelist
   final v = bind.mainGetOptionSync(key: kOptionWhitelist);
   return v != '' && v != ',';
 }

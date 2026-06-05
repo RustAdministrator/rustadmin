@@ -58,7 +58,7 @@ pub enum GrabState {
 pub type NotifyMessageBox = fn(String, String, String, String) -> dyn Future<Output = ()>;
 
 // the executable name of the portable version
-pub const PORTABLE_APPNAME_RUNTIME_ENV_KEY: &str = "RUSTDESK_APPNAME";
+pub const PORTABLE_APPNAME_RUNTIME_ENV_KEY: &str = "RUSTADMIN_APPNAME";
 
 pub const PLATFORM_WINDOWS: &str = "Windows";
 pub const PLATFORM_LINUX: &str = "Linux";
@@ -1080,7 +1080,7 @@ pub fn get_full_name() -> String {
     format!(
         "{}.{}",
         hbb_common::config::ORG.read().unwrap(),
-        hbb_common::config::APP_NAME.read().unwrap(),
+        hbb_common::config::APP_NAME.read().unwrap().to_lowercase(),
     )
 }
 

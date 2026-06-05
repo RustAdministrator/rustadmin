@@ -1,12 +1,12 @@
 {
-  "id": "com.rustdesk.RustDesk",
+  "id": "io.github.rustadministrator.rustadmin",
   "runtime": "org.freedesktop.Platform",
   "runtime-version": "24.08",
   "sdk": "org.freedesktop.Sdk",
-  "command": "rustdesk",
+  "command": "rustadmin",
   "cleanup": ["/include", "/lib/pkgconfig", "/share/gtk-doc"],
-  "rename-desktop-file": "rustdesk.desktop",
-  "rename-icon": "rustdesk",
+  "rename-desktop-file": "rustadmin.desktop",
+  "rename-icon": "rustadmin",
   "modules": [
     "shared-modules/libappindicator/libappindicator-gtk3-12.10.json",
     {
@@ -34,21 +34,21 @@
       ]
     },
     {
-      "name": "rustdesk",
+      "name": "rustadmin",
       "buildsystem": "simple",
       "build-commands": [
-        "bsdtar -Oxf rustdesk.deb data.tar.xz | bsdtar -xf -",
+        "bsdtar -Oxf rustadmin.deb data.tar.xz | bsdtar -xf -",
         "cp -r usr/* /app/",
-        "mkdir -p /app/bin && ln -s /app/share/rustdesk/rustdesk /app/bin/rustdesk"
+        "mkdir -p /app/bin && ln -s /app/share/rustadmin/rustadmin /app/bin/rustadmin"
       ],
       "sources": [
         {
           "type": "file",
-          "path": "rustdesk.deb"
+          "path": "rustadmin.deb"
         },
         {
           "type": "file",
-          "path": "com.rustdesk.RustDesk.metainfo.xml"
+          "path": "io.github.rustadministrator.rustadmin.metainfo.xml"
         }
       ]
     }

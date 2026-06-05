@@ -514,7 +514,7 @@ class _FirstRunWizardDialogState extends State<FirstRunWizardDialog> {
     final Widget page;
     switch (_page) {
       case 0:
-        pageTitle = 'Welcome to RustDesk';
+        pageTitle = 'Welcome to RustAdmin';
         pageBody =
             'This quick setup helps you start with direct local or VPN connections and shows where the main network controls live.';
         page = _buildWelcomePage();
@@ -522,7 +522,7 @@ class _FirstRunWizardDialogState extends State<FirstRunWizardDialog> {
       case 1:
         pageTitle = 'How connections work';
         pageBody =
-            'RustDesk can use a public or private rendezvous server, or it can accept direct encrypted local/VPN connections when direct access is enabled.';
+            'RustAdmin can use a public or private rendezvous server, or it can accept direct encrypted local/VPN connections when direct access is enabled.';
         page = _buildBasicsPage();
         break;
       case 2:
@@ -534,7 +534,7 @@ class _FirstRunWizardDialogState extends State<FirstRunWizardDialog> {
       default:
         pageTitle = 'Ready to apply';
         pageBody =
-            'RustDesk will save these startup settings now. You can change them later from Settings.';
+            'RustAdmin will save these startup settings now. You can change them later from Settings.';
         page = _buildReviewPage();
         break;
     }
@@ -589,7 +589,7 @@ class _FirstRunWizardDialogState extends State<FirstRunWizardDialog> {
                 },
                 title: const Text('Show on next start'),
                 subtitle: const Text(
-                  'Keep this welcome window visible automatically when RustDesk starts.',
+                  'Keep this welcome window visible automatically when RustAdmin starts.',
                 ),
               ),
               const SizedBox(height: 22),

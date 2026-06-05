@@ -77,8 +77,8 @@ Maintainer: {args.maintainer}
 Homepage: {args.homepage}
 Depends: {", ".join(depends)}
 Recommends: libayatana-appindicator3-1
-Conflicts: rustdesk
-Replaces: rustdesk
+Conflicts: rustadmin
+Replaces: rustadmin
 Description: {args.summary}
  {args.description}
 """
@@ -173,19 +173,19 @@ def build_deb(args: argparse.Namespace) -> Path:
         debian_dir = root / "DEBIAN"
         debian_dir.mkdir(parents=True)
 
-        copy_tree_contents(bundle_dir, root / "usr/share/rustdesk")
-        copy_file(res_dir / "rustdesk.service", root / "usr/share/rustdesk/files/systemd/rustdesk.service")
-        copy_file(res_dir / "128x128@2x.png", root / "usr/share/icons/hicolor/256x256/apps/rustdesk.png")
-        copy_file(res_dir / "scalable.svg", root / "usr/share/icons/hicolor/scalable/apps/rustdesk.svg")
-        copy_file(res_dir / "rustdesk.desktop", root / "usr/share/applications/rustdesk.desktop")
-        copy_file(res_dir / "rustdesk-link.desktop", root / "usr/share/applications/rustdesk-link.desktop")
-        copy_file(res_dir / "startwm.sh", root / "etc/rustdesk/startwm.sh")
-        copy_file(res_dir / "xorg.conf", root / "etc/rustdesk/xorg.conf")
-        copy_file(res_dir / "pam.d/rustdesk.debian", root / "etc/pam.d/rustdesk")
+        copy_tree_contents(bundle_dir, root / "usr/share/rustadmin")
+        copy_file(res_dir / "rustadmin.service", root / "usr/share/rustadmin/files/systemd/rustadmin.service")
+        copy_file(res_dir / "128x128@2x.png", root / "usr/share/icons/hicolor/256x256/apps/rustadmin.png")
+        copy_file(res_dir / "scalable.svg", root / "usr/share/icons/hicolor/scalable/apps/rustadmin.svg")
+        copy_file(res_dir / "rustadmin.desktop", root / "usr/share/applications/rustadmin.desktop")
+        copy_file(res_dir / "rustadmin-link.desktop", root / "usr/share/applications/rustadmin-link.desktop")
+        copy_file(res_dir / "startwm.sh", root / "etc/rustadmin/startwm.sh")
+        copy_file(res_dir / "xorg.conf", root / "etc/rustadmin/xorg.conf")
+        copy_file(res_dir / "pam.d/rustadmin.debian", root / "etc/pam.d/rustadmin")
         write_copyright(root / f"usr/share/doc/{args.package_name}/copyright", args)
         write_metainfo(root / f"usr/share/metainfo/{args.metainfo_id}.metainfo.xml", args)
 
-        polkit = root / "usr/share/rustdesk/files/polkit"
+        polkit = root / "usr/share/rustadmin/files/polkit"
         polkit.parent.mkdir(parents=True, exist_ok=True)
         polkit.write_text("#!/bin/sh\n", encoding="utf-8")
         polkit.chmod(0o755)
@@ -218,10 +218,10 @@ def parse_args() -> argparse.Namespace:
     deb.add_argument("--maintainer", default="rustadmin <info@rustadmin.local>")
     deb.add_argument("--homepage", default="https://github.com/RustAdministrator/rustadmin")
     deb.add_argument("--summary", default="RustAdmin remote desktop client.")
-    deb.add_argument("--description", default="RustAdmin is a remote desktop client based on RustDesk.")
+    deb.add_argument("--description", default="RustAdmin is a remote desktop client based on RustAdmin.")
     deb.add_argument("--display-name", default="RustAdmin")
     deb.add_argument("--metainfo-id", default="com.rustadmin.RustAdmin")
-    deb.add_argument("--desktop-id", default="rustdesk.desktop")
+    deb.add_argument("--desktop-id", default="rustadmin.desktop")
 
     return parser.parse_args()
 
