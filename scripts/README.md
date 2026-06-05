@@ -80,8 +80,8 @@ flutter\build\windows\x64\runner\Release
 ## Linux
 
 The Linux wrapper discovers Flutter from `PATH`, or from
-`RUSTDESK_FLUTTER_ROOT` when set. Native codec dependencies can come from
-system `pkg-config` packages, from `RUSTDESK_LINUX_CODEC_ROOT`, or from the
+`RUSTADMIN_FLUTTER_ROOT` when set. Native codec dependencies can come from
+system `pkg-config` packages, from `RUSTADMIN_LINUX_CODEC_ROOT`, or from the
 repo-local `.local/linux-codecs` prefix.
 
 Common system packages on Debian/Ubuntu:
@@ -113,12 +113,15 @@ scripts/build_linux.sh --package all
 Optional:
 
 ```bash
-RUSTDESK_FLUTTER_ROOT=/path/to/flutter \
-RUSTDESK_LINUX_CODEC_ROOT=/path/to/codec-prefix \
+RUSTADMIN_FLUTTER_ROOT=/path/to/flutter \
+RUSTADMIN_LINUX_CODEC_ROOT=/path/to/codec-prefix \
 scripts/build_linux.sh --clean
 
 scripts/build_linux.sh --hwcodec
 ```
+
+Legacy `RUSTDESK_*` Linux variable names are still accepted for compatibility
+with inherited build code.
 
 Toolbar lab:
 

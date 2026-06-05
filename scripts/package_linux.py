@@ -63,6 +63,21 @@ def copy_tree_contents(src: Path, dst: Path) -> None:
             shutil.copy2(item, target, follow_symlinks=False)
 
 
+def normalize_bundle_executable(bundle_root: Path) -> None:
+    rustadmin_bin = bundle_root / "rustadmin"
+    rustdesk_bin = bundle_root / "rustdesk"
+    if rustadmin_bin.exists():
+        rustadmin_bin.chmod(rustadmin_bin.stat().st_mode | 0o111)
+        if rustdesk_bin.exists():
+            rustdesk_bin.unlink()
+        return
+    if rustdesk_bin.exists():
+        rustdesk_bin.rename(rustadmin_bin)
+        rustadmin_bin.chmod(rustadmin_bin.stat().st_mode | 0o111)
+        return
+    raise SystemExit(f"Linux bundle contains neither {rustadmin_bin.name} nor {rustdesk_bin.name}")
+
+
 def write_control(path: Path, args: argparse.Namespace, arch: str) -> None:
     depends = list(DEB_DEPENDS)
     if arch == "armhf":
@@ -77,8 +92,8 @@ Maintainer: {args.maintainer}
 Homepage: {args.homepage}
 Depends: {", ".join(depends)}
 Recommends: libayatana-appindicator3-1
-Conflicts: rustadmin
-Replaces: rustadmin
+Conflicts: rustdesk
+Replaces: rustdesk
 Description: {args.summary}
  {args.description}
 """
@@ -115,6 +130,9 @@ def write_metainfo(path: Path, args: argparse.Namespace) -> None:
   <id>{component_id}</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>AGPL-3.0-only</project_license>
+  <developer id="io.github.rustadministrator">
+    <name>RustAdministrator</name>
+  </developer>
   <name>{name}</name>
   <summary>{summary}</summary>
   <description>
@@ -174,6 +192,7 @@ def build_deb(args: argparse.Namespace) -> Path:
         debian_dir.mkdir(parents=True)
 
         copy_tree_contents(bundle_dir, root / "usr/share/rustadmin")
+        normalize_bundle_executable(root / "usr/share/rustadmin")
         copy_file(res_dir / "rustadmin.service", root / "usr/share/rustadmin/files/systemd/rustadmin.service")
         copy_file(res_dir / "128x128@2x.png", root / "usr/share/icons/hicolor/256x256/apps/rustadmin.png")
         copy_file(res_dir / "scalable.svg", root / "usr/share/icons/hicolor/scalable/apps/rustadmin.svg")
@@ -218,9 +237,15 @@ def parse_args() -> argparse.Namespace:
     deb.add_argument("--maintainer", default="rustadmin <info@rustadmin.local>")
     deb.add_argument("--homepage", default="https://github.com/RustAdministrator/rustadmin")
     deb.add_argument("--summary", default="RustAdmin remote desktop client.")
-    deb.add_argument("--description", default="RustAdmin is a remote desktop client based on RustAdmin.")
+    deb.add_argument(
+        "--description",
+        default=(
+            "RustAdmin is a remote desktop administration client based on RustDesk, "
+            "with attended access, file transfer, and Linux background service support."
+        ),
+    )
     deb.add_argument("--display-name", default="RustAdmin")
-    deb.add_argument("--metainfo-id", default="com.rustadmin.RustAdmin")
+    deb.add_argument("--metainfo-id", default="io.github.rustadministrator.rustadmin")
     deb.add_argument("--desktop-id", default="rustadmin.desktop")
 
     return parser.parse_args()

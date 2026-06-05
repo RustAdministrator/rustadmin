@@ -6,22 +6,25 @@ usage() {
 Usage: scripts/build_linux.sh [--clean] [--hwcodec] [--skip-cargo] [--package zip|deb|all] [--deb]
 
 Environment overrides:
-  RUSTDESK_FLUTTER_ROOT       Flutter SDK root. Default: flutter found in PATH,
+  RUSTADMIN_FLUTTER_ROOT      Flutter SDK root. Default: flutter found in PATH,
                               then nearby checkout candidates.
-  RUSTDESK_SKIP_BRIDGE_GEN    Set to 1 to skip flutter_rust_bridge codegen. Default: 0
-  RUSTDESK_FORCE_BRIDGE_GEN   Set to 1 to regenerate bridge files even if current. Default: 0
-  RUSTDESK_VERBOSE_BRIDGE_GEN Set to 1 to print bridge generator output on success. Default: 0
-  RUSTDESK_BRIDGE_LLVM_PATH   LLVM prefix for bridge codegen, e.g. /usr/lib/llvm-20.
+  RUSTADMIN_SKIP_BRIDGE_GEN   Set to 1 to skip flutter_rust_bridge codegen. Default: 0
+  RUSTADMIN_FORCE_BRIDGE_GEN  Set to 1 to regenerate bridge files even if current. Default: 0
+  RUSTADMIN_VERBOSE_BRIDGE_GEN
+                              Set to 1 to print bridge generator output on success. Default: 0
+  RUSTADMIN_BRIDGE_LLVM_PATH  LLVM prefix for bridge codegen, e.g. /usr/lib/llvm-20.
                               Default: llvm-config/llvm-config-* prefix when found.
-  RUSTDESK_BRIDGE_LLVM_COMPILER_OPTS
+  RUSTADMIN_BRIDGE_LLVM_COMPILER_OPTS
                               Extra clang opts for bridge codegen. Optional
-  RUSTDESK_LINUX_CODEC_ROOT   Native dependency prefix. Default: .local/linux-codecs
+  RUSTADMIN_LINUX_CODEC_ROOT  Native dependency prefix. Default: .local/linux-codecs
                               when present, otherwise system pkg-config
                               packages are used.
   RUSTADMIN_LINUX_DIST_DIR    Release zip output dir. Default: dist/linux
   PUB_CACHE                   Dart package cache. Default: $XDG_CACHE_HOME/rustadmin/flutter-pub-cache-linux,
                               or $HOME/.cache/rustadmin/flutter-pub-cache-linux.
   CARGO_TARGET_DIR            Cargo output dir. Default: target
+
+Legacy RUSTDESK_* variable names are still accepted for compatibility.
 USAGE
 }
 
@@ -29,11 +32,11 @@ clean=0
 hwcodec=0
 skip_cargo=0
 package_mode="zip"
-skip_bridge_gen="${RUSTDESK_SKIP_BRIDGE_GEN:-0}"
-force_bridge_gen="${RUSTDESK_FORCE_BRIDGE_GEN:-0}"
-verbose_bridge_gen="${RUSTDESK_VERBOSE_BRIDGE_GEN:-0}"
-bridge_llvm_path="${RUSTDESK_BRIDGE_LLVM_PATH:-}"
-bridge_llvm_compiler_opts="${RUSTDESK_BRIDGE_LLVM_COMPILER_OPTS:-}"
+skip_bridge_gen="${RUSTADMIN_SKIP_BRIDGE_GEN:-${RUSTDESK_SKIP_BRIDGE_GEN:-0}}"
+force_bridge_gen="${RUSTADMIN_FORCE_BRIDGE_GEN:-${RUSTDESK_FORCE_BRIDGE_GEN:-0}}"
+verbose_bridge_gen="${RUSTADMIN_VERBOSE_BRIDGE_GEN:-${RUSTDESK_VERBOSE_BRIDGE_GEN:-0}}"
+bridge_llvm_path="${RUSTADMIN_BRIDGE_LLVM_PATH:-${RUSTDESK_BRIDGE_LLVM_PATH:-}}"
+bridge_llvm_compiler_opts="${RUSTADMIN_BRIDGE_LLVM_COMPILER_OPTS:-${RUSTDESK_BRIDGE_LLVM_COMPILER_OPTS:-}}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -63,8 +66,9 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 flutter_dir="$repo_root/flutter"
 
 resolve_flutter_root() {
-  if [[ -n "${RUSTDESK_FLUTTER_ROOT:-}" ]]; then
-    printf '%s\n' "$RUSTDESK_FLUTTER_ROOT"
+  local configured_root="${RUSTADMIN_FLUTTER_ROOT:-${RUSTDESK_FLUTTER_ROOT:-}}"
+  if [[ -n "$configured_root" ]]; then
+    printf '%s\n' "$configured_root"
     return
   fi
 
@@ -117,19 +121,22 @@ export PUB_CACHE="${PUB_CACHE:-$(default_pub_cache)}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/target}"
 
 deps_root=""
-if [[ -n "${RUSTDESK_LINUX_CODEC_ROOT:-}" ]]; then
-  deps_root="$RUSTDESK_LINUX_CODEC_ROOT"
+configured_deps_root="${RUSTADMIN_LINUX_CODEC_ROOT:-${RUSTDESK_LINUX_CODEC_ROOT:-}}"
+if [[ -n "$configured_deps_root" ]]; then
+  deps_root="$configured_deps_root"
   if [[ ! -e "$deps_root" ]]; then
     echo "Dependency prefix was not found at '$deps_root'." >&2
-    echo "Fix RUSTDESK_LINUX_CODEC_ROOT or unset it to use system pkg-config packages." >&2
+    echo "Fix RUSTADMIN_LINUX_CODEC_ROOT or unset it to use system pkg-config packages." >&2
     exit 1
   fi
 elif [[ -e "$repo_root/.local/linux-codecs" ]]; then
   deps_root="$repo_root/.local/linux-codecs"
 fi
 if [[ -n "$deps_root" ]]; then
+  export RUSTADMIN_LINUX_CODEC_ROOT="$deps_root"
   export RUSTDESK_LINUX_CODEC_ROOT="$deps_root"
 else
+  unset RUSTADMIN_LINUX_CODEC_ROOT || true
   unset RUSTDESK_LINUX_CODEC_ROOT || true
 fi
 
@@ -158,7 +165,7 @@ append_pkg_config_path "$user_pkg_config_path"
 
 if ! command -v flutter >/dev/null 2>&1; then
   echo "Flutter was not found." >&2
-  echo "Set RUSTDESK_FLUTTER_ROOT or put flutter in PATH." >&2
+  echo "Set RUSTADMIN_FLUTTER_ROOT or put flutter in PATH." >&2
   exit 1
 fi
 if ! command -v zip >/dev/null 2>&1; then
@@ -223,7 +230,7 @@ codec_dependency_available "opus" "opus/opus_multistream.h" "libopus.a" "libopus
 if [[ "${#missing_codecs[@]}" -gt 0 ]]; then
   echo "Codec development dependencies were not found: ${missing_codecs[*]}" >&2
   echo "Install distro packages such as libyuv-dev libvpx-dev libaom-dev libopus-dev," >&2
-  echo "or set RUSTDESK_LINUX_CODEC_ROOT to a prefix with include/ and lib/." >&2
+  echo "or set RUSTADMIN_LINUX_CODEC_ROOT to a prefix with include/ and lib/." >&2
   exit 1
 fi
 
@@ -266,7 +273,7 @@ EOF
 
 generate_bridge_files() {
   if [[ "$skip_bridge_gen" == "1" ]]; then
-    echo "Skipping flutter_rust_bridge generation because RUSTDESK_SKIP_BRIDGE_GEN=1."
+    echo "Skipping flutter_rust_bridge generation because RUSTADMIN_SKIP_BRIDGE_GEN=1."
     return
   fi
 
@@ -302,14 +309,14 @@ generate_bridge_files() {
 flutter_rust_bridge_codegen was not found.
 Install it with:
   cargo install flutter_rust_bridge_codegen --version 1.80.1 --features uuid
-or set RUSTDESK_SKIP_BRIDGE_GEN=1 if the generated files are already current.
+or set RUSTADMIN_SKIP_BRIDGE_GEN=1 if the generated files are already current.
 EOF
     exit 1
   fi
 
   echo "Generating flutter_rust_bridge files..."
   local bridge_log
-  bridge_log="$(mktemp "${TMPDIR:-/tmp}/rustdesk-bridge-gen.log.XXXXXX")"
+  bridge_log="$(mktemp "${TMPDIR:-/tmp}/rustadmin-bridge-gen.log.XXXXXX")"
   local -a bridge_codegen_args
   bridge_codegen_args=(
     --rust-input "$bridge_input" \
@@ -360,6 +367,8 @@ package_release_zip() {
   local bundle_dir="$flutter_dir/build/linux/x64/release/bundle"
   local dist_dir="${RUSTADMIN_LINUX_DIST_DIR:-$repo_root/dist/linux}"
   local archive_path="$dist_dir/$archive_name"
+  local zip_source_dir="$bundle_dir"
+  local zip_stage=""
 
   if [[ ! -d "$bundle_dir" ]]; then
     echo "Linux bundle was not found at $bundle_dir" >&2
@@ -368,7 +377,16 @@ package_release_zip() {
 
   mkdir -p "$dist_dir"
   rm -f "$archive_path"
-  (cd "$bundle_dir" && zip -qr "$archive_path" .)
+  if [[ -f "$bundle_dir/rustdesk" && ! -f "$bundle_dir/rustadmin" ]]; then
+    zip_stage="$(mktemp -d "${TMPDIR:-/tmp}/rustadmin-zip-stage.XXXXXX")"
+    cp -a "$bundle_dir/." "$zip_stage/"
+    mv "$zip_stage/rustdesk" "$zip_stage/rustadmin"
+    zip_source_dir="$zip_stage"
+  fi
+  (cd "$zip_source_dir" && zip -qr "$archive_path" .)
+  if [[ -n "$zip_stage" ]]; then
+    rm -rf "$zip_stage"
+  fi
 
   echo "Linux archive:"
   echo "$archive_path"
