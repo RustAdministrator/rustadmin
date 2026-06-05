@@ -89,22 +89,9 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 ```
 
-Install `vcpkg` dependencies:
-
-```sh
-git clone https://github.com/microsoft/vcpkg "$HOME/vcpkg"
-cd "$HOME/vcpkg"
-git checkout 2023.04.15
-./bootstrap-vcpkg.sh
-export VCPKG_ROOT="$HOME/vcpkg"
-"$VCPKG_ROOT/vcpkg" install libvpx libyuv opus aom
-```
-
-On Windows, use the appropriate triplets, for example:
-
-```powershell
-vcpkg install libvpx:x64-windows-static libyuv:x64-windows-static opus:x64-windows-static aom:x64-windows-static
-```
+Native codec dependencies should come from system packages or an explicit local
+prefix passed to the platform build wrappers. See `scripts/README.md` for the
+current platform-specific dependency options.
 
 ### Flutter desktop build
 
@@ -169,7 +156,7 @@ Hardware codec and platform-specific features may require additional SDKs, libra
 * `flutter/lib/desktop/` — desktop UI
 * `flutter/lib/mobile/` — mobile UI
 * `flutter/lib/common/` — shared Flutter UI and helpers
-* `libs/hbb_common/` — shared protocol, configuration, networking, protobuf, file transfer, and utility code
+* `../hbb_common/` — shared protocol, configuration, networking, protobuf, file transfer, and utility code
 * `libs/scrap/` — screen capture
 * `libs/enigo/` — keyboard and mouse control
 * `libs/clipboard/` — cross-platform clipboard support
