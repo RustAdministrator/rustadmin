@@ -111,7 +111,7 @@ function Invoke-TestStep {
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     Push-Location $WorkingDirectory
-    $output = @()
+    New-Item -ItemType File -Force -Path $stepLogPath | Out-Null
     $oldErrorActionPreference = $ErrorActionPreference
     $hasNativePreference = Test-Path Variable:\PSNativeCommandUseErrorActionPreference
     $oldNativePreference = $null
@@ -121,11 +121,12 @@ function Invoke-TestStep {
             $oldNativePreference = $PSNativeCommandUseErrorActionPreference
             $PSNativeCommandUseErrorActionPreference = $false
         }
-        $output = & $Command @Arguments *>&1
+        & $Command @Arguments *>&1 | Tee-Object -FilePath $stepLogPath
         $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
     }
     catch {
-        $output += $_
+        $_.ToString() | Add-Content -Encoding UTF8 -Path $stepLogPath
+        Write-Host $_.ToString() -ForegroundColor Red
         $exitCode = 1
     }
     finally {
@@ -135,13 +136,6 @@ function Invoke-TestStep {
         $ErrorActionPreference = $oldErrorActionPreference
         Pop-Location
         $sw.Stop()
-    }
-
-    $outputText = @($output | ForEach-Object { $_.ToString() })
-    if ($outputText.Count -eq 0) {
-        "" | Set-Content -Encoding UTF8 -Path $stepLogPath
-    } else {
-        $outputText | Set-Content -Encoding UTF8 -Path $stepLogPath
     }
 
     $status = if ($exitCode -eq 0) { "PASS" } else { "FAIL" }

@@ -4731,6 +4731,23 @@ mod security_tests {
 
     static TEST_CLIENT_SECURITY_LOCK: Mutex<()> = Mutex::new(());
 
+    fn lock_security_tests() -> std::sync::MutexGuard<'static, ()> {
+        TEST_CLIENT_SECURITY_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    async fn connect_security_test_tcp(addr: &str) -> ResultType<Stream> {
+        let deadline = Instant::now() + Duration::from_millis(CONNECT_TIMEOUT);
+        loop {
+            match connect_tcp_local(addr.to_owned(), None, CONNECT_TIMEOUT).await {
+                Ok(conn) => return Ok(conn),
+                Err(err) if Instant::now() >= deadline => return Err(err),
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    }
+
     #[derive(Clone, Default)]
     struct TestInterface {
         lch: Arc<RwLock<LoginConfigHandler>>,
@@ -5201,7 +5218,7 @@ mod security_tests {
 
     #[test]
     fn test_explicit_rendezvous_route_requires_id_relay_switch() {
-        let _guard = TEST_CLIENT_SECURITY_LOCK.lock().unwrap();
+        let _guard = lock_security_tests();
 
         struct RestoreRouteOptions {
             allow_id_relay_server: String,
@@ -5247,7 +5264,7 @@ mod security_tests {
 
     #[tokio::test]
     async fn test_secure_direct_connection_requires_pairing_or_pretrust() {
-        let _guard = TEST_CLIENT_SECURITY_LOCK.lock().unwrap();
+        let _guard = lock_security_tests();
         let saved_allow = Config::get_option(keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST);
         let peer_id = format!("direct-peer-{}", Uuid::new_v4());
         let peer_config_id = format!("direct-config-{}", Uuid::new_v4());
@@ -5261,9 +5278,7 @@ mod security_tests {
         let (addr, handle) = spawn_direct_handshake_peer(peer_id.clone(), sign_pk.0, sign_sk, None)
             .await
             .unwrap();
-        let mut conn = connect_tcp_local(addr.clone(), None, CONNECT_TIMEOUT)
-            .await
-            .unwrap();
+        let mut conn = connect_security_test_tcp(&addr).await.unwrap();
         let err = Client::secure_direct_connection(&addr, &peer_config_id, &mut conn, interface)
             .await
             .unwrap_err()
@@ -5281,7 +5296,7 @@ mod security_tests {
 
     #[tokio::test]
     async fn test_secure_direct_connection_with_pairing_repairs_changed_key() {
-        let _guard = TEST_CLIENT_SECURITY_LOCK.lock().unwrap();
+        let _guard = lock_security_tests();
         let saved_allow = Config::get_option(keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST);
         let peer_id = format!("direct-peer-{}", Uuid::new_v4());
         let peer_config_id = format!("direct-config-{}", Uuid::new_v4());
@@ -5300,9 +5315,7 @@ mod security_tests {
         )
         .await
         .unwrap();
-        let mut conn = connect_tcp_local(addr.clone(), None, CONNECT_TIMEOUT)
-            .await
-            .unwrap();
+        let mut conn = connect_security_test_tcp(&addr).await.unwrap();
         let pk =
             Client::secure_direct_connection(&addr, &peer_config_id, &mut conn, interface.clone())
                 .await
@@ -5323,9 +5336,7 @@ mod security_tests {
         )
         .await
         .unwrap();
-        let mut changed_conn = connect_tcp_local(changed_addr.clone(), None, CONNECT_TIMEOUT)
-            .await
-            .unwrap();
+        let mut changed_conn = connect_security_test_tcp(&changed_addr).await.unwrap();
         let pk = Client::secure_direct_connection(
             &changed_addr,
             &peer_config_id,
@@ -5350,7 +5361,7 @@ mod security_tests {
 
     #[tokio::test]
     async fn test_secure_direct_connection_rejects_changed_key_without_pairing() {
-        let _guard = TEST_CLIENT_SECURITY_LOCK.lock().unwrap();
+        let _guard = lock_security_tests();
         let saved_allow = Config::get_option(keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST);
         let peer_id = format!("direct-peer-{}", Uuid::new_v4());
         let peer_config_id = format!("direct-config-{}", Uuid::new_v4());
@@ -5369,9 +5380,7 @@ mod security_tests {
             spawn_direct_handshake_peer(peer_id, changed_sign_pk.0, changed_sign_sk, None)
                 .await
                 .unwrap();
-        let mut conn = connect_tcp_local(addr.clone(), None, CONNECT_TIMEOUT)
-            .await
-            .unwrap();
+        let mut conn = connect_security_test_tcp(&addr).await.unwrap();
         let err = Client::secure_direct_connection(&addr, &peer_config_id, &mut conn, interface)
             .await
             .unwrap_err()
@@ -5388,7 +5397,7 @@ mod security_tests {
 
     #[tokio::test]
     async fn test_secure_direct_connection_reuses_paired_viewer() {
-        let _guard = TEST_CLIENT_SECURITY_LOCK.lock().unwrap();
+        let _guard = lock_security_tests();
         let saved_allow = Config::get_option(keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST);
         let saved_remember = Config::get_option(keys::OPTION_REMEMBER_PAIRED_VIEWERS);
         let peer_id = format!("direct-peer-{}", Uuid::new_v4());
@@ -5414,9 +5423,7 @@ mod security_tests {
         )
         .await
         .unwrap();
-        let mut conn = connect_tcp_local(addr.clone(), None, CONNECT_TIMEOUT)
-            .await
-            .unwrap();
+        let mut conn = connect_security_test_tcp(&addr).await.unwrap();
         Client::secure_direct_connection(
             &addr,
             &peer_config_id,
@@ -5440,9 +5447,7 @@ mod security_tests {
         )
         .await
         .unwrap();
-        let mut conn = connect_tcp_local(addr.clone(), None, CONNECT_TIMEOUT)
-            .await
-            .unwrap();
+        let mut conn = connect_security_test_tcp(&addr).await.unwrap();
         let pk = Client::secure_direct_connection(
             &addr,
             &peer_config_id,
@@ -5469,7 +5474,7 @@ mod security_tests {
 
     #[tokio::test]
     async fn test_secure_direct_connection_requires_pairing_when_paired_viewer_memory_disabled() {
-        let _guard = TEST_CLIENT_SECURITY_LOCK.lock().unwrap();
+        let _guard = lock_security_tests();
         let saved_allow = Config::get_option(keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST);
         let saved_remember = Config::get_option(keys::OPTION_REMEMBER_PAIRED_VIEWERS);
         let peer_id = format!("direct-peer-{}", Uuid::new_v4());
@@ -5495,9 +5500,7 @@ mod security_tests {
         )
         .await
         .unwrap();
-        let mut conn = connect_tcp_local(addr.clone(), None, CONNECT_TIMEOUT)
-            .await
-            .unwrap();
+        let mut conn = connect_security_test_tcp(&addr).await.unwrap();
         Client::secure_direct_connection(
             &addr,
             &peer_config_id,
@@ -5525,9 +5528,7 @@ mod security_tests {
         )
         .await
         .unwrap();
-        let mut conn = connect_tcp_local(addr.clone(), None, CONNECT_TIMEOUT)
-            .await
-            .unwrap();
+        let mut conn = connect_security_test_tcp(&addr).await.unwrap();
         let err = Client::secure_direct_connection(
             &addr,
             &peer_config_id,
@@ -5555,7 +5556,7 @@ mod security_tests {
 
     #[tokio::test]
     async fn test_secure_direct_connection_retries_after_removed_paired_viewer() {
-        let _guard = TEST_CLIENT_SECURITY_LOCK.lock().unwrap();
+        let _guard = lock_security_tests();
         let saved_allow = Config::get_option(keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST);
         let saved_remember = Config::get_option(keys::OPTION_REMEMBER_PAIRED_VIEWERS);
         let peer_id = format!("direct-peer-{}", Uuid::new_v4());
@@ -5614,7 +5615,7 @@ mod security_tests {
 
     #[tokio::test]
     async fn test_secure_connection_requires_pairing_or_pretrust() {
-        let _guard = TEST_CLIENT_SECURITY_LOCK.lock().unwrap();
+        let _guard = lock_security_tests();
         let saved_allow = Config::get_option(keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST);
         let peer_id = format!("secure-peer-{}", Uuid::new_v4());
         let peer_config_id = format!("secure-config-{}", Uuid::new_v4());
@@ -5630,9 +5631,7 @@ mod security_tests {
             spawn_secure_handshake_peer(peer_id.clone(), sign_pk.0, sign_sk, rs_sk, None)
                 .await
                 .unwrap();
-        let mut conn = connect_tcp_local(addr.clone(), None, CONNECT_TIMEOUT)
-            .await
-            .unwrap();
+        let mut conn = connect_security_test_tcp(&addr).await.unwrap();
         let err = Client::secure_connection(
             &peer_id,
             &peer_id,
@@ -5659,7 +5658,7 @@ mod security_tests {
 
     #[tokio::test]
     async fn test_secure_connection_with_pairing_repairs_changed_key() {
-        let _guard = TEST_CLIENT_SECURITY_LOCK.lock().unwrap();
+        let _guard = lock_security_tests();
         let saved_allow = Config::get_option(keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST);
         let saved_remember = Config::get_option(keys::OPTION_REMEMBER_PAIRED_VIEWERS);
         let peer_id = format!("secure-peer-{}", Uuid::new_v4());
@@ -5686,9 +5685,7 @@ mod security_tests {
         )
         .await
         .unwrap();
-        let mut conn = connect_tcp_local(addr.clone(), None, CONNECT_TIMEOUT)
-            .await
-            .unwrap();
+        let mut conn = connect_security_test_tcp(&addr).await.unwrap();
         let pk = Client::secure_connection(
             &peer_id,
             &peer_id,
@@ -5718,9 +5715,7 @@ mod security_tests {
         )
         .await
         .unwrap();
-        let mut changed_conn = connect_tcp_local(changed_addr.clone(), None, CONNECT_TIMEOUT)
-            .await
-            .unwrap();
+        let mut changed_conn = connect_security_test_tcp(&changed_addr).await.unwrap();
         let pk = Client::secure_connection(
             &peer_id,
             &peer_id,
@@ -5754,7 +5749,7 @@ mod security_tests {
 
     #[tokio::test]
     async fn test_secure_connection_reuses_paired_viewer() {
-        let _guard = TEST_CLIENT_SECURITY_LOCK.lock().unwrap();
+        let _guard = lock_security_tests();
         let saved_allow = Config::get_option(keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST);
         let saved_remember = Config::get_option(keys::OPTION_REMEMBER_PAIRED_VIEWERS);
         let peer_id = format!("secure-peer-{}", Uuid::new_v4());
@@ -5782,9 +5777,7 @@ mod security_tests {
         )
         .await
         .unwrap();
-        let mut conn = connect_tcp_local(addr.clone(), None, CONNECT_TIMEOUT)
-            .await
-            .unwrap();
+        let mut conn = connect_security_test_tcp(&addr).await.unwrap();
         Client::secure_connection(
             &peer_id,
             &peer_id,
@@ -5812,9 +5805,7 @@ mod security_tests {
         )
         .await
         .unwrap();
-        let mut conn = connect_tcp_local(addr.clone(), None, CONNECT_TIMEOUT)
-            .await
-            .unwrap();
+        let mut conn = connect_security_test_tcp(&addr).await.unwrap();
         let pk = Client::secure_connection(
             &peer_id,
             &peer_id,
@@ -5845,7 +5836,7 @@ mod security_tests {
 
     #[tokio::test]
     async fn test_secure_connection_clears_deleted_paired_viewer_and_requires_passphrase() {
-        let _guard = TEST_CLIENT_SECURITY_LOCK.lock().unwrap();
+        let _guard = lock_security_tests();
         let saved_allow = Config::get_option(keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST);
         let saved_remember = Config::get_option(keys::OPTION_REMEMBER_PAIRED_VIEWERS);
         let peer_id = format!("secure-peer-{}", Uuid::new_v4());
@@ -5876,9 +5867,7 @@ mod security_tests {
         )
         .await
         .unwrap();
-        let mut conn = connect_tcp_local(addr.clone(), None, CONNECT_TIMEOUT)
-            .await
-            .unwrap();
+        let mut conn = connect_security_test_tcp(&addr).await.unwrap();
         let err = Client::secure_connection(
             &peer_id,
             &peer_id,
@@ -5912,9 +5901,7 @@ mod security_tests {
         )
         .await
         .unwrap();
-        let mut conn = connect_tcp_local(addr.clone(), None, CONNECT_TIMEOUT)
-            .await
-            .unwrap();
+        let mut conn = connect_security_test_tcp(&addr).await.unwrap();
         let pk = Client::secure_connection(
             &peer_id,
             &peer_id,
@@ -5948,7 +5935,7 @@ mod security_tests {
 
     #[tokio::test]
     async fn test_start_retries_once_after_rendezvous_pairing_was_cleared() {
-        let _guard = TEST_CLIENT_SECURITY_LOCK.lock().unwrap();
+        let _guard = lock_security_tests();
         let peer_config_id = format!("secure-config-{}", Uuid::new_v4());
         let attempts = Arc::new(Mutex::new(0usize));
 
