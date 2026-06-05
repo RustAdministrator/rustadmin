@@ -39,7 +39,7 @@ String _testRemoteModifyControlPermission = '';
 String _testKnownHostsJson = '';
 Map<String, Map<String, String>> _testPeerOptions = {};
 
-class _TestRustdeskImpl implements RustdeskImpl {
+class _TestRustadminImpl implements Rustadmin {
   String _mainGetCommon(String key) {
     if (key == 'should-block-rustadmin-gui-for-active-sessions') {
       return _testShouldBlockRustAdminGuiForActiveSessions ? 'true' : 'false';
@@ -171,7 +171,7 @@ Future<void> _initConnectionManagerTest() async {
   _testRemoteModifyControlPermission = '';
   _testKnownHostsJson = '';
   _testPeerOptions = {};
-  platformFFI.initForTest(_TestRustdeskImpl());
+  platformFFI.initForTest(_TestRustadminImpl());
   await initGlobalFFI();
 }
 
@@ -267,7 +267,7 @@ void main() {
 
   test('known hosts expose password, pinned key, and pairing memory', () async {
     isTest = true;
-    platformFFI.initForTest(_TestRustdeskImpl());
+    platformFFI.initForTest(_TestRustadminImpl());
     _testKnownHostsJson = jsonEncode([
       {
         'id': 'peer-b',

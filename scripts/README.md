@@ -156,8 +156,8 @@ scripts/build_macos.sh
 Optional:
 
 ```bash
-RUSTDESK_FLUTTER_ROOT=/path/to/flutter \
-RUSTDESK_MACOS_CODEC_ROOT=/path/to/prefix \
+RUSTADMIN_FLUTTER_ROOT=/path/to/flutter \
+RUSTADMIN_MACOS_CODEC_ROOT=/path/to/prefix \
 scripts/build_macos.sh --screencapturekit
 ```
 
@@ -191,7 +191,7 @@ For notarization with an existing `notarytool` keychain profile:
 
 ```bash
 SIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
-NOTARY_PROFILE="rustdesk-notary" \
+NOTARY_PROFILE="rustadmin-notary" \
 scripts/package_macos.sh
 ```
 

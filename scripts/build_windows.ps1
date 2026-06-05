@@ -15,7 +15,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RequiredBridgeCodegenVersion = "1.80.1"
-$BridgeClassName = "Rustdesk"
+$BridgeClassName = "Rustadmin"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $FlutterDir = Join-Path $RepoRoot "flutter"
 $Drive = Split-Path -Qualifier $RepoRoot

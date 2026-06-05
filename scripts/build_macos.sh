@@ -6,21 +6,22 @@ usage() {
 Usage: scripts/build_macos.sh [--clean] [--hwcodec] [--screencapturekit] [--skip-cargo] [--sign-only]
 
 Environment overrides:
-  RUSTDESK_FLUTTER_ROOT       Flutter SDK root. Default: first flutter in PATH
-  RUSTDESK_SKIP_BRIDGE_GEN    Set to 1 to skip flutter_rust_bridge codegen. Default: 0
-  RUSTDESK_FORCE_BRIDGE_GEN   Set to 1 to regenerate bridge files even if current. Default: 0
-  RUSTDESK_VERBOSE_BRIDGE_GEN Set to 1 to print bridge generator output on success. Default: 0
-  RUSTDESK_BRIDGE_LLVM_COMPILER_OPTS
+  RUSTADMIN_FLUTTER_ROOT       Flutter SDK root. Default: first flutter in PATH
+  RUSTADMIN_SKIP_BRIDGE_GEN    Set to 1 to skip flutter_rust_bridge codegen. Default: 0
+  RUSTADMIN_FORCE_BRIDGE_GEN   Set to 1 to regenerate bridge files even if current. Default: 0
+  RUSTADMIN_VERBOSE_BRIDGE_GEN Set to 1 to print bridge generator output on success. Default: 0
+  RUSTADMIN_BRIDGE_LLVM_COMPILER_OPTS
                               Extra clang opts for bridge codegen.
                               Default: -Wno-nullability-completeness
-  RUSTDESK_MACOS_CODEC_ROOT   Native dependency prefix. Optional
-  RUSTDESK_MACOS_SIGN_IDENTITY  Signing identity to use for the app bundle. Optional
-  RUSTDESK_MACOS_XCODE_SIGN_IDENTITY Signing identity passed to Xcode. Optional
-  RUSTDESK_MACOS_DEVELOPMENT_TEAM Development team to pass to Xcode. Optional
-  RUSTDESK_MACOS_ADHOC_SIGN   Set to 1 to force ad-hoc signing fallback. Default: 0
-  PUB_CACHE                   Dart package cache. Default: $HOME/.pub-cache-rustdesk-macos
-  CARGO_TARGET_DIR            Cargo output dir. Default: ../rustdesk-target-macos
+  RUSTADMIN_MACOS_CODEC_ROOT   Native dependency prefix. Optional
+  RUSTADMIN_MACOS_SIGN_IDENTITY  Signing identity to use for the app bundle. Optional
+  RUSTADMIN_MACOS_XCODE_SIGN_IDENTITY Signing identity passed to Xcode. Optional
+  RUSTADMIN_MACOS_DEVELOPMENT_TEAM Development team to pass to Xcode. Optional
+  RUSTADMIN_MACOS_ADHOC_SIGN   Set to 1 to force ad-hoc signing fallback. Default: 0
+  PUB_CACHE                    Dart package cache. Default: $HOME/.pub-cache-rustadmin-macos
+  CARGO_TARGET_DIR             Cargo output dir. Default: ../rustadmin-target-macos
                               Synced to target/release for Xcode embedding.
+Legacy RUSTDESK_* environment variable names are still accepted as fallbacks.
 USAGE
 }
 
@@ -47,43 +48,50 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 flutter_dir="$repo_root/flutter"
 default_codec_root="$repo_root/.local/macos-codecs"
 home_codec_root="$HOME/MO/Release"
-app_bundle="$flutter_dir/build/macos/Build/Products/Release/RustDesk.app"
-adhoc_sign="${RUSTDESK_MACOS_ADHOC_SIGN:-0}"
-skip_bridge_gen="${RUSTDESK_SKIP_BRIDGE_GEN:-0}"
-force_bridge_gen="${RUSTDESK_FORCE_BRIDGE_GEN:-0}"
-verbose_bridge_gen="${RUSTDESK_VERBOSE_BRIDGE_GEN:-0}"
-bridge_llvm_compiler_opts="${RUSTDESK_BRIDGE_LLVM_COMPILER_OPTS:--Wno-nullability-completeness}"
+app_bundle="$flutter_dir/build/macos/Build/Products/Release/RustAdmin.app"
+adhoc_sign="${RUSTADMIN_MACOS_ADHOC_SIGN:-${RUSTDESK_MACOS_ADHOC_SIGN:-0}}"
+skip_bridge_gen="${RUSTADMIN_SKIP_BRIDGE_GEN:-${RUSTDESK_SKIP_BRIDGE_GEN:-0}}"
+force_bridge_gen="${RUSTADMIN_FORCE_BRIDGE_GEN:-${RUSTDESK_FORCE_BRIDGE_GEN:-0}}"
+verbose_bridge_gen="${RUSTADMIN_VERBOSE_BRIDGE_GEN:-${RUSTDESK_VERBOSE_BRIDGE_GEN:-0}}"
+bridge_llvm_compiler_opts="${RUSTADMIN_BRIDGE_LLVM_COMPILER_OPTS:-${RUSTDESK_BRIDGE_LLVM_COMPILER_OPTS:--Wno-nullability-completeness}}"
+flutter_root="${RUSTADMIN_FLUTTER_ROOT:-${RUSTDESK_FLUTTER_ROOT:-}}"
+macos_sign_identity="${RUSTADMIN_MACOS_SIGN_IDENTITY:-${RUSTDESK_MACOS_SIGN_IDENTITY:-}}"
+macos_xcode_sign_identity="${RUSTADMIN_MACOS_XCODE_SIGN_IDENTITY:-${RUSTDESK_MACOS_XCODE_SIGN_IDENTITY:-}}"
+macos_development_team="${RUSTADMIN_MACOS_DEVELOPMENT_TEAM:-${RUSTDESK_MACOS_DEVELOPMENT_TEAM:-}}"
+macos_codec_root="${RUSTADMIN_MACOS_CODEC_ROOT:-${RUSTDESK_MACOS_CODEC_ROOT:-}}"
 
-if [[ -n "${RUSTDESK_FLUTTER_ROOT:-}" ]]; then
-  export PATH="$RUSTDESK_FLUTTER_ROOT/bin:$PATH"
+if [[ -n "$flutter_root" ]]; then
+  export PATH="$flutter_root/bin:$PATH"
 fi
 
 if ! command -v flutter >/dev/null 2>&1; then
-  echo "Flutter was not found. Set RUSTDESK_FLUTTER_ROOT or put flutter in PATH." >&2
+  echo "Flutter was not found. Set RUSTADMIN_FLUTTER_ROOT or put flutter in PATH." >&2
   exit 1
 fi
 
-export PUB_CACHE="${PUB_CACHE:-$HOME/.pub-cache-rustdesk-macos}"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$(cd "$repo_root/.." && pwd)/rustdesk-target-macos}"
+export PUB_CACHE="${PUB_CACHE:-$HOME/.pub-cache-rustadmin-macos}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$(cd "$repo_root/.." && pwd)/rustadmin-target-macos}"
 cargo_release_dir="$CARGO_TARGET_DIR/release"
 xcode_rust_release_dir="$repo_root/target/release"
 xcode_librustdesk="$xcode_rust_release_dir/liblibrustdesk.dylib"
 xcode_service="$xcode_rust_release_dir/service"
 
-if [[ -z "${RUSTDESK_MACOS_CODEC_ROOT:-}" ]]; then
+if [[ -z "$macos_codec_root" ]]; then
   if [[ -d "$default_codec_root" ]]; then
-    export RUSTDESK_MACOS_CODEC_ROOT="$default_codec_root"
+    macos_codec_root="$default_codec_root"
   elif [[ -d "$home_codec_root/include" && -d "$home_codec_root/lib" ]]; then
-    export RUSTDESK_MACOS_CODEC_ROOT="$home_codec_root"
+    macos_codec_root="$home_codec_root"
   elif [[ -n "${CMAKE_PREFIX_PATH:-}" ]]; then
-    export RUSTDESK_MACOS_CODEC_ROOT="${CMAKE_PREFIX_PATH%%:*}"
+    macos_codec_root="${CMAKE_PREFIX_PATH%%:*}"
   fi
 fi
 
-if [[ -n "${RUSTDESK_MACOS_CODEC_ROOT:-}" ]]; then
-  echo "Using macOS codec root: $RUSTDESK_MACOS_CODEC_ROOT"
-  export CMAKE_PREFIX_PATH="$RUSTDESK_MACOS_CODEC_ROOT:${CMAKE_PREFIX_PATH:-}"
-  export PKG_CONFIG_PATH="$RUSTDESK_MACOS_CODEC_ROOT/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+if [[ -n "$macos_codec_root" ]]; then
+  echo "Using macOS codec root: $macos_codec_root"
+  export RUSTADMIN_MACOS_CODEC_ROOT="$macos_codec_root"
+  export RUSTDESK_MACOS_CODEC_ROOT="$macos_codec_root"
+  export CMAKE_PREFIX_PATH="$macos_codec_root:${CMAKE_PREFIX_PATH:-}"
+  export PKG_CONFIG_PATH="$macos_codec_root/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
 fi
 
 mkdir -p "$PUB_CACHE" "$CARGO_TARGET_DIR"
@@ -231,7 +239,7 @@ EOF
 
 generate_bridge_files() {
   if [[ "$skip_bridge_gen" == "1" ]]; then
-    echo "Skipping flutter_rust_bridge generation because RUSTDESK_SKIP_BRIDGE_GEN=1."
+    echo "Skipping flutter_rust_bridge generation because RUSTADMIN_SKIP_BRIDGE_GEN=1."
     return
   fi
 
@@ -266,7 +274,7 @@ generate_bridge_files() {
 flutter_rust_bridge_codegen was not found.
 Install it with:
   cargo install flutter_rust_bridge_codegen --version 1.80.1 --features uuid
-or set RUSTDESK_SKIP_BRIDGE_GEN=1 if the generated files are already current.
+or set RUSTADMIN_SKIP_BRIDGE_GEN=1 if the generated files are already current.
 EOF
     exit 1
   fi
@@ -322,13 +330,13 @@ if [[ "$sign_only" -eq 0 ]]; then
 
   sync_macos_rust_artifacts
 
-  xcode_sign_identity="${RUSTDESK_MACOS_XCODE_SIGN_IDENTITY:-}"
-  if [[ -z "$xcode_sign_identity" && -n "${RUSTDESK_MACOS_SIGN_IDENTITY:-}" ]]; then
-    case "$RUSTDESK_MACOS_SIGN_IDENTITY" in
+  xcode_sign_identity="$macos_xcode_sign_identity"
+  if [[ -z "$xcode_sign_identity" && -n "$macos_sign_identity" ]]; then
+    case "$macos_sign_identity" in
       "Apple Development:"*) xcode_sign_identity="Apple Development" ;;
       "Developer ID Application:"*) xcode_sign_identity="Developer ID Application" ;;
       "Mac Developer:"*) xcode_sign_identity="Mac Developer" ;;
-      *) xcode_sign_identity="$RUSTDESK_MACOS_SIGN_IDENTITY" ;;
+      *) xcode_sign_identity="$macos_sign_identity" ;;
     esac
   fi
 
@@ -349,10 +357,10 @@ if [[ "$sign_only" -eq 0 ]]; then
         ARCHS="$host_arch"
         ONLY_ACTIVE_ARCH=YES
       )
-      if [[ -n "${RUSTDESK_MACOS_DEVELOPMENT_TEAM:-}" ]]; then
-        xcodebuild_args+=("DEVELOPMENT_TEAM=$RUSTDESK_MACOS_DEVELOPMENT_TEAM")
+      if [[ -n "$macos_development_team" ]]; then
+        xcodebuild_args+=("DEVELOPMENT_TEAM=$macos_development_team")
       fi
-      if [[ "$adhoc_sign" != "1" && -n "${RUSTDESK_MACOS_SIGN_IDENTITY:-}" ]]; then
+      if [[ "$adhoc_sign" != "1" && -n "$macos_sign_identity" ]]; then
         xcodebuild_args+=("CODE_SIGNING_ALLOWED=NO")
       elif [[ -n "$xcode_sign_identity" ]]; then
         xcodebuild_args+=("CODE_SIGN_IDENTITY=$xcode_sign_identity")
@@ -372,15 +380,15 @@ fi
 if [[ "$adhoc_sign" == "1" ]]; then
   sign_identity="-"
 else
-  sign_identity="${RUSTDESK_MACOS_SIGN_IDENTITY:-}"
+  sign_identity="$macos_sign_identity"
   if [[ -z "$sign_identity" ]]; then
     sign_identity="$(codesign -dv "$app_bundle" 2>&1 | sed -n 's/^Authority=//p' | head -1)"
   fi
   if [[ -z "$sign_identity" ]]; then
     cat >&2 <<EOF
 Unable to determine a valid signing identity for $app_bundle.
-Set RUSTDESK_MACOS_SIGN_IDENTITY and optionally RUSTDESK_MACOS_DEVELOPMENT_TEAM,
-or set RUSTDESK_MACOS_ADHOC_SIGN=1 to use the local ad-hoc signing fallback.
+Set RUSTADMIN_MACOS_SIGN_IDENTITY and optionally RUSTADMIN_MACOS_DEVELOPMENT_TEAM,
+or set RUSTADMIN_MACOS_ADHOC_SIGN=1 to use the local ad-hoc signing fallback.
 EOF
     exit 1
   fi

@@ -19,7 +19,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RequiredBridgeCodegenVersion = "1.80.1"
-$BridgeClassName = "Rustdesk"
+$BridgeClassName = "Rustadmin"
 $ClientRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $WorkspaceRoot = Split-Path $ClientRoot -Parent
 $HbbCommonRoot = Join-Path $WorkspaceRoot "hbb_common"

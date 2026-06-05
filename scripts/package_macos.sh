@@ -5,30 +5,35 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/package_macos.sh [options]
 
-Packages the built macOS RustDesk.app into a DMG, signs the DMG, and notarizes
-it unless SKIP_NOTARY=1 is set.
+Packages the built macOS RustAdmin.app into a DMG, signs the app and DMG, and
+notarizes it unless SKIP_NOTARY=1 is set.
 
 Environment:
   APP                  App bundle to package.
-                       Default: flutter/build/macos/Build/Products/Release/RustDesk.app
-  APP_NAME             App name inside the DMG. Default: RustDesk
+                       Default: flutter/build/macos/Build/Products/Release/RustAdmin.app
+  APP_NAME             App name inside the DMG. Default: RustAdmin
   DIST_DIR             Output directory. Default: dist/macos
-  DMG                  Output DMG path. Default: $DIST_DIR/rustdesk-$VERSION-macos-$ARCH.dmg
+  DMG                  Output DMG path. Default: $DIST_DIR/rustadmin-$VERSION-macos-$ARCH.dmg
   VERSION              Version string for the default DMG name.
                        Default: Cargo.toml package version
   VOLUME_NAME          Mounted DMG volume name. Default: "$APP_NAME Installer"
   SIGN_IDENTITY        Developer ID Application identity or SHA-1 hash.
-                       Also accepts RUSTDESK_MACOS_DMG_SIGN_IDENTITY or
-                       RUSTDESK_MACOS_SIGN_IDENTITY.
+                       Also accepts RUSTADMIN_MACOS_DMG_SIGN_IDENTITY or
+                       RUSTADMIN_MACOS_SIGN_IDENTITY.
+                       Legacy RUSTDESK_* names are accepted as fallbacks.
+                       Use "-" for local ad-hoc signing with SKIP_NOTARY=1.
+  APP_ENTITLEMENTS     Entitlements used when signing the app bundle.
+                       Default: flutter/macos/Runner/Release.entitlements,
+                       or ReleaseAdhoc.entitlements for SIGN_IDENTITY="-".
   SKIP_NOTARY          Set to 1 to skip notarization. Default: 0
   NOTARY_PROFILE       Existing xcrun notarytool keychain profile. Optional.
-                       Also accepts RUSTDESK_NOTARY_PROFILE.
+                       Also accepts RUSTADMIN_NOTARY_PROFILE.
   NOTARY_APPLE_ID      Apple ID for notarytool portable auth. Optional.
-                       Also accepts RUSTDESK_NOTARY_APPLE_ID.
+                       Also accepts RUSTADMIN_NOTARY_APPLE_ID.
   NOTARY_TEAM_ID       Developer Team ID for notarytool portable auth. Optional.
-                       Also accepts RUSTDESK_NOTARY_TEAM_ID.
+                       Also accepts RUSTADMIN_NOTARY_TEAM_ID.
   NOTARY_PASSWORD      App-specific password. Optional.
-                       Also accepts RUSTDESK_NOTARY_PASSWORD.
+                       Also accepts RUSTADMIN_NOTARY_PASSWORD.
                        If omitted with NOTARY_APPLE_ID and NOTARY_TEAM_ID,
                        notarytool prompts securely.
 
@@ -54,7 +59,7 @@ Examples:
   scripts/package_macos.sh
 
   SIGN_IDENTITY="Developer ID Application: Vladlen Erium (9UU755KL6F)" \
-  NOTARY_PROFILE="rustdesk-notary" \
+  NOTARY_PROFILE="rustadmin-notary" \
   scripts/package_macos.sh
 
   SIGN_IDENTITY="Developer ID Application: Vladlen Erium (9UU755KL6F)" \
@@ -82,17 +87,18 @@ read_version() {
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 arch="$(uname -m)"
 
-APP_NAME="${APP_NAME:-RustDesk}"
+APP_NAME="${APP_NAME:-RustAdmin}"
 APP="${APP:-$repo_root/flutter/build/macos/Build/Products/Release/$APP_NAME.app}"
 DIST_DIR="${DIST_DIR:-$repo_root/dist/macos}"
 VERSION="${VERSION:-$(read_version)}"
 VOLUME_NAME="${VOLUME_NAME:-$APP_NAME Installer}"
-SIGN_IDENTITY="${SIGN_IDENTITY:-${RUSTDESK_MACOS_DMG_SIGN_IDENTITY:-${RUSTDESK_MACOS_SIGN_IDENTITY:-}}}"
+SIGN_IDENTITY="${SIGN_IDENTITY:-${RUSTADMIN_MACOS_DMG_SIGN_IDENTITY:-${RUSTADMIN_MACOS_SIGN_IDENTITY:-${RUSTDESK_MACOS_DMG_SIGN_IDENTITY:-${RUSTDESK_MACOS_SIGN_IDENTITY:-}}}}}"
+APP_ENTITLEMENTS="${APP_ENTITLEMENTS:-}"
 SKIP_NOTARY="${SKIP_NOTARY:-0}"
-NOTARY_PROFILE="${NOTARY_PROFILE:-${RUSTDESK_NOTARY_PROFILE:-}}"
-NOTARY_APPLE_ID="${NOTARY_APPLE_ID:-${RUSTDESK_NOTARY_APPLE_ID:-}}"
-NOTARY_TEAM_ID="${NOTARY_TEAM_ID:-${RUSTDESK_NOTARY_TEAM_ID:-}}"
-NOTARY_PASSWORD="${NOTARY_PASSWORD:-${RUSTDESK_NOTARY_PASSWORD:-}}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-${RUSTADMIN_NOTARY_PROFILE:-${RUSTDESK_NOTARY_PROFILE:-}}}"
+NOTARY_APPLE_ID="${NOTARY_APPLE_ID:-${RUSTADMIN_NOTARY_APPLE_ID:-${RUSTDESK_NOTARY_APPLE_ID:-}}}"
+NOTARY_TEAM_ID="${NOTARY_TEAM_ID:-${RUSTADMIN_NOTARY_TEAM_ID:-${RUSTDESK_NOTARY_TEAM_ID:-}}}"
+NOTARY_PASSWORD="${NOTARY_PASSWORD:-${RUSTADMIN_NOTARY_PASSWORD:-${RUSTDESK_NOTARY_PASSWORD:-}}}"
 DMG="${DMG:-}"
 skip_sign=0
 skip_app_verify=0
@@ -174,12 +180,12 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 if [[ -z "$VERSION" ]]; then
-  echo "Could not read RustDesk package version from Cargo.toml." >&2
+  echo "Could not read RustAdmin package version from Cargo.toml." >&2
   exit 1
 fi
 
 if [[ -z "$DMG" ]]; then
-  DMG="$DIST_DIR/rustdesk-$VERSION-macos-$arch.dmg"
+  DMG="$DIST_DIR/rustadmin-$VERSION-macos-$arch.dmg"
 fi
 
 require_cmd codesign
@@ -202,6 +208,11 @@ if [[ "$skip_sign" -eq 0 && -z "$SIGN_IDENTITY" ]]; then
   exit 1
 fi
 
+if [[ "$skip_sign" -eq 0 && "$SIGN_IDENTITY" == "-" && "$SKIP_NOTARY" != "1" ]]; then
+  echo "Ad-hoc signing cannot be notarized. Set SKIP_NOTARY=1 or use a Developer ID identity." >&2
+  exit 1
+fi
+
 if [[ "$SKIP_NOTARY" != "1" && -z "$NOTARY_PROFILE" &&
       ( -z "$NOTARY_APPLE_ID" || -z "$NOTARY_TEAM_ID" ) ]]; then
   cat >&2 <<'EOF'
@@ -217,17 +228,100 @@ EOF
 fi
 
 APP="$(cd "$(dirname "$APP")" && pwd)/$(basename "$APP")"
+if [[ "$skip_sign" -eq 0 && -z "$APP_ENTITLEMENTS" ]]; then
+  if [[ "$SIGN_IDENTITY" == "-" ]]; then
+    APP_ENTITLEMENTS="$repo_root/flutter/macos/Runner/ReleaseAdhoc.entitlements"
+  else
+    APP_ENTITLEMENTS="$repo_root/flutter/macos/Runner/Release.entitlements"
+  fi
+fi
+if [[ "$skip_sign" -eq 0 && ! -f "$APP_ENTITLEMENTS" ]]; then
+  echo "App entitlements file does not exist: $APP_ENTITLEMENTS" >&2
+  exit 1
+fi
 mkdir -p "$DIST_DIR"
 DIST_DIR="$(cd "$DIST_DIR" && pwd)"
 DMG_DIR="$(dirname "$DMG")"
 mkdir -p "$DMG_DIR"
 DMG="$(cd "$DMG_DIR" && pwd)/$(basename "$DMG")"
 
-stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/rustdesk-dmg-stage.XXXXXX")"
+stage_dir="$(mktemp -d "${TMPDIR:-/tmp}/rustadmin-dmg-stage.XXXXXX")"
 cleanup() {
   rm -rf "$stage_dir"
 }
 trap cleanup EXIT
+
+codesign_code() {
+  local path="$1"
+  local -a codesign_args=(
+    --force
+    --sign "$SIGN_IDENTITY"
+    --options runtime
+  )
+
+  if [[ "$SIGN_IDENTITY" != "-" ]]; then
+    codesign_args+=(--timestamp)
+  fi
+
+  echo "Signing: $path"
+  codesign "${codesign_args[@]}" "$path"
+}
+
+codesign_app_bundle() {
+  local -a codesign_args=(
+    --force
+    --sign "$SIGN_IDENTITY"
+    --options runtime
+  )
+
+  if [[ "$SIGN_IDENTITY" != "-" ]]; then
+    codesign_args+=(--timestamp)
+  fi
+
+  codesign_args+=(--entitlements "$APP_ENTITLEMENTS")
+
+  echo "Signing app bundle: $APP"
+  codesign "${codesign_args[@]}" "$APP"
+}
+
+sign_app_contents() {
+  local main_executable_name
+  local main_executable
+  local path
+
+  main_executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' \
+    "$APP/Contents/Info.plist" 2>/dev/null || true)"
+  main_executable="$APP/Contents/MacOS/$main_executable_name"
+
+  while IFS= read -r -d '' path; do
+    codesign_code "$path"
+  done < <(find "$APP/Contents" -type f \
+    \( -name "*.dylib" -o -name "*.so" \) -print0)
+
+  if [[ -d "$APP/Contents/MacOS" ]]; then
+    while IFS= read -r -d '' path; do
+      if [[ -n "$main_executable_name" && "$path" == "$main_executable" ]]; then
+        continue
+      fi
+      if [[ -x "$path" ]]; then
+        codesign_code "$path"
+      fi
+    done < <(find "$APP/Contents/MacOS" -maxdepth 1 -type f -print0)
+  fi
+
+  while IFS= read -r -d '' path; do
+    codesign_code "$path"
+  done < <(find "$APP/Contents" -depth -type d \
+    \( -name "*.app" -o -name "*.appex" -o -name "*.bundle" -o \
+       -name "*.framework" -o -name "*.systemextension" -o -name "*.xpc" \) \
+    -print0)
+
+  codesign_app_bundle
+}
+
+if [[ "$skip_sign" -eq 0 ]]; then
+  sign_app_contents
+fi
 
 if [[ "$skip_app_verify" -eq 0 ]]; then
   echo "Verifying app bundle: $APP"
