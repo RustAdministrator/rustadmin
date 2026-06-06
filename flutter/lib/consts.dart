@@ -7,6 +7,32 @@ import 'package:get/get.dart';
 const int kMaxVirtualDisplayCount = 4;
 const int kAllVirtualDisplay = -1;
 
+const String kRustAdminSourceUrl =
+    'https://github.com/RustAdministrator/rustadmin';
+const String kRustDeskUpstreamUrl = 'https://github.com/rustdesk/rustdesk';
+const String kRustAdminForkSummary =
+    'RustAdmin is an independent administrator- and security-oriented fork of RustDesk.';
+const String kRustAdminUpstreamAttribution =
+    'Portions are based on RustDesk by Purslane Ltd. and RustDesk contributors.';
+const String kRustAdminLicenseNotice =
+    'Licensed under the GNU Affero General Public License v3.0.';
+const String kRustAdminNoEndorsementNotice =
+    'This project is not affiliated with or endorsed by RustDesk.';
+
+String rustAdminLegalNotice({String runtimeLicense = ''}) {
+  final lines = [
+    'Copyright (C) ${DateTime.now().year} RustAdministrator.',
+    kRustAdminUpstreamAttribution,
+    kRustAdminLicenseNotice,
+    kRustAdminNoEndorsementNotice,
+  ];
+  final normalizedLicense = runtimeLicense.trim();
+  if (normalizedLicense.isNotEmpty) {
+    lines.add(normalizedLicense);
+  }
+  return lines.join('\n');
+}
+
 const double kDesktopRemoteTabBarHeight = 28.0;
 const int kInvalidWindowId = -1;
 const int kMainWindowId = 0;

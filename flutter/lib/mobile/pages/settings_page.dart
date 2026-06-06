@@ -9,7 +9,6 @@ import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 import 'package:settings_ui/settings_ui.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:url_launcher/url_launcher_string.dart';
 
 import '../../common.dart';
 import '../../common/widgets/dialog.dart';
@@ -34,8 +33,6 @@ class SettingsPage extends StatefulWidget implements PageShape {
   @override
   State<SettingsPage> createState() => _SettingsState();
 }
-
-const url = 'https://github.com/RustAdministrator/rustadmin';
 
 enum KeepScreenOn {
   never,
@@ -1062,10 +1059,18 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
           title: Text(translate("About")),
           tiles: [
             SettingsTile(
+                title: Text('${translate("Version")}: $version'),
+                leading: Icon(Icons.info)),
+            SettingsTile(
+                title: Text('Attribution'),
+                description:
+                    Text('$kRustAdminForkSummary\n${rustAdminLegalNotice()}'),
+                leading: Icon(Icons.article_outlined)),
+            SettingsTile(
                 onPressed: (context) async {
-                  await launchUrl(Uri.parse(url));
+                  await launchUrl(Uri.parse(kRustAdminSourceUrl));
                 },
-                title: Text(translate("Version: ") + version),
+                title: Text('Source code'),
                 value: Padding(
                   padding: EdgeInsets.symmetric(vertical: 8),
                   child: Text('github.com/RustAdministrator/rustadmin',
@@ -1073,7 +1078,20 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                         decoration: TextDecoration.underline,
                       )),
                 ),
-                leading: Icon(Icons.info)),
+                leading: Icon(Icons.code)),
+            SettingsTile(
+                onPressed: (context) async {
+                  await launchUrl(Uri.parse(kRustDeskUpstreamUrl));
+                },
+                title: Text('Upstream project'),
+                value: Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8),
+                  child: Text('github.com/rustdesk/rustdesk',
+                      style: TextStyle(
+                        decoration: TextDecoration.underline,
+                      )),
+                ),
+                leading: Icon(Icons.source)),
             SettingsTile(
                 title: Text(translate("Build Date")),
                 value: Padding(
@@ -1089,13 +1107,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                     padding: EdgeInsets.symmetric(vertical: 8),
                     child: Text(_fingerprint),
                   ),
-                  leading: Icon(Icons.fingerprint)),
-            SettingsTile(
-              title: Text(translate("Privacy Statement")),
-              onPressed: (context) =>
-                  launchUrlString('https://github.com/RustAdministrator/rustadmin'),
-              leading: Icon(Icons.privacy_tip),
-            )
+                  leading: Icon(Icons.fingerprint))
           ],
         ),
       ],
@@ -1200,23 +1212,44 @@ void showThemeSettings(OverlayDialogManager dialogManager) async {
 
 void showAbout(OverlayDialogManager dialogManager) {
   dialogManager.show((setState, close, context) {
+    final appName = bind.mainGetAppNameSync();
     return CustomAlertDialog(
-      title: Text(translate('About RustDesk')),
-      content: Wrap(direction: Axis.vertical, spacing: 12, children: [
-        Text('Version: $version'),
-        InkWell(
-            onTap: () async {
-              const url = 'https://github.com/RustAdministrator/rustadmin';
-              await launchUrl(Uri.parse(url));
-            },
-            child: Padding(
-              padding: EdgeInsets.symmetric(vertical: 8),
-              child: Text('github.com/RustAdministrator/rustadmin',
-                  style: TextStyle(
-                    decoration: TextDecoration.underline,
+      title: Text('${translate('About')} $appName'),
+      content: SingleChildScrollView(
+        child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Version: $version'),
+              Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Text(kRustAdminForkSummary),
+              ),
+              Text(rustAdminLegalNotice()),
+              InkWell(
+                  onTap: () async {
+                    await launchUrl(Uri.parse(kRustAdminSourceUrl));
+                  },
+                  child: Padding(
+                    padding: EdgeInsets.only(top: 12, bottom: 8),
+                    child: Text('Source code',
+                        style: TextStyle(
+                          decoration: TextDecoration.underline,
+                        )),
                   )),
-            )),
-      ]),
+              InkWell(
+                  onTap: () async {
+                    await launchUrl(Uri.parse(kRustDeskUpstreamUrl));
+                  },
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(vertical: 8),
+                    child: Text('Upstream project',
+                        style: TextStyle(
+                          decoration: TextDecoration.underline,
+                        )),
+                  )),
+            ]),
+      ),
       actions: [],
     );
   }, clickMaskDismiss: true, backDismiss: true);

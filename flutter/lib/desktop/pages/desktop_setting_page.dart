@@ -2781,11 +2781,12 @@ class _AboutState extends State<_About> {
       final version = data['version'].toString();
       final buildDate = data['buildDate'].toString();
       final fingerprint = data['fingerprint'].toString();
+      final appName = bind.mainGetAppNameSync();
       const linkStyle = TextStyle(decoration: TextDecoration.underline);
       final scrollController = ScrollController();
       return SingleChildScrollView(
         controller: scrollController,
-        child: _Card(title: translate('About RustDesk'), children: [
+        child: _Card(title: '${translate('About')} $appName', children: [
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -2802,22 +2803,22 @@ class _AboutState extends State<_About> {
                 SelectionArea(
                     child: Text('${translate('Fingerprint')}: $fingerprint')
                         .marginSymmetric(vertical: 4.0)),
+              const SelectionArea(child: Text(kRustAdminForkSummary))
+                  .marginSymmetric(vertical: 4.0),
               InkWell(
                   onTap: () {
-                    launchUrlString(
-                        'https://github.com/RustAdministrator/rustadmin');
+                    launchUrlString(kRustAdminSourceUrl);
                   },
                   child: Text(
-                    translate('Privacy Statement'),
+                    'Source code',
                     style: linkStyle,
                   ).marginSymmetric(vertical: 4.0)),
               InkWell(
                   onTap: () {
-                    launchUrlString(
-                        'https://github.com/RustAdministrator/rustadmin');
+                    launchUrlString(kRustDeskUpstreamUrl);
                   },
                   child: Text(
-                    translate('Website'),
+                    'Upstream project',
                     style: linkStyle,
                   ).marginSymmetric(vertical: 4.0)),
               Container(
@@ -2832,7 +2833,7 @@ class _AboutState extends State<_About> {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            'Copyright © ${DateTime.now().toString().substring(0, 4)} Purslane Ltd.\n$license',
+                            rustAdminLegalNotice(runtimeLicense: license),
                             style: const TextStyle(color: Colors.white),
                           ),
                           Text(
