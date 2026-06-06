@@ -44,7 +44,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("id_change_tip", "Hanya karakter a-z, A-Z, 0-9, - (dash) dan _ (underscore) yang diperbolehkan. Huruf pertama harus a-z, A-Z. Panjang antara 6 dan 16."),
         ("Website", "Situs Web"),
         ("About", "Tentang"),
-        ("Slogan_tip", "Dibuat dengan penuh kasih sayang dalam dunia yang penuh kekacauan ini"),
+        ("Slogan_tip", "Security-first!"),
         ("Privacy Statement", "Pernyataan Privasi"),
         ("Mute", "Bisukan"),
         ("Build Date", "Tanggal Build"),

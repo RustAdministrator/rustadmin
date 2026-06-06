@@ -44,7 +44,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("id_change_tip", "Použít je možné pouze znaky a-z, A-Z, 0-9, - (dash) a _ (podtržítko). Dále je třeba aby začínalo písmenem a-z, A-Z. Délka mezi 6 a 16 znaky."),
         ("Website", "Webové stránky"),
         ("About", "O aplikaci"),
-        ("Slogan_tip", "Vytvořeno srdcem v tomto chaotickém světě!"),
+        ("Slogan_tip", "Security-first!"),
         ("Privacy Statement", "Prohlášení o ochraně osobních údajů"),
         ("Mute", "Ztlumit zvuk"),
         ("Build Date", "Datum sestavení"),

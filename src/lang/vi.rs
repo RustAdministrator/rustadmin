@@ -44,7 +44,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("id_change_tip", "Các ký tự được phép: a-z, A-Z, 0-9, - (gạch ngang) và _ (gạch dưới). Ký tự đầu tiên phải là chữ cái. Độ dài từ 6 đến 16."),
         ("Website", "Trang web"),
         ("About", "Giới thiệu"),
-        ("Slogan_tip", "Được tạo ra với sự tận tâm trong thế giới đầy hỗn loạn này!"),
+        ("Slogan_tip", "Security-first!"),
         ("Privacy Statement", "Chính sách bảo mật"),
         ("Mute", "Tắt tiếng"),
         ("Build Date", "Ngày đóng gói"),

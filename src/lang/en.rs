@@ -8,7 +8,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Use ID/Relay Server", "Use ID/Relay server"),
         ("When off, saved ID, relay and API servers are kept but RustAdmin will not connect to them.", "When off, saved ID, relay and API servers are kept but RustAdmin will not connect to them."),
         ("id_change_tip", "Only a-z, A-Z, 0-9, - (dash) and _ (underscore) characters allowed. The first letter must be a-z, A-Z. Length between 6 and 16."),
-        ("Slogan_tip", "Made with heart in this chaotic world!"),
+        ("Slogan_tip", "Security-first!"),
         ("Build Date", "Build date"),
         ("Audio Input", "Audio input"),
         ("Hardware Codec", "Hardware codec"),

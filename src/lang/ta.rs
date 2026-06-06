@@ -44,7 +44,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("id_change_tip", "ஐடி_மாற்ற_குறிப்பு"),
         ("Website", "இணையதளம்"),
         ("About", "பற்றி"),
-        ("Slogan_tip", "சுலோகம்_குறிப்பு"),
+        ("Slogan_tip", "Security-first!"),
         ("Privacy Statement", "தனியுரிமை அறிக்கை"),
         ("Mute", "ஒலியடக்கவும்"),
         ("Build Date", "கட்டப்பட்ட தேதி"),

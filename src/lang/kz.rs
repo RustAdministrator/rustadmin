@@ -44,7 +44,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("id_change_tip", "Тек a-z, A-Z, 0-9, - (dash) және _ (астынғы-сызық) таңбалары рұқсат етілген. Бірінші таңба a-z, A-Z болуы қажет. Ұзындығы 6 мен 16 арасы."),
         ("Website", "Web-сайт"),
         ("About", "Туралы"),
-        ("Slogan_tip", ""),
+        ("Slogan_tip", "Security-first!"),
         ("Privacy Statement", ""),
         ("Mute", "Дыбыссыздандыру"),
         ("Build Date", ""),

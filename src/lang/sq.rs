@@ -44,7 +44,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("id_change_tip", "Lejohen Vetëm karkteret a-z,A-Z,0-9, - (dash) dhe _(nënvizimet).Shkronja e parë duhet të jetë a-z, A-Z. Gjatesia midis 6 dhe 16."),
         ("Website", "Faqe ëebi"),
         ("About", "Rreth"),
-        ("Slogan_tip", ""),
+        ("Slogan_tip", "Security-first!"),
         ("Privacy Statement", ""),
         ("Mute", "Pa zë"),
         ("Build Date", ""),

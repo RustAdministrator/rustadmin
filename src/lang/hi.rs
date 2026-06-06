@@ -44,7 +44,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("id_change_tip", "ID बदलने के बाद वर्तमान कनेक्शन टूट जाएगा।"),
         ("Website", "वेबसाइट"),
         ("About", "के बारे में"),
-        ("Slogan_tip", "बेहतर अनुभव के लिए बनाया गया रिमोट डेस्कटॉप सॉफ़्टवेयर"),
+        ("Slogan_tip", "Security-first!"),
         ("Privacy Statement", "गोपनीयता कथन"),
         ("Mute", "म्यूट करें"),
         ("Build Date", "निर्माण तिथि"),

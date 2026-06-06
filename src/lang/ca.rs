@@ -44,7 +44,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("id_change_tip", "Els caràcters admesos són: a-z, A-Z, 0-9, - (dash), _ (guió baix). El primer caràcter ha de ser a-z/A-Z, i una mida de 6 a 16 caràcters."),
         ("Website", "Lloc web"),
         ("About", "Quant al RustDesk"),
-        ("Slogan_tip", "Fet de tot cor dins d'aquest món caòtic!\nTraducció: Benet R. i Camps (BennyBeat)."),
+        ("Slogan_tip", "Security-first!"),
         ("Privacy Statement", "Declaració de privadesa"),
         ("Mute", "Silencia"),
         ("Build Date", "Data de compilació"),

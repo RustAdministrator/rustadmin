@@ -44,7 +44,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("id_change_tip", "Podes impreare petzi sos caràteres a-z, A-Z, 0-9, - (tratigheddu) e _ (sutaliniadu).\nSu primu caràtere depet èssere a-z o A-Z.\nSa longària depet èssere de intre 6 e 16 caràteres."),
         ("Website", "Situ web programma"),
         ("About", "Info programma"),
-        ("Slogan_tip", "Fatu cun su coro in custu mundu caòticu!"),
+        ("Slogan_tip", "Security-first!"),
         ("Privacy Statement", "Informativa subra de sa riservadesa"),
         ("Mute", "Sonu istudadu"),
         ("Build Date", "Data build"),

@@ -44,7 +44,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("id_change_tip", "Kun tegnene a-z, A-Z, 0-9, - (dash) og _ (understrek) er tillat. Den første bokstaven skal være a-z, A-Z. Lengde mellom 6 og 16."),
         ("Website", "Hjemmeside"),
         ("About", "Om"),
-        ("Slogan_tip", ""),
+        ("Slogan_tip", "Security-first!"),
         ("Privacy Statement", ""),
         ("Mute", "Deaktiver mikrofonen"),
         ("Build Date", ""),

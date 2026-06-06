@@ -44,7 +44,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("id_change_tip", "Dozvoljeni su samo a-z, A-Z, 0-9, - (dash) i _ (donja crta) znakovi. Prvi znak mora biti slovo a-z, A-Z. Dužina je od 6 do 16."),
         ("Website", "Web sajt"),
         ("About", "O programu"),
-        ("Slogan_tip", ""),
+        ("Slogan_tip", "Security-first!"),
         ("Privacy Statement", ""),
         ("Mute", "Utišaj"),
         ("Build Date", ""),

@@ -44,7 +44,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("id_change_tip", "使用できるのは大文字・小文字のアルファベット、数字、アンダースコア (_) のみです。先頭の文字はアルファベット、長さは 6 文字から 16 文字である必要があります。"),
         ("Website", "公式サイト"),
         ("About", "RustDesk について"),
-        ("Slogan_tip", "この混沌とした世界から、愛をこめて！"),
+        ("Slogan_tip", "Security-first!"),
         ("Privacy Statement", "プライバシーポリシー"),
         ("Mute", "ミュート"),
         ("Build Date", "ビルド日時"),

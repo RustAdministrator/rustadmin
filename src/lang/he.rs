@@ -44,7 +44,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("id_change_tip", "מותרים רק תווים a-z, A-Z, 0-9, מקף (-) וקו תחתון (_). התו הראשון חייב להיות אות (a-z, A-Z). אורך בין 6 ל-16 תווים."),
         ("Website", "דף הבית"),
         ("About", "אודות"),
-        ("Slogan_tip", "נוצר באהבה בעולם הכאוטי הזה!"),
+        ("Slogan_tip", "Security-first!"),
         ("Privacy Statement", "הצהרת פרטיות"),
         ("Mute", "השתק"),
         ("Build Date", "תאריך בנייה"),

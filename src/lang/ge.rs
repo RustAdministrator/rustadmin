@@ -44,7 +44,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("id_change_tip", "დაშვებულია მხოლოდ a-z, A-Z, 0-9, - (დეფისი) და _ (ქვედა ტირე) სიმბოლოები. პირველი უნდა იყოს a-z, A-Z ასო. სიგრძე 6-დან 16-მდე."),
         ("Website", "ვებგვერდი"),
         ("About", "პროგრამის შესახებ"),
-        ("Slogan_tip", "შექმნილია გულით ამ შეშლილ სამყაროში!"),
+        ("Slogan_tip", "Security-first!"),
         ("Privacy Statement", "კონფიდენციალურობის განაცხადი"),
         ("Mute", "ხმის გათიშვა"),
         ("Build Date", "აგების თარიღი"),

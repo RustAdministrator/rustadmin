@@ -44,7 +44,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("id_change_tip", "Sallitut merkit: a–z, A–Z, 0–9, - ja _. Ensimmäisen merkin on oltava kirjain. Pituus 6–16 merkkiä."),
         ("Website", "Verkkosivusto"),
         ("About", "Tietoa"),
-        ("Slogan_tip", "Tehty sydämellä tässä kaoottisessa maailmassa!"),
+        ("Slogan_tip", "Security-first!"),
         ("Privacy Statement", "Tietosuojaseloste"),
         ("Mute", "Mykistä"),
         ("Build Date", "Koontipäivä"),

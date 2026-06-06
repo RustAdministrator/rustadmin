@@ -44,7 +44,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("id_change_tip", "Csak a-z, A-Z, 0-9, - (kötőjel) csoportokba tartozó karakterek, illetve a _ karakter van engedélyezve. Az első karakternek mindenképpen a-z, A-Z csoportokba kell esnie. Az azonosító hosszúsága 6-tól, 16 karakter."),
         ("Website", "Weboldal"),
         ("About", "Névjegy"),
-        ("Slogan_tip", "Szenvedéllyel programozva - egy káoszba süllyedő világban!"),
+        ("Slogan_tip", "Security-first!"),
         ("Privacy Statement", "Adatvédelmi nyilatkozat"),
         ("Mute", "Némítás"),
         ("Build Date", "Összeállítás ideje"),

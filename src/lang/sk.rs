@@ -44,7 +44,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("id_change_tip", "Povolené sú len znaky a-z, A-Z, 0-9, - (dash) a _ (podčiarkovník). Prvý znak musí byť a-z, A-Z. Dĺžka musí byť medzi 6 a 16 znakmi."),
         ("Website", "Webová stránka"),
         ("About", "O RustDesk"),
-        ("Slogan_tip", "Stvorené srdcom v tomto chaotickom svete!"),
+        ("Slogan_tip", "Security-first!"),
         ("Privacy Statement", "Vyhlásenie o ochrane osobných údajov"),
         ("Mute", "Stíšiť"),
         ("Build Date", "Dátum zostavenia"),

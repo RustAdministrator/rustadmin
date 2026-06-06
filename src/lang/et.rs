@@ -44,7 +44,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("id_change_tip", "Lubatud on vaid a-z, A-Z, 0-9, - (kriips) ja _ (alakriips) tähemärgid. Esimene täht peab olema a-z või A-Z. Pikkus vahemikus 6-16."),
         ("Website", "Veebileht"),
         ("About", "Meist"),
-        ("Slogan_tip", "Loodud südamega selles kaootilises maailmas!"),
+        ("Slogan_tip", "Security-first!"),
         ("Privacy Statement", "Privaatsusteatis"),
         ("Mute", "Hääletu"),
         ("Build Date", "Ehituskuupäev"),
