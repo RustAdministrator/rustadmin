@@ -204,6 +204,20 @@ pub fn core_main() -> Option<Vec<String>> {
         }
         std::thread::spawn(move || crate::start_server(false, no_server));
     } else {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        // Root CLI management commands must talk to the user `--server` main IPC.
+        // Example: `sudo rustadmin --option custom-rendezvous-server` should query the
+        // user's IPC instead of root's `/tmp/<app>-0/ipc`; `connect()` still limits this
+        // routing to empty-postfix main IPC only.
+        let _user_main_ipc_scope = if crate::platform::is_installed()
+            && is_root()
+            && is_user_main_ipc_scope_cli_command(&args)
+        {
+            Some(crate::ipc::UserMainIpcScope::new())
+        } else {
+            None
+        };
+
         #[cfg(windows)]
         {
             use crate::platform;
@@ -253,11 +267,9 @@ pub fn core_main() -> Option<Vec<String>> {
                 if config::is_disable_installation() {
                     return None;
                 }
-                #[cfg(not(windows))]
-                let options = "desktopicon startmenu";
-                #[cfg(windows)]
-                let options = "desktopicon startmenu printer";
-                let res = platform::install_me(options, "".to_owned(), true, args.len() > 1);
+                let (printer_override, debug) = parse_silent_install_args(&args);
+                let options = platform::get_silent_install_options(printer_override);
+                let res = platform::install_me(options, "".to_owned(), true, debug);
                 let text = match res {
                     Ok(_) => translate("Installation Successful!".to_string()),
                     Err(err) => {
@@ -850,6 +862,89 @@ fn is_root() -> bool {
     }
     #[allow(unreachable_code)]
     crate::platform::is_root()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn is_user_main_ipc_scope_cli_command(args: &[String]) -> bool {
+    matches!(
+        args.first().map(String::as_str),
+        Some("--password")
+            | Some("--set-unlock-pin")
+            | Some("--get-id")
+            | Some("--set-id")
+            | Some("--config")
+            | Some("--option")
+            | Some("--assign")
+    )
+}
+
+#[cfg(any(windows, test))]
+fn parse_silent_install_args(args: &[String]) -> (Option<bool>, bool) {
+    let mut printer_override = None;
+    let mut debug = false;
+
+    for arg in args.iter().skip(1) {
+        match arg.as_str() {
+            "printer=1" => printer_override = Some(true),
+            "printer=0" => printer_override = Some(false),
+            "debug" => debug = true,
+            _ => {}
+        }
+    }
+
+    (printer_override, debug)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn user_main_ipc_scope_cli_command_matches_management_commands_only() {
+        for command in [
+            "--password",
+            "--set-unlock-pin",
+            "--get-id",
+            "--set-id",
+            "--config",
+            "--option",
+            "--assign",
+        ] {
+            assert!(is_user_main_ipc_scope_cli_command(&args(&[command])));
+        }
+
+        for command in [
+            "--service",
+            "--server",
+            "--tray",
+            "--cm",
+            "--check-hwcodec-config",
+            "--connect",
+            "--deploy",
+        ] {
+            assert!(!is_user_main_ipc_scope_cli_command(&args(&[command])));
+        }
+    }
+
+    #[test]
+    fn parse_silent_install_args_reads_printer_override_and_debug() {
+        assert_eq!(
+            parse_silent_install_args(&args(&["--silent-install"])),
+            (None, false)
+        );
+        assert_eq!(
+            parse_silent_install_args(&args(&["--silent-install", "printer=1", "debug"])),
+            (Some(true), true)
+        );
+        assert_eq!(
+            parse_silent_install_args(&args(&["--silent-install", "printer=0"])),
+            (Some(false), false)
+        );
+    }
 }
 
 /// Check if the executable is a Quick Support version.
