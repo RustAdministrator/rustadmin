@@ -135,6 +135,7 @@ def write_metainfo(path: Path, args: argparse.Namespace) -> None:
   </developer>
   <name>{name}</name>
   <summary>{summary}</summary>
+  <icon type="stock">rustadmin</icon>
   <description>
     <p>{description}</p>
   </description>
@@ -195,6 +196,7 @@ def build_deb(args: argparse.Namespace) -> Path:
         normalize_bundle_executable(root / "usr/share/rustadmin")
         copy_file(res_dir / "rustadmin.service", root / "usr/share/rustadmin/files/systemd/rustadmin.service")
         copy_file(res_dir / "128x128@2x.png", root / "usr/share/icons/hicolor/256x256/apps/rustadmin.png")
+        copy_file(res_dir / "128x128@2x.png", root / "usr/share/pixmaps/rustadmin.png")
         copy_file(res_dir / "scalable.svg", root / "usr/share/icons/hicolor/scalable/apps/rustadmin.svg")
         copy_file(res_dir / "rustadmin.desktop", root / "usr/share/applications/rustadmin.desktop")
         copy_file(res_dir / "rustadmin-link.desktop", root / "usr/share/applications/rustadmin-link.desktop")
@@ -203,6 +205,10 @@ def build_deb(args: argparse.Namespace) -> Path:
         copy_file(res_dir / "pam.d/rustadmin.debian", root / "etc/pam.d/rustadmin")
         write_copyright(root / f"usr/share/doc/{args.package_name}/copyright", args)
         write_metainfo(root / f"usr/share/metainfo/{args.metainfo_id}.metainfo.xml", args)
+        copy_file(
+            root / f"usr/share/metainfo/{args.metainfo_id}.metainfo.xml",
+            root / f"usr/share/appdata/{args.package_name}.appdata.xml",
+        )
 
         polkit = root / "usr/share/rustadmin/files/polkit"
         polkit.parent.mkdir(parents=True, exist_ok=True)
