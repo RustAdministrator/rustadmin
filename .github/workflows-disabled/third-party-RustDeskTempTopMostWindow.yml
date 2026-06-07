@@ -39,7 +39,7 @@ jobs:
       build_output_dir: RustDeskTempTopMostWindow/WindowInjection/${{ inputs.platform }}/${{ inputs.configuration }}
     steps:
       - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@v2
+        uses: microsoft/setup-msbuild@6fb02220983dee41ce7ae257b6f4d8f9bf5ed4ce # v2
 
       - name: Download the source code
         run: |
@@ -52,7 +52,7 @@ jobs:
           msbuild ${{ env.project_path }} -p:Configuration=${{ inputs.configuration }} -p:Platform=${{ inputs.platform }} /p:TargetVersion=${{ inputs.target_version }}
 
       - name: Archive build artifacts
-        uses: actions/upload-artifact@master
+        uses: actions/upload-artifact@0c366cb4fc8897159c94880f94b55bc716ad6a66 # master 2026-05-26
         if: ${{ inputs.upload-artifact }}
         with:
             name: topmostwindow-artifacts

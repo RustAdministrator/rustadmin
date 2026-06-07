@@ -13,6 +13,7 @@ param(
     [switch]$ForceBridgeGen,
     [switch]$VerboseBridgeGen,
     [switch]$ClipboardIntegration,
+    [switch]$SkipWfCliprdrInvariant,
     [switch]$StopOnFailure
 )
 
@@ -350,6 +351,62 @@ function Invoke-BridgeGenerationStep {
     }
 }
 
+function Invoke-WfCliprdrInvariantStep {
+    $CMakeCommand = Get-Command "cmake" -ErrorAction SilentlyContinue
+    if (!$CMakeCommand) {
+        throw "CMake was not found on PATH. Install CMake or pass -SkipWfCliprdrInvariant."
+    }
+
+    $TestRoot = Join-Path $ClientRoot "target\wf-cliprdr-invariant"
+    $BuildDir = Join-Path $TestRoot "out"
+    New-Item -ItemType Directory -Force -Path $TestRoot | Out-Null
+
+    $TestSource = (Join-Path $ClientRoot "tests\test_invariant_wf_cliprdr.c") -replace '\\', '/'
+    $CMakeLists = @(
+        'cmake_minimum_required(VERSION 3.20)'
+        'project(test_invariant_wf_cliprdr C)'
+        ''
+        'set(CMAKE_C_STANDARD 11)'
+        'set(CMAKE_C_STANDARD_REQUIRED ON)'
+        'set(CMAKE_C_EXTENSIONS OFF)'
+        ''
+        'add_executable(test_invariant_wf_cliprdr'
+        "  `"$TestSource`""
+        ')'
+        ''
+        'if(WIN32)'
+        '  target_link_libraries(test_invariant_wf_cliprdr PRIVATE ole32 shell32 user32)'
+        'endif()'
+    ) -join [Environment]::NewLine
+    Set-Content -NoNewline -Encoding UTF8 -Path (Join-Path $TestRoot "CMakeLists.txt") -Value $CMakeLists
+
+    Invoke-TestStep "wf_cliprdr invariant configure" $TestRoot $CMakeCommand.Source @(
+        "-S", $TestRoot, "-B", $BuildDir, "-DCMAKE_BUILD_TYPE=Release"
+    )
+    if ($Results[$Results.Count - 1].Status -ne "PASS") {
+        return
+    }
+
+    Invoke-TestStep "wf_cliprdr invariant build" $TestRoot $CMakeCommand.Source @(
+        "--build", $BuildDir, "--config", "Release"
+    )
+    if ($Results[$Results.Count - 1].Status -ne "PASS") {
+        return
+    }
+
+    $ExecutableCandidates = @(
+        (Join-Path $BuildDir "Release\test_invariant_wf_cliprdr.exe"),
+        (Join-Path $BuildDir "Debug\test_invariant_wf_cliprdr.exe"),
+        (Join-Path $BuildDir "test_invariant_wf_cliprdr.exe")
+    )
+    $Executable = $ExecutableCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace($Executable)) {
+        throw "wf_cliprdr invariant executable was not found under '$BuildDir'."
+    }
+
+    Invoke-TestStep "wf_cliprdr invariant test" $TestRoot $Executable @()
+}
+
 $LogDir = Join-Path $ClientRoot "target\windows-test-logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $RunStamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -375,6 +432,7 @@ try {
     Write-Host "Target dir:  $env:CARGO_TARGET_DIR"
     Write-Host "Codec root:  $env:RUSTDESK_WINDOWS_CODEC_ROOT"
     Write-Host "Clipboard integration: $ClipboardIntegration"
+    Write-Host "wf_cliprdr invariant: $(!$SkipWfCliprdrInvariant)"
 
     $FlutterCommand = $null
     $FlutterPubGetAlreadyRun = $false
@@ -395,6 +453,9 @@ try {
     Invoke-TestStep "rustdesk-client cargo check" $ClientRoot "cargo" @(
         "check", "--no-default-features", "--features", $Features
     )
+    if (!$SkipWfCliprdrInvariant) {
+        Invoke-WfCliprdrInvariantStep
+    }
     Invoke-TestStep "privacy mode policy tests" $ClientRoot "cargo" @(
         "test", "--no-default-features", "--features", $Features, "privacy_mode_policy"
     )

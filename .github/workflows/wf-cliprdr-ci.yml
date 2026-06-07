@@ -1,0 +1,79 @@
+name: wf-cliprdr invariant
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "libs/clipboard/src/windows/**"
+      - "tests/test_invariant_wf_cliprdr.c"
+      - ".github/workflows/wf-cliprdr-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "libs/clipboard/src/windows/**"
+      - "tests/test_invariant_wf_cliprdr.c"
+      - ".github/workflows/wf-cliprdr-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: wf_cliprdr invariant test
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.1.7
+        with:
+          persist-credentials: false
+
+      - name: Generate CMake project
+        shell: pwsh
+        run: |
+          $testRoot = Join-Path $env:GITHUB_WORKSPACE 'build\wf-cliprdr'
+          New-Item -ItemType Directory -Force $testRoot | Out-Null
+
+          $testSource = (($env:GITHUB_WORKSPACE -replace '\\', '/') + '/tests/test_invariant_wf_cliprdr.c')
+          $cmakeLists = @(
+            'cmake_minimum_required(VERSION 3.20)'
+            'project(test_invariant_wf_cliprdr C)'
+            ''
+            'set(CMAKE_C_STANDARD 11)'
+            'set(CMAKE_C_STANDARD_REQUIRED ON)'
+            'set(CMAKE_C_EXTENSIONS OFF)'
+            ''
+            'add_executable(test_invariant_wf_cliprdr'
+            '  "TEST_SOURCE"'
+            ')'
+            ''
+            'target_link_libraries(test_invariant_wf_cliprdr PRIVATE ole32 shell32 user32)'
+          ) -join [Environment]::NewLine
+          $cmakeLists.Replace('TEST_SOURCE', $testSource) | Set-Content -NoNewline (Join-Path $testRoot 'CMakeLists.txt')
+
+      - name: Build test
+        shell: pwsh
+        run: |
+          $testRoot = Join-Path $env:GITHUB_WORKSPACE 'build\wf-cliprdr'
+          cmake -S $testRoot -B (Join-Path $testRoot 'out') -DCMAKE_BUILD_TYPE=Release
+          cmake --build (Join-Path $testRoot 'out') --config Release
+
+      - name: Run test
+        shell: pwsh
+        run: |
+          $testRoot = Join-Path $env:GITHUB_WORKSPACE 'build\wf-cliprdr\out'
+          $candidates = @(
+            (Join-Path $testRoot 'Release\test_invariant_wf_cliprdr.exe'),
+            (Join-Path $testRoot 'Debug\test_invariant_wf_cliprdr.exe'),
+            (Join-Path $testRoot 'test_invariant_wf_cliprdr.exe')
+          )
+          $exe = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (!$exe) {
+            throw "test_invariant_wf_cliprdr.exe was not found"
+          }
+          & $exe

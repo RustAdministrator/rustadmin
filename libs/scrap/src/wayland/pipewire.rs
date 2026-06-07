@@ -23,7 +23,7 @@ use gstreamer_app::AppSink;
 use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 
-use hbb_common::{bail, config, platform::linux::CMD_SH, serde_json, tokio, ResultType};
+use hbb_common::{bail, config, platform::linux::CMD_SH, serde_json, ResultType};
 
 use super::capturable::PixelProvider;
 use super::capturable::{Capturable, Recorder};
@@ -276,12 +276,17 @@ impl PipeWireRecorder {
         // see: https://gitlab.freedesktop.org/pipewire/pipewire/-/issues/982
         src.set_property("always-copy", &true)?;
 
+        // xdg-desktop-portal backends that expose DMA-BUF frames can fail
+        // negotiation when appsink's BGRx/RGBx caps are linked directly.
+        let convert = gst::ElementFactory::make("videoconvert", None)?;
+
         let sink = gst::ElementFactory::make("appsink", None)?;
         sink.set_property("drop", &true)?;
         sink.set_property("max-buffers", &1u32)?;
 
-        pipeline.add_many(&[&src, &sink])?;
-        src.link(&sink)?;
+        pipeline.add_many(&[&src, &convert, &sink])?;
+        src.link(&convert)?;
+        convert.link(&sink)?;
 
         let appsink = sink
             .dynamic_cast::<AppSink>()
