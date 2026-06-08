@@ -31,6 +31,10 @@ final SimpleWrapper<bool> _firstEnterImage = SimpleWrapper(false);
 // Used to skip session close if "move to new window" is clicked.
 final Map<String, bool> closeSessionOnDispose = {};
 
+const Duration _kDesktopSessionLifecycleStaleThreshold = Duration(seconds: 30);
+const Duration _kDesktopSessionEventLoopStaleThreshold = Duration(seconds: 45);
+const Duration _kDesktopSessionEventLoopCheckInterval = Duration(seconds: 5);
+
 class RemotePage extends StatefulWidget {
   RemotePage({
     Key? key,
@@ -66,6 +70,13 @@ class RemotePage extends StatefulWidget {
 
   FFI get ffi => (_lastState.value! as _RemotePageState)._ffi;
 
+  void reconnectIfStaleOnActivation() {
+    final state = _lastState.value;
+    if (state is _RemotePageState) {
+      state.reconnectIfStaleOnActivation();
+    }
+  }
+
   @override
   State<RemotePage> createState() {
     final state = _RemotePageState(id);
@@ -78,8 +89,14 @@ class _RemotePageState extends State<RemotePage>
     with
         AutomaticKeepAliveClientMixin,
         MultiWindowListener,
+        WidgetsBindingObserver,
         TickerProviderStateMixin {
   Timer? _timer;
+  Timer? _eventLoopStaleCheckTimer;
+  DateTime _lastEventLoopStaleCheckAt = DateTime.now();
+  DateTime? _lifecycleSuspendedAt;
+  bool _staleSessionRestartInProgress = false;
+  bool _disposed = false;
   String keyboardMode = "legacy";
   bool _isWindowBlur = false;
   final _cursorOverImage = false.obs;
@@ -124,6 +141,8 @@ class _RemotePageState extends State<RemotePage>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _startEventLoopStaleCheckTimer();
     _ffi = FFI(widget.sessionId);
     Get.put<FFI>(_ffi, tag: widget.id);
     _ffi.imageModel.addCallbackOnFirstImage((String peerId) {
@@ -188,6 +207,118 @@ class _RemotePageState extends State<RemotePage>
     // Register callback to cancel debounce timer when relative mouse mode is disabled
     _ffi.inputModel.onRelativeMouseModeDisabled =
         _cancelPointerLockCenterDebounceTimer;
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    final now = DateTime.now();
+    if (state == AppLifecycleState.resumed) {
+      final suspendedAt = _lifecycleSuspendedAt;
+      _lifecycleSuspendedAt = null;
+      if (suspendedAt != null &&
+          now.difference(suspendedAt) >=
+              _kDesktopSessionLifecycleStaleThreshold) {
+        unawaited(_restartStaleSession('desktop lifecycle resume'));
+      } else {
+        final elapsed = _takeEventLoopStaleCheckElapsed(now);
+        if (elapsed >= _kDesktopSessionEventLoopStaleThreshold) {
+          unawaited(_restartStaleSession(
+              'desktop lifecycle resume after ${elapsed.inSeconds}s event-loop gap'));
+        }
+      }
+      return;
+    }
+    if (state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      _lifecycleSuspendedAt ??= now;
+    }
+  }
+
+  void reconnectIfStaleOnActivation() {
+    final now = DateTime.now();
+    final elapsed = _takeEventLoopStaleCheckElapsed(now);
+    if (elapsed >= _kDesktopSessionEventLoopStaleThreshold) {
+      unawaited(_restartStaleSession(
+          'remote window activation after ${elapsed.inSeconds}s event-loop gap'));
+    }
+  }
+
+  void _startEventLoopStaleCheckTimer() {
+    _eventLoopStaleCheckTimer?.cancel();
+    _lastEventLoopStaleCheckAt = DateTime.now();
+    _eventLoopStaleCheckTimer = Timer.periodic(
+      _kDesktopSessionEventLoopCheckInterval,
+      (_) => _checkEventLoopStaleGap(),
+    );
+  }
+
+  void _checkEventLoopStaleGap() {
+    final now = DateTime.now();
+    final elapsed = _takeEventLoopStaleCheckElapsed(now);
+    if (elapsed >= _kDesktopSessionEventLoopStaleThreshold) {
+      unawaited(_restartStaleSession(
+          'desktop event loop resumed after ${elapsed.inSeconds}s gap'));
+    }
+  }
+
+  Duration _takeEventLoopStaleCheckElapsed(DateTime now) {
+    final elapsed = now.difference(_lastEventLoopStaleCheckAt);
+    _lastEventLoopStaleCheckAt = now;
+    return elapsed;
+  }
+
+  Future<void> _restartStaleSession(String reason) async {
+    if (_disposed || _staleSessionRestartInProgress || _ffi.closed) {
+      return;
+    }
+    _staleSessionRestartInProgress = true;
+    debugPrint('Restart stale remote session $sessionId ${widget.id}: $reason');
+    try {
+      _timer?.cancel();
+      _timer = null;
+      _ffi.inputModel.setRelativeMouseMode(false);
+      _ffi.inputModel.resetModifiers();
+      _ffi.inputModel.disposeRelativeMouseMode();
+      _ffi.dialogManager.dismissAll();
+      _ffi.ffiModel.clear();
+      _ffi.ffiModel.waitForFirstImage.value = true;
+      _ffi.ffiModel.isRefreshing = false;
+      _ffi.ffiModel.waitForImageDialogShow.value = true;
+      _ffi.ffiModel.waitForImageTimer?.cancel();
+      _ffi.ffiModel.waitForImageTimer = null;
+      await _ffi.imageModel.update(null);
+      _ffi.cursorModel.clear();
+      _ffi.canvasModel.clear();
+      if (mounted) {
+        setState(() {});
+      }
+      await _ffi.textureModel.resetForSessionRestart();
+      await bind.sessionClose(sessionId: sessionId);
+      if (_disposed) {
+        return;
+      }
+      _ffi.start(
+        widget.id,
+        password: widget.password,
+        isSharedPassword: widget.isSharedPassword,
+        switchUuid: widget.switchUuid,
+        forceRelay: widget.forceRelay,
+        display: widget.display,
+        displays: widget.displays,
+      );
+      _ffi.ffiModel.updateEventListener(sessionId, widget.id);
+      if (!isWeb) bind.pluginSyncUi(syncTo: kAppTypeDesktopRemote);
+      _ffi.qualityMonitorModel.checkShowQualityMonitor(sessionId);
+      _ffi.dialogManager
+          .showLoading(translate('Connecting...'), onCancel: closeConnection);
+    } catch (e) {
+      debugPrint(
+          'Failed to restart stale remote session $sessionId ${widget.id}: $e');
+    } finally {
+      _staleSessionRestartInProgress = false;
+    }
   }
 
   /// Cancel the pointer lock center debounce timer
@@ -316,8 +447,12 @@ class _RemotePageState extends State<RemotePage>
 
   @override
   Future<void> dispose() async {
+    _disposed = true;
     final closeSession = closeSessionOnDispose.remove(widget.id) ?? true;
 
+    WidgetsBinding.instance.removeObserver(this);
+    _eventLoopStaleCheckTimer?.cancel();
+    _eventLoopStaleCheckTimer = null;
     // https://github.com/flutter/flutter/issues/64935
     super.dispose();
     debugPrint("REMOTE PAGE dispose session $sessionId ${widget.id}");

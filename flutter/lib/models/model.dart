@@ -4227,6 +4227,7 @@ class FFI {
 
   // Terminal model registry for multiple terminals
   final Map<int, TerminalModel> _terminalModels = {};
+  int _sessionEventGeneration = 0;
 
   // Getter for terminal models
   Map<int, TerminalModel> get terminalModels => _terminalModels;
@@ -4411,13 +4412,15 @@ class FFI {
     imageModel.updateUserTextureRender();
     final hasGpuTextureRender = bind.mainHasGpuTextureRender();
     final SimpleWrapper<bool> isToNewWindowNotified = SimpleWrapper(false);
+    final sessionEventGeneration = ++_sessionEventGeneration;
     // Preserved for the rgba data.
     stream.listen((message) {
-      if (closed) return;
+      if (closed || sessionEventGeneration != _sessionEventGeneration) return;
       if (tabWindowId != null && !isToNewWindowNotified.value) {
         // Session is read to be moved to a new window.
         // Get the cached data and handle the cached data.
         Future.delayed(Duration.zero, () async {
+          if (sessionEventGeneration != _sessionEventGeneration) return;
           final args = jsonEncode({'id': id, 'close': display == null});
           final cachedData = await DesktopMultiWindow.invokeMethod(
               tabWindowId, kWindowEventGetCachedSessionData, args);

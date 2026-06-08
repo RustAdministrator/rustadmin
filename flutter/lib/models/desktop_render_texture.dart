@@ -235,6 +235,20 @@ class TextureModel {
     }
   }
 
+  resetForSessionRestart() async {
+    final ffi = parent.target;
+    if (ffi == null) return;
+    for (final texture in _pixelbufferRenderTextures.values) {
+      await texture.destroy(true, ffi);
+    }
+    for (final texture in _gpuRenderTextures.values) {
+      await texture.destroy(true, ffi);
+    }
+    _pixelbufferRenderTextures.clear();
+    _gpuRenderTextures.clear();
+    _control.clear();
+  }
+
   onViewCameraPageDispose(bool closeSession) async {
     final ffi = parent.target;
     if (ffi == null) return;

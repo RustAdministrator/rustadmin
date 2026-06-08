@@ -488,6 +488,10 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
     } else if (call.method == kWindowEventActiveSession) {
       final jumpOk = tabController.jumpToByKey(call.arguments);
       if (jumpOk) {
+        final page = tabController.widget(call.arguments);
+        if (page is RemotePage) {
+          page.reconnectIfStaleOnActivation();
+        }
         windowOnTop(windowId());
       }
       return jumpOk;
