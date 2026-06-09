@@ -4740,8 +4740,12 @@ mod security_tests {
     async fn connect_security_test_tcp(addr: &str) -> ResultType<Stream> {
         let deadline = Instant::now() + Duration::from_millis(CONNECT_TIMEOUT);
         loop {
-            match connect_tcp_local(addr.to_owned(), None, CONNECT_TIMEOUT).await {
-                Ok(conn) => return Ok(conn),
+            // These tests connect to in-process localhost listeners. Do not use
+            // connect_tcp_local() here because it honors persisted SOCKS proxy
+            // settings, which can route 127.0.0.1 test traffic away from the
+            // listener on developer/test machines.
+            match tcp::FramedStream::new(addr.to_owned(), None, CONNECT_TIMEOUT).await {
+                Ok(conn) => return Ok(Stream::Tcp(conn)),
                 Err(err) if Instant::now() >= deadline => return Err(err),
                 Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
             }
