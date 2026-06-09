@@ -12,7 +12,6 @@ Environment overrides:
   RUSTADMIN_FORCE_BRIDGE_GEN  Set to 1 to regenerate bridge files even if current. Default: 0
   RUSTADMIN_VERBOSE_BRIDGE_GEN
                               Set to 1 to print bridge generator output on success. Default: 0
-  RUSTADMIN_BRIDGE_CLASS_NAME  Dart FFI bridge class name. Default: Rustadmin
   RUSTADMIN_BRIDGE_LLVM_PATH  LLVM prefix for bridge codegen, e.g. /usr/lib/llvm-20.
                               Default: llvm-config/llvm-config-* prefix when found.
   RUSTADMIN_BRIDGE_LLVM_COMPILER_OPTS
@@ -36,7 +35,7 @@ package_mode="zip"
 skip_bridge_gen="${RUSTADMIN_SKIP_BRIDGE_GEN:-${RUSTDESK_SKIP_BRIDGE_GEN:-0}}"
 force_bridge_gen="${RUSTADMIN_FORCE_BRIDGE_GEN:-${RUSTDESK_FORCE_BRIDGE_GEN:-0}}"
 verbose_bridge_gen="${RUSTADMIN_VERBOSE_BRIDGE_GEN:-${RUSTDESK_VERBOSE_BRIDGE_GEN:-0}}"
-bridge_class_name="${RUSTADMIN_BRIDGE_CLASS_NAME:-${RUSTDESK_BRIDGE_CLASS_NAME:-Rustadmin}}"
+bridge_class_name="Rustadmin"
 bridge_llvm_path="${RUSTADMIN_BRIDGE_LLVM_PATH:-${RUSTDESK_BRIDGE_LLVM_PATH:-}}"
 bridge_llvm_compiler_opts="${RUSTADMIN_BRIDGE_LLVM_COMPILER_OPTS:-${RUSTDESK_BRIDGE_LLVM_COMPILER_OPTS:-}}"
 

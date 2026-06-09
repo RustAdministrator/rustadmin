@@ -10,7 +10,6 @@ Environment overrides:
   RUSTADMIN_SKIP_BRIDGE_GEN    Set to 1 to skip flutter_rust_bridge codegen. Default: 0
   RUSTADMIN_FORCE_BRIDGE_GEN   Set to 1 to regenerate bridge files even if current. Default: 0
   RUSTADMIN_VERBOSE_BRIDGE_GEN Set to 1 to print bridge generator output on success. Default: 0
-  RUSTADMIN_BRIDGE_CLASS_NAME  Dart FFI bridge class name. Default: Rustadmin
   RUSTADMIN_BRIDGE_LLVM_COMPILER_OPTS
                               Extra clang opts for bridge codegen.
                               Default: -Wno-nullability-completeness
@@ -54,7 +53,7 @@ adhoc_sign="${RUSTADMIN_MACOS_ADHOC_SIGN:-${RUSTDESK_MACOS_ADHOC_SIGN:-0}}"
 skip_bridge_gen="${RUSTADMIN_SKIP_BRIDGE_GEN:-${RUSTDESK_SKIP_BRIDGE_GEN:-0}}"
 force_bridge_gen="${RUSTADMIN_FORCE_BRIDGE_GEN:-${RUSTDESK_FORCE_BRIDGE_GEN:-0}}"
 verbose_bridge_gen="${RUSTADMIN_VERBOSE_BRIDGE_GEN:-${RUSTDESK_VERBOSE_BRIDGE_GEN:-0}}"
-bridge_class_name="${RUSTADMIN_BRIDGE_CLASS_NAME:-${RUSTDESK_BRIDGE_CLASS_NAME:-Rustadmin}}"
+bridge_class_name="Rustadmin"
 bridge_llvm_compiler_opts="${RUSTADMIN_BRIDGE_LLVM_COMPILER_OPTS:-${RUSTDESK_BRIDGE_LLVM_COMPILER_OPTS:--Wno-nullability-completeness}}"
 flutter_root="${RUSTADMIN_FLUTTER_ROOT:-${RUSTDESK_FLUTTER_ROOT:-}}"
 macos_sign_identity="${RUSTADMIN_MACOS_SIGN_IDENTITY:-${RUSTDESK_MACOS_SIGN_IDENTITY:-}}"
@@ -315,7 +314,7 @@ if [[ "$sign_only" -eq 0 ]]; then
   package_config="$flutter_dir/.dart_tool/package_config.json"
   if [[ "$clean" -eq 1 ]] ||
      [[ ! -f "$package_config" ]] ||
-     grep -Eq 'file:///mnt/|file:///home/|flutter-win|\\' "$package_config" 2>/dev/null; then
+     grep -Eq 'file:///([A-Z]:|[A-Za-z]%3A)|flutter-win|\\|file:///Users/|/Users/|file:///mnt/|file:///home/' "$package_config" 2>/dev/null; then
     echo "Refreshing macOS Flutter metadata..."
     rm -rf "$flutter_dir/.dart_tool" "$flutter_dir/.flutter-plugins-dependencies" "$flutter_dir/build/macos"
   fi
