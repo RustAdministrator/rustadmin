@@ -12,6 +12,7 @@ Environment overrides:
   RUSTADMIN_FORCE_BRIDGE_GEN  Set to 1 to regenerate bridge files even if current. Default: 0
   RUSTADMIN_VERBOSE_BRIDGE_GEN
                               Set to 1 to print bridge generator output on success. Default: 0
+  RUSTADMIN_BRIDGE_CLASS_NAME  Dart FFI bridge class name. Default: Rustadmin
   RUSTADMIN_BRIDGE_LLVM_PATH  LLVM prefix for bridge codegen, e.g. /usr/lib/llvm-20.
                               Default: llvm-config/llvm-config-* prefix when found.
   RUSTADMIN_BRIDGE_LLVM_COMPILER_OPTS
@@ -35,6 +36,7 @@ package_mode="zip"
 skip_bridge_gen="${RUSTADMIN_SKIP_BRIDGE_GEN:-${RUSTDESK_SKIP_BRIDGE_GEN:-0}}"
 force_bridge_gen="${RUSTADMIN_FORCE_BRIDGE_GEN:-${RUSTDESK_FORCE_BRIDGE_GEN:-0}}"
 verbose_bridge_gen="${RUSTADMIN_VERBOSE_BRIDGE_GEN:-${RUSTDESK_VERBOSE_BRIDGE_GEN:-0}}"
+bridge_class_name="${RUSTADMIN_BRIDGE_CLASS_NAME:-${RUSTDESK_BRIDGE_CLASS_NAME:-Rustadmin}}"
 bridge_llvm_path="${RUSTADMIN_BRIDGE_LLVM_PATH:-${RUSTDESK_BRIDGE_LLVM_PATH:-}}"
 bridge_llvm_compiler_opts="${RUSTADMIN_BRIDGE_LLVM_COMPILER_OPTS:-${RUSTDESK_BRIDGE_LLVM_COMPILER_OPTS:-}}"
 
@@ -280,7 +282,9 @@ generate_bridge_files() {
   local bridge_input="$repo_root/src/flutter_ffi.rs"
   local bridge_outputs=(
     "$flutter_dir/lib/generated_bridge.dart"
+    "$flutter_dir/lib/generated_bridge.freezed.dart"
     "$repo_root/src/bridge_generated.rs"
+    "$repo_root/src/bridge_generated.io.rs"
   )
   if [[ "$force_bridge_gen" != "1" ]]; then
     local current=1
@@ -291,6 +295,10 @@ generate_bridge_files() {
         break
       fi
     done
+    if [[ "$current" == "1" ]] &&
+       ! grep -Fq "abstract class $bridge_class_name" "$flutter_dir/lib/generated_bridge.dart"; then
+      current=0
+    fi
     if [[ "$current" == "1" ]]; then
       echo "flutter_rust_bridge files are current."
       return
@@ -320,7 +328,8 @@ EOF
   local -a bridge_codegen_args
   bridge_codegen_args=(
     --rust-input "$bridge_input" \
-    --dart-output "$flutter_dir/lib/generated_bridge.dart"
+    --dart-output "$flutter_dir/lib/generated_bridge.dart" \
+    --class-name "$bridge_class_name"
   )
   if [[ -n "$bridge_llvm_path" ]]; then
     bridge_codegen_args+=(--llvm-path "$bridge_llvm_path")
