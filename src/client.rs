@@ -4725,9 +4725,12 @@ mod security_tests {
     use hbb_common::{
         config::{keys, PairedViewer},
         get_time, tcp,
-        tokio::net::TcpListener,
+        tokio::net::{TcpListener, TcpStream},
     };
     use std::sync::Mutex;
+
+    const SECURITY_TEST_CONNECT_TIMEOUT_MS: u64 = 3_000;
+    const SECURITY_TEST_CONNECT_ATTEMPT_TIMEOUT_MS: u64 = 250;
 
     static TEST_CLIENT_SECURITY_LOCK: Mutex<()> = Mutex::new(());
 
@@ -4738,16 +4741,28 @@ mod security_tests {
     }
 
     async fn connect_security_test_tcp(addr: &str) -> ResultType<Stream> {
-        let deadline = Instant::now() + Duration::from_millis(CONNECT_TIMEOUT);
+        let addr: SocketAddr = addr.parse().context("Invalid security test TCP address")?;
+        let deadline = Instant::now() + Duration::from_millis(SECURITY_TEST_CONNECT_TIMEOUT_MS);
         loop {
             // These tests connect to in-process localhost listeners. Do not use
-            // connect_tcp_local() here because it honors persisted SOCKS proxy
-            // settings, which can route 127.0.0.1 test traffic away from the
-            // listener on developer/test machines.
-            match tcp::FramedStream::new(addr.to_owned(), None, CONNECT_TIMEOUT).await {
-                Ok(conn) => return Ok(Stream::Tcp(conn)),
-                Err(err) if Instant::now() >= deadline => return Err(err),
+            // connect_tcp_local()/FramedStream::new() here: they can honor
+            // persisted proxy or local-bind behavior that is irrelevant to
+            // these loopback-only mock peers.
+            let connect_result = tokio::time::timeout(
+                Duration::from_millis(SECURITY_TEST_CONNECT_ATTEMPT_TIMEOUT_MS),
+                TcpStream::connect(addr),
+            )
+            .await;
+            match connect_result {
+                Ok(Ok(conn)) => {
+                    conn.set_nodelay(true).ok();
+                    let local_addr = conn.local_addr()?;
+                    return Ok(Stream::Tcp(tcp::FramedStream::from(conn, local_addr)));
+                }
+                Ok(Err(err)) if Instant::now() >= deadline => return Err(err.into()),
+                Err(err) if Instant::now() >= deadline => return Err(err.into()),
                 Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                Ok(Err(_)) => tokio::time::sleep(Duration::from_millis(10)).await,
             }
         }
     }
