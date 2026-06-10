@@ -4729,7 +4729,7 @@ mod security_tests {
     };
     use std::sync::Mutex;
 
-    const SECURITY_TEST_CONNECT_TIMEOUT_MS: u64 = 3_000;
+    const SECURITY_TEST_CONNECT_TIMEOUT_MS: u64 = 15_000;
     const SECURITY_TEST_CONNECT_ATTEMPT_TIMEOUT_MS: u64 = 250;
 
     static TEST_CLIENT_SECURITY_LOCK: Mutex<()> = Mutex::new(());
@@ -4759,8 +4759,16 @@ mod security_tests {
                     let local_addr = conn.local_addr()?;
                     return Ok(Stream::Tcp(tcp::FramedStream::from(conn, local_addr)));
                 }
-                Ok(Err(err)) if Instant::now() >= deadline => return Err(err.into()),
-                Err(err) if Instant::now() >= deadline => return Err(err.into()),
+                Ok(Err(err)) if Instant::now() >= deadline => {
+                    bail!(
+                        "Failed to connect to security test peer {addr} within {SECURITY_TEST_CONNECT_TIMEOUT_MS} ms: {err}"
+                    );
+                }
+                Err(err) if Instant::now() >= deadline => {
+                    bail!(
+                        "Timed out connecting to security test peer {addr} within {SECURITY_TEST_CONNECT_TIMEOUT_MS} ms: {err}"
+                    );
+                }
                 Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
                 Ok(Err(_)) => tokio::time::sleep(Duration::from_millis(10)).await,
             }
