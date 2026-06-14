@@ -39,8 +39,7 @@ dependencies:
   url_launcher_ios: ^6.3.2
   toggle_switch: ^2.1.0
   dash_chat_2:
-    git:
-      url: https://github.com/rustdesk-org/Dash-Chat-2
+    path: third_party/dash_chat_2
   draggable_float_widget: ^0.1.0
   settings_ui: ^2.0.2
   flutter_breadcrumb: ^1.0.1
@@ -99,9 +98,7 @@ dependencies:
   auto_size_text_field: ^2.2.1
   flex_color_picker: ^3.3.0
   dynamic_layouts:
-    git:
-      url: https://github.com/rustdesk-org/dynamic_layouts.git
-      ref: 24cb88413fa5181d949ddacbb30a65d5c459e7d9
+    path: third_party/dynamic_layouts
   pull_down_button: ^0.9.3
   device_info_plus: ^9.1.0
   qr_flutter: ^4.1.0
