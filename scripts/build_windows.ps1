@@ -323,6 +323,133 @@ function New-ReleaseZip {
     Write-Host $ArchivePath
 }
 
+function Resolve-BinaryImportTool {
+    $Command = Get-Command "llvm-objdump.exe" -ErrorAction SilentlyContinue
+    if ($Command) {
+        return [PSCustomObject]@{ Kind = "llvm-objdump"; Path = $Command.Source }
+    }
+
+    $CandidateRoots = @(
+        $env:LLVM_PATH,
+        $BridgeLlvmPath,
+        (Join-Path $Drive "Program Files\LLVM"),
+        "C:\Program Files\LLVM"
+    ) | Where-Object { ![string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
+
+    foreach ($Root in $CandidateRoots) {
+        $Candidate = Join-Path $Root "bin\llvm-objdump.exe"
+        if (Test-Path $Candidate) {
+            return [PSCustomObject]@{ Kind = "llvm-objdump"; Path = (Resolve-Path $Candidate).Path }
+        }
+    }
+
+    $Command = Get-Command "dumpbin.exe" -ErrorAction SilentlyContinue
+    if ($Command) {
+        return [PSCustomObject]@{ Kind = "dumpbin"; Path = $Command.Source }
+    }
+
+    $VsRoots = @(
+        "C:\Program Files\Microsoft Visual Studio",
+        "D:\Program Files\Microsoft Visual Studio"
+    ) | Where-Object { Test-Path $_ }
+    foreach ($Root in $VsRoots) {
+        $Candidate = Get-ChildItem $Root -Recurse -Filter "dumpbin.exe" -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "\\bin\\Hostx64\\x64\\dumpbin\.exe$" } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+        if ($Candidate) {
+            return [PSCustomObject]@{ Kind = "dumpbin"; Path = $Candidate.FullName }
+        }
+    }
+
+    return $null
+}
+
+function Get-ImportedDllNames {
+    param(
+        [string]$BinaryPath,
+        $ImportTool
+    )
+
+    $Output = if ($ImportTool.Kind -eq "llvm-objdump") {
+        & $ImportTool.Path -p $BinaryPath 2>$null
+    } else {
+        & $ImportTool.Path /DEPENDENTS $BinaryPath 2>$null
+    }
+    if ($LASTEXITCODE -ne 0) {
+        return @()
+    }
+
+    $Names = [System.Collections.Generic.List[string]]::new()
+    foreach ($Line in $Output) {
+        if ($Line -match 'DLL Name:\s*([^"]+?\.dll)\s*$') {
+            $Names.Add($Matches[1].Trim())
+        } elseif ($ImportTool.Kind -eq "dumpbin" -and $Line -match '^\s*([^\s]+\.dll)\s*$') {
+            $Names.Add($Matches[1].Trim())
+        }
+    }
+    return $Names | Select-Object -Unique
+}
+
+function Copy-WindowsRuntimeDependencies {
+    param(
+        [string]$BundleDir,
+        [string]$DepsRoot
+    )
+
+    $ImportTool = Resolve-BinaryImportTool
+    if (!$ImportTool) {
+        Write-Warning "Could not find llvm-objdump.exe or dumpbin.exe; skipping runtime DLL dependency copy."
+        return
+    }
+
+    $SearchRoots = @(
+        (Join-Path $DepsRoot "bin"),
+        (Join-Path $DepsRoot "lib"),
+        $DepsRoot
+    ) | Where-Object { Test-Path $_ } | Select-Object -Unique
+
+    if ($SearchRoots.Count -eq 0) {
+        return
+    }
+
+    $Queue = [System.Collections.Generic.Queue[string]]::new()
+    $Seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    Get-ChildItem $BundleDir -Recurse -File -Include "*.exe", "*.dll" | ForEach-Object {
+        $Queue.Enqueue($_.FullName)
+    }
+
+    while ($Queue.Count -gt 0) {
+        $BinaryPath = $Queue.Dequeue()
+        if (!$Seen.Add($BinaryPath)) {
+            continue
+        }
+
+        foreach ($DllName in Get-ImportedDllNames $BinaryPath $ImportTool) {
+            $BundleDll = Join-Path $BundleDir $DllName
+            if (Test-Path $BundleDll) {
+                continue
+            }
+
+            $Source = $null
+            foreach ($Root in $SearchRoots) {
+                $Candidate = Join-Path $Root $DllName
+                if (Test-Path $Candidate) {
+                    $Source = (Resolve-Path $Candidate).Path
+                    break
+                }
+            }
+            if (!$Source) {
+                continue
+            }
+
+            Copy-Item -Force $Source $BundleDll
+            Write-Host "Copied runtime dependency: $DllName"
+            $Queue.Enqueue($BundleDll)
+        }
+    }
+}
+
 $VersionInfo = Get-RustAdminVersionInfo
 Write-VersionFile $VersionInfo
 
@@ -364,4 +491,5 @@ Remove-Item -Force $StaleRuntimeIcon -ErrorAction SilentlyContinue
 Write-Host "Windows bundle:"
 $BundleDir = Join-Path $FlutterDir "build\windows\x64\runner\Release"
 Write-Host $BundleDir
+Copy-WindowsRuntimeDependencies $BundleDir $DepsRoot
 New-ReleaseZip $VersionInfo
