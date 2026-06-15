@@ -19,6 +19,9 @@ Environment overrides:
   RUSTADMIN_LINUX_CODEC_ROOT  Native dependency prefix. Default: .local/linux-codecs
                               when present, otherwise system pkg-config
                               packages are used.
+  RUSTADMIN_LINUX_CODEC_LINK_MODE
+                              FFmpeg link mode for hwcodec: auto, static, or dynamic.
+                              Default: auto.
   RUSTADMIN_LINUX_DIST_DIR    Release zip output dir. Default: dist/linux
   PUB_CACHE                   Dart package cache. Default: $XDG_CACHE_HOME/rustadmin/flutter-pub-cache-linux,
                               or $HOME/.cache/rustadmin/flutter-pub-cache-linux.
@@ -38,6 +41,7 @@ verbose_bridge_gen="${RUSTADMIN_VERBOSE_BRIDGE_GEN:-${RUSTDESK_VERBOSE_BRIDGE_GE
 bridge_class_name="Rustadmin"
 bridge_llvm_path="${RUSTADMIN_BRIDGE_LLVM_PATH:-${RUSTDESK_BRIDGE_LLVM_PATH:-}}"
 bridge_llvm_compiler_opts="${RUSTADMIN_BRIDGE_LLVM_COMPILER_OPTS:-${RUSTDESK_BRIDGE_LLVM_COMPILER_OPTS:-}}"
+codec_link_mode="${RUSTADMIN_LINUX_CODEC_LINK_MODE:-${RUSTDESK_LINUX_CODEC_LINK_MODE:-}}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -139,6 +143,13 @@ if [[ -n "$deps_root" ]]; then
 else
   unset RUSTADMIN_LINUX_CODEC_ROOT || true
   unset RUSTDESK_LINUX_CODEC_ROOT || true
+fi
+if [[ -n "$codec_link_mode" ]]; then
+  export RUSTADMIN_LINUX_CODEC_LINK_MODE="$codec_link_mode"
+  export RUSTDESK_LINUX_CODEC_LINK_MODE="$codec_link_mode"
+else
+  unset RUSTADMIN_LINUX_CODEC_LINK_MODE || true
+  unset RUSTDESK_LINUX_CODEC_LINK_MODE || true
 fi
 
 if [[ -z "$bridge_llvm_path" ]]; then

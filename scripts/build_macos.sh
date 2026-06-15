@@ -14,6 +14,9 @@ Environment overrides:
                               Extra clang opts for bridge codegen.
                               Default: -Wno-nullability-completeness
   RUSTADMIN_MACOS_CODEC_ROOT   Native dependency prefix. Optional
+  RUSTADMIN_MACOS_CODEC_LINK_MODE
+                              FFmpeg link mode for hwcodec: auto, static, or dynamic.
+                              Default: auto.
   RUSTADMIN_MACOS_SIGN_IDENTITY  Signing identity to use for the app bundle. Optional
   RUSTADMIN_MACOS_XCODE_SIGN_IDENTITY Signing identity passed to Xcode. Optional
   RUSTADMIN_MACOS_DEVELOPMENT_TEAM Development team to pass to Xcode. Optional
@@ -60,6 +63,7 @@ macos_sign_identity="${RUSTADMIN_MACOS_SIGN_IDENTITY:-${RUSTDESK_MACOS_SIGN_IDEN
 macos_xcode_sign_identity="${RUSTADMIN_MACOS_XCODE_SIGN_IDENTITY:-${RUSTDESK_MACOS_XCODE_SIGN_IDENTITY:-}}"
 macos_development_team="${RUSTADMIN_MACOS_DEVELOPMENT_TEAM:-${RUSTDESK_MACOS_DEVELOPMENT_TEAM:-}}"
 macos_codec_root="${RUSTADMIN_MACOS_CODEC_ROOT:-${RUSTDESK_MACOS_CODEC_ROOT:-}}"
+macos_codec_link_mode="${RUSTADMIN_MACOS_CODEC_LINK_MODE:-${RUSTDESK_MACOS_CODEC_LINK_MODE:-}}"
 
 if [[ -n "$flutter_root" ]]; then
   export PATH="$flutter_root/bin:$PATH"
@@ -93,6 +97,10 @@ if [[ -n "$macos_codec_root" ]]; then
   export RUSTDESK_MACOS_CODEC_ROOT="$macos_codec_root"
   export CMAKE_PREFIX_PATH="$macos_codec_root:${CMAKE_PREFIX_PATH:-}"
   export PKG_CONFIG_PATH="$macos_codec_root/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+fi
+if [[ -n "$macos_codec_link_mode" ]]; then
+  export RUSTADMIN_MACOS_CODEC_LINK_MODE="$macos_codec_link_mode"
+  export RUSTDESK_MACOS_CODEC_LINK_MODE="$macos_codec_link_mode"
 fi
 
 mkdir -p "$PUB_CACHE" "$CARGO_TARGET_DIR"
