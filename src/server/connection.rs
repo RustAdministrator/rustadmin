@@ -2679,6 +2679,16 @@ impl Connection {
         } else {
             SessionAuthKind::ClickApproval
         };
+        log::info!(
+            "#{} start connection manager: peer_id={}, peer_name={}, platform={}, version={}, authorized={}, auth_kind={}",
+            self.inner.id(),
+            peer_id,
+            name,
+            self.lr.my_platform,
+            self.lr.version,
+            authorized,
+            cm_auth_kind.as_str()
+        );
         self.send_to_cm(ipc::Data::Login {
             id: self.inner.id(),
             is_file_transfer: self.file_transfer.is_some(),
@@ -2703,7 +2713,12 @@ impl Connection {
 
     #[inline]
     fn send_to_cm(&mut self, data: ipc::Data) {
-        self.tx_to_cm.send(data).ok();
+        if self.tx_to_cm.send(data).is_err() {
+            log::warn!(
+                "#{} failed to send ipc data to connection manager",
+                self.inner.id()
+            );
+        }
     }
 
     #[inline]
@@ -3015,11 +3030,28 @@ impl Connection {
         use scrap::codec::{Encoder, EncodingUpdate::*};
         if let Some(o) = self.lr.clone().option.as_ref() {
             if let Some(q) = o.supported_decoding.clone().take() {
+                log::info!(
+                    "#{} supported_decoding on login: h264={}, h265={}, vp9={}, av1={}, prefer={}",
+                    self.inner.id(),
+                    q.ability_h264,
+                    q.ability_h265,
+                    q.ability_vp9,
+                    q.ability_av1,
+                    q.prefer
+                );
                 Encoder::update(Update(self.inner.id(), q));
             } else {
+                log::info!(
+                    "#{} supported_decoding missing on login, forcing VP9 only",
+                    self.inner.id()
+                );
                 Encoder::update(NewOnlyVP9(self.inner.id()));
             }
         } else {
+            log::info!(
+                "#{} login options missing, forcing VP9 only",
+                self.inner.id()
+            );
             Encoder::update(NewOnlyVP9(self.inner.id()));
         }
     }
@@ -4061,12 +4093,24 @@ impl Connection {
                 },
                 Some(message::Union::Misc(misc)) => match misc.union {
                     Some(misc::Union::SwitchDisplay(s)) => {
+                        log::info!(
+                            "#{} recv SwitchDisplay: display={}",
+                            self.inner.id(),
+                            s.display
+                        );
                         self.handle_switch_display(s).await;
                     }
                     Some(misc::Union::CaptureDisplays(displays)) => {
                         let add = displays.add.iter().map(|d| *d as usize).collect::<Vec<_>>();
                         let sub = displays.sub.iter().map(|d| *d as usize).collect::<Vec<_>>();
                         let set = displays.set.iter().map(|d| *d as usize).collect::<Vec<_>>();
+                        log::info!(
+                            "#{} recv CaptureDisplays: add={:?}, sub={:?}, set={:?}",
+                            self.inner.id(),
+                            add,
+                            sub,
+                            set
+                        );
                         self.capture_displays(&add, &sub, &set).await;
                     }
                     #[cfg(windows)]
@@ -4831,17 +4875,35 @@ impl Connection {
 
     async fn capture_displays(&mut self, add: &[usize], sub: &[usize], set: &[usize]) {
         let video_source = self.video_source();
+        log::info!(
+            "#{} capture_displays: source={:?}, add={:?}, sub={:?}, set={:?}",
+            self.inner.id(),
+            video_source,
+            add,
+            sub,
+            set
+        );
         if let Some(sever) = self.server.upgrade() {
             let mut lock = sever.write().unwrap();
             for display in add.iter() {
                 let service_name = video_service::get_service_name(video_source, *display);
                 if !lock.contains(&service_name) {
+                    log::info!(
+                        "#{} add video service from capture_displays: {}",
+                        self.inner.id(),
+                        service_name
+                    );
                     lock.add_service(Box::new(video_service::new(video_source, *display)));
                 }
             }
             for display in set.iter() {
                 let service_name = video_service::get_service_name(video_source, *display);
                 if !lock.contains(&service_name) {
+                    log::info!(
+                        "#{} add video service from capture_displays: {}",
+                        self.inner.id(),
+                        service_name
+                    );
                     lock.add_service(Box::new(video_service::new(video_source, *display)));
                 }
             }
@@ -5059,6 +5121,15 @@ impl Connection {
             }
         }
         if let Some(q) = o.supported_decoding.clone().take() {
+            log::info!(
+                "#{} supported_decoding update: h264={}, h265={}, vp9={}, av1={}, prefer={}",
+                self.inner.id(),
+                q.ability_h264,
+                q.ability_h265,
+                q.ability_vp9,
+                q.ability_av1,
+                q.prefer
+            );
             scrap::codec::Encoder::update(scrap::codec::EncodingUpdate::Update(self.inner.id(), q));
         }
         if let Ok(q) = o.lock_after_session_end.enum_value() {
@@ -6180,6 +6251,9 @@ async fn start_ipc(
                                 })?;
                             }
                             _ => {
+                                if matches!(&data, ipc::Data::Close) {
+                                    log::info!("cm ipc bridge: close received from connection manager");
+                                }
                                 tx_from_cm.send(data)?;
                             }
                         }
@@ -6190,6 +6264,9 @@ async fn start_ipc(
             res = rx_to_cm.recv() => {
                 match res {
                     Some(data) => {
+                        if matches!(&data, ipc::Data::Close) {
+                            log::info!("cm ipc bridge: close sent to connection manager");
+                        }
                         if let Data::FS(ipc::FS::WriteBlock{id,
                             file_num,
                             data,

@@ -574,12 +574,15 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                     break;
                                 }
                                 Data::Close => {
-                                    log::info!("cm ipc connection closed from connection request");
+                                    log::info!(
+                                        "cm ipc connection closed from connection request: conn_id={}",
+                                        self.conn_id
+                                    );
                                     break;
                                 }
                                 Data::Disconnected => {
                                     self.close = false;
-                                    log::info!("cm ipc connection disconnect");
+                                    log::info!("cm ipc connection disconnect: conn_id={}", self.conn_id);
                                     break;
                                 }
                                 Data::PrivacyModeState((_id, _, _)) => {

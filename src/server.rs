@@ -616,6 +616,7 @@ impl Server {
 
     fn add_service(&mut self, service: Box<dyn Service>) {
         let name = service.name();
+        log::info!("add service: {}", name);
         self.services.insert(name, service);
     }
 
@@ -626,8 +627,20 @@ impl Server {
     pub fn subscribe(&mut self, name: &str, conn: ConnInner, sub: bool) {
         if let Some(s) = self.services.get(name) {
             if s.is_subed(conn.id()) == sub {
+                log::info!(
+                    "skip service subscription: name={}, conn_id={}, sub={}, already_matched=true",
+                    name,
+                    conn.id(),
+                    sub
+                );
                 return;
             }
+            log::info!(
+                "service subscription: name={}, conn_id={}, sub={}",
+                name,
+                conn.id(),
+                sub
+            );
             if sub {
                 s.on_subscribe(conn.clone());
             } else {
@@ -685,6 +698,14 @@ impl Server {
         include: bool,
         exclude: bool,
     ) {
+        log::info!(
+            "server capture_displays: conn_id={}, source={:?}, displays={:?}, include={}, exclude={}",
+            conn.id(),
+            source,
+            displays,
+            include,
+            exclude
+        );
         let displays = displays
             .iter()
             .map(|d| video_service::get_service_name(source, *d))
