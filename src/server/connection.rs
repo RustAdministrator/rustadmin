@@ -38,8 +38,8 @@ use hbb_common::{
     futures::{SinkExt, StreamExt},
     get_time, get_version_number,
     message_proto::{
-        option_message::BoolOption, permission_info::Permission, SessionPermissionRequest,
-        SessionPermissionResponse,
+        option_message::BoolOption, permission_info::Permission, supported_decoding::PreferCodec,
+        SessionPermissionRequest, SessionPermissionResponse,
     },
     password_security::{self as password, ApproveMode},
     sha2::{Digest, Sha256},
@@ -3031,13 +3031,13 @@ impl Connection {
         if let Some(o) = self.lr.clone().option.as_ref() {
             if let Some(q) = o.supported_decoding.clone().take() {
                 log::info!(
-                    "#{} supported_decoding on login: h264={}, h265={}, vp9={}, av1={}, prefer={}",
+                    "#{} supported_decoding on login: h264={}, h265={}, vp9={}, av1={}, prefer={:?}",
                     self.inner.id(),
                     q.ability_h264,
                     q.ability_h265,
                     q.ability_vp9,
                     q.ability_av1,
-                    q.prefer
+                    q.prefer.enum_value_or(PreferCodec::Auto)
                 );
                 Encoder::update(Update(self.inner.id(), q));
             } else {
@@ -5122,13 +5122,13 @@ impl Connection {
         }
         if let Some(q) = o.supported_decoding.clone().take() {
             log::info!(
-                "#{} supported_decoding update: h264={}, h265={}, vp9={}, av1={}, prefer={}",
+                "#{} supported_decoding update: h264={}, h265={}, vp9={}, av1={}, prefer={:?}",
                 self.inner.id(),
                 q.ability_h264,
                 q.ability_h265,
                 q.ability_vp9,
                 q.ability_av1,
-                q.prefer
+                q.prefer.enum_value_or(PreferCodec::Auto)
             );
             scrap::codec::Encoder::update(scrap::codec::EncodingUpdate::Update(self.inner.id(), q));
         }
