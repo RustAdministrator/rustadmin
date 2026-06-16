@@ -1315,8 +1315,20 @@ impl<T: InvokeUiSession> Session<T> {
         let mut connection_round_state_lock = self.connection_round_state.lock().unwrap();
         if self.thread.lock().unwrap().is_some() {
             match connection_round_state_lock.state {
-                ConnectionState::Connecting => return,
-                ConnectionState::Connected => self.send(Data::Close),
+                ConnectionState::Connecting => {
+                    log::info!(
+                        "diag session reconnect ignored while connecting: id={}, force_relay={force_relay}",
+                        self.get_id()
+                    );
+                    return;
+                }
+                ConnectionState::Connected => {
+                    log::info!(
+                        "diag session reconnect closing current connection: id={}, force_relay={force_relay}",
+                        self.get_id()
+                    );
+                    self.send(Data::Close)
+                }
                 ConnectionState::Disconnected => {}
             }
         }
@@ -1428,6 +1440,12 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     pub fn close(&self) {
+        log::info!(
+            "diag session close requested: id={}, thread_active={}, sender_ready={}",
+            self.get_id(),
+            self.thread.lock().unwrap().is_some(),
+            self.sender.read().unwrap().is_some()
+        );
         self.confirm_direct_trust_response(false);
         self.submit_direct_pairing_passphrase_response(None);
         self.send(Data::Close);

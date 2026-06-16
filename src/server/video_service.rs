@@ -1210,6 +1210,8 @@ fn handle_one_frame(
         Ok(mut vf) => {
             *encode_fail_counter = 0;
             vf.display = display as _;
+            let (payload_bytes, frame_count, has_keyframe) =
+                scrap::codec::video_frame_payload_stats(&vf).unwrap_or((0, 0, false));
             let mut msg = Message::new();
             msg.set_video_frame(vf);
             recorder
@@ -1220,7 +1222,7 @@ fn handle_one_frame(
             send_conn_ids = sp.send_video_frame(msg);
             if first {
                 log::info!(
-                    "diag first video frame encoded: service={}, display={}, width={}, height={}, targets={:?}, negotiated={:?}, hardware={}, bitrate={}, capture_ms={}",
+                    "diag first video frame encoded: service={}, display={}, width={}, height={}, targets={:?}, negotiated={:?}, hardware={}, bitrate={}, payload_bytes={}, frame_count={}, keyframe={}, capture_ms={}",
                     sp.name(),
                     display,
                     width,
@@ -1229,6 +1231,9 @@ fn handle_one_frame(
                     Encoder::negotiated_codec(),
                     encoder.is_hardware(),
                     encoder.bitrate(),
+                    payload_bytes,
+                    frame_count,
+                    has_keyframe,
                     ms
                 );
             }

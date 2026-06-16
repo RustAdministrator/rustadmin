@@ -287,6 +287,7 @@ pub fn will_session_close_close_session(session_id: SessionID) -> SyncReturn<boo
 }
 
 pub fn session_close(session_id: SessionID) {
+    log::info!("diag session_close FFI requested: session_id={session_id}");
     if let Some(session) = sessions::remove_session_by_session_id(&session_id) {
         // `release_remote_keys` is not required for mobile platforms in common cases.
         // But we still call it to make the code more stable.
@@ -294,6 +295,10 @@ pub fn session_close(session_id: SessionID) {
         crate::keyboard::release_remote_keys("map");
         session.close_event_stream(session_id);
         session.close();
+    } else {
+        log::info!(
+            "diag session_close FFI ignored: session_id={session_id}, reason=missing_session"
+        );
     }
 }
 

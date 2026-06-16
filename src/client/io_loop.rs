@@ -234,6 +234,14 @@ impl<T: InvokeUiSession> Remote<T> {
                             if let Some(res) = res {
                                 match res {
                                     Err(err) => {
+                                        log::warn!(
+                                            "diag client stream read error: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, err={}",
+                                            self.handler.get_id(),
+                                            self.is_connected,
+                                            self.first_frame,
+                                            self.video_format,
+                                            err
+                                        );
                                         self.handler.on_establish_connection_error(err.to_string());
                                         break;
                                     }
@@ -245,11 +253,25 @@ impl<T: InvokeUiSession> Remote<T> {
                                         }
                                         self.data_count.fetch_add(bytes.len(), Ordering::Relaxed);
                                         if !self.handle_msg_from_peer(bytes, &mut peer).await {
+                                            log::info!(
+                                                "diag client peer handler requested exit: id={}, is_connected={}, video_packet_seen={}, video_format={:?}",
+                                                self.handler.get_id(),
+                                                self.is_connected,
+                                                self.first_frame,
+                                                self.video_format
+                                            );
                                             break
                                         }
                                     }
                                 }
                             } else {
+                                log::warn!(
+                                    "diag client stream ended by peer: id={}, is_connected={}, video_packet_seen={}, video_format={:?}",
+                                    self.handler.get_id(),
+                                    self.is_connected,
+                                    self.first_frame,
+                                    self.video_format
+                                );
                                 if self.handler.is_restarting_remote_device() {
                                     log::info!("Restart remote device");
                                     self.handler.msgbox("restarting", "Restarting remote device", "remote_restarting_tip", "");
@@ -273,6 +295,14 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
                         _ = self.timer.tick() => {
                             if last_recv_time.elapsed() >= SEC30 {
+                                log::warn!(
+                                    "diag client receive timeout: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, elapsed_ms={}",
+                                    self.handler.get_id(),
+                                    self.is_connected,
+                                    self.first_frame,
+                                    self.video_format,
+                                    last_recv_time.elapsed().as_millis()
+                                );
                                 self.handler.msgbox("error", "Connection Error", "Timeout", "");
                                 break;
                             }
@@ -544,6 +574,15 @@ impl<T: InvokeUiSession> Remote<T> {
     async fn handle_msg_from_ui(&mut self, data: Data, peer: &mut Stream) -> bool {
         match data {
             Data::Close => {
+                log::info!(
+                    "diag client io_loop received Data::Close: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, video_threads={}, sent_close_reason={}",
+                    self.handler.get_id(),
+                    self.is_connected,
+                    self.first_frame,
+                    self.video_format,
+                    self.video_threads.len(),
+                    self.sent_close_reason
+                );
                 self.send_close_reason(peer, "").await;
                 return false;
             }
@@ -1305,6 +1344,16 @@ impl<T: InvokeUiSession> Remote<T> {
             match msg_in.union {
                 Some(message::Union::VideoFrame(vf)) => {
                     if !self.first_frame {
+                        let (payload_bytes, frame_count, has_keyframe) =
+                            scrap::codec::video_frame_payload_stats(&vf).unwrap_or((0, 0, false));
+                        log::info!(
+                            "diag first video frame received from stream: display={}, format={:?}, payload_bytes={}, frame_count={}, keyframe={}",
+                            vf.display,
+                            CodecFormat::from(&vf),
+                            payload_bytes,
+                            frame_count,
+                            has_keyframe
+                        );
                         self.first_frame = true;
                         self.handler.close_success();
                         self.handler.adapt_size();
@@ -1896,6 +1945,14 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
                     }
                     Some(misc::Union::CloseReason(c)) => {
+                        log::warn!(
+                            "diag client received remote close reason: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, reason={}",
+                            self.handler.get_id(),
+                            self.is_connected,
+                            self.first_frame,
+                            self.video_format,
+                            c
+                        );
                         self.sent_close_reason = true; // The controlled end will close, no need to send close reason
                         self.handler.msgbox("error", "Connection Error", &c, "");
                         return false;

@@ -420,6 +420,29 @@ impl Encoder {
     }
 }
 
+fn encoded_video_frames_payload_stats(frames: &EncodedVideoFrames) -> (usize, usize, bool) {
+    let mut payload_bytes = 0;
+    let mut has_keyframe = false;
+    for frame in frames.frames.iter() {
+        payload_bytes += frame.data.len();
+        has_keyframe |= frame.key;
+    }
+    (payload_bytes, frames.frames.len(), has_keyframe)
+}
+
+pub fn video_frame_payload_stats(vf: &VideoFrame) -> Option<(usize, usize, bool)> {
+    match vf.union.as_ref()? {
+        video_frame::Union::Vp8s(frames)
+        | video_frame::Union::Vp9s(frames)
+        | video_frame::Union::Av1s(frames) => Some(encoded_video_frames_payload_stats(frames)),
+        #[cfg(any(feature = "hwcodec", feature = "vram", feature = "mediacodec"))]
+        video_frame::Union::H264s(frames) | video_frame::Union::H265s(frames) => {
+            Some(encoded_video_frames_payload_stats(frames))
+        }
+        _ => None,
+    }
+}
+
 impl Decoder {
     pub fn supported_decodings(
         id_for_perfer: Option<&str>,
@@ -445,7 +468,7 @@ impl Decoder {
             ..Default::default()
         };
         #[cfg(feature = "hwcodec")]
-        {
+        if enable_hwcodec_option() {
             decoding.ability_h264 |= if HwRamDecoder::try_get(CodecFormat::H264).is_some() {
                 1
             } else {
