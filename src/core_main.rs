@@ -164,6 +164,26 @@ pub fn core_main() -> Option<Vec<String>> {
         }
     }
     hbb_common::init_log(false, &log_name);
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let role = if log_name.is_empty() {
+            "main"
+        } else {
+            log_name.as_str()
+        };
+        let exe = std::env::current_exe()
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        log::info!(
+            "process logging initialized: role={}, pid={}, exe={}, log_path={}, config={}, username={}",
+            role,
+            std::process::id(),
+            exe,
+            config::Config::log_path().display(),
+            config::Config::file().display(),
+            crate::username(),
+        );
+    }
 
     // linux uni (url) go here.
     #[cfg(all(target_os = "linux", feature = "flutter"))]

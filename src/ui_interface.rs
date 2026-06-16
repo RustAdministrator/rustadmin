@@ -1295,6 +1295,7 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
 
     loop {
         if let Ok(mut c) = ipc::connect(1000, "").await {
+            c.send(&ipc::Data::SystemInfo(None)).await.ok();
             let mut timer = crate::rustdesk_interval(time::interval(time::Duration::from_secs(1)));
             loop {
                 tokio::select! {
@@ -1325,6 +1326,9 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                                 } else if name == "temporary-password" {
                                     *TEMPORARY_PASSWD.lock().unwrap() = value;
                                 }
+                            }
+                            Ok(Some(ipc::Data::SystemInfo(Some(info)))) => {
+                                log::info!("server system info: {}", info);
                             }
                             #[cfg(feature = "flutter")]
                             Ok(Some(ipc::Data::VideoConnCount(Some(n)))) => {
