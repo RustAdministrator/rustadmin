@@ -13,9 +13,14 @@ Environment:
                        Default: flutter/build/macos/Build/Products/Release/RustAdmin.app
   APP_NAME             App name inside the DMG. Default: RustAdmin
   DIST_DIR             Output directory. Default: dist/macos
-  DMG                  Output DMG path. Default: $DIST_DIR/rustadmin-$VERSION-macos-$ARCH.dmg
-  VERSION              Version string for the default DMG name.
+  DMG                  Output DMG path.
+                       Default: $DIST_DIR/rustadmin-$PACKAGE_VERSION-macos-$ARCH.dmg
+  VERSION              Base app version for the default package version.
                        Default: Cargo.toml package version
+  REVISION             Build revision for the default package version.
+                       Default: rustadmin_revision.txt
+  PACKAGE_VERSION      Version string for the default DMG name.
+                       Default: $VERSION.$REVISION
   VOLUME_NAME          Mounted DMG volume name. Default: "$APP_NAME Installer"
   SIGN_IDENTITY        Developer ID Application identity or SHA-1 hash.
                        Also accepts RUSTADMIN_MACOS_DMG_SIGN_IDENTITY or
@@ -87,6 +92,12 @@ read_version() {
   sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "$repo_root/Cargo.toml" | head -n 1
 }
 
+read_revision() {
+  local revision_file="$repo_root/rustadmin_revision.txt"
+  [[ -f "$revision_file" ]] || return 0
+  tr -d '[:space:]' < "$revision_file"
+}
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 arch="$(uname -m)"
 
@@ -94,6 +105,8 @@ APP_NAME="${APP_NAME:-RustAdmin}"
 APP="${APP:-$repo_root/flutter/build/macos/Build/Products/Release/$APP_NAME.app}"
 DIST_DIR="${DIST_DIR:-$repo_root/dist/macos}"
 VERSION="${VERSION:-$(read_version)}"
+REVISION="${REVISION:-$(read_revision)}"
+PACKAGE_VERSION="${PACKAGE_VERSION:-}"
 VOLUME_NAME="${VOLUME_NAME:-$APP_NAME Installer}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-${RUSTADMIN_MACOS_DMG_SIGN_IDENTITY:-${RUSTADMIN_MACOS_SIGN_IDENTITY:-${RUSTDESK_MACOS_DMG_SIGN_IDENTITY:-${RUSTDESK_MACOS_SIGN_IDENTITY:-}}}}}"
 APP_ENTITLEMENTS="${APP_ENTITLEMENTS:-}"
@@ -195,8 +208,16 @@ if [[ -z "$VERSION" ]]; then
   exit 1
 fi
 
+if [[ -z "$PACKAGE_VERSION" ]]; then
+  if [[ -z "$REVISION" ]]; then
+    echo "Could not read RustAdmin revision from rustadmin_revision.txt." >&2
+    exit 1
+  fi
+  PACKAGE_VERSION="$VERSION.$REVISION"
+fi
+
 if [[ -z "$DMG" ]]; then
-  DMG="$DIST_DIR/rustadmin-$VERSION-macos-$arch.dmg"
+  DMG="$DIST_DIR/rustadmin-$PACKAGE_VERSION-macos-$arch.dmg"
 fi
 
 require_cmd codesign
