@@ -775,7 +775,13 @@ impl Connection {
             pending_permission_requests: HashMap::new(),
         };
         let addr = hbb_common::try_into_v4(addr);
+        log::info!("#{} diag conn accepted: addr={}", conn.inner.id(), addr);
         if !conn.on_open(addr).await {
+            log::warn!(
+                "#{} diag conn on_open ended before run loop: addr={}",
+                conn.inner.id(),
+                addr
+            );
             conn.closed = true;
             // sleep to ensure msg got received.
             sleep(1.).await;
@@ -812,17 +818,35 @@ impl Connection {
             crate::rustdesk_interval(time::interval_at(Instant::now(), TEST_DELAY_TIMEOUT));
         let mut last_recv_time = Instant::now();
 
-        conn.stream.set_send_timeout(
-            if conn.file_transfer.is_some() || conn.port_forward_socket.is_some() || conn.terminal {
-                SEND_TIMEOUT_OTHER
-            } else {
-                SEND_TIMEOUT_VIDEO
-            },
+        let send_timeout_ms = if conn.file_transfer.is_some()
+            || conn.port_forward_socket.is_some()
+            || conn.terminal
+        {
+            SEND_TIMEOUT_OTHER
+        } else {
+            SEND_TIMEOUT_VIDEO
+        };
+        conn.stream.set_send_timeout(send_timeout_ms);
+        log::info!(
+            "#{} diag conn run loop: addr={}, authorized={}, auth_kind={}, remote={}, file_transfer={}, view_camera={}, terminal={}, port_forward={}, display_idx={}, send_timeout_ms={}, video_ack_required={}",
+            conn.inner.id(),
+            addr,
+            conn.authorized,
+            conn.session_auth_kind.as_str(),
+            conn.is_remote(),
+            conn.file_transfer.is_some(),
+            conn.view_camera,
+            conn.terminal,
+            !conn.port_forward_address.is_empty() || conn.port_forward_socket.is_some(),
+            conn.display_idx,
+            send_timeout_ms,
+            conn.video_ack_required
         );
 
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         std::thread::spawn(move || Self::handle_input(_rx_input, tx_cloned));
         let mut second_timer = crate::rustdesk_interval(time::interval(Duration::from_secs(1)));
+        let mut first_video_frame_sent = false;
 
         #[cfg(feature = "unix-file-copy-paste")]
         let rx_clip_holder;
@@ -1093,14 +1117,32 @@ impl Connection {
                     }
                 }
                 Some((instant, value)) = rx_video.recv() => {
+                    let is_video_frame = matches!(&value.union, Some(message::Union::VideoFrame(_)));
                     if !conn.video_ack_required {
                         if let Some(message::Union::VideoFrame(vf)) = &value.union {
                             video_service::notify_video_frame_fetched(vf.display as usize, id, Some(instant.into()));
                         }
                     }
                     if let Err(err) = conn.stream.send(&value as &Message).await {
+                        if is_video_frame {
+                            log::warn!(
+                                "#{} diag video stream send failed: queue_latency_ms={}, err={}",
+                                conn.inner.id(),
+                                instant.elapsed().as_millis(),
+                                err
+                            );
+                        }
                         conn.on_close(&err.to_string(), false).await;
                         break;
+                    }
+                    if is_video_frame && !first_video_frame_sent {
+                        first_video_frame_sent = true;
+                        log::info!(
+                            "#{} diag first video frame sent to stream: queue_latency_ms={}, video_ack_required={}",
+                            conn.inner.id(),
+                            instant.elapsed().as_millis(),
+                            conn.video_ack_required
+                        );
                     }
                 },
                 Some((instant, value)) = rx.recv() => {
@@ -2558,6 +2600,11 @@ impl Connection {
             self.services_subed = true;
             if let Some(s) = self.server.upgrade() {
                 let mut noperms = Vec::new();
+                let can_sub_clipboard = self.can_sub_clipboard_service();
+                #[cfg(feature = "unix-file-copy-paste")]
+                let can_sub_file_clipboard = self.can_sub_file_clipboard_service();
+                #[cfg(not(feature = "unix-file-copy-paste"))]
+                let can_sub_file_clipboard = false;
                 if !self.peer_keyboard_enabled() && !self.show_remote_cursor {
                     noperms.push(NAME_CURSOR);
                 }
@@ -2567,22 +2614,46 @@ impl Connection {
                 if !self.follow_remote_window {
                     noperms.push(NAME_WINDOW_FOCUS);
                 }
-                if !self.can_sub_clipboard_service() {
+                if !can_sub_clipboard {
                     noperms.push(super::clipboard_service::NAME);
                 }
                 #[cfg(feature = "unix-file-copy-paste")]
-                if !self.can_sub_file_clipboard_service() {
+                if !can_sub_file_clipboard {
                     noperms.push(super::clipboard_service::FILE_NAME);
                 }
                 if !self.audio_enabled() {
                     noperms.push(super::audio_service::NAME);
                 }
+                let primary_video_service_name = video_service::get_service_name(
+                    VideoSource::Monitor,
+                    *display_service::PRIMARY_DISPLAY_IDX,
+                );
+                log::info!(
+                    "#{} diag monitor subscribe start: service={}, display_idx={}, keyboard={}, show_remote_cursor={}, follow_remote_window={}, clipboard={}, file_clipboard={}, audio={}, noperms={:?}",
+                    self.inner.id(),
+                    primary_video_service_name,
+                    self.display_idx,
+                    self.peer_keyboard_enabled(),
+                    self.show_remote_cursor,
+                    self.follow_remote_window,
+                    can_sub_clipboard,
+                    can_sub_file_clipboard,
+                    self.audio_enabled(),
+                    noperms
+                );
                 let mut s = s.write().unwrap();
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 let _h = try_start_record_cursor_pos();
                 self.auto_disconnect_timer = Self::get_auto_disconenct_timer();
                 s.try_add_primay_video_service();
                 s.add_connection(self.inner.clone(), &noperms);
+                log::info!(
+                    "#{} diag monitor subscribe added: service={}, services_subed={}, auto_disconnect_timer={}",
+                    self.inner.id(),
+                    primary_video_service_name,
+                    self.services_subed,
+                    self.auto_disconnect_timer.is_some()
+                );
             }
         }
     }
@@ -3040,12 +3111,24 @@ impl Connection {
                     q.prefer.enum_value_or(PreferCodec::Auto)
                 );
                 Encoder::update(Update(self.inner.id(), q));
+                log::info!(
+                    "#{} diag negotiated codec on login: codec={:?}, usable={:?}",
+                    self.inner.id(),
+                    Encoder::negotiated_codec(),
+                    Encoder::usable_encoding()
+                );
             } else {
                 log::info!(
                     "#{} supported_decoding missing on login, forcing VP9 only",
                     self.inner.id()
                 );
                 Encoder::update(NewOnlyVP9(self.inner.id()));
+                log::info!(
+                    "#{} diag negotiated codec on login: codec={:?}, usable={:?}",
+                    self.inner.id(),
+                    Encoder::negotiated_codec(),
+                    Encoder::usable_encoding()
+                );
             }
         } else {
             log::info!(
@@ -3053,6 +3136,12 @@ impl Connection {
                 self.inner.id()
             );
             Encoder::update(NewOnlyVP9(self.inner.id()));
+            log::info!(
+                "#{} diag negotiated codec on login: codec={:?}, usable={:?}",
+                self.inner.id(),
+                Encoder::negotiated_codec(),
+                Encoder::usable_encoding()
+            );
         }
     }
 
@@ -4772,6 +4861,12 @@ impl Connection {
     }
 
     fn refresh_video_display(&self, display: Option<usize>) {
+        log::info!(
+            "#{} diag refresh_video_display: source={:?}, display={:?}",
+            self.inner.id(),
+            self.video_source(),
+            display
+        );
         video_service::refresh();
         self.server.upgrade().map(|s| {
             s.read().unwrap().set_video_service_opt(
@@ -4825,6 +4920,15 @@ impl Connection {
         let new_service_name = video_service::get_service_name(self.video_source(), display_idx);
         let old_service_name =
             video_service::get_service_name(self.video_source(), self.display_idx);
+        log::info!(
+            "#{} diag switch display: source={:?}, old_display={}, new_display={}, old_service={}, new_service={}",
+            self.inner.id(),
+            self.video_source(),
+            self.display_idx,
+            display_idx,
+            old_service_name,
+            new_service_name
+        );
         let mut lock = server.write().unwrap();
         if display_idx != *display_service::PRIMARY_DISPLAY_IDX {
             if !lock.contains(&new_service_name) {
@@ -5131,6 +5235,12 @@ impl Connection {
                 q.prefer.enum_value_or(PreferCodec::Auto)
             );
             scrap::codec::Encoder::update(scrap::codec::EncodingUpdate::Update(self.inner.id(), q));
+            log::info!(
+                "#{} diag negotiated codec after update: codec={:?}, usable={:?}",
+                self.inner.id(),
+                scrap::codec::Encoder::negotiated_codec(),
+                scrap::codec::Encoder::usable_encoding()
+            );
         }
         if let Ok(q) = o.lock_after_session_end.enum_value() {
             if q != BoolOption::NotSet {
@@ -5492,7 +5602,25 @@ impl Connection {
         // We can add a (Vec<conn_id>, input device) to avoid this.
         // But it's not necessary now and we have to consider two audio services(client, server).
         crate::audio_service::set_voice_call_input_device(None, true);
-        log::info!("#{} Connection closed: {}", self.inner.id(), reason);
+        log::info!(
+            "#{} Connection closed: {}; diag close: lock={}, authorized={}, auth_kind={}, remote={}, file_transfer={}, view_camera={}, terminal={}, port_forward={}, display_idx={}, services_subed={}, video_ack_required={}, last_supported_encoding={:?}, negotiated_codec={:?}, usable_encoding={:?}",
+            self.inner.id(),
+            reason,
+            lock,
+            self.authorized,
+            self.session_auth_kind.as_str(),
+            self.is_remote(),
+            self.file_transfer.is_some(),
+            self.view_camera,
+            self.terminal,
+            !self.port_forward_address.is_empty() || self.port_forward_socket.is_some(),
+            self.display_idx,
+            self.services_subed,
+            self.video_ack_required,
+            &self.last_supported_encoding,
+            scrap::codec::Encoder::negotiated_codec(),
+            scrap::codec::Encoder::usable_encoding()
+        );
         if lock && self.lock_after_session_end && self.keyboard {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             lock_screen().await;

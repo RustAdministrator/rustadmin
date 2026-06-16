@@ -55,7 +55,7 @@ use hbb_common::{
     fs::JobType,
     futures::future::{select_ok, FutureExt},
     get_version_number, log,
-    message_proto::{option_message::BoolOption, *},
+    message_proto::{option_message::BoolOption, supported_decoding::PreferCodec, *},
     protobuf::{Message as _, MessageField},
     rand,
     rendezvous_proto::*,
@@ -2821,7 +2821,20 @@ impl LoginConfigHandler {
         if view_only || self.get_toggle_option("disable-clipboard") {
             msg.disable_clipboard = BoolOption::Yes.into();
         }
-        msg.supported_decoding = MessageField::some(self.get_supported_decoding());
+        let supported_decoding = self.get_supported_decoding();
+        log::info!(
+            "diag viewer supported_decoding on login: id={}, texture_render={}, adapter_luid={:?}, mark_unsupported={:?}, h264={}, h265={}, vp9={}, av1={}, prefer={:?}",
+            self.id,
+            use_texture_render(),
+            self.adapter_luid,
+            self.mark_unsupported,
+            supported_decoding.ability_h264,
+            supported_decoding.ability_h265,
+            supported_decoding.ability_vp9,
+            supported_decoding.ability_av1,
+            supported_decoding.prefer.enum_value_or(PreferCodec::Auto)
+        );
+        msg.supported_decoding = MessageField::some(supported_decoding);
         Some(msg)
     }
 
@@ -3317,6 +3330,18 @@ impl LoginConfigHandler {
             use_texture_render(),
             self.adapter_luid,
             &self.mark_unsupported,
+        );
+        log::info!(
+            "diag viewer supported_decoding update: id={}, texture_render={}, adapter_luid={:?}, mark_unsupported={:?}, h264={}, h265={}, vp9={}, av1={}, prefer={:?}",
+            self.id,
+            use_texture_render(),
+            self.adapter_luid,
+            self.mark_unsupported,
+            decoding.ability_h264,
+            decoding.ability_h265,
+            decoding.ability_vp9,
+            decoding.ability_av1,
+            decoding.prefer.enum_value_or(PreferCodec::Auto)
         );
         let mut misc = Misc::new();
         misc.set_option(OptionMessage {

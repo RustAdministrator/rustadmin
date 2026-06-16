@@ -575,6 +575,7 @@ impl<T: InvokeUiSession> Session<T> {
 
     pub fn update_supported_decodings(&self) {
         let msg = self.lc.write().unwrap().update_supported_decodings();
+        log::info!("diag viewer sending supported_decoding update");
         self.send(Data::Message(msg));
     }
 

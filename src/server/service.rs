@@ -107,20 +107,43 @@ impl<T: Subscriber + From<ConnInner>> Service for ServiceTmpl<T> {
     fn on_subscribe(&self, sub: ConnInner) {
         let mut lock = self.0.write().unwrap();
         if lock.subscribes.get(&sub.id()).is_some() {
+            log::info!(
+                "diag service subscribe skipped: name={}, conn_id={}, already_subscribed=true",
+                &lock.name,
+                sub.id()
+            );
             return;
         }
+        let conn_id = sub.id();
+        let deferred = lock.need_snapshot;
         if lock.need_snapshot {
             lock.new_subscribes.insert(sub.id(), sub.into());
         } else {
             lock.subscribes.insert(sub.id(), sub.into());
         }
+        log::info!(
+            "diag service subscribe: name={}, conn_id={}, deferred={}",
+            &lock.name,
+            conn_id,
+            deferred
+        );
     }
 
     fn on_unsubscribe(&self, id: i32) {
         let mut lock = self.0.write().unwrap();
-        if let None = lock.subscribes.remove(&id) {
-            lock.new_subscribes.remove(&id);
-        }
+        let active_removed = lock.subscribes.remove(&id).is_some();
+        let deferred_removed = if active_removed {
+            false
+        } else {
+            lock.new_subscribes.remove(&id).is_some()
+        };
+        log::info!(
+            "diag service unsubscribe: name={}, conn_id={}, active_removed={}, deferred_removed={}",
+            &lock.name,
+            id,
+            active_removed,
+            deferred_removed
+        );
     }
 
     fn join(&self) {

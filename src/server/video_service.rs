@@ -568,6 +568,22 @@ fn run(vs: VideoService) -> ResultType<()> {
         log::info!("disable dxgi with option, fall back to gdi");
         c.set_gdi();
     }
+    #[cfg(windows)]
+    let capturer_is_gdi = c.is_gdi();
+    #[cfg(not(windows))]
+    let capturer_is_gdi = false;
+    log::info!(
+        "diag video service capturer ready: service={}, source={:?}, display_idx={}, current={}, ndisplay={}, origin={:?}, width={}, height={}, gdi={}",
+        sp.name(),
+        vs.source,
+        display_idx,
+        c.current,
+        c.ndisplay,
+        c.origin,
+        c.width,
+        c.height,
+        capturer_is_gdi
+    );
     let mut video_qos = VIDEO_QOS.lock().unwrap();
     let mut spf = video_qos.spf();
     let mut quality = video_qos.ratio();
@@ -609,6 +625,23 @@ fn run(vs: VideoService) -> ResultType<()> {
             )?
         }
     };
+    #[cfg(feature = "vram")]
+    let encoder_input_texture = encoder.input_texture();
+    #[cfg(not(feature = "vram"))]
+    let encoder_input_texture = false;
+    log::info!(
+        "diag video service encoder ready: service={}, source={:?}, display_idx={}, negotiated={:?}, cfg={:?}, hardware={}, input_texture={}, bitrate={}, use_i444={}, quality={:?}",
+        sp.name(),
+        vs.source,
+        display_idx,
+        codec_format,
+        encoder_cfg,
+        encoder.is_hardware(),
+        encoder_input_texture,
+        encoder.bitrate(),
+        use_i444,
+        quality
+    );
     #[cfg(feature = "vram")]
     c.set_output_texture(encoder.input_texture());
     #[cfg(target_os = "android")]
@@ -1162,9 +1195,34 @@ fn handle_one_frame(
                 .as_mut()
                 .map(|r| r.write_message(&msg, width, height));
             send_conn_ids = sp.send_video_frame(msg);
+            if first {
+                log::info!(
+                    "diag first video frame encoded: service={}, display={}, width={}, height={}, targets={:?}, negotiated={:?}, hardware={}, bitrate={}, capture_ms={}",
+                    sp.name(),
+                    display,
+                    width,
+                    height,
+                    send_conn_ids,
+                    Encoder::negotiated_codec(),
+                    encoder.is_hardware(),
+                    encoder.bitrate(),
+                    ms
+                );
+            }
         }
         Err(e) => {
             *encode_fail_counter += 1;
+            if first {
+                log::warn!(
+                    "diag first video frame encode failed: service={}, display={}, negotiated={:?}, hardware={}, capture_ms={}, err={:?}",
+                    sp.name(),
+                    display,
+                    Encoder::negotiated_codec(),
+                    encoder.is_hardware(),
+                    ms,
+                    e
+                );
+            }
             // Encoding errors are not frequent except on Android
             if !cfg!(target_os = "android") {
                 log::error!("encode fail: {e:?}, times: {}", *encode_fail_counter,);
