@@ -199,6 +199,12 @@ SIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
 scripts/package_macos.sh
 ```
 
+Fast signing and dependency verification without creating a DMG:
+
+```bash
+SKIP_NOTARY=1 SKIP_DMG=1 SIGN_IDENTITY=- scripts/package_macos.sh
+```
+
 For notarization with an existing `notarytool` keychain profile:
 
 ```bash

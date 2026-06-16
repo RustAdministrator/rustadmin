@@ -5,8 +5,8 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/package_macos.sh [options]
 
-Packages the built macOS RustAdmin.app into a DMG, signs the app and DMG, and
-notarizes it unless SKIP_NOTARY=1 is set.
+Packages the built macOS RustAdmin.app into a DMG, signs the staged app and DMG,
+and notarizes it unless SKIP_NOTARY=1 is set.
 
 Environment:
   APP                  App bundle to package.
@@ -26,6 +26,8 @@ Environment:
                        Default: flutter/macos/Runner/Release.entitlements,
                        or ReleaseAdhoc.entitlements for SIGN_IDENTITY="-".
   SKIP_NOTARY          Set to 1 to skip notarization. Default: 0
+  SKIP_DMG             Set to 1 to stop after creating a signed app bundle in
+                       $DIST_DIR/$APP_NAME.app. Default: 0
   NOTARY_PROFILE       Existing xcrun notarytool keychain profile. Optional.
                        Also accepts RUSTADMIN_NOTARY_PROFILE.
   NOTARY_APPLE_ID      Apple ID for notarytool portable auth. Optional.
@@ -51,6 +53,7 @@ Options override environment:
   --no-staple
   --skip-sign
   --skip-app-verify
+  --skip-dmg
   -h, --help
 
 Examples:
@@ -95,6 +98,7 @@ VOLUME_NAME="${VOLUME_NAME:-$APP_NAME Installer}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-${RUSTADMIN_MACOS_DMG_SIGN_IDENTITY:-${RUSTADMIN_MACOS_SIGN_IDENTITY:-${RUSTDESK_MACOS_DMG_SIGN_IDENTITY:-${RUSTDESK_MACOS_SIGN_IDENTITY:-}}}}}"
 APP_ENTITLEMENTS="${APP_ENTITLEMENTS:-}"
 SKIP_NOTARY="${SKIP_NOTARY:-0}"
+SKIP_DMG="${SKIP_DMG:-0}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-${RUSTADMIN_NOTARY_PROFILE:-${RUSTDESK_NOTARY_PROFILE:-}}}"
 NOTARY_APPLE_ID="${NOTARY_APPLE_ID:-${RUSTADMIN_NOTARY_APPLE_ID:-${RUSTDESK_NOTARY_APPLE_ID:-}}}"
 NOTARY_TEAM_ID="${NOTARY_TEAM_ID:-${RUSTADMIN_NOTARY_TEAM_ID:-${RUSTDESK_NOTARY_TEAM_ID:-}}}"
@@ -161,6 +165,9 @@ while [[ $# -gt 0 ]]; do
     --skip-app-verify)
       skip_app_verify=1
       ;;
+    --skip-dmg)
+      SKIP_DMG=1
+      ;;
     -h|--help)
       usage
       exit 0
@@ -173,6 +180,10 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+if [[ "$SKIP_DMG" == "1" ]]; then
+  SKIP_NOTARY=1
+fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "macOS packaging must run on macOS." >&2
@@ -190,8 +201,13 @@ fi
 
 require_cmd codesign
 require_cmd ditto
-require_cmd hdiutil
-if [[ "$SKIP_NOTARY" != "1" ]]; then
+require_cmd file
+require_cmd install_name_tool
+require_cmd otool
+if [[ "${SKIP_DMG:-0}" != "1" ]]; then
+  require_cmd hdiutil
+fi
+if [[ "${SKIP_DMG:-0}" != "1" && "$SKIP_NOTARY" != "1" ]]; then
   require_cmd xcrun
   require_cmd spctl
 fi
@@ -319,24 +335,215 @@ sign_app_contents() {
   codesign_app_bundle
 }
 
+collect_macho_files() {
+  local root="$1"
+  local candidate
+
+  while IFS= read -r -d '' candidate; do
+    if file -b "$candidate" 2>/dev/null | grep -q 'Mach-O'; then
+      printf '%s\n' "$candidate"
+    fi
+  done < <(find "$root" -type f -print0)
+}
+
+otool_dependencies() {
+  otool -L "$1" 2>/dev/null | sed -n '2,$s/^[[:space:]]*\([^[:space:]]*\).*/\1/p'
+}
+
+is_system_library() {
+  case "$1" in
+    /System/Library/*|/usr/lib/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+is_external_absolute_library() {
+  local dep="$1"
+  [[ "$dep" == /* ]] || return 1
+  is_system_library "$dep" && return 1
+  case "$dep" in
+    "$APP"/*) return 1 ;;
+  esac
+  return 0
+}
+
+bundle_external_library() {
+  local dep="$1"
+  local base
+  local dest
+
+  if [[ "$dep" == *".framework/"* ]]; then
+    echo "External framework dependency is not supported for automatic bundling: $dep" >&2
+    exit 1
+  fi
+  if [[ ! -f "$dep" ]]; then
+    echo "Missing mandatory external library: $dep" >&2
+    exit 1
+  fi
+
+  base="$(basename "$dep")"
+  dest="$APP/Contents/Frameworks/$base"
+  bundled_library_dest="$dest"
+
+  if [[ ! -f "$dest" ]]; then
+    echo "Bundling external dylib: $dep -> $dest"
+    mkdir -p "$APP/Contents/Frameworks"
+    ditto --noextattr --noacl "$dep" "$dest"
+    chmod u+w "$dest" 2>/dev/null || true
+    copied_external_lib=1
+  fi
+
+  install_name_tool -id "@executable_path/../Frameworks/$base" "$dest" 2>/dev/null || true
+}
+
+rewrite_external_dependencies() {
+  local binary="$1"
+  local dep
+  local base
+
+  while IFS= read -r dep; do
+    if is_external_absolute_library "$dep"; then
+      bundle_external_library "$dep"
+      base="$(basename "$bundled_library_dest")"
+      echo "Rewriting dependency in $binary: $dep -> @executable_path/../Frameworks/$base"
+      install_name_tool -change "$dep" "@executable_path/../Frameworks/$base" "$binary"
+    fi
+  done < <(otool_dependencies "$binary")
+}
+
+dependency_resolves_in_app() {
+  local binary="$1"
+  local dep="$2"
+  local rel
+  local candidate
+  local loader_dir
+
+  case "$dep" in
+    @executable_path/*)
+      rel="${dep#@executable_path/}"
+      [[ -e "$APP/Contents/MacOS/$rel" ]]
+      ;;
+    @loader_path/*)
+      rel="${dep#@loader_path/}"
+      loader_dir="$(cd "$(dirname "$binary")" && pwd)"
+      [[ -e "$loader_dir/$rel" ]]
+      ;;
+    @rpath/*)
+      rel="${dep#@rpath/}"
+      for candidate in \
+        "$APP/Contents/Frameworks/$rel" \
+        "$APP/Contents/MacOS/$rel" \
+        "$APP/Contents/Resources/$rel"; do
+        [[ -e "$candidate" ]] && return 0
+      done
+      return 1
+      ;;
+    @*)
+      return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+verify_mandatory_libraries() {
+  local binary
+  local dep
+  local missing=0
+
+  while IFS= read -r binary; do
+    while IFS= read -r dep; do
+      [[ -z "$dep" ]] && continue
+      if is_system_library "$dep"; then
+        continue
+      fi
+      if is_external_absolute_library "$dep"; then
+        echo "Unbundled external dependency in $binary: $dep" >&2
+        missing=1
+        continue
+      fi
+      if [[ "$dep" == "$APP"/* ]]; then
+        [[ -e "$dep" ]] || {
+          echo "Missing app-local dependency in $binary: $dep" >&2
+          missing=1
+        }
+        continue
+      fi
+      if [[ "$dep" == @* ]]; then
+        dependency_resolves_in_app "$binary" "$dep" || {
+          echo "Unresolved bundled dependency in $binary: $dep" >&2
+          missing=1
+        }
+        continue
+      fi
+      echo "Unsupported relative dependency in $binary: $dep" >&2
+      missing=1
+    done < <(otool_dependencies "$binary")
+  done < <(collect_macho_files "$APP/Contents")
+
+  if [[ "$missing" -ne 0 ]]; then
+    echo "Mandatory library verification failed." >&2
+    exit 1
+  fi
+}
+
+bundle_mandatory_libraries() {
+  local binary
+  local pass=0
+  local bundled_library_dest=""
+  local copied_external_lib=1
+
+  while [[ "$copied_external_lib" -eq 1 ]]; do
+    copied_external_lib=0
+    pass=$((pass + 1))
+    if [[ "$pass" -gt 20 ]]; then
+      echo "Too many dependency bundling passes; refusing to continue." >&2
+      exit 1
+    fi
+
+    while IFS= read -r binary; do
+      rewrite_external_dependencies "$binary"
+    done < <(collect_macho_files "$APP/Contents")
+  done
+
+  verify_mandatory_libraries
+}
+
+source_app="$APP"
+APP="$stage_dir/$APP_NAME.app"
+
+echo "Staging app bundle: $source_app -> $APP"
+ditto --noextattr --noacl "$source_app" "$APP"
+
+bundle_mandatory_libraries
+
 if [[ "$skip_sign" -eq 0 ]]; then
   sign_app_contents
+elif [[ "$skip_app_verify" -eq 0 ]]; then
+  echo "WARNING: --skip-sign leaves any install_name_tool changes unsigned." >&2
 fi
 
 if [[ "$skip_app_verify" -eq 0 ]]; then
-  echo "Verifying app bundle: $APP"
+  echo "Verifying staged app bundle: $APP"
   codesign --verify --deep --strict --verbose=4 "$APP"
   codesign -dv --verbose=4 "$APP"
+  verify_mandatory_libraries
 fi
 
-echo "Staging app bundle..."
-ditto --noextattr --noacl "$APP" "$stage_dir/$APP_NAME.app"
+if [[ "$SKIP_DMG" == "1" ]]; then
+  output_app="$DIST_DIR/$APP_NAME.app"
+  echo "Writing signed app bundle: $output_app"
+  rm -rf "$output_app"
+  ditto --noextattr --noacl "$APP" "$output_app"
+  if [[ "$skip_app_verify" -eq 0 ]]; then
+    codesign --verify --deep --strict --verbose=4 "$output_app"
+  fi
+  echo "Created: $output_app"
+  exit 0
+fi
+
 ln -s /Applications "$stage_dir/Applications"
-
-if [[ "$skip_app_verify" -eq 0 ]]; then
-  echo "Verifying staged app bundle..."
-  codesign --verify --deep --strict --verbose=4 "$stage_dir/$APP_NAME.app"
-fi
 
 echo "Creating DMG: $DMG"
 echo "Volume name: $VOLUME_NAME"
@@ -348,11 +555,13 @@ hdiutil create \
   "$DMG"
 
 if [[ "$skip_sign" -eq 0 ]]; then
+  dmg_codesign_args=(--force --sign "$SIGN_IDENTITY")
+  if [[ "$SIGN_IDENTITY" != "-" ]]; then
+    dmg_codesign_args+=(--timestamp)
+  fi
+
   echo "Signing DMG with identity: $SIGN_IDENTITY"
-  codesign --force \
-    --sign "$SIGN_IDENTITY" \
-    --timestamp \
-    "$DMG"
+  codesign "${dmg_codesign_args[@]}" "$DMG"
   codesign --verify --verbose=4 "$DMG"
 fi
 
