@@ -704,11 +704,19 @@ fn run(vs: VideoService) -> ResultType<()> {
             log::info!("switch to refresh");
             bail!("SWITCH");
         }
-        if codec_format != Encoder::negotiated_codec() {
+        let negotiated_codec = Encoder::negotiated_codec();
+        if codec_format != negotiated_codec {
             log::info!(
-                "switch due to codec changed, {:?} -> {:?}",
+                "diag video service codec switch requested: service={}, source={:?}, display_idx={}, {:?} -> {:?}, usable={:?}, current_cfg={:?}, hardware={}, bitrate={}",
+                sp.name(),
+                vs.source,
+                display_idx,
                 codec_format,
-                Encoder::negotiated_codec()
+                negotiated_codec,
+                Encoder::usable_encoding(),
+                encoder_cfg,
+                encoder.is_hardware(),
+                encoder.bitrate()
             );
             bail!("SWITCH");
         }
@@ -983,6 +991,21 @@ fn setup_encoder(
     let codec_format = Encoder::negotiated_codec();
     let recorder = get_recorder(record_incoming, display_idx, source == VideoSource::Camera);
     let use_i444 = Encoder::use_i444(&encoder_cfg);
+    log::info!(
+        "diag host selected encoder config: service={}, source={:?}, display_idx={}, capture={}x{}, negotiated={:?}, cfg={:?}, use_i444={}, quality={:?}, client_record={}, record_incoming={}, portable_service={}",
+        name,
+        source,
+        display_idx,
+        c.width,
+        c.height,
+        codec_format,
+        encoder_cfg,
+        use_i444,
+        quality,
+        client_record,
+        record_incoming,
+        last_portable_service_running
+    );
     let encoder = Encoder::new(encoder_cfg.clone(), use_i444)?;
     Ok((encoder, encoder_cfg, codec_format, use_i444, recorder))
 }

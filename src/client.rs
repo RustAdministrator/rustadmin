@@ -2097,11 +2097,33 @@ impl VideoHandler {
                     chroma,
                 );
                 if res.as_ref().is_ok_and(|x| *x) {
+                    if self.first_frame {
+                        log::info!(
+                            "diag first video frame decoded: display={}, format={:?}, pixelbuffer={}, chroma={:?}, rgb={}x{}, texture={}x{}, decoder_valid={}",
+                            self._display,
+                            self.decoder.format(),
+                            *pixelbuffer,
+                            chroma,
+                            self.rgb.w,
+                            self.rgb.h,
+                            self.texture.w,
+                            self.texture.h,
+                            self.decoder.valid()
+                        );
+                    }
                     self.fail_counter = 0;
                 } else {
                     if self.fail_counter < usize::MAX {
                         if self.first_frame && self.fail_counter < MAX_DECODE_FAIL_COUNTER {
-                            log::error!("decode first frame failed");
+                            log::error!(
+                                "diag first video frame decode failed: display={}, format={:?}, pixelbuffer={}, chroma={:?}, decoder_valid={}, err={:?}",
+                                self._display,
+                                self.decoder.format(),
+                                *pixelbuffer,
+                                chroma,
+                                self.decoder.valid(),
+                                res.as_ref().err()
+                            );
                             self.fail_counter = MAX_DECODE_FAIL_COUNTER;
                         } else {
                             self.fail_counter += 1;
