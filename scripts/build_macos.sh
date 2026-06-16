@@ -3,7 +3,11 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/build_macos.sh [--clean] [--hwcodec] [--screencapturekit] [--skip-cargo] [--sign-only]
+Usage: scripts/build_macos.sh [--clean] [--hwcodec] [--no-hwcodec] [--screencapturekit] [--skip-cargo] [--sign-only]
+
+Hardware codec support is enabled by default on macOS. If FFmpeg/hwcodec
+dependencies are unavailable, the script warns and falls back to a build without
+the hwcodec Cargo feature. Pass --no-hwcodec to opt out intentionally.
 
 Environment overrides:
   RUSTADMIN_FLUTTER_ROOT       Flutter SDK root. Default: first flutter in PATH
@@ -29,15 +33,17 @@ USAGE
 }
 
 clean=0
-hwcodec=0
+hwcodec=1
 screencapturekit=0
 skip_cargo=0
 sign_only=0
+hwcodec_fallback_warning=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --clean) clean=1 ;;
     --hwcodec) hwcodec=1 ;;
+    --no-hwcodec) hwcodec=0 ;;
     --screencapturekit) screencapturekit=1 ;;
     --skip-cargo) skip_cargo=1 ;;
     --sign-only) sign_only=1 ;;
@@ -127,6 +133,95 @@ sync_macos_rust_artifacts() {
       cp -f "$cargo_service" "$xcode_service"
     fi
   fi
+}
+
+macos_hwcodec_pkg_config_available() {
+  if command -v pkg-config >/dev/null 2>&1 &&
+     pkg-config --exists libavcodec libavformat libavutil; then
+    return 0
+  fi
+  return 1
+}
+
+macos_has_codec_library_kind() {
+  local name="$1"
+  local kind="$2"
+  local lib_dir
+  local candidate
+  for lib_dir in "$macos_codec_root/lib" "$macos_codec_root/lib64" "$macos_codec_root"; do
+    case "$kind" in
+      dynamic)
+        for candidate in "$lib_dir/lib$name.dylib" "$lib_dir/$name.dylib"; do
+          [[ -f "$candidate" ]] && return 0
+        done
+        ;;
+      static)
+        for candidate in "$lib_dir/lib$name.a" "$lib_dir/$name.a"; do
+          [[ -f "$candidate" ]] && return 0
+        done
+        ;;
+    esac
+  done
+  return 1
+}
+
+macos_hwcodec_dependencies_available() {
+  if macos_hwcodec_pkg_config_available; then
+    return 0
+  fi
+  if [[ -z "$macos_codec_root" ]]; then
+    return 1
+  fi
+
+  local include_dir="$macos_codec_root/include"
+  [[ -f "$include_dir/libavcodec/avcodec.h" ]] || return 1
+  [[ -f "$include_dir/libavformat/avformat.h" ]] || return 1
+  [[ -f "$include_dir/libavutil/avutil.h" ]] || return 1
+
+  local lib
+  local dynamic_libs_available=1
+  for lib in avcodec avformat avutil; do
+    macos_has_codec_library_kind "$lib" dynamic || dynamic_libs_available=0
+  done
+
+  local codec_link_mode
+  codec_link_mode="$(printf '%s' "$macos_codec_link_mode" | tr '[:upper:]' '[:lower:]')"
+  case "$codec_link_mode" in
+    dynamic|dylib|shared)
+      [[ "$dynamic_libs_available" -eq 1 ]]
+      ;;
+    static)
+      # Static FFmpeg links need pkg-config metadata for private dependencies.
+      return 1
+      ;;
+    *)
+      if [[ "$dynamic_libs_available" -eq 1 ]]; then
+        return 0
+      fi
+      # Static-only local roots need pkg-config; without it cargo will fail.
+      return 1
+      ;;
+  esac
+}
+
+compose_cargo_features() {
+  local cargo_features="flutter"
+  if [[ "$hwcodec" -eq 1 ]]; then
+    cargo_features="$cargo_features hwcodec"
+  fi
+  if [[ "$screencapturekit" -eq 1 ]]; then
+    cargo_features="$cargo_features screencapturekit"
+  fi
+  printf '%s\n' "$cargo_features"
+}
+
+warn_hwcodec_fallback() {
+  hwcodec_fallback_warning="$1"
+  cat >&2 <<EOF
+WARNING: $hwcodec_fallback_warning
+WARNING: Continuing without the hwcodec Cargo feature. The GUI will not show
+WARNING: the "Enable hardware codec" option in this build.
+EOF
 }
 
 clean_flutter_build_state() {
@@ -331,17 +426,30 @@ if [[ "$sign_only" -eq 0 ]]; then
 
   generate_bridge_files
 
-  features="flutter"
-  if [[ "$hwcodec" -eq 1 ]]; then
-    features="$features hwcodec"
+  if [[ "$skip_cargo" -eq 0 && "$hwcodec" -eq 1 ]] && ! macos_hwcodec_dependencies_available; then
+    warn_hwcodec_fallback "macOS FFmpeg/hwcodec dependencies were not found. Set RUSTADMIN_MACOS_CODEC_ROOT to a prefix containing include/libavcodec and lib/libavcodec, or provide libavcodec/libavformat/libavutil via pkg-config."
+    hwcodec=0
   fi
-  if [[ "$screencapturekit" -eq 1 ]]; then
-    features="$features screencapturekit"
-  fi
+  features="$(compose_cargo_features)"
 
   if [[ "$skip_cargo" -eq 0 ]]; then
     generate_version_file
-    (cd "$repo_root" && MACOSX_DEPLOYMENT_TARGET=10.15 cargo build --features "$features" --release -vv)
+    if ! (cd "$repo_root" && MACOSX_DEPLOYMENT_TARGET=10.15 cargo build --features "$features" --release -vv); then
+      if [[ "$hwcodec" -eq 1 ]]; then
+        warn_hwcodec_fallback "cargo build failed with hwcodec enabled."
+        hwcodec=0
+        features="$(compose_cargo_features)"
+        (cd "$repo_root" && MACOSX_DEPLOYMENT_TARGET=10.15 cargo build --features "$features" --release -vv)
+      else
+        exit 1
+      fi
+    fi
+  elif [[ "$hwcodec" -eq 1 ]]; then
+    cat >&2 <<'EOF'
+WARNING: --skip-cargo reuses the existing Rust library.
+WARNING: Hardware codec support will only be present if that library was already
+WARNING: built with the hwcodec Cargo feature.
+EOF
   fi
 
   sync_macos_rust_artifacts
@@ -417,6 +525,20 @@ fi
 
 sign_macos_app_contents
 codesign --verify --deep --strict --verbose=4 "$app_bundle"
+
+if [[ "$sign_only" -eq 1 ]]; then
+  echo "macOS hardware codec feature: unchanged (--sign-only reused the existing bundle)"
+elif [[ "$skip_cargo" -eq 1 ]]; then
+  echo "macOS hardware codec feature: unchanged (--skip-cargo reused the existing Rust library)"
+elif [[ -n "$hwcodec_fallback_warning" ]]; then
+  echo "WARNING: macOS hardware codec support was not included: $hwcodec_fallback_warning" >&2
+else
+  if [[ "$hwcodec" -eq 1 ]]; then
+    echo "macOS hardware codec feature: enabled"
+  else
+    echo "macOS hardware codec feature: disabled"
+  fi
+fi
 
 echo "macOS bundle:"
 echo "$flutter_dir/build/macos/Build/Products/Release"

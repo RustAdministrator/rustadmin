@@ -156,12 +156,21 @@ Run on macOS:
 scripts/build_macos.sh
 ```
 
-Optional:
+Hardware codecs are enabled by default. If FFmpeg/hwcodec dependencies are not
+available, the script warns and falls back to a build without hardware codecs.
+
+Optional codec prefix:
 
 ```bash
 RUSTADMIN_FLUTTER_ROOT=/path/to/flutter \
 RUSTADMIN_MACOS_CODEC_ROOT=/path/to/prefix \
 scripts/build_macos.sh --screencapturekit
+```
+
+Explicitly disable hardware codecs:
+
+```bash
+scripts/build_macos.sh --no-hwcodec
 ```
 
 Toolbar lab:
