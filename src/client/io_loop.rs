@@ -53,6 +53,8 @@ use std::{
     },
 };
 
+const NO_VIDEO_START_TIMEOUT: Duration = Duration::from_secs(15);
+
 pub struct Remote<T: InvokeUiSession> {
     handler: Session<T>,
     audio_sender: MediaSender,
@@ -172,6 +174,8 @@ impl<T: InvokeUiSession> Remote<T> {
         } else {
             ConnType::default()
         };
+        let expects_video =
+            conn_type == ConnType::DEFAULT_CONN || conn_type == ConnType::VIEW_CAMERA;
 
         match Client::start(
             &self.handler.get_id(),
@@ -225,6 +229,7 @@ impl<T: InvokeUiSession> Remote<T> {
                 let mut status_timer =
                     crate::rustdesk_interval(time::interval(Duration::new(1, 0)));
                 let mut fps_instant = Instant::now();
+                let mut no_video_since: Option<Instant> = None;
 
                 let _keep_it = client::hc_connection(feedback, rendezvous_server, token).await;
 
@@ -317,6 +322,25 @@ impl<T: InvokeUiSession> Remote<T> {
                             }
                         }
                         _ = status_timer.tick() => {
+                            if expects_video && self.is_connected && !self.first_frame {
+                                let since = no_video_since.get_or_insert_with(Instant::now);
+                                if since.elapsed() >= NO_VIDEO_START_TIMEOUT {
+                                    log::warn!(
+                                        "diag client no video startup timeout: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, elapsed_ms={}",
+                                        self.handler.get_id(),
+                                        self.is_connected,
+                                        self.first_frame,
+                                        self.video_format,
+                                        since.elapsed().as_millis()
+                                    );
+                                    self.send_close_reason(&mut peer, "Video stream did not start").await;
+                                    self.handler.msgbox("error", "Connection Error", "Video stream did not start", "");
+                                    break;
+                                }
+                            } else {
+                                no_video_since = None;
+                            }
+
                             let elapsed = fps_instant.elapsed().as_millis();
                             if elapsed < 1000 {
                                 continue;

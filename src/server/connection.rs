@@ -637,6 +637,8 @@ const MILLI1: Duration = Duration::from_millis(1);
 const SEND_TIMEOUT_VIDEO: u64 = 12_000;
 const SEND_TIMEOUT_OTHER: u64 = SEND_TIMEOUT_VIDEO * 10;
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
+const VIDEO_FRAME_STALE_DROP_AFTER: Duration = Duration::from_secs(3);
+const VIDEO_STALE_DROP_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
 impl Connection {
     pub async fn start(
@@ -847,6 +849,8 @@ impl Connection {
         std::thread::spawn(move || Self::handle_input(_rx_input, tx_cloned));
         let mut second_timer = crate::rustdesk_interval(time::interval(Duration::from_secs(1)));
         let mut first_video_frame_sent = false;
+        let mut stale_video_drop_log_at: Option<Instant> = None;
+        let mut stale_video_drop_count = 0u64;
 
         #[cfg(feature = "unix-file-copy-paste")]
         let rx_clip_holder;
@@ -1118,10 +1122,27 @@ impl Connection {
                 }
                 Some((instant, value)) = rx_video.recv() => {
                     let is_video_frame = matches!(&value.union, Some(message::Union::VideoFrame(_)));
-                    if !conn.video_ack_required {
-                        if let Some(message::Union::VideoFrame(vf)) = &value.union {
-                            video_service::notify_video_frame_fetched(vf.display as usize, id, Some(instant.into()));
+                    if is_video_frame && first_video_frame_sent && instant.elapsed() >= VIDEO_FRAME_STALE_DROP_AFTER {
+                        stale_video_drop_count += 1;
+                        if stale_video_drop_log_at
+                            .map(|last| last.elapsed() >= VIDEO_STALE_DROP_LOG_INTERVAL)
+                            .unwrap_or(true)
+                        {
+                            log::warn!(
+                                "#{} diag stale video frame dropped before send: queue_latency_ms={}, dropped_since_last_log={}",
+                                conn.inner.id(),
+                                instant.elapsed().as_millis(),
+                                stale_video_drop_count
+                            );
+                            stale_video_drop_log_at = Some(Instant::now());
+                            stale_video_drop_count = 0;
                         }
+                        if !conn.video_ack_required {
+                            if let Some(message::Union::VideoFrame(vf)) = &value.union {
+                                video_service::notify_video_frame_fetched(vf.display as usize, id, Some(instant.into()));
+                            }
+                        }
+                        continue;
                     }
                     if let Err(err) = conn.stream.send(&value as &Message).await {
                         if is_video_frame {
@@ -1134,6 +1155,11 @@ impl Connection {
                         }
                         conn.on_close(&err.to_string(), false).await;
                         break;
+                    }
+                    if is_video_frame && !conn.video_ack_required {
+                        if let Some(message::Union::VideoFrame(vf)) = &value.union {
+                            video_service::notify_video_frame_fetched(vf.display as usize, id, Some(instant.into()));
+                        }
                     }
                     if is_video_frame && !first_video_frame_sent {
                         first_video_frame_sent = true;
