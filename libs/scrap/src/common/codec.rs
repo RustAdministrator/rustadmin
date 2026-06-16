@@ -86,6 +86,70 @@ pub struct Encoder {
     pub codec: Box<dyn EncoderApi>,
 }
 
+#[derive(Clone, Copy)]
+struct UsableCodecs {
+    vp8: bool,
+    av1: bool,
+    h264: bool,
+    h265: bool,
+}
+
+impl UsableCodecs {
+    fn supports(self, preference: PreferCodec) -> bool {
+        match preference {
+            PreferCodec::Auto => true,
+            PreferCodec::VP8 => self.vp8,
+            PreferCodec::VP9 => true,
+            PreferCodec::AV1 => self.av1,
+            PreferCodec::H264 => self.h264,
+            PreferCodec::H265 => self.h265,
+        }
+    }
+}
+
+fn explicit_codec_preference_order() -> &'static [PreferCodec] {
+    &[
+        PreferCodec::AV1,
+        PreferCodec::VP9,
+        PreferCodec::VP8,
+        PreferCodec::H265,
+        PreferCodec::H264,
+    ]
+}
+
+fn preferred_explicit_codec(
+    decodings: &HashMap<i32, SupportedDecoding>,
+    usable: UsableCodecs,
+) -> Option<PreferCodec> {
+    let mut selected = None;
+    let mut selected_count = 0;
+    for preference in explicit_codec_preference_order() {
+        if !usable.supports(*preference) {
+            continue;
+        }
+        let count = decodings
+            .values()
+            .filter(|decoding| decoding.prefer.enum_value_or(PreferCodec::Auto) == *preference)
+            .count();
+        if count > selected_count {
+            selected = Some(*preference);
+            selected_count = count;
+        }
+    }
+    selected
+}
+
+fn codec_for_preference(preference: PreferCodec, auto_codec: CodecFormat) -> CodecFormat {
+    match preference {
+        PreferCodec::VP8 => CodecFormat::VP8,
+        PreferCodec::VP9 => CodecFormat::VP9,
+        PreferCodec::AV1 => CodecFormat::AV1,
+        PreferCodec::H264 => CodecFormat::H264,
+        PreferCodec::H265 => CodecFormat::H265,
+        PreferCodec::Auto => auto_codec,
+    }
+}
+
 impl Deref for Encoder {
     type Target = Box<dyn EncoderApi>;
 
@@ -235,17 +299,12 @@ impl Encoder {
         let h265_useable =
             _all_support_h265_decoding && (h265vram_encoding || h265hw_encoding.is_some());
         let mut format = ENCODE_CODEC_FORMAT.lock().unwrap();
-        let preferences: Vec<_> = decodings
-            .iter()
-            .filter(|(_, s)| {
-                s.prefer == PreferCodec::VP9.into()
-                    || s.prefer == PreferCodec::VP8.into() && vp8_useable
-                    || s.prefer == PreferCodec::AV1.into() && av1_useable
-                    || s.prefer == PreferCodec::H264.into() && h264_useable
-                    || s.prefer == PreferCodec::H265.into() && h265_useable
-            })
-            .map(|(_, s)| s.prefer)
-            .collect();
+        let usable = UsableCodecs {
+            vp8: vp8_useable,
+            av1: av1_useable,
+            h264: h264_useable,
+            h265: h265_useable,
+        };
         *USABLE_ENCODING.lock().unwrap() = Some(SupportedEncoding {
             vp8: vp8_useable,
             av1: av1_useable,
@@ -253,20 +312,6 @@ impl Encoder {
             h265: h265_useable,
             ..Default::default()
         });
-        // find the most frequent preference
-        let mut counts = Vec::new();
-        for pref in &preferences {
-            match counts.iter_mut().find(|(p, _)| p == pref) {
-                Some((_, count)) => *count += 1,
-                None => counts.push((pref.clone(), 1)),
-            }
-        }
-        let max_count = counts.iter().map(|(_, count)| *count).max().unwrap_or(0);
-        let (most_frequent, _) = counts
-            .into_iter()
-            .find(|(_, count)| *count == max_count)
-            .unwrap_or((PreferCodec::Auto.into(), 0));
-        let preference = most_frequent.enum_value_or(PreferCodec::Auto);
 
         // auto: h265 > h264 > av1/vp9/vp8
         let av1_test = Config::get_option(hbb_common::config::keys::OPTION_AV1_TEST) != "N";
@@ -290,26 +335,8 @@ impl Encoder {
             }
         }
 
-        *format = match preference {
-            PreferCodec::VP8 => CodecFormat::VP8,
-            PreferCodec::VP9 => CodecFormat::VP9,
-            PreferCodec::AV1 => CodecFormat::AV1,
-            PreferCodec::H264 => {
-                if h264vram_encoding || h264hw_encoding.is_some() {
-                    CodecFormat::H264
-                } else {
-                    auto_codec
-                }
-            }
-            PreferCodec::H265 => {
-                if h265vram_encoding || h265hw_encoding.is_some() {
-                    CodecFormat::H265
-                } else {
-                    auto_codec
-                }
-            }
-            PreferCodec::Auto => auto_codec,
-        };
+        let preference = preferred_explicit_codec(&decodings, usable).unwrap_or(PreferCodec::Auto);
+        *format = codec_for_preference(preference, auto_codec);
         if decodings.len() > 0 {
             log::info!(
                 "usable: vp8={vp8_useable}, av1={av1_useable}, h264={h264_useable}, h265={h265_useable}",
@@ -1177,4 +1204,89 @@ pub fn test_av1() {
             );
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn all_usable_codecs() -> UsableCodecs {
+        UsableCodecs {
+            vp8: true,
+            av1: true,
+            h264: true,
+            h265: true,
+        }
+    }
+
+    fn decoding(prefer: PreferCodec) -> SupportedDecoding {
+        SupportedDecoding {
+            ability_vp8: 1,
+            ability_vp9: 1,
+            ability_av1: 1,
+            ability_h264: 1,
+            ability_h265: 1,
+            prefer: prefer.into(),
+            ..Default::default()
+        }
+    }
+
+    fn decodings(preferences: &[PreferCodec]) -> HashMap<i32, SupportedDecoding> {
+        preferences
+            .iter()
+            .enumerate()
+            .map(|(index, preference)| (index as i32, decoding(*preference)))
+            .collect()
+    }
+
+    #[test]
+    fn codec_preference_explicit_av1_wins_over_auto() {
+        let decodings = decodings(&[PreferCodec::Auto, PreferCodec::AV1]);
+        let preference = preferred_explicit_codec(&decodings, all_usable_codecs());
+
+        assert_eq!(preference, Some(PreferCodec::AV1));
+        assert_eq!(
+            codec_for_preference(preference.unwrap(), CodecFormat::H265),
+            CodecFormat::AV1
+        );
+    }
+
+    #[test]
+    fn codec_preference_ignores_unusable_explicit_codec() {
+        let decodings = decodings(&[PreferCodec::H265]);
+        let usable = UsableCodecs {
+            h265: false,
+            ..all_usable_codecs()
+        };
+
+        assert_eq!(preferred_explicit_codec(&decodings, usable), None);
+    }
+
+    #[test]
+    fn codec_preference_tie_uses_stable_order() {
+        let decodings = decodings(&[PreferCodec::H265, PreferCodec::AV1]);
+
+        assert_eq!(
+            preferred_explicit_codec(&decodings, all_usable_codecs()),
+            Some(PreferCodec::AV1)
+        );
+    }
+
+    #[test]
+    fn codec_preference_most_frequent_explicit_wins() {
+        let decodings = decodings(&[PreferCodec::H265, PreferCodec::AV1, PreferCodec::H265]);
+
+        assert_eq!(
+            preferred_explicit_codec(&decodings, all_usable_codecs()),
+            Some(PreferCodec::H265)
+        );
+    }
+
+    #[test]
+    fn codec_preference_auto_keeps_auto_codec() {
+        assert_eq!(
+            codec_for_preference(PreferCodec::Auto, CodecFormat::H265),
+            CodecFormat::H265
+        );
+    }
 }
