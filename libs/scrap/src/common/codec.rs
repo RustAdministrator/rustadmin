@@ -78,8 +78,6 @@ pub trait EncoderApi {
     fn latency_free(&self) -> bool;
 
     fn is_hardware(&self) -> bool;
-
-    fn disable(&self);
 }
 
 pub struct Encoder {
@@ -211,9 +209,8 @@ impl Encoder {
                     codec: Box::new(hw),
                 }),
                 Err(e) => {
-                    log::error!("new hw encoder failed: {e:?}, clear config");
-                    HwCodecConfig::clear(false, true);
-                    *ENCODE_CODEC_FORMAT.lock().unwrap() = CodecFormat::VP9;
+                    log::error!("new hw encoder failed: {e:?}, fallback to VP9 for this session");
+                    Self::set_fallback_codec(CodecFormat::VP9);
                     Err(e)
                 }
             },
@@ -223,9 +220,8 @@ impl Encoder {
                     codec: Box::new(tex),
                 }),
                 Err(e) => {
-                    log::error!("new vram encoder failed: {e:?}, clear config");
-                    HwCodecConfig::clear(true, true);
-                    *ENCODE_CODEC_FORMAT.lock().unwrap() = CodecFormat::VP9;
+                    log::error!("new vram encoder failed: {e:?}, fallback to VP9 for this session");
+                    Self::set_fallback_codec(CodecFormat::VP9);
                     Err(e)
                 }
             },
@@ -420,10 +416,14 @@ impl Encoder {
                 }
             },
         };
-        let current = ENCODE_CODEC_FORMAT.lock().unwrap().clone();
-        if current != format {
-            log::info!("codec fallback: {:?} -> {:?}", current, format);
-            *ENCODE_CODEC_FORMAT.lock().unwrap() = format;
+        Self::set_fallback_codec(format);
+    }
+
+    pub fn set_fallback_codec(format: CodecFormat) {
+        let mut current = ENCODE_CODEC_FORMAT.lock().unwrap();
+        if *current != format {
+            log::info!("codec fallback: {:?} -> {:?}", *current, format);
+            *current = format;
         }
     }
 
@@ -1288,5 +1288,22 @@ mod tests {
             codec_for_preference(PreferCodec::Auto, CodecFormat::H265),
             CodecFormat::H265
         );
+    }
+
+    #[test]
+    fn codec_fallback_keeps_usable_hardware_codecs_advertised() {
+        *USABLE_ENCODING.lock().unwrap() = Some(SupportedEncoding {
+            h264: true,
+            h265: true,
+            ..Default::default()
+        });
+        *ENCODE_CODEC_FORMAT.lock().unwrap() = CodecFormat::H265;
+
+        Encoder::set_fallback_codec(CodecFormat::VP9);
+
+        assert_eq!(Encoder::negotiated_codec(), CodecFormat::VP9);
+        let usable = Encoder::usable_encoding().unwrap();
+        assert!(usable.h264);
+        assert!(usable.h265);
     }
 }

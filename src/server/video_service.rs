@@ -1283,15 +1283,19 @@ fn handle_one_frame(
             {
                 *encode_fail_counter = 0;
                 if encoder.is_hardware() {
-                    encoder.disable();
-                    log::error!("switch due to encoding fails, first frame: {first}, error: {e:?}");
+                    Encoder::set_fallback_codec(CodecFormat::VP9);
+                    log::error!(
+                        "switch due to hardware encoding fails without disabling hwcodec availability, first frame: {first}, error: {e:?}"
+                    );
                     bail!("SWITCH");
                 }
             }
             match e.to_string().as_str() {
                 scrap::codec::ENCODE_NEED_SWITCH => {
-                    encoder.disable();
-                    log::error!("switch due to encoder need switch");
+                    Encoder::set_fallback_codec(CodecFormat::VP9);
+                    log::error!(
+                        "switch due to encoder need switch without disabling hwcodec availability"
+                    );
                     bail!("SWITCH");
                 }
                 _ => {}

@@ -226,8 +226,6 @@ impl EncoderApi for VpxEncoder {
     fn is_hardware(&self) -> bool {
         false
     }
-
-    fn disable(&self) {}
 }
 
 impl VpxEncoder {

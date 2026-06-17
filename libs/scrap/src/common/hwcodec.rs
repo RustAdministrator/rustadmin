@@ -203,10 +203,6 @@ impl EncoderApi for HwRamEncoder {
     fn is_hardware(&self) -> bool {
         true
     }
-
-    fn disable(&self) {
-        HwCodecConfig::clear(false, true);
-    }
 }
 
 impl HwRamEncoder {

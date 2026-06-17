@@ -282,8 +282,6 @@ impl EncoderApi for AomEncoder {
     fn is_hardware(&self) -> bool {
         false
     }
-
-    fn disable(&self) {}
 }
 
 impl AomEncoder {
