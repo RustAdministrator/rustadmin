@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/build_macos.sh [--clean] [--hwcodec] [--no-hwcodec] [--screencapturekit] [--skip-cargo] [--sign-only]
+Usage: scripts/build_macos.sh [--clean] [--hwcodec] [--no-hwcodec] [--screencapturekit] [--skip-cargo] [--sign-only] [--no-sign]
 
 Hardware codec support is enabled by default on macOS. If FFmpeg/hwcodec
 dependencies are unavailable, the script reports an error and marks the build
@@ -26,6 +26,8 @@ Environment overrides:
   RUSTADMIN_MACOS_XCODE_SIGN_IDENTITY Signing identity passed to Xcode. Optional
   RUSTADMIN_MACOS_DEVELOPMENT_TEAM Development team to pass to Xcode. Optional
   RUSTADMIN_MACOS_ADHOC_SIGN   Set to 1 to force ad-hoc signing fallback. Default: 0
+  RUSTADMIN_MACOS_SKIP_SIGN    Set to 1 to build without signing or verification.
+                              Default: 0
   RUSTADMIN_MACOS_ALLOW_HWCODEC_FALLBACK
                               Set to 1 to allow an automatic non-hwcodec
                               fallback to exit successfully. Default: 0
@@ -43,6 +45,7 @@ hwcodec=1
 screencapturekit=0
 skip_cargo=0
 sign_only=0
+skip_sign=0
 hwcodec_fallback_warning=""
 original_args=("$@")
 
@@ -54,6 +57,7 @@ while [[ $# -gt 0 ]]; do
     --screencapturekit) screencapturekit=1 ;;
     --skip-cargo) skip_cargo=1 ;;
     --sign-only) sign_only=1 ;;
+    --no-sign) skip_sign=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
   esac
@@ -71,10 +75,12 @@ build_report_printed=0
 build_report_recording_error=0
 hwcodec_requested="$hwcodec"
 hwcodec_report_status="unknown"
+signing_report_status="pending"
 allow_hwcodec_fallback="${RUSTADMIN_MACOS_ALLOW_HWCODEC_FALLBACK:-0}"
 declare -a build_report_errors=()
 declare -a build_report_warnings=()
 adhoc_sign="${RUSTADMIN_MACOS_ADHOC_SIGN:-${RUSTDESK_MACOS_ADHOC_SIGN:-0}}"
+skip_sign="${RUSTADMIN_MACOS_SKIP_SIGN:-${RUSTDESK_MACOS_SKIP_SIGN:-$skip_sign}}"
 skip_bridge_gen="${RUSTADMIN_SKIP_BRIDGE_GEN:-${RUSTDESK_SKIP_BRIDGE_GEN:-0}}"
 force_bridge_gen="${RUSTADMIN_FORCE_BRIDGE_GEN:-${RUSTDESK_FORCE_BRIDGE_GEN:-0}}"
 verbose_bridge_gen="${RUSTADMIN_VERBOSE_BRIDGE_GEN:-${RUSTDESK_VERBOSE_BRIDGE_GEN:-0}}"
@@ -106,6 +112,12 @@ write_build_report() {
     return 0
   fi
   build_report_printed=1
+  if [[ "$exit_code" -eq 0 && "$hwcodec_report_status" == "unknown" ]]; then
+    report_error "Build ended before macOS hardware codec status was finalized."
+  fi
+  if [[ "$exit_code" -eq 0 && "$signing_report_status" == "pending" ]]; then
+    report_error "Build ended before signing status was finalized."
+  fi
 
   local status="success"
   if [[ "$exit_code" -ne 0 || "${#build_report_errors[@]}" -gt 0 ]]; then
@@ -140,6 +152,7 @@ write_build_report() {
     echo "- codec_root: ${macos_codec_root:-unset}"
     echo "- hwcodec_requested: $([[ "$hwcodec_requested" -eq 1 ]] && echo yes || echo no)"
     echo "- hwcodec_status: $hwcodec_report_status"
+    echo "- signing_status: $signing_report_status"
     echo "- report_path: $build_report_path"
     echo
     echo "## Errors"
@@ -182,7 +195,19 @@ record_failed_command() {
   return "$exit_code"
 }
 
+record_signal() {
+  local signal="$1"
+  local exit_code="$2"
+  if [[ "$build_report_recording_error" -eq 0 ]]; then
+    build_report_recording_error=1
+    report_error "Build interrupted by signal $signal."
+  fi
+  exit "$exit_code"
+}
+
 trap record_failed_command ERR
+trap 'record_signal INT 130' INT
+trap 'record_signal TERM 143' TERM
 trap 'write_build_report "$?"' EXIT
 
 if [[ -n "$flutter_root" ]]; then
@@ -192,6 +217,11 @@ fi
 if ! command -v flutter >/dev/null 2>&1; then
   report_error "Flutter was not found. Set RUSTADMIN_FLUTTER_ROOT or put flutter in PATH."
   exit 1
+fi
+
+if [[ "$sign_only" -eq 1 && "$skip_sign" == "1" ]]; then
+  report_error "--sign-only cannot be combined with --no-sign or RUSTADMIN_MACOS_SKIP_SIGN=1."
+  exit 2
 fi
 
 export PUB_CACHE="${PUB_CACHE:-$HOME/.pub-cache-rustadmin-macos}"
@@ -610,7 +640,9 @@ EOF
       if [[ -n "$macos_development_team" ]]; then
         xcodebuild_args+=("DEVELOPMENT_TEAM=$macos_development_team")
       fi
-      if [[ "$adhoc_sign" != "1" && -n "$macos_sign_identity" ]]; then
+      if [[ "$skip_sign" == "1" ]]; then
+        xcodebuild_args+=("CODE_SIGNING_ALLOWED=NO")
+      elif [[ "$adhoc_sign" != "1" && -n "$macos_sign_identity" ]]; then
         xcodebuild_args+=("CODE_SIGNING_ALLOWED=NO")
       elif [[ -n "$xcode_sign_identity" ]]; then
         xcodebuild_args+=("CODE_SIGN_IDENTITY=$xcode_sign_identity")
@@ -627,31 +659,37 @@ EOF
   fi
 fi
 
-if [[ "$adhoc_sign" == "1" ]]; then
-  sign_identity="-"
-else
-  sign_identity="$macos_sign_identity"
-  if [[ -z "$sign_identity" ]]; then
-    sign_identity="$(codesign -dv "$app_bundle" 2>&1 | sed -n 's/^Authority=//p' | head -1)"
-  fi
-  if [[ -z "$sign_identity" ]]; then
-    report_error "Unable to determine a valid signing identity for $app_bundle."
-    cat >&2 <<EOF
-Unable to determine a valid signing identity for $app_bundle.
-Set RUSTADMIN_MACOS_SIGN_IDENTITY and optionally RUSTADMIN_MACOS_DEVELOPMENT_TEAM,
-or set RUSTADMIN_MACOS_ADHOC_SIGN=1 to use the local ad-hoc signing fallback.
-EOF
-    exit 1
-  fi
-fi
-
 if [[ ! -d "$app_bundle" ]]; then
   report_error "App bundle does not exist: $app_bundle"
   exit 1
 fi
 
-sign_macos_app_contents
-codesign --verify --deep --strict --verbose=4 "$app_bundle"
+if [[ "$skip_sign" == "1" ]]; then
+  signing_report_status="skipped (--no-sign/RUSTADMIN_MACOS_SKIP_SIGN=1)"
+  report_warning "Signing skipped; the app bundle is for local build inspection only and is not distributable."
+else
+  if [[ "$adhoc_sign" == "1" ]]; then
+    sign_identity="-"
+  else
+    sign_identity="$macos_sign_identity"
+    if [[ -z "$sign_identity" ]]; then
+      sign_identity="$(codesign -dv "$app_bundle" 2>&1 | sed -n 's/^Authority=//p' | head -1)"
+    fi
+    if [[ -z "$sign_identity" ]]; then
+      report_error "Unable to determine a valid signing identity for $app_bundle."
+      cat >&2 <<EOF
+Unable to determine a valid signing identity for $app_bundle.
+Set RUSTADMIN_MACOS_SIGN_IDENTITY and optionally RUSTADMIN_MACOS_DEVELOPMENT_TEAM,
+or set RUSTADMIN_MACOS_ADHOC_SIGN=1 to use the local ad-hoc signing fallback.
+EOF
+      exit 1
+    fi
+  fi
+
+  sign_macos_app_contents
+  codesign --verify --deep --strict --verbose=4 "$app_bundle"
+  signing_report_status="signed and verified"
+fi
 
 if [[ "$sign_only" -eq 1 ]]; then
   hwcodec_report_status="unchanged (--sign-only reused the existing bundle)"

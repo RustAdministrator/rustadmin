@@ -61,6 +61,8 @@ use std::{
 };
 
 pub const OPTION_REFRESH: &'static str = "refresh";
+const ENCODE_NO_VALID_FRAME: &str = "no valid frame";
+const MAX_HW_NO_VALID_FRAME_TIMES: usize = 90;
 
 type FrameFetchedNotifierSender = UnboundedSender<(i32, Option<Instant>)>;
 type FrameFetchedNotifierReceiver = Arc<TokioMutex<UnboundedReceiver<(i32, Option<Instant>)>>>;
@@ -1239,6 +1241,9 @@ fn handle_one_frame(
             }
         }
         Err(e) => {
+            let is_hw_no_valid_frame = encoder.is_hardware()
+                && e.chain()
+                    .any(|cause| cause.to_string() == ENCODE_NO_VALID_FRAME);
             *encode_fail_counter += 1;
             if first {
                 log::warn!(
@@ -1253,16 +1258,29 @@ fn handle_one_frame(
             }
             // Encoding errors are not frequent except on Android
             if !cfg!(target_os = "android") {
-                log::error!("encode fail: {e:?}, times: {}", *encode_fail_counter,);
+                if is_hw_no_valid_frame {
+                    if *encode_fail_counter == 1 || *encode_fail_counter % 30 == 0 {
+                        log::warn!(
+                            "hardware encoder has no packet yet: {e:?}, times: {}, max: {}",
+                            *encode_fail_counter,
+                            MAX_HW_NO_VALID_FRAME_TIMES
+                        );
+                    }
+                } else {
+                    log::error!("encode fail: {e:?}, times: {}", *encode_fail_counter,);
+                }
             }
-            let max_fail_times = if cfg!(target_os = "android") && encoder.is_hardware() {
+            let max_fail_times = if is_hw_no_valid_frame {
+                MAX_HW_NO_VALID_FRAME_TIMES
+            } else if cfg!(target_os = "android") && encoder.is_hardware() {
                 9
             } else {
                 3
             };
             let repeat = !encoder.latency_free();
             // repeat encoders can reach max_fail_times on the first frame
-            if (first && !repeat) || *encode_fail_counter >= max_fail_times {
+            if (first && !repeat && !is_hw_no_valid_frame) || *encode_fail_counter >= max_fail_times
+            {
                 *encode_fail_counter = 0;
                 if encoder.is_hardware() {
                     encoder.disable();
