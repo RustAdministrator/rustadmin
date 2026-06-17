@@ -54,6 +54,83 @@ use std::{
 };
 
 const NO_VIDEO_START_TIMEOUT: Duration = Duration::from_secs(15);
+const NO_VIDEO_START_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+const NO_VIDEO_START_MAX_REFRESHES: usize = 6;
+const NO_VIDEO_START_STALLED_LOG_INTERVAL: Duration = Duration::from_secs(30);
+
+#[derive(Debug, PartialEq, Eq)]
+enum NoVideoStartupAction {
+    None,
+    Refresh { attempt: usize, elapsed_ms: u128 },
+    Stalled { elapsed_ms: u128 },
+}
+
+#[derive(Default)]
+struct NoVideoStartupWatchdog {
+    since: Option<Instant>,
+    last_refresh: Option<Instant>,
+    refresh_count: usize,
+    last_stalled_log: Option<Instant>,
+}
+
+impl NoVideoStartupWatchdog {
+    fn reset(&mut self) {
+        self.since = None;
+        self.last_refresh = None;
+        self.refresh_count = 0;
+        self.last_stalled_log = None;
+    }
+
+    fn tick(
+        &mut self,
+        expects_video: bool,
+        is_connected: bool,
+        first_frame: bool,
+        now: Instant,
+    ) -> NoVideoStartupAction {
+        if !expects_video || !is_connected || first_frame {
+            self.reset();
+            return NoVideoStartupAction::None;
+        }
+
+        let Some(since) = self.since else {
+            self.since = Some(now);
+            return NoVideoStartupAction::None;
+        };
+
+        let elapsed = now.saturating_duration_since(since);
+        if elapsed < NO_VIDEO_START_TIMEOUT {
+            return NoVideoStartupAction::None;
+        }
+
+        let can_refresh = self.refresh_count < NO_VIDEO_START_MAX_REFRESHES
+            && self
+                .last_refresh
+                .map(|last| now.saturating_duration_since(last) >= NO_VIDEO_START_REFRESH_INTERVAL)
+                .unwrap_or(true);
+        if can_refresh {
+            self.refresh_count += 1;
+            self.last_refresh = Some(now);
+            return NoVideoStartupAction::Refresh {
+                attempt: self.refresh_count,
+                elapsed_ms: elapsed.as_millis(),
+            };
+        }
+
+        let should_log_stalled = self
+            .last_stalled_log
+            .map(|last| now.saturating_duration_since(last) >= NO_VIDEO_START_STALLED_LOG_INTERVAL)
+            .unwrap_or(true);
+        if should_log_stalled {
+            self.last_stalled_log = Some(now);
+            return NoVideoStartupAction::Stalled {
+                elapsed_ms: elapsed.as_millis(),
+            };
+        }
+
+        NoVideoStartupAction::None
+    }
+}
 
 pub struct Remote<T: InvokeUiSession> {
     handler: Session<T>,
@@ -229,7 +306,7 @@ impl<T: InvokeUiSession> Remote<T> {
                 let mut status_timer =
                     crate::rustdesk_interval(time::interval(Duration::new(1, 0)));
                 let mut fps_instant = Instant::now();
-                let mut no_video_since: Option<Instant> = None;
+                let mut no_video_watchdog = NoVideoStartupWatchdog::default();
 
                 let _keep_it = client::hc_connection(feedback, rendezvous_server, token).await;
 
@@ -322,23 +399,46 @@ impl<T: InvokeUiSession> Remote<T> {
                             }
                         }
                         _ = status_timer.tick() => {
-                            if expects_video && self.is_connected && !self.first_frame {
-                                let since = no_video_since.get_or_insert_with(Instant::now);
-                                if since.elapsed() >= NO_VIDEO_START_TIMEOUT {
+                            match no_video_watchdog.tick(
+                                expects_video,
+                                self.is_connected,
+                                self.first_frame,
+                                Instant::now(),
+                            ) {
+                                NoVideoStartupAction::Refresh { attempt, elapsed_ms } => {
                                     log::warn!(
-                                        "diag client no video startup timeout: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, elapsed_ms={}",
+                                        "diag client no video startup retry: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, elapsed_ms={}, refresh_attempt={}/{}",
                                         self.handler.get_id(),
                                         self.is_connected,
                                         self.first_frame,
                                         self.video_format,
-                                        since.elapsed().as_millis()
+                                        elapsed_ms,
+                                        attempt,
+                                        NO_VIDEO_START_MAX_REFRESHES
                                     );
-                                    self.send_close_reason(&mut peer, "Video stream did not start").await;
-                                    self.handler.msgbox("error", "Connection Error", "Video stream did not start", "");
-                                    break;
+                                    let msg = client::LoginConfigHandler::refresh();
+                                    if let Err(err) = peer.send(&msg).await {
+                                        log::warn!(
+                                            "diag client no video refresh send failed: id={}, attempt={}, err={}",
+                                            self.handler.get_id(),
+                                            attempt,
+                                            err
+                                        );
+                                    }
                                 }
-                            } else {
-                                no_video_since = None;
+                                NoVideoStartupAction::Stalled { elapsed_ms } => {
+                                    log::warn!(
+                                        "diag client no video startup still waiting: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, elapsed_ms={}, refresh_attempts={}/{}",
+                                        self.handler.get_id(),
+                                        self.is_connected,
+                                        self.first_frame,
+                                        self.video_format,
+                                        elapsed_ms,
+                                        NO_VIDEO_START_MAX_REFRESHES.min(no_video_watchdog.refresh_count),
+                                        NO_VIDEO_START_MAX_REFRESHES
+                                    );
+                                }
+                                NoVideoStartupAction::None => {}
                             }
 
                             let elapsed = fps_instant.elapsed().as_millis();
@@ -2656,11 +2756,120 @@ impl Drop for VideoThread {
 
 #[cfg(test)]
 mod tests {
-    use super::session_permission_response_msgbox_type;
+    use super::{
+        session_permission_response_msgbox_type, NoVideoStartupAction, NoVideoStartupWatchdog,
+        NO_VIDEO_START_MAX_REFRESHES, NO_VIDEO_START_REFRESH_INTERVAL, NO_VIDEO_START_TIMEOUT,
+    };
+    use hbb_common::tokio::time::{Duration, Instant};
 
     #[test]
     fn permission_response_dialogs_do_not_close_session_on_ok() {
         assert!(session_permission_response_msgbox_type(true).contains("custom"));
         assert!(session_permission_response_msgbox_type(false).contains("custom"));
+    }
+
+    #[test]
+    fn no_video_watchdog_waits_until_start_timeout() {
+        let mut watchdog = NoVideoStartupWatchdog::default();
+        let start = Instant::now();
+
+        assert_eq!(
+            watchdog.tick(true, true, false, start),
+            NoVideoStartupAction::None
+        );
+        assert_eq!(
+            watchdog.tick(
+                true,
+                true,
+                false,
+                start + NO_VIDEO_START_TIMEOUT - Duration::from_millis(1)
+            ),
+            NoVideoStartupAction::None
+        );
+    }
+
+    #[test]
+    fn no_video_watchdog_retries_refresh_without_close_action() {
+        let mut watchdog = NoVideoStartupWatchdog::default();
+        let start = Instant::now();
+        assert_eq!(
+            watchdog.tick(true, true, false, start),
+            NoVideoStartupAction::None
+        );
+
+        assert_eq!(
+            watchdog.tick(true, true, false, start + NO_VIDEO_START_TIMEOUT),
+            NoVideoStartupAction::Refresh {
+                attempt: 1,
+                elapsed_ms: NO_VIDEO_START_TIMEOUT.as_millis()
+            }
+        );
+
+        assert_eq!(
+            watchdog.tick(
+                true,
+                true,
+                false,
+                start + NO_VIDEO_START_TIMEOUT + NO_VIDEO_START_REFRESH_INTERVAL
+            ),
+            NoVideoStartupAction::Refresh {
+                attempt: 2,
+                elapsed_ms: (NO_VIDEO_START_TIMEOUT + NO_VIDEO_START_REFRESH_INTERVAL).as_millis()
+            }
+        );
+    }
+
+    #[test]
+    fn no_video_watchdog_caps_refreshes_and_stays_alive() {
+        let mut watchdog = NoVideoStartupWatchdog::default();
+        let start = Instant::now();
+        assert_eq!(
+            watchdog.tick(true, true, false, start),
+            NoVideoStartupAction::None
+        );
+
+        for attempt in 1..=NO_VIDEO_START_MAX_REFRESHES {
+            let now = start
+                + NO_VIDEO_START_TIMEOUT
+                + NO_VIDEO_START_REFRESH_INTERVAL * (attempt as u32 - 1);
+            assert_eq!(
+                watchdog.tick(true, true, false, now),
+                NoVideoStartupAction::Refresh {
+                    attempt,
+                    elapsed_ms: now.saturating_duration_since(start).as_millis()
+                }
+            );
+        }
+
+        let after_cap = start
+            + NO_VIDEO_START_TIMEOUT
+            + NO_VIDEO_START_REFRESH_INTERVAL * NO_VIDEO_START_MAX_REFRESHES as u32;
+        assert!(matches!(
+            watchdog.tick(true, true, false, after_cap),
+            NoVideoStartupAction::Stalled { .. }
+        ));
+    }
+
+    #[test]
+    fn no_video_watchdog_resets_after_first_frame() {
+        let mut watchdog = NoVideoStartupWatchdog::default();
+        let start = Instant::now();
+        assert_eq!(
+            watchdog.tick(true, true, false, start),
+            NoVideoStartupAction::None
+        );
+        assert!(matches!(
+            watchdog.tick(true, true, false, start + NO_VIDEO_START_TIMEOUT),
+            NoVideoStartupAction::Refresh { .. }
+        ));
+
+        assert_eq!(
+            watchdog.tick(true, true, true, start + NO_VIDEO_START_TIMEOUT),
+            NoVideoStartupAction::None
+        );
+        assert_eq!(
+            watchdog.tick(true, true, false, start + NO_VIDEO_START_TIMEOUT),
+            NoVideoStartupAction::None
+        );
     }
 }

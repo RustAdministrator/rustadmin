@@ -636,9 +636,64 @@ const H1: Duration = Duration::from_secs(3600);
 const MILLI1: Duration = Duration::from_millis(1);
 const SEND_TIMEOUT_VIDEO: u64 = 12_000;
 const SEND_TIMEOUT_OTHER: u64 = SEND_TIMEOUT_VIDEO * 10;
+const SEND_TIMEOUT_VIDEO_STARTUP: u64 = 60_000;
+const VIDEO_STARTUP_SEND_TIMEOUT_WINDOW: Duration = Duration::from_secs(60);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 const VIDEO_FRAME_STALE_DROP_AFTER: Duration = Duration::from_secs(3);
 const VIDEO_STALE_DROP_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+fn steady_send_timeout_ms(file_transfer: bool, port_forward: bool, terminal: bool) -> u64 {
+    if file_transfer || port_forward || terminal {
+        SEND_TIMEOUT_OTHER
+    } else {
+        SEND_TIMEOUT_VIDEO
+    }
+}
+
+fn initial_send_timeout_ms(file_transfer: bool, port_forward: bool, terminal: bool) -> u64 {
+    let steady = steady_send_timeout_ms(file_transfer, port_forward, terminal);
+    if steady == SEND_TIMEOUT_VIDEO {
+        SEND_TIMEOUT_VIDEO_STARTUP
+    } else {
+        steady
+    }
+}
+
+fn stream_message_kind(msg: &Message) -> &'static str {
+    match &msg.union {
+        Some(message::Union::VideoFrame(_)) => "VideoFrame",
+        Some(message::Union::AudioFrame(_)) => "AudioFrame",
+        Some(message::Union::Hash(_)) => "Hash",
+        Some(message::Union::LoginRequest(_)) => "LoginRequest",
+        Some(message::Union::LoginResponse(_)) => "LoginResponse",
+        Some(message::Union::PeerInfo(_)) => "PeerInfo",
+        Some(message::Union::CursorData(_)) => "CursorData",
+        Some(message::Union::CursorPosition(_)) => "CursorPosition",
+        Some(message::Union::KeyEvent(_)) => "KeyEvent",
+        Some(message::Union::PointerDeviceEvent(_)) => "PointerDeviceEvent",
+        Some(message::Union::MultiClipboards(_)) => "MultiClipboards",
+        Some(message::Union::Clipboard(_)) => "Clipboard",
+        Some(message::Union::Misc(misc)) => stream_misc_kind(misc),
+        Some(_) => "Other",
+        None => "None",
+    }
+}
+
+fn stream_misc_kind(misc: &Misc) -> &'static str {
+    match &misc.union {
+        Some(misc::Union::RefreshVideo(_)) => "Misc::RefreshVideo",
+        Some(misc::Union::RefreshVideoDisplay(_)) => "Misc::RefreshVideoDisplay",
+        Some(misc::Union::VideoReceived(_)) => "Misc::VideoReceived",
+        Some(misc::Union::CloseReason(_)) => "Misc::CloseReason",
+        Some(misc::Union::ChatMessage(_)) => "Misc::ChatMessage",
+        Some(misc::Union::Option(_)) => "Misc::Option",
+        Some(misc::Union::SupportedEncoding(_)) => "Misc::SupportedEncoding",
+        Some(misc::Union::SwitchDisplay(_)) => "Misc::SwitchDisplay",
+        Some(misc::Union::StopService(_)) => "Misc::StopService",
+        Some(_) => "Misc::Other",
+        None => "Misc::None",
+    }
+}
 
 impl Connection {
     pub async fn start(
@@ -820,17 +875,21 @@ impl Connection {
             crate::rustdesk_interval(time::interval_at(Instant::now(), TEST_DELAY_TIMEOUT));
         let mut last_recv_time = Instant::now();
 
-        let send_timeout_ms = if conn.file_transfer.is_some()
-            || conn.port_forward_socket.is_some()
-            || conn.terminal
-        {
-            SEND_TIMEOUT_OTHER
+        let file_transfer_conn = conn.file_transfer.is_some();
+        let port_forward_conn = conn.port_forward_socket.is_some();
+        let terminal_conn = conn.terminal;
+        let steady_timeout_ms =
+            steady_send_timeout_ms(file_transfer_conn, port_forward_conn, terminal_conn);
+        let startup_send_timeout_until = if steady_timeout_ms == SEND_TIMEOUT_VIDEO {
+            Some(Instant::now() + VIDEO_STARTUP_SEND_TIMEOUT_WINDOW)
         } else {
-            SEND_TIMEOUT_VIDEO
+            None
         };
+        let mut send_timeout_ms =
+            initial_send_timeout_ms(file_transfer_conn, port_forward_conn, terminal_conn);
         conn.stream.set_send_timeout(send_timeout_ms);
         log::info!(
-            "#{} diag conn run loop: addr={}, authorized={}, auth_kind={}, remote={}, file_transfer={}, view_camera={}, terminal={}, port_forward={}, display_idx={}, send_timeout_ms={}, video_ack_required={}",
+            "#{} diag conn run loop: addr={}, authorized={}, auth_kind={}, remote={}, file_transfer={}, view_camera={}, terminal={}, port_forward={}, display_idx={}, send_timeout_ms={}, steady_send_timeout_ms={}, startup_timeout_window_ms={}, video_ack_required={}",
             conn.inner.id(),
             addr,
             conn.authorized,
@@ -842,6 +901,10 @@ impl Connection {
             !conn.port_forward_address.is_empty() || conn.port_forward_socket.is_some(),
             conn.display_idx,
             send_timeout_ms,
+            steady_timeout_ms,
+            startup_send_timeout_until
+                .map(|until| until.saturating_duration_since(Instant::now()).as_millis())
+                .unwrap_or(0),
             conn.video_ack_required
         );
 
@@ -954,7 +1017,15 @@ impl Connection {
                             .await;
                         }
                         ipc::Data::RawMessage(bytes) => {
-                            allow_err!(conn.stream.send_raw(bytes).await);
+                            let bytes_len = bytes.len();
+                            if let Err(err) = conn.stream.send_raw(bytes).await {
+                                log::warn!(
+                                    "#{} diag raw IPC stream send failed: bytes={}, err={}",
+                                    conn.inner.id(),
+                                    bytes_len,
+                                    err
+                                );
+                            }
                         }
                         #[cfg(target_os = "windows")]
                         ipc::Data::ClipboardFile(clip) => {
@@ -1145,10 +1216,19 @@ impl Connection {
                         continue;
                     }
                     if let Err(err) = conn.stream.send(&value as &Message).await {
+                        let kind = stream_message_kind(&value);
                         if is_video_frame {
                             log::warn!(
                                 "#{} diag video stream send failed: queue_latency_ms={}, err={}",
                                 conn.inner.id(),
+                                instant.elapsed().as_millis(),
+                                err
+                            );
+                        } else {
+                            log::warn!(
+                                "#{} diag stream send failed: kind={}, queue_latency_ms={}, err={}",
+                                conn.inner.id(),
+                                kind,
                                 instant.elapsed().as_millis(),
                                 err
                             );
@@ -1216,7 +1296,15 @@ impl Connection {
                         Some(message::Union::MultiClipboards(_multi_clipboards)) => {
                             #[cfg(not(target_os = "ios"))]
                             if let Some(msg_out) = crate::clipboard::get_msg_if_not_support_multi_clip(&conn.lr.version, &conn.lr.my_platform, _multi_clipboards) {
+                                let kind = stream_message_kind(&msg_out);
                                 if let Err(err) = conn.stream.send(&msg_out).await {
+                                    log::warn!(
+                                        "#{} diag stream send failed: kind={}, queue_latency_ms={}, err={}",
+                                        conn.inner.id(),
+                                        kind,
+                                        instant.elapsed().as_millis(),
+                                        err
+                                    );
                                     conn.on_close(&err.to_string(), false).await;
                                     break;
                                 }
@@ -1227,7 +1315,15 @@ impl Connection {
                     }
 
                     let msg: &Message = &msg;
+                    let kind = stream_message_kind(msg);
                     if let Err(err) = conn.stream.send(msg).await {
+                        log::warn!(
+                            "#{} diag stream send failed: kind={}, queue_latency_ms={}, err={}",
+                            conn.inner.id(),
+                            kind,
+                            instant.elapsed().as_millis(),
+                            err
+                        );
                         conn.on_close(&err.to_string(), false).await;
                         break;
                     }
@@ -1246,6 +1342,19 @@ impl Connection {
                     }
                 }
                 _ = second_timer.tick() => {
+                    if send_timeout_ms != steady_timeout_ms
+                        && startup_send_timeout_until
+                            .map(|until| Instant::now() >= until)
+                            .unwrap_or(false)
+                    {
+                        send_timeout_ms = steady_timeout_ms;
+                        conn.stream.set_send_timeout(send_timeout_ms);
+                        log::info!(
+                            "#{} diag send timeout returned to steady state: send_timeout_ms={}",
+                            conn.inner.id(),
+                            send_timeout_ms
+                        );
+                    }
                     #[cfg(windows)]
                     conn.portable_check();
                     raii::AuthedConnID::check_wake_lock_on_setting_changed();
@@ -7148,6 +7257,51 @@ mod test {
         assert!(Ipv6Addr::from_str("::1").is_ok());
         assert!(Ipv6Addr::from_str("127.0.0.1").is_err());
         assert!(Ipv6Addr::from_str("0").is_err());
+    }
+
+    #[test]
+    fn media_connections_get_startup_tolerant_send_timeout() {
+        assert_eq!(
+            steady_send_timeout_ms(false, false, false),
+            SEND_TIMEOUT_VIDEO
+        );
+        assert_eq!(
+            initial_send_timeout_ms(false, false, false),
+            SEND_TIMEOUT_VIDEO_STARTUP
+        );
+    }
+
+    #[test]
+    fn non_media_connections_keep_long_control_send_timeout() {
+        for (file_transfer, port_forward, terminal) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            assert_eq!(
+                steady_send_timeout_ms(file_transfer, port_forward, terminal),
+                SEND_TIMEOUT_OTHER
+            );
+            assert_eq!(
+                initial_send_timeout_ms(file_transfer, port_forward, terminal),
+                SEND_TIMEOUT_OTHER
+            );
+        }
+    }
+
+    #[test]
+    fn stream_message_kind_identifies_refresh_messages() {
+        let mut misc = Misc::new();
+        misc.set_refresh_video(true);
+        let mut msg = Message::new();
+        msg.set_misc(misc);
+        assert_eq!(stream_message_kind(&msg), "Misc::RefreshVideo");
+
+        let mut misc = Misc::new();
+        misc.set_refresh_video_display(0);
+        let mut msg = Message::new();
+        msg.set_misc(misc);
+        assert_eq!(stream_message_kind(&msg), "Misc::RefreshVideoDisplay");
     }
 
     #[test]
