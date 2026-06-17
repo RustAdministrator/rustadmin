@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 usage() {
   cat <<'USAGE'
 Usage: scripts/build_macos.sh [--clean] [--hwcodec] [--no-hwcodec] [--screencapturekit] [--skip-cargo] [--sign-only]
 
 Hardware codec support is enabled by default on macOS. If FFmpeg/hwcodec
-dependencies are unavailable, the script warns and falls back to a build without
-the hwcodec Cargo feature. Pass --no-hwcodec to opt out intentionally.
+dependencies are unavailable, the script reports an error and marks the build
+failed instead of silently producing a non-hwcodec artifact. Pass --no-hwcodec
+to opt out intentionally.
 
 Environment overrides:
   RUSTADMIN_FLUTTER_ROOT       Flutter SDK root. Default: first flutter in PATH
@@ -25,6 +26,11 @@ Environment overrides:
   RUSTADMIN_MACOS_XCODE_SIGN_IDENTITY Signing identity passed to Xcode. Optional
   RUSTADMIN_MACOS_DEVELOPMENT_TEAM Development team to pass to Xcode. Optional
   RUSTADMIN_MACOS_ADHOC_SIGN   Set to 1 to force ad-hoc signing fallback. Default: 0
+  RUSTADMIN_MACOS_ALLOW_HWCODEC_FALLBACK
+                              Set to 1 to allow an automatic non-hwcodec
+                              fallback to exit successfully. Default: 0
+  RUSTADMIN_MACOS_BUILD_REPORT Report output path.
+                              Default: build/macos-build-report.md
   PUB_CACHE                    Dart package cache. Default: $HOME/.pub-cache-rustadmin-macos
   CARGO_TARGET_DIR             Cargo output dir. Default: ../rustadmin-target-macos
                               Synced to target/release for Xcode embedding.
@@ -38,6 +44,7 @@ screencapturekit=0
 skip_cargo=0
 sign_only=0
 hwcodec_fallback_warning=""
+original_args=("$@")
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -58,6 +65,15 @@ flutter_dir="$repo_root/flutter"
 default_codec_root="$repo_root/.local/macos-codecs"
 home_codec_root="$HOME/MO/Release"
 app_bundle="$flutter_dir/build/macos/Build/Products/Release/RustAdmin.app"
+build_report_path="${RUSTADMIN_MACOS_BUILD_REPORT:-$repo_root/build/macos-build-report.md}"
+build_report_started_at="$(date '+%Y-%m-%d %H:%M:%S %z')"
+build_report_printed=0
+build_report_recording_error=0
+hwcodec_requested="$hwcodec"
+hwcodec_report_status="unknown"
+allow_hwcodec_fallback="${RUSTADMIN_MACOS_ALLOW_HWCODEC_FALLBACK:-0}"
+declare -a build_report_errors=()
+declare -a build_report_warnings=()
 adhoc_sign="${RUSTADMIN_MACOS_ADHOC_SIGN:-${RUSTDESK_MACOS_ADHOC_SIGN:-0}}"
 skip_bridge_gen="${RUSTADMIN_SKIP_BRIDGE_GEN:-${RUSTDESK_SKIP_BRIDGE_GEN:-0}}"
 force_bridge_gen="${RUSTADMIN_FORCE_BRIDGE_GEN:-${RUSTDESK_FORCE_BRIDGE_GEN:-0}}"
@@ -71,12 +87,110 @@ macos_development_team="${RUSTADMIN_MACOS_DEVELOPMENT_TEAM:-${RUSTDESK_MACOS_DEV
 macos_codec_root="${RUSTADMIN_MACOS_CODEC_ROOT:-${RUSTDESK_MACOS_CODEC_ROOT:-}}"
 macos_codec_link_mode="${RUSTADMIN_MACOS_CODEC_LINK_MODE:-${RUSTDESK_MACOS_CODEC_LINK_MODE:-}}"
 
+report_error() {
+  local message="$1"
+  build_report_errors+=("$message")
+  echo "ERROR: $message" >&2
+}
+
+report_warning() {
+  local message="$1"
+  build_report_warnings+=("$message")
+  echo "WARNING: $message" >&2
+}
+
+write_build_report() {
+  set +e
+  local exit_code="${1:-0}"
+  if [[ "$build_report_printed" -eq 1 ]]; then
+    return 0
+  fi
+  build_report_printed=1
+
+  local status="success"
+  if [[ "$exit_code" -ne 0 || "${#build_report_errors[@]}" -gt 0 ]]; then
+    status="failed"
+  elif [[ "${#build_report_warnings[@]}" -gt 0 ]]; then
+    status="success-with-warnings"
+  fi
+
+  local report_dir
+  report_dir="$(dirname "$build_report_path")"
+  if ! mkdir -p "$report_dir"; then
+    echo "WARNING: could not create build report directory: $report_dir" >&2
+    return 0
+  fi
+
+  local command_line="scripts/build_macos.sh"
+  if [[ "${#original_args[@]}" -gt 0 ]]; then
+    command_line="$command_line ${original_args[*]}"
+  fi
+
+  {
+    echo "# RustAdmin macOS Build Report"
+    echo
+    echo "- status: $status"
+    echo "- exit_code: $exit_code"
+    echo "- started_at: $build_report_started_at"
+    echo "- finished_at: $(date '+%Y-%m-%d %H:%M:%S %z')"
+    echo "- command: $command_line"
+    echo "- repo: $repo_root"
+    echo "- app_bundle: $app_bundle"
+    echo "- cargo_target_dir: ${CARGO_TARGET_DIR:-unset}"
+    echo "- codec_root: ${macos_codec_root:-unset}"
+    echo "- hwcodec_requested: $([[ "$hwcodec_requested" -eq 1 ]] && echo yes || echo no)"
+    echo "- hwcodec_status: $hwcodec_report_status"
+    echo "- report_path: $build_report_path"
+    echo
+    echo "## Errors"
+    if [[ "${#build_report_errors[@]}" -eq 0 ]]; then
+      echo
+      echo "none"
+    else
+      local error
+      for error in "${build_report_errors[@]}"; do
+        echo "- $error"
+      done
+    fi
+    echo
+    echo "## Warnings"
+    if [[ "${#build_report_warnings[@]}" -eq 0 ]]; then
+      echo
+      echo "none"
+    else
+      local warning
+      for warning in "${build_report_warnings[@]}"; do
+        echo "- $warning"
+      done
+    fi
+  } > "$build_report_path"
+
+  echo "macOS build report: $build_report_path"
+  if [[ "$status" == "failed" ]]; then
+    echo "macOS build report status: failed" >&2
+  elif [[ "$status" == "success-with-warnings" ]]; then
+    echo "macOS build report status: success-with-warnings" >&2
+  fi
+}
+
+record_failed_command() {
+  local exit_code="$?"
+  if [[ "$build_report_recording_error" -eq 0 ]]; then
+    build_report_recording_error=1
+    report_error "Command failed at line ${BASH_LINENO[0]:-unknown} with exit $exit_code: ${BASH_COMMAND:-unknown}"
+  fi
+  return "$exit_code"
+}
+
+trap record_failed_command ERR
+trap 'write_build_report "$?"' EXIT
+
 if [[ -n "$flutter_root" ]]; then
   export PATH="$flutter_root/bin:$PATH"
 fi
 
 if ! command -v flutter >/dev/null 2>&1; then
-  echo "Flutter was not found. Set RUSTADMIN_FLUTTER_ROOT or put flutter in PATH." >&2
+  report_error "Flutter was not found. Set RUSTADMIN_FLUTTER_ROOT or put flutter in PATH."
   exit 1
 fi
 
@@ -116,8 +230,8 @@ sync_macos_rust_artifacts() {
   local cargo_service="$cargo_release_dir/service"
 
   if [[ ! -f "$cargo_librustdesk" ]]; then
-    echo "Missing Rust library: $cargo_librustdesk" >&2
-    echo "Run without --skip-cargo or set CARGO_TARGET_DIR to a directory containing a release build." >&2
+    report_error "Missing Rust library: $cargo_librustdesk"
+    report_error "Run without --skip-cargo or set CARGO_TARGET_DIR to a directory containing a release build."
     exit 1
   fi
 
@@ -217,11 +331,20 @@ compose_cargo_features() {
 
 warn_hwcodec_fallback() {
   hwcodec_fallback_warning="$1"
-  cat >&2 <<EOF
-WARNING: $hwcodec_fallback_warning
-WARNING: Continuing without the hwcodec Cargo feature. The GUI will not show
-WARNING: the "Enable hardware codec" option in this build.
+  if [[ "$allow_hwcodec_fallback" == "1" ]]; then
+    report_warning "Hardware codec fallback: $hwcodec_fallback_warning"
+    cat >&2 <<'EOF'
+WARNING: Continuing without the hwcodec Cargo feature because fallback was explicitly allowed.
+WARNING: The GUI will not show the "Enable hardware codec" option in this build.
 EOF
+  else
+    report_error "Hardware codec fallback: $hwcodec_fallback_warning"
+    cat >&2 <<'EOF'
+ERROR: Continuing only to produce a diagnostic fallback bundle.
+ERROR: This build will exit nonzero because hardware codecs were requested but not included.
+ERROR: Use --no-hwcodec to opt out intentionally, or set RUSTADMIN_MACOS_ALLOW_HWCODEC_FALLBACK=1 to allow fallback.
+EOF
+  fi
 }
 
 clean_flutter_build_state() {
@@ -316,16 +439,16 @@ generate_version_file() {
 
   version="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$repo_root/Cargo.toml" | head -n 1)"
   if [[ -z "$version" ]]; then
-    echo "Could not read package version from $repo_root/Cargo.toml" >&2
+    report_error "Could not read package version from $repo_root/Cargo.toml"
     exit 1
   fi
   if [[ ! -f "$revision_file" ]]; then
-    echo "Missing RustAdmin revision file: $revision_file" >&2
+    report_error "Missing RustAdmin revision file: $revision_file"
     exit 1
   fi
   revision="$(tr -d '[:space:]' < "$revision_file")"
   if [[ -z "$revision" ]]; then
-    echo "RustAdmin revision file is empty: $revision_file" >&2
+    report_error "RustAdmin revision file is empty: $revision_file"
     exit 1
   fi
 
@@ -380,6 +503,7 @@ generate_bridge_files() {
     bridge_codegen="$HOME/.cargo/bin/flutter_rust_bridge_codegen"
   fi
   if [[ -z "$bridge_codegen" ]]; then
+    report_error "flutter_rust_bridge_codegen was not found."
     cat >&2 <<'EOF'
 flutter_rust_bridge_codegen was not found.
 Install it with:
@@ -407,6 +531,7 @@ EOF
     fi
     rm -f "$bridge_log"
   else
+    report_error "flutter_rust_bridge code generation failed. See generator output above."
     cat "$bridge_log" >&2
     rm -f "$bridge_log"
     exit 1
@@ -445,6 +570,7 @@ if [[ "$sign_only" -eq 0 ]]; then
       fi
     fi
   elif [[ "$hwcodec" -eq 1 ]]; then
+    report_warning "--skip-cargo reuses the existing Rust library; hardware codec support depends on that existing artifact."
     cat >&2 <<'EOF'
 WARNING: --skip-cargo reuses the existing Rust library.
 WARNING: Hardware codec support will only be present if that library was already
@@ -509,6 +635,7 @@ else
     sign_identity="$(codesign -dv "$app_bundle" 2>&1 | sed -n 's/^Authority=//p' | head -1)"
   fi
   if [[ -z "$sign_identity" ]]; then
+    report_error "Unable to determine a valid signing identity for $app_bundle."
     cat >&2 <<EOF
 Unable to determine a valid signing identity for $app_bundle.
 Set RUSTADMIN_MACOS_SIGN_IDENTITY and optionally RUSTADMIN_MACOS_DEVELOPMENT_TEAM,
@@ -519,7 +646,7 @@ EOF
 fi
 
 if [[ ! -d "$app_bundle" ]]; then
-  echo "App bundle does not exist: $app_bundle" >&2
+  report_error "App bundle does not exist: $app_bundle"
   exit 1
 fi
 
@@ -527,18 +654,27 @@ sign_macos_app_contents
 codesign --verify --deep --strict --verbose=4 "$app_bundle"
 
 if [[ "$sign_only" -eq 1 ]]; then
+  hwcodec_report_status="unchanged (--sign-only reused the existing bundle)"
   echo "macOS hardware codec feature: unchanged (--sign-only reused the existing bundle)"
 elif [[ "$skip_cargo" -eq 1 ]]; then
+  hwcodec_report_status="unchanged (--skip-cargo reused the existing Rust library)"
   echo "macOS hardware codec feature: unchanged (--skip-cargo reused the existing Rust library)"
 elif [[ -n "$hwcodec_fallback_warning" ]]; then
+  hwcodec_report_status="not included (fallback: $hwcodec_fallback_warning)"
   echo "WARNING: macOS hardware codec support was not included: $hwcodec_fallback_warning" >&2
 else
   if [[ "$hwcodec" -eq 1 ]]; then
+    hwcodec_report_status="included"
     echo "macOS hardware codec feature: enabled"
   else
+    hwcodec_report_status="disabled (--no-hwcodec)"
     echo "macOS hardware codec feature: disabled"
   fi
 fi
 
 echo "macOS bundle:"
 echo "$flutter_dir/build/macos/Build/Products/Release"
+
+if [[ -n "$hwcodec_fallback_warning" && "$allow_hwcodec_fallback" != "1" ]]; then
+  exit 1
+fi

@@ -157,7 +157,17 @@ scripts/build_macos.sh
 ```
 
 Hardware codecs are enabled by default. If FFmpeg/hwcodec dependencies are not
-available, the script warns and falls back to a build without hardware codecs.
+available, the script writes `build/macos-build-report.md`, reports the fallback
+as an error, and exits nonzero so the issue is not missed. Use `--no-hwcodec`
+when a non-hardware-codec build is intentional, or set
+`RUSTADMIN_MACOS_ALLOW_HWCODEC_FALLBACK=1` to allow an automatic fallback.
+
+Override the report path when needed:
+
+```bash
+RUSTADMIN_MACOS_BUILD_REPORT=/tmp/rustadmin-macos-report.md \
+scripts/build_macos.sh
+```
 
 Optional codec prefix:
 
