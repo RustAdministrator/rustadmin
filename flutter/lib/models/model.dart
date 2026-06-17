@@ -4081,17 +4081,24 @@ class QualityMonitorModel with ChangeNotifier {
 
   QualityMonitorModel(this.parent);
   var _show = false;
+  var _position = kQualityMonitorPositionTopRight;
   final _data = QualityMonitorData();
 
   bool get show => _show;
+  String get position => _position;
   QualityMonitorData get data => _data;
 
   checkShowQualityMonitor(SessionID sessionId) async {
     final show = await bind.sessionGetToggleOption(
             sessionId: sessionId, arg: 'show-quality-monitor') ==
         true;
-    if (_show != show) {
+    final position = normalizeQualityMonitorPosition(
+        await bind.sessionGetOption(
+                sessionId: sessionId, arg: kOptionQualityMonitorPosition) ??
+            '');
+    if (_show != show || _position != position) {
       _show = show;
+      _position = position;
       notifyListeners();
     }
   }

@@ -578,11 +578,8 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         child: Stack(children: () {
           final paints = [
             ImagePaint(ffiModel: gFFI.ffiModel),
-            Positioned(
-              top: 10,
-              right: 10,
-              child: QualityMonitor(gFFI.qualityMonitorModel),
-            ),
+            PositionedQualityMonitor(
+                qualityMonitorModel: gFFI.qualityMonitorModel),
             KeyHelpTools(
                 keyboardIsVisible: keyboardIsVisible,
                 showGestureHelp: _showGestureHelp),

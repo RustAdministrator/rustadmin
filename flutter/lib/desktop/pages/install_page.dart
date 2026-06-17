@@ -199,43 +199,54 @@ class _InstallPageBodyState extends State<_InstallPageBody>
                       )
                     ],
                   )).marginSymmetric(vertical: 2 * em),
-              Row(
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Expanded(
-                    // NOT use Offstage to wrap LinearProgressIndicator
+                  // Reserve progress row height so the button row does not jump.
+                  SizedBox(
+                    height: 16,
                     child: Obx(() => showProgress.value
-                        ? LinearProgressIndicator().marginOnly(right: 10)
-                        : Offstage()),
+                        ? const Align(
+                            alignment: Alignment.topCenter,
+                            child: LinearProgressIndicator(),
+                          )
+                        : const SizedBox.shrink()),
                   ),
-                  Obx(
-                    () => OutlinedButton.icon(
-                      icon: MyTheme.desktopButtonIcon(
-                          Icon(Icons.close_rounded, size: 16)),
-                      label: Text(translate('Cancel')),
-                      onPressed:
-                          btnEnabled.value ? () => windowManager.close() : null,
-                    ).marginOnly(right: 10),
-                  ),
-                  Obx(
-                    () => ElevatedButton.icon(
-                      icon: MyTheme.desktopButtonIcon(
-                          Icon(Icons.done_rounded, size: 16)),
-                      label: Text(translate('Accept and Install')),
-                      onPressed: btnEnabled.value ? install : null,
-                    ),
-                  ),
-                  Offstage(
-                    offstage: bind.installShowRunWithoutInstall(),
-                    child: Obx(
-                      () => OutlinedButton.icon(
-                        icon: MyTheme.desktopButtonIcon(
-                            Icon(Icons.screen_share_outlined, size: 16)),
-                        label: Text(translate('Run without install')),
-                        onPressed: btnEnabled.value
-                            ? () => bind.installRunWithoutInstall()
-                            : null,
-                      ).marginOnly(left: 10),
-                    ),
+                  Row(
+                    children: [
+                      Obx(
+                        () => ElevatedButton.icon(
+                          icon: MyTheme.desktopButtonIcon(
+                              Icon(Icons.done_rounded, size: 16)),
+                          label: Text(translate('Accept and Install')),
+                          onPressed: btnEnabled.value ? install : null,
+                        ),
+                      ),
+                      Offstage(
+                        offstage: bind.installShowRunWithoutInstall(),
+                        child: Obx(
+                          () => OutlinedButton.icon(
+                            icon: MyTheme.desktopButtonIcon(
+                                Icon(Icons.screen_share_outlined, size: 16)),
+                            label: Text(translate('Run without install')),
+                            onPressed: btnEnabled.value
+                                ? () => bind.installRunWithoutInstall()
+                                : null,
+                          ).marginOnly(left: 10),
+                        ),
+                      ),
+                      Spacer(),
+                      Obx(
+                        () => OutlinedButton.icon(
+                          icon: MyTheme.desktopButtonIcon(
+                              Icon(Icons.close_rounded, size: 16)),
+                          label: Text(translate('Cancel')),
+                          onPressed: btnEnabled.value
+                              ? () => windowManager.close()
+                              : null,
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               )

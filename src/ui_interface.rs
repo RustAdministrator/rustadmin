@@ -302,7 +302,25 @@ pub fn forget_password(id: String) {
 #[inline]
 pub fn get_peer_option(id: String, name: String) -> String {
     let c = PeerConfig::load(&id);
-    c.options.get(&name).unwrap_or(&"".to_owned()).to_owned()
+    match name.as_str() {
+        OPTION_IMAGE_QUALITY => c.image_quality,
+        OPTION_CUSTOM_IMAGE_QUALITY => c
+            .custom_image_quality
+            .first()
+            .map(|v| v.to_string())
+            .unwrap_or_default(),
+        OPTION_SHOW_QUALITY_MONITOR => bool_peer_option(c.show_quality_monitor.v),
+        OPTION_DISABLE_AUDIO => bool_peer_option(c.disable_audio.v),
+        OPTION_ENABLE_FILE_COPY_PASTE => bool_peer_option(c.enable_file_copy_paste.v),
+        OPTION_DISABLE_CLIPBOARD => bool_peer_option(c.disable_clipboard.v),
+        OPTION_LOCK_AFTER_SESSION_END => bool_peer_option(c.lock_after_session_end.v),
+        OPTION_TERMINAL_PERSISTENT => bool_peer_option(c.terminal_persistent.v),
+        OPTION_PRIVACY_MODE => bool_peer_option(c.privacy_mode.v),
+        "allow_swap_key" => bool_peer_option(c.allow_swap_key.v),
+        OPTION_VIEW_ONLY => bool_peer_option(c.view_only.v),
+        "keyboard_mode" => c.keyboard_mode,
+        _ => c.options.get(&name).cloned().unwrap_or_default(),
+    }
 }
 
 #[inline]
@@ -327,12 +345,70 @@ pub fn set_peer_flutter_option(id: String, name: String, value: String) {
 #[inline]
 pub fn set_peer_option(id: String, name: String, value: String) {
     let mut c = PeerConfig::load(&id);
-    if value.is_empty() {
-        c.options.remove(&name);
-    } else {
-        c.options.insert(name, value);
+    match name.as_str() {
+        OPTION_IMAGE_QUALITY => {
+            if value.is_empty() {
+                c.image_quality.clear();
+            } else if matches!(value.as_str(), "best" | "balanced" | "low" | "custom") {
+                c.image_quality = value;
+            }
+        }
+        OPTION_CUSTOM_IMAGE_QUALITY => {
+            if let Ok(v) = value.parse::<i32>() {
+                if (10..=0xFFF).contains(&v) {
+                    c.custom_image_quality = vec![v];
+                }
+            }
+        }
+        OPTION_SHOW_QUALITY_MONITOR => {
+            c.show_quality_monitor.v = config::option2bool(&name, &value);
+        }
+        OPTION_DISABLE_AUDIO => {
+            c.disable_audio.v = config::option2bool(&name, &value);
+        }
+        OPTION_ENABLE_FILE_COPY_PASTE => {
+            c.enable_file_copy_paste.v = config::option2bool(&name, &value);
+        }
+        OPTION_DISABLE_CLIPBOARD => {
+            c.disable_clipboard.v = config::option2bool(&name, &value);
+        }
+        OPTION_LOCK_AFTER_SESSION_END => {
+            c.lock_after_session_end.v = config::option2bool(&name, &value);
+        }
+        OPTION_TERMINAL_PERSISTENT => {
+            c.terminal_persistent.v = config::option2bool(&name, &value);
+        }
+        OPTION_PRIVACY_MODE => {
+            c.privacy_mode.v = config::option2bool(&name, &value);
+        }
+        "allow_swap_key" => {
+            c.allow_swap_key.v = config::option2bool(&name, &value);
+        }
+        OPTION_VIEW_ONLY => {
+            c.view_only.v = config::option2bool(&name, &value);
+        }
+        "keyboard_mode" => {
+            if value.is_empty() || matches!(value.as_str(), "legacy" | "map" | "translate") {
+                c.keyboard_mode = value;
+            }
+        }
+        _ => {
+            if value.is_empty() {
+                c.options.remove(&name);
+            } else {
+                c.options.insert(name, value);
+            }
+        }
     }
     c.store(&id);
+}
+
+fn bool_peer_option(value: bool) -> String {
+    if value {
+        "Y".to_owned()
+    } else {
+        "N".to_owned()
+    }
 }
 
 #[inline]
@@ -1740,6 +1816,72 @@ mod tests {
     use uuid::Uuid;
 
     static TEST_UI_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_peer_option_bridge_updates_typed_peer_fields() {
+        let _guard = TEST_UI_LOCK.lock().unwrap();
+        let peer_id = format!("ui-peer-options-{}", Uuid::new_v4());
+        PeerConfig::remove(&peer_id);
+
+        set_peer_option(
+            peer_id.clone(),
+            OPTION_IMAGE_QUALITY.to_owned(),
+            "custom".to_owned(),
+        );
+        set_peer_option(
+            peer_id.clone(),
+            OPTION_CUSTOM_IMAGE_QUALITY.to_owned(),
+            "125".to_owned(),
+        );
+        set_peer_option(
+            peer_id.clone(),
+            OPTION_SHOW_QUALITY_MONITOR.to_owned(),
+            "Y".to_owned(),
+        );
+        set_peer_option(
+            peer_id.clone(),
+            "keyboard_mode".to_owned(),
+            "map".to_owned(),
+        );
+        set_peer_option(
+            peer_id.clone(),
+            "quality-monitor-position".to_owned(),
+            "bottom-left".to_owned(),
+        );
+
+        assert_eq!(
+            get_peer_option(peer_id.clone(), OPTION_IMAGE_QUALITY.to_owned()),
+            "custom"
+        );
+        assert_eq!(
+            get_peer_option(peer_id.clone(), OPTION_CUSTOM_IMAGE_QUALITY.to_owned()),
+            "125"
+        );
+        assert_eq!(
+            get_peer_option(peer_id.clone(), OPTION_SHOW_QUALITY_MONITOR.to_owned()),
+            "Y"
+        );
+        assert_eq!(
+            get_peer_option(peer_id.clone(), "keyboard_mode".to_owned()),
+            "map"
+        );
+        assert_eq!(
+            get_peer_option(peer_id.clone(), "quality-monitor-position".to_owned()),
+            "bottom-left"
+        );
+
+        let config = PeerConfig::load(&peer_id);
+        assert_eq!(config.image_quality, "custom");
+        assert_eq!(config.custom_image_quality, vec![125]);
+        assert!(config.show_quality_monitor.v);
+        assert_eq!(config.keyboard_mode, "map");
+        assert_eq!(
+            config.options.get("quality-monitor-position"),
+            Some(&"bottom-left".to_owned())
+        );
+
+        PeerConfig::remove(&peer_id);
+    }
 
     #[test]
     fn test_get_lan_peers_hides_identity_until_trusted() {

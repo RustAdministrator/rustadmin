@@ -646,16 +646,6 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
   final sessionId = ffi.sessionId;
   final isDefaultConn = ffi.connType == ConnType.defaultConn;
 
-  // show quality monitor
-  final option = 'show-quality-monitor';
-  v.add(TToggleMenu(
-      value: bind.sessionGetToggleOptionSync(sessionId: sessionId, arg: option),
-      onChanged: (value) async {
-        if (value == null) return;
-        await bind.sessionToggleOption(sessionId: sessionId, value: option);
-        ffi.qualityMonitorModel.checkShowQualityMonitor(sessionId);
-      },
-      child: Text(translate('Show quality monitor'))));
   // mute
   if (isDefaultConn && perms['audio'] != false) {
     final option = 'disable-audio';
@@ -780,6 +770,58 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
         child: Text(translate('View Mode'))));
   }
   return v;
+}
+
+Future<List<TRadioMenu<String>>> toolbarQualityMonitorPosition(FFI ffi) async {
+  const disabled = 'disabled';
+  final sessionId = ffi.sessionId;
+  final showQualityMonitor = bind.sessionGetToggleOptionSync(
+      sessionId: sessionId, arg: 'show-quality-monitor');
+  final position = normalizeQualityMonitorPosition(await bind.sessionGetOption(
+          sessionId: sessionId, arg: kOptionQualityMonitorPosition) ??
+      '');
+  final groupValue = showQualityMonitor ? position : disabled;
+
+  Future<void> onChanged(String? value) async {
+    if (value == null || value == groupValue) return;
+    if (value == disabled) {
+      if (showQualityMonitor) {
+        await bind.sessionToggleOption(
+            sessionId: sessionId, value: 'show-quality-monitor');
+      }
+    } else {
+      await bind.sessionPeerOption(
+          sessionId: sessionId,
+          name: kOptionQualityMonitorPosition,
+          value: normalizeQualityMonitorPosition(value));
+      if (!showQualityMonitor) {
+        await bind.sessionToggleOption(
+            sessionId: sessionId, value: 'show-quality-monitor');
+      }
+    }
+    ffi.qualityMonitorModel.checkShowQualityMonitor(sessionId);
+  }
+
+  TRadioMenu<String> item(String value, String label) {
+    return TRadioMenu<String>(
+      value: value,
+      groupValue: groupValue,
+      onChanged: onChanged,
+      child: Text(translate(label)),
+    );
+  }
+
+  return [
+    item(disabled, 'Disabled'),
+    item(kQualityMonitorPositionTopRight,
+        qualityMonitorPositionLabel(kQualityMonitorPositionTopRight)),
+    item(kQualityMonitorPositionTopLeft,
+        qualityMonitorPositionLabel(kQualityMonitorPositionTopLeft)),
+    item(kQualityMonitorPositionBottomRight,
+        qualityMonitorPositionLabel(kQualityMonitorPositionBottomRight)),
+    item(kQualityMonitorPositionBottomLeft,
+        qualityMonitorPositionLabel(kQualityMonitorPositionBottomLeft)),
+  ];
 }
 
 Future<List<TRadioMenu<String>>> toolbarClipboardDirection(FFI ffi) async {

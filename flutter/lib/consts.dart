@@ -108,6 +108,7 @@ const String kOptionViewStyle = "view_style";
 const String kOptionScrollStyle = "scroll_style";
 const String kOptionEdgeScrollEdgeThickness = "edge-scroll-edge-thickness";
 const String kOptionImageQuality = "image_quality";
+const String kOptionCustomImageQuality = "custom_image_quality";
 const String kOptionCustomFps = "custom-fps";
 const String kOptionCustomFpsMode = "custom-fps-mode";
 const String kOptionOpenNewConnInTabs = "enable-open-new-connections-in-tabs";
@@ -181,6 +182,11 @@ const String kOptionTouchMode = "touch-mode";
 const String kOptionI444 = "i444";
 const String kOptionSwapLeftRightMouse = "swap-left-right-mouse";
 const String kOptionCodecPreference = "codec-preference";
+const String kOptionQualityMonitorPosition = "quality-monitor-position";
+const String kQualityMonitorPositionTopRight = "top-right";
+const String kQualityMonitorPositionTopLeft = "top-left";
+const String kQualityMonitorPositionBottomRight = "bottom-right";
+const String kQualityMonitorPositionBottomLeft = "bottom-left";
 const String kOptionRemoteMenubarDragLeft = "remote-menubar-drag-left";
 const String kOptionRemoteMenubarDragRight = "remote-menubar-drag-right";
 const String kOptionRemoteToolbarRevealZonePx = "remote-toolbar-reveal-zone-px";
@@ -206,6 +212,33 @@ const int kMaxRemoteToolbarPinnedDimDelayMs = 5000;
 const int kDefaultRemoteToolbarPinnedDimDurationMs = 3000;
 const int kMinRemoteToolbarPinnedDimDurationMs = 0;
 const int kMaxRemoteToolbarPinnedDimDurationMs = 10000;
+
+String normalizeQualityMonitorPosition(String value) {
+  switch (value) {
+    case kQualityMonitorPositionTopLeft:
+    case kQualityMonitorPositionBottomRight:
+    case kQualityMonitorPositionBottomLeft:
+      return value;
+    case kQualityMonitorPositionTopRight:
+    default:
+      return kQualityMonitorPositionTopRight;
+  }
+}
+
+String qualityMonitorPositionLabel(String value) {
+  switch (normalizeQualityMonitorPosition(value)) {
+    case kQualityMonitorPositionTopLeft:
+      return 'Top left';
+    case kQualityMonitorPositionBottomRight:
+      return 'Bottom right';
+    case kQualityMonitorPositionBottomLeft:
+      return 'Bottom left';
+    case kQualityMonitorPositionTopRight:
+    default:
+      return 'Top right';
+  }
+}
+
 const String kOptionHideAbTagsPanel = "hideAbTagsPanel";
 const String kOptionRemoteMenubarState = "remoteMenubarState";
 const String kOptionPeerSorting = "peer-sorting";

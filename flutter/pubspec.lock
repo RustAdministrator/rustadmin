@@ -628,13 +628,13 @@ packages:
     source: hosted
     version: "2.2.1"
   flutter_plugin_android_lifecycle:
-    dependency: "direct overridden"
+    dependency: transitive
     description:
       name: flutter_plugin_android_lifecycle
-      sha256: b068ffc46f82a55844acfa4fdbb61fad72fa2aef0905548419d97f0f95c456da
+      sha256: "3854fe5e3bff0b113c658f260b90c95dea17c92db0f2addeac2e343dd9969785"
       url: "https://pub.dev"
     source: hosted
-    version: "2.0.17"
+    version: "2.0.35"
   flutter_rust_bridge:
     dependency: "direct main"
     description:
@@ -838,13 +838,13 @@ packages:
     source: hosted
     version: "0.2.2"
   intl:
-    dependency: "direct overridden"
+    dependency: transitive
     description:
       name: intl
-      sha256: d6f56758b7d3014a48af9701c085700aac781a92a87a62b1333b46d8879661cf
+      sha256: "3df61194eb431efc39c4ceba583b95633a403f46c9fd341e550ce0bfa50e9aa5"
       url: "https://pub.dev"
     source: hosted
-    version: "0.19.0"
+    version: "0.20.2"
   io:
     dependency: transitive
     description:

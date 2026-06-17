@@ -612,6 +612,38 @@ class QualityMonitor extends StatelessWidget {
               : const SizedBox.shrink()));
 }
 
+class PositionedQualityMonitor extends StatelessWidget {
+  final QualityMonitorModel qualityMonitorModel;
+  final Widget Function(Widget child)? childBuilder;
+
+  const PositionedQualityMonitor(
+      {Key? key, required this.qualityMonitorModel, this.childBuilder})
+      : super(key: key);
+
+  @override
+  Widget build(BuildContext context) => ChangeNotifierProvider.value(
+      value: qualityMonitorModel,
+      child: Consumer<QualityMonitorModel>(
+        builder: (context, qualityMonitorModel, child) {
+          final monitor =
+              childBuilder?.call(QualityMonitor(qualityMonitorModel)) ??
+                  QualityMonitor(qualityMonitorModel);
+          const inset = 10.0;
+          switch (qualityMonitorModel.position) {
+            case kQualityMonitorPositionTopLeft:
+              return Positioned(top: inset, left: inset, child: monitor);
+            case kQualityMonitorPositionBottomRight:
+              return Positioned(bottom: inset, right: inset, child: monitor);
+            case kQualityMonitorPositionBottomLeft:
+              return Positioned(bottom: inset, left: inset, child: monitor);
+            case kQualityMonitorPositionTopRight:
+            default:
+              return Positioned(top: inset, right: inset, child: monitor);
+          }
+        },
+      ));
+}
+
 class BlockableOverlayState extends OverlayKeyState {
   final _middleBlocked = false.obs;
 

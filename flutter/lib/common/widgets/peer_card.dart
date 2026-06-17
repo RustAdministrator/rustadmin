@@ -939,6 +939,35 @@ abstract class BasePeerCard extends StatelessWidget {
   }
 
   @protected
+  MenuEntryBase<String> _connectionPropertiesAction(String id) {
+    return MenuEntryButton<String>(
+      childBuilder: (TextStyle? style) => Row(
+        children: [
+          Text(
+            translate('Connection properties'),
+            style: style,
+          ),
+          Expanded(
+              child: Align(
+            alignment: Alignment.centerRight,
+            child: Transform.scale(
+              scale: 0.8,
+              child: Icon(Icons.tune),
+            ),
+          ).marginOnly(right: 4)),
+        ],
+      ),
+      proc: () {
+        () async {
+          await _showConnectionPropertiesDialog(id);
+        }();
+      },
+      padding: menuPadding,
+      dismissOnClicked: true,
+    );
+  }
+
+  @protected
   MenuEntryBase<String> _rmFavAction(
       String id, Future<void> Function() reloadFunc) {
     return MenuEntryButton<String>(
@@ -1048,6 +1077,7 @@ class RecentPeerCard extends BasePeerCard {
     } else {
       menuItems.add(_rmFavAction(peer.id, () async {}));
     }
+    menuItems.add(_connectionPropertiesAction(peer.id));
 
     if (gFFI.userModel.userName.isNotEmpty) {
       menuItems.add(_addToAb(peer));
@@ -1108,6 +1138,7 @@ class FavoritePeerCard extends BasePeerCard {
     menuItems.add(_rmFavAction(peer.id, () async {
       await bind.mainLoadFavPeers();
     }));
+    menuItems.add(_connectionPropertiesAction(peer.id));
 
     if (gFFI.userModel.userName.isNotEmpty) {
       menuItems.add(_addToAb(peer));
@@ -1167,6 +1198,7 @@ class DiscoveredPeerCard extends BasePeerCard {
     } else {
       menuItems.add(_rmFavAction(peer.id, () async {}));
     }
+    menuItems.add(_connectionPropertiesAction(peer.id));
 
     if (gFFI.userModel.userName.isNotEmpty) {
       menuItems.add(_addToAb(peer));
@@ -1232,6 +1264,7 @@ class AddressBookPeerCard extends BasePeerCard {
         menuItems.add(_editTagAction(peer.id));
       }
       menuItems.add(_editNoteAction(peer.id));
+      menuItems.add(_connectionPropertiesAction(peer.id));
     }
     final addressbooks = gFFI.abModel.addressBooksCanWrite();
     if (gFFI.peerTabModel.currentTab == PeerTabIndex.ab.index) {
@@ -1382,12 +1415,312 @@ class MyGroupPeerCard extends BasePeerCard {
     if (gFFI.userModel.userName.isNotEmpty) {
       menuItems.add(_addToAb(peer));
     }
+    menuItems.add(_connectionPropertiesAction(peer.id));
     return menuItems;
   }
 
   @protected
   @override
   void _update() => gFFI.groupModel.pull();
+}
+
+class _PeerConnectionProperties {
+  String imageQuality;
+  int customImageQuality;
+  String codecPreference;
+  bool showQualityMonitor;
+  String qualityMonitorPosition;
+  String keyboardMode;
+  String clipboardDirection;
+
+  _PeerConnectionProperties({
+    required this.imageQuality,
+    required this.customImageQuality,
+    required this.codecPreference,
+    required this.showQualityMonitor,
+    required this.qualityMonitorPosition,
+    required this.keyboardMode,
+    required this.clipboardDirection,
+  });
+
+  static Future<_PeerConnectionProperties> load(String id) async {
+    final imageQuality = _normalizeImageQuality(
+        await bind.mainGetPeerOption(id: id, key: kOptionImageQuality));
+    final customImageQuality = _normalizeCustomImageQuality(
+        await bind.mainGetPeerOption(id: id, key: kOptionCustomImageQuality));
+    final codecPreference = _normalizeCodecPreference(
+        await bind.mainGetPeerOption(id: id, key: kOptionCodecPreference));
+    final showQualityMonitor = option2bool(kOptionShowQualityMonitor,
+        await bind.mainGetPeerOption(id: id, key: kOptionShowQualityMonitor));
+    final qualityMonitorPosition = normalizeQualityMonitorPosition(await bind
+        .mainGetPeerOption(id: id, key: kOptionQualityMonitorPosition));
+    final keyboardMode = _normalizeKeyboardMode(
+        await bind.mainGetPeerOption(id: id, key: 'keyboard_mode'));
+    final clipboardDirection = normalizeClipboardDirectionPolicy(
+        await bind.mainGetPeerOption(id: id, key: kOptionClipboardDirection));
+    return _PeerConnectionProperties(
+      imageQuality: imageQuality,
+      customImageQuality: customImageQuality,
+      codecPreference: codecPreference,
+      showQualityMonitor: showQualityMonitor,
+      qualityMonitorPosition: qualityMonitorPosition,
+      keyboardMode: keyboardMode,
+      clipboardDirection: clipboardDirection,
+    );
+  }
+
+  Future<void> save(String id) async {
+    await bind.mainSetPeerOption(
+        id: id, key: kOptionImageQuality, value: imageQuality);
+    await bind.mainSetPeerOption(
+        id: id,
+        key: kOptionCustomImageQuality,
+        value: customImageQuality.toString());
+    await bind.mainSetPeerOption(
+        id: id, key: kOptionCodecPreference, value: codecPreference);
+    await bind.mainSetPeerOption(
+        id: id,
+        key: kOptionShowQualityMonitor,
+        value: bool2option(kOptionShowQualityMonitor, showQualityMonitor));
+    await bind.mainSetPeerOption(
+        id: id,
+        key: kOptionQualityMonitorPosition,
+        value: qualityMonitorPosition);
+    await bind.mainSetPeerOption(
+        id: id,
+        key: 'keyboard_mode',
+        value: keyboardMode == _kKeyboardModeAuto ? '' : keyboardMode);
+    await bind.mainSetPeerOption(
+        id: id, key: kOptionClipboardDirection, value: clipboardDirection);
+    await bind.mainSetPeerOption(
+      id: id,
+      key: kOptionDisableClipboard,
+      value: bool2option(kOptionDisableClipboard,
+          clipboardDirection == kClipboardDirectionOff),
+    );
+  }
+}
+
+const _kKeyboardModeAuto = 'auto';
+
+String _normalizeImageQuality(String value) {
+  switch (value) {
+    case kRemoteImageQualityBest:
+    case kRemoteImageQualityLow:
+    case kRemoteImageQualityCustom:
+      return value;
+    case kRemoteImageQualityBalanced:
+    default:
+      return kRemoteImageQualityBalanced;
+  }
+}
+
+int _normalizeCustomImageQuality(String value) {
+  final quality = int.tryParse(value) ?? kDefaultQuality.toInt();
+  return quality.clamp(kMinQuality.toInt(), kMaxMoreQuality.toInt()).toInt();
+}
+
+String _normalizeCodecPreference(String value) {
+  switch (value) {
+    case 'vp8':
+    case 'vp9':
+    case 'av1':
+    case 'h264':
+    case 'h265':
+      return value;
+    case 'auto':
+    default:
+      return 'auto';
+  }
+}
+
+String _normalizeKeyboardMode(String value) {
+  switch (value) {
+    case kKeyLegacyMode:
+    case kKeyMapMode:
+    case kKeyTranslateMode:
+      return value;
+    case _kKeyboardModeAuto:
+    case '':
+    default:
+      return _kKeyboardModeAuto;
+  }
+}
+
+String _keyboardModeLabel(String value) {
+  switch (_normalizeKeyboardMode(value)) {
+    case kKeyLegacyMode:
+      return 'Legacy';
+    case kKeyMapMode:
+      return 'Map';
+    case kKeyTranslateMode:
+      return 'Translate';
+    case _kKeyboardModeAuto:
+    default:
+      return 'Auto';
+  }
+}
+
+DropdownMenuItem<String> _stringMenuItem(String value, String label) {
+  return DropdownMenuItem<String>(
+    value: value,
+    child: Text(translate(label)),
+  );
+}
+
+Widget _propertiesSection(String label) {
+  return Padding(
+    padding: const EdgeInsets.only(top: 12, bottom: 6),
+    child: Text(
+      translate(label),
+      style: const TextStyle(fontWeight: FontWeight.w600),
+    ),
+  );
+}
+
+Future<void> _showConnectionPropertiesDialog(String id) async {
+  final properties = await _PeerConnectionProperties.load(id);
+  final customQualityController =
+      TextEditingController(text: properties.customImageQuality.toString());
+
+  gFFI.dialogManager.show((setState, close, context) {
+    Future<void> submit() async {
+      final quality = int.tryParse(customQualityController.text.trim()) ??
+          properties.customImageQuality;
+      properties.customImageQuality =
+          quality.clamp(kMinQuality.toInt(), kMaxMoreQuality.toInt()).toInt();
+      await properties.save(id);
+      showToast(translate('Successful'));
+      close();
+    }
+
+    return CustomAlertDialog(
+      title: Text(translate('Connection properties')),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(minWidth: 460, maxWidth: 560),
+        child: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _propertiesSection('Video'),
+              DropdownButtonFormField<String>(
+                value: properties.imageQuality,
+                decoration: InputDecoration(
+                    labelText: translate('Default Image Quality')),
+                items: [
+                  _stringMenuItem(
+                      kRemoteImageQualityBest, 'Good image quality'),
+                  _stringMenuItem(kRemoteImageQualityBalanced, 'Balanced'),
+                  _stringMenuItem(
+                      kRemoteImageQualityLow, 'Optimize reaction time'),
+                  _stringMenuItem(kRemoteImageQualityCustom, 'Custom'),
+                ],
+                onChanged: (value) {
+                  if (value == null) return;
+                  setState(() => properties.imageQuality = value);
+                },
+              ),
+              if (properties.imageQuality == kRemoteImageQualityCustom)
+                TextField(
+                  controller: customQualityController,
+                  keyboardType: TextInputType.number,
+                  inputFormatters: [
+                    FilteringTextInputFormatter.allow(RegExp(r'[0-9]')),
+                  ],
+                  decoration: InputDecoration(
+                    labelText: translate('Custom Image Quality'),
+                    suffixText: '%',
+                  ),
+                ).marginOnly(top: 8),
+              DropdownButtonFormField<String>(
+                value: properties.codecPreference,
+                decoration:
+                    InputDecoration(labelText: translate('Default Codec')),
+                items: [
+                  _stringMenuItem('auto', 'Auto'),
+                  _stringMenuItem('vp8', 'VP8'),
+                  _stringMenuItem('vp9', 'VP9'),
+                  _stringMenuItem('av1', 'AV1'),
+                  _stringMenuItem('h264', 'H264'),
+                  _stringMenuItem('h265', 'H265'),
+                ],
+                onChanged: (value) {
+                  if (value == null) return;
+                  setState(() => properties.codecPreference = value);
+                },
+              ).marginOnly(top: 8),
+              _propertiesSection('Display'),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(translate('Show quality monitor')),
+                value: properties.showQualityMonitor,
+                onChanged: (value) {
+                  setState(() => properties.showQualityMonitor = value);
+                },
+              ),
+              DropdownButtonFormField<String>(
+                value: properties.qualityMonitorPosition,
+                decoration: InputDecoration(
+                    labelText: translate('Quality monitor position')),
+                items: [
+                  kQualityMonitorPositionTopRight,
+                  kQualityMonitorPositionTopLeft,
+                  kQualityMonitorPositionBottomRight,
+                  kQualityMonitorPositionBottomLeft,
+                ]
+                    .map((value) => _stringMenuItem(
+                        value, qualityMonitorPositionLabel(value)))
+                    .toList(),
+                onChanged: (value) {
+                  if (value == null) return;
+                  setState(() => properties.qualityMonitorPosition = value);
+                },
+              ),
+              _propertiesSection('Input'),
+              DropdownButtonFormField<String>(
+                value: properties.keyboardMode,
+                decoration:
+                    InputDecoration(labelText: translate('Keyboard mode')),
+                items: [
+                  _kKeyboardModeAuto,
+                  kKeyLegacyMode,
+                  kKeyMapMode,
+                  kKeyTranslateMode,
+                ]
+                    .map((value) =>
+                        _stringMenuItem(value, _keyboardModeLabel(value)))
+                    .toList(),
+                onChanged: (value) {
+                  if (value == null) return;
+                  setState(() => properties.keyboardMode = value);
+                },
+              ),
+              _propertiesSection('Clipboard'),
+              DropdownButtonFormField<String>(
+                value: properties.clipboardDirection,
+                decoration: InputDecoration(labelText: translate('Clipboard')),
+                items: clipboardDirectionMenuKeys()
+                    .map((value) => _stringMenuItem(
+                        value, clipboardDirectionPolicyLabel(value)))
+                    .toList(),
+                onChanged: (value) {
+                  if (value == null) return;
+                  setState(() => properties.clipboardDirection = value);
+                },
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        dialogButton('Cancel', onPressed: close, isOutline: true),
+        dialogButton('Save', onPressed: submit),
+      ],
+      onSubmit: submit,
+      onCancel: close,
+    );
+  });
 }
 
 void _rdpDialog(String id) async {

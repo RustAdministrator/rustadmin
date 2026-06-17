@@ -2158,14 +2158,32 @@ class _DisplayMenuState extends State<_DisplayMenu> {
   toggles() {
     return futureBuilder(
         future: Future.wait([
+          toolbarQualityMonitorPosition(ffi),
           toolbarClipboardDirection(ffi),
           toolbarDisplayToggle(context, id, ffi),
         ]),
         hasData: (data) {
-          final clipboard = data[0] as List<TRadioMenu<String>>;
-          final toggles = data[1] as List<TToggleMenu>;
-          if (clipboard.isEmpty && toggles.isEmpty) return Offstage();
+          final qualityMonitor = data[0] as List<TRadioMenu<String>>;
+          final clipboard = data[1] as List<TRadioMenu<String>>;
+          final toggles = data[2] as List<TToggleMenu>;
+          if (qualityMonitor.isEmpty && clipboard.isEmpty && toggles.isEmpty) {
+            return Offstage();
+          }
           return Column(children: [
+            if (qualityMonitor.isNotEmpty)
+              _SubmenuButton(
+                ffi: widget.ffi,
+                child: Text(translate('Quality monitor')),
+                menuChildren: qualityMonitor
+                    .map((e) => RdoMenuButton<String>(
+                          value: e.value,
+                          groupValue: e.groupValue,
+                          onChanged: e.onChanged,
+                          child: e.child,
+                          ffi: ffi,
+                        ))
+                    .toList(),
+              ),
             if (clipboard.isNotEmpty)
               _SubmenuButton(
                 ffi: widget.ffi,

@@ -366,11 +366,8 @@ class _ViewCameraPageState extends State<ViewCameraPage>
         child: Stack(children: () {
           final paints = [
             ImagePaint(),
-            Positioned(
-              top: 10,
-              right: 10,
-              child: QualityMonitor(gFFI.qualityMonitorModel),
-            ),
+            PositionedQualityMonitor(
+                qualityMonitorModel: gFFI.qualityMonitorModel),
             SizedBox(
               width: 0,
               height: 0,

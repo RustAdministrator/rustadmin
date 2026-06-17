@@ -537,14 +537,11 @@ class _ViewCameraPageState extends State<ViewCameraPage>
       }))
     ];
 
-    paints.add(
-      Positioned(
-        top: 10,
-        right: 10,
-        child: _buildRawTouchAndPointerRegion(
-            QualityMonitor(_ffi.qualityMonitorModel), null, null, null),
-      ),
-    );
+    paints.add(PositionedQualityMonitor(
+      qualityMonitorModel: _ffi.qualityMonitorModel,
+      childBuilder: (child) =>
+          _buildRawTouchAndPointerRegion(child, null, null, null),
+    ));
     return Stack(
       children: paints,
     );
