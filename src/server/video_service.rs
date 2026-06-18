@@ -63,6 +63,7 @@ use std::{
 pub const OPTION_REFRESH: &'static str = "refresh";
 const ENCODE_NO_VALID_FRAME: &str = "no valid frame";
 const HW_ENCODER_WARMUP_TIMEOUT: Duration = Duration::from_secs(3);
+const HOST_VIDEO_DIAG_INTERVAL: Duration = Duration::from_secs(5);
 
 type FrameFetchedNotifierSender = UnboundedSender<(i32, Option<Instant>)>;
 type FrameFetchedNotifierReceiver = Arc<TokioMutex<UnboundedReceiver<(i32, Option<Instant>)>>>;
@@ -191,6 +192,117 @@ impl VideoFrameController {
                 fetched_conn_ids.insert(id);
             }
         }
+    }
+}
+
+struct HostVideoDiagnostics {
+    last_log: Instant,
+    valid_capture: usize,
+    invalid_capture: usize,
+    would_block: usize,
+    encode_calls: usize,
+    repeat_encode_calls: usize,
+    sent_batches: usize,
+    sent_targets: usize,
+    empty_send_results: usize,
+    wait_frames: usize,
+    wait_timeouts: usize,
+    wait_total_ms: u128,
+    wait_max_ms: u128,
+}
+
+impl HostVideoDiagnostics {
+    fn new() -> Self {
+        Self {
+            last_log: Instant::now(),
+            valid_capture: 0,
+            invalid_capture: 0,
+            would_block: 0,
+            encode_calls: 0,
+            repeat_encode_calls: 0,
+            sent_batches: 0,
+            sent_targets: 0,
+            empty_send_results: 0,
+            wait_frames: 0,
+            wait_timeouts: 0,
+            wait_total_ms: 0,
+            wait_max_ms: 0,
+        }
+    }
+
+    fn record_send_result(&mut self, send_conn_count: usize) {
+        self.encode_calls += 1;
+        if send_conn_count == 0 {
+            self.empty_send_results += 1;
+            return;
+        }
+        self.sent_batches += 1;
+        self.sent_targets += send_conn_count;
+    }
+
+    fn record_wait(&mut self, expected: usize, fetched: usize, elapsed: Duration) {
+        if expected == 0 {
+            return;
+        }
+        let elapsed_ms = elapsed.as_millis();
+        self.wait_frames += 1;
+        self.wait_total_ms += elapsed_ms;
+        self.wait_max_ms = self.wait_max_ms.max(elapsed_ms);
+        if fetched < expected {
+            self.wait_timeouts += 1;
+        }
+    }
+
+    fn maybe_log(
+        &mut self,
+        service_name: &str,
+        source: VideoSource,
+        display_idx: usize,
+        negotiated_codec: CodecFormat,
+        hardware: bool,
+        bitrate: u32,
+        quality: f32,
+        spf: Duration,
+        gdi: bool,
+    ) {
+        if self.last_log.elapsed() < HOST_VIDEO_DIAG_INTERVAL {
+            return;
+        }
+        let target_fps = if spf.as_nanos() == 0 {
+            0.0
+        } else {
+            1.0 / spf.as_secs_f64()
+        };
+        let wait_avg_ms = if self.wait_frames == 0 {
+            0
+        } else {
+            self.wait_total_ms / self.wait_frames as u128
+        };
+        log::info!(
+            "diag host fps: service={}, source={:?}, display_idx={}, codec={:?}, hardware={}, bitrate={}, quality={:.3}, target_fps={:.1}, gdi={}, valid_capture={}, invalid_capture={}, would_block={}, encode_calls={}, repeat_encode_calls={}, sent_batches={}, sent_targets={}, empty_send_results={}, wait_frames={}, wait_timeouts={}, wait_avg_ms={}, wait_max_ms={}",
+            service_name,
+            source,
+            display_idx,
+            negotiated_codec,
+            hardware,
+            bitrate,
+            quality,
+            target_fps,
+            gdi,
+            self.valid_capture,
+            self.invalid_capture,
+            self.would_block,
+            self.encode_calls,
+            self.repeat_encode_calls,
+            self.sent_batches,
+            self.sent_targets,
+            self.empty_send_results,
+            self.wait_frames,
+            self.wait_timeouts,
+            wait_avg_ms,
+            self.wait_max_ms
+        );
+        *self = Self::new();
     }
 }
 
@@ -687,6 +799,7 @@ fn run(vs: VideoService) -> ResultType<()> {
     let capture_width = c.width;
     let capture_height = c.height;
     let (mut second_instant, mut send_counter) = (Instant::now(), 0);
+    let mut host_diag = HostVideoDiagnostics::new();
 
     while sp.ok() {
         #[cfg(windows)]
@@ -765,6 +878,7 @@ fn run(vs: VideoService) -> ResultType<()> {
             Ok(frame) => {
                 repeat_encode_counter = 0;
                 if frame.valid() {
+                    host_diag.valid_capture += 1;
                     let screenshot = SCREENSHOTS.lock().unwrap().remove(&display_idx);
                     if let Some(mut screenshot) = screenshot {
                         let restore_vram = screenshot.restore_vram;
@@ -822,8 +936,11 @@ fn run(vs: VideoService) -> ResultType<()> {
                         capture_width,
                         capture_height,
                     )?;
+                    host_diag.record_send_result(send_conn_ids.len());
                     frame_controller.set_send(now, send_conn_ids);
                     send_counter += 1;
+                } else {
+                    host_diag.invalid_capture += 1;
                 }
                 #[cfg(windows)]
                 {
@@ -840,6 +957,7 @@ fn run(vs: VideoService) -> ResultType<()> {
 
         match res {
             Err(ref e) if e.kind() == WouldBlock => {
+                host_diag.would_block += 1;
                 #[cfg(windows)]
                 if try_gdi > 0 && !c.is_gdi() {
                     if try_gdi > 3 {
@@ -869,6 +987,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                     // yun.len() > 0 means the frame is not texture.
                     if repeat_encode_counter < repeat_encode_max {
                         repeat_encode_counter += 1;
+                        host_diag.repeat_encode_calls += 1;
                         let send_conn_ids = handle_one_frame(
                             display_idx,
                             &sp,
@@ -882,6 +1001,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                             capture_width,
                             capture_height,
                         )?;
+                        host_diag.record_send_result(send_conn_ids.len());
                         frame_controller.set_send(now, send_conn_ids);
                         send_counter += 1;
                     }
@@ -923,6 +1043,11 @@ fn run(vs: VideoService) -> ResultType<()> {
                 break;
             }
         }
+        host_diag.record_wait(
+            frame_controller.send_conn_ids.len(),
+            fetched_conn_ids.len(),
+            wait_begin.elapsed(),
+        );
         DISPLAY_CONN_IDS.lock().unwrap().remove(&display_idx);
 
         let elapsed = now.elapsed();
@@ -931,6 +1056,22 @@ fn run(vs: VideoService) -> ResultType<()> {
         if elapsed < spf {
             std::thread::sleep(spf - elapsed);
         }
+        #[cfg(windows)]
+        let current_gdi = c.is_gdi();
+        #[cfg(not(windows))]
+        let current_gdi = false;
+        let service_name = sp.name();
+        host_diag.maybe_log(
+            &service_name,
+            vs.source,
+            display_idx,
+            codec_format,
+            encoder.is_hardware(),
+            encoder.bitrate(),
+            quality,
+            spf,
+            current_gdi,
+        );
     }
 
     Ok(())

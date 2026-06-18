@@ -30,6 +30,7 @@ pub const DEFAULT_FPS: i32 = 30;
 const DEFAULT_GOP: i32 = i32::MAX;
 const DEFAULT_HW_QUALITY: Quality = Quality_Default;
 pub const ERR_HEVC_POC: i32 = HwcodecErrno::HWCODEC_ERR_HEVC_COULD_NOT_FIND_POC as i32;
+pub const ERR_NO_PACKET: i32 = HwcodecErrno::HWCODEC_ERR_NO_PACKET as i32;
 
 crate::generate_call_macro!(call_yuv, false);
 
@@ -232,6 +233,7 @@ impl HwRamEncoder {
                 data.append(v);
                 Ok(data)
             }
+            Err(ERR_NO_PACKET) => Err(anyhow!("no valid frame")),
             Err(err) => Err(anyhow!("hw encoder failed: {err}")),
         }
     }
