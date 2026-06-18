@@ -3513,7 +3513,7 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "hbb_common"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "anyhow",
  "async-recursion",
@@ -6869,7 +6869,7 @@ dependencies = [
 
 [[package]]
 name = "rustadmin"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "android-wakelock",
  "android_logger",
@@ -7016,7 +7016,7 @@ dependencies = [
 
 [[package]]
 name = "rustdesk-portable-packer"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "brotli",
  "dirs 5.0.1",
