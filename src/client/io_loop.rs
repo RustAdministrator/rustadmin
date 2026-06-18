@@ -57,6 +57,7 @@ const NO_VIDEO_START_TIMEOUT: Duration = Duration::from_secs(15);
 const NO_VIDEO_START_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const NO_VIDEO_START_MAX_REFRESHES: usize = 6;
 const NO_VIDEO_START_STALLED_LOG_INTERVAL: Duration = Duration::from_secs(30);
+const FPS_CONTROL_SUMMARY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Debug, PartialEq, Eq)]
 enum NoVideoStartupAction {
@@ -157,6 +158,7 @@ pub struct Remote<T: InvokeUiSession> {
     chroma: Arc<RwLock<Option<Chroma>>>,
     last_record_state: bool,
     sent_close_reason: bool,
+    last_fps_control_summary_log: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -214,6 +216,7 @@ impl<T: InvokeUiSession> Remote<T> {
             chroma: Default::default(),
             last_record_state: false,
             sent_close_reason: false,
+            last_fps_control_summary_log: None,
         }
     }
 
@@ -1307,6 +1310,15 @@ impl<T: InvokeUiSession> Remote<T> {
     // The controlled end can consider auto fps as the maximum decoding fps.
     #[inline]
     fn fps_control(&mut self, direct: bool, real_fps_map: HashMap<usize, i32>) {
+        let now = Instant::now();
+        let log_summary = self
+            .last_fps_control_summary_log
+            .map(|last| now.saturating_duration_since(last) >= FPS_CONTROL_SUMMARY_LOG_INTERVAL)
+            .unwrap_or(true);
+        if log_summary {
+            self.last_fps_control_summary_log = Some(now);
+        }
+
         self.video_threads.iter_mut().for_each(|(k, v)| {
             let real_fps = real_fps_map.get(k).cloned().unwrap_or_default();
             if real_fps == 0 {
@@ -1335,6 +1347,7 @@ impl<T: InvokeUiSession> Remote<T> {
             .map(|v| v.1.video_queue.read().unwrap().len())
             .max()
             .unwrap_or_default();
+        let last_auto_fps = self.handler.lc.read().unwrap().last_auto_fps;
         let min_decode_fps = self
             .video_threads
             .iter()
@@ -1343,9 +1356,45 @@ impl<T: InvokeUiSession> Remote<T> {
             .min()
             .flatten();
         let Some(min_decode_fps) = min_decode_fps else {
+            if log_summary {
+                let (decode_fps_by_display, queue_len_by_display, inactive_by_display) =
+                    self.fps_control_snapshot();
+                log::info!(
+                    "diag fps control: id={}, mode={}, direct={}, codec={:?}, custom_fps={}, last_auto_fps={:?}, real_fps={:?}, decode_fps={:?}, queue_len={:?}, inactive={:?}, reason=no_active_decode_fps",
+                    self.handler.get_id(),
+                    if fixed_fps { "fixed" } else { "adaptive" },
+                    direct,
+                    self.video_format,
+                    custom_fps,
+                    last_auto_fps,
+                    real_fps_map,
+                    decode_fps_by_display,
+                    queue_len_by_display,
+                    inactive_by_display
+                );
+            }
             return;
         };
-        if !fixed_fps {
+        if fixed_fps {
+            if log_summary {
+                let (decode_fps_by_display, queue_len_by_display, inactive_by_display) =
+                    self.fps_control_snapshot();
+                log::info!(
+                    "diag fps control: id={}, mode=fixed, direct={}, codec={:?}, custom_fps={}, last_auto_fps={:?}, real_fps={:?}, decode_fps={:?}, min_decode_fps={}, max_queue_len={}, queue_len={:?}, inactive={:?}",
+                    self.handler.get_id(),
+                    direct,
+                    self.video_format,
+                    custom_fps,
+                    last_auto_fps,
+                    real_fps_map,
+                    decode_fps_by_display,
+                    min_decode_fps,
+                    max_queue_len,
+                    queue_len_by_display,
+                    inactive_by_display
+                );
+            }
+        } else {
             let mut limited_fps = if direct {
                 min_decode_fps * 9 / 10 // 30 got 27
             } else {
@@ -1354,14 +1403,13 @@ impl<T: InvokeUiSession> Remote<T> {
             if limited_fps > custom_fps {
                 limited_fps = custom_fps;
             }
-            let last_auto_fps = self.handler.lc.read().unwrap().last_auto_fps.clone();
             let displays = self.video_threads.keys().cloned().collect::<Vec<_>>();
             let mut fps_trending = |display: usize| {
                 let thread = self.video_threads.get_mut(&display)?;
                 let ctl = &mut thread.fps_control;
                 let len = thread.video_queue.read().unwrap().len();
                 let decode_fps = thread.decode_fps.read().unwrap().clone()?;
-                let last_auto_fps = last_auto_fps.clone().unwrap_or(custom_fps as _);
+                let last_auto_fps = last_auto_fps.unwrap_or(custom_fps as _);
                 if ctl.inactive_counter > inactive_threshold {
                     return None;
                 }
@@ -1384,16 +1432,41 @@ impl<T: InvokeUiSession> Remote<T> {
             let trendings: Vec<_> = displays.iter().map(|k| fps_trending(*k)).collect();
             let should_decrease = trendings.iter().any(|v| *v == Some(false));
             let should_increase = !should_decrease && trendings.iter().any(|v| *v == Some(true));
-            if last_auto_fps.is_none() || should_decrease || should_increase {
-                // limited_fps to ensure decoding is faster than encoding
-                let mut auto_fps = limited_fps;
-                if should_decrease && limited_fps < max_queue_len {
-                    auto_fps = limited_fps / 2;
+            // limited_fps to ensure decoding is faster than encoding
+            let mut auto_fps = limited_fps;
+            if should_decrease && limited_fps < max_queue_len {
+                auto_fps = limited_fps / 2;
+            }
+            if auto_fps < 1 {
+                auto_fps = 1;
+            }
+            let should_send_auto_fps =
+                (last_auto_fps.is_none() || should_decrease || should_increase)
+                    && Some(auto_fps) != last_auto_fps;
+            if log_summary || should_send_auto_fps {
+                let (decode_fps_by_display, queue_len_by_display, inactive_by_display) =
+                    self.fps_control_snapshot();
+                if log_summary {
+                    log::info!(
+                        "diag fps control: id={}, mode=adaptive, direct={}, codec={:?}, custom_fps={}, last_auto_fps={:?}, real_fps={:?}, decode_fps={:?}, min_decode_fps={}, limited_fps={}, max_queue_len={}, queue_len={:?}, inactive={:?}, trendings={:?}, decrease={}, increase={}",
+                        self.handler.get_id(),
+                        direct,
+                        self.video_format,
+                        custom_fps,
+                        last_auto_fps,
+                        real_fps_map,
+                        decode_fps_by_display,
+                        min_decode_fps,
+                        limited_fps,
+                        max_queue_len,
+                        queue_len_by_display,
+                        inactive_by_display,
+                        trendings,
+                        should_decrease,
+                        should_increase
+                    );
                 }
-                if auto_fps < 1 {
-                    auto_fps = 1;
-                }
-                if Some(auto_fps) != last_auto_fps {
+                if should_send_auto_fps {
                     let mut misc = Misc::new();
                     misc.set_option(OptionMessage {
                         custom_fps: auto_fps as _,
@@ -1402,7 +1475,25 @@ impl<T: InvokeUiSession> Remote<T> {
                     let mut msg = Message::new();
                     msg.set_misc(misc);
                     self.sender.send(Data::Message(msg)).ok();
-                    log::info!("Set fps to {}", auto_fps);
+                    log::info!(
+                        "diag fps control set_auto_fps: id={}, auto_fps={}, previous_auto_fps={:?}, direct={}, codec={:?}, custom_fps={}, min_decode_fps={}, limited_fps={}, max_queue_len={}, real_fps={:?}, decode_fps={:?}, queue_len={:?}, inactive={:?}, trendings={:?}, decrease={}, increase={}",
+                        self.handler.get_id(),
+                        auto_fps,
+                        last_auto_fps,
+                        direct,
+                        self.video_format,
+                        custom_fps,
+                        min_decode_fps,
+                        limited_fps,
+                        max_queue_len,
+                        real_fps_map,
+                        decode_fps_by_display,
+                        queue_len_by_display,
+                        inactive_by_display,
+                        trendings,
+                        should_decrease,
+                        should_increase
+                    );
                     self.handler.lc.write().unwrap().last_auto_fps = Some(auto_fps);
                 }
             }
@@ -1424,6 +1515,41 @@ impl<T: InvokeUiSession> Remote<T> {
                 ctl.last_refresh_instant = Some(Instant::now());
             }
         }
+    }
+
+    fn fps_control_snapshot(
+        &self,
+    ) -> (
+        Vec<(usize, usize)>,
+        Vec<(usize, usize)>,
+        Vec<(usize, usize)>,
+    ) {
+        let decode_fps_by_display = self
+            .video_threads
+            .iter()
+            .filter_map(|(display, thread)| {
+                thread
+                    .decode_fps
+                    .read()
+                    .unwrap()
+                    .map(|decode_fps| (*display, decode_fps))
+            })
+            .collect::<Vec<_>>();
+        let queue_len_by_display = self
+            .video_threads
+            .iter()
+            .map(|(display, thread)| (*display, thread.video_queue.read().unwrap().len()))
+            .collect::<Vec<_>>();
+        let inactive_by_display = self
+            .video_threads
+            .iter()
+            .map(|(display, thread)| (*display, thread.fps_control.inactive_counter))
+            .collect::<Vec<_>>();
+        (
+            decode_fps_by_display,
+            queue_len_by_display,
+            inactive_by_display,
+        )
     }
 
     fn check_view_camera_support(&self, peer_version: &str, peer_platform: &str) -> bool {
