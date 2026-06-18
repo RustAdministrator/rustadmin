@@ -572,20 +572,8 @@ pub async fn start(postfix: &str) -> ResultType<()> {
     }
 }
 
-pub async fn new_listener(postfix: &str) -> ResultType<Incoming> {
-    let path = Config::ipc_path(postfix);
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let should_scrub_parent_entries = ensure_secure_ipc_parent_dir(&path, postfix)?;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    let existing_listener_alive = check_pid(postfix).await;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    if should_scrub_parent_entries_after_check_pid(
-        should_scrub_parent_entries,
-        existing_listener_alive,
-    ) {
-        scrub_secure_ipc_parent_dir(&path, postfix)?;
-    }
-    let mut endpoint = Endpoint::new(path.clone());
+fn configured_ipc_endpoint(path: &str, postfix: &str) -> ResultType<Endpoint> {
+    let mut endpoint = Endpoint::new(path.to_owned());
     let security_attrs = {
         #[cfg(windows)]
         {
@@ -612,37 +600,106 @@ pub async fn new_listener(postfix: &str) -> ResultType<Incoming> {
             }
         }
     };
-    match endpoint.incoming() {
-        Ok(incoming) => {
-            if postfix == crate::POSTFIX_SERVICE {
-                log::info!("Started protected ipc service server: postfix={}", postfix);
-            } else {
-                log::info!("Started ipc{} server at path: {}", postfix, &path);
-            }
-            #[cfg(any(target_os = "linux", target_os = "macos"))]
-            {
-                let socket_mode = if config::is_service_ipc_postfix(postfix) {
-                    0o666
-                } else {
-                    0o600
-                };
-                if let Err(err) =
-                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(socket_mode))
-                {
-                    log::error!(
-                        "Failed to set permissions on ipc{} socket at path {}: {}",
-                        postfix,
-                        &path,
-                        err
-                    );
-                    std::fs::remove_file(&path).ok();
-                    return Err(err.into());
-                }
-                write_pid(postfix);
-            }
-            Ok(incoming)
+    Ok(endpoint)
+}
+
+fn finish_new_listener(path: &str, postfix: &str, incoming: Incoming) -> ResultType<Incoming> {
+    if postfix == crate::POSTFIX_SERVICE {
+        log::info!("Started protected ipc service server: postfix={}", postfix);
+    } else {
+        log::info!("Started ipc{} server at path: {}", postfix, path);
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let socket_mode = if config::is_service_ipc_postfix(postfix) {
+            0o666
+        } else {
+            0o600
+        };
+        if let Err(err) =
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(socket_mode))
+        {
+            log::error!(
+                "Failed to set permissions on ipc{} socket at path {}: {}",
+                postfix,
+                path,
+                err
+            );
+            std::fs::remove_file(path).ok();
+            return Err(err.into());
         }
+        write_pid(postfix);
+    }
+    Ok(incoming)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn is_addr_in_use(err: &std::io::Error) -> bool {
+    err.kind() == std::io::ErrorKind::AddrInUse
+        || err.raw_os_error() == Some(hbb_common::libc::EADDRINUSE)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn retry_stale_ipc_listener_bind(
+    path: &str,
+    postfix: &str,
+    err: &std::io::Error,
+) -> ResultType<Option<Incoming>> {
+    if !is_addr_in_use(err) {
+        return Ok(None);
+    }
+    if check_pid(postfix).await {
+        log::warn!(
+            "ipc{} listener at path {} is already owned by another live RustAdmin process",
+            postfix,
+            path
+        );
+        return Ok(None);
+    }
+
+    log::warn!(
+        "ipc{} bind found a stale socket at path {}; scrubbing and retrying once",
+        postfix,
+        path
+    );
+    scrub_secure_ipc_parent_dir(path, postfix)?;
+
+    let mut endpoint = configured_ipc_endpoint(path, postfix)?;
+    match endpoint.incoming() {
+        Ok(incoming) => Ok(Some(incoming)),
+        Err(retry_err) => {
+            log::error!(
+                "Failed to start ipc{} server after stale socket retry at path {}: {}",
+                postfix,
+                path,
+                retry_err
+            );
+            Err(retry_err.into())
+        }
+    }
+}
+
+pub async fn new_listener(postfix: &str) -> ResultType<Incoming> {
+    let path = Config::ipc_path(postfix);
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let should_scrub_parent_entries = ensure_secure_ipc_parent_dir(&path, postfix)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let existing_listener_alive = check_pid(postfix).await;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if should_scrub_parent_entries_after_check_pid(
+        should_scrub_parent_entries,
+        existing_listener_alive,
+    ) {
+        scrub_secure_ipc_parent_dir(&path, postfix)?;
+    }
+    let mut endpoint = configured_ipc_endpoint(&path, postfix)?;
+    match endpoint.incoming() {
+        Ok(incoming) => finish_new_listener(&path, postfix, incoming),
         Err(err) => {
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if let Some(incoming) = retry_stale_ipc_listener_bind(&path, postfix, &err).await? {
+                return finish_new_listener(&path, postfix, incoming);
+            }
             log::error!(
                 "Failed to start ipc{} server at path {}: {}",
                 postfix,
@@ -2227,6 +2284,16 @@ mod test {
             "x".to_owned(),
             None
         ))));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn test_ipc_retry_only_classifies_addr_in_use() {
+        let addr_in_use = std::io::Error::from_raw_os_error(hbb_common::libc::EADDRINUSE);
+        assert!(is_addr_in_use(&addr_in_use));
+
+        let not_found = std::io::Error::from_raw_os_error(hbb_common::libc::ENOENT);
+        assert!(!is_addr_in_use(&not_found));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
