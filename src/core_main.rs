@@ -164,6 +164,7 @@ pub fn core_main() -> Option<Vec<String>> {
         }
     }
     hbb_common::init_log(false, &log_name);
+    install_panic_log_hook();
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let role = if log_name.is_empty() {
@@ -434,10 +435,10 @@ pub fn core_main() -> Option<Vec<String>> {
             }
             #[cfg(target_os = "macos")]
             {
-                let handler = std::thread::spawn(move || crate::start_server(true, false));
-                crate::tray::start_tray();
-                // prevent server exit when encountering errors from tray
-                hbb_common::allow_err!(handler.join());
+                if !crate::check_process("--tray", true) {
+                    hbb_common::allow_err!(crate::run_me(vec!["--tray"]));
+                }
+                crate::start_server(true, false);
             }
             return None;
         } else if args[0] == "--import-config" {
@@ -965,6 +966,20 @@ mod tests {
             (Some(false), false)
         );
     }
+}
+
+fn install_panic_log_hook() {
+    static PANIC_LOG_HOOK: std::sync::Once = std::sync::Once::new();
+
+    PANIC_LOG_HOOK.call_once(|| {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let thread = std::thread::current();
+            let thread_name = thread.name().unwrap_or("<unnamed>");
+            log::error!("panic in thread {thread_name}: {info}");
+            default_hook(info);
+        }));
+    });
 }
 
 /// Check if the executable is a Quick Support version.
