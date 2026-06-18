@@ -62,7 +62,7 @@ use std::{
 
 pub const OPTION_REFRESH: &'static str = "refresh";
 const ENCODE_NO_VALID_FRAME: &str = "no valid frame";
-const MAX_HW_NO_VALID_FRAME_TIMES: usize = 90;
+const HW_ENCODER_WARMUP_TIMEOUT: Duration = Duration::from_secs(3);
 
 type FrameFetchedNotifierSender = UnboundedSender<(i32, Option<Instant>)>;
 type FrameFetchedNotifierReceiver = Arc<TokioMutex<UnboundedReceiver<(i32, Option<Instant>)>>>;
@@ -682,6 +682,7 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut repeat_encode_counter = 0;
     let repeat_encode_max = 10;
     let mut encode_fail_counter = 0;
+    let mut hw_no_valid_frame_since: Option<Instant> = None;
     let mut first_frame = true;
     let capture_width = c.width;
     let capture_height = c.height;
@@ -816,6 +817,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                         &mut encoder,
                         recorder.clone(),
                         &mut encode_fail_counter,
+                        &mut hw_no_valid_frame_since,
                         &mut first_frame,
                         capture_width,
                         capture_height,
@@ -875,6 +877,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                             &mut encoder,
                             recorder.clone(),
                             &mut encode_fail_counter,
+                            &mut hw_no_valid_frame_since,
                             &mut first_frame,
                             capture_width,
                             capture_height,
@@ -1192,6 +1195,7 @@ fn handle_one_frame(
     encoder: &mut Encoder,
     recorder: Arc<Mutex<Option<Recorder>>>,
     encode_fail_counter: &mut usize,
+    hw_no_valid_frame_since: &mut Option<Instant>,
     first_frame: &mut bool,
     width: usize,
     height: usize,
@@ -1211,6 +1215,7 @@ fn handle_one_frame(
     match encoder.encode_to_message(frame, ms) {
         Ok(mut vf) => {
             *encode_fail_counter = 0;
+            *hw_no_valid_frame_since = None;
             vf.display = display as _;
             let (payload_bytes, frame_count, has_keyframe) =
                 scrap::codec::video_frame_payload_stats(&vf).unwrap_or((0, 0, false));
@@ -1245,6 +1250,28 @@ fn handle_one_frame(
                 && e.chain()
                     .any(|cause| cause.to_string() == ENCODE_NO_VALID_FRAME);
             *encode_fail_counter += 1;
+            if is_hw_no_valid_frame {
+                let warmup_start = hw_no_valid_frame_since.get_or_insert_with(Instant::now);
+                let warmup_elapsed = warmup_start.elapsed();
+                if warmup_elapsed < HW_ENCODER_WARMUP_TIMEOUT {
+                    if *encode_fail_counter == 1 {
+                        log::warn!(
+                            "hardware encoder has no packet yet: {e:?}, warmup_timeout_ms={}",
+                            HW_ENCODER_WARMUP_TIMEOUT.as_millis()
+                        );
+                    }
+                    return Ok(send_conn_ids);
+                }
+                *encode_fail_counter = 0;
+                *hw_no_valid_frame_since = None;
+                Encoder::set_fallback_codec(CodecFormat::VP9);
+                log::error!(
+                    "switch due to hardware encoder warmup timeout: elapsed_ms={}, error={e:?}",
+                    warmup_elapsed.as_millis()
+                );
+                bail!("SWITCH");
+            }
+            *hw_no_valid_frame_since = None;
             if first {
                 log::warn!(
                     "diag first video frame encode failed: service={}, display={}, negotiated={:?}, hardware={}, capture_ms={}, err={:?}",
@@ -1258,29 +1285,16 @@ fn handle_one_frame(
             }
             // Encoding errors are not frequent except on Android
             if !cfg!(target_os = "android") {
-                if is_hw_no_valid_frame {
-                    if *encode_fail_counter == 1 || *encode_fail_counter % 30 == 0 {
-                        log::warn!(
-                            "hardware encoder has no packet yet: {e:?}, times: {}, max: {}",
-                            *encode_fail_counter,
-                            MAX_HW_NO_VALID_FRAME_TIMES
-                        );
-                    }
-                } else {
-                    log::error!("encode fail: {e:?}, times: {}", *encode_fail_counter,);
-                }
+                log::error!("encode fail: {e:?}, times: {}", *encode_fail_counter,);
             }
-            let max_fail_times = if is_hw_no_valid_frame {
-                MAX_HW_NO_VALID_FRAME_TIMES
-            } else if cfg!(target_os = "android") && encoder.is_hardware() {
+            let max_fail_times = if cfg!(target_os = "android") && encoder.is_hardware() {
                 9
             } else {
                 3
             };
             let repeat = !encoder.latency_free();
             // repeat encoders can reach max_fail_times on the first frame
-            if (first && !repeat && !is_hw_no_valid_frame) || *encode_fail_counter >= max_fail_times
-            {
+            if (first && !repeat) || *encode_fail_counter >= max_fail_times {
                 *encode_fail_counter = 0;
                 if encoder.is_hardware() {
                     Encoder::set_fallback_codec(CodecFormat::VP9);

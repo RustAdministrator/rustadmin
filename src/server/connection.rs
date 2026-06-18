@@ -636,26 +636,15 @@ const H1: Duration = Duration::from_secs(3600);
 const MILLI1: Duration = Duration::from_millis(1);
 const SEND_TIMEOUT_VIDEO: u64 = 12_000;
 const SEND_TIMEOUT_OTHER: u64 = SEND_TIMEOUT_VIDEO * 10;
-const SEND_TIMEOUT_VIDEO_STARTUP: u64 = 60_000;
-const VIDEO_STARTUP_SEND_TIMEOUT_WINDOW: Duration = Duration::from_secs(60);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 const VIDEO_FRAME_STALE_DROP_AFTER: Duration = Duration::from_secs(3);
 const VIDEO_STALE_DROP_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
-fn steady_send_timeout_ms(file_transfer: bool, port_forward: bool, terminal: bool) -> u64 {
+fn connection_send_timeout_ms(file_transfer: bool, port_forward: bool, terminal: bool) -> u64 {
     if file_transfer || port_forward || terminal {
         SEND_TIMEOUT_OTHER
     } else {
         SEND_TIMEOUT_VIDEO
-    }
-}
-
-fn initial_send_timeout_ms(file_transfer: bool, port_forward: bool, terminal: bool) -> u64 {
-    let steady = steady_send_timeout_ms(file_transfer, port_forward, terminal);
-    if steady == SEND_TIMEOUT_VIDEO {
-        SEND_TIMEOUT_VIDEO_STARTUP
-    } else {
-        steady
     }
 }
 
@@ -878,18 +867,11 @@ impl Connection {
         let file_transfer_conn = conn.file_transfer.is_some();
         let port_forward_conn = conn.port_forward_socket.is_some();
         let terminal_conn = conn.terminal;
-        let steady_timeout_ms =
-            steady_send_timeout_ms(file_transfer_conn, port_forward_conn, terminal_conn);
-        let startup_send_timeout_until = if steady_timeout_ms == SEND_TIMEOUT_VIDEO {
-            Some(Instant::now() + VIDEO_STARTUP_SEND_TIMEOUT_WINDOW)
-        } else {
-            None
-        };
-        let mut send_timeout_ms =
-            initial_send_timeout_ms(file_transfer_conn, port_forward_conn, terminal_conn);
+        let send_timeout_ms =
+            connection_send_timeout_ms(file_transfer_conn, port_forward_conn, terminal_conn);
         conn.stream.set_send_timeout(send_timeout_ms);
         log::info!(
-            "#{} diag conn run loop: addr={}, authorized={}, auth_kind={}, remote={}, file_transfer={}, view_camera={}, terminal={}, port_forward={}, display_idx={}, send_timeout_ms={}, steady_send_timeout_ms={}, startup_timeout_window_ms={}, video_ack_required={}",
+            "#{} diag conn run loop: addr={}, authorized={}, auth_kind={}, remote={}, file_transfer={}, view_camera={}, terminal={}, port_forward={}, display_idx={}, send_timeout_ms={}, video_ack_required={}",
             conn.inner.id(),
             addr,
             conn.authorized,
@@ -901,10 +883,6 @@ impl Connection {
             !conn.port_forward_address.is_empty() || conn.port_forward_socket.is_some(),
             conn.display_idx,
             send_timeout_ms,
-            steady_timeout_ms,
-            startup_send_timeout_until
-                .map(|until| until.saturating_duration_since(Instant::now()).as_millis())
-                .unwrap_or(0),
             conn.video_ack_required
         );
 
@@ -1342,19 +1320,6 @@ impl Connection {
                     }
                 }
                 _ = second_timer.tick() => {
-                    if send_timeout_ms != steady_timeout_ms
-                        && startup_send_timeout_until
-                            .map(|until| Instant::now() >= until)
-                            .unwrap_or(false)
-                    {
-                        send_timeout_ms = steady_timeout_ms;
-                        conn.stream.set_send_timeout(send_timeout_ms);
-                        log::info!(
-                            "#{} diag send timeout returned to steady state: send_timeout_ms={}",
-                            conn.inner.id(),
-                            send_timeout_ms
-                        );
-                    }
                     #[cfg(windows)]
                     conn.portable_check();
                     raii::AuthedConnID::check_wake_lock_on_setting_changed();
@@ -7260,18 +7225,6 @@ mod test {
     }
 
     #[test]
-    fn media_connections_get_startup_tolerant_send_timeout() {
-        assert_eq!(
-            steady_send_timeout_ms(false, false, false),
-            SEND_TIMEOUT_VIDEO
-        );
-        assert_eq!(
-            initial_send_timeout_ms(false, false, false),
-            SEND_TIMEOUT_VIDEO_STARTUP
-        );
-    }
-
-    #[test]
     fn non_media_connections_keep_long_control_send_timeout() {
         for (file_transfer, port_forward, terminal) in [
             (true, false, false),
@@ -7279,14 +7232,14 @@ mod test {
             (false, false, true),
         ] {
             assert_eq!(
-                steady_send_timeout_ms(file_transfer, port_forward, terminal),
-                SEND_TIMEOUT_OTHER
-            );
-            assert_eq!(
-                initial_send_timeout_ms(file_transfer, port_forward, terminal),
+                connection_send_timeout_ms(file_transfer, port_forward, terminal),
                 SEND_TIMEOUT_OTHER
             );
         }
+        assert_eq!(
+            connection_send_timeout_ms(false, false, false),
+            SEND_TIMEOUT_VIDEO
+        );
     }
 
     #[test]

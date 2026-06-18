@@ -32,9 +32,6 @@ pub const FPS: u32 = 30;
 pub const MIN_FPS: u32 = 1;
 pub const MAX_FPS: u32 = 120;
 pub const INIT_FPS: u32 = 15;
-const STARTUP_SAFE_WINDOW: Duration = Duration::from_secs(8);
-const STARTUP_SAFE_FPS: u32 = 5;
-const STARTUP_SAFE_RATIO: f32 = 0.25;
 
 // Bitrate ratio constants for different quality levels
 const BR_MAX: f32 = 40.0; // 2000 * 2 / 100
@@ -114,7 +111,6 @@ pub struct VideoQoS {
     bitrate_store: u32,
     adjust_ratio_instant: Instant,
     abr_config: bool,
-    new_user_instant: Instant,
 }
 
 impl Default for VideoQoS {
@@ -127,7 +123,6 @@ impl Default for VideoQoS {
             bitrate_store: 0,
             adjust_ratio_instant: Instant::now(),
             abr_config: true,
-            new_user_instant: Instant::now(),
         }
     }
 }
@@ -164,14 +159,7 @@ impl VideoQoS {
         if self.ratio < BR_MIN_HIGH_RESOLUTION || self.ratio > BR_MAX {
             self.ratio = BR_BALANCED;
         }
-        if self.startup_safe_mode() {
-            return self.ratio.min(STARTUP_SAFE_RATIO);
-        }
         self.ratio
-    }
-
-    pub fn startup_safe_mode(&self) -> bool {
-        self.locked_fps().is_none() && self.new_user_instant.elapsed() < STARTUP_SAFE_WINDOW
     }
 
     // Check if any user is in recording mode
@@ -197,7 +185,6 @@ impl VideoQoS {
     pub fn on_connection_open(&mut self, id: i32) {
         self.users.insert(id, UserData::default());
         self.abr_config = Config::get_option("enable-abr") != "N";
-        self.new_user_instant = Instant::now();
     }
 
     // Clean up user session
@@ -586,10 +573,6 @@ impl VideoQoS {
             }
         }
 
-        if self.startup_safe_mode() && fps > STARTUP_SAFE_FPS {
-            fps = STARTUP_SAFE_FPS;
-        }
-
         // Ensure fps stays within valid range
         self.fps = fps.clamp(MIN_FPS, highest_fps);
     }
@@ -650,40 +633,5 @@ impl RttCalculator {
             }
         }
         None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn startup_safe_mode_caps_default_quality_ratio() {
-        let mut qos = VideoQoS::default();
-        qos.on_connection_open(1);
-
-        assert!(qos.startup_safe_mode());
-        assert_eq!(qos.ratio(), STARTUP_SAFE_RATIO);
-    }
-
-    #[test]
-    fn startup_safe_mode_expires() {
-        let mut qos = VideoQoS::default();
-        qos.on_connection_open(1);
-        qos.new_user_instant = Instant::now() - STARTUP_SAFE_WINDOW - Duration::from_secs(1);
-
-        assert!(!qos.startup_safe_mode());
-        assert_eq!(qos.ratio(), BR_BALANCED);
-    }
-
-    #[test]
-    fn startup_safe_mode_respects_fixed_fps() {
-        let mut qos = VideoQoS::default();
-        qos.on_connection_open(1);
-        qos.user_fixed_fps(1, 30);
-
-        assert!(!qos.startup_safe_mode());
-        assert_eq!(qos.ratio(), BR_BALANCED);
-        assert_eq!(qos.fps(), 30);
     }
 }

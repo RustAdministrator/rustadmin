@@ -1034,7 +1034,7 @@ async fn handle(data: Data, stream: &mut Connection) {
         #[cfg(feature = "hwcodec")]
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         Data::CheckHwcodec => {
-            scrap::hwcodec::start_check_process();
+            scrap::hwcodec::recheck_hwcodec();
         }
         #[cfg(feature = "hwcodec")]
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1948,6 +1948,10 @@ pub async fn notify_server_to_check_hwcodec() -> ResultType<()> {
     Ok(())
 }
 
+#[cfg(feature = "hwcodec")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const HWCODEC_CONFIG_IPC_TIMEOUT_MS: u64 = 500;
+
 #[cfg(target_os = "windows")]
 pub async fn get_port_forward_session_count(ms_timeout: u64) -> ResultType<usize> {
     let mut c = connect(ms_timeout, "").await?;
@@ -1962,12 +1966,27 @@ pub async fn get_port_forward_session_count(ms_timeout: u64) -> ResultType<usize
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[tokio::main(flavor = "current_thread")]
 pub async fn get_hwcodec_config_from_server() -> ResultType<()> {
-    if !scrap::codec::enable_hwcodec_option() || scrap::hwcodec::HwCodecConfig::already_set() {
+    get_hwcodec_config_from_server_impl(false).await
+}
+
+#[cfg(feature = "hwcodec")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[tokio::main(flavor = "current_thread")]
+pub async fn recheck_hwcodec_config_from_server() -> ResultType<()> {
+    get_hwcodec_config_from_server_impl(true).await
+}
+
+#[cfg(feature = "hwcodec")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+async fn get_hwcodec_config_from_server_impl(force: bool) -> ResultType<()> {
+    if !scrap::codec::enable_hwcodec_option()
+        || (!force && scrap::hwcodec::HwCodecConfig::already_set())
+    {
         return Ok(());
     }
-    let mut c = connect(50, "").await?;
+    let mut c = connect(HWCODEC_CONFIG_IPC_TIMEOUT_MS, "").await?;
     c.send(&Data::HwCodecConfig(None)).await?;
-    if let Some(Data::HwCodecConfig(v)) = c.next_timeout(50).await? {
+    if let Some(Data::HwCodecConfig(v)) = c.next_timeout(HWCODEC_CONFIG_IPC_TIMEOUT_MS).await? {
         match v {
             Some(v) => {
                 scrap::hwcodec::HwCodecConfig::set(v);
@@ -1984,26 +2003,54 @@ pub async fn get_hwcodec_config_from_server() -> ResultType<()> {
 #[cfg(feature = "hwcodec")]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn client_get_hwcodec_config_thread(wait_sec: u64) {
-    static ONCE: std::sync::Once = std::sync::Once::new();
+    client_get_hwcodec_config_thread_inner(wait_sec, false);
+}
+
+#[cfg(feature = "hwcodec")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn client_recheck_hwcodec_config_thread(wait_sec: u64) {
+    scrap::hwcodec::HwCodecConfig::reset();
+    client_get_hwcodec_config_thread_inner(wait_sec, true);
+}
+
+#[cfg(feature = "hwcodec")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn client_get_hwcodec_config_thread_inner(wait_sec: u64, force: bool) {
     if !crate::platform::is_installed()
         || !scrap::codec::enable_hwcodec_option()
-        || scrap::hwcodec::HwCodecConfig::already_set()
+        || (!force && scrap::hwcodec::HwCodecConfig::already_set())
     {
         return;
     }
+    if force {
+        spawn_hwcodec_config_fetcher(wait_sec, true);
+        return;
+    }
+    static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(move || {
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            let mut intervals: Vec<u64> = vec![wait_sec, 3, 3, 6, 9];
-            for i in intervals.drain(..) {
-                if i > 0 {
-                    std::thread::sleep(std::time::Duration::from_secs(i));
-                }
-                if get_hwcodec_config_from_server().is_ok() {
-                    break;
-                }
+        spawn_hwcodec_config_fetcher(wait_sec, false);
+    });
+}
+
+#[cfg(feature = "hwcodec")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn spawn_hwcodec_config_fetcher(wait_sec: u64, force: bool) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let mut intervals: Vec<u64> = vec![wait_sec, 3, 3, 6, 9, 12];
+        for i in intervals.drain(..) {
+            if i > 0 {
+                std::thread::sleep(std::time::Duration::from_secs(i));
             }
-        });
+            let fetched = if force {
+                recheck_hwcodec_config_from_server().is_ok()
+            } else {
+                get_hwcodec_config_from_server().is_ok()
+            };
+            if fetched {
+                break;
+            }
+        }
     });
 }
 

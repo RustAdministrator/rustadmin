@@ -1705,17 +1705,12 @@ pub fn check_hwcodec() {
     #[cfg(feature = "hwcodec")]
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        use std::sync::Once;
-        static ONCE: Once = Once::new();
-
-        ONCE.call_once(|| {
-            if crate::platform::is_installed() {
-                ipc::notify_server_to_check_hwcodec().ok();
-                ipc::client_get_hwcodec_config_thread(3);
-            } else {
-                scrap::hwcodec::start_check_process();
-            }
-        })
+        if crate::platform::is_installed() {
+            ipc::notify_server_to_check_hwcodec().ok();
+            ipc::client_recheck_hwcodec_config_thread(3);
+        } else {
+            scrap::hwcodec::recheck_hwcodec();
+        }
     }
 }
 

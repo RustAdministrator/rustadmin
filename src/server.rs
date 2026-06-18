@@ -845,7 +845,7 @@ pub async fn start_server(is_server: bool, no_server: bool) {
                     }
                 }
                 #[cfg(feature = "hwcodec")]
-                #[cfg(any(target_os = "windows", target_os = "linux"))]
+                #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
                 crate::ipc::client_get_hwcodec_config_thread(0);
             }
             Err(err) => {

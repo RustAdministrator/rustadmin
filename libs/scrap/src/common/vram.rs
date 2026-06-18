@@ -275,7 +275,7 @@ impl VRamEncoder {
                 data.append(v);
                 Ok(data)
             }
-            Err(_) => Ok(Vec::<EncodeFrame>::new()),
+            Err(err) => Err(anyhow!("vram encoder failed: {err}")),
         }
     }
 

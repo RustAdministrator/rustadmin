@@ -2861,6 +2861,7 @@ impl LoginConfigHandler {
     }
 
     pub fn get_supported_decoding(&self) -> SupportedDecoding {
+        get_hwcodec_config();
         Decoder::supported_decodings(
             Some(&self.id),
             use_texture_render(),
@@ -3639,21 +3640,20 @@ fn fps_calculate(
 fn get_hwcodec_config() {
     // for sciter and unilink
     #[cfg(feature = "hwcodec")]
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     {
-        use std::sync::Once;
-        static ONCE: Once = Once::new();
-        ONCE.call_once(|| {
-            let start = std::time::Instant::now();
-            if let Err(e) = crate::ipc::get_hwcodec_config_from_server() {
-                log::error!(
-                    "Failed to get hwcodec config: {e:?}, elapsed: {:?}",
-                    start.elapsed()
-                );
-            } else {
-                log::info!("{:?} used to get hwcodec config", start.elapsed());
-            }
-        });
+        if !scrap::codec::enable_hwcodec_option() || scrap::hwcodec::HwCodecConfig::already_set() {
+            return;
+        }
+        let start = std::time::Instant::now();
+        if let Err(e) = crate::ipc::get_hwcodec_config_from_server() {
+            log::error!(
+                "Failed to get hwcodec config: {e:?}, elapsed: {:?}",
+                start.elapsed()
+            );
+        } else {
+            log::info!("{:?} used to get hwcodec config", start.elapsed());
+        }
     }
 }
 

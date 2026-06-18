@@ -1561,130 +1561,11 @@ String _keyboardModeLabel(String value) {
   }
 }
 
-class _ConnectionPropertiesOption {
-  final String value;
-  final String label;
-
-  const _ConnectionPropertiesOption(this.value, this.label);
-}
-
-class _ConnectionPropertiesSelect extends StatelessWidget {
-  final String label;
-  final String value;
-  final List<_ConnectionPropertiesOption> options;
-  final bool expanded;
-  final VoidCallback onToggle;
-  final ValueChanged<String> onChanged;
-
-  const _ConnectionPropertiesSelect({
-    required this.label,
-    required this.value,
-    required this.options,
-    required this.expanded,
-    required this.onToggle,
-    required this.onChanged,
-  });
-
-  _ConnectionPropertiesOption get _selected {
-    return options.firstWhere(
-      (option) => option.value == value,
-      orElse: () => options.first,
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final borderColor = MyTheme.color(context).border2 ?? MyTheme.border;
-    final selected = _selected;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Material(
-          color: Colors.transparent,
-          child: InkWell(
-            borderRadius: BorderRadius.circular(4),
-            onTap: onToggle,
-            child: InputDecorator(
-              isEmpty: false,
-              decoration: InputDecoration(
-                labelText: translate(label),
-                suffixIcon: Icon(
-                  expanded
-                      ? Icons.keyboard_arrow_up
-                      : Icons.keyboard_arrow_down,
-                ),
-              ),
-              child: Text(
-                translate(selected.label),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ),
-        ),
-        if (expanded)
-          Container(
-            margin: const EdgeInsets.only(top: 4),
-            constraints: const BoxConstraints(maxHeight: 220),
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.background,
-              border: Border.all(color: borderColor),
-              borderRadius: BorderRadius.circular(4),
-            ),
-            child: ListView(
-              shrinkWrap: true,
-              padding: const EdgeInsets.symmetric(vertical: 4),
-              children: options
-                  .map((option) => _ConnectionPropertiesSelectItem(
-                        option: option,
-                        selected: option.value == value,
-                        onTap: () => onChanged(option.value),
-                      ))
-                  .toList(),
-            ),
-          ),
-      ],
-    );
-  }
-}
-
-class _ConnectionPropertiesSelectItem extends StatelessWidget {
-  final _ConnectionPropertiesOption option;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _ConnectionPropertiesSelectItem({
-    required this.option,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      child: Container(
-        height: 36,
-        padding: const EdgeInsets.symmetric(horizontal: 12),
-        child: Row(
-          children: [
-            Expanded(
-              child: Text(
-                translate(option.label),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-            if (selected)
-              Icon(
-                Icons.check,
-                size: 18,
-                color: Theme.of(context).colorScheme.primary,
-              ),
-          ],
-        ),
-      ),
-    );
-  }
+DropdownMenuItem<String> _stringMenuItem(String value, String label) {
+  return DropdownMenuItem<String>(
+    value: value,
+    child: Text(translate(label)),
+  );
 }
 
 Widget _propertiesSection(String label) {
@@ -1701,177 +1582,180 @@ Future<void> _showConnectionPropertiesDialog(String id) async {
   final properties = await _PeerConnectionProperties.load(id);
   final customQualityController =
       TextEditingController(text: properties.customImageQuality.toString());
-  String? expandedSelect;
 
-  bool isExpanded(String key) => expandedSelect == key;
+  await Future<void>.delayed(Duration.zero);
+  final dialogContext = globalKey.currentContext;
+  if (dialogContext == null) {
+    customQualityController.dispose();
+    return;
+  }
 
-  gFFI.dialogManager.show((setState, close, context) {
-    void toggleSelect(String key) {
-      setState(() {
-        expandedSelect = expandedSelect == key ? null : key;
-      });
-    }
+  try {
+    await showDialog<void>(
+      context: dialogContext,
+      barrierDismissible: false,
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setState) {
+            void close() => Navigator.of(context, rootNavigator: true).pop();
 
-    Future<void> submit() async {
-      final quality = int.tryParse(customQualityController.text.trim()) ??
-          properties.customImageQuality;
-      properties.customImageQuality =
-          quality.clamp(kMinQuality.toInt(), kMaxMoreQuality.toInt()).toInt();
-      await properties.save(id);
-      showToast(translate('Successful'));
-      close();
-    }
+            Future<void> submit() async {
+              final quality =
+                  int.tryParse(customQualityController.text.trim()) ??
+                      properties.customImageQuality;
+              properties.customImageQuality = quality
+                  .clamp(kMinQuality.toInt(), kMaxMoreQuality.toInt())
+                  .toInt();
+              await properties.save(id);
+              showToast(translate('Successful'));
+              close();
+            }
 
-    return CustomAlertDialog(
-      title: Text(translate('Connection properties')),
-      contentBoxConstraints: BoxConstraints(
-        maxWidth: 560,
-        maxHeight: math.max(280.0, MediaQuery.of(context).size.height * 0.72),
-      ),
-      content: ConstrainedBox(
-        constraints: const BoxConstraints(minWidth: 460, maxWidth: 560),
-        child: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _propertiesSection('Video'),
-              _ConnectionPropertiesSelect(
-                label: 'Default Image Quality',
-                value: properties.imageQuality,
-                expanded: isExpanded('image-quality'),
-                onToggle: () => toggleSelect('image-quality'),
-                options: const [
-                  _ConnectionPropertiesOption(
-                      kRemoteImageQualityBest, 'Good image quality'),
-                  _ConnectionPropertiesOption(
-                      kRemoteImageQualityBalanced, 'Balanced'),
-                  _ConnectionPropertiesOption(
-                      kRemoteImageQualityLow, 'Optimize reaction time'),
-                  _ConnectionPropertiesOption(
-                      kRemoteImageQualityCustom, 'Custom'),
-                ],
-                onChanged: (value) {
-                  setState(() {
-                    properties.imageQuality = value;
-                    expandedSelect = null;
-                  });
-                },
-              ),
-              if (properties.imageQuality == kRemoteImageQualityCustom)
-                TextField(
-                  controller: customQualityController,
-                  keyboardType: TextInputType.number,
-                  inputFormatters: [
-                    FilteringTextInputFormatter.allow(RegExp(r'[0-9]')),
-                  ],
-                  decoration: InputDecoration(
-                    labelText: translate('Custom Image Quality'),
-                    suffixText: '%',
+            return CustomAlertDialog(
+              title: Text(translate('Connection properties')),
+              content: ConstrainedBox(
+                constraints:
+                    const BoxConstraints(minWidth: 460, maxWidth: 560),
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _propertiesSection('Video'),
+                      DropdownButtonFormField<String>(
+                        value: properties.imageQuality,
+                        decoration: InputDecoration(
+                          labelText: translate('Default Image Quality'),
+                        ),
+                        items: [
+                          _stringMenuItem(
+                              kRemoteImageQualityBest, 'Good image quality'),
+                          _stringMenuItem(
+                              kRemoteImageQualityBalanced, 'Balanced'),
+                          _stringMenuItem(kRemoteImageQualityLow,
+                              'Optimize reaction time'),
+                          _stringMenuItem(kRemoteImageQualityCustom, 'Custom'),
+                        ],
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setState(() => properties.imageQuality = value);
+                        },
+                      ),
+                      if (properties.imageQuality == kRemoteImageQualityCustom)
+                        TextField(
+                          controller: customQualityController,
+                          keyboardType: TextInputType.number,
+                          inputFormatters: [
+                            FilteringTextInputFormatter.allow(
+                                RegExp(r'[0-9]')),
+                          ],
+                          decoration: InputDecoration(
+                            labelText: translate('Custom Image Quality'),
+                            suffixText: '%',
+                          ),
+                        ).marginOnly(top: 8),
+                      DropdownButtonFormField<String>(
+                        value: properties.codecPreference,
+                        decoration: InputDecoration(
+                          labelText: translate('Default Codec'),
+                        ),
+                        items: [
+                          _stringMenuItem('auto', 'Auto'),
+                          _stringMenuItem('vp8', 'VP8'),
+                          _stringMenuItem('vp9', 'VP9'),
+                          _stringMenuItem('av1', 'AV1'),
+                          _stringMenuItem('h264', 'H264'),
+                          _stringMenuItem('h265', 'H265'),
+                        ],
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setState(() => properties.codecPreference = value);
+                        },
+                      ).marginOnly(top: 8),
+                      _propertiesSection('Display'),
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        title: Text(translate('Show quality monitor')),
+                        value: properties.showQualityMonitor,
+                        onChanged: (value) {
+                          setState(
+                              () => properties.showQualityMonitor = value);
+                        },
+                      ),
+                      DropdownButtonFormField<String>(
+                        value: properties.qualityMonitorPosition,
+                        decoration: InputDecoration(
+                          labelText: translate('Quality monitor position'),
+                        ),
+                        items: [
+                          kQualityMonitorPositionTopRight,
+                          kQualityMonitorPositionTopLeft,
+                          kQualityMonitorPositionBottomRight,
+                          kQualityMonitorPositionBottomLeft,
+                        ]
+                            .map((value) => _stringMenuItem(
+                                value, qualityMonitorPositionLabel(value)))
+                            .toList(),
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setState(() =>
+                              properties.qualityMonitorPosition = value);
+                        },
+                      ),
+                      _propertiesSection('Input'),
+                      DropdownButtonFormField<String>(
+                        value: properties.keyboardMode,
+                        decoration: InputDecoration(
+                          labelText: translate('Keyboard mode'),
+                        ),
+                        items: [
+                          _kKeyboardModeAuto,
+                          kKeyLegacyMode,
+                          kKeyMapMode,
+                          kKeyTranslateMode,
+                        ]
+                            .map((value) => _stringMenuItem(
+                                value, _keyboardModeLabel(value)))
+                            .toList(),
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setState(() => properties.keyboardMode = value);
+                        },
+                      ),
+                      _propertiesSection('Clipboard'),
+                      DropdownButtonFormField<String>(
+                        value: properties.clipboardDirection,
+                        decoration: InputDecoration(
+                          labelText: translate('Clipboard'),
+                        ),
+                        items: clipboardDirectionMenuKeys()
+                            .map((value) => _stringMenuItem(
+                                value, clipboardDirectionPolicyLabel(value)))
+                            .toList(),
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setState(
+                              () => properties.clipboardDirection = value);
+                        },
+                      ),
+                    ],
                   ),
-                ).marginOnly(top: 8),
-              _ConnectionPropertiesSelect(
-                label: 'Default Codec',
-                value: properties.codecPreference,
-                expanded: isExpanded('codec'),
-                onToggle: () => toggleSelect('codec'),
-                options: const [
-                  _ConnectionPropertiesOption('auto', 'Auto'),
-                  _ConnectionPropertiesOption('vp8', 'VP8'),
-                  _ConnectionPropertiesOption('vp9', 'VP9'),
-                  _ConnectionPropertiesOption('av1', 'AV1'),
-                  _ConnectionPropertiesOption('h264', 'H264'),
-                  _ConnectionPropertiesOption('h265', 'H265'),
-                ],
-                onChanged: (value) {
-                  setState(() {
-                    properties.codecPreference = value;
-                    expandedSelect = null;
-                  });
-                },
-              ).marginOnly(top: 8),
-              _propertiesSection('Display'),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: Text(translate('Show quality monitor')),
-                value: properties.showQualityMonitor,
-                onChanged: (value) {
-                  setState(() => properties.showQualityMonitor = value);
-                },
+                ),
               ),
-              _ConnectionPropertiesSelect(
-                label: 'Quality monitor position',
-                value: properties.qualityMonitorPosition,
-                expanded: isExpanded('quality-monitor-position'),
-                onToggle: () => toggleSelect('quality-monitor-position'),
-                options: [
-                  kQualityMonitorPositionTopRight,
-                  kQualityMonitorPositionTopLeft,
-                  kQualityMonitorPositionBottomRight,
-                  kQualityMonitorPositionBottomLeft,
-                ]
-                    .map((value) => _ConnectionPropertiesOption(
-                        value, qualityMonitorPositionLabel(value)))
-                    .toList(),
-                onChanged: (value) {
-                  setState(() {
-                    properties.qualityMonitorPosition = value;
-                    expandedSelect = null;
-                  });
-                },
-              ),
-              _propertiesSection('Input'),
-              _ConnectionPropertiesSelect(
-                label: 'Keyboard mode',
-                value: properties.keyboardMode,
-                expanded: isExpanded('keyboard-mode'),
-                onToggle: () => toggleSelect('keyboard-mode'),
-                options: [
-                  _kKeyboardModeAuto,
-                  kKeyLegacyMode,
-                  kKeyMapMode,
-                  kKeyTranslateMode,
-                ]
-                    .map((value) =>
-                        _ConnectionPropertiesOption(
-                            value, _keyboardModeLabel(value)))
-                    .toList(),
-                onChanged: (value) {
-                  setState(() {
-                    properties.keyboardMode = value;
-                    expandedSelect = null;
-                  });
-                },
-              ),
-              _propertiesSection('Clipboard'),
-              _ConnectionPropertiesSelect(
-                label: 'Clipboard',
-                value: properties.clipboardDirection,
-                expanded: isExpanded('clipboard-direction'),
-                onToggle: () => toggleSelect('clipboard-direction'),
-                options: clipboardDirectionMenuKeys()
-                    .map((value) => _ConnectionPropertiesOption(
-                        value, clipboardDirectionPolicyLabel(value)))
-                    .toList(),
-                onChanged: (value) {
-                  setState(() {
-                    properties.clipboardDirection = value;
-                    expandedSelect = null;
-                  });
-                },
-              ),
-            ],
-          ),
-        ),
-      ),
-      actions: [
-        dialogButton('Cancel', onPressed: close, isOutline: true),
-        dialogButton('Save', onPressed: submit),
-      ],
-      onSubmit: submit,
-      onCancel: close,
+              actions: [
+                dialogButton('Cancel', onPressed: close, isOutline: true),
+                dialogButton('Save', onPressed: submit),
+              ],
+              onSubmit: submit,
+              onCancel: close,
+            );
+          },
+        );
+      },
     );
-  });
+  } finally {
+    customQualityController.dispose();
+  }
 }
 
 void _rdpDialog(String id) async {
