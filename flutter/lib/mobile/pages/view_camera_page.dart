@@ -626,6 +626,8 @@ void showOptions(
     displays.add(const Divider(color: MyTheme.border));
   }
 
+  List<TRadioMenu<String>> qualityMonitorRadios =
+      await toolbarQualityMonitorPosition(gFFI);
   List<TRadioMenu<String>> viewStyleRadios =
       await toolbarViewStyle(context, id, gFFI);
   List<TRadioMenu<String>> imageQualityRadios =
@@ -635,6 +637,10 @@ void showOptions(
       await toolbarDisplayToggle(context, id, gFFI);
 
   dialogManager.show((setState, close, context) {
+    var qualityMonitor = (qualityMonitorRadios.isNotEmpty
+            ? qualityMonitorRadios[0].groupValue
+            : '')
+        .obs;
     var viewStyle =
         (viewStyleRadios.isNotEmpty ? viewStyleRadios[0].groupValue : '').obs;
     var imageQuality =
@@ -642,6 +648,29 @@ void showOptions(
             .obs;
     var codec = (codecRadios.isNotEmpty ? codecRadios[0].groupValue : '').obs;
     final radios = [
+      if (qualityMonitorRadios.isNotEmpty)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Padding(
+            padding: const EdgeInsets.only(top: 4, bottom: 4),
+            child: Text(
+              translate('Quality monitor'),
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+          ),
+        ),
+      for (var e in qualityMonitorRadios)
+        Obx(() => getRadio<String>(
+            e.child,
+            e.value,
+            qualityMonitor.value,
+            e.onChanged != null
+                ? (v) {
+                    e.onChanged?.call(v);
+                    if (v != null) qualityMonitor.value = v;
+                  }
+                : null)),
+      if (qualityMonitorRadios.isNotEmpty) const Divider(color: MyTheme.border),
       for (var e in viewStyleRadios)
         Obx(() => getRadio<String>(
             e.child,
