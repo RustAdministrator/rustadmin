@@ -1185,6 +1185,8 @@ void showOptions(
   List<TRadioMenu<String>> codecRadios = await toolbarCodec(context, id, gFFI);
   List<TRadioMenu<String>> qualityMonitorRadios =
       await toolbarQualityMonitorPosition(gFFI);
+  List<TRadioMenu<String>> clipboardRadios =
+      await toolbarClipboardDirection(gFFI);
   List<TToggleMenu> cursorToggles = await toolbarCursor(context, id, gFFI);
   List<TToggleMenu> displayToggles =
       await toolbarDisplayToggle(context, id, gFFI);
@@ -1209,6 +1211,8 @@ void showOptions(
     var qualityMonitor =
         (qualityMonitorRadios.isNotEmpty ? qualityMonitorRadios[0].groupValue : '')
             .obs;
+    var clipboard =
+        (clipboardRadios.isNotEmpty ? clipboardRadios[0].groupValue : '').obs;
     final radios = [
       for (var e in viewStyleRadios)
         Obx(() => getRadio<String>(
@@ -1270,6 +1274,18 @@ void showOptions(
                   }
                 : null)),
       if (qualityMonitorRadios.isNotEmpty) const Divider(color: MyTheme.border),
+      for (var e in clipboardRadios)
+        Obx(() => getRadio<String>(
+            e.child,
+            e.value,
+            clipboard.value,
+            e.onChanged != null
+                ? (v) {
+                    e.onChanged?.call(v);
+                    if (v != null) clipboard.value = v;
+                  }
+                : null)),
+      if (clipboardRadios.isNotEmpty) const Divider(color: MyTheme.border),
     ];
     final rxCursorToggleValues = cursorToggles.map((e) => e.value.obs).toList();
     final cursorTogglesList = cursorToggles

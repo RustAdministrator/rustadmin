@@ -391,6 +391,21 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                 });
               },
       ),
+      _getPopupDialogRadioEntry(
+        title: 'Clipboard direction',
+        list: clipboardDirectionMenuKeys()
+            .map((key) => _RadioEntry(clipboardDirectionPolicyLabel(key), key))
+            .toList(),
+        getter: () => normalizeClipboardDirectionPolicy(
+          bind.mainGetOptionSync(key: kOptionClipboardDirection),
+        ),
+        asyncSetter: isOptionFixed(kOptionClipboardDirection)
+            ? null
+            : (value) async {
+                await bind.mainSetOption(
+                    key: kOptionClipboardDirection, value: value);
+              },
+      ),
       SettingsTile.switchTile(
         title: Row(children: [
           Expanded(child: Text(translate('Use IP Whitelisting'))),
