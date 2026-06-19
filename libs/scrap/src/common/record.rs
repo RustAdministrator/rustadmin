@@ -56,6 +56,7 @@ impl RecorderContext2 {
             + if self.format == CodecFormat::VP9
                 || self.format == CodecFormat::VP8
                 || self.format == CodecFormat::AV1
+                || self.format == CodecFormat::AV1Vulkan
             {
                 ".webm"
             } else {
@@ -152,9 +153,12 @@ impl Recorder {
         };
         if self.inner.is_none() {
             self.inner = match format {
-                CodecFormat::VP8 | CodecFormat::VP9 | CodecFormat::AV1 => Some(Box::new(
-                    WebmRecorder::new(self.ctx.clone(), (*ctx2).clone())?,
-                )),
+                CodecFormat::VP8 | CodecFormat::VP9 | CodecFormat::AV1 | CodecFormat::AV1Vulkan => {
+                    Some(Box::new(WebmRecorder::new(
+                        self.ctx.clone(),
+                        (*ctx2).clone(),
+                    )?))
+                }
                 #[cfg(feature = "hwcodec")]
                 _ => Some(Box::new(HwRecorder::new(
                     self.ctx.clone(),
@@ -308,7 +312,7 @@ impl RecorderApi for WebmRecorder {
                 mux::VideoCodecId::AV1
             },
         );
-        if ctx2.format == CodecFormat::AV1 {
+        if ctx2.format == CodecFormat::AV1 || ctx2.format == CodecFormat::AV1Vulkan {
             // [129, 8, 12, 0] in 3.6.0, but zero works
             let codec_private = vec![0, 0, 0, 0];
             if !webm.set_codec_private(vt.track_number(), &codec_private) {

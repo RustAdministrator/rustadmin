@@ -1242,7 +1242,8 @@ void showOptions(
                   }
                 : null)),
       const Divider(color: MyTheme.border),
-      for (var e in codecRadios)
+      for (var e in codecRadios) ...[
+        if (e.dividerBefore) const Divider(color: MyTheme.border),
         Obx(() => getRadio<String>(
             e.child,
             e.value,
@@ -1253,6 +1254,7 @@ void showOptions(
                     if (v != null) codec.value = v;
                   }
                 : null)),
+      ],
       if (codecRadios.isNotEmpty) const Divider(color: MyTheme.border),
       if (qualityMonitorRadios.isNotEmpty)
         Align(

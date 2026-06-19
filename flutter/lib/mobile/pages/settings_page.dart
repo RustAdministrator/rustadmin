@@ -1305,6 +1305,7 @@ class __DisplayPageState extends State<_DisplayPage> {
       _RadioEntry('VP8', 'vp8'),
       _RadioEntry('VP9', 'vp9'),
       _RadioEntry('AV1', 'av1'),
+      _RadioEntry('AV1 Vulkan', 'av1-vulkan'),
       if (h264) _RadioEntry('H264', 'h264'),
       if (h265) _RadioEntry('H265', 'h265')
     ];

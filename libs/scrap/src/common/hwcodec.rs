@@ -131,6 +131,7 @@ impl EncoderApi for HwRamEncoder {
             match self.format {
                 DataFormat::H264 => vf.set_h264s(frames),
                 DataFormat::H265 => vf.set_h265s(frames),
+                DataFormat::AV1 => vf.set_av1s(frames),
                 _ => bail!("unsupported format: {:?}", self.format),
             }
             Ok(vf)
@@ -218,6 +219,11 @@ impl HwRamEncoder {
             }
             CodecFormat::H265 => {
                 if let Some(v) = best.h265 {
+                    info = Some(v);
+                }
+            }
+            CodecFormat::AV1Vulkan => {
+                if let Some(v) = best.av1.filter(|c| c.name.contains("_vulkan")) {
                     info = Some(v);
                 }
             }

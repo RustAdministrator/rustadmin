@@ -1217,6 +1217,25 @@ fn get_encoder_config(
             },
             keyframe_interval,
         }),
+        CodecFormat::AV1Vulkan => {
+            #[cfg(feature = "hwcodec")]
+            if let Some(hw) = HwRamEncoder::try_get(CodecFormat::AV1Vulkan) {
+                return EncoderCfg::HWRAM(HwRamEncoderConfig {
+                    name: hw.name,
+                    mc_name: hw.mc_name,
+                    width: c.width,
+                    height: c.height,
+                    quality,
+                    keyframe_interval,
+                });
+            }
+            EncoderCfg::AOM(AomEncoderConfig {
+                width: c.width as _,
+                height: c.height as _,
+                quality,
+                keyframe_interval,
+            })
+        }
         CodecFormat::AV1 => EncoderCfg::AOM(AomEncoderConfig {
             width: c.width as _,
             height: c.height as _,

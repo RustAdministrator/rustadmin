@@ -2164,14 +2164,17 @@ class _DisplayMenuState extends State<_DisplayMenu> {
           return _SubmenuButton(
               ffi: widget.ffi,
               child: Text(translate('Codec')),
-              menuChildren: v
-                  .map((e) => RdoMenuButton(
+              menuChildren: [
+                for (final e in v) ...[
+                  if (e.dividerBefore) Divider(),
+                  RdoMenuButton(
                       value: e.value,
                       groupValue: e.groupValue,
                       onChanged: e.onChanged,
                       child: e.child,
-                      ffi: ffi))
-                  .toList());
+                      ffi: ffi),
+                ]
+              ]);
         });
   }
 

@@ -88,6 +88,7 @@ pub struct Encoder {
 struct UsableCodecs {
     vp8: bool,
     av1: bool,
+    av1_vulkan: bool,
     h264: bool,
     h265: bool,
 }
@@ -99,6 +100,7 @@ impl UsableCodecs {
             PreferCodec::VP8 => self.vp8,
             PreferCodec::VP9 => true,
             PreferCodec::AV1 => self.av1,
+            PreferCodec::AV1Vulkan => self.av1_vulkan,
             PreferCodec::H264 => self.h264,
             PreferCodec::H265 => self.h265,
         }
@@ -108,6 +110,7 @@ impl UsableCodecs {
 fn explicit_codec_preference_order() -> &'static [PreferCodec] {
     &[
         PreferCodec::AV1,
+        PreferCodec::AV1Vulkan,
         PreferCodec::VP9,
         PreferCodec::VP8,
         PreferCodec::H265,
@@ -142,6 +145,7 @@ fn codec_for_preference(preference: PreferCodec, auto_codec: CodecFormat) -> Cod
         PreferCodec::VP8 => CodecFormat::VP8,
         PreferCodec::VP9 => CodecFormat::VP9,
         PreferCodec::AV1 => CodecFormat::AV1,
+        PreferCodec::AV1Vulkan => CodecFormat::AV1Vulkan,
         PreferCodec::H264 => CodecFormat::H264,
         PreferCodec::H265 => CodecFormat::H265,
         PreferCodec::Auto => auto_codec,
@@ -279,6 +283,8 @@ impl Encoder {
         let mut h264hw_encoding: Option<String> = None;
         #[allow(unused_mut)]
         let mut h265hw_encoding: Option<String> = None;
+        #[allow(unused_mut)]
+        let mut av1_vulkan_encoding: Option<String> = None;
         #[cfg(feature = "hwcodec")]
         if enable_hwcodec_option() {
             if _all_support_h264_decoding {
@@ -289,21 +295,28 @@ impl Encoder {
                 h265hw_encoding =
                     HwRamEncoder::try_get(CodecFormat::H265).map_or(None, |c| Some(c.name));
             }
+            if av1_useable {
+                av1_vulkan_encoding =
+                    HwRamEncoder::try_get(CodecFormat::AV1Vulkan).map_or(None, |c| Some(c.name));
+            }
         }
         let h264_useable =
             _all_support_h264_decoding && (h264vram_encoding || h264hw_encoding.is_some());
         let h265_useable =
             _all_support_h265_decoding && (h265vram_encoding || h265hw_encoding.is_some());
+        let av1_vulkan_useable = av1_useable && av1_vulkan_encoding.is_some();
         let mut format = ENCODE_CODEC_FORMAT.lock().unwrap();
         let usable = UsableCodecs {
             vp8: vp8_useable,
             av1: av1_useable,
+            av1_vulkan: av1_vulkan_useable,
             h264: h264_useable,
             h265: h265_useable,
         };
         *USABLE_ENCODING.lock().unwrap() = Some(SupportedEncoding {
             vp8: vp8_useable,
             av1: av1_useable,
+            av1_vulkan: av1_vulkan_useable,
             h264: h264_useable,
             h265: h265_useable,
             ..Default::default()
@@ -335,7 +348,7 @@ impl Encoder {
         *format = codec_for_preference(preference, auto_codec);
         if decodings.len() > 0 {
             log::info!(
-                "usable: vp8={vp8_useable}, av1={av1_useable}, h264={h264_useable}, h265={h265_useable}",
+                "usable: vp8={vp8_useable}, av1={av1_useable}, av1_vulkan={av1_vulkan_useable}, h264={h264_useable}, h265={h265_useable}",
             );
             log::info!(
                 "connection count: {}, used preference: {:?}, encoder: {:?}",
@@ -368,6 +381,7 @@ impl Encoder {
         if enable_hwcodec_option() {
             encoding.h264 |= HwRamEncoder::try_get(CodecFormat::H264).is_some();
             encoding.h265 |= HwRamEncoder::try_get(CodecFormat::H265).is_some();
+            encoding.av1_vulkan |= HwRamEncoder::try_get(CodecFormat::AV1Vulkan).is_some();
         }
         #[cfg(feature = "vram")]
         if enable_vram_option(true) {
@@ -396,7 +410,11 @@ impl Encoder {
                 } else if name.contains("vp9") {
                     CodecFormat::VP9
                 } else if name.contains("av1") {
-                    CodecFormat::AV1
+                    if name.contains("_vulkan") {
+                        CodecFormat::AV1Vulkan
+                    } else {
+                        CodecFormat::AV1
+                    }
                 } else if name.contains("h264") {
                     CodecFormat::H264
                 } else {
@@ -539,7 +557,7 @@ impl Decoder {
             match unsupported {
                 CodecFormat::VP8 => decoding.ability_vp8 = 0,
                 CodecFormat::VP9 => decoding.ability_vp9 = 0,
-                CodecFormat::AV1 => decoding.ability_av1 = 0,
+                CodecFormat::AV1 | CodecFormat::AV1Vulkan => decoding.ability_av1 = 0,
                 CodecFormat::H264 => decoding.ability_h264 = 0,
                 CodecFormat::H265 => decoding.ability_h265 = 0,
                 _ => {}
@@ -578,7 +596,7 @@ impl Decoder {
                 }
                 valid = vp9.is_some();
             }
-            CodecFormat::AV1 => {
+            CodecFormat::AV1 | CodecFormat::AV1Vulkan => {
                 match AomDecoder::new() {
                     Ok(v) => av1 = Some(v),
                     Err(e) => log::error!("create AV1 decoder failed: {}", e),
@@ -881,6 +899,8 @@ impl Decoder {
             PreferCodec::VP9
         } else if codec == "av1" {
             PreferCodec::AV1
+        } else if codec == "av1-vulkan" {
+            PreferCodec::AV1Vulkan
         } else if codec == "h264" {
             PreferCodec::H264
         } else if codec == "h265" {
@@ -1214,6 +1234,7 @@ mod tests {
         UsableCodecs {
             vp8: true,
             av1: true,
+            av1_vulkan: true,
             h264: true,
             h265: true,
         }
@@ -1248,6 +1269,18 @@ mod tests {
         assert_eq!(
             codec_for_preference(preference.unwrap(), CodecFormat::H265),
             CodecFormat::AV1
+        );
+    }
+
+    #[test]
+    fn codec_preference_explicit_av1_vulkan_maps_to_vulkan_format() {
+        let decodings = decodings(&[PreferCodec::AV1Vulkan]);
+        let preference = preferred_explicit_codec(&decodings, all_usable_codecs());
+
+        assert_eq!(preference, Some(PreferCodec::AV1Vulkan));
+        assert_eq!(
+            codec_for_preference(preference.unwrap(), CodecFormat::H265),
+            CodecFormat::AV1Vulkan
         );
     }
 

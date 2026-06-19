@@ -1664,6 +1664,7 @@ Future<void> _showConnectionPropertiesDialog(String id) async {
                           _stringMenuItem('vp8', 'VP8'),
                           _stringMenuItem('vp9', 'VP9'),
                           _stringMenuItem('av1', 'AV1'),
+                          _stringMenuItem('av1-vulkan', 'AV1 Vulkan'),
                           _stringMenuItem('h264', 'H264'),
                           _stringMenuItem('h265', 'H265'),
                         ],

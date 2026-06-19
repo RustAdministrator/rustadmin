@@ -47,12 +47,14 @@ class TRadioMenu<T> {
   final T value;
   final T groupValue;
   final ValueChanged<T?>? onChanged;
+  final bool dividerBefore;
 
   TRadioMenu(
       {required this.child,
       required this.value,
       required this.groupValue,
-      required this.onChanged});
+      required this.onChanged,
+      this.dividerBefore = false});
 }
 
 class TToggleMenu {
@@ -481,17 +483,19 @@ Future<List<TRadioMenu<String>>> toolbarCodec(
     final Map codecsJson = jsonDecode(alternativeCodecs);
     final vp8 = codecsJson['vp8'] ?? false;
     final av1 = codecsJson['av1'] ?? false;
+    final av1Vulkan = codecsJson['av1_vulkan'] ?? false;
     final h264 = codecsJson['h264'] ?? false;
     final h265 = codecsJson['h265'] ?? false;
     codecs.add(vp8);
     codecs.add(av1);
+    codecs.add(av1Vulkan);
     codecs.add(h264);
     codecs.add(h265);
   } catch (e) {
     debugPrint("Show Codec Preference err=$e");
   }
-  final visible =
-      codecs.length == 4 && (codecs[0] || codecs[1] || codecs[2] || codecs[3]);
+  final visible = codecs.length == 5 &&
+      (codecs[0] || codecs[1] || codecs[2] || codecs[3] || codecs[4]);
   if (!visible) return [];
   onChanged(String? value) async {
     if (value == null) return;
@@ -500,12 +504,14 @@ Future<List<TRadioMenu<String>>> toolbarCodec(
     bind.sessionChangePreferCodec(sessionId: sessionId);
   }
 
-  TRadioMenu<String> radio(String label, String value, bool enabled) {
+  TRadioMenu<String> radio(String label, String value, bool enabled,
+      {bool dividerBefore = false}) {
     return TRadioMenu<String>(
         child: Text(label),
         value: value,
         groupValue: groupValue,
-        onChanged: enabled ? onChanged : null);
+        onChanged: enabled ? onChanged : null,
+        dividerBefore: dividerBefore);
   }
 
   var autoLabel = translate('Auto');
@@ -513,14 +519,31 @@ Future<List<TRadioMenu<String>>> toolbarCodec(
       ffi.qualityMonitorModel.data.codecFormat != null) {
     autoLabel = '$autoLabel (${ffi.qualityMonitorModel.data.codecFormat})';
   }
-  return [
+  final radios = <TRadioMenu<String>>[
     radio(autoLabel, 'auto', true),
-    if (codecs[0]) radio('VP8', 'vp8', codecs[0]),
-    radio('VP9', 'vp9', true),
-    if (codecs[1]) radio('AV1', 'av1', codecs[1]),
-    if (codecs[2]) radio('H264', 'h264', codecs[2]),
-    if (codecs[3]) radio('H265', 'h265', codecs[3]),
   ];
+  if (codecs[0]) {
+    radios.add(radio('VP8', 'vp8', codecs[0], dividerBefore: true));
+    radios.add(radio('VP9', 'vp9', true));
+  } else {
+    radios.add(radio('VP9', 'vp9', true, dividerBefore: true));
+  }
+  if (codecs[1]) {
+    radios.add(radio('AV1', 'av1', codecs[1]));
+  }
+  if (codecs[2]) {
+    radios.add(radio('AV1 Vulkan', 'av1-vulkan', codecs[2],
+        dividerBefore: true));
+  }
+  final hasH264 = codecs[3];
+  final hasH265 = codecs[4];
+  if (hasH264) {
+    radios.add(radio('H264', 'h264', hasH264, dividerBefore: true));
+  }
+  if (hasH265) {
+    radios.add(radio('H265', 'h265', hasH265, dividerBefore: !hasH264));
+  }
+  return radios;
 }
 
 Future<List<TToggleMenu>> toolbarCursor(
