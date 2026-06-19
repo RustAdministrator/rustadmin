@@ -435,10 +435,12 @@ pub fn core_main() -> Option<Vec<String>> {
             }
             #[cfg(target_os = "macos")]
             {
-                if !crate::check_process("--tray", true) {
-                    hbb_common::allow_err!(crate::run_me(vec!["--tray"]));
-                }
-                crate::start_server(true, false);
+                let handler = std::thread::spawn(move || crate::start_server(true, false));
+                crate::tray::start_tray();
+                // macOS input injection is dispatched onto the main GUI run loop.
+                // Keep the LaunchAgent `--server` process GUI-backed so Accessibility/TCC
+                // sees the same app context as a normal app launch.
+                hbb_common::allow_err!(handler.join());
             }
             return None;
         } else if args[0] == "--import-config" {
