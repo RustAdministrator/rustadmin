@@ -1183,6 +1183,8 @@ void showOptions(
   List<TRadioMenu<String>> imageQualityRadios =
       await toolbarImageQuality(context, id, gFFI);
   List<TRadioMenu<String>> codecRadios = await toolbarCodec(context, id, gFFI);
+  List<TRadioMenu<String>> qualityMonitorRadios =
+      await toolbarQualityMonitorPosition(gFFI);
   List<TToggleMenu> cursorToggles = await toolbarCursor(context, id, gFFI);
   List<TToggleMenu> displayToggles =
       await toolbarDisplayToggle(context, id, gFFI);
@@ -1204,6 +1206,9 @@ void showOptions(
         (imageQualityRadios.isNotEmpty ? imageQualityRadios[0].groupValue : '')
             .obs;
     var codec = (codecRadios.isNotEmpty ? codecRadios[0].groupValue : '').obs;
+    var qualityMonitor =
+        (qualityMonitorRadios.isNotEmpty ? qualityMonitorRadios[0].groupValue : '')
+            .obs;
     final radios = [
       for (var e in viewStyleRadios)
         Obx(() => getRadio<String>(
@@ -1245,6 +1250,26 @@ void showOptions(
                   }
                 : null)),
       if (codecRadios.isNotEmpty) const Divider(color: MyTheme.border),
+      if (qualityMonitorRadios.isNotEmpty)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Padding(
+            padding: const EdgeInsets.only(left: 16, top: 4, bottom: 4),
+            child: Text(translate('Quality monitor')),
+          ),
+        ),
+      for (var e in qualityMonitorRadios)
+        Obx(() => getRadio<String>(
+            e.child,
+            e.value,
+            qualityMonitor.value,
+            e.onChanged != null
+                ? (v) {
+                    e.onChanged?.call(v);
+                    if (v != null) qualityMonitor.value = v;
+                  }
+                : null)),
+      if (qualityMonitorRadios.isNotEmpty) const Divider(color: MyTheme.border),
     ];
     final rxCursorToggleValues = cursorToggles.map((e) => e.value.obs).toList();
     final cursorTogglesList = cursorToggles

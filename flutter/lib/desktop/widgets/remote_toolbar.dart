@@ -46,6 +46,9 @@ typedef ToolbarWindowPointerHandler = void Function(Offset? position);
 const String _kOptionRemoteMenubarOrientation = 'remote-menubar-orientation';
 const String _kRemoteMenubarOrientationHorizontal = 'horizontal';
 const String _kRemoteMenubarOrientationVertical = 'vertical';
+const String _kOptionRemoteMenubarDragX = 'remote-menubar-drag-x';
+const String _kOptionRemoteMenubarDragY = 'remote-menubar-drag-y';
+const double _kRemoteMenubarTopEdgeY = 0.0;
 
 class _ToolbarMenuLifecycleScope extends InheritedWidget {
   final VoidCallback onMenuOpen;
@@ -495,12 +498,14 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   bool _wasSessionHidden = false;
   Offset? _lastWindowPointer;
   final _fractionX = 0.5.obs;
+  final _fractionY = 0.0.obs;
   final _dragging = false.obs;
   final _toolbarKey = GlobalKey();
   final _menuController = flutter_widgets.MenuController();
   Offset _toolbarDragStartPointer = Offset.zero;
   Size _toolbarDragSize = Size.zero;
-  double _toolbarDragStartFraction = 0.5;
+  double _toolbarDragStartFractionX = 0.5;
+  double _toolbarDragStartFractionY = 0.0;
   double _dragLeft = 0.0;
   double _dragRight = 1.0;
   int? _lastRevealZonePx;
@@ -679,7 +684,8 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       _toolbarDragSize = Size.zero;
     }
     _toolbarDragStartPointer = details.globalPosition;
-    _toolbarDragStartFraction = _fractionX.value;
+    _toolbarDragStartFractionX = _fractionX.value;
+    _toolbarDragStartFractionY = _fractionY.value;
     _closeMenus();
     _cancelAutoHide();
     _showPinnedToolbarOpaque();
@@ -689,18 +695,29 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
 
   void _updateToolbarDrag(BuildContext context, DragUpdateDetails details) {
     final mediaSize = MediaQueryData.fromView(View.of(context)).size;
-    final range = math.max(1.0, mediaSize.width - _toolbarDragSize.width);
+    final rangeX = math.max(1.0, mediaSize.width - _toolbarDragSize.width);
     final dx = details.globalPosition.dx - _toolbarDragStartPointer.dx;
-    _fractionX.value = (_toolbarDragStartFraction + dx / range)
+    _fractionX.value = (_toolbarDragStartFractionX + dx / rangeX)
         .clamp(_dragLeft, _dragRight)
         .toDouble();
+    if (pin) {
+      final rangeY = math.max(1.0, mediaSize.height - _toolbarDragSize.height);
+      final dy = details.globalPosition.dy - _toolbarDragStartPointer.dy;
+      _fractionY.value =
+          (_toolbarDragStartFractionY + dy / rangeY).clamp(0.0, 1.0).toDouble();
+    }
   }
 
   void _endToolbarDrag() {
     bind.sessionPeerOption(
       sessionId: widget.ffi.sessionId,
-      name: 'remote-menubar-drag-x',
+      name: _kOptionRemoteMenubarDragX,
       value: _fractionX.value.toString(),
+    );
+    bind.sessionPeerOption(
+      sessionId: widget.ffi.sessionId,
+      name: _kOptionRemoteMenubarDragY,
+      value: _fractionY.value.toString(),
     );
     _dragging.value = false;
     if (pin) {
@@ -713,6 +730,16 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
         !_menuIsOpen) {
       _scheduleAutoHide();
     }
+  }
+
+  void _bindToolbarYToTopEdge() {
+    if (_fractionY.value == _kRemoteMenubarTopEdgeY) return;
+    _fractionY.value = _kRemoteMenubarTopEdgeY;
+    bind.sessionPeerOption(
+      sessionId: widget.ffi.sessionId,
+      name: _kOptionRemoteMenubarDragY,
+      value: _fractionY.value.toString(),
+    );
   }
 
   void _handleMenuOpened() {
@@ -839,6 +866,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       return;
     }
 
+    _bindToolbarYToTopEdge();
     _showPinnedToolbarOpaque();
     if (!_isCursorOverToolbar &&
         !_isCursorOverMenu &&
@@ -998,13 +1026,23 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     _pinWorker = ever<bool>(widget.state._pin, _handlePinChanged);
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      _fractionX.value = double.tryParse(await bind.sessionGetOption(
-                  sessionId: widget.ffi.sessionId,
-                  arg: 'remote-menubar-drag-x') ??
-              '0.5') ??
-          0.5;
+      final position = await Future.wait([
+        bind.sessionGetOption(
+            sessionId: widget.ffi.sessionId, arg: _kOptionRemoteMenubarDragX),
+        bind.sessionGetOption(
+            sessionId: widget.ffi.sessionId, arg: _kOptionRemoteMenubarDragY),
+      ]);
+      _fractionX.value = (double.tryParse(position[0] ?? '') ?? 0.5)
+          .clamp(_dragLeft, _dragRight)
+          .toDouble();
+      _fractionY.value = (double.tryParse(position[1] ?? '') ?? 0.0)
+          .clamp(0.0, 1.0)
+          .toDouble();
       // Initialize toolbar states (collapse, hide) from session options
-      widget.state.init(widget.ffi.sessionId);
+      await widget.state.init(widget.ffi.sessionId);
+      if (!pin) {
+        _bindToolbarYToTopEdge();
+      }
     });
 
     widget.onWindowPointerStateSetter(
@@ -1052,8 +1090,9 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       final currentShape = collapse.isFalse
           ? _buildToolbar(context)
           : _buildDraggableCollapse(context);
+      final y = pin ? _fractionY.value : 0.0;
       return Align(
-        alignment: FractionalOffset(_fractionX.value, 0),
+        alignment: FractionalOffset(_fractionX.value, y),
         child: IgnorePointer(
           ignoring: !_visible,
           child: AnimatedSlide(
@@ -1103,6 +1142,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
               sessionId: widget.ffi.sessionId,
               dragging: _dragging,
               fractionX: _fractionX,
+              fractionY: _fractionY,
               toolbarState: widget.state,
               setFullscreen: _setFullscreen,
               setMinimize: _minimize,
@@ -1204,11 +1244,10 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
         cursor: SystemMouseCursors.move,
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
-          onHorizontalDragStart: _startToolbarDrag,
-          onHorizontalDragUpdate: (details) =>
-              _updateToolbarDrag(context, details),
-          onHorizontalDragEnd: (_) => _endToolbarDrag(),
-          onHorizontalDragCancel: _endToolbarDrag,
+          onPanStart: _startToolbarDrag,
+          onPanUpdate: (details) => _updateToolbarDrag(context, details),
+          onPanEnd: (_) => _endToolbarDrag(),
+          onPanCancel: _endToolbarDrag,
           child: SizedBox(
             width: _ToolbarTheme.buttonSize,
             height: _ToolbarTheme.buttonSize,
@@ -3549,6 +3588,7 @@ class _DraggableShowHide extends StatefulWidget {
   final String id;
   final SessionID sessionId;
   final RxDouble fractionX;
+  final RxDouble fractionY;
   final RxBool dragging;
   final ToolbarState toolbarState;
   final BorderRadius borderRadius;
@@ -3561,6 +3601,7 @@ class _DraggableShowHide extends StatefulWidget {
     required this.id,
     required this.sessionId,
     required this.fractionX,
+    required this.fractionY,
     required this.dragging,
     required this.toolbarState,
     required this.setFullscreen,
@@ -3605,7 +3646,7 @@ class _DraggableShowHideState extends State<_DraggableShowHide> {
 
   Widget _buildDraggable(BuildContext context) {
     return Draggable(
-      axis: Axis.horizontal,
+      axis: widget.toolbarState.pin ? null : Axis.horizontal,
       child: Icon(
         Icons.drag_indicator,
         size: 20,
@@ -3623,18 +3664,30 @@ class _DraggableShowHideState extends State<_DraggableShowHide> {
       }),
       onDragEnd: (details) {
         final mediaSize = MediaQueryData.fromView(View.of(context)).size;
+        final rangeX = math.max(1.0, mediaSize.width - size.width);
         widget.fractionX.value +=
-            (details.offset.dx - position.dx) / (mediaSize.width - size.width);
+            (details.offset.dx - position.dx) / rangeX;
         if (widget.fractionX.value < left) {
           widget.fractionX.value = left;
         }
         if (widget.fractionX.value > right) {
           widget.fractionX.value = right;
         }
+        if (widget.toolbarState.pin) {
+          final rangeY = math.max(1.0, mediaSize.height - size.height);
+          widget.fractionY.value += (details.offset.dy - position.dy) / rangeY;
+          widget.fractionY.value =
+              widget.fractionY.value.clamp(0.0, 1.0).toDouble();
+        }
         bind.sessionPeerOption(
           sessionId: widget.sessionId,
-          name: 'remote-menubar-drag-x',
+          name: _kOptionRemoteMenubarDragX,
           value: widget.fractionX.value.toString(),
+        );
+        bind.sessionPeerOption(
+          sessionId: widget.sessionId,
+          name: _kOptionRemoteMenubarDragY,
+          value: widget.fractionY.value.toString(),
         );
         widget.dragging.value = false;
       },
