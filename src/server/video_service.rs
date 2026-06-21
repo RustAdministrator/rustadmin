@@ -57,13 +57,16 @@ use std::{
     collections::HashSet,
     io::ErrorKind::WouldBlock,
     ops::{Deref, DerefMut},
+    sync::atomic::{AtomicU64, Ordering},
     time::{self, Duration, Instant},
 };
 
 pub const OPTION_REFRESH: &'static str = "refresh";
 const ENCODE_NO_VALID_FRAME: &str = "no valid frame";
+const NO_MUTUAL_CODEC: &str = "no mutually supported video codec";
 const HW_ENCODER_WARMUP_TIMEOUT: Duration = Duration::from_secs(3);
 const HOST_VIDEO_DIAG_INTERVAL: Duration = Duration::from_secs(5);
+static NEXT_VIDEO_FRAME_ID: AtomicU64 = AtomicU64::new(1);
 
 type FrameFetchedNotifierSender = UnboundedSender<(i32, Option<Instant>)>;
 type FrameFetchedNotifierReceiver = Arc<TokioMutex<UnboundedReceiver<(i32, Option<Instant>)>>>;
@@ -123,6 +126,23 @@ struct VideoFrameController {
     display_idx: usize,
     cur: Instant,
     send_conn_ids: HashSet<i32>,
+}
+
+fn next_video_frame_id() -> u64 {
+    loop {
+        let current = NEXT_VIDEO_FRAME_ID.load(Ordering::Relaxed);
+        let frame_id = if current == 0 { 1 } else { current };
+        let mut next = frame_id.wrapping_add(1);
+        if next == 0 {
+            next = 1;
+        }
+        if NEXT_VIDEO_FRAME_ID
+            .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return frame_id;
+        }
+    }
 }
 
 impl VideoFrameController {
@@ -719,6 +739,13 @@ fn run(vs: VideoService) -> ResultType<()> {
     ) {
         Ok(result) => result,
         Err(err) => {
+            if err
+                .chain()
+                .any(|cause| cause.to_string() == NO_MUTUAL_CODEC)
+            {
+                log::error!("Failed to create encoder: {err:?}");
+                return Err(err);
+            }
             log::error!("Failed to create encoder: {err:?}, fallback to VP9");
             Encoder::set_fallback(&EncoderCfg::VPX(VpxEncoderConfig {
                 width: c.width as _,
@@ -1132,7 +1159,7 @@ fn setup_encoder(
         client_record || record_incoming,
         last_portable_service_running,
         source,
-    );
+    )?;
     Encoder::set_fallback(&encoder_cfg);
     let codec_format = Encoder::negotiated_codec();
     let recorder = get_recorder(record_incoming, display_idx, source == VideoSource::Camera);
@@ -1163,7 +1190,7 @@ fn get_encoder_config(
     record: bool,
     _portable_service: bool,
     _source: VideoSource,
-) -> EncoderCfg {
+) -> ResultType<EncoderCfg> {
     #[cfg(all(windows, feature = "vram"))]
     if _portable_service || c.is_gdi() || _source == VideoSource::Camera {
         log::info!("gdi:{}, portable:{}", c.is_gdi(), _portable_service);
@@ -1174,29 +1201,29 @@ fn get_encoder_config(
     // https://www.wowza.com/community/t/the-correct-keyframe-interval-in-obs-studio/95162
     let keyframe_interval = if record { Some(240) } else { None };
     let negotiated_codec = Encoder::negotiated_codec();
-    match negotiated_codec {
+    let encoder_cfg = match negotiated_codec {
         CodecFormat::H264 | CodecFormat::H265 => {
             #[cfg(feature = "vram")]
             if let Some(feature) = VRamEncoder::try_get(&c.device(), negotiated_codec) {
-                return EncoderCfg::VRAM(VRamEncoderConfig {
+                return Ok(EncoderCfg::VRAM(VRamEncoderConfig {
                     device: c.device(),
                     width: c.width,
                     height: c.height,
                     quality,
                     feature,
                     keyframe_interval,
-                });
+                }));
             }
             #[cfg(feature = "hwcodec")]
             if let Some(hw) = HwRamEncoder::try_get(negotiated_codec) {
-                return EncoderCfg::HWRAM(HwRamEncoderConfig {
+                return Ok(EncoderCfg::HWRAM(HwRamEncoderConfig {
                     name: hw.name,
                     mc_name: hw.mc_name,
                     width: c.width,
                     height: c.height,
                     quality,
                     keyframe_interval,
-                });
+                }));
             }
             EncoderCfg::VPX(VpxEncoderConfig {
                 width: c.width as _,
@@ -1220,14 +1247,14 @@ fn get_encoder_config(
         CodecFormat::AV1Vulkan => {
             #[cfg(feature = "hwcodec")]
             if let Some(hw) = HwRamEncoder::try_get(CodecFormat::AV1Vulkan) {
-                return EncoderCfg::HWRAM(HwRamEncoderConfig {
+                return Ok(EncoderCfg::HWRAM(HwRamEncoderConfig {
                     name: hw.name,
                     mc_name: hw.mc_name,
                     width: c.width,
                     height: c.height,
                     quality,
                     keyframe_interval,
-                });
+                }));
             }
             EncoderCfg::AOM(AomEncoderConfig {
                 width: c.width as _,
@@ -1242,14 +1269,9 @@ fn get_encoder_config(
             quality,
             keyframe_interval,
         }),
-        _ => EncoderCfg::VPX(VpxEncoderConfig {
-            width: c.width as _,
-            height: c.height as _,
-            quality,
-            codec: VpxVideoCodecId::VP9,
-            keyframe_interval,
-        }),
-    }
+        CodecFormat::Unknown => bail!(NO_MUTUAL_CODEC),
+    };
+    Ok(encoder_cfg)
 }
 
 fn get_recorder(
@@ -1377,6 +1399,7 @@ fn handle_one_frame(
             *encode_fail_counter = 0;
             *hw_no_valid_frame_since = None;
             vf.display = display as _;
+            vf.frame_id = next_video_frame_id();
             let (payload_bytes, frame_count, has_keyframe) =
                 scrap::codec::video_frame_payload_stats(&vf).unwrap_or((0, 0, false));
             let mut msg = Message::new();

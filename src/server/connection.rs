@@ -543,6 +543,8 @@ pub struct Connection {
     tx_input: std_mpsc::Sender<MessageInput>,
     // handle input messages
     video_ack_required: bool,
+    video_startup_ack_frame_id: Option<u64>,
+    video_startup_acked: bool,
     server_audit_conn: String,
     server_audit_file: String,
     lr: LoginRequest,
@@ -695,7 +697,28 @@ fn stream_misc_kind(misc: &Misc) -> &'static str {
     }
 }
 
+fn drop_realtime_message_while_waiting_video_ack(msg: &Message) -> bool {
+    matches!(
+        &msg.union,
+        Some(message::Union::AudioFrame(_))
+            | Some(message::Union::CursorData(_))
+            | Some(message::Union::CursorPosition(_))
+            | Some(message::Union::TestDelay(_))
+    )
+}
+
+fn video_ack_matches_pending(pending_frame_id: Option<u64>, ack_frame_id: u64) -> bool {
+    match pending_frame_id {
+        Some(frame_id) => ack_frame_id == 0 || ack_frame_id == frame_id,
+        None => false,
+    }
+}
+
 impl Connection {
+    fn wait_for_startup_video_ack(&self) -> bool {
+        self.video_ack_required && self.video_startup_ack_frame_id.is_some()
+    }
+
     pub async fn start(
         addr: SocketAddr,
         stream: super::Stream,
@@ -785,6 +808,8 @@ impl Connection {
             show_my_cursor: false,
             tx_input,
             video_ack_required: false,
+            video_startup_ack_frame_id: None,
+            video_startup_acked: false,
             server_audit_conn: "".to_owned(),
             server_audit_file: "".to_owned(),
             lr: Default::default(),
@@ -914,6 +939,8 @@ impl Connection {
         let mut first_video_frame_sent = false;
         let mut stale_video_drop_log_at: Option<Instant> = None;
         let mut stale_video_drop_count = 0u64;
+        let mut realtime_drop_log_at: Option<Instant> = None;
+        let mut realtime_drop_count = 0u64;
 
         #[cfg(feature = "unix-file-copy-paste")]
         let rx_clip_holder;
@@ -1193,6 +1220,51 @@ impl Connection {
                 }
                 Some((instant, value)) = rx_video.recv() => {
                     let is_video_frame = matches!(&value.union, Some(message::Union::VideoFrame(_)));
+                    if is_video_frame && conn.wait_for_startup_video_ack() {
+                        stale_video_drop_count += 1;
+                        if stale_video_drop_log_at
+                            .map(|last| last.elapsed() >= VIDEO_STALE_DROP_LOG_INTERVAL)
+                            .unwrap_or(true)
+                        {
+                            log::warn!(
+                                "#{} diag video frame dropped while waiting for startup client ack: pending_frame_id={:?}, queue_latency_ms={}, dropped_since_last_log={}",
+                                conn.inner.id(),
+                                conn.video_startup_ack_frame_id,
+                                instant.elapsed().as_millis(),
+                                stale_video_drop_count
+                            );
+                            stale_video_drop_log_at = Some(Instant::now());
+                            stale_video_drop_count = 0;
+                        }
+                        continue;
+                    }
+                    let frame_id = match &value.union {
+                        Some(message::Union::VideoFrame(vf)) => Some(vf.frame_id),
+                        _ => None,
+                    };
+                    let wait_for_startup_ack =
+                        is_video_frame && conn.video_ack_required && !conn.video_startup_acked;
+                    let first_video_diag = if is_video_frame && !first_video_frame_sent {
+                        value
+                            .union
+                            .as_ref()
+                            .and_then(|union| match union {
+                                message::Union::VideoFrame(vf) => {
+                                    let (payload_bytes, frame_count, has_keyframe) =
+                                        scrap::codec::video_frame_payload_stats(vf).unwrap_or((0, 0, false));
+                                    Some((
+                                        value.compute_size() as usize,
+                                        payload_bytes,
+                                        frame_count,
+                                        has_keyframe,
+                                        vf.frame_id,
+                                    ))
+                                }
+                                _ => None,
+                            })
+                    } else {
+                        None
+                    };
                     if is_video_frame && first_video_frame_sent && instant.elapsed() >= VIDEO_FRAME_STALE_DROP_AFTER {
                         stale_video_drop_count += 1;
                         if stale_video_drop_log_at
@@ -1212,10 +1284,14 @@ impl Connection {
                             if let Some(message::Union::VideoFrame(vf)) = &value.union {
                                 video_service::notify_video_frame_fetched(vf.display as usize, id, Some(instant.into()));
                             }
+                        } else if conn.video_startup_acked {
+                            if let Some(message::Union::VideoFrame(vf)) = &value.union {
+                                video_service::notify_video_frame_fetched(vf.display as usize, id, Some(instant.into()));
+                            }
                         }
                         continue;
                     }
-                    if let Err(err) = conn.stream.send(&value as &Message).await {
+                    if let Err(err) = conn.stream.send(value.as_ref()).await {
                         let kind = stream_message_kind(&value);
                         if is_video_frame {
                             log::warn!(
@@ -1236,25 +1312,77 @@ impl Connection {
                         conn.on_close(&err.to_string(), false).await;
                         break;
                     }
-                    if is_video_frame && !conn.video_ack_required {
-                        if let Some(message::Union::VideoFrame(vf)) = &value.union {
-                            video_service::notify_video_frame_fetched(vf.display as usize, id, Some(instant.into()));
+                    if is_video_frame {
+                        if wait_for_startup_ack {
+                            conn.video_startup_ack_frame_id = frame_id;
+                        } else if let Some(message::Union::VideoFrame(vf)) = &value.union {
+                            video_service::notify_video_frame_fetched(
+                                vf.display as usize,
+                                id,
+                                Some(instant.into()),
+                            );
                         }
                     }
                     if is_video_frame && !first_video_frame_sent {
                         first_video_frame_sent = true;
-                        log::info!(
-                            "#{} diag first video frame sent to stream: queue_latency_ms={}, video_ack_required={}",
-                            conn.inner.id(),
-                            instant.elapsed().as_millis(),
-                            conn.video_ack_required
-                        );
+                        if let Some((
+                            serialized_bytes,
+                            payload_bytes,
+                            frame_count,
+                            has_keyframe,
+                            frame_id,
+                        )) = first_video_diag
+                        {
+                            log::info!(
+                                "#{} diag first video frame sent to stream: queue_latency_ms={}, video_ack_required={}, frame_id={}, wait_for_startup_ack={}, serialized_bytes={}, payload_bytes={}, frame_count={}, keyframe={}",
+                                conn.inner.id(),
+                                instant.elapsed().as_millis(),
+                                conn.video_ack_required,
+                                frame_id,
+                                wait_for_startup_ack,
+                                serialized_bytes,
+                                payload_bytes,
+                                frame_count,
+                                has_keyframe
+                            );
+                        } else {
+                            log::info!(
+                                "#{} diag first video frame sent to stream: queue_latency_ms={}, video_ack_required={}, frame_id={:?}, wait_for_startup_ack={}",
+                                conn.inner.id(),
+                                instant.elapsed().as_millis(),
+                                conn.video_ack_required,
+                                frame_id,
+                                wait_for_startup_ack
+                            );
+                        }
                     }
                 },
                 Some((instant, value)) = rx.recv() => {
                     let latency = instant.elapsed().as_millis() as i64;
                     #[allow(unused_mut)]
                     let mut msg = value;
+
+                    if conn.wait_for_startup_video_ack()
+                        && drop_realtime_message_while_waiting_video_ack(&msg)
+                    {
+                        realtime_drop_count += 1;
+                        if realtime_drop_log_at
+                            .map(|last| last.elapsed() >= VIDEO_STALE_DROP_LOG_INTERVAL)
+                            .unwrap_or(true)
+                        {
+                            log::warn!(
+                                "#{} diag realtime message dropped while waiting for startup client video ack: kind={}, pending_frame_id={:?}, queue_latency_ms={}, dropped_since_last_log={}",
+                                conn.inner.id(),
+                                stream_message_kind(&msg),
+                                conn.video_startup_ack_frame_id,
+                                instant.elapsed().as_millis(),
+                                realtime_drop_count
+                            );
+                            realtime_drop_log_at = Some(Instant::now());
+                            realtime_drop_count = 0;
+                        }
+                        continue;
+                    }
 
                     if latency > 1000 {
                         match &msg.union {
@@ -1376,6 +1504,9 @@ impl Connection {
                     }
                     // The control end will jump out of the loop after receiving LoginResponse and will not reply to the TestDelay
                     if conn.last_test_delay.is_none() && !(conn.port_forward_socket.is_some() && conn.authorized) {
+                        if conn.wait_for_startup_video_ack() {
+                            continue;
+                        }
                         conn.last_test_delay = Some(Instant::now());
                         let mut msg_out = Message::new();
                         msg_out.set_test_delay(TestDelay{
@@ -3237,13 +3368,15 @@ impl Connection {
         if let Some(o) = self.lr.clone().option.as_ref() {
             if let Some(q) = o.supported_decoding.clone().take() {
                 log::info!(
-                    "#{} supported_decoding on login: h264={}, h265={}, vp9={}, av1={}, prefer={:?}",
+                    "#{} supported_decoding on login: h264={}, h265={}, vp9={}, av1={}, prefer={:?}, prefer_chroma={:?}",
                     self.inner.id(),
                     q.ability_h264,
                     q.ability_h265,
                     q.ability_vp9,
                     q.ability_av1,
-                    q.prefer.enum_value_or(PreferCodec::Auto)
+                    q.prefer.enum_value_or(PreferCodec::Auto),
+                    q.prefer_chroma
+                        .enum_value_or(hbb_common::message_proto::Chroma::I420)
                 );
                 Encoder::update(Update(self.inner.id(), q));
                 log::info!(
@@ -3308,6 +3441,8 @@ impl Connection {
             }
         }
         self.video_ack_required = lr.video_ack_required;
+        self.video_startup_ack_frame_id = None;
+        self.video_startup_acked = false;
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -4362,19 +4497,43 @@ impl Connection {
                         if r {
                             // Refresh all videos.
                             // Compatibility with old versions and sciter(remote).
+                            self.video_startup_ack_frame_id = None;
                             self.refresh_video_display(None);
                         }
                         self.update_auto_disconnect_timer();
                     }
                     Some(misc::Union::RefreshVideoDisplay(display)) => {
+                        self.video_startup_ack_frame_id = None;
                         self.refresh_video_display(Some(display as usize));
                         self.update_auto_disconnect_timer();
                     }
                     Some(misc::Union::VideoReceived(_)) => {
-                        video_service::notify_video_frame_fetched_by_conn_id(
-                            self.inner.id,
-                            Some(Instant::now().into()),
-                        );
+                        let ack_frame_id = misc.video_ack_frame_id;
+                        let ack_display = misc.video_ack_display;
+                        if video_ack_matches_pending(self.video_startup_ack_frame_id, ack_frame_id)
+                        {
+                            log::info!(
+                                "#{} diag startup video ack received: ack_frame_id={}, ack_display={}, pending_frame_id={:?}",
+                                self.inner.id,
+                                ack_frame_id,
+                                ack_display,
+                                self.video_startup_ack_frame_id
+                            );
+                            self.video_startup_ack_frame_id = None;
+                            self.video_startup_acked = true;
+                            video_service::notify_video_frame_fetched_by_conn_id(
+                                self.inner.id,
+                                Some(Instant::now().into()),
+                            );
+                        } else if self.video_startup_ack_frame_id.is_some() {
+                            log::warn!(
+                                "#{} diag ignoring stale video ack: ack_frame_id={}, ack_display={}, pending_frame_id={:?}",
+                                self.inner.id,
+                                ack_frame_id,
+                                ack_display,
+                                self.video_startup_ack_frame_id
+                            );
+                        }
                     }
                     Some(misc::Union::RestartRemoteDevice(_)) => {
                         #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -5360,14 +5519,17 @@ impl Connection {
             }
         }
         if let Some(q) = o.supported_decoding.clone().take() {
+            self.video_startup_ack_frame_id = None;
             log::info!(
-                "#{} supported_decoding update: h264={}, h265={}, vp9={}, av1={}, prefer={:?}",
+                "#{} supported_decoding update: h264={}, h265={}, vp9={}, av1={}, prefer={:?}, prefer_chroma={:?}",
                 self.inner.id(),
                 q.ability_h264,
                 q.ability_h265,
                 q.ability_vp9,
                 q.ability_av1,
-                q.prefer.enum_value_or(PreferCodec::Auto)
+                q.prefer.enum_value_or(PreferCodec::Auto),
+                q.prefer_chroma
+                    .enum_value_or(hbb_common::message_proto::Chroma::I420)
             );
             scrap::codec::Encoder::update(scrap::codec::EncodingUpdate::Update(self.inner.id(), q));
             log::info!(
@@ -7304,6 +7466,27 @@ mod test {
         let mut msg = Message::new();
         msg.set_misc(misc);
         assert_eq!(stream_message_kind(&msg), "Misc::RefreshVideoDisplay");
+    }
+
+    #[test]
+    fn video_ack_guard_drops_only_realtime_messages() {
+        let mut msg = Message::new();
+        msg.set_test_delay(TestDelay::new());
+        assert!(drop_realtime_message_while_waiting_video_ack(&msg));
+
+        let mut misc = Misc::new();
+        misc.set_refresh_video(true);
+        let mut msg = Message::new();
+        msg.set_misc(misc);
+        assert!(!drop_realtime_message_while_waiting_video_ack(&msg));
+    }
+
+    #[test]
+    fn video_ack_matches_pending_or_legacy_ack() {
+        assert!(video_ack_matches_pending(Some(7), 7));
+        assert!(video_ack_matches_pending(Some(7), 0));
+        assert!(!video_ack_matches_pending(Some(7), 8));
+        assert!(!video_ack_matches_pending(None, 0));
     }
 
     #[test]

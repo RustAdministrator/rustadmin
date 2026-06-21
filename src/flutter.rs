@@ -17,6 +17,8 @@ use serde::Serialize;
 use serde_json::json;
 #[cfg(target_os = "windows")]
 use std::io::{Error as IoError, ErrorKind as IoErrorKind};
+#[cfg(target_os = "android")]
+use std::time::{Duration, Instant};
 use std::{
     collections::{HashMap, HashSet},
     ffi::CString,
@@ -221,6 +223,8 @@ pub struct FlutterHandler {
     peer_info: Arc<RwLock<PeerInfo>>,
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     hooks: Arc<RwLock<HashMap<String, SessionHook>>>,
+    #[cfg(target_os = "android")]
+    last_soft_render_skip_log: Arc<RwLock<HashMap<usize, Instant>>>,
     use_texture_render: Arc<AtomicBool>,
 }
 
@@ -232,6 +236,8 @@ impl Default for FlutterHandler {
             peer_info: Default::default(),
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             hooks: Default::default(),
+            #[cfg(target_os = "android")]
+            last_soft_render_skip_log: Default::default(),
             use_texture_render: Arc::new(
                 AtomicBool::new(crate::ui_interface::use_texture_render()),
             ),
@@ -1199,6 +1205,8 @@ impl FlutterHandler {
         let mut rgba_write_lock = self.display_rgbas.write().unwrap();
         if let Some(rgba_data) = rgba_write_lock.get_mut(&display) {
             if rgba_data.valid {
+                #[cfg(target_os = "android")]
+                self.log_android_soft_render_skip(display, rgba);
                 return;
             } else {
                 rgba_data.valid = true;
@@ -1262,6 +1270,27 @@ impl FlutterHandler {
                 }
             }
         }
+    }
+
+    #[cfg(target_os = "android")]
+    fn log_android_soft_render_skip(&self, display: usize, rgba: &scrap::ImageRgb) {
+        let now = Instant::now();
+        let mut last_logs = self.last_soft_render_skip_log.write().unwrap();
+        if last_logs
+            .get(&display)
+            .map(|last| now.saturating_duration_since(*last) < Duration::from_secs(5))
+            .unwrap_or(false)
+        {
+            return;
+        }
+        last_logs.insert(display, now);
+        log::info!(
+            "diag android rgba soft render skipped: display={}, frame_resolution={}x{}, bytes={}, reason=previous_rgba_still_valid, render_path=rgba-soft",
+            display,
+            rgba.w,
+            rgba.h,
+            rgba.raw.len(),
+        );
     }
 }
 

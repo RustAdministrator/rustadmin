@@ -100,6 +100,14 @@ All configurations or options are under `../hbb_common/src/config.rs` file, 4 ty
 - Lock acquisition may use `unwrap()` only when the locking API makes that the practical option and the failure mode is poison handling rather than normal control flow.
 - Outside those exceptions, propagate errors, handle them explicitly, or use safer fallbacks instead of `unwrap()` and `expect()`.
 
+## Codec Handshake Contract
+
+- Treat codec capabilities as a two-sided contract. Viewer `SupportedDecoding` is decode capability only; host `SupportedEncoding` must be limited to encoders that passed the relevant runtime probe or smoke test.
+- Do not advertise AV1, Vulkan AV1, H264, or H265 just because code support exists. The selected codec, `USABLE_ENCODING`, `SupportedEncoding`, and encoder config must all agree.
+- For any codec change, inspect both host and viewer logs for advertised capabilities, usable codecs, selected encoder config, first encoded frame, first received frame, and first decoded frame.
+- Do not change Auto H265/H264 ordering based only on a black-screen symptom. First prove whether the viewer received a video packet, whether protobuf parsing succeeded, and whether decoder creation or frame decode failed.
+- If the viewer never receives the first video frame, do not try to recover by sending codec updates and video refreshes on the same connection. Mark the failed codec and reconnect, or use a transport with a separate media stream, because later video frames cannot repair a blocked ordered stream.
+
 ## Editing Hygiene
 
 - Do not introduce formatting-only changes.

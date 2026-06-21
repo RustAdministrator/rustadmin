@@ -28,7 +28,7 @@ use hbb_common::{
         DigestCheckResult, RemoveJobMeta,
     },
     get_time, log,
-    message_proto::{permission_info::Permission, *},
+    message_proto::{permission_info::Permission, supported_decoding::PreferCodec, *},
     protobuf::Message as _,
     rendezvous_proto::ConnType,
     timeout,
@@ -54,31 +54,51 @@ use std::{
 };
 
 const NO_VIDEO_START_TIMEOUT: Duration = Duration::from_secs(15);
-const NO_VIDEO_START_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
-const NO_VIDEO_START_MAX_REFRESHES: usize = 6;
+const NO_VIDEO_START_FALLBACK_INTERVAL: Duration = Duration::from_secs(5);
+const NO_VIDEO_START_MAX_FALLBACKS: usize = 3;
+const NO_VIDEO_START_RECONNECT_GRACE: Duration = Duration::from_millis(500);
 const NO_VIDEO_START_STALLED_LOG_INTERVAL: Duration = Duration::from_secs(30);
 const FPS_CONTROL_SUMMARY_LOG_INTERVAL: Duration = Duration::from_secs(30);
+
+fn video_received_msg(vf: &VideoFrame) -> Message {
+    let mut misc = Misc::new();
+    misc.set_video_received(true);
+    misc.video_ack_frame_id = vf.frame_id;
+    misc.video_ack_display = vf.display;
+    let mut msg = Message::new();
+    msg.set_misc(misc);
+    msg
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum NoVideoStartupAction {
     None,
-    Refresh { attempt: usize, elapsed_ms: u128 },
-    Stalled { elapsed_ms: u128 },
+    Reconnect {
+        attempt: usize,
+        elapsed_ms: u128,
+    },
+    Stalled {
+        elapsed_ms: u128,
+    },
+    GiveUp {
+        elapsed_ms: u128,
+        fallback_count: usize,
+    },
 }
 
 #[derive(Default)]
 struct NoVideoStartupWatchdog {
     since: Option<Instant>,
-    last_refresh: Option<Instant>,
-    refresh_count: usize,
+    last_fallback: Option<Instant>,
+    fallback_count: usize,
     last_stalled_log: Option<Instant>,
 }
 
 impl NoVideoStartupWatchdog {
     fn reset(&mut self) {
         self.since = None;
-        self.last_refresh = None;
-        self.refresh_count = 0;
+        self.last_fallback = None;
+        self.fallback_count = 0;
         self.last_stalled_log = None;
     }
 
@@ -104,17 +124,24 @@ impl NoVideoStartupWatchdog {
             return NoVideoStartupAction::None;
         }
 
-        let can_refresh = self.refresh_count < NO_VIDEO_START_MAX_REFRESHES
+        let can_fallback = self.fallback_count < NO_VIDEO_START_MAX_FALLBACKS
             && self
-                .last_refresh
-                .map(|last| now.saturating_duration_since(last) >= NO_VIDEO_START_REFRESH_INTERVAL)
+                .last_fallback
+                .map(|last| now.saturating_duration_since(last) >= NO_VIDEO_START_FALLBACK_INTERVAL)
                 .unwrap_or(true);
-        if can_refresh {
-            self.refresh_count += 1;
-            self.last_refresh = Some(now);
-            return NoVideoStartupAction::Refresh {
-                attempt: self.refresh_count,
+        if can_fallback {
+            self.fallback_count += 1;
+            self.last_fallback = Some(now);
+            return NoVideoStartupAction::Reconnect {
+                attempt: self.fallback_count,
                 elapsed_ms: elapsed.as_millis(),
+            };
+        }
+
+        if self.fallback_count >= NO_VIDEO_START_MAX_FALLBACKS {
+            return NoVideoStartupAction::GiveUp {
+                elapsed_ms: elapsed.as_millis(),
+                fallback_count: self.fallback_count,
             };
         }
 
@@ -131,6 +158,84 @@ impl NoVideoStartupWatchdog {
 
         NoVideoStartupAction::None
     }
+}
+
+fn codec_marked_unsupported(mark_unsupported: &[CodecFormat], format: CodecFormat) -> bool {
+    match format {
+        CodecFormat::AV1 | CodecFormat::AV1Vulkan => mark_unsupported
+            .iter()
+            .any(|codec| matches!(codec, CodecFormat::AV1 | CodecFormat::AV1Vulkan)),
+        CodecFormat::Unknown => true,
+        _ => mark_unsupported.contains(&format),
+    }
+}
+
+fn decoding_supports_codec(decoding: &SupportedDecoding, format: CodecFormat) -> bool {
+    match format {
+        CodecFormat::VP8 => decoding.ability_vp8 > 0,
+        CodecFormat::VP9 => decoding.ability_vp9 > 0,
+        CodecFormat::AV1 | CodecFormat::AV1Vulkan => decoding.ability_av1 > 0,
+        CodecFormat::H264 => decoding.ability_h264 > 0,
+        CodecFormat::H265 => decoding.ability_h265 > 0,
+        CodecFormat::Unknown => false,
+    }
+}
+
+fn encoding_supports_codec(encoding: &SupportedEncoding, format: CodecFormat) -> bool {
+    match format {
+        CodecFormat::VP8 => encoding.vp8,
+        // VP9 is always available when the server-side software encoder is built.
+        CodecFormat::VP9 => true,
+        CodecFormat::AV1 => encoding.av1,
+        CodecFormat::AV1Vulkan => encoding.av1_vulkan,
+        CodecFormat::H264 => encoding.h264,
+        CodecFormat::H265 => encoding.h265,
+        CodecFormat::Unknown => false,
+    }
+}
+
+fn preferred_codec_format(prefer: PreferCodec) -> Option<CodecFormat> {
+    match prefer {
+        PreferCodec::VP8 => Some(CodecFormat::VP8),
+        PreferCodec::VP9 => Some(CodecFormat::VP9),
+        PreferCodec::AV1 => Some(CodecFormat::AV1),
+        PreferCodec::AV1Vulkan => Some(CodecFormat::AV1Vulkan),
+        PreferCodec::H264 => Some(CodecFormat::H264),
+        PreferCodec::H265 => Some(CodecFormat::H265),
+        PreferCodec::Auto => None,
+    }
+}
+
+fn next_no_video_startup_fallback_codec(
+    decoding: &SupportedDecoding,
+    encoding: &SupportedEncoding,
+    mark_unsupported: &[CodecFormat],
+    observed_format: CodecFormat,
+) -> Option<CodecFormat> {
+    let preferred = preferred_codec_format(decoding.prefer.enum_value_or(PreferCodec::Auto))
+        .unwrap_or(CodecFormat::Unknown);
+    let candidates = [
+        observed_format,
+        preferred,
+        CodecFormat::H265,
+        CodecFormat::H264,
+        CodecFormat::AV1,
+        CodecFormat::VP9,
+        CodecFormat::VP8,
+    ];
+
+    for candidate in candidates {
+        if codec_marked_unsupported(mark_unsupported, candidate) {
+            continue;
+        }
+        if decoding_supports_codec(decoding, candidate)
+            && encoding_supports_codec(encoding, candidate)
+        {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 pub struct Remote<T: InvokeUiSession> {
@@ -220,6 +325,65 @@ impl<T: InvokeUiSession> Remote<T> {
         }
     }
 
+    fn connection_error_with_state(&self, reason: impl AsRef<str>) -> String {
+        format!(
+            "{}\n\nClient state: connected={}, video_packet_seen={}, video_format={:?}, video_threads={}",
+            reason.as_ref(),
+            self.is_connected,
+            self.first_frame,
+            self.video_format,
+            self.video_threads.len()
+        )
+    }
+
+    fn show_connection_error_with_state(&self, reason: impl AsRef<str>) {
+        let err = self.connection_error_with_state(reason);
+        log::warn!(
+            "diag client connection error shown: id={}, {}",
+            self.handler.get_id(),
+            err.replace('\n', " | ")
+        );
+        self.handler.on_establish_connection_error(err);
+    }
+
+    fn no_video_startup_mark_codec_unsupported(&self) -> Option<CodecFormat> {
+        let id = self.handler.get_id();
+        let mut lc = self.handler.lc.write().unwrap();
+        let decoding = lc.get_supported_decoding();
+        let encoding = lc.supported_encoding.clone();
+        let Some(format) = next_no_video_startup_fallback_codec(
+            &decoding,
+            &encoding,
+            &lc.mark_unsupported,
+            self.video_format,
+        ) else {
+            log::warn!(
+                "diag client no video startup has no codec fallback: id={}, video_format={:?}, mark_unsupported={:?}, supported_encoding={:?}, supported_decoding=(h264={}, h265={}, vp9={}, av1={}, prefer={:?}, prefer_chroma={:?})",
+                id,
+                self.video_format,
+                lc.mark_unsupported,
+                encoding,
+                decoding.ability_h264,
+                decoding.ability_h265,
+                decoding.ability_vp9,
+                decoding.ability_av1,
+                decoding.prefer.enum_value_or(PreferCodec::Auto),
+                decoding.prefer_chroma.enum_value_or(Chroma::I420)
+            );
+            return None;
+        };
+
+        lc.mark_unsupported.push(format);
+        log::warn!(
+            "diag client no video startup marking codec unsupported: id={}, codec={:?}, mark_unsupported={:?}, supported_encoding={:?}",
+            id,
+            format,
+            lc.mark_unsupported,
+            encoding
+        );
+        Some(format)
+    }
+
     pub async fn io_loop(&mut self, key: &str, token: &str, round: u32) {
         #[cfg(target_os = "windows")]
         let _file_clip_context_holder = {
@@ -256,6 +420,7 @@ impl<T: InvokeUiSession> Remote<T> {
         };
         let expects_video =
             conn_type == ConnType::DEFAULT_CONN || conn_type == ConnType::VIEW_CAMERA;
+        let mut reconnect_after_disconnect = false;
 
         match Client::start(
             &self.handler.get_id(),
@@ -327,7 +492,9 @@ impl<T: InvokeUiSession> Remote<T> {
                                             self.video_format,
                                             err
                                         );
-                                        self.handler.on_establish_connection_error(err.to_string());
+                                        self.show_connection_error_with_state(format!(
+                                            "Connection stream read error: {err}"
+                                        ));
                                         break;
                                     }
                                     Ok(ref bytes) => {
@@ -337,6 +504,15 @@ impl<T: InvokeUiSession> Remote<T> {
                                             self.handler.update_received(true);
                                         }
                                         self.data_count.fetch_add(bytes.len(), Ordering::Relaxed);
+                                        if !self.first_frame && bytes.len() > 4096 {
+                                            log::info!(
+                                                "diag client pre-video framed message received: id={}, bytes={}, is_connected={}, video_format={:?}",
+                                                self.handler.get_id(),
+                                                bytes.len(),
+                                                self.is_connected,
+                                                self.video_format
+                                            );
+                                        }
                                         if !self.handle_msg_from_peer(bytes, &mut peer).await {
                                             log::info!(
                                                 "diag client peer handler requested exit: id={}, is_connected={}, video_packet_seen={}, video_format={:?}",
@@ -362,7 +538,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                     self.handler.msgbox("restarting", "Restarting remote device", "remote_restarting_tip", "");
                                 } else {
                                     log::info!("Reset by the peer");
-                                    self.handler.msgbox("error", "Connection Error", "Reset by the peer", "");
+                                    self.show_connection_error_with_state("Reset by the peer");
                                 }
                                 break;
                             }
@@ -388,7 +564,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                     self.video_format,
                                     last_recv_time.elapsed().as_millis()
                                 );
-                                self.handler.msgbox("error", "Connection Error", "Timeout", "");
+                                self.show_connection_error_with_state("Connection receive timeout");
                                 break;
                             }
                             if !self.read_jobs.is_empty() {
@@ -408,38 +584,56 @@ impl<T: InvokeUiSession> Remote<T> {
                                 self.first_frame,
                                 Instant::now(),
                             ) {
-                                NoVideoStartupAction::Refresh { attempt, elapsed_ms } => {
+                                NoVideoStartupAction::Reconnect { attempt, elapsed_ms } => {
                                     log::warn!(
-                                        "diag client no video startup retry: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, elapsed_ms={}, refresh_attempt={}/{}",
+                                        "diag client no video startup reconnect fallback: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, elapsed_ms={}, local_fallback_attempt={}",
                                         self.handler.get_id(),
                                         self.is_connected,
                                         self.first_frame,
                                         self.video_format,
                                         elapsed_ms,
-                                        attempt,
-                                        NO_VIDEO_START_MAX_REFRESHES
+                                        attempt
                                     );
-                                    let msg = client::LoginConfigHandler::refresh();
-                                    if let Err(err) = peer.send(&msg).await {
+                                    if let Some(format) = self.no_video_startup_mark_codec_unsupported() {
                                         log::warn!(
-                                            "diag client no video refresh send failed: id={}, attempt={}, err={}",
+                                            "diag client no video startup scheduling reconnect after stream close: id={}, attempt={}, codec={:?}",
                                             self.handler.get_id(),
                                             attempt,
-                                            err
+                                            format
                                         );
+                                        self.send_close_reason(
+                                            &mut peer,
+                                            "startup video fallback reconnect",
+                                        )
+                                        .await;
+                                        reconnect_after_disconnect = true;
+                                        break;
+                                    } else {
+                                        self.show_connection_error_with_state(format!(
+                                            "Video stream did not start after {elapsed_ms} ms; no codec fallback is available"
+                                        ));
+                                        break;
                                     }
                                 }
                                 NoVideoStartupAction::Stalled { elapsed_ms } => {
                                     log::warn!(
-                                        "diag client no video startup still waiting: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, elapsed_ms={}, refresh_attempts={}/{}",
+                                        "diag client no video startup still waiting: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, elapsed_ms={}, local_fallback_attempts={}",
                                         self.handler.get_id(),
                                         self.is_connected,
                                         self.first_frame,
                                         self.video_format,
                                         elapsed_ms,
-                                        NO_VIDEO_START_MAX_REFRESHES.min(no_video_watchdog.refresh_count),
-                                        NO_VIDEO_START_MAX_REFRESHES
+                                        no_video_watchdog.fallback_count
                                     );
+                                }
+                                NoVideoStartupAction::GiveUp {
+                                    elapsed_ms,
+                                    fallback_count,
+                                } => {
+                                    self.show_connection_error_with_state(format!(
+                                        "Video stream did not start after {elapsed_ms} ms and {fallback_count} reconnect fallback attempts"
+                                    ));
+                                    break;
                                 }
                                 NoVideoStartupAction::None => {}
                             }
@@ -507,6 +701,17 @@ impl<T: InvokeUiSession> Remote<T> {
             .lock()
             .unwrap()
             .set_disconnected(round);
+
+        if reconnect_after_disconnect && _set_disconnected_ok {
+            log::info!(
+                "diag client no video startup reconnect after disconnect: id={}, grace_ms={}",
+                self.handler.get_id(),
+                NO_VIDEO_START_RECONNECT_GRACE.as_millis()
+            );
+            tokio::time::sleep(NO_VIDEO_START_RECONNECT_GRACE).await;
+            self.handler.reconnect(false);
+            return;
+        }
 
         #[cfg(not(target_os = "ios"))]
         if self.handler.is_default() && _set_disconnected_ok {
@@ -1590,15 +1795,49 @@ impl<T: InvokeUiSession> Remote<T> {
     }
 
     async fn handle_msg_from_peer(&mut self, data: &[u8], peer: &mut Stream) -> bool {
-        if let Ok(msg_in) = Message::parse_from_bytes(&data) {
+        let msg_in = match Message::parse_from_bytes(data) {
+            Ok(msg) => msg,
+            Err(err) => {
+                log::warn!(
+                    "diag client invalid peer message: id={}, bytes={}, is_connected={}, video_packet_seen={}, video_format={:?}, err={}",
+                    self.handler.get_id(),
+                    data.len(),
+                    self.is_connected,
+                    self.first_frame,
+                    self.video_format,
+                    err
+                );
+                self.show_connection_error_with_state(format!(
+                    "Invalid peer message received: bytes={}, error={err}",
+                    data.len()
+                ));
+                return false;
+            }
+        };
+        {
             match msg_in.union {
                 Some(message::Union::VideoFrame(vf)) => {
+                    let ack = video_received_msg(&vf);
+                    if let Err(err) = peer.send(&ack).await {
+                        log::warn!(
+                            "diag client video ack send failed: id={}, display={}, format={:?}, err={}",
+                            self.handler.get_id(),
+                            vf.display,
+                            CodecFormat::from(&vf),
+                            err
+                        );
+                        self.show_connection_error_with_state(format!(
+                            "Video acknowledgement failed: {err}"
+                        ));
+                        return false;
+                    }
                     if !self.first_frame {
                         let (payload_bytes, frame_count, has_keyframe) =
                             scrap::codec::video_frame_payload_stats(&vf).unwrap_or((0, 0, false));
                         log::info!(
-                            "diag first video frame received from stream: display={}, format={:?}, payload_bytes={}, frame_count={}, keyframe={}",
+                            "diag first video frame received from stream: display={}, frame_id={}, format={:?}, payload_bytes={}, frame_count={}, keyframe={}",
                             vf.display,
+                            vf.frame_id,
                             CodecFormat::from(&vf),
                             payload_bytes,
                             frame_count,
@@ -2204,7 +2443,7 @@ impl<T: InvokeUiSession> Remote<T> {
                             c
                         );
                         self.sent_close_reason = true; // The controlled end will close, no need to send close reason
-                        self.handler.msgbox("error", "Connection Error", &c, "");
+                        self.show_connection_error_with_state(c);
                         return false;
                     }
                     Some(misc::Union::BackNotification(notification)) => {
@@ -2883,15 +3122,66 @@ impl Drop for VideoThread {
 #[cfg(test)]
 mod tests {
     use super::{
-        session_permission_response_msgbox_type, NoVideoStartupAction, NoVideoStartupWatchdog,
-        NO_VIDEO_START_MAX_REFRESHES, NO_VIDEO_START_REFRESH_INTERVAL, NO_VIDEO_START_TIMEOUT,
+        next_no_video_startup_fallback_codec, session_permission_response_msgbox_type,
+        video_received_msg, NoVideoStartupAction, NoVideoStartupWatchdog,
+        NO_VIDEO_START_FALLBACK_INTERVAL, NO_VIDEO_START_MAX_FALLBACKS, NO_VIDEO_START_TIMEOUT,
     };
-    use hbb_common::tokio::time::{Duration, Instant};
+    use hbb_common::{
+        bytes::{Bytes, BytesMut},
+        bytes_codec::BytesCodec,
+        message_proto::{
+            message, misc, supported_decoding::PreferCodec, SupportedDecoding, SupportedEncoding,
+            VideoFrame,
+        },
+        tokio::time::{Duration, Instant},
+        tokio_util::codec::{Decoder, Encoder},
+    };
+    use scrap::CodecFormat;
+
+    fn decoding(prefer: PreferCodec) -> SupportedDecoding {
+        SupportedDecoding {
+            ability_vp8: 1,
+            ability_vp9: 1,
+            ability_av1: 1,
+            ability_h264: 1,
+            ability_h265: 1,
+            prefer: prefer.into(),
+            ..Default::default()
+        }
+    }
+
+    fn encoding() -> SupportedEncoding {
+        SupportedEncoding {
+            vp8: true,
+            av1: true,
+            av1_vulkan: true,
+            h264: true,
+            h265: true,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn permission_response_dialogs_do_not_close_session_on_ok() {
         assert!(session_permission_response_msgbox_type(true).contains("custom"));
         assert!(session_permission_response_msgbox_type(false).contains("custom"));
+    }
+
+    #[test]
+    fn video_received_ack_preserves_legacy_bool_and_frame_metadata() {
+        let vf = VideoFrame {
+            display: 3,
+            frame_id: 42,
+            ..Default::default()
+        };
+        let ack = video_received_msg(&vf);
+
+        let Some(message::Union::Misc(misc)) = ack.union else {
+            panic!("expected misc ack");
+        };
+        assert!(matches!(misc.union, Some(misc::Union::VideoReceived(true))));
+        assert_eq!(misc.video_ack_frame_id, 42);
+        assert_eq!(misc.video_ack_display, 3);
     }
 
     #[test]
@@ -2915,7 +3205,7 @@ mod tests {
     }
 
     #[test]
-    fn no_video_watchdog_retries_refresh_without_close_action() {
+    fn no_video_watchdog_retries_by_requesting_reconnect_fallback() {
         let mut watchdog = NoVideoStartupWatchdog::default();
         let start = Instant::now();
         assert_eq!(
@@ -2925,7 +3215,7 @@ mod tests {
 
         assert_eq!(
             watchdog.tick(true, true, false, start + NO_VIDEO_START_TIMEOUT),
-            NoVideoStartupAction::Refresh {
+            NoVideoStartupAction::Reconnect {
                 attempt: 1,
                 elapsed_ms: NO_VIDEO_START_TIMEOUT.as_millis()
             }
@@ -2936,17 +3226,17 @@ mod tests {
                 true,
                 true,
                 false,
-                start + NO_VIDEO_START_TIMEOUT + NO_VIDEO_START_REFRESH_INTERVAL
+                start + NO_VIDEO_START_TIMEOUT + NO_VIDEO_START_FALLBACK_INTERVAL
             ),
-            NoVideoStartupAction::Refresh {
+            NoVideoStartupAction::Reconnect {
                 attempt: 2,
-                elapsed_ms: (NO_VIDEO_START_TIMEOUT + NO_VIDEO_START_REFRESH_INTERVAL).as_millis()
+                elapsed_ms: (NO_VIDEO_START_TIMEOUT + NO_VIDEO_START_FALLBACK_INTERVAL).as_millis()
             }
         );
     }
 
     #[test]
-    fn no_video_watchdog_caps_refreshes_and_stays_alive() {
+    fn no_video_watchdog_caps_reconnect_fallbacks_and_gives_up() {
         let mut watchdog = NoVideoStartupWatchdog::default();
         let start = Instant::now();
         assert_eq!(
@@ -2954,13 +3244,13 @@ mod tests {
             NoVideoStartupAction::None
         );
 
-        for attempt in 1..=NO_VIDEO_START_MAX_REFRESHES {
+        for attempt in 1..=NO_VIDEO_START_MAX_FALLBACKS {
             let now = start
                 + NO_VIDEO_START_TIMEOUT
-                + NO_VIDEO_START_REFRESH_INTERVAL * (attempt as u32 - 1);
+                + NO_VIDEO_START_FALLBACK_INTERVAL * (attempt as u32 - 1);
             assert_eq!(
                 watchdog.tick(true, true, false, now),
-                NoVideoStartupAction::Refresh {
+                NoVideoStartupAction::Reconnect {
                     attempt,
                     elapsed_ms: now.saturating_duration_since(start).as_millis()
                 }
@@ -2969,10 +3259,10 @@ mod tests {
 
         let after_cap = start
             + NO_VIDEO_START_TIMEOUT
-            + NO_VIDEO_START_REFRESH_INTERVAL * NO_VIDEO_START_MAX_REFRESHES as u32;
+            + NO_VIDEO_START_FALLBACK_INTERVAL * NO_VIDEO_START_MAX_FALLBACKS as u32;
         assert!(matches!(
             watchdog.tick(true, true, false, after_cap),
-            NoVideoStartupAction::Stalled { .. }
+            NoVideoStartupAction::GiveUp { .. }
         ));
     }
 
@@ -2986,7 +3276,7 @@ mod tests {
         );
         assert!(matches!(
             watchdog.tick(true, true, false, start + NO_VIDEO_START_TIMEOUT),
-            NoVideoStartupAction::Refresh { .. }
+            NoVideoStartupAction::Reconnect { .. }
         ));
 
         assert_eq!(
@@ -2997,5 +3287,71 @@ mod tests {
             watchdog.tick(true, true, false, start + NO_VIDEO_START_TIMEOUT),
             NoVideoStartupAction::None
         );
+    }
+
+    #[test]
+    fn no_video_fallback_marks_explicit_h265_first() {
+        assert_eq!(
+            next_no_video_startup_fallback_codec(
+                &decoding(PreferCodec::H265),
+                &encoding(),
+                &[],
+                CodecFormat::Unknown,
+            ),
+            Some(CodecFormat::H265)
+        );
+    }
+
+    #[test]
+    fn no_video_fallback_skips_already_marked_codec() {
+        assert_eq!(
+            next_no_video_startup_fallback_codec(
+                &decoding(PreferCodec::H265),
+                &encoding(),
+                &[CodecFormat::H265],
+                CodecFormat::Unknown,
+            ),
+            Some(CodecFormat::H264)
+        );
+    }
+
+    #[test]
+    fn no_video_fallback_uses_auto_order_without_explicit_preference() {
+        assert_eq!(
+            next_no_video_startup_fallback_codec(
+                &decoding(PreferCodec::Auto),
+                &encoding(),
+                &[],
+                CodecFormat::Unknown,
+            ),
+            Some(CodecFormat::H265)
+        );
+    }
+
+    #[test]
+    fn framed_stream_waits_for_complete_first_large_frame() {
+        let first_payload = vec![0xA5; 78_597];
+        let second_payload = vec![0x5A; 512];
+        let mut encoder = BytesCodec::new();
+        let mut first_frame = BytesMut::new();
+        let mut second_frame = BytesMut::new();
+        encoder
+            .encode(Bytes::from(first_payload.clone()), &mut first_frame)
+            .unwrap();
+        encoder
+            .encode(Bytes::from(second_payload), &mut second_frame)
+            .unwrap();
+
+        let mut decoder = BytesCodec::new();
+        let last_byte = first_frame.split_off(first_frame.len() - 1);
+        assert!(decoder.decode(&mut first_frame).unwrap().is_none());
+
+        first_frame.extend_from_slice(&last_byte);
+        let decoded = decoder
+            .decode(&mut first_frame)
+            .unwrap()
+            .expect("complete first frame must decode");
+        assert_eq!(decoded.as_ref(), first_payload.as_slice());
+        assert!(decoder.decode(&mut second_frame).unwrap().is_some());
     }
 }

@@ -2845,7 +2845,7 @@ impl LoginConfigHandler {
         }
         let supported_decoding = self.get_supported_decoding();
         log::info!(
-            "diag viewer supported_decoding on login: id={}, texture_render={}, adapter_luid={:?}, mark_unsupported={:?}, h264={}, h265={}, vp9={}, av1={}, prefer={:?}",
+            "diag viewer supported_decoding on login: id={}, texture_render={}, adapter_luid={:?}, mark_unsupported={:?}, h264={}, h265={}, vp9={}, av1={}, prefer={:?}, prefer_chroma={:?}",
             self.id,
             use_texture_render(),
             self.adapter_luid,
@@ -2854,7 +2854,8 @@ impl LoginConfigHandler {
             supported_decoding.ability_h265,
             supported_decoding.ability_vp9,
             supported_decoding.ability_av1,
-            supported_decoding.prefer.enum_value_or(PreferCodec::Auto)
+            supported_decoding.prefer.enum_value_or(PreferCodec::Auto),
+            supported_decoding.prefer_chroma.enum_value_or(Chroma::I420)
         );
         msg.supported_decoding = MessageField::some(supported_decoding);
         Some(msg)
@@ -3310,6 +3311,7 @@ impl LoginConfigHandler {
             my_name: display_name,
             my_platform,
             option: self.get_option_message(true).into(),
+            video_ack_required: true,
             session_id: self.session_id,
             version: crate::VERSION.to_string(),
             os_login: Some(OSLogin {
@@ -3355,7 +3357,7 @@ impl LoginConfigHandler {
             &self.mark_unsupported,
         );
         log::info!(
-            "diag viewer supported_decoding update: id={}, texture_render={}, adapter_luid={:?}, mark_unsupported={:?}, h264={}, h265={}, vp9={}, av1={}, prefer={:?}",
+            "diag viewer supported_decoding update: id={}, texture_render={}, adapter_luid={:?}, mark_unsupported={:?}, h264={}, h265={}, vp9={}, av1={}, prefer={:?}, prefer_chroma={:?}",
             self.id,
             use_texture_render(),
             self.adapter_luid,
@@ -3364,7 +3366,8 @@ impl LoginConfigHandler {
             decoding.ability_h265,
             decoding.ability_vp9,
             decoding.ability_av1,
-            decoding.prefer.enum_value_or(PreferCodec::Auto)
+            decoding.prefer.enum_value_or(PreferCodec::Auto),
+            decoding.prefer_chroma.enum_value_or(Chroma::I420)
         );
         let mut misc = Misc::new();
         misc.set_option(OptionMessage {
@@ -3451,6 +3454,8 @@ pub fn start_video_thread<F, T>(
         let mut count = 0;
         let mut duration = std::time::Duration::ZERO;
         let mut skip_beginning = 0;
+        #[cfg(target_os = "android")]
+        let mut last_android_video_diag = None::<std::time::Instant>;
         loop {
             if let Ok(data) = video_receiver.recv() {
                 match data {
@@ -3492,14 +3497,51 @@ pub fn start_video_thread<F, T>(
                             let mut pixelbuffer = true;
                             let mut tmp_chroma = None;
                             let format_changed = handler.decoder.format() != format;
+                            #[cfg(target_os = "android")]
+                            let handle_start = std::time::Instant::now();
                             match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
                                 Ok(true) => {
+                                    #[cfg(target_os = "android")]
+                                    let handle_elapsed = handle_start.elapsed();
+                                    #[cfg(target_os = "android")]
+                                    let callback_start = std::time::Instant::now();
                                     video_callback(
                                         display,
                                         &mut handler.rgb,
                                         handler.texture.texture,
                                         pixelbuffer,
                                     );
+                                    #[cfg(target_os = "android")]
+                                    let callback_elapsed = callback_start.elapsed();
+
+                                    #[cfg(target_os = "android")]
+                                    {
+                                        let should_log = last_android_video_diag
+                                            .map(|last| {
+                                                last.elapsed() >= std::time::Duration::from_secs(5)
+                                            })
+                                            .unwrap_or(true);
+                                        if should_log {
+                                            last_android_video_diag =
+                                                Some(std::time::Instant::now());
+                                            let queue_len = video_queue.read().unwrap().len();
+                                            let decode_fps = *fps.read().unwrap();
+                                            log::info!(
+                                                "diag android video pipeline: display={}, codec={:?}, frame_resolution={}x{}, pixelbuffer={}, queue_len={}, handle_frame_ms={}, video_callback_ms={}, total_ms={}, decode_fps={:?}, render_path={}",
+                                                display,
+                                                handler.decoder.format(),
+                                                handler.rgb.w,
+                                                handler.rgb.h,
+                                                pixelbuffer,
+                                                queue_len,
+                                                handle_elapsed.as_millis(),
+                                                callback_elapsed.as_millis(),
+                                                start.elapsed().as_millis(),
+                                                decode_fps,
+                                                if pixelbuffer { "rgba-soft" } else { "texture" },
+                                            );
+                                        }
+                                    }
 
                                     // chroma
                                     if tmp_chroma.is_some() && last_chroma != tmp_chroma {

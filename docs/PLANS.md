@@ -38,3 +38,40 @@ Target design:
 
 Do not start the QUIC implementation until the current no-video startup handling
 is stable and covered by focused tests.
+
+## Codec Handshake Regression Guard
+
+Codec changes must keep advertised, usable, and selected codecs consistent.
+Before considering codec work done, compare both peer logs for:
+
+- Host `SupportedEncoding` and viewer `SupportedDecoding`.
+- `usable:` codec calculation and negotiated codec.
+- Selected encoder config and whether it came from software, Vulkan, RAM hardware,
+  or VRAM hardware.
+- First encoded frame, first received frame, and first decoded frame.
+
+Fail closed: if an encoder probe or smoke test is missing, pending, skipped, or
+failed, do not advertise that encoder and do not allow explicit peer preference to
+select it.
+
+Do not treat a black screen as an H265 decode failure by default. If the viewer
+never logs a first received video frame, debug stream delivery, protobuf parsing,
+and send queue latency before changing codec priority.
+
+If the viewer never logs a first received video frame, in-place codec fallback on
+the same ordered connection is not a valid recovery path. Mark the attempted
+codec unsupported and reconnect, or move media to a separate stream in a future
+transport design.
+
+## Android MediaCodec FPS Workaround
+
+Android H264/H265 currently decodes through MediaCodec byte buffers, converts
+YUV to RGBA on CPU, then sends RGBA into Flutter soft rendering. The measured
+`decode_fps` includes that decode, conversion, and Flutter handoff path, so
+adaptive FPS can throttle the host to the Android render pipeline speed.
+
+Do not treat codec negotiation changes as the fix for Android 2K FPS caps. The
+proper workaround is an Android-only MediaCodec Surface/SurfaceTexture/Flutter
+texture path for H264/H265, with automatic fallback to the current RGBA
+soft-render path if codec setup, texture registration, frame delivery, or runtime
+rendering fails.
