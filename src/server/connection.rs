@@ -686,6 +686,8 @@ fn stream_misc_kind(misc: &Misc) -> &'static str {
         Some(misc::Union::RefreshVideo(_)) => "Misc::RefreshVideo",
         Some(misc::Union::RefreshVideoDisplay(_)) => "Misc::RefreshVideoDisplay",
         Some(misc::Union::VideoReceived(_)) => "Misc::VideoReceived",
+        Some(misc::Union::VideoReceiverStats(_)) => "Misc::VideoReceiverStats",
+        Some(misc::Union::VideoKeyframeRequest(_)) => "Misc::VideoKeyframeRequest",
         Some(misc::Union::CloseReason(_)) => "Misc::CloseReason",
         Some(misc::Union::ChatMessage(_)) => "Misc::ChatMessage",
         Some(misc::Union::Option(_)) => "Misc::Option",
@@ -4535,6 +4537,42 @@ impl Connection {
                             );
                         }
                     }
+                    Some(misc::Union::VideoReceiverStats(stats)) => {
+                        log::debug!(
+                            "#{} diag video receiver stats: display={}, first_frame_id={}, last_frame_id={}, received={}, decoded={}, rendered={}, dropped={}, skipped={}, bytes={}, freeze_count={}, decode_errors={}, decode_queue_len={}, render_queue_len={}, last_render_age_ms={}, interval_ms={}",
+                            self.inner.id(),
+                            stats.display,
+                            stats.first_frame_id,
+                            stats.last_frame_id,
+                            stats.frames_received,
+                            stats.frames_decoded,
+                            stats.frames_rendered,
+                            stats.frames_dropped,
+                            stats.skipped_frame_ids,
+                            stats.bytes_received,
+                            stats.freeze_count,
+                            stats.decode_errors,
+                            stats.decode_queue_len,
+                            stats.render_queue_len,
+                            stats.last_render_age_ms,
+                            stats.interval_ms
+                        );
+                        video_service::VIDEO_QOS
+                            .lock()
+                            .unwrap()
+                            .user_video_receiver_stats(self.inner.id(), &stats);
+                    }
+                    Some(misc::Union::VideoKeyframeRequest(request)) => {
+                        log::info!(
+                            "#{} diag video keyframe request: display={}, last_frame_id={}, reason={}",
+                            self.inner.id(),
+                            request.display,
+                            request.last_frame_id,
+                            request.reason
+                        );
+                        self.refresh_video_display(Some(request.display.max(0) as usize));
+                        self.update_auto_disconnect_timer();
+                    }
                     Some(misc::Union::RestartRemoteDevice(_)) => {
                         #[cfg(not(any(target_os = "android", target_os = "ios")))]
                         if self.restart {
@@ -7466,6 +7504,26 @@ mod test {
         let mut msg = Message::new();
         msg.set_misc(misc);
         assert_eq!(stream_message_kind(&msg), "Misc::RefreshVideoDisplay");
+
+        let mut misc = Misc::new();
+        misc.set_video_receiver_stats(VideoReceiverStats {
+            display: 0,
+            ..Default::default()
+        });
+        let mut msg = Message::new();
+        msg.set_misc(misc);
+        assert_eq!(stream_message_kind(&msg), "Misc::VideoReceiverStats");
+
+        let mut misc = Misc::new();
+        misc.set_video_keyframe_request(VideoKeyframeRequest {
+            display: 0,
+            last_frame_id: 42,
+            reason: 1,
+            ..Default::default()
+        });
+        let mut msg = Message::new();
+        msg.set_misc(misc);
+        assert_eq!(stream_message_kind(&msg), "Misc::VideoKeyframeRequest");
     }
 
     #[test]
@@ -7476,6 +7534,15 @@ mod test {
 
         let mut misc = Misc::new();
         misc.set_refresh_video(true);
+        let mut msg = Message::new();
+        msg.set_misc(misc);
+        assert!(!drop_realtime_message_while_waiting_video_ack(&msg));
+
+        let mut misc = Misc::new();
+        misc.set_video_receiver_stats(VideoReceiverStats {
+            display: 0,
+            ..Default::default()
+        });
         let mut msg = Message::new();
         msg.set_misc(misc);
         assert!(!drop_realtime_message_while_waiting_video_ack(&msg));

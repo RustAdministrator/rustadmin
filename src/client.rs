@@ -21,6 +21,7 @@ use std::{
     ops::Deref,
     str::FromStr,
     sync::{
+        atomic::{AtomicU64, Ordering},
         mpsc::{self, RecvTimeoutError},
         Arc, Mutex, RwLock,
     },
@@ -3424,6 +3425,116 @@ pub enum MediaData {
 
 pub type MediaSender = mpsc::Sender<MediaData>;
 
+const VIDEO_DECODE_LATENCY_WINDOW: usize = 64;
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct VideoThreadStatsSnapshot {
+    pub frames_decoded: u64,
+    pub frames_rendered: u64,
+    pub decode_errors: u64,
+    pub decode_ms_avg: u32,
+    pub decode_ms_p95: u32,
+    pub last_render_age_ms: u32,
+}
+
+#[derive(Debug)]
+struct VideoDecodeLatencyWindow {
+    samples: [u16; VIDEO_DECODE_LATENCY_WINDOW],
+    len: usize,
+    next: usize,
+}
+
+impl Default for VideoDecodeLatencyWindow {
+    fn default() -> Self {
+        Self {
+            samples: [0; VIDEO_DECODE_LATENCY_WINDOW],
+            len: 0,
+            next: 0,
+        }
+    }
+}
+
+impl VideoDecodeLatencyWindow {
+    fn push(&mut self, value: u32) {
+        self.samples[self.next] = value.min(u16::MAX as u32) as u16;
+        self.next = (self.next + 1) % VIDEO_DECODE_LATENCY_WINDOW;
+        self.len = (self.len + 1).min(VIDEO_DECODE_LATENCY_WINDOW);
+    }
+
+    fn p95(&self) -> u32 {
+        if self.len == 0 {
+            return 0;
+        }
+
+        let mut samples = self.samples;
+        let samples = &mut samples[..self.len];
+        samples.sort_unstable();
+        let index = ((self.len - 1) * 95) / 100;
+        samples[index] as u32
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct VideoThreadStats {
+    frames_decoded: AtomicU64,
+    frames_rendered: AtomicU64,
+    decode_errors: AtomicU64,
+    decode_samples: AtomicU64,
+    decode_total_ms: AtomicU64,
+    last_render_ms: AtomicU64,
+    decode_latency: Mutex<VideoDecodeLatencyWindow>,
+}
+
+impl VideoThreadStats {
+    pub fn record_decoded(&self, elapsed: std::time::Duration) {
+        let elapsed_ms = elapsed.as_millis().min(u64::MAX as u128) as u64;
+        self.frames_decoded.fetch_add(1, Ordering::Relaxed);
+        self.decode_samples.fetch_add(1, Ordering::Relaxed);
+        self.decode_total_ms
+            .fetch_add(elapsed_ms, Ordering::Relaxed);
+        self.decode_latency
+            .lock()
+            .unwrap()
+            .push(elapsed_ms.min(u32::MAX as u64) as u32);
+    }
+
+    pub fn record_rendered(&self) {
+        self.frames_rendered.fetch_add(1, Ordering::Relaxed);
+        self.last_render_ms
+            .store(hbb_common::get_time().max(0) as u64, Ordering::Relaxed);
+    }
+
+    pub fn record_decode_error(&self) {
+        self.decode_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn snapshot(&self) -> VideoThreadStatsSnapshot {
+        let decode_samples = self.decode_samples.load(Ordering::Relaxed);
+        let decode_ms_avg = if decode_samples == 0 {
+            0
+        } else {
+            (self.decode_total_ms.load(Ordering::Relaxed) / decode_samples).min(u32::MAX as u64)
+                as u32
+        };
+        let now_ms = hbb_common::get_time().max(0) as u64;
+        let last_render_ms = self.last_render_ms.load(Ordering::Relaxed);
+        let last_render_age_ms = if last_render_ms == 0 {
+            u32::MAX
+        } else {
+            now_ms.saturating_sub(last_render_ms).min(u32::MAX as u64) as u32
+        };
+
+        VideoThreadStatsSnapshot {
+            frames_decoded: self.frames_decoded.load(Ordering::Relaxed),
+            frames_rendered: self.frames_rendered.load(Ordering::Relaxed),
+            decode_errors: self.decode_errors.load(Ordering::Relaxed),
+            decode_ms_avg,
+            decode_ms_p95: self.decode_latency.lock().unwrap().p95(),
+            last_render_age_ms,
+        }
+    }
+}
+
 /// Start video thread.
 ///
 /// # Arguments
@@ -3437,6 +3548,7 @@ pub fn start_video_thread<F, T>(
     fps: Arc<RwLock<Option<usize>>>,
     chroma: Arc<RwLock<Option<Chroma>>>,
     discard_queue: Arc<RwLock<bool>>,
+    stats: Arc<VideoThreadStats>,
     video_callback: F,
 ) where
     F: 'static + FnMut(usize, &mut scrap::ImageRgb, *mut c_void, bool) + Send,
@@ -3501,6 +3613,7 @@ pub fn start_video_thread<F, T>(
                             let handle_start = std::time::Instant::now();
                             match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
                                 Ok(true) => {
+                                    stats.record_decoded(start.elapsed());
                                     #[cfg(target_os = "android")]
                                     let handle_elapsed = handle_start.elapsed();
                                     #[cfg(target_os = "android")]
@@ -3511,6 +3624,7 @@ pub fn start_video_thread<F, T>(
                                         handler.texture.texture,
                                         pixelbuffer,
                                     );
+                                    stats.record_rendered();
                                     #[cfg(target_os = "android")]
                                     let callback_elapsed = callback_start.elapsed();
 
@@ -3560,6 +3674,7 @@ pub fn start_video_thread<F, T>(
                                     );
                                 }
                                 Err(e) => {
+                                    stats.record_decode_error();
                                     // This is a simple workaround.
                                     //
                                     // I only see the following error:
@@ -3574,7 +3689,9 @@ pub fn start_video_thread<F, T>(
                                     log::error!("handle video frame error, {}", e);
                                     session.refresh_video(display as _);
                                 }
-                                _ => {}
+                                _ => {
+                                    stats.record_decode_error();
+                                }
                             }
                         }
 

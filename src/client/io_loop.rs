@@ -59,6 +59,10 @@ const NO_VIDEO_START_MAX_FALLBACKS: usize = 3;
 const NO_VIDEO_START_RECONNECT_GRACE: Duration = Duration::from_millis(500);
 const NO_VIDEO_START_STALLED_LOG_INTERVAL: Duration = Duration::from_secs(30);
 const FPS_CONTROL_SUMMARY_LOG_INTERVAL: Duration = Duration::from_secs(30);
+const VIDEO_RECEIVER_FREEZE_TIMEOUT: Duration = Duration::from_secs(3);
+const VIDEO_KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
+const VIDEO_KEYFRAME_REASON_FRAME_GAP: u32 = 1;
+const VIDEO_KEYFRAME_REASON_QUEUE_DROP: u32 = 2;
 
 fn video_received_msg(vf: &VideoFrame) -> Message {
     let mut misc = Misc::new();
@@ -68,6 +72,172 @@ fn video_received_msg(vf: &VideoFrame) -> Message {
     let mut msg = Message::new();
     msg.set_misc(misc);
     msg
+}
+
+fn video_keyframe_request_msg(display: i32, last_frame_id: u64, reason: u32) -> Message {
+    let mut misc = Misc::new();
+    misc.set_video_keyframe_request(VideoKeyframeRequest {
+        display,
+        last_frame_id,
+        reason,
+        ..Default::default()
+    });
+    let mut msg = Message::new();
+    msg.set_misc(misc);
+    msg
+}
+
+fn video_receiver_stats_msg(stats: VideoReceiverStats) -> Message {
+    let mut misc = Misc::new();
+    misc.set_video_receiver_stats(stats);
+    let mut msg = Message::new();
+    msg.set_misc(misc);
+    msg
+}
+
+fn usize_to_u32(value: usize) -> u32 {
+    value.min(u32::MAX as usize) as u32
+}
+
+#[derive(Debug, Default)]
+struct VideoReceiverStatsTracker {
+    first_frame_id: u64,
+    last_frame_id: u64,
+    frames_received: u64,
+    frames_dropped: u64,
+    bytes_received: u64,
+    skipped_frame_ids: u64,
+    encoded_frames_received: u64,
+    keyframes_received: u64,
+    freeze_count: u64,
+    last_rendered_frames: u64,
+    last_render_progress: Option<Instant>,
+    last_freeze_report: Option<Instant>,
+    last_keyframe_request: Option<Instant>,
+}
+
+impl VideoReceiverStatsTracker {
+    fn record_frame_received(
+        &mut self,
+        vf: &VideoFrame,
+        bytes_received: usize,
+        encoded_frame_count: usize,
+        has_keyframe: bool,
+        now: Instant,
+    ) -> Option<u32> {
+        self.frames_received = self.frames_received.saturating_add(1);
+        self.bytes_received = self
+            .bytes_received
+            .saturating_add(bytes_received.min(u64::MAX as usize) as u64);
+        self.encoded_frames_received = self
+            .encoded_frames_received
+            .saturating_add(encoded_frame_count.min(u64::MAX as usize) as u64);
+        if has_keyframe {
+            self.keyframes_received = self.keyframes_received.saturating_add(1);
+        }
+
+        if self.first_frame_id == 0 && vf.frame_id != 0 {
+            self.first_frame_id = vf.frame_id;
+        }
+
+        let gap_reason = if vf.frame_id != 0
+            && self.last_frame_id != 0
+            && vf.frame_id > self.last_frame_id.saturating_add(1)
+        {
+            let skipped = vf
+                .frame_id
+                .saturating_sub(self.last_frame_id)
+                .saturating_sub(1);
+            self.skipped_frame_ids = self.skipped_frame_ids.saturating_add(skipped);
+            Some(VIDEO_KEYFRAME_REASON_FRAME_GAP)
+        } else {
+            None
+        };
+
+        if vf.frame_id != 0 {
+            self.last_frame_id = vf.frame_id;
+        }
+        if self.last_render_progress.is_none() {
+            self.last_render_progress = Some(now);
+        }
+
+        gap_reason
+    }
+
+    fn record_queue_drop(&mut self) {
+        self.frames_dropped = self.frames_dropped.saturating_add(1);
+    }
+
+    fn should_send_keyframe_request(&mut self, now: Instant) -> bool {
+        if self
+            .last_keyframe_request
+            .map(|last| now.saturating_duration_since(last) < VIDEO_KEYFRAME_REQUEST_INTERVAL)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        self.last_keyframe_request = Some(now);
+        true
+    }
+
+    fn update_render_progress(&mut self, frames_rendered: u64, now: Instant) {
+        if frames_rendered > self.last_rendered_frames {
+            self.last_rendered_frames = frames_rendered;
+            self.last_render_progress = Some(now);
+            return;
+        }
+
+        if self.frames_received == 0 {
+            return;
+        }
+
+        let stalled = self
+            .last_render_progress
+            .map(|last| now.saturating_duration_since(last) >= VIDEO_RECEIVER_FREEZE_TIMEOUT)
+            .unwrap_or(false);
+        let can_report = self
+            .last_freeze_report
+            .map(|last| now.saturating_duration_since(last) >= VIDEO_RECEIVER_FREEZE_TIMEOUT)
+            .unwrap_or(true);
+        if stalled && can_report {
+            self.freeze_count = self.freeze_count.saturating_add(1);
+            self.last_freeze_report = Some(now);
+        }
+    }
+
+    fn to_proto(
+        &mut self,
+        display: usize,
+        interval_ms: u32,
+        decode_queue_len: usize,
+        render_queue_len: usize,
+        decode_snapshot: client::VideoThreadStatsSnapshot,
+        now: Instant,
+    ) -> VideoReceiverStats {
+        self.update_render_progress(decode_snapshot.frames_rendered, now);
+        VideoReceiverStats {
+            display: display.min(i32::MAX as usize) as i32,
+            first_frame_id: self.first_frame_id,
+            last_frame_id: self.last_frame_id,
+            frames_received: self.frames_received,
+            frames_decoded: decode_snapshot.frames_decoded,
+            frames_rendered: decode_snapshot.frames_rendered,
+            frames_dropped: self.frames_dropped,
+            bytes_received: self.bytes_received,
+            skipped_frame_ids: self.skipped_frame_ids,
+            decode_queue_len: usize_to_u32(decode_queue_len),
+            render_queue_len: usize_to_u32(render_queue_len),
+            decode_ms_avg: decode_snapshot.decode_ms_avg,
+            decode_ms_p95: decode_snapshot.decode_ms_p95,
+            freeze_count: self.freeze_count,
+            last_render_age_ms: decode_snapshot.last_render_age_ms,
+            interval_ms,
+            encoded_frames_received: self.encoded_frames_received,
+            keyframes_received: self.keyframes_received,
+            decode_errors: decode_snapshot.decode_errors,
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -260,6 +430,7 @@ pub struct Remote<T: InvokeUiSession> {
     elevation_requested: bool,
     peer_info: ParsedPeerInfo,
     video_threads: HashMap<usize, VideoThread>,
+    video_receiver_stats: HashMap<usize, VideoReceiverStatsTracker>,
     chroma: Arc<RwLock<Option<Chroma>>>,
     last_record_state: bool,
     sent_close_reason: bool,
@@ -318,6 +489,7 @@ impl<T: InvokeUiSession> Remote<T> {
             elevation_requested: false,
             peer_info: Default::default(),
             video_threads: Default::default(),
+            video_receiver_stats: Default::default(),
             chroma: Default::default(),
             last_record_state: false,
             sent_close_reason: false,
@@ -655,6 +827,11 @@ impl<T: InvokeUiSession> Remote<T> {
                                 *v.frame_count.write().unwrap() = 0;
                             });
                             self.fps_control(direct, fps.clone());
+                            self.send_video_receiver_stats(
+                                &mut peer,
+                                elapsed.min(u32::MAX as u128) as u32,
+                            )
+                            .await;
                             let chroma = self.chroma.read().unwrap().clone();
                             let chroma = match chroma {
                                 Some(Chroma::I444) => "4:4:4",
@@ -901,6 +1078,75 @@ impl<T: InvokeUiSession> Remote<T> {
         msg.set_misc(misc);
         allow_err!(peer.send(&msg).await);
         self.sent_close_reason = true;
+    }
+
+    async fn send_video_keyframe_request(
+        &mut self,
+        peer: &mut Stream,
+        display: i32,
+        last_frame_id: u64,
+        reason: u32,
+    ) {
+        let now = Instant::now();
+        let display_key = display.max(0) as usize;
+        let Some(stats) = self.video_receiver_stats.get_mut(&display_key) else {
+            return;
+        };
+        if !stats.should_send_keyframe_request(now) {
+            return;
+        }
+        let msg = video_keyframe_request_msg(display, last_frame_id, reason);
+        if let Err(err) = peer.send(&msg).await {
+            log::warn!(
+                "diag client video keyframe request send failed: id={}, display={}, last_frame_id={}, reason={}, err={}",
+                self.handler.get_id(),
+                display,
+                last_frame_id,
+                reason,
+                err
+            );
+        } else {
+            log::info!(
+                "diag client video keyframe request sent: id={}, display={}, last_frame_id={}, reason={}",
+                self.handler.get_id(),
+                display,
+                last_frame_id,
+                reason
+            );
+        }
+    }
+
+    async fn send_video_receiver_stats(&mut self, peer: &mut Stream, interval_ms: u32) {
+        let now = Instant::now();
+        let video_threads = &self.video_threads;
+        let messages = self
+            .video_receiver_stats
+            .iter_mut()
+            .filter_map(|(display, tracker)| {
+                let thread = video_threads.get(display)?;
+                let decode_snapshot = thread.stats.snapshot();
+                Some(video_receiver_stats_msg(tracker.to_proto(
+                    *display,
+                    interval_ms,
+                    thread.video_queue.read().unwrap().len(),
+                    0,
+                    decode_snapshot,
+                    now,
+                )))
+            })
+            .collect::<Vec<_>>();
+
+        for msg in messages {
+            if let Err(err) = peer.send(&msg).await {
+                log::warn!(
+                    "diag client video receiver stats send failed: id={}, interval_ms={}, err={}",
+                    self.handler.get_id(),
+                    interval_ms,
+                    err
+                );
+                return;
+            }
+        }
     }
 
     async fn handle_msg_from_ui(&mut self, data: Data, peer: &mut Stream) -> bool {
@@ -1817,6 +2063,27 @@ impl<T: InvokeUiSession> Remote<T> {
         {
             match msg_in.union {
                 Some(message::Union::VideoFrame(vf)) => {
+                    let (payload_bytes, frame_count, has_keyframe) =
+                        scrap::codec::video_frame_payload_stats(&vf).unwrap_or((0, 0, false));
+                    let display_i32 = vf.display;
+                    let display = display_i32.max(0) as usize;
+                    let frame_id = vf.frame_id;
+                    let mut keyframe_request_reason = self
+                        .video_receiver_stats
+                        .entry(display)
+                        .or_default()
+                        .record_frame_received(
+                            &vf,
+                            if payload_bytes == 0 {
+                                data.len()
+                            } else {
+                                payload_bytes
+                            },
+                            frame_count,
+                            has_keyframe,
+                            Instant::now(),
+                        );
+
                     let ack = video_received_msg(&vf);
                     if let Err(err) = peer.send(&ack).await {
                         log::warn!(
@@ -1832,8 +2099,6 @@ impl<T: InvokeUiSession> Remote<T> {
                         return false;
                     }
                     if !self.first_frame {
-                        let (payload_bytes, frame_count, has_keyframe) =
-                            scrap::codec::video_frame_payload_stats(&vf).unwrap_or((0, 0, false));
                         log::info!(
                             "diag first video frame received from stream: display={}, frame_id={}, format={:?}, payload_bytes={}, frame_count={}, keyframe={}",
                             vf.display,
@@ -1851,7 +2116,6 @@ impl<T: InvokeUiSession> Remote<T> {
                     }
                     self.video_format = CodecFormat::from(&vf);
 
-                    let display = vf.display as usize;
                     if !self.video_threads.contains_key(&display) {
                         self.new_video_thread(display);
                     }
@@ -1867,10 +2131,19 @@ impl<T: InvokeUiSession> Remote<T> {
                         let video_queue = thread.video_queue.read().unwrap();
                         if video_queue.force_push(vf).is_some() {
                             drop(video_queue);
+                            if let Some(stats) = self.video_receiver_stats.get_mut(&display) {
+                                stats.record_queue_drop();
+                            }
+                            keyframe_request_reason =
+                                keyframe_request_reason.or(Some(VIDEO_KEYFRAME_REASON_QUEUE_DROP));
                             self.handler.refresh_video(display as _);
                         } else {
                             thread.video_sender.send(MediaData::VideoQueue).ok();
                         }
+                    }
+                    if let Some(reason) = keyframe_request_reason {
+                        self.send_video_keyframe_request(peer, display_i32, frame_id, reason)
+                            .await;
                     }
                 }
                 Some(message::Union::Hash(hash)) => {
@@ -2999,6 +3272,7 @@ impl<T: InvokeUiSession> Remote<T> {
         let decode_fps = Arc::new(RwLock::new(None));
         let frame_count = Arc::new(RwLock::new(0));
         let discard_queue = Arc::new(RwLock::new(false));
+        let stats = Arc::new(client::VideoThreadStats::default());
         let video_thread = VideoThread {
             video_queue: video_queue.clone(),
             video_sender,
@@ -3006,6 +3280,7 @@ impl<T: InvokeUiSession> Remote<T> {
             frame_count: frame_count.clone(),
             fps_control: Default::default(),
             discard_queue: discard_queue.clone(),
+            stats: stats.clone(),
         };
         let handler = self.handler.ui_handler.clone();
         crate::client::start_video_thread(
@@ -3016,6 +3291,7 @@ impl<T: InvokeUiSession> Remote<T> {
             decode_fps,
             self.chroma.clone(),
             discard_queue,
+            stats,
             move |display: usize,
                   data: &mut scrap::ImageRgb,
                   _texture: *mut c_void,
@@ -3110,6 +3386,7 @@ struct VideoThread {
     frame_count: Arc<RwLock<usize>>,
     discard_queue: Arc<RwLock<bool>>,
     fps_control: FpsControl,
+    stats: Arc<client::VideoThreadStats>,
 }
 
 impl Drop for VideoThread {
@@ -3123,8 +3400,9 @@ impl Drop for VideoThread {
 mod tests {
     use super::{
         next_no_video_startup_fallback_codec, session_permission_response_msgbox_type,
-        video_received_msg, NoVideoStartupAction, NoVideoStartupWatchdog,
-        NO_VIDEO_START_FALLBACK_INTERVAL, NO_VIDEO_START_MAX_FALLBACKS, NO_VIDEO_START_TIMEOUT,
+        video_keyframe_request_msg, video_received_msg, NoVideoStartupAction,
+        NoVideoStartupWatchdog, VideoReceiverStatsTracker, NO_VIDEO_START_FALLBACK_INTERVAL,
+        NO_VIDEO_START_MAX_FALLBACKS, NO_VIDEO_START_TIMEOUT, VIDEO_KEYFRAME_REASON_FRAME_GAP,
     };
     use hbb_common::{
         bytes::{Bytes, BytesMut},
@@ -3182,6 +3460,82 @@ mod tests {
         assert!(matches!(misc.union, Some(misc::Union::VideoReceived(true))));
         assert_eq!(misc.video_ack_frame_id, 42);
         assert_eq!(misc.video_ack_display, 3);
+    }
+
+    #[test]
+    fn video_keyframe_request_preserves_display_frame_and_reason() {
+        let msg = video_keyframe_request_msg(2, 77, VIDEO_KEYFRAME_REASON_FRAME_GAP);
+
+        let Some(message::Union::Misc(misc)) = msg.union else {
+            panic!("expected misc keyframe request");
+        };
+        let Some(misc::Union::VideoKeyframeRequest(request)) = misc.union else {
+            panic!("expected video keyframe request");
+        };
+        assert_eq!(request.display, 2);
+        assert_eq!(request.last_frame_id, 77);
+        assert_eq!(request.reason, VIDEO_KEYFRAME_REASON_FRAME_GAP);
+    }
+
+    #[test]
+    fn video_receiver_stats_tracker_counts_gaps_drops_and_decode_stats() {
+        let mut tracker = VideoReceiverStatsTracker::default();
+        let now = Instant::now();
+        let vf = VideoFrame {
+            display: 1,
+            frame_id: 10,
+            ..Default::default()
+        };
+        assert_eq!(tracker.record_frame_received(&vf, 1200, 1, true, now), None);
+
+        let vf = VideoFrame {
+            display: 1,
+            frame_id: 13,
+            ..Default::default()
+        };
+        assert_eq!(
+            tracker.record_frame_received(&vf, 800, 2, false, now + Duration::from_millis(16)),
+            Some(VIDEO_KEYFRAME_REASON_FRAME_GAP)
+        );
+        tracker.record_queue_drop();
+
+        let thread_stats = crate::client::VideoThreadStats::default();
+        thread_stats.record_decoded(Duration::from_millis(7));
+        thread_stats.record_rendered();
+        let stats = tracker.to_proto(
+            1,
+            1000,
+            2,
+            0,
+            thread_stats.snapshot(),
+            now + Duration::from_millis(32),
+        );
+
+        assert_eq!(stats.display, 1);
+        assert_eq!(stats.first_frame_id, 10);
+        assert_eq!(stats.last_frame_id, 13);
+        assert_eq!(stats.frames_received, 2);
+        assert_eq!(stats.frames_decoded, 1);
+        assert_eq!(stats.frames_rendered, 1);
+        assert_eq!(stats.frames_dropped, 1);
+        assert_eq!(stats.skipped_frame_ids, 2);
+        assert_eq!(stats.bytes_received, 2000);
+        assert_eq!(stats.encoded_frames_received, 3);
+        assert_eq!(stats.keyframes_received, 1);
+        assert_eq!(stats.decode_queue_len, 2);
+        assert_eq!(stats.render_queue_len, 0);
+        assert_eq!(stats.decode_ms_avg, 7);
+        assert_eq!(stats.decode_ms_p95, 7);
+    }
+
+    #[test]
+    fn video_keyframe_requests_are_rate_limited() {
+        let mut tracker = VideoReceiverStatsTracker::default();
+        let now = Instant::now();
+
+        assert!(tracker.should_send_keyframe_request(now));
+        assert!(!tracker.should_send_keyframe_request(now + Duration::from_millis(500)));
+        assert!(tracker.should_send_keyframe_request(now + Duration::from_secs(3)));
     }
 
     #[test]

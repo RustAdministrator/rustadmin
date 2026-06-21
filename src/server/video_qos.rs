@@ -1,4 +1,5 @@
 use super::*;
+use hbb_common::message_proto::VideoReceiverStats;
 use scrap::codec::{Quality, BR_BALANCED, BR_BEST, BR_SPEED};
 use std::{
     collections::VecDeque,
@@ -46,6 +47,9 @@ const HISTORY_DELAY_LEN: usize = 2;
 const ADJUST_RATIO_INTERVAL: usize = 3; // Adjust quality ratio every 3 seconds
 const DYNAMIC_SCREEN_THRESHOLD: usize = 2; // Allow increase quality ratio if encode more than 2 times in one second
 const DELAY_THRESHOLD_150MS: u32 = 150; // 150ms is the threshold for good network condition
+const RECEIVER_STATS_STALL_MS: u32 = 3000;
+const RECEIVER_STATS_DEGRADE_AFTER: usize = 2;
+const RECEIVER_STATS_RECOVER_AFTER: usize = 5;
 
 #[derive(Default, Debug, Clone)]
 struct UserDelay {
@@ -96,7 +100,84 @@ struct UserData {
     fixed_fps: Option<u32>,
     quality: Option<(i64, Quality)>, // (time, quality)
     delay: UserDelay,
+    receiver_stats: HashMap<i32, ReceiverVideoStatsState>,
     record: bool,
+}
+
+#[derive(Default, Debug, Clone)]
+struct ReceiverVideoStatsState {
+    frames_received: u64,
+    frames_rendered: u64,
+    frames_dropped: u64,
+    skipped_frame_ids: u64,
+    freeze_count: u64,
+    decode_errors: u64,
+    degraded_samples: usize,
+    healthy_samples: usize,
+    received_fps_ewma_x100: u32,
+    rendered_fps_ewma_x100: u32,
+    dropped_fps_ewma_x100: u32,
+}
+
+#[derive(Default, Debug, Clone, Copy)]
+struct ReceiverVideoStatsDelta {
+    frames_received: u64,
+    frames_rendered: u64,
+    frames_dropped: u64,
+    skipped_frame_ids: u64,
+    freeze_count: u64,
+    decode_errors: u64,
+}
+
+impl ReceiverVideoStatsState {
+    fn update_ewma(old: u32, sample: u32) -> u32 {
+        if old == 0 {
+            sample
+        } else {
+            ((old as u64 * 7 + sample as u64 * 3) / 10).min(u32::MAX as u64) as u32
+        }
+    }
+
+    fn fps_x100(delta: u64, interval_ms: u32) -> u32 {
+        let interval_ms = interval_ms.max(1) as u64;
+        delta
+            .saturating_mul(100_000)
+            .checked_div(interval_ms)
+            .unwrap_or(u64::MAX)
+            .min(u32::MAX as u64) as u32
+    }
+
+    fn update(&mut self, stats: &VideoReceiverStats) -> ReceiverVideoStatsDelta {
+        let delta = ReceiverVideoStatsDelta {
+            frames_received: stats.frames_received.saturating_sub(self.frames_received),
+            frames_rendered: stats.frames_rendered.saturating_sub(self.frames_rendered),
+            frames_dropped: stats.frames_dropped.saturating_sub(self.frames_dropped),
+            skipped_frame_ids: stats
+                .skipped_frame_ids
+                .saturating_sub(self.skipped_frame_ids),
+            freeze_count: stats.freeze_count.saturating_sub(self.freeze_count),
+            decode_errors: stats.decode_errors.saturating_sub(self.decode_errors),
+        };
+        self.frames_received = stats.frames_received;
+        self.frames_rendered = stats.frames_rendered;
+        self.frames_dropped = stats.frames_dropped;
+        self.skipped_frame_ids = stats.skipped_frame_ids;
+        self.freeze_count = stats.freeze_count;
+        self.decode_errors = stats.decode_errors;
+        self.received_fps_ewma_x100 = Self::update_ewma(
+            self.received_fps_ewma_x100,
+            Self::fps_x100(delta.frames_received, stats.interval_ms),
+        );
+        self.rendered_fps_ewma_x100 = Self::update_ewma(
+            self.rendered_fps_ewma_x100,
+            Self::fps_x100(delta.frames_rendered, stats.interval_ms),
+        );
+        self.dropped_fps_ewma_x100 = Self::update_ewma(
+            self.dropped_fps_ewma_x100,
+            Self::fps_x100(delta.frames_dropped, stats.interval_ms),
+        );
+        delta
+    }
 }
 
 #[derive(Default, Debug, Clone)]
@@ -386,6 +467,110 @@ impl VideoQoS {
             }
         }
     }
+
+    pub fn user_video_receiver_stats(&mut self, id: i32, stats: &VideoReceiverStats) {
+        let current_fps = self.fps();
+        let highest_fps = self.highest_fps();
+
+        let Some(user) = self.users.get_mut(&id) else {
+            log::warn!(
+                "video receiver stats ignored for unknown user: user_id={}, display={}",
+                id,
+                stats.display
+            );
+            return;
+        };
+
+        let (should_adjust_fps, should_reduce_ratio, target_fps, degraded, delta, ewma) = {
+            let state = user.receiver_stats.entry(stats.display).or_default();
+            let delta = state.update(stats);
+            let degraded = delta.skipped_frame_ids > 0
+                || delta.frames_dropped > 0
+                || delta.freeze_count > 0
+                || delta.decode_errors > 0
+                || (delta.frames_received > 0 && delta.frames_rendered == 0)
+                || stats.last_render_age_ms >= RECEIVER_STATS_STALL_MS
+                || stats.decode_queue_len > 2;
+            let mut should_adjust_fps = false;
+            let mut should_reduce_ratio = false;
+            let mut target_fps = None;
+
+            if degraded {
+                state.degraded_samples = state.degraded_samples.saturating_add(1);
+                state.healthy_samples = 0;
+                if state.degraded_samples >= RECEIVER_STATS_DEGRADE_AFTER
+                    && user.fixed_fps.is_none()
+                {
+                    let reduced = (current_fps.saturating_mul(3) / 4).max(MIN_FPS);
+                    user.delay.fps = Some(reduced);
+                    should_adjust_fps = true;
+                    should_reduce_ratio = true;
+                    target_fps = Some(reduced);
+                    state.degraded_samples = 0;
+                }
+            } else if delta.frames_rendered > 0
+                && stats.last_render_age_ms < RECEIVER_STATS_STALL_MS
+            {
+                state.healthy_samples = state.healthy_samples.saturating_add(1);
+                state.degraded_samples = 0;
+                if state.healthy_samples >= RECEIVER_STATS_RECOVER_AFTER && user.fixed_fps.is_none()
+                {
+                    let next = user
+                        .delay
+                        .fps
+                        .map(|fps| fps.saturating_add(1).min(highest_fps))
+                        .unwrap_or(current_fps)
+                        .clamp(MIN_FPS, highest_fps);
+                    user.delay.fps = Some(next);
+                    should_adjust_fps = true;
+                    target_fps = Some(next);
+                    state.healthy_samples = 0;
+                }
+            }
+            let ewma = (
+                state.received_fps_ewma_x100,
+                state.rendered_fps_ewma_x100,
+                state.dropped_fps_ewma_x100,
+            );
+            (
+                should_adjust_fps,
+                should_reduce_ratio,
+                target_fps,
+                degraded,
+                delta,
+                ewma,
+            )
+        };
+
+        if should_reduce_ratio && self.in_vbr_state() {
+            let max_ratio = self.latest_quality().ratio() * MAX_BR_MULTIPLE;
+            self.ratio = (self.ratio * 0.9).clamp(BR_MIN_HIGH_RESOLUTION, max_ratio);
+        }
+        if should_adjust_fps {
+            let previous_fps = self.fps;
+            self.adjust_fps();
+            log::info!(
+                "video receiver stats adjusted qos: user_id={}, display={}, degraded={}, target_fps={:?}, previous_active_fps={}, active_fps={}, skipped_delta={}, dropped_delta={}, freeze_delta={}, decode_error_delta={}, received_delta={}, rendered_delta={}, received_fps_ewma_x100={}, rendered_fps_ewma_x100={}, dropped_fps_ewma_x100={}, decode_queue_len={}, last_render_age_ms={}",
+                id,
+                stats.display,
+                degraded,
+                target_fps,
+                previous_fps,
+                self.fps,
+                delta.skipped_frame_ids,
+                delta.frames_dropped,
+                delta.freeze_count,
+                delta.decode_errors,
+                delta.frames_received,
+                delta.frames_rendered,
+                ewma.0,
+                ewma.1,
+                ewma.2,
+                stats.decode_queue_len,
+                stats.last_render_age_ms
+            );
+        }
+    }
 }
 
 // Common adjust functions
@@ -626,6 +811,74 @@ mod tests {
 
         assert!(!qos.startup_safe_mode());
         assert_eq!(qos.ratio(), BR_BALANCED);
+        assert_eq!(qos.fps(), 30);
+    }
+
+    #[test]
+    fn receiver_stats_reduce_adaptive_fps_after_repeated_stall() {
+        let mut qos = VideoQoS::default();
+        qos.on_connection_open(1);
+        qos.new_user_instant = Instant::now() - STARTUP_SAFE_WINDOW - Duration::from_secs(1);
+        let initial_fps = qos.fps();
+
+        qos.user_video_receiver_stats(
+            1,
+            &VideoReceiverStats {
+                display: 0,
+                frames_received: 10,
+                frames_rendered: 10,
+                last_render_age_ms: 10,
+                ..Default::default()
+            },
+        );
+        assert_eq!(qos.fps(), initial_fps);
+
+        qos.user_video_receiver_stats(
+            1,
+            &VideoReceiverStats {
+                display: 0,
+                frames_received: 20,
+                frames_rendered: 10,
+                last_render_age_ms: RECEIVER_STATS_STALL_MS,
+                ..Default::default()
+            },
+        );
+        assert_eq!(qos.fps(), initial_fps);
+
+        qos.user_video_receiver_stats(
+            1,
+            &VideoReceiverStats {
+                display: 0,
+                frames_received: 30,
+                frames_rendered: 10,
+                freeze_count: 1,
+                last_render_age_ms: RECEIVER_STATS_STALL_MS,
+                ..Default::default()
+            },
+        );
+        assert!(qos.fps() < initial_fps);
+    }
+
+    #[test]
+    fn receiver_stats_do_not_override_fixed_fps() {
+        let mut qos = VideoQoS::default();
+        qos.on_connection_open(1);
+        qos.user_fixed_fps(1, 30);
+
+        for received in [10, 20] {
+            qos.user_video_receiver_stats(
+                1,
+                &VideoReceiverStats {
+                    display: 0,
+                    frames_received: received,
+                    frames_rendered: 0,
+                    freeze_count: received / 10,
+                    last_render_age_ms: RECEIVER_STATS_STALL_MS,
+                    ..Default::default()
+                },
+            );
+        }
+
         assert_eq!(qos.fps(), 30);
     }
 }

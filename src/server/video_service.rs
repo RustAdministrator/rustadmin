@@ -1199,7 +1199,7 @@ fn get_encoder_config(
     #[cfg(feature = "vram")]
     Encoder::update(scrap::codec::EncodingUpdate::Check);
     // https://www.wowza.com/community/t/the-correct-keyframe-interval-in-obs-studio/95162
-    let keyframe_interval = if record { Some(240) } else { None };
+    let keyframe_interval = Some(if record { 240 } else { 60 });
     let negotiated_codec = Encoder::negotiated_codec();
     let encoder_cfg = match negotiated_codec {
         CodecFormat::H264 | CodecFormat::H265 => {
