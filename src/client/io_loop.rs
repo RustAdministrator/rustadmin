@@ -5,7 +5,7 @@ use crate::{audio_service, clipboard::CLIPBOARD_INTERVAL, ConnInner, CLIENT_SERV
 use crate::{
     client::{
         self, new_voice_call_request, Client, Data, Interface, MediaData, MediaSender,
-        QualityStatus, MILLI1, SEC30,
+        QualityStatus, MILLI1,
     },
     common::get_default_sound_input,
     ui_session_interface::{InvokeUiSession, Session},
@@ -22,6 +22,7 @@ use crossbeam_queue::ArrayQueue;
 use hbb_common::tokio::sync::mpsc::error::TryRecvError;
 use hbb_common::{
     allow_err,
+    bytes::Bytes,
     config::{self, LocalConfig, PeerConfig, TransferSerde},
     fs::{
         self, can_enable_overwrite_detection, get_job, get_string, new_send_confirm,
@@ -61,8 +62,12 @@ const NO_VIDEO_START_STALLED_LOG_INTERVAL: Duration = Duration::from_secs(30);
 const FPS_CONTROL_SUMMARY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 const VIDEO_RECEIVER_FREEZE_TIMEOUT: Duration = Duration::from_secs(3);
 const VIDEO_KEYFRAME_REQUEST_INTERVAL: Duration = Duration::from_secs(2);
+const CONNECTION_RECEIVE_TIMEOUT: Duration = Duration::from_secs(15);
 const VIDEO_KEYFRAME_REASON_FRAME_GAP: u32 = 1;
 const VIDEO_KEYFRAME_REASON_QUEUE_DROP: u32 = 2;
+const VIDEO_FRAME_CHUNK_REASSEMBLY_TIMEOUT: Duration = Duration::from_secs(5);
+const VIDEO_FRAME_CHUNK_MAX_ORIGINAL_SIZE: usize = 16 * 1024 * 1024;
+const VIDEO_FRAME_CHUNK_MAX_CHUNKS: usize = 2048;
 
 fn video_received_msg(vf: &VideoFrame) -> Message {
     let mut misc = Misc::new();
@@ -408,6 +413,145 @@ fn next_no_video_startup_fallback_codec(
     None
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct VideoFrameChunkKey {
+    display: i32,
+    frame_id: u64,
+}
+
+struct PendingVideoFrameChunk {
+    chunks: Vec<Option<Bytes>>,
+    received_chunks: usize,
+    received_bytes: usize,
+    original_size: usize,
+    first_seen: Instant,
+}
+
+impl PendingVideoFrameChunk {
+    fn new(chunk_count: usize, original_size: usize, now: Instant) -> Self {
+        Self {
+            chunks: vec![None; chunk_count],
+            received_chunks: 0,
+            received_bytes: 0,
+            original_size,
+            first_seen: now,
+        }
+    }
+}
+
+#[derive(Default)]
+struct VideoFrameChunkAssembler {
+    pending: HashMap<VideoFrameChunkKey, PendingVideoFrameChunk>,
+}
+
+impl VideoFrameChunkAssembler {
+    fn push(&mut self, chunk: VideoFrameChunk) -> Result<Option<(VideoFrame, usize)>, String> {
+        let now = Instant::now();
+        self.cleanup_expired(now);
+
+        let chunk_count = chunk.chunk_count as usize;
+        let chunk_index = chunk.chunk_index as usize;
+        let original_size = chunk.original_size as usize;
+        if chunk_count == 0 {
+            return Err("video frame chunk has zero chunk_count".to_owned());
+        }
+        if chunk_count > VIDEO_FRAME_CHUNK_MAX_CHUNKS {
+            return Err(format!(
+                "video frame chunk_count too large: count={}, max={}",
+                chunk_count, VIDEO_FRAME_CHUNK_MAX_CHUNKS
+            ));
+        }
+        if chunk_index >= chunk_count {
+            return Err(format!(
+                "video frame chunk index out of range: index={}, count={}",
+                chunk_index, chunk_count
+            ));
+        }
+        if original_size == 0 || original_size > VIDEO_FRAME_CHUNK_MAX_ORIGINAL_SIZE {
+            return Err(format!(
+                "video frame chunk original_size invalid: size={}, max={}",
+                original_size, VIDEO_FRAME_CHUNK_MAX_ORIGINAL_SIZE
+            ));
+        }
+        if chunk.data.is_empty() {
+            return Err("video frame chunk has empty data".to_owned());
+        }
+
+        let key = VideoFrameChunkKey {
+            display: chunk.display,
+            frame_id: chunk.frame_id,
+        };
+        let should_reset = self
+            .pending
+            .get(&key)
+            .map(|pending| {
+                pending.chunks.len() != chunk_count || pending.original_size != original_size
+            })
+            .unwrap_or(true);
+        if should_reset {
+            self.pending.insert(
+                key,
+                PendingVideoFrameChunk::new(chunk_count, original_size, now),
+            );
+        }
+
+        let pending = self
+            .pending
+            .get_mut(&key)
+            .ok_or_else(|| "video frame chunk state missing".to_owned())?;
+        if pending.chunks[chunk_index].is_some() {
+            return Ok(None);
+        }
+        pending.received_bytes = pending.received_bytes.saturating_add(chunk.data.len());
+        if pending.received_bytes > pending.original_size {
+            let received_bytes = pending.received_bytes;
+            self.pending.remove(&key);
+            return Err(format!(
+                "video frame chunks exceed declared size: received={}, declared={}",
+                received_bytes, original_size
+            ));
+        }
+        pending.chunks[chunk_index] = Some(chunk.data);
+        pending.received_chunks += 1;
+        if pending.received_chunks != chunk_count {
+            return Ok(None);
+        }
+
+        let pending = self
+            .pending
+            .remove(&key)
+            .ok_or_else(|| "complete video frame chunk state missing".to_owned())?;
+        let mut frame_bytes = Vec::with_capacity(pending.original_size);
+        for chunk in pending.chunks {
+            let chunk =
+                chunk.ok_or_else(|| "complete video frame chunk missing data".to_owned())?;
+            frame_bytes.extend_from_slice(&chunk);
+        }
+        if frame_bytes.len() != original_size {
+            return Err(format!(
+                "reassembled video frame size mismatch: received={}, declared={}",
+                frame_bytes.len(),
+                original_size
+            ));
+        }
+        let vf = VideoFrame::parse_from_bytes(&frame_bytes)
+            .map_err(|err| format!("reassembled video frame parse failed: {err}"))?;
+        if vf.display != key.display || vf.frame_id != key.frame_id {
+            return Err(format!(
+                "reassembled video frame identity mismatch: chunk_display={}, frame_display={}, chunk_frame_id={}, frame_id={}",
+                key.display, vf.display, key.frame_id, vf.frame_id
+            ));
+        }
+        Ok(Some((vf, frame_bytes.len())))
+    }
+
+    fn cleanup_expired(&mut self, now: Instant) {
+        self.pending.retain(|_, pending| {
+            now.saturating_duration_since(pending.first_seen) < VIDEO_FRAME_CHUNK_REASSEMBLY_TIMEOUT
+        });
+    }
+}
+
 pub struct Remote<T: InvokeUiSession> {
     handler: Session<T>,
     audio_sender: MediaSender,
@@ -430,6 +574,8 @@ pub struct Remote<T: InvokeUiSession> {
     elevation_requested: bool,
     peer_info: ParsedPeerInfo,
     video_threads: HashMap<usize, VideoThread>,
+    video_frame_chunks_seen: u64,
+    video_chunk_assembler: VideoFrameChunkAssembler,
     video_receiver_stats: HashMap<usize, VideoReceiverStatsTracker>,
     chroma: Arc<RwLock<Option<Chroma>>>,
     last_record_state: bool,
@@ -476,7 +622,7 @@ impl<T: InvokeUiSession> Remote<T> {
             read_jobs: Vec::new(),
             write_jobs: Vec::new(),
             remove_jobs: Default::default(),
-            timer: crate::rustdesk_interval(time::interval(SEC30)),
+            timer: crate::rustdesk_interval(time::interval(CONNECTION_RECEIVE_TIMEOUT)),
             last_update_jobs_status: (Instant::now(), Default::default()),
             is_connected: false,
             first_frame: false,
@@ -489,6 +635,8 @@ impl<T: InvokeUiSession> Remote<T> {
             elevation_requested: false,
             peer_info: Default::default(),
             video_threads: Default::default(),
+            video_frame_chunks_seen: 0,
+            video_chunk_assembler: Default::default(),
             video_receiver_stats: Default::default(),
             chroma: Default::default(),
             last_record_state: false,
@@ -499,10 +647,11 @@ impl<T: InvokeUiSession> Remote<T> {
 
     fn connection_error_with_state(&self, reason: impl AsRef<str>) -> String {
         format!(
-            "{}\n\nClient state: connected={}, video_packet_seen={}, video_format={:?}, video_threads={}",
+            "{}\n\nClient state: connected={}, video_packet_seen={}, video_chunks_seen={}, video_format={:?}, video_threads={}",
             reason.as_ref(),
             self.is_connected,
             self.first_frame,
+            self.video_frame_chunks_seen,
             self.video_format,
             self.video_threads.len()
         )
@@ -727,12 +876,13 @@ impl<T: InvokeUiSession> Remote<T> {
                             self.handle_local_clipboard_msg(&mut peer, _msg).await;
                         }
                         _ = self.timer.tick() => {
-                            if last_recv_time.elapsed() >= SEC30 {
+                            if last_recv_time.elapsed() >= CONNECTION_RECEIVE_TIMEOUT {
                                 log::warn!(
-                                    "diag client receive timeout: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, elapsed_ms={}",
+                                    "diag client receive timeout: id={}, is_connected={}, video_packet_seen={}, video_chunks_seen={}, video_format={:?}, elapsed_ms={}",
                                     self.handler.get_id(),
                                     self.is_connected,
                                     self.first_frame,
+                                    self.video_frame_chunks_seen,
                                     self.video_format,
                                     last_recv_time.elapsed().as_millis()
                                 );
@@ -746,7 +896,10 @@ impl<T: InvokeUiSession> Remote<T> {
                                 }
                                 self.update_jobs_status();
                             } else {
-                                self.timer = crate::rustdesk_interval(time::interval_at(Instant::now() + SEC30, SEC30));
+                                self.timer = crate::rustdesk_interval(time::interval_at(
+                                    Instant::now() + CONNECTION_RECEIVE_TIMEOUT,
+                                    CONNECTION_RECEIVE_TIMEOUT,
+                                ));
                             }
                         }
                         _ = status_timer.tick() => {
@@ -758,14 +911,31 @@ impl<T: InvokeUiSession> Remote<T> {
                             ) {
                                 NoVideoStartupAction::Reconnect { attempt, elapsed_ms } => {
                                     log::warn!(
-                                        "diag client no video startup reconnect fallback: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, elapsed_ms={}, local_fallback_attempt={}",
+                                        "diag client no video startup reconnect fallback: id={}, is_connected={}, video_packet_seen={}, video_chunks_seen={}, video_format={:?}, elapsed_ms={}, local_fallback_attempt={}",
                                         self.handler.get_id(),
                                         self.is_connected,
                                         self.first_frame,
+                                        self.video_frame_chunks_seen,
                                         self.video_format,
                                         elapsed_ms,
                                         attempt
                                     );
+                                    if self.video_frame_chunks_seen > 0 {
+                                        log::warn!(
+                                            "diag client no video startup transport reconnect without codec blacklist: id={}, attempt={}, video_chunks_seen={}, video_format={:?}",
+                                            self.handler.get_id(),
+                                            attempt,
+                                            self.video_frame_chunks_seen,
+                                            self.video_format
+                                        );
+                                        self.send_close_reason(
+                                            &mut peer,
+                                            "startup video chunk transport reconnect",
+                                        )
+                                        .await;
+                                        reconnect_after_disconnect = true;
+                                        break;
+                                    }
                                     if let Some(format) = self.no_video_startup_mark_codec_unsupported() {
                                         log::warn!(
                                             "diag client no video startup scheduling reconnect after stream close: id={}, attempt={}, codec={:?}",
@@ -789,10 +959,11 @@ impl<T: InvokeUiSession> Remote<T> {
                                 }
                                 NoVideoStartupAction::Stalled { elapsed_ms } => {
                                     log::warn!(
-                                        "diag client no video startup still waiting: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, elapsed_ms={}, local_fallback_attempts={}",
+                                        "diag client no video startup still waiting: id={}, is_connected={}, video_packet_seen={}, video_chunks_seen={}, video_format={:?}, elapsed_ms={}, local_fallback_attempts={}",
                                         self.handler.get_id(),
                                         self.is_connected,
                                         self.first_frame,
+                                        self.video_frame_chunks_seen,
                                         self.video_format,
                                         elapsed_ms,
                                         no_video_watchdog.fallback_count
@@ -1153,13 +1324,14 @@ impl<T: InvokeUiSession> Remote<T> {
         match data {
             Data::Close => {
                 log::info!(
-                    "diag client io_loop received Data::Close: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, video_threads={}, sent_close_reason={}",
-                    self.handler.get_id(),
-                    self.is_connected,
-                    self.first_frame,
-                    self.video_format,
-                    self.video_threads.len(),
-                    self.sent_close_reason
+                                        "diag client io_loop received Data::Close: id={}, is_connected={}, video_packet_seen={}, video_chunks_seen={}, video_format={:?}, video_threads={}, sent_close_reason={}",
+                                        self.handler.get_id(),
+                                        self.is_connected,
+                                        self.first_frame,
+                                        self.video_frame_chunks_seen,
+                                        self.video_format,
+                                        self.video_threads.len(),
+                                        self.sent_close_reason
                 );
                 self.send_close_reason(peer, "").await;
                 return false;
@@ -2040,6 +2212,95 @@ impl<T: InvokeUiSession> Remote<T> {
         return false;
     }
 
+    async fn handle_video_frame_from_peer(
+        &mut self,
+        vf: VideoFrame,
+        received_bytes: usize,
+        peer: &mut Stream,
+    ) -> bool {
+        let (payload_bytes, frame_count, has_keyframe) =
+            scrap::codec::video_frame_payload_stats(&vf).unwrap_or((0, 0, false));
+        let display_i32 = vf.display;
+        let display = display_i32.max(0) as usize;
+        let frame_id = vf.frame_id;
+        let mut keyframe_request_reason = self
+            .video_receiver_stats
+            .entry(display)
+            .or_default()
+            .record_frame_received(
+                &vf,
+                if payload_bytes == 0 {
+                    received_bytes
+                } else {
+                    payload_bytes
+                },
+                frame_count,
+                has_keyframe,
+                Instant::now(),
+            );
+
+        let ack = video_received_msg(&vf);
+        if let Err(err) = peer.send(&ack).await {
+            log::warn!(
+                "diag client video ack send failed: id={}, display={}, format={:?}, err={}",
+                self.handler.get_id(),
+                vf.display,
+                CodecFormat::from(&vf),
+                err
+            );
+            self.show_connection_error_with_state(format!("Video acknowledgement failed: {err}"));
+            return false;
+        }
+        if !self.first_frame {
+            log::info!(
+                "diag first video frame received from stream: display={}, frame_id={}, format={:?}, payload_bytes={}, frame_count={}, keyframe={}",
+                vf.display,
+                vf.frame_id,
+                CodecFormat::from(&vf),
+                payload_bytes,
+                frame_count,
+                has_keyframe
+            );
+            self.first_frame = true;
+            self.handler.close_success();
+            self.handler.adapt_size();
+            self.send_toggle_virtual_display_msg(peer).await;
+            self.send_toggle_privacy_mode_msg(peer).await;
+        }
+        self.video_format = CodecFormat::from(&vf);
+
+        if !self.video_threads.contains_key(&display) {
+            self.new_video_thread(display);
+        }
+        let Some(thread) = self.video_threads.get_mut(&display) else {
+            return true;
+        };
+        if Self::contains_key_frame(&vf) {
+            thread
+                .video_sender
+                .send(MediaData::VideoFrame(Box::new(vf)))
+                .ok();
+        } else {
+            let video_queue = thread.video_queue.read().unwrap();
+            if video_queue.force_push(vf).is_some() {
+                drop(video_queue);
+                if let Some(stats) = self.video_receiver_stats.get_mut(&display) {
+                    stats.record_queue_drop();
+                }
+                keyframe_request_reason =
+                    keyframe_request_reason.or(Some(VIDEO_KEYFRAME_REASON_QUEUE_DROP));
+                self.handler.refresh_video(display as _);
+            } else {
+                thread.video_sender.send(MediaData::VideoQueue).ok();
+            }
+        }
+        if let Some(reason) = keyframe_request_reason {
+            self.send_video_keyframe_request(peer, display_i32, frame_id, reason)
+                .await;
+        }
+        true
+    }
+
     async fn handle_msg_from_peer(&mut self, data: &[u8], peer: &mut Stream) -> bool {
         let msg_in = match Message::parse_from_bytes(data) {
             Ok(msg) => msg,
@@ -2063,87 +2324,71 @@ impl<T: InvokeUiSession> Remote<T> {
         {
             match msg_in.union {
                 Some(message::Union::VideoFrame(vf)) => {
-                    let (payload_bytes, frame_count, has_keyframe) =
-                        scrap::codec::video_frame_payload_stats(&vf).unwrap_or((0, 0, false));
-                    let display_i32 = vf.display;
-                    let display = display_i32.max(0) as usize;
-                    let frame_id = vf.frame_id;
-                    let mut keyframe_request_reason = self
-                        .video_receiver_stats
-                        .entry(display)
-                        .or_default()
-                        .record_frame_received(
-                            &vf,
-                            if payload_bytes == 0 {
-                                data.len()
-                            } else {
-                                payload_bytes
-                            },
-                            frame_count,
-                            has_keyframe,
-                            Instant::now(),
-                        );
-
-                    let ack = video_received_msg(&vf);
-                    if let Err(err) = peer.send(&ack).await {
-                        log::warn!(
-                            "diag client video ack send failed: id={}, display={}, format={:?}, err={}",
-                            self.handler.get_id(),
-                            vf.display,
-                            CodecFormat::from(&vf),
-                            err
-                        );
-                        self.show_connection_error_with_state(format!(
-                            "Video acknowledgement failed: {err}"
-                        ));
+                    if !self
+                        .handle_video_frame_from_peer(vf, data.len(), peer)
+                        .await
+                    {
                         return false;
                     }
-                    if !self.first_frame {
+                }
+                Some(message::Union::VideoFrameChunk(chunk)) => {
+                    let display = chunk.display;
+                    let frame_id = chunk.frame_id;
+                    let chunk_index = chunk.chunk_index;
+                    let chunk_count = chunk.chunk_count;
+                    let chunk_len = chunk.data.len();
+                    let original_size = chunk.original_size;
+                    let chunk_number = chunk_index.saturating_add(1);
+                    self.video_frame_chunks_seen = self.video_frame_chunks_seen.saturating_add(1);
+                    if !self.first_frame
+                        && (self.video_frame_chunks_seen <= 8 || chunk_number == chunk_count)
+                    {
                         log::info!(
-                            "diag first video frame received from stream: display={}, frame_id={}, format={:?}, payload_bytes={}, frame_count={}, keyframe={}",
-                            vf.display,
-                            vf.frame_id,
-                            CodecFormat::from(&vf),
-                            payload_bytes,
-                            frame_count,
-                            has_keyframe
+                            "diag client video frame chunk received before first frame: id={}, display={}, frame_id={}, chunk={}/{}, bytes={}, original_size={}, total_chunks_seen={}",
+                            self.handler.get_id(),
+                            display,
+                            frame_id,
+                            chunk_number,
+                            chunk_count,
+                            chunk_len,
+                            original_size,
+                            self.video_frame_chunks_seen
                         );
-                        self.first_frame = true;
-                        self.handler.close_success();
-                        self.handler.adapt_size();
-                        self.send_toggle_virtual_display_msg(peer).await;
-                        self.send_toggle_privacy_mode_msg(peer).await;
                     }
-                    self.video_format = CodecFormat::from(&vf);
-
-                    if !self.video_threads.contains_key(&display) {
-                        self.new_video_thread(display);
-                    }
-                    let Some(thread) = self.video_threads.get_mut(&display) else {
-                        return true;
-                    };
-                    if Self::contains_key_frame(&vf) {
-                        thread
-                            .video_sender
-                            .send(MediaData::VideoFrame(Box::new(vf)))
-                            .ok();
-                    } else {
-                        let video_queue = thread.video_queue.read().unwrap();
-                        if video_queue.force_push(vf).is_some() {
-                            drop(video_queue);
-                            if let Some(stats) = self.video_receiver_stats.get_mut(&display) {
-                                stats.record_queue_drop();
+                    match self.video_chunk_assembler.push(chunk) {
+                        Ok(Some((vf, received_bytes))) => {
+                            log::info!(
+                                "diag client video frame chunks reassembled: id={}, display={}, frame_id={}, received_bytes={}, total_chunks_seen={}",
+                                self.handler.get_id(),
+                                display,
+                                frame_id,
+                                received_bytes,
+                                self.video_frame_chunks_seen
+                            );
+                            if !self
+                                .handle_video_frame_from_peer(vf, received_bytes, peer)
+                                .await
+                            {
+                                return false;
                             }
-                            keyframe_request_reason =
-                                keyframe_request_reason.or(Some(VIDEO_KEYFRAME_REASON_QUEUE_DROP));
-                            self.handler.refresh_video(display as _);
-                        } else {
-                            thread.video_sender.send(MediaData::VideoQueue).ok();
                         }
-                    }
-                    if let Some(reason) = keyframe_request_reason {
-                        self.send_video_keyframe_request(peer, display_i32, frame_id, reason)
+                        Ok(None) => {}
+                        Err(err) => {
+                            log::warn!(
+                                "diag client video frame chunk rejected: id={}, display={}, frame_id={}, err={}",
+                                self.handler.get_id(),
+                                display,
+                                frame_id,
+                                err
+                            );
+                            self.send_video_keyframe_request(
+                                peer,
+                                display,
+                                frame_id,
+                                VIDEO_KEYFRAME_REASON_FRAME_GAP,
+                            )
                             .await;
+                        }
                     }
                 }
                 Some(message::Union::Hash(hash)) => {
@@ -3401,16 +3646,18 @@ mod tests {
     use super::{
         next_no_video_startup_fallback_codec, session_permission_response_msgbox_type,
         video_keyframe_request_msg, video_received_msg, NoVideoStartupAction,
-        NoVideoStartupWatchdog, VideoReceiverStatsTracker, NO_VIDEO_START_FALLBACK_INTERVAL,
-        NO_VIDEO_START_MAX_FALLBACKS, NO_VIDEO_START_TIMEOUT, VIDEO_KEYFRAME_REASON_FRAME_GAP,
+        NoVideoStartupWatchdog, VideoFrameChunkAssembler, VideoReceiverStatsTracker,
+        NO_VIDEO_START_FALLBACK_INTERVAL, NO_VIDEO_START_MAX_FALLBACKS, NO_VIDEO_START_TIMEOUT,
+        VIDEO_FRAME_CHUNK_MAX_ORIGINAL_SIZE, VIDEO_KEYFRAME_REASON_FRAME_GAP,
     };
     use hbb_common::{
         bytes::{Bytes, BytesMut},
         bytes_codec::BytesCodec,
         message_proto::{
             message, misc, supported_decoding::PreferCodec, SupportedDecoding, SupportedEncoding,
-            VideoFrame,
+            VideoFrame, VideoFrameChunk,
         },
+        protobuf::Message as _,
         tokio::time::{Duration, Instant},
         tokio_util::codec::{Decoder, Encoder},
     };
@@ -3475,6 +3722,72 @@ mod tests {
         assert_eq!(request.display, 2);
         assert_eq!(request.last_frame_id, 77);
         assert_eq!(request.reason, VIDEO_KEYFRAME_REASON_FRAME_GAP);
+    }
+
+    fn video_frame_chunk(
+        display: i32,
+        frame_id: u64,
+        chunk_index: u32,
+        chunk_count: u32,
+        data: &[u8],
+        original_size: usize,
+    ) -> VideoFrameChunk {
+        VideoFrameChunk {
+            display,
+            frame_id,
+            chunk_index,
+            chunk_count,
+            data: Bytes::copy_from_slice(data),
+            original_size: original_size as u32,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn video_frame_chunk_assembler_reassembles_out_of_order_frame() {
+        let vf = VideoFrame {
+            display: 2,
+            frame_id: 91,
+            ..Default::default()
+        };
+        let serialized = vf.write_to_bytes().unwrap();
+        let split = serialized.len() / 2;
+        assert!(split > 0 && split < serialized.len());
+
+        let mut assembler = VideoFrameChunkAssembler::default();
+        let second = video_frame_chunk(2, 91, 1, 2, &serialized[split..], serialized.len());
+        assert!(assembler.push(second).unwrap().is_none());
+
+        let first = video_frame_chunk(2, 91, 0, 2, &serialized[..split], serialized.len());
+        let Some((reassembled, received_bytes)) = assembler.push(first).unwrap() else {
+            panic!("expected reassembled video frame");
+        };
+        assert_eq!(reassembled.display, 2);
+        assert_eq!(reassembled.frame_id, 91);
+        assert_eq!(received_bytes, serialized.len());
+    }
+
+    #[test]
+    fn video_frame_chunk_assembler_rejects_invalid_metadata() {
+        let mut assembler = VideoFrameChunkAssembler::default();
+        let err = match assembler.push(video_frame_chunk(0, 1, 2, 2, b"x", 1)) {
+            Ok(_) => panic!("expected invalid chunk index error"),
+            Err(err) => err,
+        };
+        assert!(err.contains("index out of range"));
+
+        let err = match assembler.push(video_frame_chunk(
+            0,
+            1,
+            0,
+            1,
+            b"x",
+            VIDEO_FRAME_CHUNK_MAX_ORIGINAL_SIZE + 1,
+        )) {
+            Ok(_) => panic!("expected invalid original size error"),
+            Err(err) => err,
+        };
+        assert!(err.contains("original_size invalid"));
     }
 
     #[test]

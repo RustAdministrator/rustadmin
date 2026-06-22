@@ -32,6 +32,7 @@ use hbb_common::platform::linux::run_cmds;
 #[cfg(target_os = "android")]
 use hbb_common::protobuf::EnumOrUnknown;
 use hbb_common::{
+    bytes::Bytes,
     config::decode_permanent_password_h1_from_storage,
     config::{self, keys, Config, TrustedDevice},
     fs::{self, can_enable_overwrite_detection, JobType},
@@ -545,6 +546,7 @@ pub struct Connection {
     video_ack_required: bool,
     video_startup_ack_frame_id: Option<u64>,
     video_startup_acked: bool,
+    video_frame_chunking: bool,
     server_audit_conn: String,
     server_audit_file: String,
     lr: LoginRequest,
@@ -615,6 +617,7 @@ impl Subscriber for ConnInner {
         // Send SwitchDisplay on the same channel as VideoFrame to avoid send order problems.
         let tx_by_video = match &msg.union {
             Some(message::Union::VideoFrame(_)) => true,
+            Some(message::Union::VideoFrameChunk(_)) => true,
             Some(message::Union::Misc(misc)) => match &misc.union {
                 Some(misc::Union::SwitchDisplay(_)) => true,
                 _ => false,
@@ -643,6 +646,10 @@ const VIDEO_STARTUP_SEND_TIMEOUT_WINDOW: Duration = Duration::from_secs(60);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 const VIDEO_FRAME_STALE_DROP_AFTER: Duration = Duration::from_secs(3);
 const VIDEO_STALE_DROP_LOG_INTERVAL: Duration = Duration::from_secs(5);
+const VIDEO_FRAME_CHUNK_PAYLOAD_SIZE: usize = 1024;
+const VIDEO_FRAME_CHUNK_THRESHOLD: usize = VIDEO_FRAME_CHUNK_PAYLOAD_SIZE * 2;
+const VIDEO_FRAME_CHUNK_PACE_EVERY: usize = 4;
+const VIDEO_FRAME_CHUNK_PACE_DELAY: Duration = Duration::from_millis(1);
 
 fn steady_send_timeout_ms(file_transfer: bool, port_forward: bool, terminal: bool) -> u64 {
     if file_transfer || port_forward || terminal {
@@ -664,6 +671,7 @@ fn initial_send_timeout_ms(file_transfer: bool, port_forward: bool, terminal: bo
 fn stream_message_kind(msg: &Message) -> &'static str {
     match &msg.union {
         Some(message::Union::VideoFrame(_)) => "VideoFrame",
+        Some(message::Union::VideoFrameChunk(_)) => "VideoFrameChunk",
         Some(message::Union::AudioFrame(_)) => "AudioFrame",
         Some(message::Union::Hash(_)) => "Hash",
         Some(message::Union::LoginRequest(_)) => "LoginRequest",
@@ -679,6 +687,51 @@ fn stream_message_kind(msg: &Message) -> &'static str {
         Some(_) => "Other",
         None => "None",
     }
+}
+
+fn make_video_frame_chunk_messages(vf: &VideoFrame, serialized: Bytes) -> ResultType<Vec<Message>> {
+    if serialized.is_empty() {
+        bail!("video frame is empty");
+    }
+    if serialized.len() > u32::MAX as usize {
+        bail!(
+            "video frame is too large to describe: bytes={}",
+            serialized.len()
+        );
+    }
+    let chunk_count = serialized.len().div_ceil(VIDEO_FRAME_CHUNK_PAYLOAD_SIZE);
+    if chunk_count > u32::MAX as usize {
+        bail!(
+            "video frame is too large to chunk: bytes={}",
+            serialized.len()
+        );
+    }
+
+    let mut messages = Vec::with_capacity(chunk_count);
+    for (index, chunk) in serialized
+        .chunks(VIDEO_FRAME_CHUNK_PAYLOAD_SIZE)
+        .enumerate()
+    {
+        let mut msg = Message::new();
+        msg.set_video_frame_chunk(VideoFrameChunk {
+            frame_id: vf.frame_id,
+            display: vf.display,
+            chunk_index: index as u32,
+            chunk_count: chunk_count as u32,
+            data: Bytes::copy_from_slice(chunk),
+            original_size: serialized.len() as u32,
+            ..Default::default()
+        });
+        messages.push(msg);
+    }
+    Ok(messages)
+}
+
+fn should_pace_video_frame_chunk_send(sent_chunk_count: usize, chunk_count: usize) -> bool {
+    sent_chunk_count > 0
+        && sent_chunk_count < chunk_count
+        && VIDEO_FRAME_CHUNK_PACE_EVERY > 0
+        && sent_chunk_count % VIDEO_FRAME_CHUNK_PACE_EVERY == 0
 }
 
 fn stream_misc_kind(misc: &Misc) -> &'static str {
@@ -812,6 +865,7 @@ impl Connection {
             video_ack_required: false,
             video_startup_ack_frame_id: None,
             video_startup_acked: false,
+            video_frame_chunking: false,
             server_audit_conn: "".to_owned(),
             server_audit_file: "".to_owned(),
             lr: Default::default(),
@@ -1293,26 +1347,114 @@ impl Connection {
                         }
                         continue;
                     }
-                    if let Err(err) = conn.stream.send(value.as_ref()).await {
-                        let kind = stream_message_kind(&value);
-                        if is_video_frame {
-                            log::warn!(
-                                "#{} diag video stream send failed: queue_latency_ms={}, err={}",
-                                conn.inner.id(),
-                                instant.elapsed().as_millis(),
-                                err
-                            );
-                        } else {
-                            log::warn!(
-                                "#{} diag stream send failed: kind={}, queue_latency_ms={}, err={}",
-                                conn.inner.id(),
-                                kind,
-                                instant.elapsed().as_millis(),
-                                err
-                            );
+                    let mut sent_video_chunks = None;
+                    if is_video_frame && conn.video_frame_chunking {
+                        if let Some(message::Union::VideoFrame(vf)) = &value.union {
+                            match vf.write_to_bytes() {
+                                Ok(serialized) => {
+                                    let serialized_bytes = serialized.len();
+                                    if serialized_bytes > VIDEO_FRAME_CHUNK_THRESHOLD {
+                                        match make_video_frame_chunk_messages(vf, Bytes::from(serialized)) {
+                                            Ok(chunk_messages) => {
+                                                let chunk_count = chunk_messages.len();
+                                                let mut sent_chunk_count = 0usize;
+                                                let mut send_error = None;
+                                                for (chunk_index, chunk_msg) in
+                                                    chunk_messages.iter().enumerate()
+                                                {
+                                                    if let Err(err) = conn.stream.send(chunk_msg).await {
+                                                        send_error = Some((chunk_index, err));
+                                                        break;
+                                                    }
+                                                    sent_chunk_count += 1;
+                                                    if should_pace_video_frame_chunk_send(
+                                                        sent_chunk_count,
+                                                        chunk_count,
+                                                    ) {
+                                                        time::sleep(VIDEO_FRAME_CHUNK_PACE_DELAY)
+                                                            .await;
+                                                    }
+                                                }
+                                                if let Some((failed_chunk_index, err)) = send_error {
+                                                    log::warn!(
+                                                        "#{} diag video chunk stream send failed: queue_latency_ms={}, serialized_bytes={}, sent_chunks={}, chunks={}, failed_chunk_index={}, chunk_payload_size={}, chunk_pace_every={}, chunk_pace_delay_ms={}, err={}",
+                                                        conn.inner.id(),
+                                                        instant.elapsed().as_millis(),
+                                                        serialized_bytes,
+                                                        sent_chunk_count,
+                                                        chunk_count,
+                                                        failed_chunk_index,
+                                                        VIDEO_FRAME_CHUNK_PAYLOAD_SIZE,
+                                                        VIDEO_FRAME_CHUNK_PACE_EVERY,
+                                                        VIDEO_FRAME_CHUNK_PACE_DELAY.as_millis(),
+                                                        err
+                                                    );
+                                                    conn.on_close(&err.to_string(), false).await;
+                                                    break;
+                                                }
+                                                if wait_for_startup_ack {
+                                                    log::info!(
+                                                        "#{} diag startup video chunks sent: queue_latency_ms={}, serialized_bytes={}, chunks={}, chunk_payload_size={}, chunk_pace_every={}, chunk_pace_delay_ms={}",
+                                                        conn.inner.id(),
+                                                        instant.elapsed().as_millis(),
+                                                        serialized_bytes,
+                                                        chunk_count,
+                                                        VIDEO_FRAME_CHUNK_PAYLOAD_SIZE,
+                                                        VIDEO_FRAME_CHUNK_PACE_EVERY,
+                                                        VIDEO_FRAME_CHUNK_PACE_DELAY.as_millis()
+                                                    );
+                                                }
+                                                sent_video_chunks = Some((serialized_bytes, chunk_count));
+                                            }
+                                            Err(err) => {
+                                                log::warn!(
+                                                    "#{} diag video chunk creation failed: queue_latency_ms={}, serialized_bytes={}, err={}",
+                                                    conn.inner.id(),
+                                                    instant.elapsed().as_millis(),
+                                                    serialized_bytes,
+                                                    err
+                                                );
+                                                conn.on_close(&err.to_string(), false).await;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    log::warn!(
+                                        "#{} diag video frame serialization failed before chunking: queue_latency_ms={}, err={}",
+                                        conn.inner.id(),
+                                        instant.elapsed().as_millis(),
+                                        err
+                                    );
+                                    conn.on_close(&err.to_string(), false).await;
+                                    break;
+                                }
+                            }
                         }
-                        conn.on_close(&err.to_string(), false).await;
-                        break;
+                    }
+                    if sent_video_chunks.is_none() {
+                        if let Err(err) = conn.stream.send(value.as_ref()).await {
+                            let kind = stream_message_kind(&value);
+                            if is_video_frame {
+                                log::warn!(
+                                    "#{} diag video stream send failed: queue_latency_ms={}, err={}",
+                                    conn.inner.id(),
+                                    instant.elapsed().as_millis(),
+                                    err
+                                );
+                            } else {
+                                log::warn!(
+                                    "#{} diag stream send failed: kind={}, queue_latency_ms={}, err={}",
+                                    conn.inner.id(),
+                                    kind,
+                                    instant.elapsed().as_millis(),
+                                    err
+                                );
+                            }
+                            conn.on_close(&err.to_string(), false).await;
+                            break;
+                        }
                     }
                     if is_video_frame {
                         if wait_for_startup_ack {
@@ -1335,8 +1477,12 @@ impl Connection {
                             frame_id,
                         )) = first_video_diag
                         {
+                            let (chunked, chunk_serialized_bytes, chunk_count) =
+                                sent_video_chunks
+                                    .map(|(bytes, chunks)| (true, bytes, chunks))
+                                    .unwrap_or((false, 0, 0));
                             log::info!(
-                                "#{} diag first video frame sent to stream: queue_latency_ms={}, video_ack_required={}, frame_id={}, wait_for_startup_ack={}, serialized_bytes={}, payload_bytes={}, frame_count={}, keyframe={}",
+                                "#{} diag first video frame sent to stream: queue_latency_ms={}, video_ack_required={}, frame_id={}, wait_for_startup_ack={}, serialized_bytes={}, payload_bytes={}, frame_count={}, keyframe={}, chunked={}, chunk_serialized_bytes={}, chunks={}, chunk_payload_size={}, chunk_pace_every={}, chunk_pace_delay_ms={}",
                                 conn.inner.id(),
                                 instant.elapsed().as_millis(),
                                 conn.video_ack_required,
@@ -1345,16 +1491,23 @@ impl Connection {
                                 serialized_bytes,
                                 payload_bytes,
                                 frame_count,
-                                has_keyframe
+                                has_keyframe,
+                                chunked,
+                                chunk_serialized_bytes,
+                                chunk_count,
+                                VIDEO_FRAME_CHUNK_PAYLOAD_SIZE,
+                                VIDEO_FRAME_CHUNK_PACE_EVERY,
+                                VIDEO_FRAME_CHUNK_PACE_DELAY.as_millis()
                             );
                         } else {
                             log::info!(
-                                "#{} diag first video frame sent to stream: queue_latency_ms={}, video_ack_required={}, frame_id={:?}, wait_for_startup_ack={}",
+                                "#{} diag first video frame sent to stream: queue_latency_ms={}, video_ack_required={}, frame_id={:?}, wait_for_startup_ack={}, chunked={:?}",
                                 conn.inner.id(),
                                 instant.elapsed().as_millis(),
                                 conn.video_ack_required,
                                 frame_id,
-                                wait_for_startup_ack
+                                wait_for_startup_ack,
+                                sent_video_chunks
                             );
                         }
                     }
@@ -3370,7 +3523,7 @@ impl Connection {
         if let Some(o) = self.lr.clone().option.as_ref() {
             if let Some(q) = o.supported_decoding.clone().take() {
                 log::info!(
-                    "#{} supported_decoding on login: h264={}, h265={}, vp9={}, av1={}, prefer={:?}, prefer_chroma={:?}",
+                    "#{} supported_decoding on login: h264={}, h265={}, vp9={}, av1={}, prefer={:?}, prefer_chroma={:?}, video_frame_chunking={}",
                     self.inner.id(),
                     q.ability_h264,
                     q.ability_h265,
@@ -3378,7 +3531,8 @@ impl Connection {
                     q.ability_av1,
                     q.prefer.enum_value_or(PreferCodec::Auto),
                     q.prefer_chroma
-                        .enum_value_or(hbb_common::message_proto::Chroma::I420)
+                        .enum_value_or(hbb_common::message_proto::Chroma::I420),
+                    q.video_frame_chunking
                 );
                 Encoder::update(Update(self.inner.id(), q));
                 log::info!(
@@ -3428,6 +3582,13 @@ impl Connection {
         self.peer_argb = crate::str2color(&format!("{}{}", &lr.my_id, &lr.my_platform), 0xff);
         if let Some(o) = lr.option.as_ref() {
             self.options_in_login = Some(o.clone());
+            self.video_frame_chunking = o
+                .supported_decoding
+                .as_ref()
+                .map(|q| q.video_frame_chunking)
+                .unwrap_or(false);
+        } else {
+            self.video_frame_chunking = false;
         }
         if self.require_2fa.is_some() && !lr.hwid.is_empty() && Self::enable_trusted_devices() {
             let devices = Config::get_trusted_devices();
@@ -3445,6 +3606,12 @@ impl Connection {
         self.video_ack_required = lr.video_ack_required;
         self.video_startup_ack_frame_id = None;
         self.video_startup_acked = false;
+        log::info!(
+            "#{} diag viewer transport options on login: video_ack_required={}, video_frame_chunking={}",
+            self.inner.id(),
+            self.video_ack_required,
+            self.video_frame_chunking
+        );
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -4523,6 +4690,12 @@ impl Connection {
                             );
                             self.video_startup_ack_frame_id = None;
                             self.video_startup_acked = true;
+                            self.stream.set_send_timeout(SEND_TIMEOUT_VIDEO);
+                            log::info!(
+                                "#{} diag send timeout returned to steady state after startup video ack: send_timeout_ms={}",
+                                self.inner.id,
+                                SEND_TIMEOUT_VIDEO
+                            );
                             video_service::notify_video_frame_fetched_by_conn_id(
                                 self.inner.id,
                                 Some(Instant::now().into()),
@@ -5558,8 +5731,9 @@ impl Connection {
         }
         if let Some(q) = o.supported_decoding.clone().take() {
             self.video_startup_ack_frame_id = None;
+            self.video_frame_chunking = q.video_frame_chunking;
             log::info!(
-                "#{} supported_decoding update: h264={}, h265={}, vp9={}, av1={}, prefer={:?}, prefer_chroma={:?}",
+                "#{} supported_decoding update: h264={}, h265={}, vp9={}, av1={}, prefer={:?}, prefer_chroma={:?}, video_frame_chunking={}",
                 self.inner.id(),
                 q.ability_h264,
                 q.ability_h265,
@@ -5567,7 +5741,8 @@ impl Connection {
                 q.ability_av1,
                 q.prefer.enum_value_or(PreferCodec::Auto),
                 q.prefer_chroma
-                    .enum_value_or(hbb_common::message_proto::Chroma::I420)
+                    .enum_value_or(hbb_common::message_proto::Chroma::I420),
+                q.video_frame_chunking
             );
             scrap::codec::Encoder::update(scrap::codec::EncodingUpdate::Update(self.inner.id(), q));
             log::info!(
@@ -7554,6 +7729,64 @@ mod test {
         assert!(video_ack_matches_pending(Some(7), 0));
         assert!(!video_ack_matches_pending(Some(7), 8));
         assert!(!video_ack_matches_pending(None, 0));
+    }
+
+    #[test]
+    fn video_frame_chunk_messages_split_serialized_video_frame() {
+        use hbb_common::protobuf::Message as _;
+
+        let mut vf = VideoFrame::new();
+        vf.display = 1;
+        vf.frame_id = 7;
+        vf.set_vp9s(EncodedVideoFrames {
+            frames: vec![EncodedVideoFrame {
+                data: Bytes::from(vec![0x7a; VIDEO_FRAME_CHUNK_THRESHOLD + 123]),
+                key: true,
+                ..Default::default()
+            }]
+            .into(),
+            ..Default::default()
+        });
+        let serialized = vf.write_to_bytes().unwrap();
+        assert!(serialized.len() > VIDEO_FRAME_CHUNK_THRESHOLD);
+
+        let chunks = make_video_frame_chunk_messages(&vf, Bytes::from(serialized.clone())).unwrap();
+        assert!(chunks.len() > 1);
+
+        let mut reassembled = Vec::with_capacity(serialized.len());
+        for (index, msg) in chunks.iter().enumerate() {
+            let Some(message::Union::VideoFrameChunk(chunk)) = &msg.union else {
+                panic!("expected video frame chunk");
+            };
+            assert_eq!(chunk.display, 1);
+            assert_eq!(chunk.frame_id, 7);
+            assert_eq!(chunk.chunk_index, index as u32);
+            assert_eq!(chunk.chunk_count, chunks.len() as u32);
+            assert_eq!(chunk.original_size as usize, serialized.len());
+            assert!(chunk.data.len() <= VIDEO_FRAME_CHUNK_PAYLOAD_SIZE);
+            reassembled.extend_from_slice(&chunk.data);
+        }
+        assert_eq!(reassembled, serialized);
+    }
+
+    #[test]
+    fn video_frame_chunk_send_pacing_skips_initial_and_final_chunks() {
+        let chunk_count = VIDEO_FRAME_CHUNK_PACE_EVERY * 2 + 1;
+
+        assert!(!should_pace_video_frame_chunk_send(0, chunk_count));
+        assert!(!should_pace_video_frame_chunk_send(1, chunk_count));
+        assert!(should_pace_video_frame_chunk_send(
+            VIDEO_FRAME_CHUNK_PACE_EVERY,
+            chunk_count
+        ));
+        assert!(should_pace_video_frame_chunk_send(
+            VIDEO_FRAME_CHUNK_PACE_EVERY * 2,
+            chunk_count
+        ));
+        assert!(!should_pace_video_frame_chunk_send(
+            chunk_count,
+            chunk_count
+        ));
     }
 
     #[test]
