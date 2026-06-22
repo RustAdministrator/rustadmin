@@ -114,6 +114,11 @@ struct VideoReceiverStatsTracker {
     skipped_frame_ids: u64,
     encoded_frames_received: u64,
     keyframes_received: u64,
+    video_chunks_received: u64,
+    video_chunk_bytes_received: u64,
+    video_chunk_frames_reassembled: u64,
+    video_chunk_frames_expired: u64,
+    last_observed_frame_id: u64,
     freeze_count: u64,
     last_rendered_frames: u64,
     last_render_progress: Option<Instant>,
@@ -167,6 +172,36 @@ impl VideoReceiverStatsTracker {
         }
 
         gap_reason
+    }
+
+    fn record_video_chunk(&mut self, frame_id: u64, bytes_received: usize) {
+        self.video_chunks_received = self.video_chunks_received.saturating_add(1);
+        self.video_chunk_bytes_received = self
+            .video_chunk_bytes_received
+            .saturating_add(bytes_received.min(u64::MAX as usize) as u64);
+        if frame_id > self.last_observed_frame_id {
+            self.last_observed_frame_id = frame_id;
+        }
+    }
+
+    fn record_video_chunk_reassembled(&mut self) {
+        self.video_chunk_frames_reassembled = self.video_chunk_frames_reassembled.saturating_add(1);
+    }
+
+    fn record_video_chunk_expired(&mut self, summary: VideoFrameChunkExpirySummary) {
+        self.video_chunk_frames_expired = self
+            .video_chunk_frames_expired
+            .saturating_add(summary.frames.min(u64::MAX as usize) as u64);
+        if summary.last_frame_id > self.last_observed_frame_id {
+            self.last_observed_frame_id = summary.last_frame_id;
+        }
+    }
+
+    fn has_transport_progress(&self) -> bool {
+        self.frames_received > 0
+            || self.video_chunks_received > 0
+            || self.video_chunk_frames_expired > 0
+            || self.last_observed_frame_id != 0
     }
 
     fn record_queue_drop(&mut self) {
@@ -240,6 +275,11 @@ impl VideoReceiverStatsTracker {
             encoded_frames_received: self.encoded_frames_received,
             keyframes_received: self.keyframes_received,
             decode_errors: decode_snapshot.decode_errors,
+            video_chunks_received: self.video_chunks_received,
+            video_chunk_bytes_received: self.video_chunk_bytes_received,
+            video_chunk_frames_reassembled: self.video_chunk_frames_reassembled,
+            video_chunk_frames_expired: self.video_chunk_frames_expired,
+            last_observed_frame_id: self.last_observed_frame_id,
             ..Default::default()
         }
     }
@@ -282,6 +322,7 @@ impl NoVideoStartupWatchdog {
         expects_video: bool,
         is_connected: bool,
         first_frame: bool,
+        video_transport_seen: bool,
         now: Instant,
     ) -> NoVideoStartupAction {
         if !expects_video || !is_connected || first_frame {
@@ -296,6 +337,22 @@ impl NoVideoStartupWatchdog {
 
         let elapsed = now.saturating_duration_since(since);
         if elapsed < NO_VIDEO_START_TIMEOUT {
+            return NoVideoStartupAction::None;
+        }
+
+        if video_transport_seen {
+            let should_log_stalled = self
+                .last_stalled_log
+                .map(|last| {
+                    now.saturating_duration_since(last) >= NO_VIDEO_START_STALLED_LOG_INTERVAL
+                })
+                .unwrap_or(true);
+            if should_log_stalled {
+                self.last_stalled_log = Some(now);
+                return NoVideoStartupAction::Stalled {
+                    elapsed_ms: elapsed.as_millis(),
+                };
+            }
             return NoVideoStartupAction::None;
         }
 
@@ -439,15 +496,44 @@ impl PendingVideoFrameChunk {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct VideoFrameChunkExpirySummary {
+    frames: usize,
+    chunks: usize,
+    last_display: i32,
+    last_frame_id: u64,
+}
+
+impl VideoFrameChunkExpirySummary {
+    fn record(&mut self, key: VideoFrameChunkKey, pending: &PendingVideoFrameChunk) {
+        self.frames = self.frames.saturating_add(1);
+        self.chunks = self.chunks.saturating_add(pending.received_chunks);
+        if key.frame_id >= self.last_frame_id {
+            self.last_display = key.display;
+            self.last_frame_id = key.frame_id;
+        }
+    }
+
+    fn has_expired(&self) -> bool {
+        self.frames > 0
+    }
+}
+
+#[derive(Debug)]
+struct VideoFrameChunkPush {
+    frame: Option<(VideoFrame, usize)>,
+    expired: VideoFrameChunkExpirySummary,
+}
+
 #[derive(Default)]
 struct VideoFrameChunkAssembler {
     pending: HashMap<VideoFrameChunkKey, PendingVideoFrameChunk>,
 }
 
 impl VideoFrameChunkAssembler {
-    fn push(&mut self, chunk: VideoFrameChunk) -> Result<Option<(VideoFrame, usize)>, String> {
+    fn push(&mut self, chunk: VideoFrameChunk) -> Result<VideoFrameChunkPush, String> {
         let now = Instant::now();
-        self.cleanup_expired(now);
+        let expired = self.cleanup_expired(now);
 
         let chunk_count = chunk.chunk_count as usize;
         let chunk_index = chunk.chunk_index as usize;
@@ -500,7 +586,10 @@ impl VideoFrameChunkAssembler {
             .get_mut(&key)
             .ok_or_else(|| "video frame chunk state missing".to_owned())?;
         if pending.chunks[chunk_index].is_some() {
-            return Ok(None);
+            return Ok(VideoFrameChunkPush {
+                frame: None,
+                expired,
+            });
         }
         pending.received_bytes = pending.received_bytes.saturating_add(chunk.data.len());
         if pending.received_bytes > pending.original_size {
@@ -514,7 +603,10 @@ impl VideoFrameChunkAssembler {
         pending.chunks[chunk_index] = Some(chunk.data);
         pending.received_chunks += 1;
         if pending.received_chunks != chunk_count {
-            return Ok(None);
+            return Ok(VideoFrameChunkPush {
+                frame: None,
+                expired,
+            });
         }
 
         let pending = self
@@ -542,13 +634,23 @@ impl VideoFrameChunkAssembler {
                 key.display, vf.display, key.frame_id, vf.frame_id
             ));
         }
-        Ok(Some((vf, frame_bytes.len())))
+        Ok(VideoFrameChunkPush {
+            frame: Some((vf, frame_bytes.len())),
+            expired,
+        })
     }
 
-    fn cleanup_expired(&mut self, now: Instant) {
-        self.pending.retain(|_, pending| {
-            now.saturating_duration_since(pending.first_seen) < VIDEO_FRAME_CHUNK_REASSEMBLY_TIMEOUT
+    fn cleanup_expired(&mut self, now: Instant) -> VideoFrameChunkExpirySummary {
+        let mut summary = VideoFrameChunkExpirySummary::default();
+        self.pending.retain(|key, pending| {
+            let keep = now.saturating_duration_since(pending.first_seen)
+                < VIDEO_FRAME_CHUNK_REASSEMBLY_TIMEOUT;
+            if !keep {
+                summary.record(*key, pending);
+            }
+            keep
         });
+        summary
     }
 }
 
@@ -907,6 +1009,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                 expects_video,
                                 self.is_connected,
                                 self.first_frame,
+                                self.video_frame_chunks_seen > 0,
                                 Instant::now(),
                             ) {
                                 NoVideoStartupAction::Reconnect { attempt, elapsed_ms } => {
@@ -1289,21 +1392,52 @@ impl<T: InvokeUiSession> Remote<T> {
 
     async fn send_video_receiver_stats(&mut self, peer: &mut Stream, interval_ms: u32) {
         let now = Instant::now();
+        let expired = self.video_chunk_assembler.cleanup_expired(now);
+        if expired.has_expired() {
+            log::warn!(
+                "diag client video frame chunks expired on stats tick: id={}, display={}, last_frame_id={}, expired_frames={}, expired_chunks={}, total_chunks_seen={}",
+                self.handler.get_id(),
+                expired.last_display,
+                expired.last_frame_id,
+                expired.frames,
+                expired.chunks,
+                self.video_frame_chunks_seen
+            );
+            self.video_receiver_stats
+                .entry(expired.last_display.max(0) as usize)
+                .or_default()
+                .record_video_chunk_expired(expired);
+            self.send_video_keyframe_request(
+                peer,
+                expired.last_display,
+                expired.last_frame_id,
+                VIDEO_KEYFRAME_REASON_FRAME_GAP,
+            )
+            .await;
+        }
         let video_threads = &self.video_threads;
         let messages = self
             .video_receiver_stats
             .iter_mut()
-            .filter_map(|(display, tracker)| {
-                let thread = video_threads.get(display)?;
-                let decode_snapshot = thread.stats.snapshot();
-                Some(video_receiver_stats_msg(tracker.to_proto(
+            .filter(|(_, tracker)| tracker.has_transport_progress())
+            .map(|(display, tracker)| {
+                let (decode_queue_len, decode_snapshot) =
+                    if let Some(thread) = video_threads.get(display) {
+                        (
+                            thread.video_queue.read().unwrap().len(),
+                            thread.stats.snapshot(),
+                        )
+                    } else {
+                        (0, client::VideoThreadStatsSnapshot::default())
+                    };
+                video_receiver_stats_msg(tracker.to_proto(
                     *display,
                     interval_ms,
-                    thread.video_queue.read().unwrap().len(),
+                    decode_queue_len,
                     0,
                     decode_snapshot,
                     now,
-                )))
+                ))
             })
             .collect::<Vec<_>>();
 
@@ -2340,6 +2474,10 @@ impl<T: InvokeUiSession> Remote<T> {
                     let original_size = chunk.original_size;
                     let chunk_number = chunk_index.saturating_add(1);
                     self.video_frame_chunks_seen = self.video_frame_chunks_seen.saturating_add(1);
+                    self.video_receiver_stats
+                        .entry(display.max(0) as usize)
+                        .or_default()
+                        .record_video_chunk(frame_id, chunk_len);
                     if !self.first_frame
                         && (self.video_frame_chunks_seen <= 8 || chunk_number == chunk_count)
                     {
@@ -2356,7 +2494,36 @@ impl<T: InvokeUiSession> Remote<T> {
                         );
                     }
                     match self.video_chunk_assembler.push(chunk) {
-                        Ok(Some((vf, received_bytes))) => {
+                        Ok(push) => {
+                            if push.expired.has_expired() {
+                                log::warn!(
+                                    "diag client video frame chunks expired: id={}, display={}, last_frame_id={}, expired_frames={}, expired_chunks={}, total_chunks_seen={}",
+                                    self.handler.get_id(),
+                                    push.expired.last_display,
+                                    push.expired.last_frame_id,
+                                    push.expired.frames,
+                                    push.expired.chunks,
+                                    self.video_frame_chunks_seen
+                                );
+                                self.video_receiver_stats
+                                    .entry(push.expired.last_display.max(0) as usize)
+                                    .or_default()
+                                    .record_video_chunk_expired(push.expired);
+                                self.send_video_keyframe_request(
+                                    peer,
+                                    push.expired.last_display,
+                                    push.expired.last_frame_id,
+                                    VIDEO_KEYFRAME_REASON_FRAME_GAP,
+                                )
+                                .await;
+                            }
+                            let Some((vf, received_bytes)) = push.frame else {
+                                return true;
+                            };
+                            self.video_receiver_stats
+                                .entry(display.max(0) as usize)
+                                .or_default()
+                                .record_video_chunk_reassembled();
                             log::info!(
                                 "diag client video frame chunks reassembled: id={}, display={}, frame_id={}, received_bytes={}, total_chunks_seen={}",
                                 self.handler.get_id(),
@@ -2372,7 +2539,6 @@ impl<T: InvokeUiSession> Remote<T> {
                                 return false;
                             }
                         }
-                        Ok(None) => {}
                         Err(err) => {
                             log::warn!(
                                 "diag client video frame chunk rejected: id={}, display={}, frame_id={}, err={}",
@@ -3648,7 +3814,8 @@ mod tests {
         video_keyframe_request_msg, video_received_msg, NoVideoStartupAction,
         NoVideoStartupWatchdog, VideoFrameChunkAssembler, VideoReceiverStatsTracker,
         NO_VIDEO_START_FALLBACK_INTERVAL, NO_VIDEO_START_MAX_FALLBACKS, NO_VIDEO_START_TIMEOUT,
-        VIDEO_FRAME_CHUNK_MAX_ORIGINAL_SIZE, VIDEO_KEYFRAME_REASON_FRAME_GAP,
+        VIDEO_FRAME_CHUNK_MAX_ORIGINAL_SIZE, VIDEO_FRAME_CHUNK_REASSEMBLY_TIMEOUT,
+        VIDEO_KEYFRAME_REASON_FRAME_GAP,
     };
     use hbb_common::{
         bytes::{Bytes, BytesMut},
@@ -3756,10 +3923,14 @@ mod tests {
 
         let mut assembler = VideoFrameChunkAssembler::default();
         let second = video_frame_chunk(2, 91, 1, 2, &serialized[split..], serialized.len());
-        assert!(assembler.push(second).unwrap().is_none());
+        let push = assembler.push(second).unwrap();
+        assert!(push.frame.is_none());
+        assert!(!push.expired.has_expired());
 
         let first = video_frame_chunk(2, 91, 0, 2, &serialized[..split], serialized.len());
-        let Some((reassembled, received_bytes)) = assembler.push(first).unwrap() else {
+        let push = assembler.push(first).unwrap();
+        assert!(!push.expired.has_expired());
+        let Some((reassembled, received_bytes)) = push.frame else {
             panic!("expected reassembled video frame");
         };
         assert_eq!(reassembled.display, 2);
@@ -3788,6 +3959,25 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.contains("original_size invalid"));
+    }
+
+    #[test]
+    fn video_frame_chunk_assembler_reports_expired_partial_frames() {
+        let mut assembler = VideoFrameChunkAssembler::default();
+        let chunk = video_frame_chunk(4, 123, 0, 2, b"x", 2);
+        assert!(assembler.push(chunk).unwrap().frame.is_none());
+
+        let expired =
+            assembler.cleanup_expired(Instant::now() + VIDEO_FRAME_CHUNK_REASSEMBLY_TIMEOUT);
+        assert_eq!(expired.frames, 1);
+        assert_eq!(expired.chunks, 1);
+        assert_eq!(expired.last_display, 4);
+        assert_eq!(expired.last_frame_id, 123);
+        assert!(expired.has_expired());
+
+        let expired =
+            assembler.cleanup_expired(Instant::now() + VIDEO_FRAME_CHUNK_REASSEMBLY_TIMEOUT * 2);
+        assert!(!expired.has_expired());
     }
 
     #[test]
@@ -3842,6 +4032,37 @@ mod tests {
     }
 
     #[test]
+    fn video_receiver_stats_tracker_reports_chunk_transport_before_decoding() {
+        let mut tracker = VideoReceiverStatsTracker::default();
+        tracker.record_video_chunk(55, 1024);
+        tracker.record_video_chunk(55, 512);
+        tracker.record_video_chunk_reassembled();
+        tracker.record_video_chunk_expired(super::VideoFrameChunkExpirySummary {
+            frames: 1,
+            chunks: 2,
+            last_display: 0,
+            last_frame_id: 56,
+        });
+
+        let stats = tracker.to_proto(
+            0,
+            1000,
+            0,
+            0,
+            crate::client::VideoThreadStatsSnapshot::default(),
+            Instant::now(),
+        );
+
+        assert!(tracker.has_transport_progress());
+        assert_eq!(stats.frames_received, 0);
+        assert_eq!(stats.video_chunks_received, 2);
+        assert_eq!(stats.video_chunk_bytes_received, 1536);
+        assert_eq!(stats.video_chunk_frames_reassembled, 1);
+        assert_eq!(stats.video_chunk_frames_expired, 1);
+        assert_eq!(stats.last_observed_frame_id, 56);
+    }
+
+    #[test]
     fn video_keyframe_requests_are_rate_limited() {
         let mut tracker = VideoReceiverStatsTracker::default();
         let now = Instant::now();
@@ -3857,13 +4078,14 @@ mod tests {
         let start = Instant::now();
 
         assert_eq!(
-            watchdog.tick(true, true, false, start),
+            watchdog.tick(true, true, false, false, start),
             NoVideoStartupAction::None
         );
         assert_eq!(
             watchdog.tick(
                 true,
                 true,
+                false,
                 false,
                 start + NO_VIDEO_START_TIMEOUT - Duration::from_millis(1)
             ),
@@ -3876,12 +4098,12 @@ mod tests {
         let mut watchdog = NoVideoStartupWatchdog::default();
         let start = Instant::now();
         assert_eq!(
-            watchdog.tick(true, true, false, start),
+            watchdog.tick(true, true, false, false, start),
             NoVideoStartupAction::None
         );
 
         assert_eq!(
-            watchdog.tick(true, true, false, start + NO_VIDEO_START_TIMEOUT),
+            watchdog.tick(true, true, false, false, start + NO_VIDEO_START_TIMEOUT),
             NoVideoStartupAction::Reconnect {
                 attempt: 1,
                 elapsed_ms: NO_VIDEO_START_TIMEOUT.as_millis()
@@ -3892,6 +4114,7 @@ mod tests {
             watchdog.tick(
                 true,
                 true,
+                false,
                 false,
                 start + NO_VIDEO_START_TIMEOUT + NO_VIDEO_START_FALLBACK_INTERVAL
             ),
@@ -3907,7 +4130,7 @@ mod tests {
         let mut watchdog = NoVideoStartupWatchdog::default();
         let start = Instant::now();
         assert_eq!(
-            watchdog.tick(true, true, false, start),
+            watchdog.tick(true, true, false, false, start),
             NoVideoStartupAction::None
         );
 
@@ -3916,7 +4139,7 @@ mod tests {
                 + NO_VIDEO_START_TIMEOUT
                 + NO_VIDEO_START_FALLBACK_INTERVAL * (attempt as u32 - 1);
             assert_eq!(
-                watchdog.tick(true, true, false, now),
+                watchdog.tick(true, true, false, false, now),
                 NoVideoStartupAction::Reconnect {
                     attempt,
                     elapsed_ms: now.saturating_duration_since(start).as_millis()
@@ -3928,9 +4151,37 @@ mod tests {
             + NO_VIDEO_START_TIMEOUT
             + NO_VIDEO_START_FALLBACK_INTERVAL * NO_VIDEO_START_MAX_FALLBACKS as u32;
         assert!(matches!(
-            watchdog.tick(true, true, false, after_cap),
+            watchdog.tick(true, true, false, false, after_cap),
             NoVideoStartupAction::GiveUp { .. }
         ));
+    }
+
+    #[test]
+    fn no_video_watchdog_keeps_transport_alive_without_reconnect() {
+        let mut watchdog = NoVideoStartupWatchdog::default();
+        let start = Instant::now();
+        assert_eq!(
+            watchdog.tick(true, true, false, true, start),
+            NoVideoStartupAction::None
+        );
+
+        assert_eq!(
+            watchdog.tick(true, true, false, true, start + NO_VIDEO_START_TIMEOUT),
+            NoVideoStartupAction::Stalled {
+                elapsed_ms: NO_VIDEO_START_TIMEOUT.as_millis()
+            }
+        );
+
+        assert_eq!(
+            watchdog.tick(
+                true,
+                true,
+                false,
+                true,
+                start + NO_VIDEO_START_TIMEOUT + NO_VIDEO_START_FALLBACK_INTERVAL
+            ),
+            NoVideoStartupAction::None
+        );
     }
 
     #[test]
@@ -3938,20 +4189,20 @@ mod tests {
         let mut watchdog = NoVideoStartupWatchdog::default();
         let start = Instant::now();
         assert_eq!(
-            watchdog.tick(true, true, false, start),
+            watchdog.tick(true, true, false, false, start),
             NoVideoStartupAction::None
         );
         assert!(matches!(
-            watchdog.tick(true, true, false, start + NO_VIDEO_START_TIMEOUT),
+            watchdog.tick(true, true, false, false, start + NO_VIDEO_START_TIMEOUT),
             NoVideoStartupAction::Reconnect { .. }
         ));
 
         assert_eq!(
-            watchdog.tick(true, true, true, start + NO_VIDEO_START_TIMEOUT),
+            watchdog.tick(true, true, true, false, start + NO_VIDEO_START_TIMEOUT),
             NoVideoStartupAction::None
         );
         assert_eq!(
-            watchdog.tick(true, true, false, start + NO_VIDEO_START_TIMEOUT),
+            watchdog.tick(true, true, false, false, start + NO_VIDEO_START_TIMEOUT),
             NoVideoStartupAction::None
         );
     }

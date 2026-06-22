@@ -774,6 +774,39 @@ impl Connection {
         self.video_ack_required && self.video_startup_ack_frame_id.is_some()
     }
 
+    fn receiver_stats_show_video_transport(stats: &VideoReceiverStats) -> bool {
+        stats.frames_received > 0
+            || stats.video_chunks_received > 0
+            || stats.video_chunk_frames_reassembled > 0
+            || stats.video_chunk_frames_expired > 0
+            || stats.last_observed_frame_id != 0
+    }
+
+    fn release_startup_video_ack_from_receiver_stats(&mut self, stats: &VideoReceiverStats) {
+        if !self.wait_for_startup_video_ack() || !Self::receiver_stats_show_video_transport(stats) {
+            return;
+        }
+        log::info!(
+            "#{} diag startup video transport observed before complete ack: pending_frame_id={:?}, display={}, first_frame_id={}, last_frame_id={}, last_observed_frame_id={}, chunks={}, chunk_reassembled={}, chunk_expired={}",
+            self.inner.id,
+            self.video_startup_ack_frame_id,
+            stats.display,
+            stats.first_frame_id,
+            stats.last_frame_id,
+            stats.last_observed_frame_id,
+            stats.video_chunks_received,
+            stats.video_chunk_frames_reassembled,
+            stats.video_chunk_frames_expired
+        );
+        self.video_startup_ack_frame_id = None;
+        self.video_startup_acked = true;
+        self.stream.set_send_timeout(SEND_TIMEOUT_VIDEO);
+        video_service::notify_video_frame_fetched_by_conn_id(
+            self.inner.id,
+            Some(Instant::now().into()),
+        );
+    }
+
     pub async fn start(
         addr: SocketAddr,
         stream: super::Stream,
@@ -4712,17 +4745,22 @@ impl Connection {
                     }
                     Some(misc::Union::VideoReceiverStats(stats)) => {
                         log::debug!(
-                            "#{} diag video receiver stats: display={}, first_frame_id={}, last_frame_id={}, received={}, decoded={}, rendered={}, dropped={}, skipped={}, bytes={}, freeze_count={}, decode_errors={}, decode_queue_len={}, render_queue_len={}, last_render_age_ms={}, interval_ms={}",
+                            "#{} diag video receiver stats: display={}, first_frame_id={}, last_frame_id={}, last_observed_frame_id={}, received={}, decoded={}, rendered={}, dropped={}, skipped={}, bytes={}, chunks={}, chunk_bytes={}, chunk_reassembled={}, chunk_expired={}, freeze_count={}, decode_errors={}, decode_queue_len={}, render_queue_len={}, last_render_age_ms={}, interval_ms={}",
                             self.inner.id(),
                             stats.display,
                             stats.first_frame_id,
                             stats.last_frame_id,
+                            stats.last_observed_frame_id,
                             stats.frames_received,
                             stats.frames_decoded,
                             stats.frames_rendered,
                             stats.frames_dropped,
                             stats.skipped_frame_ids,
                             stats.bytes_received,
+                            stats.video_chunks_received,
+                            stats.video_chunk_bytes_received,
+                            stats.video_chunk_frames_reassembled,
+                            stats.video_chunk_frames_expired,
                             stats.freeze_count,
                             stats.decode_errors,
                             stats.decode_queue_len,
@@ -4730,6 +4768,7 @@ impl Connection {
                             stats.last_render_age_ms,
                             stats.interval_ms
                         );
+                        self.release_startup_video_ack_from_receiver_stats(&stats);
                         video_service::VIDEO_QOS
                             .lock()
                             .unwrap()
@@ -7729,6 +7768,37 @@ mod test {
         assert!(video_ack_matches_pending(Some(7), 0));
         assert!(!video_ack_matches_pending(Some(7), 8));
         assert!(!video_ack_matches_pending(None, 0));
+    }
+
+    #[test]
+    fn receiver_stats_video_transport_signal_is_explicit() {
+        assert!(!Connection::receiver_stats_show_video_transport(
+            &VideoReceiverStats::default()
+        ));
+        assert!(Connection::receiver_stats_show_video_transport(
+            &VideoReceiverStats {
+                video_chunks_received: 1,
+                ..Default::default()
+            }
+        ));
+        assert!(Connection::receiver_stats_show_video_transport(
+            &VideoReceiverStats {
+                video_chunk_frames_expired: 1,
+                ..Default::default()
+            }
+        ));
+        assert!(Connection::receiver_stats_show_video_transport(
+            &VideoReceiverStats {
+                last_observed_frame_id: 42,
+                ..Default::default()
+            }
+        ));
+        assert!(Connection::receiver_stats_show_video_transport(
+            &VideoReceiverStats {
+                frames_received: 1,
+                ..Default::default()
+            }
+        ));
     }
 
     #[test]
