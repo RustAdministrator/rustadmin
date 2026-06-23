@@ -28,6 +28,7 @@ use crate::privacy_mode::{get_privacy_mode_conn_id, INVALID_PRIVACY_MODE_CONN_ID
 use crate::{
     platform::windows::is_process_consent_running,
     privacy_mode::{is_current_privacy_mode_impl, PRIVACY_MODE_IMPL_WIN_MAG},
+    server::user_capture_helper::UserCaptureBackend,
     ui_interface::is_installed,
 };
 use hbb_common::{
@@ -478,8 +479,8 @@ pub fn new(source: VideoSource, idx: usize) -> GenericService {
 fn create_capturer(
     privacy_mode_id: i32,
     display: Display,
-    _current: usize,
-    _portable_service_running: bool,
+    current: usize,
+    portable_service_running: bool,
 ) -> ResultType<Box<dyn TraitCapturer>> {
     #[cfg(not(windows))]
     let c: Option<Box<dyn TraitCapturer>> = None;
@@ -505,11 +506,7 @@ fn create_capturer(
             #[cfg(windows)]
             {
                 log::debug!("Create capturer dxgi|gdi");
-                return crate::portable_service::client::create_capturer(
-                    _current,
-                    display,
-                    _portable_service_running,
-                );
+                return create_dxgi_capturer(current, display, portable_service_running);
             }
             #[cfg(not(windows))]
             {
@@ -520,6 +517,86 @@ fn create_capturer(
             }
         }
     };
+}
+
+#[cfg(windows)]
+fn should_use_user_capture_helper(portable_service_running: bool) -> bool {
+    !portable_service_running
+        && crate::platform::is_root()
+        && is_installed()
+        && !crate::platform::windows::is_prelogin()
+        && !crate::platform::windows::is_locked()
+        && !crate::platform::windows::desktop_changed()
+}
+
+#[cfg(windows)]
+fn create_user_capture_helper_capturer(
+    backend: UserCaptureBackend,
+    current: usize,
+    width: usize,
+    height: usize,
+) -> ResultType<Box<dyn TraitCapturer>> {
+    crate::server::user_capture_helper::client::create_capturer(backend, current, width, height)
+}
+
+#[cfg(windows)]
+fn create_dxgi_capturer(
+    current: usize,
+    display: Display,
+    portable_service_running: bool,
+) -> ResultType<Box<dyn TraitCapturer>> {
+    if should_use_user_capture_helper(portable_service_running) {
+        let width = display.width();
+        let height = display.height();
+        match create_user_capture_helper_capturer(UserCaptureBackend::Dxgi, current, width, height)
+        {
+            Ok(capturer) => {
+                log::info!(
+                    "Using user capture helper for DXGI: display={}, size={}x{}",
+                    current,
+                    width,
+                    height
+                );
+                return Ok(capturer);
+            }
+            Err(err) => {
+                log::warn!(
+                    "Failed to start user capture helper for DXGI, falling back to direct dxgi|gdi: {}",
+                    err
+                );
+            }
+        }
+    }
+    crate::portable_service::client::create_capturer(current, display, portable_service_running)
+}
+
+#[cfg(windows)]
+fn create_wgc_capturer(current: usize, display: Display) -> ResultType<Box<dyn TraitCapturer>> {
+    if !scrap::CapturerWgc::is_supported() {
+        bail!("WGC is not supported");
+    }
+    if should_use_user_capture_helper(crate::portable_service::client::running()) {
+        let width = display.width();
+        let height = display.height();
+        match create_user_capture_helper_capturer(UserCaptureBackend::Wgc, current, width, height) {
+            Ok(capturer) => {
+                log::info!(
+                    "Using user capture helper for WGC: display={}, size={}x{}",
+                    current,
+                    width,
+                    height
+                );
+                return Ok(capturer);
+            }
+            Err(err) => {
+                log::warn!(
+                    "Failed to start user capture helper for WGC, falling back to direct WGC: {}",
+                    err
+                );
+            }
+        }
+    }
+    Ok(Box::new(scrap::CapturerWgc::new(display)?))
 }
 
 // This function works on privacy mode. Windows only for now.
@@ -750,7 +827,10 @@ fn display_for_current(c: &CapturerInfo) -> Option<Display> {
     let mut displays = match Display::all() {
         Ok(displays) => displays,
         Err(err) => {
-            log::warn!("capture backend override failed to enumerate displays: {}", err);
+            log::warn!(
+                "capture backend override failed to enumerate displays: {}",
+                err
+            );
             return None;
         }
     };
@@ -766,10 +846,7 @@ fn display_for_current(c: &CapturerInfo) -> Option<Display> {
 }
 
 #[cfg(windows)]
-fn apply_capture_backend_preference(
-    c: &mut CapturerInfo,
-    capture_fallback_reason: &mut String,
-) {
+fn apply_capture_backend_preference(c: &mut CapturerInfo, capture_fallback_reason: &mut String) {
     if c._capturer_privacy_mode_id != INVALID_PRIVACY_MODE_CONN_ID {
         return;
     }
@@ -780,9 +857,13 @@ fn apply_capture_backend_preference(
             let Some(display) = display_for_current(c) else {
                 return;
             };
-            match scrap::Capturer::new(display) {
+            match create_dxgi_capturer(
+                c.current,
+                display,
+                crate::portable_service::client::running(),
+            ) {
                 Ok(capturer) => {
-                    c.capturer = Box::new(capturer);
+                    c.capturer = capturer;
                     *capture_fallback_reason = "manual_dxgi".to_owned();
                     log::info!(
                         "capture backend override applied: DXGI, effective_gdi={}",
@@ -802,9 +883,9 @@ fn apply_capture_backend_preference(
             let Some(display) = display_for_current(c) else {
                 return;
             };
-            match scrap::CapturerWgc::new(display) {
+            match create_wgc_capturer(c.current, display) {
                 Ok(wgc) => {
-                    c.capturer = Box::new(wgc);
+                    c.capturer = wgc;
                     *capture_fallback_reason = "manual_wgc".to_owned();
                     log::info!("capture backend override applied: WGC");
                 }
@@ -880,9 +961,9 @@ fn try_set_wgc_fallback(
     }
 
     let display = displays.remove(c.current);
-    match scrap::CapturerWgc::new(display) {
+    match create_wgc_capturer(c.current, display) {
         Ok(wgc) => {
-            c.capturer = Box::new(wgc);
+            c.capturer = wgc;
             *capture_fallback_reason = reason.to_owned();
             log::info!("capture wgc fallback enabled: reason={}", reason);
             true
@@ -1157,7 +1238,7 @@ fn run(vs: VideoService) -> ResultType<()> {
     #[cfg(windows)]
     let mut wgc_no_frame_since: Option<Instant> = None;
     #[cfg(windows)]
-    log::info!("gdi: {}", c.is_gdi());
+    log::info!("gdi: {}, cpu_only: {}", c.is_gdi(), c.is_cpu_only());
     #[cfg(windows)]
     start_uac_elevation_check();
 
@@ -1220,7 +1301,7 @@ fn run(vs: VideoService) -> ResultType<()> {
             bail!("SWITCH");
         }
         #[cfg(all(windows, feature = "vram"))]
-        if (c.is_gdi() || c.is_wgc() || c.is_mag()) && encoder.input_texture() {
+        if (c.is_gdi() || c.is_wgc() || c.is_mag() || c.is_cpu_only()) && encoder.input_texture() {
             log::info!("changed to pixel-buffer capture when using vram");
             VRamEncoder::set_fallback_gdi(sp.name(), true);
             bail!("SWITCH");
@@ -1784,7 +1865,7 @@ fn get_encoder_config(
     _source: VideoSource,
 ) -> EncoderCfg {
     #[cfg(all(windows, feature = "vram"))]
-    if _portable_service || c.is_gdi() || _source == VideoSource::Camera {
+    if _portable_service || c.is_gdi() || c.is_cpu_only() || _source == VideoSource::Camera {
         log::info!("gdi:{}, portable:{}", c.is_gdi(), _portable_service);
         VRamEncoder::set_not_use(_name, true);
     }

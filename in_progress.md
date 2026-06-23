@@ -4,12 +4,18 @@ Date: 2026-06-23
 
 ## Current Status
 
-Latest client/code pass is revision `008`.
+Latest client/code pass is revision `009`.
 
 What changed in this pass:
 
-- Windows service launch is now Administrator Protection-compatible. For an unlocked interactive session with Windows Administrator Protection enabled, the service starts `--server` through the interactive user token so WGC can work. For locked/prelogin sessions, it starts/restarts `--server` through the privileged `winlogon.exe` token so LogonUI and the password field remain visible.
-- The service tracks the effective launch mode. If the desired mode changes while controlled sessions are active, relaunch is deferred to avoid breaking the current remote session; once there are no controlled sessions, `--server` is relaunched in the correct mode for the current lock state.
+- Experimental branch `codex/privileged-user-token-capture` keeps the Windows service-launched `--server` process privileged so Administrator Protection and the secure desktop path stay compatible.
+- Added a Windows user-token capture helper (`--user-capture-helper`) for DXGI and WGC. The privileged server launches the helper in the current interactive session, receives CPU BGRA frames through shared memory, and marks helper capture as CPU-only so the VRAM texture path is not selected for helper frames.
+- Automatic DXGI capture, manual DXGI, manual WGC, and the DXGI-to-WGC fallback now try the user-token helper first when RustAdmin is installed, running privileged, and the session is not locked/prelogin/secure-desktop; the old direct backend path remains the fallback if the helper cannot start.
+- `rustadmin_revision.txt` was bumped to `009`.
+- Windows release archive built successfully on VM `192.168.189.137`: `RustAdmin_Release_2.0.2.009.zip`, size `41,216,561` bytes, sha256 `2317aa713eaf6de4deec2b0a5ed7b78e2ab071af457bad93faeb09a7c7910021`.
+- Windows archive was copied back to WSL as `RustAdmin_Release_2.0.2.009.zip` and verified with `unzip -t`; no compressed data errors.
+- Revision `008` tried switching unlocked Administrator Protection sessions to an interactive user-token `--server`; logs showed WGC working, but secure desktop access still failed. Revision `009` supersedes that by keeping `--server` privileged and moving DXGI/WGC capture into the user-token helper.
+- The service still tracks the effective launch mode, but this branch no longer selects the interactive-user launch mode for `--server`.
 - `rustadmin_revision.txt` was bumped to `008`.
 - Windows release archive built successfully on VM `192.168.189.137`: `RustAdmin_Release_2.0.2.008.zip`, size `41,213,520` bytes, sha256 `b80cebcb2ce91aaab31ce425c4b66dc387948d4c944584bee4f2cfa499649e8b`.
 - Windows archive was copied back to WSL as `RustAdmin_Release_2.0.2.008.zip` and verified with `unzip -t`; no compressed data errors.
@@ -33,10 +39,10 @@ Recent verification:
 - `dart analyze lib/consts.dart lib/common/widgets/toolbar.dart lib/models/model.dart lib/mobile/pages/remote_page.dart lib/mobile/pages/settings_page.dart`: passed with info/deprecation warnings only.
 - Android Rust library built for `aarch64-linux-android` with `flutter,hwcodec,mediacodec`, then copied and stripped into `flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so`.
 - Android APK verified with `apksigner verify --verbose`; `aapt dump badging` reports `versionName='2.0.2'`, `versionCode='2202'`, native code `arm64-v8a`.
-- Windows revision `008` archive copied back from the VM and verified with `unzip -t`; no compressed data errors.
+- Windows revision `009` archive copied back from the VM and verified with `unzip -t`; no compressed data errors.
 - `cargo check --lib --no-default-features`: blocked by the same missing `gstreamer-1.0` pkg-config dependency.
 
-Latest test build is `RustAdmin_Release_2.0.2.008.zip`.
+Latest test build is `RustAdmin_Release_2.0.2.009.zip`.
 
 Earlier capture-backend menu test details:
 

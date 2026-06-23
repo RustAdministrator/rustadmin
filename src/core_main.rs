@@ -155,7 +155,17 @@ pub fn core_main() -> Option<Vec<String>> {
         .any(|arg| arg.starts_with(crate::portable_service::SHMEM_ARG_PREFIX));
     #[cfg(not(windows))]
     let has_portable_service_shmem_arg = false;
-    if has_portable_service_shmem_arg {
+    #[cfg(windows)]
+    let user_capture_helper_arg = crate::server::user_capture_helper::ARG;
+    #[cfg(not(windows))]
+    let user_capture_helper_arg = "--user-capture-helper";
+    #[cfg(windows)]
+    let has_user_capture_helper_arg = args.iter().any(|arg| arg == user_capture_helper_arg);
+    #[cfg(not(windows))]
+    let has_user_capture_helper_arg = false;
+    if has_user_capture_helper_arg {
+        log_name = "user-capture-helper".to_owned();
+    } else if has_portable_service_shmem_arg {
         log_name = "portable-service".to_owned();
     } else if args.len() > 0 && args[0].starts_with("--") {
         let name = args[0].replace("--", "");
@@ -317,6 +327,10 @@ pub fn core_main() -> Option<Vec<String>> {
                         crate::virtual_display_manager::rustdesk_idd::install_update_driver()
                     );
                 }
+                return None;
+            } else if args[0] == user_capture_helper_arg {
+                #[cfg(windows)]
+                crate::server::user_capture_helper::server::run_user_capture_helper();
                 return None;
             } else if args[0] == "--portable-service" {
                 crate::platform::elevate_or_run_as_system(

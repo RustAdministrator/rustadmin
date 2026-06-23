@@ -928,6 +928,10 @@ pub fn launch_privileged_process(session_id: DWORD, cmd: &str) -> ResultType<HAN
     launch_process_in_session(session_id, cmd, ServerLaunchMode::Privileged)
 }
 
+pub fn launch_user_process_in_session(session_id: DWORD, cmd: &str) -> ResultType<HANDLE> {
+    launch_process_in_session(session_id, cmd, ServerLaunchMode::InteractiveUser)
+}
+
 fn launch_process_in_session(
     session_id: DWORD,
     cmd: &str,
@@ -974,9 +978,7 @@ fn preferred_server_launch_mode(session_id: DWORD) -> ServerLaunchMode {
     if unsafe { is_session_locked(session_id) == TRUE } {
         return ServerLaunchMode::Privileged;
     }
-    if administrator_protection_enabled() {
-        return ServerLaunchMode::InteractiveUser;
-    }
+    let _ = administrator_protection_enabled();
     ServerLaunchMode::Privileged
 }
 
