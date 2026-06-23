@@ -92,12 +92,40 @@ fn video_keyframe_request_msg(display: i32, last_frame_id: u64, reason: u32) -> 
     msg
 }
 
+fn auto_adjust_fps_msg(fps: usize) -> Message {
+    let mut misc = Misc::new();
+    misc.union = Some(misc::Union::AutoAdjustFps(usize_to_u32(fps.max(1))));
+    let mut msg = Message::new();
+    msg.set_misc(misc);
+    msg
+}
+
 fn video_receiver_stats_msg(stats: VideoReceiverStats) -> Message {
     let mut misc = Misc::new();
     misc.set_video_receiver_stats(stats);
     let mut msg = Message::new();
     msg.set_misc(misc);
     msg
+}
+
+fn next_adaptive_auto_fps(
+    custom_fps: usize,
+    last_auto_fps: Option<usize>,
+    limited_fps: usize,
+    max_queue_len: usize,
+    should_decrease: bool,
+    should_increase: bool,
+) -> usize {
+    if should_decrease && limited_fps < max_queue_len {
+        return (limited_fps / 2).max(1);
+    }
+    if should_increase {
+        let custom_fps = custom_fps.max(1);
+        let previous = last_auto_fps.unwrap_or(limited_fps).max(1);
+        let probe_step = (custom_fps / 5).clamp(5, 15);
+        return previous.saturating_add(probe_step).min(custom_fps).max(1);
+    }
+    limited_fps.max(1)
 }
 
 fn usize_to_u32(value: usize) -> u32 {
@@ -2177,7 +2205,7 @@ impl<T: InvokeUiSession> Remote<T> {
                 }
                 if len <= 1 {
                     ctl.idle_counter += 1;
-                    if ctl.idle_counter > 3 && last_auto_fps + 3 <= limited_fps {
+                    if ctl.idle_counter > 3 && last_auto_fps + 3 <= custom_fps {
                         return Some(true);
                     }
                 }
@@ -2189,14 +2217,16 @@ impl<T: InvokeUiSession> Remote<T> {
             let trendings: Vec<_> = displays.iter().map(|k| fps_trending(*k)).collect();
             let should_decrease = trendings.iter().any(|v| *v == Some(false));
             let should_increase = !should_decrease && trendings.iter().any(|v| *v == Some(true));
-            // limited_fps to ensure decoding is faster than encoding
-            let mut auto_fps = limited_fps;
-            if should_decrease && limited_fps < max_queue_len {
-                auto_fps = limited_fps / 2;
-            }
-            if auto_fps < 1 {
-                auto_fps = 1;
-            }
+            // limited_fps is a conservative steady-state estimate. If the decode queue stays
+            // empty, probe above it so a low current decode rate does not become a permanent cap.
+            let auto_fps = next_adaptive_auto_fps(
+                custom_fps,
+                last_auto_fps,
+                limited_fps,
+                max_queue_len,
+                should_decrease,
+                should_increase,
+            );
             let should_send_auto_fps =
                 (last_auto_fps.is_none() || should_decrease || should_increase)
                     && Some(auto_fps) != last_auto_fps;
@@ -2224,13 +2254,7 @@ impl<T: InvokeUiSession> Remote<T> {
                     );
                 }
                 if should_send_auto_fps {
-                    let mut misc = Misc::new();
-                    misc.set_option(OptionMessage {
-                        custom_fps: auto_fps as _,
-                        ..Default::default()
-                    });
-                    let mut msg = Message::new();
-                    msg.set_misc(misc);
+                    let msg = auto_adjust_fps_msg(auto_fps);
                     self.sender.send(Data::Message(msg)).ok();
                     log::info!(
                         "diag fps control set_auto_fps: id={}, auto_fps={}, previous_auto_fps={:?}, direct={}, codec={:?}, custom_fps={}, min_decode_fps={}, limited_fps={}, max_queue_len={}, real_fps={:?}, decode_fps={:?}, queue_len={:?}, inactive={:?}, trendings={:?}, decrease={}, increase={}",
@@ -3810,12 +3834,12 @@ impl Drop for VideoThread {
 #[cfg(test)]
 mod tests {
     use super::{
-        next_no_video_startup_fallback_codec, session_permission_response_msgbox_type,
-        video_keyframe_request_msg, video_received_msg, NoVideoStartupAction,
-        NoVideoStartupWatchdog, VideoFrameChunkAssembler, VideoReceiverStatsTracker,
-        NO_VIDEO_START_FALLBACK_INTERVAL, NO_VIDEO_START_MAX_FALLBACKS, NO_VIDEO_START_TIMEOUT,
-        VIDEO_FRAME_CHUNK_MAX_ORIGINAL_SIZE, VIDEO_FRAME_CHUNK_REASSEMBLY_TIMEOUT,
-        VIDEO_KEYFRAME_REASON_FRAME_GAP,
+        auto_adjust_fps_msg, next_adaptive_auto_fps, next_no_video_startup_fallback_codec,
+        session_permission_response_msgbox_type, video_keyframe_request_msg, video_received_msg,
+        NoVideoStartupAction, NoVideoStartupWatchdog, VideoFrameChunkAssembler,
+        VideoReceiverStatsTracker, NO_VIDEO_START_FALLBACK_INTERVAL, NO_VIDEO_START_MAX_FALLBACKS,
+        NO_VIDEO_START_TIMEOUT, VIDEO_FRAME_CHUNK_MAX_ORIGINAL_SIZE,
+        VIDEO_FRAME_CHUNK_REASSEMBLY_TIMEOUT, VIDEO_KEYFRAME_REASON_FRAME_GAP,
     };
     use hbb_common::{
         bytes::{Bytes, BytesMut},
@@ -4070,6 +4094,29 @@ mod tests {
         assert!(tracker.should_send_keyframe_request(now));
         assert!(!tracker.should_send_keyframe_request(now + Duration::from_millis(500)));
         assert!(tracker.should_send_keyframe_request(now + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn auto_adjust_fps_message_uses_dedicated_misc_field() {
+        let msg = auto_adjust_fps_msg(12);
+        let Some(message::Union::Misc(misc)) = msg.union else {
+            panic!("expected misc message");
+        };
+        let Some(misc::Union::AutoAdjustFps(fps)) = misc.union else {
+            panic!("expected auto adjust fps");
+        };
+        assert_eq!(fps, 12);
+    }
+
+    #[test]
+    fn adaptive_auto_fps_probes_above_current_decode_rate_when_idle() {
+        assert_eq!(next_adaptive_auto_fps(60, Some(12), 12, 0, false, true), 24);
+        assert_eq!(next_adaptive_auto_fps(60, Some(55), 12, 0, false, true), 60);
+        assert_eq!(next_adaptive_auto_fps(60, Some(12), 12, 20, true, false), 6);
+        assert_eq!(
+            next_adaptive_auto_fps(60, Some(12), 12, 0, false, false),
+            12
+        );
     }
 
     #[test]
