@@ -6,6 +6,8 @@ Date: 2026-06-23
 
 - Done: Android client APK built as `RustAdmin_Android_Release_2.0.2.006.apk`.
 - Done: Android client ZIP built as `RustAdmin_Android_Release_2.0.2.006.zip`.
+- Done: Windows client archive built as `RustAdmin_Release_2.0.2.011.zip`.
+- Done: Windows revision `011` lets manual/fallback WGC reach the user-token helper before checking direct WGC support in the privileged server process, and expands capture-helper diagnostics.
 - Done: Windows client archive built as `RustAdmin_Release_2.0.2.010.zip`.
 - Done: Windows revision `010` avoids the helper-DXGI startup wait when a GDI snapshot is unavailable by falling through to WGC, WinMag, then GDI fallback, and logs helper first-frame/would-block status.
 - Done: Windows client archive built as `RustAdmin_Release_2.0.2.009.zip`.

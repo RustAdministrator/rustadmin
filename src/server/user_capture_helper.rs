@@ -212,6 +212,12 @@ fn create_backend_capturer(
     current_display: usize,
 ) -> ResultType<(Box<dyn TraitCapturer>, usize, usize)> {
     let mut displays = Display::all().with_context(|| "Failed to enumerate displays")?;
+    log::info!(
+        "User capture helper preparing {} capturer: requested_display={}, display_count={}",
+        backend.as_str(),
+        current_display,
+        displays.len()
+    );
     if displays.len() <= current_display {
         bail!(
             "Invalid display index {}, display_count={}",
@@ -235,7 +241,12 @@ fn create_backend_capturer(
             Ok((Box::new(capturer), width, height))
         }
         UserCaptureBackend::Wgc => {
-            if !scrap::CapturerWgc::is_supported() {
+            let supported = scrap::CapturerWgc::is_supported();
+            log::info!(
+                "User capture helper WGC support check: supported={}",
+                supported
+            );
+            if !supported {
                 bail!("WGC is not supported");
             }
             let capturer = scrap::CapturerWgc::new(display)
@@ -484,17 +495,38 @@ pub mod client {
         ) -> ResultType<Self> {
             let shmem_name = next_shmem_name();
             let shmem_size = shmem_size_for_display(width, height);
+            log::info!(
+                "Preparing user capture helper: backend={}, display={}, size={}x{}, shmem={}, shmem_size={}",
+                backend.as_str(),
+                current_display,
+                width,
+                height,
+                shmem_name,
+                shmem_size
+            );
             let shmem = crate::portable_service::SharedMemory::create(&shmem_name, shmem_size)?;
             if let Ok(flink) = shmem_flink_path(&shmem_name) {
-                if let Err(err) =
-                    crate::platform::windows::grant_user_capture_helper_shmem_file_access(&flink)
+                match crate::platform::windows::grant_user_capture_helper_shmem_file_access(&flink)
                 {
-                    log::warn!(
-                        "Failed to grant user capture helper shared-memory access for {:?}: {}",
-                        flink,
-                        err
-                    );
+                    Ok(()) => {
+                        log::info!(
+                            "Granted user capture helper shared-memory access for {:?}",
+                            flink
+                        );
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "Failed to grant user capture helper shared-memory access for {:?}: {}",
+                            flink,
+                            err
+                        );
+                    }
                 }
+            } else {
+                log::warn!(
+                    "Failed to resolve user capture helper shared-memory flink path for {}",
+                    shmem_name
+                );
             }
             unsafe {
                 libc::memset(shmem.as_ptr() as _, 0, shmem.len());

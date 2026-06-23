@@ -520,13 +520,25 @@ fn create_capturer(
 }
 
 #[cfg(windows)]
-fn should_use_user_capture_helper(portable_service_running: bool) -> bool {
-    !portable_service_running
-        && crate::platform::is_root()
-        && is_installed()
-        && !crate::platform::windows::is_prelogin()
-        && !crate::platform::windows::is_locked()
-        && !crate::platform::windows::desktop_changed()
+fn user_capture_helper_eligibility(portable_service_running: bool) -> (bool, String) {
+    let is_root = crate::platform::is_root();
+    let installed = is_installed();
+    let prelogin = crate::platform::windows::is_prelogin();
+    let locked = crate::platform::windows::is_locked();
+    let desktop_changed = crate::platform::windows::desktop_changed();
+    let eligible = !portable_service_running
+        && is_root
+        && installed
+        && !prelogin
+        && !locked
+        && !desktop_changed;
+    (
+        eligible,
+        format!(
+            "portable_service_running={}, root={}, installed={}, prelogin={}, locked={}, desktop_changed={}",
+            portable_service_running, is_root, installed, prelogin, locked, desktop_changed
+        ),
+    )
 }
 
 #[cfg(windows)]
@@ -545,9 +557,18 @@ fn create_dxgi_capturer(
     display: Display,
     portable_service_running: bool,
 ) -> ResultType<Box<dyn TraitCapturer>> {
-    if should_use_user_capture_helper(portable_service_running) {
-        let width = display.width();
-        let height = display.height();
+    let width = display.width();
+    let height = display.height();
+    let (helper_eligible, helper_state) = user_capture_helper_eligibility(portable_service_running);
+    log::info!(
+        "capture create DXGI requested: display={}, size={}x{}, helper_eligible={}, {}",
+        current,
+        width,
+        height,
+        helper_eligible,
+        helper_state
+    );
+    if helper_eligible {
         match create_user_capture_helper_capturer(UserCaptureBackend::Dxgi, current, width, height)
         {
             Ok(capturer) => {
@@ -572,12 +593,19 @@ fn create_dxgi_capturer(
 
 #[cfg(windows)]
 fn create_wgc_capturer(current: usize, display: Display) -> ResultType<Box<dyn TraitCapturer>> {
-    if !scrap::CapturerWgc::is_supported() {
-        bail!("WGC is not supported");
-    }
-    if should_use_user_capture_helper(crate::portable_service::client::running()) {
-        let width = display.width();
-        let height = display.height();
+    let width = display.width();
+    let height = display.height();
+    let portable_service_running = crate::portable_service::client::running();
+    let (helper_eligible, helper_state) = user_capture_helper_eligibility(portable_service_running);
+    log::info!(
+        "capture create WGC requested: display={}, size={}x{}, helper_eligible={}, {}",
+        current,
+        width,
+        height,
+        helper_eligible,
+        helper_state
+    );
+    if helper_eligible {
         match create_user_capture_helper_capturer(UserCaptureBackend::Wgc, current, width, height) {
             Ok(capturer) => {
                 log::info!(
@@ -596,6 +624,21 @@ fn create_wgc_capturer(current: usize, display: Display) -> ResultType<Box<dyn T
             }
         }
     }
+    let direct_supported = scrap::CapturerWgc::is_supported();
+    log::info!(
+        "capture create WGC direct fallback support check: display={}, direct_supported_current_process={}",
+        current,
+        direct_supported
+    );
+    if !direct_supported {
+        bail!("WGC is not supported");
+    }
+    log::info!(
+        "Using direct WGC capturer in current process: display={}, size={}x{}",
+        current,
+        width,
+        height
+    );
     Ok(Box::new(scrap::CapturerWgc::new(display)?))
 }
 
@@ -876,10 +919,13 @@ fn apply_capture_backend_preference(c: &mut CapturerInfo, capture_fallback_reaso
             }
         }
         CaptureBackend::CaptureBackendWgc => {
-            if !scrap::CapturerWgc::is_supported() {
-                log::warn!("capture backend override WGC skipped: unsupported");
-                return;
-            }
+            log::info!(
+                "capture backend override requested: WGC, current_backend_gdi={}, current_backend_wgc={}, current_backend_mag={}, current_cpu_only={}",
+                c.is_gdi(),
+                c.is_wgc(),
+                c.is_mag(),
+                c.is_cpu_only()
+            );
             let Some(display) = display_for_current(c) else {
                 return;
             };
@@ -929,15 +975,22 @@ fn try_set_wgc_fallback(
     reason: &str,
 ) -> bool {
     if c._capturer_privacy_mode_id != INVALID_PRIVACY_MODE_CONN_ID || c.is_wgc() {
-        return false;
-    }
-    if !scrap::CapturerWgc::is_supported() {
-        log::warn!(
-            "capture wgc fallback skipped: reason={}, unsupported",
-            reason
+        log::info!(
+            "capture wgc fallback skipped: reason={}, privacy_mode_id={}, already_wgc={}",
+            reason,
+            c._capturer_privacy_mode_id,
+            c.is_wgc()
         );
         return false;
     }
+    log::info!(
+        "capture wgc fallback requested: reason={}, current={}, current_backend_gdi={}, current_backend_mag={}, current_cpu_only={}",
+        reason,
+        c.current,
+        c.is_gdi(),
+        c.is_mag(),
+        c.is_cpu_only()
+    );
 
     let mut displays = match Display::all() {
         Ok(displays) => displays,
