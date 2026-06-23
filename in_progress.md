@@ -4,11 +4,16 @@ Date: 2026-06-23
 
 ## Current Status
 
-Latest client/code pass is revision `007`.
+Latest client/code pass is revision `008`.
 
 What changed in this pass:
 
-- Windows service `--server` launch permission experiment was reverted. The server process now uses the previous privileged `winlogon.exe` launch path again instead of trying an interactive user token under Windows Administrator Protection.
+- Windows service launch is now Administrator Protection-compatible. For an unlocked interactive session with Windows Administrator Protection enabled, the service starts `--server` through the interactive user token so WGC can work. For locked/prelogin sessions, it starts/restarts `--server` through the privileged `winlogon.exe` token so LogonUI and the password field remain visible.
+- The service tracks the effective launch mode. If the desired mode changes while controlled sessions are active, relaunch is deferred to avoid breaking the current remote session; once there are no controlled sessions, `--server` is relaunched in the correct mode for the current lock state.
+- `rustadmin_revision.txt` was bumped to `008`.
+- Windows release archive built successfully on VM `192.168.189.137`: `RustAdmin_Release_2.0.2.008.zip`, size `41,213,520` bytes, sha256 `b80cebcb2ce91aaab31ce425c4b66dc387948d4c944584bee4f2cfa499649e8b`.
+- Windows archive was copied back to WSL as `RustAdmin_Release_2.0.2.008.zip` and verified with `unzip -t`; no compressed data errors.
+- Previous revision `007` restored the privileged `winlogon.exe` launch path. Revision `008` keeps that path for locked/prelogin sessions and uses an interactive user token only when it is needed for WGC in an unlocked Administrator Protection session.
 - `libs/scrap/src/common/codec.rs` now treats `PreferCodec::AV1Vulkan` from current `hbb_common` as ordinary AV1 until a separate AV1 Vulkan encoder path exists, fixing the Windows build against the current shared proto.
 - `rustadmin_revision.txt` was bumped to `007`.
 - Windows release archive built successfully on VM `192.168.189.137`: `RustAdmin_Release_2.0.2.007.zip`, size `41,214,152` bytes, sha256 `61e1ba4a05d8fffd6bc897c7455594d412a34fec5916de079160e1363de0abc2`.
@@ -23,17 +28,17 @@ What changed in this pass:
 - Windows release archive built successfully on VM `192.168.189.137`: `RustAdmin_Release_2.0.2.006.zip`, size `41,196,430` bytes, sha256 `ad32cf7a977e4137cb139c706826ee29d349058f81ce6303247c6d92e8e9ba43`.
 - macOS client build is blocked in the current WSL2/Linux environment. `/home/w0w/flutter/bin/flutter build macos` reports that `macos` is not a supported `flutter build` subcommand here; a macOS/Xcode Flutter toolchain is required.
 
-Verification in this pass:
+Recent verification:
 
 - `dart analyze lib/consts.dart lib/common/widgets/toolbar.dart lib/models/model.dart lib/mobile/pages/remote_page.dart lib/mobile/pages/settings_page.dart`: passed with info/deprecation warnings only.
 - Android Rust library built for `aarch64-linux-android` with `flutter,hwcodec,mediacodec`, then copied and stripped into `flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so`.
 - Android APK verified with `apksigner verify --verbose`; `aapt dump badging` reports `versionName='2.0.2'`, `versionCode='2202'`, native code `arm64-v8a`.
-- Windows archive copied back from the VM and verified with `unzip -t`; no compressed data errors.
+- Windows revision `008` archive copied back from the VM and verified with `unzip -t`; no compressed data errors.
 - `cargo check --lib --no-default-features`: blocked by the same missing `gstreamer-1.0` pkg-config dependency.
 
-Latest test build is `RustAdmin_Release_2.0.2.004-capture-backend-menu-test.zip`.
+Latest test build is `RustAdmin_Release_2.0.2.008.zip`.
 
-What changed in the latest pass:
+Earlier capture-backend menu test details:
 
 - Added a connection menu entry next to `Codec`: `Capture`.
 - `Capture` supports `Auto`, `DXGI`, `WGC`, `WinMag`, and `GDI` for Windows hosts.
