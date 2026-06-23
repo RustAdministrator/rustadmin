@@ -112,6 +112,9 @@ struct ReceiverVideoStatsState {
     skipped_frame_ids: u64,
     freeze_count: u64,
     decode_errors: u64,
+    video_chunk_bytes_received: u64,
+    video_chunk_frames_reassembled: u64,
+    video_chunk_frames_expired: u64,
     degraded_samples: usize,
     healthy_samples: usize,
     received_fps_ewma_x100: u32,
@@ -127,6 +130,9 @@ struct ReceiverVideoStatsDelta {
     skipped_frame_ids: u64,
     freeze_count: u64,
     decode_errors: u64,
+    video_chunk_bytes_received: u64,
+    video_chunk_frames_reassembled: u64,
+    video_chunk_frames_expired: u64,
 }
 
 impl ReceiverVideoStatsState {
@@ -157,6 +163,15 @@ impl ReceiverVideoStatsState {
                 .saturating_sub(self.skipped_frame_ids),
             freeze_count: stats.freeze_count.saturating_sub(self.freeze_count),
             decode_errors: stats.decode_errors.saturating_sub(self.decode_errors),
+            video_chunk_bytes_received: stats
+                .video_chunk_bytes_received
+                .saturating_sub(self.video_chunk_bytes_received),
+            video_chunk_frames_reassembled: stats
+                .video_chunk_frames_reassembled
+                .saturating_sub(self.video_chunk_frames_reassembled),
+            video_chunk_frames_expired: stats
+                .video_chunk_frames_expired
+                .saturating_sub(self.video_chunk_frames_expired),
         };
         self.frames_received = stats.frames_received;
         self.frames_rendered = stats.frames_rendered;
@@ -164,6 +179,9 @@ impl ReceiverVideoStatsState {
         self.skipped_frame_ids = stats.skipped_frame_ids;
         self.freeze_count = stats.freeze_count;
         self.decode_errors = stats.decode_errors;
+        self.video_chunk_bytes_received = stats.video_chunk_bytes_received;
+        self.video_chunk_frames_reassembled = stats.video_chunk_frames_reassembled;
+        self.video_chunk_frames_expired = stats.video_chunk_frames_expired;
         self.received_fps_ewma_x100 = Self::update_ewma(
             self.received_fps_ewma_x100,
             Self::fps_x100(delta.frames_received, stats.interval_ms),
@@ -488,6 +506,10 @@ impl VideoQoS {
                 || delta.frames_dropped > 0
                 || delta.freeze_count > 0
                 || delta.decode_errors > 0
+                || delta.video_chunk_frames_expired > 0
+                || (delta.video_chunk_bytes_received > 0
+                    && delta.frames_received == 0
+                    && delta.video_chunk_frames_reassembled == 0)
                 || (delta.frames_received > 0 && delta.frames_rendered == 0)
                 || stats.last_render_age_ms >= RECEIVER_STATS_STALL_MS
                 || stats.decode_queue_len > 2;
@@ -880,6 +902,39 @@ mod tests {
         }
 
         assert_eq!(qos.fps(), 30);
+    }
+
+    #[test]
+    fn receiver_stats_reduce_adaptive_fps_after_partial_chunk_stall() {
+        let mut qos = VideoQoS::default();
+        qos.on_connection_open(1);
+        qos.new_user_instant = Instant::now() - STARTUP_SAFE_WINDOW - Duration::from_secs(1);
+        let initial_fps = qos.fps();
+
+        qos.user_video_receiver_stats(
+            1,
+            &VideoReceiverStats {
+                display: 0,
+                video_chunks_received: 32,
+                video_chunk_bytes_received: 32 * 1024,
+                interval_ms: 1000,
+                ..Default::default()
+            },
+        );
+        assert_eq!(qos.fps(), initial_fps);
+
+        qos.user_video_receiver_stats(
+            1,
+            &VideoReceiverStats {
+                display: 0,
+                video_chunks_received: 64,
+                video_chunk_bytes_received: 64 * 1024,
+                interval_ms: 1000,
+                ..Default::default()
+            },
+        );
+
+        assert!(qos.fps() < initial_fps);
     }
 }
 

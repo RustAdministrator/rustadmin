@@ -10,6 +10,9 @@ links such as VPN over LTE:
 - No-video watchdog: timeout before closing a session that authenticated but never
   received a video packet.
 - Host video backpressure: stale-frame drop threshold and diagnostics.
+- First-frame-then-freeze diagnostics: receiver video byte progress, chunk
+  reassembly/expiration, host video send latency, and partial chunk send failure
+  counters.
 - Optional retry policy: retry direct/relay paths when the video stream never
   starts, when rendezvous/relay infrastructure is configured.
 
@@ -62,6 +65,12 @@ If the viewer never logs a first received video frame, in-place codec fallback o
 the same ordered connection is not a valid recovery path. Mark the attempted
 codec unsupported and reconnect, or move media to a separate stream in a future
 transport design.
+
+If the viewer logs the first received/decoded frame and then freezes, do not tune
+codec priority first. Confirm whether the host is blocked in video frame/chunk
+sends and whether receiver video byte progress stopped. Ordered TCP media must
+drop disposable video frames under backpressure instead of allowing stale video
+writes to block the session.
 
 ## Android MediaCodec FPS Workaround
 

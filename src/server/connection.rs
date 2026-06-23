@@ -547,6 +547,7 @@ pub struct Connection {
     video_startup_ack_frame_id: Option<u64>,
     video_startup_acked: bool,
     video_frame_chunking: bool,
+    video_backpressure: VideoTcpBackpressure,
     server_audit_conn: String,
     server_audit_file: String,
     lr: LoginRequest,
@@ -650,6 +651,77 @@ const VIDEO_FRAME_CHUNK_PAYLOAD_SIZE: usize = 1024;
 const VIDEO_FRAME_CHUNK_THRESHOLD: usize = VIDEO_FRAME_CHUNK_PAYLOAD_SIZE * 2;
 const VIDEO_FRAME_CHUNK_PACE_EVERY: usize = 4;
 const VIDEO_FRAME_CHUNK_PACE_DELAY: Duration = Duration::from_millis(1);
+const VIDEO_TCP_BACKPRESSURE_MIN_WINDOW_BYTES: u64 = 128 * 1024;
+const VIDEO_TCP_BACKPRESSURE_MAX_WINDOW_BYTES: u64 = 8 * 1024 * 1024;
+const VIDEO_TCP_BACKPRESSURE_TARGET_WINDOW_MS: u64 = 4_000;
+
+#[derive(Debug, Default, Clone, Copy)]
+struct VideoTcpBackpressureDisplay {
+    bytes_received: u64,
+}
+
+#[derive(Debug)]
+struct VideoTcpBackpressure {
+    sent_bytes: u64,
+    acknowledged_bytes: u64,
+    window_bytes: u64,
+    displays: HashMap<i32, VideoTcpBackpressureDisplay>,
+}
+
+impl Default for VideoTcpBackpressure {
+    fn default() -> Self {
+        Self {
+            sent_bytes: 0,
+            acknowledged_bytes: 0,
+            window_bytes: VIDEO_TCP_BACKPRESSURE_MIN_WINDOW_BYTES,
+            displays: Default::default(),
+        }
+    }
+}
+
+impl VideoTcpBackpressure {
+    fn inflight_bytes(&self) -> u64 {
+        self.sent_bytes.saturating_sub(self.acknowledged_bytes)
+    }
+
+    fn effective_window_bytes(&self) -> u64 {
+        self.window_bytes
+    }
+
+    fn should_drop_frame(&self, frame_bytes: usize) -> bool {
+        let frame_bytes = frame_bytes as u64;
+        self.inflight_bytes().saturating_add(frame_bytes) > self.effective_window_bytes()
+    }
+
+    fn record_frame_sent(&mut self, frame_bytes: usize) {
+        self.sent_bytes = self.sent_bytes.saturating_add(frame_bytes as u64);
+    }
+
+    fn update_from_receiver_stats(&mut self, stats: &VideoReceiverStats) {
+        let previous = self.displays.entry(stats.display).or_default();
+        let frame_delta = stats.bytes_received.saturating_sub(previous.bytes_received);
+
+        previous.bytes_received = stats.bytes_received;
+
+        if frame_delta == 0 {
+            return;
+        }
+
+        self.acknowledged_bytes = self
+            .acknowledged_bytes
+            .saturating_add(frame_delta)
+            .min(self.sent_bytes);
+
+        if stats.interval_ms > 0 {
+            let bytes_per_interval = frame_delta
+                .saturating_mul(VIDEO_TCP_BACKPRESSURE_TARGET_WINDOW_MS)
+                / u64::from(stats.interval_ms);
+            self.window_bytes = bytes_per_interval
+                .max(VIDEO_TCP_BACKPRESSURE_MIN_WINDOW_BYTES)
+                .min(VIDEO_TCP_BACKPRESSURE_MAX_WINDOW_BYTES);
+        }
+    }
+}
 
 fn steady_send_timeout_ms(file_transfer: bool, port_forward: bool, terminal: bool) -> u64 {
     if file_transfer || port_forward || terminal {
@@ -686,6 +758,16 @@ fn stream_message_kind(msg: &Message) -> &'static str {
         Some(message::Union::Misc(misc)) => stream_misc_kind(misc),
         Some(_) => "Other",
         None => "None",
+    }
+}
+
+fn video_frame_backpressure_bytes(vf: &VideoFrame, message_size: usize) -> usize {
+    let (payload_bytes, _, _) =
+        scrap::codec::video_frame_payload_stats(vf).unwrap_or((0, 0, false));
+    if payload_bytes > 0 {
+        payload_bytes
+    } else {
+        message_size
     }
 }
 
@@ -774,20 +856,16 @@ impl Connection {
         self.video_ack_required && self.video_startup_ack_frame_id.is_some()
     }
 
-    fn receiver_stats_show_video_transport(stats: &VideoReceiverStats) -> bool {
-        stats.frames_received > 0
-            || stats.video_chunks_received > 0
-            || stats.video_chunk_frames_reassembled > 0
-            || stats.video_chunk_frames_expired > 0
-            || stats.last_observed_frame_id != 0
+    fn receiver_stats_show_complete_video(stats: &VideoReceiverStats) -> bool {
+        stats.frames_received > 0 || stats.video_chunk_frames_reassembled > 0
     }
 
     fn release_startup_video_ack_from_receiver_stats(&mut self, stats: &VideoReceiverStats) {
-        if !self.wait_for_startup_video_ack() || !Self::receiver_stats_show_video_transport(stats) {
+        if !self.wait_for_startup_video_ack() || !Self::receiver_stats_show_complete_video(stats) {
             return;
         }
         log::info!(
-            "#{} diag startup video transport observed before complete ack: pending_frame_id={:?}, display={}, first_frame_id={}, last_frame_id={}, last_observed_frame_id={}, chunks={}, chunk_reassembled={}, chunk_expired={}",
+            "#{} diag startup complete video observed before explicit ack: pending_frame_id={:?}, display={}, first_frame_id={}, last_frame_id={}, last_observed_frame_id={}, chunks={}, chunk_reassembled={}, chunk_expired={}",
             self.inner.id,
             self.video_startup_ack_frame_id,
             stats.display,
@@ -899,6 +977,7 @@ impl Connection {
             video_startup_ack_frame_id: None,
             video_startup_acked: false,
             video_frame_chunking: false,
+            video_backpressure: Default::default(),
             server_audit_conn: "".to_owned(),
             server_audit_file: "".to_owned(),
             lr: Default::default(),
@@ -1028,6 +1107,8 @@ impl Connection {
         let mut first_video_frame_sent = false;
         let mut stale_video_drop_log_at: Option<Instant> = None;
         let mut stale_video_drop_count = 0u64;
+        let mut backpressure_video_drop_log_at: Option<Instant> = None;
+        let mut backpressure_video_drop_count = 0u64;
         let mut realtime_drop_log_at: Option<Instant> = None;
         let mut realtime_drop_count = 0u64;
 
@@ -1381,12 +1462,49 @@ impl Connection {
                         continue;
                     }
                     let mut sent_video_chunks = None;
+                    let mut video_bytes_sent_to_stream = None;
                     if is_video_frame && conn.video_frame_chunking {
                         if let Some(message::Union::VideoFrame(vf)) = &value.union {
                             match vf.write_to_bytes() {
                                 Ok(serialized) => {
                                     let serialized_bytes = serialized.len();
                                     if serialized_bytes > VIDEO_FRAME_CHUNK_THRESHOLD {
+                                        if !wait_for_startup_ack
+                                            && first_video_frame_sent
+                                            && conn
+                                                .video_backpressure
+                                                .should_drop_frame(serialized_bytes)
+                                        {
+                                            backpressure_video_drop_count =
+                                                backpressure_video_drop_count.saturating_add(1);
+                                            if backpressure_video_drop_log_at
+                                                .map(|last| {
+                                                    last.elapsed() >= VIDEO_STALE_DROP_LOG_INTERVAL
+                                                })
+                                                .unwrap_or(true)
+                                            {
+                                                log::warn!(
+                                                    "#{} diag video frame dropped by tcp backpressure: frame_id={}, display={}, queue_latency_ms={}, serialized_bytes={}, inflight_bytes={}, window_bytes={}, dropped_since_last_log={}",
+                                                    conn.inner.id(),
+                                                    vf.frame_id,
+                                                    vf.display,
+                                                    instant.elapsed().as_millis(),
+                                                    serialized_bytes,
+                                                    conn.video_backpressure.inflight_bytes(),
+                                                    conn.video_backpressure.effective_window_bytes(),
+                                                    backpressure_video_drop_count
+                                                );
+                                                backpressure_video_drop_log_at =
+                                                    Some(Instant::now());
+                                                backpressure_video_drop_count = 0;
+                                            }
+                                            video_service::notify_video_frame_fetched(
+                                                vf.display.max(0) as usize,
+                                                id,
+                                                Some(instant.into()),
+                                            );
+                                            continue;
+                                        }
                                         match make_video_frame_chunk_messages(vf, Bytes::from(serialized)) {
                                             Ok(chunk_messages) => {
                                                 let chunk_count = chunk_messages.len();
@@ -1438,6 +1556,8 @@ impl Connection {
                                                     );
                                                 }
                                                 sent_video_chunks = Some((serialized_bytes, chunk_count));
+                                                video_bytes_sent_to_stream =
+                                                    Some(serialized_bytes);
                                             }
                                             Err(err) => {
                                                 log::warn!(
@@ -1467,6 +1587,48 @@ impl Connection {
                         }
                     }
                     if sent_video_chunks.is_none() {
+                        if is_video_frame {
+                            if let Some(message::Union::VideoFrame(vf)) = &value.union {
+                                let frame_bytes =
+                                    video_frame_backpressure_bytes(vf, value.compute_size() as usize);
+                                if !wait_for_startup_ack
+                                    && first_video_frame_sent
+                                    && conn
+                                        .video_backpressure
+                                        .should_drop_frame(frame_bytes)
+                                {
+                                    backpressure_video_drop_count =
+                                        backpressure_video_drop_count.saturating_add(1);
+                                    if backpressure_video_drop_log_at
+                                        .map(|last| {
+                                            last.elapsed() >= VIDEO_STALE_DROP_LOG_INTERVAL
+                                        })
+                                        .unwrap_or(true)
+                                    {
+                                        log::warn!(
+                                            "#{} diag video frame dropped by tcp backpressure: frame_id={}, display={}, queue_latency_ms={}, frame_bytes={}, inflight_bytes={}, window_bytes={}, dropped_since_last_log={}",
+                                            conn.inner.id(),
+                                            vf.frame_id,
+                                            vf.display,
+                                            instant.elapsed().as_millis(),
+                                            frame_bytes,
+                                            conn.video_backpressure.inflight_bytes(),
+                                            conn.video_backpressure.effective_window_bytes(),
+                                            backpressure_video_drop_count
+                                        );
+                                        backpressure_video_drop_log_at = Some(Instant::now());
+                                        backpressure_video_drop_count = 0;
+                                    }
+                                    video_service::notify_video_frame_fetched(
+                                        vf.display.max(0) as usize,
+                                        id,
+                                        Some(instant.into()),
+                                    );
+                                    continue;
+                                }
+                                video_bytes_sent_to_stream = Some(frame_bytes);
+                            }
+                        }
                         if let Err(err) = conn.stream.send(value.as_ref()).await {
                             let kind = stream_message_kind(&value);
                             if is_video_frame {
@@ -1490,6 +1652,9 @@ impl Connection {
                         }
                     }
                     if is_video_frame {
+                        if let Some(bytes) = video_bytes_sent_to_stream {
+                            conn.video_backpressure.record_frame_sent(bytes);
+                        }
                         if wait_for_startup_ack {
                             conn.video_startup_ack_frame_id = frame_id;
                         } else if let Some(message::Union::VideoFrame(vf)) = &value.union {
@@ -3639,6 +3804,7 @@ impl Connection {
         self.video_ack_required = lr.video_ack_required;
         self.video_startup_ack_frame_id = None;
         self.video_startup_acked = false;
+        self.video_backpressure = Default::default();
         log::info!(
             "#{} diag viewer transport options on login: video_ack_required={}, video_frame_chunking={}",
             self.inner.id(),
@@ -4769,6 +4935,7 @@ impl Connection {
                             stats.interval_ms
                         );
                         self.release_startup_video_ack_from_receiver_stats(&stats);
+                        self.video_backpressure.update_from_receiver_stats(&stats);
                         video_service::VIDEO_QOS
                             .lock()
                             .unwrap()
@@ -5771,6 +5938,7 @@ impl Connection {
         if let Some(q) = o.supported_decoding.clone().take() {
             self.video_startup_ack_frame_id = None;
             self.video_frame_chunking = q.video_frame_chunking;
+            self.video_backpressure = Default::default();
             log::info!(
                 "#{} supported_decoding update: h264={}, h265={}, vp9={}, av1={}, prefer={:?}, prefer_chroma={:?}, video_frame_chunking={}",
                 self.inner.id(),
@@ -7771,34 +7939,127 @@ mod test {
     }
 
     #[test]
-    fn receiver_stats_video_transport_signal_is_explicit() {
-        assert!(!Connection::receiver_stats_show_video_transport(
+    fn receiver_stats_complete_video_signal_is_explicit() {
+        assert!(!Connection::receiver_stats_show_complete_video(
             &VideoReceiverStats::default()
         ));
-        assert!(Connection::receiver_stats_show_video_transport(
+        assert!(!Connection::receiver_stats_show_complete_video(
             &VideoReceiverStats {
                 video_chunks_received: 1,
                 ..Default::default()
             }
         ));
-        assert!(Connection::receiver_stats_show_video_transport(
+        assert!(!Connection::receiver_stats_show_complete_video(
             &VideoReceiverStats {
                 video_chunk_frames_expired: 1,
                 ..Default::default()
             }
         ));
-        assert!(Connection::receiver_stats_show_video_transport(
+        assert!(!Connection::receiver_stats_show_complete_video(
             &VideoReceiverStats {
                 last_observed_frame_id: 42,
                 ..Default::default()
             }
         ));
-        assert!(Connection::receiver_stats_show_video_transport(
+        assert!(Connection::receiver_stats_show_complete_video(
             &VideoReceiverStats {
                 frames_received: 1,
                 ..Default::default()
             }
         ));
+        assert!(Connection::receiver_stats_show_complete_video(
+            &VideoReceiverStats {
+                video_chunk_frames_reassembled: 1,
+                ..Default::default()
+            }
+        ));
+    }
+
+    #[test]
+    fn video_tcp_backpressure_drops_oversized_frame_until_receiver_proves_capacity() {
+        let mut state = VideoTcpBackpressure::default();
+        let large_frame = (VIDEO_TCP_BACKPRESSURE_MIN_WINDOW_BYTES as usize) + 123;
+
+        assert!(state.should_drop_frame(large_frame));
+        assert!(!state.should_drop_frame(VIDEO_TCP_BACKPRESSURE_MIN_WINDOW_BYTES as usize));
+
+        let small_completed = VIDEO_TCP_BACKPRESSURE_MIN_WINDOW_BYTES / 2;
+        state.update_from_receiver_stats(&VideoReceiverStats {
+            display: 0,
+            bytes_received: small_completed,
+            interval_ms: VIDEO_TCP_BACKPRESSURE_TARGET_WINDOW_MS as u32,
+            ..Default::default()
+        });
+
+        assert_eq!(state.window_bytes, VIDEO_TCP_BACKPRESSURE_MIN_WINDOW_BYTES);
+        assert!(state.should_drop_frame(large_frame));
+
+        let proven_bytes = (large_frame as u64).saturating_mul(2);
+        state.update_from_receiver_stats(&VideoReceiverStats {
+            display: 0,
+            bytes_received: small_completed.saturating_add(proven_bytes),
+            interval_ms: (VIDEO_TCP_BACKPRESSURE_TARGET_WINDOW_MS / 2) as u32,
+            ..Default::default()
+        });
+
+        assert!(state.window_bytes > large_frame as u64);
+        assert!(!state.should_drop_frame(large_frame));
+    }
+
+    #[test]
+    fn video_tcp_backpressure_waits_for_completed_frames_before_more_video() {
+        let mut state = VideoTcpBackpressure::default();
+        let frame = VIDEO_TCP_BACKPRESSURE_MIN_WINDOW_BYTES as usize;
+
+        assert!(!state.should_drop_frame(frame));
+        state.record_frame_sent(frame);
+        assert!(state.should_drop_frame(1));
+
+        state.update_from_receiver_stats(&VideoReceiverStats {
+            display: 0,
+            bytes_received: frame as u64,
+            interval_ms: 2000,
+            ..Default::default()
+        });
+
+        assert_eq!(state.inflight_bytes(), 0);
+        assert!(!state.should_drop_frame(frame));
+    }
+
+    #[test]
+    fn video_tcp_backpressure_ignores_partial_chunk_bytes_until_frame_complete() {
+        let mut state = VideoTcpBackpressure::default();
+        state.record_frame_sent(2000);
+
+        state.update_from_receiver_stats(&VideoReceiverStats {
+            display: 0,
+            video_chunk_bytes_received: 1500,
+            interval_ms: 2000,
+            ..Default::default()
+        });
+        assert_eq!(state.inflight_bytes(), 2000);
+
+        state.update_from_receiver_stats(&VideoReceiverStats {
+            display: 0,
+            bytes_received: 2000,
+            video_chunk_bytes_received: 2000,
+            interval_ms: 2000,
+            ..Default::default()
+        });
+        assert_eq!(state.inflight_bytes(), 0);
+    }
+
+    #[test]
+    fn video_tcp_backpressure_grows_window_from_receiver_rate() {
+        let mut state = VideoTcpBackpressure::default();
+        state.update_from_receiver_stats(&VideoReceiverStats {
+            display: 0,
+            bytes_received: 2 * 1024 * 1024,
+            interval_ms: 2000,
+            ..Default::default()
+        });
+
+        assert_eq!(state.window_bytes, 4 * 1024 * 1024);
     }
 
     #[test]

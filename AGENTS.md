@@ -107,6 +107,7 @@ All configurations or options are under `../hbb_common/src/config.rs` file, 4 ty
 - For any codec change, inspect both host and viewer logs for advertised capabilities, usable codecs, selected encoder config, first encoded frame, first received frame, and first decoded frame.
 - Do not change Auto H265/H264 ordering based only on a black-screen symptom. First prove whether the viewer received a video packet, whether protobuf parsing succeeded, and whether decoder creation or frame decode failed.
 - If the viewer never receives the first video frame, do not try to recover by sending codec updates and video refreshes on the same connection. Mark the failed codec and reconnect, or use a transport with a separate media stream, because later video frames cannot repair a blocked ordered stream.
+- If the viewer receives and decodes the first frame but later freezes or disconnects, treat TCP video backpressure as the first suspect before changing codecs. Check receiver video byte/chunk progress and host send latency/partial chunk failures; do not keep writing video frames into a full ordered stream. Drop stale/new video frames based on receiver progress, or move media to an independent transport stream.
 
 ## Editing Hygiene
 
