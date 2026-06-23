@@ -799,38 +799,14 @@ async fn launch_server(session_id: DWORD, close_first: bool) -> ResultType<HANDL
         "\"{}\" --server",
         std::env::current_exe()?.to_str().unwrap_or("")
     );
-    if should_launch_server_as_user_for_dxgi(session_id) {
-        match launch_process_in_session(session_id, &cmd, true) {
-            Ok(h) if !h.is_null() => {
-                log::info!(
-                    "Launched server in session {} as interactive user for DXGI compatibility",
-                    session_id
-                );
-                return Ok(h);
-            }
-            Ok(_) => {
-                log::warn!(
-                    "Failed to launch server as interactive user in session {}, falling back to privileged launch",
-                    session_id
-                );
-            }
-            Err(err) => {
-                log::warn!(
-                    "Failed to launch server as interactive user in session {}: {}; falling back to privileged launch",
-                    session_id,
-                    err
-                );
-            }
-        }
-    }
     launch_privileged_process(session_id, &cmd)
 }
 
 pub fn launch_privileged_process(session_id: DWORD, cmd: &str) -> ResultType<HANDLE> {
-    launch_process_in_session(session_id, cmd, false)
+    launch_process_in_session(session_id, cmd)
 }
 
-fn launch_process_in_session(session_id: DWORD, cmd: &str, as_user: bool) -> ResultType<HANDLE> {
+fn launch_process_in_session(session_id: DWORD, cmd: &str) -> ResultType<HANDLE> {
     use std::os::windows::ffi::OsStrExt;
     let wstr: Vec<u16> = std::ffi::OsStr::new(&cmd)
         .encode_wide()
@@ -838,68 +814,19 @@ fn launch_process_in_session(session_id: DWORD, cmd: &str, as_user: bool) -> Res
         .collect();
     let wstr = wstr.as_ptr();
     let mut token_pid = 0;
-    let h = unsafe {
-        LaunchProcessWin(
-            wstr,
-            session_id,
-            if as_user { TRUE } else { FALSE },
-            FALSE,
-            &mut token_pid,
-        )
-    };
+    let h = unsafe { LaunchProcessWin(wstr, session_id, FALSE, FALSE, &mut token_pid) };
     if h.is_null() {
         log::error!(
             "Failed to launch process in session {} as {}: {}",
             session_id,
-            if as_user {
-                EXPLORER_EXE
-            } else {
-                "winlogon.exe"
-            },
+            "winlogon.exe",
             io::Error::last_os_error()
         );
         if token_pid == 0 {
-            log::error!(
-                "No token source process {}",
-                if as_user {
-                    EXPLORER_EXE
-                } else {
-                    "winlogon.exe"
-                }
-            );
+            log::error!("No token source process winlogon.exe");
         }
     }
     Ok(h)
-}
-
-fn should_launch_server_as_user_for_dxgi(session_id: DWORD) -> bool {
-    if session_id == u32::MAX {
-        return false;
-    }
-    let username = get_session_username(session_id);
-    if username.is_empty() || username == "SYSTEM" {
-        return false;
-    }
-    if administrator_protection_enabled() {
-        log::info!(
-            "Windows Administrator Protection is enabled; prefer interactive user token for server capture in session {} ({})",
-            session_id,
-            username
-        );
-        return true;
-    }
-    false
-}
-
-fn administrator_protection_enabled() -> bool {
-    RegKey::predef(HKEY_LOCAL_MACHINE)
-        .open_subkey_with_flags(
-            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
-            KEY_READ,
-        )
-        .ok()
-        .and_then(|key| key.get_value::<u32, _>("TypeOfAdminApprovalMode").ok())
-        == Some(2)
 }
 
 pub fn run_as_user(arg: Vec<&str>) -> ResultType<Option<std::process::Child>> {
