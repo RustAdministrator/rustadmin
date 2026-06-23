@@ -4,7 +4,7 @@ Date: 2026-06-23
 
 ## Current Status
 
-Latest client/code pass is revision `009`.
+Latest client/code pass is revision `010`.
 
 What changed in this pass:
 
@@ -12,6 +12,10 @@ What changed in this pass:
 - Added a Windows user-token capture helper (`--user-capture-helper`) for DXGI and WGC. The privileged server launches the helper in the current interactive session, receives CPU BGRA frames through shared memory, and marks helper capture as CPU-only so the VRAM texture path is not selected for helper frames.
 - Automatic DXGI capture, manual DXGI, manual WGC, and the DXGI-to-WGC fallback now try the user-token helper first when RustAdmin is installed, running privileged, and the session is not locked/prelogin/secure-desktop; the old direct backend path remains the fallback if the helper cannot start.
 - Follow-up from host logs: user-token helpers were exiting with `Access is denied` while opening the privileged server's shared-memory flink. The helper shmem file now receives an explicit ACL grant for authenticated interactive users, and the main capturer detects a dead helper so it can fail over instead of waiting forever.
+- Follow-up from the next host test: the helper now opened shared memory and created DXGI, but helper DXGI could still sit in `WouldBlock` on startup because the old startup GDI snapshot path is not available on the helper capturer. Revision `010` now treats that as a backend fallback trigger and tries WGC, WinMag, then GDI instead of waiting forever. The helper log also reports first-frame and would-block status.
+- `rustadmin_revision.txt` was bumped to `010`.
+- Windows release archive built successfully on VM `192.168.189.137`: `RustAdmin_Release_2.0.2.010.zip`, size `41,216,871` bytes, sha256 `a6bbebc6d20af1aa0001ded937e4b16d4d9368fc07e9ffa6ceaafc603d2e90e6`.
+- Windows archive was copied back to WSL as `RustAdmin_Release_2.0.2.010.zip` and verified with `unzip -t`; no compressed data errors.
 - `rustadmin_revision.txt` was bumped to `009`.
 - Windows release archive built successfully on VM `192.168.189.137`: `RustAdmin_Release_2.0.2.009.zip`, size `41,216,345` bytes, sha256 `c04690a2d1277167609ce9046b84a763d7c91312e9884d0c41f0d09a83c76678`.
 - Windows archive was copied back to WSL as `RustAdmin_Release_2.0.2.009.zip` and verified with `unzip -t`; no compressed data errors.
@@ -40,10 +44,10 @@ Recent verification:
 - `dart analyze lib/consts.dart lib/common/widgets/toolbar.dart lib/models/model.dart lib/mobile/pages/remote_page.dart lib/mobile/pages/settings_page.dart`: passed with info/deprecation warnings only.
 - Android Rust library built for `aarch64-linux-android` with `flutter,hwcodec,mediacodec`, then copied and stripped into `flutter/android/app/src/main/jniLibs/arm64-v8a/librustdesk.so`.
 - Android APK verified with `apksigner verify --verbose`; `aapt dump badging` reports `versionName='2.0.2'`, `versionCode='2202'`, native code `arm64-v8a`.
-- Windows revision `009` archive copied back from the VM and verified with `unzip -t`; no compressed data errors.
+- Windows revision `010` archive copied back from the VM and verified with `unzip -t`; no compressed data errors.
 - `cargo check --lib --no-default-features`: blocked by the same missing `gstreamer-1.0` pkg-config dependency.
 
-Latest test build is `RustAdmin_Release_2.0.2.009.zip`.
+Latest test build is `RustAdmin_Release_2.0.2.010.zip`.
 
 Earlier capture-backend menu test details:
 

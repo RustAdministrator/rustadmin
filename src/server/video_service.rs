@@ -1532,6 +1532,37 @@ fn run(vs: VideoService) -> ResultType<()> {
                             );
                             continue;
                         }
+                        dxgi_startup_gdi_snapshot_done = true;
+                        dxgi_no_frame_since = Some(Instant::now());
+                        log::info!(
+                            "dxgi returned no valid startup frame for {:?}; startup gdi snapshot is unavailable, trying backend fallback",
+                            DXGI_STARTUP_GDI_SNAPSHOT_TIMEOUT
+                        );
+                        if try_set_wgc_fallback(
+                            &mut c,
+                            &mut capture_fallback_reason,
+                            "dxgi_startup_no_frame_wgc",
+                        ) {
+                            wgc_first_valid_frame = false;
+                            wgc_no_frame_since = Some(Instant::now());
+                            try_gdi = 1;
+                            continue;
+                        } else if try_set_magnifier_fallback(
+                            &mut c,
+                            &mut capture_fallback_reason,
+                            "dxgi_startup_no_frame_mag",
+                        ) {
+                            try_gdi = 0;
+                            continue;
+                        }
+                        if try_set_gdi_fallback(
+                            &mut c,
+                            &mut capture_fallback_reason,
+                            "dxgi_startup_no_frame",
+                        ) {
+                            try_gdi = 0;
+                            continue;
+                        }
                     }
                     if !dxgi_first_valid_frame
                         && dxgi_startup_gdi_snapshot_done

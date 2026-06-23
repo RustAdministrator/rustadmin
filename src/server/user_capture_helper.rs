@@ -279,6 +279,8 @@ pub mod server {
         let mut width = 0usize;
         let mut height = 0usize;
         let mut counter = 0u32;
+        let mut would_block_samples = 0u32;
+        let mut logged_first_frame = false;
         loop {
             let command = read_command(shmem);
             if command.exit != 0 {
@@ -309,6 +311,8 @@ pub mod server {
                         active_display = command.current_display;
                         width = new_width;
                         height = new_height;
+                        would_block_samples = 0;
+                        logged_first_frame = false;
                         write_frame_info(
                             shmem,
                             CaptureFrameInfo {
@@ -368,6 +372,18 @@ pub mod server {
                     }
                     shmem.write(ADDR_FRAME, data);
                     counter = counter.wrapping_add(1).max(1);
+                    would_block_samples = 0;
+                    if !logged_first_frame {
+                        logged_first_frame = true;
+                        log::info!(
+                            "User capture helper wrote first {} frame: display={}, size={}x{}, bytes={}",
+                            backend.as_str(),
+                            active_display,
+                            width,
+                            height,
+                            data.len()
+                        );
+                    }
                     write_frame_info(
                         shmem,
                         CaptureFrameInfo {
@@ -394,6 +410,15 @@ pub mod server {
                     );
                 }
                 Some(Err(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    would_block_samples = would_block_samples.wrapping_add(1);
+                    if would_block_samples == 1 || would_block_samples % 30 == 0 {
+                        log::info!(
+                            "User capture helper {} would block: display={}, samples={}",
+                            backend.as_str(),
+                            active_display,
+                            would_block_samples
+                        );
+                    }
                     write_frame_info(
                         shmem,
                         CaptureFrameInfo {

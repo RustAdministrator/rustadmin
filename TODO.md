@@ -6,6 +6,8 @@ Date: 2026-06-23
 
 - Done: Android client APK built as `RustAdmin_Android_Release_2.0.2.006.apk`.
 - Done: Android client ZIP built as `RustAdmin_Android_Release_2.0.2.006.zip`.
+- Done: Windows client archive built as `RustAdmin_Release_2.0.2.010.zip`.
+- Done: Windows revision `010` avoids the helper-DXGI startup wait when a GDI snapshot is unavailable by falling through to WGC, WinMag, then GDI fallback, and logs helper first-frame/would-block status.
 - Done: Windows client archive built as `RustAdmin_Release_2.0.2.009.zip`.
 - Done: Windows experimental revision `009` runs the service-launched `--server` privileged and uses a user-token shared-memory capture helper for DXGI/WGC on normal interactive desktops, while locked/prelogin/secure desktop stays on the privileged direct capture path.
 - Done: Fixed the helper shared-memory ACL issue found in host logs, where `--user-capture-helper` exited with `Access is denied` and left Android waiting for the first image.
