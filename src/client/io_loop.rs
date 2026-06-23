@@ -277,6 +277,11 @@ impl<T: InvokeUiSession> Remote<T> {
                 self.handler
                     .set_connection_type(peer.is_secured(), direct, stream_type); // flutter -> connection_ready
                 self.handler.update_direct(Some(direct));
+                self.handler.update_quality_status(QualityStatus {
+                    direct: Some(direct),
+                    connection_type: Some(stream_type.to_owned()),
+                    ..Default::default()
+                });
                 if conn_type == ConnType::DEFAULT_CONN || conn_type == ConnType::VIEW_CAMERA {
                     self.handler
                         .set_fingerprint(crate::common::pk_to_fingerprint(pk.unwrap_or_default()));
@@ -480,6 +485,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                 fps,
                                 chroma,
                                 codec_format,
+                                connection_type: Some(stream_type.to_owned()),
                                 ..Default::default()
                             });
                         }

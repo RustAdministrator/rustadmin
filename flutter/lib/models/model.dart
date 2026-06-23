@@ -437,6 +437,8 @@ class FfiModel with ChangeNotifier {
       } else if (name == 'connection_ready') {
         setConnectionType(peerId, evt['secure'] == 'true',
             evt['direct'] == 'true', evt['stream_type'] ?? '');
+        parent.target?.qualityMonitorModel
+            .updateConnectionInfo(evt['stream_type']);
       } else if (name == 'switch_display') {
         // switch display is kept for backward compatibility
         handleSwitchDisplay(evt, sessionId, peerId);
@@ -4135,6 +4137,7 @@ class QualityMonitorData {
   String? autoFps;
   String? fpsMode;
   String? direct;
+  String? connectionType;
   String? mediacodecInputQueueMs;
   String? mediacodecOutputDequeueMs;
   String? yuvToRgbaMs;
@@ -4234,6 +4237,27 @@ class QualityMonitorModel with ChangeNotifier {
         value: value ? 'Y' : 'N');
   }
 
+  String _formatConnectionType(String value) {
+    switch (value) {
+      case 'UDP':
+        return 'UDP/KCP';
+      case 'IPv6':
+        return 'UDP/KCP IPv6';
+      case 'Relay':
+        return 'Relay/TCP';
+      default:
+        return value;
+    }
+  }
+
+  void updateConnectionInfo(String? streamType) {
+    if (streamType == null || streamType.isEmpty) return;
+    final value = _formatConnectionType(streamType);
+    if (_data.connectionType == value) return;
+    _data.connectionType = value;
+    notifyListeners();
+  }
+
   updateQualityStatus(Map<String, dynamic> evt) {
     String? nonEmptyString(String key) {
       final value = evt[key];
@@ -4296,6 +4320,10 @@ class QualityMonitorModel with ChangeNotifier {
           nonEmptyString('host_video_backend') ?? _data.hostVideoBackend;
       _data.hostVideoFallback =
           nonEmptyString('host_video_fallback') ?? _data.hostVideoFallback;
+      final connectionType = nonEmptyString('connection_type');
+      if (connectionType != null) {
+        _data.connectionType = _formatConnectionType(connectionType);
+      }
 
       final hasPipelineUpdate =
           evt.containsKey('codec_path') || evt.containsKey('decode_fps');

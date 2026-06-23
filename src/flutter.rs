@@ -776,6 +776,10 @@ impl InvokeUiSession for FlutterHandler {
                 ),
                 ("direct", &status.direct.map_or(NULL, |it| it.to_string())),
                 (
+                    "connection_type",
+                    &status.connection_type.map_or(NULL, |it| it.to_string()),
+                ),
+                (
                     "mediacodec_input_queue_ms",
                     &status
                         .mediacodec_input_queue_ms

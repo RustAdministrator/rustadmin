@@ -21,6 +21,7 @@ pub struct QualityStatus {
     pub auto_fps: Option<usize>,
     pub fps_mode: Option<String>,
     pub direct: Option<bool>,
+    pub connection_type: Option<String>,
     pub mediacodec_input_queue_ms: Option<String>,
     pub mediacodec_output_dequeue_ms: Option<String>,
     pub yuv_to_rgba_ms: Option<String>,

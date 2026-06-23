@@ -4,6 +4,9 @@ Date: 2026-06-23
 
 ## Status
 
+- Done: Android client APK built as `RustAdmin_Android_Release_2.0.2.015.apk`.
+- Done: Android client ZIP built as `RustAdmin_Android_Release_2.0.2.015.zip`.
+- Done: Android revision `015` shows the established transport in Quality Monitor debug mode as `Conn` (`TCP`, `UDP/KCP`, `UDP/KCP IPv6`, `Relay/TCP`, or `WebSocket`). Actual path MTU is not shown because the current transport state does not expose a reliable path MTU.
 - Done: Android client APK built as `RustAdmin_Android_Release_2.0.2.006.apk`.
 - Done: Android client ZIP built as `RustAdmin_Android_Release_2.0.2.006.zip`.
 - Done: Android client APK built as `RustAdmin_Android_Release_2.0.2.014.apk`.

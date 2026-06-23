@@ -665,6 +665,8 @@ class QualityMonitor extends StatelessWidget {
                         _optionalRow("Mode", qualityMonitorModel.data.fpsMode),
                         _optionalRow("Direct", qualityMonitorModel.data.direct),
                         _optionalRow(
+                            "Conn", qualityMonitorModel.data.connectionType),
+                        _optionalRow(
                             "HostFPS", qualityMonitorModel.data.hostVideoFps),
                         _optionalRow("HostCodec",
                             qualityMonitorModel.data.hostVideoCodec),
@@ -680,21 +682,22 @@ class QualityMonitor extends StatelessWidget {
                             qualityMonitorModel.data.mediacodecInputQueueMs),
                         _optionalRow("MC out",
                             qualityMonitorModel.data.mediacodecOutputDequeueMs),
-                        _optionalRow("YUV->RGBA",
-                            qualityMonitorModel.data.yuvToRgbaMs),
                         _optionalRow(
-                            "MC dec", qualityMonitorModel.data.mediacodecDecodeMs),
+                            "YUV->RGBA", qualityMonitorModel.data.yuvToRgbaMs),
+                        _optionalRow("MC dec",
+                            qualityMonitorModel.data.mediacodecDecodeMs),
                         _optionalRow(
                             "Frame", qualityMonitorModel.data.handleFrameMs),
                         _optionalRow("Flutter",
                             qualityMonitorModel.data.flutterHandoffMs),
                         _optionalRow(
                             "Total", qualityMonitorModel.data.endToEndMs),
-                        _optionalRow("RGBA", qualityMonitorModel.data.rgbaBytes),
+                        _optionalRow(
+                            "RGBA", qualityMonitorModel.data.rgbaBytes),
                         _optionalRow("Realloc",
                             qualityMonitorModel.data.rgbaReallocated),
-                        _optionalRow(
-                            "Out buf", qualityMonitorModel.data.outputBufferBytes),
+                        _optionalRow("Out buf",
+                            qualityMonitorModel.data.outputBufferBytes),
                         _optionalRow(
                             "Format", qualityMonitorModel.data.mediaFormat),
                       ],
