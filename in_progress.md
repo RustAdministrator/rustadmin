@@ -4,10 +4,14 @@ Date: 2026-06-23
 
 ## Current Status
 
-Latest client/code pass is revision `011`.
+Latest client/code pass is revision `012`.
 
 What changed in this pass:
 
+- Follow-up from Android connection testing: the waiting-for-first-image timer calls `sessionInputOsPassword(..., value: '')` to activate the remote OS. The old empty activation path sent a right-click pair, which could open the host desktop context menu or steal focus during ordinary connects. Revision `012` keeps the wake-up mouse movement but sends no click unless an actual OS password is provided.
+- `rustadmin_revision.txt` was bumped to `012`.
+- Android release APK built successfully: `RustAdmin_Android_Release_2.0.2.012.apk`, size `25,259,326` bytes, sha256 `78d2bb3870b1d39464ddc6ff4f9bcaad793e7b1ad238125aff12be86a5659bcb`.
+- Android release ZIP built successfully: `RustAdmin_Android_Release_2.0.2.012.zip`, size `24,689,445` bytes, sha256 `f238b65ec1d4cf82843bd0b519fe661217733e8db3bc4a5ce80c822798e98240`.
 - Experimental branch `codex/privileged-user-token-capture` keeps the Windows service-launched `--server` process privileged so Administrator Protection and the secure desktop path stay compatible.
 - Added a Windows user-token capture helper (`--user-capture-helper`) for DXGI and WGC. The privileged server launches the helper in the current interactive session, receives CPU BGRA frames through shared memory, and marks helper capture as CPU-only so the VRAM texture path is not selected for helper frames.
 - Automatic DXGI capture, manual DXGI, manual WGC, and the DXGI-to-WGC fallback now try the user-token helper first when RustAdmin is installed, running privileged, and the session is not locked/prelogin/secure-desktop; the old direct backend path remains the fallback if the helper cannot start.
@@ -50,7 +54,7 @@ Recent verification:
 - Windows revision `011` archive copied back from the VM and verified with `unzip -t`; no compressed data errors.
 - `cargo check --lib --no-default-features`: blocked by the same missing `gstreamer-1.0` pkg-config dependency.
 
-Latest test build is `RustAdmin_Release_2.0.2.011.zip`.
+Latest Windows test build is `RustAdmin_Release_2.0.2.011.zip`; latest Android test build is `RustAdmin_Android_Release_2.0.2.012.apk`.
 
 Earlier capture-backend menu test details:
 

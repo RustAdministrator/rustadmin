@@ -6,6 +6,9 @@ Date: 2026-06-23
 
 - Done: Android client APK built as `RustAdmin_Android_Release_2.0.2.006.apk`.
 - Done: Android client ZIP built as `RustAdmin_Android_Release_2.0.2.006.zip`.
+- Done: Android client APK built as `RustAdmin_Android_Release_2.0.2.012.apk`.
+- Done: Android client ZIP built as `RustAdmin_Android_Release_2.0.2.012.zip`.
+- Done: Android/Flutter client revision `012` stops sending a right click during empty OS activation while waiting for the first image.
 - Done: Windows client archive built as `RustAdmin_Release_2.0.2.011.zip`.
 - Done: Windows revision `011` lets manual/fallback WGC reach the user-token helper before checking direct WGC support in the privileged server process, and expands capture-helper diagnostics.
 - Done: Windows client archive built as `RustAdmin_Release_2.0.2.010.zip`.
