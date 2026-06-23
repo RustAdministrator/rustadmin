@@ -1,31 +1,37 @@
-# RustAdmin Android FPS and menu worklog, 2026-06-20
+# RustAdmin Android FPS and Menu Worklog, 2026-06-20
 
-## Репозитории
+## Repositories
 
-- Основной репозиторий: `/home/w0w/rustadmin-fps-diag`
-- Внешний proto-репозиторий: `/home/w0w/hbb_common`
-- Целевой upstream: `RustAdministrator/rustadmin`
-- Fork для PR: `woffko/rustadmin`
+- Main repository: `/home/w0w/rustadmin-fps-diag`
+- External proto repository: `/home/w0w/hbb_common`
+- Target upstream: `RustAdministrator/rustadmin`
+- PR fork: `woffko/rustadmin`
 
-## Исходная проблема
+## Original Problem
 
-На Android при подключении к хосту с 2K-разрешением, например `2560x1440`, FPS держался около `15-16` независимо от выбранного кодека: VP9, AV1, H.264 или H.265.
+On Android, when connecting to a host with a 2K resolution such as `2560x1440`,
+FPS stayed around `15-16` regardless of the selected codec: VP9, AV1, H.264, or
+H.265.
 
-Первичная гипотеза: ограничение не в выборе кодека, а в Android decode/render pipeline:
+The initial hypothesis was that the bottleneck was not codec selection but the
+Android decode/render pipeline:
 
-- H.264/H.265 на Android шли через MediaCodec, но результат забирался как CPU-доступный YUV/I420 buffer.
-- После этого выполнялась CPU-конвертация YUV/I420 в RGBA через `I420ToARGB` / `I420ToABGR`.
-- Затем RGBA buffer передавался во Flutter soft render path.
-- `decode_fps` фактически включал не только декодер, но и часть render/callback pipeline.
-- Adaptive FPS мог ограничивать удаленный FPS через `min_decode_fps`.
+- H.264/H.265 on Android used MediaCodec, but the result was read back as a
+  CPU-accessible YUV/I420 buffer.
+- That was followed by CPU YUV/I420 to RGBA conversion through `I420ToARGB` /
+  `I420ToABGR`.
+- The RGBA buffer was then passed into the Flutter soft-render path.
+- `decode_fps` effectively included not only decoder time but also part of the
+  render/callback pipeline.
+- Adaptive FPS could limit remote FPS through `min_decode_fps`.
 
-## Что было сделано по Android video pipeline
+## Android Video Pipeline Work
 
-### Диагностика decode/render pipeline
+### Decode/Render Pipeline Diagnostics
 
-Добавлена Android-специфичная диагностика, чтобы разделить:
+Android-specific diagnostics were added to separate:
 
-- активный codec path;
+- active codec path;
 - render path;
 - resolution;
 - video queue length;
@@ -37,11 +43,11 @@
 - total frame handling timing;
 - Flutter handoff timing;
 - RGBA buffer size;
-- факт realloc RGBA buffer;
+- whether the RGBA buffer was reallocated;
 - output buffer size;
 - MediaFormat/stride/crop/slice-height/color-format details.
 
-Основные файлы:
+Primary files:
 
 - `libs/scrap/src/common/mod.rs`
 - `libs/scrap/src/common/codec.rs`
@@ -52,11 +58,12 @@
 - `flutter/lib/models/model.dart`
 - `flutter/lib/common/widgets/overlay.dart`
 
-### Quality Monitor вместо logcat
+### Quality Monitor Instead Of logcat
 
-Часть данных перенесена в Quality Monitor, чтобы не полагаться только на `adb logcat`.
+Some data was moved into Quality Monitor so diagnostics do not depend only on
+`adb logcat`.
 
-На Android viewer в Quality Monitor теперь выводятся client-side поля:
+The Android viewer now shows these client-side fields in Quality Monitor:
 
 - `Path`
 - `Render`
@@ -78,18 +85,20 @@
 - `Out buf`
 - `Format`
 
-Чтобы снизить накладные расходы, частые pipeline-поля во Flutter throttled примерно до одного обновления в секунду.
+To reduce overhead, frequent pipeline fields in Flutter are throttled to roughly
+one update per second.
 
-### Host-side данные в Quality Monitor
+### Host-Side Data In Quality Monitor
 
-Добавлена передача host-side diagnostic snapshot через `TestDelay`, чтобы видеть не только Android viewer, но и удаленный host:
+A host-side diagnostic snapshot is now sent through `TestDelay`, so the UI can
+show not only Android viewer data but also remote-host data:
 
 - `HostFPS`
 - `HostCodec`
 - `HostQoS`
 - `HostWait`
 
-Изменения:
+Changed files:
 
 - `/home/w0w/hbb_common/protos/message.proto`
 - `src/server/video_service.rs`
@@ -100,11 +109,13 @@
 - `flutter/lib/models/model.dart`
 - `flutter/lib/common/widgets/overlay.dart`
 
-Важно: эти строки появятся в Quality Monitor только если удаленный host тоже собран с обновленным proto/server-кодом. Если Android APK обновлен, а Windows/Linux host старый, поля `Host...` будут пустыми.
+Important: these rows appear in Quality Monitor only if the remote host is also
+built with the updated proto/server code. If the Android APK is updated but the
+Windows/Linux host is old, the `Host...` fields stay empty.
 
-### Вывод по скриншотам
+### Screenshot Findings
 
-По скриншотам Android viewer показывал примерно:
+The Android viewer screenshots showed approximately:
 
 - `FPS 15`
 - `Codec H264`
@@ -117,113 +128,122 @@
 - `Mode adaptive`
 - `Direct true`
 - `Frame 9-17 ms`
-- `Flutter около 0.1 ms или меньше`
+- `Flutter around 0.1 ms or less`
 
-Это говорит, что в этом конкретном замере:
+For that specific sample, this means:
 
-- очередь на Android viewer не забита (`Queue 0`);
-- Android decode/render sample не выглядит как причина 15 FPS (`DecFPS` сильно выше 15);
-- adaptive client cap выставлен на 30, а не на 15;
-- соединение direct, задержка низкая;
-- нужны host-side данные, чтобы понять, ограничивает ли FPS capture/encode/send сторона хоста.
+- the Android viewer queue was not backed up (`Queue 0`);
+- the Android decode/render sample did not look like the reason for 15 FPS
+  (`DecFPS` was far above 15);
+- the adaptive client cap was 30, not 15;
+- the connection was direct and latency was low;
+- host-side data was needed to determine whether FPS was limited by host
+  capture/encode/send.
 
-## Исправления MediaCodec
+## MediaCodec Fixes
 
-Проверен и поправлен `libs/scrap/src/common/mediacodec.rs`.
+`libs/scrap/src/common/mediacodec.rs` was reviewed and fixed.
 
-Сделано:
+Changes:
 
-- добавлены timing-поля для MediaCodec input/output и conversion;
-- добавлена диагностика MediaFormat;
-- поправлена обработка stride/crop/slice-height;
-- добавлен warning/fallback для unexpected color format;
-- убраны лишние realloc RGBA buffer, где это возможно;
-- исправлена ошибка duplicate `ImageFormat::ARGB` match arm: второй arm должен быть `ImageFormat::ABGR`;
-- сохранен fallback на существующий RGBA soft-render path.
+- added timing fields for MediaCodec input/output and conversion;
+- added MediaFormat diagnostics;
+- fixed stride/crop/slice-height handling;
+- added warning/fallback for unexpected color formats;
+- removed unnecessary RGBA buffer reallocations where possible;
+- fixed a duplicate `ImageFormat::ARGB` match arm: the second arm should be
+  `ImageFormat::ABGR`;
+- kept the fallback to the existing RGBA soft-render path.
 
-Текущий pipeline для Android H.264/H.265 остается byte-buffer based:
+The current Android H.264/H.265 pipeline remains byte-buffer based:
 
 ```text
 MediaCodec decode -> YUV/I420 output buffer -> CPU YUV/RGBA conversion -> RGBA Vec<u8> -> Flutter soft render
 ```
 
-Желаемый будущий pipeline описан отдельно:
+The desired future pipeline is documented separately:
 
 ```text
 MediaCodec decode -> Surface/SurfaceTexture -> Flutter texture
 ```
 
-Документ:
+Document:
 
 - `docs/android-video-pipeline.md`
 
-## Texture path
+## Texture Path
 
-Полный Android SurfaceTexture/Flutter texture path не был реализован в этой итерации, потому что это отдельная интеграция с жизненным циклом Flutter texture registration, Surface/SurfaceTexture и MediaCodec surface output.
+The full Android SurfaceTexture/Flutter texture path was not implemented in
+this iteration because it is a separate integration with the Flutter texture
+registration lifecycle, Surface/SurfaceTexture, and MediaCodec surface output.
 
-Оставлены требования к безопасному будущему варианту:
+Requirements left for a safe future implementation:
 
-- если texture init failed, fallback to RGBA soft render;
-- если Flutter texture registration failed, fallback to RGBA soft render;
-- если MediaCodec Surface output failed, fallback to byte-buffer decode;
-- если texture delivery failed at runtime, fallback to RGBA soft render;
-- VP8/VP9/AV1 software decode paths не трогать;
-- desktop platforms не ломать.
+- if texture init fails, fall back to RGBA soft render;
+- if Flutter texture registration fails, fall back to RGBA soft render;
+- if MediaCodec Surface output fails, fall back to byte-buffer decode;
+- if texture delivery fails at runtime, fall back to RGBA soft render;
+- do not touch VP8/VP9/AV1 software decode paths;
+- do not break desktop platforms.
 
-## Исправления Quality Monitor и меню Android
+## Quality Monitor And Android Menu Fixes
 
-### Пропавший пункт Quality Monitor
+### Missing Quality Monitor Item
 
-Были возвращены пункты меню, которые ранее пропали после изменений в mobile toolbar/menu.
+Menu items that had disappeared after mobile toolbar/menu changes were restored.
 
-Затронутые файлы:
+Affected files:
 
 - `flutter/lib/mobile/pages/remote_page.dart`
 - `flutter/lib/mobile/pages/view_camera_page.dart`
 - `flutter/lib/common/widgets/setting_widgets.dart`
 - `src/lang/ru.rs`
 
-### Clipboard heading
+### Clipboard Heading
 
-После возврата пунктов меню пропал заголовок секции clipboard. Он возвращен в оба мобильных меню:
+After restoring menu items, the clipboard section heading was missing. It was
+restored in both mobile menus:
 
 - `remote_page.dart`: `Clipboard direction`
 - `view_camera_page.dart`: `Clipboard direction`
 
-### Custom quality FPS mode dropdown
+### Custom Quality FPS Mode Dropdown
 
-На Android dropdown для выбора режима custom quality:
+On Android, the dropdown used to choose custom quality mode:
 
 - `Adaptive FPS cap`
 - `Fixed FPS`
 
-рисовался вне меню/overlay, из-за чего выбрать пункт было почти невозможно.
+was rendered outside the menu/overlay, making the option almost impossible to
+select.
 
-Исправление: на mobile UI dropdown заменен на inline `RadioListTile` внутри самого меню. Desktop UI оставлен с dropdown.
+Fix: in the mobile UI, the dropdown was replaced with inline `RadioListTile`
+entries inside the menu itself. The desktop UI still uses the dropdown.
 
-Файл:
+File:
 
 - `flutter/lib/common/widgets/setting_widgets.dart`
 
-## Исправления сборки Android
+## Android Build Fixes
 
-Сборка Android была доведена до успешного release APK.
+The Android build was brought to a successful release APK.
 
-Сделано:
+Changes:
 
-- поправлен Gradle proto path в `flutter/android/app/build.gradle`;
-- обновлены/pinned Flutter зависимости в `flutter/pubspec.yaml` и `flutter/pubspec.lock`;
-- внесены правки совместимости с Flutter/Dart:
+- fixed the Gradle proto path in `flutter/android/app/build.gradle`;
+- updated/pinned Flutter dependencies in `flutter/pubspec.yaml` and
+  `flutter/pubspec.lock`;
+- added Flutter/Dart compatibility fixes:
   - `DialogTheme`;
   - deprecated `withOpacity`;
-  - удаление/замена несовместимого `selectAllOnFocus`;
-  - упрощение controller logic в desktop remote toolbar;
-- поправлены Android wake lock lifetime и clipboard compile issues;
-- обновлен `flutter/ndk_arm64.sh`.
+  - removal/replacement of incompatible `selectAllOnFocus`;
+  - simplified controller logic in the desktop remote toolbar;
+- fixed Android wake lock lifetime and clipboard compile issues;
+- updated `flutter/ndk_arm64.sh`.
 
-## Проверки
+## Verification
 
-Выполнялись:
+Commands that were run:
 
 ```bash
 cargo ndk check --features flutter,hwcodec,mediacodec
@@ -236,20 +256,20 @@ unzip -l ... lib/arm64-v8a/*
 git diff --check
 ```
 
-Результат:
+Result:
 
-- Android APK собран успешно.
-- APK signature v1/v2 valid.
+- Android APK was built successfully.
+- APK signature v1/v2 is valid.
 - Package: `io.github.rustadministrator.rustadmin`
 - Version name: `2.0.2`
 - Version code: `2202`
 - Native ABI: `arm64-v8a`
-- `git diff --check` чистый.
-- Временные signing-файлы после сборки удалены из рабочей копии.
+- `git diff --check` was clean.
+- Temporary signing files were removed from the working tree after the build.
 
-## Последний APK
+## Latest APK
 
-Файл:
+File:
 
 ```text
 /home/w0w/rustadmin-fps-diag/flutter/build/app/outputs/flutter-apk/rustadmin-2.0.2-v2202-arm64-v8a-menu-hostdiag-release-20260620.apk
@@ -261,17 +281,18 @@ SHA256:
 697ce4d60c07113dfe62f0af5ec76b3eeb7d289bfb465e35955d23359098373f
 ```
 
-## Текущий статус рабочих деревьев
+## Current Working Tree Status
 
-Основной репозиторий содержит изменения в Android/Flutter UI, diagnostics, MediaCodec, server host diagnostics и документации.
+The main repository contains changes in Android/Flutter UI, diagnostics,
+MediaCodec, server host diagnostics, and documentation.
 
-Внешний `/home/w0w/hbb_common` содержит изменение:
+External `/home/w0w/hbb_common` contains this change:
 
 ```text
 M protos/message.proto
 ```
 
-Добавленные поля `TestDelay`:
+Added `TestDelay` fields:
 
 ```proto
 string host_video_fps = 5;
@@ -280,15 +301,15 @@ string host_video_qos = 7;
 string host_video_wait = 8;
 ```
 
-## Что важно сделать дальше
+## Important Next Steps
 
-1. Собрать и установить обновленный host binary на удаленный хост.
-2. Проверить Quality Monitor после обновления host:
+1. Build and install an updated host binary on the remote host.
+2. Check Quality Monitor after updating the host:
    - `HostFPS`
    - `HostCodec`
    - `HostQoS`
    - `HostWait`
-3. Повторить тесты на 2K:
+3. Repeat 2K tests:
    - adaptive FPS;
    - fixed FPS 30;
    - H.264;
@@ -297,11 +318,16 @@ string host_video_wait = 8;
    - AV1;
    - direct;
    - relay.
-4. Если `HostFPS/HostWait/HostQoS` покажут ограничение на capture/encode/send стороне, дальше оптимизировать host path.
-5. Если host будет отдавать 30 FPS стабильно, а Android снова покажет 15 FPS при низком `DecFPS`, возвращаться к Android texture path.
+4. If `HostFPS/HostWait/HostQoS` shows a limit on the capture/encode/send side,
+   optimize the host path next.
+5. If the host reliably sends 30 FPS and Android still shows 15 FPS with low
+   `DecFPS`, return to the Android texture path.
 
-## Краткий технический вывод
+## Short Technical Conclusion
 
-На текущих скриншотах Android viewer не выглядит главным ограничителем: `DecFPS` выше целевого, `Queue 0`, `AutoFPS 30`, `Direct true`.
+In the current screenshots, the Android viewer does not look like the primary
+bottleneck: `DecFPS` is above target, `Queue 0`, `AutoFPS 30`, `Direct true`.
 
-Вероятнее всего, текущий 15 FPS нужно подтверждать host-side диагностикой. Без обновленного host эти поля в Quality Monitor не появятся, потому что старый host не отправляет новые поля `TestDelay`.
+The current 15 FPS issue most likely needs to be confirmed with host-side
+diagnostics. Without an updated host, these fields do not appear in Quality
+Monitor because the old host does not send the new `TestDelay` fields.
