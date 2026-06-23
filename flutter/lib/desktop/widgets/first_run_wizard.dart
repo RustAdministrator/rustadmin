@@ -553,10 +553,15 @@ class _FirstRunWizardDialogState extends State<FirstRunWizardDialog> {
         RoundedRectangleBorder(borderRadius: BorderRadius.circular(4.0)),
       ),
     );
+    final availableHeight = MediaQuery.of(context).size.height - 48;
+    final maxDialogHeight = availableHeight < 360 ? 360.0 : availableHeight;
     return Dialog(
       insetPadding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 620),
+        constraints: BoxConstraints(
+          maxWidth: 620,
+          maxHeight: maxDialogHeight,
+        ),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(24, 22, 24, 20),
           child: Column(
@@ -571,44 +576,46 @@ class _FirstRunWizardDialogState extends State<FirstRunWizardDialog> {
               ),
               const SizedBox(height: 20),
               Flexible(
-                child: SingleChildScrollView(child: page),
-              ),
-              const SizedBox(height: 14),
-              Text(
-                pageBody,
-                style: Theme.of(context)
-                    .textTheme
-                    .bodyMedium
-                    ?.copyWith(height: 1.45),
-              ),
-              const SizedBox(height: 16),
-              _buildStepIndicator(),
-              const SizedBox(height: 8),
-              CheckboxListTile(
-                contentPadding: EdgeInsets.zero,
-                controlAffinity: ListTileControlAffinity.leading,
-                value: _settings.showOnNextStart,
-                onChanged: (value) {
-                  if (value == null) return;
-                  setState(() {
-                    _settings = _settings.copyWith(showOnNextStart: value);
-                  });
-                },
-                title: const Text('Show on next start'),
-                subtitle: const Text(
-                  'Keep this welcome window visible automatically when RustAdmin starts.',
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      page,
+                      const SizedBox(height: 14),
+                      Text(
+                        pageBody,
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodyMedium
+                            ?.copyWith(height: 1.45),
+                      ),
+                      const SizedBox(height: 16),
+                      _buildStepIndicator(),
+                      const SizedBox(height: 8),
+                      CheckboxListTile(
+                        contentPadding: EdgeInsets.zero,
+                        controlAffinity: ListTileControlAffinity.leading,
+                        value: _settings.showOnNextStart,
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setState(() {
+                            _settings =
+                                _settings.copyWith(showOnNextStart: value);
+                          });
+                        },
+                        title: const Text('Show on next start'),
+                        subtitle: const Text(
+                          'Keep this welcome window visible automatically when RustAdmin starts.',
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
               const SizedBox(height: 22),
               Row(
                 children: [
-                  if (_page == 0)
-                    TextButton(
-                      style: navButtonStyle,
-                      onPressed: _finish,
-                      child: const Text('Skip'),
-                    )
-                  else
+                  if (_page > 0)
                     TextButton(
                       style: navButtonStyle,
                       onPressed: () {

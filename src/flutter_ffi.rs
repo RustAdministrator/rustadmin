@@ -2854,6 +2854,7 @@ pub fn main_get_common(key: String) -> String {
             "trust_phrase": info.trust_phrase,
             "direct_endpoints": info.direct_endpoints,
             "pairing_required": info.pairing_required,
+            "known_contacts_only": info.known_contacts_only,
         })
         .to_string();
     } else if key == "paired-viewers" {

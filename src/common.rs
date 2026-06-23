@@ -1161,6 +1161,7 @@ pub struct NetworkModeInfo {
     pub trust_phrase: String,
     pub direct_endpoints: Vec<String>,
     pub pairing_required: bool,
+    pub known_contacts_only: bool,
 }
 
 const TRUST_PHRASE_WORDS: [&str; 64] = [
@@ -1225,6 +1226,7 @@ pub fn get_network_mode_info() -> NetworkModeInfo {
     let trust_phrase = fingerprint_to_trust_phrase(&crate::ui_interface::get_fingerprint());
     let direct_endpoints = get_direct_access_endpoints();
     let pairing_required = has_effective_direct_access_pairing_passphrase();
+    let known_contacts_only = !allow_unverified_peer_trust() && !pairing_required;
     let detail = if !rendezvous_server.is_empty() {
         rendezvous_server
     } else if !relay_server.is_empty() {
@@ -1241,6 +1243,7 @@ pub fn get_network_mode_info() -> NetworkModeInfo {
             trust_phrase,
             direct_endpoints,
             pairing_required,
+            known_contacts_only,
         }
     } else if has_remote {
         NetworkModeInfo {
@@ -1250,6 +1253,7 @@ pub fn get_network_mode_info() -> NetworkModeInfo {
             trust_phrase,
             direct_endpoints,
             pairing_required,
+            known_contacts_only,
         }
     } else if is_local_network_mode_enabled() {
         NetworkModeInfo {
@@ -1259,6 +1263,7 @@ pub fn get_network_mode_info() -> NetworkModeInfo {
             trust_phrase,
             direct_endpoints,
             pairing_required,
+            known_contacts_only,
         }
     } else {
         NetworkModeInfo {
@@ -1268,6 +1273,7 @@ pub fn get_network_mode_info() -> NetworkModeInfo {
             trust_phrase,
             direct_endpoints,
             pairing_required,
+            known_contacts_only,
         }
     }
 }

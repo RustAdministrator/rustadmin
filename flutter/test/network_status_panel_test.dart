@@ -31,6 +31,7 @@ void main() {
         trustPhrase: 'amber river solar mint dune cedar',
         directEndpoints: ['192.168.1.25:21118', '10.8.0.5:21118'],
         pairingRequired: true,
+        knownContactsOnly: false,
         lanDiscoveryLabel: 'Trusted Peers Only',
       ),
     ));
@@ -66,6 +67,7 @@ void main() {
         trustPhrase: '',
         directEndpoints: [],
         pairingRequired: false,
+        knownContactsOnly: false,
         lanDiscoveryLabel: 'Off',
       ),
     ));
@@ -88,6 +90,7 @@ void main() {
         trustPhrase: '',
         directEndpoints: [],
         pairingRequired: false,
+        knownContactsOnly: false,
         lanDiscoveryLabel: 'Off',
       ),
     ));
@@ -98,5 +101,28 @@ void main() {
     expect(find.textContaining('Pairing passphrase:'), findsNothing);
     expect(find.textContaining('Direct access:'), findsNothing);
     expect(find.textContaining('Endpoint:'), findsNothing);
+  });
+
+  testWidgets('renders known contacts only warning', (tester) async {
+    await tester.pumpWidget(buildTestApp(
+      const NetworkStatusPanelBody(
+        mode: 'local_only',
+        label: 'Local Only',
+        detail: '',
+        trustPhrase: '',
+        directEndpoints: [],
+        pairingRequired: false,
+        knownContactsOnly: true,
+        lanDiscoveryLabel: 'Off',
+      ),
+    ));
+
+    expect(find.text('Local Only'), findsOneWidget);
+    expect(find.text('Known contacts only'), findsOneWidget);
+    expect(
+      find.text('New contacts need a pairing passphrase or a pretrusted key.'),
+      findsOneWidget,
+    );
+    expect(find.byIcon(Icons.warning_amber_rounded), findsOneWidget);
   });
 }

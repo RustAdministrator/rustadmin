@@ -80,7 +80,7 @@ void main() {
     expect(result!.showOnNextStart, isFalse);
   });
 
-  testWidgets('skip returns the current settings unchanged', (tester) async {
+  testWidgets('welcome page requires moving through setup', (tester) async {
     FirstRunWizardSettings? result;
 
     await tester.pumpWidget(buildTestApp(
@@ -109,14 +109,22 @@ void main() {
 
     await tester.tap(find.text('Open'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Skip'));
+
+    expect(find.text('Welcome to RustAdmin'), findsOneWidget);
+    expect(find.text('Skip'), findsNothing);
+    expect(find.text('Back'), findsNothing);
+    expect(find.text('Next'), findsOneWidget);
+
+    await tester.tap(find.text('Next'));
+    await tester.pumpAndSettle();
+    expect(find.text('How connections work'), findsOneWidget);
+    expect(find.text('Back'), findsOneWidget);
+
+    await tester.tap(find.text('Back'));
     await tester.pumpAndSettle();
 
-    expect(result, isNotNull);
-    expect(result!.directAccessEnabled, isFalse);
-    expect(result!.lanDiscoveryMode, kLanDiscoveryModeStandard);
-    expect(result!.localPairingPassphrase, 'already-set');
-    expect(result!.showOnNextStart, isTrue);
+    expect(find.text('Welcome to RustAdmin'), findsOneWidget);
+    expect(result, isNull);
   });
 
   testWidgets('local pairing passphrase depends on direct access',

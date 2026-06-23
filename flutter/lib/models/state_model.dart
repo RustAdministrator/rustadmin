@@ -23,6 +23,7 @@ class StateGlobal {
   final networkModeTrustPhrase = ''.obs;
   final RxList<String> networkModeDirectEndpoints = <String>[].obs;
   final networkModePairingRequired = false.obs;
+  final networkModeKnownContactsOnly = false.obs;
   final lanDiscoveryMode = kLanDiscoveryModeStandard.obs;
   final lanDiscoveryModeLabel = 'Standard'.obs;
   final RxInt videoConnCount = 0.obs;

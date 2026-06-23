@@ -29,6 +29,7 @@ class NetworkModeInfo {
   final String trustPhrase;
   final List<String> directEndpoints;
   final bool pairingRequired;
+  final bool knownContactsOnly;
 
   const NetworkModeInfo({
     required this.mode,
@@ -37,6 +38,7 @@ class NetworkModeInfo {
     required this.trustPhrase,
     required this.directEndpoints,
     required this.pairingRequired,
+    required this.knownContactsOnly,
   });
 
   const NetworkModeInfo.fallback()
@@ -45,7 +47,8 @@ class NetworkModeInfo {
         detail = '',
         trustPhrase = '',
         directEndpoints = const [],
-        pairingRequired = false;
+        pairingRequired = false,
+        knownContactsOnly = false;
 
   factory NetworkModeInfo.fromJson(Map<String, dynamic> json) {
     return NetworkModeInfo(
@@ -58,6 +61,7 @@ class NetworkModeInfo {
           .where((e) => e.isNotEmpty)
           .toList(),
       pairingRequired: json['pairing_required'] as bool? ?? false,
+      knownContactsOnly: json['known_contacts_only'] as bool? ?? false,
     );
   }
 }
@@ -75,9 +79,17 @@ Future<NetworkModeInfo> loadNetworkModeInfo() async {
         useIdRelayServer ? await bind.mainGetOption(key: 'relay-server') : '';
     final directAccessEnabled = option2bool(kOptionDirectServer,
         await bind.mainGetOption(key: kOptionDirectServer));
+    final directPairingPassphrase =
+        await bind.mainGetOption(key: kOptionDirectAccessPairingPassphrase);
+    final peerPairingPassphrase =
+        await bind.mainGetOption(key: kOptionPeerPairingPassphrase);
     final pairingRequired =
-        (await bind.mainGetOption(key: kOptionDirectAccessPairingPassphrase))
-            .isNotEmpty;
+        directPairingPassphrase.isNotEmpty || peerPairingPassphrase.isNotEmpty;
+    final allowUnverifiedPeerTrust = option2bool(
+      kOptionAllowUnverifiedPeerTrust,
+      await bind.mainGetOption(key: kOptionAllowUnverifiedPeerTrust),
+    );
+    final knownContactsOnly = !allowUnverifiedPeerTrust && !pairingRequired;
     final detail = rendezvousServer.isNotEmpty
         ? rendezvousServer
         : relayServer.isNotEmpty
@@ -91,6 +103,7 @@ Future<NetworkModeInfo> loadNetworkModeInfo() async {
         trustPhrase: trustPhrase,
         directEndpoints: const [],
         pairingRequired: pairingRequired,
+        knownContactsOnly: knownContactsOnly,
       );
     }
     if (detail.isNotEmpty) {
@@ -101,6 +114,7 @@ Future<NetworkModeInfo> loadNetworkModeInfo() async {
         trustPhrase: trustPhrase,
         directEndpoints: const [],
         pairingRequired: pairingRequired,
+        knownContactsOnly: knownContactsOnly,
       );
     }
     if (directAccessEnabled) {
@@ -111,6 +125,7 @@ Future<NetworkModeInfo> loadNetworkModeInfo() async {
         trustPhrase: trustPhrase,
         directEndpoints: const [],
         pairingRequired: pairingRequired,
+        knownContactsOnly: knownContactsOnly,
       );
     }
     return NetworkModeInfo(
@@ -120,6 +135,7 @@ Future<NetworkModeInfo> loadNetworkModeInfo() async {
       trustPhrase: trustPhrase,
       directEndpoints: const [],
       pairingRequired: pairingRequired,
+      knownContactsOnly: knownContactsOnly,
     );
   }
 
@@ -175,6 +191,7 @@ class NetworkStatusPanel extends StatelessWidget {
         directEndpoints:
             stateGlobal.networkModeDirectEndpoints.toList(growable: false),
         pairingRequired: stateGlobal.networkModePairingRequired.value,
+        knownContactsOnly: stateGlobal.networkModeKnownContactsOnly.value,
         lanDiscoveryLabel: translate(stateGlobal.lanDiscoveryModeLabel.value),
       );
     });
@@ -188,6 +205,7 @@ class NetworkStatusPanelBody extends StatefulWidget {
   final String trustPhrase;
   final List<String> directEndpoints;
   final bool pairingRequired;
+  final bool knownContactsOnly;
   final String lanDiscoveryLabel;
 
   const NetworkStatusPanelBody({
@@ -198,6 +216,7 @@ class NetworkStatusPanelBody extends StatefulWidget {
     required this.trustPhrase,
     required this.directEndpoints,
     required this.pairingRequired,
+    required this.knownContactsOnly,
     required this.lanDiscoveryLabel,
   });
 
@@ -289,25 +308,60 @@ class _NetworkStatusPanelBodyState extends State<NetworkStatusPanelBody> {
       );
     }
 
+    Widget buildBadge(
+      String label,
+      Color badgeColor, {
+      IconData? icon,
+    }) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: badgeColor.withOpacity(0.14),
+          borderRadius: BorderRadius.circular(4.0),
+          border: Border.all(color: badgeColor.withOpacity(0.4)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (icon != null) ...[
+              Icon(icon, size: 14, color: badgeColor),
+              const SizedBox(width: 5),
+            ],
+            Text(
+              label,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: badgeColor,
+                    fontWeight: FontWeight.w700,
+                  ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-          decoration: BoxDecoration(
-            color: color.withOpacity(0.14),
-            borderRadius: BorderRadius.circular(4.0),
-            border: Border.all(color: color.withOpacity(0.4)),
-          ),
-          child: Text(
-            widget.label,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: color,
-                  fontWeight: FontWeight.w700,
-                ),
-          ),
+        Wrap(
+          spacing: 8,
+          runSpacing: 6,
+          children: [
+            buildBadge(widget.label, color),
+            if (widget.knownContactsOnly)
+              buildBadge(
+                'Known contacts only',
+                Colors.orange.shade700,
+                icon: Icons.warning_amber_rounded,
+              ),
+          ],
         ),
         const SizedBox(height: 8),
+        if (widget.knownContactsOnly) ...[
+          buildStatusValue(
+            'New contacts need a pairing passphrase or a pretrusted key.',
+          ),
+          const SizedBox(height: 4),
+        ],
         buildStatusLine('LAN discovery', widget.lanDiscoveryLabel),
         if (widget.trustPhrase.isNotEmpty) ...[
           const SizedBox(height: 4),
@@ -539,6 +593,8 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
     stateGlobal.networkModeDirectEndpoints
         .assignAll(networkMode.directEndpoints);
     stateGlobal.networkModePairingRequired.value = networkMode.pairingRequired;
+    stateGlobal.networkModeKnownContactsOnly.value =
+        networkMode.knownContactsOnly;
     final lanDiscoveryMode = await loadLanDiscoveryMode();
     stateGlobal.lanDiscoveryMode.value = lanDiscoveryMode;
     stateGlobal.lanDiscoveryModeLabel.value =

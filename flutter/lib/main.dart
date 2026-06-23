@@ -157,7 +157,10 @@ void runMainApp(bool startService) async {
 
   // Set window option.
   WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
-      isMainWindow: true, alwaysOnTop: alwaysOnTop);
+    isMainWindow: true,
+    size: kDesktopDefaultMainWindowSize,
+    alwaysOnTop: alwaysOnTop,
+  );
   windowManager.waitUntilReadyToShow(windowOptions, () async {
     // Restore the location of the main window before window hide or show.
     await restoreWindowPosition(WindowType.Main);

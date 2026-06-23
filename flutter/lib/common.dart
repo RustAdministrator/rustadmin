@@ -49,6 +49,8 @@ import 'package:flutter_hbb/utils/http_service.dart' as http;
 final globalKey = GlobalKey<NavigatorState>();
 final navigationBarKey = GlobalKey();
 
+const Size kDesktopDefaultMainWindowSize = Size(1280, 800);
+
 final isAndroid = isAndroid_;
 final isIOS = isIOS_;
 final isWindows = isWindows_;
@@ -2209,12 +2211,14 @@ Future<Size> _adjustRestoreMainWindowSize(double? width, double? height) async {
   const double maxWidth = 6480;
   const double maxHeight = 6480;
 
-  final defaultWidth =
-      ((isDesktop || isWebDesktop) ? 1280 : kMobileDefaultDisplayWidth)
-          .toDouble();
-  final defaultHeight =
-      ((isDesktop || isWebDesktop) ? 720 : kMobileDefaultDisplayHeight)
-          .toDouble();
+  final defaultWidth = ((isDesktop || isWebDesktop)
+          ? kDesktopDefaultMainWindowSize.width
+          : kMobileDefaultDisplayWidth)
+      .toDouble();
+  final defaultHeight = ((isDesktop || isWebDesktop)
+          ? kDesktopDefaultMainWindowSize.height
+          : kMobileDefaultDisplayHeight)
+      .toDouble();
   double restoreWidth = width ?? defaultWidth;
   double restoreHeight = height ?? defaultHeight;
 
