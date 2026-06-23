@@ -16,6 +16,7 @@ import 'package:flutter_hbb/desktop/widgets/material_mod_popup_menu.dart'
     as mod_menu;
 import 'package:flutter_hbb/desktop/widgets/popup_menu.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
+import 'package:flutter_hbb/utils/platform_channel.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:get/get.dart';
 import 'package:bot_toast/bot_toast.dart';
@@ -108,12 +109,14 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
       _update_remote_count();
     }
     tabController.onRemoved = (_, id) => onRemoveId(id);
+    tabController.onChanged = _schedulePublishConnectionMenu;
     rustDeskWinManager.setMethodHandler(_remoteMethodHandler);
   }
 
   @override
   void initState() {
     super.initState();
+    _schedulePublishConnectionMenu();
 
     if (!_isScreenRectSet) {
       Future.delayed(Duration.zero, () {
@@ -127,6 +130,17 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
         );
       });
     }
+  }
+
+  @override
+  void dispose() {
+    if (isMacOS) {
+      unawaited(RdPlatformChannel.instance.updateMacOSConnectionMenu(
+        windowId(),
+        const [],
+      ));
+    }
+    super.dispose();
   }
 
   @override
@@ -388,6 +402,32 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
 
   int windowId() {
     return widget.params["windowId"];
+  }
+
+  void _schedulePublishConnectionMenu() {
+    if (!isMacOS) {
+      return;
+    }
+    unawaited(_publishConnectionMenu());
+  }
+
+  Future<void> _publishConnectionMenu() async {
+    final tabs = tabController.state.value.tabs;
+    final selected = tabController.state.value.selected;
+    final entries = <MacOSConnectionMenuEntry>[];
+    for (var i = 0; i < tabs.length; i++) {
+      final key = tabs[i].key;
+      entries.add(MacOSConnectionMenuEntry(
+        windowId: windowId(),
+        peerId: key,
+        title: DesktopTab.tablabelGetter(key).value,
+        selected: i == selected,
+      ));
+    }
+    await RdPlatformChannel.instance.updateMacOSConnectionMenu(
+      windowId(),
+      entries,
+    );
   }
 
   Future<bool> handleWindowCloseButton() async {

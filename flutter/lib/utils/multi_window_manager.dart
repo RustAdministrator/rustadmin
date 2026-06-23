@@ -312,6 +312,24 @@ class RustDeskMultiWindowManager {
     return false;
   }
 
+  Future<bool> activateRemoteDesktopWindow(int windowId, String remoteId) async {
+    if (!_remoteDesktopWindows.contains(windowId)) {
+      return false;
+    }
+    try {
+      if (await DesktopMultiWindow.invokeMethod(
+          windowId, kWindowEventActiveSession, remoteId)) {
+        await WindowController.fromWindowId(windowId).show();
+        await windowOnTop(windowId);
+        return true;
+      }
+    } catch (e) {
+      debugPrint(
+          'Failed to activate remote desktop $remoteId in window $windowId: $e');
+    }
+    return false;
+  }
+
   Future<MultiWindowCallResult> newFileTransfer(
     String remoteId, {
     String? password,

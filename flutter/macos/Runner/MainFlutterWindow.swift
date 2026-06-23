@@ -34,6 +34,149 @@ class RelativeMouseState {
     private init() {}
 }
 
+private struct ConnectionMenuEntry {
+    let windowId: Int
+    let peerId: String
+    let title: String
+    let selected: Bool
+}
+
+private final class ConnectionMenuSelection: NSObject {
+    let windowId: Int
+    let peerId: String
+
+    init(windowId: Int, peerId: String) {
+        self.windowId = windowId
+        self.peerId = peerId
+    }
+}
+
+private final class ConnectionMenuManager: NSObject {
+    static let shared = ConnectionMenuManager()
+
+    private var mainChannel: FlutterMethodChannel?
+    private var entriesByWindowId: [Int: [ConnectionMenuEntry]] = [:]
+    private let connectionsMenu = NSMenu(title: "Connections")
+    private weak var connectionsMenuItem: NSMenuItem?
+
+    private override init() {
+        connectionsMenu.autoenablesItems = false
+        super.init()
+    }
+
+    func setMainChannel(_ channel: FlutterMethodChannel) {
+        if mainChannel == nil {
+            mainChannel = channel
+        }
+    }
+
+    func update(windowId: Int, rawEntries: [[String: Any]]) {
+        assert(Thread.isMainThread, "Connection menu updates must run on the main thread")
+        ensureMenuInstalled()
+
+        let entries = rawEntries.compactMap { raw -> ConnectionMenuEntry? in
+            guard let peerId = raw["peerId"] as? String, !peerId.isEmpty else {
+                return nil
+            }
+            let title = (raw["title"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? peerId
+            let selected = boolValue(raw["selected"]) ?? false
+            return ConnectionMenuEntry(windowId: windowId, peerId: peerId, title: title, selected: selected)
+        }
+
+        if entries.isEmpty {
+            entriesByWindowId.removeValue(forKey: windowId)
+        } else {
+            entriesByWindowId[windowId] = entries
+        }
+
+        rebuildMenu()
+    }
+
+    private func ensureMenuInstalled() {
+        guard connectionsMenuItem == nil else { return }
+        guard let windowMenu = NSApplication.shared.windowsMenu
+            ?? NSApplication.shared.mainMenu?.item(withTitle: "Window")?.submenu else {
+            return
+        }
+
+        if NSApplication.shared.windowsMenu == nil {
+            NSApplication.shared.windowsMenu = windowMenu
+        }
+
+        let item = NSMenuItem(title: "Connections", action: nil, keyEquivalent: "")
+        item.submenu = connectionsMenu
+
+        if let separatorIndex = windowMenu.items.firstIndex(where: { $0.isSeparatorItem }) {
+            windowMenu.insertItem(item, at: separatorIndex)
+        } else {
+            windowMenu.addItem(NSMenuItem.separator())
+            windowMenu.addItem(item)
+        }
+
+        connectionsMenuItem = item
+    }
+
+    private func rebuildMenu() {
+        connectionsMenu.removeAllItems()
+
+        let sortedWindowIds = entriesByWindowId.keys.sorted()
+        if sortedWindowIds.isEmpty {
+            let emptyItem = NSMenuItem(title: "No Connections", action: nil, keyEquivalent: "")
+            emptyItem.isEnabled = false
+            connectionsMenu.addItem(emptyItem)
+            return
+        }
+
+        var addedAnyItem = false
+        for windowId in sortedWindowIds {
+            guard let entries = entriesByWindowId[windowId], !entries.isEmpty else {
+                continue
+            }
+            if addedAnyItem {
+                connectionsMenu.addItem(NSMenuItem.separator())
+            }
+            for entry in entries {
+                let item = NSMenuItem(title: entry.title, action: #selector(selectConnection(_:)), keyEquivalent: "")
+                item.target = self
+                item.state = entry.selected ? .on : .off
+                item.representedObject = ConnectionMenuSelection(windowId: entry.windowId, peerId: entry.peerId)
+                connectionsMenu.addItem(item)
+                addedAnyItem = true
+            }
+        }
+    }
+
+    @objc private func selectConnection(_ sender: NSMenuItem) {
+        guard let selection = sender.representedObject as? ConnectionMenuSelection else {
+            return
+        }
+        mainChannel?.invokeMethod("activateConnection", arguments: [
+            "windowId": selection.windowId,
+            "peerId": selection.peerId,
+        ])
+    }
+
+    private func boolValue(_ value: Any?) -> Bool? {
+        if let value = value as? Bool {
+            return value
+        }
+        if let value = value as? NSNumber {
+            return value.boolValue
+        }
+        return nil
+    }
+
+    static func intValue(_ value: Any?) -> Int? {
+        if let value = value as? Int {
+            return value
+        }
+        if let value = value as? NSNumber {
+            return value.intValue
+        }
+        return nil
+    }
+}
+
 class MainFlutterWindow: NSWindow {
     override func awakeFromNib() {
         rustdesk_core_main();
@@ -43,7 +186,7 @@ class MainFlutterWindow: NSWindow {
         self.setFrame(windowFrame, display: true)
         // register self method handler
         let registrar = flutterViewController.registrar(forPlugin: "RustDeskPlugin")
-        setMethodHandler(registrar: registrar)
+        setMethodHandler(registrar: registrar, isMainWindow: true)
 
         RegisterGeneratedPlugins(registry: flutterViewController)
 
@@ -176,8 +319,11 @@ class MainFlutterWindow: NSWindow {
         }
     }
 
-    public func setMethodHandler(registrar: FlutterPluginRegistrar) {
+    public func setMethodHandler(registrar: FlutterPluginRegistrar, isMainWindow: Bool = false) {
         let channel = FlutterMethodChannel(name: "org.rustdesk.rustdesk/host", binaryMessenger: registrar.messenger)
+        if isMainWindow {
+            ConnectionMenuManager.shared.setMainChannel(channel)
+        }
         channel.setMethodCallHandler({
             (call, result) -> Void in
                 switch call.method {
@@ -274,6 +420,16 @@ class MainFlutterWindow: NSWindow {
 
                 case "disableNativeRelativeMouseMode":
                     self.disableNativeRelativeMouseMode()
+                    result(true)
+
+                case "updateConnectionMenu":
+                    guard let argMap = call.arguments as? [String: Any],
+                          let windowId = ConnectionMenuManager.intValue(argMap["windowId"]),
+                          let entries = argMap["entries"] as? [[String: Any]] else {
+                        result(false)
+                        break
+                    }
+                    ConnectionMenuManager.shared.update(windowId: windowId, rawEntries: entries)
                     result(true)
 
                 default:

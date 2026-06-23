@@ -787,6 +787,13 @@ class _DesktopHomePageState extends State<DesktopHomePage>
     });
     Get.put<RxBool>(svcStopped, tag: 'stop-service');
     rustDeskWinManager.registerActiveWindowListener(onActiveWindowChanged);
+    if (isMacOS) {
+      RdPlatformChannel.instance.setMacOSConnectionMenuHandler(
+          (windowId, peerId) async =>
+              await rustDeskWinManager.activateRemoteDesktopWindow(
+                  windowId, peerId) ||
+              await rustDeskWinManager.activateRemoteDesktop(peerId));
+    }
 
     screenToMap(window_size.Screen screen) => {
           'frame': {

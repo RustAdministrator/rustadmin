@@ -99,9 +99,10 @@ class DesktopTabController {
   /// index, key
   Function(int, String)? onRemoved;
   Function(String)? onSelected;
+  VoidCallback? onChanged;
 
   DesktopTabController(
-      {required this.tabType, this.onRemoved, this.onSelected});
+      {required this.tabType, this.onRemoved, this.onSelected, this.onChanged});
 
   int get length => state.value.tabs.length;
 
@@ -119,12 +120,16 @@ class DesktopTabController {
       toIndex = state.value.tabs.length - 1;
       assert(toIndex >= 0);
     }
+    var notified = false;
     try {
       // tabPage has not been initialized, call `onSelected` at the end of initState
-      jumpTo(toIndex, callOnSelected: false);
+      notified = jumpTo(toIndex, callOnSelected: false);
     } catch (e) {
       // call before binding controller will throw
       debugPrint("Failed to jumpTo: $e");
+    }
+    if (!notified) {
+      onChanged?.call();
     }
   }
 
@@ -175,6 +180,7 @@ class DesktopTabController {
         onSelected?.call(key);
       }
     }
+    onChanged?.call();
     return true;
   }
 
@@ -213,6 +219,7 @@ class DesktopTabController {
   void clear() {
     state.value.tabs.clear();
     state.refresh();
+    onChanged?.call();
   }
 
   Widget? widget(String key) {
