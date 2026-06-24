@@ -59,6 +59,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Important Build Notes
 
+### Repository Policy
+- Use the `woffko` GitHub fork family as the active sync and push target for this workspace.
+- Do not fetch, merge, rebase, or push `ssh4net` repositories unless the user explicitly requests a `ssh4net` synchronization.
+- Treat existing `origin` remotes that point at `ssh4net` or upstream projects as legacy/reference-only remotes.
+- Active RustAdmin work should stay on `woffko/rustadmin` branch `codex/privileged-user-token-capture`.
+- Active shared dependency branches are `woffko/hbb_common` and `woffko/hwcodec`, both on `codex/privileged-user-token-capture`.
+- The RustAdmin checkout depends on local sibling/shared repos: `../hbb_common` from the root `Cargo.toml`, and `../../../hbb_common` plus `../../../hwcodec` from `libs/scrap/Cargo.toml`.
+
 ### Dependencies
 - This RustAdmin fork does not use vcpkg as the default dependency manager and prefers to avoid it for project work.
 - Prefer explicit system packages, native SDKs, CMake/pkg-config prefixes, or local WSL build prefixes for C/C++ dependencies.
