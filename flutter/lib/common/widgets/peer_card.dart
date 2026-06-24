@@ -1430,6 +1430,7 @@ class _PeerConnectionProperties {
   String codecPreference;
   bool showQualityMonitor;
   String qualityMonitorPosition;
+  String qualityMonitorDetails;
   String keyboardMode;
   String clipboardDirection;
 
@@ -1439,6 +1440,7 @@ class _PeerConnectionProperties {
     required this.codecPreference,
     required this.showQualityMonitor,
     required this.qualityMonitorPosition,
+    required this.qualityMonitorDetails,
     required this.keyboardMode,
     required this.clipboardDirection,
   });
@@ -1454,6 +1456,8 @@ class _PeerConnectionProperties {
         await bind.mainGetPeerOption(id: id, key: kOptionShowQualityMonitor));
     final qualityMonitorPosition = normalizeQualityMonitorPosition(await bind
         .mainGetPeerOption(id: id, key: kOptionQualityMonitorPosition));
+    final qualityMonitorDetails = normalizeQualityMonitorDetails(await bind
+        .mainGetPeerOption(id: id, key: kOptionQualityMonitorDetails));
     final keyboardMode = _normalizeKeyboardMode(
         await bind.mainGetPeerOption(id: id, key: 'keyboard_mode'));
     final clipboardDirection = normalizeClipboardDirectionPolicy(
@@ -1464,6 +1468,7 @@ class _PeerConnectionProperties {
       codecPreference: codecPreference,
       showQualityMonitor: showQualityMonitor,
       qualityMonitorPosition: qualityMonitorPosition,
+      qualityMonitorDetails: qualityMonitorDetails,
       keyboardMode: keyboardMode,
       clipboardDirection: clipboardDirection,
     );
@@ -1486,6 +1491,10 @@ class _PeerConnectionProperties {
         id: id,
         key: kOptionQualityMonitorPosition,
         value: qualityMonitorPosition);
+    await bind.mainSetPeerOption(
+        id: id,
+        key: kOptionQualityMonitorDetails,
+        value: qualityMonitorDetails);
     await bind.mainSetPeerOption(
         id: id,
         key: 'keyboard_mode',
@@ -1702,6 +1711,24 @@ Future<void> _showConnectionPropertiesDialog(String id) async {
                               properties.qualityMonitorPosition = value);
                         },
                       ),
+                      DropdownButtonFormField<String>(
+                        value: properties.qualityMonitorDetails,
+                        decoration: InputDecoration(
+                          labelText: translate('Quality monitor details'),
+                        ),
+                        items: [
+                          kQualityMonitorDetailsBasic,
+                          kQualityMonitorDetailsExtended,
+                        ]
+                            .map((value) => _stringMenuItem(
+                                value, qualityMonitorDetailsLabel(value)))
+                            .toList(),
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setState(() =>
+                              properties.qualityMonitorDetails = value);
+                        },
+                      ).marginOnly(top: 8),
                       _propertiesSection('Input'),
                       DropdownButtonFormField<String>(
                         value: properties.keyboardMode,

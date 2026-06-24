@@ -183,10 +183,15 @@ const String kOptionI444 = "i444";
 const String kOptionSwapLeftRightMouse = "swap-left-right-mouse";
 const String kOptionCodecPreference = "codec-preference";
 const String kOptionQualityMonitorPosition = "quality-monitor-position";
+const String kOptionQualityMonitorFloatingPosition =
+    "quality-monitor-floating-position";
+const String kOptionQualityMonitorDetails = "quality-monitor-details";
 const String kQualityMonitorPositionTopRight = "top-right";
 const String kQualityMonitorPositionTopLeft = "top-left";
 const String kQualityMonitorPositionBottomRight = "bottom-right";
 const String kQualityMonitorPositionBottomLeft = "bottom-left";
+const String kQualityMonitorDetailsBasic = "basic";
+const String kQualityMonitorDetailsExtended = "extended";
 const String kOptionRemoteMenubarDragLeft = "remote-menubar-drag-left";
 const String kOptionRemoteMenubarDragRight = "remote-menubar-drag-right";
 const String kOptionRemoteToolbarRevealZonePx = "remote-toolbar-reveal-zone-px";
@@ -236,6 +241,26 @@ String qualityMonitorPositionLabel(String value) {
     case kQualityMonitorPositionTopRight:
     default:
       return 'Top right';
+  }
+}
+
+String normalizeQualityMonitorDetails(String value) {
+  switch (value) {
+    case kQualityMonitorDetailsExtended:
+      return value;
+    case kQualityMonitorDetailsBasic:
+    default:
+      return kQualityMonitorDetailsBasic;
+  }
+}
+
+String qualityMonitorDetailsLabel(String value) {
+  switch (normalizeQualityMonitorDetails(value)) {
+    case kQualityMonitorDetailsExtended:
+      return 'Extended';
+    case kQualityMonitorDetailsBasic:
+    default:
+      return 'Basic';
   }
 }
 

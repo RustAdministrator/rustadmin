@@ -677,6 +677,63 @@ impl Decoder {
         self.valid
     }
 
+    pub fn backend(&self) -> &'static str {
+        match self.format {
+            CodecFormat::VP8 => {
+                if self.vp8.is_some() {
+                    "libvpx"
+                } else {
+                    "unavailable"
+                }
+            }
+            CodecFormat::VP9 => {
+                if self.vp9.is_some() {
+                    "libvpx"
+                } else {
+                    "unavailable"
+                }
+            }
+            CodecFormat::AV1 => {
+                if self.av1.is_some() {
+                    "libaom"
+                } else {
+                    "unavailable"
+                }
+            }
+            CodecFormat::H264 => {
+                #[cfg(feature = "vram")]
+                if self.h264_vram.is_some() {
+                    return "vram";
+                }
+                #[cfg(feature = "hwcodec")]
+                if self.h264_ram.is_some() {
+                    return "hwcodec";
+                }
+                #[cfg(feature = "mediacodec")]
+                if self.h264_media_codec.is_some() {
+                    return "mediacodec";
+                }
+                "unavailable"
+            }
+            CodecFormat::H265 => {
+                #[cfg(feature = "vram")]
+                if self.h265_vram.is_some() {
+                    return "vram";
+                }
+                #[cfg(feature = "hwcodec")]
+                if self.h265_ram.is_some() {
+                    return "hwcodec";
+                }
+                #[cfg(feature = "mediacodec")]
+                if self.h265_media_codec.is_some() {
+                    return "mediacodec";
+                }
+                "unavailable"
+            }
+            CodecFormat::Unknown => "unknown",
+        }
+    }
+
     // rgb [in/out] fmt and stride must be set in ImageRgb
     pub fn handle_video_frame(
         &mut self,

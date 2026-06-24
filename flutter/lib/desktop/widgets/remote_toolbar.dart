@@ -2198,30 +2198,45 @@ class _DisplayMenuState extends State<_DisplayMenu> {
     return futureBuilder(
         future: Future.wait([
           toolbarQualityMonitorPosition(ffi),
+          toolbarQualityMonitorDetails(ffi),
           toolbarClipboardDirection(ffi),
           toolbarDisplayToggle(context, id, ffi),
         ]),
         hasData: (data) {
           final qualityMonitor = data[0] as List<TRadioMenu<String>>;
-          final clipboard = data[1] as List<TRadioMenu<String>>;
-          final toggles = data[2] as List<TToggleMenu>;
-          if (qualityMonitor.isEmpty && clipboard.isEmpty && toggles.isEmpty) {
+          final qualityMonitorDetails = data[1] as List<TRadioMenu<String>>;
+          final clipboard = data[2] as List<TRadioMenu<String>>;
+          final toggles = data[3] as List<TToggleMenu>;
+          if (qualityMonitor.isEmpty &&
+              qualityMonitorDetails.isEmpty &&
+              clipboard.isEmpty &&
+              toggles.isEmpty) {
             return Offstage();
           }
           return Column(children: [
-            if (qualityMonitor.isNotEmpty)
+            if (qualityMonitor.isNotEmpty || qualityMonitorDetails.isNotEmpty)
               _SubmenuButton(
                 ffi: widget.ffi,
                 child: Text(translate('Quality monitor')),
-                menuChildren: qualityMonitor
-                    .map((e) => RdoMenuButton<String>(
-                          value: e.value,
-                          groupValue: e.groupValue,
-                          onChanged: e.onChanged,
-                          child: e.child,
-                          ffi: ffi,
-                        ))
-                    .toList(),
+                menuChildren: [
+                  ...qualityMonitor.map((e) => RdoMenuButton<String>(
+                        value: e.value,
+                        groupValue: e.groupValue,
+                        onChanged: e.onChanged,
+                        child: e.child,
+                        ffi: ffi,
+                      )),
+                  if (qualityMonitor.isNotEmpty &&
+                      qualityMonitorDetails.isNotEmpty)
+                    const Divider(),
+                  ...qualityMonitorDetails.map((e) => RdoMenuButton<String>(
+                        value: e.value,
+                        groupValue: e.groupValue,
+                        onChanged: e.onChanged,
+                        child: e.child,
+                        ffi: ffi,
+                      )),
+                ],
               ),
             if (clipboard.isNotEmpty)
               _SubmenuButton(

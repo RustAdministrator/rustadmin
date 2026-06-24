@@ -630,6 +630,8 @@ void showOptions(
   List<TRadioMenu<String>> codecRadios = await toolbarCodec(context, id, gFFI);
   List<TRadioMenu<String>> qualityMonitorRadios =
       await toolbarQualityMonitorPosition(gFFI);
+  List<TRadioMenu<String>> qualityMonitorDetailsRadios =
+      await toolbarQualityMonitorDetails(gFFI);
   List<TRadioMenu<String>> clipboardRadios =
       await toolbarClipboardDirection(gFFI);
   List<TToggleMenu> displayToggles =
@@ -645,6 +647,10 @@ void showOptions(
     var qualityMonitor =
         (qualityMonitorRadios.isNotEmpty ? qualityMonitorRadios[0].groupValue : '')
             .obs;
+    var qualityMonitorDetails = (qualityMonitorDetailsRadios.isNotEmpty
+            ? qualityMonitorDetailsRadios[0].groupValue
+            : '')
+        .obs;
     var clipboard =
         (clipboardRadios.isNotEmpty ? clipboardRadios[0].groupValue : '').obs;
     final radios = [
@@ -703,7 +709,30 @@ void showOptions(
                     if (v != null) qualityMonitor.value = v;
                   }
                 : null)),
-      if (qualityMonitorRadios.isNotEmpty) const Divider(color: MyTheme.border),
+      if (qualityMonitorDetailsRadios.isNotEmpty)
+        const Divider(color: MyTheme.border),
+      if (qualityMonitorDetailsRadios.isNotEmpty)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Padding(
+            padding: const EdgeInsets.only(left: 16, top: 4, bottom: 4),
+            child: Text(translate('Quality monitor details')),
+          ),
+        ),
+      for (var e in qualityMonitorDetailsRadios)
+        Obx(() => getRadio<String>(
+            e.child,
+            e.value,
+            qualityMonitorDetails.value,
+            e.onChanged != null
+                ? (v) {
+                    e.onChanged?.call(v);
+                    if (v != null) qualityMonitorDetails.value = v;
+                  }
+                : null)),
+      if (qualityMonitorRadios.isNotEmpty ||
+          qualityMonitorDetailsRadios.isNotEmpty)
+        const Divider(color: MyTheme.border),
       for (var e in clipboardRadios)
         Obx(() => getRadio<String>(
             e.child,

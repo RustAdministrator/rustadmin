@@ -4077,6 +4077,12 @@ class QualityMonitorData {
   String? codecFormat;
   String? chroma;
   String? connectionType;
+  String? decoder;
+  String? renderer;
+  String? decodeFps;
+  String? videoQueue;
+  String? videoThreads;
+  String? textureRender;
 }
 
 class QualityMonitorModel with ChangeNotifier {
@@ -4085,10 +4091,16 @@ class QualityMonitorModel with ChangeNotifier {
   QualityMonitorModel(this.parent);
   var _show = false;
   var _position = kQualityMonitorPositionTopRight;
+  var _details = kQualityMonitorDetailsBasic;
+  Offset? _floatingPosition;
+  Timer? _floatingPositionStoreTimer;
   final _data = QualityMonitorData();
 
   bool get show => _show;
   String get position => _position;
+  String get details => _details;
+  bool get extendedDetails => _details == kQualityMonitorDetailsExtended;
+  Offset? get floatingPosition => _floatingPosition;
   QualityMonitorData get data => _data;
 
   updateConnectionInfo(dynamic streamType) {
@@ -4101,6 +4113,38 @@ class QualityMonitorModel with ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> clearFloatingPosition(SessionID sessionId) async {
+    _floatingPositionStoreTimer?.cancel();
+    _floatingPositionStoreTimer = null;
+    if (_floatingPosition == null) {
+      return;
+    }
+    _floatingPosition = null;
+    await bind.sessionPeerOption(
+        sessionId: sessionId,
+        name: kOptionQualityMonitorFloatingPosition,
+        value: '');
+    notifyListeners();
+  }
+
+  void updateFloatingPosition(Offset position) {
+    final sessionId = parent.target?.sessionId;
+    if (sessionId == null) return;
+    final rounded =
+        Offset(position.dx.roundToDouble(), position.dy.roundToDouble());
+    if (_floatingPosition == rounded) return;
+    _floatingPosition = rounded;
+    notifyListeners();
+    _floatingPositionStoreTimer?.cancel();
+    _floatingPositionStoreTimer =
+        Timer(const Duration(milliseconds: 300), () {
+      bind.sessionPeerOption(
+          sessionId: sessionId,
+          name: kOptionQualityMonitorFloatingPosition,
+          value: _formatFloatingPosition(rounded));
+    });
+  }
+
   checkShowQualityMonitor(SessionID sessionId) async {
     final show = await bind.sessionGetToggleOption(
             sessionId: sessionId, arg: 'show-quality-monitor') ==
@@ -4109,11 +4153,68 @@ class QualityMonitorModel with ChangeNotifier {
         await bind.sessionGetOption(
                 sessionId: sessionId, arg: kOptionQualityMonitorPosition) ??
             '');
-    if (_show != show || _position != position) {
+    final details = normalizeQualityMonitorDetails(
+        await bind.sessionGetOption(
+                sessionId: sessionId, arg: kOptionQualityMonitorDetails) ??
+            '');
+    final floatingPosition = _parseFloatingPosition(
+        await bind.sessionGetOption(
+                sessionId: sessionId,
+                arg: kOptionQualityMonitorFloatingPosition) ??
+            '');
+    if (_show != show ||
+        _position != position ||
+        _details != details ||
+        _floatingPosition != floatingPosition) {
       _show = show;
       _position = position;
+      _details = details;
+      _floatingPosition = floatingPosition;
       notifyListeners();
     }
+  }
+
+  static String _formatFloatingPosition(Offset position) {
+    return '${position.dx.round()},${position.dy.round()}';
+  }
+
+  static Offset? _parseFloatingPosition(String value) {
+    if (value.isEmpty) return null;
+    final parts = value.split(',');
+    if (parts.length != 2) return null;
+    final x = double.tryParse(parts[0]);
+    final y = double.tryParse(parts[1]);
+    if (x == null || y == null) return null;
+    return Offset(x, y);
+  }
+
+  String? _displayMetricFromMap(String value) {
+    if (value.isEmpty) return null;
+    final values = jsonDecode(value) as Map<String, dynamic>;
+    if (values.isEmpty) return null;
+    final pi = parent.target?.ffiModel.pi;
+    if (pi != null) {
+      final currentDisplay = pi.currentDisplay;
+      if (currentDisplay != kAllDisplayValue) {
+        return values[currentDisplay.toString()]?.toString();
+      }
+      if (pi.displays.isNotEmpty) {
+        final displayValues = <String>[];
+        for (var i = 0; i < pi.displays.length; i++) {
+          displayValues.add((values[i.toString()] ?? '-').toString());
+        }
+        return displayValues.join(' ');
+      }
+    }
+    final entries = values.entries.toList()
+      ..sort((a, b) {
+        final aKey = int.tryParse(a.key);
+        final bKey = int.tryParse(b.key);
+        if (aKey != null && bKey != null) return aKey.compareTo(bKey);
+        return a.key.compareTo(b.key);
+      });
+    if (entries.length == 1) return entries.first.value.toString();
+    return entries.map((e) => '${e.key}:${e.value}').join(' ');
   }
 
   updateQualityStatus(Map<String, dynamic> evt) {
@@ -4160,10 +4261,39 @@ class QualityMonitorModel with ChangeNotifier {
           (evt['connection_type'] as String).isNotEmpty) {
         _data.connectionType = evt['connection_type'];
       }
+      if (evt.containsKey('decoder') &&
+          (evt['decoder'] as String).isNotEmpty) {
+        _data.decoder = evt['decoder'];
+      }
+      if (evt.containsKey('renderer') &&
+          (evt['renderer'] as String).isNotEmpty) {
+        _data.renderer = evt['renderer'];
+      }
+      if (evt.containsKey('decode_fps')) {
+        _data.decodeFps = _displayMetricFromMap(evt['decode_fps'] as String);
+      }
+      if (evt.containsKey('video_queue')) {
+        _data.videoQueue = _displayMetricFromMap(evt['video_queue'] as String);
+      }
+      if (evt.containsKey('video_threads') &&
+          (evt['video_threads'] as String).isNotEmpty) {
+        _data.videoThreads = evt['video_threads'];
+      }
+      if (evt.containsKey('texture_render') &&
+          (evt['texture_render'] as String).isNotEmpty) {
+        _data.textureRender =
+            evt['texture_render'] == 'true' ? 'enabled' : 'disabled';
+      }
       notifyListeners();
     } catch (e) {
       //
     }
+  }
+
+  @override
+  void dispose() {
+    _floatingPositionStoreTimer?.cancel();
+    super.dispose();
   }
 }
 

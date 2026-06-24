@@ -732,6 +732,24 @@ impl InvokeUiSession for FlutterHandler {
                     "connection_type",
                     &status.connection_type.map_or(NULL, |it| it.to_string()),
                 ),
+                ("decoder", &status.decoder.map_or(NULL, |it| it)),
+                ("renderer", &status.renderer.map_or(NULL, |it| it)),
+                (
+                    "decode_fps",
+                    &serde_json::ser::to_string(&status.decode_fps).unwrap_or(NULL.to_owned()),
+                ),
+                (
+                    "video_queue",
+                    &serde_json::ser::to_string(&status.video_queue).unwrap_or(NULL.to_owned()),
+                ),
+                (
+                    "video_threads",
+                    &status.video_threads.map_or(NULL, |it| it.to_string()),
+                ),
+                (
+                    "texture_render",
+                    &status.texture_render.map_or(NULL, |it| it.to_string()),
+                ),
             ],
             &[],
         );

@@ -794,6 +794,7 @@ Future<List<TRadioMenu<String>>> toolbarQualityMonitorPosition(FFI ffi) async {
           sessionId: sessionId,
           name: kOptionQualityMonitorPosition,
           value: normalizeQualityMonitorPosition(value));
+      await ffi.qualityMonitorModel.clearFloatingPosition(sessionId);
       if (!showQualityMonitor) {
         await bind.sessionToggleOption(
             sessionId: sessionId, value: 'show-quality-monitor');
@@ -821,6 +822,38 @@ Future<List<TRadioMenu<String>>> toolbarQualityMonitorPosition(FFI ffi) async {
         qualityMonitorPositionLabel(kQualityMonitorPositionBottomRight)),
     item(kQualityMonitorPositionBottomLeft,
         qualityMonitorPositionLabel(kQualityMonitorPositionBottomLeft)),
+  ];
+}
+
+Future<List<TRadioMenu<String>>> toolbarQualityMonitorDetails(FFI ffi) async {
+  final sessionId = ffi.sessionId;
+  final details = normalizeQualityMonitorDetails(await bind.sessionGetOption(
+          sessionId: sessionId, arg: kOptionQualityMonitorDetails) ??
+      '');
+
+  Future<void> onChanged(String? value) async {
+    if (value == null || value == details) return;
+    await bind.sessionPeerOption(
+        sessionId: sessionId,
+        name: kOptionQualityMonitorDetails,
+        value: normalizeQualityMonitorDetails(value));
+    ffi.qualityMonitorModel.checkShowQualityMonitor(sessionId);
+  }
+
+  TRadioMenu<String> item(String value, String label) {
+    return TRadioMenu<String>(
+      value: value,
+      groupValue: details,
+      onChanged: onChanged,
+      child: Text(translate(label)),
+    );
+  }
+
+  return [
+    item(kQualityMonitorDetailsBasic,
+        qualityMonitorDetailsLabel(kQualityMonitorDetailsBasic)),
+    item(kQualityMonitorDetailsExtended,
+        qualityMonitorDetailsLabel(kQualityMonitorDetailsExtended)),
   ];
 }
 

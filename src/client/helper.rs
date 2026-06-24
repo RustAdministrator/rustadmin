@@ -14,6 +14,12 @@ pub struct QualityStatus {
     pub codec_format: Option<CodecFormat>,
     pub chroma: Option<String>,
     pub connection_type: Option<String>,
+    pub decoder: Option<String>,
+    pub renderer: Option<String>,
+    pub decode_fps: HashMap<usize, usize>,
+    pub video_queue: HashMap<usize, usize>,
+    pub video_threads: Option<usize>,
+    pub texture_render: Option<bool>,
 }
 
 #[inline]

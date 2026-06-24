@@ -828,8 +828,6 @@ class _RemotePageState extends State<RemotePage>
     }
     paints.add(PositionedQualityMonitor(
       qualityMonitorModel: _ffi.qualityMonitorModel,
-      childBuilder: (child) =>
-          _buildRawTouchAndPointerRegion(child, null, null, null),
     ));
     return Stack(
       children: paints,

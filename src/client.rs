@@ -2075,6 +2075,10 @@ impl VideoHandler {
         }
     }
 
+    pub fn decoder_backend(&self) -> &'static str {
+        self.decoder.backend()
+    }
+
     /// Handle a new video frame.
     #[inline]
     pub fn handle_frame(
@@ -3432,6 +3436,8 @@ pub fn start_video_thread<F, T>(
     video_receiver: mpsc::Receiver<MediaData>,
     video_queue: Arc<RwLock<ArrayQueue<VideoFrame>>>,
     fps: Arc<RwLock<Option<usize>>>,
+    decoder_backend: Arc<RwLock<Option<&'static str>>>,
+    renderer: Arc<RwLock<Option<&'static str>>>,
     chroma: Arc<RwLock<Option<Chroma>>>,
     discard_queue: Arc<RwLock<bool>>,
     video_callback: F,
@@ -3486,6 +3492,7 @@ pub fn start_video_thread<F, T>(
                             if record_state && record_permission {
                                 handler.record_screen(true, id, display, is_view_camera);
                             }
+                            *decoder_backend.write().unwrap() = Some(handler.decoder_backend());
                             video_handler = Some(handler);
                         }
                         if let Some(handler) = video_handler.as_mut() {
@@ -3494,6 +3501,10 @@ pub fn start_video_thread<F, T>(
                             let format_changed = handler.decoder.format() != format;
                             match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
                                 Ok(true) => {
+                                    *decoder_backend.write().unwrap() =
+                                        Some(handler.decoder_backend());
+                                    *renderer.write().unwrap() =
+                                        Some(if pixelbuffer { "rgba" } else { "texture" });
                                     video_callback(
                                         display,
                                         &mut handler.rgb,
@@ -3560,6 +3571,7 @@ pub fn start_video_thread<F, T>(
                     MediaData::Reset => {
                         if let Some(handler) = video_handler.as_mut() {
                             handler.reset(None);
+                            *decoder_backend.write().unwrap() = Some(handler.decoder_backend());
                         }
                     }
                     MediaData::RecordScreen(start) => {
