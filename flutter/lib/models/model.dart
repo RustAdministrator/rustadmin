@@ -437,6 +437,8 @@ class FfiModel with ChangeNotifier {
       } else if (name == 'connection_ready') {
         setConnectionType(peerId, evt['secure'] == 'true',
             evt['direct'] == 'true', evt['stream_type'] ?? '');
+        parent.target?.qualityMonitorModel
+            .updateConnectionInfo(evt['stream_type']);
       } else if (name == 'switch_display') {
         // switch display is kept for backward compatibility
         handleSwitchDisplay(evt, sessionId, peerId);
@@ -4074,6 +4076,7 @@ class QualityMonitorData {
   String? targetBitrate;
   String? codecFormat;
   String? chroma;
+  String? connectionType;
 }
 
 class QualityMonitorModel with ChangeNotifier {
@@ -4087,6 +4090,16 @@ class QualityMonitorModel with ChangeNotifier {
   bool get show => _show;
   String get position => _position;
   QualityMonitorData get data => _data;
+
+  updateConnectionInfo(dynamic streamType) {
+    final value = streamType?.toString();
+    final connectionType = value == null || value.isEmpty ? null : value;
+    if (_data.connectionType == connectionType) {
+      return;
+    }
+    _data.connectionType = connectionType;
+    notifyListeners();
+  }
 
   checkShowQualityMonitor(SessionID sessionId) async {
     final show = await bind.sessionGetToggleOption(
@@ -4142,6 +4155,10 @@ class QualityMonitorModel with ChangeNotifier {
       }
       if (evt.containsKey('chroma') && (evt['chroma'] as String).isNotEmpty) {
         _data.chroma = evt['chroma'];
+      }
+      if (evt.containsKey('connection_type') &&
+          (evt['connection_type'] as String).isNotEmpty) {
+        _data.connectionType = evt['connection_type'];
       }
       notifyListeners();
     } catch (e) {

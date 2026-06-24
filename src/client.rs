@@ -29,7 +29,7 @@ use uuid::Uuid;
 
 use crate::{
     check_port,
-    common::input::{MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_TYPE_DOWN, MOUSE_TYPE_UP},
+    common::input::{MOUSE_BUTTON_LEFT, MOUSE_TYPE_DOWN, MOUSE_TYPE_UP},
     create_symmetric_key_msg, decode_direct_id_pk, decode_id_pk, decode_secure_signed_id,
     get_rs_pk, is_direct_handshake_ack_ok, is_keyboard_mode_supported,
     kcp_stream::KcpStream,
@@ -3816,25 +3816,22 @@ pub fn send_pointer_device_event(
 /// # Arguments
 ///
 /// * `interface` - The interface for sending data.
-/// * `send_left_click` - Whether to send a click event.
+/// * `send_left_click` - Whether to send a left click event.
 fn activate_os(interface: &impl Interface, send_left_click: bool) {
     let left_down = MOUSE_BUTTON_LEFT << 3 | MOUSE_TYPE_DOWN;
     let left_up = MOUSE_BUTTON_LEFT << 3 | MOUSE_TYPE_UP;
-    let right_down = MOUSE_BUTTON_RIGHT << 3 | MOUSE_TYPE_DOWN;
-    let right_up = MOUSE_BUTTON_RIGHT << 3 | MOUSE_TYPE_UP;
-    send_mouse(left_up, 0, 0, false, false, false, false, interface);
+    if send_left_click {
+        send_mouse(left_up, 0, 0, false, false, false, false, interface);
+    }
     std::thread::sleep(Duration::from_millis(50));
     send_mouse(0, 0, 0, false, false, false, false, interface);
     std::thread::sleep(Duration::from_millis(50));
     send_mouse(0, 3, 3, false, false, false, false, interface);
-    let (click_down, click_up) = if send_left_click {
-        (left_down, left_up)
-    } else {
-        (right_down, right_up)
-    };
-    std::thread::sleep(Duration::from_millis(50));
-    send_mouse(click_down, 0, 0, false, false, false, false, interface);
-    send_mouse(click_up, 0, 0, false, false, false, false, interface);
+    if send_left_click {
+        std::thread::sleep(Duration::from_millis(50));
+        send_mouse(left_down, 0, 0, false, false, false, false, interface);
+        send_mouse(left_up, 0, 0, false, false, false, false, interface);
+    }
     /*
     let mut key_event = KeyEvent::new();
     // do not use Esc, which has problem with Linux
@@ -3870,6 +3867,8 @@ fn _input_os_password(p: String, activate: bool, interface: impl Interface) {
     let input_password = !p.is_empty();
     if activate {
         // Click event is used to bring up the password input box.
+        // Empty activation is sent while waiting for the first image; it must not
+        // click because an unlocked desktop would receive an unexpected context menu.
         activate_os(&interface, input_password);
         std::thread::sleep(Duration::from_millis(1200));
     }

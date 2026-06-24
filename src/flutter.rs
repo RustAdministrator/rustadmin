@@ -728,6 +728,10 @@ impl InvokeUiSession for FlutterHandler {
                     &status.codec_format.map_or(NULL, |it| it.to_string()),
                 ),
                 ("chroma", &status.chroma.map_or(NULL, |it| it.to_string())),
+                (
+                    "connection_type",
+                    &status.connection_type.map_or(NULL, |it| it.to_string()),
+                ),
             ],
             &[],
         );

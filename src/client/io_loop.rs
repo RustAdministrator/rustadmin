@@ -478,6 +478,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                 fps,
                                 chroma,
                                 codec_format,
+                                connection_type: Some(stream_type.to_owned()),
                                 ..Default::default()
                             });
                         }
