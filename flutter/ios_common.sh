@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -ne 4 ]]; then
+  echo "usage: $0 <rust-target> <lipo-arch> <platform-id> <platform-name>" >&2
+  exit 2
+fi
+
+RUST_TARGET="$1"
+LIPO_ARCH="$2"
+EXPECTED_PLATFORM="$3"
+PLATFORM_NAME="$4"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+declare -a CODEC_ROOTS=()
+declare -a CODEC_ROOT_LABELS=()
+
+add_unique_codec_root() {
+  local root="$1"
+  local label="$2"
+  [[ -z "${root}" ]] && return 0
+
+  if [[ -d "${root}" ]]; then
+    root="$(cd "${root}" && pwd)"
+  fi
+
+  local existing
+  for existing in "${CODEC_ROOTS[@]:-}"; do
+    [[ "${existing}" == "${root}" ]] && return 0
+  done
+
+  CODEC_ROOTS+=("${root}")
+  CODEC_ROOT_LABELS+=("${label}")
+}
+
+add_codec_root_candidate() {
+  local root="$1"
+  local label="$2"
+  add_unique_codec_root "${root}" "${label}"
+
+  case "$(basename "${root}")" in
+    include|lib)
+      add_unique_codec_root "$(dirname "${root}")" "${label} parent"
+      ;;
+  esac
+}
+
+add_path_list_candidates() {
+  local value="$1"
+  local label="$2"
+  local old_ifs="${IFS}"
+  local -a paths=()
+  IFS=":;"
+  read -r -a paths <<< "${value}"
+  IFS="${old_ifs}"
+
+  local path
+  for path in "${paths[@]}"; do
+    add_codec_root_candidate "${path}" "${label}"
+  done
+}
+
+if [[ -n "${RUSTDESK_IOS_CODEC_ROOT:-}" ]]; then
+  add_codec_root_candidate "${RUSTDESK_IOS_CODEC_ROOT}" "RUSTDESK_IOS_CODEC_ROOT"
+fi
+
+if [[ -n "${CMAKE_PREFIX_PATH:-}" ]]; then
+  add_path_list_candidates "${CMAKE_PREFIX_PATH}" "CMAKE_PREFIX_PATH"
+fi
+
+add_codec_root_candidate "${REPO_DIR}/.local/ios-codecs" ".local/ios-codecs"
+
+check_library_platform() {
+  local component="$1"
+  local library="$2"
+
+  if ! lipo "${library}" -verify_arch "${LIPO_ARCH}" >/dev/null 2>&1; then
+    echo "error: ${component} library does not contain ${LIPO_ARCH}: ${library}" >&2
+    return 1
+  fi
+
+  local output
+  if ! output="$(otool -arch "${LIPO_ARCH}" -l "${library}" 2>&1)"; then
+    echo "error: failed to inspect ${component} library: ${library}" >&2
+    echo "${output}" >&2
+    return 1
+  fi
+
+  local platforms
+  platforms="$(
+    awk '
+      /LC_BUILD_VERSION/ { in_build = 1; next }
+      in_build && $1 == "platform" { print $2; in_build = 0 }
+    ' <<< "${output}" | sort -u | tr '\n' ' '
+  )"
+
+  if [[ -z "${platforms// }" ]]; then
+    if grep -q "LC_VERSION_MIN_IPHONEOS" <<< "${output}"; then
+      return 0
+    fi
+    echo "error: ${component} library has no iOS platform marker: ${library}" >&2
+    return 1
+  fi
+
+  local platform
+  for platform in ${platforms}; do
+    [[ "${platform}" == "${EXPECTED_PLATFORM}" ]] && return 0
+  done
+
+  echo "error: ${component} library is not built for ${PLATFORM_NAME}: ${library}" >&2
+  echo "       found LC_BUILD_VERSION platform(s): ${platforms}" >&2
+  echo "       expected platform ${EXPECTED_PLATFORM} for ${RUST_TARGET}" >&2
+  if [[ " ${platforms} " == *" 1 "* ]]; then
+    echo "       platform 1 is macOS, not iOS." >&2
+  fi
+  return 1
+}
+
+find_component_root() {
+  local component="$1"
+  local header="$2"
+  local library="$3"
+
+  local index
+  for index in "${!CODEC_ROOTS[@]}"; do
+    local root="${CODEC_ROOTS[${index}]}"
+    local label="${CODEC_ROOT_LABELS[${index}]}"
+    local header_path="${root}/${header}"
+    local library_path="${root}/${library}"
+
+    if [[ ! -f "${header_path}" || ! -f "${library_path}" ]]; then
+      continue
+    fi
+
+    check_library_platform "${component}" "${library_path}"
+    echo "Using ${component} from ${root} (${label})"
+    return 0
+  done
+
+  echo "error: no ${component} iOS codec prefix found for ${RUST_TARGET}." >&2
+  echo "       required files: ${header} and ${library}" >&2
+  return 1
+}
+
+if [[ ${#CODEC_ROOTS[@]} -eq 0 ]]; then
+  echo "error: no iOS codec roots configured." >&2
+  echo "       Set RUSTDESK_IOS_CODEC_ROOT, CMAKE_PREFIX_PATH, or create ${REPO_DIR}/.local/ios-codecs." >&2
+  exit 1
+fi
+
+find_component_root "libyuv" "include/libyuv/convert.h" "lib/libyuv.a"
+find_component_root "libvpx" "include/vpx/vpx_encoder.h" "lib/libvpx.a"
+find_component_root "aom" "include/aom/aom.h" "lib/libaom.a"
+find_component_root "opus" "include/opus/opus_multistream.h" "lib/libopus.a"
+
+cd "${REPO_DIR}"
+cargo build --locked --features flutter --release --target "${RUST_TARGET}" --lib

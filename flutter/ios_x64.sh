@@ -1,2 +1,5 @@
 #!/usr/bin/env bash
-cargo build --locked --features flutter --release --target x86_64-apple-ios --lib
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec bash "${SCRIPT_DIR}/ios_common.sh" x86_64-apple-ios x86_64 7 "iOS simulator"
