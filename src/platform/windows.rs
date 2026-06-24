@@ -537,6 +537,25 @@ pub fn start_os_service() {
 
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServerLaunchMode {
+    Privileged,
+    InteractiveUser,
+}
+
+impl ServerLaunchMode {
+    fn as_user(self) -> bool {
+        self == Self::InteractiveUser
+    }
+
+    fn token_source(self) -> &'static str {
+        match self {
+            Self::Privileged => "winlogon.exe",
+            Self::InteractiveUser => EXPLORER_EXE,
+        }
+    }
+}
+
 extern "C" {
     fn get_current_session(rdp: BOOL) -> DWORD;
     fn is_session_locked(session_id: DWORD) -> BOOL;
@@ -672,7 +691,10 @@ async fn run_service(_arguments: Vec<OsString>) -> ResultType<()> {
 
     let mut session_id = unsafe { get_current_session(share_rdp()) };
     log::info!("session id {}", session_id);
-    let mut h_process = launch_server(session_id, true).await.unwrap_or(NULL);
+    let mut h_process = NULL as HANDLE;
+    let mut server_launch_mode = ServerLaunchMode::Privileged;
+    let mut server_launch_mode_switch_deferred_logged = false;
+    launch_server_and_store(session_id, true, &mut h_process, &mut server_launch_mode).await;
     let mut incoming = ipc::new_listener(crate::POSTFIX_SERVICE).await?;
     let mut stored_usid = None;
     loop {
@@ -687,7 +709,13 @@ async fn run_service(_arguments: Vec<OsString>) -> ResultType<()> {
                 // https://github.com/rustdesk/rustdesk/discussions/10039
                 let count = ipc::get_port_forward_session_count(1000).await.unwrap_or(0);
                 if count == 0 {
-                    h_process = launch_server(session_id, true).await.unwrap_or(NULL);
+                    launch_server_and_store(
+                        session_id,
+                        true,
+                        &mut h_process,
+                        &mut server_launch_mode,
+                    )
+                    .await;
                 }
             }
         }
@@ -724,8 +752,13 @@ async fn run_service(_arguments: Vec<OsString>) -> ResultType<()> {
                                         );
                                         session_id = usid;
                                         stored_usid = Some(session_id);
-                                        h_process =
-                                            launch_server(session_id, true).await.unwrap_or(NULL);
+                                        launch_server_and_store(
+                                            session_id,
+                                            true,
+                                            &mut h_process,
+                                            &mut server_launch_mode,
+                                        )
+                                        .await;
                                     }
                                 }
                             }
@@ -752,20 +785,61 @@ async fn run_service(_arguments: Vec<OsString>) -> ResultType<()> {
                             close_sent = true;
                         }
                     }
+                    let preferred_launch_mode = preferred_server_launch_mode(session_id);
+                    if !h_process.is_null() && server_launch_mode != preferred_launch_mode {
+                        let controlled_session_count = match ipc::get_controlled_session_count(500)
+                            .await
+                        {
+                            Ok(count) => count,
+                            Err(err) => {
+                                if !server_launch_mode_switch_deferred_logged {
+                                    log::warn!(
+                                        "Failed to query controlled session count before Windows server launch mode switch: {}; relaunch deferred",
+                                        err
+                                    );
+                                    server_launch_mode_switch_deferred_logged = true;
+                                }
+                                usize::MAX
+                            }
+                        };
+                        if controlled_session_count == 0 {
+                            log::info!(
+                                "Windows server launch mode changed for session {}: {:?} -> {:?}; relaunching with no active controlled sessions",
+                                session_id,
+                                server_launch_mode,
+                                preferred_launch_mode
+                            );
+                            send_close_async("").await.ok();
+                            CloseHandle(h_process);
+                            h_process = NULL as HANDLE;
+                            close_sent = true;
+                            server_launch_mode_switch_deferred_logged = false;
+                        } else if !server_launch_mode_switch_deferred_logged {
+                            log::info!(
+                                "Windows server launch mode changed for session {}: {:?} -> {:?}; deferring relaunch while {} controlled session(s) are active",
+                                session_id,
+                                server_launch_mode,
+                                preferred_launch_mode,
+                                controlled_session_count
+                            );
+                            server_launch_mode_switch_deferred_logged = true;
+                        }
+                    } else {
+                        server_launch_mode_switch_deferred_logged = false;
+                    }
                     let mut exit_code: DWORD = 0;
                     if h_process.is_null()
                         || (GetExitCodeProcess(h_process, &mut exit_code) == TRUE
                             && exit_code != STILL_ACTIVE
                             && CloseHandle(h_process) == TRUE)
                     {
-                        match launch_server(session_id, !close_sent).await {
-                            Ok(ptr) => {
-                                h_process = ptr;
-                            }
-                            Err(err) => {
-                                log::error!("Failed to launch server: {}", err);
-                            }
-                        }
+                        launch_server_and_store(
+                            session_id,
+                            !close_sent,
+                            &mut h_process,
+                            &mut server_launch_mode,
+                        )
+                        .await;
                     }
                 }
             }
@@ -790,7 +864,29 @@ async fn run_service(_arguments: Vec<OsString>) -> ResultType<()> {
     Ok(())
 }
 
-async fn launch_server(session_id: DWORD, close_first: bool) -> ResultType<HANDLE> {
+async fn launch_server_and_store(
+    session_id: DWORD,
+    close_first: bool,
+    h_process: &mut HANDLE,
+    launch_mode: &mut ServerLaunchMode,
+) {
+    match launch_server(session_id, close_first).await {
+        Ok((ptr, mode)) => {
+            *h_process = ptr;
+            *launch_mode = mode;
+        }
+        Err(err) => {
+            *h_process = NULL as HANDLE;
+            *launch_mode = ServerLaunchMode::Privileged;
+            log::error!("Failed to launch server: {}", err);
+        }
+    }
+}
+
+async fn launch_server(
+    session_id: DWORD,
+    close_first: bool,
+) -> ResultType<(HANDLE, ServerLaunchMode)> {
     if close_first {
         // in case started some elsewhere
         send_close_async("").await.ok();
@@ -799,10 +895,44 @@ async fn launch_server(session_id: DWORD, close_first: bool) -> ResultType<HANDL
         "\"{}\" --server",
         std::env::current_exe()?.to_str().unwrap_or("")
     );
-    launch_privileged_process(session_id, &cmd)
+    let preferred_mode = preferred_server_launch_mode(session_id);
+    if preferred_mode == ServerLaunchMode::InteractiveUser {
+        let h = launch_process_in_session(session_id, &cmd, preferred_mode)?;
+        if !h.is_null() {
+            log::info!(
+                "Launched server in session {} with {:?} launch mode",
+                session_id,
+                preferred_mode
+            );
+            return Ok((h, preferred_mode));
+        }
+        log::warn!(
+            "Failed to launch server in session {} with {:?} launch mode; falling back to {:?}",
+            session_id,
+            preferred_mode,
+            ServerLaunchMode::Privileged
+        );
+    }
+    let h = launch_privileged_process(session_id, &cmd)?;
+    if !h.is_null() {
+        log::info!(
+            "Launched server in session {} with {:?} launch mode",
+            session_id,
+            ServerLaunchMode::Privileged
+        );
+    }
+    Ok((h, ServerLaunchMode::Privileged))
 }
 
 pub fn launch_privileged_process(session_id: DWORD, cmd: &str) -> ResultType<HANDLE> {
+    launch_process_in_session(session_id, cmd, ServerLaunchMode::Privileged)
+}
+
+fn launch_process_in_session(
+    session_id: DWORD,
+    cmd: &str,
+    launch_mode: ServerLaunchMode,
+) -> ResultType<HANDLE> {
     use std::os::windows::ffi::OsStrExt;
     let wstr: Vec<u16> = std::ffi::OsStr::new(&cmd)
         .encode_wide()
@@ -810,17 +940,55 @@ pub fn launch_privileged_process(session_id: DWORD, cmd: &str) -> ResultType<HAN
         .collect();
     let wstr = wstr.as_ptr();
     let mut token_pid = 0;
-    let h = unsafe { LaunchProcessWin(wstr, session_id, FALSE, FALSE, &mut token_pid) };
+    let h = unsafe {
+        LaunchProcessWin(
+            wstr,
+            session_id,
+            if launch_mode.as_user() { TRUE } else { FALSE },
+            FALSE,
+            &mut token_pid,
+        )
+    };
     if h.is_null() {
         log::error!(
-            "Failed to launch privileged process: {}",
+            "Failed to launch process in session {} as {}: {}",
+            session_id,
+            launch_mode.token_source(),
             io::Error::last_os_error()
         );
         if token_pid == 0 {
-            log::error!("No process winlogon.exe");
+            log::error!("No token source process {}", launch_mode.token_source());
         }
     }
     Ok(h)
+}
+
+fn preferred_server_launch_mode(session_id: DWORD) -> ServerLaunchMode {
+    if session_id == u32::MAX {
+        return ServerLaunchMode::Privileged;
+    }
+    let username = get_session_username(session_id);
+    if username.is_empty() || username == "SYSTEM" {
+        return ServerLaunchMode::Privileged;
+    }
+    if unsafe { is_session_locked(session_id) == TRUE } {
+        return ServerLaunchMode::Privileged;
+    }
+    if administrator_protection_enabled() {
+        return ServerLaunchMode::InteractiveUser;
+    }
+    ServerLaunchMode::Privileged
+}
+
+fn administrator_protection_enabled() -> bool {
+    RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(
+            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
+            KEY_READ,
+        )
+        .ok()
+        .and_then(|key| key.get_value::<u32, _>("TypeOfAdminApprovalMode").ok())
+        == Some(2)
 }
 
 pub fn run_as_user(arg: Vec<&str>) -> ResultType<Option<std::process::Child>> {
