@@ -438,7 +438,7 @@ class FfiModel with ChangeNotifier {
         setConnectionType(peerId, evt['secure'] == 'true',
             evt['direct'] == 'true', evt['stream_type'] ?? '');
         parent.target?.qualityMonitorModel
-            .updateConnectionInfo(evt['stream_type']);
+            .updateConnectionInfo(evt['stream_type'], evt['direct']);
       } else if (name == 'switch_display') {
         // switch display is kept for backward compatibility
         handleSwitchDisplay(evt, sessionId, peerId);
@@ -4077,12 +4077,18 @@ class QualityMonitorData {
   String? codecFormat;
   String? chroma;
   String? connectionType;
+  String? hostVersion;
+  String? clientVersion;
   String? decoder;
   String? renderer;
+  String? frameResolution;
   String? decodeFps;
   String? videoQueue;
   String? videoThreads;
   String? textureRender;
+  String? direct;
+  String? fpsMode;
+  String? autoFps;
 }
 
 class QualityMonitorModel with ChangeNotifier {
@@ -4103,13 +4109,34 @@ class QualityMonitorModel with ChangeNotifier {
   Offset? get floatingPosition => _floatingPosition;
   QualityMonitorData get data => _data;
 
-  updateConnectionInfo(dynamic streamType) {
+  String? _directLabel(dynamic direct) {
+    if (direct == null) return null;
+    if (direct is bool) return direct ? 'yes' : 'no';
+    final value = direct.toString();
+    if (value.isEmpty) return null;
+    return value == 'true' ? 'yes' : 'no';
+  }
+
+  Future<String?> _clientVersion() async {
+    if (version.isNotEmpty) return version;
+    final value = await bind.mainGetVersion();
+    return value.isEmpty ? null : value;
+  }
+
+  String? _hostVersion() {
+    final value = parent.target?.ffiModel.pi.version;
+    return value == null || value.isEmpty ? null : value;
+  }
+
+  updateConnectionInfo(dynamic streamType, [dynamic direct]) {
     final value = streamType?.toString();
     final connectionType = value == null || value.isEmpty ? null : value;
-    if (_data.connectionType == connectionType) {
+    final directLabel = _directLabel(direct);
+    if (_data.connectionType == connectionType && _data.direct == directLabel) {
       return;
     }
     _data.connectionType = connectionType;
+    _data.direct = directLabel;
     notifyListeners();
   }
 
@@ -4162,14 +4189,20 @@ class QualityMonitorModel with ChangeNotifier {
                 sessionId: sessionId,
                 arg: kOptionQualityMonitorFloatingPosition) ??
             '');
+    final hostVersion = _hostVersion();
+    final clientVersion = await _clientVersion();
     if (_show != show ||
         _position != position ||
         _details != details ||
-        _floatingPosition != floatingPosition) {
+        _floatingPosition != floatingPosition ||
+        _data.hostVersion != hostVersion ||
+        _data.clientVersion != clientVersion) {
       _show = show;
       _position = position;
       _details = details;
       _floatingPosition = floatingPosition;
+      _data.hostVersion = hostVersion;
+      _data.clientVersion = clientVersion;
       notifyListeners();
     }
   }
@@ -4261,6 +4294,13 @@ class QualityMonitorModel with ChangeNotifier {
           (evt['connection_type'] as String).isNotEmpty) {
         _data.connectionType = evt['connection_type'];
       }
+      final hostVersion = _hostVersion();
+      if (hostVersion != null) {
+        _data.hostVersion = hostVersion;
+      }
+      if (version.isNotEmpty) {
+        _data.clientVersion = version;
+      }
       if (evt.containsKey('decoder') &&
           (evt['decoder'] as String).isNotEmpty) {
         _data.decoder = evt['decoder'];
@@ -4275,6 +4315,10 @@ class QualityMonitorModel with ChangeNotifier {
       if (evt.containsKey('video_queue')) {
         _data.videoQueue = _displayMetricFromMap(evt['video_queue'] as String);
       }
+      if (evt.containsKey('frame_resolution')) {
+        _data.frameResolution =
+            _displayMetricFromMap(evt['frame_resolution'] as String);
+      }
       if (evt.containsKey('video_threads') &&
           (evt['video_threads'] as String).isNotEmpty) {
         _data.videoThreads = evt['video_threads'];
@@ -4283,6 +4327,17 @@ class QualityMonitorModel with ChangeNotifier {
           (evt['texture_render'] as String).isNotEmpty) {
         _data.textureRender =
             evt['texture_render'] == 'true' ? 'enabled' : 'disabled';
+      }
+      if (evt.containsKey('direct') && (evt['direct'] as String).isNotEmpty) {
+        _data.direct = _directLabel(evt['direct']);
+      }
+      if (evt.containsKey('fps_mode') &&
+          (evt['fps_mode'] as String).isNotEmpty) {
+        _data.fpsMode = evt['fps_mode'];
+      }
+      if (evt.containsKey('auto_fps') &&
+          (evt['auto_fps'] as String).isNotEmpty) {
+        _data.autoFps = evt['auto_fps'];
       }
       notifyListeners();
     } catch (e) {

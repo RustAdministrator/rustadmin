@@ -3438,6 +3438,7 @@ pub fn start_video_thread<F, T>(
     fps: Arc<RwLock<Option<usize>>>,
     decoder_backend: Arc<RwLock<Option<&'static str>>>,
     renderer: Arc<RwLock<Option<&'static str>>>,
+    frame_resolution: Arc<RwLock<Option<(usize, usize)>>>,
     chroma: Arc<RwLock<Option<Chroma>>>,
     discard_queue: Arc<RwLock<bool>>,
     video_callback: F,
@@ -3505,6 +3506,19 @@ pub fn start_video_thread<F, T>(
                                         Some(handler.decoder_backend());
                                     *renderer.write().unwrap() =
                                         Some(if pixelbuffer { "rgba" } else { "texture" });
+                                    let resolution = if pixelbuffer {
+                                        Some((handler.rgb.w, handler.rgb.h))
+                                    } else if handler.texture.w > 0 && handler.texture.h > 0 {
+                                        Some((handler.texture.w, handler.texture.h))
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(resolution) = resolution {
+                                        let mut current = frame_resolution.write().unwrap();
+                                        if *current != Some(resolution) {
+                                            *current = Some(resolution);
+                                        }
+                                    }
                                     video_callback(
                                         display,
                                         &mut handler.rgb,

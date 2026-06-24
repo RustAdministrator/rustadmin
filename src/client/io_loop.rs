@@ -475,6 +475,17 @@ impl<T: InvokeUiSession> Remote<T> {
                                     (*display, thread.video_queue.read().unwrap().len())
                                 })
                                 .collect::<HashMap<usize, usize>>();
+                            let frame_resolution = self
+                                .video_threads
+                                .iter()
+                                .filter_map(|(display, thread)| {
+                                    thread
+                                        .frame_resolution
+                                        .read()
+                                        .unwrap()
+                                        .map(|(w, h)| (*display, format!("{w}x{h}")))
+                                })
+                                .collect::<HashMap<usize, String>>();
                             let decoder = self.video_thread_label(|thread| {
                                 *thread.decoder_backend.read().unwrap()
                             });
@@ -496,6 +507,12 @@ impl<T: InvokeUiSession> Remote<T> {
                             } else {
                                 Some(self.video_format.clone())
                             };
+                            let lc = self.handler.lc.read().unwrap();
+                            let fixed_fps =
+                                lc.get_option(config::keys::OPTION_CUSTOM_FPS_MODE) == "fixed";
+                            let fps_mode = if fixed_fps { "fixed" } else { "adaptive" }.to_owned();
+                            let auto_fps = if fixed_fps { None } else { lc.last_auto_fps };
+                            drop(lc);
                             self.handler.update_quality_status(QualityStatus {
                                 speed: Some(speed),
                                 fps,
@@ -506,8 +523,12 @@ impl<T: InvokeUiSession> Remote<T> {
                                 renderer,
                                 decode_fps,
                                 video_queue,
+                                frame_resolution,
                                 video_threads: Some(self.video_threads.len()),
                                 texture_render: Some(crate::ui_interface::use_texture_render()),
+                                direct: Some(direct),
+                                fps_mode: Some(fps_mode),
+                                auto_fps,
                                 ..Default::default()
                             });
                         }
@@ -2813,6 +2834,7 @@ impl<T: InvokeUiSession> Remote<T> {
         let decode_fps = Arc::new(RwLock::new(None));
         let decoder_backend = Arc::new(RwLock::new(None));
         let renderer = Arc::new(RwLock::new(None));
+        let frame_resolution = Arc::new(RwLock::new(None));
         let frame_count = Arc::new(RwLock::new(0));
         let discard_queue = Arc::new(RwLock::new(false));
         let video_thread = VideoThread {
@@ -2821,6 +2843,7 @@ impl<T: InvokeUiSession> Remote<T> {
             decode_fps: decode_fps.clone(),
             decoder_backend: decoder_backend.clone(),
             renderer: renderer.clone(),
+            frame_resolution: frame_resolution.clone(),
             frame_count: frame_count.clone(),
             fps_control: Default::default(),
             discard_queue: discard_queue.clone(),
@@ -2834,6 +2857,7 @@ impl<T: InvokeUiSession> Remote<T> {
             decode_fps,
             decoder_backend,
             renderer,
+            frame_resolution,
             self.chroma.clone(),
             discard_queue,
             move |display: usize,
@@ -2929,6 +2953,7 @@ struct VideoThread {
     decode_fps: Arc<RwLock<Option<usize>>>,
     decoder_backend: Arc<RwLock<Option<&'static str>>>,
     renderer: Arc<RwLock<Option<&'static str>>>,
+    frame_resolution: Arc<RwLock<Option<(usize, usize)>>>,
     frame_count: Arc<RwLock<usize>>,
     discard_queue: Arc<RwLock<bool>>,
     fps_control: FpsControl,

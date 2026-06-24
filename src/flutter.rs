@@ -743,12 +743,23 @@ impl InvokeUiSession for FlutterHandler {
                     &serde_json::ser::to_string(&status.video_queue).unwrap_or(NULL.to_owned()),
                 ),
                 (
+                    "frame_resolution",
+                    &serde_json::ser::to_string(&status.frame_resolution)
+                        .unwrap_or(NULL.to_owned()),
+                ),
+                (
                     "video_threads",
                     &status.video_threads.map_or(NULL, |it| it.to_string()),
                 ),
                 (
                     "texture_render",
                     &status.texture_render.map_or(NULL, |it| it.to_string()),
+                ),
+                ("direct", &status.direct.map_or(NULL, |it| it.to_string())),
+                ("fps_mode", &status.fps_mode.map_or(NULL, |it| it)),
+                (
+                    "auto_fps",
+                    &status.auto_fps.map_or(NULL, |it| it.to_string()),
                 ),
             ],
             &[],

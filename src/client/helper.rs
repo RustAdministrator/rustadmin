@@ -18,8 +18,12 @@ pub struct QualityStatus {
     pub renderer: Option<String>,
     pub decode_fps: HashMap<usize, usize>,
     pub video_queue: HashMap<usize, usize>,
+    pub frame_resolution: HashMap<usize, String>,
     pub video_threads: Option<usize>,
     pub texture_render: Option<bool>,
+    pub direct: Option<bool>,
+    pub fps_mode: Option<String>,
+    pub auto_fps: Option<usize>,
 }
 
 #[inline]

@@ -618,6 +618,10 @@ class QualityMonitor extends StatelessWidget {
                           _row("Conn",
                               qualityMonitorModel.data.connectionType ?? '-'),
                           if (qualityMonitorModel.extendedDetails) ...[
+                            _row("HostVer",
+                                qualityMonitorModel.data.hostVersion ?? '-'),
+                            _row("ClientVer",
+                                qualityMonitorModel.data.clientVersion ?? '-'),
                             _row("Decoder",
                                 qualityMonitorModel.data.decoder ?? '-'),
                             _row("Renderer",
@@ -626,10 +630,18 @@ class QualityMonitor extends StatelessWidget {
                                 qualityMonitorModel.data.textureRender ?? '-'),
                             _row("Threads",
                                 qualityMonitorModel.data.videoThreads ?? '-'),
+                            _row("Res",
+                                qualityMonitorModel.data.frameResolution ?? '-'),
                             _row("Decode FPS",
                                 qualityMonitorModel.data.decodeFps ?? '-'),
                             _row("Queue",
                                 qualityMonitorModel.data.videoQueue ?? '-'),
+                            _row("Direct",
+                                qualityMonitorModel.data.direct ?? '-'),
+                            _row("FPS Mode",
+                                qualityMonitorModel.data.fpsMode ?? '-'),
+                            _row("Auto FPS",
+                                qualityMonitorModel.data.autoFps ?? '-'),
                           ],
                         ],
                       ),
@@ -666,7 +678,7 @@ class PositionedQualityMonitor extends StatelessWidget {
   static const _inset = 10.0;
   static const _monitorWidth = 200.0;
   static const _basicHeight = 158.0;
-  static const _extendedHeight = 250.0;
+  static const _extendedHeight = 340.0;
 
   double _boundedWidth(BoxConstraints constraints) {
     return constraints.hasBoundedWidth
