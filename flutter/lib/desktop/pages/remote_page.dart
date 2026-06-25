@@ -122,6 +122,7 @@ class _RemotePageState extends State<RemotePage>
   ToolbarImagePointerHandler? _onImagePointerState4Toolbar;
   int? _instanceIdOnWindowPointerState4Toolbar;
   ToolbarWindowPointerHandler? _onWindowPointerState4Toolbar;
+  Rect? _qualityMonitorBounds;
 
   late FFI _ffi;
 
@@ -697,7 +698,7 @@ class _RemotePageState extends State<RemotePage>
   void leaveView(PointerExitEvent evt) {
     _ffi.canvasModel.disableEdgeScroll();
 
-    if (_ffi.ffiModel.keyboard) {
+    if (_ffi.ffiModel.keyboard && !_isInsideQualityMonitor(evt.position)) {
       _ffi.inputModel.tryMoveEdgeOnExit(evt.position);
     }
 
@@ -736,6 +737,11 @@ class _RemotePageState extends State<RemotePage>
         //
       }
     }
+  }
+
+  bool _isInsideQualityMonitor(Offset globalPosition) {
+    final bounds = _qualityMonitorBounds;
+    return bounds != null && bounds.inflate(1).contains(globalPosition);
   }
 
   Widget _buildRawTouchAndPointerRegion(
@@ -828,6 +834,7 @@ class _RemotePageState extends State<RemotePage>
     }
     paints.add(PositionedQualityMonitor(
       qualityMonitorModel: _ffi.qualityMonitorModel,
+      onBoundsChanged: (bounds) => _qualityMonitorBounds = bounds,
     ));
     return Stack(
       children: paints,

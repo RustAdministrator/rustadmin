@@ -90,6 +90,7 @@ class _ViewCameraPageState extends State<ViewCameraPage>
   ToolbarImagePointerHandler? _onImagePointerState4Toolbar;
   int? _instanceIdOnWindowPointerState4Toolbar;
   ToolbarWindowPointerHandler? _onWindowPointerState4Toolbar;
+  Rect? _qualityMonitorBounds;
 
   late FFI _ffi;
 
@@ -427,7 +428,7 @@ class _ViewCameraPageState extends State<ViewCameraPage>
   }
 
   void leaveView(PointerExitEvent evt) {
-    if (_ffi.ffiModel.keyboard) {
+    if (_ffi.ffiModel.keyboard && !_isInsideQualityMonitor(evt.position)) {
       _ffi.inputModel.tryMoveEdgeOnExit(evt.position);
     }
 
@@ -465,6 +466,11 @@ class _ViewCameraPageState extends State<ViewCameraPage>
         //
       }
     }
+  }
+
+  bool _isInsideQualityMonitor(Offset globalPosition) {
+    final bounds = _qualityMonitorBounds;
+    return bounds != null && bounds.inflate(1).contains(globalPosition);
   }
 
   Widget _buildRawTouchAndPointerRegion(
@@ -539,6 +545,7 @@ class _ViewCameraPageState extends State<ViewCameraPage>
 
     paints.add(PositionedQualityMonitor(
       qualityMonitorModel: _ffi.qualityMonitorModel,
+      onBoundsChanged: (bounds) => _qualityMonitorBounds = bounds,
     ));
     return Stack(
       children: paints,

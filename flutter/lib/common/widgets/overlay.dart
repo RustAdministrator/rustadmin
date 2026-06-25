@@ -595,55 +595,64 @@ class QualityMonitor extends StatelessWidget {
                   .show
               ? Stack(
                   children: [
-                    Container(
-                      constraints: BoxConstraints(maxWidth: 200),
-                      padding: const EdgeInsets.all(8),
-                      color: MyTheme.canvasColor.withAlpha(150),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          _row("Speed", qualityMonitorModel.data.speed ?? '-'),
-                          _row("FPS", qualityMonitorModel.data.fps ?? '-'),
-                          // let delay be 0 if fps is 0
-                          _row(
-                              "Delay",
-                              "${qualityMonitorModel.data.delay == null ? '-' : (qualityMonitorModel.data.fps ?? "").replaceAll(' ', '').replaceAll('0', '').isEmpty ? 0 : qualityMonitorModel.data.delay}ms",
-                              rightColor: Colors.green),
-                          _row("Target Bitrate",
-                              "${qualityMonitorModel.data.targetBitrate ?? '-'}kb"),
-                          _row("Codec",
-                              qualityMonitorModel.data.codecFormat ?? '-'),
-                          _row(
-                              "Chroma", qualityMonitorModel.data.chroma ?? '-'),
-                          _row("Conn",
-                              qualityMonitorModel.data.connectionType ?? '-'),
-                          if (qualityMonitorModel.extendedDetails) ...[
-                            _row("HostVer",
-                                qualityMonitorModel.data.hostVersion ?? '-'),
-                            _row("ClientVer",
-                                qualityMonitorModel.data.clientVersion ?? '-'),
-                            _row("Decoder",
-                                qualityMonitorModel.data.decoder ?? '-'),
-                            _row("Renderer",
-                                qualityMonitorModel.data.renderer ?? '-'),
-                            _row("Texture",
-                                qualityMonitorModel.data.textureRender ?? '-'),
-                            _row("Threads",
-                                qualityMonitorModel.data.videoThreads ?? '-'),
-                            _row("Res",
-                                qualityMonitorModel.data.frameResolution ?? '-'),
-                            _row("Decode FPS",
-                                qualityMonitorModel.data.decodeFps ?? '-'),
-                            _row("Queue",
-                                qualityMonitorModel.data.videoQueue ?? '-'),
-                            _row("Direct",
-                                qualityMonitorModel.data.direct ?? '-'),
-                            _row("FPS Mode",
-                                qualityMonitorModel.data.fpsMode ?? '-'),
-                            _row("Auto FPS",
-                                qualityMonitorModel.data.autoFps ?? '-'),
+                    IgnorePointer(
+                      child: Container(
+                        constraints: BoxConstraints(maxWidth: 200),
+                        padding: const EdgeInsets.all(8),
+                        color: MyTheme.canvasColor.withAlpha(150),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            _row(
+                                "Speed", qualityMonitorModel.data.speed ?? '-'),
+                            _row("FPS", qualityMonitorModel.data.fps ?? '-'),
+                            // let delay be 0 if fps is 0
+                            _row(
+                                "Delay",
+                                "${qualityMonitorModel.data.delay == null ? '-' : (qualityMonitorModel.data.fps ?? "").replaceAll(' ', '').replaceAll('0', '').isEmpty ? 0 : qualityMonitorModel.data.delay}ms",
+                                rightColor: Colors.green),
+                            _row("Target Bitrate",
+                                "${qualityMonitorModel.data.targetBitrate ?? '-'}kb"),
+                            _row("Codec",
+                                qualityMonitorModel.data.codecFormat ?? '-'),
+                            _row("Chroma",
+                                qualityMonitorModel.data.chroma ?? '-'),
+                            _row("Conn",
+                                qualityMonitorModel.data.connectionType ?? '-'),
+                            if (qualityMonitorModel.extendedDetails) ...[
+                              _row("HostVer",
+                                  qualityMonitorModel.data.hostVersion ?? '-'),
+                              _row(
+                                  "ClientVer",
+                                  qualityMonitorModel.data.clientVersion ??
+                                      '-'),
+                              _row("Decoder",
+                                  qualityMonitorModel.data.decoder ?? '-'),
+                              _row("Renderer",
+                                  qualityMonitorModel.data.renderer ?? '-'),
+                              _row(
+                                  "Texture",
+                                  qualityMonitorModel.data.textureRender ??
+                                      '-'),
+                              _row("Threads",
+                                  qualityMonitorModel.data.videoThreads ?? '-'),
+                              _row(
+                                  "Res",
+                                  qualityMonitorModel.data.frameResolution ??
+                                      '-'),
+                              _row("Decode FPS",
+                                  qualityMonitorModel.data.decodeFps ?? '-'),
+                              _row("Queue",
+                                  qualityMonitorModel.data.videoQueue ?? '-'),
+                              _row("Direct",
+                                  qualityMonitorModel.data.direct ?? '-'),
+                              _row("FPS Mode",
+                                  qualityMonitorModel.data.fpsMode ?? '-'),
+                              _row("Auto FPS",
+                                  qualityMonitorModel.data.autoFps ?? '-'),
+                            ],
                           ],
-                        ],
+                        ),
                       ),
                     ),
                     if (onGripPanUpdate != null)
@@ -668,12 +677,23 @@ class QualityMonitor extends StatelessWidget {
               : const SizedBox.shrink()));
 }
 
-class PositionedQualityMonitor extends StatelessWidget {
+class PositionedQualityMonitor extends StatefulWidget {
   final QualityMonitorModel qualityMonitorModel;
+  final ValueChanged<Rect?>? onBoundsChanged;
 
   const PositionedQualityMonitor(
-      {Key? key, required this.qualityMonitorModel})
+      {Key? key, required this.qualityMonitorModel, this.onBoundsChanged})
       : super(key: key);
+
+  @override
+  State<PositionedQualityMonitor> createState() =>
+      _PositionedQualityMonitorState();
+}
+
+class _PositionedQualityMonitorState extends State<PositionedQualityMonitor> {
+  final _monitorKey = GlobalKey();
+  Rect? _lastBounds;
+  bool _boundsUpdateScheduled = false;
 
   static const _inset = 10.0;
   static const _monitorWidth = 200.0;
@@ -700,8 +720,8 @@ class PositionedQualityMonitor extends StatelessWidget {
       case kQualityMonitorPositionTopLeft:
         return const Offset(_inset, _inset);
       case kQualityMonitorPositionBottomRight:
-        return Offset(width - _monitorWidth - _inset,
-            height - monitorHeight - _inset);
+        return Offset(
+            width - _monitorWidth - _inset, height - monitorHeight - _inset);
       case kQualityMonitorPositionBottomLeft:
         return Offset(_inset, height - monitorHeight - _inset);
       case kQualityMonitorPositionTopRight:
@@ -721,23 +741,60 @@ class PositionedQualityMonitor extends StatelessWidget {
         position.dy.clamp(0.0, maxY).toDouble());
   }
 
+  void _scheduleBoundsUpdate() {
+    if (widget.onBoundsChanged == null || _boundsUpdateScheduled) {
+      return;
+    }
+    _boundsUpdateScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _boundsUpdateScheduled = false;
+      if (!mounted) {
+        return;
+      }
+      Rect? bounds;
+      final renderObject = _monitorKey.currentContext?.findRenderObject();
+      if (renderObject is RenderBox && renderObject.hasSize) {
+        final topLeft = renderObject.localToGlobal(Offset.zero);
+        bounds = topLeft & renderObject.size;
+        if (bounds.width <= 0 || bounds.height <= 0) {
+          bounds = null;
+        }
+      }
+      if (bounds != _lastBounds) {
+        _lastBounds = bounds;
+        widget.onBoundsChanged!(bounds);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    widget.onBoundsChanged?.call(null);
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) => Positioned.fill(
         child: ChangeNotifierProvider.value(
-            value: qualityMonitorModel,
+            value: widget.qualityMonitorModel,
             child: Consumer<QualityMonitorModel>(
               builder: (context, qualityMonitorModel, child) {
                 return LayoutBuilder(builder: (context, constraints) {
                   final extended = qualityMonitorModel.extendedDetails;
-                  final monitor = QualityMonitor(
-                    qualityMonitorModel,
-                    onGripPanUpdate: (details) {
-                      final base = qualityMonitorModel.floatingPosition ??
-                          _fixedOrigin(constraints, qualityMonitorModel.position,
-                              extended);
-                      qualityMonitorModel.updateFloatingPosition(_clampPosition(
-                          constraints, base + details.delta, extended));
-                    },
+                  _scheduleBoundsUpdate();
+                  final monitor = KeyedSubtree(
+                    key: _monitorKey,
+                    child: QualityMonitor(
+                      qualityMonitorModel,
+                      onGripPanUpdate: (details) {
+                        final base = qualityMonitorModel.floatingPosition ??
+                            _fixedOrigin(constraints,
+                                qualityMonitorModel.position, extended);
+                        qualityMonitorModel.updateFloatingPosition(
+                            _clampPosition(
+                                constraints, base + details.delta, extended));
+                      },
+                    ),
                   );
                   final floatingPosition = qualityMonitorModel.floatingPosition;
                   Widget positionedMonitor;
