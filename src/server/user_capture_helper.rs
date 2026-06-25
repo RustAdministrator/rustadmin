@@ -7,7 +7,7 @@ use std::{
     path::PathBuf,
     slice,
     sync::atomic::{AtomicU32, Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use winapi::um::{
     handleapi::CloseHandle,
@@ -25,6 +25,7 @@ const STATUS_STARTING: u32 = 0;
 const STATUS_OK: u32 = 1;
 const STATUS_WOULD_BLOCK: u32 = 2;
 const STATUS_ERROR: u32 = 3;
+const GDI_BOOTSTRAP_AFTER: Duration = Duration::from_millis(500);
 
 const fn align_up(value: usize, align: usize) -> usize {
     (value + align - 1) / align * align
@@ -177,7 +178,7 @@ fn validate_frame_length(shmem_len: usize, length: usize) -> bool {
     length > 0 && length <= shmem_len.saturating_sub(ADDR_FRAME)
 }
 
-fn create_dxgi_capturer(
+fn create_wgc_capturer(
     current_display: usize,
 ) -> ResultType<(Box<dyn TraitCapturer>, usize, usize)> {
     let mut displays = Display::all().with_context(|| "Failed to enumerate displays")?;
@@ -191,13 +192,32 @@ fn create_dxgi_capturer(
     let display = displays.remove(current_display);
     let width = display.width();
     let height = display.height();
-    let capturer = Capturer::new(display).with_context(|| "Failed to create DXGI capturer")?;
-    #[cfg(feature = "vram")]
-    let capturer = {
-        let mut capturer = capturer;
-        capturer.set_output_texture(false);
-        capturer
-    };
+    if !scrap::CapturerWgc::is_supported() {
+        bail!("WGC is not supported");
+    }
+    let capturer =
+        scrap::CapturerWgc::new(display).with_context(|| "Failed to create WGC capturer")?;
+    Ok((Box::new(capturer), width, height))
+}
+
+fn create_gdi_capturer(
+    current_display: usize,
+) -> ResultType<(Box<dyn TraitCapturer>, usize, usize)> {
+    let mut displays = Display::all().with_context(|| "Failed to enumerate displays")?;
+    if displays.len() <= current_display {
+        bail!(
+            "Invalid display index {}, display_count={}",
+            current_display,
+            displays.len()
+        );
+    }
+    let display = displays.remove(current_display);
+    let width = display.width();
+    let height = display.height();
+    let mut capturer = Capturer::new(display).with_context(|| "Failed to create GDI capturer")?;
+    if !capturer.set_gdi() {
+        bail!("Failed to enable GDI capture");
+    }
     Ok((Box::new(capturer), width, height))
 }
 
@@ -235,6 +255,13 @@ pub mod server {
         let mut height = 0usize;
         let mut counter = 0u32;
         let mut would_block_samples = 0u32;
+        let mut primary_frames = 0u32;
+        let mut primary_no_frame_since: Option<Instant> = None;
+        let mut primary_backend = "WGC";
+        let mut primary_is_gdi = false;
+        let mut gdi_fallback: Option<Box<dyn TraitCapturer>> = None;
+        let mut gdi_fallback_frames = 0u32;
+        let mut gdi_bootstrap_attempted = false;
         loop {
             let command = read_command(shmem);
             if command.exit != 0 {
@@ -245,55 +272,85 @@ pub mod server {
                 || active_generation != command.generation
                 || active_display != command.current_display;
             if recreate {
-                match create_dxgi_capturer(command.current_display) {
+                let new_backend = match create_wgc_capturer(command.current_display) {
                     Ok((new_capturer, new_width, new_height)) => {
-                        log::info!(
-                            "User capture helper created DXGI capturer for display {}, size={}x{}",
-                            command.current_display,
-                            new_width,
-                            new_height
-                        );
-                        capturer = Some(new_capturer);
-                        active_generation = command.generation;
-                        active_display = command.current_display;
-                        width = new_width;
-                        height = new_height;
-                        would_block_samples = 0;
-                        write_frame_info(
-                            shmem,
-                            CaptureFrameInfo {
-                                counter,
-                                status: STATUS_STARTING,
-                                length: 0,
-                                width,
-                                height,
-                            },
-                        );
+                        (new_capturer, new_width, new_height, "WGC", false)
                     }
-                    Err(err) => {
+                    Err(wgc_err) => {
                         log::warn!(
-                            "User capture helper failed to create DXGI capturer: {}",
-                            err
+                            "User capture helper failed to create WGC capturer, trying GDI fallback: {}",
+                            wgc_err
                         );
-                        capturer = None;
-                        write_frame_info(
-                            shmem,
-                            CaptureFrameInfo {
-                                counter,
-                                status: STATUS_ERROR,
-                                length: 0,
-                                width: 0,
-                                height: 0,
-                            },
-                        );
-                        std::thread::sleep(Duration::from_millis(500));
-                        continue;
+                        match create_gdi_capturer(command.current_display) {
+                            Ok((new_capturer, new_width, new_height)) => {
+                                (new_capturer, new_width, new_height, "GDI", true)
+                            }
+                            Err(gdi_err) => {
+                                log::warn!(
+                                    "User capture helper failed to create GDI fallback capturer: {}",
+                                    gdi_err
+                                );
+                                capturer = None;
+                                write_frame_info(
+                                    shmem,
+                                    CaptureFrameInfo {
+                                        counter,
+                                        status: STATUS_ERROR,
+                                        length: 0,
+                                        width: 0,
+                                        height: 0,
+                                    },
+                                );
+                                std::thread::sleep(Duration::from_millis(500));
+                                continue;
+                            }
+                        }
                     }
-                }
+                };
+                let (new_capturer, new_width, new_height, new_backend_name, new_is_gdi) =
+                    new_backend;
+                log::info!(
+                    "User capture helper created {} capturer for display {}, size={}x{}",
+                    new_backend_name,
+                    command.current_display,
+                    new_width,
+                    new_height
+                );
+                capturer = Some(new_capturer);
+                active_generation = command.generation;
+                active_display = command.current_display;
+                width = new_width;
+                height = new_height;
+                primary_backend = new_backend_name;
+                primary_is_gdi = new_is_gdi;
+                would_block_samples = 0;
+                primary_frames = 0;
+                primary_no_frame_since = None;
+                gdi_fallback = None;
+                gdi_fallback_frames = 0;
+                gdi_bootstrap_attempted = false;
+                write_frame_info(
+                    shmem,
+                    CaptureFrameInfo {
+                        counter,
+                        status: STATUS_STARTING,
+                        length: 0,
+                        width,
+                        height,
+                    },
+                );
             }
 
             let timeout = Duration::from_millis(command.timeout_ms.max(1) as u64);
-            match capturer.as_mut().map(|capturer| capturer.frame(timeout)) {
+            let primary_timeout = if primary_frames == 0 && gdi_fallback.is_some() {
+                Duration::from_millis(1)
+            } else {
+                timeout
+            };
+            match capturer
+                .as_mut()
+                .map(|capturer| capturer.frame(primary_timeout))
+            {
                 Some(Ok(Frame::PixelBuffer(frame))) => {
                     let data = frame.data();
                     if !validate_frame_length(shmem.len(), data.len()) {
@@ -317,14 +374,25 @@ pub mod server {
                     }
                     shmem.write(ADDR_FRAME, data);
                     counter = counter.wrapping_add(1).max(1);
-                    if counter == 1 {
+                    primary_frames = primary_frames.saturating_add(1);
+                    if primary_frames == 1 {
                         log::info!(
-                            "User capture helper received first DXGI frame, len={}, size={}x{}",
+                            "User capture helper received first {} frame, len={}, size={}x{}",
+                            primary_backend,
                             data.len(),
                             width,
                             height
                         );
+                        if gdi_fallback.is_some() {
+                            log::info!(
+                                "User capture helper switching from GDI fallback to {}",
+                                primary_backend
+                            );
+                        }
                     }
+                    gdi_fallback = None;
+                    gdi_fallback_frames = 0;
+                    primary_no_frame_since = None;
                     would_block_samples = 0;
                     write_frame_info(
                         shmem,
@@ -338,7 +406,10 @@ pub mod server {
                     );
                 }
                 Some(Ok(Frame::Texture(_))) => {
-                    log::warn!("User capture helper received texture frame, recreating capturer");
+                    log::warn!(
+                        "User capture helper received {} texture frame, recreating capturer",
+                        primary_backend
+                    );
                     capturer = None;
                     write_frame_info(
                         shmem,
@@ -353,25 +424,123 @@ pub mod server {
                 }
                 Some(Err(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     would_block_samples = would_block_samples.saturating_add(1);
+                    let first_no_frame = *primary_no_frame_since.get_or_insert_with(Instant::now);
                     if would_block_samples == 1 || would_block_samples % 60 == 0 {
                         log::debug!(
-                            "User capture helper DXGI would block, samples={}",
-                            would_block_samples
+                            "User capture helper {} would block, samples={}",
+                            primary_backend,
+                            would_block_samples,
                         );
                     }
-                    write_frame_info(
-                        shmem,
-                        CaptureFrameInfo {
-                            counter,
-                            status: STATUS_WOULD_BLOCK,
-                            length: 0,
-                            width,
-                            height,
-                        },
-                    );
+                    if primary_frames == 0
+                        && !primary_is_gdi
+                        && first_no_frame.elapsed() >= GDI_BOOTSTRAP_AFTER
+                    {
+                        if gdi_fallback.is_none() && !gdi_bootstrap_attempted {
+                            gdi_bootstrap_attempted = true;
+                            match create_gdi_capturer(active_display) {
+                                Ok((new_gdi_capturer, gdi_width, gdi_height))
+                                    if gdi_width == width && gdi_height == height =>
+                                {
+                                    log::info!(
+                                        "User capture helper enabled GDI fallback after {:?}, size={}x{}",
+                                        first_no_frame.elapsed(),
+                                        width,
+                                        height
+                                    );
+                                    gdi_fallback = Some(new_gdi_capturer);
+                                    gdi_fallback_frames = 0;
+                                }
+                                Ok((_gdi_capturer, gdi_width, gdi_height)) => {
+                                    log::warn!(
+                                        "User capture helper GDI fallback size mismatch: primary={}x{}, gdi={}x{}",
+                                        width,
+                                        height,
+                                        gdi_width,
+                                        gdi_height
+                                    );
+                                }
+                                Err(err) => {
+                                    log::warn!(
+                                        "User capture helper failed to create GDI fallback capturer: {}",
+                                        err
+                                    );
+                                }
+                            }
+                        }
+                        if let Some(gdi_capturer) = gdi_fallback.as_mut() {
+                            match gdi_capturer.frame(timeout) {
+                                Ok(Frame::PixelBuffer(frame)) => {
+                                    let data = frame.data();
+                                    if validate_frame_length(shmem.len(), data.len()) {
+                                        shmem.write(ADDR_FRAME, data);
+                                        counter = counter.wrapping_add(1).max(1);
+                                        gdi_fallback_frames = gdi_fallback_frames.saturating_add(1);
+                                        if gdi_fallback_frames == 1 || gdi_fallback_frames % 60 == 0
+                                        {
+                                            log::info!(
+                                                "User capture helper wrote GDI fallback frame #{}, len={}, size={}x{}",
+                                                gdi_fallback_frames,
+                                                data.len(),
+                                                width,
+                                                height
+                                            );
+                                        }
+                                        write_frame_info(
+                                            shmem,
+                                            CaptureFrameInfo {
+                                                counter,
+                                                status: STATUS_OK,
+                                                length: data.len(),
+                                                width,
+                                                height,
+                                            },
+                                        );
+                                        continue;
+                                    }
+                                    log::warn!(
+                                        "User capture helper GDI fallback frame exceeds shared memory capacity: frame_len={}, shmem_len={}",
+                                        data.len(),
+                                        shmem.len()
+                                    );
+                                    gdi_fallback = None;
+                                }
+                                Ok(Frame::Texture(_)) => {
+                                    log::warn!(
+                                        "User capture helper GDI fallback returned texture frame"
+                                    );
+                                    gdi_fallback = None;
+                                }
+                                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+                                Err(err) => {
+                                    log::warn!(
+                                        "User capture helper GDI fallback frame failed: {}",
+                                        err
+                                    );
+                                    gdi_fallback = None;
+                                }
+                            }
+                        }
+                    }
+                    if counter == 0 {
+                        write_frame_info(
+                            shmem,
+                            CaptureFrameInfo {
+                                counter,
+                                status: STATUS_WOULD_BLOCK,
+                                length: 0,
+                                width,
+                                height,
+                            },
+                        );
+                    }
                 }
                 Some(Err(err)) => {
-                    log::warn!("User capture helper DXGI frame failed: {}", err);
+                    log::warn!(
+                        "User capture helper {} frame failed: {}",
+                        primary_backend,
+                        err
+                    );
                     capturer = None;
                     write_frame_info(
                         shmem,
@@ -469,7 +638,7 @@ pub mod client {
                 bail!("Failed to launch user capture helper");
             }
             log::info!(
-                "Launched user capture helper: backend=DXGI, display={}, session={}, shmem={}, size={}",
+                "Launched user capture helper: backend=WGC, display={}, session={}, shmem={}, size={}",
                 current_display,
                 session_id,
                 shmem_name,

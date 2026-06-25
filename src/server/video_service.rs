@@ -405,12 +405,12 @@ fn create_dxgi_capturer(
     if should_use_user_capture_helper(portable_service_running, privacy_mode_id) {
         match crate::server::user_capture_helper::client::create_capturer(current, width, height) {
             Ok(capturer) => {
-                log::info!("Create capturer via user DXGI helper");
+                log::info!("Create capturer via user WGC helper");
                 return Ok(capturer);
             }
             Err(err) => {
                 log::warn!(
-                    "Failed to create user DXGI helper capturer, falling back to direct dxgi|gdi: {}",
+                    "Failed to create user WGC helper capturer, falling back to direct dxgi|gdi: {}",
                     err
                 );
             }

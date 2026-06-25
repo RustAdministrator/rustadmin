@@ -2,6 +2,7 @@ use std::{io, mem, ptr, slice};
 pub mod gdi;
 pub use gdi::CapturerGDI;
 pub mod mag;
+pub mod wgc;
 
 use winapi::{
     shared::{
