@@ -281,6 +281,18 @@ pub fn set_path_permission_for_portable_service_shmem_file(path: &Path) -> Resul
     set_path_permission_for_portable_service_shmem_impl(path, false)
 }
 
+pub fn grant_user_capture_helper_shmem_file_access(path: &Path) -> ResultType<()> {
+    validate_portable_service_shmem_file_target(path)?;
+    let authenticated_users_sid = sid_string_to_local_alloc_guard("S-1-5-11")?;
+    apply_grant_sid_allow_ace_to_path(
+        path,
+        authenticated_users_sid.as_sid_ptr(),
+        FILE_ALL_ACCESS.0,
+        true,
+        false,
+    )
+}
+
 #[derive(Debug)]
 pub(super) struct LocalAllocGuard(*mut std::ffi::c_void);
 
@@ -369,6 +381,42 @@ fn validate_portable_service_shmem_dir_target(path: &Path) -> ResultType<()> {
     Ok(())
 }
 
+fn validate_portable_service_shmem_file_target(path: &Path) -> ResultType<()> {
+    let metadata_result = fs::symlink_metadata(path);
+    match metadata_result {
+        Ok(metadata) => {
+            if metadata.file_type().is_dir() {
+                bail!(
+                    "Portable service shared-memory ACL target is a directory, expected file-like path: '{}'",
+                    path.display()
+                );
+            }
+            if is_reparse_point(&metadata) {
+                bail!(
+                    "Portable service shared-memory ACL file target is a reparse point and is rejected: '{}'",
+                    path.display()
+                );
+            }
+        }
+        Err(e)
+            if e.kind() == io::ErrorKind::NotFound
+                || e.kind() == io::ErrorKind::PermissionDenied =>
+        {
+            // Keep going and let Win32 ACL APIs return the final OS error.
+            // `Path::exists()/is_file()` and metadata can collapse ACL-denied paths into
+            // a false "not found" signal under restricted directory ACLs.
+        }
+        Err(e) => {
+            bail!(
+                "Failed to inspect portable service shared-memory ACL target '{}': {}",
+                path.display(),
+                e
+            );
+        }
+    }
+    Ok(())
+}
+
 fn set_path_permission_for_portable_service_shmem_impl(
     path: &Path,
     expect_dir: bool,
@@ -376,38 +424,7 @@ fn set_path_permission_for_portable_service_shmem_impl(
     if expect_dir {
         validate_portable_service_shmem_dir_target(path)?;
     } else {
-        let metadata_result = fs::symlink_metadata(path);
-        match metadata_result {
-            Ok(metadata) => {
-                if metadata.file_type().is_dir() {
-                    bail!(
-                        "Portable service shared-memory ACL target is a directory, expected file-like path: '{}'",
-                        path.display()
-                    );
-                }
-                if is_reparse_point(&metadata) {
-                    bail!(
-                        "Portable service shared-memory ACL file target is a reparse point and is rejected: '{}'",
-                        path.display()
-                    );
-                }
-            }
-            Err(e)
-                if e.kind() == io::ErrorKind::NotFound
-                    || e.kind() == io::ErrorKind::PermissionDenied =>
-            {
-                // Keep going and let Win32 ACL APIs return the final OS error.
-                // `Path::exists()/is_file()` and metadata can collapse ACL-denied paths into
-                // a false "not found" signal under restricted directory ACLs.
-            }
-            Err(e) => {
-                bail!(
-                    "Failed to inspect portable service shared-memory ACL target '{}': {}",
-                    path.display(),
-                    e
-                );
-            }
-        }
+        validate_portable_service_shmem_file_target(path)?;
     }
 
     let user_sid = current_process_user_sid_string()?;

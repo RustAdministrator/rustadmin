@@ -99,7 +99,8 @@ use winreg::{enums::*, RegKey};
 mod acl;
 pub(crate) use acl::current_process_user_sid_string;
 pub use acl::{
-    set_path_permission, set_path_permission_for_portable_service_shmem_dir,
+    grant_user_capture_helper_shmem_file_access, set_path_permission,
+    set_path_permission_for_portable_service_shmem_dir,
     set_path_permission_for_portable_service_shmem_file,
     validate_path_for_portable_service_shmem_dir,
 };
@@ -926,6 +927,10 @@ async fn launch_server(
 
 pub fn launch_privileged_process(session_id: DWORD, cmd: &str) -> ResultType<HANDLE> {
     launch_process_in_session(session_id, cmd, ServerLaunchMode::Privileged)
+}
+
+pub fn launch_user_process_in_session(session_id: DWORD, cmd: &str) -> ResultType<HANDLE> {
+    launch_process_in_session(session_id, cmd, ServerLaunchMode::InteractiveUser)
 }
 
 fn launch_process_in_session(

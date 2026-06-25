@@ -52,7 +52,10 @@ use scrap::{
     CodecFormat, Display, EncodeInput, TraitCapturer, TraitPixelBuffer,
 };
 #[cfg(windows)]
-use std::sync::Once;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Once,
+};
 use std::{
     collections::HashSet,
     io::ErrorKind::WouldBlock,
@@ -64,6 +67,11 @@ pub const OPTION_REFRESH: &'static str = "refresh";
 const ENCODE_NO_VALID_FRAME: &str = "no valid frame";
 const HW_ENCODER_WARMUP_TIMEOUT: Duration = Duration::from_secs(3);
 const HOST_VIDEO_DIAG_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(windows)]
+const USER_CAPTURE_HELPER_STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[cfg(windows)]
+static USER_CAPTURE_HELPER_DISABLED: AtomicBool = AtomicBool::new(false);
 
 type FrameFetchedNotifierSender = UnboundedSender<(i32, Option<Instant>)>;
 type FrameFetchedNotifierReceiver = Arc<TokioMutex<UnboundedReceiver<(i32, Option<Instant>)>>>;
@@ -373,12 +381,53 @@ pub fn new(source: VideoSource, idx: usize) -> GenericService {
 }
 
 // Capturer object is expensive, avoiding to create it frequently.
+#[cfg(windows)]
+fn should_use_user_capture_helper(portable_service_running: bool, privacy_mode_id: i32) -> bool {
+    privacy_mode_id == INVALID_PRIVACY_MODE_CONN_ID
+        && !USER_CAPTURE_HELPER_DISABLED.load(Ordering::Relaxed)
+        && !portable_service_running
+        && crate::platform::is_root()
+        && is_installed()
+        && !crate::platform::windows::is_prelogin()
+        && !crate::platform::windows::is_locked()
+        && !crate::platform::windows::desktop_changed()
+}
+
+#[cfg(windows)]
+fn create_dxgi_capturer(
+    privacy_mode_id: i32,
+    display: Display,
+    current: usize,
+    portable_service_running: bool,
+    width: usize,
+    height: usize,
+) -> ResultType<Box<dyn TraitCapturer>> {
+    if should_use_user_capture_helper(portable_service_running, privacy_mode_id) {
+        match crate::server::user_capture_helper::client::create_capturer(current, width, height) {
+            Ok(capturer) => {
+                log::info!("Create capturer via user DXGI helper");
+                return Ok(capturer);
+            }
+            Err(err) => {
+                log::warn!(
+                    "Failed to create user DXGI helper capturer, falling back to direct dxgi|gdi: {}",
+                    err
+                );
+            }
+        }
+    }
+    log::debug!("Create capturer dxgi|gdi");
+    crate::portable_service::client::create_capturer(current, display, portable_service_running)
+}
+
 fn create_capturer(
     privacy_mode_id: i32,
     display: Display,
-    _current: usize,
-    _portable_service_running: bool,
+    current: usize,
+    portable_service_running: bool,
 ) -> ResultType<Box<dyn TraitCapturer>> {
+    #[cfg(not(windows))]
+    let _ = (current, portable_service_running);
     #[cfg(not(windows))]
     let c: Option<Box<dyn TraitCapturer>> = None;
     #[cfg(windows)]
@@ -402,11 +451,15 @@ fn create_capturer(
         None => {
             #[cfg(windows)]
             {
-                log::debug!("Create capturer dxgi|gdi");
-                return crate::portable_service::client::create_capturer(
-                    _current,
+                let width = display.width();
+                let height = display.height();
+                return create_dxgi_capturer(
+                    privacy_mode_id,
                     display,
-                    _portable_service_running,
+                    current,
+                    portable_service_running,
+                    width,
+                    height,
                 );
             }
             #[cfg(not(windows))]
@@ -783,7 +836,9 @@ fn run(vs: VideoService) -> ResultType<()> {
     #[cfg(windows)]
     let mut try_gdi = 1;
     #[cfg(windows)]
-    log::info!("gdi: {}", c.is_gdi());
+    let mut user_capture_helper_no_frame_since: Option<Instant> = None;
+    #[cfg(windows)]
+    log::info!("gdi: {}, cpu_only: {}", c.is_gdi(), c.is_cpu_only());
     #[cfg(windows)]
     start_uac_elevation_check();
 
@@ -846,8 +901,12 @@ fn run(vs: VideoService) -> ResultType<()> {
             bail!("SWITCH");
         }
         #[cfg(all(windows, feature = "vram"))]
-        if c.is_gdi() && encoder.input_texture() {
-            log::info!("changed to gdi when using vram");
+        if (c.is_gdi() || c.is_cpu_only()) && encoder.input_texture() {
+            log::info!(
+                "changed to gdi/cpu-only capture when using vram, gdi={}, cpu_only={}",
+                c.is_gdi(),
+                c.is_cpu_only()
+            );
             VRamEncoder::set_fallback_gdi(sp.name(), true);
             bail!("SWITCH");
         }
@@ -878,6 +937,10 @@ fn run(vs: VideoService) -> ResultType<()> {
             Ok(frame) => {
                 repeat_encode_counter = 0;
                 if frame.valid() {
+                    #[cfg(windows)]
+                    {
+                        user_capture_helper_no_frame_since = None;
+                    }
                     host_diag.valid_capture += 1;
                     let screenshot = SCREENSHOTS.lock().unwrap().remove(&display_idx);
                     if let Some(mut screenshot) = screenshot {
@@ -959,7 +1022,19 @@ fn run(vs: VideoService) -> ResultType<()> {
             Err(ref e) if e.kind() == WouldBlock => {
                 host_diag.would_block += 1;
                 #[cfg(windows)]
-                if try_gdi > 0 && !c.is_gdi() {
+                if c.is_cpu_only() && first_frame {
+                    let first_no_frame = *user_capture_helper_no_frame_since.get_or_insert(now);
+                    if first_no_frame.elapsed() >= USER_CAPTURE_HELPER_STARTUP_TIMEOUT {
+                        USER_CAPTURE_HELPER_DISABLED.store(true, Ordering::Relaxed);
+                        log::warn!(
+                            "User capture helper did not produce startup frame after {:?}; switching to direct dxgi|gdi",
+                            USER_CAPTURE_HELPER_STARTUP_TIMEOUT
+                        );
+                        bail!("SWITCH");
+                    }
+                }
+                #[cfg(windows)]
+                if try_gdi > 0 && !c.is_gdi() && !c.is_cpu_only() {
                     if try_gdi > 3 {
                         c.set_gdi();
                         try_gdi = 0;
@@ -1012,6 +1087,16 @@ fn run(vs: VideoService) -> ResultType<()> {
                 // The previous check in `sp.is_option_true(OPTION_REFRESH)` block may be enough.
                 if vs.source.is_monitor() {
                     try_broadcast_display_changed(&sp, display_idx, &c, true)?;
+                }
+
+                #[cfg(windows)]
+                if c.is_cpu_only() {
+                    USER_CAPTURE_HELPER_DISABLED.store(true, Ordering::Relaxed);
+                    log::warn!(
+                        "User capture helper returned capture error; switching to direct dxgi|gdi: {:?}",
+                        err
+                    );
+                    bail!("SWITCH");
                 }
 
                 #[cfg(windows)]
@@ -1165,8 +1250,13 @@ fn get_encoder_config(
     _source: VideoSource,
 ) -> EncoderCfg {
     #[cfg(all(windows, feature = "vram"))]
-    if _portable_service || c.is_gdi() || _source == VideoSource::Camera {
-        log::info!("gdi:{}, portable:{}", c.is_gdi(), _portable_service);
+    if _portable_service || c.is_gdi() || c.is_cpu_only() || _source == VideoSource::Camera {
+        log::info!(
+            "gdi:{}, cpu_only:{}, portable:{}",
+            c.is_gdi(),
+            c.is_cpu_only(),
+            _portable_service
+        );
         VRamEncoder::set_not_use(_name, true);
     }
     #[cfg(feature = "vram")]

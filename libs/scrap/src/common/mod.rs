@@ -134,6 +134,10 @@ pub trait TraitCapturer {
     #[cfg(windows)]
     fn is_gdi(&self) -> bool;
     #[cfg(windows)]
+    fn is_cpu_only(&self) -> bool {
+        false
+    }
+    #[cfg(windows)]
     fn set_gdi(&mut self) -> bool;
 
     #[cfg(feature = "vram")]
