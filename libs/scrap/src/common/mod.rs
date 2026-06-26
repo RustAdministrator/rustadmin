@@ -138,6 +138,16 @@ pub trait TraitCapturer {
         false
     }
     #[cfg(windows)]
+    fn capture_backend(&self) -> &'static str {
+        if self.is_gdi() {
+            "GDI"
+        } else if self.is_cpu_only() {
+            "CPU"
+        } else {
+            "Unknown"
+        }
+    }
+    #[cfg(windows)]
     fn set_gdi(&mut self) -> bool;
 
     #[cfg(feature = "vram")]

@@ -587,6 +587,15 @@ class QualityMonitor extends StatelessWidget {
     );
   }
 
+  Widget _section(String title) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 5, bottom: 1),
+      child: Text(title,
+          style: const TextStyle(
+              color: Color.fromARGB(210, 210, 210, 210), fontSize: 10)),
+    );
+  }
+
   @override
   Widget build(BuildContext context) => ChangeNotifierProvider.value(
       value: qualityMonitorModel,
@@ -603,25 +612,52 @@ class QualityMonitor extends StatelessWidget {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
+                            _section("Network"),
                             _row(
                                 "Speed", qualityMonitorModel.data.speed ?? '-'),
-                            _row("FPS", qualityMonitorModel.data.fps ?? '-'),
                             // let delay be 0 if fps is 0
                             _row(
                                 "Delay",
                                 "${qualityMonitorModel.data.delay == null ? '-' : (qualityMonitorModel.data.fps ?? "").replaceAll(' ', '').replaceAll('0', '').isEmpty ? 0 : qualityMonitorModel.data.delay}ms",
                                 rightColor: Colors.green),
+                            _row("Conn",
+                                qualityMonitorModel.data.connectionType ?? '-'),
+                            if (qualityMonitorModel.extendedDetails)
+                              _row("Direct",
+                                  qualityMonitorModel.data.direct ?? '-'),
+                            _section("QoS"),
+                            _row("FPS", qualityMonitorModel.data.fps ?? '-'),
                             _row("Target Bitrate",
                                 "${qualityMonitorModel.data.targetBitrate ?? '-'}kb"),
                             _row("Codec",
                                 qualityMonitorModel.data.codecFormat ?? '-'),
                             _row("Chroma",
                                 qualityMonitorModel.data.chroma ?? '-'),
-                            _row("Conn",
-                                qualityMonitorModel.data.connectionType ?? '-'),
                             if (qualityMonitorModel.extendedDetails) ...[
+                              _section("Remote"),
                               _row("HostVer",
                                   qualityMonitorModel.data.hostVersion ?? '-'),
+                              _row(
+                                  "Capture",
+                                  qualityMonitorModel.data.captureBackend ??
+                                      '-'),
+                              _row(
+                                  "Encoder",
+                                  qualityMonitorModel.data.encoderBackend ??
+                                      '-'),
+                              _row("Input",
+                                  qualityMonitorModel.data.encoderInput ?? '-'),
+                              _row("Threads",
+                                  qualityMonitorModel.data.videoThreads ?? '-'),
+                              _row(
+                                  "Res",
+                                  qualityMonitorModel.data.frameResolution ??
+                                      '-'),
+                              _row("FPS Mode",
+                                  qualityMonitorModel.data.fpsMode ?? '-'),
+                              _row("Auto FPS",
+                                  qualityMonitorModel.data.autoFps ?? '-'),
+                              _section("Local"),
                               _row(
                                   "ClientVer",
                                   qualityMonitorModel.data.clientVersion ??
@@ -634,22 +670,10 @@ class QualityMonitor extends StatelessWidget {
                                   "Texture",
                                   qualityMonitorModel.data.textureRender ??
                                       '-'),
-                              _row("Threads",
-                                  qualityMonitorModel.data.videoThreads ?? '-'),
-                              _row(
-                                  "Res",
-                                  qualityMonitorModel.data.frameResolution ??
-                                      '-'),
                               _row("Decode FPS",
                                   qualityMonitorModel.data.decodeFps ?? '-'),
                               _row("Queue",
                                   qualityMonitorModel.data.videoQueue ?? '-'),
-                              _row("Direct",
-                                  qualityMonitorModel.data.direct ?? '-'),
-                              _row("FPS Mode",
-                                  qualityMonitorModel.data.fpsMode ?? '-'),
-                              _row("Auto FPS",
-                                  qualityMonitorModel.data.autoFps ?? '-'),
                             ],
                           ],
                         ),
@@ -697,8 +721,8 @@ class _PositionedQualityMonitorState extends State<PositionedQualityMonitor> {
 
   static const _inset = 10.0;
   static const _monitorWidth = 200.0;
-  static const _basicHeight = 158.0;
-  static const _extendedHeight = 340.0;
+  static const _basicHeight = 180.0;
+  static const _extendedHeight = 420.0;
 
   double _boundedWidth(BoxConstraints constraints) {
     return constraints.hasBoundedWidth

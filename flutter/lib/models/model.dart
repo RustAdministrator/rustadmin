@@ -4081,6 +4081,9 @@ class QualityMonitorData {
   String? clientVersion;
   String? decoder;
   String? renderer;
+  String? captureBackend;
+  String? encoderBackend;
+  String? encoderInput;
   String? frameResolution;
   String? decodeFps;
   String? videoQueue;
@@ -4308,6 +4311,18 @@ class QualityMonitorModel with ChangeNotifier {
       if (evt.containsKey('renderer') &&
           (evt['renderer'] as String).isNotEmpty) {
         _data.renderer = evt['renderer'];
+      }
+      if (evt.containsKey('capture_backend') &&
+          (evt['capture_backend'] as String).isNotEmpty) {
+        _data.captureBackend = evt['capture_backend'];
+      }
+      if (evt.containsKey('encoder_backend') &&
+          (evt['encoder_backend'] as String).isNotEmpty) {
+        _data.encoderBackend = evt['encoder_backend'];
+      }
+      if (evt.containsKey('encoder_input') &&
+          (evt['encoder_input'] as String).isNotEmpty) {
+        _data.encoderInput = evt['encoder_input'];
       }
       if (evt.containsKey('decode_fps')) {
         _data.decodeFps = _displayMetricFromMap(evt['decode_fps'] as String);

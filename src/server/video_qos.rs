@@ -112,6 +112,9 @@ pub struct VideoQoS {
     users: HashMap<i32, UserData>,
     displays: HashMap<String, DisplayData>,
     bitrate_store: u32,
+    capture_backend: Option<String>,
+    encoder_backend: Option<String>,
+    encoder_input: Option<String>,
     adjust_ratio_instant: Instant,
     abr_config: bool,
     new_user_instant: Instant,
@@ -125,6 +128,9 @@ impl Default for VideoQoS {
             users: Default::default(),
             displays: Default::default(),
             bitrate_store: 0,
+            capture_backend: None,
+            encoder_backend: None,
+            encoder_input: None,
             adjust_ratio_instant: Instant::now(),
             abr_config: true,
             new_user_instant: Instant::now(),
@@ -157,6 +163,25 @@ impl VideoQoS {
     // Get stored bitrate
     pub fn bitrate(&self) -> u32 {
         self.bitrate_store
+    }
+
+    pub fn store_pipeline_status(
+        &mut self,
+        capture_backend: &str,
+        encoder_backend: &str,
+        encoder_input: &str,
+    ) {
+        self.capture_backend = Some(capture_backend.to_owned());
+        self.encoder_backend = Some(encoder_backend.to_owned());
+        self.encoder_input = Some(encoder_input.to_owned());
+    }
+
+    pub fn pipeline_status(&self) -> (Option<String>, Option<String>, Option<String>) {
+        (
+            self.capture_backend.clone(),
+            self.encoder_backend.clone(),
+            self.encoder_input.clone(),
+        )
     }
 
     // Get current bitrate ratio with bounds checking

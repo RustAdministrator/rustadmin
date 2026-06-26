@@ -1377,10 +1377,29 @@ impl Connection {
                     // The control end will jump out of the loop after receiving LoginResponse and will not reply to the TestDelay
                     if conn.last_test_delay.is_none() && !(conn.port_forward_socket.is_some() && conn.authorized) {
                         conn.last_test_delay = Some(Instant::now());
+                        let (
+                            target_bitrate,
+                            capture_backend,
+                            encoder_backend,
+                            encoder_input,
+                        ) = {
+                            let video_qos = video_service::VIDEO_QOS.lock().unwrap();
+                            let (capture_backend, encoder_backend, encoder_input) =
+                                video_qos.pipeline_status();
+                            (
+                                video_qos.bitrate(),
+                                capture_backend.unwrap_or_default(),
+                                encoder_backend.unwrap_or_default(),
+                                encoder_input.unwrap_or_default(),
+                            )
+                        };
                         let mut msg_out = Message::new();
                         msg_out.set_test_delay(TestDelay{
                             last_delay: conn.network_delay,
-                            target_bitrate: video_service::VIDEO_QOS.lock().unwrap().bitrate(),
+                            target_bitrate,
+                            capture_backend,
+                            encoder_backend,
+                            encoder_input,
                             ..Default::default()
                         });
                         conn.send(msg_out.into()).await;

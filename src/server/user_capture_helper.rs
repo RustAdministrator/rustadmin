@@ -741,6 +741,10 @@ pub mod client {
             true
         }
 
+        fn capture_backend(&self) -> &'static str {
+            "WGC"
+        }
+
         fn set_gdi(&mut self) -> bool {
             false
         }

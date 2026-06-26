@@ -445,6 +445,16 @@ impl Encoder {
         };
         prefer_i444 && i444_useable && !decodings.is_empty()
     }
+
+    pub fn backend_label(config: &EncoderCfg) -> &'static str {
+        match config {
+            EncoderCfg::VPX(_) | EncoderCfg::AOM(_) => "Software",
+            #[cfg(feature = "hwcodec")]
+            EncoderCfg::HWRAM(_) => "HWRAM",
+            #[cfg(feature = "vram")]
+            EncoderCfg::VRAM(_) => "VRAM",
+        }
+    }
 }
 
 fn encoded_video_frames_payload_stats(frames: &EncodedVideoFrames) -> (usize, usize, bool) {

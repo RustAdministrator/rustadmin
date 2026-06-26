@@ -735,6 +735,15 @@ impl InvokeUiSession for FlutterHandler {
                 ("decoder", &status.decoder.map_or(NULL, |it| it)),
                 ("renderer", &status.renderer.map_or(NULL, |it| it)),
                 (
+                    "capture_backend",
+                    &status.capture_backend.map_or(NULL, |it| it),
+                ),
+                (
+                    "encoder_backend",
+                    &status.encoder_backend.map_or(NULL, |it| it),
+                ),
+                ("encoder_input", &status.encoder_input.map_or(NULL, |it| it)),
+                (
                     "decode_fps",
                     &serde_json::ser::to_string(&status.decode_fps).unwrap_or(NULL.to_owned()),
                 ),

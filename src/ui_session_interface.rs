@@ -2052,6 +2052,21 @@ impl<T: InvokeUiSession> Interface for Session<T> {
             self.update_quality_status(QualityStatus {
                 delay: Some(t.last_delay as _),
                 target_bitrate: Some(t.target_bitrate as _),
+                capture_backend: if t.capture_backend.is_empty() {
+                    None
+                } else {
+                    Some(t.capture_backend.clone())
+                },
+                encoder_backend: if t.encoder_backend.is_empty() {
+                    None
+                } else {
+                    Some(t.encoder_backend.clone())
+                },
+                encoder_input: if t.encoder_input.is_empty() {
+                    None
+                } else {
+                    Some(t.encoder_input.clone())
+                },
                 ..Default::default()
             });
             handle_test_delay(t, peer).await;

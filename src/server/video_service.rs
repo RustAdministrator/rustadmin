@@ -383,14 +383,64 @@ pub fn new(source: VideoSource, idx: usize) -> GenericService {
 // Capturer object is expensive, avoiding to create it frequently.
 #[cfg(windows)]
 fn should_use_user_capture_helper(portable_service_running: bool, privacy_mode_id: i32) -> bool {
-    privacy_mode_id == INVALID_PRIVACY_MODE_CONN_ID
-        && !USER_CAPTURE_HELPER_DISABLED.load(Ordering::Relaxed)
+    let privacy_mode_ok = privacy_mode_id == INVALID_PRIVACY_MODE_CONN_ID;
+    let helper_disabled = USER_CAPTURE_HELPER_DISABLED.load(Ordering::Relaxed);
+    let is_root = crate::platform::is_root();
+    let installed = is_installed();
+    let prelogin = crate::platform::windows::is_prelogin();
+    let locked = crate::platform::windows::is_locked();
+    let desktop_changed = crate::platform::windows::desktop_changed();
+    let use_helper = privacy_mode_ok
+        && !helper_disabled
         && !portable_service_running
-        && crate::platform::is_root()
-        && is_installed()
-        && !crate::platform::windows::is_prelogin()
-        && !crate::platform::windows::is_locked()
-        && !crate::platform::windows::desktop_changed()
+        && is_root
+        && installed
+        && !prelogin
+        && !locked
+        && !desktop_changed;
+    let mut blocked_by = Vec::new();
+    if !privacy_mode_ok {
+        blocked_by.push("privacy_mode");
+    }
+    if helper_disabled {
+        blocked_by.push("helper_disabled");
+    }
+    if portable_service_running {
+        blocked_by.push("portable_service");
+    }
+    if !is_root {
+        blocked_by.push("not_service");
+    }
+    if !installed {
+        blocked_by.push("not_installed");
+    }
+    if prelogin {
+        blocked_by.push("prelogin");
+    }
+    if locked {
+        blocked_by.push("locked");
+    }
+    if desktop_changed {
+        blocked_by.push("desktop_changed");
+    }
+    let blocked_by = if blocked_by.is_empty() {
+        "none".to_owned()
+    } else {
+        blocked_by.join(",")
+    };
+    log::info!(
+        "user capture helper decision: use_helper={}, blocked_by={}, privacy_mode_id={}, portable_service_running={}, is_root={}, installed={}, prelogin={}, locked={}, desktop_changed={}",
+        use_helper,
+        blocked_by,
+        privacy_mode_id,
+        portable_service_running,
+        is_root,
+        installed,
+        prelogin,
+        locked,
+        desktop_changed
+    );
+    use_helper
 }
 
 #[cfg(windows)]
@@ -751,6 +801,10 @@ fn run(vs: VideoService) -> ResultType<()> {
         c.height,
         capturer_is_gdi
     );
+    #[cfg(windows)]
+    let capture_backend = c.capture_backend();
+    #[cfg(not(windows))]
+    let capture_backend = "Unknown";
     let mut video_qos = VIDEO_QOS.lock().unwrap();
     let mut spf = video_qos.spf();
     let mut quality = video_qos.ratio();
@@ -796,13 +850,22 @@ fn run(vs: VideoService) -> ResultType<()> {
     let encoder_input_texture = encoder.input_texture();
     #[cfg(not(feature = "vram"))]
     let encoder_input_texture = false;
+    let encoder_backend = Encoder::backend_label(&encoder_cfg);
+    let encoder_input = if encoder_input_texture {
+        "Texture"
+    } else {
+        "YUV"
+    };
     log::info!(
-        "diag video service encoder ready: service={}, source={:?}, display_idx={}, negotiated={:?}, cfg={:?}, hardware={}, input_texture={}, bitrate={}, use_i444={}, quality={:?}",
+        "diag video service encoder ready: service={}, source={:?}, display_idx={}, negotiated={:?}, cfg={:?}, capture_backend={}, encoder_backend={}, encoder_input={}, hardware={}, input_texture={}, bitrate={}, use_i444={}, quality={:?}",
         sp.name(),
         vs.source,
         display_idx,
         codec_format,
         encoder_cfg,
+        capture_backend,
+        encoder_backend,
+        encoder_input,
         encoder.is_hardware(),
         encoder_input_texture,
         encoder.bitrate(),
@@ -818,11 +881,12 @@ fn run(vs: VideoService) -> ResultType<()> {
             bail!(e);
         }
     }
-    VIDEO_QOS.lock().unwrap().store_bitrate(encoder.bitrate());
-    VIDEO_QOS
-        .lock()
-        .unwrap()
-        .set_support_changing_quality(&sp.name(), encoder.support_changing_quality());
+    {
+        let mut video_qos = VIDEO_QOS.lock().unwrap();
+        video_qos.store_bitrate(encoder.bitrate());
+        video_qos.store_pipeline_status(capture_backend, encoder_backend, encoder_input);
+        video_qos.set_support_changing_quality(&sp.name(), encoder.support_changing_quality());
+    }
     log::info!("initial quality: {quality:?}");
 
     if sp.is_option_true(OPTION_REFRESH) {
