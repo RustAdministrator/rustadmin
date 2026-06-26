@@ -4103,6 +4103,7 @@ class QualityMonitorModel with ChangeNotifier {
   var _details = kQualityMonitorDetailsBasic;
   Offset? _floatingPosition;
   Timer? _floatingPositionStoreTimer;
+  SessionID? _sessionId;
   final _data = QualityMonitorData();
 
   bool get show => _show;
@@ -4129,6 +4130,34 @@ class QualityMonitorModel with ChangeNotifier {
   String? _hostVersion() {
     final value = parent.target?.ffiModel.pi.version;
     return value == null || value.isEmpty ? null : value;
+  }
+
+  bool _resetDataForSession(SessionID sessionId) {
+    if (_sessionId == sessionId) return false;
+    _sessionId = sessionId;
+    _data.speed = null;
+    _data.fps = null;
+    _data.delay = null;
+    _data.targetBitrate = null;
+    _data.codecFormat = null;
+    _data.chroma = null;
+    _data.connectionType = null;
+    _data.hostVersion = null;
+    _data.clientVersion = null;
+    _data.decoder = null;
+    _data.renderer = null;
+    _data.captureBackend = null;
+    _data.encoderBackend = null;
+    _data.encoderInput = null;
+    _data.frameResolution = null;
+    _data.decodeFps = null;
+    _data.videoQueue = null;
+    _data.videoThreads = null;
+    _data.textureRender = null;
+    _data.direct = null;
+    _data.fpsMode = null;
+    _data.autoFps = null;
+    return true;
   }
 
   updateConnectionInfo(dynamic streamType, [dynamic direct]) {
@@ -4176,6 +4205,7 @@ class QualityMonitorModel with ChangeNotifier {
   }
 
   checkShowQualityMonitor(SessionID sessionId) async {
+    final dataReset = _resetDataForSession(sessionId);
     final show = await bind.sessionGetToggleOption(
             sessionId: sessionId, arg: 'show-quality-monitor') ==
         true;
@@ -4199,7 +4229,8 @@ class QualityMonitorModel with ChangeNotifier {
         _details != details ||
         _floatingPosition != floatingPosition ||
         _data.hostVersion != hostVersion ||
-        _data.clientVersion != clientVersion) {
+        _data.clientVersion != clientVersion ||
+        dataReset) {
       _show = show;
       _position = position;
       _details = details;

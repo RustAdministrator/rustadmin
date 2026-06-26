@@ -128,11 +128,7 @@ impl EncoderApi for HwRamEncoder {
                 frames: frames.into(),
                 ..Default::default()
             };
-            match self.format {
-                DataFormat::H264 => vf.set_h264s(frames),
-                DataFormat::H265 => vf.set_h265s(frames),
-                _ => bail!("unsupported format: {:?}", self.format),
-            }
+            set_encoded_video_frames(self.format, &mut vf, frames)?;
             Ok(vf)
         } else {
             Err(anyhow!("no valid frame"))
@@ -206,6 +202,36 @@ impl EncoderApi for HwRamEncoder {
     }
 }
 
+fn set_encoded_video_frames(
+    format: DataFormat,
+    vf: &mut VideoFrame,
+    frames: EncodedVideoFrames,
+) -> ResultType<()> {
+    match format {
+        DataFormat::H264 => vf.set_h264s(frames),
+        DataFormat::H265 => vf.set_h265s(frames),
+        DataFormat::AV1 => vf.set_av1s(frames),
+        _ => bail!("unsupported format: {:?}", format),
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hbb_common::message_proto::video_frame;
+
+    #[test]
+    fn set_encoded_video_frames_routes_av1_to_av1_union() {
+        let mut vf = VideoFrame::new();
+
+        set_encoded_video_frames(DataFormat::AV1, &mut vf, EncodedVideoFrames::default())
+            .expect("AV1 HWRAM packets should be supported");
+
+        assert!(matches!(vf.union, Some(video_frame::Union::Av1s(_))));
+    }
+}
+
 impl HwRamEncoder {
     pub fn try_get(format: CodecFormat) -> Option<CodecInfo> {
         let mut info = None;
@@ -218,6 +244,11 @@ impl HwRamEncoder {
             }
             CodecFormat::H265 => {
                 if let Some(v) = best.h265 {
+                    info = Some(v);
+                }
+            }
+            CodecFormat::AV1 => {
+                if let Some(v) = best.av1 {
                     info = Some(v);
                 }
             }

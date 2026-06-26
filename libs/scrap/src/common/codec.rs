@@ -87,7 +87,9 @@ pub struct Encoder {
 #[derive(Clone, Copy)]
 struct UsableCodecs {
     vp8: bool,
+    vp9: bool,
     av1: bool,
+    av1_hardware: bool,
     h264: bool,
     h265: bool,
 }
@@ -97,7 +99,7 @@ impl UsableCodecs {
         match preference {
             PreferCodec::Auto => true,
             PreferCodec::VP8 => self.vp8,
-            PreferCodec::VP9 => true,
+            PreferCodec::VP9 => self.vp9,
             PreferCodec::AV1 => self.av1,
             PreferCodec::H264 => self.h264,
             PreferCodec::H265 => self.h265,
@@ -108,10 +110,10 @@ impl UsableCodecs {
 fn explicit_codec_preference_order() -> &'static [PreferCodec] {
     &[
         PreferCodec::AV1,
-        PreferCodec::VP9,
-        PreferCodec::VP8,
         PreferCodec::H265,
         PreferCodec::H264,
+        PreferCodec::VP9,
+        PreferCodec::VP8,
     ]
 }
 
@@ -145,6 +147,30 @@ fn codec_for_preference(preference: PreferCodec, auto_codec: CodecFormat) -> Cod
         PreferCodec::H264 => CodecFormat::H264,
         PreferCodec::H265 => CodecFormat::H265,
         PreferCodec::Auto => auto_codec,
+    }
+}
+
+fn software_auto_codec(usable: UsableCodecs, av1_software_allowed: bool) -> CodecFormat {
+    if usable.av1 && av1_software_allowed {
+        CodecFormat::AV1
+    } else if usable.vp9 {
+        CodecFormat::VP9
+    } else if usable.vp8 {
+        CodecFormat::VP8
+    } else {
+        CodecFormat::VP9
+    }
+}
+
+fn auto_codec_for_usable(usable: UsableCodecs, av1_software_allowed: bool) -> CodecFormat {
+    if usable.av1_hardware {
+        CodecFormat::AV1
+    } else if usable.h265 {
+        CodecFormat::H265
+    } else if usable.h264 {
+        CodecFormat::H264
+    } else {
+        software_auto_codec(usable, av1_software_allowed)
     }
 }
 
@@ -251,6 +277,7 @@ impl Encoder {
         }
 
         let vp8_useable = decodings.len() > 0 && decodings.iter().all(|(_, s)| s.ability_vp8 > 0);
+        let vp9_useable = decodings.len() > 0 && decodings.iter().all(|(_, s)| s.ability_vp9 > 0);
         let av1_useable = decodings.len() > 0
             && decodings.iter().all(|(_, s)| s.ability_av1 > 0)
             && !disable_av1();
@@ -276,11 +303,17 @@ impl Encoder {
             }
         }
         #[allow(unused_mut)]
+        let mut av1hw_encoding: Option<String> = None;
+        #[allow(unused_mut)]
         let mut h264hw_encoding: Option<String> = None;
         #[allow(unused_mut)]
         let mut h265hw_encoding: Option<String> = None;
         #[cfg(feature = "hwcodec")]
         if enable_hwcodec_option() {
+            if av1_useable {
+                av1hw_encoding =
+                    HwRamEncoder::try_get(CodecFormat::AV1).map_or(None, |c| Some(c.name));
+            }
             if _all_support_h264_decoding {
                 h264hw_encoding =
                     HwRamEncoder::try_get(CodecFormat::H264).map_or(None, |c| Some(c.name));
@@ -290,6 +323,7 @@ impl Encoder {
                     HwRamEncoder::try_get(CodecFormat::H265).map_or(None, |c| Some(c.name));
             }
         }
+        let av1_hw_useable = av1_useable && av1hw_encoding.is_some();
         let h264_useable =
             _all_support_h264_decoding && (h264vram_encoding || h264hw_encoding.is_some());
         let h265_useable =
@@ -297,7 +331,9 @@ impl Encoder {
         let mut format = ENCODE_CODEC_FORMAT.lock().unwrap();
         let usable = UsableCodecs {
             vp8: vp8_useable,
+            vp9: vp9_useable,
             av1: av1_useable,
+            av1_hardware: av1_hw_useable,
             h264: h264_useable,
             h265: h265_useable,
         };
@@ -309,33 +345,15 @@ impl Encoder {
             ..Default::default()
         });
 
-        // auto: h265 > h264 > av1/vp9/vp8
+        // auto: hardware AV1 > H265 > H264, then software AV1 > VP9 > VP8.
         let av1_test = Config::get_option(hbb_common::config::keys::OPTION_AV1_TEST) != "N";
-        let mut auto_codec = if av1_useable && av1_test {
-            CodecFormat::AV1
-        } else {
-            CodecFormat::VP9
-        };
-        if h264_useable {
-            auto_codec = CodecFormat::H264;
-        }
-        if h265_useable {
-            auto_codec = CodecFormat::H265;
-        }
-        if auto_codec == CodecFormat::VP9 || auto_codec == CodecFormat::AV1 {
-            let mut system = System::new();
-            system.refresh_memory();
-            if vp8_useable && system.total_memory() <= 4 * 1024 * 1024 * 1024 {
-                // 4 Gb
-                auto_codec = CodecFormat::VP8
-            }
-        }
+        let auto_codec = auto_codec_for_usable(usable, av1_test);
 
         let preference = preferred_explicit_codec(&decodings, usable).unwrap_or(PreferCodec::Auto);
         *format = codec_for_preference(preference, auto_codec);
         if decodings.len() > 0 {
             log::info!(
-                "usable: vp8={vp8_useable}, av1={av1_useable}, h264={h264_useable}, h265={h265_useable}",
+                "usable: vp8={vp8_useable}, vp9={vp9_useable}, av1={av1_useable}, av1_hw={av1_hw_useable}, h264={h264_useable}, h265={h265_useable}",
             );
             log::info!(
                 "connection count: {}, used preference: {:?}, encoder: {:?}",
@@ -1317,7 +1335,9 @@ mod tests {
     fn all_usable_codecs() -> UsableCodecs {
         UsableCodecs {
             vp8: true,
+            vp9: true,
             av1: true,
+            av1_hardware: true,
             h264: true,
             h265: true,
         }
@@ -1368,11 +1388,11 @@ mod tests {
 
     #[test]
     fn codec_preference_tie_uses_stable_order() {
-        let decodings = decodings(&[PreferCodec::H265, PreferCodec::AV1]);
+        let decodings = decodings(&[PreferCodec::VP9, PreferCodec::H264]);
 
         assert_eq!(
             preferred_explicit_codec(&decodings, all_usable_codecs()),
-            Some(PreferCodec::AV1)
+            Some(PreferCodec::H264)
         );
     }
 
@@ -1392,6 +1412,78 @@ mod tests {
             codec_for_preference(PreferCodec::Auto, CodecFormat::H265),
             CodecFormat::H265
         );
+    }
+
+    #[test]
+    fn auto_codec_prefers_hardware_before_software() {
+        assert_eq!(
+            auto_codec_for_usable(all_usable_codecs(), true),
+            CodecFormat::AV1
+        );
+
+        assert_eq!(
+            auto_codec_for_usable(
+                UsableCodecs {
+                    av1_hardware: false,
+                    ..all_usable_codecs()
+                },
+                true
+            ),
+            CodecFormat::H265
+        );
+
+        assert_eq!(
+            auto_codec_for_usable(
+                UsableCodecs {
+                    av1_hardware: false,
+                    h265: false,
+                    ..all_usable_codecs()
+                },
+                true
+            ),
+            CodecFormat::H264
+        );
+    }
+
+    #[test]
+    fn auto_codec_uses_software_order_after_hardware() {
+        let software_only = UsableCodecs {
+            av1_hardware: false,
+            h264: false,
+            h265: false,
+            ..all_usable_codecs()
+        };
+
+        assert_eq!(auto_codec_for_usable(software_only, true), CodecFormat::AV1);
+        assert_eq!(
+            auto_codec_for_usable(software_only, false),
+            CodecFormat::VP9
+        );
+        assert_eq!(
+            auto_codec_for_usable(
+                UsableCodecs {
+                    vp9: false,
+                    ..software_only
+                },
+                false
+            ),
+            CodecFormat::VP8
+        );
+    }
+
+    #[test]
+    fn forced_software_codec_keeps_hardware_available() {
+        let decodings = decodings(&[PreferCodec::VP9]);
+        let usable = all_usable_codecs();
+        let preference = preferred_explicit_codec(&decodings, usable).unwrap_or(PreferCodec::Auto);
+
+        assert_eq!(
+            codec_for_preference(preference, CodecFormat::AV1),
+            CodecFormat::VP9
+        );
+        assert!(usable.av1_hardware);
+        assert!(usable.h265);
+        assert!(usable.h264);
     }
 
     #[test]
