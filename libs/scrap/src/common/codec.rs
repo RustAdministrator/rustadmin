@@ -448,11 +448,30 @@ impl Encoder {
 
     pub fn backend_label(config: &EncoderCfg) -> &'static str {
         match config {
-            EncoderCfg::VPX(_) | EncoderCfg::AOM(_) => "Software",
+            EncoderCfg::VPX(vpx) => match vpx.codec {
+                VpxVideoCodecId::VP8 => "Software libvpx VP8",
+                VpxVideoCodecId::VP9 => "Software libvpx VP9",
+            },
+            EncoderCfg::AOM(_) => "Software libaom AV1",
             #[cfg(feature = "hwcodec")]
-            EncoderCfg::HWRAM(_) => "HWRAM",
+            EncoderCfg::HWRAM(hw) => {
+                let name = hw.name.as_str();
+                if name.contains("_nvenc") {
+                    "Hardware NVIDIA NVENC via FFmpeg"
+                } else if name.contains("_qsv") {
+                    "Hardware Intel QSV via FFmpeg"
+                } else if name.contains("_amf") {
+                    "Hardware AMD AMF via FFmpeg"
+                } else if name.contains("videotoolbox") {
+                    "Hardware VideoToolbox via FFmpeg"
+                } else if name.contains("mediacodec") {
+                    "Hardware MediaCodec via FFmpeg"
+                } else {
+                    "Hardware encoder via FFmpeg"
+                }
+            }
             #[cfg(feature = "vram")]
-            EncoderCfg::VRAM(_) => "VRAM",
+            EncoderCfg::VRAM(_) => "Hardware Direct3D texture encoder",
         }
     }
 }
@@ -691,21 +710,21 @@ impl Decoder {
         match self.format {
             CodecFormat::VP8 => {
                 if self.vp8.is_some() {
-                    "libvpx"
+                    "Software libvpx"
                 } else {
                     "unavailable"
                 }
             }
             CodecFormat::VP9 => {
                 if self.vp9.is_some() {
-                    "libvpx"
+                    "Software libvpx"
                 } else {
                     "unavailable"
                 }
             }
             CodecFormat::AV1 => {
                 if self.av1.is_some() {
-                    "libaom"
+                    "Software libaom"
                 } else {
                     "unavailable"
                 }
@@ -713,30 +732,30 @@ impl Decoder {
             CodecFormat::H264 => {
                 #[cfg(feature = "vram")]
                 if self.h264_vram.is_some() {
-                    return "vram";
+                    return "Hardware Direct3D texture decoder";
                 }
                 #[cfg(feature = "hwcodec")]
-                if self.h264_ram.is_some() {
-                    return "hwcodec";
+                if let Some(decoder) = self.h264_ram.as_ref() {
+                    return hw_decoder_backend_label(decoder);
                 }
                 #[cfg(feature = "mediacodec")]
                 if self.h264_media_codec.is_some() {
-                    return "mediacodec";
+                    return "Hardware Android MediaCodec";
                 }
                 "unavailable"
             }
             CodecFormat::H265 => {
                 #[cfg(feature = "vram")]
                 if self.h265_vram.is_some() {
-                    return "vram";
+                    return "Hardware Direct3D texture decoder";
                 }
                 #[cfg(feature = "hwcodec")]
-                if self.h265_ram.is_some() {
-                    return "hwcodec";
+                if let Some(decoder) = self.h265_ram.as_ref() {
+                    return hw_decoder_backend_label(decoder);
                 }
                 #[cfg(feature = "mediacodec")]
                 if self.h265_media_codec.is_some() {
-                    return "mediacodec";
+                    return "Hardware Android MediaCodec";
                 }
                 "unavailable"
             }
@@ -961,6 +980,24 @@ impl Decoder {
             Chroma::I420
         };
         (codec, chroma)
+    }
+}
+
+#[cfg(feature = "hwcodec")]
+fn hw_decoder_backend_label(decoder: &HwRamDecoder) -> &'static str {
+    use hwcodec::ffmpeg::AVHWDeviceType;
+
+    match decoder.info.hwdevice {
+        AVHWDeviceType::AV_HWDEVICE_TYPE_NONE => "Software FFmpeg",
+        AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA => "Hardware FFmpeg D3D11VA",
+        AVHWDeviceType::AV_HWDEVICE_TYPE_DXVA2 => "Hardware FFmpeg DXVA2",
+        AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA => "Hardware FFmpeg CUDA",
+        AVHWDeviceType::AV_HWDEVICE_TYPE_QSV => "Hardware FFmpeg QSV",
+        AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI => "Hardware FFmpeg VAAPI",
+        AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX => "Hardware FFmpeg VideoToolbox",
+        AVHWDeviceType::AV_HWDEVICE_TYPE_MEDIACODEC => "Hardware FFmpeg MediaCodec",
+        AVHWDeviceType::AV_HWDEVICE_TYPE_VULKAN => "Hardware FFmpeg Vulkan",
+        _ => "Hardware FFmpeg decoder",
     }
 }
 

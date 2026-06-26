@@ -620,14 +620,14 @@ class QualityMonitor extends StatelessWidget {
                                 "Delay",
                                 "${qualityMonitorModel.data.delay == null ? '-' : (qualityMonitorModel.data.fps ?? "").replaceAll(' ', '').replaceAll('0', '').isEmpty ? 0 : qualityMonitorModel.data.delay}ms",
                                 rightColor: Colors.green),
-                            _row("Conn",
+                            _row("Path",
                                 qualityMonitorModel.data.connectionType ?? '-'),
                             if (qualityMonitorModel.extendedDetails)
                               _row("Direct",
                                   qualityMonitorModel.data.direct ?? '-'),
                             _section("QoS"),
                             _row("FPS", qualityMonitorModel.data.fps ?? '-'),
-                            _row("Target Bitrate",
+                            _row("Bitrate",
                                 "${qualityMonitorModel.data.targetBitrate ?? '-'}kb"),
                             _row("Codec",
                                 qualityMonitorModel.data.codecFormat ?? '-'),
@@ -635,22 +635,22 @@ class QualityMonitor extends StatelessWidget {
                                 qualityMonitorModel.data.chroma ?? '-'),
                             if (qualityMonitorModel.extendedDetails) ...[
                               _section("Remote"),
-                              _row("HostVer",
+                              _row("Host Ver",
                                   qualityMonitorModel.data.hostVersion ?? '-'),
                               _row(
-                                  "Capture",
+                                  "Capture API",
                                   qualityMonitorModel.data.captureBackend ??
                                       '-'),
                               _row(
-                                  "Encoder",
+                                  "Encoder API",
                                   qualityMonitorModel.data.encoderBackend ??
                                       '-'),
-                              _row("Input",
+                              _row("Encoder Input",
                                   qualityMonitorModel.data.encoderInput ?? '-'),
-                              _row("Threads",
+                              _row("Video Threads",
                                   qualityMonitorModel.data.videoThreads ?? '-'),
                               _row(
-                                  "Res",
+                                  "Frame Size",
                                   qualityMonitorModel.data.frameResolution ??
                                       '-'),
                               _row("FPS Mode",
@@ -659,15 +659,15 @@ class QualityMonitor extends StatelessWidget {
                                   qualityMonitorModel.data.autoFps ?? '-'),
                               _section("Local"),
                               _row(
-                                  "ClientVer",
+                                  "Client Ver",
                                   qualityMonitorModel.data.clientVersion ??
                                       '-'),
-                              _row("Decoder",
+                              _row("Decoder API",
                                   qualityMonitorModel.data.decoder ?? '-'),
-                              _row("Renderer",
+                              _row("Renderer Path",
                                   qualityMonitorModel.data.renderer ?? '-'),
                               _row(
-                                  "Texture",
+                                  "Texture Render",
                                   qualityMonitorModel.data.textureRender ??
                                       '-'),
                               _row("Decode FPS",

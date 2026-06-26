@@ -852,9 +852,9 @@ fn run(vs: VideoService) -> ResultType<()> {
     let encoder_input_texture = false;
     let encoder_backend = Encoder::backend_label(&encoder_cfg);
     let encoder_input = if encoder_input_texture {
-        "Texture"
+        "GPU texture"
     } else {
-        "YUV"
+        "CPU YUV frame"
     };
     log::info!(
         "diag video service encoder ready: service={}, source={:?}, display_idx={}, negotiated={:?}, cfg={:?}, capture_backend={}, encoder_backend={}, encoder_input={}, hardware={}, input_texture={}, bitrate={}, use_i444={}, quality={:?}",

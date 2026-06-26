@@ -140,9 +140,9 @@ pub trait TraitCapturer {
     #[cfg(windows)]
     fn capture_backend(&self) -> &'static str {
         if self.is_gdi() {
-            "GDI"
+            "Windows GDI"
         } else if self.is_cpu_only() {
-            "CPU"
+            "CPU capture"
         } else {
             "Unknown"
         }

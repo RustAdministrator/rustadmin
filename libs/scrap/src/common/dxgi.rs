@@ -55,9 +55,9 @@ impl TraitCapturer for Capturer {
 
     fn capture_backend(&self) -> &'static str {
         if self.inner.is_gdi() {
-            "GDI"
+            "Windows GDI"
         } else {
-            "DXGI"
+            "DXGI Desktop Duplication"
         }
     }
 
@@ -259,7 +259,7 @@ impl TraitCapturer for CapturerMag {
     }
 
     fn capture_backend(&self) -> &'static str {
-        "MAG"
+        "Windows Magnification API"
     }
 
     fn set_gdi(&mut self) -> bool {
@@ -332,7 +332,7 @@ impl TraitCapturer for CapturerWgc {
     }
 
     fn capture_backend(&self) -> &'static str {
-        "WGC"
+        "Windows Graphics Capture"
     }
 
     fn set_gdi(&mut self) -> bool {

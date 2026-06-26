@@ -257,7 +257,7 @@ pub mod server {
         let mut would_block_samples = 0u32;
         let mut primary_frames = 0u32;
         let mut primary_no_frame_since: Option<Instant> = None;
-        let mut primary_backend = "WGC";
+        let mut primary_backend = "Windows Graphics Capture";
         let mut primary_is_gdi = false;
         let mut gdi_fallback: Option<Box<dyn TraitCapturer>> = None;
         let mut gdi_fallback_frames = 0u32;
@@ -273,9 +273,13 @@ pub mod server {
                 || active_display != command.current_display;
             if recreate {
                 let new_backend = match create_wgc_capturer(command.current_display) {
-                    Ok((new_capturer, new_width, new_height)) => {
-                        (new_capturer, new_width, new_height, "WGC", false)
-                    }
+                    Ok((new_capturer, new_width, new_height)) => (
+                        new_capturer,
+                        new_width,
+                        new_height,
+                        "Windows Graphics Capture",
+                        false,
+                    ),
                     Err(wgc_err) => {
                         log::warn!(
                             "User capture helper failed to create WGC capturer, trying GDI fallback: {}",
@@ -283,7 +287,7 @@ pub mod server {
                         );
                         match create_gdi_capturer(command.current_display) {
                             Ok((new_capturer, new_width, new_height)) => {
-                                (new_capturer, new_width, new_height, "GDI", true)
+                                (new_capturer, new_width, new_height, "Windows GDI", true)
                             }
                             Err(gdi_err) => {
                                 log::warn!(
@@ -742,7 +746,7 @@ pub mod client {
         }
 
         fn capture_backend(&self) -> &'static str {
-            "WGC"
+            "Windows Graphics Capture"
         }
 
         fn set_gdi(&mut self) -> bool {

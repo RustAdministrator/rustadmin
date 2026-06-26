@@ -65,6 +65,44 @@ Select-String "$serverLog\*.log","$serverLog\*\*.log" `
   -Pattern "diag conn run loop|supported_decoding|diag host selected encoder|diag first video frame|Connection closed"
 ```
 
+## Quality Monitor Naming
+
+The in-session Quality Monitor should stay compact. When names are shown in
+logs, diagnostics, or future help text, use explicit terms instead of internal
+shorthand such as `HWRAM` or `VRAM`.
+
+| Area | Display name | Meaning |
+| --- | --- | --- |
+| Network | Path | Current connection path, such as direct TCP, relay, or other transport. |
+| Network | Video ACK | Whether the video stream is using explicit frame/chunk acknowledgement. |
+| QoS | Codec | Negotiated video codec, for example H.265 / HEVC. |
+| QoS | Chroma | Pixel chroma format used by the video stream, for example I420 or I444. |
+| Remote | Capture API | Host-side screen capture API, for example Windows Graphics Capture, DXGI, GDI, PipeWire, or CGDisplayStream. |
+| Remote | Capture mode | Host-side capture process path, for example service, user helper, or portable helper. |
+| Remote | Encoder type | Hardware or software encoder. |
+| Remote | Encoder API | Concrete encoder API/library, for example NVIDIA NVENC via FFmpeg, Intel QSV, AMD AMF, VideoToolbox, or libvpx/libaom. |
+| Remote | Encoder name | Exact encoder implementation reported by the host, for example `hevc_nvenc`. |
+| Remote | Encoder input | Data passed into the encoder, for example CPU YUV frame or GPU texture. |
+| Local | Decoder type | Hardware or software decoder. |
+| Local | Decoder API | Concrete decoder API/library, for example FFmpeg D3D11VA, VideoToolbox, MediaCodec, or software FFmpeg. |
+| Local | Decoder output | Data produced by the decoder, for example CPU pixel buffer, Android surface, or GPU texture. |
+| Local | Renderer path | Client-side display path, for example Flutter pixel-buffer render or Direct3D texture render. |
+
+Example interpretation:
+
+```text
+Capture API       Windows Graphics Capture
+Capture mode      User helper, shared-memory transfer
+Encoder type      Hardware
+Encoder API       Hardware NVIDIA NVENC via FFmpeg
+Encoder name      hevc_nvenc
+Encoder input     CPU YUV frame
+Decoder type      Hardware
+Decoder API       Hardware FFmpeg D3D11VA
+Decoder output    CPU pixel buffer
+Renderer path     Flutter pixel-buffer render
+```
+
 Portable mode uses the same rule: logs go under the account that owns that
 portable/helper process. Do not assume a build-tree path; check
 `process logging initialized` or `server system info` in the logs.
