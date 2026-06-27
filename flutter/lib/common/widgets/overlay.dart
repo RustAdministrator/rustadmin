@@ -568,7 +568,50 @@ class QualityMonitor extends StatelessWidget {
       {Key? key, this.onGripPanUpdate})
       : super(key: key);
 
+  String _pipelineLabel(String? value) {
+    if (value == null || value.isEmpty) {
+      return '-';
+    }
+    switch (value) {
+      case 'Windows Graphics Capture':
+        return 'WGC';
+      case 'DXGI Desktop Duplication':
+        return 'DXGI';
+      case 'Windows Magnification API':
+        return 'Magnification';
+      case 'Windows GDI':
+        return 'GDI';
+      case 'Hardware NVIDIA NVENC via FFmpeg':
+        return 'NVENC';
+      case 'Hardware Intel QSV via FFmpeg':
+        return 'QSV';
+      case 'Hardware AMD AMF via FFmpeg':
+        return 'AMF';
+      case 'Hardware VideoToolbox via FFmpeg':
+        return 'VideoToolbox';
+      case 'Hardware FFmpeg D3D11VA':
+        return 'D3D11VA';
+      case 'Hardware FFmpeg DXVA2':
+        return 'DXVA2';
+      case 'Hardware FFmpeg CUDA':
+        return 'CUDA';
+      case 'Hardware FFmpeg VAAPI':
+        return 'VAAPI';
+      case 'Hardware FFmpeg Vulkan':
+        return 'Vulkan';
+      case 'Software FFmpeg decoder':
+        return 'FFmpeg SW';
+      case 'rgba':
+        return 'CPU RGBA';
+      case 'texture':
+        return 'GPU texture';
+      default:
+        return value;
+    }
+  }
+
   Widget _row(String info, String? value, {Color? rightColor}) {
+    final valueText = value ?? '';
     return Row(
       children: [
         Expanded(
@@ -580,7 +623,7 @@ class QualityMonitor extends StatelessWidget {
         Spacer(flex: 1),
         Expanded(
             flex: 8,
-            child: AutoSizeText(value ?? '',
+            child: AutoSizeText(valueText,
                 style: TextStyle(color: rightColor ?? Colors.white),
                 maxLines: 1)),
       ],
@@ -606,7 +649,10 @@ class QualityMonitor extends StatelessWidget {
                   children: [
                     IgnorePointer(
                       child: Container(
-                        constraints: BoxConstraints(maxWidth: 200),
+                        constraints: BoxConstraints(
+                          maxWidth:
+                              qualityMonitorModel.extendedDetails ? 240 : 200,
+                        ),
                         padding: const EdgeInsets.all(8),
                         color: MyTheme.canvasColor.withAlpha(150),
                         child: Column(
@@ -639,12 +685,12 @@ class QualityMonitor extends StatelessWidget {
                                   qualityMonitorModel.data.hostVersion ?? '-'),
                               _row(
                                   "Capture API",
-                                  qualityMonitorModel.data.captureBackend ??
-                                      '-'),
+                                  _pipelineLabel(
+                                      qualityMonitorModel.data.captureBackend)),
                               _row(
                                   "Encoder API",
-                                  qualityMonitorModel.data.encoderBackend ??
-                                      '-'),
+                                  _pipelineLabel(
+                                      qualityMonitorModel.data.encoderBackend)),
                               _row("Encoder Input",
                                   qualityMonitorModel.data.encoderInput ?? '-'),
                               _row("Video Threads",
@@ -663,9 +709,11 @@ class QualityMonitor extends StatelessWidget {
                                   qualityMonitorModel.data.clientVersion ??
                                       '-'),
                               _row("Decoder API",
-                                  qualityMonitorModel.data.decoder ?? '-'),
+                                  _pipelineLabel(
+                                      qualityMonitorModel.data.decoder)),
                               _row("Renderer Path",
-                                  qualityMonitorModel.data.renderer ?? '-'),
+                                  _pipelineLabel(
+                                      qualityMonitorModel.data.renderer)),
                               _row(
                                   "Texture Render",
                                   qualityMonitorModel.data.textureRender ??
