@@ -826,6 +826,48 @@ fn try_set_magnifier_fallback(c: &mut CapturerInfo, reason: &str) -> bool {
 }
 
 #[cfg(windows)]
+fn try_recreate_magnifier_capture(c: &mut CapturerInfo, reason: &str) -> bool {
+    if c._capturer_privacy_mode_id != INVALID_PRIVACY_MODE_CONN_ID || !c.is_mag() {
+        return false;
+    }
+    let prelogin = crate::platform::windows::is_prelogin();
+    let locked_service = crate::platform::is_root() && crate::platform::windows::is_locked();
+    if prelogin || locked_service {
+        log::info!(
+            "capture magnifier recreate skipped: reason={}, prelogin={}, locked_service={}",
+            reason,
+            prelogin,
+            locked_service
+        );
+        return false;
+    }
+    match scrap::CapturerMag::new(c.origin, c.width, c.height) {
+        Ok(mag) => {
+            c.capturer = Box::new(mag);
+            log::info!(
+                "capture magnifier recreated: reason={}, origin={:?}, width={}, height={}",
+                reason,
+                c.origin,
+                c.width,
+                c.height
+            );
+            true
+        }
+        Err(err) => {
+            log::warn!(
+                "capture magnifier recreate failed: reason={}, origin={:?}, width={}, height={}, err={}",
+                reason,
+                c.origin,
+                c.width,
+                c.height,
+                err
+            );
+            false
+        }
+    }
+}
+
+#[cfg(windows)]
 fn try_set_gdi_fallback(c: &mut CapturerInfo, reason: &str) -> bool {
     if c.is_gdi() {
         return true;
@@ -1036,6 +1078,8 @@ fn run(vs: VideoService) -> ResultType<()> {
     #[cfg(windows)]
     let mut user_capture_helper_no_frame_since: Option<Instant> = None;
     #[cfg(windows)]
+    let mut mag_recreated_after_desktop_change = false;
+    #[cfg(windows)]
     log::info!(
         "gdi: {}, mag: {}, user_helper: {}, cpu_only: {}",
         c.is_gdi(),
@@ -1119,9 +1163,22 @@ fn run(vs: VideoService) -> ResultType<()> {
         }
         #[cfg(windows)]
         {
-            if crate::platform::windows::desktop_changed()
-                && !crate::portable_service::client::running()
-            {
+            let desktop_changed = crate::platform::windows::desktop_changed();
+            let portable_service_running = crate::portable_service::client::running();
+            if desktop_changed && portable_service_running && c.is_mag() {
+                if !mag_recreated_after_desktop_change {
+                    if try_set_gdi_fallback(&mut c, "desktop_changed_mag_gdi") {
+                        log::info!("desktop changed while using magnifier; fall back to gdi");
+                        mag_recreated_after_desktop_change = true;
+                        continue;
+                    }
+                    let _ = try_recreate_magnifier_capture(&mut c, "desktop_changed_mag_recreate");
+                    mag_recreated_after_desktop_change = true;
+                }
+            } else {
+                mag_recreated_after_desktop_change = false;
+            }
+            if desktop_changed && !portable_service_running {
                 bail!("Desktop changed");
             }
         }
