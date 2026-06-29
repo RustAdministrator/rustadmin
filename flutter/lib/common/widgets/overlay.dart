@@ -580,7 +580,7 @@ class QualityMonitor extends StatelessWidget {
       case 'DXGI Desktop Duplication':
         return 'DXGI';
       case 'Windows Magnification API':
-        return 'Magnification';
+        return 'WinMag CPU';
       case 'Windows GDI':
         return 'GDI';
       case 'Windows GDI Helper (CPU)':

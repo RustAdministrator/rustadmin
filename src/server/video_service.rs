@@ -673,11 +673,11 @@ fn get_capturer_monitor(
             && is_current_privacy_mode_impl(PRIVACY_MODE_IMPL_WIN_MAG)
         {
             if crate::platform::windows::is_prelogin()
-                || crate::platform::windows::is_locked()
                 || crate::platform::windows::desktop_changed()
+                || (crate::platform::is_root() && crate::platform::windows::is_locked())
             {
                 log::warn!(
-                    "WinMag privacy capture disabled on logon/locked/changed desktop; using normal service capture"
+                    "WinMag privacy capture disabled on prelogin/service-locked/changed desktop; using normal service capture"
                 );
                 capturer_privacy_mode_id = INVALID_PRIVACY_MODE_CONN_ID;
             }
@@ -768,6 +768,115 @@ fn get_capturer(
     match source {
         VideoSource::Monitor => get_capturer_monitor(current, portable_service_running),
         VideoSource::Camera => get_capturer_camera(current),
+    }
+}
+
+#[cfg(windows)]
+fn can_try_magnifier_fallback(reason: &str) -> bool {
+    let prelogin = crate::platform::windows::is_prelogin();
+    let locked = crate::platform::windows::is_locked();
+    let desktop_changed = crate::platform::windows::desktop_changed();
+    let local_system = crate::platform::is_root();
+    let can_try = !prelogin && !desktop_changed && !(local_system && locked);
+    if !can_try {
+        log::info!(
+            "capture magnifier fallback skipped: reason={}, prelogin={}, locked={}, desktop_changed={}, local_system={}",
+            reason,
+            prelogin,
+            locked,
+            desktop_changed,
+            local_system
+        );
+    }
+    can_try
+}
+
+#[cfg(windows)]
+fn try_set_magnifier_fallback(c: &mut CapturerInfo, reason: &str) -> bool {
+    if c._capturer_privacy_mode_id != INVALID_PRIVACY_MODE_CONN_ID || c.is_mag() {
+        return false;
+    }
+    if !can_try_magnifier_fallback(reason) {
+        return false;
+    }
+    match scrap::CapturerMag::new(c.origin, c.width, c.height) {
+        Ok(mag) => {
+            c.capturer = Box::new(mag);
+            log::info!(
+                "capture magnifier fallback enabled: reason={}, origin={:?}, width={}, height={}",
+                reason,
+                c.origin,
+                c.width,
+                c.height
+            );
+            true
+        }
+        Err(err) => {
+            log::warn!(
+                "capture magnifier fallback failed: reason={}, origin={:?}, width={}, height={}, err={}",
+                reason,
+                c.origin,
+                c.width,
+                c.height,
+                err
+            );
+            false
+        }
+    }
+}
+
+#[cfg(windows)]
+fn try_set_gdi_fallback(c: &mut CapturerInfo, reason: &str) -> bool {
+    if c.is_gdi() {
+        return true;
+    }
+    if c.set_gdi() {
+        log::info!("capture gdi fallback enabled: reason={}", reason);
+        return true;
+    }
+
+    let mut displays = match Display::all() {
+        Ok(displays) => displays,
+        Err(err) => {
+            log::warn!(
+                "capture gdi fallback failed to enumerate displays: reason={}, err={}",
+                reason,
+                err
+            );
+            return false;
+        }
+    };
+    if displays.len() <= c.current {
+        log::warn!(
+            "capture gdi fallback failed: reason={}, current={}, display_count={}",
+            reason,
+            c.current,
+            displays.len()
+        );
+        return false;
+    }
+    let display = displays.remove(c.current);
+    match scrap::Capturer::new(display) {
+        Ok(mut capturer) => {
+            if !capturer.set_gdi() {
+                log::warn!(
+                    "capture gdi fallback failed to enable gdi on recreated capturer: reason={}",
+                    reason
+                );
+                return false;
+            }
+            c.capturer = Box::new(capturer);
+            log::info!("capture gdi fallback enabled: reason={}", reason);
+            true
+        }
+        Err(err) => {
+            log::warn!(
+                "capture gdi fallback failed to recreate capturer: reason={}, err={}",
+                reason,
+                err
+            );
+            false
+        }
     }
 }
 
@@ -927,7 +1036,13 @@ fn run(vs: VideoService) -> ResultType<()> {
     #[cfg(windows)]
     let mut user_capture_helper_no_frame_since: Option<Instant> = None;
     #[cfg(windows)]
-    log::info!("gdi: {}, cpu_only: {}", c.is_gdi(), c.is_cpu_only());
+    log::info!(
+        "gdi: {}, mag: {}, user_helper: {}, cpu_only: {}",
+        c.is_gdi(),
+        c.is_mag(),
+        c.is_user_capture_helper(),
+        c.is_cpu_only()
+    );
     #[cfg(windows)]
     start_uac_elevation_check();
 
@@ -1149,7 +1264,7 @@ fn run(vs: VideoService) -> ResultType<()> {
             Err(ref e) if e.kind() == WouldBlock => {
                 host_diag.would_block += 1;
                 #[cfg(windows)]
-                if c.is_cpu_only() && first_frame {
+                if c.is_user_capture_helper() && first_frame {
                     let first_no_frame = *user_capture_helper_no_frame_since.get_or_insert(now);
                     if first_no_frame.elapsed() >= USER_CAPTURE_HELPER_STARTUP_TIMEOUT {
                         USER_CAPTURE_HELPER_DISABLED.store(true, Ordering::Relaxed);
@@ -1163,9 +1278,17 @@ fn run(vs: VideoService) -> ResultType<()> {
                 #[cfg(windows)]
                 if try_gdi > 0 && !c.is_gdi() && !c.is_cpu_only() {
                     if try_gdi > 3 {
-                        c.set_gdi();
+                        if try_set_magnifier_fallback(&mut c, "no_image_mag") {
+                            try_gdi = 0;
+                            log::info!("No image, fall back to magnifier capture");
+                            continue;
+                        }
+                        if try_set_gdi_fallback(&mut c, "no_image") {
+                            log::info!("No image, fall back to gdi");
+                        } else {
+                            log::warn!("No image, failed to fall back to gdi");
+                        }
                         try_gdi = 0;
-                        log::info!("No image, fall back to gdi");
                     }
                     try_gdi += 1;
                 }
@@ -1217,7 +1340,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                 }
 
                 #[cfg(windows)]
-                if c.is_cpu_only() {
+                if c.is_user_capture_helper() {
                     USER_CAPTURE_HELPER_DISABLED.store(true, Ordering::Relaxed);
                     log::warn!(
                         "User capture helper returned capture error; switching to direct dxgi|gdi: {:?}",
@@ -1227,10 +1350,25 @@ fn run(vs: VideoService) -> ResultType<()> {
                 }
 
                 #[cfg(windows)]
+                if c.is_mag() {
+                    if try_set_gdi_fallback(&mut c, "mag_error") {
+                        log::info!("magnifier capture error, fall back to gdi: {:?}", err);
+                        continue;
+                    }
+                    return Err(err.into());
+                }
+
+                #[cfg(windows)]
                 if !c.is_gdi() {
-                    c.set_gdi();
-                    log::info!("dxgi error, fall back to gdi: {:?}", err);
-                    continue;
+                    if try_set_magnifier_fallback(&mut c, "capture_error_mag") {
+                        log::info!("capture error, fall back to magnifier: {:?}", err);
+                        continue;
+                    }
+                    if try_set_gdi_fallback(&mut c, "capture_error") {
+                        log::info!("dxgi error, fall back to gdi: {:?}", err);
+                        continue;
+                    }
+                    return Err(err.into());
                 }
                 return Err(err.into());
             }

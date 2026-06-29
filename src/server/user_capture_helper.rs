@@ -783,6 +783,10 @@ pub mod client {
             false
         }
 
+        fn is_user_capture_helper(&self) -> bool {
+            true
+        }
+
         fn is_cpu_only(&self) -> bool {
             true
         }

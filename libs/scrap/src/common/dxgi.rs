@@ -258,6 +258,10 @@ impl TraitCapturer for CapturerMag {
         false
     }
 
+    fn is_mag(&self) -> bool {
+        true
+    }
+
     fn is_cpu_only(&self) -> bool {
         true
     }

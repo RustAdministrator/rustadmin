@@ -134,6 +134,14 @@ pub trait TraitCapturer {
     #[cfg(windows)]
     fn is_gdi(&self) -> bool;
     #[cfg(windows)]
+    fn is_mag(&self) -> bool {
+        false
+    }
+    #[cfg(windows)]
+    fn is_user_capture_helper(&self) -> bool {
+        false
+    }
+    #[cfg(windows)]
     fn is_cpu_only(&self) -> bool {
         false
     }
