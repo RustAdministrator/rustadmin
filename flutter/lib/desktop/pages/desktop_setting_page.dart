@@ -2305,8 +2305,16 @@ class _DisplayState extends State<_Display> {
     final isOptFixed = isOptionFixed(kOptionCodecPreference);
     try {
       final Map codecsJson = jsonDecode(bind.mainSupportedHwdecodings());
+      final av1 = codecsJson['av1'] ?? false;
       final h264 = codecsJson['h264'] ?? false;
       final h265 = codecsJson['h265'] ?? false;
+      if (av1) {
+        hwRadios.add(_Radio(context,
+            value: 'av1-hw',
+            groupValue: groupValue,
+            label: 'AV1 HW',
+            onChanged: isOptFixed ? null : onChanged));
+      }
       if (h264) {
         hwRadios.add(_Radio(context,
             value: 'h264',

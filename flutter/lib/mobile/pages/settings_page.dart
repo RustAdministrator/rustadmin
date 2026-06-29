@@ -1298,6 +1298,7 @@ class __DisplayPageState extends State<_DisplayPage> {
   @override
   Widget build(BuildContext context) {
     final Map codecsJson = jsonDecode(bind.mainSupportedHwdecodings());
+    final av1 = codecsJson['av1'] ?? false;
     final h264 = codecsJson['h264'] ?? false;
     final h265 = codecsJson['h265'] ?? false;
     var codecList = [
@@ -1305,6 +1306,7 @@ class __DisplayPageState extends State<_DisplayPage> {
       _RadioEntry('VP8', 'vp8'),
       _RadioEntry('VP9', 'vp9'),
       _RadioEntry('AV1', 'av1'),
+      if (av1) _RadioEntry('AV1 HW', 'av1-hw'),
       if (h264) _RadioEntry('H264', 'h264'),
       if (h265) _RadioEntry('H265', 'h265')
     ];

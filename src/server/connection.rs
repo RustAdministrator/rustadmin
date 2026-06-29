@@ -6181,6 +6181,7 @@ impl Connection {
         };
         if usable.vp8 != last.vp8
             || usable.av1 != last.av1
+            || usable.av1_hw != last.av1_hw
             || usable.h264 != last.h264
             || usable.h265 != last.h265
         {
@@ -6188,6 +6189,7 @@ impl Connection {
             let supported_encoding = SupportedEncoding {
                 vp8: usable.vp8,
                 av1: usable.av1,
+                av1_hw: usable.av1_hw,
                 h264: usable.h264,
                 h265: usable.h265,
                 ..last.clone()

@@ -1534,6 +1534,7 @@ String _normalizeCodecPreference(String value) {
     case 'vp8':
     case 'vp9':
     case 'av1':
+    case 'av1-hw':
     case 'h264':
     case 'h265':
       return value;
@@ -1673,6 +1674,7 @@ Future<void> _showConnectionPropertiesDialog(String id) async {
                           _stringMenuItem('vp8', 'VP8'),
                           _stringMenuItem('vp9', 'VP9'),
                           _stringMenuItem('av1', 'AV1'),
+                          _stringMenuItem('av1-hw', 'AV1 HW'),
                           _stringMenuItem('h264', 'H264'),
                           _stringMenuItem('h265', 'H265'),
                         ],

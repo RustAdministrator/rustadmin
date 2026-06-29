@@ -599,12 +599,36 @@ class QualityMonitor extends StatelessWidget {
         return 'VAAPI';
       case 'Hardware FFmpeg Vulkan':
         return 'Vulkan';
+      case 'Hardware FFmpeg decoder':
+        return 'FFmpeg HW';
+      case 'Hardware Android MediaCodec':
+        return 'MediaCodec';
       case 'Software FFmpeg decoder':
         return 'FFmpeg SW';
+      case 'Software FFmpeg':
+        return 'FFmpeg SW';
+      case 'Software libvpx':
+        return 'libvpx';
+      case 'Software libaom':
+        return 'libaom';
+      case 'Software libaom AV1':
+        return 'libaom AV1';
+      case 'Software libvpx VP8':
+        return 'libvpx VP8';
+      case 'Software libvpx VP9':
+        return 'libvpx VP9';
       case 'rgba':
         return 'CPU RGBA';
       case 'texture':
         return 'GPU texture';
+      case 'Hardware encoder via FFmpeg':
+        return 'FFmpeg HW';
+      case 'Hardware FFmpeg QSV':
+        return 'QSV';
+      case 'Hardware FFmpeg VideoToolbox':
+        return 'VideoToolbox';
+      case 'Hardware FFmpeg MediaCodec':
+        return 'MediaCodec';
       default:
         return value;
     }

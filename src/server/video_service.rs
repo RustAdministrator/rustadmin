@@ -1373,15 +1373,27 @@ fn get_encoder_config(
         }),
         CodecFormat::AV1 => {
             #[cfg(feature = "hwcodec")]
-            if let Some(hw) = HwRamEncoder::try_get(CodecFormat::AV1) {
-                return EncoderCfg::HWRAM(HwRamEncoderConfig {
-                    name: hw.name,
-                    mc_name: hw.mc_name,
-                    width: c.width,
-                    height: c.height,
-                    quality,
-                    keyframe_interval,
-                });
+            if Encoder::av1_hardware_allowed() {
+                if let Some(hw) = HwRamEncoder::try_get(CodecFormat::AV1) {
+                    return EncoderCfg::HWRAM(HwRamEncoderConfig {
+                        name: hw.name,
+                        mc_name: hw.mc_name,
+                        width: c.width,
+                        height: c.height,
+                        quality,
+                        keyframe_interval,
+                    });
+                }
+                if Encoder::av1_hardware_required() {
+                    log::warn!("AV1 hardware was requested but no hardware encoder is available");
+                    return EncoderCfg::VPX(VpxEncoderConfig {
+                        width: c.width as _,
+                        height: c.height as _,
+                        quality,
+                        codec: VpxVideoCodecId::VP9,
+                        keyframe_interval,
+                    });
+                }
             }
             EncoderCfg::AOM(AomEncoderConfig {
                 width: c.width as _,

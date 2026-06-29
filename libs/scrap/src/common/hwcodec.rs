@@ -353,6 +353,7 @@ impl HwRamDecoder {
                     info = Some(v);
                 }
             }
+            CodecFormat::AV1 => {}
             _ => {}
         }
         if enable_hwcodec_option() {
@@ -365,6 +366,11 @@ impl HwRamDecoder {
                 }
                 CodecFormat::H265 => {
                     if let Some(v) = best.h265 {
+                        info = Some(v);
+                    }
+                }
+                CodecFormat::AV1 => {
+                    if let Some(v) = best.av1 {
                         info = Some(v);
                     }
                 }

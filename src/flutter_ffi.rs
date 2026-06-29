@@ -1794,7 +1794,11 @@ pub fn main_has_vram() -> SyncReturn<bool> {
 
 pub fn main_supported_hwdecodings() -> SyncReturn<String> {
     let decoding = supported_hwdecodings();
-    let msg = HashMap::from([("h264", decoding.0), ("h265", decoding.1)]);
+    let msg = HashMap::from([
+        ("av1", decoding.0),
+        ("h264", decoding.1),
+        ("h265", decoding.2),
+    ]);
 
     SyncReturn(serde_json::ser::to_string(&msg).unwrap_or("".to_owned()))
 }
@@ -2048,8 +2052,14 @@ pub fn session_get_conn_session_id(session_id: SessionID) -> SyncReturn<String> 
 
 pub fn session_alternative_codecs(session_id: SessionID) -> String {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
-        let (vp8, av1, h264, h265) = session.alternative_codecs();
-        let msg = HashMap::from([("vp8", vp8), ("av1", av1), ("h264", h264), ("h265", h265)]);
+        let (vp8, av1, av1_hw, h264, h265) = session.alternative_codecs();
+        let msg = HashMap::from([
+            ("vp8", vp8),
+            ("av1", av1),
+            ("av1Hw", av1_hw),
+            ("h264", h264),
+            ("h265", h265),
+        ]);
         serde_json::ser::to_string(&msg).unwrap_or("".to_owned())
     } else {
         String::new()

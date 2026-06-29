@@ -552,7 +552,7 @@ impl<T: InvokeUiSession> Session<T> {
         true
     }
 
-    pub fn alternative_codecs(&self) -> (bool, bool, bool, bool) {
+    pub fn alternative_codecs(&self) -> (bool, bool, bool, bool, bool) {
         let luid = self.lc.read().unwrap().adapter_luid;
         let mark_unsupported = self.lc.read().unwrap().mark_unsupported.clone();
         let decoder = scrap::codec::Decoder::supported_decodings(
@@ -563,14 +563,16 @@ impl<T: InvokeUiSession> Session<T> {
         );
         let mut vp8 = decoder.ability_vp8 > 0;
         let mut av1 = decoder.ability_av1 > 0;
+        let mut av1_hw = decoder.ability_av1 > 0;
         let mut h264 = decoder.ability_h264 > 0;
         let mut h265 = decoder.ability_h265 > 0;
         let enc = &self.lc.read().unwrap().supported_encoding;
         vp8 = vp8 && enc.vp8;
         av1 = av1 && enc.av1;
+        av1_hw = av1_hw && enc.av1_hw;
         h264 = h264 && enc.h264;
         h265 = h265 && enc.h265;
-        (vp8, av1, h264, h265)
+        (vp8, av1, av1_hw, h264, h265)
     }
 
     pub fn update_supported_decodings(&self) {

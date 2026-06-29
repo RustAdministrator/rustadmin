@@ -41,6 +41,7 @@ use hbb_common::{
 lazy_static::lazy_static! {
     static ref PEER_DECODINGS: Arc<Mutex<HashMap<i32, SupportedDecoding>>> = Default::default();
     static ref ENCODE_CODEC_FORMAT: Arc<Mutex<CodecFormat>> = Arc::new(Mutex::new(CodecFormat::VP9));
+    static ref ENCODE_CODEC_PREFERENCE: Arc<Mutex<PreferCodec>> = Arc::new(Mutex::new(PreferCodec::Auto));
     static ref THREAD_LOG_TIME: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     static ref USABLE_ENCODING: Arc<Mutex<Option<SupportedEncoding>>> = Arc::new(Mutex::new(None));
 }
@@ -100,7 +101,8 @@ impl UsableCodecs {
             PreferCodec::Auto => true,
             PreferCodec::VP8 => self.vp8,
             PreferCodec::VP9 => self.vp9,
-            PreferCodec::AV1 => self.av1,
+            PreferCodec::AV1 | PreferCodec::AV1_SW => self.av1,
+            PreferCodec::AV1_HW => self.av1_hardware,
             PreferCodec::H264 => self.h264,
             PreferCodec::H265 => self.h265,
         }
@@ -109,6 +111,8 @@ impl UsableCodecs {
 
 fn explicit_codec_preference_order() -> &'static [PreferCodec] {
     &[
+        PreferCodec::AV1_HW,
+        PreferCodec::AV1_SW,
         PreferCodec::AV1,
         PreferCodec::H265,
         PreferCodec::H264,
@@ -143,7 +147,7 @@ fn codec_for_preference(preference: PreferCodec, auto_codec: CodecFormat) -> Cod
     match preference {
         PreferCodec::VP8 => CodecFormat::VP8,
         PreferCodec::VP9 => CodecFormat::VP9,
-        PreferCodec::AV1 => CodecFormat::AV1,
+        PreferCodec::AV1 | PreferCodec::AV1_SW | PreferCodec::AV1_HW => CodecFormat::AV1,
         PreferCodec::H264 => CodecFormat::H264,
         PreferCodec::H265 => CodecFormat::H265,
         PreferCodec::Auto => auto_codec,
@@ -192,6 +196,8 @@ pub struct Decoder {
     vp8: Option<VpxDecoder>,
     vp9: Option<VpxDecoder>,
     av1: Option<AomDecoder>,
+    #[cfg(feature = "hwcodec")]
+    av1_ram: Option<HwRamDecoder>,
     #[cfg(feature = "hwcodec")]
     h264_ram: Option<HwRamDecoder>,
     #[cfg(feature = "hwcodec")]
@@ -340,6 +346,7 @@ impl Encoder {
         *USABLE_ENCODING.lock().unwrap() = Some(SupportedEncoding {
             vp8: vp8_useable,
             av1: av1_useable,
+            av1_hw: av1_hw_useable,
             h264: h264_useable,
             h265: h265_useable,
             ..Default::default()
@@ -351,6 +358,7 @@ impl Encoder {
 
         let preference = preferred_explicit_codec(&decodings, usable).unwrap_or(PreferCodec::Auto);
         *format = codec_for_preference(preference, auto_codec);
+        *ENCODE_CODEC_PREFERENCE.lock().unwrap() = preference;
         if decodings.len() > 0 {
             log::info!(
                 "usable: vp8={vp8_useable}, vp9={vp9_useable}, av1={av1_useable}, av1_hw={av1_hw_useable}, h264={h264_useable}, h265={h265_useable}",
@@ -369,6 +377,21 @@ impl Encoder {
         ENCODE_CODEC_FORMAT.lock().unwrap().clone()
     }
 
+    #[inline]
+    pub fn negotiated_prefer_codec() -> PreferCodec {
+        ENCODE_CODEC_PREFERENCE.lock().unwrap().clone()
+    }
+
+    #[inline]
+    pub fn av1_hardware_allowed() -> bool {
+        !matches!(Self::negotiated_prefer_codec(), PreferCodec::AV1_SW)
+    }
+
+    #[inline]
+    pub fn av1_hardware_required() -> bool {
+        matches!(Self::negotiated_prefer_codec(), PreferCodec::AV1_HW)
+    }
+
     pub fn supported_encoding() -> SupportedEncoding {
         #[allow(unused_mut)]
         let mut encoding = SupportedEncoding {
@@ -384,6 +407,7 @@ impl Encoder {
         };
         #[cfg(feature = "hwcodec")]
         if enable_hwcodec_option() {
+            encoding.av1_hw |= HwRamEncoder::try_get(CodecFormat::AV1).is_some();
             encoding.h264 |= HwRamEncoder::try_get(CodecFormat::H264).is_some();
             encoding.h265 |= HwRamEncoder::try_get(CodecFormat::H265).is_some();
         }
@@ -443,6 +467,7 @@ impl Encoder {
             log::info!("codec fallback: {:?} -> {:?}", *current, format);
             *current = format;
         }
+        *ENCODE_CODEC_PREFERENCE.lock().unwrap() = PreferCodec::Auto;
     }
 
     pub fn use_i444(config: &EncoderCfg) -> bool {
@@ -525,15 +550,16 @@ impl Decoder {
         mark_unsupported: &Vec<CodecFormat>,
     ) -> SupportedDecoding {
         let (prefer, prefer_chroma) = Self::preference(id_for_perfer);
+        let av1_software_decoding = !disable_av1();
 
         #[allow(unused_mut)]
         let mut decoding = SupportedDecoding {
             ability_vp8: 1,
             ability_vp9: 1,
-            ability_av1: if disable_av1() { 0 } else { 1 },
+            ability_av1: if av1_software_decoding { 1 } else { 0 },
             i444: Some(CodecAbility {
                 vp9: true,
-                av1: true,
+                av1: av1_software_decoding,
                 ..Default::default()
             })
             .into(),
@@ -543,6 +569,11 @@ impl Decoder {
         };
         #[cfg(feature = "hwcodec")]
         if enable_hwcodec_option() {
+            decoding.ability_av1 |= if HwRamDecoder::try_get(CodecFormat::AV1).is_some() {
+                1
+            } else {
+                0
+            };
             decoding.ability_h264 |= if HwRamDecoder::try_get(CodecFormat::H264).is_some() {
                 1
             } else {
@@ -599,7 +630,7 @@ impl Decoder {
         log::info!("try create new decoder, format: {format:?}, _luid: {_luid:?}");
         let (mut vp8, mut vp9, mut av1) = (None, None, None);
         #[cfg(feature = "hwcodec")]
-        let (mut h264_ram, mut h265_ram) = (None, None);
+        let (mut av1_ram, mut h264_ram, mut h265_ram) = (None, None, None);
         #[cfg(feature = "vram")]
         let (mut h264_vram, mut h265_vram) = (None, None);
         #[cfg(feature = "mediacodec")]
@@ -626,11 +657,28 @@ impl Decoder {
                 valid = vp9.is_some();
             }
             CodecFormat::AV1 => {
-                match AomDecoder::new() {
-                    Ok(v) => av1 = Some(v),
-                    Err(e) => log::error!("create AV1 decoder failed: {}", e),
+                #[cfg(feature = "hwcodec")]
+                if !valid {
+                    match HwRamDecoder::new(format) {
+                        Ok(v) => av1_ram = Some(v),
+                        Err(e) => log::error!("create AV1 ram decoder failed: {}", e),
+                    }
+                    valid = av1_ram.is_some();
                 }
-                valid = av1.is_some();
+                #[cfg(feature = "hwcodec")]
+                if valid {
+                    match AomDecoder::new() {
+                        Ok(v) => av1 = Some(v),
+                        Err(e) => log::warn!("create AV1 software fallback decoder failed: {}", e),
+                    }
+                }
+                if !valid {
+                    match AomDecoder::new() {
+                        Ok(v) => av1 = Some(v),
+                        Err(e) => log::error!("create AV1 decoder failed: {}", e),
+                    }
+                    valid = av1.is_some();
+                }
             }
             CodecFormat::H264 => {
                 #[cfg(feature = "vram")]
@@ -698,6 +746,8 @@ impl Decoder {
             vp9,
             av1,
             #[cfg(feature = "hwcodec")]
+            av1_ram,
+            #[cfg(feature = "hwcodec")]
             h264_ram,
             #[cfg(feature = "hwcodec")]
             h265_ram,
@@ -741,6 +791,10 @@ impl Decoder {
                 }
             }
             CodecFormat::AV1 => {
+                #[cfg(feature = "hwcodec")]
+                if let Some(decoder) = self.av1_ram.as_ref() {
+                    return hw_decoder_backend_label(decoder);
+                }
                 if self.av1.is_some() {
                     "Software libaom"
                 } else {
@@ -806,6 +860,22 @@ impl Decoder {
                 }
             }
             video_frame::Union::Av1s(av1s) => {
+                #[cfg(feature = "hwcodec")]
+                if let Some(decoder) = &mut self.av1_ram {
+                    *chroma = Some(Chroma::I420);
+                    match Decoder::handle_hwram_video_frame(decoder, av1s, rgb, &mut self.i420) {
+                        Ok(v) => return Ok(v),
+                        Err(e) => {
+                            log::warn!(
+                                "AV1 hardware decoder failed, falling back to software libaom: {e}"
+                            );
+                            self.av1_ram = None;
+                            if self.av1.is_none() {
+                                return Err(e);
+                            }
+                        }
+                    }
+                }
                 if let Some(av1) = &mut self.av1 {
                     Decoder::handle_av1s_video_frame(av1, av1s, rgb, chroma)
                 } else {
@@ -984,6 +1054,10 @@ impl Decoder {
         } else if codec == "vp9" {
             PreferCodec::VP9
         } else if codec == "av1" {
+            PreferCodec::AV1_SW
+        } else if codec == "av1-hw" {
+            PreferCodec::AV1_HW
+        } else if codec == "av1-legacy" {
             PreferCodec::AV1
         } else if codec == "h264" {
             PreferCodec::H264
@@ -1372,6 +1446,53 @@ mod tests {
         assert_eq!(
             codec_for_preference(preference.unwrap(), CodecFormat::H265),
             CodecFormat::AV1
+        );
+    }
+
+    #[test]
+    fn codec_preference_explicit_av1_software_wins_over_auto() {
+        let decodings = decodings(&[PreferCodec::Auto, PreferCodec::AV1_SW]);
+        let preference = preferred_explicit_codec(&decodings, all_usable_codecs());
+
+        assert_eq!(preference, Some(PreferCodec::AV1_SW));
+        assert_eq!(
+            codec_for_preference(preference.unwrap(), CodecFormat::H265),
+            CodecFormat::AV1
+        );
+    }
+
+    #[test]
+    fn codec_preference_av1_software_does_not_require_hardware() {
+        let decodings = decodings(&[PreferCodec::AV1_SW]);
+        let usable = UsableCodecs {
+            av1_hardware: false,
+            ..all_usable_codecs()
+        };
+
+        assert_eq!(
+            preferred_explicit_codec(&decodings, usable),
+            Some(PreferCodec::AV1_SW)
+        );
+    }
+
+    #[test]
+    fn codec_preference_av1_hardware_requires_hardware() {
+        let decodings = decodings(&[PreferCodec::AV1_HW]);
+        let usable = UsableCodecs {
+            av1_hardware: false,
+            ..all_usable_codecs()
+        };
+
+        assert_eq!(preferred_explicit_codec(&decodings, usable), None);
+    }
+
+    #[test]
+    fn codec_preference_av1_hardware_wins_tie() {
+        let decodings = decodings(&[PreferCodec::AV1_SW, PreferCodec::AV1_HW]);
+
+        assert_eq!(
+            preferred_explicit_codec(&decodings, all_usable_codecs()),
+            Some(PreferCodec::AV1_HW)
         );
     }
 
