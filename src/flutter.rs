@@ -738,6 +738,7 @@ impl InvokeUiSession for FlutterHandler {
                     "capture_backend",
                     &status.capture_backend.map_or(NULL, |it| it),
                 ),
+                ("capture_frame", &status.capture_frame.map_or(NULL, |it| it)),
                 (
                     "encoder_backend",
                     &status.encoder_backend.map_or(NULL, |it| it),

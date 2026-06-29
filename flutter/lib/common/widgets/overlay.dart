@@ -575,12 +575,36 @@ class QualityMonitor extends StatelessWidget {
     switch (value) {
       case 'Windows Graphics Capture':
         return 'WGC';
+      case 'Windows Graphics Capture Helper (CPU)':
+        return 'WGC helper CPU';
       case 'DXGI Desktop Duplication':
         return 'DXGI';
       case 'Windows Magnification API':
         return 'Magnification';
       case 'Windows GDI':
         return 'GDI';
+      case 'Windows GDI Helper (CPU)':
+        return 'GDI helper CPU';
+      case 'User Capture Helper (CPU)':
+        return 'Helper CPU';
+      case 'GPU texture frame':
+        return 'GPU texture';
+      case 'CPU BGRA frame':
+        return 'CPU BGRA';
+      case 'CPU RGBA frame':
+        return 'CPU RGBA';
+      case 'CPU RGB565 frame':
+        return 'CPU RGB565';
+      case 'CPU I420 frame':
+        return 'CPU I420';
+      case 'CPU NV12 frame':
+        return 'CPU NV12';
+      case 'CPU I444 frame':
+        return 'CPU I444';
+      case 'GPU texture':
+        return 'GPU texture';
+      case 'CPU YUV frame':
+        return 'CPU YUV';
       case 'Hardware NVIDIA NVENC via FFmpeg':
         return 'NVENC';
       case 'Hardware Intel QSV via FFmpeg':
@@ -712,11 +736,16 @@ class QualityMonitor extends StatelessWidget {
                                   _pipelineLabel(
                                       qualityMonitorModel.data.captureBackend)),
                               _row(
+                                  "Capture Frame",
+                                  _pipelineLabel(
+                                      qualityMonitorModel.data.captureFrame)),
+                              _row(
                                   "Encoder API",
                                   _pipelineLabel(
                                       qualityMonitorModel.data.encoderBackend)),
                               _row("Encoder Input",
-                                  qualityMonitorModel.data.encoderInput ?? '-'),
+                                  _pipelineLabel(
+                                      qualityMonitorModel.data.encoderInput)),
                               _row("Video Threads",
                                   qualityMonitorModel.data.videoThreads ?? '-'),
                               _row(

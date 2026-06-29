@@ -19,6 +19,7 @@ pub struct QualityStatus {
     pub capture_backend: Option<String>,
     pub encoder_backend: Option<String>,
     pub encoder_input: Option<String>,
+    pub capture_frame: Option<String>,
     pub decode_fps: HashMap<usize, usize>,
     pub video_queue: HashMap<usize, usize>,
     pub frame_resolution: HashMap<usize, String>,

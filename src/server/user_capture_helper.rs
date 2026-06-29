@@ -25,6 +25,9 @@ const STATUS_STARTING: u32 = 0;
 const STATUS_OK: u32 = 1;
 const STATUS_WOULD_BLOCK: u32 = 2;
 const STATUS_ERROR: u32 = 3;
+const BACKEND_UNKNOWN: u32 = 0;
+const BACKEND_WGC_CPU: u32 = 1;
+const BACKEND_GDI_CPU: u32 = 2;
 const GDI_BOOTSTRAP_AFTER: Duration = Duration::from_millis(500);
 
 const fn align_up(value: usize, align: usize) -> usize {
@@ -53,6 +56,7 @@ struct CaptureFrameInfo {
     length: usize,
     width: usize,
     height: usize,
+    backend: u32,
 }
 
 #[inline]
@@ -303,6 +307,7 @@ pub mod server {
                                         length: 0,
                                         width: 0,
                                         height: 0,
+                                        backend: BACKEND_UNKNOWN,
                                     },
                                 );
                                 std::thread::sleep(Duration::from_millis(500));
@@ -341,6 +346,11 @@ pub mod server {
                         length: 0,
                         width,
                         height,
+                        backend: if primary_is_gdi {
+                            BACKEND_GDI_CPU
+                        } else {
+                            BACKEND_WGC_CPU
+                        },
                     },
                 );
             }
@@ -371,6 +381,11 @@ pub mod server {
                                 length: 0,
                                 width,
                                 height,
+                                backend: if primary_is_gdi {
+                                    BACKEND_GDI_CPU
+                                } else {
+                                    BACKEND_WGC_CPU
+                                },
                             },
                         );
                         std::thread::sleep(timeout);
@@ -406,6 +421,11 @@ pub mod server {
                             length: data.len(),
                             width,
                             height,
+                            backend: if primary_is_gdi {
+                                BACKEND_GDI_CPU
+                            } else {
+                                BACKEND_WGC_CPU
+                            },
                         },
                     );
                 }
@@ -423,6 +443,11 @@ pub mod server {
                             length: 0,
                             width,
                             height,
+                            backend: if primary_is_gdi {
+                                BACKEND_GDI_CPU
+                            } else {
+                                BACKEND_WGC_CPU
+                            },
                         },
                     );
                 }
@@ -498,6 +523,7 @@ pub mod server {
                                                 length: data.len(),
                                                 width,
                                                 height,
+                                                backend: BACKEND_GDI_CPU,
                                             },
                                         );
                                         continue;
@@ -535,6 +561,11 @@ pub mod server {
                                 length: 0,
                                 width,
                                 height,
+                                backend: if primary_is_gdi {
+                                    BACKEND_GDI_CPU
+                                } else {
+                                    BACKEND_WGC_CPU
+                                },
                             },
                         );
                     }
@@ -554,6 +585,11 @@ pub mod server {
                             length: 0,
                             width,
                             height,
+                            backend: if primary_is_gdi {
+                                BACKEND_GDI_CPU
+                            } else {
+                                BACKEND_WGC_CPU
+                            },
                         },
                     );
                     std::thread::sleep(Duration::from_millis(100));
@@ -579,6 +615,7 @@ pub mod client {
         width: usize,
         height: usize,
         last_counter: u32,
+        last_backend: u32,
     }
 
     unsafe impl Send for UserCaptureHelperCapturer {}
@@ -620,6 +657,7 @@ pub mod client {
                     length: 0,
                     width,
                     height,
+                    backend: BACKEND_UNKNOWN,
                 },
             );
             let exe = std::env::current_exe()?.to_string_lossy().to_string();
@@ -642,7 +680,7 @@ pub mod client {
                 bail!("Failed to launch user capture helper");
             }
             log::info!(
-                "Launched user capture helper: backend=WGC, display={}, session={}, shmem={}, size={}",
+                "Launched user capture helper: backend=WGC helper CPU, display={}, session={}, shmem={}, size={}",
                 current_display,
                 session_id,
                 shmem_name,
@@ -657,6 +695,7 @@ pub mod client {
                 width,
                 height,
                 last_counter: 0,
+                last_backend: BACKEND_UNKNOWN,
             })
         }
 
@@ -697,6 +736,9 @@ pub mod client {
         fn frame<'a>(&'a mut self, timeout: Duration) -> std::io::Result<Frame<'a>> {
             self.update_timeout(timeout);
             let info = read_frame_info(&self.shmem);
+            if info.backend != BACKEND_UNKNOWN {
+                self.last_backend = info.backend;
+            }
             if info.status == STATUS_OK && info.counter != self.last_counter {
                 if info.width != self.width || info.height != self.height {
                     return Err(std::io::Error::new(
@@ -746,7 +788,11 @@ pub mod client {
         }
 
         fn capture_backend(&self) -> &'static str {
-            "Windows Graphics Capture"
+            match self.last_backend {
+                BACKEND_WGC_CPU => "Windows Graphics Capture Helper (CPU)",
+                BACKEND_GDI_CPU => "Windows GDI Helper (CPU)",
+                _ => "User Capture Helper (CPU)",
+            }
         }
 
         fn set_gdi(&mut self) -> bool {

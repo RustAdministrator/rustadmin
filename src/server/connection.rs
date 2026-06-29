@@ -1380,15 +1380,22 @@ impl Connection {
                         let (
                             target_bitrate,
                             capture_backend,
+                            capture_frame,
                             encoder_backend,
                             encoder_input,
                         ) = {
                             let video_qos = video_service::VIDEO_QOS.lock().unwrap();
-                            let (capture_backend, encoder_backend, encoder_input) =
+                            let (
+                                capture_backend,
+                                capture_frame,
+                                encoder_backend,
+                                encoder_input,
+                            ) =
                                 video_qos.pipeline_status();
                             (
                                 video_qos.bitrate(),
                                 capture_backend.unwrap_or_default(),
+                                capture_frame.unwrap_or_default(),
                                 encoder_backend.unwrap_or_default(),
                                 encoder_input.unwrap_or_default(),
                             )
@@ -1398,6 +1405,7 @@ impl Connection {
                             last_delay: conn.network_delay,
                             target_bitrate,
                             capture_backend,
+                            capture_frame,
                             encoder_backend,
                             encoder_input,
                             ..Default::default()
@@ -5611,6 +5619,26 @@ impl Connection {
     }
 
     async fn turn_on_privacy(&mut self, impl_key: String) {
+        #[cfg(windows)]
+        if crate::platform::is_prelogin()
+            || crate::platform::is_locked()
+            || crate::platform::windows::desktop_changed()
+        {
+            let reason = "Privacy mode is not available on the Windows logon or locked desktop.";
+            log::warn!(
+                "Privacy mode denied: conn={}, auth_kind={}, reason={}",
+                self.inner.id,
+                self.session_auth_kind.as_str(),
+                reason
+            );
+            let msg_out = crate::common::make_privacy_mode_msg_with_details(
+                back_notification::PrivacyModeState::PrvOnFailed,
+                reason.to_owned(),
+                impl_key,
+            );
+            self.send(msg_out).await;
+            return;
+        }
         if let Some(reason) = self.privacy_mode_policy_denial_reason() {
             log::warn!(
                 "Privacy mode denied: conn={}, auth_kind={}, reason={}",

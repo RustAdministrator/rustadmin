@@ -113,6 +113,7 @@ pub struct VideoQoS {
     displays: HashMap<String, DisplayData>,
     bitrate_store: u32,
     capture_backend: Option<String>,
+    capture_frame: Option<String>,
     encoder_backend: Option<String>,
     encoder_input: Option<String>,
     adjust_ratio_instant: Instant,
@@ -129,6 +130,7 @@ impl Default for VideoQoS {
             displays: Default::default(),
             bitrate_store: 0,
             capture_backend: None,
+            capture_frame: None,
             encoder_backend: None,
             encoder_input: None,
             adjust_ratio_instant: Instant::now(),
@@ -176,9 +178,25 @@ impl VideoQoS {
         self.encoder_input = Some(encoder_input.to_owned());
     }
 
-    pub fn pipeline_status(&self) -> (Option<String>, Option<String>, Option<String>) {
+    pub fn store_capture_frame(&mut self, capture_frame: &str) -> bool {
+        if self.capture_frame.as_deref() == Some(capture_frame) {
+            return false;
+        }
+        self.capture_frame = Some(capture_frame.to_owned());
+        true
+    }
+
+    pub fn pipeline_status(
+        &self,
+    ) -> (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) {
         (
             self.capture_backend.clone(),
+            self.capture_frame.clone(),
             self.encoder_backend.clone(),
             self.encoder_input.clone(),
         )

@@ -2059,6 +2059,11 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                 } else {
                     Some(t.capture_backend.clone())
                 },
+                capture_frame: if t.capture_frame.is_empty() {
+                    None
+                } else {
+                    Some(t.capture_frame.clone())
+                },
                 encoder_backend: if t.encoder_backend.is_empty() {
                     None
                 } else {

@@ -49,7 +49,7 @@ use scrap::{
     codec::{Encoder, EncoderCfg},
     record::{Recorder, RecorderContext},
     vpxcodec::{VpxEncoderConfig, VpxVideoCodecId},
-    CodecFormat, Display, EncodeInput, TraitCapturer, TraitPixelBuffer,
+    CodecFormat, Display, EncodeInput, Pixfmt, TraitCapturer, TraitPixelBuffer,
 };
 #[cfg(windows)]
 use std::sync::{
@@ -69,6 +69,20 @@ const HW_ENCODER_WARMUP_TIMEOUT: Duration = Duration::from_secs(3);
 const HOST_VIDEO_DIAG_INTERVAL: Duration = Duration::from_secs(5);
 #[cfg(windows)]
 const USER_CAPTURE_HELPER_STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
+
+fn capture_frame_label(frame: &scrap::Frame<'_>) -> &'static str {
+    match frame {
+        scrap::Frame::Texture(_) => "GPU texture frame",
+        scrap::Frame::PixelBuffer(pixelbuffer) => match pixelbuffer.pixfmt() {
+            Pixfmt::BGRA => "CPU BGRA frame",
+            Pixfmt::RGBA => "CPU RGBA frame",
+            Pixfmt::RGB565LE => "CPU RGB565 frame",
+            Pixfmt::I420 => "CPU I420 frame",
+            Pixfmt::NV12 => "CPU NV12 frame",
+            Pixfmt::I444 => "CPU I444 frame",
+        },
+    }
+}
 
 #[cfg(windows)]
 static USER_CAPTURE_HELPER_DISABLED: AtomicBool = AtomicBool::new(false);
@@ -658,6 +672,15 @@ fn get_capturer_monitor(
         if capturer_privacy_mode_id != INVALID_PRIVACY_MODE_CONN_ID
             && is_current_privacy_mode_impl(PRIVACY_MODE_IMPL_WIN_MAG)
         {
+            if crate::platform::windows::is_prelogin()
+                || crate::platform::windows::is_locked()
+                || crate::platform::windows::desktop_changed()
+            {
+                log::warn!(
+                    "WinMag privacy capture disabled on logon/locked/changed desktop; using normal service capture"
+                );
+                capturer_privacy_mode_id = INVALID_PRIVACY_MODE_CONN_ID;
+            }
             if !is_installed() {
                 if is_process_consent_running()? {
                     capturer_privacy_mode_id = INVALID_PRIVACY_MODE_CONN_ID;
@@ -672,7 +695,9 @@ fn get_capturer_monitor(
 
     if privacy_mode_id != INVALID_PRIVACY_MODE_CONN_ID {
         if privacy_mode_id != capturer_privacy_mode_id {
-            log::info!("In privacy mode, but show UAC prompt window for now");
+            log::info!(
+                "In privacy mode, but current desktop requires normal service capture for now"
+            );
         } else {
             log::info!("In privacy mode, the peer side cannot watch the screen");
         }
@@ -802,7 +827,7 @@ fn run(vs: VideoService) -> ResultType<()> {
         capturer_is_gdi
     );
     #[cfg(windows)]
-    let capture_backend = c.capture_backend();
+    let mut capture_backend = c.capture_backend();
     #[cfg(not(windows))]
     let capture_backend = "Unknown";
     let mut video_qos = VIDEO_QOS.lock().unwrap();
@@ -993,6 +1018,28 @@ fn run(vs: VideoService) -> ResultType<()> {
             try_broadcast_display_changed(&sp, display_idx, &c, false)?;
         }
 
+        #[cfg(windows)]
+        {
+            let current_capture_backend = c.capture_backend();
+            if current_capture_backend != capture_backend {
+                capture_backend = current_capture_backend;
+                log::info!(
+                    "diag video service capture backend changed: service={}, source={:?}, display_idx={}, capture_backend={}, encoder_backend={}, encoder_input={}",
+                    sp.name(),
+                    vs.source,
+                    display_idx,
+                    capture_backend,
+                    encoder_backend,
+                    encoder_input
+                );
+                VIDEO_QOS.lock().unwrap().store_pipeline_status(
+                    capture_backend,
+                    encoder_backend,
+                    encoder_input,
+                );
+            }
+        }
+
         frame_controller.reset();
 
         let time = now - start;
@@ -1006,6 +1053,22 @@ fn run(vs: VideoService) -> ResultType<()> {
                         user_capture_helper_no_frame_since = None;
                     }
                     host_diag.valid_capture += 1;
+                    let capture_frame = capture_frame_label(&frame);
+                    let capture_frame_changed = {
+                        let mut video_qos = VIDEO_QOS.lock().unwrap();
+                        video_qos.store_capture_frame(capture_frame)
+                    };
+                    if capture_frame_changed {
+                        log::info!(
+                            "diag video service capture frame: service={}, source={:?}, display_idx={}, capture_backend={}, capture_frame={}, encoder_input={}",
+                            sp.name(),
+                            vs.source,
+                            display_idx,
+                            capture_backend,
+                            capture_frame,
+                            encoder_input
+                        );
+                    }
                     let screenshot = SCREENSHOTS.lock().unwrap().remove(&display_idx);
                     if let Some(mut screenshot) = screenshot {
                         let restore_vram = screenshot.restore_vram;

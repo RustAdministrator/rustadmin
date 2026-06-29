@@ -4082,6 +4082,7 @@ class QualityMonitorData {
   String? decoder;
   String? renderer;
   String? captureBackend;
+  String? captureFrame;
   String? encoderBackend;
   String? encoderInput;
   String? frameResolution;
@@ -4147,6 +4148,7 @@ class QualityMonitorModel with ChangeNotifier {
     _data.decoder = null;
     _data.renderer = null;
     _data.captureBackend = null;
+    _data.captureFrame = null;
     _data.encoderBackend = null;
     _data.encoderInput = null;
     _data.frameResolution = null;
@@ -4346,6 +4348,10 @@ class QualityMonitorModel with ChangeNotifier {
       if (evt.containsKey('capture_backend') &&
           (evt['capture_backend'] as String).isNotEmpty) {
         _data.captureBackend = evt['capture_backend'];
+      }
+      if (evt.containsKey('capture_frame') &&
+          (evt['capture_frame'] as String).isNotEmpty) {
+        _data.captureFrame = evt['capture_frame'];
       }
       if (evt.containsKey('encoder_backend') &&
           (evt['encoder_backend'] as String).isNotEmpty) {
