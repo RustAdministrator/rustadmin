@@ -142,6 +142,10 @@ pub trait TraitCapturer {
         false
     }
     #[cfg(windows)]
+    fn is_portable_service(&self) -> bool {
+        false
+    }
+    #[cfg(windows)]
     fn is_cpu_only(&self) -> bool {
         false
     }

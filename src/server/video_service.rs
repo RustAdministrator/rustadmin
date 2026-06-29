@@ -1165,6 +1165,19 @@ fn run(vs: VideoService) -> ResultType<()> {
         {
             let desktop_changed = crate::platform::windows::desktop_changed();
             let portable_service_running = crate::portable_service::client::running();
+            if desktop_changed
+                && portable_service_running
+                && !c.is_portable_service()
+                && crate::portable_service::client::should_use_shared_memory_capture(
+                    display_idx,
+                    portable_service_running,
+                )
+            {
+                log::info!(
+                    "desktop changed while portable service is running; switch to portable capture"
+                );
+                bail!("SWITCH");
+            }
             if desktop_changed && portable_service_running && c.is_mag() {
                 if !mag_recreated_after_desktop_change {
                     if try_set_gdi_fallback(&mut c, "desktop_changed_mag_gdi") {
