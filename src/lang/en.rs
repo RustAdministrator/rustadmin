@@ -38,6 +38,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Set Password", "Set password"),
         ("OS Password", "OS password"),
         ("install_tip", "Due to UAC, RustDesk can not work properly as the remote side in some cases. To avoid UAC, please click the button below to install RustDesk to the system."),
+        ("portable_elevation_tip", "Portable mode is running without administrator rights. Elevate it to control UAC and elevated windows during remote sessions."),
         ("config_acc", "In order to control your Desktop remotely, you need to grant RustDesk \"Accessibility\" permissions."),
         ("config_screen", "In order to access your Desktop remotely, you need to grant RustDesk \"Screen Recording\" permissions."),
         ("Installation Path", "Installation path"),

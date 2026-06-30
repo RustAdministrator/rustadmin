@@ -42,14 +42,12 @@ use hbb_common::{
 use scrap::hwcodec::{HwRamEncoder, HwRamEncoderConfig};
 #[cfg(feature = "vram")]
 use scrap::vram::{VRamEncoder, VRamEncoderConfig};
-#[cfg(not(windows))]
-use scrap::Capturer;
 use scrap::{
     aom::AomEncoderConfig,
     codec::{Encoder, EncoderCfg},
     record::{Recorder, RecorderContext},
     vpxcodec::{VpxEncoderConfig, VpxVideoCodecId},
-    CodecFormat, Display, EncodeInput, Pixfmt, TraitCapturer, TraitPixelBuffer,
+    Capturer, CodecFormat, Display, EncodeInput, Pixfmt, TraitCapturer, TraitPixelBuffer,
 };
 #[cfg(windows)]
 use std::sync::{
@@ -458,9 +456,16 @@ fn should_use_user_capture_helper(portable_service_running: bool, privacy_mode_i
 }
 
 #[cfg(windows)]
-fn create_dxgi_capturer(
+fn can_use_direct_wgc(privacy_mode_id: i32) -> bool {
+    privacy_mode_id == INVALID_PRIVACY_MODE_CONN_ID
+        && !crate::platform::windows::is_prelogin()
+        && !crate::platform::windows::is_locked()
+        && !crate::platform::windows::desktop_changed()
+}
+
+#[cfg(windows)]
+fn create_wgc_priority_capturer(
     privacy_mode_id: i32,
-    display: Display,
     current: usize,
     portable_service_running: bool,
     width: usize,
@@ -474,14 +479,144 @@ fn create_dxgi_capturer(
             }
             Err(err) => {
                 log::warn!(
-                    "Failed to create user WGC helper capturer, falling back to direct dxgi|gdi: {}",
+                    "Failed to create user WGC helper capturer, falling back to direct WGC: {}",
                     err
                 );
             }
         }
     }
+
+    if !can_use_direct_wgc(privacy_mode_id) {
+        bail!("direct WGC is not valid for current desktop state");
+    }
+    if !scrap::CapturerWgc::is_supported() {
+        bail!("WGC is not supported");
+    }
+    let mut displays = Display::all().with_context(|| "Failed to enumerate displays for WGC")?;
+    if displays.len() <= current {
+        bail!(
+            "Failed to get display {} for WGC capturer, display_count={}",
+            current,
+            displays.len()
+        );
+    }
+    let wgc_display = displays.remove(current);
+    let capturer = scrap::CapturerWgc::new(wgc_display)
+        .with_context(|| "Failed to create direct WGC capturer")?;
+    log::info!("Create direct WGC capturer");
+    Ok(Box::new(capturer))
+}
+
+#[cfg(windows)]
+fn create_magnifier_priority_capturer(
+    privacy_mode_id: i32,
+    origin: (i32, i32),
+    width: usize,
+    height: usize,
+) -> ResultType<Box<dyn TraitCapturer>> {
+    if privacy_mode_id != INVALID_PRIVACY_MODE_CONN_ID {
+        bail!("magnifier priority capture is skipped in privacy mode");
+    }
+    if !can_try_magnifier_fallback("auto_priority") {
+        bail!("magnifier priority capture is not valid for current desktop state");
+    }
+    let mag = scrap::CapturerMag::new(origin, width, height)
+        .with_context(|| "Failed to create magnifier capturer")?;
+    log::info!(
+        "Create magnifier capturer by priority: origin={:?}, width={}, height={}",
+        origin,
+        width,
+        height
+    );
+    Ok(Box::new(mag))
+}
+
+#[cfg(windows)]
+fn create_dxgi_priority_capturer(
+    display: Display,
+    current: usize,
+    portable_service_running: bool,
+) -> ResultType<Box<dyn TraitCapturer>> {
     log::debug!("Create capturer dxgi|gdi");
     crate::portable_service::client::create_capturer(current, display, portable_service_running)
+}
+
+#[cfg(windows)]
+fn create_gdi_priority_capturer(current: usize) -> ResultType<Box<dyn TraitCapturer>> {
+    let mut displays = Display::all().with_context(|| "Failed to enumerate displays for GDI")?;
+    if displays.len() <= current {
+        bail!(
+            "Failed to get display {} for GDI capturer, display_count={}",
+            current,
+            displays.len()
+        );
+    }
+    let display = displays.remove(current);
+    let mut capturer =
+        Capturer::new(display).with_context(|| "Failed to create fallback GDI capturer")?;
+    if !capturer.set_gdi() {
+        bail!("Failed to enable fallback GDI capturer");
+    }
+    log::info!("Create GDI capturer by final priority fallback");
+    Ok(Box::new(capturer))
+}
+
+#[cfg(windows)]
+fn create_windows_capturer(
+    privacy_mode_id: i32,
+    display: Display,
+    current: usize,
+    portable_service_running: bool,
+) -> ResultType<Box<dyn TraitCapturer>> {
+    let origin = display.origin();
+    let width = display.width();
+    let height = display.height();
+    log::info!(
+        "capture auto backend priority requested: display={}, size={}x{}, priority=WGC,WinMag,DXGI,GDI",
+        current,
+        width,
+        height
+    );
+
+    match create_wgc_priority_capturer(
+        privacy_mode_id,
+        current,
+        portable_service_running,
+        width,
+        height,
+    ) {
+        Ok(capturer) => {
+            log::info!("capture auto backend selected: WGC");
+            return Ok(capturer);
+        }
+        Err(err) => {
+            log::info!("capture auto backend WGC skipped: {}", err);
+        }
+    }
+
+    match create_magnifier_priority_capturer(privacy_mode_id, origin, width, height) {
+        Ok(capturer) => {
+            log::info!("capture auto backend selected: WinMag");
+            return Ok(capturer);
+        }
+        Err(err) => {
+            log::info!("capture auto backend WinMag skipped: {}", err);
+        }
+    }
+
+    match create_dxgi_priority_capturer(display, current, portable_service_running) {
+        Ok(capturer) => {
+            log::info!(
+                "capture auto backend selected: {}",
+                capturer.capture_backend()
+            );
+            Ok(capturer)
+        }
+        Err(dxgi_err) => {
+            log::warn!("capture auto backend DXGI/GDI failed: {}", dxgi_err);
+            create_gdi_priority_capturer(current)
+        }
+    }
 }
 
 fn create_capturer(
@@ -515,15 +650,11 @@ fn create_capturer(
         None => {
             #[cfg(windows)]
             {
-                let width = display.width();
-                let height = display.height();
-                return create_dxgi_capturer(
+                return create_windows_capturer(
                     privacy_mode_id,
                     display,
                     current,
                     portable_service_running,
-                    width,
-                    height,
                 );
             }
             #[cfg(not(windows))]
@@ -1078,7 +1209,13 @@ fn run(vs: VideoService) -> ResultType<()> {
     #[cfg(windows)]
     let mut user_capture_helper_no_frame_since: Option<Instant> = None;
     #[cfg(windows)]
-    let mut mag_recreated_after_desktop_change = false;
+    let mut mag_no_frame_count = 0u32;
+    #[cfg(windows)]
+    let mut last_desktop_capture_state = (
+        crate::platform::windows::is_prelogin(),
+        crate::platform::windows::is_locked(),
+        crate::platform::windows::desktop_changed(),
+    );
     #[cfg(windows)]
     log::info!(
         "gdi: {}, mag: {}, user_helper: {}, cpu_only: {}",
@@ -1163,33 +1300,45 @@ fn run(vs: VideoService) -> ResultType<()> {
         }
         #[cfg(windows)]
         {
-            let desktop_changed = crate::platform::windows::desktop_changed();
+            let desktop_state = (
+                crate::platform::windows::is_prelogin(),
+                crate::platform::windows::is_locked(),
+                crate::platform::windows::desktop_changed(),
+            );
+            let desktop_changed = desktop_state.2;
             let portable_service_running = crate::portable_service::client::running();
-            if desktop_changed
-                && portable_service_running
-                && !c.is_portable_service()
-                && crate::portable_service::client::should_use_shared_memory_capture(
-                    display_idx,
-                    portable_service_running,
-                )
-            {
+            if portable_service_running && desktop_state != last_desktop_capture_state {
                 log::info!(
-                    "desktop changed while portable service is running; switch to portable capture"
+                    "portable capture desktop state changed: prelogin {}->{}, locked {}->{}, desktop_changed {}->{}",
+                    last_desktop_capture_state.0,
+                    desktop_state.0,
+                    last_desktop_capture_state.1,
+                    desktop_state.1,
+                    last_desktop_capture_state.2,
+                    desktop_state.2
                 );
-                bail!("SWITCH");
-            }
-            if desktop_changed && portable_service_running && c.is_mag() {
-                if !mag_recreated_after_desktop_change {
-                    if try_set_gdi_fallback(&mut c, "desktop_changed_mag_gdi") {
-                        log::info!("desktop changed while using magnifier; fall back to gdi");
-                        mag_recreated_after_desktop_change = true;
-                        continue;
-                    }
-                    let _ = try_recreate_magnifier_capture(&mut c, "desktop_changed_mag_recreate");
-                    mag_recreated_after_desktop_change = true;
+                last_desktop_capture_state = desktop_state;
+                if desktop_changed {
+                    log::info!(
+                        "portable input desktop changed; restart capture backend on input desktop"
+                    );
+                    bail!("SWITCH");
                 }
-            } else {
-                mag_recreated_after_desktop_change = false;
+                if c.is_mag() {
+                    if try_recreate_magnifier_capture(&mut c, "desktop_state_mag_recreate") {
+                        log::info!(
+                            "portable desktop state changed while using magnifier; recreated magnifier"
+                        );
+                    } else if !desktop_state.0 && !desktop_state.2 {
+                        log::info!(
+                            "portable desktop state changed and magnifier recreate failed; switch capture backend"
+                        );
+                        bail!("SWITCH");
+                    }
+                } else {
+                    log::info!("portable desktop state changed; switch capture backend");
+                    bail!("SWITCH");
+                }
             }
             if desktop_changed && !portable_service_running {
                 bail!("Desktop changed");
@@ -1236,6 +1385,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                     #[cfg(windows)]
                     {
                         user_capture_helper_no_frame_since = None;
+                        mag_no_frame_count = 0;
                     }
                     host_diag.valid_capture += 1;
                     let capture_frame = capture_frame_label(&frame);
@@ -1334,6 +1484,25 @@ fn run(vs: VideoService) -> ResultType<()> {
             Err(ref e) if e.kind() == WouldBlock => {
                 host_diag.would_block += 1;
                 #[cfg(windows)]
+                if c.is_mag() {
+                    mag_no_frame_count = mag_no_frame_count.saturating_add(1);
+                    let portable_service_running = crate::portable_service::client::running();
+                    let locked = crate::platform::windows::is_locked();
+                    let desktop_changed = crate::platform::windows::desktop_changed();
+                    if portable_service_running
+                        && (locked || desktop_changed)
+                        && (mag_no_frame_count == 10 || mag_no_frame_count % 60 == 0)
+                        && try_recreate_magnifier_capture(&mut c, "mag_no_frame_recreate")
+                    {
+                        log::info!(
+                            "portable magnifier produced no frames; recreated magnifier, no_frame_count={}",
+                            mag_no_frame_count
+                        );
+                        mag_no_frame_count = 0;
+                        continue;
+                    }
+                }
+                #[cfg(windows)]
                 if c.is_user_capture_helper() && first_frame {
                     let first_no_frame = *user_capture_helper_no_frame_since.get_or_insert(now);
                     if first_no_frame.elapsed() >= USER_CAPTURE_HELPER_STARTUP_TIMEOUT {
@@ -1421,6 +1590,23 @@ fn run(vs: VideoService) -> ResultType<()> {
 
                 #[cfg(windows)]
                 if c.is_mag() {
+                    let portable_service_running = crate::portable_service::client::running();
+                    let locked = crate::platform::windows::is_locked();
+                    let desktop_changed = crate::platform::windows::desktop_changed();
+                    if portable_service_running && (locked || desktop_changed) {
+                        if try_recreate_magnifier_capture(&mut c, "mag_error_recreate") {
+                            log::info!(
+                                "portable magnifier capture error; recreated magnifier: {:?}",
+                                err
+                            );
+                            continue;
+                        }
+                        log::warn!(
+                            "portable magnifier capture error; keep magnifier on secure/changed desktop: {:?}",
+                            err
+                        );
+                        continue;
+                    }
                     if try_set_gdi_fallback(&mut c, "mag_error") {
                         log::info!("magnifier capture error, fall back to gdi: {:?}", err);
                         continue;

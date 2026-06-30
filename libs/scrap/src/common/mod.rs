@@ -141,11 +141,6 @@ pub trait TraitCapturer {
     fn is_user_capture_helper(&self) -> bool {
         false
     }
-    #[cfg(windows)]
-    fn is_portable_service(&self) -> bool {
-        false
-    }
-    #[cfg(windows)]
     fn is_cpu_only(&self) -> bool {
         false
     }

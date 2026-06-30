@@ -1665,6 +1665,25 @@ pub fn can_elevate() -> bool {
 pub fn elevate_portable(_id: i32) {
     #[cfg(windows)]
     {
+        if _id < 0 {
+            if crate::platform::is_installed() {
+                log::info!("Skip portable elevation request from main window: installed service");
+                return;
+            }
+            if crate::portable_service::client::running() {
+                log::info!("Skip portable elevation request from main window: already running");
+                return;
+            }
+            if let Err(err) = crate::portable_service::client::start_portable_service(
+                crate::portable_service::client::StartPara::Direct,
+            ) {
+                log::error!(
+                    "Failed to start portable service from main window elevation request: {:?}",
+                    err
+                );
+            }
+            return;
+        }
         let lock = CLIENTS.read().unwrap();
         if let Some(s) = lock.get(&_id) {
             allow_err!(s.tx.send(ipc::Data::DataPortableService(

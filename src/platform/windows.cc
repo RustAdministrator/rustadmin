@@ -296,11 +296,7 @@ extern "C"
     inputDesktopSelected()
     {
         HDESK current = GetThreadDesktop(GetCurrentThreadId());
-        HDESK input = OpenInputDesktop(0, FALSE,
-                                       DESKTOP_CREATEMENU | DESKTOP_CREATEWINDOW |
-                                           DESKTOP_ENUMERATE | DESKTOP_HOOKCONTROL |
-                                           DESKTOP_WRITEOBJECTS | DESKTOP_READOBJECTS |
-                                           DESKTOP_SWITCHDESKTOP | GENERIC_WRITE);
+        HDESK input = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
         if (!input)
         {
             return FALSE;
@@ -331,10 +327,8 @@ extern "C"
     {
         // - Open the input desktop
         HDESK desktop = OpenInputDesktop(0, FALSE,
-                                         DESKTOP_CREATEMENU | DESKTOP_CREATEWINDOW |
-                                             DESKTOP_ENUMERATE | DESKTOP_HOOKCONTROL |
-                                             DESKTOP_WRITEOBJECTS | DESKTOP_READOBJECTS |
-                                             DESKTOP_SWITCHDESKTOP | GENERIC_WRITE);
+                                         DESKTOP_CREATEWINDOW | DESKTOP_READOBJECTS |
+                                             DESKTOP_WRITEOBJECTS | DESKTOP_SWITCHDESKTOP);
         if (!desktop)
         {
             return false;

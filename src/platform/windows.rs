@@ -2527,6 +2527,29 @@ pub fn get_user_token(session_id: u32, as_user: bool) -> HANDLE {
     }
 }
 
+pub(crate) fn get_current_session_user_sid_string() -> ResultType<String> {
+    let Some(session_id) = get_current_process_session_id() else {
+        bail!("Failed to get current process session id");
+    };
+    get_session_user_sid_string(session_id)
+}
+
+fn get_session_user_sid_string(session_id: u32) -> ResultType<String> {
+    let token = get_user_token(session_id, true);
+    if token.is_null() {
+        bail!(
+            "Failed to get interactive user token for session {}",
+            session_id
+        );
+    }
+    let subject = format!("session {} interactive user", session_id);
+    let result = acl::token_user_sid_string(WinHANDLE(token as _), subject.as_str());
+    unsafe {
+        CloseHandle(token);
+    }
+    result
+}
+
 pub fn run_background(exe: &str, arg: &str) -> ResultType<bool> {
     let wexe = wide_string(exe);
     let warg;

@@ -1304,14 +1304,6 @@ pub mod client {
             true
         }
 
-        fn is_portable_service(&self) -> bool {
-            true
-        }
-
-        fn capture_backend(&self) -> &'static str {
-            "Portable service shared memory"
-        }
-
         fn set_gdi(&mut self) -> bool {
             true
         }
@@ -1517,47 +1509,8 @@ pub mod client {
         ipc_send(Data::DataPortableService(DataPortableService::Key(v)))
     }
 
-    fn should_use_shared_memory_capture_for_display(
-        display: &scrap::Display,
-        portable_service_running: bool,
-    ) -> bool {
-        if !portable_service_running || !display.is_primary() {
-            return false;
-        }
-        let locked = crate::platform::windows::is_locked();
-        let prelogin = crate::platform::windows::is_prelogin();
-        let desktop_changed = crate::platform::windows::desktop_changed();
-        if locked || prelogin || desktop_changed {
-            log::info!(
-                "Portable mode primary display: use shared memory capturer, locked={}, prelogin={}, desktop_changed={}",
-                locked,
-                prelogin,
-                desktop_changed
-            );
-            return true;
-        }
-        log::warn!("Portable mode primary display: bypass shared memory capturer, use dxgi|gdi");
-        false
-    }
-
-    pub fn should_use_shared_memory_capture(
-        current_display: usize,
-        portable_service_running: bool,
-    ) -> bool {
-        if !portable_service_running {
-            return false;
-        }
-        let Ok(displays) = display_service::try_get_displays() else {
-            return false;
-        };
-        let Some(display) = displays.get(current_display) else {
-            return false;
-        };
-        should_use_shared_memory_capture_for_display(display, portable_service_running)
-    }
-
     pub fn create_capturer(
-        current_display: usize,
+        _current_display: usize,
         display: scrap::Display,
         portable_service_running: bool,
     ) -> ResultType<Box<dyn TraitCapturer>> {
@@ -1569,11 +1522,11 @@ pub mod client {
         // CapturerPortable for the primary display: non-primary monitors worked, but
         // the primary monitor stayed on "Waiting for an Image". Keep the primary
         // display on dxgi|gdi unless a Windows portable-mode smoke test proves a
-        // replacement path works for normal unlocked primary-monitor capture.
-        // Secure desktop is different: direct DXGI/Mag/GDI can stay valid while
-        // returning blank/no frames, so use the portable service capture there.
-        if should_use_shared_memory_capture_for_display(&display, portable_service_running) {
-            return Ok(Box::new(CapturerPortable::new(current_display)));
+        // replacement path works for the primary monitor.
+        if portable_service_running && display.is_primary() {
+            log::warn!(
+                "Portable mode primary display: bypass shared memory capturer, use dxgi|gdi"
+            );
         }
         log::debug!("Create capturer dxgi|gdi");
         Ok(Box::new(

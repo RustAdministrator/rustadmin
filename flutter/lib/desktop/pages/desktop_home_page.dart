@@ -54,6 +54,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   var watchIsProcessTrust = false;
   var watchIsInputMonitoring = false;
   var watchIsCanRecordAudio = false;
+  var _isRoot = false;
   Timer? _updateTimer;
   bool isCardClosed = false;
 
@@ -501,6 +502,13 @@ class _DesktopHomePageState extends State<DesktopHomePage>
 
     if (isWindows && !bind.isDisableInstallation()) {
       if (!bind.mainIsInstalled()) {
+        if (!_isRoot && !bind.isOutgoingOnly()) {
+          return buildInstallCard(
+              "Portable mode", "portable_elevation_tip", "Elevate",
+              () async {
+            await bind.cmElevatePortable(connId: -1);
+          });
+        }
         return buildInstallCard(
             "", bind.isOutgoingOnly() ? "" : "install_tip", "Install",
             () async {
@@ -747,6 +755,13 @@ class _DesktopHomePageState extends State<DesktopHomePage>
       if (v != svcStopped.value) {
         svcStopped.value = v;
         setState(() {});
+      }
+      if (isWindows) {
+        final isRoot = await bind.mainIsRoot();
+        if (isRoot != _isRoot) {
+          _isRoot = isRoot;
+          setState(() {});
+        }
       }
       if (watchIsCanScreenRecording) {
         if (bind.mainIsCanScreenRecording(prompt: false)) {

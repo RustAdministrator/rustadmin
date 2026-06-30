@@ -571,7 +571,7 @@ impl CapturerMag {
         let mut lock = MAG_BUFFER.lock().unwrap();
         if !lock.0 {
             return Err(Error::new(
-                ErrorKind::Other,
+                ErrorKind::WouldBlock,
                 "No data captured by magnifier",
             ));
         }
