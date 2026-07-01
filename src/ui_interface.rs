@@ -527,13 +527,16 @@ pub fn set_option(key: String, value: String) {
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        let mut options = OPTIONS.lock().unwrap();
-        if value.is_empty() {
-            options.remove(&key);
-        } else {
-            options.insert(key.clone(), value.clone());
-        }
-        ipc::set_options(options.clone()).ok();
+        let options = {
+            let mut options = OPTIONS.lock().unwrap();
+            if value.is_empty() {
+                options.remove(&key);
+            } else {
+                options.insert(key.clone(), value.clone());
+            }
+            options.clone()
+        };
+        ipc::set_options(options).ok();
     }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {

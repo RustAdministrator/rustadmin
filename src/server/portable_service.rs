@@ -838,10 +838,12 @@ pub mod client {
         static ref IPC_RUNTIME_TOKEN: Arc<Mutex<Option<String>>> = Default::default();
         static ref SENDER : Mutex<mpsc::UnboundedSender<ipc::Data>> = Mutex::new(client::start_ipc_server());
         static ref QUICK_SUPPORT: Arc<Mutex<bool>> = Default::default();
+        static ref INPUT_VIA_HELPER: AtomicBool = AtomicBool::new(false);
     }
 
     pub enum StartPara {
         Direct,
+        ElevatedDirect,
         Logon(String, String),
     }
 
@@ -864,6 +866,73 @@ pub mod client {
     #[inline]
     fn set_runtime_ipc_token(token: String) {
         *IPC_RUNTIME_TOKEN.lock().unwrap() = Some(token);
+    }
+
+    fn start_para_routes_input_via_helper(para: &StartPara) -> bool {
+        matches!(para, StartPara::ElevatedDirect | StartPara::Logon(_, _))
+    }
+
+    fn routes_input_via_helper() -> bool {
+        *RUNNING.lock().unwrap() && INPUT_VIA_HELPER.load(Ordering::SeqCst)
+    }
+
+    fn start_direct_portable_service_process(portable_service_arg: &str) -> ResultType<()> {
+        match crate::platform::run_background(
+            &std::env::current_exe()?.to_string_lossy().to_string(),
+            portable_service_arg,
+        ) {
+            Ok(true) => Ok(()),
+            Ok(false) => bail!("Failed to run portable service process"),
+            Err(e) => bail!("Failed to run portable service process: {}", e),
+        }
+    }
+
+    #[cfg(windows)]
+    fn portable_service_process_arg(shmem_arg: &str) -> String {
+        format!("--portable-service {}", shmem_arg)
+    }
+
+    #[cfg(windows)]
+    fn portable_service_system_process_arg(shmem_arg: &str) -> String {
+        format!(
+            "--run-as-system {}",
+            portable_service_process_arg(shmem_arg)
+        )
+    }
+
+    #[cfg(windows)]
+    fn start_elevated_portable_service_process(shmem_name: &str) -> ResultType<()> {
+        let shmem_arg = crate::portable_service::portable_service_shmem_arg(shmem_name);
+        if crate::platform::is_root() {
+            log::info!("Start portable service directly from SYSTEM process");
+            let portable_service_arg = portable_service_process_arg(&shmem_arg);
+            return start_direct_portable_service_process(&portable_service_arg);
+        }
+
+        if crate::platform::is_elevated(None).unwrap_or(false) {
+            log::info!("Start portable service as SYSTEM from elevated process");
+            let portable_service_arg = portable_service_system_process_arg(&shmem_arg);
+            if let Err(err) = crate::platform::run_as_system(&portable_service_arg) {
+                log::warn!(
+                    "Failed to start portable service as SYSTEM from elevated process: {}. Falling back to elevated user process",
+                    err
+                );
+                let portable_service_arg = portable_service_process_arg(&shmem_arg);
+                return start_direct_portable_service_process(&portable_service_arg);
+            }
+            return Ok(());
+        }
+
+        log::info!("Start portable service through UAC elevation bootstrap");
+        crate::platform::elevate(&format!("--elevate {}", shmem_arg))
+            .and_then(|started| {
+                if started {
+                    Ok(())
+                } else {
+                    bail!("Failed to start elevated portable service process")
+                }
+            })
+            .map_err(|err| anyhow!("Failed to start elevated portable service process: {}", err))
     }
 
     #[inline]
@@ -995,6 +1064,7 @@ pub mod client {
     // 3) Keep STARTING=true until IPC ping/pong marks RUNNING, or timeout watchdog resets it.
     pub(crate) fn start_portable_service(para: StartPara) -> ResultType<()> {
         log::info!("start portable service");
+        let input_via_helper = start_para_routes_input_via_helper(&para);
         let launch_token = {
             // Keep lock guards in explicit short scopes to make it obvious
             // there is no nested lock ordering (and to avoid Copilot false positives).
@@ -1068,28 +1138,22 @@ pub mod client {
             };
             drop(shmem_lock);
             set_runtime_ipc_token(ipc_token.clone());
-            let portable_service_arg = format!(
-                "--portable-service {}",
-                crate::portable_service::portable_service_shmem_arg(&shmem_name)
-            );
+            let shmem_arg = crate::portable_service::portable_service_shmem_arg(&shmem_name);
+            let portable_service_arg = portable_service_process_arg(&shmem_arg);
             {
                 let _sender = SENDER.lock().unwrap();
             }
             match para {
                 StartPara::Direct => {
-                    match crate::platform::run_background(
-                        &std::env::current_exe()?.to_string_lossy().to_string(),
-                        &portable_service_arg,
-                    ) {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            clear_runtime_shmem_state();
-                            bail!("Failed to run portable service process");
-                        }
-                        Err(e) => {
-                            clear_runtime_shmem_state();
-                            bail!("Failed to run portable service process: {}", e);
-                        }
+                    if let Err(e) = start_direct_portable_service_process(&portable_service_arg) {
+                        clear_runtime_shmem_state();
+                        bail!("{}", e);
+                    }
+                }
+                StartPara::ElevatedDirect => {
+                    if let Err(e) = start_elevated_portable_service_process(&shmem_name) {
+                        clear_runtime_shmem_state();
+                        bail!("{}", e);
                     }
                 }
                 StartPara::Logon(username, password) => {
@@ -1166,10 +1230,12 @@ pub mod client {
                 }
             }
             schedule_starting_timeout_reset(launch_token);
+            INPUT_VIA_HELPER.store(input_via_helper, Ordering::SeqCst);
             Ok(())
         })();
         if start_result.is_err() {
             *STARTING.lock().unwrap() = false;
+            INPUT_VIA_HELPER.store(false, Ordering::SeqCst);
         }
         start_result
     }
@@ -1182,6 +1248,10 @@ pub mod client {
 
     pub fn set_quick_support(v: bool) {
         *QUICK_SUPPORT.lock().unwrap() = v;
+    }
+
+    pub fn quick_support() -> bool {
+        *QUICK_SUPPORT.lock().unwrap()
     }
 
     pub struct CapturerPortable {
@@ -1328,7 +1398,6 @@ pub mod client {
         use DataPortableService::*;
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
         let postfix = IPC_SUFFIX;
-        let quick_support = QUICK_SUPPORT.lock().unwrap().clone();
 
         match new_listener(postfix).await {
             Ok(mut incoming) => loop {
@@ -1406,7 +1475,7 @@ pub mod client {
                                                                 *STARTING.lock().unwrap() = false;
                                                             },
                                                             ConnCount(None) => {
-                                                                if !quick_support {
+                                                                if !quick_support() {
                                                                     let remote_count = crate::server::AUTHED_CONNS
                                                                         .lock()
                                                                         .unwrap()
@@ -1441,6 +1510,7 @@ pub mod client {
                                         }
                                         *RUNNING.lock().unwrap() = false;
                                         *STARTING.lock().unwrap() = false;
+                                        INPUT_VIA_HELPER.store(false, Ordering::SeqCst);
                                     });
                                 }
                                 Err(err) => {
@@ -1457,13 +1527,6 @@ pub mod client {
         }
     }
 
-    fn ipc_send(data: Data) -> ResultType<()> {
-        let sender = SENDER.lock().unwrap();
-        sender
-            .send(data)
-            .map_err(|e| anyhow!("ipc send error:{:?}", e))
-    }
-
     fn get_cursor_info_(shmem: &mut SharedMemory, pci: PCURSORINFO) -> BOOL {
         unsafe {
             let shmem_addr_para = shmem.as_ptr().add(ADDR_CURSOR_PARA);
@@ -1473,6 +1536,13 @@ pub mod client {
             }
             FALSE
         }
+    }
+
+    fn ipc_send(data: Data) -> ResultType<()> {
+        let sender = SENDER.lock().unwrap();
+        sender
+            .send(data)
+            .map_err(|e| anyhow!("ipc send error:{:?}", e))
     }
 
     fn handle_mouse_(
@@ -1553,26 +1623,53 @@ pub mod client {
         simulate: bool,
         show_cursor: bool,
     ) {
-        if RUNNING.lock().unwrap().clone() {
+        if routes_input_via_helper() {
             crate::input_service::update_latest_input_cursor_time(conn);
-            handle_mouse_(evt, conn, username, argb, simulate, show_cursor).ok();
+            if let Err(err) =
+                handle_mouse_(evt, conn, username.clone(), argb, simulate, show_cursor)
+            {
+                log::warn!(
+                    "portable service mouse IPC failed, falling back to local input: {}",
+                    err
+                );
+                crate::input_service::handle_mouse_(
+                    evt,
+                    conn,
+                    username,
+                    argb,
+                    simulate,
+                    show_cursor,
+                );
+            }
         } else {
             crate::input_service::handle_mouse_(evt, conn, username, argb, simulate, show_cursor);
         }
     }
 
     pub fn handle_pointer(evt: &PointerDeviceEvent, conn: i32) {
-        if RUNNING.lock().unwrap().clone() {
+        if routes_input_via_helper() {
             crate::input_service::update_latest_input_cursor_time(conn);
-            handle_pointer_(evt, conn).ok();
+            if let Err(err) = handle_pointer_(evt, conn) {
+                log::warn!(
+                    "portable service pointer IPC failed, falling back to local input: {}",
+                    err
+                );
+                crate::input_service::handle_pointer_(evt, conn);
+            }
         } else {
             crate::input_service::handle_pointer_(evt, conn);
         }
     }
 
     pub fn handle_key(evt: &KeyEvent) {
-        if RUNNING.lock().unwrap().clone() {
-            handle_key_(evt).ok();
+        if routes_input_via_helper() {
+            if let Err(err) = handle_key_(evt) {
+                log::warn!(
+                    "portable service keyboard IPC failed, falling back to local input: {}",
+                    err
+                );
+                crate::input_service::handle_key_(evt);
+            }
         } else {
             crate::input_service::handle_key_(evt);
         }
@@ -1580,6 +1677,89 @@ pub mod client {
 
     pub fn running() -> bool {
         RUNNING.lock().unwrap().clone()
+    }
+
+    pub fn active() -> bool {
+        let running = { *RUNNING.lock().unwrap() };
+        let starting = { *STARTING.lock().unwrap() };
+        running || starting
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::Mutex;
+
+        static TEST_STATE_LOCK: Mutex<()> = Mutex::new(());
+
+        struct InputRouteStateGuard {
+            running: bool,
+            input_via_helper: bool,
+        }
+
+        impl InputRouteStateGuard {
+            fn set(running: bool, input_via_helper: bool) -> Self {
+                let guard = Self {
+                    running: *RUNNING.lock().unwrap(),
+                    input_via_helper: INPUT_VIA_HELPER.load(Ordering::SeqCst),
+                };
+                *RUNNING.lock().unwrap() = running;
+                INPUT_VIA_HELPER.store(input_via_helper, Ordering::SeqCst);
+                guard
+            }
+        }
+
+        impl Drop for InputRouteStateGuard {
+            fn drop(&mut self) {
+                *RUNNING.lock().unwrap() = self.running;
+                INPUT_VIA_HELPER.store(self.input_via_helper, Ordering::SeqCst);
+            }
+        }
+
+        #[test]
+        fn test_start_para_input_routing_policy() {
+            let _lock = TEST_STATE_LOCK.lock().unwrap();
+            assert!(!start_para_routes_input_via_helper(&StartPara::Direct));
+            assert!(start_para_routes_input_via_helper(
+                &StartPara::ElevatedDirect
+            ));
+            assert!(start_para_routes_input_via_helper(&StartPara::Logon(
+                "user".to_owned(),
+                "password".to_owned()
+            )));
+        }
+
+        #[cfg(windows)]
+        #[test]
+        fn test_elevated_portable_service_uses_system_bootstrap_arg() {
+            let shmem_arg = crate::portable_service::portable_service_shmem_arg("test-shmem");
+
+            assert_eq!(
+                portable_service_process_arg(&shmem_arg),
+                "--portable-service --portable-service-shmem-name=test-shmem"
+            );
+            assert_eq!(
+                portable_service_system_process_arg(&shmem_arg),
+                "--run-as-system --portable-service --portable-service-shmem-name=test-shmem"
+            );
+        }
+
+        #[test]
+        fn test_input_helper_routing_requires_running_helper_mode() {
+            let _lock = TEST_STATE_LOCK.lock().unwrap();
+
+            let _guard = InputRouteStateGuard::set(false, false);
+            assert!(!routes_input_via_helper());
+
+            let _guard = InputRouteStateGuard::set(false, true);
+            assert!(!routes_input_via_helper());
+
+            let _guard = InputRouteStateGuard::set(true, false);
+            assert!(!routes_input_via_helper());
+
+            let _guard = InputRouteStateGuard::set(true, true);
+            assert!(routes_input_via_helper());
+        }
     }
 }
 

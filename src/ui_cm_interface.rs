@@ -1657,7 +1657,12 @@ fn cm_inner_send(id: i32, data: Data) {
 
 pub fn can_elevate() -> bool {
     #[cfg(windows)]
-    return !crate::platform::is_installed();
+    {
+        return !crate::platform::is_installed()
+            && !crate::platform::is_root()
+            && !crate::platform::is_elevated(None).unwrap_or(false)
+            && !crate::portable_service::client::active();
+    }
     #[cfg(not(windows))]
     return false;
 }
@@ -1670,13 +1675,16 @@ pub fn elevate_portable(_id: i32) {
                 log::info!("Skip portable elevation request from main window: installed service");
                 return;
             }
-            if crate::portable_service::client::running() {
+            if crate::portable_service::client::active() {
                 log::info!("Skip portable elevation request from main window: already running");
                 return;
             }
+            let was_quick_support = crate::portable_service::client::quick_support();
+            crate::portable_service::client::set_quick_support(true);
             if let Err(err) = crate::portable_service::client::start_portable_service(
-                crate::portable_service::client::StartPara::Direct,
+                crate::portable_service::client::StartPara::ElevatedDirect,
             ) {
+                crate::portable_service::client::set_quick_support(was_quick_support);
                 log::error!(
                     "Failed to start portable service from main window elevation request: {:?}",
                     err

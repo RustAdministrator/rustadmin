@@ -1081,7 +1081,7 @@ impl Connection {
                         }
                         #[cfg(windows)]
                         ipc::Data::DataPortableService(ipc::DataPortableService::RequestStart) => {
-                            if let Err(e) = portable_client::start_portable_service(portable_client::StartPara::Direct) {
+                            if let Err(e) = portable_client::start_portable_service(portable_client::StartPara::ElevatedDirect) {
                                 log::error!("Failed to start portable service from cm: {:?}", e);
                             }
                         }
@@ -4422,8 +4422,10 @@ impl Connection {
                     #[cfg(windows)]
                     Some(misc::Union::ElevationRequest(r)) => match r.union {
                         Some(elevation_request::Union::Direct(_)) => {
-                            self.handle_elevation_request(portable_client::StartPara::Direct)
-                                .await;
+                            self.handle_elevation_request(
+                                portable_client::StartPara::ElevatedDirect,
+                            )
+                            .await;
                         }
                         Some(elevation_request::Union::Logon(r)) => {
                             self.handle_elevation_request(portable_client::StartPara::Logon(
@@ -6128,7 +6130,7 @@ impl Connection {
             return;
         }
         let running = portable_client::running();
-        let show_elevation = !running;
+        let show_elevation = crate::ui_cm_interface::can_elevate();
         self.send_to_cm(ipc::Data::DataPortableService(
             ipc::DataPortableService::CmShowElevation(show_elevation),
         ));

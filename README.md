@@ -149,6 +149,9 @@ client library suite; running it in parallel can produce false failures.
 
 Hardware codec and platform-specific features may require additional SDKs, libraries, or driver components.
 
+For Windows capture, input-desktop, portable-elevation, and service-mode
+constraints, see [Windows development notes](docs/WINDOWS_DEVELOPMENT.md).
+
 ## Project structure
 
 * `src/` — main Rust application code

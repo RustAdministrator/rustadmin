@@ -575,6 +575,7 @@ extern "C" {
     ) -> BOOL;
     fn selectInputDesktop() -> BOOL;
     fn inputDesktopSelected() -> BOOL;
+    fn inputDesktopAccessMask() -> DWORD;
     fn is_windows_server() -> BOOL;
     fn is_windows_10_or_greater() -> BOOL;
     fn handleMask(
@@ -1194,7 +1195,10 @@ pub fn try_change_desktop() -> bool {
                     *s = Instant::now();
                 }
             } else {
-                log::info!("Desktop switched");
+                log::info!(
+                    "Desktop switched: input_access_mask=0x{:08x}",
+                    inputDesktopAccessMask()
+                );
             }
             return res;
         }
@@ -2650,6 +2654,7 @@ pub fn elevate_or_run_as_system(is_setup: bool, is_elevate: bool, is_run_as_syst
         // with inconsistent shared-memory contract.
         std::process::exit(1);
     }
+    let is_portable_service_bootstrap = shmem_name_from_args.is_some();
     if let Some(shmem_name) = shmem_name_from_args {
         let shmem_arg = crate::portable_service::portable_service_shmem_arg(&shmem_name);
         arg_elevate.push(' ');
@@ -2666,6 +2671,19 @@ pub fn elevate_or_run_as_system(is_setup: bool, is_elevate: bool, is_run_as_syst
         match is_elevated(None) {
             Ok(elevated) => {
                 if elevated {
+                    if is_elevate && is_portable_service_bootstrap {
+                        log::info!("run portable service as SYSTEM from elevated bootstrap");
+                        if run_as_system(arg_run_as_system.as_str()).is_ok() {
+                            std::process::exit(0);
+                        }
+                        log::error!(
+                            "Failed to run portable service as SYSTEM from elevated bootstrap, fallback to elevated user, error {}",
+                            io::Error::last_os_error()
+                        );
+                        log::info!("run elevated portable service fallback");
+                        crate::portable_service::server::run_portable_service();
+                        return;
+                    }
                     if !is_run_as_system {
                         if run_as_system(arg_run_as_system.as_str()).is_ok() {
                             std::process::exit(0);
@@ -4773,6 +4791,25 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_input_desktop_access_mask_matches_service_switch_contract() {
+        let mask = unsafe { inputDesktopAccessMask() };
+        let required = DESKTOP_CREATEMENU
+            | DESKTOP_CREATEWINDOW
+            | DESKTOP_ENUMERATE
+            | DESKTOP_HOOKCONTROL
+            | DESKTOP_WRITEOBJECTS
+            | DESKTOP_READOBJECTS
+            | DESKTOP_SWITCHDESKTOP
+            | winapi::um::winnt::GENERIC_WRITE;
+
+        assert_eq!(
+            mask & required,
+            required,
+            "input desktop switching must keep service-grade access rights"
+        );
     }
 
     #[test]

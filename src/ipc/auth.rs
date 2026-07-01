@@ -154,13 +154,20 @@ pub(crate) fn is_allowed_windows_session_scoped_peer(
 #[inline]
 fn is_allowed_windows_portable_service_peer(
     client_is_system: Option<bool>,
-    _client_session_id: Option<u32>,
-    _expected_session_id: Option<u32>,
+    client_session_id: Option<u32>,
+    expected_session_id: Option<u32>,
 ) -> bool {
     // Portable-service listener DACL includes SYSTEM and current-process SID.
-    // In the portable-service path, current process is expected to run as SYSTEM,
-    // and the higher-layer peer policy stays SYSTEM-only.
+    // Allow either:
+    // - SYSTEM helper, used by installed/system-style bootstrap paths.
+    // - Same-session non-SYSTEM helper, used by portable GUI elevation. This
+    //   path is still gated by the listener DACL, executable verification, and
+    //   the one-time token handshake.
     matches!(client_is_system, Some(true))
+        || matches!(
+            (client_is_system, client_session_id, expected_session_id),
+            (Some(false), Some(client), Some(expected)) if client == expected
+        )
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -685,9 +692,11 @@ pub(crate) fn authorize_windows_portable_service_ipc_connection(
     postfix: &str,
 ) -> bool {
     // Portable service IPC policy:
-    // - only SYSTEM peers are authorized by is_allowed_windows_portable_service_peer()
+    // - SYSTEM peers and same-session portable elevated helpers are authorized
+    //   by is_allowed_windows_portable_service_peer()
     // - expected_session_id is still collected for diagnostics and identity checks
-    // - final privilege boundary is enforced by named-pipe ACL + one-time token handshake
+    // - final privilege boundary is enforced by executable verification +
+    //   named-pipe ACL + one-time token handshake
     // - when peer identity is unavailable on some hosts, executable verification remains
     //   best-effort telemetry (not fail-closed) to avoid breaking valid SYSTEM bootstrap
     //   flows that cannot be fully introspected
@@ -728,6 +737,15 @@ pub(crate) fn authorize_windows_portable_service_ipc_connection(
             peer_session_id,
             expected_session_id,
             peer_is_system
+        );
+        return false;
+    }
+    if let Err(err) = ensure_peer_executable_matches_current_by_pid_opt(peer_pid, postfix) {
+        log::warn!(
+            "Rejected unauthorized connection on portable service ipc channel due to executable mismatch: postfix={}, peer_pid={:?}, err={}",
+            postfix,
+            peer_pid,
+            err
         );
         return false;
     }
@@ -852,7 +870,7 @@ impl ConnectionTmpl<parity_tokio_ipc::Connection> {
         expected_active_session_id: Option<u32>,
     ) -> (bool, Option<u32>, Option<u32>, Option<bool>) {
         // Portable-service policy:
-        // only SYSTEM peers are allowed.
+        // SYSTEM peers and same-session elevated portable helpers are allowed.
         let (_service_authorized, peer_pid, peer_session_id, peer_is_system) =
             self.service_authorization_status_for_session(expected_active_session_id);
         (
@@ -910,7 +928,7 @@ mod tests {
             None,
             None
         ));
-        assert!(!super::is_allowed_windows_portable_service_peer(
+        assert!(super::is_allowed_windows_portable_service_peer(
             Some(false),
             Some(1),
             Some(1)

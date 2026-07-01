@@ -55,6 +55,8 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   var watchIsInputMonitoring = false;
   var watchIsCanRecordAudio = false;
   var _isRoot = false;
+  var _canElevatePortable = false;
+  var _portableElevationRequested = false;
   Timer? _updateTimer;
   bool isCardClosed = false;
 
@@ -502,19 +504,32 @@ class _DesktopHomePageState extends State<DesktopHomePage>
 
     if (isWindows && !bind.isDisableInstallation()) {
       if (!bind.mainIsInstalled()) {
-        if (!_isRoot && !bind.isOutgoingOnly()) {
-          return buildInstallCard(
-              "Portable mode", "portable_elevation_tip", "Elevate",
-              () async {
-            await bind.cmElevatePortable(connId: -1);
-          });
-        }
-        return buildInstallCard(
+        final cards = <Widget>[];
+        cards.add(buildInstallCard(
             "", bind.isOutgoingOnly() ? "" : "install_tip", "Install",
             () async {
           await rustDeskWinManager.closeAllSubWindows();
           bind.mainGotoInstall();
-        });
+        }, marginTop: 20));
+        if (!bind.isOutgoingOnly()) {
+          final portableElevated = _isRoot || !_canElevatePortable;
+          cards.add(buildInstallCard(
+              "Portable mode",
+              portableElevated
+                  ? "portable_elevated_tip"
+                  : "portable_elevation_tip",
+              portableElevated || _portableElevationRequested ? "" : "Elevate",
+              () async {
+            await bind.cmElevatePortable(connId: -1);
+            if (mounted && !_portableElevationRequested) {
+              _portableElevationRequested = true;
+              setState(() {});
+            }
+          }, marginTop: 10));
+        }
+        return Column(
+          children: cards,
+        );
       } else if (bind.mainIsInstalledLowerVersion()) {
         return buildInstallCard(
             "Status", "Your installation is lower version.", "Click to upgrade",
@@ -744,6 +759,9 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   @override
   void initState() {
     super.initState();
+    if (isWindows) {
+      _canElevatePortable = bind.cmCanElevate();
+    }
     _updateTimer = periodic_immediate(const Duration(seconds: 1), () async {
       await gFFI.serverModel.fetchID();
       final error = await bind.mainGetError();
@@ -758,8 +776,16 @@ class _DesktopHomePageState extends State<DesktopHomePage>
       }
       if (isWindows) {
         final isRoot = await bind.mainIsRoot();
-        if (isRoot != _isRoot) {
+        final canElevatePortable = bind.cmCanElevate();
+        final wasPortableElevationRequested = _portableElevationRequested;
+        if (canElevatePortable) {
+          _portableElevationRequested = false;
+        }
+        if (isRoot != _isRoot ||
+            canElevatePortable != _canElevatePortable ||
+            wasPortableElevationRequested != _portableElevationRequested) {
           _isRoot = isRoot;
+          _canElevatePortable = canElevatePortable;
           setState(() {});
         }
       }

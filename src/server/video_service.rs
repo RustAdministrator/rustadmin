@@ -1318,24 +1318,28 @@ fn run(vs: VideoService) -> ResultType<()> {
                     desktop_state.2
                 );
                 last_desktop_capture_state = desktop_state;
-                if desktop_changed {
-                    log::info!(
-                        "portable input desktop changed; restart capture backend on input desktop"
-                    );
-                    bail!("SWITCH");
-                }
                 if c.is_mag() {
+                    if !desktop_state.0 && !desktop_state.1 && !desktop_state.2 {
+                        log::info!(
+                            "portable returned to user desktop while using magnifier; switch capture backend"
+                        );
+                        bail!("SWITCH");
+                    }
                     if try_recreate_magnifier_capture(&mut c, "desktop_state_mag_recreate") {
                         log::info!(
                             "portable desktop state changed while using magnifier; recreated magnifier"
                         );
-                    } else if !desktop_state.0 && !desktop_state.2 {
-                        log::info!(
-                            "portable desktop state changed and magnifier recreate failed; switch capture backend"
+                    } else {
+                        log::warn!(
+                            "portable desktop state changed while using magnifier; keep magnifier on locked/secure desktop"
                         );
-                        bail!("SWITCH");
                     }
                 } else {
+                    if desktop_changed {
+                        log::info!(
+                            "portable input desktop changed; switch capture backend from current backend"
+                        );
+                    }
                     log::info!("portable desktop state changed; switch capture backend");
                     bail!("SWITCH");
                 }

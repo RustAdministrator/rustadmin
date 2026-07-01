@@ -273,19 +273,32 @@ extern "C"
         return hProcess;
     }
 
+    static constexpr DWORD kRustAdminInputDesktopAccess =
+        DESKTOP_CREATEMENU |
+        DESKTOP_CREATEWINDOW |
+        DESKTOP_ENUMERATE |
+        DESKTOP_HOOKCONTROL |
+        DESKTOP_WRITEOBJECTS |
+        DESKTOP_READOBJECTS |
+        DESKTOP_SWITCHDESKTOP |
+        GENERIC_WRITE;
+
+    DWORD inputDesktopAccessMask()
+    {
+        return kRustAdminInputDesktopAccess;
+    }
+
     // Switch the current thread to the specified desktop
     static bool
     switchToDesktop(HDESK desktop)
     {
-        HDESK old_desktop = GetThreadDesktop(GetCurrentThreadId());
         if (!SetThreadDesktop(desktop))
         {
             return false;
         }
-        if (!CloseDesktop(old_desktop))
-        {
-            //
-        }
+        // Do not CloseDesktop(GetThreadDesktop(...)). Microsoft documents that
+        // handle as owned by the thread, not as an OpenDesktop/OpenInputDesktop
+        // handle. Closing it can poison later input after lock/logon switches.
         return true;
     }
 
@@ -296,7 +309,7 @@ extern "C"
     inputDesktopSelected()
     {
         HDESK current = GetThreadDesktop(GetCurrentThreadId());
-        HDESK input = OpenInputDesktop(0, FALSE, DESKTOP_READOBJECTS);
+        HDESK input = OpenInputDesktop(0, FALSE, kRustAdminInputDesktopAccess);
         if (!input)
         {
             return FALSE;
@@ -326,9 +339,7 @@ extern "C"
     selectInputDesktop()
     {
         // - Open the input desktop
-        HDESK desktop = OpenInputDesktop(0, FALSE,
-                                         DESKTOP_CREATEWINDOW | DESKTOP_READOBJECTS |
-                                             DESKTOP_WRITEOBJECTS | DESKTOP_SWITCHDESKTOP);
+        HDESK desktop = OpenInputDesktop(0, FALSE, kRustAdminInputDesktopAccess);
         if (!desktop)
         {
             return false;
