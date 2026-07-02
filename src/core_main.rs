@@ -208,7 +208,14 @@ pub fn core_main() -> Option<Vec<String>> {
         && !_is_run_as_system
     {
         use crate::portable_service::client;
-        if let Err(e) = client::start_portable_service(client::StartPara::Direct) {
+        let elevated = crate::platform::is_elevated(None).unwrap_or(false);
+        let start_para = client::start_para_for_quick_support_process(elevated);
+        log::info!(
+            "Start quick-support portable service: elevated={}, input_via_helper={}",
+            elevated,
+            elevated
+        );
+        if let Err(e) = client::start_portable_service(start_para) {
             log::error!("Failed to start portable service: {:?}", e);
         }
     }

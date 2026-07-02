@@ -872,6 +872,23 @@ pub mod client {
         matches!(para, StartPara::ElevatedDirect | StartPara::Logon(_, _))
     }
 
+    fn should_use_helper_capture_for_desktop_state(
+        portable_service_running: bool,
+        prelogin: bool,
+        locked: bool,
+        desktop_changed: bool,
+    ) -> bool {
+        portable_service_running && (prelogin || locked || desktop_changed)
+    }
+
+    pub(crate) fn start_para_for_quick_support_process(elevated: bool) -> StartPara {
+        if elevated {
+            StartPara::ElevatedDirect
+        } else {
+            StartPara::Direct
+        }
+    }
+
     fn routes_input_via_helper() -> bool {
         *RUNNING.lock().unwrap() && INPUT_VIA_HELPER.load(Ordering::SeqCst)
     }
@@ -1580,12 +1597,30 @@ pub mod client {
     }
 
     pub fn create_capturer(
-        _current_display: usize,
+        current_display: usize,
         display: scrap::Display,
         portable_service_running: bool,
     ) -> ResultType<Box<dyn TraitCapturer>> {
         if portable_service_running != RUNNING.lock().unwrap().clone() {
             log::info!("portable service status mismatch");
+        }
+        let prelogin = crate::platform::windows::is_prelogin();
+        let locked = crate::platform::windows::is_locked();
+        let desktop_changed = crate::platform::windows::desktop_changed();
+        if should_use_helper_capture_for_desktop_state(
+            portable_service_running,
+            prelogin,
+            locked,
+            desktop_changed,
+        ) {
+            log::info!(
+                "Portable secure desktop capture: use SYSTEM helper shared-memory capturer, display={}, prelogin={}, locked={}, desktop_changed={}",
+                current_display,
+                prelogin,
+                locked,
+                desktop_changed
+            );
+            return Ok(Box::new(CapturerPortable::new(current_display)));
         }
         // WARNING: Be extremely careful changing the portable primary-display path.
         // RustAdmin 2.0.1.81 regressed here after upstream IPC changes restored
@@ -1727,6 +1762,36 @@ pub mod client {
                 "user".to_owned(),
                 "password".to_owned()
             )));
+        }
+
+        #[test]
+        fn test_quick_support_start_policy_routes_elevated_input_through_helper() {
+            let direct = start_para_for_quick_support_process(false);
+            assert!(matches!(direct, StartPara::Direct));
+            assert!(!start_para_routes_input_via_helper(&direct));
+
+            let elevated = start_para_for_quick_support_process(true);
+            assert!(matches!(elevated, StartPara::ElevatedDirect));
+            assert!(start_para_routes_input_via_helper(&elevated));
+        }
+
+        #[test]
+        fn test_portable_helper_capture_only_for_secure_or_changed_desktop() {
+            assert!(!should_use_helper_capture_for_desktop_state(
+                false, true, true, true
+            ));
+            assert!(!should_use_helper_capture_for_desktop_state(
+                true, false, false, false
+            ));
+            assert!(should_use_helper_capture_for_desktop_state(
+                true, true, false, false
+            ));
+            assert!(should_use_helper_capture_for_desktop_state(
+                true, false, true, false
+            ));
+            assert!(should_use_helper_capture_for_desktop_state(
+                true, false, false, true
+            ));
         }
 
         #[cfg(windows)]

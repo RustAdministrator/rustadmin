@@ -43,6 +43,9 @@ const double _kContentFontSize = 15;
 const Color _accentColor = MyTheme.accent;
 const String _kSettingPageControllerTag = 'settingPageController';
 const String _kSettingPageTabKeyTag = 'settingPageTabKey';
+// DEBUG-PROBE START: set false or remove this tab before normal release builds.
+const bool _kDebugProbeSettingsEnabled = true;
+// DEBUG-PROBE END
 
 class _TabInfo {
   late final SettingsTabKey key;
@@ -60,8 +63,9 @@ enum SettingsTabKey {
   plugin,
   account,
   printer,
-  about,
   quickStart,
+  debug,
+  about,
 }
 
 class DesktopSettingPage extends StatefulWidget {
@@ -84,6 +88,7 @@ class DesktopSettingPage extends StatefulWidget {
         bind.mainGetBuildinOption(key: kOptionHideRemotePrinterSetting) != 'Y')
       SettingsTabKey.printer,
     SettingsTabKey.quickStart,
+    if (_kDebugProbeSettingsEnabled) SettingsTabKey.debug,
     SettingsTabKey.about,
   ];
 
@@ -212,13 +217,17 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
           settingTabs
               .add(_TabInfo(tab, 'Printer', Icons.print_outlined, Icons.print));
           break;
-        case SettingsTabKey.about:
-          settingTabs
-              .add(_TabInfo(tab, 'About', Icons.info_outline, Icons.info));
-          break;
         case SettingsTabKey.quickStart:
           settingTabs.add(_TabInfo(
               tab, 'Quick Start', Icons.slideshow_outlined, Icons.slideshow));
+          break;
+        case SettingsTabKey.debug:
+          settingTabs.add(_TabInfo(
+              tab, 'Debug', Icons.bug_report_outlined, Icons.bug_report));
+          break;
+        case SettingsTabKey.about:
+          settingTabs
+              .add(_TabInfo(tab, 'About', Icons.info_outline, Icons.info));
           break;
       }
     }
@@ -250,11 +259,14 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
         case SettingsTabKey.printer:
           children.add(const _Printer());
           break;
-        case SettingsTabKey.about:
-          children.add(const _About());
-          break;
         case SettingsTabKey.quickStart:
           children.add(const _QuickStartSettingsPage());
+          break;
+        case SettingsTabKey.debug:
+          children.add(const _DebugProbe());
+          break;
+        case SettingsTabKey.about:
+          children.add(const _About());
           break;
       }
     }
@@ -2766,6 +2778,314 @@ class __PrinterState extends State<_Printer> {
   }
 }
 
+// DEBUG-PROBE START: temporary GUI/backend latency probe for slow-PC diagnostics.
+class _DebugProbe extends StatefulWidget {
+  const _DebugProbe({Key? key}) : super(key: key);
+
+  @override
+  State<_DebugProbe> createState() => _DebugProbeState();
+}
+
+class _DebugProbeState extends State<_DebugProbe> {
+  final TextEditingController _textController = TextEditingController();
+  final FocusNode _textFocusNode = FocusNode(debugLabel: 'debug-probe-text');
+  final Stopwatch _watch = Stopwatch();
+  final List<String> _recent = <String>[];
+  File? _logFile;
+  bool _running = false;
+  int _seq = 0;
+  int _pulse = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _textFocusNode.addListener(() {
+      unawaited(_record('text-focus', {'has_focus': _textFocusNode.hasFocus}));
+    });
+  }
+
+  @override
+  void dispose() {
+    _textController.dispose();
+    _textFocusNode.dispose();
+    super.dispose();
+  }
+
+  Future<File> _ensureLogFile() async {
+    if (_logFile != null) return _logFile!;
+    final baseDir = Platform.isWindows
+        ? (Platform.environment['APPDATA'] ?? Directory.systemTemp.path)
+        : Directory.systemTemp.path;
+    final dir =
+        Directory([baseDir, 'RustAdmin', 'log'].join(Platform.pathSeparator));
+    await dir.create(recursive: true);
+    final stamp = DateTime.now()
+        .toIso8601String()
+        .replaceAll(':', '-')
+        .replaceAll('.', '-');
+    _logFile =
+        File('${dir.path}${Platform.pathSeparator}gui-probe-$stamp.jsonl');
+    return _logFile!;
+  }
+
+  Future<void> _record(
+    String event, [
+    Map<String, Object?> data = const <String, Object?>{},
+  ]) async {
+    if (!_running &&
+        event != 'probe-start' &&
+        event != 'probe-stop' &&
+        event != 'copy-log-path') {
+      return;
+    }
+    final row = <String, Object?>{
+      'seq': ++_seq,
+      'wall': DateTime.now().toIso8601String(),
+      'elapsed_us': _watch.isRunning ? _watch.elapsedMicroseconds : 0,
+      'event': event,
+      'data': data,
+    };
+    try {
+      final file = await _ensureLogFile();
+      await file.writeAsString('${jsonEncode(row)}\n',
+          mode: FileMode.append, flush: true);
+    } catch (e) {
+      debugPrint('Debug probe log write failed: $e');
+    }
+    if (!mounted) return;
+    final line = "${row['elapsed_us']}us $event ${jsonEncode(data)}";
+    setState(() {
+      _recent.insert(0, line);
+      if (_recent.length > 120) _recent.removeLast();
+    });
+  }
+
+  Future<void> _time(String name, FutureOr<void> Function() action) async {
+    await _record('timing-begin', {'name': name});
+    final sw = Stopwatch()..start();
+    try {
+      await action();
+      sw.stop();
+      await _record('timing-end', {
+        'name': name,
+        'elapsed_us': sw.elapsedMicroseconds,
+      });
+    } catch (e, st) {
+      sw.stop();
+      await _record('timing-error', {
+        'name': name,
+        'elapsed_us': sw.elapsedMicroseconds,
+        'error': e.toString(),
+        'stack': st.toString(),
+      });
+    }
+  }
+
+  Future<void> _startProbe() async {
+    if (_running) return;
+    setState(() {
+      _running = true;
+      _recent.clear();
+    });
+    _watch
+      ..reset()
+      ..start();
+    final file = await _ensureLogFile();
+    await _record('probe-start', {
+      'log_path': file.path,
+      'platform': Platform.operatingSystem,
+      'app_name': bind.mainGetAppNameSync(),
+    });
+  }
+
+  Future<void> _stopProbe() async {
+    if (!_running) return;
+    await _record('probe-stop');
+    _watch.stop();
+    if (mounted) setState(() => _running = false);
+  }
+
+  Future<void> _copyLogPath() async {
+    final file = await _ensureLogFile();
+    await Clipboard.setData(ClipboardData(text: file.path));
+    await _record('copy-log-path', {'path': file.path});
+  }
+
+  Future<void> _runBackendTiming() async {
+    await _time('ffi-main-get-version', () async {
+      final value = await bind.mainGetVersion();
+      await _record(
+          'ffi-result', {'name': 'mainGetVersion', 'chars': value.length});
+    });
+    await _time('ffi-main-get-build-date', () async {
+      final value = await bind.mainGetBuildDate();
+      await _record(
+          'ffi-result', {'name': 'mainGetBuildDate', 'chars': value.length});
+    });
+    await _time('ffi-main-get-fingerprint', () async {
+      final value = await bind.mainGetFingerprint();
+      await _record(
+          'ffi-result', {'name': 'mainGetFingerprint', 'chars': value.length});
+    });
+    await _time('ffi-main-is-installed', () async {
+      await _record('ffi-result',
+          {'name': 'mainIsInstalled', 'value': bind.mainIsInstalled()});
+    });
+    await _time('ffi-main-is-root', () async {
+      final value = await bind.mainIsRoot();
+      await _record('ffi-result', {'name': 'mainIsRoot', 'value': value});
+    });
+    await _time('ffi-local-option-roundtrip', () async {
+      const key = 'debug-probe-last-ping';
+      final before = bind.mainGetLocalOption(key: key);
+      await bind.mainSetLocalOption(
+          key: key, value: DateTime.now().toIso8601String());
+      final after = bind.mainGetLocalOption(key: key);
+      await _record('ffi-result', {
+        'name': 'mainGetSetLocalOption',
+        'before_chars': before.length,
+        'after_chars': after.length,
+      });
+    });
+  }
+
+  Future<void> _measureNextFrame(String label) async {
+    final sw = Stopwatch()..start();
+    await _record('frame-request', {'label': label});
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      sw.stop();
+      unawaited(_record('frame-callback', {
+        'label': label,
+        'elapsed_us': sw.elapsedMicroseconds,
+      }));
+    });
+    if (mounted) setState(() => _pulse++);
+  }
+
+  Future<void> _showProbeDialog() async {
+    final controller = TextEditingController();
+    try {
+      await _time('dialog-open-close', () async {
+        await showDialog<void>(
+          context: context,
+          builder: (context) {
+            unawaited(_record('dialog-build'));
+            return AlertDialog(
+              title: const Text('Debug Probe'),
+              content: TextField(
+                controller: controller,
+                autofocus: true,
+                decoration: const InputDecoration(labelText: 'Type test text'),
+                onTap: () => unawaited(_record('dialog-text-tap')),
+                onChanged: (value) => unawaited(_record('dialog-text-change', {
+                  'length': value.length,
+                  'selection_base': controller.selection.baseOffset,
+                  'selection_extent': controller.selection.extentOffset,
+                })),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text('Close'),
+                ),
+              ],
+            );
+          },
+        );
+      });
+    } finally {
+      controller.dispose();
+    }
+  }
+
+  Widget _probeButton(String label, Future<void> Function() onPressed) {
+    return OutlinedButton(
+      onPressed: () => unawaited(onPressed()),
+      child: Text(label),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final logPath = _logFile?.path ?? 'not started';
+    return ListView(
+      children: [
+        _Card(title: 'Debug Probe', children: [
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Debug-Probe only. Disable before normal release builds.',
+                style: TextStyle(fontSize: _kContentFontSize),
+              ).marginOnly(bottom: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  _probeButton(_running ? 'Restart probe' : 'Start probe',
+                      () async {
+                    if (_running) await _stopProbe();
+                    await _startProbe();
+                  }),
+                  _probeButton('Stop probe', _stopProbe),
+                  _probeButton('Copy log path', _copyLogPath),
+                  _probeButton('Backend timing', _runBackendTiming),
+                  _probeButton('Next frame timing',
+                      () => _measureNextFrame('manual-$_pulse')),
+                  _probeButton('Open dialog timing', _showProbeDialog),
+                ],
+              ).marginOnly(bottom: 16),
+              Text('Pulse: $_pulse').marginOnly(bottom: 8),
+              Focus(
+                onKeyEvent: (node, event) {
+                  unawaited(_record('text-key', {
+                    'type': event.runtimeType.toString(),
+                    'logical': event.logicalKey.keyLabel,
+                  }));
+                  return KeyEventResult.ignored;
+                },
+                child: TextField(
+                  controller: _textController,
+                  focusNode: _textFocusNode,
+                  decoration: const InputDecoration(
+                    labelText: 'Text input probe',
+                    border: OutlineInputBorder(),
+                  ),
+                  onTap: () => unawaited(_record('text-tap')),
+                  onChanged: (value) => unawaited(_record('text-change', {
+                    'length': value.length,
+                    'selection_base': _textController.selection.baseOffset,
+                    'selection_extent': _textController.selection.extentOffset,
+                  })),
+                ),
+              ).marginOnly(bottom: 12),
+              SelectableText('Log file: $logPath').marginOnly(bottom: 8),
+              Container(
+                height: 220,
+                width: double.infinity,
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  border: Border.all(color: Theme.of(context).dividerColor),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    _recent.isEmpty
+                        ? 'No probe events yet.'
+                        : _recent.join('\n'),
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                ),
+              ),
+            ],
+          ).marginOnly(left: _kContentHMargin),
+        ]),
+      ],
+    ).marginOnly(bottom: _kListViewBottomMargin);
+  }
+}
+
+// DEBUG-PROBE END
 class _About extends StatefulWidget {
   const _About({Key? key}) : super(key: key);
 
