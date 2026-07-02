@@ -28,6 +28,8 @@ const CLIPBOARD_DEBUG_CATEGORY: &str = "clipboard";
 const CLIPBOARD_DEBUG_MAX_EVENTS: usize = 64;
 #[cfg(not(target_os = "android"))]
 const CLIPBOARD_DEBUG_MAX_LINE: usize = 1200;
+#[cfg(not(target_os = "android"))]
+const REMOTE_CLIPBOARD_ECHO_SUPPRESS_DUR: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClipboardDirectionPolicy {
@@ -226,6 +228,7 @@ const WINDOWS_TEXT_OLE_WRAPPER_FORMATS: &[&str] = &["DataObject", "Ole Private D
 lazy_static::lazy_static! {
     static ref ARBOARD_MTX: Arc<Mutex<()>> = Arc::new(Mutex::new(()));
     static ref CLIPBOARD_TIMING: Arc<Mutex<ClipboardTiming>> = Arc::new(Mutex::new(ClipboardTiming::default()));
+    static ref REMOTE_CLIPBOARD_APPLY_GUARD: Arc<Mutex<RemoteClipboardApplyGuard>> = Arc::new(Mutex::new(RemoteClipboardApplyGuard::default()));
     // cache the clipboard msg
     static ref LAST_MULTI_CLIPBOARDS: Arc<Mutex<MultiClipboards>> = Arc::new(Mutex::new(MultiClipboards::new()));
     // For updating in server and getting content in cm.
@@ -247,6 +250,42 @@ struct ClipboardTiming {
     last_local_change_at: Option<Instant>,
     last_remote_apply_at: Option<Instant>,
     last_external_opaque_signature: Option<String>,
+}
+
+#[cfg(not(target_os = "android"))]
+#[derive(Default)]
+struct RemoteClipboardApplyGuard {
+    last: Option<RemoteClipboardApplyRecord>,
+}
+
+#[cfg(not(target_os = "android"))]
+struct RemoteClipboardApplyRecord {
+    side: ClipboardSide,
+    signature: Vec<u8>,
+    observed_at: Instant,
+}
+
+#[cfg(not(target_os = "android"))]
+impl RemoteClipboardApplyGuard {
+    fn should_skip(&mut self, side: ClipboardSide, signature: Vec<u8>, now: Instant) -> bool {
+        if let Some(last) = &mut self.last {
+            if last.side == side
+                && last.signature == signature
+                && now.saturating_duration_since(last.observed_at)
+                    < REMOTE_CLIPBOARD_ECHO_SUPPRESS_DUR
+            {
+                last.observed_at = now;
+                return true;
+            }
+        }
+
+        self.last = Some(RemoteClipboardApplyRecord {
+            side,
+            signature,
+            observed_at: now,
+        });
+        false
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -463,6 +502,92 @@ fn is_rustdesk_owner_clipboard_data(data: &ClipboardData) -> bool {
 #[cfg(not(target_os = "android"))]
 fn remove_remote_owner_markers(data: &mut Vec<ClipboardData>) {
     data.retain(|item| !is_rustdesk_owner_clipboard_data(item));
+}
+
+#[cfg(not(target_os = "android"))]
+fn append_signature_bytes(signature: &mut Vec<u8>, bytes: &[u8]) {
+    signature.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    signature.extend_from_slice(bytes);
+}
+
+#[cfg(not(target_os = "android"))]
+fn append_signature_str(signature: &mut Vec<u8>, value: &str) {
+    append_signature_bytes(signature, value.as_bytes());
+}
+
+#[cfg(not(target_os = "android"))]
+fn remote_clipboard_payload_signature(data: &[ClipboardData]) -> Vec<u8> {
+    let mut signature = Vec::new();
+    for item in data {
+        match item {
+            ClipboardData::Unsupported => signature.push(0),
+            ClipboardData::Text(text) => {
+                signature.push(1);
+                append_signature_str(&mut signature, text);
+            }
+            ClipboardData::Html(html) => {
+                signature.push(2);
+                append_signature_str(&mut signature, html);
+            }
+            ClipboardData::Rtf(rtf) => {
+                signature.push(3);
+                append_signature_str(&mut signature, rtf);
+            }
+            ClipboardData::Image(arboard::ImageData::Rgba(image)) => {
+                signature.push(4);
+                signature.extend_from_slice(&(image.width as u64).to_le_bytes());
+                signature.extend_from_slice(&(image.height as u64).to_le_bytes());
+                append_signature_bytes(&mut signature, image.bytes.as_ref());
+            }
+            ClipboardData::Image(arboard::ImageData::Png(png)) => {
+                signature.push(5);
+                append_signature_bytes(&mut signature, png.as_ref());
+            }
+            ClipboardData::Image(arboard::ImageData::Svg(svg)) => {
+                signature.push(6);
+                append_signature_str(&mut signature, svg);
+            }
+            ClipboardData::Special((name, bytes)) => {
+                if name.eq_ignore_ascii_case(RUSTDESK_CLIPBOARD_OWNER_FORMAT) {
+                    continue;
+                }
+                signature.push(7);
+                append_signature_str(&mut signature, name);
+                append_signature_bytes(&mut signature, bytes);
+            }
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            ClipboardData::FileUrl(urls) => {
+                signature.push(8);
+                signature.extend_from_slice(&(urls.len() as u64).to_le_bytes());
+                for url in urls {
+                    append_signature_str(&mut signature, url);
+                }
+            }
+            ClipboardData::None => signature.push(9),
+        }
+    }
+    signature
+}
+
+#[cfg(not(target_os = "android"))]
+fn should_skip_repeated_remote_clipboard(data: &[ClipboardData], side: ClipboardSide) -> bool {
+    let signature = remote_clipboard_payload_signature(data);
+    let skip =
+        REMOTE_CLIPBOARD_APPLY_GUARD
+            .lock()
+            .unwrap()
+            .should_skip(side, signature, Instant::now());
+    if skip {
+        log::debug!(
+            "Skip applying duplicate remote {} clipboard because it repeated within {:?}",
+            side,
+            REMOTE_CLIPBOARD_ECHO_SUPPRESS_DUR
+        );
+        emit_clipboard_debug(format!(
+            "skip-remote-apply side={side} reason=duplicate-remote-payload"
+        ));
+    }
+    skip
 }
 
 #[cfg(not(target_os = "android"))]
@@ -1041,83 +1166,42 @@ mod platform_clipboard {
 
 #[cfg(target_os = "macos")]
 mod platform_clipboard {
-    use cocoa::{
-        appkit::{NSPasteboard, NSPasteboardItem},
-        base::{id, nil},
-        foundation::{NSArray, NSString},
-    };
     use hbb_common::{bail, log, ResultType};
-    use std::ffi::CStr;
+    use std::{
+        ffi::CStr,
+        os::raw::{c_char, c_longlong},
+    };
 
-    unsafe fn nsstring_to_string(value: id) -> Option<String> {
-        if value == nil {
-            return None;
-        }
-        // Safety: Cocoa returns a null-terminated UTF-8 view for NSString.
-        let bytes = unsafe { NSString::UTF8String(value) };
-        if bytes.is_null() {
-            None
-        } else {
-            // Safety: bytes is valid for the lifetime of the Objective-C object.
-            Some(
-                unsafe { CStr::from_ptr(bytes) }
-                    .to_string_lossy()
-                    .into_owned(),
-            )
-        }
-    }
-
-    unsafe fn append_type_names(types: id, names: &mut Vec<String>) {
-        if types == nil {
-            return;
-        }
-        // Safety: types is an NSArray returned by NSPasteboard APIs.
-        let count = unsafe { NSArray::count(types) };
-        names.reserve(count as usize);
-        for index in 0..count {
-            // Safety: index is below count and NSArray elements are NSString instances.
-            let value = unsafe { NSArray::objectAtIndex(types, index) };
-            if let Some(name) = unsafe { nsstring_to_string(value) } {
-                names.push(name);
-            }
-        }
+    extern "C" {
+        fn MacPasteboardCopyTypeNames() -> *mut c_char;
+        fn MacFreeCString(value: *mut c_char);
+        fn MacPasteboardChangeCount(change_count: *mut c_longlong) -> bool;
     }
 
     fn pasteboard_type_names() -> ResultType<Vec<String>> {
-        let mut names = Vec::new();
         unsafe {
-            // Safety: generalPasteboard is an AppKit singleton and does not require ownership.
-            let pasteboard = NSPasteboard::generalPasteboard(nil);
-            if pasteboard == nil {
-                bail!("failed to get macOS general pasteboard");
+            // Safety: the Objective-C++ wrapper catches NSPasteboard exceptions
+            // and returns a malloc-allocated UTF-8 string that must be freed by
+            // MacFreeCString.
+            let names = MacPasteboardCopyTypeNames();
+            if names.is_null() {
+                bail!("failed to inspect macOS pasteboard type names");
             }
-            // Prefer item-local types because vector editors often attach native
-            // formats to pasteboard items while still publishing plain fallbacks.
-            let items = NSPasteboard::pasteboardItems(pasteboard);
-            if items != nil {
-                let count = NSArray::count(items);
-                for index in 0..count {
-                    let item = NSArray::objectAtIndex(items, index);
-                    let types = NSPasteboardItem::types(item);
-                    append_type_names(types, &mut names);
-                }
-            }
-            if names.is_empty() {
-                append_type_names(NSPasteboard::types(pasteboard), &mut names);
-            }
+            let text = CStr::from_ptr(names).to_string_lossy().into_owned();
+            MacFreeCString(names);
+            Ok(text.lines().map(str::to_owned).collect())
         }
-        Ok(names)
     }
 
     fn pasteboard_change_count() -> ResultType<isize> {
         unsafe {
-            // Safety: generalPasteboard is an AppKit singleton and does not require ownership.
-            let pasteboard = NSPasteboard::generalPasteboard(nil);
-            if pasteboard == nil {
-                bail!("failed to get macOS general pasteboard");
+            // Safety: the Objective-C++ wrapper catches NSPasteboard exceptions
+            // and writes to the provided pointer only when it returns true.
+            let mut change_count = 0;
+            if !MacPasteboardChangeCount(&mut change_count) {
+                bail!("failed to inspect macOS pasteboard change count");
             }
-            // Safety: changeCount only reads the pasteboard generation counter.
-            Ok(NSPasteboard::changeCount(pasteboard) as isize)
+            Ok(change_count as isize)
         }
     }
 
@@ -1554,6 +1638,9 @@ fn do_update_clipboard_(
     if let Some(ctx) = ctx.as_mut() {
         remove_remote_owner_markers(&mut to_update_data);
         if to_update_data.is_empty() {
+            return;
+        }
+        if should_skip_repeated_remote_clipboard(&to_update_data, side) {
             return;
         }
         to_update_data.push(ClipboardData::Special((
@@ -2043,6 +2130,69 @@ mod clipboard_timing_tests {
 
         assert_eq!(data.len(), 1);
         assert!(matches!(&data[0], ClipboardData::Text(text) if text == "remote text"));
+    }
+
+    #[test]
+    fn remote_payload_signature_ignores_owner_marker() {
+        let without_marker = vec![ClipboardData::Text("remote text".to_owned())];
+        let with_marker = vec![
+            ClipboardData::Text("remote text".to_owned()),
+            ClipboardData::Special((RUSTDESK_CLIPBOARD_OWNER_FORMAT.to_owned(), vec![0b11])),
+        ];
+
+        assert_eq!(
+            remote_clipboard_payload_signature(&without_marker),
+            remote_clipboard_payload_signature(&with_marker)
+        );
+    }
+
+    #[test]
+    fn repeated_remote_payload_is_suppressed_inside_echo_window() {
+        let start = Instant::now();
+        let mut guard = RemoteClipboardApplyGuard::default();
+        let data = vec![ClipboardData::Text(
+            "https://github.com/example/repo".to_owned(),
+        )];
+        let signature = remote_clipboard_payload_signature(&data);
+
+        assert!(!guard.should_skip(ClipboardSide::Client, signature.clone(), start));
+        assert!(guard.should_skip(
+            ClipboardSide::Client,
+            signature,
+            start + REMOTE_CLIPBOARD_ECHO_SUPPRESS_DUR / 2
+        ));
+    }
+
+    #[test]
+    fn repeated_remote_payload_is_allowed_after_quiet_window() {
+        let start = Instant::now();
+        let mut guard = RemoteClipboardApplyGuard::default();
+        let data = vec![ClipboardData::Text(
+            "https://github.com/example/repo".to_owned(),
+        )];
+        let signature = remote_clipboard_payload_signature(&data);
+
+        assert!(!guard.should_skip(ClipboardSide::Client, signature.clone(), start));
+        assert!(!guard.should_skip(
+            ClipboardSide::Client,
+            signature,
+            start + REMOTE_CLIPBOARD_ECHO_SUPPRESS_DUR + Duration::from_millis(1)
+        ));
+    }
+
+    #[test]
+    fn repeated_remote_payload_is_side_specific() {
+        let start = Instant::now();
+        let mut guard = RemoteClipboardApplyGuard::default();
+        let data = vec![ClipboardData::Text("shared text".to_owned())];
+        let signature = remote_clipboard_payload_signature(&data);
+
+        assert!(!guard.should_skip(ClipboardSide::Client, signature.clone(), start));
+        assert!(!guard.should_skip(
+            ClipboardSide::Host,
+            signature,
+            start + REMOTE_CLIPBOARD_ECHO_SUPPRESS_DUR / 2
+        ));
     }
 
     #[test]

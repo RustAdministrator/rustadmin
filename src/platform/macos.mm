@@ -10,6 +10,83 @@
 #include <set>
 #include <mutex>
 #include <string>
+#include <cstring>
+#include <cstdlib>
+#include <cstdint>
+
+static char *CopyCString(const char *value) {
+    if (value == NULL) {
+        return NULL;
+    }
+    size_t len = strlen(value);
+    char *copy = (char *)malloc(len + 1);
+    if (copy == NULL) {
+        return NULL;
+    }
+    memcpy(copy, value, len + 1);
+    return copy;
+}
+
+extern "C" char *MacPasteboardCopyTypeNames() {
+    @autoreleasepool {
+        @try {
+            NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+            if (pasteboard == nil) {
+                return NULL;
+            }
+
+            NSMutableArray<NSString *> *names = [NSMutableArray array];
+            NSArray *items = [pasteboard pasteboardItems];
+            if (items != nil) {
+                for (NSPasteboardItem *item in items) {
+                    NSArray *types = [item types];
+                    for (NSString *type in types) {
+                        if (type != nil) {
+                            [names addObject:type];
+                        }
+                    }
+                }
+            }
+            if ([names count] == 0) {
+                NSArray *types = [pasteboard types];
+                for (NSString *type in types) {
+                    if (type != nil) {
+                        [names addObject:type];
+                    }
+                }
+            }
+
+            NSString *joined = [names componentsJoinedByString:@"\n"];
+            return CopyCString([joined UTF8String]);
+        } @catch (NSException *exception) {
+            NSLog(@"RustAdmin caught NSPasteboard exception while reading type names: %@ %@", [exception name], [exception reason]);
+            return NULL;
+        }
+    }
+}
+
+extern "C" void MacFreeCString(char *value) {
+    free(value);
+}
+
+extern "C" bool MacPasteboardChangeCount(int64_t *change_count) {
+    if (change_count == NULL) {
+        return false;
+    }
+    @autoreleasepool {
+        @try {
+            NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+            if (pasteboard == nil) {
+                return false;
+            }
+            *change_count = (int64_t)[pasteboard changeCount];
+            return true;
+        } @catch (NSException *exception) {
+            NSLog(@"RustAdmin caught NSPasteboard exception while reading change count: %@ %@", [exception name], [exception reason]);
+            return false;
+        }
+    }
+}
 
 extern "C" bool CanUseNewApiForScreenCaptureCheck() {
     #ifdef NO_InputMonitoringAuthStatus

@@ -1306,9 +1306,9 @@ class __DisplayPageState extends State<_DisplayPage> {
       _RadioEntry('VP8', 'vp8'),
       _RadioEntry('VP9', 'vp9'),
       _RadioEntry('AV1', 'av1'),
-      if (av1) _RadioEntry('AV1 HW', 'av1-hw'),
-      if (h264) _RadioEntry('H264', 'h264'),
-      if (h265) _RadioEntry('H265', 'h265')
+      _RadioEntry('AV1 HW', 'av1-hw', enabled: av1),
+      _RadioEntry('H264', 'h264', enabled: h264),
+      _RadioEntry('H265', 'h265', enabled: h265)
     ];
     RxBool showCustomImageQuality = false.obs;
     return Scaffold(
@@ -1496,7 +1496,8 @@ class __ManagePairedViewersState extends State<_ManagePairedViewers> {
 class _RadioEntry {
   final String label;
   final String value;
-  _RadioEntry(this.label, this.value);
+  final bool enabled;
+  _RadioEntry(this.label, this.value, {this.enabled = true});
 }
 
 typedef _RadioEntryGetter = String Function();
@@ -1530,6 +1531,11 @@ SettingsTile _getPopupDialogRadioEntry({
           ? null
           : (String? value) async {
               if (value == null) return;
+              final entry = list.firstWhereOrNull((e) => e.value == value);
+              if (entry != null && !entry.enabled) {
+                showCodecUnavailableDialog(gFFI.dialogManager, entry.label);
+                return;
+              }
               await asyncSetter(value);
               init();
               if (value != notCloseValue) {
@@ -1541,8 +1547,13 @@ SettingsTile _getPopupDialogRadioEntry({
           content: Obx(
         () => Column(children: [
           ...list
-              .map((e) => getRadio(Text(translate(e.label)), e.value,
-                  groupValue.value, onChanged))
+              .map((e) => getRadio(
+                  Text(translate(e.label),
+                      style: TextStyle(
+                          color: disabledTextColor(context, e.enabled))),
+                  e.value,
+                  groupValue.value,
+                  onChanged))
               .toList(),
           Offstage(
             offstage:

@@ -449,6 +449,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Default Scroll Style", ""),
         ("Default Image Quality", ""),
         ("Default Codec", ""),
+        ("codec_unavailable_tip", ""),
         ("Quality monitor position", ""),
         ("Top right", ""),
         ("Top left", ""),

@@ -162,6 +162,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Default Scroll Style", "Default scroll style"),
         ("Default Image Quality", "Default image quality"),
         ("Default Codec", "Default codec"),
+        ("codec_unavailable_tip", "This codec is not available for this connection or this device. RustAdmin will keep using a working codec."),
         ("Display", "Display"),
         ("Quality monitor", "Quality monitor"),
         ("Show quality monitor", "Show quality monitor"),

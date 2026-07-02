@@ -1210,9 +1210,10 @@ void showOptions(
         (imageQualityRadios.isNotEmpty ? imageQualityRadios[0].groupValue : '')
             .obs;
     var codec = (codecRadios.isNotEmpty ? codecRadios[0].groupValue : '').obs;
-    var qualityMonitor =
-        (qualityMonitorRadios.isNotEmpty ? qualityMonitorRadios[0].groupValue : '')
-            .obs;
+    var qualityMonitor = (qualityMonitorRadios.isNotEmpty
+            ? qualityMonitorRadios[0].groupValue
+            : '')
+        .obs;
     var qualityMonitorDetails = (qualityMonitorDetailsRadios.isNotEmpty
             ? qualityMonitorDetailsRadios[0].groupValue
             : '')
@@ -1256,7 +1257,7 @@ void showOptions(
             e.onChanged != null
                 ? (v) {
                     e.onChanged?.call(v);
-                    if (v != null) codec.value = v;
+                    if (v != null && e.enabled) codec.value = v;
                   }
                 : null)),
       if (codecRadios.isNotEmpty) const Divider(color: MyTheme.border),

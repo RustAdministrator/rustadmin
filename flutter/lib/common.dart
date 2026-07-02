@@ -1541,6 +1541,14 @@ void msgBoxCommon(OverlayDialogManager dialogManager, String title,
       ));
 }
 
+void showCodecUnavailableDialog(
+    OverlayDialogManager dialogManager, String codec) {
+  msgBoxCommon(dialogManager, 'Codec',
+      Text('${translate(codec)}\n\n${translate('codec_unavailable_tip')}'), [
+    dialogButton('OK', onPressed: dialogManager.dismissAll),
+  ]);
+}
+
 Color str2color(String str, [alpha = 0xFF]) {
   var hash = 160 << 16 + 114 << 8 + 91;
   for (var i = 0; i < str.length; i += 1) {

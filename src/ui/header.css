@@ -95,3 +95,7 @@ button:disabled {
   opacity: 0.3;
 }
 
+li.codec-unavailable {
+  color: color(light-text);
+}
+

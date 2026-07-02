@@ -2308,27 +2308,30 @@ class _DisplayState extends State<_Display> {
       final av1 = codecsJson['av1'] ?? false;
       final h264 = codecsJson['h264'] ?? false;
       final h265 = codecsJson['h265'] ?? false;
-      if (av1) {
-        hwRadios.add(_Radio(context,
-            value: 'av1-hw',
-            groupValue: groupValue,
-            label: 'AV1 HW',
-            onChanged: isOptFixed ? null : onChanged));
-      }
-      if (h264) {
-        hwRadios.add(_Radio(context,
-            value: 'h264',
-            groupValue: groupValue,
-            label: 'H264',
-            onChanged: isOptFixed ? null : onChanged));
-      }
-      if (h265) {
-        hwRadios.add(_Radio(context,
-            value: 'h265',
-            groupValue: groupValue,
-            label: 'H265',
-            onChanged: isOptFixed ? null : onChanged));
-      }
+      hwRadios.add(_Radio(context,
+          value: 'av1-hw',
+          groupValue: groupValue,
+          label: 'AV1 HW',
+          enabled: av1,
+          onDisabledTap: () =>
+              showCodecUnavailableDialog(gFFI.dialogManager, 'AV1 HW'),
+          onChanged: isOptFixed ? null : onChanged));
+      hwRadios.add(_Radio(context,
+          value: 'h264',
+          groupValue: groupValue,
+          label: 'H264',
+          enabled: h264,
+          onDisabledTap: () =>
+              showCodecUnavailableDialog(gFFI.dialogManager, 'H264'),
+          onChanged: isOptFixed ? null : onChanged));
+      hwRadios.add(_Radio(context,
+          value: 'h265',
+          groupValue: groupValue,
+          label: 'H265',
+          enabled: h265,
+          onDisabledTap: () =>
+              showCodecUnavailableDialog(gFFI.dialogManager, 'H265'),
+          onChanged: isOptFixed ? null : onChanged));
     } catch (e) {
       debugPrint("failed to parse supported hwdecodings, err=$e");
     }
@@ -3065,29 +3068,43 @@ Widget _Radio<T>(BuildContext context,
     required T groupValue,
     required String label,
     required FutureOr<void> Function(T value)? onChanged,
-    bool autoNewLine = true}) {
-  final onChange2 = onChanged != null
+    bool autoNewLine = true,
+    bool enabled = true,
+    VoidCallback? onDisabledTap}) {
+  final canChange = enabled && onChanged != null;
+  final onChange2 = canChange
       ? (T? value) {
           if (value != null) {
             onChanged(value);
           }
         }
       : null;
+  final onUnavailable = !enabled ? onDisabledTap : null;
   return GestureDetector(
     child: Row(
       children: [
-        Radio<T>(value: value, groupValue: groupValue, onChanged: onChange2),
+        Radio<T>(
+            value: value,
+            groupValue: groupValue,
+            onChanged: onChange2 ??
+                (onUnavailable == null ? null : (_) => onUnavailable())),
         Expanded(
           child: Text(translate(label),
                   overflow: autoNewLine ? null : TextOverflow.ellipsis,
                   style: TextStyle(
                       fontSize: _kContentFontSize,
-                      color: disabledTextColor(context, onChange2 != null)))
+                      color: disabledTextColor(context, canChange)))
               .marginOnly(left: 5),
         ),
       ],
     ).marginOnly(left: _kRadioLeftMargin),
-    onTap: () => onChange2?.call(value),
+    onTap: () {
+      if (onChange2 != null) {
+        onChange2(value);
+      } else {
+        onUnavailable?.call();
+      }
+    },
   );
 }
 
