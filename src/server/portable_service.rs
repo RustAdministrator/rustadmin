@@ -578,6 +578,32 @@ pub mod server {
         }
     }
 
+    fn capture_desktop_state() -> (bool, bool, bool) {
+        (
+            crate::platform::windows::is_prelogin(),
+            crate::platform::windows::is_locked(),
+            crate::platform::windows::desktop_changed(),
+        )
+    }
+
+    fn sampled_bgr_sum(data: &[u8]) -> u64 {
+        let pixels = data.len() / 4;
+        if pixels == 0 {
+            return 0;
+        }
+        let step = (pixels / 1024).max(1);
+        let mut sum = 0u64;
+        let mut samples = 0usize;
+        let mut pixel = 0usize;
+        while pixel < pixels && samples < 1024 {
+            let i = pixel * 4;
+            sum += data[i] as u64 + data[i + 1] as u64 + data[i + 2] as u64;
+            samples += 1;
+            pixel += step;
+        }
+        sum
+    }
+
     fn run_capture(shmem: Arc<SharedMemory>) {
         let mut c = None;
         let mut last_current_display = usize::MAX;
@@ -598,6 +624,7 @@ pub mod server {
                 let current_display = (*para).current_display;
                 let timeout_ms = (*para).timeout_ms;
                 if c.is_none() {
+                    let (prelogin, locked, desktop_changed) = capture_desktop_state();
                     let Ok(mut displays) = display_service::try_get_displays() else {
                         log::error!("Failed to get displays");
                         *EXIT.lock().unwrap() = true;
@@ -613,13 +640,28 @@ pub mod server {
                     display_height = display.height();
                     match Capturer::new(display) {
                         Ok(mut v) => {
+                            let force_gdi = prelogin || locked || desktop_changed;
+                            let mut forced_gdi = false;
+                            if force_gdi || dxgi_failed_times > MAX_DXGI_FAIL_TIME {
+                                dxgi_failed_times = 0;
+                                forced_gdi = v.set_gdi();
+                            }
+                            log::info!(
+                                "portable service capture created: display={}, size={}x{}, prelogin={}, locked={}, desktop_changed={}, force_gdi={}, forced_gdi={}, backend={}, is_gdi={}",
+                                current_display,
+                                display_width,
+                                display_height,
+                                prelogin,
+                                locked,
+                                desktop_changed,
+                                force_gdi,
+                                forced_gdi,
+                                v.capture_backend(),
+                                v.is_gdi()
+                            );
                             c = {
                                 last_current_display = current_display;
                                 first_frame_captured = false;
-                                if dxgi_failed_times > MAX_DXGI_FAIL_TIME {
-                                    dxgi_failed_times = 0;
-                                    v.set_gdi();
-                                }
                                 utils::set_para(
                                     &shmem,
                                     CapturerPara {
@@ -661,6 +703,8 @@ pub mod server {
                         continue;
                     }
                 }
+                let capture_backend = c.as_ref().map(|f| f.capture_backend()).unwrap_or("none");
+                let capture_is_gdi = c.as_ref().map(|f| f.is_gdi()).unwrap_or(false);
                 match c.as_mut().map(|f| f.frame(spf)) {
                     Some(Ok(f)) => match f {
                         Frame::PixelBuffer(f) => {
@@ -686,6 +730,17 @@ pub mod server {
                             shmem.write(ADDR_CAPTURE_FRAME, f.data());
                             shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(TRUE));
                             utils::increase_counter(shmem.as_ptr().add(ADDR_CAPTURE_FRAME_COUNTER));
+                            if !first_frame_captured {
+                                log::info!(
+                                    "portable service capture first frame: backend={}, is_gdi={}, frame_len={}, size={}x{}, sampled_bgr_sum={}",
+                                    capture_backend,
+                                    capture_is_gdi,
+                                    f.data().len(),
+                                    display_width,
+                                    display_height,
+                                    sampled_bgr_sum(f.data())
+                                );
+                            }
                             first_frame_captured = true;
                             dxgi_failed_times = 0;
                         }
@@ -695,7 +750,12 @@ pub mod server {
                     },
                     Some(Err(e)) => {
                         if crate::platform::windows::desktop_changed() {
-                            crate::platform::try_change_desktop();
+                            let changed = crate::platform::try_change_desktop();
+                            log::warn!(
+                                "portable service capture desktop changed after frame error; try_change_desktop={}, err={:?}",
+                                changed,
+                                e
+                            );
                             c = None;
                             std::thread::sleep(spf);
                             continue;
@@ -1389,6 +1449,10 @@ pub mod client {
         // control by itself
         fn is_gdi(&self) -> bool {
             true
+        }
+
+        fn capture_backend(&self) -> &'static str {
+            "Portable SYSTEM helper capture"
         }
 
         fn set_gdi(&mut self) -> bool {

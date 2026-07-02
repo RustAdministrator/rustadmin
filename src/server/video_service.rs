@@ -541,6 +541,40 @@ fn create_dxgi_priority_capturer(
     crate::portable_service::client::create_capturer(current, display, portable_service_running)
 }
 
+#[cfg(any(windows, test))]
+fn should_force_portable_secure_capturer(
+    portable_service_running: bool,
+    prelogin: bool,
+    locked: bool,
+    desktop_changed: bool,
+) -> bool {
+    portable_service_running && (prelogin || locked || desktop_changed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_force_portable_secure_capturer;
+
+    #[test]
+    fn test_portable_secure_capture_routing_requires_secure_desktop() {
+        assert!(!should_force_portable_secure_capturer(
+            false, true, true, true
+        ));
+        assert!(!should_force_portable_secure_capturer(
+            true, false, false, false
+        ));
+        assert!(should_force_portable_secure_capturer(
+            true, true, false, false
+        ));
+        assert!(should_force_portable_secure_capturer(
+            true, false, true, false
+        ));
+        assert!(should_force_portable_secure_capturer(
+            true, false, false, true
+        ));
+    }
+}
+
 #[cfg(windows)]
 fn create_gdi_priority_capturer(current: usize) -> ResultType<Box<dyn TraitCapturer>> {
     let mut displays = Display::all().with_context(|| "Failed to enumerate displays for GDI")?;
@@ -577,6 +611,24 @@ fn create_windows_capturer(
         width,
         height
     );
+
+    let prelogin = crate::platform::windows::is_prelogin();
+    let locked = crate::platform::windows::is_locked();
+    let desktop_changed = crate::platform::windows::desktop_changed();
+    if should_force_portable_secure_capturer(
+        portable_service_running,
+        prelogin,
+        locked,
+        desktop_changed,
+    ) {
+        log::info!(
+            "capture auto backend selected: Portable SYSTEM helper before WGC/WinMag, prelogin={}, locked={}, desktop_changed={}",
+            prelogin,
+            locked,
+            desktop_changed
+        );
+        return create_dxgi_priority_capturer(display, current, portable_service_running);
+    }
 
     match create_wgc_priority_capturer(
         privacy_mode_id,
@@ -1319,6 +1371,17 @@ fn run(vs: VideoService) -> ResultType<()> {
                 );
                 last_desktop_capture_state = desktop_state;
                 if c.is_mag() {
+                    if should_force_portable_secure_capturer(
+                        portable_service_running,
+                        desktop_state.0,
+                        desktop_state.1,
+                        desktop_state.2,
+                    ) {
+                        log::info!(
+                            "portable secure desktop while using magnifier; switch to helper capture"
+                        );
+                        bail!("SWITCH");
+                    }
                     if !desktop_state.0 && !desktop_state.1 && !desktop_state.2 {
                         log::info!(
                             "portable returned to user desktop while using magnifier; switch capture backend"
@@ -1491,8 +1554,21 @@ fn run(vs: VideoService) -> ResultType<()> {
                 if c.is_mag() {
                     mag_no_frame_count = mag_no_frame_count.saturating_add(1);
                     let portable_service_running = crate::portable_service::client::running();
+                    let prelogin = crate::platform::windows::is_prelogin();
                     let locked = crate::platform::windows::is_locked();
                     let desktop_changed = crate::platform::windows::desktop_changed();
+                    if should_force_portable_secure_capturer(
+                        portable_service_running,
+                        prelogin,
+                        locked,
+                        desktop_changed,
+                    ) {
+                        log::info!(
+                            "portable magnifier produced no frames on secure desktop; switch to helper capture, no_frame_count={}",
+                            mag_no_frame_count
+                        );
+                        bail!("SWITCH");
+                    }
                     if portable_service_running
                         && (locked || desktop_changed)
                         && (mag_no_frame_count == 10 || mag_no_frame_count % 60 == 0)
@@ -1595,8 +1671,21 @@ fn run(vs: VideoService) -> ResultType<()> {
                 #[cfg(windows)]
                 if c.is_mag() {
                     let portable_service_running = crate::portable_service::client::running();
+                    let prelogin = crate::platform::windows::is_prelogin();
                     let locked = crate::platform::windows::is_locked();
                     let desktop_changed = crate::platform::windows::desktop_changed();
+                    if should_force_portable_secure_capturer(
+                        portable_service_running,
+                        prelogin,
+                        locked,
+                        desktop_changed,
+                    ) {
+                        log::info!(
+                            "portable magnifier capture error on secure desktop; switch to helper capture: {:?}",
+                            err
+                        );
+                        bail!("SWITCH");
+                    }
                     if portable_service_running && (locked || desktop_changed) {
                         if try_recreate_magnifier_capture(&mut c, "mag_error_recreate") {
                             log::info!(
