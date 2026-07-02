@@ -43,9 +43,7 @@ const double _kContentFontSize = 15;
 const Color _accentColor = MyTheme.accent;
 const String _kSettingPageControllerTag = 'settingPageController';
 const String _kSettingPageTabKeyTag = 'settingPageTabKey';
-// DEBUG-PROBE START: set false or remove this tab before normal release builds.
 const bool _kDebugProbeSettingsEnabled = true;
-// DEBUG-PROBE END
 
 class _TabInfo {
   late final SettingsTabKey key;
@@ -2778,7 +2776,7 @@ class __PrinterState extends State<_Printer> {
   }
 }
 
-// DEBUG-PROBE START: temporary GUI/backend latency probe for slow-PC diagnostics.
+// DEBUG-PROBE START: temporary backend/control latency probe for slow-PC diagnostics.
 class _DebugProbe extends StatefulWidget {
   const _DebugProbe({Key? key}) : super(key: key);
 
@@ -2787,29 +2785,12 @@ class _DebugProbe extends StatefulWidget {
 }
 
 class _DebugProbeState extends State<_DebugProbe> {
-  final TextEditingController _textController = TextEditingController();
-  final FocusNode _textFocusNode = FocusNode(debugLabel: 'debug-probe-text');
   final Stopwatch _watch = Stopwatch();
   final List<String> _recent = <String>[];
   File? _logFile;
+  Future<void> _writeChain = Future<void>.value();
   bool _running = false;
   int _seq = 0;
-  int _pulse = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    _textFocusNode.addListener(() {
-      unawaited(_record('text-focus', {'has_focus': _textFocusNode.hasFocus}));
-    });
-  }
-
-  @override
-  void dispose() {
-    _textController.dispose();
-    _textFocusNode.dispose();
-    super.dispose();
-  }
 
   Future<File> _ensureLogFile() async {
     if (_logFile != null) return _logFile!;
@@ -2845,10 +2826,14 @@ class _DebugProbeState extends State<_DebugProbe> {
       'event': event,
       'data': data,
     };
-    try {
+    final encoded = '${jsonEncode(row)}\n';
+    final write = _writeChain.then((_) async {
       final file = await _ensureLogFile();
-      await file.writeAsString('${jsonEncode(row)}\n',
-          mode: FileMode.append, flush: true);
+      await file.writeAsString(encoded, mode: FileMode.append, flush: true);
+    });
+    _writeChain = write.catchError((_) {});
+    try {
+      await write;
     } catch (e) {
       debugPrint('Debug probe log write failed: $e');
     }
@@ -2911,91 +2896,27 @@ class _DebugProbeState extends State<_DebugProbe> {
     await _record('copy-log-path', {'path': file.path});
   }
 
-  Future<void> _runBackendTiming() async {
-    await _time('ffi-main-get-version', () async {
-      final value = await bind.mainGetVersion();
-      await _record(
-          'ffi-result', {'name': 'mainGetVersion', 'chars': value.length});
-    });
-    await _time('ffi-main-get-build-date', () async {
-      final value = await bind.mainGetBuildDate();
-      await _record(
-          'ffi-result', {'name': 'mainGetBuildDate', 'chars': value.length});
-    });
-    await _time('ffi-main-get-fingerprint', () async {
-      final value = await bind.mainGetFingerprint();
-      await _record(
-          'ffi-result', {'name': 'mainGetFingerprint', 'chars': value.length});
-    });
-    await _time('ffi-main-is-installed', () async {
-      await _record('ffi-result',
-          {'name': 'mainIsInstalled', 'value': bind.mainIsInstalled()});
-    });
-    await _time('ffi-main-is-root', () async {
-      final value = await bind.mainIsRoot();
-      await _record('ffi-result', {'name': 'mainIsRoot', 'value': value});
-    });
-    await _time('ffi-local-option-roundtrip', () async {
-      const key = 'debug-probe-last-ping';
-      final before = bind.mainGetLocalOption(key: key);
-      await bind.mainSetLocalOption(
-          key: key, value: DateTime.now().toIso8601String());
-      final after = bind.mainGetLocalOption(key: key);
-      await _record('ffi-result', {
-        'name': 'mainGetSetLocalOption',
-        'before_chars': before.length,
-        'after_chars': after.length,
+  Future<void> _runControlProbe() async {
+    await _time('ffi-main-debug-control-probe', () async {
+      final raw = await bind.mainDebugControlProbe();
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) {
+        await _record('control-probe-error', {'error': 'invalid json report'});
+        return;
+      }
+      await _record('control-probe-meta', {
+        'app_name': decoded['app_name']?.toString() ?? '',
+        'platform': decoded['platform']?.toString() ?? '',
+        'rust_total_elapsed_us': decoded['total_elapsed_us'],
       });
+      final steps = decoded['steps'];
+      if (steps is! List) return;
+      for (final step in steps) {
+        if (step is Map) {
+          await _record('control-probe-step', Map<String, Object?>.from(step));
+        }
+      }
     });
-  }
-
-  Future<void> _measureNextFrame(String label) async {
-    final sw = Stopwatch()..start();
-    await _record('frame-request', {'label': label});
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      sw.stop();
-      unawaited(_record('frame-callback', {
-        'label': label,
-        'elapsed_us': sw.elapsedMicroseconds,
-      }));
-    });
-    if (mounted) setState(() => _pulse++);
-  }
-
-  Future<void> _showProbeDialog() async {
-    final controller = TextEditingController();
-    try {
-      await _time('dialog-open-close', () async {
-        await showDialog<void>(
-          context: context,
-          builder: (context) {
-            unawaited(_record('dialog-build'));
-            return AlertDialog(
-              title: const Text('Debug Probe'),
-              content: TextField(
-                controller: controller,
-                autofocus: true,
-                decoration: const InputDecoration(labelText: 'Type test text'),
-                onTap: () => unawaited(_record('dialog-text-tap')),
-                onChanged: (value) => unawaited(_record('dialog-text-change', {
-                  'length': value.length,
-                  'selection_base': controller.selection.baseOffset,
-                  'selection_extent': controller.selection.extentOffset,
-                })),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('Close'),
-                ),
-              ],
-            );
-          },
-        );
-      });
-    } finally {
-      controller.dispose();
-    }
   }
 
   Widget _probeButton(String label, Future<void> Function() onPressed) {
@@ -3029,39 +2950,12 @@ class _DebugProbeState extends State<_DebugProbe> {
                   }),
                   _probeButton('Stop probe', _stopProbe),
                   _probeButton('Copy log path', _copyLogPath),
-                  _probeButton('Backend timing', _runBackendTiming),
-                  _probeButton('Next frame timing',
-                      () => _measureNextFrame('manual-$_pulse')),
-                  _probeButton('Open dialog timing', _showProbeDialog),
+                  _probeButton('Run control probe', _runControlProbe),
                 ],
               ).marginOnly(bottom: 16),
-              Text('Pulse: $_pulse').marginOnly(bottom: 8),
-              Focus(
-                onKeyEvent: (node, event) {
-                  unawaited(_record('text-key', {
-                    'type': event.runtimeType.toString(),
-                    'logical': event.logicalKey.keyLabel,
-                  }));
-                  return KeyEventResult.ignored;
-                },
-                child: TextField(
-                  controller: _textController,
-                  focusNode: _textFocusNode,
-                  decoration: const InputDecoration(
-                    labelText: 'Text input probe',
-                    border: OutlineInputBorder(),
-                  ),
-                  onTap: () => unawaited(_record('text-tap')),
-                  onChanged: (value) => unawaited(_record('text-change', {
-                    'length': value.length,
-                    'selection_base': _textController.selection.baseOffset,
-                    'selection_extent': _textController.selection.extentOffset,
-                  })),
-                ),
-              ).marginOnly(bottom: 12),
               SelectableText('Log file: $logPath').marginOnly(bottom: 8),
               Container(
-                height: 220,
+                height: 260,
                 width: double.infinity,
                 padding: const EdgeInsets.all(8),
                 decoration: BoxDecoration(

@@ -28,7 +28,7 @@ use std::{
         atomic::{AtomicI32, Ordering},
         Arc,
     },
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 pub type SessionID = uuid::Uuid;
@@ -1101,6 +1101,148 @@ pub fn main_get_license() -> String {
 
 pub fn main_get_version() -> String {
     get_version()
+}
+
+#[derive(serde::Serialize)]
+struct DebugControlProbeStep {
+    name: &'static str,
+    elapsed_us: u64,
+    ok: bool,
+    summary: String,
+}
+
+#[derive(serde::Serialize)]
+struct DebugControlProbeReport {
+    app_name: String,
+    platform: String,
+    total_elapsed_us: u64,
+    steps: Vec<DebugControlProbeStep>,
+}
+
+fn debug_probe_elapsed_us(started: Instant) -> u64 {
+    let elapsed = started.elapsed().as_micros();
+    elapsed.min(u64::MAX as u128) as u64
+}
+
+fn debug_probe_step<F>(steps: &mut Vec<DebugControlProbeStep>, name: &'static str, action: F)
+where
+    F: FnOnce() -> Result<String, String>,
+{
+    let started = Instant::now();
+    let result = action();
+    let elapsed_us = debug_probe_elapsed_us(started);
+    match result {
+        Ok(summary) => steps.push(DebugControlProbeStep {
+            name,
+            elapsed_us,
+            ok: true,
+            summary,
+        }),
+        Err(err) => steps.push(DebugControlProbeStep {
+            name,
+            elapsed_us,
+            ok: false,
+            summary: err,
+        }),
+    }
+}
+
+pub fn main_debug_control_probe() -> String {
+    let report_started = Instant::now();
+    let mut steps = Vec::with_capacity(16);
+
+    debug_probe_step(&mut steps, "local-main-get-version", || {
+        Ok(format!("value={}", get_version()))
+    });
+    debug_probe_step(&mut steps, "local-main-get-build-date", || {
+        Ok(format!("value={}", crate::BUILD_DATE))
+    });
+    debug_probe_step(&mut steps, "local-temporary-password", || {
+        Ok(format!(
+            "chars={}",
+            ui_interface::temporary_password().len()
+        ))
+    });
+    debug_probe_step(&mut steps, "local-get-options-cache", || {
+        let options = ui_interface::get_options();
+        let count = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&options)
+            .map(|m| m.len())
+            .unwrap_or_default();
+        Ok(format!("chars={}, entries={}", options.len(), count))
+    });
+    debug_probe_step(&mut steps, "local-option-roundtrip", || {
+        const KEY: &str = "debug-probe-last-ping";
+        let before = get_local_option(KEY.to_owned());
+        set_local_option(KEY.to_owned(), format!("{:?}", SystemTime::now()));
+        let after = get_local_option(KEY.to_owned());
+        Ok(format!(
+            "before_chars={}, after_chars={}",
+            before.len(),
+            after.len()
+        ))
+    });
+    debug_probe_step(&mut steps, "platform-is-installed", || {
+        Ok(format!("value={}", is_installed()))
+    });
+    debug_probe_step(&mut steps, "platform-is-root", || {
+        Ok(format!("value={}", is_root()))
+    });
+    debug_probe_step(&mut steps, "ipc-get-fingerprint", || {
+        Ok(format!("chars={}", get_fingerprint().len()))
+    });
+    debug_probe_step(&mut steps, "ipc-is-permanent-password-set", || {
+        Ok(format!(
+            "value={}",
+            ui_interface::is_permanent_password_set()
+        ))
+    });
+    debug_probe_step(&mut steps, "ipc-is-local-permanent-password-set", || {
+        Ok(format!(
+            "value={}",
+            ui_interface::is_local_permanent_password_set()
+        ))
+    });
+    debug_probe_step(&mut steps, "ipc-get-unlock-pin", || {
+        Ok(format!("chars={}", get_unlock_pin().len()))
+    });
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        debug_probe_step(&mut steps, "ipc-get-config-id", || {
+            crate::ipc::get_config("id")
+                .map(|v| format!("chars={}", v.unwrap_or_default().len()))
+                .map_err(|err| err.to_string())
+        });
+        debug_probe_step(&mut steps, "ipc-get-config-permanent-password-set", || {
+            crate::ipc::get_config("permanent-password-set")
+                .map(|v| format!("value={}", v.unwrap_or_default()))
+                .map_err(|err| err.to_string())
+        });
+        debug_probe_step(&mut steps, "ipc-get-config-unlock-pin", || {
+            crate::ipc::get_config("unlock-pin")
+                .map(|v| format!("chars={}", v.unwrap_or_default().len()))
+                .map_err(|err| err.to_string())
+        });
+        debug_probe_step(&mut steps, "ipc-get-options", || {
+            let options = crate::ipc::get_options();
+            Ok(format!("entries={}", options.len()))
+        });
+    }
+
+    let total_elapsed_us = debug_probe_elapsed_us(report_started);
+    let report = DebugControlProbeReport {
+        app_name: get_app_name(),
+        platform: std::env::consts::OS.to_owned(),
+        total_elapsed_us,
+        steps,
+    };
+    serde_json::to_string(&report).unwrap_or_else(|err| {
+        format!(
+            r#"{{"app_name":"{}","platform":"{}","error":"{}","steps":[]}}"#,
+            get_app_name(),
+            std::env::consts::OS,
+            err
+        )
+    })
 }
 
 pub fn main_get_fav() -> Vec<String> {
