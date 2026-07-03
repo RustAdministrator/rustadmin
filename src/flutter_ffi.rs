@@ -26,7 +26,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicI32, Ordering},
-        Arc,
+        mpsc, Arc,
     },
     time::{Duration, Instant, SystemTime},
 };
@@ -1115,6 +1115,9 @@ struct DebugControlProbeStep {
 struct DebugControlProbeReport {
     app_name: String,
     platform: String,
+    frb_worker_active_count: usize,
+    frb_worker_queued_count: usize,
+    frb_worker_max_count: usize,
     total_elapsed_us: u64,
     steps: Vec<DebugControlProbeStep>,
 }
@@ -1124,12 +1127,36 @@ fn debug_probe_elapsed_us(started: Instant) -> u64 {
     elapsed.min(u64::MAX as u128) as u64
 }
 
+#[cfg(not(target_family = "wasm"))]
+fn debug_probe_frb_worker_counts() -> (usize, usize, usize) {
+    let pool = flutter_rust_bridge::thread::THREAD_POOL.lock();
+    (pool.active_count(), pool.queued_count(), pool.max_count())
+}
+
+#[cfg(target_family = "wasm")]
+fn debug_probe_frb_worker_counts() -> (usize, usize, usize) {
+    (0, 0, 0)
+}
+
+const DEBUG_CONTROL_PROBE_STEP_TIMEOUT_MS: u64 = 2_000;
+
 fn debug_probe_step<F>(steps: &mut Vec<DebugControlProbeStep>, name: &'static str, action: F)
 where
-    F: FnOnce() -> Result<String, String>,
+    F: FnOnce() -> Result<String, String> + Send + 'static,
 {
     let started = Instant::now();
-    let result = action();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(action());
+    });
+    let result = match rx.recv_timeout(Duration::from_millis(DEBUG_CONTROL_PROBE_STEP_TIMEOUT_MS)) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "timeout_after_ms={}",
+            DEBUG_CONTROL_PROBE_STEP_TIMEOUT_MS
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err("worker_disconnected".to_owned()),
+    };
     let elapsed_us = debug_probe_elapsed_us(started);
     match result {
         Ok(summary) => steps.push(DebugControlProbeStep {
@@ -1149,6 +1176,8 @@ where
 
 pub fn main_debug_control_probe() -> String {
     let report_started = Instant::now();
+    let (frb_worker_active_count, frb_worker_queued_count, frb_worker_max_count) =
+        debug_probe_frb_worker_counts();
     let mut steps = Vec::with_capacity(16);
 
     debug_probe_step(&mut steps, "local-main-get-version", || {
@@ -1232,6 +1261,9 @@ pub fn main_debug_control_probe() -> String {
     let report = DebugControlProbeReport {
         app_name: get_app_name(),
         platform: std::env::consts::OS.to_owned(),
+        frb_worker_active_count,
+        frb_worker_queued_count,
+        frb_worker_max_count,
         total_elapsed_us,
         steps,
     };

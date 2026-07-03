@@ -2790,6 +2790,7 @@ class _DebugProbeState extends State<_DebugProbe> {
   File? _logFile;
   Future<void> _writeChain = Future<void>.value();
   bool _running = false;
+  bool _controlProbeRunning = false;
   int _seq = 0;
 
   Future<File> _ensureLogFile() async {
@@ -2814,6 +2815,7 @@ class _DebugProbeState extends State<_DebugProbe> {
     Map<String, Object?> data = const <String, Object?>{},
   ]) async {
     if (!_running &&
+        !_controlProbeRunning &&
         event != 'probe-start' &&
         event != 'probe-stop' &&
         event != 'copy-log-path') {
@@ -2897,31 +2899,49 @@ class _DebugProbeState extends State<_DebugProbe> {
   }
 
   Future<void> _runControlProbe() async {
-    await _time('ffi-main-debug-control-probe', () async {
-      final raw = await bind.mainDebugControlProbe();
-      final decoded = jsonDecode(raw);
-      if (decoded is! Map) {
-        await _record('control-probe-error', {'error': 'invalid json report'});
-        return;
-      }
-      await _record('control-probe-meta', {
-        'app_name': decoded['app_name']?.toString() ?? '',
-        'platform': decoded['platform']?.toString() ?? '',
-        'rust_total_elapsed_us': decoded['total_elapsed_us'],
-      });
-      final steps = decoded['steps'];
-      if (steps is! List) return;
-      for (final step in steps) {
-        if (step is Map) {
-          await _record('control-probe-step', Map<String, Object?>.from(step));
+    if (_controlProbeRunning) {
+      await _record('control-probe-skipped', {'reason': 'already-running'});
+      return;
+    }
+    setState(() => _controlProbeRunning = true);
+    try {
+      await _time('ffi-main-debug-control-probe', () async {
+        final raw = await bind
+            .mainDebugControlProbe()
+            .timeout(const Duration(seconds: 45));
+        final decoded = jsonDecode(raw);
+        if (decoded is! Map) {
+          await _record('control-probe-error', {'error': 'invalid json report'});
+          return;
         }
-      }
-    });
+        await _record('control-probe-meta', {
+          'app_name': decoded['app_name']?.toString() ?? '',
+          'platform': decoded['platform']?.toString() ?? '',
+          'frb_worker_active_count': decoded['frb_worker_active_count'],
+          'frb_worker_queued_count': decoded['frb_worker_queued_count'],
+          'frb_worker_max_count': decoded['frb_worker_max_count'],
+          'rust_total_elapsed_us': decoded['total_elapsed_us'],
+        });
+        final steps = decoded['steps'];
+        if (steps is! List) return;
+        for (final step in steps) {
+          if (step is Map) {
+            await _record('control-probe-step', Map<String, Object?>.from(step));
+          }
+        }
+      });
+    } finally {
+      if (mounted) setState(() => _controlProbeRunning = false);
+    }
   }
 
-  Widget _probeButton(String label, Future<void> Function() onPressed) {
+  Widget _probeButton(
+    String label,
+    Future<void> Function() onPressed, {
+    bool enabled = true,
+  }) {
     return OutlinedButton(
-      onPressed: () => unawaited(onPressed()),
+      onPressed: enabled ? () => unawaited(onPressed()) : null,
       child: Text(label),
     );
   }
@@ -2950,7 +2970,13 @@ class _DebugProbeState extends State<_DebugProbe> {
                   }),
                   _probeButton('Stop probe', _stopProbe),
                   _probeButton('Copy log path', _copyLogPath),
-                  _probeButton('Run control probe', _runControlProbe),
+                  _probeButton(
+                    _controlProbeRunning
+                        ? 'Control probe running'
+                        : 'Run control probe',
+                    _runControlProbe,
+                    enabled: !_controlProbeRunning,
+                  ),
                 ],
               ).marginOnly(bottom: 16),
               SelectableText('Log file: $logPath').marginOnly(bottom: 8),
@@ -2988,30 +3014,55 @@ class _About extends StatefulWidget {
 }
 
 class _AboutState extends State<_About> {
+  late final Future<Map<String, String>> _aboutFuture = () async {
+    final license = await bind.mainGetLicense();
+    final version = await bind.mainGetVersion();
+    final buildDate = await bind.mainGetBuildDate();
+    final fingerprint = await bind.mainGetFingerprint();
+    return {
+      'license': license,
+      'version': version,
+      'buildDate': buildDate,
+      'fingerprint': fingerprint,
+    };
+  }();
+
   @override
   Widget build(BuildContext context) {
-    return futureBuilder(future: () async {
-      final license = await bind.mainGetLicense();
-      final version = await bind.mainGetVersion();
-      final buildDate = await bind.mainGetBuildDate();
-      final fingerprint = await bind.mainGetFingerprint();
-      return {
-        'license': license,
-        'version': version,
-        'buildDate': buildDate,
-        'fingerprint': fingerprint
-      };
-    }(), hasData: (data) {
-      final license = data['license'].toString();
-      final version = data['version'].toString();
-      final buildDate = data['buildDate'].toString();
-      final fingerprint = data['fingerprint'].toString();
-      final appName = bind.mainGetAppNameSync();
-      const linkStyle = TextStyle(decoration: TextDecoration.underline);
-      final scrollController = ScrollController();
-      return SingleChildScrollView(
-        controller: scrollController,
-        child: _Card(title: '${translate('About')} $appName', children: [
+    final appName = bind.mainGetAppNameSync();
+    return FutureBuilder<Map<String, String>>(
+      future: _aboutFuture,
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          final status = snapshot.hasError
+              ? snapshot.error.toString()
+              : 'Loading...';
+          return _Card(title: '${translate('About')} $appName', children: [
+            Row(
+              children: [
+                if (!snapshot.hasError)
+                  const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ).marginOnly(right: 8),
+                Expanded(
+                  child: SelectableText(status),
+                ),
+              ],
+            ).marginOnly(left: _kContentHMargin),
+          ]);
+        }
+        final data = snapshot.data!;
+        final license = data['license'].toString();
+        final version = data['version'].toString();
+        final buildDate = data['buildDate'].toString();
+        final fingerprint = data['fingerprint'].toString();
+        const linkStyle = TextStyle(decoration: TextDecoration.underline);
+        final scrollController = ScrollController();
+        return SingleChildScrollView(
+          controller: scrollController,
+          child: _Card(title: '${translate('About')} $appName', children: [
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -3077,7 +3128,8 @@ class _AboutState extends State<_About> {
           ).marginOnly(left: _kContentHMargin)
         ]),
       );
-    });
+      },
+    );
   }
 }
 
