@@ -1,10 +1,13 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     future::Future,
     net::{IpAddr, SocketAddr, ToSocketAddrs},
     sync::{Arc, Mutex, RwLock},
     task::Poll,
 };
+
+#[cfg(not(target_os = "ios"))]
+use std::collections::HashSet;
 
 use serde_json::{json, Map, Value};
 
@@ -1443,36 +1446,43 @@ pub fn get_direct_access_endpoints() -> Vec<String> {
         return Vec::new();
     }
     let port = get_direct_access_port();
-    let default_name = default_net::interface::get_default_interface_name();
-    let mut interfaces = default_net::get_interfaces();
-    if let Some(default_name) = default_name {
-        interfaces.sort_by_key(|iface| iface.name != default_name);
+    #[cfg(target_os = "ios")]
+    {
+        return vec![format!("{}:{}", hostname(), port)];
     }
-    let mut seen = HashSet::new();
-    let mut endpoints = Vec::new();
-    for iface in interfaces {
-        if iface.if_type == default_net::interface::InterfaceType::Loopback {
-            continue;
+    #[cfg(not(target_os = "ios"))]
+    {
+        let default_name = default_net::interface::get_default_interface_name();
+        let mut interfaces = default_net::get_interfaces();
+        if let Some(default_name) = default_name {
+            interfaces.sort_by_key(|iface| iface.name != default_name);
         }
-        for ip in iface
-            .ipv4
-            .iter()
-            .map(|net| IpAddr::V4(net.addr))
-            .chain(iface.ipv6.iter().map(|net| IpAddr::V6(net.addr)))
-        {
-            if !is_usable_direct_access_ip(ip) {
+        let mut seen = HashSet::new();
+        let mut endpoints = Vec::new();
+        for iface in interfaces {
+            if iface.if_type == default_net::interface::InterfaceType::Loopback {
                 continue;
             }
-            let endpoint = format_direct_access_endpoint(ip, port);
-            if seen.insert(endpoint.clone()) {
-                endpoints.push(endpoint);
+            for ip in iface
+                .ipv4
+                .iter()
+                .map(|net| IpAddr::V4(net.addr))
+                .chain(iface.ipv6.iter().map(|net| IpAddr::V6(net.addr)))
+            {
+                if !is_usable_direct_access_ip(ip) {
+                    continue;
+                }
+                let endpoint = format_direct_access_endpoint(ip, port);
+                if seen.insert(endpoint.clone()) {
+                    endpoints.push(endpoint);
+                }
             }
         }
+        if endpoints.is_empty() {
+            endpoints.push(format!("{}:{}", hostname(), port));
+        }
+        endpoints
     }
-    if endpoints.is_empty() {
-        endpoints.push(format!("{}:{}", hostname(), port));
-    }
-    endpoints
 }
 
 fn get_api_server_(api: String, custom: String) -> String {

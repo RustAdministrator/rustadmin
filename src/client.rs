@@ -2592,26 +2592,35 @@ impl LoginConfigHandler {
         let mut option = OptionMessage::default();
         let mut config = self.load_config();
         if let Some(direction) = name.strip_prefix(CLIPBOARD_DIRECTION_TOGGLE_PREFIX) {
-            let direction =
-                crate::clipboard::clipboard_direction_policy_from_option_value(direction);
-            config.options.insert(
-                keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION.to_owned(),
-                direction.as_option_value().to_owned(),
-            );
-            let disable_clipboard =
-                !direction.allows_local_to_remote() && !direction.allows_remote_to_local();
-            let disable_changed = config.disable_clipboard.v != disable_clipboard;
-            config.disable_clipboard.v = disable_clipboard;
-            if disable_changed {
-                option.disable_clipboard = (if disable_clipboard {
-                    BoolOption::Yes
-                } else {
-                    BoolOption::No
-                })
-                .into();
-            } else {
+            #[cfg(target_os = "ios")]
+            {
+                let _ = direction;
                 self.save_config(config);
                 return None;
+            }
+            #[cfg(not(target_os = "ios"))]
+            {
+                let direction =
+                    crate::clipboard::clipboard_direction_policy_from_option_value(direction);
+                config.options.insert(
+                    keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION.to_owned(),
+                    direction.as_option_value().to_owned(),
+                );
+                let disable_clipboard =
+                    !direction.allows_local_to_remote() && !direction.allows_remote_to_local();
+                let disable_changed = config.disable_clipboard.v != disable_clipboard;
+                config.disable_clipboard.v = disable_clipboard;
+                if disable_changed {
+                    option.disable_clipboard = (if disable_clipboard {
+                        BoolOption::Yes
+                    } else {
+                        BoolOption::No
+                    })
+                    .into();
+                } else {
+                    self.save_config(config);
+                    return None;
+                }
             }
         } else if name == "show-remote-cursor" {
             config.show_remote_cursor.v = !config.show_remote_cursor.v;

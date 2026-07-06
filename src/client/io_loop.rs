@@ -2149,7 +2149,10 @@ impl<T: InvokeUiSession> Remote<T> {
                         self.handler.new_message(c.text);
                     }
                     Some(misc::Union::DebugEvent(event)) => {
+                        #[cfg(not(target_os = "ios"))]
                         crate::clipboard::log_remote_debug_event(event);
+                        #[cfg(target_os = "ios")]
+                        let _ = event;
                     }
                     Some(misc::Union::PermissionInfo(p)) => {
                         log::info!(

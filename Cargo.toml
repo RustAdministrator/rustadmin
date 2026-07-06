@@ -68,7 +68,6 @@ rpassword = "7.2"
 num_cpus = "1.15"
 libc = "0.2"
 bytes = { version = "1.4", features = ["serde"] }
-default-net = "0.14"
 wol-rs = "1.0"
 flutter_rust_bridge = { version = "=1.80.1", features = ["uuid"], optional = true }
 errno = "0.3"
@@ -85,6 +84,9 @@ totp-rs = { version = "5.4", default-features = false, features = ["gen_secret",
 stunclient = "0.4"
 kcp-sys= { git = "https://github.com/rustdesk-org/kcp-sys"}
 reqwest = { version = "0.12", features = ["blocking", "socks", "json", "native-tls", "rustls-tls", "rustls-tls-native-roots", "gzip"], default-features=false }
+
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+default-net = "0.14"
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 # https://github.com/rustdesk/rustdesk/discussions/10197, not use cpal on linux

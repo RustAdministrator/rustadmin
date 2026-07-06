@@ -3017,7 +3017,11 @@ pub fn main_get_common(key: String) -> String {
         }
         .to_string();
     } else if key == "should-block-rustadmin-gui-for-active-sessions" {
-        return ui_interface::should_block_rustadmin_gui_for_active_sessions()
+        let configured = ui_interface::should_block_rustadmin_gui_for_active_sessions();
+        #[cfg(target_os = "ios")]
+        return configured.unwrap_or(false).to_string();
+        #[cfg(not(target_os = "ios"))]
+        return configured
             .unwrap_or_else(crate::server::should_block_rustadmin_gui_for_active_sessions)
             .to_string();
     } else if key == "has-gnome-shortcuts-inhibitor-permission" {
