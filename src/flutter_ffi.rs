@@ -23,7 +23,6 @@ use hbb_common::{
 };
 use std::{
     collections::HashMap,
-    path::PathBuf,
     sync::{
         atomic::{AtomicI32, Ordering},
         mpsc, Arc,
@@ -1095,12 +1094,26 @@ pub fn main_uri_prefix_sync() -> SyncReturn<String> {
     SyncReturn(crate::get_uri_prefix())
 }
 
+// DEBUG-PROBE: temporary About bridge timing diagnostics.
+fn debug_about_string(name: &'static str, value: impl FnOnce() -> String) -> String {
+    let started = Instant::now();
+    log::info!("debug-about ffi entered {}", name);
+    let result = value();
+    log::info!(
+        "debug-about ffi done {} elapsed_us={} chars={}",
+        name,
+        started.elapsed().as_micros(),
+        result.len()
+    );
+    result
+}
+
 pub fn main_get_license() -> String {
-    get_license()
+    debug_about_string("main_get_license", get_license)
 }
 
 pub fn main_get_version() -> String {
-    get_version()
+    debug_about_string("main_get_version", get_version)
 }
 
 #[derive(serde::Serialize)]
@@ -1923,7 +1936,7 @@ pub fn main_set_permanent_password_with_result(password: String) -> bool {
 }
 
 pub fn main_get_fingerprint() -> String {
-    get_fingerprint()
+    debug_about_string("main_get_fingerprint", get_fingerprint)
 }
 
 pub fn cm_get_clients_state() -> String {
@@ -2431,7 +2444,7 @@ pub fn cm_get_config(name: String) -> String {
 }
 
 pub fn main_get_build_date() -> String {
-    crate::BUILD_DATE.to_string()
+    debug_about_string("main_get_build_date", || crate::BUILD_DATE.to_string())
 }
 
 pub fn translate(name: String, locale: String) -> SyncReturn<String> {
@@ -3145,7 +3158,7 @@ pub fn main_set_common(_key: String, _value: String) {
                 std::fs::remove_file(&download_file).ok();
                 match crate::hbbs_http::downloader::download_file(
                     download_url,
-                    Some(PathBuf::from(download_file)),
+                    Some(std::path::PathBuf::from(download_file)),
                     Some(Duration::from_secs(3)),
                 ) {
                     Ok(id) => HashMap::from([("name", event_key), ("id", id)]),

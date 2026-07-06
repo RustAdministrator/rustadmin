@@ -74,6 +74,9 @@ class ServerModel with ChangeNotifier {
   bool? _permissionRequestPreviousAlwaysOnTop;
 
   Timer? cmHiddenTimer;
+  Timer? _statusPollTimer;
+  bool _statusPollRunning = false;
+  bool _statusPollPending = false;
 
   final _wakelockKey = UniqueKey();
 
@@ -207,18 +210,15 @@ class ServerModel with ChangeNotifier {
         }
       }
 
-      updatePasswordModel();
+      await updatePasswordModel();
     }
 
     if (!isTest) {
-      Future.delayed(Duration.zero, () async {
-        if (await bind.optionSynced()) {
-          await timerCallback();
-        }
-      });
-      Timer.periodic(Duration(milliseconds: 500), (timer) async {
-        await timerCallback();
-      });
+      Future.delayed(Duration.zero, () => _runStatusPoll(timerCallback));
+      _statusPollTimer = Timer.periodic(
+        const Duration(milliseconds: 500),
+        (_) => _runStatusPoll(timerCallback),
+      );
     }
 
     // Initial keyboard status is off on mobile
@@ -324,6 +324,26 @@ class ServerModel with ChangeNotifier {
     */
     if (update) {
       notifyListeners();
+    }
+  }
+
+  Future<void> _runStatusPoll(Future<void> Function() timerCallback) async {
+    if (_statusPollRunning) {
+      _statusPollPending = true;
+      return;
+    }
+    _statusPollRunning = true;
+    try {
+      do {
+        _statusPollPending = false;
+        if (await bind.optionSynced()) {
+          await timerCallback();
+        }
+      } while (_statusPollPending);
+    } catch (e) {
+      debugPrint('ServerModel status poll failed: $e');
+    } finally {
+      _statusPollRunning = false;
     }
   }
 
@@ -981,6 +1001,12 @@ class ServerModel with ChangeNotifier {
     } else {
       WakelockManager.disable(_wakelockKey);
     }
+  }
+
+  @override
+  void dispose() {
+    _statusPollTimer?.cancel();
+    super.dispose();
   }
 }
 

@@ -43,7 +43,9 @@ const double _kContentFontSize = 15;
 const Color _accentColor = MyTheme.accent;
 const String _kSettingPageControllerTag = 'settingPageController';
 const String _kSettingPageTabKeyTag = 'settingPageTabKey';
-const bool _kDebugProbeSettingsEnabled = true;
+// DEBUG-PROBE: keep false for normal builds.
+// Set true only while diagnosing GUI/FRB stalls.
+const bool _kDebugProbeSettingsEnabled = false;
 
 class _TabInfo {
   late final SettingsTabKey key;
@@ -3014,18 +3016,39 @@ class _About extends StatefulWidget {
 }
 
 class _AboutState extends State<_About> {
+  // DEBUG-PROBE: temporary About bridge timing diagnostics.
+  static const _aboutStepTimeout = Duration(seconds: 12);
+
   late final Future<Map<String, String>> _aboutFuture = () async {
-    final license = await bind.mainGetLicense();
-    final version = await bind.mainGetVersion();
-    final buildDate = await bind.mainGetBuildDate();
-    final fingerprint = await bind.mainGetFingerprint();
+    final values = await Future.wait([
+      _aboutStep('mainGetLicense', bind.mainGetLicense()),
+      _aboutStep('mainGetVersion', bind.mainGetVersion()),
+      _aboutStep('mainGetBuildDate', bind.mainGetBuildDate()),
+      _aboutStep('mainGetFingerprint', bind.mainGetFingerprint()),
+    ]);
     return {
-      'license': license,
-      'version': version,
-      'buildDate': buildDate,
-      'fingerprint': fingerprint,
+      'license': values[0],
+      'version': values[1],
+      'buildDate': values[2],
+      'fingerprint': values[3],
     };
   }();
+
+  Future<String> _aboutStep(String name, Future<String> future) async {
+    final started = DateTime.now();
+    debugPrint('[debug-about] begin $name');
+    try {
+      final value = await future.timeout(_aboutStepTimeout);
+      final elapsed = DateTime.now().difference(started).inMilliseconds;
+      debugPrint(
+          '[debug-about] done $name ${elapsed}ms chars=${value.length}');
+      return value;
+    } catch (e, st) {
+      final elapsed = DateTime.now().difference(started).inMilliseconds;
+      debugPrint('[debug-about] error $name ${elapsed}ms: $e\n$st');
+      return '$name failed after ${elapsed}ms: $e';
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
