@@ -88,7 +88,7 @@ reqwest = { version = "0.12", features = ["blocking", "socks", "json", "native-t
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 default-net = "0.14"
 
-[target.'cfg(not(target_os = "linux"))'.dependencies]
+[target.'cfg(not(any(target_os = "linux", target_os = "ios")))'.dependencies]
 # https://github.com/rustdesk/rustdesk/discussions/10197, not use cpal on linux
 cpal = { git = "https://github.com/rustdesk-org/cpal", branch = "osx-screencapturekit" }
 ringbuf = "0.3"
@@ -234,7 +234,7 @@ winapi = { version = "0.3", features = [ "winnt", "pdh", "synchapi" ] }
 [build-dependencies]
 bindgen = { version = "=0.69.4", default-features = false, features = ["runtime"] }
 cc = "1.0"
-hbb_common = { path = "../hbb_common" }
+chrono = "0.4"
 os-version = "0.2"
 
 [dev-dependencies]

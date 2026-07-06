@@ -10,6 +10,10 @@ RUST_TARGET="$1"
 LIPO_ARCH="$2"
 EXPECTED_PLATFORM="$3"
 PLATFORM_NAME="$4"
+SDK_NAME="iphoneos"
+if [[ "${EXPECTED_PLATFORM}" == "7" ]]; then
+  SDK_NAME="iphonesimulator"
+fi
 
 : "${IPHONEOS_DEPLOYMENT_TARGET:=13.0}"
 export IPHONEOS_DEPLOYMENT_TARGET
@@ -19,6 +23,7 @@ REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 declare -a CODEC_ROOTS=()
 declare -a CODEC_ROOT_LABELS=()
+FOUND_COMPONENT_ROOT=""
 
 add_unique_codec_root() {
   local root="$1"
@@ -73,7 +78,34 @@ if [[ -n "${CMAKE_PREFIX_PATH:-}" ]]; then
   add_path_list_candidates "${CMAKE_PREFIX_PATH}" "CMAKE_PREFIX_PATH"
 fi
 
-add_codec_root_candidate "${REPO_DIR}/.local/ios-codecs" ".local/ios-codecs"
+if [[ "${EXPECTED_PLATFORM}" == "7" ]]; then
+  add_codec_root_candidate "${REPO_DIR}/.local/ios-simulator-codecs" ".local/ios-simulator-codecs"
+  add_codec_root_candidate "/Volumes/Dev/MOemu/Release" "MOemu simulator prefix"
+else
+  add_codec_root_candidate "${REPO_DIR}/.local/ios-codecs" ".local/ios-codecs"
+  add_codec_root_candidate "/Volumes/Dev/MOios/Release" "MOios device prefix"
+fi
+
+SDK_PATH="$(xcrun --sdk "${SDK_NAME}" --show-sdk-path)"
+BINDGEN_TARGET=""
+BINDGEN_ENV=""
+case "${RUST_TARGET}" in
+  aarch64-apple-ios)
+    BINDGEN_TARGET="arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}"
+    BINDGEN_ENV="BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios"
+    ;;
+  aarch64-apple-ios-sim)
+    BINDGEN_TARGET="arm64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}-simulator"
+    BINDGEN_ENV="BINDGEN_EXTRA_CLANG_ARGS_aarch64_apple_ios_sim"
+    ;;
+  x86_64-apple-ios)
+    BINDGEN_TARGET="x86_64-apple-ios${IPHONEOS_DEPLOYMENT_TARGET}-simulator"
+    BINDGEN_ENV="BINDGEN_EXTRA_CLANG_ARGS_x86_64_apple_ios"
+    ;;
+esac
+if [[ -n "${BINDGEN_ENV}" && -z "${!BINDGEN_ENV:-}" ]]; then
+  export "${BINDGEN_ENV}=--target=${BINDGEN_TARGET} -isysroot ${SDK_PATH}"
+fi
 
 check_library_platform() {
   local component="$1"
@@ -138,6 +170,7 @@ find_component_root() {
     fi
 
     check_library_platform "${component}" "${library_path}"
+    FOUND_COMPONENT_ROOT="${root}"
     echo "Using ${component} from ${root} (${label})"
     return 0
   done
@@ -149,14 +182,25 @@ find_component_root() {
 
 if [[ ${#CODEC_ROOTS[@]} -eq 0 ]]; then
   echo "error: no iOS codec roots configured." >&2
-  echo "       Set RUSTDESK_IOS_CODEC_ROOT, CMAKE_PREFIX_PATH, or create ${REPO_DIR}/.local/ios-codecs." >&2
+  echo "       Set RUSTDESK_IOS_CODEC_ROOT, CMAKE_PREFIX_PATH, or create a local iOS codec prefix." >&2
   exit 1
 fi
 
 find_component_root "libyuv" "include/libyuv/convert.h" "lib/libyuv.a"
+SELECTED_CODEC_ROOT="${FOUND_COMPONENT_ROOT}"
+if [[ -z "${RUSTDESK_IOS_CODEC_ROOT:-}" ]]; then
+  export RUSTDESK_IOS_CODEC_ROOT="${SELECTED_CODEC_ROOT}"
+fi
+if [[ -z "${CMAKE_PREFIX_PATH:-}" ]]; then
+  export CMAKE_PREFIX_PATH="${SELECTED_CODEC_ROOT}"
+fi
 find_component_root "libvpx" "include/vpx/vpx_encoder.h" "lib/libvpx.a"
 find_component_root "aom" "include/aom/aom.h" "lib/libaom.a"
 find_component_root "opus" "include/opus/opus_multistream.h" "lib/libopus.a"
+find_component_root "libsodium" "include/sodium.h" "lib/libsodium.a"
+if [[ -z "${SODIUM_LIB_DIR:-}" ]]; then
+  export SODIUM_LIB_DIR="${FOUND_COMPONENT_ROOT}/lib"
+fi
 
 cd "${REPO_DIR}"
 cargo build --locked --features flutter --release --target "${RUST_TARGET}" --lib

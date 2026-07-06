@@ -354,7 +354,7 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALIDATE_PRODUCT = YES;
 			};
@@ -381,14 +381,16 @@
 					/usr/lib/swift,
 					"$(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME)/",
 					"$(SDKROOT)/usr/lib/swift",
-					"$(PROJECT_DIR)/../../target/aarch64-apple-ios/release/",
+					"$(PROJECT_DIR)/../../target/$(RUSTDESK_IOS_RUST_TARGET_DIR)/release/",
+					"$(RUSTDESK_IOS_CODEC_ROOT)/lib",
 				);
 				OTHER_LDFLAGS = (
 					"$(inherited)",
-					"$(PROJECT_DIR)/../../target/aarch64-apple-ios/release/liblibrustdesk.a",
+					"$(PROJECT_DIR)/../../target/$(RUSTDESK_IOS_RUST_TARGET_DIR)/release/liblibrustdesk.a",
 					"-ObjC",
 					"-l\"c++\"",
 					"-l\"sqlite3\"",
+					"-l\"sodium\"",
 					"-framework",
 					"\"AVFoundation\"",
 					"-framework",
@@ -440,6 +442,11 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "io.github.rustadministrator.rustadmin";
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				RUSTDESK_IOS_CODEC_ROOT = "/Volumes/Dev/MOios/Release";
+				"RUSTDESK_IOS_CODEC_ROOT[sdk=iphonesimulator*]" = "/Volumes/Dev/MOemu/Release";
+				RUSTDESK_IOS_RUST_TARGET_DIR = "aarch64-apple-ios";
+				"RUSTDESK_IOS_RUST_TARGET_DIR[sdk=iphonesimulator*][arch=arm64]" = "aarch64-apple-ios-sim";
+				"RUSTDESK_IOS_RUST_TARGET_DIR[sdk=iphonesimulator*][arch=x86_64]" = "x86_64-apple-ios";
 				STRIP_STYLE = "non-global";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
@@ -499,6 +506,7 @@
 				MTL_ENABLE_DEBUG_INFO = YES;
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
@@ -548,7 +556,7 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				SDKROOT = iphoneos;
-				SUPPORTED_PLATFORMS = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -577,14 +585,16 @@
 					/usr/lib/swift,
 					"$(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME)/",
 					"$(SDKROOT)/usr/lib/swift",
-					"$(PROJECT_DIR)/../../target/aarch64-apple-ios/release/",
+					"$(PROJECT_DIR)/../../target/$(RUSTDESK_IOS_RUST_TARGET_DIR)/release/",
+					"$(RUSTDESK_IOS_CODEC_ROOT)/lib",
 				);
 				OTHER_LDFLAGS = (
 					"$(inherited)",
-					"$(PROJECT_DIR)/../../target/aarch64-apple-ios/release/liblibrustdesk.a",
+					"$(PROJECT_DIR)/../../target/$(RUSTDESK_IOS_RUST_TARGET_DIR)/release/liblibrustdesk.a",
 					"-ObjC",
 					"-l\"c++\"",
 					"-l\"sqlite3\"",
+					"-l\"sodium\"",
 					"-framework",
 					"\"AVFoundation\"",
 					"-framework",
@@ -636,6 +646,11 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "io.github.rustadministrator.rustadmin";
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				RUSTDESK_IOS_CODEC_ROOT = "/Volumes/Dev/MOios/Release";
+				"RUSTDESK_IOS_CODEC_ROOT[sdk=iphonesimulator*]" = "/Volumes/Dev/MOemu/Release";
+				RUSTDESK_IOS_RUST_TARGET_DIR = "aarch64-apple-ios";
+				"RUSTDESK_IOS_RUST_TARGET_DIR[sdk=iphonesimulator*][arch=arm64]" = "aarch64-apple-ios-sim";
+				"RUSTDESK_IOS_RUST_TARGET_DIR[sdk=iphonesimulator*][arch=x86_64]" = "x86_64-apple-ios";
 				STRIP_STYLE = "non-global";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -665,14 +680,16 @@
 					/usr/lib/swift,
 					"$(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME)/",
 					"$(SDKROOT)/usr/lib/swift",
-					"$(PROJECT_DIR)/../../target/aarch64-apple-ios/release/",
+					"$(PROJECT_DIR)/../../target/$(RUSTDESK_IOS_RUST_TARGET_DIR)/release/",
+					"$(RUSTDESK_IOS_CODEC_ROOT)/lib",
 				);
 				OTHER_LDFLAGS = (
 					"$(inherited)",
-					"$(PROJECT_DIR)/../../target/aarch64-apple-ios/release/liblibrustdesk.a",
+					"$(PROJECT_DIR)/../../target/$(RUSTDESK_IOS_RUST_TARGET_DIR)/release/liblibrustdesk.a",
 					"-ObjC",
 					"-l\"c++\"",
 					"-l\"sqlite3\"",
+					"-l\"sodium\"",
 					"-framework",
 					"\"AVFoundation\"",
 					"-framework",
@@ -724,6 +741,11 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = "io.github.rustadministrator.rustadmin";
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				RUSTDESK_IOS_CODEC_ROOT = "/Volumes/Dev/MOios/Release";
+				"RUSTDESK_IOS_CODEC_ROOT[sdk=iphonesimulator*]" = "/Volumes/Dev/MOemu/Release";
+				RUSTDESK_IOS_RUST_TARGET_DIR = "aarch64-apple-ios";
+				"RUSTDESK_IOS_RUST_TARGET_DIR[sdk=iphonesimulator*][arch=arm64]" = "aarch64-apple-ios-sim";
+				"RUSTDESK_IOS_RUST_TARGET_DIR[sdk=iphonesimulator*][arch=x86_64]" = "x86_64-apple-ios";
 				STRIP_STYLE = "non-global";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;

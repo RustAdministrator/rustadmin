@@ -1,3 +1,7 @@
+use std::fs::File;
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
+
 #[cfg(windows)]
 fn build_windows() {
     let file = "src/platform/windows.cc";
@@ -77,8 +81,71 @@ fn install_android_deps() {
     println!("cargo:rustc-link-lib=OpenSLES");
 }
 
+fn read_revision_file<P: AsRef<Path>>(path: P) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn build_rustadmin_revision() -> String {
+    read_revision_file("rustadmin_revision.txt")
+        .or_else(|| read_revision_file("../hbb_common/rustadmin_revision.txt"))
+        .unwrap_or_default()
+}
+
+fn create_version_file() -> File {
+    match File::create("./src/version.rs") {
+        Ok(file) => file,
+        Err(error) => panic!("failed to create src/version.rs: {error}"),
+    }
+}
+
+fn open_cargo_toml() -> File {
+    match File::open("Cargo.toml") {
+        Ok(file) => file,
+        Err(error) => panic!("failed to open Cargo.toml: {error}"),
+    }
+}
+
+fn write_version_file(file: &mut File, contents: &str) {
+    if let Err(error) = file.write_all(contents.as_bytes()) {
+        panic!("failed to write src/version.rs: {error}");
+    }
+}
+
+fn gen_version() {
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-changed=../hbb_common/rustadmin_revision.txt");
+    println!("cargo:rerun-if-changed=rustadmin_revision.txt");
+
+    let mut file = create_version_file();
+    let revision = build_rustadmin_revision();
+    for line in BufReader::new(open_cargo_toml()).lines().map_while(Result::ok) {
+        let ab: Vec<&str> = line.split('=').map(str::trim).collect();
+        if ab.len() == 2 && ab[0] == "version" {
+            let version = ab[1].trim_matches('"');
+            let contents = format!(
+                "#[allow(dead_code)]\npub const VERSION: &str = {};\n#[allow(dead_code)]\npub const RUSTADMIN_REVISION: &str = \"{revision}\";\n#[allow(dead_code)]\npub const FULL_VERSION: &str = \"{version} rev {revision}\";\n",
+                ab[1]
+            );
+            write_version_file(&mut file, &contents);
+            break;
+        }
+    }
+
+    let build_date = chrono::Local::now().format("%Y-%m-%d %H:%M");
+    write_version_file(
+        &mut file,
+        &format!("#[allow(dead_code)]\npub const BUILD_DATE: &str = \"{build_date}\";\n"),
+    );
+    if let Err(error) = file.sync_all() {
+        panic!("failed to sync src/version.rs: {error}");
+    }
+}
+
 fn main() {
-    hbb_common::gen_version();
+    gen_version();
     install_android_deps();
     #[cfg(all(windows, feature = "inline"))]
     build_manifest();
