@@ -3005,7 +3005,19 @@ pub fn main_get_printer_names() -> SyncReturn<String> {
 }
 
 pub fn main_get_common(key: String) -> String {
-    if key == "is-printer-installed" {
+    if key == "about-license" {
+        return debug_about_string("main_get_common_sync_about_license", get_license);
+    } else if key == "about-version" {
+        return debug_about_string("main_get_common_sync_about_version", get_version);
+    } else if key == "about-build-date" {
+        return debug_about_string("main_get_common_sync_about_build_date", || {
+            crate::BUILD_DATE.to_string()
+        });
+    } else if key == "about-fingerprint" {
+        return debug_about_string("main_get_common_sync_about_fingerprint", get_fingerprint);
+    } else if key == "check-super-user-permission" {
+        return check_super_user_permission().to_string();
+    } else if key == "is-printer-installed" {
         #[cfg(target_os = "windows")]
         {
             return match remote_printer::is_rd_printer_installed(&get_app_name()) {

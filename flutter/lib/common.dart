@@ -3237,6 +3237,35 @@ Timer periodic_immediate(Duration duration, Future<void> Function() callback) {
   });
 }
 
+Timer periodicImmediateSingleFlight(
+    Duration duration, Future<void> Function() callback) {
+  var running = false;
+  var pending = false;
+
+  Future<void> run() async {
+    if (running) {
+      pending = true;
+      return;
+    }
+    running = true;
+    try {
+      do {
+        pending = false;
+        await callback();
+      } while (pending);
+    } catch (e, s) {
+      debugPrint('periodicImmediateSingleFlight failed: $e\n$s');
+    } finally {
+      running = false;
+    }
+  }
+
+  Future.delayed(Duration.zero, run);
+  return Timer.periodic(duration, (timer) {
+    run();
+  });
+}
+
 /// return a human readable windows version
 WindowsTarget getWindowsTarget(int buildNumber) {
   if (!isWindows) {
@@ -3482,7 +3511,9 @@ void onCopyFingerprint(String value) {
 }
 
 Future<bool> callMainCheckSuperUserPermission() async {
-  bool checked = await bind.mainCheckSuperUserPermission();
+  bool checked = isDesktop
+      ? bind.mainGetCommonSync(key: "check-super-user-permission") == "true"
+      : await bind.mainCheckSuperUserPermission();
   if (isMacOS) {
     await windowManager.show();
   }

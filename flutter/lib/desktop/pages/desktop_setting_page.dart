@@ -45,7 +45,7 @@ const String _kSettingPageControllerTag = 'settingPageController';
 const String _kSettingPageTabKeyTag = 'settingPageTabKey';
 // DEBUG-PROBE: keep false for normal builds.
 // Set true only while diagnosing GUI/FRB stalls.
-const bool _kDebugProbeSettingsEnabled = false;
+const bool _kDebugProbeSettingsEnabled = true;
 
 class _TabInfo {
   late final SettingsTabKey key;
@@ -168,8 +168,14 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _videoConnTimer =
-        periodic_immediate(Duration(milliseconds: 1000), () async {
+        periodicImmediateSingleFlight(Duration(milliseconds: 1000), () async {
       if (!mounted) {
+        return;
+      }
+      if (stateGlobal.videoConnCount <= 0) {
+        if (_canBeBlocked.value) {
+          _canBeBlocked.value = false;
+        }
         return;
       }
       _canBeBlocked.value = await canBeBlocked();
@@ -3016,29 +3022,24 @@ class _About extends StatefulWidget {
 }
 
 class _AboutState extends State<_About> {
-  // DEBUG-PROBE: temporary About bridge timing diagnostics.
-  static const _aboutStepTimeout = Duration(seconds: 12);
-
   late final Future<Map<String, String>> _aboutFuture = () async {
-    final values = await Future.wait([
-      _aboutStep('mainGetLicense', bind.mainGetLicense()),
-      _aboutStep('mainGetVersion', bind.mainGetVersion()),
-      _aboutStep('mainGetBuildDate', bind.mainGetBuildDate()),
-      _aboutStep('mainGetFingerprint', bind.mainGetFingerprint()),
-    ]);
     return {
-      'license': values[0],
-      'version': values[1],
-      'buildDate': values[2],
-      'fingerprint': values[3],
+      'license': _aboutStepSync('mainGetLicenseSync',
+          () => bind.mainGetCommonSync(key: 'about-license')),
+      'version': _aboutStepSync('mainGetVersionSync',
+          () => bind.mainGetCommonSync(key: 'about-version')),
+      'buildDate': _aboutStepSync('mainGetBuildDateSync',
+          () => bind.mainGetCommonSync(key: 'about-build-date')),
+      'fingerprint': _aboutStepSync('mainGetFingerprintSync',
+          () => bind.mainGetCommonSync(key: 'about-fingerprint')),
     };
   }();
 
-  Future<String> _aboutStep(String name, Future<String> future) async {
+  String _aboutStepSync(String name, String Function() action) {
     final started = DateTime.now();
     debugPrint('[debug-about] begin $name');
     try {
-      final value = await future.timeout(_aboutStepTimeout);
+      final value = action();
       final elapsed = DateTime.now().difference(started).inMilliseconds;
       debugPrint(
           '[debug-about] done $name ${elapsed}ms chars=${value.length}');
@@ -3771,7 +3772,8 @@ Widget _lock(
                             Text(translate(label)).marginOnly(left: 5),
                           ]).marginSymmetric(vertical: 2)),
                   onPressed: () async {
-                    if (await canBeBlocked()) {
+                    if (stateGlobal.videoConnCount > 0 &&
+                        await canBeBlocked()) {
                       showToast(translate(
                           'Settings are locked during support sessions'));
                       return;
