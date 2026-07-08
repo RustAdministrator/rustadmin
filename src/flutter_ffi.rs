@@ -11,11 +11,16 @@ use crate::{
     input::*,
     ui_interface::{self, *},
 };
-use flutter_rust_bridge::{StreamSink, SyncReturn};
+use flutter_rust_bridge::{
+    handler::{Executor, ReportDartErrorHandler, SimpleHandler, ThreadPoolExecutor},
+    rust2dart::{IntoIntoDart, TaskCallback},
+    IntoDart, StreamSink, SyncReturn, WrapInfo,
+};
 #[cfg(feature = "plugin_framework")]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use hbb_common::allow_err;
 use hbb_common::{
+    anyhow,
     config::{self, LocalConfig, PeerConfig, PeerInfoSerde},
     fs, lazy_static, log,
     rendezvous_proto::ConnType,
@@ -23,8 +28,9 @@ use hbb_common::{
 };
 use std::{
     collections::HashMap,
+    panic::UnwindSafe,
     sync::{
-        atomic::{AtomicI32, Ordering},
+        atomic::{AtomicI32, AtomicU64, Ordering},
         mpsc, Arc,
     },
     time::{Duration, Instant, SystemTime},
@@ -35,6 +41,141 @@ pub type SessionID = uuid::Uuid;
 lazy_static::lazy_static! {
     static ref TEXTURE_RENDER_KEY: Arc<AtomicI32> = Arc::new(AtomicI32::new(0));
 }
+
+// DEBUG-PROBE START: identify FRB calls that monopolize the shared worker pool.
+struct FrbTraceTask {
+    name: &'static str,
+    queued_at: Instant,
+    started_at: Option<Instant>,
+}
+
+lazy_static::lazy_static! {
+    static ref FRB_TRACE_TASKS: std::sync::Mutex<HashMap<u64, FrbTraceTask>> =
+        std::sync::Mutex::new(HashMap::new());
+}
+
+static FRB_TRACE_NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+struct FrbTraceGuard {
+    id: u64,
+    name: &'static str,
+    started_at: Instant,
+}
+
+impl FrbTraceGuard {
+    fn start(id: u64, name: &'static str) -> Self {
+        let started_at = Instant::now();
+        if let Ok(mut tasks) = FRB_TRACE_TASKS.lock() {
+            if let Some(task) = tasks.get_mut(&id) {
+                task.started_at = Some(started_at);
+            }
+        }
+        Self {
+            id,
+            name,
+            started_at,
+        }
+    }
+}
+
+impl Drop for FrbTraceGuard {
+    fn drop(&mut self) {
+        if let Ok(mut tasks) = FRB_TRACE_TASKS.lock() {
+            tasks.remove(&self.id);
+        }
+        let elapsed_us = self.started_at.elapsed().as_micros();
+        if elapsed_us >= 100_000 {
+            log::warn!(
+                "frb-task slow-end id={} name={} elapsed_us={}",
+                self.id,
+                self.name,
+                elapsed_us
+            );
+        }
+    }
+}
+
+pub struct RustAdminFrbExecutor {
+    inner: ThreadPoolExecutor<ReportDartErrorHandler>,
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn frb_pool_queued_count() -> usize {
+    flutter_rust_bridge::thread::THREAD_POOL
+        .lock()
+        .queued_count()
+}
+
+#[cfg(target_family = "wasm")]
+fn frb_pool_queued_count() -> usize {
+    0
+}
+
+impl RustAdminFrbExecutor {
+    fn new() -> Self {
+        Self {
+            inner: ThreadPoolExecutor::new(ReportDartErrorHandler),
+        }
+    }
+}
+
+impl Executor for RustAdminFrbExecutor {
+    fn execute<TaskFn, TaskRet, D>(&self, wrap_info: WrapInfo, task: TaskFn)
+    where
+        TaskFn: FnOnce(TaskCallback) -> anyhow::Result<TaskRet> + Send + UnwindSafe + 'static,
+        TaskRet: IntoIntoDart<D>,
+        D: IntoDart,
+    {
+        let id = FRB_TRACE_NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let name = wrap_info.debug_name;
+        let queued_at = Instant::now();
+        let queued_count = frb_pool_queued_count();
+        if let Ok(mut tasks) = FRB_TRACE_TASKS.lock() {
+            tasks.insert(
+                id,
+                FrbTraceTask {
+                    name,
+                    queued_at,
+                    started_at: None,
+                },
+            );
+        }
+        if queued_count > 0 {
+            log::warn!(
+                "frb-task queued id={} name={} queue_before={}",
+                id,
+                name,
+                queued_count
+            );
+        }
+        self.inner.execute(wrap_info, move |task_callback| {
+            let _trace = FrbTraceGuard::start(id, name);
+            task(task_callback)
+        });
+    }
+
+    fn execute_sync<SyncTaskFn, TaskRet>(
+        &self,
+        wrap_info: WrapInfo,
+        sync_task: SyncTaskFn,
+    ) -> anyhow::Result<SyncReturn<TaskRet>>
+    where
+        SyncTaskFn: FnOnce() -> anyhow::Result<SyncReturn<TaskRet>> + UnwindSafe,
+        TaskRet: IntoDart,
+    {
+        self.inner.execute_sync(wrap_info, sync_task)
+    }
+}
+
+pub type RustAdminFrbHandler = SimpleHandler<RustAdminFrbExecutor, ReportDartErrorHandler>;
+
+lazy_static::lazy_static! {
+    pub static ref FLUTTER_RUST_BRIDGE_HANDLER: RustAdminFrbHandler = SimpleHandler::new(
+        RustAdminFrbExecutor::new(),
+        ReportDartErrorHandler,
+    );
+}
+// DEBUG-PROBE END
 
 fn initialize(app_dir: &str, custom_client_config: &str) {
     flutter::async_tasks::start_flutter_async_runner();
@@ -1118,10 +1259,19 @@ pub fn main_get_version() -> String {
 
 #[derive(serde::Serialize)]
 struct DebugControlProbeStep {
-    name: &'static str,
+    name: String,
     elapsed_us: u64,
     ok: bool,
     summary: String,
+}
+
+#[derive(serde::Serialize)]
+struct DebugFrbTaskSnapshot {
+    id: u64,
+    name: &'static str,
+    state: &'static str,
+    queued_us: u64,
+    active_us: u64,
 }
 
 #[derive(serde::Serialize)]
@@ -1131,6 +1281,7 @@ struct DebugControlProbeReport {
     frb_worker_active_count: usize,
     frb_worker_queued_count: usize,
     frb_worker_max_count: usize,
+    frb_tasks: Vec<DebugFrbTaskSnapshot>,
     total_elapsed_us: u64,
     steps: Vec<DebugControlProbeStep>,
 }
@@ -1138,6 +1289,43 @@ struct DebugControlProbeReport {
 fn debug_probe_elapsed_us(started: Instant) -> u64 {
     let elapsed = started.elapsed().as_micros();
     elapsed.min(u64::MAX as u128) as u64
+}
+
+fn debug_frb_task_snapshot() -> Vec<DebugFrbTaskSnapshot> {
+    let now = Instant::now();
+    let mut snapshots = FRB_TRACE_TASKS
+        .lock()
+        .map(|tasks| {
+            tasks
+                .iter()
+                .map(|(&id, task)| {
+                    let started_at = task.started_at;
+                    DebugFrbTaskSnapshot {
+                        id,
+                        name: task.name,
+                        state: if started_at.is_some() {
+                            "active"
+                        } else {
+                            "queued"
+                        },
+                        queued_us: now
+                            .duration_since(task.queued_at)
+                            .as_micros()
+                            .min(u64::MAX as u128) as u64,
+                        active_us: started_at
+                            .map(|started| {
+                                now.duration_since(started)
+                                    .as_micros()
+                                    .min(u64::MAX as u128) as u64
+                            })
+                            .unwrap_or_default(),
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    snapshots.sort_unstable_by_key(|task| task.id);
+    snapshots
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -1151,12 +1339,15 @@ fn debug_probe_frb_worker_counts() -> (usize, usize, usize) {
     (0, 0, 0)
 }
 
-const DEBUG_CONTROL_PROBE_STEP_TIMEOUT_MS: u64 = 2_000;
+const DEBUG_CONTROL_PROBE_STEP_TIMEOUT_MS: u64 = 3_500;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const DEBUG_IPC_PROBE_TIMEOUT_MS: u64 = 1_000;
 
-fn debug_probe_step<F>(steps: &mut Vec<DebugControlProbeStep>, name: &'static str, action: F)
+fn debug_probe_step<F>(steps: &mut Vec<DebugControlProbeStep>, name: impl Into<String>, action: F)
 where
     F: FnOnce() -> Result<String, String> + Send + 'static,
 {
+    let name = name.into();
     let started = Instant::now();
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
@@ -1187,11 +1378,392 @@ where
     }
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn debug_probe_ipc_connect_only(steps: &mut Vec<DebugControlProbeStep>) {
+    debug_probe_step(steps, "ipc-connect-main", || {
+        let rt_started = Instant::now();
+        let rt = hbb_common::tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| format!("phase=runtime err={err}"))?;
+        let runtime_us = debug_probe_elapsed_us(rt_started);
+        rt.block_on(async move {
+            let connect_started = Instant::now();
+            let _conn = crate::ipc::connect(DEBUG_IPC_PROBE_TIMEOUT_MS, "")
+                .await
+                .map_err(|err| format!("phase=connect err={err}"))?;
+            Ok(format!(
+                "runtime_us={} connect_us={}",
+                runtime_us,
+                debug_probe_elapsed_us(connect_started)
+            ))
+        })
+    });
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn debug_probe_data_kind(data: &crate::ipc::Data) -> String {
+    format!("{:?}", std::mem::discriminant(data))
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn debug_probe_ipc_request<F>(
+    steps: &mut Vec<DebugControlProbeStep>,
+    name: impl Into<String>,
+    request: crate::ipc::Data,
+    summarize: F,
+) where
+    F: FnOnce(Option<crate::ipc::Data>) -> Result<String, String> + Send + 'static,
+{
+    debug_probe_step(steps, name, move || {
+        let rt_started = Instant::now();
+        let rt = hbb_common::tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| format!("phase=runtime err={err}"))?;
+        let runtime_us = debug_probe_elapsed_us(rt_started);
+        rt.block_on(async move {
+            let connect_started = Instant::now();
+            let mut conn = crate::ipc::connect(DEBUG_IPC_PROBE_TIMEOUT_MS, "")
+                .await
+                .map_err(|err| format!("phase=connect err={err}"))?;
+            let connect_us = debug_probe_elapsed_us(connect_started);
+
+            let send_started = Instant::now();
+            conn.send(&request)
+                .await
+                .map_err(|err| format!("phase=send err={err}"))?;
+            let send_us = debug_probe_elapsed_us(send_started);
+
+            let receive_started = Instant::now();
+            let response = conn
+                .next_timeout(DEBUG_IPC_PROBE_TIMEOUT_MS)
+                .await
+                .map_err(|err| format!("phase=receive err={err}"))?;
+            let receive_us = debug_probe_elapsed_us(receive_started);
+            let response_summary = summarize(response)?;
+            Ok(format!(
+                "runtime_us={} connect_us={} send_us={} receive_us={} {}",
+                runtime_us, connect_us, send_us, receive_us, response_summary
+            ))
+        })
+    });
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn debug_probe_ipc_config(steps: &mut Vec<DebugControlProbeStep>, key: &'static str) {
+    debug_probe_ipc_request(
+        steps,
+        format!("ipc-config-{key}"),
+        crate::ipc::Data::Config((key.to_owned(), None)),
+        move |response| match response {
+            Some(crate::ipc::Data::Config((name, value))) if name == key => {
+                let value_chars = value.as_deref().map(str::len).unwrap_or_default();
+                Ok(format!(
+                    "key={} value_present={} value_chars={}",
+                    key,
+                    value.is_some(),
+                    value_chars
+                ))
+            }
+            Some(data) => Err(format!(
+                "unexpected_response={} expected=Config({})",
+                debug_probe_data_kind(&data),
+                key
+            )),
+            None => Err(format!("empty_response expected=Config({key})")),
+        },
+    );
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn debug_probe_ipc_read_steps(steps: &mut Vec<DebugControlProbeStep>) {
+    debug_probe_ipc_connect_only(steps);
+
+    debug_probe_ipc_request(
+        steps,
+        "ipc-system-info",
+        crate::ipc::Data::SystemInfo(None),
+        |response| match response {
+            Some(crate::ipc::Data::SystemInfo(Some(value))) => {
+                Ok(format!("value_chars={}", value.len()))
+            }
+            Some(data) => Err(format!(
+                "unexpected_response={} expected=SystemInfo",
+                debug_probe_data_kind(&data)
+            )),
+            None => Err("empty_response expected=SystemInfo".to_owned()),
+        },
+    );
+    debug_probe_ipc_request(
+        steps,
+        "ipc-online-status",
+        crate::ipc::Data::OnlineStatus(None),
+        |response| match response {
+            Some(crate::ipc::Data::OnlineStatus(Some((status, confirmed)))) => {
+                Ok(format!("status={} key_confirmed={}", status, confirmed))
+            }
+            Some(data) => Err(format!(
+                "unexpected_response={} expected=OnlineStatus",
+                debug_probe_data_kind(&data)
+            )),
+            None => Err("empty_response expected=OnlineStatus".to_owned()),
+        },
+    );
+    debug_probe_ipc_request(
+        steps,
+        "ipc-options",
+        crate::ipc::Data::Options(None),
+        |response| match response {
+            Some(crate::ipc::Data::Options(Some(value))) => Ok(format!("entries={}", value.len())),
+            Some(data) => Err(format!(
+                "unexpected_response={} expected=Options",
+                debug_probe_data_kind(&data)
+            )),
+            None => Err("empty_response expected=Options".to_owned()),
+        },
+    );
+
+    for key in [
+        "id",
+        "temporary-password",
+        "permanent-password-storage-and-salt",
+        "permanent-password-set",
+        "permanent-password-is-preset",
+        "salt",
+        "rendezvous_server",
+        "rendezvous_servers",
+        "fingerprint",
+        "hide_cm",
+        "voice-call-input",
+        "unlock-pin",
+        "trusted-devices",
+        "paired-viewers",
+    ] {
+        debug_probe_ipc_config(steps, key);
+    }
+
+    debug_probe_ipc_request(
+        steps,
+        "ipc-click-time",
+        crate::ipc::Data::ClickTime(0),
+        |response| match response {
+            Some(crate::ipc::Data::ClickTime(value)) => Ok(format!("value={value}")),
+            Some(data) => Err(format!(
+                "unexpected_response={} expected=ClickTime",
+                debug_probe_data_kind(&data)
+            )),
+            None => Err("empty_response expected=ClickTime".to_owned()),
+        },
+    );
+    debug_probe_ipc_request(
+        steps,
+        "ipc-mouse-move-time",
+        crate::ipc::Data::MouseMoveTime(0),
+        |response| match response {
+            Some(crate::ipc::Data::MouseMoveTime(value)) => Ok(format!("value={value}")),
+            Some(data) => Err(format!(
+                "unexpected_response={} expected=MouseMoveTime",
+                debug_probe_data_kind(&data)
+            )),
+            None => Err("empty_response expected=MouseMoveTime".to_owned()),
+        },
+    );
+    debug_probe_ipc_request(
+        steps,
+        "ipc-confirmed-key",
+        crate::ipc::Data::ConfirmedKey(None),
+        |response| match response {
+            Some(crate::ipc::Data::ConfirmedKey(Some((public_key, secret_key)))) => Ok(format!(
+                "present=true public_key_len={} secret_key_len={}",
+                public_key.len(),
+                secret_key.len()
+            )),
+            Some(crate::ipc::Data::ConfirmedKey(None)) => Ok("present=false".to_owned()),
+            Some(data) => Err(format!(
+                "unexpected_response={} expected=ConfirmedKey",
+                debug_probe_data_kind(&data)
+            )),
+            None => Err("empty_response expected=ConfirmedKey".to_owned()),
+        },
+    );
+    debug_probe_ipc_request(
+        steps,
+        "ipc-nat-type",
+        crate::ipc::Data::NatType(None),
+        |response| match response {
+            Some(crate::ipc::Data::NatType(Some(value))) => Ok(format!("value={value}")),
+            Some(data) => Err(format!(
+                "unexpected_response={} expected=NatType",
+                debug_probe_data_kind(&data)
+            )),
+            None => Err("empty_response expected=NatType".to_owned()),
+        },
+    );
+    debug_probe_ipc_request(
+        steps,
+        "ipc-socks",
+        crate::ipc::Data::Socks(None),
+        |response| match response {
+            Some(crate::ipc::Data::Socks(value)) => Ok(format!("present={}", value.is_some())),
+            Some(data) => Err(format!(
+                "unexpected_response={} expected=Socks",
+                debug_probe_data_kind(&data)
+            )),
+            None => Err("empty_response expected=Socks".to_owned()),
+        },
+    );
+    debug_probe_ipc_request(
+        steps,
+        "ipc-socks-ws",
+        crate::ipc::Data::SocksWs(None),
+        |response| match response {
+            Some(crate::ipc::Data::SocksWs(Some(value))) => Ok(format!(
+                "socks_present={} ws_chars={}",
+                value.0.is_some(),
+                value.1.len()
+            )),
+            Some(data) => Err(format!(
+                "unexpected_response={} expected=SocksWs",
+                debug_probe_data_kind(&data)
+            )),
+            None => Err("empty_response expected=SocksWs".to_owned()),
+        },
+    );
+    #[cfg(feature = "flutter")]
+    debug_probe_ipc_request(
+        steps,
+        "ipc-video-conn-count",
+        crate::ipc::Data::VideoConnCount(None),
+        |response| match response {
+            Some(crate::ipc::Data::VideoConnCount(Some(value))) => Ok(format!("count={value}")),
+            Some(data) => Err(format!(
+                "unexpected_response={} expected=VideoConnCount",
+                debug_probe_data_kind(&data)
+            )),
+            None => Err("empty_response expected=VideoConnCount".to_owned()),
+        },
+    );
+    #[cfg(feature = "hwcodec")]
+    debug_probe_ipc_request(
+        steps,
+        "ipc-hwcodec-config",
+        crate::ipc::Data::HwCodecConfig(None),
+        |response| match response {
+            Some(crate::ipc::Data::HwCodecConfig(value)) => Ok(format!(
+                "value_present={} value_chars={}",
+                value.is_some(),
+                value.as_deref().map(str::len).unwrap_or_default()
+            )),
+            Some(data) => Err(format!(
+                "unexpected_response={} expected=HwCodecConfig",
+                debug_probe_data_kind(&data)
+            )),
+            None => Err("empty_response expected=HwCodecConfig".to_owned()),
+        },
+    );
+    #[cfg(target_os = "windows")]
+    {
+        debug_probe_ipc_request(
+            steps,
+            "ipc-controlled-session-count",
+            crate::ipc::Data::ControlledSessionCount(0),
+            |response| match response {
+                Some(crate::ipc::Data::ControlledSessionCount(value)) => {
+                    Ok(format!("count={value}"))
+                }
+                Some(data) => Err(format!(
+                    "unexpected_response={} expected=ControlledSessionCount",
+                    debug_probe_data_kind(&data)
+                )),
+                None => Err("empty_response expected=ControlledSessionCount".to_owned()),
+            },
+        );
+        debug_probe_ipc_request(
+            steps,
+            "ipc-port-forward-session-count",
+            crate::ipc::Data::PortForwardSessionCount(None),
+            |response| match response {
+                Some(crate::ipc::Data::PortForwardSessionCount(Some(value))) => {
+                    Ok(format!("count={value}"))
+                }
+                Some(data) => Err(format!(
+                    "unexpected_response={} expected=PortForwardSessionCount",
+                    debug_probe_data_kind(&data)
+                )),
+                None => Err("empty_response expected=PortForwardSessionCount".to_owned()),
+            },
+        );
+        debug_probe_ipc_request(
+            steps,
+            "ipc-file-transfer-enabled-state",
+            crate::ipc::Data::FileTransferEnabledState(None),
+            |response| match response {
+                Some(crate::ipc::Data::FileTransferEnabledState(Some(value))) => {
+                    Ok(format!("enabled={value}"))
+                }
+                Some(data) => Err(format!(
+                    "unexpected_response={} expected=FileTransferEnabledState",
+                    debug_probe_data_kind(&data)
+                )),
+                None => Err("empty_response expected=FileTransferEnabledState".to_owned()),
+            },
+        );
+    }
+    #[cfg(target_os = "linux")]
+    debug_probe_ipc_request(
+        steps,
+        "ipc-terminal-session-count",
+        crate::ipc::Data::TerminalSessionCount(0),
+        |response| match response {
+            Some(crate::ipc::Data::TerminalSessionCount(value)) => Ok(format!("count={value}")),
+            Some(data) => Err(format!(
+                "unexpected_response={} expected=TerminalSessionCount",
+                debug_probe_data_kind(&data)
+            )),
+            None => Err("empty_response expected=TerminalSessionCount".to_owned()),
+        },
+    );
+    debug_probe_ipc_request(
+        steps,
+        "ipc-control-permissions-remote-modify",
+        crate::ipc::Data::ControlPermissionsRemoteModify(None),
+        |response| match response {
+            Some(crate::ipc::Data::ControlPermissionsRemoteModify(value)) => {
+                Ok(format!("value={value:?}"))
+            }
+            Some(data) => Err(format!(
+                "unexpected_response={} expected=ControlPermissionsRemoteModify",
+                debug_probe_data_kind(&data)
+            )),
+            None => Err("empty_response expected=ControlPermissionsRemoteModify".to_owned()),
+        },
+    );
+    debug_probe_ipc_request(
+        steps,
+        "ipc-should-block-gui-active-sessions",
+        crate::ipc::Data::ShouldBlockRustAdminGuiForActiveSessions(None),
+        |response| match response {
+            Some(crate::ipc::Data::ShouldBlockRustAdminGuiForActiveSessions(Some(value))) => {
+                Ok(format!("value={value}"))
+            }
+            Some(data) => Err(format!(
+                "unexpected_response={} expected=ShouldBlockRustAdminGuiForActiveSessions",
+                debug_probe_data_kind(&data)
+            )),
+            None => {
+                Err("empty_response expected=ShouldBlockRustAdminGuiForActiveSessions".to_owned())
+            }
+        },
+    );
+}
+
 pub fn main_debug_control_probe() -> String {
     let report_started = Instant::now();
     let (frb_worker_active_count, frb_worker_queued_count, frb_worker_max_count) =
         debug_probe_frb_worker_counts();
-    let mut steps = Vec::with_capacity(16);
+    let frb_tasks = debug_frb_task_snapshot();
+    let mut steps = Vec::with_capacity(48);
 
     debug_probe_step(&mut steps, "local-main-get-version", || {
         Ok(format!("value={}", get_version()))
@@ -1249,6 +1821,7 @@ pub fn main_debug_control_probe() -> String {
     });
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
+        debug_probe_ipc_read_steps(&mut steps);
         debug_probe_step(&mut steps, "ipc-get-config-id", || {
             crate::ipc::get_config("id")
                 .map(|v| format!("chars={}", v.unwrap_or_default().len()))
@@ -1277,6 +1850,7 @@ pub fn main_debug_control_probe() -> String {
         frb_worker_active_count,
         frb_worker_queued_count,
         frb_worker_max_count,
+        frb_tasks,
         total_elapsed_us,
         steps,
     };
@@ -1320,6 +1894,10 @@ pub fn main_get_connect_status() -> String {
         }
         serde_json::json!({ "status_num": state }).to_string()
     }
+}
+
+pub fn main_get_connect_status_sync() -> SyncReturn<String> {
+    SyncReturn(main_get_connect_status())
 }
 
 pub fn main_check_connect_status() {
@@ -1931,6 +2509,10 @@ pub fn main_get_temporary_password() -> String {
     ui_interface::temporary_password()
 }
 
+pub fn main_get_temporary_password_sync() -> SyncReturn<String> {
+    SyncReturn(ui_interface::temporary_password())
+}
+
 pub fn main_set_permanent_password_with_result(password: String) -> bool {
     ui_interface::set_permanent_password_with_result(password)
 }
@@ -1992,6 +2574,10 @@ pub fn main_supported_hwdecodings() -> SyncReturn<String> {
 
 pub fn main_is_root() -> bool {
     is_root()
+}
+
+pub fn main_is_root_sync() -> SyncReturn<bool> {
+    SyncReturn(is_root())
 }
 
 pub fn get_double_click_time() -> SyncReturn<i32> {
@@ -2489,6 +3075,10 @@ pub fn version_to_number(v: String) -> SyncReturn<i64> {
 
 pub fn option_synced() -> bool {
     crate::ui_interface::option_synced()
+}
+
+pub fn option_synced_sync() -> SyncReturn<bool> {
+    SyncReturn(crate::ui_interface::option_synced())
 }
 
 pub fn main_is_installed() -> SyncReturn<bool> {
@@ -3120,6 +3710,10 @@ pub fn main_get_common_sync(key: String) -> SyncReturn<String> {
 }
 
 pub fn main_set_common(_key: String, _value: String) {
+    if _key == "debug-probe-log" {
+        log::info!("debug-probe: {}", _value);
+        return;
+    }
     if _key == "remove-paired-viewers" {
         ui_interface::remove_paired_viewers(&_value);
         return;

@@ -3231,10 +3231,8 @@ Future<void> onActiveWindowChanged() async {
 }
 
 Timer periodic_immediate(Duration duration, Future<void> Function() callback) {
-  Future.delayed(Duration.zero, callback);
-  return Timer.periodic(duration, (timer) async {
-    await callback();
-  });
+  // Keep periodic UI refreshes from flooding the shared FRB worker queue.
+  return periodicImmediateSingleFlight(duration, callback);
 }
 
 Timer periodicImmediateSingleFlight(
@@ -3511,9 +3509,7 @@ void onCopyFingerprint(String value) {
 }
 
 Future<bool> callMainCheckSuperUserPermission() async {
-  bool checked = isDesktop
-      ? bind.mainGetCommonSync(key: "check-super-user-permission") == "true"
-      : await bind.mainCheckSuperUserPermission();
+  final checked = await bind.mainCheckSuperUserPermission();
   if (isMacOS) {
     await windowManager.show();
   }

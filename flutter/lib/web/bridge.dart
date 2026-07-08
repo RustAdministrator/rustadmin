@@ -864,8 +864,11 @@ class RustadminImpl {
   }
 
   Future<String> mainGetConnectStatus({dynamic hint}) {
-    return Future(
-        () => js.context.callMethod('getByName', ["get_conn_status"]));
+    return Future.value(mainGetConnectStatusSync());
+  }
+
+  String mainGetConnectStatusSync({dynamic hint}) {
+    return js.context.callMethod('getByName', ["get_conn_status"]);
   }
 
   Future<void> mainCheckConnectStatus({dynamic hint}) {
@@ -1164,7 +1167,11 @@ class RustadminImpl {
   }
 
   Future<String> mainGetTemporaryPassword({dynamic hint}) {
-    return Future.value('');
+    return Future.value(mainGetTemporaryPasswordSync());
+  }
+
+  String mainGetTemporaryPasswordSync({dynamic hint}) {
+    return '';
   }
 
   Future<String> mainGetFingerprint({dynamic hint}) {
@@ -1216,6 +1223,10 @@ class RustadminImpl {
 
   Future<bool> mainIsRoot({dynamic hint}) {
     throw UnimplementedError("mainIsRoot");
+  }
+
+  bool mainIsRootSync({dynamic hint}) {
+    throw UnimplementedError("mainIsRootSync");
   }
 
   int getDoubleClickTime({dynamic hint}) {
@@ -1482,7 +1493,11 @@ class RustadminImpl {
   }
 
   Future<bool> optionSynced({dynamic hint}) {
-    return Future.value(true);
+    return Future.value(optionSyncedSync());
+  }
+
+  bool optionSyncedSync({dynamic hint}) {
+    return true;
   }
 
   bool mainIsInstalled({dynamic hint}) {
@@ -2052,7 +2067,9 @@ class RustadminImpl {
   }
 
   String mainResolveAvatarUrl({required String avatar, dynamic hint}) {
-    return js.context.callMethod('getByName', ['resolve_avatar_url', avatar])?.toString() ?? avatar;
+    return js.context.callMethod(
+            'getByName', ['resolve_avatar_url', avatar])?.toString() ??
+        avatar;
   }
 
   void dispose() {}

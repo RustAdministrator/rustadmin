@@ -460,6 +460,9 @@ try {
         Remove-Item -Recurse -Force ".dart_tool", ".flutter-plugins-dependencies", "build\windows" -ErrorAction SilentlyContinue
     }
     & $FlutterBat pub get
+    if ($LASTEXITCODE -ne 0) {
+        throw "flutter pub get failed with exit code $LASTEXITCODE."
+    }
 }
 finally {
     Pop-Location
@@ -472,6 +475,9 @@ $Features = if ($NoHwCodec) { "flutter" } else { "flutter,hwcodec" }
 Push-Location $RepoRoot
 try {
     cargo build --features $Features --lib --release
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo build failed with exit code $LASTEXITCODE."
+    }
 }
 finally {
     Pop-Location
@@ -480,6 +486,9 @@ finally {
 Push-Location $FlutterDir
 try {
     & $FlutterBat build windows
+    if ($LASTEXITCODE -ne 0) {
+        throw "flutter build windows failed with exit code $LASTEXITCODE."
+    }
 }
 finally {
     Pop-Location

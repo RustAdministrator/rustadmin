@@ -45,7 +45,7 @@ const String _kSettingPageControllerTag = 'settingPageController';
 const String _kSettingPageTabKeyTag = 'settingPageTabKey';
 // DEBUG-PROBE: keep false for normal builds.
 // Set true only while diagnosing GUI/FRB stalls.
-const bool _kDebugProbeSettingsEnabled = true;
+const bool _kDebugProbeSettingsEnabled = false;
 
 class _TabInfo {
   late final SettingsTabKey key;
@@ -167,15 +167,8 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _videoConnTimer =
-        periodicImmediateSingleFlight(Duration(milliseconds: 1000), () async {
+    _videoConnTimer = periodic_immediate(Duration(milliseconds: 1000), () async {
       if (!mounted) {
-        return;
-      }
-      if (stateGlobal.videoConnCount <= 0) {
-        if (_canBeBlocked.value) {
-          _canBeBlocked.value = false;
-        }
         return;
       }
       _canBeBlocked.value = await canBeBlocked();
@@ -2799,6 +2792,9 @@ class _DebugProbeState extends State<_DebugProbe> {
   Future<void> _writeChain = Future<void>.value();
   bool _running = false;
   bool _controlProbeRunning = false;
+  bool _frbLatencyProbeRunning = false;
+  bool _guiFlowProbeRunning = false;
+  bool _privilegeProbeRunning = false;
   int _seq = 0;
 
   Future<File> _ensureLogFile() async {
@@ -2824,6 +2820,9 @@ class _DebugProbeState extends State<_DebugProbe> {
   ]) async {
     if (!_running &&
         !_controlProbeRunning &&
+        !_frbLatencyProbeRunning &&
+        !_guiFlowProbeRunning &&
+        !_privilegeProbeRunning &&
         event != 'probe-start' &&
         event != 'probe-stop' &&
         event != 'copy-log-path') {
@@ -2906,6 +2905,295 @@ class _DebugProbeState extends State<_DebugProbe> {
     await _record('copy-log-path', {'path': file.path});
   }
 
+  bool get _anyDiagnosticRunning =>
+      _controlProbeRunning ||
+      _frbLatencyProbeRunning ||
+      _guiFlowProbeRunning ||
+      _privilegeProbeRunning;
+
+  Future<void> _ensureProbeStarted() async {
+    if (_running) return;
+    await _startProbe();
+  }
+
+  Map<String, Object?> _valueSummary(Object? value) {
+    if (value == null) return {'value_type': 'null'};
+    if (value is String) {
+      return {'value_type': 'String', 'chars': value.length};
+    }
+    if (value is bool || value is num) {
+      return {'value_type': value.runtimeType.toString(), 'value': value};
+    }
+    if (value is List) {
+      return {'value_type': 'List', 'length': value.length};
+    }
+    if (value is Map) {
+      return {'value_type': 'Map', 'length': value.length};
+    }
+    return {'value_type': value.runtimeType.toString()};
+  }
+
+  Future<Map<String, Object?>> _measureCall(
+    String name,
+    FutureOr<Object?> Function() action, {
+    Duration timeout = const Duration(seconds: 45),
+  }) async {
+    await _record('call-begin', {'name': name});
+    final sw = Stopwatch()..start();
+    try {
+      final value = await Future<Object?>.sync(action).timeout(timeout);
+      sw.stop();
+      final data = <String, Object?>{
+        'name': name,
+        'elapsed_us': sw.elapsedMicroseconds,
+        'ok': true,
+        ..._valueSummary(value),
+      };
+      await _record('call-end', data);
+      return data;
+    } catch (e, st) {
+      sw.stop();
+      final data = <String, Object?>{
+        'name': name,
+        'elapsed_us': sw.elapsedMicroseconds,
+        'ok': false,
+        'error': e.toString(),
+        'stack': st.toString(),
+      };
+      await _record('call-error', data);
+      return data;
+    }
+  }
+
+  int _percentile(List<int> sortedValues, double percentile) {
+    if (sortedValues.isEmpty) return 0;
+    final index = ((sortedValues.length - 1) * percentile)
+        .round()
+        .clamp(0, sortedValues.length - 1)
+        .toInt();
+    return sortedValues[index];
+  }
+
+  Future<void> _runFrbLatencyProbe() async {
+    if (_frbLatencyProbeRunning) {
+      await _record('frb-latency-probe-skipped', {'reason': 'already-running'});
+      return;
+    }
+    setState(() => _frbLatencyProbeRunning = true);
+    try {
+      await _ensureProbeStarted();
+      const sequentialSamples = 5;
+      const burstSamples = 8;
+      const failureLimit = 2;
+      const callTimeout = Duration(seconds: 5);
+      await _record('frb-latency-probe-start', {
+        'sequential_samples': sequentialSamples,
+        'burst_samples': burstSamples,
+        'call_timeout_ms': callTimeout.inMilliseconds,
+        'failure_limit': failureLimit,
+      });
+
+      final sequentialUs = <int>[];
+      var sequentialFailures = 0;
+      for (var i = 0; i < sequentialSamples; i++) {
+        final result = await _measureCall(
+          'frb-seq-main-get-version-$i',
+          () => bind.mainGetVersion(),
+          timeout: callTimeout,
+        );
+        final elapsed = result['elapsed_us'];
+        if (result['ok'] == true && elapsed is int) {
+          sequentialUs.add(elapsed);
+        } else {
+          sequentialFailures++;
+          if (sequentialFailures >= failureLimit) {
+            await _record('frb-latency-probe-aborted', {
+              'reason': 'sequential failures reached limit',
+              'failures': sequentialFailures,
+              'limit': failureLimit,
+            });
+            break;
+          }
+        }
+      }
+      sequentialUs.sort();
+      await _record('frb-sequential-summary', {
+        'samples': sequentialUs.length,
+        'errors': sequentialFailures,
+        'min_us': sequentialUs.isEmpty ? 0 : sequentialUs.first,
+        'p50_us': _percentile(sequentialUs, 0.50),
+        'p90_us': _percentile(sequentialUs, 0.90),
+        'p95_us': _percentile(sequentialUs, 0.95),
+        'max_us': sequentialUs.isEmpty ? 0 : sequentialUs.last,
+      });
+      if (sequentialFailures > 0) {
+        await _record('frb-latency-probe-end', {
+          'burst_skipped': true,
+          'reason': 'sequential call failed or timed out',
+        });
+        return;
+      }
+
+      final burstStopwatch = Stopwatch()..start();
+      final burstResults =
+          await Future.wait(List.generate(burstSamples, (i) async {
+        final sw = Stopwatch()..start();
+        try {
+          final value = await bind.mainGetVersion().timeout(callTimeout);
+          sw.stop();
+          return <String, Object?>{
+            'index': i,
+            'elapsed_us': sw.elapsedMicroseconds,
+            'ok': true,
+            'chars': value.length,
+          };
+        } catch (e) {
+          sw.stop();
+          return <String, Object?>{
+            'index': i,
+            'elapsed_us': sw.elapsedMicroseconds,
+            'ok': false,
+            'error': e.toString(),
+          };
+        }
+      }));
+      burstStopwatch.stop();
+      for (final result in burstResults) {
+        await _record('frb-burst-sample', result);
+      }
+      final burstUs = burstResults
+          .where((e) => e['ok'] == true && e['elapsed_us'] is int)
+          .map((e) => e['elapsed_us'] as int)
+          .toList()
+        ..sort();
+      await _record('frb-burst-summary', {
+        'samples': burstResults.length,
+        'ok': burstUs.length,
+        'errors': burstResults.length - burstUs.length,
+        'total_elapsed_us': burstStopwatch.elapsedMicroseconds,
+        'min_us': burstUs.isEmpty ? 0 : burstUs.first,
+        'p50_us': _percentile(burstUs, 0.50),
+        'p90_us': _percentile(burstUs, 0.90),
+        'p95_us': _percentile(burstUs, 0.95),
+        'max_us': burstUs.isEmpty ? 0 : burstUs.last,
+      });
+      await _record('frb-latency-probe-end');
+    } finally {
+      if (mounted) setState(() => _frbLatencyProbeRunning = false);
+    }
+  }
+
+  Future<void> _runGuiFlowProbe() async {
+    if (_guiFlowProbeRunning) {
+      await _record('gui-flow-probe-skipped', {'reason': 'already-running'});
+      return;
+    }
+    setState(() => _guiFlowProbeRunning = true);
+    try {
+      await _ensureProbeStarted();
+      const callTimeout = Duration(seconds: 5);
+      const failureLimit = 2;
+      var failures = 0;
+      await _record('gui-flow-probe-start', {
+        'call_timeout_ms': callTimeout.inMilliseconds,
+        'failure_limit': failureLimit,
+      });
+      Future<bool> measureGuiCall(
+        String name,
+        FutureOr<Object?> Function() action,
+      ) async {
+        final result = await _measureCall(
+          name,
+          action,
+          timeout: callTimeout,
+        );
+        if (result['ok'] == true) return true;
+        failures++;
+        if (failures >= failureLimit) {
+          await _record('gui-flow-probe-aborted', {
+            'reason': 'failures reached limit',
+            'failures': failures,
+            'limit': failureLimit,
+          });
+          return false;
+        }
+        return true;
+      }
+
+      await _measureCall('sync-about-license',
+          () => bind.mainGetCommonSync(key: 'about-license'));
+      await _measureCall('sync-about-version',
+          () => bind.mainGetCommonSync(key: 'about-version'));
+      await _measureCall('sync-about-build-date',
+          () => bind.mainGetCommonSync(key: 'about-build-date'));
+      await _measureCall('sync-about-fingerprint',
+          () => bind.mainGetCommonSync(key: 'about-fingerprint'));
+      await _measureCall(
+          'sync-main-is-installed', () => bind.mainIsInstalled());
+      await _measureCall('sync-main-is-installed-daemon',
+          () => bind.mainIsInstalledDaemon(prompt: false));
+      if (!await measureGuiCall(
+          'sync-option-synced', () => bind.optionSyncedSync())) {
+        return;
+      }
+      if (!await measureGuiCall('sync-main-get-connect-status',
+          () => bind.mainGetConnectStatusSync())) {
+        return;
+      }
+      if (!await measureGuiCall('sync-main-get-temporary-password',
+          () => bind.mainGetTemporaryPasswordSync())) {
+        return;
+      }
+      if (!await measureGuiCall(
+          'sync-main-get-options', () => bind.mainGetOptionsSync())) {
+        return;
+      }
+      for (final key in <String>[
+        kOptionVerificationMethod,
+        kOptionApproveMode,
+        'temporary-password-length',
+        kOptionStopService,
+        kOptionEnableAudio,
+        kOptionEnableFileTransfer,
+        kOptionEnableClipboard,
+        kOptionAccessMode,
+        kOptionAllowRemoteConfigModification,
+        'allow-hide-cm',
+      ]) {
+        if (!await measureGuiCall(
+          'sync-main-get-option-$key',
+          () => bind.mainGetOptionSync(key: key),
+        )) {
+          return;
+        }
+      }
+      await _record('gui-flow-probe-end');
+    } finally {
+      if (mounted) setState(() => _guiFlowProbeRunning = false);
+    }
+  }
+
+  Future<void> _runPrivilegeProbe() async {
+    if (_privilegeProbeRunning) {
+      await _record('privilege-probe-skipped', {'reason': 'already-running'});
+      return;
+    }
+    setState(() => _privilegeProbeRunning = true);
+    try {
+      await _ensureProbeStarted();
+      await _record('privilege-probe-start');
+      await _measureCall('sync-main-is-root', () => bind.mainIsRootSync());
+      await _measureCall(
+        'async-main-check-super-user-permission',
+        () => bind.mainCheckSuperUserPermission(),
+        timeout: const Duration(seconds: 120),
+      );
+      await _record('privilege-probe-end');
+    } finally {
+      if (mounted) setState(() => _privilegeProbeRunning = false);
+    }
+  }
+
   Future<void> _runControlProbe() async {
     if (_controlProbeRunning) {
       await _record('control-probe-skipped', {'reason': 'already-running'});
@@ -2916,10 +3204,11 @@ class _DebugProbeState extends State<_DebugProbe> {
       await _time('ffi-main-debug-control-probe', () async {
         final raw = await bind
             .mainDebugControlProbe()
-            .timeout(const Duration(seconds: 45));
+            .timeout(const Duration(seconds: 120));
         final decoded = jsonDecode(raw);
         if (decoded is! Map) {
-          await _record('control-probe-error', {'error': 'invalid json report'});
+          await _record(
+              'control-probe-error', {'error': 'invalid json report'});
           return;
         }
         await _record('control-probe-meta', {
@@ -2928,13 +3217,15 @@ class _DebugProbeState extends State<_DebugProbe> {
           'frb_worker_active_count': decoded['frb_worker_active_count'],
           'frb_worker_queued_count': decoded['frb_worker_queued_count'],
           'frb_worker_max_count': decoded['frb_worker_max_count'],
+          'frb_tasks': decoded['frb_tasks'],
           'rust_total_elapsed_us': decoded['total_elapsed_us'],
         });
         final steps = decoded['steps'];
         if (steps is! List) return;
         for (final step in steps) {
           if (step is Map) {
-            await _record('control-probe-step', Map<String, Object?>.from(step));
+            await _record(
+                'control-probe-step', Map<String, Object?>.from(step));
           }
         }
       });
@@ -2980,10 +3271,31 @@ class _DebugProbeState extends State<_DebugProbe> {
                   _probeButton('Copy log path', _copyLogPath),
                   _probeButton(
                     _controlProbeRunning
-                        ? 'Control probe running'
-                        : 'Run control probe',
+                        ? 'Control / IPC probe running'
+                        : 'Run control / IPC probe',
                     _runControlProbe,
-                    enabled: !_controlProbeRunning,
+                    enabled: !_anyDiagnosticRunning,
+                  ),
+                  _probeButton(
+                    _frbLatencyProbeRunning
+                        ? 'FRB latency probe running'
+                        : 'Run FRB latency probe',
+                    _runFrbLatencyProbe,
+                    enabled: !_anyDiagnosticRunning,
+                  ),
+                  _probeButton(
+                    _guiFlowProbeRunning
+                        ? 'GUI flow probe running'
+                        : 'Run GUI flow probe',
+                    _runGuiFlowProbe,
+                    enabled: !_anyDiagnosticRunning,
+                  ),
+                  _probeButton(
+                    _privilegeProbeRunning
+                        ? 'Privilege probe running'
+                        : 'Run privilege probe',
+                    _runPrivilegeProbe,
+                    enabled: !_anyDiagnosticRunning,
                   ),
                 ],
               ).marginOnly(bottom: 16),
@@ -3023,33 +3335,17 @@ class _About extends StatefulWidget {
 
 class _AboutState extends State<_About> {
   late final Future<Map<String, String>> _aboutFuture = () async {
+    final license = await bind.mainGetLicense();
+    final version = await bind.mainGetVersion();
+    final buildDate = await bind.mainGetBuildDate();
+    final fingerprint = await bind.mainGetFingerprint();
     return {
-      'license': _aboutStepSync('mainGetLicenseSync',
-          () => bind.mainGetCommonSync(key: 'about-license')),
-      'version': _aboutStepSync('mainGetVersionSync',
-          () => bind.mainGetCommonSync(key: 'about-version')),
-      'buildDate': _aboutStepSync('mainGetBuildDateSync',
-          () => bind.mainGetCommonSync(key: 'about-build-date')),
-      'fingerprint': _aboutStepSync('mainGetFingerprintSync',
-          () => bind.mainGetCommonSync(key: 'about-fingerprint')),
+      'license': license,
+      'version': version,
+      'buildDate': buildDate,
+      'fingerprint': fingerprint,
     };
   }();
-
-  String _aboutStepSync(String name, String Function() action) {
-    final started = DateTime.now();
-    debugPrint('[debug-about] begin $name');
-    try {
-      final value = action();
-      final elapsed = DateTime.now().difference(started).inMilliseconds;
-      debugPrint(
-          '[debug-about] done $name ${elapsed}ms chars=${value.length}');
-      return value;
-    } catch (e, st) {
-      final elapsed = DateTime.now().difference(started).inMilliseconds;
-      debugPrint('[debug-about] error $name ${elapsed}ms: $e\n$st');
-      return '$name failed after ${elapsed}ms: $e';
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -3058,9 +3354,8 @@ class _AboutState extends State<_About> {
       future: _aboutFuture,
       builder: (context, snapshot) {
         if (!snapshot.hasData) {
-          final status = snapshot.hasError
-              ? snapshot.error.toString()
-              : 'Loading...';
+          final status =
+              snapshot.hasError ? snapshot.error.toString() : 'Loading...';
           return _Card(title: '${translate('About')} $appName', children: [
             Row(
               children: [
@@ -3087,71 +3382,71 @@ class _AboutState extends State<_About> {
         return SingleChildScrollView(
           controller: scrollController,
           child: _Card(title: '${translate('About')} $appName', children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const SizedBox(
-                height: 8.0,
-              ),
-              SelectionArea(
-                  child: Text('${translate('Version')}: $version')
-                      .marginSymmetric(vertical: 4.0)),
-              SelectionArea(
-                  child: Text('${translate('Build Date')}: $buildDate')
-                      .marginSymmetric(vertical: 4.0)),
-              if (!isWeb)
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const SizedBox(
+                  height: 8.0,
+                ),
                 SelectionArea(
-                    child: Text('${translate('Fingerprint')}: $fingerprint')
+                    child: Text('${translate('Version')}: $version')
                         .marginSymmetric(vertical: 4.0)),
-              const SelectionArea(child: Text(kRustAdminForkSummary))
-                  .marginSymmetric(vertical: 4.0),
-              InkWell(
-                  onTap: () {
-                    launchUrlString(kRustAdminSourceUrl);
-                  },
-                  child: Text(
-                    'Source code',
-                    style: linkStyle,
-                  ).marginSymmetric(vertical: 4.0)),
-              InkWell(
-                  onTap: () {
-                    launchUrlString(kRustDeskUpstreamUrl);
-                  },
-                  child: Text(
-                    'Upstream project',
-                    style: linkStyle,
-                  ).marginSymmetric(vertical: 4.0)),
-              Container(
-                decoration: const BoxDecoration(color: Color(0xFF2c8cff)),
-                padding:
-                    const EdgeInsets.symmetric(vertical: 24, horizontal: 8),
-                child: SelectionArea(
-                    child: Row(
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            rustAdminLegalNotice(runtimeLicense: license),
-                            style: const TextStyle(color: Colors.white),
-                          ),
-                          Text(
-                            translate('Slogan_tip'),
-                            style: TextStyle(
-                                fontWeight: FontWeight.w800,
-                                color: Colors.white),
-                          )
-                        ],
+                SelectionArea(
+                    child: Text('${translate('Build Date')}: $buildDate')
+                        .marginSymmetric(vertical: 4.0)),
+                if (!isWeb)
+                  SelectionArea(
+                      child: Text('${translate('Fingerprint')}: $fingerprint')
+                          .marginSymmetric(vertical: 4.0)),
+                const SelectionArea(child: Text(kRustAdminForkSummary))
+                    .marginSymmetric(vertical: 4.0),
+                InkWell(
+                    onTap: () {
+                      launchUrlString(kRustAdminSourceUrl);
+                    },
+                    child: Text(
+                      'Source code',
+                      style: linkStyle,
+                    ).marginSymmetric(vertical: 4.0)),
+                InkWell(
+                    onTap: () {
+                      launchUrlString(kRustDeskUpstreamUrl);
+                    },
+                    child: Text(
+                      'Upstream project',
+                      style: linkStyle,
+                    ).marginSymmetric(vertical: 4.0)),
+                Container(
+                  decoration: const BoxDecoration(color: Color(0xFF2c8cff)),
+                  padding:
+                      const EdgeInsets.symmetric(vertical: 24, horizontal: 8),
+                  child: SelectionArea(
+                      child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              rustAdminLegalNotice(runtimeLicense: license),
+                              style: const TextStyle(color: Colors.white),
+                            ),
+                            Text(
+                              translate('Slogan_tip'),
+                              style: TextStyle(
+                                  fontWeight: FontWeight.w800,
+                                  color: Colors.white),
+                            )
+                          ],
+                        ),
                       ),
-                    ),
-                  ],
-                )),
-              ).marginSymmetric(vertical: 4.0)
-            ],
-          ).marginOnly(left: _kContentHMargin)
-        ]),
-      );
+                    ],
+                  )),
+                ).marginSymmetric(vertical: 4.0)
+              ],
+            ).marginOnly(left: _kContentHMargin)
+          ]),
+        );
       },
     );
   }
@@ -3772,8 +4067,7 @@ Widget _lock(
                             Text(translate(label)).marginOnly(left: 5),
                           ]).marginSymmetric(vertical: 2)),
                   onPressed: () async {
-                    if (stateGlobal.videoConnCount > 0 &&
-                        await canBeBlocked()) {
+                    if (await canBeBlocked()) {
                       showToast(translate(
                           'Settings are locked during support sessions'));
                       return;
