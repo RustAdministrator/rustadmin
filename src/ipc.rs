@@ -1018,6 +1018,9 @@ async fn handle(data: Data, stream: &mut Connection) {
             allow_err!(stream.send(&Data::SyncConfig(None)).await);
         }
         Data::SyncConfig(None) => {
+            // The service owns the shared device identity. Initialize and
+            // persist it before a GUI process replaces its local config.
+            Config::get_key_pair();
             allow_err!(
                 stream
                     .send(&Data::SyncConfig(Some(

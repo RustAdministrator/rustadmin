@@ -1,5 +1,37 @@
 # RustAdmin Plans
 
+## Android Video Pipeline Work Without Device Testing
+
+The following Android MediaCodec and rendering work can be implemented and
+validated before real-device testing:
+
+1. Instrument the existing RGBA path. Measure MediaCodec input queue, output
+   dequeue, YUV-to-RGBA conversion, Flutter handoff, video queue depth, decode
+   FPS, render FPS, adaptive FPS, resolution, codec, and direct/relay state.
+   Rate-limit diagnostics and expose the active render path in the Extended
+   Quality Monitor.
+2. Fix statically provable MediaCodec bugs and add defensive validation for
+   dimensions, stride, crop, plane offsets, and output-buffer bounds. Do not
+   change vendor-specific color-layout assumptions without device evidence.
+3. Refactor Android rendering behind an explicit state machine with RGBA,
+   texture initialization, active texture, and failed-texture states. Keep the
+   existing RGBA implementation intact as the mandatory fallback.
+4. Implement the experimental Surface/SurfaceTexture path behind a disabled-by-
+   default developer option. Centralize cleanup for disconnect, display switch,
+   decoder recreation, and application pause/resume, and log every fallback
+   reason.
+5. Provide developer controls for RGBA, experimental texture, and forced texture
+   failure. Reserve automatic texture selection until real-device validation.
+6. Add device-independent tests for MediaFormat and plane-layout validation,
+   render-path transitions, initialization/runtime fallback, timing aggregation,
+   and diagnostic rate limiting. Cross-compile the Rust library and build the
+   Android APK as the final offline checks.
+
+One APK should support testing the existing RGBA path, the experimental texture
+path, and forced fallback. Do not make texture rendering the production default
+until Qualcomm and MediaTek devices have validated Surface output, lifecycle,
+rotation/crop/color correctness, fallback behavior, and actual FPS improvement.
+
 ## Advanced Connection Diagnostics and Tuning
 
 Future GUI work should expose advanced, non-default connection tuning for difficult
