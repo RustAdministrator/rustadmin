@@ -1900,6 +1900,7 @@ fn get_encoder_config(
                     height: c.height,
                     quality,
                     keyframe_interval,
+                    profile: Default::default(),
                 });
             }
             EncoderCfg::VPX(VpxEncoderConfig {
@@ -1932,6 +1933,7 @@ fn get_encoder_config(
                         height: c.height,
                         quality,
                         keyframe_interval,
+                        profile: Default::default(),
                     });
                 }
                 if Encoder::av1_hardware_required() {

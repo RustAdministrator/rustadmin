@@ -40,6 +40,18 @@ lazy_static::lazy_static! {
     static ref CONFIG_SET_BY_IPC: std::sync::Arc<std::sync::Mutex<bool>> = Default::default();
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HwEncoderProfile {
+    Default,
+    HighQuality,
+}
+
+impl Default for HwEncoderProfile {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HwRamEncoderConfig {
     pub name: String,
@@ -48,6 +60,7 @@ pub struct HwRamEncoderConfig {
     pub height: usize,
     pub quality: f32,
     pub keyframe_interval: Option<usize>,
+    pub profile: HwEncoderProfile,
 }
 
 pub struct HwRamEncoder {
@@ -66,6 +79,7 @@ impl EncoderApi for HwRamEncoder {
         match cfg {
             EncoderCfg::HWRAM(config) => {
                 let rc = Self::rate_control(&config);
+                let hw_quality = Self::encoder_quality(&config)?;
                 let mut bitrate =
                     Self::bitrate(&config.name, config.width, config.height, config.quality);
                 bitrate = Self::check_bitrate_range(&config, bitrate);
@@ -80,7 +94,7 @@ impl EncoderApi for HwRamEncoder {
                     kbs: bitrate as i32,
                     fps: DEFAULT_FPS,
                     gop,
-                    quality: DEFAULT_HW_QUALITY,
+                    quality: hw_quality,
                     rc,
                     q: -1,
                     thread_count: codec_thread_num(16) as _, // ffmpeg's thread_count is used for cpu
@@ -230,9 +244,62 @@ mod tests {
 
         assert!(matches!(vf.union, Some(video_frame::Union::Av1s(_))));
     }
+
+    fn encoder_config(name: &str, profile: HwEncoderProfile) -> HwRamEncoderConfig {
+        HwRamEncoderConfig {
+            name: name.to_owned(),
+            mc_name: None,
+            width: 1920,
+            height: 1080,
+            quality: 1.0,
+            keyframe_interval: None,
+            profile,
+        }
+    }
+
+    #[test]
+    fn default_profile_preserves_encoder_defaults() {
+        let config = encoder_config("h264_nvenc", HwEncoderProfile::Default);
+        assert_eq!(
+            HwRamEncoder::encoder_quality(&config).expect("default quality"),
+            Quality_Default
+        );
+    }
+
+    #[test]
+    fn high_quality_profile_is_nvenc_h26x_only() {
+        for name in ["h264_nvenc", "hevc_nvenc"] {
+            let config = encoder_config(name, HwEncoderProfile::HighQuality);
+            assert_eq!(
+                HwRamEncoder::encoder_quality(&config).expect("NVENC high quality"),
+                Quality_High
+            );
+        }
+
+        for name in ["h264_amf", "hevc_qsv", "av1_nvenc"] {
+            let config = encoder_config(name, HwEncoderProfile::HighQuality);
+            assert!(HwRamEncoder::encoder_quality(&config).is_err());
+        }
+    }
 }
 
 impl HwRamEncoder {
+    pub fn supports_high_quality_profile(name: &str) -> bool {
+        name.contains("nvenc") && (name.contains("h264") || name.contains("hevc"))
+    }
+
+    fn encoder_quality(config: &HwRamEncoderConfig) -> ResultType<Quality> {
+        match config.profile {
+            HwEncoderProfile::Default => Ok(DEFAULT_HW_QUALITY),
+            HwEncoderProfile::HighQuality if Self::supports_high_quality_profile(&config.name) => {
+                Ok(Quality_High)
+            }
+            HwEncoderProfile::HighQuality => {
+                bail!("high-quality profile is unsupported for {}", config.name)
+            }
+        }
+    }
+
     pub fn try_get(format: CodecFormat) -> Option<CodecInfo> {
         let mut info = None;
         let best = CodecInfo::prioritized(HwCodecConfig::get().ram_encode);
