@@ -450,6 +450,227 @@ mod tests {
     fn nvenc_high_quality_h265_encode_decode_smoke() {
         run_nvenc_high_quality_encode_decode_smoke(CodecFormat::H265);
     }
+
+    #[cfg(target_os = "macos")]
+    struct VideoToolboxProfileResult {
+        encoded_fps: f64,
+        encoded_bytes: usize,
+        luma_psnr: f64,
+    }
+
+    #[cfg(target_os = "macos")]
+    fn videotoolbox_encoder(format: CodecFormat) -> Option<CodecInfo> {
+        let data_format = match format {
+            CodecFormat::H264 => DataFormat::H264,
+            CodecFormat::H265 => DataFormat::H265,
+            _ => return None,
+        };
+        probed_hwcodec_config()
+            .ram_encode
+            .iter()
+            .find(|encoder| encoder.format == data_format && encoder.name.contains("videotoolbox"))
+            .cloned()
+    }
+
+    #[cfg(target_os = "macos")]
+    fn decoded_luma_error(
+        frame: &DecodeFrame,
+        frame_index: usize,
+        width: usize,
+        height: usize,
+    ) -> (f64, usize) {
+        let stride = frame.linesize[0] as usize;
+        let luma = &frame.data[0];
+        let mut squared_error = 0.0;
+        for y in 0..height {
+            let row = &luma[y * stride..y * stride + width];
+            for (x, pixel) in row.iter().enumerate() {
+                let expected = 16 + ((x + y + frame_index * 7) % 220) as i32;
+                let error = *pixel as i32 - expected;
+                squared_error += (error * error) as f64;
+            }
+        }
+        (squared_error, width * height)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn run_videotoolbox_profile(
+        info: &CodecInfo,
+        format: CodecFormat,
+        quality: Quality,
+        profile_name: &str,
+    ) -> VideoToolboxProfileResult {
+        const WIDTH: usize = 1280;
+        const HEIGHT: usize = 720;
+        const FRAME_COUNT: usize = 30;
+        const BITRATE_KBPS: i32 = 4_000;
+
+        let ctx = EncodeContext {
+            name: info.name.clone(),
+            mc_name: info.mc_name.clone(),
+            width: WIDTH as i32,
+            height: HEIGHT as i32,
+            pixfmt: DEFAULT_PIXFMT,
+            align: HW_STRIDE_ALIGN as i32,
+            kbs: BITRATE_KBPS,
+            fps: DEFAULT_FPS,
+            gop: 30,
+            quality,
+            rc: RC_CBR,
+            q: -1,
+            thread_count: 4,
+        };
+        let mut encoder = Encoder::new(ctx).unwrap_or_else(|_| {
+            panic!(
+                "failed to open {} VideoToolbox {} profile",
+                info.name, profile_name
+            )
+        });
+        let (linesize, offset, length) =
+            ffmpeg_linesize_offset_length(DEFAULT_PIXFMT, WIDTH, HEIGHT, HW_STRIDE_ALIGN)
+                .expect("failed to calculate aligned NV12 layout");
+        let mut yuv = vec![0; length as usize];
+        let mut packets = Vec::with_capacity(FRAME_COUNT);
+        let mut first_packet_frame = None;
+        let mut saw_keyframe = false;
+        let mut encode_time = std::time::Duration::ZERO;
+
+        for frame_index in 0..FRAME_COUNT {
+            fill_nv12_frame(&mut yuv, &linesize, &offset, WIDTH, HEIGHT, frame_index);
+            let started = std::time::Instant::now();
+            let encoded = encoder.encode(&yuv, (frame_index * 1_000 / DEFAULT_FPS as usize) as i64);
+            encode_time += started.elapsed();
+            match encoded {
+                Ok(frames) => {
+                    if !frames.is_empty() && first_packet_frame.is_none() {
+                        first_packet_frame = Some(frame_index);
+                    }
+                    for frame in frames {
+                        saw_keyframe |= frame.key == 1;
+                        packets.push(frame.data.clone());
+                    }
+                }
+                Err(ERR_NO_PACKET) => {}
+                Err(err) => panic!(
+                    "{} VideoToolbox {} encode failed on frame {}: {}",
+                    info.name, profile_name, frame_index, err
+                ),
+            }
+        }
+
+        assert_eq!(
+            first_packet_frame,
+            Some(0),
+            "{} VideoToolbox {} added frame buffering",
+            info.name,
+            profile_name
+        );
+        assert!(
+            saw_keyframe,
+            "{} VideoToolbox {} produced no keyframe",
+            info.name, profile_name
+        );
+        let encoded_bytes = packets.iter().map(Vec::len).sum();
+
+        let decoder_name = match format {
+            CodecFormat::H264 => "h264",
+            CodecFormat::H265 => "hevc",
+            _ => unreachable!("VideoToolbox HQ smoke test only supports H264 and H265"),
+        };
+        let mut decoder = Decoder::new(DecodeContext {
+            name: decoder_name.to_owned(),
+            device_type: hwcodec::ffmpeg::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE,
+            thread_count: 4,
+        })
+        .unwrap_or_else(|_| panic!("failed to open software {} decoder", decoder_name));
+        let mut decoded_frames = 0;
+        let mut squared_error = 0.0;
+        let mut sample_count = 0;
+        for packet in packets {
+            let frames = decoder.decode(&packet).unwrap_or_else(|err| {
+                panic!(
+                    "software {} decoder rejected {} VideoToolbox output: {}",
+                    decoder_name, profile_name, err
+                )
+            });
+            for frame in frames {
+                assert_eq!(frame.width, WIDTH as i32);
+                assert_eq!(frame.height, HEIGHT as i32);
+                let (frame_error, frame_samples) =
+                    decoded_luma_error(frame, decoded_frames, WIDTH, HEIGHT);
+                squared_error += frame_error;
+                sample_count += frame_samples;
+                decoded_frames += 1;
+            }
+        }
+        assert_eq!(
+            decoded_frames, FRAME_COUNT,
+            "{} VideoToolbox {} did not reproduce every encoded frame",
+            info.name, profile_name
+        );
+
+        let encoded_fps = FRAME_COUNT as f64 / encode_time.as_secs_f64();
+        assert!(
+            encoded_fps >= DEFAULT_FPS as f64,
+            "{} VideoToolbox {} encoded only {:.1} FPS",
+            info.name,
+            profile_name,
+            encoded_fps
+        );
+        let mean_squared_error = squared_error / sample_count as f64;
+        let luma_psnr = if mean_squared_error == 0.0 {
+            f64::INFINITY
+        } else {
+            10.0 * (255.0 * 255.0 / mean_squared_error).log10()
+        };
+
+        VideoToolboxProfileResult {
+            encoded_fps,
+            encoded_bytes,
+            luma_psnr,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn compare_videotoolbox_profiles(format: CodecFormat) {
+        let Some(info) = videotoolbox_encoder(format) else {
+            eprintln!(
+                "SKIPPED: no {:?} VideoToolbox encoder was confirmed by the probe",
+                format
+            );
+            return;
+        };
+        let baseline = run_videotoolbox_profile(&info, format, Quality_Default, "baseline");
+        let high_quality = run_videotoolbox_profile(&info, format, Quality_High, "high-quality");
+
+        eprintln!(
+            "RESULT: {} baseline fps={:.1} bytes={} y_psnr={:.3}dB",
+            info.name, baseline.encoded_fps, baseline.encoded_bytes, baseline.luma_psnr
+        );
+        eprintln!(
+            "RESULT: {} high-quality fps={:.1} bytes={} y_psnr={:.3}dB",
+            info.name, high_quality.encoded_fps, high_quality.encoded_bytes, high_quality.luma_psnr
+        );
+        assert!(
+            high_quality.luma_psnr + 0.25 >= baseline.luma_psnr,
+            "{} VideoToolbox high-quality profile reduced luma PSNR by more than 0.25dB",
+            info.name
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires a locally available VideoToolbox H264 encoder"]
+    fn videotoolbox_high_quality_h264_profile_smoke() {
+        compare_videotoolbox_profiles(CodecFormat::H264);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "requires a locally available VideoToolbox HEVC encoder"]
+    fn videotoolbox_high_quality_h265_profile_smoke() {
+        compare_videotoolbox_profiles(CodecFormat::H265);
+    }
 }
 
 impl HwRamEncoder {
