@@ -268,16 +268,21 @@ mod tests {
     }
 
     #[test]
-    fn high_quality_profile_is_nvenc_h26x_only() {
-        for name in ["h264_nvenc", "hevc_nvenc"] {
+    fn high_quality_profile_is_supported_for_nvenc_and_videotoolbox_h26x() {
+        for name in [
+            "h264_nvenc",
+            "hevc_nvenc",
+            "h264_videotoolbox",
+            "hevc_videotoolbox",
+        ] {
             let config = encoder_config(name, HwEncoderProfile::HighQuality);
             assert_eq!(
-                HwRamEncoder::encoder_quality(&config).expect("NVENC high quality"),
+                HwRamEncoder::encoder_quality(&config).expect("supported high quality"),
                 Quality_High
             );
         }
 
-        for name in ["h264_amf", "hevc_qsv", "av1_nvenc"] {
+        for name in ["h264_amf", "hevc_qsv", "av1_nvenc", "av1_videotoolbox"] {
             let config = encoder_config(name, HwEncoderProfile::HighQuality);
             assert!(HwRamEncoder::encoder_quality(&config).is_err());
         }
@@ -311,6 +316,30 @@ mod tests {
         .expect("H264 NVENC should be selected");
 
         assert_eq!(encoder.name, "h264_nvenc");
+    }
+
+    #[test]
+    fn high_quality_selection_uses_matching_videotoolbox_encoder() {
+        let encoder = HwRamEncoder::select_high_quality_encoder(
+            vec![
+                CodecInfo {
+                    name: "h264_videotoolbox".to_owned(),
+                    format: DataFormat::H264,
+                    priority: 0,
+                    ..Default::default()
+                },
+                CodecInfo {
+                    name: "hevc_videotoolbox".to_owned(),
+                    format: DataFormat::H265,
+                    priority: 0,
+                    ..Default::default()
+                },
+            ],
+            CodecFormat::H265,
+        )
+        .expect("HEVC VideoToolbox should be selected");
+
+        assert_eq!(encoder.name, "hevc_videotoolbox");
     }
 
     fn probed_hwcodec_config() -> &'static HwCodecConfig {
@@ -675,7 +704,8 @@ mod tests {
 
 impl HwRamEncoder {
     pub fn supports_high_quality_profile(name: &str) -> bool {
-        name.contains("nvenc") && (name.contains("h264") || name.contains("hevc"))
+        (name.contains("nvenc") || name.contains("videotoolbox"))
+            && (name.contains("h264") || name.contains("hevc"))
     }
 
     fn encoder_quality(config: &HwRamEncoderConfig) -> ResultType<Quality> {

@@ -615,6 +615,8 @@ class QualityMonitor extends StatelessWidget {
         return 'AMF';
       case 'Hardware VideoToolbox via FFmpeg':
         return 'VideoToolbox';
+      case 'Hardware VideoToolbox HQ via FFmpeg':
+        return 'VideoToolbox HQ';
       case 'Hardware FFmpeg D3D11VA':
         return 'D3D11VA';
       case 'Hardware FFmpeg DXVA2':

@@ -13,6 +13,17 @@ void main() {
     expect(data.codecLabel, 'H265 HQ');
   });
 
+  test('quality monitor identifies VideoToolbox HQ H264 and H265 as HQ', () {
+    final data = QualityMonitorData()
+      ..encoderBackend = 'Hardware VideoToolbox HQ via FFmpeg';
+
+    data.codecFormat = 'H264';
+    expect(data.codecLabel, 'H264 HQ');
+
+    data.codecFormat = 'H265';
+    expect(data.codecLabel, 'H265 HQ');
+  });
+
   test('quality monitor does not infer HQ from codec or backend alone', () {
     final data = QualityMonitorData()..codecFormat = 'H265';
     expect(data.codecLabel, 'H265');

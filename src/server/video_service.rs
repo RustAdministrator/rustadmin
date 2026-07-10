@@ -1916,7 +1916,7 @@ fn get_encoder_config(
             }
             if high_quality {
                 log::warn!(
-                    "high-quality {:?} was negotiated but no matching NVENC RAM encoder is available",
+                    "high-quality {:?} was negotiated but no matching HQ RAM encoder is available",
                     negotiated_codec
                 );
             }

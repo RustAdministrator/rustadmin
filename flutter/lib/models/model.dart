@@ -4097,7 +4097,8 @@ class QualityMonitorData {
   String? get codecLabel {
     final codec = codecFormat;
     if ((codec == 'H264' || codec == 'H265') &&
-        encoderBackend == 'Hardware NVIDIA NVENC p5 via FFmpeg') {
+        (encoderBackend == 'Hardware NVIDIA NVENC p5 via FFmpeg' ||
+            encoderBackend == 'Hardware VideoToolbox HQ via FFmpeg')) {
       return '$codec HQ';
     }
     return codec;

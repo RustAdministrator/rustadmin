@@ -553,7 +553,11 @@ impl Encoder {
                 } else if name.contains("_amf") {
                     "Hardware AMD AMF via FFmpeg"
                 } else if name.contains("videotoolbox") {
-                    "Hardware VideoToolbox via FFmpeg"
+                    if hw.profile == HwEncoderProfile::HighQuality {
+                        "Hardware VideoToolbox HQ via FFmpeg"
+                    } else {
+                        "Hardware VideoToolbox via FFmpeg"
+                    }
                 } else if name.contains("mediacodec") {
                     "Hardware MediaCodec via FFmpeg"
                 } else {
@@ -1436,6 +1440,25 @@ pub fn test_av1() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "hwcodec")]
+    #[test]
+    fn high_quality_videotoolbox_backend_label_is_explicit() {
+        let config = EncoderCfg::HWRAM(HwRamEncoderConfig {
+            name: "hevc_videotoolbox".to_owned(),
+            mc_name: None,
+            width: 1920,
+            height: 1080,
+            quality: 1.0,
+            keyframe_interval: Some(30),
+            profile: HwEncoderProfile::HighQuality,
+        });
+
+        assert_eq!(
+            Encoder::backend_label(&config),
+            "Hardware VideoToolbox HQ via FFmpeg"
+        );
+    }
 
     fn all_usable_codecs() -> UsableCodecs {
         UsableCodecs {
