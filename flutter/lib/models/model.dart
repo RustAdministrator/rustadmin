@@ -4093,6 +4093,15 @@ class QualityMonitorData {
   String? direct;
   String? fpsMode;
   String? autoFps;
+
+  String? get codecLabel {
+    final codec = codecFormat;
+    if ((codec == 'H264' || codec == 'H265') &&
+        encoderBackend == 'Hardware NVIDIA NVENC p5 via FFmpeg') {
+      return '$codec HQ';
+    }
+    return codec;
+  }
 }
 
 class QualityMonitorModel with ChangeNotifier {
