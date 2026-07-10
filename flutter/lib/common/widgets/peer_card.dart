@@ -1676,7 +1676,9 @@ Future<void> _showConnectionPropertiesDialog(String id) async {
                           _stringMenuItem('av1', 'AV1'),
                           _stringMenuItem('av1-hw', 'AV1 HW'),
                           _stringMenuItem('h264', 'H264'),
+                          _stringMenuItem('h264-hq', 'H264 HQ'),
                           _stringMenuItem('h265', 'H265'),
+                          _stringMenuItem('h265-hq', 'H265 HQ'),
                         ],
                         onChanged: (value) {
                           if (value == null) return;

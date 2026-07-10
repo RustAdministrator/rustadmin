@@ -6214,6 +6214,8 @@ impl Connection {
             || usable.av1_hw != last.av1_hw
             || usable.h264 != last.h264
             || usable.h265 != last.h265
+            || usable.h264_hq != last.h264_hq
+            || usable.h265_hq != last.h265_hq
         {
             let mut misc: Misc = Misc::new();
             let supported_encoding = SupportedEncoding {
@@ -6222,6 +6224,8 @@ impl Connection {
                 av1_hw: usable.av1_hw,
                 h264: usable.h264,
                 h265: usable.h265,
+                h264_hq: usable.h264_hq,
+                h265_hq: usable.h265_hq,
                 ..last.clone()
             };
             log::info!("update supported encoding: {:?}", supported_encoding);

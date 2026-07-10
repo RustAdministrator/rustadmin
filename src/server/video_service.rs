@@ -39,7 +39,7 @@ use hbb_common::{
     },
 };
 #[cfg(feature = "hwcodec")]
-use scrap::hwcodec::{HwRamEncoder, HwRamEncoderConfig};
+use scrap::hwcodec::{HwEncoderProfile, HwRamEncoder, HwRamEncoderConfig};
 #[cfg(feature = "vram")]
 use scrap::vram::{VRamEncoder, VRamEncoderConfig};
 use scrap::{
@@ -1880,19 +1880,26 @@ fn get_encoder_config(
     let negotiated_codec = Encoder::negotiated_codec();
     match negotiated_codec {
         CodecFormat::H264 | CodecFormat::H265 => {
+            let high_quality = Encoder::high_quality_profile_required();
             #[cfg(feature = "vram")]
-            if let Some(feature) = VRamEncoder::try_get(&c.device(), negotiated_codec) {
-                return EncoderCfg::VRAM(VRamEncoderConfig {
-                    device: c.device(),
-                    width: c.width,
-                    height: c.height,
-                    quality,
-                    feature,
-                    keyframe_interval,
-                });
+            if !high_quality {
+                if let Some(feature) = VRamEncoder::try_get(&c.device(), negotiated_codec) {
+                    return EncoderCfg::VRAM(VRamEncoderConfig {
+                        device: c.device(),
+                        width: c.width,
+                        height: c.height,
+                        quality,
+                        feature,
+                        keyframe_interval,
+                    });
+                }
             }
             #[cfg(feature = "hwcodec")]
-            if let Some(hw) = HwRamEncoder::try_get(negotiated_codec) {
+            if let Some(hw) = if high_quality {
+                HwRamEncoder::try_get_high_quality(negotiated_codec)
+            } else {
+                HwRamEncoder::try_get(negotiated_codec)
+            } {
                 return EncoderCfg::HWRAM(HwRamEncoderConfig {
                     name: hw.name,
                     mc_name: hw.mc_name,
@@ -1900,8 +1907,18 @@ fn get_encoder_config(
                     height: c.height,
                     quality,
                     keyframe_interval,
-                    profile: Default::default(),
+                    profile: if high_quality {
+                        HwEncoderProfile::HighQuality
+                    } else {
+                        HwEncoderProfile::Default
+                    },
                 });
+            }
+            if high_quality {
+                log::warn!(
+                    "high-quality {:?} was negotiated but no matching NVENC RAM encoder is available",
+                    negotiated_codec
+                );
             }
             EncoderCfg::VPX(VpxEncoderConfig {
                 width: c.width as _,

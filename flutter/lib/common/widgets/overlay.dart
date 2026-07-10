@@ -607,6 +607,8 @@ class QualityMonitor extends StatelessWidget {
         return 'CPU YUV';
       case 'Hardware NVIDIA NVENC via FFmpeg':
         return 'NVENC';
+      case 'Hardware NVIDIA NVENC p5 via FFmpeg':
+        return 'NVENC p5';
       case 'Hardware Intel QSV via FFmpeg':
         return 'QSV';
       case 'Hardware AMD AMF via FFmpeg':

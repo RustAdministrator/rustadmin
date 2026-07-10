@@ -93,6 +93,8 @@ struct UsableCodecs {
     av1_hardware: bool,
     h264: bool,
     h265: bool,
+    h264_hq: bool,
+    h265_hq: bool,
 }
 
 impl UsableCodecs {
@@ -105,6 +107,8 @@ impl UsableCodecs {
             PreferCodec::AV1_HW => self.av1_hardware,
             PreferCodec::H264 => self.h264,
             PreferCodec::H265 => self.h265,
+            PreferCodec::H264_HQ => self.h264_hq,
+            PreferCodec::H265_HQ => self.h265_hq,
         }
     }
 }
@@ -114,6 +118,8 @@ fn explicit_codec_preference_order() -> &'static [PreferCodec] {
         PreferCodec::AV1_HW,
         PreferCodec::AV1_SW,
         PreferCodec::AV1,
+        PreferCodec::H265_HQ,
+        PreferCodec::H264_HQ,
         PreferCodec::H265,
         PreferCodec::H264,
         PreferCodec::VP9,
@@ -148,9 +154,24 @@ fn codec_for_preference(preference: PreferCodec, auto_codec: CodecFormat) -> Cod
         PreferCodec::VP8 => CodecFormat::VP8,
         PreferCodec::VP9 => CodecFormat::VP9,
         PreferCodec::AV1 | PreferCodec::AV1_SW | PreferCodec::AV1_HW => CodecFormat::AV1,
-        PreferCodec::H264 => CodecFormat::H264,
-        PreferCodec::H265 => CodecFormat::H265,
+        PreferCodec::H264 | PreferCodec::H264_HQ => CodecFormat::H264,
+        PreferCodec::H265 | PreferCodec::H265_HQ => CodecFormat::H265,
         PreferCodec::Auto => auto_codec,
+    }
+}
+
+fn preference_from_codec_option(codec: &str) -> PreferCodec {
+    match codec {
+        "vp8" => PreferCodec::VP8,
+        "vp9" => PreferCodec::VP9,
+        "av1" => PreferCodec::AV1_SW,
+        "av1-hw" => PreferCodec::AV1_HW,
+        "av1-legacy" => PreferCodec::AV1,
+        "h264" => PreferCodec::H264,
+        "h265" => PreferCodec::H265,
+        "h264-hq" => PreferCodec::H264_HQ,
+        "h265-hq" => PreferCodec::H265_HQ,
+        _ => PreferCodec::Auto,
     }
 }
 
@@ -314,6 +335,10 @@ impl Encoder {
         let mut h264hw_encoding: Option<String> = None;
         #[allow(unused_mut)]
         let mut h265hw_encoding: Option<String> = None;
+        #[allow(unused_mut)]
+        let mut h264hq_encoding = false;
+        #[allow(unused_mut)]
+        let mut h265hq_encoding = false;
         #[cfg(feature = "hwcodec")]
         if enable_hwcodec_option() {
             if av1_useable {
@@ -323,10 +348,12 @@ impl Encoder {
             if _all_support_h264_decoding {
                 h264hw_encoding =
                     HwRamEncoder::try_get(CodecFormat::H264).map_or(None, |c| Some(c.name));
+                h264hq_encoding = HwRamEncoder::try_get_high_quality(CodecFormat::H264).is_some();
             }
             if _all_support_h265_decoding {
                 h265hw_encoding =
                     HwRamEncoder::try_get(CodecFormat::H265).map_or(None, |c| Some(c.name));
+                h265hq_encoding = HwRamEncoder::try_get_high_quality(CodecFormat::H265).is_some();
             }
         }
         let av1_hw_useable = av1_useable && av1hw_encoding.is_some();
@@ -334,6 +361,8 @@ impl Encoder {
             _all_support_h264_decoding && (h264vram_encoding || h264hw_encoding.is_some());
         let h265_useable =
             _all_support_h265_decoding && (h265vram_encoding || h265hw_encoding.is_some());
+        let h264_hq_useable = _all_support_h264_decoding && h264hq_encoding;
+        let h265_hq_useable = _all_support_h265_decoding && h265hq_encoding;
         let mut format = ENCODE_CODEC_FORMAT.lock().unwrap();
         let usable = UsableCodecs {
             vp8: vp8_useable,
@@ -342,6 +371,8 @@ impl Encoder {
             av1_hardware: av1_hw_useable,
             h264: h264_useable,
             h265: h265_useable,
+            h264_hq: h264_hq_useable,
+            h265_hq: h265_hq_useable,
         };
         *USABLE_ENCODING.lock().unwrap() = Some(SupportedEncoding {
             vp8: vp8_useable,
@@ -349,6 +380,8 @@ impl Encoder {
             av1_hw: av1_hw_useable,
             h264: h264_useable,
             h265: h265_useable,
+            h264_hq: h264_hq_useable,
+            h265_hq: h265_hq_useable,
             ..Default::default()
         });
 
@@ -361,7 +394,7 @@ impl Encoder {
         *ENCODE_CODEC_PREFERENCE.lock().unwrap() = preference;
         if decodings.len() > 0 {
             log::info!(
-                "usable: vp8={vp8_useable}, vp9={vp9_useable}, av1={av1_useable}, av1_hw={av1_hw_useable}, h264={h264_useable}, h265={h265_useable}",
+                "usable: vp8={vp8_useable}, vp9={vp9_useable}, av1={av1_useable}, av1_hw={av1_hw_useable}, h264={h264_useable}, h265={h265_useable}, h264_hq={h264_hq_useable}, h265_hq={h265_hq_useable}",
             );
             log::info!(
                 "connection count: {}, used preference: {:?}, encoder: {:?}",
@@ -392,6 +425,14 @@ impl Encoder {
         matches!(Self::negotiated_prefer_codec(), PreferCodec::AV1_HW)
     }
 
+    #[inline]
+    pub fn high_quality_profile_required() -> bool {
+        matches!(
+            Self::negotiated_prefer_codec(),
+            PreferCodec::H264_HQ | PreferCodec::H265_HQ
+        )
+    }
+
     pub fn supported_encoding() -> SupportedEncoding {
         #[allow(unused_mut)]
         let mut encoding = SupportedEncoding {
@@ -410,6 +451,8 @@ impl Encoder {
             encoding.av1_hw |= HwRamEncoder::try_get(CodecFormat::AV1).is_some();
             encoding.h264 |= HwRamEncoder::try_get(CodecFormat::H264).is_some();
             encoding.h265 |= HwRamEncoder::try_get(CodecFormat::H265).is_some();
+            encoding.h264_hq |= HwRamEncoder::try_get_high_quality(CodecFormat::H264).is_some();
+            encoding.h265_hq |= HwRamEncoder::try_get_high_quality(CodecFormat::H265).is_some();
         }
         #[cfg(feature = "vram")]
         if enable_vram_option(true) {
@@ -500,7 +543,11 @@ impl Encoder {
             EncoderCfg::HWRAM(hw) => {
                 let name = hw.name.as_str();
                 if name.contains("_nvenc") {
-                    "Hardware NVIDIA NVENC via FFmpeg"
+                    if hw.profile == HwEncoderProfile::HighQuality {
+                        "Hardware NVIDIA NVENC p5 via FFmpeg"
+                    } else {
+                        "Hardware NVIDIA NVENC via FFmpeg"
+                    }
                 } else if name.contains("_qsv") {
                     "Hardware Intel QSV via FFmpeg"
                 } else if name.contains("_amf") {
@@ -1049,23 +1096,7 @@ impl Decoder {
         let codec = options
             .get("codec-preference")
             .map_or("".to_owned(), |c| c.to_owned());
-        let codec = if codec == "vp8" {
-            PreferCodec::VP8
-        } else if codec == "vp9" {
-            PreferCodec::VP9
-        } else if codec == "av1" {
-            PreferCodec::AV1_SW
-        } else if codec == "av1-hw" {
-            PreferCodec::AV1_HW
-        } else if codec == "av1-legacy" {
-            PreferCodec::AV1
-        } else if codec == "h264" {
-            PreferCodec::H264
-        } else if codec == "h265" {
-            PreferCodec::H265
-        } else {
-            PreferCodec::Auto
-        };
+        let codec = preference_from_codec_option(&codec);
         let chroma = if options.get("i444") == Some(&"Y".to_string()) {
             Chroma::I444
         } else {
@@ -1414,6 +1445,8 @@ mod tests {
             av1_hardware: true,
             h264: true,
             h265: true,
+            h264_hq: true,
+            h265_hq: true,
         }
     }
 
@@ -1493,6 +1526,33 @@ mod tests {
         assert_eq!(
             preferred_explicit_codec(&decodings, all_usable_codecs()),
             Some(PreferCodec::AV1_HW)
+        );
+    }
+
+    #[test]
+    fn codec_preference_hq_requires_matching_encoder() {
+        let decodings = decodings(&[PreferCodec::H264_HQ]);
+        let usable = UsableCodecs {
+            h264_hq: false,
+            ..all_usable_codecs()
+        };
+
+        assert_eq!(preferred_explicit_codec(&decodings, usable), None);
+        assert_eq!(
+            codec_for_preference(PreferCodec::H264_HQ, CodecFormat::VP9),
+            CodecFormat::H264
+        );
+    }
+
+    #[test]
+    fn codec_option_parses_high_quality_preferences() {
+        assert_eq!(
+            preference_from_codec_option("h264-hq"),
+            PreferCodec::H264_HQ
+        );
+        assert_eq!(
+            preference_from_codec_option("h265-hq"),
+            PreferCodec::H265_HQ
         );
     }
 
@@ -1612,6 +1672,8 @@ mod tests {
         *USABLE_ENCODING.lock().unwrap() = Some(SupportedEncoding {
             h264: true,
             h265: true,
+            h264_hq: true,
+            h265_hq: true,
             ..Default::default()
         });
         *ENCODE_CODEC_FORMAT.lock().unwrap() = CodecFormat::H265;
@@ -1622,5 +1684,7 @@ mod tests {
         let usable = Encoder::usable_encoding().unwrap();
         assert!(usable.h264);
         assert!(usable.h265);
+        assert!(usable.h264_hq);
+        assert!(usable.h265_hq);
     }
 }

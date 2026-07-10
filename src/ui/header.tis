@@ -208,7 +208,9 @@ class Header: Reactor.Component {
                 <li #av1 type="codec-preference" class={!codecs[1] ? "codec-unavailable" : ""}><span>{svg_checkmark}</span>AV1</li>
                 <li #av1-hw type="codec-preference" class={!codecs[2] ? "codec-unavailable" : ""}><span>{svg_checkmark}</span>AV1 HW</li>
                 <li #h264 type="codec-preference" class={!codecs[3] ? "codec-unavailable" : ""}><span>{svg_checkmark}</span>H264</li>
+                <li #h264-hq type="codec-preference" class={!codecs[5] ? "codec-unavailable" : ""}><span>{svg_checkmark}</span>H264 HQ</li>
                 <li #h265 type="codec-preference" class={!codecs[4] ? "codec-unavailable" : ""}><span>{svg_checkmark}</span>H265</li>
+                <li #h265-hq type="codec-preference" class={!codecs[6] ? "codec-unavailable" : ""}><span>{svg_checkmark}</span>H265 HQ</li>
                 </div> : ""}
                 <div .separator />
                 {!cursor_embedded && <li #show-remote-cursor .toggle-option><span>{svg_checkmark}</span>{translate('Show remote cursor')}</li>}

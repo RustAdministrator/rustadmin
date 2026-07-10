@@ -1308,7 +1308,9 @@ class __DisplayPageState extends State<_DisplayPage> {
       _RadioEntry('AV1', 'av1'),
       _RadioEntry('AV1 HW', 'av1-hw', enabled: av1),
       _RadioEntry('H264', 'h264', enabled: h264),
-      _RadioEntry('H265', 'h265', enabled: h265)
+      _RadioEntry('H264 HQ', 'h264-hq', enabled: h264),
+      _RadioEntry('H265', 'h265', enabled: h265),
+      _RadioEntry('H265 HQ', 'h265-hq', enabled: h265)
     ];
     RxBool showCustomImageQuality = false.obs;
     return Scaffold(

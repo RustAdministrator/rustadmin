@@ -2336,12 +2336,28 @@ class _DisplayState extends State<_Display> {
               showCodecUnavailableDialog(gFFI.dialogManager, 'H264'),
           onChanged: isOptFixed ? null : onChanged));
       hwRadios.add(_Radio(context,
+          value: 'h264-hq',
+          groupValue: groupValue,
+          label: 'H264 HQ',
+          enabled: h264,
+          onDisabledTap: () =>
+              showCodecUnavailableDialog(gFFI.dialogManager, 'H264 HQ'),
+          onChanged: isOptFixed ? null : onChanged));
+      hwRadios.add(_Radio(context,
           value: 'h265',
           groupValue: groupValue,
           label: 'H265',
           enabled: h265,
           onDisabledTap: () =>
               showCodecUnavailableDialog(gFFI.dialogManager, 'H265'),
+          onChanged: isOptFixed ? null : onChanged));
+      hwRadios.add(_Radio(context,
+          value: 'h265-hq',
+          groupValue: groupValue,
+          label: 'H265 HQ',
+          enabled: h265,
+          onDisabledTap: () =>
+              showCodecUnavailableDialog(gFFI.dialogManager, 'H265 HQ'),
           onChanged: isOptFixed ? null : onChanged));
     } catch (e) {
       debugPrint("failed to parse supported hwdecodings, err=$e");

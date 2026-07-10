@@ -483,6 +483,8 @@ Future<List<TRadioMenu<String>>> toolbarCodec(
   bool av1Hw = false;
   bool h264 = false;
   bool h265 = false;
+  bool h264Hq = false;
+  bool h265Hq = false;
   try {
     final Map codecsJson = jsonDecode(alternativeCodecs);
     vp8 = codecsJson['vp8'] ?? false;
@@ -490,6 +492,8 @@ Future<List<TRadioMenu<String>>> toolbarCodec(
     av1Hw = codecsJson['av1Hw'] ?? false;
     h264 = codecsJson['h264'] ?? false;
     h265 = codecsJson['h265'] ?? false;
+    h264Hq = codecsJson['h264Hq'] ?? false;
+    h265Hq = codecsJson['h265Hq'] ?? false;
   } catch (e) {
     debugPrint("Show Codec Preference err=$e");
   }
@@ -531,7 +535,9 @@ Future<List<TRadioMenu<String>>> toolbarCodec(
     radio('AV1', 'av1', av1),
     radio('AV1 HW', 'av1-hw', av1Hw),
     radio('H264', 'h264', h264),
+    radio('H264 HQ', 'h264-hq', h264Hq),
     radio('H265', 'h265', h265),
+    radio('H265 HQ', 'h265-hq', h265Hq),
   ];
 }
 

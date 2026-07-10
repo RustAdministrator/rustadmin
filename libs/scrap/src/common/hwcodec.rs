@@ -281,6 +281,36 @@ mod tests {
             assert!(HwRamEncoder::encoder_quality(&config).is_err());
         }
     }
+
+    #[test]
+    fn high_quality_selection_uses_matching_nvenc_encoder() {
+        let encoder = HwRamEncoder::select_high_quality_encoder(
+            vec![
+                CodecInfo {
+                    name: "h264_qsv".to_owned(),
+                    format: DataFormat::H264,
+                    priority: 0,
+                    ..Default::default()
+                },
+                CodecInfo {
+                    name: "h264_nvenc".to_owned(),
+                    format: DataFormat::H264,
+                    priority: 1,
+                    ..Default::default()
+                },
+                CodecInfo {
+                    name: "hevc_nvenc".to_owned(),
+                    format: DataFormat::H265,
+                    priority: 0,
+                    ..Default::default()
+                },
+            ],
+            CodecFormat::H264,
+        )
+        .expect("H264 NVENC should be selected");
+
+        assert_eq!(encoder.name, "h264_nvenc");
+    }
 }
 
 impl HwRamEncoder {
@@ -322,6 +352,27 @@ impl HwRamEncoder {
             _ => {}
         }
         info
+    }
+
+    pub fn try_get_high_quality(format: CodecFormat) -> Option<CodecInfo> {
+        Self::select_high_quality_encoder(HwCodecConfig::get().ram_encode, format)
+    }
+
+    fn select_high_quality_encoder(
+        encoders: Vec<CodecInfo>,
+        format: CodecFormat,
+    ) -> Option<CodecInfo> {
+        let data_format = match format {
+            CodecFormat::H264 => DataFormat::H264,
+            CodecFormat::H265 => DataFormat::H265,
+            _ => return None,
+        };
+        encoders
+            .into_iter()
+            .filter(|encoder| {
+                encoder.format == data_format && Self::supports_high_quality_profile(&encoder.name)
+            })
+            .min_by_key(|encoder| encoder.priority)
     }
 
     pub fn encode(&mut self, yuv: &[u8], ms: i64) -> ResultType<Vec<EncodeFrame>> {
