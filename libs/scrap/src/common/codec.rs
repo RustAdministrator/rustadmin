@@ -506,11 +506,11 @@ impl Encoder {
 
     pub fn set_fallback_codec(format: CodecFormat) {
         let mut current = ENCODE_CODEC_FORMAT.lock().unwrap();
-        if *current != format {
-            log::info!("codec fallback: {:?} -> {:?}", *current, format);
-            *current = format;
+        let mut preference = ENCODE_CODEC_PREFERENCE.lock().unwrap();
+        let previous = *current;
+        if apply_codec_fallback(&mut current, &mut preference, format) {
+            log::info!("codec fallback: {:?} -> {:?}", previous, format);
         }
-        *ENCODE_CODEC_PREFERENCE.lock().unwrap() = PreferCodec::Auto;
     }
 
     pub fn use_i444(config: &EncoderCfg) -> bool {
@@ -1437,6 +1437,19 @@ pub fn test_av1() {
     });
 }
 
+fn apply_codec_fallback(
+    current: &mut CodecFormat,
+    preference: &mut PreferCodec,
+    fallback: CodecFormat,
+) -> bool {
+    if *current == fallback {
+        return false;
+    }
+    *current = fallback;
+    *preference = PreferCodec::Auto;
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1577,6 +1590,34 @@ mod tests {
             preference_from_codec_option("h265-hq"),
             PreferCodec::H265_HQ
         );
+    }
+
+    #[test]
+    fn same_codec_recreation_preserves_high_quality_preference() {
+        let mut codec = CodecFormat::H265;
+        let mut preference = PreferCodec::H265_HQ;
+
+        assert!(!apply_codec_fallback(
+            &mut codec,
+            &mut preference,
+            CodecFormat::H265
+        ));
+        assert_eq!(codec, CodecFormat::H265);
+        assert_eq!(preference, PreferCodec::H265_HQ);
+    }
+
+    #[test]
+    fn real_codec_fallback_clears_high_quality_preference() {
+        let mut codec = CodecFormat::H265;
+        let mut preference = PreferCodec::H265_HQ;
+
+        assert!(apply_codec_fallback(
+            &mut codec,
+            &mut preference,
+            CodecFormat::VP9
+        ));
+        assert_eq!(codec, CodecFormat::VP9);
+        assert_eq!(preference, PreferCodec::Auto);
     }
 
     #[test]

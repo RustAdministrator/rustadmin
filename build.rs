@@ -121,7 +121,10 @@ fn gen_version() {
 
     let mut file = create_version_file();
     let revision = build_rustadmin_revision();
-    for line in BufReader::new(open_cargo_toml()).lines().map_while(Result::ok) {
+    for line in BufReader::new(open_cargo_toml())
+        .lines()
+        .map_while(Result::ok)
+    {
         let ab: Vec<&str> = line.split('=').map(str::trim).collect();
         if ab.len() == 2 && ab[0] == "version" {
             let version = ab[1].trim_matches('"');
