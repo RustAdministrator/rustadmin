@@ -49,6 +49,21 @@ pub struct AomEncoderConfig {
     pub keyframe_interval: Option<usize>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AomScreenDetectionMode {
+    Standard,
+    AntialiasingAware,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AomEncoderTuning {
+    pub cpu_used: Option<u32>,
+    pub enable_intrabc: bool,
+    pub auto_tiles: bool,
+    pub screen_detection: Option<AomScreenDetectionMode>,
+    pub adaptive_sharpness: Option<u32>,
+}
+
 pub struct AomEncoder {
     ctx: aom_codec_ctx_t,
     width: usize,
@@ -132,7 +147,11 @@ mod webrtc {
         Ok(c)
     }
 
-    pub fn set_controls(ctx: *mut aom_codec_ctx_t, cfg: &aom_codec_enc_cfg) -> ResultType<()> {
+    pub fn set_controls(
+        ctx: *mut aom_codec_ctx_t,
+        cfg: &aom_codec_enc_cfg,
+        tuning: AomEncoderTuning,
+    ) -> ResultType<()> {
         use aom_tune_content::*;
         use aome_enc_control_id::*;
         macro_rules! call_ctl {
@@ -141,7 +160,13 @@ mod webrtc {
             }};
         }
 
-        call_ctl!(ctx, AOME_SET_CPUUSED, get_cpu_speed(cfg.g_w, cfg.g_h));
+        let cpu_used = tuning
+            .cpu_used
+            .unwrap_or_else(|| get_cpu_speed(cfg.g_w, cfg.g_h));
+        if cpu_used > 12 {
+            return Err(anyhow!("invalid libaom cpu-used value: {cpu_used}"));
+        }
+        call_ctl!(ctx, AOME_SET_CPUUSED, cpu_used);
         call_ctl!(ctx, AV1E_SET_ENABLE_CDEF, 1);
         call_ctl!(ctx, AV1E_SET_ENABLE_TPL_MODEL, 0);
         call_ctl!(ctx, AV1E_SET_DELTAQ_MODE, 0);
@@ -154,14 +179,19 @@ mod webrtc {
         // kScreensharing
         call_ctl!(ctx, AV1E_SET_TUNE_CONTENT, AOM_CONTENT_SCREEN);
         call_ctl!(ctx, AV1E_SET_ENABLE_PALETTE, 1);
-        let tile_set = if cfg.g_threads == 4 && cfg.g_w == 640 && (cfg.g_h == 360 || cfg.g_h == 480)
-        {
-            AV1E_SET_TILE_ROWS
+        if tuning.auto_tiles {
+            // AV1E_SET_AUTO_TILES was added after the original RustDesk bindings.
+            call_aom!(aom_codec_control(ctx, 166, 1u32));
         } else {
-            AV1E_SET_TILE_COLUMNS
-        };
-        // Failed on android
-        call_ctl!(ctx, tile_set, (cfg.g_threads as f64 * 1.0f64).log2().ceil());
+            let tile_set =
+                if cfg.g_threads == 4 && cfg.g_w == 640 && (cfg.g_h == 360 || cfg.g_h == 480) {
+                    AV1E_SET_TILE_ROWS
+                } else {
+                    AV1E_SET_TILE_COLUMNS
+                };
+            // Failed on android
+            call_ctl!(ctx, tile_set, (cfg.g_threads as f64 * 1.0f64).log2().ceil());
+        }
         call_ctl!(ctx, AV1E_SET_ROW_MT, 1);
         call_ctl!(ctx, AV1E_SET_ENABLE_OBMC, 0);
         call_ctl!(ctx, AV1E_SET_NOISE_SENSITIVITY, 0);
@@ -185,7 +215,11 @@ mod webrtc {
         call_ctl!(ctx, AV1E_SET_ENABLE_INTERINTRA_COMP, 0);
         call_ctl!(ctx, AV1E_SET_ENABLE_INTERINTRA_WEDGE, 0);
         call_ctl!(ctx, AV1E_SET_ENABLE_INTRA_EDGE_FILTER, 0);
-        call_ctl!(ctx, AV1E_SET_ENABLE_INTRABC, 0);
+        if tuning.enable_intrabc {
+            call_aom!(aom_codec_control(ctx, AV1E_SET_ENABLE_INTRABC as i32, 1));
+        } else {
+            call_ctl!(ctx, AV1E_SET_ENABLE_INTRABC, 0);
+        }
         call_ctl!(ctx, AV1E_SET_ENABLE_MASKED_COMP, 0);
         call_ctl!(ctx, AV1E_SET_ENABLE_PAETH_INTRA, 0);
         call_ctl!(ctx, AV1E_SET_ENABLE_QM, 0);
@@ -194,6 +228,25 @@ mod webrtc {
         call_ctl!(ctx, AV1E_SET_ENABLE_SMOOTH_INTERINTRA, 0);
         call_ctl!(ctx, AV1E_SET_ENABLE_TX64, 0);
         call_ctl!(ctx, AV1E_SET_MAX_REFERENCE_FRAMES, 3);
+
+        if let Some(mode) = tuning.screen_detection {
+            let mode = match mode {
+                AomScreenDetectionMode::Standard => 1,
+                AomScreenDetectionMode::AntialiasingAware => 2,
+            };
+            // AV1E_SET_SCREEN_CONTENT_DETECTION_MODE.
+            call_aom!(aom_codec_control(ctx, 171, mode));
+        }
+        if let Some(max_sharpness) = tuning.adaptive_sharpness {
+            if !(1..=7).contains(&max_sharpness) {
+                return Err(anyhow!(
+                    "invalid libaom adaptive sharpness limit: {max_sharpness}"
+                ));
+            }
+            call_ctl!(ctx, AOME_SET_SHARPNESS, max_sharpness);
+            // AV1E_SET_ENABLE_ADAPTIVE_SHARPNESS.
+            call_aom!(aom_codec_control(ctx, 172, 1u32));
+        }
 
         Ok(())
     }
@@ -206,27 +259,7 @@ impl EncoderApi for AomEncoder {
     {
         match cfg {
             crate::codec::EncoderCfg::AOM(config) => {
-                let i = call_aom_ptr!(aom_codec_av1_cx());
-                let c = webrtc::enc_cfg(i, config, i444)?;
-
-                let mut ctx = Default::default();
-                // Flag options: AOM_CODEC_USE_PSNR and AOM_CODEC_USE_HIGHBITDEPTH
-                let flags: aom_codec_flags_t = 0;
-                call_aom!(aom_codec_enc_init_ver(
-                    &mut ctx,
-                    i,
-                    &c,
-                    flags,
-                    AOM_ENCODER_ABI_VERSION as _
-                ));
-                webrtc::set_controls(&mut ctx, &c)?;
-                Ok(Self {
-                    ctx,
-                    width: config.width as _,
-                    height: config.height as _,
-                    i444,
-                    yuvfmt: Self::get_yuvfmt(config.width, config.height, i444),
-                })
+                Self::new_with_tuning(config, i444, AomEncoderTuning::default())
             }
             _ => Err(anyhow!("encoder type mismatch")),
         }
@@ -285,6 +318,71 @@ impl EncoderApi for AomEncoder {
 }
 
 impl AomEncoder {
+    pub fn new_with_tuning(
+        config: AomEncoderConfig,
+        i444: bool,
+        tuning: AomEncoderTuning,
+    ) -> ResultType<Self> {
+        let i = call_aom_ptr!(aom_codec_av1_cx());
+        let c = webrtc::enc_cfg(i, config, i444)?;
+
+        let mut ctx = Default::default();
+        // Flag options: AOM_CODEC_USE_PSNR and AOM_CODEC_USE_HIGHBITDEPTH
+        let flags: aom_codec_flags_t = 0;
+        call_aom!(aom_codec_enc_init_ver(
+            &mut ctx,
+            i,
+            &c,
+            flags,
+            AOM_ENCODER_ABI_VERSION as _
+        ));
+        if let Err(error) = webrtc::set_controls(&mut ctx, &c, tuning) {
+            // Safety: encoder initialization succeeded and this context has not
+            // been moved into AomEncoder, so it must be destroyed on failure.
+            unsafe {
+                aom_codec_destroy(&mut ctx);
+            }
+            return Err(error);
+        }
+        Ok(Self {
+            ctx,
+            width: config.width as _,
+            height: config.height as _,
+            i444,
+            yuvfmt: Self::get_yuvfmt(config.width, config.height, i444),
+        })
+    }
+
+    pub fn active_map_dimensions(&self) -> (usize, usize) {
+        (self.width.div_ceil(16), self.height.div_ceil(16))
+    }
+
+    pub fn set_active_map(&mut self, active_map: &[u8]) -> ResultType<()> {
+        use aome_enc_control_id::AOME_SET_ACTIVEMAP;
+
+        let (cols, rows) = self.active_map_dimensions();
+        let expected_len = cols.saturating_mul(rows);
+        if active_map.len() != expected_len {
+            return Err(anyhow!(
+                "invalid libaom active map length: {}, expected {expected_len}",
+                active_map.len()
+            ));
+        }
+
+        let mut map = aom_active_map_t {
+            // libaom consumes this map during the synchronous control call.
+            active_map: active_map.as_ptr().cast_mut(),
+            rows: rows as _,
+            cols: cols as _,
+        };
+        call_aom!(aom_codec_control(
+            &mut self.ctx,
+            AOME_SET_ACTIVEMAP as i32,
+            &mut map
+        ));
+        Ok(())
+    }
+
     pub fn encode<'a>(
         &'a mut self,
         ms: i64,
