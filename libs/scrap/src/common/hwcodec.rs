@@ -234,6 +234,7 @@ fn set_encoded_video_frames(
 mod tests {
     use super::*;
     use hbb_common::message_proto::video_frame;
+    use std::sync::OnceLock;
 
     #[test]
     fn set_encoded_video_frames_routes_av1_to_av1_union() {
@@ -310,6 +311,144 @@ mod tests {
         .expect("H264 NVENC should be selected");
 
         assert_eq!(encoder.name, "h264_nvenc");
+    }
+
+    fn probed_hwcodec_config() -> &'static HwCodecConfig {
+        static CONFIG: OnceLock<HwCodecConfig> = OnceLock::new();
+        CONFIG.get_or_init(|| {
+            let json = check_available_hwcodec();
+            serde_json::from_str(&json).expect("hardware codec probe must return valid JSON")
+        })
+    }
+
+    fn fill_nv12_frame(
+        frame: &mut [u8],
+        linesize: &[i32],
+        offset: &[i32],
+        width: usize,
+        height: usize,
+        frame_index: usize,
+    ) {
+        let y_stride = linesize[0] as usize;
+        for y in 0..height {
+            let row = &mut frame[y * y_stride..y * y_stride + width];
+            for (x, pixel) in row.iter_mut().enumerate() {
+                *pixel = 16 + ((x + y + frame_index * 7) % 220) as u8;
+            }
+        }
+
+        let uv_stride = linesize[1] as usize;
+        let uv_offset = offset[0] as usize;
+        for y in 0..height / 2 {
+            let row = &mut frame[uv_offset + y * uv_stride..uv_offset + y * uv_stride + width];
+            for x in (0..width).step_by(2) {
+                row[x] = 96 + ((frame_index + y) % 48) as u8;
+                row[x + 1] = 112 + ((frame_index * 3 + x / 2) % 32) as u8;
+            }
+        }
+    }
+
+    fn run_nvenc_high_quality_encode_decode_smoke(format: CodecFormat) -> bool {
+        const WIDTH: usize = 640;
+        const HEIGHT: usize = 360;
+        const FRAME_COUNT: usize = 12;
+
+        let Some(info) = HwRamEncoder::select_high_quality_encoder(
+            probed_hwcodec_config().ram_encode.clone(),
+            format,
+        ) else {
+            eprintln!(
+                "SKIPPED: no {:?} NVENC encoder was confirmed by the probe",
+                format
+            );
+            return false;
+        };
+
+        let config = HwRamEncoderConfig {
+            name: info.name.clone(),
+            mc_name: info.mc_name.clone(),
+            width: WIDTH,
+            height: HEIGHT,
+            quality: 1.0,
+            keyframe_interval: Some(30),
+            profile: HwEncoderProfile::HighQuality,
+        };
+        let mut encoder = HwRamEncoder::new(EncoderCfg::HWRAM(config), false)
+            .unwrap_or_else(|err| panic!("failed to open {} with NVENC p5: {err}", info.name));
+        assert_eq!(encoder.format, info.format);
+
+        let (linesize, offset, length) =
+            ffmpeg_linesize_offset_length(DEFAULT_PIXFMT, WIDTH, HEIGHT, HW_STRIDE_ALIGN)
+                .expect("failed to calculate aligned NV12 layout");
+        let mut yuv = vec![0; length as usize];
+        let mut packets = Vec::with_capacity(FRAME_COUNT);
+        let mut saw_keyframe = false;
+
+        for frame_index in 0..FRAME_COUNT {
+            fill_nv12_frame(&mut yuv, &linesize, &offset, WIDTH, HEIGHT, frame_index);
+            let frames = encoder
+                .encode(&yuv, (frame_index * 1_000 / DEFAULT_FPS as usize) as i64)
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "{} did not produce low-delay output for frame {frame_index}: {err}",
+                        info.name
+                    )
+                });
+            for frame in frames {
+                saw_keyframe |= frame.key == 1;
+                packets.push(frame.data);
+            }
+        }
+
+        assert!(!packets.is_empty(), "{} produced no packets", info.name);
+        assert!(saw_keyframe, "{} produced no keyframe", info.name);
+
+        let decoder_name = match format {
+            CodecFormat::H264 => "h264",
+            CodecFormat::H265 => "hevc",
+            _ => unreachable!("HQ smoke test only supports H264 and H265"),
+        };
+        let mut decoder = Decoder::new(DecodeContext {
+            name: decoder_name.to_owned(),
+            device_type: hwcodec::ffmpeg::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE,
+            thread_count: 4,
+        })
+        .unwrap_or_else(|_| panic!("failed to open software {} decoder", decoder_name));
+        let mut decoded_frames = 0;
+        for packet in packets {
+            let frames = decoder.decode(&packet).unwrap_or_else(|err| {
+                panic!(
+                    "software {} decoder rejected NVENC output: {}",
+                    decoder_name, err
+                )
+            });
+            for frame in frames {
+                assert_eq!(frame.width, WIDTH as i32);
+                assert_eq!(frame.height, HEIGHT as i32);
+                decoded_frames += 1;
+            }
+        }
+        assert_eq!(
+            decoded_frames, FRAME_COUNT,
+            "software decoder did not reproduce every encoded frame"
+        );
+        eprintln!(
+            "PASSED: {} NVENC p5 produced and decoded {decoded_frames} frames",
+            info.name
+        );
+        true
+    }
+
+    #[test]
+    #[ignore = "requires a locally available NVIDIA NVENC H264 encoder"]
+    fn nvenc_high_quality_h264_encode_decode_smoke() {
+        run_nvenc_high_quality_encode_decode_smoke(CodecFormat::H264);
+    }
+
+    #[test]
+    #[ignore = "requires a locally available NVIDIA NVENC HEVC encoder"]
+    fn nvenc_high_quality_h265_encode_decode_smoke() {
+        run_nvenc_high_quality_encode_decode_smoke(CodecFormat::H265);
     }
 }
 
