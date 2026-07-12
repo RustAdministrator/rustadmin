@@ -450,7 +450,7 @@ try {
         Write-Host "Bridge gen:  generated files are current"
     }
 
-    Invoke-TestStep "rustdesk-client cargo check" $ClientRoot "cargo" @(
+    Invoke-TestStep "rustadmin cargo check" $ClientRoot "cargo" @(
         "check", "--no-default-features", "--features", $Features
     )
     if (!$SkipWfCliprdrInvariant) {
@@ -473,7 +473,7 @@ try {
     )
 
     if (!$SkipFullClient) {
-        Invoke-TestStep "rustdesk-client full serial tests" $ClientRoot "cargo" @(
+        Invoke-TestStep "rustadmin full serial tests" $ClientRoot "cargo" @(
             "test", "--no-default-features", "--features", $Features, "--", "--test-threads=1"
         )
     }

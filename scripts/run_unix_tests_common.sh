@@ -13,7 +13,7 @@ Options:
   --codec-root PATH         Native dependency prefix for macOS. Also read from
                             RUSTDESK_MACOS_CODEC_ROOT or CMAKE_PREFIX_PATH.
   --features LIST           Cargo features. Default: flutter,use_dasp.
-  --skip-full-client        Skip the full serial rustdesk-client cargo test step.
+  --skip-full-client        Skip the full serial rustadmin cargo test step.
   --skip-hbb-common         Skip hbb_common test steps.
   --skip-flutter            Skip Flutter pub get and Flutter tests.
   --stop-on-failure         Stop after the first failed step.
@@ -375,7 +375,7 @@ if [[ -n "${LIBCLANG_PATH:-}" ]]; then
   printf 'LIBCLANG:    %s\n' "$LIBCLANG_PATH"
 fi
 
-run_step "rustdesk-client cargo check" "$client_root" \
+run_step "rustadmin cargo check" "$client_root" \
   cargo check --no-default-features --features "$features"
 run_step "privacy mode policy tests" "$client_root" \
   cargo test --no-default-features --features "$features" privacy_mode_policy
@@ -389,7 +389,7 @@ run_step "IPC enum size contract" "$client_root" \
   cargo test --no-default-features --features "$features" ipc::test::verify_ffi_enum_data_size
 
 if [[ "$skip_full_client" -eq 0 ]]; then
-  run_step "rustdesk-client full serial tests" "$client_root" \
+  run_step "rustadmin full serial tests" "$client_root" \
     cargo test --no-default-features --features "$features" -- --test-threads=1
 fi
 
