@@ -65,8 +65,81 @@ pub const OPTION_REFRESH: &'static str = "refresh";
 const ENCODE_NO_VALID_FRAME: &str = "no valid frame";
 const HW_ENCODER_WARMUP_TIMEOUT: Duration = Duration::from_secs(3);
 const HOST_VIDEO_DIAG_INTERVAL: Duration = Duration::from_secs(5);
+const HQ_REFERENCE_REFRESH_BITRATE_MULTIPLIER: u32 = 3;
+const HQ_REFERENCE_REFRESH_BITRATE_DIVISOR: u32 = 2;
+const HQ_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_secs(6);
 #[cfg(windows)]
 const USER_CAPTURE_HELPER_STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReferenceRefreshReason {
+    StartupSafeEnded,
+    SignificantBitrateIncrease,
+}
+
+#[derive(Debug)]
+struct HqReferenceRefreshPolicy {
+    startup_safe: bool,
+    reference_bitrate: u32,
+    last_refresh: Option<Instant>,
+}
+
+impl HqReferenceRefreshPolicy {
+    fn new(startup_safe: bool, bitrate: u32) -> Self {
+        Self {
+            startup_safe,
+            reference_bitrate: bitrate,
+            last_refresh: None,
+        }
+    }
+
+    fn evaluate(
+        &mut self,
+        eligible: bool,
+        startup_safe: bool,
+        bitrate: u32,
+        now: Instant,
+    ) -> Option<ReferenceRefreshReason> {
+        let startup_safe_ended = self.startup_safe && !startup_safe;
+        self.startup_safe = startup_safe;
+        if !eligible || startup_safe || bitrate == 0 {
+            return None;
+        }
+        if startup_safe_ended {
+            return Some(ReferenceRefreshReason::StartupSafeEnded);
+        }
+        let threshold = self
+            .reference_bitrate
+            .saturating_mul(HQ_REFERENCE_REFRESH_BITRATE_MULTIPLIER)
+            / HQ_REFERENCE_REFRESH_BITRATE_DIVISOR;
+        let cooldown_elapsed = self.last_refresh.map_or(true, |last_refresh| {
+            now.duration_since(last_refresh) >= HQ_REFERENCE_REFRESH_COOLDOWN
+        });
+        if self.reference_bitrate > 0 && bitrate >= threshold && cooldown_elapsed {
+            return Some(ReferenceRefreshReason::SignificantBitrateIncrease);
+        }
+        None
+    }
+
+    fn record_refresh(&mut self, bitrate: u32, now: Instant) {
+        self.reference_bitrate = bitrate;
+        self.last_refresh = Some(now);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingReferenceRefresh {
+    reason: ReferenceRefreshReason,
+    requested_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct QosUpdate {
+    startup_safe: bool,
+    ratio_changed: bool,
+    previous_bitrate: u32,
+    current_bitrate: u32,
+}
 
 fn capture_frame_label(frame: &scrap::Frame<'_>) -> &'static str {
     match frame {
@@ -553,7 +626,11 @@ fn should_force_portable_secure_capturer(
 
 #[cfg(test)]
 mod tests {
-    use super::should_force_portable_secure_capturer;
+    use super::{
+        should_force_portable_secure_capturer, HqReferenceRefreshPolicy, ReferenceRefreshReason,
+        HQ_REFERENCE_REFRESH_COOLDOWN,
+    };
+    use std::time::{Duration, Instant};
 
     #[test]
     fn test_portable_secure_capture_routing_requires_secure_desktop() {
@@ -572,6 +649,50 @@ mod tests {
         assert!(should_force_portable_secure_capturer(
             true, false, false, true
         ));
+    }
+
+    #[test]
+    fn hq_reference_refreshes_when_startup_safe_mode_ends() {
+        let now = Instant::now();
+        let mut policy = HqReferenceRefreshPolicy::new(true, 1_000);
+
+        assert_eq!(policy.evaluate(true, true, 1_000, now), None);
+        assert_eq!(
+            policy.evaluate(true, false, 4_000, now),
+            Some(ReferenceRefreshReason::StartupSafeEnded)
+        );
+        policy.record_refresh(4_000, now);
+        assert_eq!(policy.evaluate(true, false, 4_000, now), None);
+    }
+
+    #[test]
+    fn hq_reference_refresh_requires_material_bitrate_growth_and_cooldown() {
+        let now = Instant::now();
+        let mut policy = HqReferenceRefreshPolicy::new(false, 2_000);
+
+        assert_eq!(policy.evaluate(true, false, 2_999, now), None);
+        assert_eq!(
+            policy.evaluate(true, false, 3_000, now),
+            Some(ReferenceRefreshReason::SignificantBitrateIncrease)
+        );
+        policy.record_refresh(3_000, now);
+        assert_eq!(policy.evaluate(true, false, 4_500, now), None);
+        assert_eq!(
+            policy.evaluate(true, false, 4_500, now + HQ_REFERENCE_REFRESH_COOLDOWN),
+            Some(ReferenceRefreshReason::SignificantBitrateIncrease)
+        );
+    }
+
+    #[test]
+    fn hq_reference_refresh_policy_ignores_ineligible_encoder() {
+        let now = Instant::now();
+        let mut policy = HqReferenceRefreshPolicy::new(true, 1_000);
+
+        assert_eq!(policy.evaluate(false, false, 4_000, now), None);
+        assert_eq!(
+            policy.evaluate(false, false, 8_000, now + Duration::from_secs(60)),
+            None
+        );
     }
 }
 
@@ -1288,6 +1409,11 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut encode_fail_counter = 0;
     let mut hw_no_valid_frame_since: Option<Instant> = None;
     let mut first_frame = true;
+    let mut reference_refresh_pending = None;
+    let mut reference_refresh_policy = HqReferenceRefreshPolicy::new(
+        VIDEO_QOS.lock().unwrap().startup_safe_mode(),
+        encoder.bitrate(),
+    );
     let capture_width = c.width;
     let capture_height = c.height;
     let (mut second_instant, mut send_counter) = (Instant::now(), 0);
@@ -1296,7 +1422,7 @@ fn run(vs: VideoService) -> ResultType<()> {
     while sp.ok() {
         #[cfg(windows)]
         check_uac_switch(c.privacy_mode_id, c._capturer_privacy_mode_id)?;
-        check_qos(
+        let qos_update = check_qos(
             &mut encoder,
             &mut quality,
             &mut spf,
@@ -1305,6 +1431,55 @@ fn run(vs: VideoService) -> ResultType<()> {
             &mut second_instant,
             &sp.name(),
         )?;
+        let reference_refresh_eligible = hq_reference_refresh_eligible(&encoder_cfg, codec_format);
+        if let Some(reason) = reference_refresh_policy.evaluate(
+            reference_refresh_eligible,
+            qos_update.startup_safe,
+            qos_update.current_bitrate,
+            Instant::now(),
+        ) {
+            let refresh_started = Instant::now();
+            match recreate_encoder_at_quality(&encoder_cfg, use_i444, quality) {
+                Ok(refreshed_encoder) => {
+                    let refreshed_bitrate = refreshed_encoder.bitrate();
+                    log::info!(
+                        "diag HQ reference refresh: service={}, display={}, codec={:?}, reason={:?}, ratio={}, bitrate_before={}, bitrate_after={}, qos_previous_bitrate={}, ratio_changed={}, startup_safe={}",
+                        sp.name(),
+                        display_idx,
+                        codec_format,
+                        reason,
+                        quality,
+                        encoder.bitrate(),
+                        refreshed_bitrate,
+                        qos_update.previous_bitrate,
+                        qos_update.ratio_changed,
+                        qos_update.startup_safe
+                    );
+                    encoder = refreshed_encoder;
+                    VIDEO_QOS.lock().unwrap().store_bitrate(refreshed_bitrate);
+                    reference_refresh_policy.record_refresh(refreshed_bitrate, refresh_started);
+                    reference_refresh_pending = Some(PendingReferenceRefresh {
+                        reason,
+                        requested_at: refresh_started,
+                    });
+                    repeat_encode_counter = 0;
+                    encode_fail_counter = 0;
+                    hw_no_valid_frame_since = None;
+                }
+                Err(err) => {
+                    log::warn!(
+                        "diag HQ reference refresh failed: service={}, display={}, codec={:?}, reason={:?}, ratio={}, bitrate={}, err={:?}",
+                        sp.name(),
+                        display_idx,
+                        codec_format,
+                        reason,
+                        quality,
+                        encoder.bitrate(),
+                        err
+                    );
+                }
+            }
+        }
         if sp.is_option_true(OPTION_REFRESH) {
             if vs.source.is_monitor() {
                 let _ = try_broadcast_display_changed(&sp, display_idx, &c, true);
@@ -1525,6 +1700,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                         &mut encode_fail_counter,
                         &mut hw_no_valid_frame_since,
                         &mut first_frame,
+                        &mut reference_refresh_pending,
                         capture_width,
                         capture_height,
                     )?;
@@ -1642,6 +1818,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                             &mut encode_fail_counter,
                             &mut hw_no_valid_frame_since,
                             &mut first_frame,
+                            &mut reference_refresh_pending,
                             capture_width,
                             capture_height,
                         )?;
@@ -1853,6 +2030,43 @@ fn setup_encoder(
     );
     let encoder = Encoder::new(encoder_cfg.clone(), use_i444)?;
     Ok((encoder, encoder_cfg, codec_format, use_i444, recorder))
+}
+
+fn hq_reference_refresh_eligible(encoder_cfg: &EncoderCfg, codec_format: CodecFormat) -> bool {
+    #[cfg(feature = "hwcodec")]
+    {
+        matches!(codec_format, CodecFormat::H264 | CodecFormat::H265)
+            && matches!(
+                encoder_cfg,
+                EncoderCfg::HWRAM(HwRamEncoderConfig {
+                    profile: HwEncoderProfile::HighQuality,
+                    keyframe_interval: None,
+                    ..
+                })
+            )
+    }
+    #[cfg(not(feature = "hwcodec"))]
+    {
+        let _ = (encoder_cfg, codec_format);
+        false
+    }
+}
+
+fn recreate_encoder_at_quality(
+    encoder_cfg: &EncoderCfg,
+    use_i444: bool,
+    quality: f32,
+) -> ResultType<Encoder> {
+    let mut encoder_cfg = encoder_cfg.clone();
+    match &mut encoder_cfg {
+        EncoderCfg::VPX(config) => config.quality = quality,
+        EncoderCfg::AOM(config) => config.quality = quality,
+        #[cfg(feature = "hwcodec")]
+        EncoderCfg::HWRAM(config) => config.quality = quality,
+        #[cfg(feature = "vram")]
+        EncoderCfg::VRAM(config) => config.quality = quality,
+    }
+    Encoder::new(encoder_cfg, use_i444)
 }
 
 fn get_encoder_config(
@@ -2086,6 +2300,7 @@ fn handle_one_frame(
     encode_fail_counter: &mut usize,
     hw_no_valid_frame_since: &mut Option<Instant>,
     first_frame: &mut bool,
+    reference_refresh_pending: &mut Option<PendingReferenceRefresh>,
     width: usize,
     height: usize,
 ) -> ResultType<HashSet<i32>> {
@@ -2132,6 +2347,27 @@ fn handle_one_frame(
                     has_keyframe,
                     ms
                 );
+            }
+            if let Some(refresh) = reference_refresh_pending.take() {
+                log::info!(
+                    "diag HQ reference refresh encoded: service={}, display={}, reason={:?}, elapsed_ms={}, bitrate={}, payload_bytes={}, frame_count={}, keyframe={}",
+                    sp.name(),
+                    display,
+                    refresh.reason,
+                    refresh.requested_at.elapsed().as_millis(),
+                    encoder.bitrate(),
+                    payload_bytes,
+                    frame_count,
+                    has_keyframe
+                );
+                if !has_keyframe {
+                    log::warn!(
+                        "diag HQ reference refresh did not produce a keyframe: service={}, display={}, reason={:?}",
+                        sp.name(),
+                        display,
+                        refresh.reason
+                    );
+                }
             }
         }
         Err(e) => {
@@ -2326,11 +2562,15 @@ fn check_qos(
     send_counter: &mut usize,
     second_instant: &mut Instant,
     name: &str,
-) -> ResultType<()> {
+) -> ResultType<QosUpdate> {
     let mut video_qos = VIDEO_QOS.lock().unwrap();
     *spf = video_qos.spf();
-    if *ratio != video_qos.ratio() {
-        *ratio = video_qos.ratio();
+    let startup_safe = video_qos.startup_safe_mode();
+    let next_ratio = video_qos.ratio();
+    let previous_bitrate = encoder.bitrate();
+    let ratio_changed = *ratio != next_ratio;
+    if ratio_changed {
+        *ratio = next_ratio;
         if encoder.support_changing_quality() {
             allow_err!(encoder.set_quality(*ratio));
             video_qos.store_bitrate(encoder.bitrate());
@@ -2351,8 +2591,14 @@ fn check_qos(
         video_qos.update_display_data(&name, *send_counter);
         *send_counter = 0;
     }
+    let current_bitrate = encoder.bitrate();
     drop(video_qos);
-    Ok(())
+    Ok(QosUpdate {
+        startup_safe,
+        ratio_changed,
+        previous_bitrate,
+        current_bitrate,
+    })
 }
 
 pub fn set_take_screenshot(display_idx: usize, sid: String, tx: Sender) {
