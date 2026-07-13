@@ -58,6 +58,7 @@ use std::{
     collections::HashSet,
     io::ErrorKind::WouldBlock,
     ops::{Deref, DerefMut},
+    sync::atomic::{AtomicU64, Ordering as AtomicOrdering},
     time::{self, Duration, Instant},
 };
 
@@ -70,6 +71,31 @@ const HQ_REFERENCE_REFRESH_BITRATE_DIVISOR: u32 = 2;
 const HQ_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_secs(6);
 #[cfg(windows)]
 const USER_CAPTURE_HELPER_STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
+static NEXT_VIDEO_STREAM_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_video_stream_id() -> u64 {
+    let id = NEXT_VIDEO_STREAM_ID.fetch_add(1, AtomicOrdering::Relaxed);
+    if id == 0 {
+        NEXT_VIDEO_STREAM_ID.store(2, AtomicOrdering::Relaxed);
+        1
+    } else {
+        id
+    }
+}
+
+fn stamp_video_frame(
+    vf: &mut hbb_common::message_proto::VideoFrame,
+    stream_id: u64,
+    next_frame_id: &mut u64,
+    capture_time_ms: i64,
+) -> u64 {
+    let frame_id = (*next_frame_id).max(1);
+    *next_frame_id = frame_id.wrapping_add(1).max(1);
+    vf.stream_id = stream_id;
+    vf.frame_id = frame_id;
+    vf.capture_time_ms = capture_time_ms.max(0) as u64;
+    frame_id
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ReferenceRefreshReason {
@@ -627,9 +653,10 @@ fn should_force_portable_secure_capturer(
 #[cfg(test)]
 mod tests {
     use super::{
-        should_force_portable_secure_capturer, HqReferenceRefreshPolicy, ReferenceRefreshReason,
-        HQ_REFERENCE_REFRESH_COOLDOWN,
+        should_force_portable_secure_capturer, stamp_video_frame, HqReferenceRefreshPolicy,
+        ReferenceRefreshReason, HQ_REFERENCE_REFRESH_COOLDOWN,
     };
+    use hbb_common::message_proto::VideoFrame;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -649,6 +676,27 @@ mod tests {
         assert!(should_force_portable_secure_capturer(
             true, false, false, true
         ));
+    }
+
+    #[test]
+    fn video_frame_stamp_is_monotonic_and_capture_relative() {
+        let mut next_frame_id = 1;
+        let mut first = VideoFrame::new();
+        let mut second = VideoFrame::new();
+
+        assert_eq!(stamp_video_frame(&mut first, 17, &mut next_frame_id, 42), 1);
+        assert_eq!(
+            stamp_video_frame(&mut second, 17, &mut next_frame_id, 57),
+            2
+        );
+        assert_eq!(
+            (first.stream_id, first.frame_id, first.capture_time_ms),
+            (17, 1, 42)
+        );
+        assert_eq!(
+            (second.stream_id, second.frame_id, second.capture_time_ms),
+            (17, 2, 57)
+        );
     }
 
     #[test]
@@ -1409,6 +1457,8 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut encode_fail_counter = 0;
     let mut hw_no_valid_frame_since: Option<Instant> = None;
     let mut first_frame = true;
+    let stream_id = next_video_stream_id();
+    let mut next_frame_id = 1;
     let mut reference_refresh_pending = None;
     let mut reference_refresh_policy = HqReferenceRefreshPolicy::new(
         VIDEO_QOS.lock().unwrap().startup_safe_mode(),
@@ -1700,6 +1750,8 @@ fn run(vs: VideoService) -> ResultType<()> {
                         &mut encode_fail_counter,
                         &mut hw_no_valid_frame_since,
                         &mut first_frame,
+                        stream_id,
+                        &mut next_frame_id,
                         &mut reference_refresh_pending,
                         capture_width,
                         capture_height,
@@ -1818,6 +1870,8 @@ fn run(vs: VideoService) -> ResultType<()> {
                             &mut encode_fail_counter,
                             &mut hw_no_valid_frame_since,
                             &mut first_frame,
+                            stream_id,
+                            &mut next_frame_id,
                             &mut reference_refresh_pending,
                             capture_width,
                             capture_height,
@@ -2300,6 +2354,8 @@ fn handle_one_frame(
     encode_fail_counter: &mut usize,
     hw_no_valid_frame_since: &mut Option<Instant>,
     first_frame: &mut bool,
+    stream_id: u64,
+    next_frame_id: &mut u64,
     reference_refresh_pending: &mut Option<PendingReferenceRefresh>,
     width: usize,
     height: usize,
@@ -2321,6 +2377,7 @@ fn handle_one_frame(
             *encode_fail_counter = 0;
             *hw_no_valid_frame_since = None;
             vf.display = display as _;
+            let frame_id = stamp_video_frame(&mut vf, stream_id, next_frame_id, ms);
             let (payload_bytes, frame_count, has_keyframe) =
                 scrap::codec::video_frame_payload_stats(&vf).unwrap_or((0, 0, false));
             let mut msg = Message::new();
@@ -2333,9 +2390,11 @@ fn handle_one_frame(
             send_conn_ids = sp.send_video_frame(msg);
             if first {
                 log::info!(
-                    "diag first video frame encoded: service={}, display={}, width={}, height={}, targets={:?}, negotiated={:?}, hardware={}, bitrate={}, payload_bytes={}, frame_count={}, keyframe={}, capture_ms={}",
+                    "diag first video frame encoded: service={}, display={}, stream_id={}, frame_id={}, width={}, height={}, targets={:?}, negotiated={:?}, hardware={}, bitrate={}, payload_bytes={}, frame_count={}, keyframe={}, capture_ms={}",
                     sp.name(),
                     display,
+                    stream_id,
+                    frame_id,
                     width,
                     height,
                     send_conn_ids,

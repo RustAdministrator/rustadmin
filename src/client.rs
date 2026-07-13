@@ -102,6 +102,7 @@ pub mod screenshot;
 pub const MILLI1: Duration = Duration::from_millis(1);
 pub const SEC30: Duration = Duration::from_secs(30);
 pub const VIDEO_QUEUE_SIZE: usize = 120;
+const VIDEO_FEEDBACK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 const MAX_DECODE_FAIL_COUNTER: usize = 3;
 
 #[cfg(target_os = "linux")]
@@ -2093,6 +2094,9 @@ impl VideoHandler {
         chroma: &mut Option<Chroma>,
     ) -> ResultType<bool> {
         let format = CodecFormat::from(&vf);
+        let stream_id = vf.stream_id;
+        let frame_id = vf.frame_id;
+        let capture_time_ms = vf.capture_time_ms;
         if format != self.decoder.format() {
             self.reset(Some(format));
         }
@@ -2108,8 +2112,11 @@ impl VideoHandler {
                 if res.as_ref().is_ok_and(|x| *x) {
                     if self.first_frame {
                         log::info!(
-                            "diag first video frame decoded: display={}, format={:?}, pixelbuffer={}, chroma={:?}, rgb={}x{}, texture={}x{}, decoder_valid={}",
+                            "diag first video frame decoded: display={}, stream_id={}, frame_id={}, capture_ms={}, format={:?}, pixelbuffer={}, chroma={:?}, rgb={}x{}, texture={}x{}, decoder_valid={}",
                             self._display,
+                            stream_id,
+                            frame_id,
+                            capture_time_ms,
                             self.decoder.format(),
                             *pixelbuffer,
                             chroma,
@@ -3439,6 +3446,128 @@ pub enum MediaData {
 
 pub type MediaSender = mpsc::Sender<MediaData>;
 
+#[derive(Debug, Default)]
+pub(crate) struct VideoFeedbackTracker {
+    stream_id: u64,
+    display: i32,
+    received_frame_id: u64,
+    decoded_frame_id: u64,
+    render_submitted_frame_id: u64,
+    queue_depth_frames: u32,
+    decode_time_us: u32,
+    render_submit_time_us: u32,
+    dropped_frames: u64,
+    last_sent: Option<std::time::Instant>,
+    last_sent_decoded_frame_id: u64,
+    last_sent_render_submitted_frame_id: u64,
+}
+
+impl VideoFeedbackTracker {
+    pub(crate) fn record_received(&mut self, vf: &VideoFrame) -> bool {
+        if vf.stream_id == 0 || vf.frame_id == 0 {
+            return false;
+        }
+        let new_stream = self.stream_id != vf.stream_id || self.display != vf.display;
+        if new_stream {
+            *self = Self {
+                stream_id: vf.stream_id,
+                display: vf.display,
+                ..Default::default()
+            };
+        }
+        self.received_frame_id = self.received_frame_id.max(vf.frame_id);
+        new_stream
+    }
+
+    pub(crate) fn record_queue_depth(&mut self, queue_depth_frames: usize) {
+        self.queue_depth_frames = queue_depth_frames.min(u32::MAX as usize) as u32;
+    }
+
+    pub(crate) fn record_drop(&mut self) {
+        self.dropped_frames = self.dropped_frames.saturating_add(1);
+    }
+
+    fn duration_us(duration: std::time::Duration) -> u32 {
+        duration.as_micros().min(u32::MAX as u128) as u32
+    }
+
+    pub(crate) fn record_decoded(
+        &mut self,
+        stream_id: u64,
+        frame_id: u64,
+        decode_time: std::time::Duration,
+    ) {
+        if self.stream_id == stream_id && frame_id != 0 {
+            self.decoded_frame_id = self.decoded_frame_id.max(frame_id);
+            self.decode_time_us = Self::duration_us(decode_time);
+        }
+    }
+
+    pub(crate) fn record_render_submitted(
+        &mut self,
+        stream_id: u64,
+        frame_id: u64,
+        render_submit_time: std::time::Duration,
+        queue_depth_frames: usize,
+    ) {
+        if self.stream_id == stream_id && frame_id != 0 {
+            self.render_submitted_frame_id = self.render_submitted_frame_id.max(frame_id);
+            self.render_submit_time_us = Self::duration_us(render_submit_time);
+            self.record_queue_depth(queue_depth_frames);
+        }
+    }
+
+    fn take_due_at(&mut self, now: std::time::Instant, force: bool) -> Option<VideoFeedback> {
+        if self.stream_id == 0 || self.received_frame_id == 0 {
+            return None;
+        }
+        let first_decode = self.decoded_frame_id != 0 && self.last_sent_decoded_frame_id == 0;
+        let first_render_submit =
+            self.render_submitted_frame_id != 0 && self.last_sent_render_submitted_frame_id == 0;
+        let interval_elapsed = self
+            .last_sent
+            .map(|last| now.saturating_duration_since(last) >= VIDEO_FEEDBACK_INTERVAL)
+            .unwrap_or(true);
+        if !force && !first_decode && !first_render_submit && !interval_elapsed {
+            return None;
+        }
+        self.last_sent = Some(now);
+        self.last_sent_decoded_frame_id = self.decoded_frame_id;
+        self.last_sent_render_submitted_frame_id = self.render_submitted_frame_id;
+        Some(VideoFeedback {
+            stream_id: self.stream_id,
+            display: self.display,
+            received_frame_id: self.received_frame_id,
+            decoded_frame_id: self.decoded_frame_id,
+            render_submitted_frame_id: self.render_submitted_frame_id,
+            queue_depth_frames: self.queue_depth_frames,
+            decode_time_us: self.decode_time_us,
+            render_submit_time_us: self.render_submit_time_us,
+            dropped_frames: self.dropped_frames,
+            ..Default::default()
+        })
+    }
+
+    pub(crate) fn take_due(&mut self, force: bool) -> Option<VideoFeedback> {
+        self.take_due_at(std::time::Instant::now(), force)
+    }
+}
+
+pub(crate) fn send_video_feedback<T: InvokeUiSession>(
+    session: &Session<T>,
+    tracker: &Arc<Mutex<VideoFeedbackTracker>>,
+    force: bool,
+) {
+    let feedback = tracker.lock().unwrap().take_due(force);
+    if let Some(feedback) = feedback {
+        let mut misc = Misc::new();
+        misc.set_video_feedback(feedback);
+        let mut message = Message::new();
+        message.set_misc(misc);
+        session.send(Data::Message(message));
+    }
+}
+
 /// Start video thread.
 ///
 /// # Arguments
@@ -3455,6 +3584,7 @@ pub fn start_video_thread<F, T>(
     frame_resolution: Arc<RwLock<Option<(usize, usize)>>>,
     chroma: Arc<RwLock<Option<Chroma>>>,
     discard_queue: Arc<RwLock<bool>>,
+    video_feedback: Arc<Mutex<VideoFeedbackTracker>>,
     video_callback: F,
 ) where
     F: 'static + FnMut(usize, &mut scrap::ImageRgb, *mut c_void, bool) + Send,
@@ -3497,6 +3627,8 @@ pub fn start_video_thread<F, T>(
                             }
                         };
                         let display = vf.display as usize;
+                        let stream_id = vf.stream_id;
+                        let frame_id = vf.frame_id;
                         let start = std::time::Instant::now();
                         let format = CodecFormat::from(&vf);
                         if video_handler.is_none() {
@@ -3516,6 +3648,12 @@ pub fn start_video_thread<F, T>(
                             let format_changed = handler.decoder.format() != format;
                             match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
                                 Ok(true) => {
+                                    let decode_time = start.elapsed();
+                                    video_feedback.lock().unwrap().record_decoded(
+                                        stream_id,
+                                        frame_id,
+                                        decode_time,
+                                    );
                                     *decoder_backend.write().unwrap() =
                                         Some(handler.decoder_backend());
                                     *renderer.write().unwrap() =
@@ -3533,12 +3671,20 @@ pub fn start_video_thread<F, T>(
                                             *current = Some(resolution);
                                         }
                                     }
+                                    let render_submit_start = std::time::Instant::now();
                                     video_callback(
                                         display,
                                         &mut handler.rgb,
                                         handler.texture.texture,
                                         pixelbuffer,
                                     );
+                                    video_feedback.lock().unwrap().record_render_submitted(
+                                        stream_id,
+                                        frame_id,
+                                        render_submit_start.elapsed(),
+                                        video_queue.read().unwrap().len(),
+                                    );
+                                    send_video_feedback(&session, &video_feedback, false);
 
                                     // chroma
                                     if tmp_chroma.is_some() && last_chroma != tmp_chroma {
@@ -4802,6 +4948,72 @@ pub mod peer_online {
             )
             .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod video_feedback_tests {
+    use super::*;
+
+    fn frame(stream_id: u64, frame_id: u64, display: i32) -> VideoFrame {
+        VideoFrame {
+            stream_id,
+            frame_id,
+            display,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn feedback_reports_receive_decode_and_render_submission_progress() {
+        let start = std::time::Instant::now();
+        let mut tracker = VideoFeedbackTracker::default();
+
+        assert!(tracker.record_received(&frame(7, 1, 0)));
+        let received = tracker.take_due_at(start, true).unwrap();
+        assert_eq!(received.received_frame_id, 1);
+        assert_eq!(received.decoded_frame_id, 0);
+        assert_eq!(received.render_submitted_frame_id, 0);
+
+        tracker.record_decoded(7, 1, std::time::Duration::from_micros(120));
+        tracker.record_render_submitted(7, 1, std::time::Duration::from_micros(30), 2);
+        let rendered = tracker
+            .take_due_at(start + std::time::Duration::from_millis(1), false)
+            .unwrap();
+        assert_eq!(rendered.decoded_frame_id, 1);
+        assert_eq!(rendered.render_submitted_frame_id, 1);
+        assert_eq!(rendered.queue_depth_frames, 2);
+        assert_eq!(rendered.decode_time_us, 120);
+        assert_eq!(rendered.render_submit_time_us, 30);
+    }
+
+    #[test]
+    fn feedback_is_coalesced_and_reset_for_a_new_stream() {
+        let start = std::time::Instant::now();
+        let mut tracker = VideoFeedbackTracker::default();
+
+        tracker.record_received(&frame(7, 1, 0));
+        tracker.record_drop();
+        assert!(tracker.take_due_at(start, true).is_some());
+        tracker.record_received(&frame(7, 2, 0));
+        assert!(tracker
+            .take_due_at(start + std::time::Duration::from_millis(10), false)
+            .is_none());
+        assert_eq!(
+            tracker
+                .take_due_at(start + VIDEO_FEEDBACK_INTERVAL, false)
+                .unwrap()
+                .received_frame_id,
+            2
+        );
+
+        assert!(tracker.record_received(&frame(8, 1, 0)));
+        let reset = tracker
+            .take_due_at(start + VIDEO_FEEDBACK_INTERVAL, true)
+            .unwrap();
+        assert_eq!(reset.stream_id, 8);
+        assert_eq!(reset.received_frame_id, 1);
+        assert_eq!(reset.dropped_frames, 0);
     }
 }
 

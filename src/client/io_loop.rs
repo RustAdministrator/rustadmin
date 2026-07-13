@@ -1671,8 +1671,11 @@ impl<T: InvokeUiSession> Remote<T> {
                         let (payload_bytes, frame_count, has_keyframe) =
                             scrap::codec::video_frame_payload_stats(&vf).unwrap_or((0, 0, false));
                         log::info!(
-                            "diag first video frame received from stream: display={}, format={:?}, payload_bytes={}, frame_count={}, keyframe={}",
+                            "diag first video frame received from stream: display={}, stream_id={}, frame_id={}, capture_ms={}, format={:?}, payload_bytes={}, frame_count={}, keyframe={}",
                             vf.display,
+                            vf.stream_id,
+                            vf.frame_id,
+                            vf.capture_time_ms,
                             CodecFormat::from(&vf),
                             payload_bytes,
                             frame_count,
@@ -1693,6 +1696,8 @@ impl<T: InvokeUiSession> Remote<T> {
                     let Some(thread) = self.video_threads.get_mut(&display) else {
                         return true;
                     };
+                    let new_feedback_stream =
+                        thread.video_feedback.lock().unwrap().record_received(&vf);
                     if Self::contains_key_frame(&vf) {
                         thread
                             .video_sender
@@ -1702,11 +1707,22 @@ impl<T: InvokeUiSession> Remote<T> {
                         let video_queue = thread.video_queue.read().unwrap();
                         if video_queue.force_push(vf).is_some() {
                             drop(video_queue);
+                            thread.video_feedback.lock().unwrap().record_drop();
                             self.handler.refresh_video(display as _);
                         } else {
                             thread.video_sender.send(MediaData::VideoQueue).ok();
                         }
                     }
+                    thread
+                        .video_feedback
+                        .lock()
+                        .unwrap()
+                        .record_queue_depth(thread.video_queue.read().unwrap().len());
+                    client::send_video_feedback(
+                        &self.handler,
+                        &thread.video_feedback,
+                        new_feedback_stream,
+                    );
                 }
                 Some(message::Union::Hash(hash)) => {
                     self.handler
@@ -2840,6 +2856,9 @@ impl<T: InvokeUiSession> Remote<T> {
         let frame_resolution = Arc::new(RwLock::new(None));
         let frame_count = Arc::new(RwLock::new(0));
         let discard_queue = Arc::new(RwLock::new(false));
+        let video_feedback = Arc::new(std::sync::Mutex::new(
+            client::VideoFeedbackTracker::default(),
+        ));
         let video_thread = VideoThread {
             video_queue: video_queue.clone(),
             video_sender,
@@ -2848,6 +2867,7 @@ impl<T: InvokeUiSession> Remote<T> {
             renderer: renderer.clone(),
             frame_resolution: frame_resolution.clone(),
             frame_count: frame_count.clone(),
+            video_feedback: video_feedback.clone(),
             fps_control: Default::default(),
             discard_queue: discard_queue.clone(),
         };
@@ -2863,6 +2883,7 @@ impl<T: InvokeUiSession> Remote<T> {
             frame_resolution,
             self.chroma.clone(),
             discard_queue,
+            video_feedback,
             move |display: usize,
                   data: &mut scrap::ImageRgb,
                   _texture: *mut c_void,
@@ -2958,6 +2979,7 @@ struct VideoThread {
     renderer: Arc<RwLock<Option<&'static str>>>,
     frame_resolution: Arc<RwLock<Option<(usize, usize)>>>,
     frame_count: Arc<RwLock<usize>>,
+    video_feedback: Arc<std::sync::Mutex<client::VideoFeedbackTracker>>,
     discard_queue: Arc<RwLock<bool>>,
     fps_control: FpsControl,
 }

@@ -39,7 +39,7 @@ use hbb_common::{
     get_time, get_version_number,
     message_proto::{
         option_message::BoolOption, permission_info::Permission, supported_decoding::PreferCodec,
-        SessionPermissionRequest, SessionPermissionResponse,
+        SessionPermissionRequest, SessionPermissionResponse, VideoFeedback,
     },
     password_security::{self as password, ApproveMode},
     sha2::{Digest, Sha256},
@@ -388,6 +388,30 @@ struct PendingPermissionRequest {
 }
 
 const PENDING_PERMISSION_REQUEST_TIMEOUT_SECS: u64 = 120;
+const VIDEO_FEEDBACK_LOG_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_VIDEO_FEEDBACK_DISPLAYS: usize = 32;
+
+#[derive(Clone)]
+struct VideoFeedbackDiagnostics {
+    feedback: VideoFeedback,
+    last_log: Instant,
+}
+
+fn valid_video_feedback(feedback: &VideoFeedback) -> bool {
+    feedback.stream_id != 0
+        && feedback.display >= 0
+        && feedback.received_frame_id != 0
+        && feedback.decoded_frame_id <= feedback.received_frame_id
+        && feedback.render_submitted_frame_id <= feedback.decoded_frame_id
+}
+
+fn video_feedback_regressed(previous: &VideoFeedback, next: &VideoFeedback) -> bool {
+    previous.stream_id == next.stream_id
+        && (next.received_frame_id < previous.received_frame_id
+            || next.decoded_frame_id < previous.decoded_frame_id
+            || next.render_submitted_frame_id < previous.render_submitted_frame_id
+            || next.dropped_frames < previous.dropped_frames)
+}
 
 fn pending_permission_response_values<'a>(
     pending: &'a PendingPermissionRequest,
@@ -594,6 +618,7 @@ pub struct Connection {
     terminal_user_token: Option<TerminalUserToken>,
     terminal_generic_service: Option<Box<GenericService>>,
     pending_permission_requests: HashMap<u64, PendingPermissionRequest>,
+    video_feedback_by_display: HashMap<i32, VideoFeedbackDiagnostics>,
 }
 
 impl ConnInner {
@@ -830,6 +855,7 @@ impl Connection {
             terminal_user_token: None,
             terminal_generic_service: None,
             pending_permission_requests: HashMap::new(),
+            video_feedback_by_display: HashMap::new(),
         };
         let addr = hbb_common::try_into_v4(addr);
         log::info!("#{} diag conn accepted: addr={}", conn.inner.id(), addr);
@@ -1243,12 +1269,18 @@ impl Connection {
                     }
                     if is_video_frame && !first_video_frame_sent {
                         first_video_frame_sent = true;
-                        log::info!(
-                            "#{} diag first video frame sent to stream: queue_latency_ms={}, video_ack_required={}",
-                            conn.inner.id(),
-                            instant.elapsed().as_millis(),
-                            conn.video_ack_required
-                        );
+                        if let Some(message::Union::VideoFrame(vf)) = &value.union {
+                            log::info!(
+                                "#{} diag first video frame sent to stream: display={}, stream_id={}, frame_id={}, capture_ms={}, queue_latency_ms={}, video_ack_required={}",
+                                conn.inner.id(),
+                                vf.display,
+                                vf.stream_id,
+                                vf.frame_id,
+                                vf.capture_time_ms,
+                                instant.elapsed().as_millis(),
+                                conn.video_ack_required
+                            );
+                        }
                     }
                 },
                 Some((instant, value)) = rx.recv() => {
@@ -3371,6 +3403,94 @@ impl Connection {
         }
     }
 
+    fn handle_video_feedback(&mut self, feedback: VideoFeedback) {
+        if !valid_video_feedback(&feedback) {
+            log::warn!(
+                "#{} ignored invalid video feedback: display={}, stream_id={}, received={}, decoded={}, render_submitted={}, queue={}, dropped={}",
+                self.inner.id(),
+                feedback.display,
+                feedback.stream_id,
+                feedback.received_frame_id,
+                feedback.decoded_frame_id,
+                feedback.render_submitted_frame_id,
+                feedback.queue_depth_frames,
+                feedback.dropped_frames
+            );
+            return;
+        }
+
+        let previous = self
+            .video_feedback_by_display
+            .get(&feedback.display)
+            .cloned();
+        if previous
+            .as_ref()
+            .is_some_and(|state| video_feedback_regressed(&state.feedback, &feedback))
+        {
+            log::warn!(
+                "#{} ignored regressed video feedback: display={}, stream_id={}, received={}, decoded={}, render_submitted={}, dropped={}",
+                self.inner.id(),
+                feedback.display,
+                feedback.stream_id,
+                feedback.received_frame_id,
+                feedback.decoded_frame_id,
+                feedback.render_submitted_frame_id,
+                feedback.dropped_frames
+            );
+            return;
+        }
+        if previous.is_none() && self.video_feedback_by_display.len() >= MAX_VIDEO_FEEDBACK_DISPLAYS
+        {
+            log::warn!(
+                "#{} ignored video feedback for excess display {}",
+                self.inner.id(),
+                feedback.display
+            );
+            return;
+        }
+
+        let now = Instant::now();
+        let new_stream = previous
+            .as_ref()
+            .map(|state| state.feedback.stream_id != feedback.stream_id)
+            .unwrap_or(true);
+        let dropped_increased = previous
+            .as_ref()
+            .map(|state| feedback.dropped_frames > state.feedback.dropped_frames)
+            .unwrap_or(feedback.dropped_frames > 0);
+        let should_log = new_stream
+            || dropped_increased
+            || previous.as_ref().map_or(true, |state| {
+                now.saturating_duration_since(state.last_log) >= VIDEO_FEEDBACK_LOG_INTERVAL
+            });
+        let last_log = if should_log {
+            now
+        } else {
+            previous.as_ref().map(|state| state.last_log).unwrap_or(now)
+        };
+
+        if should_log {
+            log::info!(
+                "#{} diag video feedback: display={}, stream_id={}, received={}, decoded={}, render_submitted={}, queue={}, decode_us={}, render_submit_us={}, dropped={}, new_stream={}",
+                self.inner.id(),
+                feedback.display,
+                feedback.stream_id,
+                feedback.received_frame_id,
+                feedback.decoded_frame_id,
+                feedback.render_submitted_frame_id,
+                feedback.queue_depth_frames,
+                feedback.decode_time_us,
+                feedback.render_submit_time_us,
+                feedback.dropped_frames,
+                new_stream
+            );
+        }
+        self.video_feedback_by_display.insert(
+            feedback.display,
+            VideoFeedbackDiagnostics { feedback, last_log },
+        );
+    }
+
     async fn on_message(&mut self, msg: Message) -> bool {
         if let Some(message::Union::Misc(misc)) = &msg.union {
             // Move the CloseReason forward, as this message needs to be received when unauthorized, especially for kcp.
@@ -4402,6 +4522,9 @@ impl Connection {
                             self.inner.id,
                             Some(Instant::now().into()),
                         );
+                    }
+                    Some(misc::Union::VideoFeedback(feedback)) => {
+                        self.handle_video_feedback(feedback);
                     }
                     Some(misc::Union::RestartRemoteDevice(_)) => {
                         #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -7342,6 +7465,56 @@ mod test {
                 SEND_TIMEOUT_OTHER
             );
         }
+    }
+
+    #[test]
+    fn video_feedback_requires_ordered_pipeline_progress() {
+        assert!(valid_video_feedback(&VideoFeedback {
+            stream_id: 7,
+            display: 0,
+            received_frame_id: 3,
+            decoded_frame_id: 2,
+            render_submitted_frame_id: 2,
+            ..Default::default()
+        }));
+        assert!(!valid_video_feedback(&VideoFeedback {
+            stream_id: 7,
+            display: 0,
+            received_frame_id: 2,
+            decoded_frame_id: 3,
+            render_submitted_frame_id: 2,
+            ..Default::default()
+        }));
+        assert!(!valid_video_feedback(&VideoFeedback {
+            stream_id: 0,
+            display: 0,
+            received_frame_id: 1,
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn video_feedback_rejects_progress_regression_within_a_stream() {
+        let previous = VideoFeedback {
+            stream_id: 7,
+            display: 0,
+            received_frame_id: 5,
+            decoded_frame_id: 4,
+            render_submitted_frame_id: 4,
+            dropped_frames: 1,
+            ..Default::default()
+        };
+        let mut next = previous.clone();
+        next.received_frame_id = 6;
+        next.decoded_frame_id = 5;
+        next.render_submitted_frame_id = 5;
+        assert!(!video_feedback_regressed(&previous, &next));
+
+        next.decoded_frame_id = 3;
+        assert!(video_feedback_regressed(&previous, &next));
+
+        next.stream_id = 8;
+        assert!(!video_feedback_regressed(&previous, &next));
     }
 
     #[test]
