@@ -771,6 +771,64 @@ impl InvokeUiSession for FlutterHandler {
                     "auto_fps",
                     &status.auto_fps.map_or(NULL, |it| it.to_string()),
                 ),
+                (
+                    "video_progress",
+                    &if status.video_progress.is_empty() {
+                        NULL
+                    } else {
+                        serde_json::ser::to_string(&status.video_progress)
+                            .unwrap_or(NULL.to_owned())
+                    },
+                ),
+                (
+                    "video_dropped",
+                    &if status.video_dropped.is_empty() {
+                        NULL
+                    } else {
+                        serde_json::ser::to_string(&status.video_dropped).unwrap_or(NULL.to_owned())
+                    },
+                ),
+                (
+                    "video_decode_time_us",
+                    &if status.video_decode_time_us.is_empty() {
+                        NULL
+                    } else {
+                        serde_json::ser::to_string(&status.video_decode_time_us)
+                            .unwrap_or(NULL.to_owned())
+                    },
+                ),
+                (
+                    "video_render_submit_time_us",
+                    &if status.video_render_submit_time_us.is_empty() {
+                        NULL
+                    } else {
+                        serde_json::ser::to_string(&status.video_render_submit_time_us)
+                            .unwrap_or(NULL.to_owned())
+                    },
+                ),
+                (
+                    "video_feedback_queue",
+                    &if status.video_feedback_queue.is_empty() {
+                        NULL
+                    } else {
+                        serde_json::ser::to_string(&status.video_feedback_queue)
+                            .unwrap_or(NULL.to_owned())
+                    },
+                ),
+                (
+                    "video_delivery_phase",
+                    &status.video_delivery_phase.map_or(NULL, |it| it),
+                ),
+                (
+                    "video_recovery_count",
+                    &status
+                        .video_recovery_count
+                        .map_or(NULL, |it| it.to_string()),
+                ),
+                (
+                    "video_stall_ms",
+                    &status.video_stall_ms.map_or(NULL, |it| it.to_string()),
+                ),
             ],
             &[],
         );

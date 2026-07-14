@@ -3467,7 +3467,30 @@ pub(crate) struct VideoFeedbackTracker {
     last_sent_render_submitted_frame_id: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct VideoFeedbackSnapshot {
+    pub(crate) received_frame_id: u64,
+    pub(crate) decoded_frame_id: u64,
+    pub(crate) render_submitted_frame_id: u64,
+    pub(crate) queue_depth_frames: u32,
+    pub(crate) decode_time_us: u32,
+    pub(crate) render_submit_time_us: u32,
+    pub(crate) dropped_frames: u64,
+}
+
 impl VideoFeedbackTracker {
+    pub(crate) fn snapshot(&self) -> VideoFeedbackSnapshot {
+        VideoFeedbackSnapshot {
+            received_frame_id: self.received_frame_id,
+            decoded_frame_id: self.decoded_frame_id,
+            render_submitted_frame_id: self.render_submitted_frame_id,
+            queue_depth_frames: self.queue_depth_frames,
+            decode_time_us: self.decode_time_us,
+            render_submit_time_us: self.render_submit_time_us,
+            dropped_frames: self.dropped_frames,
+        }
+    }
+
     pub(crate) fn record_received(&mut self, vf: &VideoFrame) -> bool {
         if vf.stream_id == 0 || vf.frame_id == 0 {
             return false;
@@ -4990,6 +5013,18 @@ mod video_feedback_tests {
         assert_eq!(rendered.queue_depth_frames, 2);
         assert_eq!(rendered.decode_time_us, 120);
         assert_eq!(rendered.render_submit_time_us, 30);
+        assert_eq!(
+            tracker.snapshot(),
+            VideoFeedbackSnapshot {
+                received_frame_id: 1,
+                decoded_frame_id: 1,
+                render_submitted_frame_id: 1,
+                queue_depth_frames: 2,
+                decode_time_us: 120,
+                render_submit_time_us: 30,
+                dropped_frames: 0,
+            }
+        );
     }
 
     #[test]

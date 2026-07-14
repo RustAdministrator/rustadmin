@@ -2055,6 +2055,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
 
     async fn handle_test_delay(&self, t: TestDelay, peer: &mut Stream) {
         if !t.from_client {
+            let has_video_delivery_status = !t.video_delivery_phase.is_empty();
             self.update_quality_status(QualityStatus {
                 delay: Some(t.last_delay as _),
                 target_bitrate: Some(t.target_bitrate as _),
@@ -2078,6 +2079,10 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                 } else {
                     Some(t.encoder_input.clone())
                 },
+                video_delivery_phase: has_video_delivery_status
+                    .then(|| t.video_delivery_phase.clone()),
+                video_recovery_count: has_video_delivery_status.then_some(t.video_recovery_count),
+                video_stall_ms: has_video_delivery_status.then_some(t.video_stall_ms),
                 ..Default::default()
             });
             handle_test_delay(t, peer).await;

@@ -412,6 +412,24 @@ enum VideoDeliveryPhase {
     Recovering,
 }
 
+impl VideoDeliveryPhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Healthy => "healthy",
+            Self::Recovering => "recovering",
+        }
+    }
+
+    fn severity(self) -> u8 {
+        match self {
+            Self::Healthy => 0,
+            Self::Starting => 1,
+            Self::Recovering => 2,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct VideoDeliveryState {
     stream_id: u64,
@@ -421,6 +439,8 @@ struct VideoDeliveryState {
     last_render_progress_at: Instant,
     last_refresh_at: Option<Instant>,
     phase: VideoDeliveryPhase,
+    recovery_count: u64,
+    latest_stall_ms: u64,
 }
 
 impl VideoDeliveryState {
@@ -433,8 +453,17 @@ impl VideoDeliveryState {
             last_render_progress_at: now,
             last_refresh_at: None,
             phase: VideoDeliveryPhase::Starting,
+            recovery_count: 0,
+            latest_stall_ms: 0,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VideoDeliveryStatus {
+    phase: VideoDeliveryPhase,
+    recovery_count: u64,
+    latest_stall_ms: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -536,6 +565,8 @@ impl VideoDeliveryController {
             let previous_phase = state.phase;
             state.phase = VideoDeliveryPhase::Recovering;
             state.last_refresh_at = Some(now);
+            state.recovery_count = state.recovery_count.saturating_add(1);
+            state.latest_stall_ms = stalled.as_millis().min(u64::MAX as u128) as u64;
             actions.push(VideoRecoveryAction {
                 display,
                 stream_id: state.stream_id,
@@ -546,6 +577,23 @@ impl VideoDeliveryController {
             });
         }
         actions
+    }
+
+    fn status(&self, display: i32) -> Option<VideoDeliveryStatus> {
+        let state = self.by_display.get(&display).or_else(|| {
+            self.by_display.values().max_by_key(|state| {
+                (
+                    state.phase.severity(),
+                    state.latest_stall_ms,
+                    state.recovery_count,
+                )
+            })
+        })?;
+        Some(VideoDeliveryStatus {
+            phase: state.phase,
+            recovery_count: state.recovery_count,
+            latest_stall_ms: state.latest_stall_ms,
+        })
     }
 }
 
@@ -1623,6 +1671,7 @@ impl Connection {
                                 encoder_input.unwrap_or_default(),
                             )
                         };
+                        let delivery_status = conn.video_delivery.status(conn.display_idx as i32);
                         let mut msg_out = Message::new();
                         msg_out.set_test_delay(TestDelay{
                             last_delay: conn.network_delay,
@@ -1631,6 +1680,15 @@ impl Connection {
                             capture_frame,
                             encoder_backend,
                             encoder_input,
+                            video_delivery_phase: delivery_status
+                                .map(|status| status.phase.as_str().to_owned())
+                                .unwrap_or_default(),
+                            video_recovery_count: delivery_status
+                                .map(|status| status.recovery_count)
+                                .unwrap_or_default(),
+                            video_stall_ms: delivery_status
+                                .map(|status| status.latest_stall_ms)
+                                .unwrap_or_default(),
                             ..Default::default()
                         });
                         conn.send(msg_out.into()).await;
@@ -7785,6 +7843,14 @@ mod test {
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].display, 0);
         assert_eq!(actions[0].previous_phase, VideoDeliveryPhase::Starting);
+        assert_eq!(
+            controller.status(0),
+            Some(VideoDeliveryStatus {
+                phase: VideoDeliveryPhase::Recovering,
+                recovery_count: 1,
+                latest_stall_ms: VIDEO_DELIVERY_MIN_PROGRESS_TIMEOUT.as_millis() as u64,
+            })
+        );
 
         assert!(controller
             .poll_recovery(
@@ -7798,6 +7864,7 @@ mod test {
         );
         assert_eq!(retry.len(), 1);
         assert_eq!(retry[0].previous_phase, VideoDeliveryPhase::Recovering);
+        assert_eq!(controller.status(0).unwrap().recovery_count, 2);
     }
 
     #[test]
@@ -7866,6 +7933,142 @@ mod test {
         assert!(controller
             .poll_recovery(start + Duration::from_secs(2), 10)
             .is_empty());
+    }
+
+    #[test]
+    fn video_delivery_fast_link_progress_never_requests_recovery() {
+        let start = Instant::now();
+        let mut controller = VideoDeliveryController::default();
+        for frame_id in 1..=120 {
+            let now = start + Duration::from_millis(frame_id * 16);
+            controller.on_frame_sent(
+                &VideoFrame {
+                    stream_id: 7,
+                    frame_id,
+                    display: 0,
+                    ..Default::default()
+                },
+                now,
+            );
+            controller.on_feedback(
+                &VideoFeedback {
+                    stream_id: 7,
+                    display: 0,
+                    received_frame_id: frame_id,
+                    decoded_frame_id: frame_id,
+                    render_submitted_frame_id: frame_id,
+                    ..Default::default()
+                },
+                now + Duration::from_millis(2),
+            );
+            assert!(controller
+                .poll_recovery(now + Duration::from_millis(3), 10)
+                .is_empty());
+        }
+
+        assert_eq!(
+            controller.status(0),
+            Some(VideoDeliveryStatus {
+                phase: VideoDeliveryPhase::Healthy,
+                recovery_count: 0,
+                latest_stall_ms: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn video_delivery_high_rtt_waits_for_scaled_timeout() {
+        let start = Instant::now();
+        let mut controller = VideoDeliveryController::default();
+        controller.on_frame_sent(
+            &VideoFrame {
+                stream_id: 7,
+                frame_id: 1,
+                display: 0,
+                ..Default::default()
+            },
+            start,
+        );
+
+        assert!(controller
+            .poll_recovery(start + Duration::from_millis(1_799), 600)
+            .is_empty());
+        let actions = controller.poll_recovery(start + Duration::from_millis(1_800), 600);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].stalled_ms, 1_800);
+    }
+
+    #[test]
+    fn video_delivery_repeated_stalls_recover_after_progress_resumes() {
+        let start = Instant::now();
+        let mut controller = VideoDeliveryController::default();
+        controller.on_frame_sent(
+            &VideoFrame {
+                stream_id: 7,
+                frame_id: 1,
+                display: 0,
+                ..Default::default()
+            },
+            start,
+        );
+        controller.on_feedback(
+            &VideoFeedback {
+                stream_id: 7,
+                display: 0,
+                received_frame_id: 1,
+                decoded_frame_id: 1,
+                render_submitted_frame_id: 1,
+                ..Default::default()
+            },
+            start + Duration::from_millis(100),
+        );
+
+        controller.on_frame_sent(
+            &VideoFrame {
+                stream_id: 7,
+                frame_id: 2,
+                display: 0,
+                ..Default::default()
+            },
+            start + Duration::from_millis(150),
+        );
+        assert_eq!(
+            controller
+                .poll_recovery(start + Duration::from_millis(600), 10)
+                .len(),
+            1
+        );
+        controller.on_feedback(
+            &VideoFeedback {
+                stream_id: 7,
+                display: 0,
+                received_frame_id: 2,
+                decoded_frame_id: 2,
+                render_submitted_frame_id: 2,
+                ..Default::default()
+            },
+            start + Duration::from_millis(650),
+        );
+        controller.on_frame_sent(
+            &VideoFrame {
+                stream_id: 7,
+                frame_id: 3,
+                display: 0,
+                ..Default::default()
+            },
+            start + Duration::from_millis(700),
+        );
+        assert_eq!(
+            controller
+                .poll_recovery(start + Duration::from_millis(1_600), 10)
+                .len(),
+            1
+        );
+
+        let status = controller.status(0).unwrap();
+        assert_eq!(status.phase, VideoDeliveryPhase::Recovering);
+        assert_eq!(status.recovery_count, 2);
+        assert_eq!(status.latest_stall_ms, 950);
     }
 
     #[test]

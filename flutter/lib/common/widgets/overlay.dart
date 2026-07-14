@@ -760,6 +760,19 @@ class QualityMonitor extends StatelessWidget {
                                   qualityMonitorModel.data.fpsMode ?? '-'),
                               _row("Auto FPS",
                                   qualityMonitorModel.data.autoFps ?? '-'),
+                              _row("Delivery",
+                                  qualityMonitorModel.data.videoDeliveryPhase ??
+                                      '-'),
+                              _row(
+                                  "Recoveries",
+                                  qualityMonitorModel
+                                          .data.videoRecoveryCount ??
+                                      '-'),
+                              _row(
+                                  "Last Stall",
+                                  qualityMonitorModel.data.videoStallMs == null
+                                      ? '-'
+                                      : '${qualityMonitorModel.data.videoStallMs}ms'),
                               _section("Local"),
                               _row(
                                   "Client Ver",
@@ -777,8 +790,29 @@ class QualityMonitor extends StatelessWidget {
                                       '-'),
                               _row("Decode FPS",
                                   qualityMonitorModel.data.decodeFps ?? '-'),
-                              _row("Queue",
-                                  qualityMonitorModel.data.videoQueue ?? '-'),
+                              _row(
+                                  "Queue",
+                                  qualityMonitorModel
+                                          .data.videoFeedbackQueue ??
+                                      qualityMonitorModel.data.videoQueue ??
+                                      '-'),
+                              _row("Frames R/D/S",
+                                  qualityMonitorModel.data.videoProgress ?? '-'),
+                              _row("Dropped",
+                                  qualityMonitorModel.data.videoDropped ?? '-'),
+                              _row(
+                                  "Decode Time",
+                                  qualityMonitorModel.data.videoDecodeTimeUs ==
+                                          null
+                                      ? '-'
+                                      : '${qualityMonitorModel.data.videoDecodeTimeUs}us'),
+                              _row(
+                                  "Submit Time",
+                                  qualityMonitorModel
+                                              .data.videoRenderSubmitTimeUs ==
+                                          null
+                                      ? '-'
+                                      : '${qualityMonitorModel.data.videoRenderSubmitTimeUs}us'),
                             ],
                           ],
                         ),

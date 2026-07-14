@@ -704,6 +704,19 @@ mod tests {
     }
 
     #[test]
+    fn legacy_viewer_keeps_time_based_startup_fallback() {
+        let mut qos = VideoQoS::default();
+        qos.on_connection_open(1);
+        qos.user_video_feedback_capability(1, false);
+
+        assert!(!qos.user_video_frame_rendered(1));
+        assert!(qos.startup_safe_mode());
+        qos.users.get_mut(&1).unwrap().video_startup_instant =
+            Some(Instant::now() - STARTUP_SAFE_WINDOW - Duration::from_secs(1));
+        assert!(!qos.startup_safe_mode());
+    }
+
+    #[test]
     fn startup_safe_mode_respects_fixed_fps() {
         let mut qos = VideoQoS::default();
         qos.on_connection_open(1);

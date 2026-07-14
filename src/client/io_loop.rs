@@ -486,6 +486,47 @@ impl<T: InvokeUiSession> Remote<T> {
                                         .map(|(w, h)| (*display, format!("{w}x{h}")))
                                 })
                                 .collect::<HashMap<usize, String>>();
+                            let feedback_snapshots = self
+                                .video_threads
+                                .iter()
+                                .map(|(display, thread)| {
+                                    (*display, thread.video_feedback.lock().unwrap().snapshot())
+                                })
+                                .collect::<HashMap<usize, client::VideoFeedbackSnapshot>>();
+                            let video_progress = feedback_snapshots
+                                .iter()
+                                .map(|(display, snapshot)| {
+                                    (
+                                        *display,
+                                        format!(
+                                            "{}/{}/{}",
+                                            snapshot.received_frame_id,
+                                            snapshot.decoded_frame_id,
+                                            snapshot.render_submitted_frame_id
+                                        ),
+                                    )
+                                })
+                                .collect::<HashMap<usize, String>>();
+                            let video_dropped = feedback_snapshots
+                                .iter()
+                                .map(|(display, snapshot)| (*display, snapshot.dropped_frames))
+                                .collect::<HashMap<usize, u64>>();
+                            let video_decode_time_us = feedback_snapshots
+                                .iter()
+                                .map(|(display, snapshot)| (*display, snapshot.decode_time_us))
+                                .collect::<HashMap<usize, u32>>();
+                            let video_render_submit_time_us = feedback_snapshots
+                                .iter()
+                                .map(|(display, snapshot)| {
+                                    (*display, snapshot.render_submit_time_us)
+                                })
+                                .collect::<HashMap<usize, u32>>();
+                            let video_feedback_queue = feedback_snapshots
+                                .iter()
+                                .map(|(display, snapshot)| {
+                                    (*display, snapshot.queue_depth_frames)
+                                })
+                                .collect::<HashMap<usize, u32>>();
                             let decoder = self.video_thread_label(|thread| {
                                 *thread.decoder_backend.read().unwrap()
                             });
@@ -529,6 +570,11 @@ impl<T: InvokeUiSession> Remote<T> {
                                 direct: Some(direct),
                                 fps_mode: Some(fps_mode),
                                 auto_fps,
+                                video_progress,
+                                video_dropped,
+                                video_decode_time_us,
+                                video_render_submit_time_us,
+                                video_feedback_queue,
                                 ..Default::default()
                             });
                         }

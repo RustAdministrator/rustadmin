@@ -4093,6 +4093,14 @@ class QualityMonitorData {
   String? direct;
   String? fpsMode;
   String? autoFps;
+  String? videoProgress;
+  String? videoDropped;
+  String? videoDecodeTimeUs;
+  String? videoRenderSubmitTimeUs;
+  String? videoFeedbackQueue;
+  String? videoDeliveryPhase;
+  String? videoRecoveryCount;
+  String? videoStallMs;
 
   String? get codecLabel {
     final codec = codecFormat;
@@ -4169,6 +4177,14 @@ class QualityMonitorModel with ChangeNotifier {
     _data.direct = null;
     _data.fpsMode = null;
     _data.autoFps = null;
+    _data.videoProgress = null;
+    _data.videoDropped = null;
+    _data.videoDecodeTimeUs = null;
+    _data.videoRenderSubmitTimeUs = null;
+    _data.videoFeedbackQueue = null;
+    _data.videoDeliveryPhase = null;
+    _data.videoRecoveryCount = null;
+    _data.videoStallMs = null;
     return true;
   }
 
@@ -4400,6 +4416,46 @@ class QualityMonitorModel with ChangeNotifier {
       if (evt.containsKey('auto_fps') &&
           (evt['auto_fps'] as String).isNotEmpty) {
         _data.autoFps = evt['auto_fps'];
+      }
+      if (evt.containsKey('video_progress') &&
+          (evt['video_progress'] as String).isNotEmpty) {
+        _data.videoProgress =
+            _displayMetricFromMap(evt['video_progress'] as String);
+      }
+      if (evt.containsKey('video_dropped') &&
+          (evt['video_dropped'] as String).isNotEmpty) {
+        _data.videoDropped =
+            _displayMetricFromMap(evt['video_dropped'] as String);
+      }
+      if (evt.containsKey('video_decode_time_us') &&
+          (evt['video_decode_time_us'] as String).isNotEmpty) {
+        _data.videoDecodeTimeUs =
+            _displayMetricFromMap(evt['video_decode_time_us'] as String);
+      }
+      if (evt.containsKey('video_render_submit_time_us') &&
+          (evt['video_render_submit_time_us'] as String).isNotEmpty) {
+        _data.videoRenderSubmitTimeUs = _displayMetricFromMap(
+            evt['video_render_submit_time_us'] as String);
+      }
+      if (evt.containsKey('video_feedback_queue') &&
+          (evt['video_feedback_queue'] as String).isNotEmpty) {
+        _data.videoFeedbackQueue =
+            _displayMetricFromMap(evt['video_feedback_queue'] as String);
+      }
+      if (evt.containsKey('video_delivery_phase') &&
+          (evt['video_delivery_phase'] as String).isNotEmpty) {
+        final phase = evt['video_delivery_phase'] as String;
+        _data.videoDeliveryPhase = phase.isEmpty
+            ? null
+            : '${phase[0].toUpperCase()}${phase.substring(1)}';
+      }
+      if (evt.containsKey('video_recovery_count') &&
+          (evt['video_recovery_count'] as String).isNotEmpty) {
+        _data.videoRecoveryCount = evt['video_recovery_count'];
+      }
+      if (evt.containsKey('video_stall_ms') &&
+          (evt['video_stall_ms'] as String).isNotEmpty) {
+        _data.videoStallMs = evt['video_stall_ms'];
       }
       notifyListeners();
     } catch (e) {

@@ -28,6 +28,14 @@ pub struct QualityStatus {
     pub direct: Option<bool>,
     pub fps_mode: Option<String>,
     pub auto_fps: Option<usize>,
+    pub video_progress: HashMap<usize, String>,
+    pub video_dropped: HashMap<usize, u64>,
+    pub video_decode_time_us: HashMap<usize, u32>,
+    pub video_render_submit_time_us: HashMap<usize, u32>,
+    pub video_feedback_queue: HashMap<usize, u32>,
+    pub video_delivery_phase: Option<String>,
+    pub video_recovery_count: Option<u64>,
+    pub video_stall_ms: Option<u64>,
 }
 
 #[inline]
