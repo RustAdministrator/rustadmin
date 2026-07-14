@@ -97,6 +97,9 @@ struct UserData {
     quality: Option<(i64, Quality)>, // (time, quality)
     delay: UserDelay,
     record: bool,
+    video_feedback_capable: bool,
+    video_render_started: bool,
+    video_startup_instant: Option<Instant>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -118,7 +121,6 @@ pub struct VideoQoS {
     encoder_input: Option<String>,
     adjust_ratio_instant: Instant,
     abr_config: bool,
-    new_user_instant: Instant,
 }
 
 impl Default for VideoQoS {
@@ -135,7 +137,6 @@ impl Default for VideoQoS {
             encoder_input: None,
             adjust_ratio_instant: Instant::now(),
             abr_config: true,
-            new_user_instant: Instant::now(),
         }
     }
 }
@@ -214,7 +215,13 @@ impl VideoQoS {
     }
 
     pub fn startup_safe_mode(&self) -> bool {
-        self.locked_fps().is_none() && self.new_user_instant.elapsed() < STARTUP_SAFE_WINDOW
+        self.locked_fps().is_none()
+            && self.users.values().any(|user| {
+                !user.video_render_started
+                    && user
+                        .video_startup_instant
+                        .is_some_and(|started| started.elapsed() < STARTUP_SAFE_WINDOW)
+            })
     }
 
     // Check if any user is in recording mode
@@ -238,9 +245,14 @@ impl VideoQoS {
 impl VideoQoS {
     // Initialize new user session
     pub fn on_connection_open(&mut self, id: i32) {
-        self.users.insert(id, UserData::default());
+        self.users.insert(
+            id,
+            UserData {
+                video_startup_instant: Some(Instant::now()),
+                ..Default::default()
+            },
+        );
         self.abr_config = Config::get_option("enable-abr") != "N";
-        self.new_user_instant = Instant::now();
     }
 
     // Clean up user session
@@ -328,6 +340,35 @@ impl VideoQoS {
         if let Some(user) = self.users.get_mut(&id) {
             user.record = v;
         }
+    }
+
+    pub fn user_video_feedback_capability(&mut self, id: i32, capable: bool) {
+        if let Some(user) = self.users.get_mut(&id) {
+            user.video_feedback_capable = capable;
+            if !capable {
+                user.video_render_started = false;
+            }
+        }
+    }
+
+    pub fn user_video_frame_rendered(&mut self, id: i32) -> bool {
+        let highest_fps = self.highest_fps();
+        let first_render = self.users.get_mut(&id).is_some_and(|user| {
+            if !user.video_feedback_capable || user.video_render_started {
+                return false;
+            }
+            user.video_render_started = true;
+            // One end-to-end rendered frame is enough to leave the conservative
+            // bootstrap profile. A measured delay sample still takes priority.
+            if user.delay.fps.is_none() && !user.delay.response_delayed {
+                user.delay.fps = Some(highest_fps);
+            }
+            true
+        });
+        if first_render {
+            self.adjust_fps();
+        }
+        first_render
     }
 
     pub fn user_network_delay(&mut self, id: i32, delay: u32) {
@@ -655,7 +696,8 @@ mod tests {
     fn startup_safe_mode_expires() {
         let mut qos = VideoQoS::default();
         qos.on_connection_open(1);
-        qos.new_user_instant = Instant::now() - STARTUP_SAFE_WINDOW - Duration::from_secs(1);
+        qos.users.get_mut(&1).unwrap().video_startup_instant =
+            Some(Instant::now() - STARTUP_SAFE_WINDOW - Duration::from_secs(1));
 
         assert!(!qos.startup_safe_mode());
         assert_eq!(qos.ratio(), BR_BALANCED);
@@ -670,6 +712,45 @@ mod tests {
         assert!(!qos.startup_safe_mode());
         assert_eq!(qos.ratio(), BR_BALANCED);
         assert_eq!(qos.fps(), 30);
+    }
+
+    #[test]
+    fn first_render_feedback_releases_startup_safe_mode() {
+        let mut qos = VideoQoS::default();
+        qos.on_connection_open(1);
+        qos.user_video_feedback_capability(1, true);
+
+        assert!(qos.startup_safe_mode());
+        assert!(qos.user_video_frame_rendered(1));
+        assert!(!qos.user_video_frame_rendered(1));
+        assert!(!qos.startup_safe_mode());
+        assert_eq!(qos.ratio(), BR_BALANCED);
+        assert_eq!(qos.fps(), FPS);
+    }
+
+    #[test]
+    fn expired_existing_viewer_does_not_extend_new_viewer_startup() {
+        let mut qos = VideoQoS::default();
+        qos.on_connection_open(1);
+        qos.users.get_mut(&1).unwrap().video_startup_instant =
+            Some(Instant::now() - STARTUP_SAFE_WINDOW - Duration::from_secs(1));
+        qos.on_connection_open(2);
+        qos.user_video_feedback_capability(2, true);
+
+        assert!(qos.startup_safe_mode());
+        assert!(qos.user_video_frame_rendered(2));
+        assert!(!qos.startup_safe_mode());
+    }
+
+    #[test]
+    fn first_render_does_not_override_delayed_response_cap() {
+        let mut qos = VideoQoS::default();
+        qos.on_connection_open(1);
+        qos.user_video_feedback_capability(1, true);
+        qos.user_delay_response_elapsed(1, 2_500);
+
+        assert!(qos.user_video_frame_rendered(1));
+        assert_eq!(qos.fps(), MIN_FPS + 1);
     }
 }
 

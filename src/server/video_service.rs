@@ -63,6 +63,7 @@ use std::{
 };
 
 pub const OPTION_REFRESH: &'static str = "refresh";
+pub const OPTION_REFERENCE_REFRESH: &'static str = "reference-refresh";
 const ENCODE_NO_VALID_FRAME: &str = "no valid frame";
 const HW_ENCODER_WARMUP_TIMEOUT: Duration = Duration::from_secs(3);
 const HOST_VIDEO_DIAG_INTERVAL: Duration = Duration::from_secs(5);
@@ -101,6 +102,7 @@ fn stamp_video_frame(
 enum ReferenceRefreshReason {
     StartupSafeEnded,
     SignificantBitrateIncrease,
+    DeliveryRecovery,
 }
 
 #[derive(Debug)]
@@ -1420,6 +1422,9 @@ fn run(vs: VideoService) -> ResultType<()> {
     if sp.is_option_true(OPTION_REFRESH) {
         sp.set_option_bool(OPTION_REFRESH, false);
     }
+    if sp.is_option_true(OPTION_REFERENCE_REFRESH) {
+        sp.set_option_bool(OPTION_REFERENCE_REFRESH, false);
+    }
 
     let mut frame_controller = VideoFrameController::new(display_idx);
 
@@ -1482,18 +1487,26 @@ fn run(vs: VideoService) -> ResultType<()> {
             &sp.name(),
         )?;
         let reference_refresh_eligible = hq_reference_refresh_eligible(&encoder_cfg, codec_format);
-        if let Some(reason) = reference_refresh_policy.evaluate(
+        let policy_refresh_reason = reference_refresh_policy.evaluate(
             reference_refresh_eligible,
             qos_update.startup_safe,
             qos_update.current_bitrate,
             Instant::now(),
-        ) {
+        );
+        let delivery_refresh_requested = sp.is_option_true(OPTION_REFERENCE_REFRESH);
+        if delivery_refresh_requested {
+            sp.set_option_bool(OPTION_REFERENCE_REFRESH, false);
+        }
+        if let Some(reason) = delivery_refresh_requested
+            .then_some(ReferenceRefreshReason::DeliveryRecovery)
+            .or(policy_refresh_reason)
+        {
             let refresh_started = Instant::now();
             match recreate_encoder_at_quality(&encoder_cfg, use_i444, quality) {
                 Ok(refreshed_encoder) => {
                     let refreshed_bitrate = refreshed_encoder.bitrate();
                     log::info!(
-                        "diag HQ reference refresh: service={}, display={}, codec={:?}, reason={:?}, ratio={}, bitrate_before={}, bitrate_after={}, qos_previous_bitrate={}, ratio_changed={}, startup_safe={}",
+                        "diag video reference refresh: service={}, display={}, codec={:?}, reason={:?}, ratio={}, bitrate_before={}, bitrate_after={}, qos_previous_bitrate={}, ratio_changed={}, startup_safe={}",
                         sp.name(),
                         display_idx,
                         codec_format,
@@ -1518,7 +1531,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                 }
                 Err(err) => {
                     log::warn!(
-                        "diag HQ reference refresh failed: service={}, display={}, codec={:?}, reason={:?}, ratio={}, bitrate={}, err={:?}",
+                        "diag video reference refresh failed: service={}, display={}, codec={:?}, reason={:?}, ratio={}, bitrate={}, err={:?}",
                         sp.name(),
                         display_idx,
                         codec_format,
@@ -2409,7 +2422,7 @@ fn handle_one_frame(
             }
             if let Some(refresh) = reference_refresh_pending.take() {
                 log::info!(
-                    "diag HQ reference refresh encoded: service={}, display={}, reason={:?}, elapsed_ms={}, bitrate={}, payload_bytes={}, frame_count={}, keyframe={}",
+                    "diag video reference refresh encoded: service={}, display={}, reason={:?}, elapsed_ms={}, bitrate={}, payload_bytes={}, frame_count={}, keyframe={}",
                     sp.name(),
                     display,
                     refresh.reason,
@@ -2421,7 +2434,7 @@ fn handle_one_frame(
                 );
                 if !has_keyframe {
                     log::warn!(
-                        "diag HQ reference refresh did not produce a keyframe: service={}, display={}, reason={:?}",
+                        "diag video reference refresh did not produce a keyframe: service={}, display={}, reason={:?}",
                         sp.name(),
                         display,
                         refresh.reason
