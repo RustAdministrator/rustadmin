@@ -3,15 +3,13 @@
 set -e
 
 case $1 in
-    remove|upgrade)
-		INITSYS=$(ls -al /proc/1/exe | awk -F' ' '{print $NF}' | awk -F'/' '{print $NF}')
+    remove)
 		rm -f /usr/bin/rustadmin
 		
-		if [ "systemd" == "${INITSYS}" ]; then
-
-			systemctl stop rustadmin || true
-			systemctl disable rustadmin || true
-			rm /etc/systemd/system/rustadmin.service /usr/lib/systemd/system/rustadmin.service || true
+		if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+			systemctl disable --now rustadmin.service || true
+			rm -f /etc/systemd/system/rustadmin.service /usr/lib/systemd/system/rustadmin.service
+			systemctl daemon-reload || true
 			
 			# workaround temp dev build between 1.1.9 and 1.2.0
 			serverUser=$(ps -ef | grep -E 'rustadmin +--server' | grep -v 'sudo ' | awk '{print $1}' | head -1)

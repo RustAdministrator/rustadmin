@@ -3,25 +3,16 @@
 set -e
 
 if [ "$1" = configure ]; then
-
-	INITSYS=$(ls -al /proc/1/exe | awk -F' ' '{print $NF}' | awk -F'/' '{print $NF}')
 	ln -f -s /usr/share/rustadmin/rustadmin /usr/bin/rustadmin
 
-	if [ "systemd" == "$INITSYS" ]; then
-
-		if [ -e /etc/systemd/system/rustadmin.service ]; then
-			rm /etc/systemd/system/rustadmin.service /usr/lib/systemd/system/rustadmin.service /usr/lib/systemd/user/rustadmin.service >/dev/null  2>&1
-		fi
-		mkdir -p /usr/lib/systemd/system/
-		cp /usr/share/rustadmin/files/systemd/rustadmin.service /usr/lib/systemd/system/rustadmin.service
-		# try fix error in Ubuntu 18.04
-		# Failed to reload rustadmin.service: Unit rustadmin.service is not loaded properly: Exec format error.
-		# /usr/lib/systemd/system/rustadmin.service:10: Executable path is not absolute: pkill -f "rustadmin --"
-		if [ -e /usr/bin/pkill ]; then
-			sed -i "s|pkill|/usr/bin/pkill|g" /usr/lib/systemd/system/rustadmin.service
-		fi
+	if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+		rm -f /etc/systemd/system/rustadmin.service /usr/lib/systemd/user/rustadmin.service
+		install -Dm644 /usr/share/rustadmin/files/systemd/rustadmin.service \
+			/usr/lib/systemd/system/rustadmin.service
 		systemctl daemon-reload
-		systemctl enable rustadmin
-		systemctl start rustadmin
+		# Clear a persisted stop-service flag before starting. Without this, a
+		# service stopped from the UI can disable itself again during an upgrade.
+		/usr/bin/rustadmin --install-service
+		systemctl enable --now rustadmin.service
 	fi
 fi

@@ -8,7 +8,18 @@ bool gIsConnectionManager = false;
 void print_help_install_pkg(const char* so);
 
 bool flutter_rustdesk_core_main() {
-   void* librustdesk = dlopen(RUSTDESK_LIB_PATH, RTLD_LAZY);
+   g_autofree gchar* executable_path = g_file_read_link("/proc/self/exe", nullptr);
+   g_autofree gchar* executable_dir = executable_path
+       ? g_path_get_dirname(executable_path)
+       : nullptr;
+   g_autofree gchar* bundled_library_path = executable_dir
+       ? g_build_filename(executable_dir, "lib", RUSTDESK_LIB_PATH, nullptr)
+       : nullptr;
+   const char* library_path = bundled_library_path &&
+           g_file_test(bundled_library_path, G_FILE_TEST_IS_REGULAR)
+       ? bundled_library_path
+       : RUSTDESK_LIB_PATH;
+   void* librustdesk = dlopen(library_path, RTLD_LAZY);
    if (!librustdesk) {
       fprintf(stderr,"Failed to load \"librustdesk.so\"\n");
       char* error;

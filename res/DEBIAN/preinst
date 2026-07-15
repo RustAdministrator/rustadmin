@@ -4,12 +4,11 @@ set -e
 
 case $1 in
     install|upgrade)
-		INITSYS=$(ls -al /proc/1/exe | awk -F' ' '{print $NF}' | awk -F'/' '{print $NF}')
-		if [ "systemd" == "${INITSYS}" ]; then
-			service rustadmin stop || true
-      sleep 1
-      rm -rf /usr/bin/libsciter-gtk.so
+		if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+			systemctl stop rustadmin.service || true
+			sleep 1
 		fi
+		rm -f /usr/bin/libsciter-gtk.so
         ;;
 esac
 

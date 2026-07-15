@@ -178,6 +178,28 @@ def normalize_permissions(package_root: Path) -> None:
                 path.chmod(0o644)
 
 
+def validate_bundle(bundle_dir: Path) -> None:
+    executable = bundle_dir / "rustadmin"
+    core_library = bundle_dir / "lib/librustdesk.so"
+    if not executable.is_file() or not core_library.is_file():
+        raise RuntimeError("Linux bundle is missing rustadmin or lib/librustdesk.so")
+
+    env = os.environ.copy()
+    env.pop("LD_LIBRARY_PATH", None)
+    result = subprocess.run(
+        [str(executable), "--version"],
+        cwd=bundle_dir,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip() or "Failed to load" in result.stderr:
+        details = result.stderr.strip() or result.stdout.strip() or "no output"
+        raise RuntimeError(f"Linux bundle launch validation failed: {details}")
+
+
 def build_deb(args: argparse.Namespace) -> Path:
     repo_root = args.repo_root.resolve()
     bundle_dir = args.bundle.resolve()
@@ -186,6 +208,8 @@ def build_deb(args: argparse.Namespace) -> Path:
     arch = deb_arch()
     output_name = args.output_name or f"{args.package_name}_{args.version}_{arch}.deb"
     output_path = output_dir / output_name
+
+    validate_bundle(bundle_dir)
 
     with tempfile.TemporaryDirectory(prefix="rustadmin-deb-") as tmp:
         root = Path(tmp) / "pkg"

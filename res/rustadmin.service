@@ -7,10 +7,10 @@ After=systemd-user-sessions.service
 Type=simple
 ExecStart=/usr/bin/rustadmin --service
 # kill --tray and --server both
-ExecStop=pkill -f "rustadmin --"
+ExecStop=/usr/bin/pkill -f "rustadmin --"
 # below two lines do not work, have to use above one line
-#ExecStop=pkill -f "rustadmin --tray"
-#ExecStop=pkill -f "rustadmin --server"
+#ExecStop=/usr/bin/pkill -f "rustadmin --tray"
+#ExecStop=/usr/bin/pkill -f "rustadmin --server"
 PIDFile=/run/rustadmin.pid
 KillMode=mixed
 TimeoutStopSec=30
