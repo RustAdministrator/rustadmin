@@ -211,6 +211,14 @@ impl<T: Subscriber + From<ConnInner>> ServiceTmpl<T> {
         self.0.read().unwrap().has_subscribes()
     }
 
+    pub fn subscriber_ids(&self) -> HashSet<i32> {
+        let lock = self.0.read().unwrap();
+        let mut ids = HashSet::with_capacity(lock.subscribes.len() + lock.new_subscribes.len());
+        ids.extend(lock.subscribes.keys().copied());
+        ids.extend(lock.new_subscribes.keys().copied());
+        ids
+    }
+
     pub fn snapshot<F>(&self, callback: F) -> ResultType<()>
     where
         F: FnMut(ServiceSwap<T>) -> ResultType<()>,

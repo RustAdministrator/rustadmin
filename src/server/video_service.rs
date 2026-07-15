@@ -70,6 +70,7 @@ const HOST_VIDEO_DIAG_INTERVAL: Duration = Duration::from_secs(5);
 const HQ_REFERENCE_REFRESH_BITRATE_MULTIPLIER: u32 = 3;
 const HQ_REFERENCE_REFRESH_BITRATE_DIVISOR: u32 = 2;
 const HQ_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_secs(6);
+const DELIVERY_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_secs(2);
 #[cfg(windows)]
 const USER_CAPTURE_HELPER_STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
 static NEXT_VIDEO_STREAM_ID: AtomicU64 = AtomicU64::new(1);
@@ -110,6 +111,7 @@ struct HqReferenceRefreshPolicy {
     startup_safe: bool,
     reference_bitrate: u32,
     last_refresh: Option<Instant>,
+    last_delivery_refresh_attempt: Option<Instant>,
 }
 
 impl HqReferenceRefreshPolicy {
@@ -118,6 +120,7 @@ impl HqReferenceRefreshPolicy {
             startup_safe,
             reference_bitrate: bitrate,
             last_refresh: None,
+            last_delivery_refresh_attempt: None,
         }
     }
 
@@ -152,6 +155,24 @@ impl HqReferenceRefreshPolicy {
     fn record_refresh(&mut self, bitrate: u32, now: Instant) {
         self.reference_bitrate = bitrate;
         self.last_refresh = Some(now);
+    }
+
+    fn request_delivery_refresh(
+        &mut self,
+        requested: bool,
+        now: Instant,
+    ) -> Option<ReferenceRefreshReason> {
+        if !requested
+            || self
+                .last_delivery_refresh_attempt
+                .is_some_and(|last_attempt| {
+                    now.duration_since(last_attempt) < DELIVERY_REFERENCE_REFRESH_COOLDOWN
+                })
+        {
+            return None;
+        }
+        self.last_delivery_refresh_attempt = Some(now);
+        Some(ReferenceRefreshReason::DeliveryRecovery)
     }
 }
 
@@ -189,15 +210,30 @@ static USER_CAPTURE_HELPER_DISABLED: AtomicBool = AtomicBool::new(false);
 type FrameFetchedNotifierSender = UnboundedSender<(i32, Option<Instant>)>;
 type FrameFetchedNotifierReceiver = Arc<TokioMutex<UnboundedReceiver<(i32, Option<Instant>)>>>;
 
-lazy_static::lazy_static! {
-    static ref FRAME_FETCHED_NOTIFIERS: Mutex<HashMap<usize, (FrameFetchedNotifierSender, FrameFetchedNotifierReceiver)>> = Mutex::new(HashMap::default());
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct VideoStreamKey {
+    source: VideoSource,
+    display_idx: usize,
+}
 
-    // display_idx -> set of conn id.
+impl VideoStreamKey {
+    fn new(source: VideoSource, display_idx: usize) -> Self {
+        Self {
+            source,
+            display_idx,
+        }
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref FRAME_FETCHED_NOTIFIERS: Mutex<HashMap<VideoStreamKey, (FrameFetchedNotifierSender, FrameFetchedNotifierReceiver)>> = Mutex::new(HashMap::default());
+
+    // (source, display_idx) -> set of conn id.
     // Used to record which connections need to be notified when
     // 1. A new frame is received from a web client.
     //   Because web client does not send the display index in message `VideoReceived`.
     // 2. The client is closing.
-    static ref DISPLAY_CONN_IDS: Arc<Mutex<HashMap<usize, HashSet<i32>>>> = Default::default();
+    static ref DISPLAY_CONN_IDS: Arc<Mutex<HashMap<VideoStreamKey, HashSet<i32>>>> = Default::default();
     pub static ref VIDEO_QOS: Arc<Mutex<VideoQoS>> = Default::default();
     pub static ref IS_UAC_RUNNING: Arc<Mutex<bool>> = Default::default();
     pub static ref IS_FOREGROUND_WINDOW_ELEVATED: Arc<Mutex<bool>> = Default::default();
@@ -211,21 +247,27 @@ struct Screenshot {
 }
 
 #[inline]
-pub fn notify_video_frame_fetched(display_idx: usize, conn_id: i32, frame_tm: Option<Instant>) {
-    if let Some(notifier) = FRAME_FETCHED_NOTIFIERS.lock().unwrap().get(&display_idx) {
+pub fn notify_video_frame_fetched(
+    source: VideoSource,
+    display_idx: usize,
+    conn_id: i32,
+    frame_tm: Option<Instant>,
+) {
+    let key = VideoStreamKey::new(source, display_idx);
+    if let Some(notifier) = FRAME_FETCHED_NOTIFIERS.lock().unwrap().get(&key) {
         notifier.0.send((conn_id, frame_tm)).ok();
     }
 }
 
 #[inline]
 pub fn notify_video_frame_fetched_by_conn_id(conn_id: i32, frame_tm: Option<Instant>) {
-    let vec_display_idx: Vec<usize> = {
+    let stream_keys: Vec<VideoStreamKey> = {
         let display_conn_ids = DISPLAY_CONN_IDS.lock().unwrap();
         display_conn_ids
             .iter()
-            .filter_map(|(display_idx, conn_ids)| {
+            .filter_map(|(stream_key, conn_ids)| {
                 if conn_ids.contains(&conn_id) {
-                    Some(*display_idx)
+                    Some(*stream_key)
                 } else {
                     None
                 }
@@ -233,23 +275,23 @@ pub fn notify_video_frame_fetched_by_conn_id(conn_id: i32, frame_tm: Option<Inst
             .collect()
     };
     let notifiers = FRAME_FETCHED_NOTIFIERS.lock().unwrap();
-    for display_idx in vec_display_idx {
-        if let Some(notifier) = notifiers.get(&display_idx) {
+    for stream_key in stream_keys {
+        if let Some(notifier) = notifiers.get(&stream_key) {
             notifier.0.send((conn_id, frame_tm)).ok();
         }
     }
 }
 
 struct VideoFrameController {
-    display_idx: usize,
+    stream_key: VideoStreamKey,
     cur: Instant,
     send_conn_ids: HashSet<i32>,
 }
 
 impl VideoFrameController {
-    fn new(display_idx: usize) -> Self {
+    fn new(source: VideoSource, display_idx: usize) -> Self {
         Self {
-            display_idx,
+            stream_key: VideoStreamKey::new(source, display_idx),
             cur: Instant::now(),
             send_conn_ids: HashSet::new(),
         }
@@ -266,8 +308,21 @@ impl VideoFrameController {
             DISPLAY_CONN_IDS
                 .lock()
                 .unwrap()
-                .insert(self.display_idx, self.send_conn_ids.clone());
+                .insert(self.stream_key, self.send_conn_ids.clone());
         }
+    }
+
+    fn delivery_ready(&self, fetched_conn_ids: &HashSet<i32>) -> bool {
+        if self.send_conn_ids.is_empty() {
+            return true;
+        }
+        let fetched_expected = self
+            .send_conn_ids
+            .iter()
+            .filter(|id| fetched_conn_ids.contains(id))
+            .count();
+        fetched_expected == self.send_conn_ids.len()
+            || (self.send_conn_ids.len() > 1 && fetched_expected > 0)
     }
 
     #[tokio::main(flavor = "current_thread")]
@@ -281,7 +336,7 @@ impl VideoFrameController {
             match FRAME_FETCHED_NOTIFIERS
                 .lock()
                 .unwrap()
-                .get(&self.display_idx)
+                .get(&self.stream_key)
             {
                 Some(notifier) => notifier.1.clone(),
                 None => {
@@ -299,7 +354,9 @@ impl VideoFrameController {
                 if let Some(tm) = instant {
                     log::trace!("Channel recv latency: {}", tm.elapsed().as_secs_f32());
                 }
-                fetched_conn_ids.insert(id);
+                if self.send_conn_ids.contains(&id) {
+                    fetched_conn_ids.insert(id);
+                }
             }
             Ok(None) => {
                 // this branch would never be reached
@@ -310,7 +367,9 @@ impl VideoFrameController {
                 if let Some(tm) = instant {
                     log::trace!("Channel recv latency: {}", tm.elapsed().as_secs_f32());
                 }
-                fetched_conn_ids.insert(id);
+                if self.send_conn_ids.contains(&id) {
+                    fetched_conn_ids.insert(id);
+                }
             }
         }
     }
@@ -427,8 +486,9 @@ impl HostVideoDiagnostics {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum VideoSource {
+    #[default]
     Monitor,
     Camera,
 }
@@ -476,10 +536,11 @@ pub fn get_service_name(source: VideoSource, idx: usize) -> String {
 }
 
 pub fn new(source: VideoSource, idx: usize) -> GenericService {
+    let stream_key = VideoStreamKey::new(source, idx);
     let _ = FRAME_FETCHED_NOTIFIERS
         .lock()
         .unwrap()
-        .entry(idx)
+        .entry(stream_key)
         .or_insert_with(|| {
             let (tx, rx) = unbounded_channel();
             (tx, Arc::new(TokioMutex::new(rx)))
@@ -656,10 +717,14 @@ fn should_force_portable_secure_capturer(
 mod tests {
     use super::{
         should_force_portable_secure_capturer, stamp_video_frame, HqReferenceRefreshPolicy,
-        ReferenceRefreshReason, HQ_REFERENCE_REFRESH_COOLDOWN,
+        ReferenceRefreshReason, VideoFrameController, VideoSource, VideoStreamKey,
+        DELIVERY_REFERENCE_REFRESH_COOLDOWN, HQ_REFERENCE_REFRESH_COOLDOWN,
     };
     use hbb_common::message_proto::VideoFrame;
-    use std::time::{Duration, Instant};
+    use std::{
+        collections::HashSet,
+        time::{Duration, Instant},
+    };
 
     #[test]
     fn test_portable_secure_capture_routing_requires_secure_desktop() {
@@ -699,6 +764,37 @@ mod tests {
             (second.stream_id, second.frame_id, second.capture_time_ms),
             (17, 2, 57)
         );
+    }
+
+    #[test]
+    fn frame_delivery_key_isolates_monitor_and_camera_indices() {
+        let monitor = VideoStreamKey::new(VideoSource::Monitor, 0);
+        let camera = VideoStreamKey::new(VideoSource::Camera, 0);
+        let second_monitor = VideoStreamKey::new(VideoSource::Monitor, 1);
+
+        assert_ne!(monitor, camera);
+        assert_ne!(monitor, second_monitor);
+    }
+
+    #[test]
+    fn shared_stream_advances_when_one_expected_viewer_fetches_frame() {
+        let mut controller = VideoFrameController::new(VideoSource::Monitor, 0);
+        controller.set_send(Instant::now(), [10, 20].into_iter().collect());
+
+        assert!(!controller.delivery_ready(&HashSet::new()));
+        assert!(controller.delivery_ready(&HashSet::from([10])));
+        assert!(controller.delivery_ready(&HashSet::from([10, 20])));
+        assert!(!controller.delivery_ready(&HashSet::from([99])));
+    }
+
+    #[test]
+    fn single_viewer_stream_still_waits_for_its_viewer() {
+        let mut controller = VideoFrameController::new(VideoSource::Monitor, 0);
+        controller.set_send(Instant::now(), HashSet::from([10]));
+
+        assert!(!controller.delivery_ready(&HashSet::new()));
+        assert!(!controller.delivery_ready(&HashSet::from([99])));
+        assert!(controller.delivery_ready(&HashSet::from([10])));
     }
 
     #[test]
@@ -743,6 +839,26 @@ mod tests {
             policy.evaluate(false, false, 8_000, now + Duration::from_secs(60)),
             None
         );
+    }
+
+    #[test]
+    fn delivery_reference_refresh_requests_are_coalesced_per_service() {
+        let now = Instant::now();
+        let mut policy = HqReferenceRefreshPolicy::new(false, 1_000);
+
+        assert_eq!(
+            policy.request_delivery_refresh(true, now),
+            Some(ReferenceRefreshReason::DeliveryRecovery)
+        );
+        assert_eq!(
+            policy.request_delivery_refresh(true, now + Duration::from_millis(500)),
+            None
+        );
+        assert_eq!(
+            policy.request_delivery_refresh(true, now + DELIVERY_REFERENCE_REFRESH_COOLDOWN),
+            Some(ReferenceRefreshReason::DeliveryRecovery)
+        );
+        assert_eq!(policy.request_delivery_refresh(false, now), None);
     }
 }
 
@@ -1277,7 +1393,7 @@ fn try_set_gdi_fallback(c: &mut CapturerInfo, reason: &str) -> bool {
 }
 
 fn run(vs: VideoService) -> ResultType<()> {
-    let mut _raii = Raii::new(vs.idx, vs.sp.name());
+    let mut _raii = Raii::new(vs.source, vs.idx, vs.sp.name());
     // Wayland only support one video capturer for now. It is ok to call ensure_inited() here.
     //
     // ensure_inited() is needed because clear() may be called.
@@ -1309,6 +1425,7 @@ fn run(vs: VideoService) -> ResultType<()> {
 
     let display_idx = vs.idx;
     let sp = vs.sp;
+    let service_name = sp.name();
     let mut c = get_capturer(vs.source, display_idx, last_portable_service_running)?;
     #[cfg(windows)]
     if !scrap::codec::enable_directx_capture() && !c.is_gdi() {
@@ -1335,18 +1452,20 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut capture_backend = c.capture_backend();
     #[cfg(not(windows))]
     let capture_backend = "Unknown";
+    let subscriber_ids = sp.subscriber_ids();
     let mut video_qos = VIDEO_QOS.lock().unwrap();
-    let mut spf = video_qos.spf();
-    let mut quality = video_qos.ratio();
+    video_qos.sync_subscribers(&service_name, subscriber_ids);
+    let mut spf = video_qos.spf(&service_name);
+    let mut quality = video_qos.ratio(&service_name);
     let record_incoming = config::option2bool(
         "allow-auto-record-incoming",
         &Config::get_option("allow-auto-record-incoming"),
     );
-    let client_record = video_qos.record();
+    let client_record = video_qos.record(&service_name);
     drop(video_qos);
     let (mut encoder, encoder_cfg, codec_format, use_i444, recorder) = match setup_encoder(
         &c,
-        sp.name(),
+        service_name.clone(),
         quality,
         client_record,
         record_incoming,
@@ -1366,7 +1485,7 @@ fn run(vs: VideoService) -> ResultType<()> {
             }));
             setup_encoder(
                 &c,
-                sp.name(),
+                service_name.clone(),
                 quality,
                 client_record,
                 record_incoming,
@@ -1413,9 +1532,14 @@ fn run(vs: VideoService) -> ResultType<()> {
     }
     {
         let mut video_qos = VIDEO_QOS.lock().unwrap();
-        video_qos.store_bitrate(encoder.bitrate());
-        video_qos.store_pipeline_status(capture_backend, encoder_backend, encoder_input);
-        video_qos.set_support_changing_quality(&sp.name(), encoder.support_changing_quality());
+        video_qos.store_bitrate(&service_name, encoder.bitrate());
+        video_qos.store_pipeline_status(
+            &service_name,
+            capture_backend,
+            encoder_backend,
+            encoder_input,
+        );
+        video_qos.set_support_changing_quality(&service_name, encoder.support_changing_quality());
     }
     log::info!("initial quality: {quality:?}");
 
@@ -1426,7 +1550,7 @@ fn run(vs: VideoService) -> ResultType<()> {
         sp.set_option_bool(OPTION_REFERENCE_REFRESH, false);
     }
 
-    let mut frame_controller = VideoFrameController::new(display_idx);
+    let mut frame_controller = VideoFrameController::new(vs.source, display_idx);
 
     let start = time::Instant::now();
     let mut last_check_displays = time::Instant::now();
@@ -1466,7 +1590,7 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut next_frame_id = 1;
     let mut reference_refresh_pending = None;
     let mut reference_refresh_policy = HqReferenceRefreshPolicy::new(
-        VIDEO_QOS.lock().unwrap().startup_safe_mode(),
+        VIDEO_QOS.lock().unwrap().startup_safe_mode(&service_name),
         encoder.bitrate(),
     );
     let capture_width = c.width;
@@ -1484,7 +1608,8 @@ fn run(vs: VideoService) -> ResultType<()> {
             client_record,
             &mut send_counter,
             &mut second_instant,
-            &sp.name(),
+            &service_name,
+            &sp,
         )?;
         let reference_refresh_eligible = hq_reference_refresh_eligible(&encoder_cfg, codec_format);
         let policy_refresh_reason = reference_refresh_policy.evaluate(
@@ -1497,10 +1622,9 @@ fn run(vs: VideoService) -> ResultType<()> {
         if delivery_refresh_requested {
             sp.set_option_bool(OPTION_REFERENCE_REFRESH, false);
         }
-        if let Some(reason) = delivery_refresh_requested
-            .then_some(ReferenceRefreshReason::DeliveryRecovery)
-            .or(policy_refresh_reason)
-        {
+        let delivery_refresh_reason = reference_refresh_policy
+            .request_delivery_refresh(delivery_refresh_requested, Instant::now());
+        if let Some(reason) = delivery_refresh_reason.or(policy_refresh_reason) {
             let refresh_started = Instant::now();
             match recreate_encoder_at_quality(&encoder_cfg, use_i444, quality) {
                 Ok(refreshed_encoder) => {
@@ -1519,7 +1643,10 @@ fn run(vs: VideoService) -> ResultType<()> {
                         qos_update.startup_safe
                     );
                     encoder = refreshed_encoder;
-                    VIDEO_QOS.lock().unwrap().store_bitrate(refreshed_bitrate);
+                    VIDEO_QOS
+                        .lock()
+                        .unwrap()
+                        .store_bitrate(&service_name, refreshed_bitrate);
                     reference_refresh_policy.record_refresh(refreshed_bitrate, refresh_started);
                     reference_refresh_pending = Some(PendingReferenceRefresh {
                         reason,
@@ -1672,6 +1799,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                     encoder_input
                 );
                 VIDEO_QOS.lock().unwrap().store_pipeline_status(
+                    &service_name,
                     capture_backend,
                     encoder_backend,
                     encoder_input,
@@ -1696,7 +1824,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                     let capture_frame = capture_frame_label(&frame);
                     let capture_frame_changed = {
                         let mut video_qos = VIDEO_QOS.lock().unwrap();
-                        video_qos.store_capture_frame(capture_frame)
+                        video_qos.store_capture_frame(&service_name, capture_frame)
                     };
                     if capture_frame_changed {
                         log::info!(
@@ -1982,7 +2110,7 @@ fn run(vs: VideoService) -> ResultType<()> {
             }
             frame_controller.try_wait_next(&mut fetched_conn_ids, 300);
             // break if all connections have received current frame
-            if fetched_conn_ids.len() >= frame_controller.send_conn_ids.len() {
+            if frame_controller.delivery_ready(&fetched_conn_ids) {
                 break;
             }
         }
@@ -1991,7 +2119,10 @@ fn run(vs: VideoService) -> ResultType<()> {
             fetched_conn_ids.len(),
             wait_begin.elapsed(),
         );
-        DISPLAY_CONN_IDS.lock().unwrap().remove(&display_idx);
+        DISPLAY_CONN_IDS
+            .lock()
+            .unwrap()
+            .remove(&VideoStreamKey::new(vs.source, display_idx));
 
         let elapsed = now.elapsed();
         // may need to enable frame(timeout)
@@ -2021,16 +2152,18 @@ fn run(vs: VideoService) -> ResultType<()> {
 }
 
 struct Raii {
+    source: VideoSource,
     display_idx: usize,
     name: String,
     try_vram: bool,
 }
 
 impl Raii {
-    fn new(display_idx: usize, name: String) -> Self {
+    fn new(source: VideoSource, display_idx: usize, name: String) -> Self {
         log::info!("new video service: {}", name);
         VIDEO_QOS.lock().unwrap().new_display(name.clone());
         Raii {
+            source,
             display_idx,
             name,
             try_vram: true,
@@ -2048,7 +2181,10 @@ impl Drop for Raii {
         #[cfg(feature = "vram")]
         Encoder::update(scrap::codec::EncodingUpdate::Check);
         VIDEO_QOS.lock().unwrap().remove_display(&self.name);
-        DISPLAY_CONN_IDS.lock().unwrap().remove(&self.display_idx);
+        DISPLAY_CONN_IDS
+            .lock()
+            .unwrap()
+            .remove(&VideoStreamKey::new(self.source, self.display_idx));
     }
 }
 
@@ -2634,33 +2770,41 @@ fn check_qos(
     send_counter: &mut usize,
     second_instant: &mut Instant,
     name: &str,
+    sp: &GenericService,
 ) -> ResultType<QosUpdate> {
+    let update_display = second_instant.elapsed() > Duration::from_secs(1);
+    let subscriber_ids = update_display.then(|| sp.subscriber_ids());
+    if update_display {
+        *second_instant = Instant::now();
+    }
     let mut video_qos = VIDEO_QOS.lock().unwrap();
-    *spf = video_qos.spf();
-    let startup_safe = video_qos.startup_safe_mode();
-    let next_ratio = video_qos.ratio();
+    if let Some(subscriber_ids) = subscriber_ids {
+        video_qos.sync_subscribers(name, subscriber_ids);
+    }
+    *spf = video_qos.spf(name);
+    let startup_safe = video_qos.startup_safe_mode(name);
+    let next_ratio = video_qos.ratio(name);
     let previous_bitrate = encoder.bitrate();
     let ratio_changed = *ratio != next_ratio;
     if ratio_changed {
         *ratio = next_ratio;
         if encoder.support_changing_quality() {
             allow_err!(encoder.set_quality(*ratio));
-            video_qos.store_bitrate(encoder.bitrate());
+            video_qos.store_bitrate(name, encoder.bitrate());
         } else {
             // Now only vaapi doesn't support changing quality
-            if !video_qos.in_vbr_state() && !video_qos.latest_quality().is_custom() {
+            if !video_qos.in_vbr_state(name) && !video_qos.latest_quality(name).is_custom() {
                 log::info!("switch to change quality");
                 bail!("SWITCH");
             }
         }
     }
-    if client_record != video_qos.record() {
+    if client_record != video_qos.record(name) {
         log::info!("switch due to record changed");
         bail!("SWITCH");
     }
-    if second_instant.elapsed() > Duration::from_secs(1) {
-        *second_instant = Instant::now();
-        video_qos.update_display_data(&name, *send_counter);
+    if update_display {
+        video_qos.update_display_data(name, *send_counter);
         *send_counter = 0;
     }
     let current_bitrate = encoder.bitrate();

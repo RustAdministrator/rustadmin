@@ -59,7 +59,7 @@ use serde_json::{json, value::Value};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use std::sync::atomic::Ordering;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     net::Ipv6Addr,
     num::NonZeroI64,
     path::PathBuf,
@@ -77,6 +77,160 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE};
 #[cfg(windows)]
 use crate::virtual_display_manager;
 pub type Sender = mpsc::UnboundedSender<(Instant, Arc<Message>)>;
+type QueuedVideoMessage = (Instant, Arc<Message>);
+const VIDEO_QUEUE_CAPACITY: usize = 8;
+
+struct VideoQueueInner {
+    messages: std::sync::Mutex<VecDeque<QueuedVideoMessage>>,
+    drop_diagnostics: std::sync::Mutex<VideoQueueDropDiagnostics>,
+    notify: hbb_common::tokio::sync::Notify,
+}
+
+struct VideoQueueDropDiagnostics {
+    dropped_since_log: usize,
+    last_log: Instant,
+}
+
+#[derive(Clone)]
+pub(crate) struct VideoQueueSender {
+    inner: Arc<VideoQueueInner>,
+}
+
+struct VideoQueueReceiver {
+    inner: Arc<VideoQueueInner>,
+}
+
+fn video_queue() -> (VideoQueueSender, VideoQueueReceiver) {
+    let inner = Arc::new(VideoQueueInner {
+        messages: std::sync::Mutex::new(VecDeque::with_capacity(VIDEO_QUEUE_CAPACITY)),
+        drop_diagnostics: std::sync::Mutex::new(VideoQueueDropDiagnostics {
+            dropped_since_log: 0,
+            last_log: Instant::now(),
+        }),
+        notify: hbb_common::tokio::sync::Notify::new(),
+    });
+    (
+        VideoQueueSender {
+            inner: inner.clone(),
+        },
+        VideoQueueReceiver { inner },
+    )
+}
+
+fn is_video_frame(message: &Message) -> bool {
+    matches!(&message.union, Some(message::Union::VideoFrame(_)))
+}
+
+impl VideoQueueSender {
+    fn send(&self, message: QueuedVideoMessage) -> Option<QueuedVideoMessage> {
+        let incoming_is_video = is_video_frame(&message.1);
+        let mut messages = self.inner.messages.lock().unwrap();
+        let dropped = if messages.len() >= VIDEO_QUEUE_CAPACITY {
+            if let Some(position) = messages
+                .iter()
+                .position(|(_, queued)| is_video_frame(queued))
+            {
+                messages.remove(position)
+            } else if incoming_is_video {
+                return Some(message);
+            } else {
+                messages.pop_front()
+            }
+        } else {
+            None
+        };
+        messages.push_back(message);
+        drop(messages);
+        self.inner.notify.notify_one();
+        dropped
+    }
+
+    fn record_drop(&self, conn_id: i32, queued_at: Instant) {
+        let mut diagnostics = self.inner.drop_diagnostics.lock().unwrap();
+        diagnostics.dropped_since_log += 1;
+        if diagnostics.last_log.elapsed() < VIDEO_STALE_DROP_LOG_INTERVAL {
+            return;
+        }
+        let queue_depth = self.inner.messages.lock().unwrap().len();
+        log::warn!(
+            "#{conn_id} diag bounded video queue dropped stale frames: dropped_since_last_log={}, queue_depth={}, queue_capacity={}, dropped_queue_latency_ms={}",
+            diagnostics.dropped_since_log,
+            queue_depth,
+            VIDEO_QUEUE_CAPACITY,
+            queued_at.elapsed().as_millis()
+        );
+        diagnostics.dropped_since_log = 0;
+        diagnostics.last_log = Instant::now();
+    }
+}
+
+impl VideoQueueReceiver {
+    async fn recv(&mut self) -> QueuedVideoMessage {
+        loop {
+            let notified = self.inner.notify.notified();
+            if let Some(message) = self.inner.messages.lock().unwrap().pop_front() {
+                return message;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod video_queue_tests {
+    use super::*;
+
+    fn video_message(frame_id: u64) -> Arc<Message> {
+        let mut frame = VideoFrame::new();
+        frame.frame_id = frame_id;
+        let mut message = Message::new();
+        message.set_video_frame(frame);
+        Arc::new(message)
+    }
+
+    #[test]
+    fn bounded_video_queue_evicts_oldest_video_frame() {
+        let (sender, _receiver) = video_queue();
+        for frame_id in 1..=VIDEO_QUEUE_CAPACITY as u64 {
+            assert!(sender
+                .send((Instant::now(), video_message(frame_id)))
+                .is_none());
+        }
+
+        let dropped = sender
+            .send((Instant::now(), video_message(99)))
+            .expect("full queue must evict a video frame");
+        let Some(message::Union::VideoFrame(frame)) = &dropped.1.union else {
+            panic!("evicted message must be a video frame");
+        };
+        assert_eq!(frame.frame_id, 1);
+        assert_eq!(
+            sender.inner.messages.lock().unwrap().len(),
+            VIDEO_QUEUE_CAPACITY
+        );
+    }
+
+    #[test]
+    fn bounded_video_queue_preserves_ordering_messages() {
+        let (sender, _receiver) = video_queue();
+        let ordering_message = Arc::new(Message::new());
+        assert!(sender
+            .send((Instant::now(), ordering_message.clone()))
+            .is_none());
+        for frame_id in 1..VIDEO_QUEUE_CAPACITY as u64 {
+            assert!(sender
+                .send((Instant::now(), video_message(frame_id)))
+                .is_none());
+        }
+
+        let dropped = sender
+            .send((Instant::now(), video_message(99)))
+            .expect("full queue must evict a video frame");
+        assert!(is_video_frame(&dropped.1));
+        let messages = sender.inner.messages.lock().unwrap();
+        assert!(Arc::ptr_eq(&messages.front().unwrap().1, &ordering_message));
+    }
+}
 
 lazy_static::lazy_static! {
     static ref LOGIN_FAILURES: [Arc::<Mutex<HashMap<String, (i32, i32, i32)>>>; 2] = Default::default();
@@ -185,7 +339,8 @@ pub fn plugin_block_input(peer: &str, block: bool) -> bool {
 pub struct ConnInner {
     id: i32,
     tx: Option<Sender>,
-    tx_video: Option<Sender>,
+    tx_video: Option<VideoQueueSender>,
+    video_source: VideoSource,
 }
 
 struct InputMouse {
@@ -824,8 +979,13 @@ pub struct Connection {
 }
 
 impl ConnInner {
-    pub fn new(id: i32, tx: Option<Sender>, tx_video: Option<Sender>) -> Self {
-        Self { id, tx, tx_video }
+    pub(crate) fn new(id: i32, tx: Option<Sender>, tx_video: Option<VideoQueueSender>) -> Self {
+        Self {
+            id,
+            tx,
+            tx_video,
+            video_source: VideoSource::Monitor,
+        }
     }
 }
 
@@ -846,14 +1006,24 @@ impl Subscriber for ConnInner {
             },
             _ => false,
         };
-        let tx = if tx_by_video {
-            self.tx_video.as_mut()
-        } else {
-            self.tx.as_mut()
-        };
-        tx.map(|tx| {
-            allow_err!(tx.send((Instant::now(), msg)));
-        });
+        let queued = (Instant::now(), msg);
+        if tx_by_video {
+            if let Some(tx) = self.tx_video.as_ref() {
+                if let Some((instant, dropped)) = tx.send(queued) {
+                    tx.record_drop(self.id, instant);
+                    if let Some(message::Union::VideoFrame(frame)) = &dropped.union {
+                        video_service::notify_video_frame_fetched(
+                            self.video_source,
+                            frame.display as usize,
+                            self.id,
+                            Some(instant.into()),
+                        );
+                    }
+                }
+            }
+        } else if let Some(tx) = self.tx.as_ref() {
+            allow_err!(tx.send(queued));
+        }
     }
 }
 
@@ -946,7 +1116,7 @@ impl Connection {
         let tx_from_cm = tx_from_cm_holder.clone();
         let (tx_to_cm, rx_to_cm) = mpsc::unbounded_channel::<ipc::Data>();
         let (tx, mut rx) = mpsc::unbounded_channel::<(Instant, Arc<Message>)>();
-        let (tx_video, mut rx_video) = mpsc::unbounded_channel::<(Instant, Arc<Message>)>();
+        let (tx_video, mut rx_video) = video_queue();
         let (tx_input, _rx_input) = std_mpsc::channel();
         let (tx_from_authed, mut rx_from_authed) = mpsc::unbounded_channel::<ipc::Data>();
         let mut hbbs_rx = crate::hbbs_http::sync::signal_receiver();
@@ -970,6 +1140,7 @@ impl Connection {
                 id,
                 tx: Some(tx),
                 tx_video: Some(tx_video),
+                video_source: VideoSource::Monitor,
             },
             require_2fa: crate::auth_2fa::get_2fa(None),
             display_idx: *display_service::PRIMARY_DISPLAY_IDX,
@@ -1423,7 +1594,7 @@ impl Connection {
                         break;
                     }
                 }
-                Some((instant, value)) = rx_video.recv() => {
+                (instant, value) = rx_video.recv() => {
                     let is_video_frame = matches!(&value.union, Some(message::Union::VideoFrame(_)));
                     if is_video_frame && first_video_frame_sent && instant.elapsed() >= VIDEO_FRAME_STALE_DROP_AFTER {
                         stale_video_drop_count += 1;
@@ -1442,7 +1613,12 @@ impl Connection {
                         }
                         if !conn.video_ack_required {
                             if let Some(message::Union::VideoFrame(vf)) = &value.union {
-                                video_service::notify_video_frame_fetched(vf.display as usize, id, Some(instant.into()));
+                                video_service::notify_video_frame_fetched(
+                                    conn.video_source(),
+                                    vf.display as usize,
+                                    id,
+                                    Some(instant.into()),
+                                );
                             }
                         }
                         continue;
@@ -1479,7 +1655,12 @@ impl Connection {
                     }
                     if is_video_frame && !conn.video_ack_required {
                         if let Some(message::Union::VideoFrame(vf)) = &value.union {
-                            video_service::notify_video_frame_fetched(vf.display as usize, id, Some(instant.into()));
+                            video_service::notify_video_frame_fetched(
+                                conn.video_source(),
+                                vf.display as usize,
+                                id,
+                                Some(instant.into()),
+                            );
                         }
                     }
                     if is_video_frame && !first_video_frame_sent {
@@ -1656,15 +1837,19 @@ impl Connection {
                             encoder_input,
                         ) = {
                             let video_qos = video_service::VIDEO_QOS.lock().unwrap();
+                            let video_service_name = video_service::get_service_name(
+                                conn.video_source(),
+                                conn.display_idx,
+                            );
                             let (
                                 capture_backend,
                                 capture_frame,
                                 encoder_backend,
                                 encoder_input,
                             ) =
-                                video_qos.pipeline_status();
+                                video_qos.pipeline_status(&video_service_name);
                             (
-                                video_qos.bitrate(),
+                                video_qos.bitrate(&video_service_name),
                                 capture_backend.unwrap_or_default(),
                                 capture_frame.unwrap_or_default(),
                                 encoder_backend.unwrap_or_default(),
@@ -3818,6 +4003,7 @@ impl Connection {
                         return false;
                     }
                     self.view_camera = true;
+                    self.inner.video_source = VideoSource::Camera;
                 }
                 Some(login_request::Union::Terminal(terminal)) => {
                     if !Self::permission(keys::OPTION_ENABLE_TERMINAL, &self.control_permissions) {
