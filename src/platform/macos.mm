@@ -88,6 +88,77 @@ extern "C" bool MacPasteboardChangeCount(int64_t *change_count) {
     }
 }
 
+extern "C" bool MacPasteboardTypeConformsToPlainText(const char *value) {
+    if (value == NULL) {
+        return false;
+    }
+    @autoreleasepool {
+        @try {
+            NSString *type = [NSString stringWithUTF8String:value];
+            if (type == nil) {
+                return false;
+            }
+            return [[NSWorkspace sharedWorkspace] type:type conformsToType:@"public.plain-text"];
+        } @catch (NSException *exception) {
+            NSLog(@"RustAdmin caught NSPasteboard exception while classifying text type: %@ %@", [exception name], [exception reason]);
+            return false;
+        }
+    }
+}
+
+static NSString *StringFromPlainTextPasteboardData(NSData *data, NSPasteboardType type) {
+    if (data == nil) {
+        return nil;
+    }
+    if ([type isEqualToString:@"public.utf16-plain-text"] ||
+        [type isEqualToString:@"public.utf16-external-plain-text"]) {
+        return [[NSString alloc] initWithData:data encoding:NSUTF16StringEncoding];
+    }
+    if ([type isEqualToString:@"com.apple.traditional-mac-plain-text"]) {
+        return [[NSString alloc] initWithData:data encoding:NSMacOSRomanStringEncoding];
+    }
+    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (text == nil) {
+        text = [[NSString alloc] initWithData:data encoding:NSUTF16StringEncoding];
+    }
+    return text;
+}
+
+extern "C" char *MacPasteboardCopyPlainText() {
+    @autoreleasepool {
+        @try {
+            NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+            if (pasteboard == nil) {
+                return NULL;
+            }
+            NSArray *items = [pasteboard pasteboardItems];
+            for (NSPasteboardItem *item in items) {
+                NSPasteboardType type = [item availableTypeFromArray:@[
+                    NSPasteboardTypeString,
+                    @"public.plain-text",
+                    @"public.utf16-plain-text",
+                    @"public.utf16-external-plain-text",
+                    @"com.apple.traditional-mac-plain-text"
+                ]];
+                if (type == nil) {
+                    continue;
+                }
+                NSString *text = [item stringForType:type];
+                if (text == nil) {
+                    text = StringFromPlainTextPasteboardData([item dataForType:type], type);
+                }
+                if (text != nil) {
+                    return CopyCString([text UTF8String]);
+                }
+            }
+            return NULL;
+        } @catch (NSException *exception) {
+            NSLog(@"RustAdmin caught NSPasteboard exception while reading plain text: %@ %@", [exception name], [exception reason]);
+            return NULL;
+        }
+    }
+}
+
 extern "C" bool CanUseNewApiForScreenCaptureCheck() {
     #ifdef NO_InputMonitoringAuthStatus
     return false;
