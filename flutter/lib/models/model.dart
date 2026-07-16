@@ -4132,6 +4132,19 @@ class QualityMonitorModel with ChangeNotifier {
   Offset? get floatingPosition => _floatingPosition;
   QualityMonitorData get data => _data;
 
+  Future<void> setDetails(String value) async {
+    final details = normalizeQualityMonitorDetails(value);
+    if (_details == details) return;
+    final sessionId = parent.target?.sessionId;
+    if (sessionId == null) return;
+    _details = details;
+    notifyListeners();
+    await bind.sessionPeerOption(
+        sessionId: sessionId,
+        name: kOptionQualityMonitorDetails,
+        value: details);
+  }
+
   String? _directLabel(dynamic direct) {
     if (direct == null) return null;
     if (direct is bool) return direct ? 'yes' : 'no';

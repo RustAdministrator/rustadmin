@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:auto_size_text/auto_size_text.dart';
 import 'package:debounce_throttle/debounce_throttle.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
@@ -822,22 +824,174 @@ class QualityMonitor extends StatelessWidget {
                       Positioned(
                         top: 0,
                         left: 0,
-                        child: MouseRegion(
-                          cursor: SystemMouseCursors.move,
-                          child: GestureDetector(
-                            behavior: HitTestBehavior.opaque,
-                            onPanUpdate: onGripPanUpdate,
-                            child: Container(
-                              width: 16,
-                              height: 16,
-                              color: MyTheme.canvasColor.withAlpha(180),
-                            ),
-                          ),
+                        child: QualityMonitorGrip(
+                          details: qualityMonitorModel.details,
+                          onPanUpdate: onGripPanUpdate!,
+                          onDetailsChanged: qualityMonitorModel.setDetails,
                         ),
                       ),
                   ],
                 )
               : const SizedBox.shrink()));
+}
+
+class QualityMonitorGrip extends StatelessWidget {
+  final String details;
+  final GestureDragUpdateCallback onPanUpdate;
+  final Future<void> Function(String details) onDetailsChanged;
+
+  const QualityMonitorGrip(
+      {Key? key,
+      required this.details,
+      required this.onPanUpdate,
+      required this.onDetailsChanged})
+      : super(key: key);
+
+  Future<void> _showDetailsMenu(
+      BuildContext context, Offset globalPosition) async {
+    if (!(isDesktop || isWebDesktop)) return;
+    final overlay = Overlay.of(context).context.findRenderObject();
+    if (overlay is! RenderBox) return;
+    final position = overlay.globalToLocal(globalPosition);
+    final selected = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        position.dx,
+        position.dy,
+        overlay.size.width - position.dx,
+        overlay.size.height - position.dy,
+      ),
+      items: [
+        PopupMenuItem<String>(
+          value: kQualityMonitorDetailsBasic,
+          height: 32,
+          child: _detailsMenuRow(kQualityMonitorDetailsBasic),
+        ),
+        PopupMenuItem<String>(
+          value: kQualityMonitorDetailsExtended,
+          height: 32,
+          child: _detailsMenuRow(kQualityMonitorDetailsExtended),
+        ),
+      ],
+    );
+    if (selected != null && selected != details) {
+      await onDetailsChanged(selected);
+    }
+  }
+
+  Widget _detailsMenuRow(String value) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          SizedBox(
+            width: 16,
+            child: details == value ? const Icon(Icons.check, size: 14) : null,
+          ),
+          const SizedBox(width: 6),
+          Text(translate(qualityMonitorDetailsLabel(value))),
+        ],
+      );
+
+  @override
+  Widget build(BuildContext context) => MouseRegion(
+        cursor: SystemMouseCursors.move,
+        child: Listener(
+          behavior: HitTestBehavior.opaque,
+          onPointerDown: (event) {
+            if (event.buttons & kSecondaryMouseButton != 0) {
+              _showDetailsMenu(context, event.position);
+            }
+          },
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onPanUpdate: onPanUpdate,
+            child: Container(
+              width: 16,
+              height: 16,
+              color: MyTheme.canvasColor.withAlpha(180),
+            ),
+          ),
+        ),
+      );
+}
+
+class QualityMonitorHoverFade extends StatefulWidget {
+  static const dimOpacity = 0.5;
+  static const dimDelay = Duration(milliseconds: 1000);
+  static const dimDuration = Duration(milliseconds: 3000);
+  static const restoreDuration = Duration(milliseconds: 180);
+
+  final Widget child;
+
+  const QualityMonitorHoverFade({Key? key, required this.child})
+      : super(key: key);
+
+  @override
+  State<QualityMonitorHoverFade> createState() =>
+      _QualityMonitorHoverFadeState();
+}
+
+class _QualityMonitorHoverFadeState extends State<QualityMonitorHoverFade> {
+  Timer? _dimTimer;
+  double _opacity = 1.0;
+  Duration _duration = QualityMonitorHoverFade.restoreDuration;
+
+  @override
+  void initState() {
+    super.initState();
+    if (isDesktop || isWebDesktop) {
+      _scheduleDim();
+    }
+  }
+
+  void _cancelDim() {
+    _dimTimer?.cancel();
+    _dimTimer = null;
+  }
+
+  void _setOpacity(double opacity, Duration duration) {
+    if (!mounted || (_opacity == opacity && _duration == duration)) return;
+    setState(() {
+      _opacity = opacity;
+      _duration = duration;
+    });
+  }
+
+  void _scheduleDim() {
+    _cancelDim();
+    _dimTimer = Timer(QualityMonitorHoverFade.dimDelay, () {
+      _dimTimer = null;
+      _setOpacity(QualityMonitorHoverFade.dimOpacity,
+          QualityMonitorHoverFade.dimDuration);
+    });
+  }
+
+  void _handleEnter(PointerEnterEvent event) {
+    _cancelDim();
+    _setOpacity(1.0, QualityMonitorHoverFade.restoreDuration);
+  }
+
+  void _handleExit(PointerExitEvent event) {
+    _scheduleDim();
+  }
+
+  @override
+  void dispose() {
+    _cancelDim();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => MouseRegion(
+        opaque: false,
+        onEnter: _handleEnter,
+        onExit: _handleExit,
+        child: AnimatedOpacity(
+          opacity: _opacity,
+          duration: _duration,
+          curve: Curves.easeOutCubic,
+          child: widget.child,
+        ),
+      );
 }
 
 class PositionedQualityMonitor extends StatefulWidget {
@@ -947,16 +1101,18 @@ class _PositionedQualityMonitorState extends State<PositionedQualityMonitor> {
                   _scheduleBoundsUpdate();
                   final monitor = KeyedSubtree(
                     key: _monitorKey,
-                    child: QualityMonitor(
-                      qualityMonitorModel,
-                      onGripPanUpdate: (details) {
-                        final base = qualityMonitorModel.floatingPosition ??
-                            _fixedOrigin(constraints,
-                                qualityMonitorModel.position, extended);
-                        qualityMonitorModel.updateFloatingPosition(
-                            _clampPosition(
-                                constraints, base + details.delta, extended));
-                      },
+                    child: QualityMonitorHoverFade(
+                      child: QualityMonitor(
+                        qualityMonitorModel,
+                        onGripPanUpdate: (details) {
+                          final base = qualityMonitorModel.floatingPosition ??
+                              _fixedOrigin(constraints,
+                                  qualityMonitorModel.position, extended);
+                          qualityMonitorModel.updateFloatingPosition(
+                              _clampPosition(constraints,
+                                  base + details.delta, extended));
+                        },
+                      ),
                     ),
                   );
                   final floatingPosition = qualityMonitorModel.floatingPosition;
