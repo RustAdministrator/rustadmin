@@ -63,6 +63,11 @@ void main() {
   testWidgets('quality monitor fades without blocking remote hover',
       (tester) async {
     var backgroundHoverCount = 0;
+    var settings = const QualityMonitorFadeSettings(
+      opacity: 0.5,
+      delay: Duration(milliseconds: 1000),
+      duration: Duration(milliseconds: 3000),
+    );
 
     await tester.pumpWidget(MaterialApp(
       home: Stack(
@@ -73,11 +78,12 @@ void main() {
               child: const SizedBox.expand(),
             ),
           ),
-          const Positioned(
+          Positioned(
             left: 20,
             top: 20,
             child: QualityMonitorHoverFade(
-              child: SizedBox(width: 100, height: 100),
+              settingsProvider: () => settings,
+              child: const SizedBox(width: 100, height: 100),
             ),
           ),
         ],
@@ -88,10 +94,19 @@ void main() {
         tester.widget<AnimatedOpacity>(find.byType(AnimatedOpacity));
 
     expect(opacityWidget().opacity, 1.0);
-    await tester.pump(QualityMonitorHoverFade.dimDelay);
-    expect(opacityWidget().opacity, QualityMonitorHoverFade.dimOpacity);
-    expect(opacityWidget().duration, QualityMonitorHoverFade.dimDuration);
-    await tester.pump(QualityMonitorHoverFade.dimDuration);
+    await tester.pump(settings.delay);
+    expect(opacityWidget().opacity, settings.opacity);
+    expect(opacityWidget().duration, settings.duration);
+    await tester.pump(settings.duration);
+
+    settings = const QualityMonitorFadeSettings(
+      opacity: 0.35,
+      delay: Duration(milliseconds: 250),
+      duration: Duration(milliseconds: 750),
+    );
+    await tester.pump(QualityMonitorHoverFade.settingsRefreshInterval);
+    expect(opacityWidget().opacity, settings.opacity);
+    expect(opacityWidget().duration, QualityMonitorHoverFade.restoreDuration);
 
     final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
     addTearDown(mouse.removePointer);
@@ -107,7 +122,8 @@ void main() {
 
     await mouse.moveTo(const Offset(250, 250));
     await tester.pump();
-    await tester.pump(QualityMonitorHoverFade.dimDelay);
-    expect(opacityWidget().opacity, QualityMonitorHoverFade.dimOpacity);
+    await tester.pump(settings.delay);
+    expect(opacityWidget().opacity, settings.opacity);
+    expect(opacityWidget().duration, settings.duration);
   });
 }

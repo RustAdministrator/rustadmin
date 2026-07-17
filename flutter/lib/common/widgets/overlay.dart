@@ -915,14 +915,14 @@ class QualityMonitorGrip extends StatelessWidget {
 }
 
 class QualityMonitorHoverFade extends StatefulWidget {
-  static const dimOpacity = 0.5;
-  static const dimDelay = Duration(milliseconds: 1000);
-  static const dimDuration = Duration(milliseconds: 3000);
+  static const settingsRefreshInterval = Duration(milliseconds: 1000);
   static const restoreDuration = Duration(milliseconds: 180);
 
   final Widget child;
+  final QualityMonitorFadeSettings Function()? settingsProvider;
 
-  const QualityMonitorHoverFade({Key? key, required this.child})
+  const QualityMonitorHoverFade(
+      {Key? key, required this.child, this.settingsProvider})
       : super(key: key);
 
   @override
@@ -930,15 +930,99 @@ class QualityMonitorHoverFade extends StatefulWidget {
       _QualityMonitorHoverFadeState();
 }
 
+class QualityMonitorFadeSettings {
+  final double opacity;
+  final Duration delay;
+  final Duration duration;
+
+  const QualityMonitorFadeSettings({
+    required this.opacity,
+    required this.delay,
+    required this.duration,
+  });
+
+  factory QualityMonitorFadeSettings.fromUserDefaults() {
+    int option(String key,
+        {required int defaultValue, required int min, required int max}) {
+      return (int.tryParse(bind.mainGetUserDefaultOption(key: key)) ??
+              defaultValue)
+          .clamp(min, max);
+    }
+
+    return QualityMonitorFadeSettings(
+      opacity: option(
+            kOptionRemoteToolbarPinnedOpacityPercent,
+            defaultValue: kDefaultRemoteToolbarPinnedOpacityPercent,
+            min: kMinRemoteToolbarPinnedOpacityPercent,
+            max: kMaxRemoteToolbarPinnedOpacityPercent,
+          ) /
+          100.0,
+      delay: Duration(
+        milliseconds: option(
+          kOptionRemoteToolbarPinnedDimDelayMs,
+          defaultValue: kDefaultRemoteToolbarPinnedDimDelayMs,
+          min: kMinRemoteToolbarPinnedDimDelayMs,
+          max: kMaxRemoteToolbarPinnedDimDelayMs,
+        ),
+      ),
+      duration: Duration(
+        milliseconds: option(
+          kOptionRemoteToolbarPinnedDimDurationMs,
+          defaultValue: kDefaultRemoteToolbarPinnedDimDurationMs,
+          min: kMinRemoteToolbarPinnedDimDurationMs,
+          max: kMaxRemoteToolbarPinnedDimDurationMs,
+        ),
+      ),
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is QualityMonitorFadeSettings &&
+      opacity == other.opacity &&
+      delay == other.delay &&
+      duration == other.duration;
+
+  @override
+  int get hashCode => Object.hash(opacity, delay, duration);
+}
+
 class _QualityMonitorHoverFadeState extends State<QualityMonitorHoverFade> {
   Timer? _dimTimer;
+  Timer? _settingsTimer;
+  late QualityMonitorFadeSettings _settings;
   double _opacity = 1.0;
   Duration _duration = QualityMonitorHoverFade.restoreDuration;
+  bool _hovered = false;
 
   @override
   void initState() {
     super.initState();
+    _settings = _readSettings();
     if (isDesktop || isWebDesktop) {
+      _scheduleDim();
+      _settingsTimer = Timer.periodic(
+        QualityMonitorHoverFade.settingsRefreshInterval,
+        (_) => _refreshSettings(),
+      );
+    }
+  }
+
+  QualityMonitorFadeSettings _readSettings() =>
+      widget.settingsProvider?.call() ??
+      QualityMonitorFadeSettings.fromUserDefaults();
+
+  void _refreshSettings() {
+    if (!mounted) return;
+    final next = _readSettings();
+    if (next == _settings) return;
+    _settings = next;
+    _cancelDim();
+    if (_hovered) {
+      _setOpacity(1.0, QualityMonitorHoverFade.restoreDuration);
+    } else if (_opacity < 1.0) {
+      _setOpacity(_settings.opacity, QualityMonitorHoverFade.restoreDuration);
+    } else {
       _scheduleDim();
     }
   }
@@ -958,25 +1042,28 @@ class _QualityMonitorHoverFadeState extends State<QualityMonitorHoverFade> {
 
   void _scheduleDim() {
     _cancelDim();
-    _dimTimer = Timer(QualityMonitorHoverFade.dimDelay, () {
+    _dimTimer = Timer(_settings.delay, () {
       _dimTimer = null;
-      _setOpacity(QualityMonitorHoverFade.dimOpacity,
-          QualityMonitorHoverFade.dimDuration);
+      if (_hovered) return;
+      _setOpacity(_settings.opacity, _settings.duration);
     });
   }
 
   void _handleEnter(PointerEnterEvent event) {
+    _hovered = true;
     _cancelDim();
     _setOpacity(1.0, QualityMonitorHoverFade.restoreDuration);
   }
 
   void _handleExit(PointerExitEvent event) {
+    _hovered = false;
     _scheduleDim();
   }
 
   @override
   void dispose() {
     _cancelDim();
+    _settingsTimer?.cancel();
     super.dispose();
   }
 

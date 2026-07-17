@@ -2202,7 +2202,7 @@ class _DisplayState extends State<_Display> {
         ),
       ),
       _IntegerSettingSlider(
-        label: 'Pinned toolbar opacity',
+        label: 'Toolbar and monitor opacity',
         value: pinnedOpacityPercent,
         min: kMinRemoteToolbarPinnedOpacityPercent,
         max: kMaxRemoteToolbarPinnedOpacityPercent,
@@ -2216,7 +2216,7 @@ class _DisplayState extends State<_Display> {
         ),
       ),
       _IntegerSettingSlider(
-        label: 'Pinned toolbar dim delay',
+        label: 'Toolbar and monitor dim delay',
         value: pinnedDimDelayMs,
         min: kMinRemoteToolbarPinnedDimDelayMs,
         max: kMaxRemoteToolbarPinnedDimDelayMs,
@@ -2230,7 +2230,7 @@ class _DisplayState extends State<_Display> {
         ),
       ),
       _IntegerSettingSlider(
-        label: 'Pinned toolbar dim duration',
+        label: 'Toolbar and monitor dim duration',
         value: pinnedDimDurationMs,
         min: kMinRemoteToolbarPinnedDimDurationMs,
         max: kMaxRemoteToolbarPinnedDimDurationMs,
