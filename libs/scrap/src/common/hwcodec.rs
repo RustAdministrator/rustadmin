@@ -480,6 +480,114 @@ mod tests {
         run_nvenc_high_quality_encode_decode_smoke(CodecFormat::H265);
     }
 
+    #[test]
+    #[ignore = "requires NVIDIA NVENC and intentionally churns HEVC encoder sessions"]
+    fn nvenc_hevc_delivery_recovery_recreate_stress() {
+        const WIDTH: usize = 2560;
+        const HEIGHT: usize = 1440;
+        const DEFAULT_RECREATIONS: usize = 64;
+        const DEFAULT_FRAMES_PER_GENERATION: usize = 4;
+
+        let Some(info) = HwRamEncoder::select_high_quality_encoder(
+            probed_hwcodec_config().ram_encode.clone(),
+            CodecFormat::H265,
+        ) else {
+            eprintln!("SKIPPED: no HEVC NVENC encoder was confirmed by the probe");
+            return;
+        };
+        let recreations = std::env::var("RUSTADMIN_NVENC_RECREATE_ITERATIONS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_RECREATIONS)
+            .clamp(1, 1_000);
+        let frames_per_generation = std::env::var("RUSTADMIN_NVENC_FRAMES_PER_GENERATION")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_FRAMES_PER_GENERATION)
+            .clamp(1, 60);
+        let mut config = HwRamEncoderConfig {
+            name: info.name.clone(),
+            mc_name: info.mc_name.clone(),
+            width: WIDTH,
+            height: HEIGHT,
+            quality: 0.25,
+            keyframe_interval: None,
+            profile: HwEncoderProfile::Default,
+        };
+        let mut encoder = HwRamEncoder::new(EncoderCfg::HWRAM(config.clone()), false)
+            .unwrap_or_else(|err| panic!("failed to open initial {} encoder: {err}", info.name));
+        let mut bgra = vec![0; WIDTH * HEIGHT * 4];
+        let mut yuv = Vec::new();
+        let mut mid_data = Vec::new();
+
+        for generation in 0..=recreations {
+            if generation > 0 {
+                if generation == 1 {
+                    encoder
+                        .set_quality(0.67)
+                        .expect("failed to apply the production QoS bitrate increase");
+                }
+                config.quality = 0.67;
+                let replacement = HwRamEncoder::new(EncoderCfg::HWRAM(config.clone()), false)
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "failed to recreate {} encoder at generation {generation}: {err}",
+                            info.name
+                        )
+                    });
+                encoder = replacement;
+            }
+
+            for frame_in_generation in 0..frames_per_generation {
+                let frame_index = generation * frames_per_generation + frame_in_generation;
+                let pixel_offset = (frame_index * 4) % bgra.len();
+                bgra[pixel_offset] = frame_index as u8;
+                bgra[pixel_offset + 1] = frame_index.wrapping_mul(3) as u8;
+                bgra[pixel_offset + 2] = frame_index.wrapping_mul(7) as u8;
+                bgra[pixel_offset + 3] = u8::MAX;
+                let frame = crate::Frame::PixelBuffer(crate::PixelBuffer::new(
+                    &bgra,
+                    Pixfmt::BGRA,
+                    WIDTH,
+                    HEIGHT,
+                ));
+                let input = frame
+                    .to(encoder.yuvfmt(), &mut yuv, &mut mid_data)
+                    .expect("failed to convert the captured BGRA frame to encoder NV12");
+                let frames = encoder
+                    .encode(
+                        input.yuv().expect("converted frame was not CPU YUV"),
+                        (frame_index * 1_000 / DEFAULT_FPS as usize) as i64,
+                    )
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "{} failed after delivery-recovery recreation {generation}, frame {frame_in_generation}: {err}",
+                            info.name
+                        )
+                    });
+                assert_eq!(
+                    frames.len(),
+                    1,
+                    "{} recreation {generation}, frame {frame_in_generation} did not produce one low-delay frame",
+                    info.name
+                );
+                if frame_in_generation == 0 {
+                    assert_eq!(
+                        frames[0].key, 1,
+                        "{} recreation {generation} did not start with a keyframe",
+                        info.name
+                    );
+                }
+            }
+            if generation % 8 == 0 || generation == recreations {
+                eprintln!(
+                    "{} delivery-recovery recreation {generation}/{recreations} passed",
+                    info.name
+                );
+            }
+        }
+    }
+
     #[cfg(target_os = "macos")]
     struct VideoToolboxProfileResult {
         encoded_fps: f64,
