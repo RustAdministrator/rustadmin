@@ -553,6 +553,9 @@ const VIDEO_DELIVERY_DEFAULT_NETWORK_DELAY_MS: u32 = 250;
 const VIDEO_DELIVERY_MIN_PROGRESS_TIMEOUT: Duration = Duration::from_millis(500);
 const VIDEO_DELIVERY_MAX_PROGRESS_TIMEOUT: Duration = Duration::from_secs(4);
 const VIDEO_DELIVERY_MIN_REFRESH_COOLDOWN: Duration = Duration::from_secs(1);
+// Feedback can be emitted after receive but before asynchronous decode/render.
+// Older viewers may never send the final same-frame update on an idle desktop.
+const VIDEO_DELIVERY_PIPELINE_SLACK_FRAMES: u64 = 2;
 
 #[derive(Clone)]
 struct VideoFeedbackDiagnostics {
@@ -726,6 +729,14 @@ impl VideoDeliveryController {
         let mut actions = Vec::new();
         for (&display, state) in self.by_display.iter_mut() {
             if state.highest_sent_frame_id <= state.highest_decoded_frame_id {
+                continue;
+            }
+            let undecoded_frames = state
+                .highest_sent_frame_id
+                .saturating_sub(state.highest_decoded_frame_id);
+            if state.phase != VideoDeliveryPhase::Starting
+                && undecoded_frames <= VIDEO_DELIVERY_PIPELINE_SLACK_FRAMES
+            {
                 continue;
             }
             let progress_at = state.decode_pending_since.unwrap_or(state.first_sent_at);
@@ -8028,7 +8039,7 @@ mod test {
     }
 
     #[test]
-    fn video_delivery_requests_rtt_scaled_recovery_without_disconnect() {
+    fn video_delivery_startup_recovery_is_not_retried_for_same_pipeline_gap() {
         let start = Instant::now();
         let mut controller = VideoDeliveryController::default();
         controller.on_frame_sent(
@@ -8070,9 +8081,8 @@ mod test {
             start + VIDEO_DELIVERY_MIN_PROGRESS_TIMEOUT + Duration::from_secs(1),
             10,
         );
-        assert_eq!(retry.len(), 1);
-        assert_eq!(retry[0].previous_phase, VideoDeliveryPhase::Recovering);
-        assert_eq!(controller.status(0).unwrap().recovery_count, 2);
+        assert!(retry.is_empty());
+        assert_eq!(controller.status(0).unwrap().recovery_count, 1);
     }
 
     #[test]
@@ -8094,7 +8104,7 @@ mod test {
     }
 
     #[test]
-    fn video_delivery_render_progress_returns_to_healthy() {
+    fn video_delivery_small_pipeline_gap_remains_healthy() {
         let start = Instant::now();
         let mut controller = VideoDeliveryController::default();
         controller.on_frame_sent(
@@ -8130,11 +8140,8 @@ mod test {
             start + Duration::from_millis(250),
         );
         assert!(controller
-            .poll_recovery(start + Duration::from_millis(749), 10)
+            .poll_recovery(start + Duration::from_secs(2), 10)
             .is_empty());
-        let actions = controller.poll_recovery(start + Duration::from_millis(750), 10);
-        assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].previous_phase, VideoDeliveryPhase::Healthy);
 
         let mut recovered = feedback;
         recovered.received_frame_id = 2;
@@ -8147,7 +8154,7 @@ mod test {
     }
 
     #[test]
-    fn video_delivery_fresh_frame_after_idle_waits_from_its_send_time() {
+    fn video_delivery_idle_pipeline_slack_does_not_request_recovery() {
         let start = Instant::now();
         let mut controller = VideoDeliveryController::default();
         controller.on_frame_sent(
@@ -8182,18 +8189,21 @@ mod test {
             },
             fresh_frame_sent_at,
         );
+        controller.on_frame_sent(
+            &VideoFrame {
+                stream_id: 7,
+                frame_id: 3,
+                display: 0,
+                ..Default::default()
+            },
+            fresh_frame_sent_at + Duration::from_millis(1),
+        );
 
         let polled_at = fresh_frame_sent_at + Duration::from_millis(1);
         assert!(controller.poll_recovery(polled_at, 10).is_empty());
-        let actions = controller.poll_recovery(
-            fresh_frame_sent_at + VIDEO_DELIVERY_MIN_PROGRESS_TIMEOUT,
-            10,
-        );
-        assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].highest_sent_frame_id, 2);
-        assert_eq!(actions[0].highest_decoded_frame_id, 1);
-        assert_eq!(actions[0].highest_render_submitted_frame_id, 1);
-        assert_eq!(actions[0].stalled_ms, 500);
+        assert!(controller
+            .poll_recovery(fresh_frame_sent_at + Duration::from_secs(10), 10)
+            .is_empty());
         assert_eq!(
             polled_at.saturating_duration_since(fresh_frame_sent_at),
             Duration::from_millis(1)
@@ -8381,15 +8391,17 @@ mod test {
             start + Duration::from_millis(100),
         );
 
-        controller.on_frame_sent(
-            &VideoFrame {
-                stream_id: 7,
-                frame_id: 2,
-                display: 0,
-                ..Default::default()
-            },
-            start + Duration::from_millis(150),
-        );
+        for frame_id in 2..=4 {
+            controller.on_frame_sent(
+                &VideoFrame {
+                    stream_id: 7,
+                    frame_id,
+                    display: 0,
+                    ..Default::default()
+                },
+                start + Duration::from_millis(150),
+            );
+        }
         assert!(controller
             .poll_recovery(start + Duration::from_millis(649), 10)
             .is_empty());
@@ -8403,22 +8415,24 @@ mod test {
             &VideoFeedback {
                 stream_id: 7,
                 display: 0,
-                received_frame_id: 2,
-                decoded_frame_id: 2,
-                render_submitted_frame_id: 2,
+                received_frame_id: 4,
+                decoded_frame_id: 4,
+                render_submitted_frame_id: 4,
                 ..Default::default()
             },
             start + Duration::from_millis(700),
         );
-        controller.on_frame_sent(
-            &VideoFrame {
-                stream_id: 7,
-                frame_id: 3,
-                display: 0,
-                ..Default::default()
-            },
-            start + Duration::from_millis(750),
-        );
+        for frame_id in 5..=7 {
+            controller.on_frame_sent(
+                &VideoFrame {
+                    stream_id: 7,
+                    frame_id,
+                    display: 0,
+                    ..Default::default()
+                },
+                start + Duration::from_millis(750),
+            );
+        }
         assert!(controller
             .poll_recovery(start + Duration::from_millis(1_649), 10)
             .is_empty());
