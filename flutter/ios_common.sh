@@ -186,6 +186,8 @@ if [[ ${#CODEC_ROOTS[@]} -eq 0 ]]; then
   exit 1
 fi
 
+: "${RUSTDESK_IOS_CARGO_FEATURES:=flutter,hwcodec}"
+
 find_component_root "libyuv" "include/libyuv/convert.h" "lib/libyuv.a"
 SELECTED_CODEC_ROOT="${FOUND_COMPONENT_ROOT}"
 if [[ -z "${RUSTDESK_IOS_CODEC_ROOT:-}" ]]; then
@@ -194,6 +196,13 @@ fi
 if [[ -z "${CMAKE_PREFIX_PATH:-}" ]]; then
   export CMAKE_PREFIX_PATH="${SELECTED_CODEC_ROOT}"
 fi
+if [[ -d "${SELECTED_CODEC_ROOT}/lib/pkgconfig" ]]; then
+  if [[ -z "${PKG_CONFIG_PATH:-}" ]]; then
+    export PKG_CONFIG_PATH="${SELECTED_CODEC_ROOT}/lib/pkgconfig"
+  else
+    export PKG_CONFIG_PATH="${SELECTED_CODEC_ROOT}/lib/pkgconfig:${PKG_CONFIG_PATH}"
+  fi
+fi
 find_component_root "libvpx" "include/vpx/vpx_encoder.h" "lib/libvpx.a"
 find_component_root "aom" "include/aom/aom.h" "lib/libaom.a"
 find_component_root "opus" "include/opus/opus_multistream.h" "lib/libopus.a"
@@ -201,6 +210,12 @@ find_component_root "libsodium" "include/sodium.h" "lib/libsodium.a"
 if [[ -z "${SODIUM_LIB_DIR:-}" ]]; then
   export SODIUM_LIB_DIR="${FOUND_COMPONENT_ROOT}/lib"
 fi
+IOS_CARGO_FEATURES_CSV=",${RUSTDESK_IOS_CARGO_FEATURES// /,},"
+if [[ "${IOS_CARGO_FEATURES_CSV}" == *",hwcodec,"* ]]; then
+  find_component_root "FFmpeg avcodec" "include/libavcodec/avcodec.h" "lib/libavcodec.a"
+  find_component_root "FFmpeg avformat" "include/libavformat/avformat.h" "lib/libavformat.a"
+  find_component_root "FFmpeg avutil" "include/libavutil/avutil.h" "lib/libavutil.a"
+fi
 
 cd "${REPO_DIR}"
-cargo build --locked --features flutter --release --target "${RUST_TARGET}" --lib
+cargo build --locked --features "${RUSTDESK_IOS_CARGO_FEATURES}" --release --target "${RUST_TARGET}" --lib

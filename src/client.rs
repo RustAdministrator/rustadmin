@@ -3869,6 +3869,14 @@ fn get_hwcodec_config() {
             log::info!("{:?} used to get hwcodec config", start.elapsed());
         }
     }
+    #[cfg(feature = "hwcodec")]
+    #[cfg(target_os = "ios")]
+    {
+        if !scrap::codec::enable_hwcodec_option() || scrap::hwcodec::HwCodecConfig::already_set() {
+            return;
+        }
+        scrap::hwcodec::start_check_process();
+    }
 }
 
 #[cfg(windows)]

@@ -1171,7 +1171,7 @@ pub fn get_api_server() -> String {
 #[inline]
 pub fn has_hwcodec() -> bool {
     // Has real hardware codec using gpu
-    (cfg!(feature = "hwcodec") && cfg!(not(target_os = "ios"))) || cfg!(feature = "mediacodec")
+    cfg!(feature = "hwcodec") || cfg!(feature = "mediacodec")
 }
 
 #[inline]
@@ -1719,6 +1719,9 @@ pub fn check_hwcodec() {
             scrap::hwcodec::recheck_hwcodec();
         }
     }
+    #[cfg(feature = "hwcodec")]
+    #[cfg(target_os = "ios")]
+    scrap::hwcodec::recheck_hwcodec();
 }
 
 #[cfg(feature = "flutter")]
