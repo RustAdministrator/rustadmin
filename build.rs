@@ -1,6 +1,9 @@
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+const ANDROID_NATIVE_ROOT_ENV: &str = "RUSTADMIN_ANDROID_NATIVE_ROOT";
+const CMAKE_PREFIX_PATH_ENV: &str = "CMAKE_PREFIX_PATH";
 
 #[cfg(windows)]
 fn build_windows() {
@@ -47,38 +50,99 @@ fn build_manifest() {
     }
 }
 
-fn install_android_deps() {
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+fn android_abi(target_arch: &str) -> Result<&'static str, String> {
+    match target_arch {
+        "aarch64" => Ok("arm64-v8a"),
+        "arm" => Ok("armeabi-v7a"),
+        "x86_64" => Ok("x86_64"),
+        "x86" => Ok("x86"),
+        _ => Err(format!(
+            "unsupported Android target architecture: {target_arch}"
+        )),
+    }
+}
+
+fn push_android_prefix(candidates: &mut Vec<PathBuf>, root: PathBuf, abi: &str) {
+    if root.file_name().and_then(|name| name.to_str()) == Some(abi) {
+        candidates.push(root);
+    } else {
+        candidates.push(root.join(abi));
+    }
+}
+
+fn has_android_library(lib_dir: &Path, name: &str) -> bool {
+    lib_dir.join(format!("lib{name}.a")).is_file()
+        || lib_dir.join(format!("lib{name}.so")).is_file()
+}
+
+fn explicit_android_prefix(abi: &str) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(root) = std::env::var_os(ANDROID_NATIVE_ROOT_ENV) {
+        push_android_prefix(&mut candidates, PathBuf::from(root), abi);
+    }
+    if let Some(paths) = std::env::var_os(CMAKE_PREFIX_PATH_ENV) {
+        for root in std::env::split_paths(&paths) {
+            push_android_prefix(&mut candidates, root, abi);
+        }
+    }
+
+    candidates.into_iter().find(|prefix| {
+        let lib_dir = prefix.join("lib");
+        has_android_library(&lib_dir, "ndk_compat") && has_android_library(&lib_dir, "oboe")
+    })
+}
+
+fn legacy_android_vcpkg_prefix(target_arch: &str) -> Option<PathBuf> {
+    let triplet = match target_arch {
+        "aarch64" => "arm64-android",
+        "arm" => "arm-android",
+        "x86_64" => "x64-android",
+        "x86" => "x86-android",
+        _ => return None,
+    };
+
+    if let Some(installed_root) = std::env::var_os("VCPKG_INSTALLED_ROOT") {
+        return Some(PathBuf::from(installed_root).join(triplet));
+    }
+    std::env::var_os("VCPKG_ROOT")
+        .map(PathBuf::from)
+        .map(|root| root.join("installed").join(triplet))
+}
+
+fn install_android_deps(target_os: &str) -> Result<(), String> {
     if target_os != "android" {
-        return;
+        return Ok(());
     }
-    let mut target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
-    if target_arch == "x86_64" {
-        target_arch = "x64".to_owned();
-    } else if target_arch == "x86" {
-        target_arch = "x86".to_owned();
-    } else if target_arch == "aarch64" {
-        target_arch = "arm64".to_owned();
-    } else {
-        target_arch = "arm".to_owned();
+
+    println!("cargo:rerun-if-env-changed={ANDROID_NATIVE_ROOT_ENV}");
+    println!("cargo:rerun-if-env-changed={CMAKE_PREFIX_PATH_ENV}");
+    println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
+    println!("cargo:rerun-if-env-changed=VCPKG_INSTALLED_ROOT");
+
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH")
+        .map_err(|error| format!("CARGO_CFG_TARGET_ARCH is unavailable: {error}"))?;
+    let abi = android_abi(&target_arch)?;
+    let prefix = explicit_android_prefix(abi)
+        .or_else(|| legacy_android_vcpkg_prefix(&target_arch))
+        .ok_or_else(|| {
+            format!(
+                "Android native dependencies for {abi} were not found. Set {ANDROID_NATIVE_ROOT_ENV} to a root containing {abi}/lib, or add that ABI prefix to {CMAKE_PREFIX_PATH_ENV}."
+            )
+        })?;
+    let lib_dir = prefix.join("lib");
+    if !has_android_library(&lib_dir, "ndk_compat") || !has_android_library(&lib_dir, "oboe") {
+        return Err(format!(
+            "Android native prefix {} must contain libndk_compat and liboboe in lib/",
+            prefix.display()
+        ));
     }
-    let target = format!("{}-android", target_arch);
-    let vcpkg_root = std::env::var("VCPKG_ROOT").unwrap();
-    let mut path: std::path::PathBuf = vcpkg_root.into();
-    if let Ok(vcpkg_root) = std::env::var("VCPKG_INSTALLED_ROOT") {
-        path = vcpkg_root.into();
-    } else {
-        path.push("installed");
-    }
-    path.push(target);
-    println!(
-        "cargo:rustc-link-search={}",
-        path.join("lib").to_str().unwrap()
-    );
+
+    println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=ndk_compat");
     println!("cargo:rustc-link-lib=oboe");
     println!("cargo:rustc-link-lib=c++");
     println!("cargo:rustc-link-lib=OpenSLES");
+    Ok(())
 }
 
 fn read_revision_file<P: AsRef<Path>>(path: P) -> Option<String> {
@@ -147,18 +211,20 @@ fn gen_version() {
     }
 }
 
-fn main() {
+fn main() -> Result<(), String> {
     gen_version();
-    install_android_deps();
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS")
+        .map_err(|error| format!("CARGO_CFG_TARGET_OS is unavailable: {error}"))?;
+    install_android_deps(&target_os)?;
     #[cfg(all(windows, feature = "inline"))]
     build_manifest();
     #[cfg(windows)]
     build_windows();
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
     if target_os == "macos" {
         #[cfg(target_os = "macos")]
         build_mac();
         println!("cargo:rustc-link-lib=framework=ApplicationServices");
     }
     println!("cargo:rerun-if-changed=build.rs");
+    Ok(())
 }

@@ -1,2 +1,5 @@
 #!/usr/bin/env bash
-cargo ndk --platform 21 --target aarch64-linux-android build --locked --release --features flutter,hwcodec
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec bash "${SCRIPT_DIR}/android_common.sh" aarch64-linux-android arm64-v8a flutter,hwcodec

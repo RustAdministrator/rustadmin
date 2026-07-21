@@ -11,6 +11,7 @@ const LOCAL_CODEC_ROOT_ENV: &str = "RUSTDESK_MACOS_CODEC_ROOT";
 const LOCAL_CODEC_ROOT_ENV: &str = "RUSTDESK_WINDOWS_CODEC_ROOT";
 const CMAKE_PREFIX_PATH_ENV: &str = "CMAKE_PREFIX_PATH";
 const IOS_CODEC_ROOT_ENV: &str = "RUSTDESK_IOS_CODEC_ROOT";
+const ANDROID_NATIVE_ROOT_ENV: &str = "RUSTADMIN_ANDROID_NATIVE_ROOT";
 
 fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
     if paths.iter().all(|existing| existing != &path) {
@@ -43,6 +44,70 @@ fn push_prefix_path_list(paths: &mut Vec<PathBuf>, value: &std::ffi::OsStr) {
             push_prefix_candidate(paths, PathBuf::from(raw_path));
         }
     }
+}
+
+fn android_abi() -> Result<&'static str, String> {
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH")
+        .map_err(|error| format!("CARGO_CFG_TARGET_ARCH is unavailable: {error}"))?;
+    match target_arch.as_str() {
+        "aarch64" => Ok("arm64-v8a"),
+        "arm" => Ok("armeabi-v7a"),
+        "x86_64" => Ok("x86_64"),
+        "x86" => Ok("x86"),
+        _ => Err(format!(
+            "unsupported Android target architecture: {target_arch}"
+        )),
+    }
+}
+
+fn push_android_prefix(paths: &mut Vec<PathBuf>, root: PathBuf, abi: &str) {
+    let prefix = if root.file_name().and_then(|name| name.to_str()) == Some(abi) {
+        root
+    } else {
+        root.join(abi)
+    };
+    push_unique_path(paths, prefix);
+}
+
+fn android_native_roots(abi: &str) -> Vec<PathBuf> {
+    println!("cargo:rerun-if-env-changed={ANDROID_NATIVE_ROOT_ENV}");
+    println!("cargo:rerun-if-env-changed={CMAKE_PREFIX_PATH_ENV}");
+    let mut roots = Vec::new();
+
+    if let Some(root) = env::var_os(ANDROID_NATIVE_ROOT_ENV) {
+        push_android_prefix(&mut roots, PathBuf::from(root), abi);
+    }
+    if let Some(path_list) = env::var_os(CMAKE_PREFIX_PATH_ENV) {
+        for root in env::split_paths(&path_list) {
+            push_android_prefix(&mut roots, root, abi);
+        }
+    }
+    roots
+}
+
+fn link_android_opus_root(name: &str) -> Result<Option<Vec<PathBuf>>, String> {
+    let abi = android_abi()?;
+    for root in android_native_roots(abi) {
+        let include_dir = root.join("include");
+        if !include_dir
+            .join("opus")
+            .join("opus_multistream.h")
+            .is_file()
+        {
+            continue;
+        }
+
+        let lib_dir = root.join("lib");
+        if !lib_dir.join(format!("lib{name}.a")).is_file() {
+            continue;
+        }
+
+        println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        println!("cargo:rustc-link-lib=static={name}");
+        println!("cargo:include={}", include_dir.display());
+        return Ok(Some(vec![include_dir]));
+    }
+    Ok(None)
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -375,6 +440,20 @@ fn find_package(name: &str) -> Vec<PathBuf> {
 #[cfg(not(all(target_os = "linux", feature = "linux-pkg-config")))]
 fn find_package(name: &str) -> Vec<PathBuf> {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
+    if target_os == "android" {
+        match link_android_opus_root(name) {
+            Ok(Some(include_paths)) => return include_paths,
+            Ok(None) => {}
+            Err(error) => panic!("{error}"),
+        }
+        if let Ok(vcpkg_root) = std::env::var("VCPKG_ROOT") {
+            return vec![link_vcpkg(vcpkg_root.into(), name)];
+        }
+        panic!(
+            "Couldn't find Android codec '{}'. Set {} to a root containing ABI-specific include/ and lib/ directories, or add the ABI prefix to {}.",
+            name, ANDROID_NATIVE_ROOT_ENV, CMAKE_PREFIX_PATH_ENV
+        );
+    }
     if target_os == "ios" {
         if let Some(include_paths) = link_ios_codec_root(name) {
             return include_paths;

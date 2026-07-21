@@ -4,7 +4,9 @@ set -e -o pipefail
 
 ANDROID_ABI=$1
 
-# Build RustDesk dependencies for Android using vcpkg.json
+# Compatibility-only F-Droid dependency builder using the upstream vcpkg flow.
+# Normal RustAdmin Android builds consume ABI-specific prefixes through
+# RUSTADMIN_ANDROID_NATIVE_ROOT or CMAKE_PREFIX_PATH instead.
 # Required:
 #   1. set VCPKG_ROOT / ANDROID_NDK path environment variables
 #   2. vcpkg initialized
