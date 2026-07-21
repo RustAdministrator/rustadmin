@@ -1170,7 +1170,7 @@ struct HwCodecConfig2 {
 // portable: ui start check process, check process send to ui
 // sciter and unilink: get from ipc server
 impl HwCodecConfig {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     pub fn set(config: String) {
         let config: HwCodecConfig = serde_json::from_str(&config).unwrap_or_default();
         log::info!("set hwcodec config");
@@ -1291,11 +1291,11 @@ impl HwCodecConfig {
         }
         #[cfg(target_os = "ios")]
         {
-            HwCodecConfig::default()
+            CONFIG.lock().unwrap().clone().unwrap_or_default()
         }
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     pub fn get_set_value() -> Option<HwCodecConfig> {
         let set = CONFIG_SET_BY_IPC.lock().unwrap().clone();
         if set {
@@ -1305,12 +1305,12 @@ impl HwCodecConfig {
         }
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     pub fn already_set() -> bool {
         CONFIG_SET_BY_IPC.lock().unwrap().clone()
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "android"))]
     pub fn reset() {
         log::info!("reset hwcodec config");
         *CONFIG.lock().unwrap() = None;
@@ -1393,6 +1393,28 @@ pub fn start_check_process() {
 pub fn recheck_hwcodec() {
     HwCodecConfig::reset();
     start_check_process_inner(true);
+}
+
+#[cfg(target_os = "ios")]
+pub fn start_check_process() {
+    start_check_process_inner_ios(false);
+}
+
+#[cfg(target_os = "ios")]
+pub fn recheck_hwcodec() {
+    HwCodecConfig::reset();
+    start_check_process_inner_ios(true);
+}
+
+#[cfg(target_os = "ios")]
+fn start_check_process_inner_ios(force: bool) {
+    if !enable_hwcodec_option() || (!force && HwCodecConfig::already_set()) {
+        return;
+    }
+    std::thread::spawn(|| {
+        let config = check_available_hwcodec();
+        HwCodecConfig::set(config);
+    });
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
