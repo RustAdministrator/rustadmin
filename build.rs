@@ -63,9 +63,8 @@ fn android_abi(target_arch: &str) -> Result<&'static str, String> {
 }
 
 fn push_android_prefix(candidates: &mut Vec<PathBuf>, root: PathBuf, abi: &str) {
-    if root.file_name().and_then(|name| name.to_str()) == Some(abi) {
-        candidates.push(root);
-    } else {
+    candidates.push(root.clone());
+    if root.file_name().and_then(|name| name.to_str()) != Some(abi) {
         candidates.push(root.join(abi));
     }
 }
@@ -126,7 +125,7 @@ fn install_android_deps(target_os: &str) -> Result<(), String> {
         .or_else(|| legacy_android_vcpkg_prefix(&target_arch))
         .ok_or_else(|| {
             format!(
-                "Android native dependencies for {abi} were not found. Set {ANDROID_NATIVE_ROOT_ENV} to a root containing {abi}/lib, or add that ABI prefix to {CMAKE_PREFIX_PATH_ENV}."
+                "Android native dependencies for {abi} were not found. Set {ANDROID_NATIVE_ROOT_ENV} or {CMAKE_PREFIX_PATH_ENV} to the dedicated ABI prefix containing include/ and lib/."
             )
         })?;
     let lib_dir = prefix.join("lib");

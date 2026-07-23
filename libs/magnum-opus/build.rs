@@ -61,12 +61,10 @@ fn android_abi() -> Result<&'static str, String> {
 }
 
 fn push_android_prefix(paths: &mut Vec<PathBuf>, root: PathBuf, abi: &str) {
-    let prefix = if root.file_name().and_then(|name| name.to_str()) == Some(abi) {
-        root
-    } else {
-        root.join(abi)
-    };
-    push_unique_path(paths, prefix);
+    push_unique_path(paths, root.clone());
+    if root.file_name().and_then(|name| name.to_str()) != Some(abi) {
+        push_unique_path(paths, root.join(abi));
+    }
 }
 
 fn android_native_roots(abi: &str) -> Vec<PathBuf> {

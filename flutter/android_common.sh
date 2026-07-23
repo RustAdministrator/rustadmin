@@ -32,9 +32,8 @@ declare -a PREFIX_CANDIDATES=()
 add_prefix_candidate() {
   local root="$1"
   [[ -z "${root}" ]] && return 0
-  if [[ "$(basename "${root}")" == "${ANDROID_ABI}" ]]; then
-    PREFIX_CANDIDATES+=("${root}")
-  else
+  PREFIX_CANDIDATES+=("${root}")
+  if [[ "$(basename "${root}")" != "${ANDROID_ABI}" ]]; then
     PREFIX_CANDIDATES+=("${root}/${ANDROID_ABI}")
   fi
 }
@@ -72,8 +71,8 @@ done
 
 if [[ -z "${ANDROID_NATIVE_PREFIX}" ]]; then
   echo "error: native Android dependencies for ${ANDROID_ABI} were not found." >&2
-  echo "       Set RUSTADMIN_ANDROID_NATIVE_ROOT to a root containing ${ANDROID_ABI}/include and ${ANDROID_ABI}/lib," >&2
-  echo "       or add that ABI-specific prefix to CMAKE_PREFIX_PATH." >&2
+  echo "       Set RUSTADMIN_ANDROID_NATIVE_ROOT or CMAKE_PREFIX_PATH to the dedicated" >&2
+  echo "       ${ANDROID_ABI} prefix containing include/ and lib/." >&2
   exit 1
 fi
 
