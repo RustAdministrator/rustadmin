@@ -7,7 +7,8 @@ use super::{input_service::*, *};
 #[cfg(feature = "unix-file-copy-paste")]
 use crate::clipboard::try_empty_clipboard_files;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-use crate::clipboard::{update_clipboard, ClipboardSide};
+use crate::clipboard::update_clipboard;
+use crate::clipboard::ClipboardSide;
 #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
 use crate::clipboard_file::*;
 #[cfg(target_os = "android")]

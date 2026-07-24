@@ -104,25 +104,24 @@ impl WakeLock {
         match android_wakelock::partial(tag) {
             Ok(lock) => {
                 let lock = Box::new(lock);
-                match lock.acquire() {
-                    Ok(guard) => {
-                        let guard = unsafe {
-                            // SAFETY: `guard` borrows data inside `lock`, and the boxed lock is
-                            // stored in the same struct. Field order drops `_guard` before `_lock`.
-                            std::mem::transmute::<
-                                android_wakelock::Guard<'_>,
-                                android_wakelock::Guard<'static>,
-                            >(guard)
-                        };
-                        Self {
-                            _guard: Some(guard),
-                            _lock: Some(lock),
-                        }
-                    }
+                let guard = match lock.acquire() {
+                    Ok(guard) => guard,
                     Err(e) => {
                         hbb_common::log::error!("Failed to acquire wakelock: {e:?}");
-                        Self::default()
+                        return Self::default();
                     }
+                };
+                let guard = unsafe {
+                    // SAFETY: `guard` borrows data inside `lock`, and the boxed lock is
+                    // stored in the same struct. Field order drops `_guard` before `_lock`.
+                    std::mem::transmute::<
+                        android_wakelock::Guard<'_>,
+                        android_wakelock::Guard<'static>,
+                    >(guard)
+                };
+                Self {
+                    _guard: Some(guard),
+                    _lock: Some(lock),
                 }
             }
             Err(e) => {

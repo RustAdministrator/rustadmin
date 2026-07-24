@@ -87,7 +87,7 @@ fn explicit_android_prefix(abi: &str) -> Option<PathBuf> {
 
     candidates.into_iter().find(|prefix| {
         let lib_dir = prefix.join("lib");
-        has_android_library(&lib_dir, "ndk_compat") && has_android_library(&lib_dir, "oboe")
+        has_android_library(&lib_dir, "ndk_compat")
     })
 }
 
@@ -129,16 +129,15 @@ fn install_android_deps(target_os: &str) -> Result<(), String> {
             )
         })?;
     let lib_dir = prefix.join("lib");
-    if !has_android_library(&lib_dir, "ndk_compat") || !has_android_library(&lib_dir, "oboe") {
+    if !has_android_library(&lib_dir, "ndk_compat") {
         return Err(format!(
-            "Android native prefix {} must contain libndk_compat and liboboe in lib/",
+            "Android native prefix {} must contain libndk_compat in lib/",
             prefix.display()
         ));
     }
 
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=ndk_compat");
-    println!("cargo:rustc-link-lib=oboe");
     println!("cargo:rustc-link-lib=c++");
     println!("cargo:rustc-link-lib=OpenSLES");
     Ok(())
