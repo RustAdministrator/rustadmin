@@ -981,7 +981,9 @@ fn preferred_server_launch_mode(session_id: DWORD) -> ServerLaunchMode {
         return ServerLaunchMode::Privileged;
     }
     if administrator_protection_enabled() {
-        return ServerLaunchMode::InteractiveUser;
+        log::debug!(
+            "Administrator Protection detected; retaining privileged server and using per-capture user helpers"
+        );
     }
     ServerLaunchMode::Privileged
 }

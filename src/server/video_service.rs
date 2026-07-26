@@ -28,6 +28,7 @@ use crate::privacy_mode::{get_privacy_mode_conn_id, INVALID_PRIVACY_MODE_CONN_ID
 use crate::{
     platform::windows::is_process_consent_running,
     privacy_mode::{is_current_privacy_mode_impl, PRIVACY_MODE_IMPL_WIN_MAG},
+    server::user_capture_helper::UserCaptureBackend,
     ui_interface::is_installed,
 };
 use hbb_common::{
@@ -649,7 +650,12 @@ fn create_wgc_priority_capturer(
     height: usize,
 ) -> ResultType<Box<dyn TraitCapturer>> {
     if should_use_user_capture_helper(portable_service_running, privacy_mode_id) {
-        match crate::server::user_capture_helper::client::create_capturer(current, width, height) {
+        match crate::server::user_capture_helper::client::create_capturer(
+            UserCaptureBackend::Wgc,
+            current,
+            width,
+            height,
+        ) {
             Ok(capturer) => {
                 log::info!("Create capturer via user WGC helper");
                 return Ok(capturer);
@@ -710,11 +716,38 @@ fn create_magnifier_priority_capturer(
 
 #[cfg(windows)]
 fn create_dxgi_priority_capturer(
+    privacy_mode_id: i32,
     display: Display,
     current: usize,
     portable_service_running: bool,
 ) -> ResultType<Box<dyn TraitCapturer>> {
-    log::debug!("Create capturer dxgi|gdi");
+    let width = display.width();
+    let height = display.height();
+    if should_use_user_capture_helper(portable_service_running, privacy_mode_id) {
+        match crate::server::user_capture_helper::client::create_capturer(
+            UserCaptureBackend::Dxgi,
+            current,
+            width,
+            height,
+        ) {
+            Ok(capturer) => {
+                log::info!(
+                    "Create capturer via user DXGI helper: display={}, size={}x{}",
+                    current,
+                    width,
+                    height
+                );
+                return Ok(capturer);
+            }
+            Err(err) => {
+                log::warn!(
+                    "Failed to create user DXGI helper capturer, falling back to direct dxgi|gdi: {}",
+                    err
+                );
+            }
+        }
+    }
+    log::debug!("Create direct capturer dxgi|gdi");
     crate::portable_service::client::create_capturer(current, display, portable_service_running)
 }
 
@@ -929,7 +962,12 @@ fn create_windows_capturer(
             locked,
             desktop_changed
         );
-        return create_dxgi_priority_capturer(display, current, portable_service_running);
+        return create_dxgi_priority_capturer(
+            privacy_mode_id,
+            display,
+            current,
+            portable_service_running,
+        );
     }
 
     match create_wgc_priority_capturer(
@@ -958,7 +996,8 @@ fn create_windows_capturer(
         }
     }
 
-    match create_dxgi_priority_capturer(display, current, portable_service_running) {
+    match create_dxgi_priority_capturer(privacy_mode_id, display, current, portable_service_running)
+    {
         Ok(capturer) => {
             log::info!(
                 "capture auto backend selected: {}",
@@ -1314,6 +1353,7 @@ fn apply_capture_backend_preference(c: &mut CapturerInfo) {
                 return;
             };
             match create_dxgi_priority_capturer(
+                c._capturer_privacy_mode_id,
                 display,
                 c.current,
                 crate::portable_service::client::running(),
