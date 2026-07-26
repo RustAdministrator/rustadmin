@@ -52,5 +52,5 @@ lib/generated_bridge.freezed.dart
 **/Runner/bridge_generated.h
 flutter_export_environment.sh
 Flutter-Generated.xcconfig
-key.jks
+*.jks
 macos/rustdesk.xcodeproj/project.xcworkspace/

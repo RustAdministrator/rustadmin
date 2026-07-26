@@ -4576,6 +4576,7 @@ class FFI {
   // Terminal model registry for multiple terminals
   final Map<int, TerminalModel> _terminalModels = {};
   int _sessionEventGeneration = 0;
+  int _sessionStartGeneration = 0;
 
   // Getter for terminal models
   Map<int, TerminalModel> get terminalModels => _terminalModels;
@@ -4621,7 +4622,7 @@ class FFI {
   }
 
   /// Start with the given [id]. Only transfer file if [isFileTransfer], only view camera if [isViewCamera], only port forward if [isPortForward].
-  void start(
+  Future<void> start(
     String id, {
     bool isFileTransfer = false,
     bool isViewCamera = false,
@@ -4638,7 +4639,8 @@ class FFI {
     List<int>? displays,
     bool attachExisting = false,
     String? cachedPeerData,
-  }) {
+  }) async {
+    final sessionStartGeneration = ++_sessionStartGeneration;
     closed = false;
     if (isMobile) mobileReset();
     assert(
@@ -4669,21 +4671,42 @@ class FFI {
     // If tabWindowId != null, this session is a "tab -> window" one.
     // Else this session is a new one.
     if (isNewPeer && !attachExisting) {
-      // ignore: unused_local_variable
-      final addRes = bind.sessionAddSync(
-        sessionId: sessionId,
-        id: id,
-        isFileTransfer: isFileTransfer,
-        isViewCamera: isViewCamera,
-        isPortForward: isPortForward,
-        isRdp: isRdp,
-        isTerminal: isTerminal,
-        switchUuid: switchUuid ?? '',
-        forceRelay: forceRelay ?? false,
-        password: password ?? '',
-        isSharedPassword: isSharedPassword ?? false,
-        connToken: connToken,
-      );
+      final addRes = isMobile
+          ? await bind.sessionAddAsync(
+              sessionId: sessionId,
+              id: id,
+              isFileTransfer: isFileTransfer,
+              isViewCamera: isViewCamera,
+              isPortForward: isPortForward,
+              isRdp: isRdp,
+              isTerminal: isTerminal,
+              switchUuid: switchUuid ?? '',
+              forceRelay: forceRelay ?? false,
+              password: password ?? '',
+              isSharedPassword: isSharedPassword ?? false,
+              connToken: connToken,
+            )
+          : bind.sessionAddSync(
+              sessionId: sessionId,
+              id: id,
+              isFileTransfer: isFileTransfer,
+              isViewCamera: isViewCamera,
+              isPortForward: isPortForward,
+              isRdp: isRdp,
+              isTerminal: isTerminal,
+              switchUuid: switchUuid ?? '',
+              forceRelay: forceRelay ?? false,
+              password: password ?? '',
+              isSharedPassword: isSharedPassword ?? false,
+              connToken: connToken,
+            );
+      if (addRes.isNotEmpty) {
+        throw StateError(addRes);
+      }
+      if (closed || sessionStartGeneration != _sessionStartGeneration) {
+        await bind.sessionClose(sessionId: sessionId);
+        return;
+      }
     } else if (display != null) {
       if (displays == null) {
         debugPrint(
@@ -4876,6 +4899,7 @@ class FFI {
   /// Close the remote session.
   Future<void> close(
       {bool closeSession = true, bool saveCanvasConfig = true}) async {
+    ++_sessionStartGeneration;
     closed = true;
     chatModel.close();
     // Close all terminal models

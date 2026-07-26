@@ -106,6 +106,14 @@ android {
         versionName flutterVersionName
     }
 
+    packaging {
+        jniLibs {
+            // Keep the APK compact; Android extracts compressed native libraries
+            // at install time, matching the packaging used by earlier releases.
+            useLegacyPackaging true
+        }
+    }
+
     signingConfigs {
       release {
         keyAlias keystoreProperties['keyAlias']

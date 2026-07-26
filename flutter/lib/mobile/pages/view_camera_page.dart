@@ -87,22 +87,16 @@ class _ViewCameraPageState extends State<ViewCameraPage>
   void initState() {
     super.initState();
     gFFI.ffiModel.updateEventListener(sessionId, widget.id);
-    gFFI.start(
-      widget.id,
-      isViewCamera: true,
-      password: widget.password,
-      isSharedPassword: widget.isSharedPassword,
-      forceRelay: widget.forceRelay,
-    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
       gFFI.dialogManager
           .showLoading(translate('Connecting...'), onCancel: closeConnection);
+      unawaited(_startConnection());
     });
     WakelockManager.enable(_uniqueKey);
     _physicalFocusNode.requestFocus();
     gFFI.inputModel.listenToMouse(true);
-    gFFI.qualityMonitorModel.checkShowQualityMonitor(sessionId);
     gFFI.chatModel
         .changeCurrentKey(MessageKey(widget.id, ChatModel.clientModeID));
     _blockableOverlayState.applyFfi(gFFI);
@@ -116,6 +110,26 @@ class _ViewCameraPageState extends State<ViewCameraPage>
           isKeyboardVisible: keyboardVisibilityController.isVisible);
     });
     WidgetsBinding.instance.addObserver(this);
+  }
+
+  Future<void> _startConnection() async {
+    try {
+      await gFFI.start(
+        widget.id,
+        isViewCamera: true,
+        password: widget.password,
+        isSharedPassword: widget.isSharedPassword,
+        forceRelay: widget.forceRelay,
+      );
+      if (!mounted || gFFI.closed) return;
+      unawaited(gFFI.qualityMonitorModel.checkShowQualityMonitor(sessionId));
+    } catch (e, stackTrace) {
+      debugPrint('Failed to start mobile camera session: $e\n$stackTrace');
+      if (!mounted) return;
+      gFFI.dialogManager.dismissAll();
+      showToast(translate('Failed to connect'));
+      closeConnection();
+    }
   }
 
   @override

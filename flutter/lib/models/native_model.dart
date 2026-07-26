@@ -28,6 +28,7 @@ typedef HandleEvent = Future<void> Function(Map<String, dynamic> evt);
 /// FFI wrapper around the native Rust core.
 /// Hides the platform differences.
 class PlatformFFI {
+  static const _flutterDiagnosticMaxBytes = 2 * 1024 * 1024;
   String _dir = '';
   // _homeDir is only needed for Android and IOS.
   String _homeDir = '';
@@ -35,6 +36,7 @@ class PlatformFFI {
   late Rustadmin _ffiBind;
   late String _appType;
   StreamEventHandler? _eventCallback;
+  File? _flutterDiagnosticFile;
 
   PlatformFFI._();
 
@@ -148,6 +150,9 @@ class PlatformFFI {
       try {
         // SYSTEM user failed
         _dir = (await getApplicationDocumentsDirectory()).path;
+        if (isAndroid) {
+          _initializeAndroidDiagnostics();
+        }
       } catch (e) {
         debugPrint('Failed to get documents directory: $e');
       }
@@ -298,8 +303,62 @@ class PlatformFFI {
     return await _toAndroidChannel.invokeMethod(method, arguments);
   }
 
+  Future<String?> exportAndroidDiagnostics() async {
+    if (!isAndroid) return null;
+    return _toAndroidChannel.invokeMethod<String>('export_diagnostics');
+  }
+
   void syncAndroidServiceAppDirConfigPath() {
     invokeMethod(AndroidChannel.kSyncAppDirConfigPath, _dir);
+  }
+
+  void _initializeAndroidDiagnostics() {
+    if (_dir.isEmpty || _flutterDiagnosticFile != null) return;
+    try {
+      final directory = Directory('$_dir/diagnostics')
+        ..createSync(recursive: true);
+      _flutterDiagnosticFile = File('${directory.path}/flutter-errors.log');
+      _rotateFlutterDiagnosticFileIfNeeded();
+
+      final previousFlutterHandler = FlutterError.onError;
+      FlutterError.onError = (details) {
+        _appendFlutterDiagnostic(
+            'FlutterError', details.exception, details.stack);
+        previousFlutterHandler?.call(details);
+      };
+
+      final previousPlatformHandler = PlatformDispatcher.instance.onError;
+      PlatformDispatcher.instance.onError = (error, stack) {
+        _appendFlutterDiagnostic('PlatformDispatcher', error, stack);
+        return previousPlatformHandler?.call(error, stack) ?? false;
+      };
+    } catch (_) {
+      _flutterDiagnosticFile = null;
+    }
+  }
+
+  void _appendFlutterDiagnostic(
+      String source, Object error, StackTrace? stack) {
+    final file = _flutterDiagnosticFile;
+    if (file == null) return;
+    try {
+      _rotateFlutterDiagnosticFileIfNeeded();
+      var entry = '${DateTime.now().toUtc().toIso8601String()} '
+          '[$source] $error\n${stack ?? ''}\n';
+      if (entry.length > 64 * 1024) {
+        entry = '${entry.substring(0, 64 * 1024)}\n[truncated]\n';
+      }
+      file.writeAsStringSync(entry, mode: FileMode.append, flush: true);
+    } catch (_) {}
+  }
+
+  void _rotateFlutterDiagnosticFileIfNeeded() {
+    final file = _flutterDiagnosticFile;
+    if (file == null || !file.existsSync()) return;
+    if (file.lengthSync() < _flutterDiagnosticMaxBytes) return;
+    final previous = File('${file.path}.1');
+    if (previous.existsSync()) previous.deleteSync();
+    file.renameSync(previous.path);
   }
 
   void setFullscreenCallback(void Function(bool) fun) {}

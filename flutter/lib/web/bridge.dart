@@ -104,6 +104,37 @@ class RustadminImpl {
     ]);
   }
 
+  Future<String> sessionAddAsync(
+      {required UuidValue sessionId,
+      required String id,
+      required bool isFileTransfer,
+      required bool isViewCamera,
+      required bool isPortForward,
+      required bool isRdp,
+      required bool isTerminal,
+      required String switchUuid,
+      required bool forceRelay,
+      required String password,
+      required bool isSharedPassword,
+      String? connToken,
+      dynamic hint}) async {
+    return sessionAddSync(
+      sessionId: sessionId,
+      id: id,
+      isFileTransfer: isFileTransfer,
+      isViewCamera: isViewCamera,
+      isPortForward: isPortForward,
+      isRdp: isRdp,
+      isTerminal: isTerminal,
+      switchUuid: switchUuid,
+      forceRelay: forceRelay,
+      password: password,
+      isSharedPassword: isSharedPassword,
+      connToken: connToken,
+      hint: hint,
+    );
+  }
+
   Stream<EventToUI> sessionStart(
       {required UuidValue sessionId, required String id, dynamic hint}) {
     js.context.callMethod('setByName', [

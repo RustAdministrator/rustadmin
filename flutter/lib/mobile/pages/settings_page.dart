@@ -1076,6 +1076,20 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             SettingsTile(
                 title: Text('${translate("Version")}: $version'),
                 leading: Icon(Icons.info)),
+            if (isAndroid)
+              SettingsTile(
+                onPressed: (context) async {
+                  try {
+                    await platformFFI.exportAndroidDiagnostics();
+                  } catch (error) {
+                    debugPrint('Failed to export diagnostics: $error');
+                    showToast(translate('Failed'));
+                  }
+                },
+                title: Text('Export diagnostic report'),
+                description: Text('Create a private log ZIP and share it'),
+                leading: Icon(Icons.bug_report_outlined),
+              ),
             SettingsTile(
                 title: Text('Attribution'),
                 description:
