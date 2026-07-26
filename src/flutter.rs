@@ -1428,8 +1428,10 @@ pub fn session_add(
         // The same session is added before?
         bail!("same session id is found");
     }
+    log::info!("session-add stage=session-id-available");
 
     LocalConfig::set_remote_id(&id);
+    log::info!("session-add stage=remote-id-saved");
 
     let mut preset_password = password.clone();
     let shared_password = if is_shared_password {
@@ -1464,9 +1466,11 @@ pub fn session_add(
         shared_password,
         conn_token,
     );
+    log::info!("session-add stage=login-config-initialized");
 
     let session = Arc::new(session.clone());
     sessions::insert_session(session_id.to_owned(), conn_type, session.clone());
+    log::info!("session-add stage=session-inserted");
 
     Ok(session)
 }

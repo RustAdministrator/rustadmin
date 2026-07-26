@@ -187,6 +187,8 @@ class PlatformFFI {
   // just for compilation
   void syncAndroidServiceAppDirConfigPath() {}
 
+  Future<String?> exportAndroidDiagnostics() async => null;
+
   void setFullscreenCallback(void Function(bool) fun) {
     context["onFullscreenChanged"] = (bool v) {
       fun(v);

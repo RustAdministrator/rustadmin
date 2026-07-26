@@ -76,17 +76,30 @@ class _FileManagerPageState extends State<FileManagerPage> {
   @override
   void initState() {
     super.initState();
-    gFFI.start(widget.id,
-        isFileTransfer: true,
-        password: widget.password,
-        isSharedPassword: widget.isSharedPassword,
-        forceRelay: widget.forceRelay);
+    gFFI.ffiModel.updateEventListener(gFFI.sessionId, widget.id);
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       gFFI.dialogManager
           .showLoading(translate('Connecting...'), onCancel: closeConnection);
+      unawaited(_startConnection());
     });
-    gFFI.ffiModel.updateEventListener(gFFI.sessionId, widget.id);
     WakelockManager.enable(_uniqueKey);
+  }
+
+  Future<void> _startConnection() async {
+    try {
+      await gFFI.start(widget.id,
+          isFileTransfer: true,
+          password: widget.password,
+          isSharedPassword: widget.isSharedPassword,
+          forceRelay: widget.forceRelay);
+    } catch (e, stackTrace) {
+      debugPrint('Failed to start mobile file session: $e\n$stackTrace');
+      if (!mounted) return;
+      gFFI.dialogManager.dismissAll();
+      showToast(translate('Failed to connect'));
+      closeConnection();
+    }
   }
 
   @override

@@ -91,21 +91,16 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     gFFI.ffiModel.updateEventListener(sessionId, widget.id);
-    gFFI.start(
-      widget.id,
-      password: widget.password,
-      isSharedPassword: widget.isSharedPassword,
-      forceRelay: widget.forceRelay,
-    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
       gFFI.dialogManager
           .showLoading(translate('Connecting...'), onCancel: closeConnection);
+      unawaited(_startConnection());
     });
     WakelockManager.enable(_uniqueKey);
     _physicalFocusNode.requestFocus();
     gFFI.inputModel.listenToMouse(true);
-    gFFI.qualityMonitorModel.checkShowQualityMonitor(sessionId);
     keyboardSubscription =
         keyboardVisibilityController.onChange.listen(onSoftKeyboardChanged);
     gFFI.chatModel
@@ -121,6 +116,25 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
           isKeyboardVisible: keyboardVisibilityController.isVisible);
     });
     WidgetsBinding.instance.addObserver(this);
+  }
+
+  Future<void> _startConnection() async {
+    try {
+      await gFFI.start(
+        widget.id,
+        password: widget.password,
+        isSharedPassword: widget.isSharedPassword,
+        forceRelay: widget.forceRelay,
+      );
+      if (!mounted || gFFI.closed) return;
+      unawaited(gFFI.qualityMonitorModel.checkShowQualityMonitor(sessionId));
+    } catch (e, stackTrace) {
+      debugPrint('Failed to start mobile session: $e\n$stackTrace');
+      if (!mounted) return;
+      gFFI.dialogManager.dismissAll();
+      showToast(translate('Failed to connect'));
+      closeConnection();
+    }
   }
 
   @override
@@ -1183,6 +1197,8 @@ void showOptions(
   List<TRadioMenu<String>> imageQualityRadios =
       await toolbarImageQuality(context, id, gFFI);
   List<TRadioMenu<String>> codecRadios = await toolbarCodec(context, id, gFFI);
+  List<TRadioMenu<String>> captureBackendRadios =
+      await toolbarCaptureBackend(gFFI);
   List<TRadioMenu<String>> qualityMonitorRadios =
       await toolbarQualityMonitorPosition(gFFI);
   List<TRadioMenu<String>> qualityMonitorDetailsRadios =
@@ -1210,6 +1226,10 @@ void showOptions(
         (imageQualityRadios.isNotEmpty ? imageQualityRadios[0].groupValue : '')
             .obs;
     var codec = (codecRadios.isNotEmpty ? codecRadios[0].groupValue : '').obs;
+    var captureBackend = (captureBackendRadios.isNotEmpty
+            ? captureBackendRadios[0].groupValue
+            : '')
+        .obs;
     var qualityMonitor = (qualityMonitorRadios.isNotEmpty
             ? qualityMonitorRadios[0].groupValue
             : '')
@@ -1261,6 +1281,27 @@ void showOptions(
                   }
                 : null)),
       if (codecRadios.isNotEmpty) const Divider(color: MyTheme.border),
+      if (captureBackendRadios.isNotEmpty)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Padding(
+            padding: const EdgeInsets.only(left: 16, top: 4, bottom: 4),
+            child: Text(translate('Capture')),
+          ),
+        ),
+      for (var e in captureBackendRadios)
+        Obx(() => getRadio<String>(
+            e.child,
+            e.value,
+            captureBackend.value,
+            e.onChanged != null
+                ? (v) {
+                    e.onChanged?.call(v);
+                    if (v != null) captureBackend.value = v;
+                  }
+                : null)),
+      if (captureBackendRadios.isNotEmpty)
+        const Divider(color: MyTheme.border),
       if (qualityMonitorRadios.isNotEmpty)
         Align(
           alignment: Alignment.centerLeft,
@@ -1304,6 +1345,14 @@ void showOptions(
       if (qualityMonitorRadios.isNotEmpty ||
           qualityMonitorDetailsRadios.isNotEmpty)
         const Divider(color: MyTheme.border),
+      if (clipboardRadios.isNotEmpty)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Padding(
+            padding: const EdgeInsets.only(left: 16, top: 4, bottom: 4),
+            child: Text(translate('Clipboard')),
+          ),
+        ),
       for (var e in clipboardRadios)
         Obx(() => getRadio<String>(
             e.child,

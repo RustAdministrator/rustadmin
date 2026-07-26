@@ -104,6 +104,37 @@ class RustadminImpl {
     ]);
   }
 
+  Future<String> sessionAddAsync(
+      {required UuidValue sessionId,
+      required String id,
+      required bool isFileTransfer,
+      required bool isViewCamera,
+      required bool isPortForward,
+      required bool isRdp,
+      required bool isTerminal,
+      required String switchUuid,
+      required bool forceRelay,
+      required String password,
+      required bool isSharedPassword,
+      String? connToken,
+      dynamic hint}) async {
+    return sessionAddSync(
+      sessionId: sessionId,
+      id: id,
+      isFileTransfer: isFileTransfer,
+      isViewCamera: isViewCamera,
+      isPortForward: isPortForward,
+      isRdp: isRdp,
+      isTerminal: isTerminal,
+      switchUuid: switchUuid,
+      forceRelay: forceRelay,
+      password: password,
+      isSharedPassword: isSharedPassword,
+      connToken: connToken,
+      hint: hint,
+    );
+  }
+
   Stream<EventToUI> sessionStart(
       {required UuidValue sessionId, required String id, dynamic hint}) {
     js.context.callMethod('setByName', [
@@ -402,6 +433,14 @@ class RustadminImpl {
         () => js.context.callMethod('setByName', ['custom-fps', fps]));
   }
 
+  Future<void> sessionSetCaptureBackend(
+      {required UuidValue sessionId, required String value, dynamic hint}) {
+    return Future(() => js.context.callMethod('setByName', [
+          'capture-backend',
+          value == 'auto' ? '' : value,
+        ]));
+  }
+
   Future<void> sessionLockScreen({required UuidValue sessionId, dynamic hint}) {
     return Future(() => js.context.callMethod('setByName', ['lock_screen']));
   }
@@ -516,6 +555,10 @@ class RustadminImpl {
       {required UuidValue sessionId, required String value, dynamic hint}) {
     return Future(
         () => js.context.callMethod('setByName', ['input_os_password', value]));
+  }
+
+  Future<void> sessionShowSignIn({required UuidValue sessionId, dynamic hint}) {
+    return Future(() => js.context.callMethod('setByName', ['show_sign_in', '']));
   }
 
   Future<void> sessionReadRemoteDir(

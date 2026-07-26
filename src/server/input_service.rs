@@ -457,6 +457,17 @@ lazy_static::lazy_static! {
     static ref RELATIVE_MOUSE_CONNS: Arc<Mutex<std::collections::HashSet<i32>>> = Default::default();
 }
 
+#[cfg(windows)]
+static WINDOWS_FIRST_INPUT_STATE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(windows)]
+fn log_windows_input_state_once(context: &str) {
+    if !WINDOWS_FIRST_INPUT_STATE_LOGGED.swap(true, Ordering::Relaxed) {
+        crate::platform::windows::log_lock_screen_state(context);
+        super::display_service::log_windows_displays(context);
+    }
+}
+
 #[inline]
 fn set_relative_mouse_active(conn: i32, active: bool) {
     let mut lock = RELATIVE_MOUSE_CONNS.lock().unwrap();
@@ -1060,6 +1071,8 @@ pub fn handle_mouse_simulation_(evt: &MouseEvent, conn: i32) {
     }
 
     #[cfg(windows)]
+    log_windows_input_state_once("first-input-mouse");
+    #[cfg(windows)]
     crate::platform::windows::try_change_desktop();
     let buttons = evt.mask >> 3;
     let evt_type = evt.mask & MOUSE_TYPE_MASK;
@@ -1468,6 +1481,8 @@ fn char_value_to_key(value: u32) -> Key {
 
 fn map_keyboard_mode(evt: &KeyEvent) {
     #[cfg(windows)]
+    log_windows_input_state_once("first-input-keyboard");
+    #[cfg(windows)]
     crate::platform::windows::try_change_desktop();
 
     // Wayland
@@ -1861,6 +1876,8 @@ fn release_shift_for_char_input(en: &mut Enigo) {
 
 fn legacy_keyboard_mode(evt: &KeyEvent) {
     #[cfg(windows)]
+    log_windows_input_state_once("first-input-keyboard");
+    #[cfg(windows)]
     crate::platform::windows::try_change_desktop();
     let mut to_release: Vec<Key> = Vec::new();
 
@@ -1906,6 +1923,7 @@ fn legacy_keyboard_mode(evt: &KeyEvent) {
 
 #[cfg(target_os = "windows")]
 fn translate_process_code(code: u32, down: bool) {
+    log_windows_input_state_once("first-input-keyboard");
     crate::platform::windows::try_change_desktop();
     match code >> 16 {
         0 => sim_rdev_rawkey_position(code as _, down),

@@ -54,6 +54,9 @@ const String kPlatformAdditionsAmyuniVirtualDisplays =
 const String kPlatformAdditionsHasFileClipboard = "has_file_clipboard";
 const String kPlatformAdditionsSupportedPrivacyModeImpl =
     "supported_privacy_mode_impl";
+const String kPlatformAdditionsFullVersion = "full_version";
+const String kPlatformAdditionsSupportCaptureBackend =
+    "support_capture_backend";
 
 const String kPeerPlatformWindows = "Windows";
 const String kPeerPlatformLinux = "Linux";
@@ -111,6 +114,7 @@ const String kOptionImageQuality = "image_quality";
 const String kOptionCustomImageQuality = "custom_image_quality";
 const String kOptionCustomFps = "custom-fps";
 const String kOptionCustomFpsMode = "custom-fps-mode";
+const String kOptionCaptureBackend = "capture-backend";
 const String kOptionOpenNewConnInTabs = "enable-open-new-connections-in-tabs";
 const String kOptionTextureRender = "use-texture-render";
 const String kOptionD3DRender = "allow-d3d-render";

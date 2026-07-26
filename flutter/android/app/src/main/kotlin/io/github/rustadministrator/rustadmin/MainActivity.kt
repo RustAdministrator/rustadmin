@@ -10,6 +10,7 @@ package io.github.rustadministrator.rustadmin
 import ffi.FFI
 
 import android.content.ComponentName
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
@@ -26,12 +27,23 @@ import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.util.DisplayMetrics
 import androidx.annotation.RequiresApi
+import androidx.core.content.FileProvider
 import org.json.JSONArray
 import org.json.JSONObject
 import com.hjq.permissions.XXPermissions
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 import kotlin.concurrent.thread
 
 
@@ -256,6 +268,22 @@ class MainActivity : FlutterActivity() {
                         result.success(false)
                     }
                 }
+                "export_diagnostics" -> {
+                    thread {
+                        try {
+                            val archive = createDiagnosticArchive()
+                            runOnUiThread {
+                                shareDiagnosticArchive(archive)
+                                result.success(archive.name)
+                            }
+                        } catch (e: Exception) {
+                            Log.e(logTag, "Failed to export diagnostics", e)
+                            runOnUiThread {
+                                result.error("diagnostic-export-failed", e.message, null)
+                            }
+                        }
+                    }
+                }
                 GET_VALUE -> {
                     if (call.arguments is String) {
                         if (call.arguments == KEY_IS_SUPPORT_VOICE_CALL) {
@@ -278,6 +306,105 @@ class MainActivity : FlutterActivity() {
                 }
             }
         }
+    }
+
+    private fun createDiagnosticArchive(): File {
+        val outputDirectory = File(cacheDir, "diagnostics").apply { mkdirs() }
+        outputDirectory.listFiles { file -> file.extension == "zip" }
+            ?.forEach { it.delete() }
+        val timestamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        val archive = File(outputDirectory, "RustAdmin-diagnostics-$timestamp.zip")
+
+        ZipOutputStream(BufferedOutputStream(FileOutputStream(archive))).use { zip ->
+            addDiagnosticText(zip, "device.txt", diagnosticDeviceInfo())
+            addDiagnosticText(zip, "threads.txt", diagnosticThreadDump())
+
+            val preferences = getSharedPreferences(KEY_SHARED_PREFERENCES, MODE_PRIVATE)
+            val appDirectory = preferences.getString(KEY_APP_DIR_CONFIG_PATH, "")
+                ?.takeIf { it.isNotBlank() }
+                ?.let(::File)
+            if (appDirectory != null && isPrivateAppPath(appDirectory)) {
+                val diagnosticDirectory = File(appDirectory, "diagnostics")
+                listOf(
+                    "rustadmin.log.1",
+                    "rustadmin.log",
+                    "flutter-errors.log.1",
+                    "flutter-errors.log",
+                )
+                    .map { File(diagnosticDirectory, it) }
+                    .filter { it.isFile }
+                    .forEach { addDiagnosticFile(zip, it) }
+            }
+        }
+        return archive
+    }
+
+    private fun isPrivateAppPath(file: File): Boolean {
+        val privateRoot = File(applicationInfo.dataDir).canonicalFile
+        val candidate = file.canonicalFile
+        return candidate == privateRoot || candidate.path.startsWith("${privateRoot.path}${File.separator}")
+    }
+
+    private fun addDiagnosticText(zip: ZipOutputStream, name: String, text: String) {
+        zip.putNextEntry(ZipEntry(name))
+        zip.write(text.toByteArray(Charsets.UTF_8))
+        zip.closeEntry()
+    }
+
+    private fun addDiagnosticFile(zip: ZipOutputStream, file: File) {
+        zip.putNextEntry(ZipEntry(file.name))
+        BufferedInputStream(FileInputStream(file)).use { input -> input.copyTo(zip) }
+        zip.closeEntry()
+    }
+
+    private fun diagnosticDeviceInfo(): String {
+        val packageInfo = packageManager.getPackageInfo(packageName, 0)
+        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            packageInfo.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo.versionCode.toLong()
+        }
+        return buildString {
+            appendLine("package=$packageName")
+            appendLine("versionName=${packageInfo.versionName.orEmpty()}")
+            appendLine("versionCode=$versionCode")
+            appendLine("timestampMs=${System.currentTimeMillis()}")
+            appendLine("sdk=${Build.VERSION.SDK_INT}")
+            appendLine("release=${Build.VERSION.RELEASE}")
+            appendLine("manufacturer=${Build.MANUFACTURER}")
+            appendLine("model=${Build.MODEL}")
+            appendLine("abis=${Build.SUPPORTED_ABIS.joinToString(",")}")
+            appendLine("pid=${android.os.Process.myPid()}")
+            appendLine("maxMemory=${Runtime.getRuntime().maxMemory()}")
+        }
+    }
+
+    private fun diagnosticThreadDump(): String = buildString {
+        Thread.getAllStackTraces().entries
+            .sortedBy { it.key.name }
+            .forEach { (thread, stack) ->
+                append('"').append(thread.name).append('"')
+                    .append(" state=").append(thread.state)
+                    .appendLine()
+                stack.forEach { frame -> append("  at ").appendLine(frame) }
+                appendLine()
+            }
+    }
+
+    private fun shareDiagnosticArchive(archive: File) {
+        val uri = FileProvider.getUriForFile(
+            this,
+            "$packageName.fileprovider",
+            archive,
+        )
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "application/zip"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            clipData = ClipData.newRawUri(archive.name, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(Intent.createChooser(shareIntent, "Share diagnostic report"))
     }
 
     private fun setCodecInfo() {

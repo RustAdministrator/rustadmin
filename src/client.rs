@@ -55,7 +55,11 @@ use hbb_common::{
     fs::JobType,
     futures::future::{select_ok, FutureExt},
     get_version_number, log,
-    message_proto::{option_message::BoolOption, supported_decoding::PreferCodec, *},
+    message_proto::{
+        option_message::{BoolOption, CaptureBackend},
+        supported_decoding::PreferCodec,
+        *,
+    },
     protobuf::{Message as _, MessageField},
     rand,
     rendezvous_proto::*,
@@ -833,11 +837,19 @@ impl Client {
                 peer
             );
         }
-        if let Some(udp_socket_nat) = udp_socket_nat {
-            connect_futures.push(udp_nat_connect(udp_socket_nat, "UDP", connect_timeout).boxed());
-        }
-        if let Some(udp_socket_v6) = udp_socket_v6 {
-            connect_futures.push(udp_nat_connect(udp_socket_v6, "IPv6", connect_timeout).boxed());
+        if is_local {
+            log::info!(
+                "Using TCP-only local connection path for LAN MTU compatibility; UDP/KCP candidates are skipped"
+            );
+        } else {
+            if let Some(udp_socket_nat) = udp_socket_nat {
+                connect_futures
+                    .push(udp_nat_connect(udp_socket_nat, "UDP", connect_timeout).boxed());
+            }
+            if let Some(udp_socket_v6) = udp_socket_v6 {
+                connect_futures
+                    .push(udp_nat_connect(udp_socket_v6, "IPv6", connect_timeout).boxed());
+            }
         }
         // Run all connection attempts concurrently, return the first successful one
         let (mut conn, kcp, mut typ) = if connect_futures.is_empty() {
@@ -2304,6 +2316,17 @@ impl Deref for LoginConfigHandler {
 }
 
 impl LoginConfigHandler {
+    pub fn capture_backend_from_value(value: &str) -> CaptureBackend {
+        match value.to_ascii_lowercase().as_str() {
+            "dxgi" => CaptureBackend::CaptureBackendDxgi,
+            "wgc" => CaptureBackend::CaptureBackendWgc,
+            "winmag" => CaptureBackend::CaptureBackendWinMag,
+            "gdi" => CaptureBackend::CaptureBackendGdi,
+            "auto" | "" => CaptureBackend::CaptureBackendAuto,
+            _ => CaptureBackend::CaptureBackendAuto,
+        }
+    }
+
     /// Initialize the login config handler.
     ///
     /// # Arguments
@@ -2840,6 +2863,15 @@ impl LoginConfigHandler {
                 *self.custom_fps.lock().unwrap() = Some(custom_fps as _);
             }
         }
+        let capture_backend = self.get_option(keys::OPTION_CAPTURE_BACKEND);
+        msg.capture_backend = Self::capture_backend_from_value(&capture_backend).into();
+        if !capture_backend.is_empty() {
+            log::info!(
+                "capture_backend initial option send: id={}, value={}",
+                self.id,
+                capture_backend
+            );
+        }
         let view_only = self.get_toggle_option("view-only");
         if view_only {
             msg.disable_keyboard = BoolOption::Yes.into();
@@ -3068,6 +3100,43 @@ impl LoginConfigHandler {
             self.save_config(config);
         }
         *self.custom_fps.lock().unwrap() = Some(custom_fps as _);
+        msg_out
+    }
+
+    pub fn set_capture_backend(&mut self, value: String, save_config: bool) -> Message {
+        let normalized = match value.to_ascii_lowercase().as_str() {
+            "dxgi" => "dxgi",
+            "wgc" => "wgc",
+            "winmag" => "winmag",
+            "gdi" => "gdi",
+            _ => "auto",
+        };
+        let capture_backend = Self::capture_backend_from_value(normalized);
+        let mut misc = Misc::new();
+        misc.set_option(OptionMessage {
+            capture_backend: capture_backend.into(),
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_misc(misc);
+        if save_config {
+            let mut config = self.load_config();
+            if normalized == "auto" {
+                config.options.remove(keys::OPTION_CAPTURE_BACKEND);
+            } else {
+                config.options.insert(
+                    keys::OPTION_CAPTURE_BACKEND.to_owned(),
+                    normalized.to_owned(),
+                );
+            }
+            self.save_config(config);
+        }
+        log::info!(
+            "capture_backend option send: id={}, value={}, wire={:?}",
+            self.id,
+            normalized,
+            capture_backend
+        );
         msg_out
     }
 
@@ -4065,6 +4134,16 @@ fn activate_os(interface: &impl Interface, send_left_click: bool) {
     */
 }
 
+fn send_show_sign_in_key(interface: &impl Interface) {
+    let mut key_event = KeyEvent::new();
+    key_event.mode = KeyboardMode::Legacy.into();
+    key_event.press = true;
+    key_event.set_control_key(ControlKey::Return);
+    let mut msg_out = Message::new();
+    msg_out.set_key_event(key_event);
+    interface.send(Data::Message(msg_out));
+}
+
 /// Input the OS's password.
 ///
 /// # Arguments
@@ -4075,6 +4154,14 @@ fn activate_os(interface: &impl Interface, send_left_click: bool) {
 pub fn input_os_password(p: String, activate: bool, interface: impl Interface) {
     std::thread::spawn(move || {
         _input_os_password(p, activate, interface);
+    });
+}
+
+pub fn show_sign_in(interface: impl Interface) {
+    std::thread::spawn(move || {
+        activate_os(&interface, false);
+        std::thread::sleep(Duration::from_millis(150));
+        send_show_sign_in_key(&interface);
     });
 }
 

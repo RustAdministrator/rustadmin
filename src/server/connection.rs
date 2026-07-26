@@ -39,7 +39,9 @@ use hbb_common::{
     futures::{SinkExt, StreamExt},
     get_time, get_version_number,
     message_proto::{
-        option_message::BoolOption, permission_info::Permission, supported_decoding::PreferCodec,
+        option_message::{BoolOption, CaptureBackend},
+        permission_info::Permission,
+        supported_decoding::PreferCodec,
         SessionPermissionRequest, SessionPermissionResponse, VideoFeedback, VideoFrame,
     },
     password_security::{self as password, ApproveMode},
@@ -2982,14 +2984,8 @@ impl Connection {
             pi.hostname = DEVICE_NAME.lock().unwrap().clone();
             pi.platform = "Android".into();
         }
-        #[cfg(all(target_os = "macos", not(feature = "unix-file-copy-paste")))]
         let mut platform_additions = serde_json::Map::new();
-        #[cfg(any(
-            target_os = "windows",
-            target_os = "linux",
-            all(target_os = "macos", feature = "unix-file-copy-paste")
-        ))]
-        let mut platform_additions = serde_json::Map::new();
+        platform_additions.insert("full_version".into(), json!(crate::FULL_VERSION));
         #[cfg(target_os = "linux")]
         {
             if crate::platform::current_is_wayland() {
@@ -3015,6 +3011,7 @@ impl Connection {
                 "supported_privacy_mode_impl".into(),
                 json!(privacy_mode::get_supported_privacy_mode_impl()),
             );
+            platform_additions.insert("support_capture_backend".into(), json!(true));
         }
         #[cfg(target_os = "macos")]
         {
@@ -3047,7 +3044,6 @@ impl Connection {
             platform_additions.insert("support_view_camera".into(), json!(true));
         }
 
-        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         if !platform_additions.is_empty() {
             pi.platform_additions = serde_json::to_string(&platform_additions).unwrap_or("".into());
         }
@@ -3162,6 +3158,11 @@ impl Connection {
                 self.send(msg_out).await;
             }
 
+            #[cfg(windows)]
+            {
+                crate::platform::windows::log_lock_screen_state("connection-login");
+                super::display_service::log_windows_displays("connection-login");
+            }
             try_activate_screen();
 
             match super::display_service::update_get_sync_displays_on_login().await {
@@ -6029,6 +6030,17 @@ impl Connection {
                     o.custom_fps
                 );
                 video_qos.user_custom_fps(self.inner.id(), fps);
+            }
+        }
+        if let Ok(backend) = o.capture_backend.enum_value() {
+            if backend != CaptureBackend::CaptureBackendNotSet {
+                video_service::set_capture_backend_preference(backend);
+                log::info!(
+                    "#{} capture backend override requested: {:?}",
+                    self.inner.id(),
+                    backend
+                );
+                self.refresh_video_display(None);
             }
         }
         if let Some(q) = o.supported_decoding.clone().take() {

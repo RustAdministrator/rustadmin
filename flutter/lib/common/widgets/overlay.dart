@@ -570,6 +570,10 @@ class QualityMonitor extends StatelessWidget {
       {Key? key, this.onGripPanUpdate})
       : super(key: key);
 
+  Widget _compactTextScale(Widget child) => isMobile
+      ? MediaQuery.withClampedTextScaling(maxScaleFactor: 1, child: child)
+      : child;
+
   String _pipelineLabel(String? value) {
     if (value == null || value.isEmpty) {
       return '-';
@@ -581,6 +585,8 @@ class QualityMonitor extends StatelessWidget {
         return 'WGC helper CPU';
       case 'DXGI Desktop Duplication':
         return 'DXGI';
+      case 'DXGI Desktop Duplication Helper (CPU)':
+        return 'DXGI helper CPU';
       case 'Windows Magnification API':
         return 'WinMag CPU';
       case 'Windows GDI':
@@ -666,30 +672,54 @@ class QualityMonitor extends StatelessWidget {
 
   Widget _row(String info, String? value, {Color? rightColor}) {
     final valueText = value ?? '';
-    return Row(
-      children: [
-        Expanded(
+    final compact = isMobile;
+    return SizedBox(
+      height: compact ? 11 : null,
+      child: Row(
+        children: [
+          Expanded(
             flex: 8,
-            child: AutoSizeText(info,
-                style: TextStyle(color: Color.fromARGB(255, 210, 210, 210)),
-                textAlign: TextAlign.right,
-                maxLines: 1)),
-        Spacer(flex: 1),
-        Expanded(
+            child: _compactTextScale(
+              AutoSizeText(info,
+                  minFontSize: compact ? 7 : 8,
+                  style: TextStyle(
+                      color: const Color.fromARGB(255, 210, 210, 210),
+                      fontSize: compact ? 9 : null,
+                      height: compact ? 1 : null),
+                  textAlign: TextAlign.right,
+                  maxLines: 1),
+            ),
+          ),
+          const Spacer(flex: 1),
+          Expanded(
             flex: 8,
-            child: AutoSizeText(valueText,
-                style: TextStyle(color: rightColor ?? Colors.white),
-                maxLines: 1)),
-      ],
+            child: _compactTextScale(
+              AutoSizeText(valueText,
+                  minFontSize: compact ? 7 : 8,
+                  style: TextStyle(
+                      color: rightColor ?? Colors.white,
+                      fontSize: compact ? 9 : null,
+                      height: compact ? 1 : null),
+                  maxLines: 1),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
   Widget _section(String title) {
+    final compact = isMobile;
     return Padding(
-      padding: const EdgeInsets.only(top: 5, bottom: 1),
-      child: Text(title,
-          style: const TextStyle(
-              color: Color.fromARGB(210, 210, 210, 210), fontSize: 10)),
+      padding: EdgeInsets.only(
+          top: compact ? 2 : 5, bottom: compact ? 0 : 1),
+      child: _compactTextScale(
+        Text(title,
+            style: TextStyle(
+                color: const Color.fromARGB(210, 210, 210, 210),
+                fontSize: compact ? 8 : 10,
+                height: compact ? 1 : null)),
+      ),
     );
   }
 
@@ -704,10 +734,11 @@ class QualityMonitor extends StatelessWidget {
                     IgnorePointer(
                       child: Container(
                         constraints: BoxConstraints(
-                          maxWidth:
-                              qualityMonitorModel.extendedDetails ? 240 : 200,
+                          maxWidth: isMobile
+                              ? (qualityMonitorModel.extendedDetails ? 196 : 176)
+                              : (qualityMonitorModel.extendedDetails ? 240 : 200),
                         ),
-                        padding: const EdgeInsets.all(8),
+                        padding: EdgeInsets.all(isMobile ? 4 : 8),
                         color: MyTheme.canvasColor.withAlpha(150),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,

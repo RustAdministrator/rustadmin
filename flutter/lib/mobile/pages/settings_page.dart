@@ -1076,6 +1076,20 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             SettingsTile(
                 title: Text('${translate("Version")}: $version'),
                 leading: Icon(Icons.info)),
+            if (isAndroid)
+              SettingsTile(
+                onPressed: (context) async {
+                  try {
+                    await platformFFI.exportAndroidDiagnostics();
+                  } catch (error) {
+                    debugPrint('Failed to export diagnostics: $error');
+                    showToast(translate('Failed'));
+                  }
+                },
+                title: Text('Export diagnostic report'),
+                description: Text('Create a private log ZIP and share it'),
+                leading: Icon(Icons.bug_report_outlined),
+              ),
             SettingsTile(
                 title: Text('Attribution'),
                 description:
@@ -1235,7 +1249,13 @@ void showAbout(OverlayDialogManager dialogManager) {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Version: $version'),
+              FutureBuilder<String>(
+                  future: bind.mainGetVersion(),
+                  initialData: version,
+                  builder: (context, snapshot) {
+                    final appVersion = (snapshot.data ?? version);
+                    return Text('Version: $appVersion');
+                  }),
               Padding(
                 padding: EdgeInsets.symmetric(vertical: 12),
                 child: Text(kRustAdminForkSummary),

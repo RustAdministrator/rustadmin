@@ -981,7 +981,9 @@ fn preferred_server_launch_mode(session_id: DWORD) -> ServerLaunchMode {
         return ServerLaunchMode::Privileged;
     }
     if administrator_protection_enabled() {
-        return ServerLaunchMode::InteractiveUser;
+        log::debug!(
+            "Administrator Protection detected; retaining privileged server and using per-capture user helpers"
+        );
     }
     ServerLaunchMode::Privileged
 }
@@ -1192,6 +1194,7 @@ pub fn try_change_desktop() -> bool {
                 let mut s = SUPPRESS.lock().unwrap();
                 if s.elapsed() > std::time::Duration::from_secs(3) {
                     log::error!("Failed to switch desktop: {}", io::Error::last_os_error());
+                    log_lock_screen_state("desktop-switch-failed");
                     *s = Instant::now();
                 }
             } else {
@@ -1199,11 +1202,39 @@ pub fn try_change_desktop() -> bool {
                     "Desktop switched: input_access_mask=0x{:08x}",
                     inputDesktopAccessMask()
                 );
+                log_lock_screen_state("desktop-switched");
             }
             return res;
         }
     }
     return false;
+}
+
+pub fn log_lock_screen_state(context: &str) {
+    let process_session = get_current_process_session_id();
+    let active_session = unsafe { get_current_session(share_rdp()) };
+    let locked = process_session
+        .map(|session_id| unsafe { is_session_locked(session_id) == TRUE })
+        .unwrap_or(false);
+    let logon_ui = match is_logon_ui() {
+        Ok(v) => v.to_string(),
+        Err(err) => format!("error: {err}"),
+    };
+    let username = get_current_session_username().unwrap_or_else(|| "<unknown>".to_owned());
+    log::info!(
+        "windows lock/logon state [{}]: installed={}, root={}, share_rdp={}, active_session={}, process_session={:?}, username={}, prelogin={}, locked={}, logon_ui={}, desktop_changed={}",
+        context,
+        is_installed(),
+        is_root(),
+        is_share_rdp(),
+        active_session,
+        process_session,
+        username,
+        is_prelogin(),
+        locked,
+        logon_ui,
+        desktop_changed(),
+    );
 }
 
 fn share_rdp() -> BOOL {
