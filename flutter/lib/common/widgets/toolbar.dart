@@ -137,6 +137,15 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
       ),
     );
   }
+  // show sign-in
+  if (isDefaultConn &&
+      pi.platform == kPeerPlatformWindows &&
+      perms['keyboard'] != false &&
+      !ffiModel.viewOnly) {
+    v.add(TTextMenu(
+        child: Text(translate('Show sign-in')),
+        onPressed: () => bind.sessionShowSignIn(sessionId: sessionId)));
+  }
   // paste
   if (isDefaultConn &&
       pi.platform != kPeerPlatformAndroid &&
@@ -538,6 +547,51 @@ Future<List<TRadioMenu<String>>> toolbarCodec(
     radio('H264 HQ', 'h264-hq', h264Hq),
     radio('H265', 'h265', h265),
     radio('H265 HQ', 'h265-hq', h265Hq),
+  ];
+}
+
+Future<List<TRadioMenu<String>>> toolbarCaptureBackend(FFI ffi) async {
+  if (ffi.ffiModel.pi.platform != kPeerPlatformWindows ||
+      !ffi.ffiModel.pi.supportCaptureBackend ||
+      ffi.connType != ConnType.defaultConn) {
+    return [];
+  }
+  final sessionId = ffi.sessionId;
+  var groupValue = await bind.sessionGetOption(
+          sessionId: sessionId, arg: kOptionCaptureBackend) ??
+      '';
+  if (groupValue.isEmpty) {
+    groupValue = 'auto';
+  }
+
+  onChanged(String? value) async {
+    if (value == null) return;
+    await bind.sessionPeerOption(
+        sessionId: sessionId,
+        name: kOptionCaptureBackend,
+        value: value == 'auto' ? '' : value);
+    await bind.sessionSetCaptureBackend(sessionId: sessionId, value: value);
+  }
+
+  TRadioMenu<String> radio(String label, String value) {
+    return TRadioMenu<String>(
+        child: Text(label),
+        value: value,
+        groupValue: groupValue,
+        onChanged: onChanged);
+  }
+
+  var autoLabel = translate('Auto');
+  if (groupValue == 'auto' &&
+      ffi.qualityMonitorModel.data.captureBackend != null) {
+    autoLabel = '$autoLabel (${ffi.qualityMonitorModel.data.captureBackend})';
+  }
+  return [
+    radio(autoLabel, 'auto'),
+    radio('DXGI', 'dxgi'),
+    radio('WGC', 'wgc'),
+    radio('WinMag', 'winmag'),
+    radio('GDI', 'gdi'),
   ];
 }
 

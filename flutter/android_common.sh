@@ -96,14 +96,12 @@ for prefix in "${PREFIX_CANDIDATES[@]:-}"; do
      [[ ! -f "${prefix}/lib/libavcodec.a" ||
         ! -f "${prefix}/lib/libavformat.a" ||
         ! -f "${prefix}/lib/libavutil.a" ||
-        ! -f "${prefix}/lib/libswresample.a" ||
         ! -f "${prefix}/include/libavcodec/avcodec.h" ||
         ! -f "${prefix}/include/libavformat/avformat.h" ||
         ! -f "${prefix}/include/libavutil/avutil.h" ||
         ! -f "${prefix}/lib/pkgconfig/libavcodec.pc" ||
         ! -f "${prefix}/lib/pkgconfig/libavformat.pc" ||
-        ! -f "${prefix}/lib/pkgconfig/libavutil.pc" ||
-        ! -f "${prefix}/lib/pkgconfig/libswresample.pc" ]]; then
+        ! -f "${prefix}/lib/pkgconfig/libavutil.pc" ]]; then
     continue
   fi
   ANDROID_NATIVE_PREFIX="${prefix}"
@@ -127,7 +125,6 @@ cargo ndk \
   --platform "${ANDROID_API_LEVEL}" \
   --target "${RUST_TARGET}" \
   --output-dir "${JNI_LIBS_DIR}" \
-  --bindgen \
   build \
   --locked \
   --lib \

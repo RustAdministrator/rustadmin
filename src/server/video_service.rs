@@ -33,6 +33,7 @@ use crate::{
 use hbb_common::{
     anyhow::anyhow,
     config,
+    message_proto::option_message::CaptureBackend,
     tokio::sync::{
         mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
         Mutex as TokioMutex,
@@ -235,6 +236,8 @@ lazy_static::lazy_static! {
     // 2. The client is closing.
     static ref DISPLAY_CONN_IDS: Arc<Mutex<HashMap<VideoStreamKey, HashSet<i32>>>> = Default::default();
     pub static ref VIDEO_QOS: Arc<Mutex<VideoQoS>> = Default::default();
+    static ref CAPTURE_BACKEND_PREFERENCE: Mutex<CaptureBackend> =
+        Mutex::new(CaptureBackend::CaptureBackendAuto);
     pub static ref IS_UAC_RUNNING: Arc<Mutex<bool>> = Default::default();
     pub static ref IS_FOREGROUND_WINDOW_ELEVATED: Arc<Mutex<bool>> = Default::default();
     static ref SCREENSHOTS: Mutex<HashMap<usize, Screenshot>> = Default::default();
@@ -280,6 +283,18 @@ pub fn notify_video_frame_fetched_by_conn_id(conn_id: i32, frame_tm: Option<Inst
             notifier.0.send((conn_id, frame_tm)).ok();
         }
     }
+}
+
+pub fn set_capture_backend_preference(backend: CaptureBackend) {
+    let normalized = match backend {
+        CaptureBackend::CaptureBackendDxgi
+        | CaptureBackend::CaptureBackendWgc
+        | CaptureBackend::CaptureBackendWinMag
+        | CaptureBackend::CaptureBackendGdi => backend,
+        _ => CaptureBackend::CaptureBackendAuto,
+    };
+    *CAPTURE_BACKEND_PREFERENCE.lock().unwrap() = normalized;
+    log::info!("capture backend preference set to {:?}", normalized);
 }
 
 struct VideoFrameController {
@@ -1178,7 +1193,7 @@ fn get_capturer_monitor(
         current,
         portable_service_running,
     )?;
-    Ok(CapturerInfo {
+    let mut c = CapturerInfo {
         origin,
         width,
         height,
@@ -1187,7 +1202,10 @@ fn get_capturer_monitor(
         privacy_mode_id,
         _capturer_privacy_mode_id: capturer_privacy_mode_id,
         capturer,
-    })
+    };
+    #[cfg(windows)]
+    apply_capture_backend_preference(&mut c);
+    Ok(c)
 }
 
 fn get_capturer_camera(current: usize) -> ResultType<CapturerInfo> {
@@ -1238,6 +1256,131 @@ fn get_capturer(
     match source {
         VideoSource::Monitor => get_capturer_monitor(current, portable_service_running),
         VideoSource::Camera => get_capturer_camera(current),
+    }
+}
+
+#[cfg(windows)]
+fn display_for_current(c: &CapturerInfo) -> Option<Display> {
+    let mut displays = match Display::all() {
+        Ok(displays) => displays,
+        Err(err) => {
+            log::warn!(
+                "capture backend override failed to enumerate displays: {}",
+                err
+            );
+            return None;
+        }
+    };
+    if displays.len() <= c.current {
+        log::warn!(
+            "capture backend override failed: current={}, display_count={}",
+            c.current,
+            displays.len()
+        );
+        return None;
+    }
+    Some(displays.remove(c.current))
+}
+
+#[cfg(windows)]
+fn apply_capture_backend_preference(c: &mut CapturerInfo) {
+    if c._capturer_privacy_mode_id != INVALID_PRIVACY_MODE_CONN_ID {
+        return;
+    }
+    let preference = *CAPTURE_BACKEND_PREFERENCE.lock().unwrap();
+    match preference {
+        CaptureBackend::CaptureBackendAuto | CaptureBackend::CaptureBackendNotSet => {}
+        CaptureBackend::CaptureBackendDxgi
+        | CaptureBackend::CaptureBackendWgc
+        | CaptureBackend::CaptureBackendWinMag
+        | CaptureBackend::CaptureBackendGdi => {
+            if crate::platform::windows::is_prelogin()
+                || crate::platform::windows::desktop_changed()
+                || (crate::platform::is_root() && crate::platform::windows::is_locked())
+            {
+                log::info!(
+                    "capture backend override deferred on secure desktop: requested={:?}",
+                    preference
+                );
+                return;
+            }
+        }
+    }
+
+    match preference {
+        CaptureBackend::CaptureBackendAuto | CaptureBackend::CaptureBackendNotSet => {}
+        CaptureBackend::CaptureBackendDxgi => {
+            let Some(display) = display_for_current(c) else {
+                return;
+            };
+            match create_dxgi_priority_capturer(
+                display,
+                c.current,
+                crate::portable_service::client::running(),
+            ) {
+                Ok(capturer) => {
+                    c.capturer = capturer;
+                    log::info!(
+                        "capture backend override applied: DXGI, effective_backend={}",
+                        c.capture_backend()
+                    );
+                }
+                Err(err) => {
+                    log::warn!("capture backend override DXGI failed: {}", err);
+                }
+            }
+        }
+        CaptureBackend::CaptureBackendWgc => {
+            log::info!(
+                "capture backend override requested: WGC, current_backend={}",
+                c.capture_backend()
+            );
+            match create_wgc_priority_capturer(
+                c._capturer_privacy_mode_id,
+                c.current,
+                crate::portable_service::client::running(),
+                c.width,
+                c.height,
+            ) {
+                Ok(wgc) => {
+                    c.capturer = wgc;
+                    log::info!("capture backend override applied: WGC");
+                }
+                Err(err) => {
+                    log::warn!("capture backend override WGC failed: {}", err);
+                }
+            }
+        }
+        CaptureBackend::CaptureBackendWinMag => {
+            match create_magnifier_priority_capturer(
+                c._capturer_privacy_mode_id,
+                c.origin,
+                c.width,
+                c.height,
+            ) {
+                Ok(mag) => {
+                    c.capturer = mag;
+                    log::info!(
+                        "capture backend override applied: WinMag, origin={:?}, width={}, height={}",
+                        c.origin,
+                        c.width,
+                        c.height
+                    );
+                }
+                Err(err) => {
+                    log::warn!("capture backend override WinMag failed: {}", err);
+                }
+            }
+        }
+        CaptureBackend::CaptureBackendGdi => match create_gdi_priority_capturer(c.current) {
+            Ok(gdi) => {
+                c.capturer = gdi;
+                log::info!("capture backend override applied: GDI");
+            }
+            Err(err) => {
+                log::warn!("capture backend override GDI failed: {}", err);
+            }
+        },
     }
 }
 

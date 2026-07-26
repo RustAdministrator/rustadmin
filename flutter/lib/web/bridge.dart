@@ -402,6 +402,14 @@ class RustadminImpl {
         () => js.context.callMethod('setByName', ['custom-fps', fps]));
   }
 
+  Future<void> sessionSetCaptureBackend(
+      {required UuidValue sessionId, required String value, dynamic hint}) {
+    return Future(() => js.context.callMethod('setByName', [
+          'capture-backend',
+          value == 'auto' ? '' : value,
+        ]));
+  }
+
   Future<void> sessionLockScreen({required UuidValue sessionId, dynamic hint}) {
     return Future(() => js.context.callMethod('setByName', ['lock_screen']));
   }
@@ -516,6 +524,10 @@ class RustadminImpl {
       {required UuidValue sessionId, required String value, dynamic hint}) {
     return Future(
         () => js.context.callMethod('setByName', ['input_os_password', value]));
+  }
+
+  Future<void> sessionShowSignIn({required UuidValue sessionId, dynamic hint}) {
+    return Future(() => js.context.callMethod('setByName', ['show_sign_in', '']));
   }
 
   Future<void> sessionReadRemoteDir(

@@ -319,6 +319,11 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
     }
 
     if (perms['keyboard'] != false && !ffi.ffiModel.viewOnly) {
+      if (pi.platform == kPeerPlatformWindows) {
+        menu.add(RemoteMenuEntry.showSignIn(sessionId, padding,
+            dismissFunc: cancelFunc));
+      }
+
       menu.add(RemoteMenuEntry.insertLock(sessionId, padding,
           dismissFunc: cancelFunc));
 

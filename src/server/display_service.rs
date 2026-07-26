@@ -221,6 +221,37 @@ pub fn check_displays_changed() -> ResultType<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+pub fn log_windows_displays(context: &str) {
+    match Display::all() {
+        Ok(displays) => {
+            let primary = get_primary_2(&displays);
+            log::info!(
+                "windows display state [{}]: count={}, primary_idx={}",
+                context,
+                displays.len(),
+                primary,
+            );
+            for (idx, display) in displays.iter().enumerate() {
+                log::info!(
+                    "windows display [{}][{}]: name={}, origin={:?}, size={}x{}, online={}, primary={}",
+                    context,
+                    idx,
+                    display.name(),
+                    display.origin(),
+                    display.width(),
+                    display.height(),
+                    display.is_online(),
+                    idx == primary,
+                );
+            }
+        }
+        Err(err) => {
+            log::warn!("windows display state [{}]: failed: {}", context, err);
+        }
+    }
+}
+
 fn get_displays_msg() -> Option<Message> {
     let displays = SYNC_DISPLAYS.lock().unwrap().get_update_sync_displays()?;
     Some(displays_to_msg(displays))

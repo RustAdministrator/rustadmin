@@ -1235,7 +1235,13 @@ void showAbout(OverlayDialogManager dialogManager) {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Version: $version'),
+              FutureBuilder<String>(
+                  future: bind.mainGetVersion(),
+                  initialData: version,
+                  builder: (context, snapshot) {
+                    final appVersion = (snapshot.data ?? version);
+                    return Text('Version: $appVersion');
+                  }),
               Padding(
                 padding: EdgeInsets.symmetric(vertical: 12),
                 child: Text(kRustAdminForkSummary),

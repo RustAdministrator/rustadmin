@@ -34,6 +34,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Video", "Video"),
         ("Custom Image Quality", "Custom image quality"),
         ("Adjust Window", "Adjust window"),
+        ("Show sign-in", "Show sign-in"),
         ("Insert Lock", "Insert lock"),
         ("Set Password", "Set password"),
         ("OS Password", "OS password"),

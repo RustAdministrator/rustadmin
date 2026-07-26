@@ -408,6 +408,29 @@ EdgeInsets _toolbarItemMargin(
 typedef DismissFunc = void Function();
 
 class RemoteMenuEntry {
+  static MenuEntryButton<String> showSignIn(
+    SessionID sessionId,
+    EdgeInsets? padding, {
+    DismissFunc? dismissFunc,
+    DismissCallback? dismissCallback,
+  }) {
+    return MenuEntryButton<String>(
+      childBuilder: (TextStyle? style) => Text(
+        translate('Show sign-in'),
+        style: style,
+      ),
+      proc: () {
+        bind.sessionShowSignIn(sessionId: sessionId);
+        if (dismissFunc != null) {
+          dismissFunc();
+        }
+      },
+      padding: padding,
+      dismissOnClicked: true,
+      dismissCallback: dismissCallback,
+    );
+  }
+
   static MenuEntryButton<String> insertLock(
     SessionID sessionId,
     EdgeInsets? padding, {
@@ -1938,6 +1961,7 @@ class _DisplayMenuState extends State<_DisplayMenu> {
         scrollStyle(state),
         imageQuality(),
         codec(),
+        captureBackend(),
         if (ffi.connType == ConnType.defaultConn)
           _ResolutionsMenu(
             id: widget.id,
@@ -2164,6 +2188,27 @@ class _DisplayMenuState extends State<_DisplayMenu> {
           return _SubmenuButton(
               ffi: widget.ffi,
               child: Text(translate('Codec')),
+              menuChildren: v
+                  .map((e) => RdoMenuButton(
+                      value: e.value,
+                      groupValue: e.groupValue,
+                      onChanged: e.onChanged,
+                      child: e.child,
+                      ffi: ffi))
+                  .toList());
+        });
+  }
+
+  captureBackend() {
+    return futureBuilder(
+        future: toolbarCaptureBackend(ffi),
+        hasData: (data) {
+          final v = data as List<TRadioMenu<String>>;
+          if (v.isEmpty) return Offstage();
+
+          return _SubmenuButton(
+              ffi: widget.ffi,
+              child: Text(translate('Capture')),
               menuChildren: v
                   .map((e) => RdoMenuButton(
                       value: e.value,

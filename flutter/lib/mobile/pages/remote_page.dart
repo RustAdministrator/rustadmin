@@ -1183,6 +1183,8 @@ void showOptions(
   List<TRadioMenu<String>> imageQualityRadios =
       await toolbarImageQuality(context, id, gFFI);
   List<TRadioMenu<String>> codecRadios = await toolbarCodec(context, id, gFFI);
+  List<TRadioMenu<String>> captureBackendRadios =
+      await toolbarCaptureBackend(gFFI);
   List<TRadioMenu<String>> qualityMonitorRadios =
       await toolbarQualityMonitorPosition(gFFI);
   List<TRadioMenu<String>> qualityMonitorDetailsRadios =
@@ -1210,6 +1212,10 @@ void showOptions(
         (imageQualityRadios.isNotEmpty ? imageQualityRadios[0].groupValue : '')
             .obs;
     var codec = (codecRadios.isNotEmpty ? codecRadios[0].groupValue : '').obs;
+    var captureBackend = (captureBackendRadios.isNotEmpty
+            ? captureBackendRadios[0].groupValue
+            : '')
+        .obs;
     var qualityMonitor = (qualityMonitorRadios.isNotEmpty
             ? qualityMonitorRadios[0].groupValue
             : '')
@@ -1261,6 +1267,27 @@ void showOptions(
                   }
                 : null)),
       if (codecRadios.isNotEmpty) const Divider(color: MyTheme.border),
+      if (captureBackendRadios.isNotEmpty)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Padding(
+            padding: const EdgeInsets.only(left: 16, top: 4, bottom: 4),
+            child: Text(translate('Capture')),
+          ),
+        ),
+      for (var e in captureBackendRadios)
+        Obx(() => getRadio<String>(
+            e.child,
+            e.value,
+            captureBackend.value,
+            e.onChanged != null
+                ? (v) {
+                    e.onChanged?.call(v);
+                    if (v != null) captureBackend.value = v;
+                  }
+                : null)),
+      if (captureBackendRadios.isNotEmpty)
+        const Divider(color: MyTheme.border),
       if (qualityMonitorRadios.isNotEmpty)
         Align(
           alignment: Alignment.centerLeft,

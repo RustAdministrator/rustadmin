@@ -4154,13 +4154,20 @@ class QualityMonitorModel with ChangeNotifier {
   }
 
   Future<String?> _clientVersion() async {
-    if (version.isNotEmpty) return version;
-    final value = await bind.mainGetVersion();
+    var value = '';
+    try {
+      value = await bind.mainGetVersion();
+    } catch (_) {
+      //
+    }
+    if (value.isEmpty) {
+      value = version;
+    }
     return value.isEmpty ? null : value;
   }
 
   String? _hostVersion() {
-    final value = parent.target?.ffiModel.pi.version;
+    final value = parent.target?.ffiModel.pi.fullVersion;
     return value == null || value.isEmpty ? null : value;
   }
 
@@ -4373,7 +4380,8 @@ class QualityMonitorModel with ChangeNotifier {
       if (hostVersion != null) {
         _data.hostVersion = hostVersion;
       }
-      if (version.isNotEmpty) {
+      if ((_data.clientVersion == null || _data.clientVersion!.isEmpty) &&
+          version.isNotEmpty) {
         _data.clientVersion = version;
       }
       if (evt.containsKey('decoder') &&
@@ -5031,6 +5039,10 @@ class PeerInfo with ChangeNotifier {
       platformAdditions[kPlatformAdditionsIddImpl] == 'rustdesk_idd';
   bool get isAmyuniIdd =>
       platformAdditions[kPlatformAdditionsIddImpl] == 'amyuni_idd';
+  String get fullVersion =>
+      platformAdditions[kPlatformAdditionsFullVersion] as String? ?? version;
+  bool get supportCaptureBackend =>
+      platformAdditions[kPlatformAdditionsSupportCaptureBackend] == true;
 
   Display? tryGetDisplay({int? display}) {
     if (displays.isEmpty) {
