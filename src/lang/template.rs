@@ -444,6 +444,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Switch Sides", ""),
         ("Please confirm if you want to share your desktop?", ""),
         ("Display", ""),
+        ("Capture", ""),
         ("Quality monitor", ""),
         ("Default View Style", ""),
         ("Default Scroll Style", ""),

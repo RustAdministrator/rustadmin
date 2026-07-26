@@ -775,6 +775,14 @@ void showOptions(
       if (qualityMonitorRadios.isNotEmpty ||
           qualityMonitorDetailsRadios.isNotEmpty)
         const Divider(color: MyTheme.border),
+      if (clipboardRadios.isNotEmpty)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Padding(
+            padding: const EdgeInsets.only(left: 16, top: 4, bottom: 4),
+            child: Text(translate('Clipboard')),
+          ),
+        ),
       for (var e in clipboardRadios)
         Obx(() => getRadio<String>(
             e.child,
