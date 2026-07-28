@@ -4,6 +4,7 @@ import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:path/path.dart' as path;
 
 const _accentColor = Color(0xFF0071FF);
@@ -37,6 +38,31 @@ class RemoteLabMonitor {
 
   ImageProvider<Object>? get imageProvider =>
       imagePath.isEmpty ? null : FileImage(File(imagePath));
+}
+
+enum RemoteLabScenario {
+  windowsFullAccess,
+  androidPeer,
+  viewOnly,
+  connecting,
+  disconnected,
+}
+
+extension RemoteLabScenarioDetails on RemoteLabScenario {
+  String get label => switch (this) {
+    RemoteLabScenario.windowsFullAccess =>
+      'Windows · full access · multi-monitor',
+    RemoteLabScenario.androidPeer => 'Android peer · full access',
+    RemoteLabScenario.viewOnly => 'Windows · view only',
+    RemoteLabScenario.connecting => 'Connecting',
+    RemoteLabScenario.disconnected => 'Disconnected',
+  };
+
+  bool get connected =>
+      this != RemoteLabScenario.connecting &&
+      this != RemoteLabScenario.disconnected;
+  bool get peerIsAndroid => this == RemoteLabScenario.androidPeer;
+  bool get viewOnly => this == RemoteLabScenario.viewOnly;
 }
 
 class MobileRemoteLabPage extends StatefulWidget {
@@ -77,6 +103,7 @@ class _MobileRemoteLabPageState extends State<MobileRemoteLabPage> {
   String? _loadError;
   bool _portrait = true;
   bool _loading = false;
+  RemoteLabScenario _scenario = RemoteLabScenario.windowsFullAccess;
 
   @override
   void initState() {
@@ -322,6 +349,25 @@ class _MobileRemoteLabPageState extends State<MobileRemoteLabPage> {
             ],
           ),
           const SizedBox(height: 22),
+          DropdownButtonFormField<RemoteLabScenario>(
+            initialValue: _scenario,
+            decoration: const InputDecoration(
+              labelText: 'Remote-session scenario',
+              border: OutlineInputBorder(),
+            ),
+            items: [
+              for (final scenario in RemoteLabScenario.values)
+                DropdownMenuItem(value: scenario, child: Text(scenario.label)),
+            ],
+            onChanged: (value) {
+              if (value != null) {
+                setState(() {
+                  _scenario = value;
+                });
+              }
+            },
+          ),
+          const SizedBox(height: 16),
           DropdownButtonFormField<_DevicePreset>(
             initialValue: _devicePreset,
             decoration: const InputDecoration(
@@ -457,7 +503,10 @@ class _MobileRemoteLabPageState extends State<MobileRemoteLabPage> {
                         textScaler: TextScaler.noScaling,
                         platformBrightness: Theme.of(context).brightness,
                       ),
-                      child: MobileRemotePreview(monitors: _monitors),
+                      child: MobileRemotePreview(
+                        monitors: _monitors,
+                        scenario: _scenario,
+                      ),
                     ),
                   ),
                 ),
@@ -470,12 +519,17 @@ class _MobileRemoteLabPageState extends State<MobileRemoteLabPage> {
   }
 }
 
-enum _RemotePanel { displays, chat, more }
+enum _RemotePanel { displays, chat }
 
 class MobileRemotePreview extends StatefulWidget {
-  const MobileRemotePreview({super.key, required this.monitors});
+  const MobileRemotePreview({
+    super.key,
+    required this.monitors,
+    this.scenario = RemoteLabScenario.windowsFullAccess,
+  });
 
   final List<RemoteLabMonitor> monitors;
+  final RemoteLabScenario scenario;
 
   @override
   State<MobileRemotePreview> createState() => _MobileRemotePreviewState();
@@ -488,12 +542,19 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       TransformationController();
 
   int _selectedMonitor = 0;
-  bool _connected = true;
+  late bool _connected;
   bool _showToolbar = true;
   bool _showKeyboard = false;
   bool _touchMode = true;
   bool _showGestureHelp = false;
+  bool _showAndroidActions = false;
   _RemotePanel? _panel;
+
+  @override
+  void initState() {
+    super.initState();
+    _connected = widget.scenario.connected;
+  }
 
   @override
   void didUpdateWidget(covariant MobileRemotePreview oldWidget) {
@@ -502,6 +563,14 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       _selectedMonitor = widget.monitors.isEmpty
           ? 0
           : widget.monitors.length - 1;
+    }
+    if (oldWidget.scenario != widget.scenario) {
+      _connected = widget.scenario.connected;
+      _showToolbar = widget.scenario != RemoteLabScenario.connecting;
+      _showKeyboard = false;
+      _showGestureHelp = false;
+      _showAndroidActions = widget.scenario.peerIsAndroid && _connected;
+      _panel = null;
     }
     _resetView();
   }
@@ -532,7 +601,10 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
         children: [
           Positioned.fill(child: _buildRemoteCanvas(context)),
           Positioned(left: 10, top: 10, child: _buildScreenLabel(context)),
-          if (!_connected) Positioned.fill(child: _buildDisconnected(context)),
+          if (widget.scenario == RemoteLabScenario.connecting)
+            Positioned.fill(child: _buildConnecting(context)),
+          if (!_connected && widget.scenario != RemoteLabScenario.connecting)
+            Positioned.fill(child: _buildDisconnected(context)),
           if (_showGestureHelp)
             Positioned.fill(child: _buildGestureHelp(context)),
           if (_showKeyboard && _connected)
@@ -541,10 +613,30 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
               child: _buildKeyboard(context),
             ),
           if (_panel != null) Positioned.fill(child: _buildPanel(context)),
+          if (_showAndroidActions && _connected)
+            Positioned(
+              left: 96,
+              bottom: 12,
+              width: 200,
+              height: 45,
+              child: MobileRemoteAndroidActionsBar(
+                scale: 1,
+                onBack: () => _showPreviewAction('Back'),
+                onHome: () => _showPreviewAction('Home'),
+                onRecent: () => _showPreviewAction('Apps'),
+                onHide: () {
+                  setState(() {
+                    _showAndroidActions = false;
+                  });
+                },
+              ),
+            ),
         ],
       ),
-      bottomNavigationBar: _showToolbar ? _buildBottomToolbar(context) : null,
-      floatingActionButton: _showToolbar
+      bottomNavigationBar: _showToolbar && _connected
+          ? _buildBottomToolbar(context)
+          : null,
+      floatingActionButton: _showToolbar || !_connected
           ? null
           : FloatingActionButton.small(
               tooltip: 'Show toolbar',
@@ -692,111 +784,53 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
   }
 
   Widget _buildBottomToolbar(BuildContext context) {
-    return Material(
-      color: _accentColor,
-      child: SafeArea(
-        top: false,
-        child: SizedBox(
-          height: 56,
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              _toolbarButton(
-                tooltip: _connected ? 'Disconnect' : 'Reconnect',
-                icon: _connected ? Icons.close : Icons.refresh,
-                onPressed: () {
-                  setState(() {
-                    _connected = !_connected;
-                    _showKeyboard = false;
-                    _panel = null;
-                  });
-                },
-              ),
-              _toolbarButton(
-                tooltip: 'Displays',
-                icon: Icons.tv,
-                onPressed: widget.monitors.isEmpty
-                    ? null
-                    : () {
-                        setState(() {
-                          _panel = _RemotePanel.displays;
-                        });
-                      },
-              ),
-              _toolbarButton(
-                tooltip: 'Keyboard',
-                icon: Icons.keyboard,
-                active: _showKeyboard,
-                onPressed: _connected
-                    ? () {
-                        setState(() {
-                          _showKeyboard = !_showKeyboard;
-                          _panel = null;
-                        });
-                      }
-                    : null,
-              ),
-              _toolbarButton(
-                tooltip: _touchMode ? 'Touch mode' : 'Mouse mode',
-                icon: _touchMode ? Icons.touch_app : Icons.mouse,
-                onPressed: _connected
-                    ? () {
-                        setState(() {
-                          _touchMode = !_touchMode;
-                        });
-                      }
-                    : null,
-              ),
-              _toolbarButton(
-                tooltip: 'Chat',
-                icon: Icons.message,
-                onPressed: _connected
-                    ? () {
-                        setState(() {
-                          _panel = _RemotePanel.chat;
-                        });
-                      }
-                    : null,
-              ),
-              _toolbarButton(
-                tooltip: 'More',
-                icon: Icons.more_vert,
-                onPressed: () {
-                  setState(() {
-                    _panel = _RemotePanel.more;
-                  });
-                },
-              ),
-              _toolbarButton(
-                tooltip: 'Hide toolbar',
-                icon: Icons.expand_more,
-                onPressed: () {
-                  setState(() {
-                    _showToolbar = false;
-                    _panel = null;
-                  });
-                },
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _toolbarButton({
-    required String tooltip,
-    required IconData icon,
-    required VoidCallback? onPressed,
-    bool active = false,
-  }) {
-    return Expanded(
-      child: IconButton(
-        tooltip: tooltip,
-        color: active ? Colors.amberAccent : Colors.white,
-        disabledColor: Colors.white38,
-        onPressed: onPressed,
-        icon: Icon(icon),
+    return MobileRemoteBottomBar(
+      onDisconnect: () {
+        setState(() {
+          _connected = false;
+          _showKeyboard = false;
+          _showAndroidActions = false;
+          _panel = null;
+        });
+      },
+      onOptions: () {
+        setState(() {
+          _showKeyboard = false;
+          _panel = _RemotePanel.displays;
+        });
+      },
+      onKeyboard: () {
+        setState(() {
+          _showKeyboard = !_showKeyboard;
+          _panel = null;
+        });
+      },
+      onGestureHelp: () {
+        setState(() {
+          _showGestureHelp = !_showGestureHelp;
+        });
+      },
+      onMobileActions: () {
+        setState(() {
+          _showAndroidActions = !_showAndroidActions;
+        });
+      },
+      onMore: _showMoreMenu,
+      onHide: () {
+        setState(() {
+          _showToolbar = false;
+          _panel = null;
+        });
+      },
+      showInputControls: !widget.scenario.viewOnly,
+      peerIsAndroid: widget.scenario.peerIsAndroid,
+      touchMode: _touchMode,
+      waitForFirstImage: false,
+      chatButton: IconButton(
+        tooltip: 'Chat',
+        color: Colors.white,
+        icon: const Icon(Icons.message),
+        onPressed: _showChatMenu,
       ),
     );
   }
@@ -820,13 +854,17 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
               borderRadius: const BorderRadius.vertical(
                 top: Radius.circular(20),
               ),
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(20, 14, 20, 24),
-                child: switch (_panel!) {
-                  _RemotePanel.displays => _buildDisplayPanel(context),
-                  _RemotePanel.chat => _buildChatPanel(context),
-                  _RemotePanel.more => _buildMorePanel(context),
-                },
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.sizeOf(context).height * 0.84,
+                ),
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(20, 14, 20, 24),
+                  child: switch (_panel!) {
+                    _RemotePanel.displays => _buildDisplayPanel(context),
+                    _RemotePanel.chat => _buildChatPanel(context),
+                  },
+                ),
               ),
             ),
           ),
@@ -836,30 +874,228 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
   }
 
   Widget _buildDisplayPanel(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
+    final enabled = !widget.scenario.viewOnly;
+    return MobileRemoteOptionsContent(
+      key: ValueKey(widget.scenario),
+      header: [
         Text('Displays', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 12),
         Wrap(
+          alignment: WrapAlignment.center,
           spacing: 8,
           runSpacing: 8,
           children: [
             for (var index = 0; index < widget.monitors.length; index++)
-              ChoiceChip(
-                label: Text('Monitor ${index + 1}'),
+              _displayButton(
+                label: '${index + 1}',
                 selected: _selectedMonitor == index,
-                onSelected: (_) => _selectMonitor(index),
+                onTap: () => _selectMonitor(index),
               ),
             if (widget.monitors.length > 1)
-              ChoiceChip(
-                label: const Text('All monitors'),
+              _displayButton(
+                label: 'All',
                 selected: _selectedMonitor == _allMonitors,
-                onSelected: (_) => _selectMonitor(_allMonitors),
+                onTap: () => _selectMonitor(_allMonitors),
+                width: 54,
               ),
           ],
         ),
+        const Divider(),
+      ],
+      radioSections: [
+        _radioSection('view-style', 'adaptive', const [
+          ('original', 'Scale original'),
+          ('adaptive', 'Scale adaptive'),
+          ('custom', 'Scale custom'),
+        ]),
+        _radioSection('image-quality', 'balanced', const [
+          ('best', 'Good image quality'),
+          ('balanced', 'Balanced'),
+          ('low', 'Optimize reaction time'),
+          ('custom', 'Custom'),
+        ]),
+        _radioSection('codec', 'auto', const [
+          ('auto', 'Auto (VP9)'),
+          ('vp8', 'VP8'),
+          ('vp9', 'VP9'),
+          ('av1', 'AV1'),
+          ('av1-hw', 'AV1 HW'),
+          ('h264', 'H264'),
+          ('h264-hq', 'H264 HQ'),
+          ('h265', 'H265'),
+          ('h265-hq', 'H265 HQ'),
+        ]),
+        if (!widget.scenario.peerIsAndroid)
+          _radioSection('capture-backend', 'auto', const [
+            ('auto', 'Auto (DXGI)'),
+            ('dxgi', 'DXGI'),
+            ('wgc', 'WGC'),
+            ('winmag', 'WinMag'),
+            ('gdi', 'GDI'),
+          ], heading: 'Capture'),
+        _radioSection('quality-monitor', 'disabled', const [
+          ('disabled', 'Disabled'),
+          ('top-right', 'Top right'),
+          ('top-left', 'Top left'),
+          ('bottom-right', 'Bottom right'),
+          ('bottom-left', 'Bottom left'),
+        ], heading: 'Quality monitor'),
+        _radioSection('quality-monitor-details', 'basic', const [
+          ('basic', 'Basic'),
+          ('extended', 'Extended'),
+        ], heading: 'Quality monitor details'),
+        _radioSection(
+          'clipboard',
+          enabled ? 'bidirectional' : 'off',
+          const [
+            ('bidirectional', 'Bidirectional'),
+            ('host-to-client', 'Host to client'),
+            ('client-to-host', 'Client to host'),
+            ('off', 'Disabled'),
+          ],
+          heading: 'Clipboard',
+          enabled: enabled,
+        ),
+      ],
+      actions: [
+        if (!widget.scenario.peerIsAndroid)
+          MobileRemoteActionItem(
+            child: const Text('Resolution'),
+            onPressed: _showResolutionMenu,
+          ),
+        if (!widget.scenario.peerIsAndroid)
+          MobileRemoteActionItem(
+            child: const Text('Virtual display'),
+            onPressed: _showVirtualDisplayMenu,
+          ),
+      ],
+      toggles: [
+        if (!widget.scenario.peerIsAndroid)
+          MobileRemoteToggleItem(
+            id: 'show-remote-cursor',
+            value: true,
+            child: const Text('Show remote cursor'),
+            onChanged: enabled ? (_) {} : null,
+          ),
+        if (!widget.scenario.peerIsAndroid && widget.monitors.length > 1)
+          MobileRemoteToggleItem(
+            id: 'follow-remote-cursor',
+            value: false,
+            child: const Text('Follow remote cursor'),
+            onChanged: enabled ? (_) {} : null,
+          ),
+        if (!widget.scenario.peerIsAndroid && widget.monitors.length > 1)
+          MobileRemoteToggleItem(
+            id: 'follow-remote-window',
+            value: false,
+            child: const Text('Follow remote window focus'),
+            onChanged: enabled ? (_) {} : null,
+          ),
+        MobileRemoteToggleItem(
+          id: 'mute',
+          value: false,
+          child: const Text('Mute'),
+          onChanged: (_) {},
+          dividerBefore: !widget.scenario.peerIsAndroid,
+        ),
+        if (!widget.scenario.peerIsAndroid)
+          MobileRemoteToggleItem(
+            id: 'file-copy-paste',
+            value: true,
+            child: const Text('Enable file copy and paste'),
+            onChanged: enabled ? (_) {} : null,
+          ),
+        if (!widget.scenario.peerIsAndroid)
+          MobileRemoteToggleItem(
+            id: 'lock-after-session',
+            value: false,
+            child: const Text('Lock after session end'),
+            onChanged: enabled ? (_) {} : null,
+          ),
+        MobileRemoteToggleItem(
+          id: 'true-color',
+          value: false,
+          child: const Text('True color (4:4:4)'),
+          onChanged: (_) {},
+        ),
+        MobileRemoteToggleItem(
+          id: 'reverse-wheel',
+          value: false,
+          child: const Text('Reverse mouse wheel'),
+          onChanged: enabled ? (_) {} : null,
+        ),
+        MobileRemoteToggleItem(
+          id: 'swap-buttons',
+          value: false,
+          child: const Text('Swap left and right mouse buttons'),
+          onChanged: enabled ? (_) {} : null,
+        ),
+        MobileRemoteToggleItem(
+          id: 'view-mode',
+          value: widget.scenario.viewOnly,
+          child: const Text('View Mode'),
+          onChanged: (_) {},
+        ),
+        if (!widget.scenario.peerIsAndroid)
+          MobileRemoteToggleItem(
+            id: 'privacy-mode',
+            value: false,
+            child: const Text('Privacy mode'),
+            onChanged: enabled ? (_) {} : null,
+          ),
+      ],
+    );
+  }
+
+  Widget _displayButton({
+    required String label,
+    required bool selected,
+    required VoidCallback onTap,
+    double width = 40,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      child: Ink(
+        width: width,
+        height: 40,
+        decoration: BoxDecoration(
+          border: Border.all(color: Theme.of(context).hintColor),
+          borderRadius: BorderRadius.circular(2),
+          color: selected
+              ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.6)
+              : null,
+        ),
+        child: Center(
+          child: Text(
+            label,
+            style: TextStyle(
+              color: selected ? Colors.white : null,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  MobileRemoteRadioSection _radioSection(
+    String id,
+    String selected,
+    List<(String, String)> values, {
+    String? heading,
+    bool enabled = true,
+  }) {
+    return MobileRemoteRadioSection(
+      id: id,
+      value: selected,
+      heading: heading == null ? null : Text(heading),
+      items: [
+        for (final value in values)
+          MobileRemoteRadioItem(
+            value: value.$1,
+            child: Text(value.$2),
+            onChanged: enabled ? (_) {} : null,
+          ),
       ],
     );
   }
@@ -887,39 +1123,151 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
     );
   }
 
-  Widget _buildMorePanel(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Session controls',
-          style: Theme.of(context).textTheme.titleMedium,
+  Future<void> _showChatMenu() async {
+    await showMobileRemotePopupMenu(context, [
+      MobileRemoteMenuItem(
+        child: const Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [Text('Text chat'), Icon(Icons.message)],
         ),
-        const SizedBox(height: 8),
-        ListTile(
-          contentPadding: EdgeInsets.zero,
-          leading: const Icon(Icons.center_focus_strong),
-          title: const Text('Reset view'),
-          onTap: () {
-            _resetView();
-            setState(() {
-              _panel = null;
-            });
-          },
+        onPressed: () {
+          setState(() {
+            _panel = _RemotePanel.chat;
+          });
+        },
+      ),
+      MobileRemoteMenuItem(
+        child: const Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [Text('Voice call'), Icon(Icons.call)],
         ),
-        ListTile(
-          contentPadding: EdgeInsets.zero,
-          leading: const Icon(Icons.gesture),
-          title: const Text('Gesture help'),
-          onTap: () {
-            setState(() {
-              _showGestureHelp = true;
-              _panel = null;
-            });
-          },
-        ),
+        onPressed: () => _showPreviewAction('Voice call'),
+      ),
+    ]);
+  }
+
+  Future<void> _showMoreMenu() async {
+    final androidActions = <String>[
+      if (widget.scenario.peerIsAndroid) ...[
+        'Back',
+        'Home',
+        'Apps',
+        'Volume up',
+        'Volume down',
+        'Power',
       ],
+    ];
+    final sessionActions = <String>[
+      if (!widget.scenario.viewOnly) 'Request Elevation',
+      'OS Password',
+      if (!widget.scenario.peerIsAndroid && !widget.scenario.viewOnly)
+        'Show sign-in',
+      if (!widget.scenario.peerIsAndroid) 'Send clipboard keystrokes',
+      'Reset canvas',
+      'Note',
+      if (!widget.scenario.peerIsAndroid && !widget.scenario.viewOnly)
+        'Insert Ctrl + Alt + Del',
+      if (!widget.scenario.peerIsAndroid) 'Restart remote device',
+      if (!widget.scenario.viewOnly) 'Insert Lock',
+      if (!widget.scenario.peerIsAndroid) 'Block user input',
+      'Refresh',
+      'Start session recording',
+      'Copy Fingerprint',
+    ];
+
+    await showMobileRemotePopupMenu(context, [
+      for (final action in androidActions)
+        MobileRemoteMenuItem(
+          child: Text(action),
+          onPressed: () => _showPreviewAction(action),
+        ),
+      for (var index = 0; index < sessionActions.length; index++)
+        MobileRemoteMenuItem(
+          child: Text(sessionActions[index]),
+          dividerBefore: index == 0 && androidActions.isNotEmpty,
+          onPressed: sessionActions[index] == 'Reset canvas'
+              ? () {
+                  _resetView();
+                  _showPreviewAction('Reset canvas');
+                }
+              : () => _showPreviewAction(sessionActions[index]),
+        ),
+    ]);
+  }
+
+  void _showPreviewAction(String action) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          duration: const Duration(milliseconds: 900),
+          content: Text('$action · preview only'),
+        ),
+      );
+  }
+
+  Future<void> _showResolutionMenu() async {
+    var selected = '2560x1440';
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Resolution'),
+          content: RadioGroup<String>(
+            groupValue: selected,
+            onChanged: (value) {
+              if (value != null) {
+                setDialogState(() {
+                  selected = value;
+                });
+              }
+            },
+            child: const Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                RadioListTile(value: '1920x1080', title: Text('1920x1080')),
+                RadioListTile(value: '2560x1440', title: Text('2560x1440')),
+                RadioListTile(value: '3840x2160', title: Text('3840x2160')),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showVirtualDisplayMenu() async {
+    final enabled = <bool>[true, false, false, false];
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Virtual display'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (var index = 0; index < enabled.length; index++)
+                CheckboxListTile(
+                  value: enabled[index],
+                  title: Text('Virtual display ${index + 1}'),
+                  onChanged: (value) {
+                    setDialogState(() {
+                      enabled[index] = value ?? false;
+                    });
+                  },
+                ),
+              TextButton(
+                onPressed: () {
+                  setDialogState(() {
+                    enabled.fillRange(0, enabled.length, false);
+                  });
+                },
+                child: const Text('Plug out all'),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -1012,6 +1360,27 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
                 ).textTheme.headlineSmall?.copyWith(color: Colors.white),
               ),
               const SizedBox(height: 10),
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(
+                    value: false,
+                    icon: Icon(Icons.mouse),
+                    label: Text('Mouse'),
+                  ),
+                  ButtonSegment(
+                    value: true,
+                    icon: Icon(Icons.touch_app),
+                    label: Text('Touch'),
+                  ),
+                ],
+                selected: {_touchMode},
+                onSelectionChanged: (selection) {
+                  setState(() {
+                    _touchMode = selection.first;
+                  });
+                },
+              ),
+              const SizedBox(height: 10),
               const Text(
                 'Drag to pan • wheel or pinch to zoom\nTap anywhere to close',
                 textAlign: TextAlign.center,
@@ -1048,6 +1417,27 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
               },
               icon: const Icon(Icons.refresh),
               label: const Text('Reconnect'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildConnecting(BuildContext context) {
+    return ColoredBox(
+      color: Colors.black.withValues(alpha: 0.78),
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(color: Colors.white),
+            const SizedBox(height: 16),
+            Text(
+              'Connecting to remote device…',
+              style: Theme.of(
+                context,
+              ).textTheme.titleMedium?.copyWith(color: Colors.white),
             ),
           ],
         ),

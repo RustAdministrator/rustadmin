@@ -6,6 +6,7 @@ import 'package:debounce_throttle/debounce_throttle.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
@@ -206,46 +207,13 @@ class DraggableMobileActions extends StatelessWidget {
               child: Card(
                   color: Colors.transparent,
                   shadowColor: Colors.transparent,
-                  child: Container(
-                    decoration: BoxDecoration(
-                        color: MyTheme.accent.withOpacity(0.4),
-                        borderRadius:
-                            BorderRadius.all(Radius.circular(4.0 * scale))),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: [
-                        IconButton(
-                            color: Colors.white,
-                            onPressed: onBackPressed,
-                            splashRadius: kDesktopIconButtonSplashRadius,
-                            icon: const Icon(Icons.arrow_back),
-                            iconSize: 24 * scale),
-                        IconButton(
-                            color: Colors.white,
-                            onPressed: onHomePressed,
-                            splashRadius: kDesktopIconButtonSplashRadius,
-                            icon: const Icon(Icons.home),
-                            iconSize: 24 * scale),
-                        IconButton(
-                            color: Colors.white,
-                            onPressed: onRecentPressed,
-                            splashRadius: kDesktopIconButtonSplashRadius,
-                            icon: const Icon(Icons.more_horiz),
-                            iconSize: 24 * scale),
-                        const VerticalDivider(
-                          width: 0,
-                          thickness: 2,
-                          indent: 10,
-                          endIndent: 10,
-                        ),
-                        IconButton(
-                            color: Colors.white,
-                            onPressed: onHidePressed,
-                            splashRadius: kDesktopIconButtonSplashRadius,
-                            icon: const Icon(Icons.keyboard_arrow_down),
-                            iconSize: 24 * scale),
-                      ],
-                    ),
+                  child: MobileRemoteAndroidActionsBar(
+                    scale: scale,
+                    onBack: onBackPressed,
+                    onHome: onHomePressed,
+                    onRecent: onRecentPressed,
+                    onHide: onHidePressed,
+                    splashRadius: kDesktopIconButtonSplashRadius,
                   )));
         });
   }
