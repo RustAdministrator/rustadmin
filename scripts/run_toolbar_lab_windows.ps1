@@ -4,6 +4,7 @@ param(
     [string]$CargoTargetDir = "",
     [string]$PubCache = "",
     [string]$Device = "windows",
+    [string]$Target = "lib\prototyping\main_toolbar_lab.dart",
     [switch]$HwCodec,
     [switch]$SkipCargo,
     [switch]$Clean,
@@ -87,7 +88,7 @@ if (-not $SkipCargo) {
 
 Push-Location $FlutterDir
 try {
-    & $FlutterBat run -d $Device -t "lib\prototyping\main_toolbar_lab.dart" @FlutterArgs
+    & $FlutterBat run -d $Device -t $Target @FlutterArgs
 }
 finally {
     Pop-Location
