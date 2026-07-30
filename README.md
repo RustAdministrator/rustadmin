@@ -13,7 +13,7 @@ RustAdmin is aimed primarily at environments where the operator controls the net
 
 * local networks
 * site-to-site VPNs
-* private WireGuard / OpenVPN / IPsec links
+* private VPN links
 * self-hosted rendezvous and relay infrastructure
 * small teams, labs, workshops, and private administration setups
 

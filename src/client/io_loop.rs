@@ -298,7 +298,13 @@ impl<T: InvokeUiSession> Remote<T> {
                 self.handler
                     .set_connection_type(peer.is_secured(), direct, stream_type); // flutter -> connection_ready
                 self.handler.update_direct(Some(direct));
-                peer = peer.into_duplex(CLIENT_ASYNC_OUTBOX_CAPACITY);
+                let peer_id = self.handler.get_id();
+                let diagnostic_context = {
+                    let login = self.handler.lc.read().unwrap();
+                    format!("viewer_peer={} session={}", peer_id, login.session_id)
+                };
+                peer =
+                    peer.into_duplex_with_context(CLIENT_ASYNC_OUTBOX_CAPACITY, diagnostic_context);
                 if conn_type == ConnType::DEFAULT_CONN || conn_type == ConnType::VIEW_CAMERA {
                     self.handler
                         .set_fingerprint(crate::common::pk_to_fingerprint(pk.unwrap_or_default()));

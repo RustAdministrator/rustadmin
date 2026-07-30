@@ -3541,6 +3541,7 @@ dependencies = [
  "osascript",
  "protobuf",
  "protobuf-codegen",
+ "quinn",
  "rand 0.8.5",
  "regex",
  "rustls-native-certs",
