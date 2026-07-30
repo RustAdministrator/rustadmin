@@ -1213,6 +1213,7 @@ pub struct SecureSignedId {
     pub pairing_required: bool,
     pub pairing_salt: Option<[u8; argon2id13::SALTBYTES]>,
     pub supports_paired_viewer_identity: bool,
+    pub quic_certificate_der: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1408,19 +1409,9 @@ fn is_safe_rendezvous_peer_ip(ip: IpAddr) -> bool {
     }
 }
 
-fn is_safe_local_rendezvous_peer_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => ip.is_private(),
-        IpAddr::V6(ip) => (ip.segments()[0] & 0xfe00) == 0xfc00,
-    }
-}
-
-pub fn is_safe_rendezvous_peer_hint(addr: SocketAddr, is_local_hint: bool) -> bool {
+pub fn is_safe_rendezvous_peer_hint(addr: SocketAddr, _is_local_hint: bool) -> bool {
     if addr.port() == 0 {
         return false;
-    }
-    if is_local_hint {
-        return is_safe_local_rendezvous_peer_ip(addr.ip());
     }
     is_safe_rendezvous_peer_ip(addr.ip())
 }
@@ -2963,6 +2954,7 @@ pub fn decode_secure_signed_id(signed: &[u8], key: &sign::PublicKey) -> ResultTy
             pairing_required,
             pairing_salt,
             supports_paired_viewer_identity,
+            quic_certificate_der: None,
         });
     }
     let res = IdPk::parse_from_bytes(&verified)?;
@@ -2975,6 +2967,7 @@ pub fn decode_secure_signed_id(signed: &[u8], key: &sign::PublicKey) -> ResultTy
         pairing_required: false,
         pairing_salt: None,
         supports_paired_viewer_identity: false,
+        quic_certificate_der: None,
     })
 }
 
@@ -3274,6 +3267,41 @@ pub fn attach_direct_quic_identity(
         bail!("Handshake failed: signed QUIC identity does not match direct peer identity");
     }
     direct_id.quic_certificate_der = identity.quic_certificate_der;
+    Ok(())
+}
+
+#[cfg(feature = "quic-transport")]
+pub fn attach_secure_quic_identity(
+    secure_id: &mut SecureSignedId,
+    expected_sign_pk: &[u8; sign::PUBLICKEYBYTES],
+    payload: &[u8],
+) -> ResultType<()> {
+    if payload.is_empty() {
+        return Ok(());
+    }
+    let identity = decode_direct_id_pk(payload)
+        .map_err(|error| anyhow!("Handshake failed: invalid signed QUIC identity: {error}"))?;
+    if identity.id != secure_id.id
+        || &identity.sign_pk != expected_sign_pk
+        || identity.box_pk != secure_id.box_pk
+        || identity.quic_certificate_der.is_none()
+    {
+        bail!("Handshake failed: signed QUIC identity does not match rendezvous peer identity");
+    }
+    secure_id.quic_certificate_der = identity.quic_certificate_der;
+    Ok(())
+}
+
+#[cfg(feature = "quic-transport")]
+pub fn validate_quic_peer_binding(
+    stream: &Stream,
+    signing_key: &[u8],
+    certificate_der: &[u8],
+) -> ResultType<()> {
+    let binding = stream
+        .quic_peer_binding()
+        .ok_or_else(|| anyhow!("Handshake failed: QUIC peer binding is unavailable"))?;
+    binding.verify_signed_identity(signing_key, certificate_der)?;
     Ok(())
 }
 
@@ -5119,6 +5147,38 @@ mod tests {
         assert!(attach_direct_quic_identity(&mut decoded, &mismatched).is_err());
     }
 
+    #[cfg(feature = "quic-transport")]
+    #[test]
+    fn test_attach_secure_quic_identity_requires_same_rendezvous_peer() {
+        let (sign_pk, sign_sk) = sign::gen_keypair();
+        let (box_pk, _) = box_::gen_keypair();
+        let salt = create_direct_pairing_salt();
+        let certificate = vec![0x30; 384];
+        let legacy = create_secure_signed_id_with_pairing("peer-id", box_pk.0, &sign_sk, salt);
+        let quic = create_direct_signed_id_with_quic(
+            "peer-id",
+            box_pk.0,
+            &sign_pk.0,
+            &sign_sk,
+            &certificate,
+        )
+        .unwrap();
+        let mut decoded = decode_secure_signed_id(&legacy, &sign_pk).unwrap();
+        attach_secure_quic_identity(&mut decoded, &sign_pk.0, &quic).unwrap();
+        assert_eq!(decoded.quic_certificate_der, Some(certificate));
+
+        let (other_sign_pk, other_sign_sk) = sign::gen_keypair();
+        let mismatched = create_direct_signed_id_with_quic(
+            "peer-id",
+            box_pk.0,
+            &other_sign_pk.0,
+            &other_sign_sk,
+            &[0x31; 384],
+        )
+        .unwrap();
+        assert!(attach_secure_quic_identity(&mut decoded, &sign_pk.0, &mismatched).is_err());
+    }
+
     #[test]
     fn test_decode_direct_signed_id_without_paired_viewer_capability() {
         let (sign_pk, sign_sk) = sign::gen_keypair();
@@ -5558,7 +5618,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_safe_rendezvous_peer_hint_rejects_unsafe_and_requires_local_ranges() {
+    fn test_is_safe_rendezvous_peer_hint_is_vpn_agnostic() {
         assert!(is_safe_rendezvous_peer_hint(
             "203.0.113.10:21116".parse().unwrap(),
             false
@@ -5575,7 +5635,7 @@ mod tests {
             "192.168.1.20:21116".parse().unwrap(),
             true
         ));
-        assert!(!is_safe_rendezvous_peer_hint(
+        assert!(is_safe_rendezvous_peer_hint(
             "203.0.113.10:21116".parse().unwrap(),
             true
         ));
@@ -5583,7 +5643,7 @@ mod tests {
             "[fd00::20]:21116".parse().unwrap(),
             true
         ));
-        assert!(!is_safe_rendezvous_peer_hint(
+        assert!(is_safe_rendezvous_peer_hint(
             "[2001:db8::20]:21116".parse().unwrap(),
             true
         ));

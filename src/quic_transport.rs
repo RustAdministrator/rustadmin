@@ -75,14 +75,7 @@ async fn connect_pretrusted_inner(
 ) -> Result<Stream, DirectQuicConnectError> {
     let store = FileTrustedPeerStore::new(&config.trusted_peer_store)
         .map_err(DirectQuicConnectError::fatal)?;
-    let trusted = store
-        .load(peer_id)
-        .map_err(DirectQuicConnectError::fatal)?
-        .ok_or_else(|| {
-            DirectQuicConnectError::unavailable(anyhow!(
-                "peer {peer_id} has no confirmed QUIC identity; complete one secure TCP pairing first"
-            ))
-        })?;
+    let trusted = store.load(peer_id).map_err(DirectQuicConnectError::fatal)?;
     let identity = local_tls_identity().map_err(DirectQuicConnectError::fatal)?;
     let peer_address =
         resolve_peer_address(connect_address, config.listen_port, config.enable_ipv6)
@@ -90,14 +83,22 @@ async fn connect_pretrusted_inner(
             .map_err(DirectQuicConnectError::unavailable)?;
     let bind_ip = compatible_client_bind(config.listen_address, peer_address.ip());
     let options = quic_options(config);
-    let endpoint = QuicClientEndpoint::bind(
-        SocketAddr::new(bind_ip, 0),
-        identity
-            .credentials()
-            .map_err(DirectQuicConnectError::fatal)?,
-        trusted.certificate_der.clone().into(),
-        &options,
-    )
+    let credentials = identity
+        .credentials()
+        .map_err(DirectQuicConnectError::fatal)?;
+    let endpoint = if let Some(trusted) = trusted.as_ref() {
+        QuicClientEndpoint::bind(
+            SocketAddr::new(bind_ip, 0),
+            credentials,
+            trusted.certificate_der.clone().into(),
+            &options,
+        )
+    } else {
+        hbb_common::log::info!(
+            "Starting bounded QUIC first-contact authentication for unpaired peer {peer_id}"
+        );
+        QuicClientEndpoint::bind_provisional(SocketAddr::new(bind_ip, 0), credentials, &options)
+    }
     .map_err(|error| match error {
         QuicTransportError::UdpBind(_)
         | QuicTransportError::UdpDisabled
@@ -115,7 +116,7 @@ async fn connect_pretrusted_inner(
                 | QuicTransportError::UdpBind(_)
         );
         let error = anyhow!(error).context(format!(
-            "QUIC UDP connection to {peer_address} failed; check the WireGuard route and UDP port {}",
+            "QUIC UDP connection to {peer_address} failed; check the routed path and UDP port {}",
             peer_address.port()
         ));
         if unavailable {
@@ -132,14 +133,25 @@ async fn connect_pretrusted_inner(
     if session_id.iter().all(|byte| *byte == 0) {
         session_id[0] = 1;
     }
-    let authentication = AuthenticatedControlChannel::authenticate_client(
-        connection,
-        &DeviceIdentity::from_config().map_err(DirectQuicConnectError::fatal)?,
-        trusted.identity_key,
-        session_id,
-        options.authentication_timeout,
-    )
-    .await
+    let device_identity = DeviceIdentity::from_config().map_err(DirectQuicConnectError::fatal)?;
+    let authentication = if let Some(trusted) = trusted.as_ref() {
+        AuthenticatedControlChannel::authenticate_client(
+            connection,
+            &device_identity,
+            trusted.identity_key,
+            session_id,
+            options.authentication_timeout,
+        )
+        .await
+    } else {
+        AuthenticatedControlChannel::authenticate_client_discover_peer(
+            connection,
+            &device_identity,
+            session_id,
+            options.authentication_timeout,
+        )
+        .await
+    }
     .map_err(DirectQuicConnectError::fatal)?;
     let mut application = QuicApplicationStream::establish(
         authentication,
@@ -156,61 +168,36 @@ pub async fn run_direct_server(server: ServerPtr) {
     loop {
         if let Err(error) = run_direct_server_once(server.clone()).await {
             hbb_common::log::warn!("QUIC direct server stopped: {error}");
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
-        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 
 async fn run_direct_server_once(server: ServerPtr) -> ResultType<()> {
     let config = NetworkTransportConfig::load()?;
     if config.mode == RemoteTransportMode::Tcp
-        || !option2bool(
-            hbb_common::config::keys::OPTION_DIRECT_SERVER,
-            &Config::get_option(hbb_common::config::keys::OPTION_DIRECT_SERVER),
-        )
         || option2bool("stop-service", &Config::get_option("stop-service"))
     {
         tokio::time::sleep(Duration::from_secs(5)).await;
         return Ok(());
     }
     let store = FileTrustedPeerStore::new(&config.trusted_peer_store)?;
-    let trusted_peers = store.load_all()?;
-    if trusted_peers.is_empty() {
-        hbb_common::log::info!(
-            "QUIC direct server is waiting for a confirmed peer; complete one secure TCP pairing first"
-        );
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        return Ok(());
-    }
     let identity = local_tls_identity()?;
     let options = quic_options(&config);
     let bind_address = SocketAddr::new(config.listen_address, config.listen_port);
-    let trusted_certificates = trusted_peers
-        .iter()
-        .map(|peer| peer.certificate_der.clone().into())
-        .collect();
-    let endpoint = QuicServerEndpoint::bind_trusted_certificates(
-        bind_address,
-        identity.credentials()?,
-        trusted_certificates,
-        &options,
-    )?;
+    let endpoint =
+        QuicServerEndpoint::bind_provisional(bind_address, identity.credentials()?, &options)?;
     let endpoint_address = endpoint.local_addr()?;
     let identity = Arc::new(DeviceIdentity::from_config()?);
-    let trusted_peers = Arc::new(trusted_peers);
+    let first_contact_slots = Arc::new(tokio::sync::Semaphore::new(8));
     loop {
         let current = NetworkTransportConfig::load()?;
         if current.mode == RemoteTransportMode::Tcp
             || current.listen_address != config.listen_address
             || current.listen_port != config.listen_port
+            || option2bool("stop-service", &Config::get_option("stop-service"))
         {
-            endpoint.close();
-            return Ok(());
-        }
-        let refreshed = store.load_all()?;
-        if refreshed.as_slice() != trusted_peers.as_slice() {
-            hbb_common::log::info!("QUIC trusted-peer set changed; refreshing the UDP listener");
-            endpoint.close();
+            endpoint.close_and_wait().await;
             return Ok(());
         }
         let connection = match endpoint.accept().await {
@@ -234,28 +221,51 @@ async fn run_direct_server_once(server: ServerPtr) -> ResultType<()> {
                 continue;
             }
         };
-        let Some(peer) = trusted_peers
+        let peer = store
+            .load_all()?
             .iter()
             .find(|peer| CertificatePin(peer.certificate_pin) == pin)
-            .cloned()
-        else {
-            hbb_common::log::warn!("Rejected QUIC peer with an unknown certificate pin");
-            continue;
+            .cloned();
+        let first_contact_permit = if peer.is_none() {
+            match first_contact_slots.clone().try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    hbb_common::log::warn!(
+                        "Rejected provisional QUIC peer because all first-contact slots are busy"
+                    );
+                    continue;
+                }
+            }
+        } else {
+            None
         };
         let remote_address = connection.remote_address();
         let server = server.clone();
         let identity = identity.clone();
         let authentication_timeout = options.authentication_timeout;
         tokio::spawn(async move {
+            let _first_contact_permit = first_contact_permit;
+            let peer_label = peer
+                .as_ref()
+                .map(|peer| peer.peer_id.as_str())
+                .unwrap_or("unpaired");
             let result = async {
-                let authentication =
+                let authentication = if let Some(peer) = peer.as_ref() {
                     AuthenticatedControlChannel::authenticate_server_discover_session(
                         connection,
                         identity.as_ref(),
                         peer.identity_key,
                         authentication_timeout,
                     )
-                    .await?;
+                    .await?
+                } else {
+                    AuthenticatedControlChannel::authenticate_server_discover_peer(
+                        connection,
+                        identity.as_ref(),
+                        authentication_timeout,
+                    )
+                    .await?
+                };
                 let application = QuicApplicationStream::establish(
                     authentication,
                     ApplicationQuicRole::Server,
@@ -274,7 +284,7 @@ async fn run_direct_server_once(server: ServerPtr) -> ResultType<()> {
             if let Err(error) = result {
                 hbb_common::log::warn!(
                     "QUIC direct session failed: peer={}, address={}, error={}",
-                    peer.peer_id,
+                    peer_label,
                     remote_address,
                     error
                 );
@@ -285,6 +295,12 @@ async fn run_direct_server_once(server: ServerPtr) -> ResultType<()> {
 
 pub fn local_quic_certificate_der() -> ResultType<Vec<u8>> {
     Ok(local_tls_identity()?.certificate_bytes().to_vec())
+}
+
+pub fn has_paired_peer(peer_id: &str) -> ResultType<bool> {
+    let config = NetworkTransportConfig::load()?;
+    let store = FileTrustedPeerStore::new(&config.trusted_peer_store)?;
+    Ok(store.load(peer_id)?.is_some())
 }
 
 pub fn remember_paired_peer(

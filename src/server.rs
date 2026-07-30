@@ -300,7 +300,7 @@ async fn create_tcp_connection_with_mode(
             ),
         };
         #[cfg(feature = "quic-transport")]
-        let quic_identity = if handshake_mode == HandshakeMode::Direct {
+        let quic_identity = if handshake_mode != HandshakeMode::Disabled {
             let certificate = crate::quic_transport::local_quic_certificate_der()?;
             crate::common::create_direct_signed_id_with_quic(
                 &Config::get_id(),
@@ -346,8 +346,21 @@ async fn create_tcp_connection_with_mode(
                             if identity.quic_certificate_der.is_none() {
                                 bail!("Handshake failed: client QUIC identity has no certificate");
                             }
+                            if stream.is_quic() {
+                                crate::common::validate_quic_peer_binding(
+                                    &stream,
+                                    &identity.sign_pk,
+                                    identity.quic_certificate_der.as_deref().unwrap_or_default(),
+                                )?;
+                            }
                             Some(identity)
                         };
+                        #[cfg(feature = "quic-transport")]
+                        if stream.is_quic() && quic_initiator.is_none() {
+                            bail!(
+                                "Handshake failed: QUIC client omitted its signed TLS certificate binding"
+                            );
+                        }
                         #[cfg(feature = "quic-transport")]
                         if let (Some(legacy), Some(quic)) = (
                             public_key_payload.initiator.as_ref(),
@@ -445,7 +458,7 @@ async fn create_tcp_connection_with_mode(
                                 bail!("{}", error_text);
                             }
                             #[cfg(feature = "quic-transport")]
-                            if handshake_mode == HandshakeMode::Direct {
+                            if handshake_mode != HandshakeMode::Disabled {
                                 if let Some(initiator) = quic_initiator.as_ref() {
                                     if let Some(certificate) =
                                         initiator.quic_certificate_der.as_deref()
@@ -463,14 +476,22 @@ async fn create_tcp_connection_with_mode(
                                 }
                             }
                             if let Some((scope, initiator)) = paired_initiator {
-                                Config::add_paired_viewer(PairedViewer {
+                                let viewer = PairedViewer {
                                     sign_pk: Bytes::from(initiator.sign_pk.to_vec()),
                                     time: get_time(),
                                     id: initiator.id,
                                     name: String::new(),
                                     platform: String::new(),
                                     scope: scope.to_owned(),
-                                });
+                                };
+                                Config::add_paired_viewer(viewer.clone());
+                                #[cfg(feature = "quic-transport")]
+                                if quic_initiator.is_some() {
+                                    let mut direct_viewer = viewer;
+                                    direct_viewer.scope =
+                                        crate::common::DIRECT_PAIRING_SCOPE.to_owned();
+                                    Config::add_paired_viewer(direct_viewer);
+                                }
                             }
                             ack.set_signed_id(SignedId {
                                 id: crate::common::direct_handshake_ack_ok(),

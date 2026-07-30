@@ -1,8 +1,8 @@
-# QUIC Transport over VPNs
+# QUIC Direct Transport over Routed UDP
 
 ## Status
 
-Revision 114 with `hbb_common` revision 018 integrates the QUIC transport into direct IP/domain sessions. The default build enables the `quic-transport` feature and selects `quic-preferred` unless the global `Disable UDP` option is enabled.
+Revision 115 with `hbb_common` revision 019 integrates QUIC into direct IP/domain and rendezvous-assisted sessions. It does not detect or require a specific VPN implementation: any routed IPv4/IPv6 path, including LANs and VPNs, is eligible. The default build enables `quic-transport` and selects automatic QUIC-first mode unless the global `Disable UDP` option is enabled.
 
 Implemented and tested:
 
@@ -23,10 +23,12 @@ Implemented and tested:
 - Reliable `SwitchDisplay` acknowledgement before related video DATAGRAM delivery
 - Reliable raw mode for direct port forwarding
 - Persistent local TLS identity and signed certificate exchange through backward-compatible optional protobuf fields
-- Direct UDP listener startup, pretrusted client connection, dynamic trusted-client refresh, and classified TCP fallback
+- A continuously available bounded first-contact listener, exporter-bound provisional identity discovery, dynamic trusted-peer lookup, and classified TCP fallback
+- Concurrent QUIC, TCP, and eligible UDP/KCP candidates for normal one-click connection
+- First-connection QUIC promotion without requiring a disconnect and reconnect cycle
 - Extended Quality Monitor fields for `QUIC/UDP`, path MTU, maximum DATAGRAM size, QUIC RTT, and cumulative lost packets
 
-Release gates still pending are Windows compilation, physical Android-to-Windows VPN testing, packet-loss/reordering/reduced-MTU emulation, controlled in-session reconnect integration, and iOS compilation. `quic-only` should remain a diagnostic mode until those field gates pass.
+Release gates still pending are physical Android-to-Windows routed-UDP testing, packet-loss/reordering/reduced-MTU emulation, controlled in-session reconnect integration, and iOS compilation. `quic-only` should remain a diagnostic mode until those field gates pass.
 
 ## Existing Architecture
 
@@ -34,7 +36,7 @@ RustAdmin is a Rust application with a Flutter desktop/mobile UI. `hbb_common` o
 
 The legacy transport is framed protobuf over TCP, relay TCP/WebSocket, or KCP. The asynchronous `DuplexStream` writer isolates reads from blocked TCP writes and keeps bounded latest-only video/feedback entries. QUIC is a separate `Stream` variant; the adapter reconstructs the original protobuf messages on receive, so capture, codec, rendering, audio, input injection, clipboard, and file policy remain unchanged.
 
-## Proposed Application Architecture
+## Application Architecture
 
 One authenticated QUIC connection represents one remote-access session:
 
@@ -59,9 +61,9 @@ Quinn owns congestion control and path MTU discovery. RustAdmin's adaptation lay
 
 ## Security Model
 
-VPN reachability is not authorization. QUIC requires all of the following:
+Network or VPN reachability is not authorization. A previously paired QUIC session requires all of the following:
 
-1. TLS 1.3 mutual certificate validation.
+1. TLS 1.3 with an exact previously pinned peer certificate.
 2. Exact SHA-256 pin verification of the peer leaf certificate.
 3. An Ed25519 challenge signed by the existing RustAdmin device identity and bound to the TLS exporter, session ID, both nonces, and both identity keys.
 4. A trusted peer record created only after explicit fingerprint confirmation, a valid signed direct-pairing proof, or secure pre-enrollment.
@@ -71,7 +73,9 @@ Zero-RTT is not used. Clipboard text, keyboard data, file contents, private keys
 
 On Unix, the identity/trust directories use mode 0700 and private files use mode 0600. Records and identity files are written through synchronized temporary files. On Windows these files live below the existing application configuration directory and inherit its ACL; migration to an OS credential vault remains a hardening option.
 
-The first connection to a compatible peer intentionally uses the existing authenticated TCP direct handshake. Both sides exchange an optional signed QUIC certificate bound to the legacy device signing key and ephemeral direct-session key. The production bootstrap stores that identity only after the direct-pairing passphrase proof succeeds or a previously confirmed paired-viewer identity is accepted; a password-only TCP login does not pre-authorize QUIC. Old clients ignore these protobuf fields. Later connections use mTLS and TLS-exporter-bound Ed25519 authentication before the normal RustAdmin login/permission flow.
+For first contact, TLS certificate acceptance is provisional and grants no application authorization. Before normal RustAdmin session data is accepted, both peers prove their existing Ed25519 device identities over the TLS exporter. The signed RustAdmin handshake must then bind the same device key and exact TLS certificate, and the existing passphrase/fingerprint pairing must succeed. Only then is the certificate pin persisted. Provisional sessions are bounded and time limited. A changed certificate or device identity is never silently accepted or downgraded to TCP.
+
+Auto mode starts QUIC and legacy direct candidates together. QUIC gets a bounded 1500 ms preference window after a legacy candidate becomes ready. Pairing prompts happen only after a transport has won, so the race cannot cancel an interactive prompt. If an authenticated legacy first contact wins, RustAdmin attempts one bounded QUIC promotion in the same user connection. Old clients ignore the optional signed QUIC fields and continue on the legacy path.
 
 ## Configuration
 
@@ -79,7 +83,7 @@ The current shared option keys are:
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `remote-transport` | `quic-preferred` | `tcp`, `quic-preferred`, or `quic-only` |
+| `remote-transport` | `quic-preferred` | `tcp`, `quic-preferred` (Auto), or `quic-only` |
 | `disable-udp` | off | Emergency kill switch; forces TCP regardless of mode |
 | `quic-listen-address` | `0.0.0.0` | UDP bind address |
 | `quic-listen-port` | `48100` | UDP listen and peer port |
@@ -88,23 +92,23 @@ The current shared option keys are:
 | `quic-enable-ipv6` | enabled | Set to `N` to disable IPv6 |
 | `quic-file-bandwidth-mbps` | `20` | File-transfer cap; 0 disables file bandwidth |
 
-`quic-preferred` falls back for missing pre-enrollment, UDP bind failure, timeout, or pre-authentication path reset. It does not fall back after TLS certificate, pin, device identity, session negotiation, or application protocol failure.
+`quic-preferred` falls back for UDP bind failure, unreachable paths, and bounded network timeouts. It does not fall back after certificate, pin, device identity, signed-metadata, pairing, session-negotiation, or application-protocol failure.
 
-Android and Windows expose `Enable QUIC` in Network settings. Enabling it writes `remote-transport=quic-preferred` and clears `disable-udp`; disabling it writes `remote-transport=tcp` without disabling UDP for legacy rendezvous or KCP traffic. `Disable UDP` remains the separate global TCP-only emergency switch.
+Android and Windows expose one `Transport` selector with `Auto (QUIC preferred)`, `QUIC only`, and `TCP only`. It writes a consistent `remote-transport` and legacy `disable-udp` pair. `TCP only` is the emergency UDP kill switch; Auto leaves legacy UDP/KCP candidates eligible.
 
 TCP and UDP use independent ports. Existing direct TCP continues to use the configured direct-access port; QUIC listens on UDP 48100 by default. The Windows installer already authorizes the application executable in both firewall directions, which covers TCP and UDP for installed builds.
 
-See `docs/quic-vpn.example.toml`.
+See `docs/quic-vpn.example.toml`; its settings apply to any routed UDP path.
 
-## Run a Direct VPN Session
+## Run a Direct Routed Session
 
-1. Configure the VPN normally and verify that each peer can route to the other peer's tunnel IP or domain.
-2. Leave `Disable UDP` off. Allow the RustAdmin executable and UDP 48100 on the applicable VPN firewall profile.
+1. Verify that each peer can route to the other peer's LAN or VPN address. RustAdmin does not inspect the VPN implementation.
+2. Select `Auto (QUIC preferred)`. Allow the RustAdmin executable and UDP 48100 on the applicable firewall profile.
 3. Enable RustAdmin direct IP access on the host and configure the direct-pairing passphrase (or retain an already confirmed paired viewer).
-4. Enter the host VPN IP or domain in the client connection field. The first compatible connection uses TCP and the signed direct-pairing proof to enroll both QUIC identities.
-5. Disconnect and connect again. Extended Quality Monitor should show `Path QUIC/UDP`, MTU, Datagram, QUIC RTT, and Lost.
+4. Enter the host routed IP in the normal connection field. QUIC and compatible legacy candidates start during the same connection action.
+5. Complete normal pairing if prompted. Extended Quality Monitor should show `Path QUIC/UDP`, `Path MTU`, `QUIC DATAGRAM max`, QUIC RTT, and loss when QUIC wins.
 
-`remote-transport=tcp` forces the legacy path. `remote-transport=quic-only` is intended for diagnostics and fails instead of falling back. No public rendezvous, NAT punch, or relay is used when the user connects to an explicit VPN peer address.
+`remote-transport=tcp` forces the legacy path. `remote-transport=quic-only` is intended for diagnostics and fails instead of falling back. An explicit routed IP does not require a public relay.
 
 ## Build and Test
 
@@ -141,13 +145,13 @@ cargo test --offline --features quic-transport --lib \
 
 - `UDP is disabled`: clear `disable-udp` only after confirming local policy permits UDP.
 - UDP bind failure: verify the configured local address exists and UDP port 48100 is free.
-- Connect timeout: verify the VPN route, peer tunnel address, host firewall, and UDP port. A timeout alone cannot distinguish a dropped firewall packet from an unreachable peer.
+- Connect timeout: verify the routed peer address, host firewall, and UDP port. A timeout alone cannot distinguish a dropped firewall packet from an unreachable peer.
 - Certificate or identity mismatch: TCP fallback is deliberately refused. Confirm the peer fingerprint and investigate a changed device identity or restored configuration.
 - Protocol mismatch: update the older peer; do not bypass negotiation.
 - Repeated frame timeouts: inspect current MTU, QUIC loss, DATAGRAM drops, and frame completion metrics. Do not hardcode a 1500-byte datagram.
 - Input works but media does not: verify QUIC DATAGRAM was negotiated, `max_datagram_size()` is present, and the Quality Monitor shows a nonzero Datagram value.
-- First connection remains TCP: this is expected while signed QUIC identities are enrolled. Complete direct pairing, then reconnect. A password-only login intentionally does not create persistent QUIC trust.
-- Port 48100 is blocked: the Quality Monitor remains on `TCP`, and the log contains a classified QUIC reachability fallback. Open UDP 48100 on the VPN interface or configure the matching port at both peers.
+- First connection remains TCP: inspect the classified QUIC candidate and promotion diagnostics. A network timeout may keep the authenticated legacy session; a certificate, identity, or protocol error must fail instead of downgrading.
+- Port 48100 is blocked: the Quality Monitor remains on `TCP`, and the log contains a classified QUIC reachability fallback. Open UDP 48100 on the relevant interface or configure the matching port at both peers.
 - File transfer affects interaction: enforce the dedicated stream priority and rate limiter; do not send file chunks on control or input streams.
 
 ## Integration Stages
@@ -158,5 +162,6 @@ cargo test --offline --features quic-transport --lib \
 4. Completed: protobuf channel adapter, raw mode, reliable display ordering, and persistent TLS identity lifecycle.
 5. Completed: host listener, signed peer enrollment, client mode selection, production negotiation, and classified preferred-mode fallback.
 6. Completed: extended Quality Monitor transport, MTU, DATAGRAM, RTT, and loss reporting.
-7. In progress: Windows/Android release builds and physical VPN validation.
-8. Pending: root-capable packet impairment matrix, in-session reconnect supervisor, iOS build, and optional configuration UI beyond the existing `Disable UDP` kill switch.
+7. Completed: VPN-neutral QUIC-first candidate racing, bounded first-contact identity binding, same-session promotion, and unified transport UI.
+8. In progress: Windows/Android release builds and physical routed-UDP validation.
+9. Pending: root-capable packet impairment matrix, in-session reconnect supervisor, and iOS build.

@@ -49,7 +49,9 @@ Each following message is a four-byte big-endian length followed by one complete
 
 ## Control and Authentication
 
-TLS uses ALPN `rustadmin-quic-v1`, TLS 1.3, mutual certificates, and no 0-RTT. The first bidirectional stream is control and receives maximum stream priority.
+TLS uses ALPN `rustadmin-quic-v1`, TLS 1.3, peer certificates, and no 0-RTT. The first bidirectional stream is control and receives maximum stream priority.
+
+For a known peer, the TLS certificate is pinned before application authentication. For first contact, certificate validation is deliberately provisional and bounded; it grants no session authorization. The following exporter-bound Ed25519 exchange proves possession of the existing RustAdmin device key. The normal signed RustAdmin handshake must then bind that proved key to the exact TLS certificate, and existing passphrase/fingerprint pairing must authorize the peer before the pin is stored. A mismatch closes the connection and cannot trigger an authenticated downgrade.
 
 Client and server hello payloads carry role, Ed25519 public key, random nonces, and signatures. Signatures cover the TLS exporter, session ID, role, nonces, and both device keys. Hello payloads have exact fixed limits.
 
@@ -127,4 +129,4 @@ Chunks contain transfer ID, exact offset, declared length, and at most 256 KiB o
 
 Reconnect uses bounded exponential backoff with jitter. Every new connection performs TLS, device authentication, and negotiation again. Disconnect actions release input, discard old media, request a keyframe, and require file integrity validation before resume. Sequence state is reset; old input is not replayed.
 
-The state machine and reset actions are implemented in protocol code. Automatic reconnection of an already running GUI session is not enabled in revision 114; the existing application retry/manual reconnect path creates a fully new authenticated QUIC session.
+The state machine and reset actions are implemented in protocol code. Automatic reconnection of an already running GUI session is not enabled in revision 115; the existing application retry/manual reconnect path creates a fully new authenticated QUIC session.

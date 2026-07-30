@@ -108,6 +108,8 @@ pub const SEC30: Duration = Duration::from_secs(30);
 pub const VIDEO_QUEUE_SIZE: usize = 120;
 const VIDEO_FEEDBACK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 const MAX_DECODE_FAIL_COUNTER: usize = 3;
+#[cfg(feature = "quic-transport")]
+const AUTO_QUIC_RACE_TIMEOUT: Duration = Duration::from_millis(1_500);
 
 #[cfg(target_os = "linux")]
 pub const LOGIN_MSG_DESKTOP_NOT_INITED: &str = "Desktop env is not inited";
@@ -822,6 +824,32 @@ impl Client {
         }
         log::info!("peer address: {}, timeout: {}", peer, connect_timeout);
         let start = std::time::Instant::now();
+        let peer_config_id = interface.get_id();
+
+        #[cfg(feature = "quic-transport")]
+        let quic_only = hbb_common::transport::configuration::NetworkTransportConfig::load()?.mode
+            == hbb_common::transport::configuration::RemoteTransportMode::QuicOnly;
+        #[cfg(feature = "quic-transport")]
+        let had_quic_trust = crate::quic_transport::has_paired_peer(&peer_config_id)?;
+        #[cfg(feature = "quic-transport")]
+        if quic_only && interface.is_force_relay() {
+            bail!("QUIC only mode cannot use the configured TCP relay path");
+        }
+        #[cfg(feature = "quic-transport")]
+        let quic_candidate = if !interface.is_force_relay()
+            && crate::common::is_safe_rendezvous_peer_hint(peer, is_local)
+        {
+            let peer_config_id = peer_config_id.clone();
+            let peer_address = peer.to_string();
+            Some(
+                async move {
+                    crate::quic_transport::connect_pretrusted(&peer_config_id, &peer_address).await
+                }
+                .boxed(),
+            )
+        } else {
+            None
+        };
 
         let mut connect_futures = Vec::new();
         if crate::common::is_safe_rendezvous_peer_hint(peer, is_local) {
@@ -841,26 +869,77 @@ impl Client {
         }
         if is_local {
             log::info!(
-                "Using TCP-only local connection path for LAN MTU compatibility; UDP/KCP candidates are skipped"
+                "Local/routed peer detected; TCP and available UDP/KCP candidates remain eligible"
             );
-        } else {
-            if let Some(udp_socket_nat) = udp_socket_nat {
-                connect_futures
-                    .push(udp_nat_connect(udp_socket_nat, "UDP", connect_timeout).boxed());
-            }
-            if let Some(udp_socket_v6) = udp_socket_v6 {
-                connect_futures
-                    .push(udp_nat_connect(udp_socket_v6, "IPv6", connect_timeout).boxed());
-            }
         }
-        // Run all connection attempts concurrently, return the first successful one
-        let (mut conn, kcp, mut typ) = if connect_futures.is_empty() {
-            (Err(anyhow!("No trusted direct path available")), None, "")
-        } else {
-            match select_ok(connect_futures).await {
-                Ok(conn) => (Ok(conn.0 .0), conn.0 .1, conn.0 .2),
-                Err(e) => (Err(e), None, ""),
+        if let Some(udp_socket_nat) = udp_socket_nat {
+            connect_futures.push(udp_nat_connect(udp_socket_nat, "UDP", connect_timeout).boxed());
+        }
+        if let Some(udp_socket_v6) = udp_socket_v6 {
+            connect_futures.push(udp_nat_connect(udp_socket_v6, "IPv6", connect_timeout).boxed());
+        }
+        let legacy_candidate = async move {
+            if connect_futures.is_empty() {
+                Err(anyhow!("No trusted direct path available"))
+            } else {
+                select_ok(connect_futures)
+                    .await
+                    .map(|candidate| candidate.0)
             }
+        };
+        #[cfg(feature = "quic-transport")]
+        let (mut conn, mut kcp, mut typ) = {
+            let into_legacy =
+                |result: ResultType<(Stream, Option<KcpStream>, &'static str)>| match result {
+                    Ok((stream, kcp, typ)) => (Ok(stream), kcp, typ),
+                    Err(error) => (Err(error), None, ""),
+                };
+            if let Some(mut quic_candidate) = quic_candidate {
+                if quic_only {
+                    match quic_candidate.await? {
+                        Some(stream) => (Ok(stream), None, "QUIC/UDP"),
+                        None => bail!("QUIC only mode requires a confirmed peer identity"),
+                    }
+                } else {
+                    let deadline = Instant::now() + AUTO_QUIC_RACE_TIMEOUT;
+                    tokio::pin!(legacy_candidate);
+                    tokio::select! {
+                        quic = &mut quic_candidate => match quic? {
+                            Some(stream) => (Ok(stream), None, "QUIC/UDP"),
+                            None => into_legacy(legacy_candidate.await),
+                        },
+                        legacy = &mut legacy_candidate => match legacy {
+                            Ok(legacy) => {
+                                match tokio::time::timeout_at(deadline, &mut quic_candidate).await {
+                                    Ok(Ok(Some(stream))) => (Ok(stream), None, "QUIC/UDP"),
+                                    Ok(Ok(None)) => into_legacy(Ok(legacy)),
+                                    Ok(Err(error)) => return Err(error),
+                                    Err(_) => {
+                                        log::info!(
+                                            "QUIC candidate did not complete within {}ms; using the ready legacy direct path",
+                                            AUTO_QUIC_RACE_TIMEOUT.as_millis()
+                                        );
+                                        into_legacy(Ok(legacy))
+                                    }
+                                }
+                            }
+                            Err(legacy_error) => match quic_candidate.await? {
+                                Some(stream) => (Ok(stream), None, "QUIC/UDP"),
+                                None => into_legacy(Err(legacy_error)),
+                            },
+                        },
+                    }
+                }
+            } else if quic_only {
+                bail!("QUIC only mode has no safe direct endpoint candidate");
+            } else {
+                into_legacy(legacy_candidate.await)
+            }
+        };
+        #[cfg(not(feature = "quic-transport"))]
+        let (mut conn, mut kcp, mut typ) = match legacy_candidate.await {
+            Ok((stream, kcp, typ)) => (Ok(stream), kcp, typ),
+            Err(error) => (Err(error), None, ""),
         };
 
         let mut direct = !conn.is_err();
@@ -883,6 +962,7 @@ impl Client {
                 }
                 typ = "Relay";
                 direct = false;
+                kcp = None;
             } else {
                 bail!("Failed to make direct connection to remote desktop");
             }
@@ -893,27 +973,107 @@ impl Client {
             start.elapsed(),
             punch_type
         );
-        let peer_config_id = interface.get_id();
-        let res = Self::secure_connection(
-            peer_id,
-            peer_id,
-            &peer_config_id,
-            signed_id_pk,
-            key,
-            &interface,
-            &mut conn,
-        )
-        .await;
-        let pk: Option<Vec<u8>> = match res {
-            Ok(pk) => pk,
-            Err(e) => {
-                // this direct is mainly used by on_establish_connection_error, so we update it here before bail
-                interface.update_direct(Some(direct));
-                bail!(e);
+        let pk = if conn.is_quic() {
+            #[cfg(feature = "quic-transport")]
+            {
+                let quic_pk = Self::secure_direct_connection(
+                    peer_id,
+                    &peer_config_id,
+                    &mut conn,
+                    interface.clone(),
+                )
+                .await?;
+                Self::validate_rendezvous_peer_identity(peer_id, &signed_id_pk, key, &quic_pk)?;
+                Some(quic_pk)
+            }
+            #[cfg(not(feature = "quic-transport"))]
+            unreachable!()
+        } else {
+            match Self::secure_connection(
+                peer_id,
+                peer_id,
+                &peer_config_id,
+                signed_id_pk,
+                key,
+                &interface,
+                &mut conn,
+            )
+            .await
+            {
+                Ok(pk) => pk,
+                Err(e) => {
+                    // this direct is mainly used by on_establish_connection_error, so we update it here before bail
+                    interface.update_direct(Some(direct));
+                    bail!(e);
+                }
             }
         };
+        #[cfg(feature = "quic-transport")]
+        if direct && !conn.is_quic() && !had_quic_trust {
+            let promotion = tokio::time::timeout(
+                AUTO_QUIC_RACE_TIMEOUT,
+                crate::quic_transport::connect_pretrusted(&peer_config_id, &peer.to_string()),
+            )
+            .await;
+            match promotion {
+                Ok(Ok(Some(mut quic))) => {
+                let quic_pk = Self::secure_direct_connection(
+                    peer_id,
+                    &peer_config_id,
+                    &mut quic,
+                    interface.clone(),
+                )
+                .await?;
+                if pk.as_deref() != Some(quic_pk.as_slice()) {
+                    bail!(
+                        "Handshake failed: QUIC upgrade identity does not match the paired rendezvous identity"
+                    );
+                }
+                let bootstrap_transport = typ;
+                conn = quic;
+                kcp = None;
+                typ = "QUIC/UDP";
+                log::info!(
+                    "Promoted the confirmed rendezvous direct connection from {bootstrap_transport} to QUIC without a user reconnect"
+                );
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => return Err(error),
+                Err(_) => log::info!(
+                    "QUIC promotion did not complete within {}ms; keeping the authenticated {typ} session",
+                    AUTO_QUIC_RACE_TIMEOUT.as_millis()
+                ),
+            }
+        }
         log::debug!("{} punch secure_connection ok", punch_type);
         Ok((conn, direct, pk, kcp, typ))
+    }
+
+    #[cfg(feature = "quic-transport")]
+    fn validate_rendezvous_peer_identity(
+        peer_id: &str,
+        signed_id_pk: &[u8],
+        key: &str,
+        direct_sign_pk: &[u8],
+    ) -> ResultType<()> {
+        let key = if key.is_empty() {
+            Config::get_bootstrap_key()
+        } else {
+            key.to_owned()
+        };
+        let rs_pk = get_rs_pk(&key).ok_or_else(|| {
+            anyhow!("Handshake failed: no valid rendezvous signing key is configured")
+        })?;
+        if signed_id_pk.is_empty() {
+            bail!("Handshake failed: missing public key from rendezvous server");
+        }
+        let (signed_peer_id, signed_peer_pk) = decode_id_pk(signed_id_pk, &rs_pk).map_err(|e| {
+            anyhow!("Handshake failed: invalid public key from rendezvous server: {e}")
+        })?;
+        if signed_peer_id != peer_id || signed_peer_pk.as_slice() != direct_sign_pk {
+            bail!("Handshake failed: QUIC peer identity does not match rendezvous identity");
+        }
+        Ok(())
     }
 
     /// Establish secure connection with the server.
@@ -953,8 +1113,20 @@ impl Client {
                 let Some(message::Union::SignedId(si)) = msg_in.union else {
                     bail!("Handshake failed: invalid message type");
                 };
-                let secure_id = decode_secure_signed_id(&si.id, &sign_pk)
+                let mut secure_id = decode_secure_signed_id(&si.id, &sign_pk)
                     .map_err(|e| anyhow!("Handshake failed: invalid signed peer key: {e}"))?;
+                #[cfg(feature = "quic-transport")]
+                crate::common::attach_secure_quic_identity(&mut secure_id, &pk, &si.quic_identity)?;
+                #[cfg(feature = "quic-transport")]
+                if conn.is_quic() {
+                    let certificate =
+                        secure_id.quic_certificate_der.as_deref().ok_or_else(|| {
+                            anyhow!(
+                                "Handshake failed: QUIC peer omitted its signed TLS certificate"
+                            )
+                        })?;
+                    crate::common::validate_quic_peer_binding(conn, &pk, certificate)?;
+                }
                 if secure_id.id != peer_id {
                     bail!("Handshake failed: peer id mismatch");
                 }
@@ -966,6 +1138,7 @@ impl Client {
                     )?,
                     option_pk.as_deref().unwrap_or_default(),
                 );
+                let mut trust_was_confirmed = false;
                 if let Some(pending) = pending_trust.as_ref() {
                     if !secure_id.pairing_required {
                         if pending.replace_existing_pin {
@@ -988,6 +1161,7 @@ impl Client {
                             )
                             .await?;
                         crate::common::pin_trusted_peer_signing_key(peer_id, peer_config_id, &pk)?;
+                        trust_was_confirmed = true;
                         pending_trust = None;
                     }
                 }
@@ -1010,6 +1184,15 @@ impl Client {
                     )?)
                 } else {
                     None
+                };
+                #[cfg(feature = "quic-transport")]
+                let quic_identity = if secure_id.quic_certificate_der.is_some() {
+                    crate::common::create_direct_quic_identity(
+                        &Config::get_id(),
+                        &asymmetric_value,
+                    )?
+                } else {
+                    Bytes::new()
                 };
                 let mut pairing_was_proven = false;
                 let pairing_proof = if let Some(pairing_salt) = secure_id.pairing_salt {
@@ -1042,6 +1225,8 @@ impl Client {
                         pairing_proof,
                         initiator_signed_id.as_ref().map(|value| value.as_ref()),
                     )?,
+                    #[cfg(feature = "quic-transport")]
+                    quic_identity,
                     ..Default::default()
                 });
                 timeout(CONNECT_TIMEOUT, conn.send(&msg_out)).await??;
@@ -1089,9 +1274,31 @@ impl Client {
                         peer_config_id,
                         &pk,
                     )?;
+                    trust_was_confirmed = true;
                 }
                 if pairing_was_proven && initiator_signed_id.is_some() {
                     crate::common::set_confirmed_rendezvous_paired_viewer(peer_config_id, true);
+                    #[cfg(feature = "quic-transport")]
+                    if secure_id.quic_certificate_der.is_some() {
+                        crate::common::set_confirmed_direct_paired_viewer(peer_config_id, true);
+                    }
+                }
+                #[cfg(feature = "quic-transport")]
+                if trust_was_confirmed
+                    || pairing_was_proven
+                    || crate::common::has_confirmed_rendezvous_paired_viewer(peer_config_id)
+                {
+                    if let Some(certificate) = secure_id.quic_certificate_der.as_deref() {
+                        crate::common::set_confirmed_direct_paired_viewer(peer_config_id, true);
+                        crate::quic_transport::remember_paired_peer(peer_id, pk, certificate)?;
+                        if peer_config_id != peer_id {
+                            crate::quic_transport::remember_paired_peer(
+                                peer_config_id,
+                                pk,
+                                certificate,
+                            )?;
+                        }
+                    }
                 }
             }
             None => {
@@ -1119,6 +1326,20 @@ impl Client {
                     .map_err(|e| anyhow!("Handshake failed: invalid direct peer key: {e}"))?;
                 #[cfg(feature = "quic-transport")]
                 crate::common::attach_direct_quic_identity(&mut direct_id, &si.quic_identity)?;
+                #[cfg(feature = "quic-transport")]
+                if conn.is_quic() {
+                    let certificate =
+                        direct_id.quic_certificate_der.as_deref().ok_or_else(|| {
+                            anyhow!(
+                                "Handshake failed: QUIC peer omitted its signed TLS certificate"
+                            )
+                        })?;
+                    crate::common::validate_quic_peer_binding(
+                        conn,
+                        &direct_id.sign_pk,
+                        certificate,
+                    )?;
+                }
                 let peer_id = direct_id.id;
                 let sign_pk = direct_id.sign_pk;
                 let their_pk_b = direct_id.box_pk;
@@ -1133,6 +1354,7 @@ impl Client {
                     )?,
                     &sign_pk,
                 );
+                let mut trust_was_confirmed = false;
                 if let Some(pending) = pending_trust.as_ref() {
                     if !direct_id.pairing_required {
                         if pending.replace_existing_pin {
@@ -1159,6 +1381,7 @@ impl Client {
                             peer_config_id,
                             &sign_pk,
                         )?;
+                        trust_was_confirmed = true;
                         pending_trust = None;
                     }
                 }
@@ -1272,12 +1495,14 @@ impl Client {
                         peer_config_id,
                         &sign_pk,
                     )?;
+                    trust_was_confirmed = true;
                 }
                 if pairing_was_proven && initiator_signed_id.is_some() {
                     crate::common::set_confirmed_direct_paired_viewer(peer_config_id, true);
                 }
                 #[cfg(feature = "quic-transport")]
-                if pairing_was_proven
+                if trust_was_confirmed
+                    || pairing_was_proven
                     || crate::common::has_confirmed_direct_paired_viewer(peer_config_id)
                 {
                     if let Some(certificate) = direct_id.quic_certificate_der.as_deref() {
@@ -1330,11 +1555,18 @@ impl Client {
     ) -> ResultType<(Stream, Vec<u8>)> {
         let had_confirmed_pairing =
             crate::common::has_confirmed_direct_paired_viewer(peer_config_id);
+        #[cfg(feature = "quic-transport")]
+        let had_quic_trust = crate::quic_transport::has_paired_peer(peer_config_id)?;
         let mut conn = Self::connect_direct_transport(peer_config_id, connect_addr).await?;
-        match Self::secure_direct_connection(peer, peer_config_id, &mut conn, interface.clone())
-            .await
+        let (conn, pk) = match Self::secure_direct_connection(
+            peer,
+            peer_config_id,
+            &mut conn,
+            interface.clone(),
+        )
+        .await
         {
-            Ok(pk) => Ok((conn, pk)),
+            Ok(pk) => (conn, pk),
             Err(err) => {
                 let pairing_was_cleared = had_confirmed_pairing
                     && !crate::common::has_confirmed_direct_paired_viewer(peer_config_id);
@@ -1345,11 +1577,33 @@ impl Client {
                     "Remembered direct pairing for {peer_config_id} was refused; retrying with local pairing passphrase"
                 );
                 let mut conn = Self::connect_direct_transport(peer_config_id, connect_addr).await?;
-                let pk = Self::secure_direct_connection(peer, peer_config_id, &mut conn, interface)
-                    .await?;
-                Ok((conn, pk))
+                let pk = Self::secure_direct_connection(
+                    peer,
+                    peer_config_id,
+                    &mut conn,
+                    interface.clone(),
+                )
+                .await?;
+                (conn, pk)
             }
+        };
+        #[cfg(feature = "quic-transport")]
+        {
+            if had_quic_trust && !conn.is_quic() {
+                return Ok((conn, pk));
+            }
+            Self::promote_confirmed_direct_to_quic(
+                peer,
+                peer_config_id,
+                connect_addr,
+                conn,
+                pk,
+                interface,
+            )
+            .await
         }
+        #[cfg(not(feature = "quic-transport"))]
+        Ok((conn, pk))
     }
 
     async fn connect_direct_transport(
@@ -1357,12 +1611,87 @@ impl Client {
         connect_addr: &str,
     ) -> ResultType<Stream> {
         #[cfg(feature = "quic-transport")]
-        if let Some(stream) =
-            crate::quic_transport::connect_pretrusted(peer_config_id, connect_addr).await?
         {
-            return Ok(stream);
+            let mode = hbb_common::transport::configuration::NetworkTransportConfig::load()?.mode;
+            if mode == hbb_common::transport::configuration::RemoteTransportMode::Tcp {
+                return connect_tcp_local(connect_addr, None, CONNECT_TIMEOUT).await;
+            }
+            let mut quic = Box::pin(crate::quic_transport::connect_pretrusted(
+                peer_config_id,
+                connect_addr,
+            ));
+            if mode == hbb_common::transport::configuration::RemoteTransportMode::QuicOnly {
+                return quic
+                    .await?
+                    .ok_or_else(|| anyhow!("QUIC only mode requires a confirmed peer identity"));
+            }
+            let mut tcp = Box::pin(connect_tcp_local(connect_addr, None, CONNECT_TIMEOUT));
+            let deadline = Instant::now() + AUTO_QUIC_RACE_TIMEOUT;
+            return tokio::select! {
+                quic_result = &mut quic => match quic_result? {
+                    Some(stream) => Ok(stream),
+                    None => tcp.await,
+                },
+                tcp_result = &mut tcp => match tcp_result {
+                    Ok(stream) => match tokio::time::timeout_at(deadline, &mut quic).await {
+                        Ok(Ok(Some(quic))) => Ok(quic),
+                        Ok(Ok(None)) => Ok(stream),
+                        Ok(Err(error)) => Err(error),
+                        Err(_) => {
+                            log::info!(
+                                "QUIC candidate did not complete within {}ms; using the ready TCP direct path",
+                                AUTO_QUIC_RACE_TIMEOUT.as_millis()
+                            );
+                            Ok(stream)
+                        }
+                    },
+                    Err(tcp_error) => match quic.await? {
+                        Some(stream) => Ok(stream),
+                        None => Err(tcp_error),
+                    },
+                },
+            };
         }
+        #[cfg(not(feature = "quic-transport"))]
         connect_tcp_local(connect_addr, None, CONNECT_TIMEOUT).await
+    }
+
+    #[cfg(feature = "quic-transport")]
+    async fn promote_confirmed_direct_to_quic(
+        peer: &str,
+        peer_config_id: &str,
+        connect_addr: &str,
+        conn: Stream,
+        pk: Vec<u8>,
+        interface: impl Interface,
+    ) -> ResultType<(Stream, Vec<u8>)> {
+        if conn.is_quic() {
+            return Ok((conn, pk));
+        }
+        let promotion = tokio::time::timeout(
+            AUTO_QUIC_RACE_TIMEOUT,
+            crate::quic_transport::connect_pretrusted(peer_config_id, connect_addr),
+        )
+        .await;
+        let mut quic = match promotion {
+            Ok(Ok(Some(stream))) => stream,
+            Ok(Ok(None)) => return Ok((conn, pk)),
+            Ok(Err(error)) => return Err(error),
+            Err(_) => {
+                log::info!(
+                    "QUIC promotion did not complete within {}ms; keeping the authenticated TCP session",
+                    AUTO_QUIC_RACE_TIMEOUT.as_millis()
+                );
+                return Ok((conn, pk));
+            }
+        };
+        let quic_pk =
+            Self::secure_direct_connection(peer, peer_config_id, &mut quic, interface).await?;
+        if quic_pk != pk {
+            bail!("Handshake failed: QUIC upgrade identity does not match the paired TCP identity");
+        }
+        log::info!("Promoted the confirmed direct connection to QUIC without a user reconnect");
+        Ok((quic, quic_pk))
     }
 
     /// Request a relay connection to the server.
@@ -5795,6 +6124,40 @@ mod security_tests {
         assert_eq!(server, format!("hbbs.example.test:{RENDEZVOUS_PORT}"));
         assert!(alternates.is_empty());
         assert!(contained);
+    }
+
+    #[cfg(feature = "quic-transport")]
+    #[test]
+    fn test_quic_candidate_must_match_rendezvous_identity() {
+        let (peer_sign_pk, _) = sign::gen_keypair();
+        let (rendezvous_pk, rendezvous_sk) = sign::gen_keypair();
+        let signed_binding =
+            create_rendezvous_signed_peer_binding("peer-id", &peer_sign_pk.0, &rendezvous_sk);
+        let rendezvous_key = crate::common::encode64(rendezvous_pk.0);
+
+        Client::validate_rendezvous_peer_identity(
+            "peer-id",
+            &signed_binding,
+            &rendezvous_key,
+            &peer_sign_pk.0,
+        )
+        .unwrap();
+
+        let (other_peer_pk, _) = sign::gen_keypair();
+        assert!(Client::validate_rendezvous_peer_identity(
+            "peer-id",
+            &signed_binding,
+            &rendezvous_key,
+            &other_peer_pk.0,
+        )
+        .is_err());
+        assert!(Client::validate_rendezvous_peer_identity(
+            "other-peer",
+            &signed_binding,
+            &rendezvous_key,
+            &peer_sign_pk.0,
+        )
+        .is_err());
     }
 
     #[tokio::test]
