@@ -8,6 +8,9 @@ bool gIsConnectionManager = false;
 void print_help_install_pkg(const char* so);
 
 bool flutter_rustdesk_core_main() {
+#ifdef RUSTADMIN_FLUTTER_LAB
+   return true;
+#else
    g_autofree gchar* executable_path = g_file_read_link("/proc/self/exe", nullptr);
    g_autofree gchar* executable_dir = executable_path
        ? g_path_get_dirname(executable_path)
@@ -42,6 +45,7 @@ bool flutter_rustdesk_core_main() {
        return false;
    }
    return core_main();
+#endif
 }
 
 int main(int argc, char** argv) {

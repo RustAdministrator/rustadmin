@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 const mobileRemoteAccentColor = Color(0xFF0071FF);
+const mobileRemoteAccentActiveColor = Color(0xAA0071FF);
 
 class MobileRemoteBottomBar extends StatelessWidget {
   const MobileRemoteBottomBar({
@@ -164,6 +165,160 @@ class MobileRemoteAndroidActionsBar extends StatelessWidget {
             icon: const Icon(Icons.keyboard_arrow_down),
             iconSize: 24 * scale,
           ),
+        ],
+      ),
+    );
+  }
+}
+
+class MobileRemoteKeyHelpTools extends StatelessWidget {
+  const MobileRemoteKeyHelpTools({
+    super.key,
+    required this.keyboardIsVisible,
+    required this.ctrlActive,
+    required this.altActive,
+    required this.shiftActive,
+    required this.commandActive,
+    required this.functionKeysActive,
+    required this.pinned,
+    required this.moreKeysActive,
+    required this.isMac,
+    required this.showWindowsLinuxKeys,
+    required this.onCtrl,
+    required this.onAlt,
+    required this.onShift,
+    required this.onCommand,
+    required this.onFunctionKeys,
+    required this.onPin,
+    required this.onMoreKeys,
+    required this.onKeyPressed,
+    required this.onShortcutPressed,
+    this.labelBuilder,
+  });
+
+  final bool keyboardIsVisible;
+  final bool ctrlActive;
+  final bool altActive;
+  final bool shiftActive;
+  final bool commandActive;
+  final bool functionKeysActive;
+  final bool pinned;
+  final bool moreKeysActive;
+  final bool isMac;
+  final bool showWindowsLinuxKeys;
+  final VoidCallback onCtrl;
+  final VoidCallback onAlt;
+  final VoidCallback onShift;
+  final VoidCallback onCommand;
+  final VoidCallback onFunctionKeys;
+  final VoidCallback onPin;
+  final VoidCallback onMoreKeys;
+  final ValueChanged<String> onKeyPressed;
+  final ValueChanged<String> onShortcutPressed;
+  final String Function(String)? labelBuilder;
+
+  String _label(String value) => labelBuilder?.call(value) ?? value;
+
+  Widget _button(
+    String text,
+    VoidCallback onPressed, {
+    bool active = false,
+    IconData? icon,
+  }) {
+    return TextButton(
+      style: TextButton.styleFrom(
+        minimumSize: Size.zero,
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 9.75),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+        backgroundColor: active ? mobileRemoteAccentActiveColor : null,
+      ),
+      onPressed: onPressed,
+      child: icon != null
+          ? Icon(icon, size: 14, color: Colors.white)
+          : Text(
+              _label(text),
+              style: const TextStyle(color: Colors.white, fontSize: 11),
+            ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final width = MediaQuery.sizeOf(context).width;
+    final spacing = width > 320 ? 4.0 : 2.0;
+    final modifiers = <Widget>[
+      _button('Ctrl ', onCtrl, active: ctrlActive),
+      _button(' Alt ', onAlt, active: altActive),
+      _button('Shift', onShift, active: shiftActive),
+      _button(isMac ? ' Cmd ' : ' Win ', onCommand, active: commandActive),
+    ];
+    final controls = <Widget>[
+      _button(' Fn ', onFunctionKeys, active: functionKeysActive),
+      _button('', onPin, active: pinned, icon: Icons.push_pin),
+      _button(' ... ', onMoreKeys, active: moreKeysActive),
+    ];
+    final expandedKeys = <Widget>[];
+    if (functionKeysActive) {
+      for (var index = 1; index <= 12; index++) {
+        final name = 'F$index';
+        expandedKeys.add(_button(name, () => onKeyPressed('VK_$name')));
+      }
+    } else if (moreKeysActive) {
+      expandedKeys.addAll([
+        _button('Esc', () => onKeyPressed('VK_ESCAPE')),
+        _button('Tab', () => onKeyPressed('VK_TAB')),
+        _button('Home', () => onKeyPressed('VK_HOME')),
+        _button('End', () => onKeyPressed('VK_END')),
+        _button('Ins', () => onKeyPressed('VK_INSERT')),
+        _button('Del', () => onKeyPressed('VK_DELETE')),
+        _button('PgUp', () => onKeyPressed('VK_PRIOR')),
+        _button('PgDn', () => onKeyPressed('VK_NEXT')),
+        if (showWindowsLinuxKeys)
+          _button('PrtScr', () => onKeyPressed('VK_SNAPSHOT')),
+        if (showWindowsLinuxKeys)
+          _button('ScrollLock', () => onKeyPressed('VK_SCROLL')),
+        if (showWindowsLinuxKeys)
+          _button('Pause', () => onKeyPressed('VK_PAUSE')),
+        if (showWindowsLinuxKeys) _button('Menu', () => onKeyPressed('Apps')),
+        _button('Enter', () => onKeyPressed('VK_ENTER')),
+        const SizedBox(width: 9999),
+        _button(
+          '',
+          () => onKeyPressed('VK_LEFT'),
+          icon: Icons.keyboard_arrow_left,
+        ),
+        _button('', () => onKeyPressed('VK_UP'), icon: Icons.keyboard_arrow_up),
+        _button(
+          '',
+          () => onKeyPressed('VK_DOWN'),
+          icon: Icons.keyboard_arrow_down,
+        ),
+        _button(
+          '',
+          () => onKeyPressed('VK_RIGHT'),
+          icon: Icons.keyboard_arrow_right,
+        ),
+        _button(isMac ? 'Cmd+C' : 'Ctrl+C', () => onShortcutPressed('VK_C')),
+        _button(isMac ? 'Cmd+V' : 'Ctrl+V', () => onShortcutPressed('VK_V')),
+        _button(isMac ? 'Cmd+S' : 'Ctrl+S', () => onShortcutPressed('VK_S')),
+      ]);
+    }
+
+    return Container(
+      color: const Color(0xAA000000),
+      padding: EdgeInsets.only(top: keyboardIsVisible ? 24 : 4, bottom: 8),
+      child: Wrap(
+        spacing: spacing,
+        runSpacing: spacing,
+        children: [
+          const SizedBox(width: 9999),
+          ...modifiers,
+          ...controls,
+          if (expandedKeys.isNotEmpty) ...[
+            const SizedBox(width: 9999),
+            ...expandedKeys,
+          ],
         ],
       ),
     );

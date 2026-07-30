@@ -39,6 +39,25 @@ void main() {
     );
   }
 
+  Future<void> pumpLab(WidgetTester tester) async {
+    tester.view.physicalSize = const Size(1440, 920);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: mobileRemoteLabTheme(Brightness.light),
+        home: MobileRemoteLabPage(
+          initialScreensDirectory: '',
+          themeMode: ThemeMode.light,
+          onThemeModeChanged: (_) {},
+          initialMonitors: monitors,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
   testWidgets('switches between individual and combined monitor views', (
     tester,
   ) async {
@@ -154,4 +173,75 @@ void main() {
     expect(find.text('Session disconnected'), findsOneWidget);
     expect(find.byTooltip('Disconnect'), findsNothing);
   });
+
+  testWidgets('contains phone popup routes and avoids control overflow', (
+    tester,
+  ) async {
+    await pumpLab(tester);
+    expect(tester.takeException(), isNull);
+
+    final viewport = find.byKey(const Key('mobile-remote-device-viewport'));
+    final viewportRect = tester.getRect(viewport);
+
+    await tester.tap(find.byTooltip('More actions'));
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(of: viewport, matching: find.text('OS Password')),
+      findsOneWidget,
+    );
+    final menuTextRect = tester.getRect(find.text('OS Password'));
+    expect(viewportRect.contains(menuTextRect.topLeft), isTrue);
+    expect(viewportRect.contains(menuTextRect.bottomRight), isTrue);
+
+    await tester.tapAt(viewportRect.topLeft + const Offset(4, 4));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Chat'));
+    await tester.pumpAndSettle();
+    expect(
+      find.descendant(of: viewport, matching: find.text('Text chat')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: viewport, matching: find.text('Voice call')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'switches simulated platform and exposes production keyboard keys',
+    (tester) async {
+      await pumpLab(tester);
+
+      var previewContext = tester.element(find.byType(MobileRemotePreview));
+      expect(Theme.of(previewContext).platform, TargetPlatform.android);
+      expect(MediaQuery.viewPaddingOf(previewContext).top, 32);
+
+      await tester.tap(find.text('Redmi Note class · Android'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('iPhone 15 class · iOS'));
+      await tester.pumpAndSettle();
+
+      previewContext = tester.element(find.byType(MobileRemotePreview));
+      expect(Theme.of(previewContext).platform, TargetPlatform.iOS);
+      expect(MediaQuery.viewPaddingOf(previewContext).top, 59);
+
+      await tester.tap(find.byTooltip('Keyboard'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('mobile-remote-key-help-tools')),
+        findsOneWidget,
+      );
+      expect(find.text('Ctrl '), findsOneWidget);
+      expect(find.text('Esc'), findsOneWidget);
+      expect(find.text('Ctrl+C'), findsOneWidget);
+      expect(find.byIcon(Icons.keyboard_arrow_left), findsOneWidget);
+
+      await tester.tap(find.text(' Fn '));
+      await tester.pumpAndSettle();
+      expect(find.text('F1'), findsOneWidget);
+      expect(find.text('F12'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
 }

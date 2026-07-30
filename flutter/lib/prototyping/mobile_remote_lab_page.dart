@@ -71,29 +71,88 @@ class MobileRemoteLabPage extends StatefulWidget {
     required this.initialScreensDirectory,
     required this.themeMode,
     required this.onThemeModeChanged,
+    this.initialMonitors,
   });
 
   final String initialScreensDirectory;
   final ThemeMode themeMode;
   final ValueChanged<ThemeMode> onThemeModeChanged;
+  final List<RemoteLabMonitor>? initialMonitors;
 
   @override
   State<MobileRemoteLabPage> createState() => _MobileRemoteLabPageState();
 }
 
 class _DevicePreset {
-  const _DevicePreset(this.name, this.logicalSize, this.devicePixelRatio);
+  const _DevicePreset(
+    this.name,
+    this.logicalSize,
+    this.devicePixelRatio, {
+    required this.platform,
+    required this.portraitViewPadding,
+  });
 
   final String name;
   final Size logicalSize;
   final double devicePixelRatio;
+  final TargetPlatform platform;
+  final EdgeInsets portraitViewPadding;
+
+  String get platformLabel => switch (platform) {
+    TargetPlatform.android => 'Android',
+    TargetPlatform.iOS => 'iOS',
+    _ => platform.name,
+  };
+
+  EdgeInsets viewPadding({required bool portrait}) {
+    if (portrait) {
+      return portraitViewPadding;
+    }
+    return EdgeInsets.fromLTRB(
+      portraitViewPadding.top,
+      0,
+      portraitViewPadding.bottom,
+      0,
+    );
+  }
 }
 
 const _devicePresets = <_DevicePreset>[
-  _DevicePreset('Redmi Note class', Size(393, 873), 2.75),
-  _DevicePreset('Compact phone', Size(360, 800), 3),
-  _DevicePreset('Large phone', Size(430, 932), 3),
-  _DevicePreset('Small tablet', Size(800, 1280), 2),
+  _DevicePreset(
+    'Redmi Note class · Android',
+    Size(393, 873),
+    2.75,
+    platform: TargetPlatform.android,
+    portraitViewPadding: EdgeInsets.fromLTRB(0, 32, 0, 16),
+  ),
+  _DevicePreset(
+    'Compact phone · Android',
+    Size(360, 800),
+    3,
+    platform: TargetPlatform.android,
+    portraitViewPadding: EdgeInsets.fromLTRB(0, 24, 0, 16),
+  ),
+  _DevicePreset(
+    'Large phone · Android',
+    Size(430, 932),
+    3,
+    platform: TargetPlatform.android,
+    portraitViewPadding: EdgeInsets.fromLTRB(0, 32, 0, 16),
+  ),
+  _DevicePreset(
+    'iPhone 15 class · iOS',
+    Size(393, 852),
+    3,
+    platform: TargetPlatform.iOS,
+    portraitViewPadding: EdgeInsets.fromLTRB(0, 59, 0, 34),
+  ),
+  _DevicePreset(
+    'Small tablet · Android',
+    Size(800, 1280),
+    2,
+    platform: TargetPlatform.android,
+    portraitViewPadding: EdgeInsets.fromLTRB(0, 24, 0, 16),
+  ),
 ];
 
 class _MobileRemoteLabPageState extends State<MobileRemoteLabPage> {
@@ -108,7 +167,12 @@ class _MobileRemoteLabPageState extends State<MobileRemoteLabPage> {
   @override
   void initState() {
     super.initState();
-    unawaited(_loadInitialScreens());
+    final initialMonitors = widget.initialMonitors;
+    if (initialMonitors != null) {
+      _monitors = initialMonitors;
+    } else {
+      unawaited(_loadInitialScreens());
+    }
   }
 
   Future<void> _loadInitialScreens() async {
@@ -351,13 +415,21 @@ class _MobileRemoteLabPageState extends State<MobileRemoteLabPage> {
           const SizedBox(height: 22),
           DropdownButtonFormField<RemoteLabScenario>(
             initialValue: _scenario,
+            isExpanded: true,
             decoration: const InputDecoration(
               labelText: 'Remote-session scenario',
               border: OutlineInputBorder(),
             ),
             items: [
               for (final scenario in RemoteLabScenario.values)
-                DropdownMenuItem(value: scenario, child: Text(scenario.label)),
+                DropdownMenuItem(
+                  value: scenario,
+                  child: Text(
+                    scenario.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
             ],
             onChanged: (value) {
               if (value != null) {
@@ -370,14 +442,21 @@ class _MobileRemoteLabPageState extends State<MobileRemoteLabPage> {
           const SizedBox(height: 16),
           DropdownButtonFormField<_DevicePreset>(
             initialValue: _devicePreset,
+            isExpanded: true,
             decoration: const InputDecoration(
               labelText: 'Device viewport',
               border: OutlineInputBorder(),
             ),
             items: _devicePresets
                 .map(
-                  (preset) =>
-                      DropdownMenuItem(value: preset, child: Text(preset.name)),
+                  (preset) => DropdownMenuItem(
+                    value: preset,
+                    child: Text(
+                      preset.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
                 )
                 .toList(),
             onChanged: (value) {
@@ -412,6 +491,7 @@ class _MobileRemoteLabPageState extends State<MobileRemoteLabPage> {
           const SizedBox(height: 16),
           DropdownButtonFormField<ThemeMode>(
             initialValue: widget.themeMode,
+            isExpanded: true,
             decoration: const InputDecoration(
               labelText: 'Theme',
               border: OutlineInputBorder(),
@@ -441,6 +521,7 @@ class _MobileRemoteLabPageState extends State<MobileRemoteLabPage> {
             'Device pixel ratio',
             _devicePreset.devicePixelRatio.toStringAsFixed(2),
           ),
+          _metric('Simulated platform', _devicePreset.platformLabel),
           const SizedBox(height: 18),
           Text(
             'Mouse drag simulates panning. Use the wheel or trackpad to zoom. '
@@ -470,6 +551,18 @@ class _MobileRemoteLabPageState extends State<MobileRemoteLabPage> {
     final viewport = _portrait
         ? baseSize
         : Size(baseSize.height, baseSize.width);
+    final viewPadding = _devicePreset.viewPadding(portrait: _portrait);
+    final previewNavigatorKey = ValueKey(
+      Object.hash(
+        _scenario,
+        Object.hashAll(_monitors),
+        _devicePreset.name,
+        _portrait,
+      ),
+    );
+    final previewTheme = Theme.of(
+      context,
+    ).copyWith(platform: _devicePreset.platform);
     return ColoredBox(
       color: Theme.of(context).colorScheme.surfaceContainerLow,
       child: Padding(
@@ -494,18 +587,34 @@ class _MobileRemoteLabPageState extends State<MobileRemoteLabPage> {
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(32),
                   child: SizedBox(
+                    key: const Key('mobile-remote-device-viewport'),
                     width: viewport.width,
                     height: viewport.height,
-                    child: MediaQuery(
-                      data: MediaQueryData(
-                        size: viewport,
-                        devicePixelRatio: _devicePreset.devicePixelRatio,
-                        textScaler: TextScaler.noScaling,
-                        platformBrightness: Theme.of(context).brightness,
-                      ),
-                      child: MobileRemotePreview(
-                        monitors: _monitors,
-                        scenario: _scenario,
+                    child: Theme(
+                      data: previewTheme,
+                      child: MediaQuery(
+                        data: MediaQueryData(
+                          size: viewport,
+                          devicePixelRatio: _devicePreset.devicePixelRatio,
+                          textScaler: TextScaler.noScaling,
+                          platformBrightness: Theme.of(context).brightness,
+                          padding: viewPadding,
+                          viewPadding: viewPadding,
+                          systemGestureInsets: viewPadding,
+                        ),
+                        child: ScaffoldMessenger(
+                          child: Navigator(
+                            key: previewNavigatorKey,
+                            onGenerateRoute: (settings) =>
+                                MaterialPageRoute<void>(
+                                  settings: settings,
+                                  builder: (context) => MobileRemotePreview(
+                                    monitors: _monitors,
+                                    scenario: _scenario,
+                                  ),
+                                ),
+                          ),
+                        ),
                       ),
                     ),
                   ),
@@ -545,6 +654,13 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
   late bool _connected;
   bool _showToolbar = true;
   bool _showKeyboard = false;
+  bool _keyboardCtrl = false;
+  bool _keyboardAlt = false;
+  bool _keyboardShift = false;
+  bool _keyboardCommand = false;
+  bool _keyboardFunctionKeys = false;
+  bool _keyboardPinned = false;
+  bool _keyboardMoreKeys = true;
   bool _touchMode = true;
   bool _showGestureHelp = false;
   bool _showAndroidActions = false;
@@ -568,6 +684,13 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       _connected = widget.scenario.connected;
       _showToolbar = widget.scenario != RemoteLabScenario.connecting;
       _showKeyboard = false;
+      _keyboardCtrl = false;
+      _keyboardAlt = false;
+      _keyboardShift = false;
+      _keyboardCommand = false;
+      _keyboardFunctionKeys = false;
+      _keyboardPinned = false;
+      _keyboardMoreKeys = true;
       _showGestureHelp = false;
       _showAndroidActions = widget.scenario.peerIsAndroid && _connected;
       _panel = null;
@@ -1272,6 +1395,72 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
   }
 
   Widget _buildKeyboard(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        MobileRemoteKeyHelpTools(
+          key: const Key('mobile-remote-key-help-tools'),
+          keyboardIsVisible: true,
+          ctrlActive: _keyboardCtrl,
+          altActive: _keyboardAlt,
+          shiftActive: _keyboardShift,
+          commandActive: _keyboardCommand,
+          functionKeysActive: _keyboardFunctionKeys,
+          pinned: _keyboardPinned,
+          moreKeysActive: _keyboardMoreKeys,
+          isMac: false,
+          showWindowsLinuxKeys: !widget.scenario.peerIsAndroid,
+          onCtrl: () {
+            setState(() {
+              _keyboardCtrl = !_keyboardCtrl;
+            });
+          },
+          onAlt: () {
+            setState(() {
+              _keyboardAlt = !_keyboardAlt;
+            });
+          },
+          onShift: () {
+            setState(() {
+              _keyboardShift = !_keyboardShift;
+            });
+          },
+          onCommand: () {
+            setState(() {
+              _keyboardCommand = !_keyboardCommand;
+            });
+          },
+          onFunctionKeys: () {
+            setState(() {
+              _keyboardFunctionKeys = !_keyboardFunctionKeys;
+              if (_keyboardFunctionKeys) {
+                _keyboardMoreKeys = false;
+              }
+            });
+          },
+          onPin: () {
+            setState(() {
+              _keyboardPinned = !_keyboardPinned;
+            });
+          },
+          onMoreKeys: () {
+            setState(() {
+              _keyboardMoreKeys = !_keyboardMoreKeys;
+              if (_keyboardMoreKeys) {
+                _keyboardFunctionKeys = false;
+              }
+            });
+          },
+          onKeyPressed: _showPreviewAction,
+          onShortcutPressed: _showPreviewAction,
+        ),
+        _buildSimulatedSystemKeyboard(context),
+      ],
+    );
+  }
+
+  Widget _buildSimulatedSystemKeyboard(BuildContext context) {
     const rows = [
       ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
       ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'],
