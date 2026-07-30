@@ -6,6 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/transport_mode.dart';
 import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/consts.dart';
@@ -1928,7 +1929,10 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
           ),
         );
 
-    final outgoingOnly = bind.isOutgoingOnly();
+    final transportMode = remoteTransportPreferenceFromOptions(
+      remoteTransport: bind.mainGetOptionSync(key: kOptionRemoteTransport),
+      disableUdp: bind.mainGetOptionSync(key: kOptionDisableUdp),
+    );
 
     final divider = const Divider(height: 1, indent: 16, endIndent: 16);
     return _Card(
@@ -1969,31 +1973,41 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
               if (!isWeb)
                 listTile(
                   icon: Icons.speed_outlined,
-                  title: 'Enable QUIC',
+                  title: 'Transport',
                   showTooltip: true,
                   tooltipMessage: translate('enable-quic-tip'),
-                  trailing: Switch(
-                    value: bind.mainGetOptionSync(key: kOptionDisableUdp) !=
-                            'Y' &&
-                        bind.mainGetOptionSync(key: kOptionRemoteTransport) !=
-                            'tcp',
-                    onChanged:
-                        locked || isOptionFixed(kOptionRemoteTransport)
-                            ? null
-                            : (value) async {
-                                await bind.mainSetOption(
-                                  key: kOptionRemoteTransport,
-                                  value: value ? 'quic-preferred' : 'tcp',
-                                );
-                                if (value &&
-                                    !isOptionFixed(kOptionDisableUdp)) {
-                                  await bind.mainSetOption(
-                                    key: kOptionDisableUdp,
-                                    value: 'N',
-                                  );
-                                }
-                                setState(() {});
-                              },
+                  trailing: PopupMenuButton<RemoteTransportPreference>(
+                    initialValue: transportMode,
+                    enabled: !locked &&
+                        !isOptionFixed(kOptionRemoteTransport) &&
+                        !isOptionFixed(kOptionDisableUdp),
+                    tooltip: translate('Transport'),
+                    onSelected: (mode) async {
+                      await bind.mainSetOption(
+                        key: kOptionRemoteTransport,
+                        value: remoteTransportOption(mode),
+                      );
+                      await bind.mainSetOption(
+                        key: kOptionDisableUdp,
+                        value: disableUdpOption(mode),
+                      );
+                      setState(() {});
+                    },
+                    itemBuilder: (context) => RemoteTransportPreference.values
+                        .map((mode) => PopupMenuItem(
+                              value: mode,
+                              child:
+                                  Text(translate(remoteTransportLabel(mode))),
+                            ))
+                        .toList(),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(translate(remoteTransportLabel(transportMode))),
+                        const SizedBox(width: 4),
+                        const Icon(Icons.arrow_drop_down),
+                      ],
+                    ),
                   ),
                 ),
               if (!isWeb)
@@ -2012,29 +2026,6 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
                               'Allow insecure TLS fallback',
                               'allow-insecure-tls-fallback-tip',
                               kOptionAllowInsecureTLSFallback),
-                          if (!outgoingOnly) divider,
-                          if (!outgoingOnly)
-                            listTile(
-                              icon: Icons.lan_outlined,
-                              title: 'Disable UDP',
-                              showTooltip: true,
-                              tooltipMessage:
-                                  '${translate('disable-udp-tip')}\n\n${translate('server-oss-not-support-tip')}',
-                              trailing: Switch(
-                                value: bind.mainGetOptionSync(
-                                        key: kOptionDisableUdp) ==
-                                    'Y',
-                                onChanged:
-                                    locked || isOptionFixed(kOptionDisableUdp)
-                                        ? null
-                                        : (value) async {
-                                            await bind.mainSetOption(
-                                                key: kOptionDisableUdp,
-                                                value: value ? 'Y' : 'N');
-                                            setState(() {});
-                                          },
-                              ),
-                            ),
                         ],
                       );
                     }

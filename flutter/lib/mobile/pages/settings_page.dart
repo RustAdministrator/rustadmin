@@ -11,6 +11,7 @@ import 'package:settings_ui/settings_ui.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../common.dart';
+import '../../common/transport_mode.dart';
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/login.dart';
 import '../../consts.dart';
@@ -98,8 +99,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   var _enableUdpPunch = false;
   var _allowInsecureTlsFallback = false;
   var _allowUnverifiedPeerTrust = false;
-  var _disableUdp = false;
-  var _enableQuic = true;
+  var _transportMode = RemoteTransportPreference.auto;
   var _enableIpv6Punch = false;
   var _isUsingPublicServer = false;
   var _allowAskForNoteAtEndOfConnection = false;
@@ -132,9 +132,10 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
         mainGetBoolOptionSync(kOptionAllowInsecureTLSFallback);
     _allowUnverifiedPeerTrust =
         mainGetBoolOptionSync(kOptionAllowUnverifiedPeerTrust);
-    _disableUdp = bind.mainGetOptionSync(key: kOptionDisableUdp) == 'Y';
-    _enableQuic = !_disableUdp &&
-        bind.mainGetOptionSync(key: kOptionRemoteTransport) != 'tcp';
+    _transportMode = remoteTransportPreferenceFromOptions(
+      remoteTransport: bind.mainGetOptionSync(key: kOptionRemoteTransport),
+      disableUdp: bind.mainGetOptionSync(key: kOptionDisableUdp),
+    );
     _autoRecordIncomingSession = option2bool(kOptionAllowAutoRecordIncoming,
         bind.mainGetOptionSync(key: kOptionAllowAutoRecordIncoming));
     _autoRecordOutgoingSession = option2bool(kOptionAllowAutoRecordOutgoing,
@@ -891,51 +892,29 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                     },
             ),
           if (isAndroid && !disabledSettings && !_hideNetwork)
-            SettingsTile.switchTile(
-              title: Text(translate('Enable QUIC')),
-              description: Text(translate('enable-quic-tip')),
-              initialValue: _enableQuic,
-              onToggle: isOptionFixed(kOptionRemoteTransport)
+            _getPopupDialogRadioEntry(
+              title: 'Transport',
+              list: RemoteTransportPreference.values
+                  .map((mode) =>
+                      _RadioEntry(remoteTransportLabel(mode), mode.name))
+                  .toList(),
+              getter: () => _transportMode.name,
+              asyncSetter: isOptionFixed(kOptionRemoteTransport) ||
+                      isOptionFixed(kOptionDisableUdp)
                   ? null
-                  : (v) async {
+                  : (value) async {
+                      final mode = RemoteTransportPreference.values.firstWhere(
+                          (candidate) => candidate.name == value);
                       await bind.mainSetOption(
                         key: kOptionRemoteTransport,
-                        value: v ? 'quic-preferred' : 'tcp',
+                        value: remoteTransportOption(mode),
                       );
-                      if (v && !isOptionFixed(kOptionDisableUdp)) {
-                        await bind.mainSetOption(
-                          key: kOptionDisableUdp,
-                          value: 'N',
-                        );
-                      }
-                      final disableUdp =
-                          bind.mainGetOptionSync(key: kOptionDisableUdp) == 'Y';
-                      final mode = bind.mainGetOptionSync(
-                        key: kOptionRemoteTransport,
-                      );
-                      setState(() {
-                        _disableUdp = disableUdp;
-                        _enableQuic = !disableUdp && mode != 'tcp';
-                      });
-                    },
-            ),
-          if (isAndroid && !outgoingOnly && !_isUsingPublicServer)
-            SettingsTile.switchTile(
-              title: Text(translate('Disable UDP')),
-              initialValue: _disableUdp,
-              onToggle: isOptionFixed(kOptionDisableUdp)
-                  ? null
-                  : (v) async {
                       await bind.mainSetOption(
-                          key: kOptionDisableUdp, value: v ? 'Y' : 'N');
-                      final newValue =
-                          bind.mainGetOptionSync(key: kOptionDisableUdp) == 'Y';
-                      final mode = bind.mainGetOptionSync(
-                        key: kOptionRemoteTransport,
+                        key: kOptionDisableUdp,
+                        value: disableUdpOption(mode),
                       );
                       setState(() {
-                        _disableUdp = newValue;
-                        _enableQuic = !newValue && mode != 'tcp';
+                        _transportMode = mode;
                       });
                     },
             ),

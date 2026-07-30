@@ -723,11 +723,11 @@ class QualityMonitor extends StatelessWidget {
                                 qualityMonitorModel.data.connectionType ?? '-'),
                             if (qualityMonitorModel.extendedDetails &&
                                 qualityMonitorModel.data.transportMtu != null)
-                              _row("MTU",
+                              _row("Path MTU",
                                   qualityMonitorModel.data.transportMtu),
                             if (qualityMonitorModel.extendedDetails &&
                                 qualityMonitorModel.data.datagramPayload != null)
-                              _row("Datagram",
+                              _row("QUIC DATAGRAM max",
                                   qualityMonitorModel.data.datagramPayload),
                             if (qualityMonitorModel.extendedDetails &&
                                 qualityMonitorModel.data.transportRttMs != null)
