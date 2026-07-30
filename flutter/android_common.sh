@@ -17,6 +17,22 @@ case ",${CARGO_FEATURES}," in
   *,hwcodec,*) REQUIRE_FFMPEG=1 ;;
 esac
 
+case ",${CARGO_FEATURES}," in
+  *,hwcodec,*)
+    case ",${CARGO_FEATURES}," in
+      *,mediacodec,*) ;;
+      *)
+        echo "error: Android hwcodec builds must include the mediacodec Cargo feature." >&2
+        exit 2
+        ;;
+    esac
+    ;;
+esac
+
+if [[ "${RUSTADMIN_ANDROID_VALIDATE_FEATURES_ONLY:-0}" == "1" ]]; then
+  exit 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 JNI_LIBS_DIR="${SCRIPT_DIR}/android/app/src/main/jniLibs"
@@ -139,3 +155,10 @@ if [[ ! -f "${GENERATED_RUST_LIBRARY}" ]]; then
 fi
 mv -f "${GENERATED_RUST_LIBRARY}" "${ABI_JNI_LIBS_DIR}/librustdesk.so"
 cp -f "${LIBCXX_SHARED}" "${ABI_JNI_LIBS_DIR}/libc++_shared.so"
+
+if [[ "${REQUIRE_FFMPEG}" == "1" ]]; then
+  if ! strings "${ABI_JNI_LIBS_DIR}/librustdesk.so" | grep -Fq "Hardware Android MediaCodec"; then
+    echo "error: Android release library does not contain the dedicated MediaCodec decoder path." >&2
+    exit 1
+  fi
+fi
