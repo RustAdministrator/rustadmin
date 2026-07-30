@@ -58,6 +58,17 @@ const NO_VIDEO_START_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const NO_VIDEO_START_MAX_REFRESHES: usize = 6;
 const NO_VIDEO_START_STALLED_LOG_INTERVAL: Duration = Duration::from_secs(30);
 const FPS_CONTROL_SUMMARY_LOG_INTERVAL: Duration = Duration::from_secs(30);
+const CLIENT_SLOW_STREAM_SEND_THRESHOLD: Duration = Duration::from_millis(250);
+
+fn client_outbound_message_kind(message: &Message) -> &'static str {
+    if let Some(message::Union::Misc(misc)) = &message.union {
+        if matches!(&misc.union, Some(misc::Union::VideoFeedback(_))) {
+            return "Misc::VideoFeedback";
+        }
+        return "Misc";
+    }
+    "Message"
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum NoVideoStartupAction {
@@ -836,7 +847,30 @@ impl<T: InvokeUiSession> Remote<T> {
                     },
                     _ => {}
                 }
-                allow_err!(peer.send(&msg).await);
+                let kind = client_outbound_message_kind(&msg);
+                let started = Instant::now();
+                match peer.send(&msg).await {
+                    Ok(()) => {
+                        let elapsed = started.elapsed();
+                        if elapsed >= CLIENT_SLOW_STREAM_SEND_THRESHOLD {
+                            log::warn!(
+                                "diag client slow stream send: id={}, kind={}, elapsed_ms={}",
+                                self.handler.get_id(),
+                                kind,
+                                elapsed.as_millis()
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "diag client stream send failed: id={}, kind={}, elapsed_ms={}, err={}",
+                            self.handler.get_id(),
+                            kind,
+                            started.elapsed().as_millis(),
+                            err
+                        );
+                    }
+                }
             }
             Data::SendFiles((id, r#type, path, to, file_num, include_hidden, is_remote)) => {
                 log::info!("send files, is remote {}", is_remote);

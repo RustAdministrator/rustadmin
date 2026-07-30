@@ -3618,14 +3618,14 @@ impl VideoFeedbackTracker {
         if self.stream_id == 0 || self.received_frame_id == 0 {
             return None;
         }
-        let decode_progress = self.decoded_frame_id > self.last_sent_decoded_frame_id;
-        let render_submit_progress =
-            self.render_submitted_frame_id > self.last_sent_render_submitted_frame_id;
+        let first_decode = self.decoded_frame_id != 0 && self.last_sent_decoded_frame_id == 0;
+        let first_render_submit =
+            self.render_submitted_frame_id != 0 && self.last_sent_render_submitted_frame_id == 0;
         let interval_elapsed = self
             .last_sent
             .map(|last| now.saturating_duration_since(last) >= VIDEO_FEEDBACK_INTERVAL)
             .unwrap_or(true);
-        if !force && !decode_progress && !render_submit_progress && !interval_elapsed {
+        if !force && !first_decode && !first_render_submit && !interval_elapsed {
             return None;
         }
         self.last_sent = Some(now);
@@ -5123,7 +5123,7 @@ mod video_feedback_tests {
     }
 
     #[test]
-    fn feedback_reports_later_decode_progress_before_periodic_interval() {
+    fn feedback_coalesces_later_decode_progress_until_periodic_interval() {
         let start = std::time::Instant::now();
         let mut tracker = VideoFeedbackTracker::default();
 
@@ -5139,9 +5139,12 @@ mod video_feedback_tests {
         tracker.record_decoded(7, 2, std::time::Duration::from_micros(125));
         tracker.record_render_submitted(7, 2, std::time::Duration::from_micros(35), 0);
 
-        let progressed = tracker
+        assert!(tracker
             .take_due_at(start + std::time::Duration::from_millis(11), false)
-            .expect("decode/render progress must not wait for another received frame");
+            .is_none());
+        let progressed = tracker
+            .take_due_at(start + VIDEO_FEEDBACK_INTERVAL, false)
+            .expect("decode/render progress must be reported at the periodic interval");
         assert_eq!(progressed.received_frame_id, 2);
         assert_eq!(progressed.decoded_frame_id, 2);
         assert_eq!(progressed.render_submitted_frame_id, 2);
