@@ -721,6 +721,24 @@ class QualityMonitor extends StatelessWidget {
                                 rightColor: Colors.green),
                             _row("Path",
                                 qualityMonitorModel.data.connectionType ?? '-'),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.transportMtu != null)
+                              _row("MTU",
+                                  qualityMonitorModel.data.transportMtu),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.datagramPayload != null)
+                              _row("Datagram",
+                                  qualityMonitorModel.data.datagramPayload),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.transportRttMs != null)
+                              _row("QUIC RTT",
+                                  '${qualityMonitorModel.data.transportRttMs}ms'),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.transportLostPackets !=
+                                    null)
+                              _row("Lost", qualityMonitorModel
+                                  .data.transportLostPackets),
                             if (qualityMonitorModel.extendedDetails)
                               _row("Direct",
                                   qualityMonitorModel.data.direct ?? '-'),

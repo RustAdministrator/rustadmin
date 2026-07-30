@@ -732,6 +732,24 @@ impl InvokeUiSession for FlutterHandler {
                     "connection_type",
                     &status.connection_type.map_or(NULL, |it| it.to_string()),
                 ),
+                (
+                    "transport_mtu",
+                    &status.transport_mtu.map_or(NULL, |it| it.to_string()),
+                ),
+                (
+                    "transport_rtt_ms",
+                    &status.transport_rtt_ms.map_or(NULL, |it| it.to_string()),
+                ),
+                (
+                    "transport_lost_packets",
+                    &status
+                        .transport_lost_packets
+                        .map_or(NULL, |it| it.to_string()),
+                ),
+                (
+                    "datagram_payload",
+                    &status.datagram_payload.map_or(NULL, |it| it.to_string()),
+                ),
                 ("decoder", &status.decoder.map_or(NULL, |it| it)),
                 ("renderer", &status.renderer.map_or(NULL, |it| it)),
                 (

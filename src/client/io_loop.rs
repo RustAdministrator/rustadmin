@@ -584,12 +584,25 @@ impl<T: InvokeUiSession> Remote<T> {
                             let fps_mode = if fixed_fps { "fixed" } else { "adaptive" }.to_owned();
                             let auto_fps = if fixed_fps { None } else { lc.last_auto_fps };
                             drop(lc);
+                            #[cfg(feature = "quic-transport")]
+                            let quic_stats = peer.quic_stats();
                             self.handler.update_quality_status(QualityStatus {
                                 speed: Some(speed),
                                 fps,
                                 chroma,
                                 codec_format,
                                 connection_type: Some(stream_type.to_owned()),
+                                #[cfg(feature = "quic-transport")]
+                                transport_mtu: quic_stats.map(|stats| stats.current_mtu),
+                                #[cfg(feature = "quic-transport")]
+                                transport_rtt_ms: quic_stats
+                                    .map(|stats| stats.rtt_us.saturating_add(500) / 1_000),
+                                #[cfg(feature = "quic-transport")]
+                                transport_lost_packets: quic_stats
+                                    .map(|stats| stats.lost_packets),
+                                #[cfg(feature = "quic-transport")]
+                                datagram_payload: quic_stats
+                                    .and_then(|stats| stats.max_datagram_size),
                                 decoder,
                                 renderer,
                                 decode_fps,

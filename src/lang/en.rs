@@ -306,6 +306,8 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("allow-unverified-peer-trust-tip", "Allow first secure peer connections without a trusted peer key or rendezvous pairing passphrase. This re-enables legacy trust-on-first-use and is not safe against a malicious rendezvous server."),
         ("allow-insecure-tls-fallback-tip", "By default, RustDesk verifies the server certificate for protocols using TLS.\nWith this option enabled, RustDesk will fall back to skipping the verification step and proceed in case of verification failure."),
         ("disable-udp-tip", "Controls whether to use TCP only.\nWhen this option enabled, RustDesk will not use UDP 21116 any more, TCP 21116 will be used instead."),
+        ("Enable QUIC", "Enable QUIC"),
+        ("enable-quic-tip", "Use QUIC over UDP for direct IP and VPN sessions. If UDP is unavailable, the connection falls back to TCP. Certificate and peer identity failures never fall back."),
         ("server-oss-not-support-tip", "NOTE: RustDesk server OSS doesn't include this feature."),
         ("note-at-conn-end-tip", "Ask for note at end of connection"),
         ("rel-mouse-not-supported-peer-tip", "Relative Mouse Mode is not supported by the connected peer."),

@@ -99,6 +99,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   var _allowInsecureTlsFallback = false;
   var _allowUnverifiedPeerTrust = false;
   var _disableUdp = false;
+  var _enableQuic = true;
   var _enableIpv6Punch = false;
   var _isUsingPublicServer = false;
   var _allowAskForNoteAtEndOfConnection = false;
@@ -132,6 +133,8 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
     _allowUnverifiedPeerTrust =
         mainGetBoolOptionSync(kOptionAllowUnverifiedPeerTrust);
     _disableUdp = bind.mainGetOptionSync(key: kOptionDisableUdp) == 'Y';
+    _enableQuic = !_disableUdp &&
+        bind.mainGetOptionSync(key: kOptionRemoteTransport) != 'tcp';
     _autoRecordIncomingSession = option2bool(kOptionAllowAutoRecordIncoming,
         bind.mainGetOptionSync(key: kOptionAllowAutoRecordIncoming));
     _autoRecordOutgoingSession = option2bool(kOptionAllowAutoRecordOutgoing,
@@ -887,6 +890,35 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                       });
                     },
             ),
+          if (isAndroid && !disabledSettings && !_hideNetwork)
+            SettingsTile.switchTile(
+              title: Text(translate('Enable QUIC')),
+              description: Text(translate('enable-quic-tip')),
+              initialValue: _enableQuic,
+              onToggle: isOptionFixed(kOptionRemoteTransport)
+                  ? null
+                  : (v) async {
+                      await bind.mainSetOption(
+                        key: kOptionRemoteTransport,
+                        value: v ? 'quic-preferred' : 'tcp',
+                      );
+                      if (v && !isOptionFixed(kOptionDisableUdp)) {
+                        await bind.mainSetOption(
+                          key: kOptionDisableUdp,
+                          value: 'N',
+                        );
+                      }
+                      final disableUdp =
+                          bind.mainGetOptionSync(key: kOptionDisableUdp) == 'Y';
+                      final mode = bind.mainGetOptionSync(
+                        key: kOptionRemoteTransport,
+                      );
+                      setState(() {
+                        _disableUdp = disableUdp;
+                        _enableQuic = !disableUdp && mode != 'tcp';
+                      });
+                    },
+            ),
           if (isAndroid && !outgoingOnly && !_isUsingPublicServer)
             SettingsTile.switchTile(
               title: Text(translate('Disable UDP')),
@@ -898,8 +930,12 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                           key: kOptionDisableUdp, value: v ? 'Y' : 'N');
                       final newValue =
                           bind.mainGetOptionSync(key: kOptionDisableUdp) == 'Y';
+                      final mode = bind.mainGetOptionSync(
+                        key: kOptionRemoteTransport,
+                      );
                       setState(() {
                         _disableUdp = newValue;
+                        _enableQuic = !newValue && mode != 'tcp';
                       });
                     },
             ),

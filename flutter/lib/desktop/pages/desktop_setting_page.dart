@@ -1965,6 +1965,37 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
                     'Use WebSocket',
                     '${translate('websocket_tip')}\n\n${translate('server-oss-not-support-tip')}',
                     kOptionAllowWebSocket),
+              if (!isWeb) divider,
+              if (!isWeb)
+                listTile(
+                  icon: Icons.speed_outlined,
+                  title: 'Enable QUIC',
+                  showTooltip: true,
+                  tooltipMessage: translate('enable-quic-tip'),
+                  trailing: Switch(
+                    value: bind.mainGetOptionSync(key: kOptionDisableUdp) !=
+                            'Y' &&
+                        bind.mainGetOptionSync(key: kOptionRemoteTransport) !=
+                            'tcp',
+                    onChanged:
+                        locked || isOptionFixed(kOptionRemoteTransport)
+                            ? null
+                            : (value) async {
+                                await bind.mainSetOption(
+                                  key: kOptionRemoteTransport,
+                                  value: value ? 'quic-preferred' : 'tcp',
+                                );
+                                if (value &&
+                                    !isOptionFixed(kOptionDisableUdp)) {
+                                  await bind.mainSetOption(
+                                    key: kOptionDisableUdp,
+                                    value: 'N',
+                                  );
+                                }
+                                setState(() {});
+                              },
+                  ),
+                ),
               if (!isWeb)
                 futureBuilder(
                   future: bind.mainIsUsingPublicServer(),

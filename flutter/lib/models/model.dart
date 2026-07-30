@@ -4077,6 +4077,10 @@ class QualityMonitorData {
   String? codecFormat;
   String? chroma;
   String? connectionType;
+  String? transportMtu;
+  String? transportRttMs;
+  String? transportLostPackets;
+  String? datagramPayload;
   String? hostVersion;
   String? clientVersion;
   String? decoder;
@@ -4181,6 +4185,10 @@ class QualityMonitorModel with ChangeNotifier {
     _data.codecFormat = null;
     _data.chroma = null;
     _data.connectionType = null;
+    _data.transportMtu = null;
+    _data.transportRttMs = null;
+    _data.transportLostPackets = null;
+    _data.datagramPayload = null;
     _data.hostVersion = null;
     _data.clientVersion = null;
     _data.decoder = null;
@@ -4375,6 +4383,22 @@ class QualityMonitorModel with ChangeNotifier {
       if (evt.containsKey('connection_type') &&
           (evt['connection_type'] as String).isNotEmpty) {
         _data.connectionType = evt['connection_type'];
+      }
+      if (evt.containsKey('transport_mtu') &&
+          (evt['transport_mtu'] as String).isNotEmpty) {
+        _data.transportMtu = evt['transport_mtu'];
+      }
+      if (evt.containsKey('transport_rtt_ms') &&
+          (evt['transport_rtt_ms'] as String).isNotEmpty) {
+        _data.transportRttMs = evt['transport_rtt_ms'];
+      }
+      if (evt.containsKey('transport_lost_packets') &&
+          (evt['transport_lost_packets'] as String).isNotEmpty) {
+        _data.transportLostPackets = evt['transport_lost_packets'];
+      }
+      if (evt.containsKey('datagram_payload') &&
+          (evt['datagram_payload'] as String).isNotEmpty) {
+        _data.datagramPayload = evt['datagram_payload'];
       }
       final hostVersion = _hostVersion();
       if (hostVersion != null) {

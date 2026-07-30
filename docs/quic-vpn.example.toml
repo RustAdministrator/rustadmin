@@ -1,7 +1,7 @@
 # These values belong in the existing RustAdmin options table.
-# Keep TCP until the application adapter and UI integration are complete.
+# QUIC runs over UDP and falls back only for classified reachability failures.
 [options]
-remote-transport = "tcp"
+remote-transport = "quic-preferred"
 disable-udp = "N"
 quic-listen-address = "0.0.0.0"
 quic-listen-port = "48100"
@@ -10,7 +10,8 @@ quic-keepalive-interval-ms = "5000"
 quic-enable-ipv6 = "Y"
 quic-file-bandwidth-mbps = "20"
 
-# Planned direct VPN peer settings are session-specific, for example:
+# Direct VPN peers remain session-specific and are entered as their
+# tunnel IP/domain in the normal connection field, for example:
 # peer-address = "10.20.30.2"
 # peer-port = "48100"
 # pairing-mode = "pinned-key"

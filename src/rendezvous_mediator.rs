@@ -95,6 +95,13 @@ impl RendezvousMediator {
         tokio::spawn(async move {
             direct_server(server_cloned).await;
         });
+        #[cfg(feature = "quic-transport")]
+        {
+            let server_cloned = server.clone();
+            tokio::spawn(async move {
+                crate::quic_transport::run_direct_server(server_cloned).await;
+            });
+        }
         #[cfg(target_os = "android")]
         std::thread::spawn(move || {
             allow_err!(super::lan::start_listening());

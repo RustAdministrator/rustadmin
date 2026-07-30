@@ -365,8 +365,9 @@ impl Client {
                 interface.clone(),
             )
             .await?;
+            let transport = if conn.is_quic() { "QUIC/UDP" } else { "TCP" };
             return Ok((
-                (conn, true, Some(pk), None, "TCP"),
+                (conn, true, Some(pk), None, transport),
                 (0, "".to_owned()),
                 false,
             ));
@@ -381,8 +382,9 @@ impl Client {
                 interface.clone(),
             )
             .await?;
+            let transport = if conn.is_quic() { "QUIC/UDP" } else { "TCP" };
             return Ok((
-                (conn, true, Some(pk), None, "TCP"),
+                (conn, true, Some(pk), None, transport),
                 (0, "".to_owned()),
                 false,
             ));
@@ -1113,8 +1115,10 @@ impl Client {
                 let Some(message::Union::SignedId(si)) = msg_in.union else {
                     bail!("Handshake failed: invalid message type");
                 };
-                let direct_id = decode_direct_id_pk(&si.id)
+                let mut direct_id = decode_direct_id_pk(&si.id)
                     .map_err(|e| anyhow!("Handshake failed: invalid direct peer key: {e}"))?;
+                #[cfg(feature = "quic-transport")]
+                crate::common::attach_direct_quic_identity(&mut direct_id, &si.quic_identity)?;
                 let peer_id = direct_id.id;
                 let sign_pk = direct_id.sign_pk;
                 let their_pk_b = direct_id.box_pk;
@@ -1177,6 +1181,15 @@ impl Client {
                 } else {
                     None
                 };
+                #[cfg(feature = "quic-transport")]
+                let quic_identity = if direct_id.quic_certificate_der.is_some() {
+                    crate::common::create_direct_quic_identity(
+                        &Config::get_id(),
+                        &asymmetric_value,
+                    )?
+                } else {
+                    Bytes::new()
+                };
                 let mut pairing_was_proven = false;
                 let pairing_proof = if let Some(pairing_salt) = direct_id.pairing_salt {
                     let mut our_pk_b = [0u8; box_::PUBLICKEYBYTES];
@@ -1208,6 +1221,8 @@ impl Client {
                         pairing_proof,
                         initiator_signed_id.as_ref().map(|value| value.as_ref()),
                     )?,
+                    #[cfg(feature = "quic-transport")]
+                    quic_identity,
                     ..Default::default()
                 });
                 timeout(CONNECT_TIMEOUT, conn.send(&msg_out)).await??;
@@ -1261,6 +1276,25 @@ impl Client {
                 if pairing_was_proven && initiator_signed_id.is_some() {
                     crate::common::set_confirmed_direct_paired_viewer(peer_config_id, true);
                 }
+                #[cfg(feature = "quic-transport")]
+                if pairing_was_proven
+                    || crate::common::has_confirmed_direct_paired_viewer(peer_config_id)
+                {
+                    if let Some(certificate) = direct_id.quic_certificate_der.as_deref() {
+                        crate::quic_transport::remember_paired_peer(
+                            &peer_id,
+                            sign_pk,
+                            certificate,
+                        )?;
+                        if peer_config_id != peer_id {
+                            crate::quic_transport::remember_paired_peer(
+                                peer_config_id,
+                                sign_pk,
+                                certificate,
+                            )?;
+                        }
+                    }
+                }
                 log::info!("Established direct secure connection to {peer} as {peer_id}");
                 Ok(sign_pk.to_vec())
             }
@@ -1296,7 +1330,7 @@ impl Client {
     ) -> ResultType<(Stream, Vec<u8>)> {
         let had_confirmed_pairing =
             crate::common::has_confirmed_direct_paired_viewer(peer_config_id);
-        let mut conn = connect_tcp_local(connect_addr, None, CONNECT_TIMEOUT).await?;
+        let mut conn = Self::connect_direct_transport(peer_config_id, connect_addr).await?;
         match Self::secure_direct_connection(peer, peer_config_id, &mut conn, interface.clone())
             .await
         {
@@ -1310,12 +1344,25 @@ impl Client {
                 log::info!(
                     "Remembered direct pairing for {peer_config_id} was refused; retrying with local pairing passphrase"
                 );
-                let mut conn = connect_tcp_local(connect_addr, None, CONNECT_TIMEOUT).await?;
+                let mut conn = Self::connect_direct_transport(peer_config_id, connect_addr).await?;
                 let pk = Self::secure_direct_connection(peer, peer_config_id, &mut conn, interface)
                     .await?;
                 Ok((conn, pk))
             }
         }
+    }
+
+    async fn connect_direct_transport(
+        peer_config_id: &str,
+        connect_addr: &str,
+    ) -> ResultType<Stream> {
+        #[cfg(feature = "quic-transport")]
+        if let Some(stream) =
+            crate::quic_transport::connect_pretrusted(peer_config_id, connect_addr).await?
+        {
+            return Ok(stream);
+        }
+        connect_tcp_local(connect_addr, None, CONNECT_TIMEOUT).await
     }
 
     /// Request a relay connection to the server.

@@ -299,8 +299,23 @@ async fn create_tcp_connection_with_mode(
                 },
             ),
         };
+        #[cfg(feature = "quic-transport")]
+        let quic_identity = if handshake_mode == HandshakeMode::Direct {
+            let certificate = crate::quic_transport::local_quic_certificate_der()?;
+            crate::common::create_direct_signed_id_with_quic(
+                &Config::get_id(),
+                our_pk_b.0,
+                &pk,
+                &sk,
+                &certificate,
+            )?
+        } else {
+            Bytes::new()
+        };
         msg_out.set_signed_id(SignedId {
             id: signed_id,
+            #[cfg(feature = "quic-transport")]
+            quic_identity,
             ..Default::default()
         });
         timeout(CONNECT_TIMEOUT, stream.send(&msg_out)).await??;
@@ -318,6 +333,32 @@ async fn create_tcp_connection_with_mode(
                             &public_key.symmetric_value,
                             pairing_salt.is_some(),
                         )?;
+                        #[cfg(feature = "quic-transport")]
+                        let quic_initiator = if public_key.quic_identity.is_empty() {
+                            None
+                        } else {
+                            let identity =
+                                crate::common::decode_direct_id_pk(&public_key.quic_identity)?;
+                            crate::common::validate_direct_public_key_initiator(
+                                &identity,
+                                &public_key.asymmetric_value,
+                            )?;
+                            if identity.quic_certificate_der.is_none() {
+                                bail!("Handshake failed: client QUIC identity has no certificate");
+                            }
+                            Some(identity)
+                        };
+                        #[cfg(feature = "quic-transport")]
+                        if let (Some(legacy), Some(quic)) = (
+                            public_key_payload.initiator.as_ref(),
+                            quic_initiator.as_ref(),
+                        ) {
+                            if legacy.id != quic.id || legacy.sign_pk != quic.sign_pk {
+                                bail!(
+                                    "Handshake failed: client QUIC identity does not match paired viewer identity"
+                                );
+                            }
+                        }
                         let key = tcp::Encrypt::decode(
                             &public_key_payload.symmetric_value,
                             &public_key.asymmetric_value,
@@ -402,6 +443,24 @@ async fn create_tcp_connection_with_mode(
                                 });
                                 timeout(CONNECT_TIMEOUT, stream.send(&ack)).await??;
                                 bail!("{}", error_text);
+                            }
+                            #[cfg(feature = "quic-transport")]
+                            if handshake_mode == HandshakeMode::Direct {
+                                if let Some(initiator) = quic_initiator.as_ref() {
+                                    if let Some(certificate) =
+                                        initiator.quic_certificate_der.as_deref()
+                                    {
+                                        crate::common::validate_direct_public_key_initiator(
+                                            initiator,
+                                            &public_key.asymmetric_value,
+                                        )?;
+                                        crate::quic_transport::remember_paired_peer(
+                                            &initiator.id,
+                                            initiator.sign_pk,
+                                            certificate,
+                                        )?;
+                                    }
+                                }
                             }
                             if let Some((scope, initiator)) = paired_initiator {
                                 Config::add_paired_viewer(PairedViewer {
