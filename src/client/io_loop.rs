@@ -58,7 +58,9 @@ const NO_VIDEO_START_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const NO_VIDEO_START_MAX_REFRESHES: usize = 6;
 const NO_VIDEO_START_STALLED_LOG_INTERVAL: Duration = Duration::from_secs(30);
 const FPS_CONTROL_SUMMARY_LOG_INTERVAL: Duration = Duration::from_secs(30);
-const CLIENT_SLOW_STREAM_SEND_THRESHOLD: Duration = Duration::from_millis(250);
+const CLIENT_ASYNC_OUTBOX_CAPACITY: usize = 256;
+const CLIENT_VIDEO_FEEDBACK_LATEST_KEY_BASE: u64 = 1 << 32;
+const CLIENT_CLOSE_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 
 fn client_outbound_message_kind(message: &Message) -> &'static str {
     if let Some(message::Union::Misc(misc)) = &message.union {
@@ -68,6 +70,16 @@ fn client_outbound_message_kind(message: &Message) -> &'static str {
         return "Misc";
     }
     "Message"
+}
+
+fn client_outbound_latest_key(message: &Message) -> Option<u64> {
+    let Some(message::Union::Misc(misc)) = &message.union else {
+        return None;
+    };
+    let Some(misc::Union::VideoFeedback(feedback)) = &misc.union else {
+        return None;
+    };
+    Some(CLIENT_VIDEO_FEEDBACK_LATEST_KEY_BASE | u64::from(feedback.display as u32))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -286,6 +298,7 @@ impl<T: InvokeUiSession> Remote<T> {
                 self.handler
                     .set_connection_type(peer.is_secured(), direct, stream_type); // flutter -> connection_ready
                 self.handler.update_direct(Some(direct));
+                peer = peer.into_duplex(CLIENT_ASYNC_OUTBOX_CAPACITY);
                 if conn_type == ConnType::DEFAULT_CONN || conn_type == ConnType::VIEW_CAMERA {
                     self.handler
                         .set_fingerprint(crate::common::pk_to_fingerprint(pk.unwrap_or_default()));
@@ -802,7 +815,23 @@ impl<T: InvokeUiSession> Remote<T> {
         misc.set_close_reason(reason.to_owned());
         let mut msg = Message::new();
         msg.set_misc(misc);
-        allow_err!(peer.send(&msg).await);
+        match tokio::time::timeout(
+            CLIENT_CLOSE_SEND_TIMEOUT,
+            peer.send_tagged_and_wait("CloseReason", &msg),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                log::warn!("failed to send close reason: {error}");
+            }
+            Err(_) => {
+                log::warn!(
+                    "timed out waiting for close reason write after {}ms",
+                    CLIENT_CLOSE_SEND_TIMEOUT.as_millis()
+                );
+            }
+        }
         self.sent_close_reason = true;
     }
 
@@ -848,25 +877,18 @@ impl<T: InvokeUiSession> Remote<T> {
                     _ => {}
                 }
                 let kind = client_outbound_message_kind(&msg);
-                let started = Instant::now();
-                match peer.send(&msg).await {
-                    Ok(()) => {
-                        let elapsed = started.elapsed();
-                        if elapsed >= CLIENT_SLOW_STREAM_SEND_THRESHOLD {
-                            log::warn!(
-                                "diag client slow stream send: id={}, kind={}, elapsed_ms={}",
-                                self.handler.get_id(),
-                                kind,
-                                elapsed.as_millis()
-                            );
-                        }
-                    }
+                let send_result = if let Some(key) = client_outbound_latest_key(&msg) {
+                    peer.send_latest(key, kind, &msg).await
+                } else {
+                    peer.send_tagged(kind, &msg).await
+                };
+                match send_result {
+                    Ok(()) => {}
                     Err(err) => {
                         log::warn!(
-                            "diag client stream send failed: id={}, kind={}, elapsed_ms={}, err={}",
+                            "diag client stream enqueue failed: id={}, kind={}, err={}",
                             self.handler.get_id(),
                             kind,
-                            started.elapsed().as_millis(),
                             err
                         );
                     }
