@@ -108,6 +108,7 @@ pub const SEC30: Duration = Duration::from_secs(30);
 pub const VIDEO_QUEUE_SIZE: usize = 120;
 const VIDEO_FEEDBACK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 const MAX_DECODE_FAIL_COUNTER: usize = 3;
+const MEDIACODEC_STARTUP_OUTPUT_GRACE_FRAMES: usize = 10;
 #[cfg(feature = "quic-transport")]
 const AUTO_QUIC_RACE_TIMEOUT: Duration = Duration::from_millis(1_500);
 
@@ -191,6 +192,19 @@ fn pending_peer_trust_from_status(
             Some(PendingPeerTrust::new(pk, true))
         }
     }
+}
+
+#[cfg(feature = "quic-transport")]
+fn authenticated_peer_allows_quic_pin(
+    signing_key_was_trusted: bool,
+    trust_was_confirmed: bool,
+    pairing_was_proven: bool,
+    paired_viewer_was_confirmed: bool,
+) -> bool {
+    signing_key_was_trusted
+        || trust_was_confirmed
+        || pairing_was_proven
+        || paired_viewer_was_confirmed
 }
 
 #[cfg(not(target_os = "ios"))]
@@ -1130,12 +1144,17 @@ impl Client {
                 if secure_id.id != peer_id {
                     bail!("Handshake failed: peer id mismatch");
                 }
+                let signing_key_status = crate::common::trusted_peer_signing_key_status(
+                    peer_id,
+                    peer_config_id,
+                    option_pk.as_deref().unwrap_or_default(),
+                )?;
+                let signing_key_was_trusted = matches!(
+                    &signing_key_status,
+                    crate::common::TrustedPeerSigningKeyStatus::Trusted
+                );
                 let mut pending_trust = pending_peer_trust_from_status(
-                    crate::common::trusted_peer_signing_key_status(
-                        peer_id,
-                        peer_config_id,
-                        option_pk.as_deref().unwrap_or_default(),
-                    )?,
+                    signing_key_status,
                     option_pk.as_deref().unwrap_or_default(),
                 );
                 let mut trust_was_confirmed = false;
@@ -1284,10 +1303,13 @@ impl Client {
                     }
                 }
                 #[cfg(feature = "quic-transport")]
-                if trust_was_confirmed
-                    || pairing_was_proven
-                    || crate::common::has_confirmed_rendezvous_paired_viewer(peer_config_id)
-                {
+                if authenticated_peer_allows_quic_pin(
+                    signing_key_was_trusted,
+                    trust_was_confirmed,
+                    pairing_was_proven,
+                    crate::common::has_confirmed_rendezvous_paired_viewer(peer_config_id)
+                        || crate::common::has_confirmed_direct_paired_viewer(peer_config_id),
+                ) {
                     if let Some(certificate) = secure_id.quic_certificate_der.as_deref() {
                         crate::common::set_confirmed_direct_paired_viewer(peer_config_id, true);
                         crate::quic_transport::remember_paired_peer(peer_id, pk, certificate)?;
@@ -1346,14 +1368,17 @@ impl Client {
                 if peer_id.is_empty() {
                     bail!("Handshake failed: empty peer id");
                 }
-                let mut pending_trust = pending_peer_trust_from_status(
-                    crate::common::trusted_peer_signing_key_status(
-                        &peer_id,
-                        peer_config_id,
-                        &sign_pk,
-                    )?,
+                let signing_key_status = crate::common::trusted_peer_signing_key_status(
+                    &peer_id,
+                    peer_config_id,
                     &sign_pk,
+                )?;
+                let signing_key_was_trusted = matches!(
+                    &signing_key_status,
+                    crate::common::TrustedPeerSigningKeyStatus::Trusted
                 );
+                let mut pending_trust =
+                    pending_peer_trust_from_status(signing_key_status, &sign_pk);
                 let mut trust_was_confirmed = false;
                 if let Some(pending) = pending_trust.as_ref() {
                     if !direct_id.pairing_required {
@@ -1501,10 +1526,12 @@ impl Client {
                     crate::common::set_confirmed_direct_paired_viewer(peer_config_id, true);
                 }
                 #[cfg(feature = "quic-transport")]
-                if trust_was_confirmed
-                    || pairing_was_proven
-                    || crate::common::has_confirmed_direct_paired_viewer(peer_config_id)
-                {
+                if authenticated_peer_allows_quic_pin(
+                    signing_key_was_trusted,
+                    trust_was_confirmed,
+                    pairing_was_proven,
+                    crate::common::has_confirmed_direct_paired_viewer(peer_config_id),
+                ) {
                     if let Some(certificate) = direct_id.quic_certificate_der.as_deref() {
                         crate::quic_transport::remember_paired_peer(
                             &peer_id,
@@ -2427,12 +2454,14 @@ impl AudioHandler {
 /// Video handler for the [`Client`].
 pub struct VideoHandler {
     decoder: Decoder,
+    decoder_dimensions: Option<(usize, usize)>,
     pub rgb: ImageRgb,
     pub texture: ImageTexture,
     recorder: Arc<Mutex<Option<Recorder>>>,
     record: bool,
     _display: usize, // useful for debug
     fail_counter: usize,
+    decode_wait_counter: usize,
     first_frame: bool,
 }
 
@@ -2448,7 +2477,11 @@ impl VideoHandler {
     }
 
     /// Create a new video handler.
-    pub fn new(format: CodecFormat, _display: usize) -> Self {
+    pub fn new(
+        format: CodecFormat,
+        _display: usize,
+        decoder_dimensions: Option<(usize, usize)>,
+    ) -> Self {
         let luid = Self::get_adapter_luid();
         log::info!("new video handler for display #{_display}, format: {format:?}, luid: {luid:?}");
         let rgba_format =
@@ -2458,13 +2491,15 @@ impl VideoHandler {
                 ImageFormat::ARGB
             };
         VideoHandler {
-            decoder: Decoder::new(format, luid),
+            decoder: Decoder::new(format, luid, decoder_dimensions),
+            decoder_dimensions,
             rgb: ImageRgb::new(rgba_format, crate::get_dst_align_rgba()),
             texture: Default::default(),
             recorder: Default::default(),
             record: false,
             _display,
             fail_counter: 0,
+            decode_wait_counter: 0,
             first_frame: true,
         }
     }
@@ -2486,7 +2521,7 @@ impl VideoHandler {
         let frame_id = vf.frame_id;
         let capture_time_ms = vf.capture_time_ms;
         if format != self.decoder.format() {
-            self.reset(Some(format));
+            self.reset(Some(format), None);
         }
         match &vf.union {
             Some(frame) => {
@@ -2497,48 +2532,76 @@ impl VideoHandler {
                     pixelbuffer,
                     chroma,
                 );
-                if res.as_ref().is_ok_and(|x| *x) {
-                    if self.first_frame {
-                        log::info!(
-                            "diag first video frame decoded: display={}, stream_id={}, frame_id={}, capture_ms={}, format={:?}, pixelbuffer={}, chroma={:?}, rgb={}x{}, texture={}x{}, decoder_valid={}",
-                            self._display,
-                            stream_id,
-                            frame_id,
-                            capture_time_ms,
-                            self.decoder.format(),
-                            *pixelbuffer,
-                            chroma,
-                            self.rgb.w,
-                            self.rgb.h,
-                            self.texture.w,
-                            self.texture.h,
-                            self.decoder.valid()
-                        );
-                    }
-                    self.fail_counter = 0;
-                } else {
-                    if self.fail_counter < usize::MAX {
-                        if self.first_frame && self.fail_counter < MAX_DECODE_FAIL_COUNTER {
-                            log::error!(
-                                "diag first video frame decode failed: display={}, format={:?}, pixelbuffer={}, chroma={:?}, decoder_valid={}, err={:?}",
+                match &res {
+                    Ok(true) => {
+                        if self.first_frame {
+                            log::info!(
+                                "diag first video frame decoded: display={}, stream_id={}, frame_id={}, capture_ms={}, format={:?}, pixelbuffer={}, chroma={:?}, rgb={}x{}, texture={}x{}, decoder_valid={}",
                                 self._display,
+                                stream_id,
+                                frame_id,
+                                capture_time_ms,
                                 self.decoder.format(),
                                 *pixelbuffer,
                                 chroma,
-                                self.decoder.valid(),
-                                res.as_ref().err()
+                                self.rgb.w,
+                                self.rgb.h,
+                                self.texture.w,
+                                self.texture.h,
+                                self.decoder.valid()
                             );
-                            self.fail_counter = MAX_DECODE_FAIL_COUNTER;
-                        } else {
+                        }
+                        self.fail_counter = 0;
+                        self.decode_wait_counter = 0;
+                        self.first_frame = false;
+                    }
+                    Ok(false) => {
+                        self.decode_wait_counter = self.decode_wait_counter.saturating_add(1);
+                        let mediacodec_is_warming_up = self.first_frame
+                            && self.decoder.backend() == "Hardware Android MediaCodec"
+                            && self.decode_wait_counter <= MEDIACODEC_STARTUP_OUTPUT_GRACE_FRAMES;
+                        if !mediacodec_is_warming_up && self.fail_counter < usize::MAX {
                             self.fail_counter += 1;
                         }
-                        log::error!(
-                            "Failed to handle video frame, fail counter: {}",
-                            self.fail_counter
-                        );
+                        if self.first_frame {
+                            log::warn!(
+                                "diag video decoder is waiting for output: display={}, stream_id={}, frame_id={}, format={:?}, backend={}, decoder_valid={}, attempt={}, grace_remaining={}, fail_counter={}",
+                                self._display,
+                                stream_id,
+                                frame_id,
+                                self.decoder.format(),
+                                self.decoder.backend(),
+                                self.decoder.valid(),
+                                self.decode_wait_counter,
+                                MEDIACODEC_STARTUP_OUTPUT_GRACE_FRAMES
+                                    .saturating_sub(self.decode_wait_counter),
+                                self.fail_counter
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        if self.fail_counter < usize::MAX {
+                            if self.first_frame {
+                                log::error!(
+                                    "diag first video frame decode failed: display={}, format={:?}, pixelbuffer={}, chroma={:?}, decoder_valid={}, err={error:?}",
+                                    self._display,
+                                    self.decoder.format(),
+                                    *pixelbuffer,
+                                    chroma,
+                                    self.decoder.valid()
+                                );
+                                self.fail_counter = MAX_DECODE_FAIL_COUNTER;
+                            } else {
+                                self.fail_counter += 1;
+                            }
+                            log::error!(
+                                "Failed to handle video frame, fail counter: {}",
+                                self.fail_counter
+                            );
+                        }
+                        self.first_frame = false;
                     }
                 }
-                self.first_frame = false;
                 if self.record {
                     self.recorder.lock().unwrap().as_mut().map(|r| {
                         let (w, h) = if *pixelbuffer {
@@ -2556,7 +2619,11 @@ impl VideoHandler {
     }
 
     /// Reset the decoder, change format if it is Some
-    pub fn reset(&mut self, format: Option<CodecFormat>) {
+    pub fn reset(
+        &mut self,
+        format: Option<CodecFormat>,
+        decoder_dimensions: Option<(usize, usize)>,
+    ) {
         log::info!(
             "reset video handler for display #{}, format: {format:?}",
             self._display
@@ -2565,8 +2632,12 @@ impl VideoHandler {
         self.rgb.set_align(crate::get_dst_align_rgba());
         let luid = Self::get_adapter_luid();
         let format = format.unwrap_or(self.decoder.format());
-        self.decoder = Decoder::new(format, luid);
+        if decoder_dimensions.is_some() {
+            self.decoder_dimensions = decoder_dimensions;
+        }
+        self.decoder = Decoder::new(format, luid, self.decoder_dimensions);
         self.fail_counter = 0;
+        self.decode_wait_counter = 0;
         self.first_frame = true;
     }
 
@@ -3890,7 +3961,7 @@ pub enum MediaData {
     VideoFrame(Box<VideoFrame>),
     AudioFrame(Box<AudioFrame>),
     AudioFormat(AudioFormat),
-    Reset,
+    Reset(Option<(usize, usize)>),
     RecordScreen(bool),
 }
 
@@ -4105,7 +4176,21 @@ pub fn start_video_thread<F, T>(
                         let start = std::time::Instant::now();
                         let format = CodecFormat::from(&vf);
                         if video_handler.is_none() {
-                            let mut handler = VideoHandler::new(format, display);
+                            let decoder_dimensions = session
+                                .lc
+                                .read()
+                                .unwrap()
+                                .peer_info
+                                .as_ref()
+                                .and_then(|peer_info| peer_info.displays.get(display))
+                                .and_then(|display| {
+                                    (display.width > 0 && display.height > 0).then_some((
+                                        display.width as usize,
+                                        display.height as usize,
+                                    ))
+                                });
+                            let mut handler =
+                                VideoHandler::new(format, display, decoder_dimensions);
                             let record_state = session.lc.read().unwrap().record_state;
                             let record_permission = session.lc.read().unwrap().record_permission;
                             let id = session.lc.read().unwrap().id.clone();
@@ -4215,9 +4300,9 @@ pub fn start_video_thread<F, T>(
                             ));
                         }
                     }
-                    MediaData::Reset => {
+                    MediaData::Reset(decoder_dimensions) => {
                         if let Some(handler) = video_handler.as_mut() {
-                            handler.reset(None);
+                            handler.reset(None, decoder_dimensions);
                             *decoder_backend.write().unwrap() = Some(handler.decoder_backend());
                         }
                     }
@@ -5570,6 +5655,26 @@ mod security_tests {
     const SECURITY_TEST_CONNECT_ATTEMPT_TIMEOUT_MS: u64 = 250;
 
     static TEST_CLIENT_SECURITY_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(feature = "quic-transport")]
+    #[test]
+    fn trusted_signing_key_allows_persisting_signed_quic_identity() {
+        assert!(authenticated_peer_allows_quic_pin(
+            true, false, false, false
+        ));
+        assert!(authenticated_peer_allows_quic_pin(
+            false, true, false, false
+        ));
+        assert!(authenticated_peer_allows_quic_pin(
+            false, false, true, false
+        ));
+        assert!(authenticated_peer_allows_quic_pin(
+            false, false, false, true
+        ));
+        assert!(!authenticated_peer_allows_quic_pin(
+            false, false, false, false
+        ));
+    }
 
     fn lock_security_tests() -> std::sync::MutexGuard<'static, ()> {
         TEST_CLIENT_SECURITY_LOCK

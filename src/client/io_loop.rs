@@ -82,6 +82,13 @@ fn client_outbound_latest_key(message: &Message) -> Option<u64> {
     Some(CLIENT_VIDEO_FEEDBACK_LATEST_KEY_BASE | u64::from(feedback.display as u32))
 }
 
+fn should_wait_for_startup_keyframe(
+    frame_id: u64,
+    payload_stats: Option<(usize, usize, bool)>,
+) -> bool {
+    frame_id != 0 && payload_stats.is_some_and(|(_, _, has_keyframe)| !has_keyframe)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum NoVideoStartupAction {
     None,
@@ -171,6 +178,7 @@ pub struct Remote<T: InvokeUiSession> {
     last_update_jobs_status: (Instant, HashMap<i32, u64>),
     is_connected: bool,
     first_frame: bool,
+    startup_keyframe_refresh_sent: bool,
     #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
     client_conn_id: i32, // used for file clipboard
     data_count: Arc<AtomicUsize>,
@@ -227,6 +235,7 @@ impl<T: InvokeUiSession> Remote<T> {
             last_update_jobs_status: (Instant::now(), Default::default()),
             is_connected: false,
             first_frame: false,
+            startup_keyframe_refresh_sent: false,
             #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
             client_conn_id: 0,
             data_count: Arc::new(AtomicUsize::new(0)),
@@ -1315,12 +1324,12 @@ impl<T: InvokeUiSession> Remote<T> {
             Data::ResetDecoder(display) => match display {
                 Some(display) => {
                     if let Some(v) = self.video_threads.get_mut(&display) {
-                        v.video_sender.send(MediaData::Reset).ok();
+                        v.video_sender.send(MediaData::Reset(None)).ok();
                     }
                 }
                 None => {
                     for (_, v) in self.video_threads.iter_mut() {
-                        v.video_sender.send(MediaData::Reset).ok();
+                        v.video_sender.send(MediaData::Reset(None)).ok();
                     }
                 }
             },
@@ -1789,8 +1798,33 @@ impl<T: InvokeUiSession> Remote<T> {
             match msg_in.union {
                 Some(message::Union::VideoFrame(vf)) => {
                     if !self.first_frame {
+                        let payload_stats = scrap::codec::video_frame_payload_stats(&vf);
                         let (payload_bytes, frame_count, has_keyframe) =
-                            scrap::codec::video_frame_payload_stats(&vf).unwrap_or((0, 0, false));
+                            payload_stats.unwrap_or((0, 0, false));
+                        if should_wait_for_startup_keyframe(vf.frame_id, payload_stats) {
+                            log::warn!(
+                                "diag video startup dropped delta before keyframe: display={}, stream_id={}, frame_id={}, format={:?}, payload_bytes={}, refresh_requested={}",
+                                vf.display,
+                                vf.stream_id,
+                                vf.frame_id,
+                                CodecFormat::from(&vf),
+                                payload_bytes,
+                                !self.startup_keyframe_refresh_sent
+                            );
+                            if !self.startup_keyframe_refresh_sent {
+                                self.startup_keyframe_refresh_sent = true;
+                                let refresh = client::LoginConfigHandler::refresh();
+                                if let Err(error) = peer.send(&refresh).await {
+                                    log::warn!(
+                                        "diag video startup keyframe request failed: display={}, stream_id={}, err={}",
+                                        vf.display,
+                                        vf.stream_id,
+                                        error
+                                    );
+                                }
+                            }
+                            return true;
+                        }
                         log::info!(
                             "diag first video frame received from stream: display={}, stream_id={}, frame_id={}, capture_ms={}, format={:?}, payload_bytes={}, frame_count={}, keyframe={}",
                             vf.display,
@@ -1803,6 +1837,7 @@ impl<T: InvokeUiSession> Remote<T> {
                             has_keyframe
                         );
                         self.first_frame = true;
+                        self.startup_keyframe_refresh_sent = false;
                         self.handler.close_success();
                         self.handler.adapt_size();
                         self.send_toggle_virtual_display_msg(peer).await;
@@ -2387,7 +2422,9 @@ impl<T: InvokeUiSession> Remote<T> {
                     Some(misc::Union::SwitchDisplay(s)) => {
                         self.handler.handle_peer_switch_display(&s);
                         if let Some(thread) = self.video_threads.get_mut(&(s.display as usize)) {
-                            thread.video_sender.send(MediaData::Reset).ok();
+                            let dimensions = (s.width > 0 && s.height > 0)
+                                .then_some((s.width as usize, s.height as usize));
+                            thread.video_sender.send(MediaData::Reset(dimensions)).ok();
                         }
 
                         let mut scale = 1.0;
@@ -3115,8 +3152,9 @@ impl Drop for VideoThread {
 #[cfg(test)]
 mod tests {
     use super::{
-        session_permission_response_msgbox_type, NoVideoStartupAction, NoVideoStartupWatchdog,
-        NO_VIDEO_START_MAX_REFRESHES, NO_VIDEO_START_REFRESH_INTERVAL, NO_VIDEO_START_TIMEOUT,
+        session_permission_response_msgbox_type, should_wait_for_startup_keyframe,
+        NoVideoStartupAction, NoVideoStartupWatchdog, NO_VIDEO_START_MAX_REFRESHES,
+        NO_VIDEO_START_REFRESH_INTERVAL, NO_VIDEO_START_TIMEOUT,
     };
     use hbb_common::tokio::time::{Duration, Instant};
 
@@ -3124,6 +3162,14 @@ mod tests {
     fn permission_response_dialogs_do_not_close_session_on_ok() {
         assert!(session_permission_response_msgbox_type(true).contains("custom"));
         assert!(session_permission_response_msgbox_type(false).contains("custom"));
+    }
+
+    #[test]
+    fn startup_video_waits_for_keyframe_only_for_stamped_encoded_frames() {
+        assert!(should_wait_for_startup_keyframe(2, Some((512, 1, false))));
+        assert!(!should_wait_for_startup_keyframe(1, Some((4096, 1, true))));
+        assert!(!should_wait_for_startup_keyframe(0, Some((512, 1, false))));
+        assert!(!should_wait_for_startup_keyframe(2, None));
     }
 
     #[test]

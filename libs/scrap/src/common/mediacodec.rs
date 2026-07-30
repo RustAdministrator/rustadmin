@@ -51,10 +51,22 @@ impl Deref for MediaCodecDecoder {
 }
 
 impl MediaCodecDecoder {
-    pub fn new(format: CodecFormat) -> Option<MediaCodecDecoder> {
+    pub fn new(
+        format: CodecFormat,
+        dimensions: Option<(usize, usize)>,
+    ) -> Option<MediaCodecDecoder> {
+        let Some((width, height)) = dimensions.filter(|(width, height)| *width > 0 && *height > 0)
+        else {
+            log::warn!("MediaCodec decoder requires a valid remote video size");
+            return None;
+        };
         match format {
-            CodecFormat::H264 => create_media_codec(H264_MIME_TYPE, MediaCodecDirection::Decoder),
-            CodecFormat::H265 => create_media_codec(H265_MIME_TYPE, MediaCodecDirection::Decoder),
+            CodecFormat::H264 => {
+                create_media_codec(H264_MIME_TYPE, MediaCodecDirection::Decoder, width, height)
+            }
+            CodecFormat::H265 => {
+                create_media_codec(H265_MIME_TYPE, MediaCodecDirection::Decoder, width, height)
+            }
             _ => {
                 log::error!("Unsupported codec format: {:?}", format);
                 None
@@ -155,20 +167,27 @@ impl MediaCodecDecoder {
     }
 }
 
-fn create_media_codec(name: &str, direction: MediaCodecDirection) -> Option<MediaCodecDecoder> {
+fn create_media_codec(
+    name: &str,
+    direction: MediaCodecDirection,
+    width: usize,
+    height: usize,
+) -> Option<MediaCodecDecoder> {
     let codec = MediaCodec::from_decoder_type(name)?;
     let media_format = MediaFormat::new();
     media_format.set_str("mime", name);
-    media_format.set_i32("width", 0);
-    media_format.set_i32("height", 0);
+    media_format.set_i32("width", width as i32);
+    media_format.set_i32("height", height as i32);
     media_format.set_i32("color-format", COLOR_FORMAT_YUV420_PLANAR);
     if let Err(e) = codec.configure(&media_format, None, direction) {
         log::error!("Failed to init decoder: {:?}", e);
         return None;
     };
     log::info!(
-        "MediaCodec decoder configure success: mime={}, requested_color_format={}",
+        "MediaCodec decoder configure success: mime={}, size={}x{}, requested_color_format={}",
         name,
+        width,
+        height,
         COLOR_FORMAT_YUV420_PLANAR
     );
     if let Err(e) = codec.start() {
@@ -384,24 +403,31 @@ fn copy_nv12_output_to_rgba(
     Ok(())
 }
 
+pub fn update_decoder_support(infos: &crate::android::ffi::MediaCodecInfos) {
+    let supports = |mime_type: &str| {
+        infos.codecs.iter().any(|codec| {
+            !codec.is_encoder
+                && codec.hw == Some(true)
+                && codec.yuv420
+                && codec.mime_type == mime_type
+        })
+    };
+    let h264 = supports(H264_MIME_TYPE);
+    let h265 = supports(H265_MIME_TYPE);
+    H264_DECODER_SUPPORT.store(h264, Ordering::SeqCst);
+    H265_DECODER_SUPPORT.store(h265, Ordering::SeqCst);
+    log::info!(
+        "Android MediaCodec decoder capabilities: h264={}, h265={}, codec_entries={}",
+        h264,
+        h265,
+        infos.codecs.len()
+    );
+}
+
 pub fn check_mediacodec() {
-    std::thread::spawn(move || {
-        // check decoders
-        let h264 = MediaCodecDecoder::new(CodecFormat::H264);
-        let h265 = MediaCodecDecoder::new(CodecFormat::H265);
-        H264_DECODER_SUPPORT.store(h264.is_some(), Ordering::SeqCst);
-        H265_DECODER_SUPPORT.store(h265.is_some(), Ordering::SeqCst);
-        log::info!(
-            "Android MediaCodec capability probe: h264={}, h265={}",
-            h264.is_some(),
-            h265.is_some()
-        );
-        if let Some(decoder) = h264 {
-            decoder.stop().ok();
-        }
-        if let Some(decoder) = h265 {
-            decoder.stop().ok();
-        }
-        // TODO encoders
-    });
+    if let Some(infos) = crate::android::ffi::get_codec_info() {
+        update_decoder_support(&infos);
+    } else {
+        log::info!("Android MediaCodec capability check is waiting for the Java codec list");
+    }
 }

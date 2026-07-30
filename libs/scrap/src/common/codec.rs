@@ -679,8 +679,14 @@ impl Decoder {
         decoding
     }
 
-    pub fn new(format: CodecFormat, _luid: Option<i64>) -> Decoder {
-        log::info!("try create new decoder, format: {format:?}, _luid: {_luid:?}");
+    pub fn new(
+        format: CodecFormat,
+        _luid: Option<i64>,
+        _dimensions: Option<(usize, usize)>,
+    ) -> Decoder {
+        log::info!(
+            "try create new decoder, format: {format:?}, _luid: {_luid:?}, dimensions: {_dimensions:?}"
+        );
         let (mut vp8, mut vp9, mut av1) = (None, None, None);
         #[cfg(feature = "hwcodec")]
         let (mut av1_ram, mut h264_ram, mut h265_ram) = (None, None, None);
@@ -744,7 +750,7 @@ impl Decoder {
                 }
                 #[cfg(feature = "mediacodec")]
                 if !valid && enable_hwcodec_option() {
-                    h264_media_codec = MediaCodecDecoder::new(format);
+                    h264_media_codec = MediaCodecDecoder::new(format, _dimensions);
                     if h264_media_codec.is_none() {
                         log::error!("create H264 media codec decoder failed");
                     }
@@ -770,7 +776,7 @@ impl Decoder {
                 }
                 #[cfg(feature = "mediacodec")]
                 if !valid && enable_hwcodec_option() {
-                    h265_media_codec = MediaCodecDecoder::new(format);
+                    h265_media_codec = MediaCodecDecoder::new(format, _dimensions);
                     if h265_media_codec.is_none() {
                         log::error!("create H265 media codec decoder failed");
                     }
