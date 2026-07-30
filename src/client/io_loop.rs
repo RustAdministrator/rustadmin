@@ -57,6 +57,7 @@ const NO_VIDEO_START_TIMEOUT: Duration = Duration::from_secs(15);
 const NO_VIDEO_START_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const NO_VIDEO_START_MAX_REFRESHES: usize = 6;
 const NO_VIDEO_START_STALLED_LOG_INTERVAL: Duration = Duration::from_secs(30);
+const STARTUP_KEYFRAME_REFRESH_INTERVAL: Duration = Duration::from_millis(750);
 const FPS_CONTROL_SUMMARY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 const CLIENT_ASYNC_OUTBOX_CAPACITY: usize = 256;
 const CLIENT_VIDEO_FEEDBACK_LATEST_KEY_BASE: u64 = 1 << 32;
@@ -87,6 +88,42 @@ fn should_wait_for_startup_keyframe(
     payload_stats: Option<(usize, usize, bool)>,
 ) -> bool {
     frame_id != 0 && payload_stats.is_some_and(|(_, _, has_keyframe)| !has_keyframe)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StartupKeyframeAction {
+    Wait,
+    Refresh { attempt: usize, dropped_deltas: u64 },
+}
+
+#[derive(Default)]
+struct StartupKeyframeRecovery {
+    last_refresh: Option<Instant>,
+    refresh_count: usize,
+    dropped_deltas: u64,
+}
+
+impl StartupKeyframeRecovery {
+    fn observe_delta(&mut self, now: Instant) -> StartupKeyframeAction {
+        self.dropped_deltas = self.dropped_deltas.saturating_add(1);
+        let refresh_due = self
+            .last_refresh
+            .map(|last| now.saturating_duration_since(last) >= STARTUP_KEYFRAME_REFRESH_INTERVAL)
+            .unwrap_or(true);
+        if !refresh_due {
+            return StartupKeyframeAction::Wait;
+        }
+        self.last_refresh = Some(now);
+        self.refresh_count = self.refresh_count.saturating_add(1);
+        StartupKeyframeAction::Refresh {
+            attempt: self.refresh_count,
+            dropped_deltas: self.dropped_deltas,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -178,7 +215,7 @@ pub struct Remote<T: InvokeUiSession> {
     last_update_jobs_status: (Instant, HashMap<i32, u64>),
     is_connected: bool,
     first_frame: bool,
-    startup_keyframe_refresh_sent: bool,
+    startup_keyframe_recovery: StartupKeyframeRecovery,
     #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
     client_conn_id: i32, // used for file clipboard
     data_count: Arc<AtomicUsize>,
@@ -235,7 +272,7 @@ impl<T: InvokeUiSession> Remote<T> {
             last_update_jobs_status: (Instant::now(), Default::default()),
             is_connected: false,
             first_frame: false,
-            startup_keyframe_refresh_sent: false,
+            startup_keyframe_recovery: StartupKeyframeRecovery::default(),
             #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
             client_conn_id: 0,
             data_count: Arc::new(AtomicUsize::new(0)),
@@ -612,6 +649,28 @@ impl<T: InvokeUiSession> Remote<T> {
                                 #[cfg(feature = "quic-transport")]
                                 datagram_payload: quic_stats
                                     .and_then(|stats| stats.max_datagram_size),
+                                #[cfg(feature = "quic-transport")]
+                                negotiated_datagram_payload: quic_stats
+                                    .and_then(|stats| stats.negotiated_datagram_size),
+                                #[cfg(feature = "quic-transport")]
+                                quic_protocol: quic_stats.and_then(|stats| {
+                                    (stats.application_protocol != 0)
+                                        .then(|| format!("v{}", stats.application_protocol))
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_video_transport: quic_stats.map(|stats| {
+                                    if stats.reliable_keyframes {
+                                        "DATAGRAM + reliable KF".to_owned()
+                                    } else {
+                                        "DATAGRAM".to_owned()
+                                    }
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_reassembly_drops: quic_stats
+                                    .map(|stats| stats.video_reassembly_drops),
+                                #[cfg(feature = "quic-transport")]
+                                quic_keyframe_requests: quic_stats
+                                    .map(|stats| stats.video_keyframe_requests),
                                 decoder,
                                 renderer,
                                 decode_fps,
@@ -1802,23 +1861,28 @@ impl<T: InvokeUiSession> Remote<T> {
                         let (payload_bytes, frame_count, has_keyframe) =
                             payload_stats.unwrap_or((0, 0, false));
                         if should_wait_for_startup_keyframe(vf.frame_id, payload_stats) {
-                            log::warn!(
-                                "diag video startup dropped delta before keyframe: display={}, stream_id={}, frame_id={}, format={:?}, payload_bytes={}, refresh_requested={}",
-                                vf.display,
-                                vf.stream_id,
-                                vf.frame_id,
-                                CodecFormat::from(&vf),
-                                payload_bytes,
-                                !self.startup_keyframe_refresh_sent
-                            );
-                            if !self.startup_keyframe_refresh_sent {
-                                self.startup_keyframe_refresh_sent = true;
+                            if let StartupKeyframeAction::Refresh {
+                                attempt,
+                                dropped_deltas,
+                            } = self.startup_keyframe_recovery.observe_delta(Instant::now())
+                            {
+                                log::warn!(
+                                    "diag video startup keyframe recovery: display={}, stream_id={}, frame_id={}, format={:?}, payload_bytes={}, dropped_deltas={}, refresh_attempt={}",
+                                    vf.display,
+                                    vf.stream_id,
+                                    vf.frame_id,
+                                    CodecFormat::from(&vf),
+                                    payload_bytes,
+                                    dropped_deltas,
+                                    attempt
+                                );
                                 let refresh = client::LoginConfigHandler::refresh();
                                 if let Err(error) = peer.send(&refresh).await {
                                     log::warn!(
-                                        "diag video startup keyframe request failed: display={}, stream_id={}, err={}",
+                                        "diag video startup keyframe request failed: display={}, stream_id={}, attempt={}, err={}",
                                         vf.display,
                                         vf.stream_id,
+                                        attempt,
                                         error
                                     );
                                 }
@@ -1837,7 +1901,7 @@ impl<T: InvokeUiSession> Remote<T> {
                             has_keyframe
                         );
                         self.first_frame = true;
-                        self.startup_keyframe_refresh_sent = false;
+                        self.startup_keyframe_recovery.reset();
                         self.handler.close_success();
                         self.handler.adapt_size();
                         self.send_toggle_virtual_display_msg(peer).await;
@@ -3153,8 +3217,9 @@ impl Drop for VideoThread {
 mod tests {
     use super::{
         session_permission_response_msgbox_type, should_wait_for_startup_keyframe,
-        NoVideoStartupAction, NoVideoStartupWatchdog, NO_VIDEO_START_MAX_REFRESHES,
-        NO_VIDEO_START_REFRESH_INTERVAL, NO_VIDEO_START_TIMEOUT,
+        NoVideoStartupAction, NoVideoStartupWatchdog, StartupKeyframeAction,
+        StartupKeyframeRecovery, NO_VIDEO_START_MAX_REFRESHES, NO_VIDEO_START_REFRESH_INTERVAL,
+        NO_VIDEO_START_TIMEOUT, STARTUP_KEYFRAME_REFRESH_INTERVAL,
     };
     use hbb_common::tokio::time::{Duration, Instant};
 
@@ -3170,6 +3235,38 @@ mod tests {
         assert!(!should_wait_for_startup_keyframe(1, Some((4096, 1, true))));
         assert!(!should_wait_for_startup_keyframe(0, Some((512, 1, false))));
         assert!(!should_wait_for_startup_keyframe(2, None));
+    }
+
+    #[test]
+    fn startup_keyframe_recovery_retries_at_a_bounded_rate() {
+        let mut recovery = StartupKeyframeRecovery::default();
+        let start = Instant::now();
+        assert_eq!(
+            recovery.observe_delta(start),
+            StartupKeyframeAction::Refresh {
+                attempt: 1,
+                dropped_deltas: 1
+            }
+        );
+        assert_eq!(
+            recovery.observe_delta(start + STARTUP_KEYFRAME_REFRESH_INTERVAL / 2),
+            StartupKeyframeAction::Wait
+        );
+        assert_eq!(
+            recovery.observe_delta(start + STARTUP_KEYFRAME_REFRESH_INTERVAL),
+            StartupKeyframeAction::Refresh {
+                attempt: 2,
+                dropped_deltas: 3
+            }
+        );
+        recovery.reset();
+        assert_eq!(
+            recovery.observe_delta(start + STARTUP_KEYFRAME_REFRESH_INTERVAL),
+            StartupKeyframeAction::Refresh {
+                attempt: 1,
+                dropped_deltas: 1
+            }
+        );
     }
 
     #[test]

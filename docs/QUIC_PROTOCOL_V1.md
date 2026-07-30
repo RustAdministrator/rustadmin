@@ -1,5 +1,10 @@
 # RustAdmin QUIC Application Protocol Version 1
 
+Version 1 remains the compatibility layout selected through ALPN
+`rustadmin-quic-v1`. New peers also support version 2; see
+`docs/QUIC_PROTOCOL_V2.md`. A version 1 connection still opens exactly five
+application streams and never receives version 2 capability bits or channels.
+
 All integer fields use network byte order (big endian). Receivers validate the complete fixed-width header before allocating payload memory. Native Rust structs are never deserialized directly from untrusted bytes.
 
 ## Common Message Header
@@ -99,7 +104,7 @@ The common payload starts with a 28-byte video fragment header:
 | 16 | 8 | Presentation timestamp in microseconds |
 | 24 | 4 | Complete encoded frame size |
 
-Fragment data follows. Fragment size is derived from Quinn's current maximum DATAGRAM size minus both headers. The receiver allows out-of-order and exact duplicate fragments. It rejects conflicting duplicates and inconsistent metadata. Pending frames, fragment count, frame size, and memory are bounded. Incomplete frames expire, completion of a newer frame removes older incomplete state, and repeated loss produces a rate-limited keyframe-request signal. Ordinary delta fragments are never retransmitted by the application.
+Fragment data follows. Fragment size is derived from Quinn's current maximum DATAGRAM size minus both headers. The receiver allows out-of-order and exact duplicate fragments. It rejects conflicting duplicates and inconsistent metadata. Pending frames, fragment count, frame size, and memory are bounded. Before the first complete keyframe, a complete delta frame cannot obsolete a partial keyframe. Incomplete frames expire and repeated loss produces a rate-limited keyframe-request signal. Ordinary delta fragments are never retransmitted by the application.
 
 `SwitchDisplay` remains reliable. Before sending it, the sender increments a video-ordering epoch and closes its video gate. The receiver first queues the reliable display update, then returns an eight-byte `VideoOrderingAck`. Video for that epoch remains latest-only and blocked until the acknowledgement arrives, preventing a DATAGRAM from overtaking geometry changes.
 

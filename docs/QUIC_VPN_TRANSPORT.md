@@ -2,7 +2,7 @@
 
 ## Status
 
-Revision 115 with `hbb_common` revision 019 integrates QUIC into direct IP/domain and rendezvous-assisted sessions. It does not detect or require a specific VPN implementation: any routed IPv4/IPv6 path, including LANs and VPNs, is eligible. The default build enables `quic-transport` and selects automatic QUIC-first mode unless the global `Disable UDP` option is enabled.
+Revision 118 with `hbb_common` revision 021 integrates QUIC into direct IP/domain and rendezvous-assisted sessions. It does not detect or require a specific VPN implementation: any routed IPv4/IPv6 path, including LANs and VPNs, is eligible. The default build enables `quic-transport` and selects automatic QUIC-first mode unless the global `Disable UDP` option is enabled.
 
 Implemented and tested:
 
@@ -12,13 +12,17 @@ Implemented and tested:
 - Versioned, fixed-width, big-endian application headers
 - Session offer/accept negotiation with downgrade detection
 - Video fragmentation and bounded out-of-order reassembly
+- ALPN v2/v1 negotiation that preserves the exact five-stream v1 layout for old peers
+- A sixth high-priority v2 stream for reliable keyframes while delta frames remain disposable DATAGRAM traffic
+- Startup reassembly that preserves a partial keyframe and rate-limits repeated refresh requests
+- Version-aware startup gating so a v2 reliable keyframe cannot leave later DATAGRAM deltas blocked in the v1 reassembler state
 - Audio packet transport and a bounded jitter buffer with a PLC integration event
 - Disposable mouse movement and reliable keyboard/button/wheel representations
 - Dedicated reliable input, clipboard, file-transfer, and diagnostics streams
 - Clipboard direction policy and loop suppression
 - File metadata, bounded chunks, cancellation, resume hash state, SHA-256 verification, and rate limiting
 - Bounded reconnect policy, media/input reset actions, adaptation targets, and runtime statistics
-- Dynamic QUIC DATAGRAM sizing from Quinn's current path MTU estimate
+- Dynamic QUIC DATAGRAM sizing from Quinn's live path limit, with a conservative VPN-safe PMTUD search ceiling
 - A bounded protobuf adapter that preserves the existing application pipelines while routing video, audio, mouse movement, input, clipboard, files, diagnostics, and control independently
 - Reliable `SwitchDisplay` acknowledgement before related video DATAGRAM delivery
 - Reliable raw mode for direct port forwarding
@@ -26,7 +30,7 @@ Implemented and tested:
 - A continuously available bounded first-contact listener, exporter-bound provisional identity discovery, dynamic trusted-peer lookup, and classified TCP fallback
 - Concurrent QUIC, TCP, and eligible UDP/KCP candidates for normal one-click connection
 - First-connection QUIC promotion without requiring a disconnect and reconnect cycle
-- Extended Quality Monitor fields for `QUIC/UDP`, path MTU, maximum DATAGRAM size, QUIC RTT, and cumulative lost packets
+- Extended Quality Monitor fields for `QUIC/UDP`, ALPN/session version, keyframe mode, path MTU, live and negotiated DATAGRAM limits, QUIC RTT, loss, reassembly drops, and keyframe requests
 
 Release gates still pending are physical Android-to-Windows routed-UDP testing, packet-loss/reordering/reduced-MTU emulation, controlled in-session reconnect integration, and iOS compilation. `quic-only` should remain a diagnostic mode until those field gates pass.
 
@@ -46,18 +50,21 @@ One authenticated QUIC connection represents one remote-access session:
 | Keyboard, mouse buttons, wheel | Dedicated bidirectional stream | High |
 | Mouse movement | DATAGRAM | Disposable |
 | Audio | DATAGRAM | Low latency |
-| Video fragments | DATAGRAM | Disposable |
+| Video delta fragments | DATAGRAM | Disposable |
+| Video keyframes (v2) | Dedicated bidirectional stream | High, reliable bootstrap/recovery |
 | Clipboard | Dedicated bidirectional stream | Medium |
 | File transfer | One or more dedicated streams | Low and rate limited |
 | Diagnostics | Dedicated bidirectional stream or DATAGRAM telemetry | Lowest |
 
-The application adapter parses bounded existing protobuf `Message` values before QUIC encryption, routes them to the appropriate channel, and reconstructs the original bytes on receive. Video and mouse queues are latest-only, audio is bounded and disposable, and each reliable class has an independent writer task. A display-ordering epoch blocks video DATAGRAM transmission until the peer has queued the reliable `SwitchDisplay` update.
+The application adapter parses bounded existing protobuf `Message` values before QUIC encryption, routes them to the appropriate channel, and reconstructs the original bytes on receive. Video and mouse queues are latest-only, audio is bounded and disposable, and each reliable class has an independent writer task. A display-ordering epoch blocks both video DATAGRAM transmission and reliable keyframes until the peer has queued the reliable `SwitchDisplay` update.
+
+New peers negotiate ALPN `rustadmin-quic-v2` and open six reliable streams. If either peer supports only `rustadmin-quic-v1`, TLS selects v1 and both sides retain exactly the previous five-stream layout. See `docs/QUIC_PROTOCOL_V2.md` and `docs/QUIC_PROTOCOL_V1.md`.
 
 ## QUIC Library
 
 The implementation pins Quinn 0.11.9. Quinn is maintained, supports QUIC DATAGRAM, Tokio, IPv4/IPv6, stream priorities, congestion control, path MTU discovery, and Windows/Linux/macOS/Android/iOS targets. It uses rustls with the ring provider and TLS 1.3 only in this transport. Quinn is dual licensed under Apache-2.0 and MIT.
 
-Quinn owns congestion control and path MTU discovery. RustAdmin's adaptation layer only adjusts encoder and file-transfer targets; it does not implement a competing network congestion controller.
+Quinn owns congestion control and path MTU discovery. RustAdmin starts at 1200 bytes and limits the default PMTUD search to a 1360-byte UDP payload. The v2 application ceiling is 1300 bytes, but each send remains clamped to Quinn's live DATAGRAM limit. RustAdmin's adaptation layer only adjusts encoder and file-transfer targets; it does not implement a competing network congestion controller.
 
 ## Security Model
 
@@ -106,7 +113,7 @@ See `docs/quic-vpn.example.toml`; its settings apply to any routed UDP path.
 2. Select `Auto (QUIC preferred)`. Allow the RustAdmin executable and UDP 48100 on the applicable firewall profile.
 3. Enable RustAdmin direct IP access on the host and configure the direct-pairing passphrase (or retain an already confirmed paired viewer).
 4. Enter the host routed IP in the normal connection field. QUIC and compatible legacy candidates start during the same connection action.
-5. Complete normal pairing if prompted. Extended Quality Monitor should show `Path QUIC/UDP`, `Path MTU`, `QUIC DATAGRAM max`, QUIC RTT, and loss when QUIC wins.
+5. Complete normal pairing if prompted. Extended Quality Monitor should show `Path QUIC/UDP`, `QUIC App v2` for a current pair (or `v1` for compatibility), `Video TX DATAGRAM + reliable KF`, path MTU, DATAGRAM limits, QUIC RTT, loss, and recovery counters when QUIC wins.
 
 `remote-transport=tcp` forces the legacy path. `remote-transport=quic-only` is intended for diagnostics and fails instead of falling back. An explicit routed IP does not require a public relay.
 
@@ -130,7 +137,7 @@ export RUSTADMIN_ANDROID_NATIVE_ROOT=/home/w0w/UBarm/Release
 export CMAKE_PREFIX_PATH="$RUSTADMIN_ANDROID_NATIVE_ROOT"
 
 cargo ndk --platform 24 --target aarch64-linux-android check \
-  --offline --lib --features flutter,hwcodec,quic-transport
+  --offline --lib --features flutter,hwcodec,mediacodec
 ```
 
 The localhost integration test performs mTLS, device authentication, ping, session negotiation, independent input/file streams, fragmented video, audio, and mouse DATAGRAM delivery:
@@ -148,7 +155,7 @@ cargo test --offline --features quic-transport --lib \
 - Connect timeout: verify the routed peer address, host firewall, and UDP port. A timeout alone cannot distinguish a dropped firewall packet from an unreachable peer.
 - Certificate or identity mismatch: TCP fallback is deliberately refused. Confirm the peer fingerprint and investigate a changed device identity or restored configuration.
 - Protocol mismatch: update the older peer; do not bypass negotiation.
-- Repeated frame timeouts: inspect current MTU, QUIC loss, DATAGRAM drops, and frame completion metrics. Do not hardcode a 1500-byte datagram.
+- Repeated frame timeouts: inspect current MTU, QUIC loss, live/negotiated DATAGRAM limits, reassembly drops, keyframe requests, and whether v2 reliable keyframes are active. Do not hardcode a 1500-byte datagram.
 - Input works but media does not: verify QUIC DATAGRAM was negotiated, `max_datagram_size()` is present, and the Quality Monitor shows a nonzero Datagram value.
 - First connection remains TCP: inspect the classified QUIC candidate and promotion diagnostics. A network timeout may keep the authenticated legacy session; a certificate, identity, or protocol error must fail instead of downgrading.
 - Port 48100 is blocked: the Quality Monitor remains on `TCP`, and the log contains a classified QUIC reachability fallback. Open UDP 48100 on the relevant interface or configure the matching port at both peers.
@@ -163,5 +170,6 @@ cargo test --offline --features quic-transport --lib \
 5. Completed: host listener, signed peer enrollment, client mode selection, production negotiation, and classified preferred-mode fallback.
 6. Completed: extended Quality Monitor transport, MTU, DATAGRAM, RTT, and loss reporting.
 7. Completed: VPN-neutral QUIC-first candidate racing, bounded first-contact identity binding, same-session promotion, and unified transport UI.
-8. In progress: Windows/Android release builds and physical routed-UDP validation.
-9. Pending: root-capable packet impairment matrix, in-session reconnect supervisor, and iOS build.
+8. Completed in revision 118: ALPN-compatible reliable keyframe bootstrap, startup reassembly recovery, bounded repeated refresh, Android `ndk` 0.9 MediaCodec status handling, and expanded Quality Monitor truth fields.
+9. In progress: Windows/Android release builds and physical routed-UDP validation.
+10. Pending: root-capable packet impairment matrix, in-session reconnect supervisor, and iOS build.

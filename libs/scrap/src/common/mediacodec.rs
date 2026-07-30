@@ -1,8 +1,13 @@
 use hbb_common::{anyhow::Error, bail, log, ResultType};
-use ndk::media::media_codec::{MediaCodec, MediaCodecDirection, MediaFormat};
+use ndk::media::{
+    media_codec::{
+        DequeuedInputBufferResult, DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection,
+    },
+    media_format::MediaFormat,
+};
 use std::ops::Deref;
 use std::{
-    io::Write,
+    ops::Range,
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
@@ -15,6 +20,7 @@ const H264_MIME_TYPE: &str = "video/avc";
 const H265_MIME_TYPE: &str = "video/hevc";
 const COLOR_FORMAT_YUV420_PLANAR: i32 = 19;
 const COLOR_FORMAT_YUV420_SEMIPLANAR: i32 = 21;
+const MAX_OUTPUT_DEQUEUE_EVENTS: usize = 4;
 // const VP8_MIME_TYPE: &str = "video/x-vnd.on2.vp8";
 // const VP9_MIME_TYPE: &str = "video/x-vnd.on2.vp9";
 
@@ -79,68 +85,114 @@ impl MediaCodecDecoder {
         let total_start = Instant::now();
         let input_start = Instant::now();
         match self.dequeue_input_buffer(Duration::from_millis(10))? {
-            Some(mut input_buffer) => {
-                let mut buf = input_buffer.buffer_mut();
+            DequeuedInputBufferResult::Buffer(mut input_buffer) => {
+                let buf = input_buffer.buffer_mut();
                 if data.len() > buf.len() {
                     log::error!("Failed to decode, the input data size is bigger than input buf");
                     bail!("The input data size is bigger than input buf");
                 }
-                buf.write_all(&data)?;
+                for (destination, source) in buf.iter_mut().zip(data.iter()) {
+                    destination.write(*source);
+                }
                 self.queue_input_buffer(input_buffer, 0, data.len(), 0, 0)?;
             }
-            None => {
+            DequeuedInputBufferResult::TryAgainLater => {
                 log::debug!("Failed to dequeue_input_buffer: No available input_buffer");
             }
         };
         let input_queue_elapsed = input_start.elapsed();
 
         let output_dequeue_start = Instant::now();
-        return match self.dequeue_output_buffer(Duration::from_millis(100))? {
-            Some(output_buffer) => {
-                let output_dequeue_elapsed = output_dequeue_start.elapsed();
-                let res_format = self.output_format();
-                let convert_start = Instant::now();
-                let convert_result: ResultType<(OutputLayout, usize)> = (|| {
-                    let layout = output_layout(&res_format)?;
-                    let buf = output_buffer.buffer();
-                    copy_output_to_rgba(buf, &layout, rgb)?;
-                    Ok((layout, buf.len()))
-                })();
-                let convert_elapsed = convert_start.elapsed();
-                self.release_output_buffer(output_buffer, false)?;
-                let (layout, output_bytes) = convert_result?;
-                self.decoded_frames = self.decoded_frames.saturating_add(1);
-                if self.should_log_diag() {
+        for attempt in 0..MAX_OUTPUT_DEQUEUE_EVENTS {
+            let timeout = if attempt == 0 {
+                Duration::from_millis(100)
+            } else {
+                Duration::ZERO
+            };
+            match self.dequeue_output_buffer(timeout)? {
+                DequeuedOutputBufferInfoResult::Buffer(output_buffer) => {
+                    let output_dequeue_elapsed = output_dequeue_start.elapsed();
+                    let res_format = self.output_format();
+                    let convert_start = Instant::now();
+                    let convert_result: ResultType<(OutputLayout, usize, usize)> = (|| {
+                        let layout = output_layout(&res_format)?;
+                        let raw_buffer = output_buffer.buffer();
+                        let range = output_buffer_range(
+                            raw_buffer.len(),
+                            output_buffer.info().offset(),
+                            output_buffer.info().size(),
+                        )?;
+                        if range.is_empty() {
+                            return Ok((layout, 0, raw_buffer.len()));
+                        }
+                        let buf = &raw_buffer[range];
+                        copy_output_to_rgba(buf, &layout, rgb)?;
+                        Ok((layout, buf.len(), raw_buffer.len()))
+                    })(
+                    );
+                    let convert_elapsed = convert_start.elapsed();
+                    self.release_output_buffer(output_buffer, false)?;
+                    let (layout, output_bytes, output_capacity) = convert_result?;
+                    if output_bytes == 0 {
+                        log::debug!("MediaCodec returned an empty output buffer");
+                        return Ok(false);
+                    }
+                    self.decoded_frames = self.decoded_frames.saturating_add(1);
+                    if self.should_log_diag() {
+                        log::info!(
+                            "diag android mediacodec frame: decoder={}, codec={}, coded={}x{}, visible={}x{}, stride={}, slice_height={}, crop=({},{}), color_format={}, input_queue_ms={}, output_dequeue_ms={}, convert_ms={}, total_ms={}, input_bytes={}, output_bytes={}, output_capacity={}, dst_stride={}, render_path=rgba-soft, output_format={:?}",
+                            self.name,
+                            self.codec_label(),
+                            layout.coded_w,
+                            layout.coded_h,
+                            layout.visible_w,
+                            layout.visible_h,
+                            layout.stride,
+                            layout.slice_height,
+                            layout.crop_left,
+                            layout.crop_top,
+                            layout.color_format,
+                            input_queue_elapsed.as_millis(),
+                            output_dequeue_elapsed.as_millis(),
+                            convert_elapsed.as_millis(),
+                            total_start.elapsed().as_millis(),
+                            data.len(),
+                            output_bytes,
+                            output_capacity,
+                            rgba_stride(layout.visible_w, rgb.align()),
+                            res_format,
+                        );
+                    }
+                    return Ok(true);
+                }
+                DequeuedOutputBufferInfoResult::TryAgainLater => {
+                    log::debug!("Failed to dequeue_output: No available dequeue_output");
+                    return Ok(false);
+                }
+                DequeuedOutputBufferInfoResult::OutputFormatChanged => {
                     log::info!(
-                        "diag android mediacodec frame: decoder={}, codec={}, coded={}x{}, visible={}x{}, stride={}, slice_height={}, crop=({},{}), color_format={}, input_queue_ms={}, output_dequeue_ms={}, convert_ms={}, total_ms={}, input_bytes={}, output_bytes={}, dst_stride={}, render_path=rgba-soft, output_format={:?}",
+                        "MediaCodec output format changed: decoder={}, codec={}, format={:?}",
                         self.name,
                         self.codec_label(),
-                        layout.coded_w,
-                        layout.coded_h,
-                        layout.visible_w,
-                        layout.visible_h,
-                        layout.stride,
-                        layout.slice_height,
-                        layout.crop_left,
-                        layout.crop_top,
-                        layout.color_format,
-                        input_queue_elapsed.as_millis(),
-                        output_dequeue_elapsed.as_millis(),
-                        convert_elapsed.as_millis(),
-                        total_start.elapsed().as_millis(),
-                        data.len(),
-                        output_bytes,
-                        rgba_stride(layout.visible_w, rgb.align()),
-                        res_format,
+                        self.output_format()
                     );
                 }
-                Ok(true)
+                DequeuedOutputBufferInfoResult::OutputBuffersChanged => {
+                    log::debug!(
+                        "MediaCodec output buffers changed: decoder={}, codec={}",
+                        self.name,
+                        self.codec_label()
+                    );
+                }
             }
-            None => {
-                log::debug!("Failed to dequeue_output: No available dequeue_output");
-                Ok(false)
-            }
-        };
+        }
+        log::debug!(
+            "MediaCodec produced only control events while draining output: decoder={}, codec={}, events={}",
+            self.name,
+            self.codec_label(),
+            MAX_OUTPUT_DEQUEUE_EVENTS
+        );
+        Ok(false)
     }
 
     fn codec_label(&self) -> &'static str {
@@ -167,6 +219,33 @@ impl MediaCodecDecoder {
     }
 }
 
+fn output_buffer_range(buffer_len: usize, offset: i32, size: i32) -> ResultType<Range<usize>> {
+    if offset < 0 || size < 0 {
+        bail!(
+            "Invalid MediaCodec output buffer range: offset={}, size={}, capacity={}",
+            offset,
+            size,
+            buffer_len
+        );
+    }
+    let start = offset as usize;
+    let end = start.checked_add(size as usize).ok_or_else(|| {
+        Error::msg(format!(
+            "MediaCodec output buffer range overflow: offset={}, size={}, capacity={}",
+            offset, size, buffer_len
+        ))
+    })?;
+    if end > buffer_len {
+        bail!(
+            "MediaCodec output buffer range exceeds capacity: offset={}, size={}, capacity={}",
+            offset,
+            size,
+            buffer_len
+        );
+    }
+    Ok(start..end)
+}
+
 fn create_media_codec(
     name: &str,
     direction: MediaCodecDirection,
@@ -174,7 +253,7 @@ fn create_media_codec(
     height: usize,
 ) -> Option<MediaCodecDecoder> {
     let codec = MediaCodec::from_decoder_type(name)?;
-    let media_format = MediaFormat::new();
+    let mut media_format = MediaFormat::new();
     media_format.set_str("mime", name);
     media_format.set_i32("width", width as i32);
     media_format.set_i32("height", height as i32);
@@ -429,5 +508,18 @@ pub fn check_mediacodec() {
         update_decoder_support(&infos);
     } else {
         log::info!("Android MediaCodec capability check is waiting for the Java codec list");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::output_buffer_range;
+
+    #[test]
+    fn output_buffer_range_validates_offset_size_and_capacity() {
+        assert_eq!(output_buffer_range(64, 8, 16).unwrap(), 8..24);
+        assert!(output_buffer_range(64, -1, 16).is_err());
+        assert!(output_buffer_range(64, 8, -1).is_err());
+        assert!(output_buffer_range(64, 60, 8).is_err());
     }
 }

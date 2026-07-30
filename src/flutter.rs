@@ -750,6 +750,29 @@ impl InvokeUiSession for FlutterHandler {
                     "datagram_payload",
                     &status.datagram_payload.map_or(NULL, |it| it.to_string()),
                 ),
+                (
+                    "negotiated_datagram_payload",
+                    &status
+                        .negotiated_datagram_payload
+                        .map_or(NULL, |it| it.to_string()),
+                ),
+                ("quic_protocol", &status.quic_protocol.map_or(NULL, |it| it)),
+                (
+                    "quic_video_transport",
+                    &status.quic_video_transport.map_or(NULL, |it| it),
+                ),
+                (
+                    "quic_reassembly_drops",
+                    &status
+                        .quic_reassembly_drops
+                        .map_or(NULL, |it| it.to_string()),
+                ),
+                (
+                    "quic_keyframe_requests",
+                    &status
+                        .quic_keyframe_requests
+                        .map_or(NULL, |it| it.to_string()),
+                ),
                 ("decoder", &status.decoder.map_or(NULL, |it| it)),
                 ("renderer", &status.renderer.map_or(NULL, |it| it)),
                 (
