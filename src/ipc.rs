@@ -722,6 +722,8 @@ pub struct CheckIfRestart {
     allow_id_relay_server: String,
     relay_server: String,
     api_server: String,
+    #[cfg(windows)]
+    process_priority: String,
 }
 
 impl CheckIfRestart {
@@ -739,6 +741,8 @@ impl CheckIfRestart {
             allow_id_relay_server: Config::get_option(config::keys::OPTION_ALLOW_ID_RELAY_SERVER),
             relay_server: Config::get_option(config::keys::OPTION_RELAY_SERVER),
             api_server: Config::get_option("api-server"),
+            #[cfg(windows)]
+            process_priority: Config::get_option(crate::platform::windows::OPTION_PROCESS_PRIORITY),
         }
     }
 }
@@ -772,6 +776,12 @@ impl Drop for CheckIfRestart {
                 Some(Config::get_option("voice-call-input")),
                 true,
             )
+        }
+        #[cfg(windows)]
+        if self.process_priority
+            != Config::get_option(crate::platform::windows::OPTION_PROCESS_PRIORITY)
+        {
+            crate::platform::windows::apply_configured_process_priority("server");
         }
     }
 }

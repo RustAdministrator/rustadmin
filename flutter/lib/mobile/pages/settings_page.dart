@@ -104,6 +104,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   var _isUsingPublicServer = false;
   var _allowAskForNoteAtEndOfConnection = false;
   var _preventSleepWhileConnected = true;
+  var _diagnosticLogging = true;
 
   _SettingsState() {
     _enableAbr = option2bool(
@@ -163,6 +164,9 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
         mainGetLocalBoolOptionSync(kOptionKeepAwakeDuringOutgoingSessions);
     _showTerminalExtraKeys =
         mainGetLocalBoolOptionSync(kOptionEnableShowTerminalExtraKeys);
+    _diagnosticLogging = option2bool(
+        kOptionEnableAndroidDiagnosticLogging,
+        bind.mainGetLocalOption(key: kOptionEnableAndroidDiagnosticLogging));
   }
 
   @override
@@ -1092,6 +1096,24 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                 title: Text('${translate("Version")}: $version'),
                 leading: Icon(Icons.info)),
             if (isAndroid)
+              SettingsTile.switchTile(
+                title: Text(translate('Diagnostic logging')),
+                leading: const Icon(Icons.article_outlined),
+                initialValue: _diagnosticLogging,
+                onToggle: (enabled) async {
+                  await bind.mainSetLocalOption(
+                      key: kOptionEnableAndroidDiagnosticLogging,
+                      value: bool2option(
+                          kOptionEnableAndroidDiagnosticLogging, enabled));
+                  final actual = option2bool(
+                      kOptionEnableAndroidDiagnosticLogging,
+                      bind.mainGetLocalOption(
+                          key: kOptionEnableAndroidDiagnosticLogging));
+                  platformFFI.setAndroidDiagnosticLoggingEnabled(actual);
+                  setState(() => _diagnosticLogging = actual);
+                },
+              ),
+            if (isAndroid)
               SettingsTile(
                 onPressed: (context) async {
                   try {
@@ -1101,9 +1123,35 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                     showToast(translate('Failed'));
                   }
                 },
-                title: Text('Export diagnostic report'),
-                description: Text('Create a private log ZIP and share it'),
+                title: Text(translate('Export diagnostic report')),
+                description:
+                    Text(translate('Create a private log ZIP and share it')),
                 leading: Icon(Icons.bug_report_outlined),
+              ),
+            if (isAndroid && !_diagnosticLogging)
+              SettingsTile(
+                onPressed: (context) async {
+                  final confirmed = await showDialog<bool>(
+                        context: context,
+                        builder: (context) => AlertDialog(
+                          title: Text(translate('Delete diagnostic logs')),
+                          actions: [
+                            TextButton(
+                              onPressed: () => Navigator.pop(context, false),
+                              child: Text(translate('Cancel'))),
+                            TextButton(
+                              onPressed: () => Navigator.pop(context, true),
+                              child: Text(translate('Delete'))),
+                          ],
+                        ),
+                      ) ??
+                      false;
+                  if (confirmed) {
+                    await platformFFI.clearAndroidDiagnostics();
+                  }
+                },
+                title: Text(translate('Delete diagnostic logs')),
+                leading: const Icon(Icons.delete_outline),
               ),
             SettingsTile(
                 title: Text('Attribution'),

@@ -140,10 +140,13 @@ const String kLanDiscoveryModeStandard = "standard";
 const String kOptionAllowAutoDisconnect = "allow-auto-disconnect";
 const String kOptionAutoDisconnectTimeout = "auto-disconnect-timeout";
 const String kOptionEnableHwcodec = "enable-hwcodec";
+const String kOptionProcessPriority = "process-priority";
 const String kOptionAllowAutoRecordIncoming = "allow-auto-record-incoming";
 const String kOptionAllowAutoRecordOutgoing = "allow-auto-record-outgoing";
 const String kOptionVideoSaveDirectory = "video-save-directory";
 const String kOptionAllowClipboardDebug = "allow-clipboard-debug";
+const String kOptionEnableAndroidDiagnosticLogging =
+    "enable-android-diagnostic-logging";
 const String kOptionAccessMode = "access-mode";
 const String kOptionEnableKeyboard = "enable-keyboard";
 // "Settings -> Security -> Permissions"

@@ -157,7 +157,7 @@ mv -f "${GENERATED_RUST_LIBRARY}" "${ABI_JNI_LIBS_DIR}/librustdesk.so"
 cp -f "${LIBCXX_SHARED}" "${ABI_JNI_LIBS_DIR}/libc++_shared.so"
 
 if [[ "${REQUIRE_FFMPEG}" == "1" ]]; then
-  if ! strings "${ABI_JNI_LIBS_DIR}/librustdesk.so" | grep -Fq "Hardware Android MediaCodec"; then
+  if ! LC_ALL=C grep -aFq "MediaCodec decoder configure success" "${ABI_JNI_LIBS_DIR}/librustdesk.so"; then
     echo "error: Android release library does not contain the dedicated MediaCodec decoder path." >&2
     exit 1
   fi

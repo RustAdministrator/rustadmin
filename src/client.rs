@@ -83,7 +83,7 @@ use hbb_common::{
 };
 pub use helper::*;
 use scrap::{
-    codec::Decoder,
+    codec::{DecodeOutcome, Decoder},
     record::{Recorder, RecorderContext},
     CodecFormat, ImageFormat, ImageRgb, ImageTexture,
 };
@@ -108,7 +108,6 @@ pub const SEC30: Duration = Duration::from_secs(30);
 pub const VIDEO_QUEUE_SIZE: usize = 120;
 const VIDEO_FEEDBACK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 const MAX_DECODE_FAIL_COUNTER: usize = 3;
-const MEDIACODEC_STARTUP_OUTPUT_GRACE_FRAMES: usize = 10;
 #[cfg(feature = "quic-transport")]
 const AUTO_QUIC_RACE_TIMEOUT: Duration = Duration::from_millis(1_500);
 
@@ -2463,6 +2462,7 @@ pub struct VideoHandler {
     fail_counter: usize,
     decode_wait_counter: usize,
     first_frame: bool,
+    stream_id: u64,
 }
 
 impl VideoHandler {
@@ -2501,6 +2501,7 @@ impl VideoHandler {
             fail_counter: 0,
             decode_wait_counter: 0,
             first_frame: true,
+            stream_id: 0,
         }
     }
 
@@ -2515,31 +2516,37 @@ impl VideoHandler {
         vf: VideoFrame,
         pixelbuffer: &mut bool,
         chroma: &mut Option<Chroma>,
-    ) -> ResultType<bool> {
+    ) -> ResultType<DecodeOutcome> {
         let format = CodecFormat::from(&vf);
         let stream_id = vf.stream_id;
         let frame_id = vf.frame_id;
         let capture_time_ms = vf.capture_time_ms;
-        if format != self.decoder.format() {
+        let stream_changed = stream_id != 0 && self.stream_id != 0 && stream_id != self.stream_id;
+        if format != self.decoder.format() || stream_changed {
             self.reset(Some(format), None);
         }
+        self.stream_id = stream_id;
         match &vf.union {
             Some(frame) => {
                 let res = self.decoder.handle_video_frame(
                     frame,
+                    frame_id,
                     &mut self.rgb,
                     &mut self.texture,
                     pixelbuffer,
                     chroma,
                 );
                 match &res {
-                    Ok(true) => {
+                    Ok(DecodeOutcome::FrameReady {
+                        frame_id: decoded_frame_id,
+                    }) => {
+                        let decoded_frame_id = decoded_frame_id.unwrap_or(frame_id);
                         if self.first_frame {
                             log::info!(
                                 "diag first video frame decoded: display={}, stream_id={}, frame_id={}, capture_ms={}, format={:?}, pixelbuffer={}, chroma={:?}, rgb={}x{}, texture={}x{}, decoder_valid={}",
                                 self._display,
                                 stream_id,
-                                frame_id,
+                                decoded_frame_id,
                                 capture_time_ms,
                                 self.decoder.format(),
                                 *pixelbuffer,
@@ -2555,17 +2562,15 @@ impl VideoHandler {
                         self.decode_wait_counter = 0;
                         self.first_frame = false;
                     }
-                    Ok(false) => {
+                    Ok(DecodeOutcome::OutputPending | DecodeOutcome::InputBackpressure) => {
                         self.decode_wait_counter = self.decode_wait_counter.saturating_add(1);
-                        let mediacodec_is_warming_up = self.first_frame
-                            && self.decoder.backend() == "Hardware Android MediaCodec"
-                            && self.decode_wait_counter <= MEDIACODEC_STARTUP_OUTPUT_GRACE_FRAMES;
-                        if !mediacodec_is_warming_up && self.fail_counter < usize::MAX {
-                            self.fail_counter += 1;
-                        }
-                        if self.first_frame {
+                        if self.first_frame
+                            && (self.decode_wait_counter == 1
+                                || self.decode_wait_counter == 10
+                                || self.decode_wait_counter % 30 == 0)
+                        {
                             log::warn!(
-                                "diag video decoder is waiting for output: display={}, stream_id={}, frame_id={}, format={:?}, backend={}, decoder_valid={}, attempt={}, grace_remaining={}, fail_counter={}",
+                                "diag video decoder is waiting for output: display={}, stream_id={}, frame_id={}, format={:?}, backend={}, decoder_valid={}, attempt={}, state={:?}",
                                 self._display,
                                 stream_id,
                                 frame_id,
@@ -2573,9 +2578,7 @@ impl VideoHandler {
                                 self.decoder.backend(),
                                 self.decoder.valid(),
                                 self.decode_wait_counter,
-                                MEDIACODEC_STARTUP_OUTPUT_GRACE_FRAMES
-                                    .saturating_sub(self.decode_wait_counter),
-                                self.fail_counter
+                                res.as_ref().ok()
                             );
                         }
                     }
@@ -2614,7 +2617,7 @@ impl VideoHandler {
                 }
                 res
             }
-            _ => Ok(false),
+            _ => Ok(DecodeOutcome::OutputPending),
         }
     }
 
@@ -2639,6 +2642,7 @@ impl VideoHandler {
         self.fail_counter = 0;
         self.decode_wait_counter = 0;
         self.first_frame = true;
+        self.stream_id = 0;
     }
 
     /// Start or stop screen record.
@@ -4205,11 +4209,14 @@ pub fn start_video_thread<F, T>(
                             let mut tmp_chroma = None;
                             let format_changed = handler.decoder.format() != format;
                             match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
-                                Ok(true) => {
+                                Ok(DecodeOutcome::FrameReady {
+                                    frame_id: decoded_frame_id,
+                                }) => {
+                                    let decoded_frame_id = decoded_frame_id.unwrap_or(frame_id);
                                     let decode_time = start.elapsed();
                                     video_feedback.lock().unwrap().record_decoded(
                                         stream_id,
-                                        frame_id,
+                                        decoded_frame_id,
                                         decode_time,
                                     );
                                     *decoder_backend.write().unwrap() =
@@ -4238,7 +4245,7 @@ pub fn start_video_thread<F, T>(
                                     );
                                     video_feedback.lock().unwrap().record_render_submitted(
                                         stream_id,
-                                        frame_id,
+                                        decoded_frame_id,
                                         render_submit_start.elapsed(),
                                         video_queue.read().unwrap().len(),
                                     );
@@ -4275,7 +4282,9 @@ pub fn start_video_thread<F, T>(
                                     log::error!("handle video frame error, {}", e);
                                     session.refresh_video(display as _);
                                 }
-                                _ => {}
+                                Ok(
+                                    DecodeOutcome::OutputPending | DecodeOutcome::InputBackpressure,
+                                ) => {}
                             }
                         }
 

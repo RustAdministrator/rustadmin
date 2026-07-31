@@ -765,5 +765,13 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Display Name", "Отображаемое имя"),
         ("password-hidden-tip", "Установлен постоянный пароль (скрытый)."),
         ("preset-password-in-use-tip", "Установленный пароль сейчас используется."),
+        ("Process priority", "Приоритет процесса"),
+        ("Normal", "Обычный"),
+        ("Above normal", "Выше обычного"),
+        ("High", "Высокий"),
+        ("Diagnostic logging", "Диагностические логи"),
+        ("Export diagnostic report", "Отправить диагностический отчёт"),
+        ("Create a private log ZIP and share it", "Создать ZIP с диагностикой и отправить его"),
+        ("Delete diagnostic logs", "Удалить диагностические логи"),
     ].iter().cloned().collect();
 }

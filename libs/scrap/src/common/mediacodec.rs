@@ -7,6 +7,7 @@ use ndk::media::{
 };
 use std::ops::Deref;
 use std::{
+    collections::VecDeque,
     ops::Range,
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
@@ -20,7 +21,11 @@ const H264_MIME_TYPE: &str = "video/avc";
 const H265_MIME_TYPE: &str = "video/hevc";
 const COLOR_FORMAT_YUV420_PLANAR: i32 = 19;
 const COLOR_FORMAT_YUV420_SEMIPLANAR: i32 = 21;
+const MAX_PENDING_INPUTS: usize = 16;
+const MAX_PENDING_INPUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_INPUT_DEQUEUE_EVENTS: usize = 4;
 const MAX_OUTPUT_DEQUEUE_EVENTS: usize = 4;
+const MAX_IN_FLIGHT_FRAMES: usize = 128;
 // const VP8_MIME_TYPE: &str = "video/x-vnd.on2.vp8";
 // const VP9_MIME_TYPE: &str = "video/x-vnd.on2.vp9";
 
@@ -29,11 +34,27 @@ const MAX_OUTPUT_DEQUEUE_EVENTS: usize = 4;
 pub static H264_DECODER_SUPPORT: AtomicBool = AtomicBool::new(false);
 pub static H265_DECODER_SUPPORT: AtomicBool = AtomicBool::new(false);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MediaCodecDecodeOutcome {
+    FrameReady { frame_id: Option<u64> },
+    OutputPending,
+    InputBackpressure,
+}
+
+struct PendingInput {
+    data: Vec<u8>,
+    frame_id: u64,
+}
+
 pub struct MediaCodecDecoder {
     decoder: MediaCodec,
     name: String,
     decoded_frames: u64,
     last_diag_log: Option<Instant>,
+    pending_inputs: VecDeque<PendingInput>,
+    pending_input_bytes: usize,
+    in_flight_frames: VecDeque<(i64, u64)>,
+    next_input_token: u64,
 }
 
 struct OutputLayout {
@@ -81,25 +102,16 @@ impl MediaCodecDecoder {
     }
 
     // rgb [in/out] fmt and stride must be set in ImageRgb
-    pub fn decode(&mut self, data: &[u8], rgb: &mut ImageRgb) -> ResultType<bool> {
+    pub fn decode(
+        &mut self,
+        data: &[u8],
+        frame_id: u64,
+        rgb: &mut ImageRgb,
+    ) -> ResultType<MediaCodecDecodeOutcome> {
         let total_start = Instant::now();
         let input_start = Instant::now();
-        match self.dequeue_input_buffer(Duration::from_millis(10))? {
-            DequeuedInputBufferResult::Buffer(mut input_buffer) => {
-                let buf = input_buffer.buffer_mut();
-                if data.len() > buf.len() {
-                    log::error!("Failed to decode, the input data size is bigger than input buf");
-                    bail!("The input data size is bigger than input buf");
-                }
-                for (destination, source) in buf.iter_mut().zip(data.iter()) {
-                    destination.write(*source);
-                }
-                self.queue_input_buffer(input_buffer, 0, data.len(), 0, 0)?;
-            }
-            DequeuedInputBufferResult::TryAgainLater => {
-                log::debug!("Failed to dequeue_input_buffer: No available input_buffer");
-            }
-        };
+        self.enqueue_input(data, frame_id)?;
+        let input_backpressure = self.queue_pending_inputs()?;
         let input_queue_elapsed = input_start.elapsed();
 
         let output_dequeue_start = Instant::now();
@@ -109,10 +121,11 @@ impl MediaCodecDecoder {
             } else {
                 Duration::ZERO
             };
-            match self.dequeue_output_buffer(timeout)? {
+            match self.decoder.dequeue_output_buffer(timeout)? {
                 DequeuedOutputBufferInfoResult::Buffer(output_buffer) => {
                     let output_dequeue_elapsed = output_dequeue_start.elapsed();
-                    let res_format = self.output_format();
+                    let presentation_time_us = output_buffer.info().presentation_time_us();
+                    let res_format = self.decoder.output_format();
                     let convert_start = Instant::now();
                     let convert_result: ResultType<(OutputLayout, usize, usize)> = (|| {
                         let layout = output_layout(&res_format)?;
@@ -131,16 +144,30 @@ impl MediaCodecDecoder {
                     })(
                     );
                     let convert_elapsed = convert_start.elapsed();
-                    self.release_output_buffer(output_buffer, false)?;
+                    self.decoder.release_output_buffer(output_buffer, false)?;
                     let (layout, output_bytes, output_capacity) = convert_result?;
+                    let output_frame_id = self
+                        .in_flight_frames
+                        .iter()
+                        .position(|(token, _)| *token == presentation_time_us)
+                        .and_then(|position| self.in_flight_frames.remove(position))
+                        .map(|(_, frame_id)| frame_id);
                     if output_bytes == 0 {
                         log::debug!("MediaCodec returned an empty output buffer");
-                        return Ok(false);
+                        continue;
+                    }
+                    if output_frame_id.is_none() {
+                        log::warn!(
+                            "MediaCodec output has no matching input token: decoder={}, codec={}, presentation_time_us={}",
+                            self.name,
+                            self.codec_label(),
+                            presentation_time_us
+                        );
                     }
                     self.decoded_frames = self.decoded_frames.saturating_add(1);
                     if self.should_log_diag() {
                         log::info!(
-                            "diag android mediacodec frame: decoder={}, codec={}, coded={}x{}, visible={}x{}, stride={}, slice_height={}, crop=({},{}), color_format={}, input_queue_ms={}, output_dequeue_ms={}, convert_ms={}, total_ms={}, input_bytes={}, output_bytes={}, output_capacity={}, dst_stride={}, render_path=rgba-soft, output_format={:?}",
+                            "diag android mediacodec frame: decoder={}, codec={}, coded={}x{}, visible={}x{}, stride={}, slice_height={}, crop=({},{}), color_format={}, input_queue_ms={}, output_dequeue_ms={}, convert_ms={}, total_ms={}, input_bytes={}, output_bytes={}, output_capacity={}, dst_stride={}, pending_inputs={}, render_path=rgba-soft, output_format={:?}",
                             self.name,
                             self.codec_label(),
                             layout.coded_w,
@@ -160,21 +187,21 @@ impl MediaCodecDecoder {
                             output_bytes,
                             output_capacity,
                             rgba_stride(layout.visible_w, rgb.align()),
+                            self.pending_inputs.len(),
                             res_format,
                         );
                     }
-                    return Ok(true);
+                    return Ok(MediaCodecDecodeOutcome::FrameReady {
+                        frame_id: output_frame_id,
+                    });
                 }
-                DequeuedOutputBufferInfoResult::TryAgainLater => {
-                    log::debug!("Failed to dequeue_output: No available dequeue_output");
-                    return Ok(false);
-                }
+                DequeuedOutputBufferInfoResult::TryAgainLater => break,
                 DequeuedOutputBufferInfoResult::OutputFormatChanged => {
                     log::info!(
                         "MediaCodec output format changed: decoder={}, codec={}, format={:?}",
                         self.name,
                         self.codec_label(),
-                        self.output_format()
+                        self.decoder.output_format()
                     );
                 }
                 DequeuedOutputBufferInfoResult::OutputBuffersChanged => {
@@ -186,13 +213,86 @@ impl MediaCodecDecoder {
                 }
             }
         }
-        log::debug!(
-            "MediaCodec produced only control events while draining output: decoder={}, codec={}, events={}",
-            self.name,
-            self.codec_label(),
-            MAX_OUTPUT_DEQUEUE_EVENTS
-        );
-        Ok(false)
+        Ok(if input_backpressure || !self.pending_inputs.is_empty() {
+            MediaCodecDecodeOutcome::InputBackpressure
+        } else {
+            MediaCodecDecodeOutcome::OutputPending
+        })
+    }
+
+    fn enqueue_input(&mut self, data: &[u8], frame_id: u64) -> ResultType<()> {
+        if self.pending_inputs.len() >= MAX_PENDING_INPUTS
+            || self.pending_input_bytes.saturating_add(data.len()) > MAX_PENDING_INPUT_BYTES
+        {
+            bail!(
+                "MediaCodec input queue limit exceeded: pending={}, pending_bytes={}, input_bytes={}",
+                self.pending_inputs.len(),
+                self.pending_input_bytes,
+                data.len()
+            );
+        }
+        self.pending_input_bytes = self.pending_input_bytes.saturating_add(data.len());
+        self.pending_inputs.push_back(PendingInput {
+            data: data.to_vec(),
+            frame_id,
+        });
+        Ok(())
+    }
+
+    fn queue_pending_inputs(&mut self) -> ResultType<bool> {
+        for attempt in 0..MAX_INPUT_DEQUEUE_EVENTS {
+            if self.pending_inputs.is_empty() {
+                return Ok(false);
+            }
+            let timeout = if attempt == 0 {
+                Duration::from_millis(10)
+            } else {
+                Duration::ZERO
+            };
+            let token = self.next_input_token();
+            match self.decoder.dequeue_input_buffer(timeout)? {
+                DequeuedInputBufferResult::Buffer(mut input_buffer) => {
+                    let Some(pending) = self.pending_inputs.pop_front() else {
+                        return Ok(false);
+                    };
+                    self.pending_input_bytes =
+                        self.pending_input_bytes.saturating_sub(pending.data.len());
+                    let buf = input_buffer.buffer_mut();
+                    if pending.data.len() > buf.len() {
+                        bail!(
+                            "MediaCodec input exceeds buffer capacity: input_bytes={}, capacity={}",
+                            pending.data.len(),
+                            buf.len()
+                        );
+                    }
+                    for (destination, source) in buf.iter_mut().zip(pending.data.iter()) {
+                        destination.write(*source);
+                    }
+                    self.decoder.queue_input_buffer(
+                        input_buffer,
+                        0,
+                        pending.data.len(),
+                        token as u64,
+                        0,
+                    )?;
+                    self.in_flight_frames.push_back((token, pending.frame_id));
+                    while self.in_flight_frames.len() > MAX_IN_FLIGHT_FRAMES {
+                        self.in_flight_frames.pop_front();
+                    }
+                }
+                DequeuedInputBufferResult::TryAgainLater => return Ok(true),
+            }
+        }
+        Ok(!self.pending_inputs.is_empty())
+    }
+
+    fn next_input_token(&mut self) -> i64 {
+        self.next_input_token = if self.next_input_token >= i64::MAX as u64 {
+            1
+        } else {
+            self.next_input_token.saturating_add(1).max(1)
+        };
+        self.next_input_token as i64
     }
 
     fn codec_label(&self) -> &'static str {
@@ -279,6 +379,10 @@ fn create_media_codec(
         name: name.to_owned(),
         decoded_frames: 0,
         last_diag_log: None,
+        pending_inputs: VecDeque::new(),
+        pending_input_bytes: 0,
+        in_flight_frames: VecDeque::new(),
+        next_input_token: 0,
     });
 }
 

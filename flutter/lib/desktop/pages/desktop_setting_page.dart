@@ -441,6 +441,7 @@ class _GeneralState extends State<_General> {
         theme(),
         _Card(title: 'Language', children: [language()]),
         if (!isWeb) hwcodec(),
+        if (isWindows) processPriority(),
         if (!isWeb) audio(context),
         if (!isWeb) record(context),
         if (!isWeb) WaylandCard(),
@@ -686,6 +687,30 @@ class _GeneralState extends State<_General> {
         )
       ]),
     );
+  }
+
+  Widget processPriority() {
+    const priorities = <String, String>{
+      'normal': 'Normal',
+      'above-normal': 'Above normal',
+      'high': 'High',
+    };
+    var current = bind.mainGetOptionSync(key: kOptionProcessPriority);
+    if (!priorities.containsKey(current)) {
+      current = 'normal';
+    }
+    return _Card(title: 'Process priority', children: [
+      ComboBox(
+        keys: priorities.keys.toList(),
+        values: priorities.values.map(translate).toList(),
+        initialKey: current,
+        enabled: !isOptionFixed(kOptionProcessPriority),
+        onChanged: (value) async {
+          await bind.mainSetOption(key: kOptionProcessPriority, value: value);
+          setState(() {});
+        },
+      ).marginOnly(left: _kContentHMargin),
+    ]);
   }
 
   Widget audio(BuildContext context) {

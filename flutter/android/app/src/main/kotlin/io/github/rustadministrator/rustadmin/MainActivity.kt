@@ -286,6 +286,18 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                 }
+                "clear_diagnostics" -> {
+                    thread {
+                        try {
+                            val deleted = clearDiagnosticFiles()
+                            runOnUiThread { result.success(deleted) }
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                result.error("diagnostic-clear-failed", e.message, null)
+                            }
+                        }
+                    }
+                }
                 GET_VALUE -> {
                     if (call.arguments is String) {
                         if (call.arguments == KEY_IS_SUPPORT_VOICE_CALL) {
@@ -339,6 +351,22 @@ class MainActivity : FlutterActivity() {
             }
         }
         return archive
+    }
+
+    private fun clearDiagnosticFiles(): Int {
+        val preferences = getSharedPreferences(KEY_SHARED_PREFERENCES, MODE_PRIVATE)
+        val appDirectory = preferences.getString(KEY_APP_DIR_CONFIG_PATH, "")
+            ?.takeIf { it.isNotBlank() }
+            ?.let(::File)
+            ?: return 0
+        if (!isPrivateAppPath(appDirectory)) return 0
+        val diagnosticDirectory = File(appDirectory, "diagnostics")
+        return listOf(
+            "rustadmin.log.1",
+            "rustadmin.log",
+            "flutter-errors.log.1",
+            "flutter-errors.log",
+        ).count { File(diagnosticDirectory, it).delete() }
     }
 
     private fun isPrivateAppPath(file: File): Boolean {

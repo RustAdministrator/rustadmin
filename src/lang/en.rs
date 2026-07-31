@@ -327,5 +327,13 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("FPS mode", "FPS mode"),
         ("Adaptive FPS cap", "Adaptive FPS cap"),
         ("Fixed FPS", "Fixed FPS"),
+        ("Process priority", "Process priority"),
+        ("Normal", "Normal"),
+        ("Above normal", "Above normal"),
+        ("High", "High"),
+        ("Diagnostic logging", "Diagnostic logging"),
+        ("Export diagnostic report", "Export diagnostic report"),
+        ("Create a private log ZIP and share it", "Create a private log ZIP and share it"),
+        ("Delete diagnostic logs", "Delete diagnostic logs"),
     ].iter().cloned().collect();
 }
