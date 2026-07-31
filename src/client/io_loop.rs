@@ -671,6 +671,22 @@ impl<T: InvokeUiSession> Remote<T> {
                                 #[cfg(feature = "quic-transport")]
                                 quic_keyframe_requests: quic_stats
                                     .map(|stats| stats.video_keyframe_requests),
+                                #[cfg(feature = "quic-transport")]
+                                quic_receiver_recovery: quic_stats.map(|stats| {
+                                    format!(
+                                        "{}/{}",
+                                        stats.video_source_frame_gaps,
+                                        stats.video_recovery_suppressed_frames
+                                    )
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_sender_recovery: quic_stats.map(|stats| {
+                                    format!(
+                                        "{}/{}",
+                                        stats.video_sender_replacements,
+                                        stats.video_sender_reference_resets
+                                    )
+                                }),
                                 decoder,
                                 renderer,
                                 decode_fps,
