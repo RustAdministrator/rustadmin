@@ -23,6 +23,8 @@ pub struct QualityStatus {
     pub quic_video_transport: Option<String>,
     pub quic_reassembly_drops: Option<u64>,
     pub quic_keyframe_requests: Option<u64>,
+    pub quic_receiver_recovery: Option<String>,
+    pub quic_sender_recovery: Option<String>,
     pub decoder: Option<String>,
     pub renderer: Option<String>,
     pub capture_backend: Option<String>,

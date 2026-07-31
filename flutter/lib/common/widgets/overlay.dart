@@ -767,6 +767,18 @@ class QualityMonitor extends StatelessWidget {
                                     null)
                               _row("KF requests", qualityMonitorModel
                                   .data.quicKeyframeRequests),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.quicReceiverRecovery !=
+                                    null)
+                              _row("RX gap/drop", qualityMonitorModel
+                                  .data.quicReceiverRecovery),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.quicSenderRecovery !=
+                                    null)
+                              _row("TX drop/reset", qualityMonitorModel
+                                  .data.quicSenderRecovery),
                             if (qualityMonitorModel.extendedDetails)
                               _row("Direct",
                                   qualityMonitorModel.data.direct ?? '-'),

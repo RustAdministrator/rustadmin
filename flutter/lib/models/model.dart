@@ -4086,6 +4086,8 @@ class QualityMonitorData {
   String? quicVideoTransport;
   String? quicReassemblyDrops;
   String? quicKeyframeRequests;
+  String? quicReceiverRecovery;
+  String? quicSenderRecovery;
   String? hostVersion;
   String? clientVersion;
   String? decoder;
@@ -4199,6 +4201,8 @@ class QualityMonitorModel with ChangeNotifier {
     _data.quicVideoTransport = null;
     _data.quicReassemblyDrops = null;
     _data.quicKeyframeRequests = null;
+    _data.quicReceiverRecovery = null;
+    _data.quicSenderRecovery = null;
     _data.hostVersion = null;
     _data.clientVersion = null;
     _data.decoder = null;
@@ -4429,6 +4433,14 @@ class QualityMonitorModel with ChangeNotifier {
       if (evt.containsKey('quic_keyframe_requests') &&
           (evt['quic_keyframe_requests'] as String).isNotEmpty) {
         _data.quicKeyframeRequests = evt['quic_keyframe_requests'];
+      }
+      if (evt.containsKey('quic_receiver_recovery') &&
+          (evt['quic_receiver_recovery'] as String).isNotEmpty) {
+        _data.quicReceiverRecovery = evt['quic_receiver_recovery'];
+      }
+      if (evt.containsKey('quic_sender_recovery') &&
+          (evt['quic_sender_recovery'] as String).isNotEmpty) {
+        _data.quicSenderRecovery = evt['quic_sender_recovery'];
       }
       final hostVersion = _hostVersion();
       if (hostVersion != null) {

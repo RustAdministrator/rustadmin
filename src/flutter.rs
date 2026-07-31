@@ -773,6 +773,14 @@ impl InvokeUiSession for FlutterHandler {
                         .quic_keyframe_requests
                         .map_or(NULL, |it| it.to_string()),
                 ),
+                (
+                    "quic_receiver_recovery",
+                    &status.quic_receiver_recovery.map_or(NULL, |it| it),
+                ),
+                (
+                    "quic_sender_recovery",
+                    &status.quic_sender_recovery.map_or(NULL, |it| it),
+                ),
                 ("decoder", &status.decoder.map_or(NULL, |it| it)),
                 ("renderer", &status.renderer.map_or(NULL, |it| it)),
                 (
