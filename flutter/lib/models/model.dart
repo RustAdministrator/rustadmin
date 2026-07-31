@@ -4077,6 +4077,15 @@ class QualityMonitorData {
   String? codecFormat;
   String? chroma;
   String? connectionType;
+  String? transportMtu;
+  String? transportRttMs;
+  String? transportLostPackets;
+  String? datagramPayload;
+  String? negotiatedDatagramPayload;
+  String? quicProtocol;
+  String? quicVideoTransport;
+  String? quicReassemblyDrops;
+  String? quicKeyframeRequests;
   String? hostVersion;
   String? clientVersion;
   String? decoder;
@@ -4181,6 +4190,15 @@ class QualityMonitorModel with ChangeNotifier {
     _data.codecFormat = null;
     _data.chroma = null;
     _data.connectionType = null;
+    _data.transportMtu = null;
+    _data.transportRttMs = null;
+    _data.transportLostPackets = null;
+    _data.datagramPayload = null;
+    _data.negotiatedDatagramPayload = null;
+    _data.quicProtocol = null;
+    _data.quicVideoTransport = null;
+    _data.quicReassemblyDrops = null;
+    _data.quicKeyframeRequests = null;
     _data.hostVersion = null;
     _data.clientVersion = null;
     _data.decoder = null;
@@ -4375,6 +4393,42 @@ class QualityMonitorModel with ChangeNotifier {
       if (evt.containsKey('connection_type') &&
           (evt['connection_type'] as String).isNotEmpty) {
         _data.connectionType = evt['connection_type'];
+      }
+      if (evt.containsKey('transport_mtu') &&
+          (evt['transport_mtu'] as String).isNotEmpty) {
+        _data.transportMtu = evt['transport_mtu'];
+      }
+      if (evt.containsKey('transport_rtt_ms') &&
+          (evt['transport_rtt_ms'] as String).isNotEmpty) {
+        _data.transportRttMs = evt['transport_rtt_ms'];
+      }
+      if (evt.containsKey('transport_lost_packets') &&
+          (evt['transport_lost_packets'] as String).isNotEmpty) {
+        _data.transportLostPackets = evt['transport_lost_packets'];
+      }
+      if (evt.containsKey('datagram_payload') &&
+          (evt['datagram_payload'] as String).isNotEmpty) {
+        _data.datagramPayload = evt['datagram_payload'];
+      }
+      if (evt.containsKey('negotiated_datagram_payload') &&
+          (evt['negotiated_datagram_payload'] as String).isNotEmpty) {
+        _data.negotiatedDatagramPayload = evt['negotiated_datagram_payload'];
+      }
+      if (evt.containsKey('quic_protocol') &&
+          (evt['quic_protocol'] as String).isNotEmpty) {
+        _data.quicProtocol = evt['quic_protocol'];
+      }
+      if (evt.containsKey('quic_video_transport') &&
+          (evt['quic_video_transport'] as String).isNotEmpty) {
+        _data.quicVideoTransport = evt['quic_video_transport'];
+      }
+      if (evt.containsKey('quic_reassembly_drops') &&
+          (evt['quic_reassembly_drops'] as String).isNotEmpty) {
+        _data.quicReassemblyDrops = evt['quic_reassembly_drops'];
+      }
+      if (evt.containsKey('quic_keyframe_requests') &&
+          (evt['quic_keyframe_requests'] as String).isNotEmpty) {
+        _data.quicKeyframeRequests = evt['quic_keyframe_requests'];
       }
       final hostVersion = _hostVersion();
       if (hostVersion != null) {

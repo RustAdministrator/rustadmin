@@ -86,6 +86,7 @@ struct CaptureCommand {
     exit: u32,
     generation: u32,
     backend: u32,
+    process_priority: u32,
     current_display: usize,
     timeout_ms: u32,
 }
@@ -313,6 +314,7 @@ pub mod server {
         let mut capturer: Option<Box<dyn TraitCapturer>> = None;
         let mut active_generation = u32::MAX;
         let mut active_backend: Option<UserCaptureBackend> = None;
+        let mut active_process_priority = u32::MAX;
         let mut active_display = usize::MAX;
         let mut width = 0usize;
         let mut height = 0usize;
@@ -347,6 +349,15 @@ pub mod server {
                 std::thread::sleep(Duration::from_millis(20));
                 continue;
             };
+            if active_process_priority != command.process_priority {
+                let priority =
+                    crate::platform::windows::ProcessPriority::from_raw(command.process_priority);
+                crate::platform::windows::apply_current_process_priority(
+                    priority,
+                    "user-capture-helper",
+                );
+                active_process_priority = command.process_priority;
+            }
             let recreate = capturer.is_none()
                 || active_generation != command.generation
                 || active_backend != Some(requested_backend)
@@ -714,6 +725,8 @@ pub mod client {
                     exit: 0,
                     generation,
                     backend: requested_backend as u32,
+                    process_priority: crate::platform::windows::configured_process_priority()
+                        .as_raw(),
                     current_display,
                     timeout_ms: 33,
                 },
@@ -776,6 +789,8 @@ pub mod client {
             command.exit = 0;
             command.generation = self.generation;
             command.backend = self.requested_backend as u32;
+            command.process_priority =
+                crate::platform::windows::configured_process_priority().as_raw();
             command.current_display = self.current_display;
             write_command(&self.shmem, command);
         }

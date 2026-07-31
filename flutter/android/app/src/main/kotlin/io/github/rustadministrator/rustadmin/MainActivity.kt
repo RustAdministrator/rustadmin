@@ -22,6 +22,8 @@ import android.util.Log
 import android.view.WindowManager
 import android.media.MediaCodecInfo
 import android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
+import android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
+import android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar
 import android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
 import android.media.MediaCodecList
 import android.media.MediaFormat
@@ -284,6 +286,18 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                 }
+                "clear_diagnostics" -> {
+                    thread {
+                        try {
+                            val deleted = clearDiagnosticFiles()
+                            runOnUiThread { result.success(deleted) }
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                result.error("diagnostic-clear-failed", e.message, null)
+                            }
+                        }
+                    }
+                }
                 GET_VALUE -> {
                     if (call.arguments is String) {
                         if (call.arguments == KEY_IS_SUPPORT_VOICE_CALL) {
@@ -337,6 +351,22 @@ class MainActivity : FlutterActivity() {
             }
         }
         return archive
+    }
+
+    private fun clearDiagnosticFiles(): Int {
+        val preferences = getSharedPreferences(KEY_SHARED_PREFERENCES, MODE_PRIVATE)
+        val appDirectory = preferences.getString(KEY_APP_DIR_CONFIG_PATH, "")
+            ?.takeIf { it.isNotBlank() }
+            ?.let(::File)
+            ?: return 0
+        if (!isPrivateAppPath(appDirectory)) return 0
+        val diagnosticDirectory = File(appDirectory, "diagnostics")
+        return listOf(
+            "rustadmin.log.1",
+            "rustadmin.log",
+            "flutter-errors.log.1",
+            "flutter-errors.log",
+        ).count { File(diagnosticDirectory, it).delete() }
     }
 
     private fun isPrivateAppPath(file: File): Boolean {
@@ -462,18 +492,20 @@ class MainActivity : FlutterActivity() {
                 codecObject.put("surface", surface)
                 val nv12 = caps.colorFormats.contains(COLOR_FormatYUV420SemiPlanar)
                 codecObject.put("nv12", nv12)
-                if (!(nv12 || surface)) {
-                    return@forEach
+                val yuv420 = caps.colorFormats.any {
+                    it == COLOR_FormatYUV420Planar ||
+                        it == COLOR_FormatYUV420SemiPlanar ||
+                        it == COLOR_FormatYUV420Flexible
                 }
+                codecObject.put("yuv420", yuv420)
+                if (codec.isEncoder && !(nv12 || surface)) return@forEach
+                if (!codec.isEncoder && !yuv420) return@forEach
                 codecObject.put("min_bitrate", caps.videoCapabilities.bitrateRange.lower / 1000)
                 codecObject.put("max_bitrate", caps.videoCapabilities.bitrateRange.upper / 1000)
                 if (!codec.isEncoder) {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                         codecObject.put("low_latency", caps.isFeatureSupported(MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency))
                     }
-                }
-                if (!codec.isEncoder) {
-                    return@forEach
                 }
                 codecArray.put(codecObject)
             }

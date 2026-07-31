@@ -323,6 +323,26 @@ function New-ReleaseZip {
     Write-Host $ArchivePath
 }
 
+function Invoke-NativeCommand {
+    param(
+        [scriptblock]$Command,
+        [string]$Description
+    )
+
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Command
+        $ExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+    if ($ExitCode -ne 0) {
+        throw "$Description failed with exit code $ExitCode."
+    }
+}
+
 function Resolve-BinaryImportTool {
     $Command = Get-Command "llvm-objdump.exe" -ErrorAction SilentlyContinue
     if ($Command) {
@@ -459,10 +479,7 @@ try {
         Write-Host "Refreshing Windows Flutter metadata..."
         Remove-Item -Recurse -Force ".dart_tool", ".flutter-plugins-dependencies", "build\windows" -ErrorAction SilentlyContinue
     }
-    & $FlutterBat pub get
-    if ($LASTEXITCODE -ne 0) {
-        throw "flutter pub get failed with exit code $LASTEXITCODE."
-    }
+    Invoke-NativeCommand { & $FlutterBat pub get } "flutter pub get"
 }
 finally {
     Pop-Location
@@ -474,10 +491,7 @@ $Features = if ($NoHwCodec) { "flutter" } else { "flutter,hwcodec" }
 
 Push-Location $RepoRoot
 try {
-    cargo build --features $Features --lib --release
-    if ($LASTEXITCODE -ne 0) {
-        throw "cargo build failed with exit code $LASTEXITCODE."
-    }
+    Invoke-NativeCommand { cargo build --features $Features --lib --release } "cargo build"
 }
 finally {
     Pop-Location
@@ -485,10 +499,7 @@ finally {
 
 Push-Location $FlutterDir
 try {
-    & $FlutterBat build windows
-    if ($LASTEXITCODE -ne 0) {
-        throw "flutter build windows failed with exit code $LASTEXITCODE."
-    }
+    Invoke-NativeCommand { & $FlutterBat build windows } "flutter build windows"
 }
 finally {
     Pop-Location

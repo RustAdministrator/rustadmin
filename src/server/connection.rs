@@ -82,6 +82,17 @@ use crate::virtual_display_manager;
 pub type Sender = mpsc::UnboundedSender<(Instant, Arc<Message>)>;
 type QueuedVideoMessage = (Instant, Arc<Message>);
 const VIDEO_QUEUE_CAPACITY: usize = 8;
+const SERVER_ASYNC_OUTBOX_CAPACITY: usize = 256;
+const SERVER_VIDEO_LATEST_KEY_FALLBACK: u64 = 1 << 63;
+const SERVER_CLOSE_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+
+fn server_video_latest_key(frame: &VideoFrame) -> u64 {
+    if frame.stream_id != 0 {
+        frame.stream_id
+    } else {
+        SERVER_VIDEO_LATEST_KEY_FALLBACK | u64::from(frame.display as u32)
+    }
+}
 
 struct VideoQueueInner {
     messages: std::sync::Mutex<VecDeque<QueuedVideoMessage>>,
@@ -1139,6 +1150,8 @@ impl Connection {
         #[cfg(target_os = "android")]
         let control_permissions = None;
         let _raii_id = raii::ConnectionID::new(id);
+        let stream = stream
+            .into_duplex_with_context(SERVER_ASYNC_OUTBOX_CAPACITY, format!("host_conn={id}"));
         let _raii_control_permissions_id =
             raii::ControlPermissionsID::new(id, &control_permissions);
         let hash = Hash {
@@ -1323,9 +1336,10 @@ impl Connection {
         };
         let mut send_timeout_ms =
             initial_send_timeout_ms(file_transfer_conn, port_forward_conn, terminal_conn);
+        let tcp_write_pacing = Config::get_option(keys::OPTION_TCP_WRITE_PACING) == "Y";
         conn.stream.set_send_timeout(send_timeout_ms);
         log::info!(
-            "#{} diag conn run loop: addr={}, authorized={}, auth_kind={}, remote={}, file_transfer={}, view_camera={}, terminal={}, port_forward={}, display_idx={}, send_timeout_ms={}, steady_send_timeout_ms={}, startup_timeout_window_ms={}, video_ack_required={}",
+            "#{} diag conn run loop: addr={}, authorized={}, auth_kind={}, remote={}, file_transfer={}, view_camera={}, terminal={}, port_forward={}, display_idx={}, send_timeout_ms={}, steady_send_timeout_ms={}, startup_timeout_window_ms={}, video_ack_required={}, tcp_write_pacing={}",
             conn.inner.id(),
             addr,
             conn.authorized,
@@ -1341,7 +1355,8 @@ impl Connection {
             startup_send_timeout_until
                 .map(|until| until.saturating_duration_since(Instant::now()).as_millis())
                 .unwrap_or(0),
-            conn.video_ack_required
+            conn.video_ack_required,
+            tcp_write_pacing
         );
 
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1658,7 +1673,20 @@ impl Connection {
                         }
                         continue;
                     }
-                    if let Err(err) = conn.stream.send(&value as &Message).await {
+                    let send_result = if let Some(message::Union::VideoFrame(frame)) = &value.union {
+                        conn.stream
+                            .send_latest(
+                                server_video_latest_key(frame),
+                                "VideoFrame",
+                                &value as &Message,
+                            )
+                            .await
+                    } else {
+                        conn.stream
+                            .send_ordering_tagged("VideoOrdering", &value as &Message)
+                            .await
+                    };
+                    if let Err(err) = send_result {
                         let kind = stream_message_kind(&value);
                         if is_video_frame {
                             log::warn!(
@@ -1702,7 +1730,7 @@ impl Connection {
                         first_video_frame_sent = true;
                         if let Some(message::Union::VideoFrame(vf)) = &value.union {
                             log::info!(
-                                "#{} diag first video frame sent to stream: display={}, stream_id={}, frame_id={}, capture_ms={}, queue_latency_ms={}, video_ack_required={}",
+                                "#{} diag first video frame queued to async stream: display={}, stream_id={}, frame_id={}, capture_ms={}, queue_latency_ms={}, video_ack_required={}",
                                 conn.inner.id(),
                                 vf.display,
                                 vf.stream_id,
@@ -6488,7 +6516,24 @@ impl Connection {
         }
         let mut msg_out = Message::new();
         msg_out.set_misc(misc);
-        self.send(msg_out).await;
+        match time::timeout(
+            SERVER_CLOSE_SEND_TIMEOUT,
+            self.stream.send_tagged_and_wait("CloseReason", &msg_out),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => log::warn!(
+                "#{} failed to send close reason: {}",
+                self.inner.id(),
+                error
+            ),
+            Err(_) => log::warn!(
+                "#{} timed out waiting for close reason write after {}ms",
+                self.inner.id(),
+                SERVER_CLOSE_SEND_TIMEOUT.as_millis()
+            ),
+        }
         raii::AuthedConnID::check_remove_session(self.inner.id(), self.session_key());
     }
 
@@ -7999,6 +8044,23 @@ mod test {
                 SEND_TIMEOUT_OTHER
             );
         }
+    }
+
+    #[test]
+    fn video_latest_key_changes_with_stream_and_has_zero_id_fallback() {
+        let mut frame = VideoFrame {
+            stream_id: 7,
+            display: 3,
+            ..Default::default()
+        };
+        assert_eq!(server_video_latest_key(&frame), 7);
+        frame.stream_id = 8;
+        assert_eq!(server_video_latest_key(&frame), 8);
+        frame.stream_id = 0;
+        assert_eq!(
+            server_video_latest_key(&frame),
+            SERVER_VIDEO_LATEST_KEY_FALLBACK | 3
+        );
     }
 
     #[test]

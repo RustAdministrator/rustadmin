@@ -195,9 +195,13 @@ fn initialize(app_dir: &str, custom_client_config: &str) {
     }
     #[cfg(target_os = "android")]
     {
-        // Keep Logcat output for ADB and bugreports, and a bounded private copy for
-        // the in-app diagnostic export that does not require storage permissions.
-        android_diagnostics::init(app_dir);
+        let diagnostic_logging = config::option2bool(
+            android_diagnostics::OPTION_ENABLE_ANDROID_DIAGNOSTIC_LOGGING,
+            &config::LocalConfig::get_option(
+                android_diagnostics::OPTION_ENABLE_ANDROID_DIAGNOSTIC_LOGGING,
+            ),
+        );
+        android_diagnostics::init(app_dir, diagnostic_logging);
         #[cfg(feature = "mediacodec")]
         scrap::mediacodec::check_mediacodec();
         crate::common::test_rendezvous_server();
@@ -1210,6 +1214,8 @@ pub fn main_show_option(_key: String) -> SyncReturn<bool> {
 }
 
 pub fn main_set_option(key: String, value: String) {
+    #[cfg(windows)]
+    let is_process_priority = key.eq(crate::platform::windows::OPTION_PROCESS_PRIORITY);
     #[cfg(target_os = "android")]
     if key.eq(config::keys::OPTION_ENABLE_KEYBOARD) {
         crate::ui_cm_interface::switch_permission_all(
@@ -1247,6 +1253,10 @@ pub fn main_set_option(key: String, value: String) {
         crate::common::test_rendezvous_server();
     } else {
         set_option(key, value.clone());
+    }
+    #[cfg(windows)]
+    if is_process_priority {
+        crate::platform::windows::apply_configured_process_priority("flutter-gui");
     }
 }
 
@@ -2027,7 +2037,14 @@ pub fn main_set_env(key: String, value: Option<String>) -> SyncReturn<()> {
 pub fn main_set_local_option(key: String, value: String) {
     let is_texture_render_key = key.eq(config::keys::OPTION_TEXTURE_RENDER);
     let is_d3d_render_key = key.eq(config::keys::OPTION_ALLOW_D3D_RENDER);
-    set_local_option(key, value.clone());
+    #[cfg(target_os = "android")]
+    let is_android_diagnostic_logging =
+        key.eq(android_diagnostics::OPTION_ENABLE_ANDROID_DIAGNOSTIC_LOGGING);
+    set_local_option(key.clone(), value.clone());
+    #[cfg(target_os = "android")]
+    if is_android_diagnostic_logging {
+        android_diagnostics::set_enabled(config::option2bool(&key, &value));
+    }
     if is_texture_render_key {
         let session_event = [("v", &value)];
         for session in sessions::get_sessions() {

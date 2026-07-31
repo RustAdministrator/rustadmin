@@ -721,6 +721,52 @@ class QualityMonitor extends StatelessWidget {
                                 rightColor: Colors.green),
                             _row("Path",
                                 qualityMonitorModel.data.connectionType ?? '-'),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.quicProtocol != null)
+                              _row("QUIC App",
+                                  qualityMonitorModel.data.quicProtocol),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.quicVideoTransport !=
+                                    null)
+                              _row("Video TX", qualityMonitorModel
+                                  .data.quicVideoTransport),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.transportMtu != null)
+                              _row("Path MTU",
+                                  qualityMonitorModel.data.transportMtu),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.datagramPayload != null)
+                              _row("QUIC DATAGRAM max",
+                                  qualityMonitorModel.data.datagramPayload),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.negotiatedDatagramPayload !=
+                                    null)
+                              _row("QUIC DATAGRAM cap", qualityMonitorModel
+                                  .data.negotiatedDatagramPayload),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.transportRttMs != null)
+                              _row("QUIC RTT",
+                                  '${qualityMonitorModel.data.transportRttMs}ms'),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.transportLostPackets !=
+                                    null)
+                              _row("Lost", qualityMonitorModel
+                                  .data.transportLostPackets),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.quicReassemblyDrops !=
+                                    null)
+                              _row("Reassembly drops", qualityMonitorModel
+                                  .data.quicReassemblyDrops),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.quicKeyframeRequests !=
+                                    null)
+                              _row("KF requests", qualityMonitorModel
+                                  .data.quicKeyframeRequests),
                             if (qualityMonitorModel.extendedDetails)
                               _row("Direct",
                                   qualityMonitorModel.data.direct ?? '-'),

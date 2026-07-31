@@ -54,7 +54,7 @@ jni = "0.21"
 lazy_static = "1.4"
 log = "0.4"
 serde_json = "1.0"
-ndk = { version = "0.7", features = ["media"], optional = true}
+ndk = { version = "0.9", default-features = false, features = ["media"], optional = true }
 ndk-context = "0.1"
 
 [target.'cfg(not(target_os = "android"))'.dev-dependencies]
@@ -81,4 +81,3 @@ optional = true
 
 [target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
 nokhwa = { git = "https://github.com/rustdesk-org/nokhwa.git", branch = "fix_from_raw_parts", features = ["input-native"] }
-

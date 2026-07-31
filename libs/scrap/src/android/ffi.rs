@@ -236,6 +236,8 @@ pub struct MediaCodecInfo {
     pub surface: bool,
     pub nv12: bool,
     #[serde(default)]
+    pub yuv420: bool,
+    #[serde(default)]
     pub low_latency: Option<bool>, // api 30+, decoder
     pub min_bitrate: u32,
     pub max_bitrate: u32,
@@ -259,6 +261,8 @@ pub extern "system" fn Java_ffi_FFI_setCodecInfo(env: JNIEnv, _class: JClass, in
     if let Ok(info) = env.get_string(&info) {
         let info: String = info.into();
         if let Ok(infos) = serde_json::from_str::<MediaCodecInfos>(&info) {
+            #[cfg(feature = "mediacodec")]
+            crate::mediacodec::update_decoder_support(&infos);
             *MEDIA_CODEC_INFOS.write().unwrap() = Some(infos);
         }
     }

@@ -37,6 +37,8 @@ class PlatformFFI {
   late String _appType;
   StreamEventHandler? _eventCallback;
   File? _flutterDiagnosticFile;
+  bool _androidDiagnosticLoggingEnabled = true;
+  bool _androidDiagnosticHandlersInstalled = false;
 
   PlatformFFI._();
 
@@ -150,9 +152,6 @@ class PlatformFFI {
       try {
         // SYSTEM user failed
         _dir = (await getApplicationDocumentsDirectory()).path;
-        if (isAndroid) {
-          _initializeAndroidDiagnostics();
-        }
       } catch (e) {
         debugPrint('Failed to get documents directory: $e');
       }
@@ -237,6 +236,13 @@ class PlatformFFI {
         appDir: _dir,
         customClientConfig: '',
       );
+      if (isAndroid) {
+        final enabled = option2bool(
+            kOptionEnableAndroidDiagnosticLogging,
+            _ffiBind.mainGetLocalOption(
+                key: kOptionEnableAndroidDiagnosticLogging));
+        setAndroidDiagnosticLoggingEnabled(enabled);
+      }
     } catch (e) {
       debugPrintStack(label: 'initialize failed: $e');
     }
@@ -308,30 +314,41 @@ class PlatformFFI {
     return _toAndroidChannel.invokeMethod<String>('export_diagnostics');
   }
 
+  Future<void> clearAndroidDiagnostics() async {
+    if (!isAndroid) return;
+    await _toAndroidChannel.invokeMethod<void>('clear_diagnostics');
+  }
+
   void syncAndroidServiceAppDirConfigPath() {
     invokeMethod(AndroidChannel.kSyncAppDirConfigPath, _dir);
   }
 
-  void _initializeAndroidDiagnostics() {
-    if (_dir.isEmpty || _flutterDiagnosticFile != null) return;
+  void setAndroidDiagnosticLoggingEnabled(bool enabled) {
+    _androidDiagnosticLoggingEnabled = enabled;
+    if (_dir.isEmpty) return;
     try {
-      final directory = Directory('$_dir/diagnostics')
-        ..createSync(recursive: true);
-      _flutterDiagnosticFile = File('${directory.path}/flutter-errors.log');
-      _rotateFlutterDiagnosticFileIfNeeded();
+      if (enabled && _flutterDiagnosticFile == null) {
+        final directory = Directory('$_dir/diagnostics')
+          ..createSync(recursive: true);
+        _flutterDiagnosticFile = File('${directory.path}/flutter-errors.log');
+        _rotateFlutterDiagnosticFileIfNeeded();
+      }
 
-      final previousFlutterHandler = FlutterError.onError;
-      FlutterError.onError = (details) {
-        _appendFlutterDiagnostic(
-            'FlutterError', details.exception, details.stack);
-        previousFlutterHandler?.call(details);
-      };
+      if (!_androidDiagnosticHandlersInstalled) {
+        _androidDiagnosticHandlersInstalled = true;
+        final previousFlutterHandler = FlutterError.onError;
+        FlutterError.onError = (details) {
+          _appendFlutterDiagnostic(
+              'FlutterError', details.exception, details.stack);
+          previousFlutterHandler?.call(details);
+        };
 
-      final previousPlatformHandler = PlatformDispatcher.instance.onError;
-      PlatformDispatcher.instance.onError = (error, stack) {
-        _appendFlutterDiagnostic('PlatformDispatcher', error, stack);
-        return previousPlatformHandler?.call(error, stack) ?? false;
-      };
+        final previousPlatformHandler = PlatformDispatcher.instance.onError;
+        PlatformDispatcher.instance.onError = (error, stack) {
+          _appendFlutterDiagnostic('PlatformDispatcher', error, stack);
+          return previousPlatformHandler?.call(error, stack) ?? false;
+        };
+      }
     } catch (_) {
       _flutterDiagnosticFile = null;
     }
@@ -339,6 +356,7 @@ class PlatformFFI {
 
   void _appendFlutterDiagnostic(
       String source, Object error, StackTrace? stack) {
+    if (!_androidDiagnosticLoggingEnabled) return;
     final file = _flutterDiagnosticFile;
     if (file == null) return;
     try {

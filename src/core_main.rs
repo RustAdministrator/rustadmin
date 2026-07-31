@@ -192,6 +192,8 @@ pub fn core_main() -> Option<Vec<String>> {
             config::Config::file().display(),
             crate::username(),
         );
+        #[cfg(windows)]
+        crate::platform::windows::apply_configured_process_priority(role);
     }
 
     // linux uni (url) go here.

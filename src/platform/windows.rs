@@ -45,8 +45,9 @@ use winapi::{
         },
         minwinbase::STILL_ACTIVE,
         processthreadsapi::{
-            GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess, OpenProcess,
-            OpenProcessToken, ProcessIdToSessionId, PROCESS_INFORMATION, STARTUPINFOW,
+            GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess, GetPriorityClass,
+            OpenProcess, OpenProcessToken, ProcessIdToSessionId, SetPriorityClass,
+            PROCESS_INFORMATION, STARTUPINFOW,
         },
         securitybaseapi::{
             AllocateAndInitializeSid, DuplicateToken, EqualSid, FreeSid, GetTokenInformation,
@@ -108,6 +109,86 @@ pub use acl::{
 pub const FLUTTER_RUNNER_WIN32_WINDOW_CLASS: &'static str = "FLUTTER_RUNNER_WIN32_WINDOW"; // main window, install window
 pub const EXPLORER_EXE: &'static str = "explorer.exe";
 pub const SET_FOREGROUND_WINDOW: &'static str = "SET_FOREGROUND_WINDOW";
+pub const OPTION_PROCESS_PRIORITY: &str = "process-priority";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessPriority {
+    Normal,
+    AboveNormal,
+    High,
+}
+
+impl ProcessPriority {
+    pub fn from_option(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "above-normal" => Self::AboveNormal,
+            "high" => Self::High,
+            _ => Self::Normal,
+        }
+    }
+
+    pub fn option_value(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::AboveNormal => "above-normal",
+            Self::High => "high",
+        }
+    }
+
+    pub fn from_raw(value: u32) -> Self {
+        match value {
+            1 => Self::AboveNormal,
+            2 => Self::High,
+            _ => Self::Normal,
+        }
+    }
+
+    pub fn as_raw(self) -> u32 {
+        match self {
+            Self::Normal => 0,
+            Self::AboveNormal => 1,
+            Self::High => 2,
+        }
+    }
+
+    fn class(self) -> DWORD {
+        match self {
+            Self::Normal => NORMAL_PRIORITY_CLASS,
+            Self::AboveNormal => ABOVE_NORMAL_PRIORITY_CLASS,
+            Self::High => HIGH_PRIORITY_CLASS,
+        }
+    }
+}
+
+pub fn configured_process_priority() -> ProcessPriority {
+    ProcessPriority::from_option(&Config::get_option(OPTION_PROCESS_PRIORITY))
+}
+
+pub fn apply_configured_process_priority(role: &str) -> bool {
+    apply_current_process_priority(configured_process_priority(), role)
+}
+
+pub fn apply_current_process_priority(priority: ProcessPriority, role: &str) -> bool {
+    let requested = priority.class();
+    let process = unsafe { GetCurrentProcess() };
+    if unsafe { SetPriorityClass(process, requested) } == FALSE {
+        log::warn!(
+            "Failed to set Windows process priority: role={}, requested={}, error={}",
+            role,
+            priority.option_value(),
+            io::Error::last_os_error()
+        );
+        return false;
+    }
+    let effective = unsafe { GetPriorityClass(process) };
+    log::info!(
+        "Windows process priority applied: role={}, requested={}, effective_class=0x{:x}",
+        role,
+        priority.option_value(),
+        effective
+    );
+    true
+}
 
 const REG_NAME_INSTALL_DESKTOPSHORTCUTS: &str = "DESKTOPSHORTCUTS";
 const REG_NAME_INSTALL_STARTMENUSHORTCUTS: &str = "STARTMENUSHORTCUTS";
@@ -4794,6 +4875,26 @@ pub(super) fn get_pids_with_first_arg_by_wmic<S1: AsRef<str>, S2: AsRef<str>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_priority_option_values_round_trip() {
+        for priority in [
+            ProcessPriority::Normal,
+            ProcessPriority::AboveNormal,
+            ProcessPriority::High,
+        ] {
+            assert_eq!(
+                ProcessPriority::from_option(priority.option_value()),
+                priority
+            );
+            assert_eq!(ProcessPriority::from_raw(priority.as_raw()), priority);
+        }
+        assert_eq!(
+            ProcessPriority::from_option("invalid"),
+            ProcessPriority::Normal
+        );
+        assert_eq!(ProcessPriority::from_raw(u32::MAX), ProcessPriority::Normal);
+    }
 
     // Test-only reusable Win32 HANDLE RAII helper.
     // If a future non-test path needs the same pattern, move it out of this test module.

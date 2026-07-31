@@ -4,7 +4,10 @@ use std::{
     fs::{self, File, OpenOptions},
     io::Write,
     path::PathBuf,
-    sync::{Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, OnceLock,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -12,6 +15,7 @@ const LOG_FILE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const LOG_LINE_MAX_BYTES: usize = 16 * 1024;
 
 static LOGGER: OnceLock<AndroidDiagnosticLogger> = OnceLock::new();
+pub const OPTION_ENABLE_ANDROID_DIAGNOSTIC_LOGGING: &str = "enable-android-diagnostic-logging";
 
 struct LogFile {
     path: PathBuf,
@@ -20,19 +24,45 @@ struct LogFile {
 }
 
 impl LogFile {
-    fn new(app_dir: &str) -> Self {
-        let directory = PathBuf::from(app_dir).join("diagnostics");
-        let _ = fs::create_dir_all(&directory);
-        let path = directory.join("rustadmin.log");
+    fn new(app_dir: &str, enabled: bool) -> Self {
+        let path = PathBuf::from(app_dir)
+            .join("diagnostics")
+            .join("rustadmin.log");
         let bytes = fs::metadata(&path)
             .map(|metadata| metadata.len())
             .unwrap_or(0);
-        let file = OpenOptions::new()
+        let mut state = Self {
+            path,
+            file: None,
+            bytes,
+        };
+        if enabled {
+            state.open();
+        }
+        state
+    }
+
+    fn open(&mut self) {
+        if self.file.is_some() {
+            return;
+        }
+        if let Some(directory) = self.path.parent() {
+            let _ = fs::create_dir_all(directory);
+        }
+        self.file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)
+            .open(&self.path)
             .ok();
-        Self { path, file, bytes }
+        self.bytes = fs::metadata(&self.path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+    }
+
+    fn close(&mut self) {
+        if let Some(mut file) = self.file.take() {
+            let _ = file.flush();
+        }
     }
 
     fn write(&mut self, line: &[u8]) {
@@ -64,24 +94,37 @@ impl LogFile {
 struct AndroidDiagnosticLogger {
     logcat: AndroidLogger,
     file: Mutex<LogFile>,
+    enabled: AtomicBool,
 }
 
 impl AndroidDiagnosticLogger {
-    fn new(app_dir: &str) -> Self {
+    fn new(app_dir: &str, enabled: bool) -> Self {
         Self {
             logcat: AndroidLogger::new(
                 Config::default()
                     .with_max_level(LevelFilter::Debug)
                     .with_tag("RustAdmin"),
             ),
-            file: Mutex::new(LogFile::new(app_dir)),
+            file: Mutex::new(LogFile::new(app_dir, enabled)),
+            enabled: AtomicBool::new(enabled),
+        }
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
+        if let Ok(mut file) = self.file.lock() {
+            if enabled {
+                file.open();
+            } else {
+                file.close();
+            }
         }
     }
 }
 
 impl Log for AndroidDiagnosticLogger {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        self.logcat.enabled(metadata)
+        self.enabled.load(Ordering::Relaxed) && self.logcat.enabled(metadata)
     }
 
     fn log(&self, record: &Record<'_>) {
@@ -122,9 +165,16 @@ impl Log for AndroidDiagnosticLogger {
     }
 }
 
-pub fn init(app_dir: &str) {
-    let logger = LOGGER.get_or_init(|| AndroidDiagnosticLogger::new(app_dir));
+pub fn init(app_dir: &str, enabled: bool) {
+    let logger = LOGGER.get_or_init(|| AndroidDiagnosticLogger::new(app_dir, enabled));
+    logger.set_enabled(enabled);
     if log::set_logger(logger).is_ok() {
         log::set_max_level(LevelFilter::Debug);
+    }
+}
+
+pub fn set_enabled(enabled: bool) {
+    if let Some(logger) = LOGGER.get() {
+        logger.set_enabled(enabled);
     }
 }
