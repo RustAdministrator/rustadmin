@@ -669,6 +669,34 @@ impl<T: InvokeUiSession> Remote<T> {
                                 quic_reassembly_drops: quic_stats
                                     .map(|stats| stats.video_reassembly_drops),
                                 #[cfg(feature = "quic-transport")]
+                                quic_reassembly_reasons: quic_stats.map(|stats| {
+                                    format!(
+                                        "{}/{}/{}/{}",
+                                        stats.video_reassembly_expired,
+                                        stats.video_reassembly_evicted,
+                                        stats.video_reassembly_obsolete,
+                                        stats.video_reassembly_pre_keyframe,
+                                    )
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_reassembly_frame: quic_stats.map(|stats| {
+                                    format!(
+                                        "{}KB/{}f miss {}",
+                                        stats.video_reassembly_last_frame_bytes / 1024,
+                                        stats.video_reassembly_last_frame_fragments,
+                                        stats.video_reassembly_missing_fragments,
+                                    )
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_reassembly_timing: quic_stats.map(|stats| {
+                                    format!(
+                                        "{}/{}/{}ms",
+                                        stats.video_reassembly_last_us / 1000,
+                                        stats.video_reassembly_max_us / 1000,
+                                        stats.video_reassembly_max_gap_us / 1000,
+                                    )
+                                }),
+                                #[cfg(feature = "quic-transport")]
                                 quic_keyframe_requests: quic_stats
                                     .map(|stats| stats.video_keyframe_requests),
                                 #[cfg(feature = "quic-transport")]
@@ -686,6 +714,58 @@ impl<T: InvokeUiSession> Remote<T> {
                                         stats.video_sender_replacements,
                                         stats.video_sender_reference_resets
                                     )
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_sender_admission: quic_stats.and_then(|stats| {
+                                    (stats.video_datagram_frames_sent > 0
+                                        || stats.video_datagram_frames_rejected > 0)
+                                        .then(|| {
+                                            format!(
+                                                "{}/{}",
+                                                stats.video_datagram_frames_sent,
+                                                stats.video_datagram_frames_rejected,
+                                            )
+                                        })
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_sender_frame: quic_stats.and_then(|stats| {
+                                    (stats.video_datagram_frames_sent > 0
+                                        || stats.video_datagram_frames_rejected > 0)
+                                        .then(|| {
+                                            format!(
+                                                "{}KB/{}f peak {}KB/{}f",
+                                                stats.video_datagram_frame_bytes / 1024,
+                                                stats.video_datagram_frame_fragments,
+                                                stats.video_datagram_frame_bytes_peak / 1024,
+                                                stats.video_datagram_frame_fragments_peak,
+                                            )
+                                        })
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_sender_space: quic_stats.and_then(|stats| {
+                                    (stats.video_datagram_frames_sent > 0
+                                        || stats.video_datagram_frames_rejected > 0)
+                                        .then(|| {
+                                            format!(
+                                                "q {}/{}KB free {}/{}KB",
+                                                stats.datagram_send_buffer_queued / 1024,
+                                                stats.video_datagram_queue_budget / 1024,
+                                                stats.datagram_send_buffer_space / 1024,
+                                                stats.datagram_send_buffer_space_min / 1024,
+                                            )
+                                        })
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_disposable_drops: quic_stats.and_then(|stats| {
+                                    (stats.audio_datagram_drops > 0
+                                        || stats.mouse_datagram_drops > 0)
+                                        .then(|| {
+                                            format!(
+                                                "{}/{}",
+                                                stats.audio_datagram_drops,
+                                                stats.mouse_datagram_drops,
+                                            )
+                                        })
                                 }),
                                 decoder,
                                 renderer,

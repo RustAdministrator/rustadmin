@@ -106,6 +106,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Control Actions", "Control actions"),
         ("Display Settings", "Display settings"),
         ("Image Quality", "Image quality"),
+        ("Scale", "Scale"),
         ("Scroll Style", "Scroll style"),
         ("Show Toolbar", "Show toolbar"),
         ("Hide Toolbar", "Hide toolbar"),

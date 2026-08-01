@@ -768,6 +768,18 @@ impl InvokeUiSession for FlutterHandler {
                         .map_or(NULL, |it| it.to_string()),
                 ),
                 (
+                    "quic_reassembly_reasons",
+                    &status.quic_reassembly_reasons.map_or(NULL, |it| it),
+                ),
+                (
+                    "quic_reassembly_frame",
+                    &status.quic_reassembly_frame.map_or(NULL, |it| it),
+                ),
+                (
+                    "quic_reassembly_timing",
+                    &status.quic_reassembly_timing.map_or(NULL, |it| it),
+                ),
+                (
                     "quic_keyframe_requests",
                     &status
                         .quic_keyframe_requests
@@ -780,6 +792,22 @@ impl InvokeUiSession for FlutterHandler {
                 (
                     "quic_sender_recovery",
                     &status.quic_sender_recovery.map_or(NULL, |it| it),
+                ),
+                (
+                    "quic_sender_admission",
+                    &status.quic_sender_admission.map_or(NULL, |it| it),
+                ),
+                (
+                    "quic_sender_frame",
+                    &status.quic_sender_frame.map_or(NULL, |it| it),
+                ),
+                (
+                    "quic_sender_space",
+                    &status.quic_sender_space.map_or(NULL, |it| it),
+                ),
+                (
+                    "quic_disposable_drops",
+                    &status.quic_disposable_drops.map_or(NULL, |it| it),
                 ),
                 ("decoder", &status.decoder.map_or(NULL, |it| it)),
                 ("renderer", &status.renderer.map_or(NULL, |it| it)),

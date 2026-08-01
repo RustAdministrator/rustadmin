@@ -338,6 +338,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Display Settings", ""),
         ("Ratio", ""),
         ("Image Quality", ""),
+        ("Scale", ""),
         ("Scroll Style", ""),
         ("Show Toolbar", ""),
         ("Hide Toolbar", ""),

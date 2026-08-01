@@ -743,7 +743,7 @@ class QualityMonitor extends StatelessWidget {
                                 qualityMonitorModel
                                         .data.negotiatedDatagramPayload !=
                                     null)
-                              _row("QUIC DATAGRAM cap", qualityMonitorModel
+                              _row("QUIC negotiated cap", qualityMonitorModel
                                   .data.negotiatedDatagramPayload),
                             if (qualityMonitorModel.extendedDetails &&
                                 qualityMonitorModel.data.transportRttMs != null)
@@ -763,6 +763,23 @@ class QualityMonitor extends StatelessWidget {
                                   .data.quicReassemblyDrops),
                             if (qualityMonitorModel.extendedDetails &&
                                 qualityMonitorModel
+                                        .data.quicReassemblyReasons !=
+                                    null)
+                              _row("RX E/V/O/P", qualityMonitorModel
+                                  .data.quicReassemblyReasons),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.quicReassemblyFrame !=
+                                    null)
+                              _row("RX frame", qualityMonitorModel
+                                  .data.quicReassemblyFrame),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.quicReassemblyTiming !=
+                                    null)
+                              _row("RX L/P/G", qualityMonitorModel
+                                  .data.quicReassemblyTiming),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
                                         .data.quicKeyframeRequests !=
                                     null)
                               _row("KF requests", qualityMonitorModel
@@ -779,6 +796,25 @@ class QualityMonitor extends StatelessWidget {
                                     null)
                               _row("TX drop/reset", qualityMonitorModel
                                   .data.quicSenderRecovery),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.quicSenderAdmission !=
+                                    null)
+                              _row("TX sent/reject", qualityMonitorModel
+                                  .data.quicSenderAdmission),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.quicSenderFrame != null)
+                              _row("TX frame", qualityMonitorModel
+                                  .data.quicSenderFrame),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.quicSenderSpace != null)
+                              _row("TX space", qualityMonitorModel
+                                  .data.quicSenderSpace),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.quicDisposableDrops !=
+                                    null)
+                              _row("A/M drops", qualityMonitorModel
+                                  .data.quicDisposableDrops),
                             if (qualityMonitorModel.extendedDetails)
                               _row("Direct",
                                   qualityMonitorModel.data.direct ?? '-'),

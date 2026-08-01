@@ -2,7 +2,7 @@ use android_logger::{AndroidLogger, Config};
 use hbb_common::log::{self, LevelFilter, Log, Metadata, Record};
 use std::{
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{Read, Seek, SeekFrom, Write},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -11,8 +11,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const LOG_FILE_MAX_BYTES: u64 = 4 * 1024 * 1024;
-const LOG_LINE_MAX_BYTES: usize = 16 * 1024;
+const LOG_FILE_MAX_BYTES: u64 = 1024 * 1024;
+const LOG_LINE_MAX_BYTES: usize = 4 * 1024;
 
 static LOGGER: OnceLock<AndroidDiagnosticLogger> = OnceLock::new();
 pub const OPTION_ENABLE_ANDROID_DIAGNOSTIC_LOGGING: &str = "enable-android-diagnostic-logging";
@@ -49,14 +49,25 @@ impl LogFile {
         if let Some(directory) = self.path.parent() {
             let _ = fs::create_dir_all(directory);
         }
+        let previous = self.path.with_extension("log.1");
+        if fs::metadata(&previous)
+            .map(|metadata| metadata.len() > LOG_FILE_MAX_BYTES)
+            .unwrap_or(false)
+        {
+            let _ = fs::remove_file(&previous);
+        }
+        self.bytes = fs::metadata(&self.path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if self.bytes >= LOG_FILE_MAX_BYTES {
+            self.rotate();
+            return;
+        }
         self.file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.path)
             .ok();
-        self.bytes = fs::metadata(&self.path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
     }
 
     fn close(&mut self) {
@@ -80,7 +91,15 @@ impl LogFile {
         self.file.take();
         let previous = self.path.with_extension("log.1");
         let _ = fs::remove_file(&previous);
-        let _ = fs::rename(&self.path, previous);
+        if self.bytes > LOG_FILE_MAX_BYTES {
+            if Self::copy_tail(&self.path, &previous).is_ok() {
+                let _ = fs::remove_file(&self.path);
+            } else {
+                let _ = fs::rename(&self.path, previous);
+            }
+        } else {
+            let _ = fs::rename(&self.path, previous);
+        }
         self.file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -88,6 +107,21 @@ impl LogFile {
             .open(&self.path)
             .ok();
         self.bytes = 0;
+    }
+
+    fn copy_tail(source: &PathBuf, destination: &PathBuf) -> std::io::Result<()> {
+        let mut input = File::open(source)?;
+        let file_len = input.metadata()?.len();
+        let tail_len = file_len.min(LOG_FILE_MAX_BYTES);
+        input.seek(SeekFrom::Start(file_len.saturating_sub(tail_len)))?;
+        let mut tail = Vec::with_capacity(tail_len as usize);
+        input.read_to_end(&mut tail)?;
+        let start = tail
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|index| index.saturating_add(1))
+            .unwrap_or(0);
+        fs::write(destination, &tail[start..])
     }
 }
 
