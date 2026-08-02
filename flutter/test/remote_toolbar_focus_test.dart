@@ -2,6 +2,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
+import 'package:flutter_hbb/common/widgets/remote_input.dart';
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
 import 'package:flutter_hbb/generated_bridge.dart';
 import 'package:flutter_hbb/models/model.dart';
@@ -76,45 +77,52 @@ void main() {
       ..id = peerId
       ..connType = ConnType.viewCamera;
     final menuFocusChanges = <bool>[];
+    late StateSetter rebuildRemotePage;
 
     await tester.pumpWidget(
       MaterialApp(
         theme: MyTheme.lightTheme,
         home: Scaffold(
-          body: Stack(
-            children: [
-              Positioned.fill(
-                child: Focus(
-                  focusNode: rawKeyFocusNode,
-                  child: const SizedBox.expand(),
-                ),
-              ),
-              MultiProvider(
-                providers: [
-                  ChangeNotifierProvider.value(value: ffi.ffiModel),
-                  ChangeNotifierProvider.value(value: ffi.imageModel),
-                  ChangeNotifierProvider.value(value: ffi.cursorModel),
-                  ChangeNotifierProvider.value(value: ffi.canvasModel),
-                  ChangeNotifierProvider.value(value: ffi.recordingModel),
+          body: StatefulBuilder(
+            builder: (context, setState) {
+              rebuildRemotePage = setState;
+              return Stack(
+                children: [
+                  Positioned.fill(
+                    child: RawKeyFocusScope(
+                      focusNode: rawKeyFocusNode,
+                      inputModel: ffi.inputModel,
+                      child: const SizedBox.expand(),
+                    ),
+                  ),
+                  MultiProvider(
+                    providers: [
+                      ChangeNotifierProvider.value(value: ffi.ffiModel),
+                      ChangeNotifierProvider.value(value: ffi.imageModel),
+                      ChangeNotifierProvider.value(value: ffi.cursorModel),
+                      ChangeNotifierProvider.value(value: ffi.canvasModel),
+                      ChangeNotifierProvider.value(value: ffi.recordingModel),
+                    ],
+                    child: RemoteToolbar(
+                      id: peerId,
+                      ffi: ffi,
+                      state: state,
+                      onEnterOrLeaveImageSetter: (_, __) {},
+                      onEnterOrLeaveImageCleaner: (_) {},
+                      onImagePointerStateSetter: (_, __) {},
+                      onImagePointerStateCleaner: (_) {},
+                      onWindowPointerStateSetter: (_, __) {},
+                      onWindowPointerStateCleaner: (_) {},
+                      onMenuFocusChanged: (menuOpen) {
+                        menuFocusChanges.add(menuOpen);
+                        rawKeyFocusNode.canRequestFocus = !menuOpen;
+                      },
+                      setRemoteState: (_) {},
+                    ),
+                  ),
                 ],
-                child: RemoteToolbar(
-                  id: peerId,
-                  ffi: ffi,
-                  state: state,
-                  onEnterOrLeaveImageSetter: (_, __) {},
-                  onEnterOrLeaveImageCleaner: (_) {},
-                  onImagePointerStateSetter: (_, __) {},
-                  onImagePointerStateCleaner: (_) {},
-                  onWindowPointerStateSetter: (_, __) {},
-                  onWindowPointerStateCleaner: (_) {},
-                  onMenuFocusChanged: (menuOpen) {
-                    menuFocusChanges.add(menuOpen);
-                    rawKeyFocusNode.canRequestFocus = !menuOpen;
-                  },
-                  setRemoteState: (_) {},
-                ),
-              ),
-            ],
+              );
+            },
           ),
         ),
       ),
@@ -132,6 +140,12 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(menuFocusChanges, [true]);
+    expect(rawKeyFocusNode.canRequestFocus, isFalse);
+    expect(find.text('Scale original'), findsOneWidget);
+
+    rebuildRemotePage(() {});
+    await tester.pump();
+
     expect(rawKeyFocusNode.canRequestFocus, isFalse);
     expect(find.text('Scale original'), findsOneWidget);
 

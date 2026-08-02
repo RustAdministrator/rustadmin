@@ -36,7 +36,8 @@ class RawKeyFocusScope extends StatelessWidget {
         autofocus: true,
         child: Focus(
             autofocus: true,
-            canRequestFocus: true,
+            // Preserve focus guards managed by the remote page across rebuilds.
+            canRequestFocus: focusNode?.canRequestFocus,
             focusNode: focusNode,
             onFocusChange: onFocusChange,
             onKey: useRawKeyEvents
