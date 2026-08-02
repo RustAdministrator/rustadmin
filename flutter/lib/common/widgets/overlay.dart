@@ -1162,7 +1162,8 @@ class _QualityMonitorHoverFadeState extends State<QualityMonitorHoverFade> {
 
   @override
   Widget build(BuildContext context) => MouseRegion(
-        opaque: false,
+        opaque: true,
+        hitTestBehavior: HitTestBehavior.translucent,
         onEnter: _handleEnter,
         onExit: _handleExit,
         child: AnimatedOpacity(

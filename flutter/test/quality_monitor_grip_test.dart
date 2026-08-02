@@ -60,6 +60,61 @@ void main() {
     expect(dragUpdate, isNotNull);
   });
 
+  testWidgets('quality monitor grip blocks remote pointer passthrough',
+      (tester) async {
+    var backgroundDownCount = 0;
+    var backgroundMoveCount = 0;
+    var backgroundUpCount = 0;
+    var gripMoveCount = 0;
+    const settings = QualityMonitorFadeSettings(
+      opacity: 0.5,
+      delay: Duration(milliseconds: 1000),
+      duration: Duration(milliseconds: 3000),
+    );
+
+    await tester.pumpWidget(MaterialApp(
+      home: Stack(
+        children: [
+          Positioned.fill(
+            child: Listener(
+              behavior: HitTestBehavior.opaque,
+              onPointerDown: (_) => backgroundDownCount++,
+              onPointerMove: (_) => backgroundMoveCount++,
+              onPointerUp: (_) => backgroundUpCount++,
+              child: const SizedBox.expand(),
+            ),
+          ),
+          Positioned(
+            left: 20,
+            top: 20,
+            child: QualityMonitorHoverFade(
+              settingsProvider: () => settings,
+              child: QualityMonitorGrip(
+                details: kQualityMonitorDetailsBasic,
+                onPanUpdate: (_) => gripMoveCount++,
+                onDetailsChanged: (_) async {},
+              ),
+            ),
+          ),
+        ],
+      ),
+    ));
+
+    final grip = find.byType(QualityMonitorGrip);
+    final gesture = await tester.startGesture(
+      tester.getCenter(grip),
+      kind: PointerDeviceKind.mouse,
+    );
+    await gesture.moveBy(const Offset(8, 6));
+    await gesture.up();
+    await tester.pumpAndSettle();
+
+    expect(gripMoveCount, greaterThan(0));
+    expect(backgroundDownCount, 0);
+    expect(backgroundMoveCount, 0);
+    expect(backgroundUpCount, 0);
+  });
+
   testWidgets('quality monitor fades without blocking remote hover',
       (tester) async {
     var backgroundHoverCount = 0;
