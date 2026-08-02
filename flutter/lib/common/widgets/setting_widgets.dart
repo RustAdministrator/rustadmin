@@ -151,40 +151,89 @@ customImageQualityWidget(
                         ))
                   ],
                 )),
-            Obx(() => Row(
+            Obx(() {
+              void selectFpsMode(String value) {
+                fpsModeValue.value = value;
+                setFpsMode?.call(value);
+              }
+
+              if (isMobile) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(
-                        flex: 1,
-                        child: Text(
-                          translate('FPS mode'),
-                          style: const TextStyle(fontSize: 15),
-                        )),
-                    Expanded(
-                      flex: 3,
-                      child: DropdownButton<String>(
-                        value: fpsModeValue.value,
-                        isExpanded: true,
-                        onChanged: setFpsMode == null
-                            ? null
-                            : (String? value) {
-                                if (value == null) return;
-                                fpsModeValue.value = value;
-                                setFpsMode(value);
-                              },
-                        items: [
-                          DropdownMenuItem(
+                    Text(
+                      translate('FPS mode'),
+                      style: const TextStyle(fontSize: 15),
+                    ),
+                    const SizedBox(height: 6),
+                    SizedBox(
+                      width: double.infinity,
+                      child: SegmentedButton<String>(
+                        expandedInsets: EdgeInsets.zero,
+                        showSelectedIcon: false,
+                        segments: [
+                          ButtonSegment(
                             value: kCustomFpsModeAdaptive,
-                            child: Text(translate('Adaptive FPS cap')),
+                            label: Text(
+                              translate('Adaptive FPS cap'),
+                              maxLines: 2,
+                              textAlign: TextAlign.center,
+                            ),
                           ),
-                          DropdownMenuItem(
+                          ButtonSegment(
                             value: kCustomFpsModeFixed,
-                            child: Text(translate('Fixed FPS')),
+                            label: Text(
+                              translate('Fixed FPS'),
+                              maxLines: 2,
+                              textAlign: TextAlign.center,
+                            ),
                           ),
                         ],
+                        selected: {fpsModeValue.value},
+                        onSelectionChanged: setFpsMode == null
+                            ? null
+                            : (values) => selectFpsMode(values.first),
                       ),
                     ),
                   ],
-                )),
+                );
+              }
+
+              return Row(
+                children: [
+                  Expanded(
+                      flex: 1,
+                      child: Text(
+                        translate('FPS mode'),
+                        style: const TextStyle(fontSize: 15),
+                      )),
+                  Expanded(
+                    flex: 3,
+                    child: DropdownButton<String>(
+                      value: fpsModeValue.value,
+                      isExpanded: true,
+                      onChanged: setFpsMode == null
+                          ? null
+                          : (value) {
+                              if (value != null) {
+                                selectFpsMode(value);
+                              }
+                            },
+                      items: [
+                        DropdownMenuItem(
+                          value: kCustomFpsModeAdaptive,
+                          child: Text(translate('Adaptive FPS cap')),
+                        ),
+                        DropdownMenuItem(
+                          value: kCustomFpsModeFixed,
+                          child: Text(translate('Fixed FPS')),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              );
+            }),
           ],
         ),
     ],

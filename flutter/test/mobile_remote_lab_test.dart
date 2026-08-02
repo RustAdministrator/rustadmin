@@ -114,8 +114,11 @@ void main() {
 
     await tester.tap(find.byTooltip('Display and session options'));
     await tester.pumpAndSettle();
+    expect(find.text('Scale'), findsOneWidget);
     expect(find.text('Scale original'), findsOneWidget);
+    expect(find.text('Image quality'), findsOneWidget);
     expect(find.text('Good image quality'), findsOneWidget);
+    expect(find.text('Codec'), findsOneWidget);
     expect(find.text('Capture'), findsOneWidget);
     expect(find.text('Quality monitor'), findsOneWidget);
     expect(find.text('Clipboard'), findsOneWidget);
@@ -139,6 +142,43 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Text chat'), findsOneWidget);
     expect(find.text('Voice call'), findsOneWidget);
+  });
+
+  testWidgets('reopens inline custom image quality without a popup route', (
+    tester,
+  ) async {
+    await pumpPreview(tester);
+
+    await tester.tap(find.byTooltip('Display and session options'));
+    await tester.pumpAndSettle();
+
+    final custom = find.text('Custom');
+    await tester.ensureVisible(custom);
+    await tester.tap(custom);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const Key('mobile-custom-image-quality-preview')),
+      findsOneWidget,
+    );
+    expect(find.text('FPS mode'), findsOneWidget);
+    expect(find.byType(SegmentedButton<String>), findsOneWidget);
+
+    final balanced = find.text('Balanced');
+    await tester.ensureVisible(balanced);
+    await tester.tap(balanced);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const Key('mobile-custom-image-quality-preview')),
+      findsNothing,
+    );
+
+    await tester.ensureVisible(custom);
+    await tester.tap(custom);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const Key('mobile-custom-image-quality-preview')),
+      findsOneWidget,
+    );
   });
 
   testWidgets('exposes Android peer controls and action menus', (tester) async {

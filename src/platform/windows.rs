@@ -29,7 +29,10 @@ use std::{
     },
     path::*,
     ptr::null_mut,
-    sync::{atomic::Ordering, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 #[cfg(not(debug_assertions))]
@@ -1051,6 +1054,8 @@ fn launch_process_in_session(
 }
 
 fn preferred_server_launch_mode(session_id: DWORD) -> ServerLaunchMode {
+    static ADMINISTRATOR_PROTECTION_LOGGED: AtomicBool = AtomicBool::new(false);
+
     if session_id == u32::MAX {
         return ServerLaunchMode::Privileged;
     }
@@ -1061,7 +1066,9 @@ fn preferred_server_launch_mode(session_id: DWORD) -> ServerLaunchMode {
     if unsafe { is_session_locked(session_id) == TRUE } {
         return ServerLaunchMode::Privileged;
     }
-    if administrator_protection_enabled() {
+    if administrator_protection_enabled()
+        && !ADMINISTRATOR_PROTECTION_LOGGED.swap(true, Ordering::Relaxed)
+    {
         log::debug!(
             "Administrator Protection detected; retaining privileged server and using per-capture user helpers"
         );
@@ -1261,7 +1268,11 @@ pub fn send_sas() {
 
 lazy_static::lazy_static! {
     static ref SUPPRESS: Arc<Mutex<Instant>> = Arc::new(Mutex::new(Instant::now()));
+    static ref LOGON_UI_CAPTURE_CACHE: Arc<Mutex<Option<(Instant, bool)>>> =
+        Arc::new(Mutex::new(None));
 }
+
+const LOGON_UI_CAPTURE_CACHE_TTL: Duration = Duration::from_millis(200);
 
 pub fn desktop_changed() -> bool {
     unsafe { inputDesktopSelected() == FALSE }
@@ -1543,6 +1554,30 @@ pub fn is_logon_ui() -> ResultType<bool> {
     Ok(pids
         .into_iter()
         .any(|pid| get_session_id_of_process(pid) == Some(current_sid)))
+}
+
+/// Capture must not fall back to an interactive-only backend when process
+/// enumeration is unavailable on a desktop transition. The SYSTEM helper is
+/// valid on both desktops, while WGC/DXGI user helpers are not.
+pub fn is_logon_ui_for_capture() -> bool {
+    let now = Instant::now();
+    if let Some((checked_at, is_logon_ui)) = *LOGON_UI_CAPTURE_CACHE.lock().unwrap() {
+        if now.saturating_duration_since(checked_at) < LOGON_UI_CAPTURE_CACHE_TTL {
+            return is_logon_ui;
+        }
+    }
+    let is_logon_ui = match is_logon_ui() {
+        Ok(is_logon_ui) => is_logon_ui,
+        Err(err) => {
+            log::warn!(
+                "failed to query LogonUI for capture routing; using secure desktop helper: {}",
+                err
+            );
+            true
+        }
+    };
+    *LOGON_UI_CAPTURE_CACHE.lock().unwrap() = Some((now, is_logon_ui));
+    is_logon_ui
 }
 
 pub fn is_root() -> bool {

@@ -1030,13 +1030,21 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
           ('original', 'Scale original'),
           ('adaptive', 'Scale adaptive'),
           ('custom', 'Scale custom'),
-        ]),
-        _radioSection('image-quality', 'balanced', const [
-          ('best', 'Good image quality'),
-          ('balanced', 'Balanced'),
-          ('low', 'Optimize reaction time'),
-          ('custom', 'Custom'),
-        ]),
+        ], heading: 'Scale'),
+        _radioSection(
+          'image-quality',
+          'balanced',
+          const [
+            ('best', 'Good image quality'),
+            ('balanced', 'Balanced'),
+            ('low', 'Optimize reaction time'),
+            ('custom', 'Custom'),
+          ],
+          heading: 'Image quality',
+          selectionDetailsBuilder: (value) => value == 'custom'
+              ? _buildCustomImageQualityPreview()
+              : const SizedBox.shrink(),
+        ),
         _radioSection('codec', 'auto', const [
           ('auto', 'Auto (VP9)'),
           ('vp8', 'VP8'),
@@ -1047,7 +1055,7 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
           ('h264-hq', 'H264 HQ'),
           ('h265', 'H265'),
           ('h265-hq', 'H265 HQ'),
-        ]),
+        ], heading: 'Codec'),
         if (!widget.scenario.peerIsAndroid)
           _radioSection('capture-backend', 'auto', const [
             ('auto', 'Auto (DXGI)'),
@@ -1207,11 +1215,13 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
     List<(String, String)> values, {
     String? heading,
     bool enabled = true,
+    Widget Function(String value)? selectionDetailsBuilder,
   }) {
     return MobileRemoteRadioSection(
       id: id,
       value: selected,
       heading: heading == null ? null : Text(heading),
+      selectionDetailsBuilder: selectionDetailsBuilder,
       items: [
         for (final value in values)
           MobileRemoteRadioItem(
@@ -1220,6 +1230,45 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
             onChanged: enabled ? (_) {} : null,
           ),
       ],
+    );
+  }
+
+  Widget _buildCustomImageQualityPreview() {
+    return Padding(
+      key: const Key('mobile-custom-image-quality-preview'),
+      padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Expanded(child: Slider(value: 0.5, onChanged: null)),
+              Text('50% Bitrate'),
+            ],
+          ),
+          const Row(
+            children: [
+              Expanded(child: Slider(value: 0.5, onChanged: null)),
+              Text('30 FPS'),
+            ],
+          ),
+          const Text('FPS mode'),
+          const SizedBox(height: 6),
+          SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<String>(
+              expandedInsets: EdgeInsets.zero,
+              showSelectedIcon: false,
+              segments: const [
+                ButtonSegment(value: 'adaptive', label: Text('Adaptive')),
+                ButtonSegment(value: 'fixed', label: Text('Fixed')),
+              ],
+              selected: const {'adaptive'},
+              onSelectionChanged: (_) {},
+            ),
+          ),
+        ],
+      ),
     );
   }
 

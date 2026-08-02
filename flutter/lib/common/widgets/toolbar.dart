@@ -443,7 +443,8 @@ Future<List<TRadioMenu<String>>> toolbarViewStyle(
 }
 
 Future<List<TRadioMenu<String>>> toolbarImageQuality(
-    BuildContext context, String id, FFI ffi) async {
+    BuildContext context, String id, FFI ffi,
+    {bool openCustomDialog = true}) async {
   final groupValue =
       await bind.sessionGetImageQuality(sessionId: ffi.sessionId) ?? '';
   onChanged(String? value) async {
@@ -473,7 +474,9 @@ Future<List<TRadioMenu<String>>> toolbarImageQuality(
       groupValue: groupValue,
       onChanged: (value) {
         onChanged(value);
-        customImageQualityDialog(ffi.sessionId, id, ffi);
+        if (openCustomDialog) {
+          customImageQualityDialog(ffi.sessionId, id, ffi);
+        }
       },
     ),
   ];

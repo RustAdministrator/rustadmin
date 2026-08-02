@@ -23,6 +23,7 @@ import '../../models/input_model.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../../utils/image.dart';
+import '../widgets/custom_image_quality_widget.dart';
 import '../widgets/dialog.dart';
 import '../widgets/custom_scale_widget.dart';
 
@@ -988,7 +989,7 @@ void showOptions(
   List<TRadioMenu<String>> viewStyleRadios =
       await toolbarViewStyle(context, id, gFFI);
   List<TRadioMenu<String>> imageQualityRadios =
-      await toolbarImageQuality(context, id, gFFI);
+      await toolbarImageQuality(context, id, gFFI, openCustomDialog: false);
   List<TRadioMenu<String>> codecRadios = await toolbarCodec(context, id, gFFI);
   List<TRadioMenu<String>> captureBackendRadios =
       await toolbarCaptureBackend(gFFI);
@@ -1046,13 +1047,31 @@ void showOptions(
           radioSection(
             'view-style',
             viewStyleRadios,
+            heading: Text(translate('Scale')),
             selectionDetailsBuilder: (value) =>
                 value == kRemoteViewStyleCustom
                     ? MobileCustomScaleControls(ffi: gFFI)
                     : const SizedBox.shrink(),
           ),
-          radioSection('image-quality', imageQualityRadios),
-          radioSection('codec', codecRadios, honorEnabled: true),
+          radioSection(
+            'image-quality',
+            imageQualityRadios,
+            heading: Text(translate('Image Quality')),
+            selectionDetailsBuilder: (value) =>
+                value == kRemoteImageQualityCustom
+                    ? MobileCustomImageQualityControls(
+                        key: const ValueKey('mobile-custom-image-quality'),
+                        peerId: id,
+                        ffi: gFFI,
+                      )
+                    : const SizedBox.shrink(),
+          ),
+          radioSection(
+            'codec',
+            codecRadios,
+            heading: Text(translate('Codec')),
+            honorEnabled: true,
+          ),
           radioSection(
             'capture-backend',
             captureBackendRadios,

@@ -72,9 +72,15 @@ const HOST_VIDEO_DIAG_INTERVAL: Duration = Duration::from_secs(5);
 const HQ_REFERENCE_REFRESH_BITRATE_MULTIPLIER: u32 = 3;
 const HQ_REFERENCE_REFRESH_BITRATE_DIVISOR: u32 = 2;
 const HQ_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_secs(6);
-const DELIVERY_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_secs(2);
+// Per-connection recovery is already rate-limited. Keep only a short
+// service-wide coalescing window so one lost refresh cannot create a 2s stall.
+const DELIVERY_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_millis(250);
 #[cfg(windows)]
 const USER_CAPTURE_HELPER_STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(windows)]
+const INSTALLED_SECURE_CAPTURE_HELPER_START_COOLDOWN: Duration = Duration::from_secs(5);
+#[cfg(windows)]
+const SECURE_DESKTOP_EXIT_DEBOUNCE: Duration = Duration::from_millis(500);
 static NEXT_VIDEO_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 
 fn next_video_stream_id() -> u64 {
@@ -242,6 +248,12 @@ lazy_static::lazy_static! {
     pub static ref IS_UAC_RUNNING: Arc<Mutex<bool>> = Default::default();
     pub static ref IS_FOREGROUND_WINDOW_ELEVATED: Arc<Mutex<bool>> = Default::default();
     static ref SCREENSHOTS: Mutex<HashMap<usize, Screenshot>> = Default::default();
+}
+
+#[cfg(windows)]
+lazy_static::lazy_static! {
+    static ref LAST_INSTALLED_SECURE_CAPTURE_HELPER_START: std::sync::Mutex<Option<Instant>> =
+        Default::default();
 }
 
 struct Screenshot {
@@ -572,22 +584,43 @@ pub fn new(source: VideoSource, idx: usize) -> GenericService {
 
 // Capturer object is expensive, avoiding to create it frequently.
 #[cfg(windows)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WindowsCaptureDesktopState {
+    prelogin: bool,
+    locked: bool,
+    desktop_changed: bool,
+    logon_ui: bool,
+}
+
+#[cfg(windows)]
+impl WindowsCaptureDesktopState {
+    fn current() -> Self {
+        Self {
+            prelogin: crate::platform::windows::is_prelogin(),
+            locked: crate::platform::windows::is_locked(),
+            desktop_changed: crate::platform::windows::desktop_changed(),
+            logon_ui: crate::platform::windows::is_logon_ui_for_capture(),
+        }
+    }
+
+    fn requires_secure_capture(self) -> bool {
+        self.prelogin || self.locked || self.desktop_changed || self.logon_ui
+    }
+}
+
+#[cfg(windows)]
 fn should_use_user_capture_helper(portable_service_running: bool, privacy_mode_id: i32) -> bool {
     let privacy_mode_ok = privacy_mode_id == INVALID_PRIVACY_MODE_CONN_ID;
     let helper_disabled = USER_CAPTURE_HELPER_DISABLED.load(Ordering::Relaxed);
     let is_root = crate::platform::is_root();
     let installed = is_installed();
-    let prelogin = crate::platform::windows::is_prelogin();
-    let locked = crate::platform::windows::is_locked();
-    let desktop_changed = crate::platform::windows::desktop_changed();
+    let desktop_state = WindowsCaptureDesktopState::current();
     let use_helper = privacy_mode_ok
         && !helper_disabled
         && !portable_service_running
         && is_root
         && installed
-        && !prelogin
-        && !locked
-        && !desktop_changed;
+        && !desktop_state.requires_secure_capture();
     let mut blocked_by = Vec::new();
     if !privacy_mode_ok {
         blocked_by.push("privacy_mode");
@@ -604,14 +637,17 @@ fn should_use_user_capture_helper(portable_service_running: bool, privacy_mode_i
     if !installed {
         blocked_by.push("not_installed");
     }
-    if prelogin {
+    if desktop_state.prelogin {
         blocked_by.push("prelogin");
     }
-    if locked {
+    if desktop_state.locked {
         blocked_by.push("locked");
     }
-    if desktop_changed {
+    if desktop_state.desktop_changed {
         blocked_by.push("desktop_changed");
+    }
+    if desktop_state.logon_ui {
+        blocked_by.push("logon_ui");
     }
     let blocked_by = if blocked_by.is_empty() {
         "none".to_owned()
@@ -619,16 +655,17 @@ fn should_use_user_capture_helper(portable_service_running: bool, privacy_mode_i
         blocked_by.join(",")
     };
     log::info!(
-        "user capture helper decision: use_helper={}, blocked_by={}, privacy_mode_id={}, portable_service_running={}, is_root={}, installed={}, prelogin={}, locked={}, desktop_changed={}",
+        "user capture helper decision: use_helper={}, blocked_by={}, privacy_mode_id={}, portable_service_running={}, is_root={}, installed={}, prelogin={}, locked={}, desktop_changed={}, logon_ui={}",
         use_helper,
         blocked_by,
         privacy_mode_id,
         portable_service_running,
         is_root,
         installed,
-        prelogin,
-        locked,
-        desktop_changed
+        desktop_state.prelogin,
+        desktop_state.locked,
+        desktop_state.desktop_changed,
+        desktop_state.logon_ui
     );
     use_helper
 }
@@ -636,9 +673,7 @@ fn should_use_user_capture_helper(portable_service_running: bool, privacy_mode_i
 #[cfg(windows)]
 fn can_use_direct_wgc(privacy_mode_id: i32) -> bool {
     privacy_mode_id == INVALID_PRIVACY_MODE_CONN_ID
-        && !crate::platform::windows::is_prelogin()
-        && !crate::platform::windows::is_locked()
-        && !crate::platform::windows::desktop_changed()
+        && !WindowsCaptureDesktopState::current().requires_secure_capture()
 }
 
 #[cfg(windows)]
@@ -752,45 +787,211 @@ fn create_dxgi_priority_capturer(
 }
 
 #[cfg(any(windows, test))]
-fn should_force_portable_secure_capturer(
+fn should_force_privileged_secure_capturer(
     portable_service_running: bool,
+    installed_service_running: bool,
     prelogin: bool,
     locked: bool,
     desktop_changed: bool,
+    logon_ui: bool,
 ) -> bool {
-    portable_service_running && (prelogin || locked || desktop_changed)
+    (portable_service_running || installed_service_running)
+        && (prelogin || locked || desktop_changed || logon_ui)
+}
+
+#[cfg(any(windows, test))]
+fn secure_capture_helper_ready(
+    portable_service_running: bool,
+    installed_secure_helper_ready: bool,
+) -> bool {
+    portable_service_running || installed_secure_helper_ready
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowsCaptureRoute {
+    SecureHelper,
+    Auto,
+    Manual(CaptureBackend),
+}
+
+#[cfg(any(windows, test))]
+fn windows_capture_route(
+    preference: CaptureBackend,
+    secure_desktop_requires_helper: bool,
+) -> WindowsCaptureRoute {
+    if secure_desktop_requires_helper {
+        return WindowsCaptureRoute::SecureHelper;
+    }
+    match preference {
+        CaptureBackend::CaptureBackendDxgi
+        | CaptureBackend::CaptureBackendWgc
+        | CaptureBackend::CaptureBackendWinMag
+        | CaptureBackend::CaptureBackendGdi => WindowsCaptureRoute::Manual(preference),
+        CaptureBackend::CaptureBackendAuto | CaptureBackend::CaptureBackendNotSet => {
+            WindowsCaptureRoute::Auto
+        }
+    }
+}
+
+#[cfg(windows)]
+fn installed_service_can_use_secure_capture_helper() -> bool {
+    crate::platform::is_root() && is_installed()
+}
+
+#[cfg(windows)]
+fn ensure_installed_secure_capture_helper(
+    prelogin: bool,
+    locked: bool,
+    desktop_changed: bool,
+    logon_ui: bool,
+) -> bool {
+    if !should_force_privileged_secure_capturer(
+        false,
+        installed_service_can_use_secure_capture_helper(),
+        prelogin,
+        locked,
+        desktop_changed,
+        logon_ui,
+    ) {
+        return false;
+    }
+    if crate::portable_service::client::running() {
+        return true;
+    }
+    if crate::portable_service::client::active() {
+        log::debug!(
+            "installed service secure desktop capture helper is still starting: lifecycle={:?}",
+            crate::portable_service::client::lifecycle()
+        );
+        return false;
+    }
+    if !crate::portable_service::client::secure_capture_recovery_allowed() {
+        log::error!(
+            "installed service secure desktop capture helper recovery is exhausted; waiting for desktop state reset"
+        );
+        return false;
+    }
+    let now = Instant::now();
+    {
+        let mut last_start = LAST_INSTALLED_SECURE_CAPTURE_HELPER_START.lock().unwrap();
+        if last_start.is_some_and(|last| {
+            now.saturating_duration_since(last) < INSTALLED_SECURE_CAPTURE_HELPER_START_COOLDOWN
+        }) {
+            return false;
+        }
+        *last_start = Some(now);
+    }
+    match crate::portable_service::client::start_portable_service(
+        crate::portable_service::client::StartPara::SecureDesktop,
+    ) {
+        Ok(()) => {
+            log::info!(
+                "installed service secure desktop capture helper started: prelogin={}, locked={}, desktop_changed={}, logon_ui={}",
+                prelogin,
+                locked,
+                desktop_changed,
+                logon_ui
+            );
+            crate::portable_service::client::running()
+        }
+        Err(err) => {
+            log::warn!(
+                "failed to start installed service secure desktop capture helper: prelogin={}, locked={}, desktop_changed={}, logon_ui={}, err={}",
+                prelogin,
+                locked,
+                desktop_changed,
+                logon_ui,
+                err
+            );
+            false
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        should_force_portable_secure_capturer, stamp_video_frame, HqReferenceRefreshPolicy,
-        ReferenceRefreshReason, VideoFrameController, VideoSource, VideoStreamKey,
+        secure_capture_helper_ready, should_force_privileged_secure_capturer, stamp_video_frame,
+        windows_capture_route, HqReferenceRefreshPolicy, ReferenceRefreshReason,
+        VideoFrameController, VideoSource, VideoStreamKey, WindowsCaptureRoute,
         DELIVERY_REFERENCE_REFRESH_COOLDOWN, HQ_REFERENCE_REFRESH_COOLDOWN,
     };
-    use hbb_common::message_proto::VideoFrame;
+    use hbb_common::message_proto::{option_message::CaptureBackend, VideoFrame};
     use std::{
         collections::HashSet,
         time::{Duration, Instant},
     };
 
     #[test]
-    fn test_portable_secure_capture_routing_requires_secure_desktop() {
-        assert!(!should_force_portable_secure_capturer(
-            false, true, true, true
+    fn test_privileged_secure_capture_routing_requires_secure_desktop() {
+        assert!(!should_force_privileged_secure_capturer(
+            false, false, true, true, true, true
         ));
-        assert!(!should_force_portable_secure_capturer(
-            true, false, false, false
+        assert!(!should_force_privileged_secure_capturer(
+            true, false, false, false, false, false
         ));
-        assert!(should_force_portable_secure_capturer(
-            true, true, false, false
+        assert!(should_force_privileged_secure_capturer(
+            true, false, true, false, false, false
         ));
-        assert!(should_force_portable_secure_capturer(
-            true, false, true, false
+        assert!(should_force_privileged_secure_capturer(
+            true, false, false, true, false, false
         ));
-        assert!(should_force_portable_secure_capturer(
-            true, false, false, true
+        assert!(should_force_privileged_secure_capturer(
+            true, false, false, false, true, false
         ));
+        assert!(should_force_privileged_secure_capturer(
+            false, true, false, true, false, false
+        ));
+        assert!(should_force_privileged_secure_capturer(
+            false, true, false, false, false, true
+        ));
+    }
+
+    #[test]
+    fn test_secure_capture_waits_for_authenticated_helper_readiness() {
+        assert!(!secure_capture_helper_ready(false, false));
+        assert!(secure_capture_helper_ready(true, false));
+        assert!(secure_capture_helper_ready(false, true));
+    }
+
+    #[test]
+    fn secure_capture_route_overrides_manual_backend() {
+        assert_eq!(
+            windows_capture_route(CaptureBackend::CaptureBackendWgc, true),
+            WindowsCaptureRoute::SecureHelper
+        );
+        assert_eq!(
+            windows_capture_route(CaptureBackend::CaptureBackendGdi, true),
+            WindowsCaptureRoute::SecureHelper
+        );
+    }
+
+    #[test]
+    fn interactive_capture_route_preserves_manual_backend() {
+        for backend in [
+            CaptureBackend::CaptureBackendDxgi,
+            CaptureBackend::CaptureBackendWgc,
+            CaptureBackend::CaptureBackendWinMag,
+            CaptureBackend::CaptureBackendGdi,
+        ] {
+            assert_eq!(
+                windows_capture_route(backend, false),
+                WindowsCaptureRoute::Manual(backend)
+            );
+        }
+    }
+
+    #[test]
+    fn unset_capture_route_uses_auto() {
+        assert_eq!(
+            windows_capture_route(CaptureBackend::CaptureBackendNotSet, false),
+            WindowsCaptureRoute::Auto
+        );
+        assert_eq!(
+            windows_capture_route(CaptureBackend::CaptureBackendAuto, false),
+            WindowsCaptureRoute::Auto
+        );
     }
 
     #[test]
@@ -899,7 +1100,7 @@ mod tests {
             Some(ReferenceRefreshReason::DeliveryRecovery)
         );
         assert_eq!(
-            policy.request_delivery_refresh(true, now + Duration::from_millis(500)),
+            policy.request_delivery_refresh(true, now + Duration::from_millis(100)),
             None
         );
         assert_eq!(
@@ -931,44 +1132,151 @@ fn create_gdi_priority_capturer(current: usize) -> ResultType<Box<dyn TraitCaptu
 }
 
 #[cfg(windows)]
+const PORTABLE_SYSTEM_HELPER_CAPTURE_BACKEND: &str = "Portable SYSTEM helper capture";
+
+#[cfg(windows)]
+fn create_privileged_secure_capturer(
+    display: Display,
+    current: usize,
+) -> ResultType<Box<dyn TraitCapturer>> {
+    if !crate::portable_service::client::ready_for_capture() {
+        bail!(
+            "secure desktop helper is not IPC-ready: lifecycle={:?}",
+            crate::portable_service::client::lifecycle()
+        );
+    }
+    // `true` forces the authenticated portable-service shared-memory route. Do not
+    // pass this state through the interactive user WGC/DXGI helper selection.
+    let capturer = crate::portable_service::client::create_capturer(current, display, true)?;
+    if capturer.capture_backend() != PORTABLE_SYSTEM_HELPER_CAPTURE_BACKEND {
+        bail!(
+            "secure desktop capture refused non-privileged backend: {}",
+            capturer.capture_backend()
+        );
+    }
+    Ok(capturer)
+}
+
+#[cfg(windows)]
 fn create_windows_capturer(
     privacy_mode_id: i32,
     display: Display,
     current: usize,
     portable_service_running: bool,
+    preference: CaptureBackend,
 ) -> ResultType<Box<dyn TraitCapturer>> {
     let origin = display.origin();
     let width = display.width();
     let height = display.height();
+
+    let desktop_state = WindowsCaptureDesktopState::current();
+    if !desktop_state.requires_secure_capture() {
+        crate::portable_service::client::reset_secure_capture_recovery_failures(
+            "interactive desktop selected",
+        );
+    }
+    let installed_service_can_secure_capture = installed_service_can_use_secure_capture_helper();
+    let secure_desktop_requires_helper = should_force_privileged_secure_capturer(
+        portable_service_running,
+        installed_service_can_secure_capture,
+        desktop_state.prelogin,
+        desktop_state.locked,
+        desktop_state.desktop_changed,
+        desktop_state.logon_ui,
+    );
+    let installed_secure_helper_ready =
+        if portable_service_running || !secure_desktop_requires_helper {
+            false
+        } else {
+            ensure_installed_secure_capture_helper(
+                desktop_state.prelogin,
+                desktop_state.locked,
+                desktop_state.desktop_changed,
+                desktop_state.logon_ui,
+            )
+        };
+    let route = windows_capture_route(preference, secure_desktop_requires_helper);
+    if route == WindowsCaptureRoute::SecureHelper {
+        log::info!(
+            "capture backend selected: privileged SYSTEM helper, requested={:?}, prelogin={}, locked={}, desktop_changed={}, logon_ui={}, portable_service_running={}, installed_service_can_secure_capture={}, installed_secure_helper_ready={}, lifecycle={:?}",
+            preference,
+            desktop_state.prelogin,
+            desktop_state.locked,
+            desktop_state.desktop_changed,
+            desktop_state.logon_ui,
+            portable_service_running,
+            installed_service_can_secure_capture,
+            installed_secure_helper_ready,
+            crate::portable_service::client::lifecycle()
+        );
+        if !secure_capture_helper_ready(portable_service_running, installed_secure_helper_ready) {
+            bail!(
+                "secure desktop helper is starting or unavailable: lifecycle={:?}",
+                crate::portable_service::client::lifecycle()
+            );
+        }
+        return create_privileged_secure_capturer(display, current);
+    }
+
+    if let WindowsCaptureRoute::Manual(requested) = route {
+        let requested_result = match requested {
+            CaptureBackend::CaptureBackendWgc => create_wgc_priority_capturer(
+                privacy_mode_id,
+                current,
+                portable_service_running,
+                width,
+                height,
+            ),
+            CaptureBackend::CaptureBackendWinMag => {
+                create_magnifier_priority_capturer(privacy_mode_id, origin, width, height)
+            }
+            CaptureBackend::CaptureBackendGdi => create_gdi_priority_capturer(current),
+            CaptureBackend::CaptureBackendDxgi => (|| {
+                let mut displays = Display::all()
+                    .with_context(|| "Failed to enumerate displays for manual DXGI capture")?;
+                if displays.len() <= current {
+                    bail!(
+                        "Failed to get display {} for manual DXGI capture, display_count={}",
+                        current,
+                        displays.len()
+                    );
+                }
+                create_dxgi_priority_capturer(
+                    privacy_mode_id,
+                    displays.remove(current),
+                    current,
+                    portable_service_running,
+                )
+            })(),
+            CaptureBackend::CaptureBackendAuto | CaptureBackend::CaptureBackendNotSet => {
+                unreachable!("automatic capture routes are handled separately")
+            }
+        };
+        match requested_result {
+            Ok(capturer) => {
+                log::info!(
+                    "capture manual backend selected: requested={:?}, effective={}",
+                    requested,
+                    capturer.capture_backend()
+                );
+                return Ok(capturer);
+            }
+            Err(err) => {
+                log::warn!(
+                    "capture manual backend failed; falling back to Auto: requested={:?}, err={}",
+                    requested,
+                    err
+                );
+            }
+        }
+    }
+
     log::info!(
         "capture auto backend priority requested: display={}, size={}x{}, priority=WGC,WinMag,DXGI,GDI",
         current,
         width,
         height
     );
-
-    let prelogin = crate::platform::windows::is_prelogin();
-    let locked = crate::platform::windows::is_locked();
-    let desktop_changed = crate::platform::windows::desktop_changed();
-    if should_force_portable_secure_capturer(
-        portable_service_running,
-        prelogin,
-        locked,
-        desktop_changed,
-    ) {
-        log::info!(
-            "capture auto backend selected: Portable SYSTEM helper before WGC/WinMag, prelogin={}, locked={}, desktop_changed={}",
-            prelogin,
-            locked,
-            desktop_changed
-        );
-        return create_dxgi_priority_capturer(
-            privacy_mode_id,
-            display,
-            current,
-            portable_service_running,
-        );
-    }
 
     match create_wgc_priority_capturer(
         privacy_mode_id,
@@ -1017,9 +1325,14 @@ fn create_capturer(
     display: Display,
     current: usize,
     portable_service_running: bool,
+    capture_backend_preference: CaptureBackend,
 ) -> ResultType<Box<dyn TraitCapturer>> {
     #[cfg(not(windows))]
-    let _ = (current, portable_service_running);
+    let _ = (
+        current,
+        portable_service_running,
+        capture_backend_preference,
+    );
     #[cfg(not(windows))]
     let c: Option<Box<dyn TraitCapturer>> = None;
     #[cfg(windows)]
@@ -1048,6 +1361,7 @@ fn create_capturer(
                     display,
                     current,
                     portable_service_running,
+                    capture_backend_preference,
                 );
             }
             #[cfg(not(windows))]
@@ -1079,7 +1393,13 @@ pub fn test_create_capturer(
                     )
                 } else {
                     let display = displays.remove(display_idx);
-                    match create_capturer(privacy_mode_id, display, display_idx, false) {
+                    match create_capturer(
+                        privacy_mode_id,
+                        display,
+                        display_idx,
+                        false,
+                        CaptureBackend::CaptureBackendAuto,
+                    ) {
                         Ok(_) => return "".to_owned(),
                         Err(e) => e,
                     }
@@ -1196,12 +1516,9 @@ fn get_capturer_monitor(
         if capturer_privacy_mode_id != INVALID_PRIVACY_MODE_CONN_ID
             && is_current_privacy_mode_impl(PRIVACY_MODE_IMPL_WIN_MAG)
         {
-            if crate::platform::windows::is_prelogin()
-                || crate::platform::windows::desktop_changed()
-                || (crate::platform::is_root() && crate::platform::windows::is_locked())
-            {
+            if WindowsCaptureDesktopState::current().requires_secure_capture() {
                 log::warn!(
-                    "WinMag privacy capture disabled on prelogin/service-locked/changed desktop; using normal service capture"
+                    "WinMag privacy capture disabled on secure desktop; using normal service capture"
                 );
                 capturer_privacy_mode_id = INVALID_PRIVACY_MODE_CONN_ID;
             }
@@ -1231,8 +1548,9 @@ fn get_capturer_monitor(
         display,
         current,
         portable_service_running,
+        *CAPTURE_BACKEND_PREFERENCE.lock().unwrap(),
     )?;
-    let mut c = CapturerInfo {
+    let c = CapturerInfo {
         origin,
         width,
         height,
@@ -1242,8 +1560,6 @@ fn get_capturer_monitor(
         _capturer_privacy_mode_id: capturer_privacy_mode_id,
         capturer,
     };
-    #[cfg(windows)]
-    apply_capture_backend_preference(&mut c);
     Ok(c)
 }
 
@@ -1299,145 +1615,19 @@ fn get_capturer(
 }
 
 #[cfg(windows)]
-fn display_for_current(c: &CapturerInfo) -> Option<Display> {
-    let mut displays = match Display::all() {
-        Ok(displays) => displays,
-        Err(err) => {
-            log::warn!(
-                "capture backend override failed to enumerate displays: {}",
-                err
-            );
-            return None;
-        }
-    };
-    if displays.len() <= c.current {
-        log::warn!(
-            "capture backend override failed: current={}, display_count={}",
-            c.current,
-            displays.len()
-        );
-        return None;
-    }
-    Some(displays.remove(c.current))
-}
-
-#[cfg(windows)]
-fn apply_capture_backend_preference(c: &mut CapturerInfo) {
-    if c._capturer_privacy_mode_id != INVALID_PRIVACY_MODE_CONN_ID {
-        return;
-    }
-    let preference = *CAPTURE_BACKEND_PREFERENCE.lock().unwrap();
-    match preference {
-        CaptureBackend::CaptureBackendAuto | CaptureBackend::CaptureBackendNotSet => {}
-        CaptureBackend::CaptureBackendDxgi
-        | CaptureBackend::CaptureBackendWgc
-        | CaptureBackend::CaptureBackendWinMag
-        | CaptureBackend::CaptureBackendGdi => {
-            if crate::platform::windows::is_prelogin()
-                || crate::platform::windows::desktop_changed()
-                || (crate::platform::is_root() && crate::platform::windows::is_locked())
-            {
-                log::info!(
-                    "capture backend override deferred on secure desktop: requested={:?}",
-                    preference
-                );
-                return;
-            }
-        }
-    }
-
-    match preference {
-        CaptureBackend::CaptureBackendAuto | CaptureBackend::CaptureBackendNotSet => {}
-        CaptureBackend::CaptureBackendDxgi => {
-            let Some(display) = display_for_current(c) else {
-                return;
-            };
-            match create_dxgi_priority_capturer(
-                c._capturer_privacy_mode_id,
-                display,
-                c.current,
-                crate::portable_service::client::running(),
-            ) {
-                Ok(capturer) => {
-                    c.capturer = capturer;
-                    log::info!(
-                        "capture backend override applied: DXGI, effective_backend={}",
-                        c.capture_backend()
-                    );
-                }
-                Err(err) => {
-                    log::warn!("capture backend override DXGI failed: {}", err);
-                }
-            }
-        }
-        CaptureBackend::CaptureBackendWgc => {
-            log::info!(
-                "capture backend override requested: WGC, current_backend={}",
-                c.capture_backend()
-            );
-            match create_wgc_priority_capturer(
-                c._capturer_privacy_mode_id,
-                c.current,
-                crate::portable_service::client::running(),
-                c.width,
-                c.height,
-            ) {
-                Ok(wgc) => {
-                    c.capturer = wgc;
-                    log::info!("capture backend override applied: WGC");
-                }
-                Err(err) => {
-                    log::warn!("capture backend override WGC failed: {}", err);
-                }
-            }
-        }
-        CaptureBackend::CaptureBackendWinMag => {
-            match create_magnifier_priority_capturer(
-                c._capturer_privacy_mode_id,
-                c.origin,
-                c.width,
-                c.height,
-            ) {
-                Ok(mag) => {
-                    c.capturer = mag;
-                    log::info!(
-                        "capture backend override applied: WinMag, origin={:?}, width={}, height={}",
-                        c.origin,
-                        c.width,
-                        c.height
-                    );
-                }
-                Err(err) => {
-                    log::warn!("capture backend override WinMag failed: {}", err);
-                }
-            }
-        }
-        CaptureBackend::CaptureBackendGdi => match create_gdi_priority_capturer(c.current) {
-            Ok(gdi) => {
-                c.capturer = gdi;
-                log::info!("capture backend override applied: GDI");
-            }
-            Err(err) => {
-                log::warn!("capture backend override GDI failed: {}", err);
-            }
-        },
-    }
-}
-
-#[cfg(windows)]
 fn can_try_magnifier_fallback(reason: &str) -> bool {
-    let prelogin = crate::platform::windows::is_prelogin();
-    let locked = crate::platform::windows::is_locked();
-    let desktop_changed = crate::platform::windows::desktop_changed();
+    let desktop_state = WindowsCaptureDesktopState::current();
     let local_system = crate::platform::is_root();
-    let can_try = !prelogin && !desktop_changed && !(local_system && locked);
+    let can_try =
+        !desktop_state.requires_secure_capture() && !(local_system && desktop_state.locked);
     if !can_try {
         log::info!(
-            "capture magnifier fallback skipped: reason={}, prelogin={}, locked={}, desktop_changed={}, local_system={}",
+            "capture magnifier fallback skipped: reason={}, prelogin={}, locked={}, desktop_changed={}, logon_ui={}, local_system={}",
             reason,
-            prelogin,
-            locked,
-            desktop_changed,
+            desktop_state.prelogin,
+            desktop_state.locked,
+            desktop_state.desktop_changed,
+            desktop_state.logon_ui,
             local_system
         );
     }
@@ -1483,14 +1673,15 @@ fn try_recreate_magnifier_capture(c: &mut CapturerInfo, reason: &str) -> bool {
     if c._capturer_privacy_mode_id != INVALID_PRIVACY_MODE_CONN_ID || !c.is_mag() {
         return false;
     }
-    let prelogin = crate::platform::windows::is_prelogin();
-    let locked_service = crate::platform::is_root() && crate::platform::windows::is_locked();
-    if prelogin || locked_service {
+    let desktop_state = WindowsCaptureDesktopState::current();
+    if desktop_state.requires_secure_capture() {
         log::info!(
-            "capture magnifier recreate skipped: reason={}, prelogin={}, locked_service={}",
+            "capture magnifier recreate skipped: reason={}, prelogin={}, locked={}, desktop_changed={}, logon_ui={}",
             reason,
-            prelogin,
-            locked_service
+            desktop_state.prelogin,
+            desktop_state.locked,
+            desktop_state.desktop_changed,
+            desktop_state.logon_ui
         );
         return false;
     }
@@ -1744,11 +1935,11 @@ fn run(vs: VideoService) -> ResultType<()> {
     #[cfg(windows)]
     let mut mag_no_frame_count = 0u32;
     #[cfg(windows)]
-    let mut last_desktop_capture_state = (
-        crate::platform::windows::is_prelogin(),
-        crate::platform::windows::is_locked(),
-        crate::platform::windows::desktop_changed(),
-    );
+    let mut last_desktop_capture_state = WindowsCaptureDesktopState::current();
+    #[cfg(windows)]
+    let mut last_secure_desktop_seen = last_desktop_capture_state
+        .requires_secure_capture()
+        .then(Instant::now);
     #[cfg(windows)]
     log::info!(
         "gdi: {}, mag: {}, user_helper: {}, cpu_only: {}",
@@ -1900,62 +2091,134 @@ fn run(vs: VideoService) -> ResultType<()> {
         }
         #[cfg(windows)]
         {
-            let desktop_state = (
-                crate::platform::windows::is_prelogin(),
-                crate::platform::windows::is_locked(),
-                crate::platform::windows::desktop_changed(),
-            );
-            let desktop_changed = desktop_state.2;
+            let desktop_state = WindowsCaptureDesktopState::current();
+            let desktop_changed = desktop_state.desktop_changed;
+            if desktop_state.requires_secure_capture() {
+                last_secure_desktop_seen = Some(Instant::now());
+            }
             let portable_service_running = crate::portable_service::client::running();
-            if portable_service_running && desktop_state != last_desktop_capture_state {
+            let installed_secure_helper_active = if portable_service_running {
+                false
+            } else {
+                ensure_installed_secure_capture_helper(
+                    desktop_state.prelogin,
+                    desktop_state.locked,
+                    desktop_state.desktop_changed,
+                    desktop_state.logon_ui,
+                )
+            };
+            let secure_capture_helper_active =
+                portable_service_running || installed_secure_helper_active;
+            let should_track_privileged_secure_capture =
+                portable_service_running || installed_service_can_use_secure_capture_helper();
+            if should_track_privileged_secure_capture && desktop_state != last_desktop_capture_state
+            {
+                let must_use_privileged_secure_capture = should_force_privileged_secure_capturer(
+                    portable_service_running,
+                    installed_service_can_use_secure_capture_helper(),
+                    desktop_state.prelogin,
+                    desktop_state.locked,
+                    desktop_state.desktop_changed,
+                    desktop_state.logon_ui,
+                );
+                let using_privileged_secure_capture =
+                    c.capture_backend() == PORTABLE_SYSTEM_HELPER_CAPTURE_BACKEND;
                 log::info!(
-                    "portable capture desktop state changed: prelogin {}->{}, locked {}->{}, desktop_changed {}->{}",
-                    last_desktop_capture_state.0,
-                    desktop_state.0,
-                    last_desktop_capture_state.1,
-                    desktop_state.1,
-                    last_desktop_capture_state.2,
-                    desktop_state.2
+                    "privileged secure capture desktop state changed: prelogin {}->{}, locked {}->{}, desktop_changed {}->{}, logon_ui {}->{}, portable_service_running={}, installed_secure_helper_active={}",
+                    last_desktop_capture_state.prelogin,
+                    desktop_state.prelogin,
+                    last_desktop_capture_state.locked,
+                    desktop_state.locked,
+                    last_desktop_capture_state.desktop_changed,
+                    desktop_state.desktop_changed,
+                    last_desktop_capture_state.logon_ui,
+                    desktop_state.logon_ui,
+                    portable_service_running,
+                    installed_secure_helper_active
                 );
                 last_desktop_capture_state = desktop_state;
+                if must_use_privileged_secure_capture && !using_privileged_secure_capture {
+                    log::info!(
+                        "secure desktop requires SYSTEM helper capture; recreating current backend={}",
+                        c.capture_backend()
+                    );
+                    bail!("SWITCH");
+                }
+                let secure_exit_debounced = !desktop_state.requires_secure_capture()
+                    && last_secure_desktop_seen.is_some_and(|last_seen| {
+                        last_seen.elapsed() < SECURE_DESKTOP_EXIT_DEBOUNCE
+                    });
+                if !must_use_privileged_secure_capture
+                    && using_privileged_secure_capture
+                    && !secure_exit_debounced
+                {
+                    let stop_requested =
+                        crate::portable_service::client::stop_secure_capture_helper(
+                            "interactive desktop restored",
+                        );
+                    log::info!(
+                        "interactive desktop restored; leaving SYSTEM helper capture, stop_requested={}",
+                        stop_requested
+                    );
+                    bail!("SWITCH");
+                }
                 if c.is_mag() {
-                    if should_force_portable_secure_capturer(
+                    if should_force_privileged_secure_capturer(
                         portable_service_running,
-                        desktop_state.0,
-                        desktop_state.1,
-                        desktop_state.2,
+                        installed_service_can_use_secure_capture_helper(),
+                        desktop_state.prelogin,
+                        desktop_state.locked,
+                        desktop_state.desktop_changed,
+                        desktop_state.logon_ui,
                     ) {
                         log::info!(
-                            "portable secure desktop while using magnifier; switch to helper capture"
+                            "secure desktop while using magnifier; switch to privileged helper capture"
                         );
                         bail!("SWITCH");
                     }
-                    if !desktop_state.0 && !desktop_state.1 && !desktop_state.2 {
+                    if !desktop_state.requires_secure_capture() {
                         log::info!(
-                            "portable returned to user desktop while using magnifier; switch capture backend"
+                            "returned to user desktop while using magnifier; switch capture backend"
                         );
                         bail!("SWITCH");
                     }
                     if try_recreate_magnifier_capture(&mut c, "desktop_state_mag_recreate") {
                         log::info!(
-                            "portable desktop state changed while using magnifier; recreated magnifier"
+                            "desktop state changed while using magnifier; recreated magnifier"
                         );
                     } else {
                         log::warn!(
-                            "portable desktop state changed while using magnifier; keep magnifier on locked/secure desktop"
+                            "desktop state changed while using magnifier; keep magnifier on locked/secure desktop"
                         );
                     }
-                } else {
+                } else if !secure_exit_debounced {
                     if desktop_changed {
                         log::info!(
-                            "portable input desktop changed; switch capture backend from current backend"
+                            "input desktop changed; switch capture backend from current backend"
                         );
                     }
-                    log::info!("portable desktop state changed; switch capture backend");
+                    log::info!("desktop state changed; switch capture backend");
                     bail!("SWITCH");
                 }
             }
-            if desktop_changed && !portable_service_running {
+            let using_privileged_secure_capture =
+                c.capture_backend() == PORTABLE_SYSTEM_HELPER_CAPTURE_BACKEND;
+            if using_privileged_secure_capture
+                && !desktop_state.requires_secure_capture()
+                && last_secure_desktop_seen
+                    .is_some_and(|last_seen| last_seen.elapsed() >= SECURE_DESKTOP_EXIT_DEBOUNCE)
+            {
+                let stop_requested = crate::portable_service::client::stop_secure_capture_helper(
+                    "secure desktop exit stabilized",
+                );
+                log::info!(
+                    "secure desktop exit stabilized; leaving SYSTEM helper capture after {}ms, stop_requested={}",
+                    SECURE_DESKTOP_EXIT_DEBOUNCE.as_millis(),
+                    stop_requested
+                );
+                bail!("SWITCH");
+            }
+            if desktop_changed && !secure_capture_helper_active {
                 bail!("Desktop changed");
             }
         }
@@ -2106,28 +2369,42 @@ fn run(vs: VideoService) -> ResultType<()> {
                 if c.is_mag() {
                     mag_no_frame_count = mag_no_frame_count.saturating_add(1);
                     let portable_service_running = crate::portable_service::client::running();
-                    let prelogin = crate::platform::windows::is_prelogin();
-                    let locked = crate::platform::windows::is_locked();
-                    let desktop_changed = crate::platform::windows::desktop_changed();
-                    if should_force_portable_secure_capturer(
-                        portable_service_running,
-                        prelogin,
-                        locked,
-                        desktop_changed,
+                    let desktop_state = WindowsCaptureDesktopState::current();
+                    let installed_secure_helper_active = if portable_service_running {
+                        false
+                    } else {
+                        ensure_installed_secure_capture_helper(
+                            desktop_state.prelogin,
+                            desktop_state.locked,
+                            desktop_state.desktop_changed,
+                            desktop_state.logon_ui,
+                        )
+                    };
+                    let secure_capture_helper_active =
+                        portable_service_running || installed_secure_helper_active;
+                    if should_force_privileged_secure_capturer(
+                        secure_capture_helper_active,
+                        false,
+                        desktop_state.prelogin,
+                        desktop_state.locked,
+                        desktop_state.desktop_changed,
+                        desktop_state.logon_ui,
                     ) {
                         log::info!(
-                            "portable magnifier produced no frames on secure desktop; switch to helper capture, no_frame_count={}",
-                            mag_no_frame_count
+                            "magnifier produced no frames on secure desktop; switch to privileged helper capture, no_frame_count={}, portable_service_running={}, installed_secure_helper_active={}",
+                            mag_no_frame_count,
+                            portable_service_running,
+                            installed_secure_helper_active
                         );
                         bail!("SWITCH");
                     }
-                    if portable_service_running
-                        && (locked || desktop_changed)
+                    if secure_capture_helper_active
+                        && desktop_state.requires_secure_capture()
                         && (mag_no_frame_count == 10 || mag_no_frame_count % 60 == 0)
                         && try_recreate_magnifier_capture(&mut c, "mag_no_frame_recreate")
                     {
                         log::info!(
-                            "portable magnifier produced no frames; recreated magnifier, no_frame_count={}",
+                            "magnifier produced no frames; recreated magnifier, no_frame_count={}",
                             mag_no_frame_count
                         );
                         mag_no_frame_count = 0;
@@ -2226,31 +2503,42 @@ fn run(vs: VideoService) -> ResultType<()> {
                 #[cfg(windows)]
                 if c.is_mag() {
                     let portable_service_running = crate::portable_service::client::running();
-                    let prelogin = crate::platform::windows::is_prelogin();
-                    let locked = crate::platform::windows::is_locked();
-                    let desktop_changed = crate::platform::windows::desktop_changed();
-                    if should_force_portable_secure_capturer(
-                        portable_service_running,
-                        prelogin,
-                        locked,
-                        desktop_changed,
+                    let desktop_state = WindowsCaptureDesktopState::current();
+                    let installed_secure_helper_active = if portable_service_running {
+                        false
+                    } else {
+                        ensure_installed_secure_capture_helper(
+                            desktop_state.prelogin,
+                            desktop_state.locked,
+                            desktop_state.desktop_changed,
+                            desktop_state.logon_ui,
+                        )
+                    };
+                    let secure_capture_helper_active =
+                        portable_service_running || installed_secure_helper_active;
+                    if should_force_privileged_secure_capturer(
+                        secure_capture_helper_active,
+                        false,
+                        desktop_state.prelogin,
+                        desktop_state.locked,
+                        desktop_state.desktop_changed,
+                        desktop_state.logon_ui,
                     ) {
                         log::info!(
-                            "portable magnifier capture error on secure desktop; switch to helper capture: {:?}",
-                            err
+                            "magnifier capture error on secure desktop; switch to privileged helper capture: {:?}, portable_service_running={}, installed_secure_helper_active={}",
+                            err,
+                            portable_service_running,
+                            installed_secure_helper_active
                         );
                         bail!("SWITCH");
                     }
-                    if portable_service_running && (locked || desktop_changed) {
+                    if secure_capture_helper_active && desktop_state.requires_secure_capture() {
                         if try_recreate_magnifier_capture(&mut c, "mag_error_recreate") {
-                            log::info!(
-                                "portable magnifier capture error; recreated magnifier: {:?}",
-                                err
-                            );
+                            log::info!("magnifier capture error; recreated magnifier: {:?}", err);
                             continue;
                         }
                         log::warn!(
-                            "portable magnifier capture error; keep magnifier on secure/changed desktop: {:?}",
+                            "magnifier capture error; keep magnifier on secure/changed desktop: {:?}",
                             err
                         );
                         continue;

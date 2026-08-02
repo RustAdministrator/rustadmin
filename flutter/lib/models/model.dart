@@ -4085,9 +4085,16 @@ class QualityMonitorData {
   String? quicProtocol;
   String? quicVideoTransport;
   String? quicReassemblyDrops;
+  String? quicReassemblyReasons;
+  String? quicReassemblyFrame;
+  String? quicReassemblyTiming;
   String? quicKeyframeRequests;
   String? quicReceiverRecovery;
   String? quicSenderRecovery;
+  String? quicSenderAdmission;
+  String? quicSenderFrame;
+  String? quicSenderSpace;
+  String? quicDisposableDrops;
   String? hostVersion;
   String? clientVersion;
   String? decoder;
@@ -4200,9 +4207,16 @@ class QualityMonitorModel with ChangeNotifier {
     _data.quicProtocol = null;
     _data.quicVideoTransport = null;
     _data.quicReassemblyDrops = null;
+    _data.quicReassemblyReasons = null;
+    _data.quicReassemblyFrame = null;
+    _data.quicReassemblyTiming = null;
     _data.quicKeyframeRequests = null;
     _data.quicReceiverRecovery = null;
     _data.quicSenderRecovery = null;
+    _data.quicSenderAdmission = null;
+    _data.quicSenderFrame = null;
+    _data.quicSenderSpace = null;
+    _data.quicDisposableDrops = null;
     _data.hostVersion = null;
     _data.clientVersion = null;
     _data.decoder = null;
@@ -4430,6 +4444,18 @@ class QualityMonitorModel with ChangeNotifier {
           (evt['quic_reassembly_drops'] as String).isNotEmpty) {
         _data.quicReassemblyDrops = evt['quic_reassembly_drops'];
       }
+      if (evt.containsKey('quic_reassembly_reasons') &&
+          (evt['quic_reassembly_reasons'] as String).isNotEmpty) {
+        _data.quicReassemblyReasons = evt['quic_reassembly_reasons'];
+      }
+      if (evt.containsKey('quic_reassembly_frame') &&
+          (evt['quic_reassembly_frame'] as String).isNotEmpty) {
+        _data.quicReassemblyFrame = evt['quic_reassembly_frame'];
+      }
+      if (evt.containsKey('quic_reassembly_timing') &&
+          (evt['quic_reassembly_timing'] as String).isNotEmpty) {
+        _data.quicReassemblyTiming = evt['quic_reassembly_timing'];
+      }
       if (evt.containsKey('quic_keyframe_requests') &&
           (evt['quic_keyframe_requests'] as String).isNotEmpty) {
         _data.quicKeyframeRequests = evt['quic_keyframe_requests'];
@@ -4441,6 +4467,22 @@ class QualityMonitorModel with ChangeNotifier {
       if (evt.containsKey('quic_sender_recovery') &&
           (evt['quic_sender_recovery'] as String).isNotEmpty) {
         _data.quicSenderRecovery = evt['quic_sender_recovery'];
+      }
+      if (evt.containsKey('quic_sender_admission') &&
+          (evt['quic_sender_admission'] as String).isNotEmpty) {
+        _data.quicSenderAdmission = evt['quic_sender_admission'];
+      }
+      if (evt.containsKey('quic_sender_frame') &&
+          (evt['quic_sender_frame'] as String).isNotEmpty) {
+        _data.quicSenderFrame = evt['quic_sender_frame'];
+      }
+      if (evt.containsKey('quic_sender_space') &&
+          (evt['quic_sender_space'] as String).isNotEmpty) {
+        _data.quicSenderSpace = evt['quic_sender_space'];
+      }
+      if (evt.containsKey('quic_disposable_drops') &&
+          (evt['quic_disposable_drops'] as String).isNotEmpty) {
+        _data.quicDisposableDrops = evt['quic_disposable_drops'];
       }
       final hostVersion = _hostVersion();
       if (hostVersion != null) {

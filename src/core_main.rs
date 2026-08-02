@@ -339,11 +339,19 @@ pub fn core_main() -> Option<Vec<String>> {
                 }
                 return None;
             } else if args[0] == "--portable-service" {
-                crate::platform::elevate_or_run_as_system(
-                    click_setup,
-                    _is_elevate,
-                    _is_run_as_system,
-                );
+                if crate::platform::is_root() {
+                    // The installed service launches this child as SYSTEM directly, without
+                    // adding `--run-as-system`. Re-entering the elevation bootstrap in that
+                    // case exits before the portable-service worker starts.
+                    log::info!("Run portable service directly in already-SYSTEM process");
+                    crate::portable_service::server::run_portable_service();
+                } else {
+                    crate::platform::elevate_or_run_as_system(
+                        click_setup,
+                        _is_elevate,
+                        _is_run_as_system,
+                    );
+                }
                 return None;
             } else if args[0] == "--uninstall-amyuni-idd" {
                 #[cfg(windows)]

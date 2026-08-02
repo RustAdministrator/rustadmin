@@ -325,6 +325,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Display Settings", "Настройки отображения"),
         ("Ratio", "Соотношение"),
         ("Image Quality", "Качество изображения"),
+        ("Scale", "Масштаб"),
         ("Clipboard", "Буфер обмена"),
         ("Clipboard direction", "Направление буфера обмена"),
         ("Bidirectional", "В обоих направлениях"),

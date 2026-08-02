@@ -20,6 +20,8 @@ import '../../models/input_model.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../../utils/image.dart';
+import '../widgets/custom_image_quality_widget.dart';
+import '../widgets/custom_scale_widget.dart';
 
 final initText = '1' * 1024;
 
@@ -640,7 +642,7 @@ void showOptions(
   List<TRadioMenu<String>> viewStyleRadios =
       await toolbarViewStyle(context, id, gFFI);
   List<TRadioMenu<String>> imageQualityRadios =
-      await toolbarImageQuality(context, id, gFFI);
+      await toolbarImageQuality(context, id, gFFI, openCustomDialog: false);
   List<TRadioMenu<String>> codecRadios = await toolbarCodec(context, id, gFFI);
   List<TRadioMenu<String>> captureBackendRadios =
       await toolbarCaptureBackend(gFFI);
@@ -674,7 +676,18 @@ void showOptions(
         .obs;
     var clipboard =
         (clipboardRadios.isNotEmpty ? clipboardRadios[0].groupValue : '').obs;
+    Widget radioSectionTitle(String label) {
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: Padding(
+          padding: const EdgeInsets.only(left: 16, top: 4, bottom: 4),
+          child: Text(translate(label)),
+        ),
+      );
+    }
+
     final radios = [
+      if (viewStyleRadios.isNotEmpty) radioSectionTitle('Scale'),
       for (var e in viewStyleRadios)
         Obx(() => getRadio<String>(
             e.child,
@@ -686,7 +699,11 @@ void showOptions(
                     if (v != null) viewStyle.value = v;
                   }
                 : null)),
+      Obx(() => viewStyle.value == kRemoteViewStyleCustom
+          ? MobileCustomScaleControls(ffi: gFFI)
+          : const SizedBox.shrink()),
       const Divider(color: MyTheme.border),
+      if (imageQualityRadios.isNotEmpty) radioSectionTitle('Image Quality'),
       for (var e in imageQualityRadios)
         Obx(() => getRadio<String>(
             e.child,
@@ -698,7 +715,15 @@ void showOptions(
                     if (v != null) imageQuality.value = v;
                   }
                 : null)),
+      Obx(() => imageQuality.value == kRemoteImageQualityCustom
+          ? MobileCustomImageQualityControls(
+              key: const ValueKey('mobile-camera-custom-image-quality'),
+              peerId: id,
+              ffi: gFFI,
+            )
+          : const SizedBox.shrink()),
       const Divider(color: MyTheme.border),
+      if (codecRadios.isNotEmpty) radioSectionTitle('Codec'),
       for (var e in codecRadios)
         Obx(() => getRadio<String>(
             e.child,
