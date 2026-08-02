@@ -488,6 +488,7 @@ class RemoteToolbar extends StatefulWidget {
   final Function(int) onImagePointerStateCleaner;
   final Function(int, ToolbarWindowPointerHandler) onWindowPointerStateSetter;
   final Function(int) onWindowPointerStateCleaner;
+  final ValueChanged<bool> onMenuFocusChanged;
   final Function(VoidCallback) setRemoteState;
 
   RemoteToolbar({
@@ -501,6 +502,7 @@ class RemoteToolbar extends StatefulWidget {
     required this.onImagePointerStateCleaner,
     required this.onWindowPointerStateSetter,
     required this.onWindowPointerStateCleaner,
+    required this.onMenuFocusChanged,
     required this.setRemoteState,
   }) : super(key: key);
 
@@ -540,6 +542,8 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   int? _lastDefaultEdgeScrollEdgeThickness;
   int? _lastDefaultTrackpadSpeed;
   bool _refreshingGlobalOptions = false;
+  bool _menuFocusGuardActive = false;
+  int _menuFocusGeneration = 0;
 
   int get windowId => stateGlobal.windowId;
 
@@ -766,12 +770,21 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   }
 
   void _handleMenuOpened() {
+    _menuFocusGeneration += 1;
+    _setMenuFocusGuard(true);
     _cancelAutoHide();
     _showPinnedToolbarOpaque();
     _setVisible(true);
   }
 
   void _handleMenuClosed() {
+    final generation = ++_menuFocusGeneration;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || generation != _menuFocusGeneration || _menuIsOpen) {
+        return;
+      }
+      _setMenuFocusGuard(false);
+    });
     _menuHoverDepth = 0;
     if (!mounted || hide.value) return;
     if (pin ||
@@ -789,6 +802,12 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     if (_visible) {
       _scheduleAutoHide();
     }
+  }
+
+  void _setMenuFocusGuard(bool active) {
+    if (_menuFocusGuardActive == active) return;
+    _menuFocusGuardActive = active;
+    widget.onMenuFocusChanged(active);
   }
 
   void _setVisible(bool value) {
@@ -1076,6 +1095,8 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
 
   @override
   dispose() {
+    _menuFocusGeneration += 1;
+    _setMenuFocusGuard(false);
     _cancelAutoHide();
     _cancelPinnedDim();
     _cancelGlobalOptionRefresh();

@@ -535,6 +535,9 @@ class _RemotePageState extends State<RemotePage>
               _onWindowPointerState4Toolbar = null;
             }
           },
+          onMenuFocusChanged: (menuOpen) {
+            _rawKeyFocusNode.canRequestFocus = !menuOpen;
+          },
           setRemoteState: setState,
         );
 

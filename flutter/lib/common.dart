@@ -1261,16 +1261,10 @@ class CustomAlertDialog extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // request focus
-    FocusScopeNode scopeNode = FocusScopeNode();
-    Future.delayed(Duration.zero, () {
-      if (!scopeNode.hasFocus) scopeNode.requestFocus();
-    });
     bool tabTapped = false;
     if (isAndroid) gFFI.invokeMethod("enable_soft_keyboard", true);
 
     return FocusScope(
-      node: scopeNode,
       autofocus: true,
       onKey: (node, key) {
         if (key.logicalKey == LogicalKeyboardKey.escape) {
@@ -1286,7 +1280,7 @@ class CustomAlertDialog extends StatelessWidget {
           return KeyEventResult.handled;
         } else if (key.logicalKey == LogicalKeyboardKey.tab) {
           if (key is RawKeyDownEvent) {
-            scopeNode.nextFocus();
+            node.nextFocus();
             tabTapped = true;
           }
           return KeyEventResult.handled;

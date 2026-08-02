@@ -295,6 +295,9 @@ class _ViewCameraPageState extends State<ViewCameraPage>
               _onWindowPointerState4Toolbar = null;
             }
           },
+          onMenuFocusChanged: (menuOpen) {
+            _rawKeyFocusNode.canRequestFocus = !menuOpen;
+          },
           setRemoteState: setState,
         );
 
