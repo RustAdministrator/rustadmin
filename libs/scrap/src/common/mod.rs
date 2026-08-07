@@ -286,20 +286,33 @@ pub fn is_x11() -> bool {
     hbb_common::platform::linux::is_x11_or_headless()
 }
 
+pub const CAPTURE_CURSOR_EMBEDDED: bool = false;
+
 #[cfg(x11)]
 #[inline]
 pub fn is_cursor_embedded() -> bool {
     if is_x11() {
         x11::IS_CURSOR_EMBEDDED
     } else {
-        false
+        CAPTURE_CURSOR_EMBEDDED
     }
 }
 
 #[cfg(not(x11))]
 #[inline]
 pub fn is_cursor_embedded() -> bool {
-    false
+    CAPTURE_CURSOR_EMBEDDED
+}
+
+#[cfg(test)]
+mod cursor_capture_tests {
+    use super::{is_cursor_embedded, CAPTURE_CURSOR_EMBEDDED};
+
+    #[test]
+    fn capture_policy_keeps_cursor_out_of_video() {
+        assert!(!CAPTURE_CURSOR_EMBEDDED);
+        assert!(!is_cursor_embedded());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

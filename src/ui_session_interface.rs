@@ -46,8 +46,8 @@ use uuid::Uuid;
 use crate::client::io_loop::Remote;
 use crate::client::{
     check_if_retry, handle_hash, handle_login_error, handle_login_from_ui, handle_test_delay,
-    input_os_password, send_mouse, send_pointer_device_event, FileManager, Key, LoginConfigHandler,
-    QualityStatus, KEY_MAP,
+    input_os_password, send_mouse, send_pointer_device_event, show_sign_in, FileManager, Key,
+    LoginConfigHandler, QualityStatus, KEY_MAP,
 };
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::common::GrabState;
@@ -433,7 +433,7 @@ impl<T: InvokeUiSession> Session<T> {
         self.lc.read().unwrap().is_privacy_mode_supported()
     }
 
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub fn is_text_clipboard_required(&self) -> bool {
         *self.server_clipboard_enabled.read().unwrap()
             && *self.server_keyboard_enabled.read().unwrap()
@@ -443,6 +443,16 @@ impl<T: InvokeUiSession> Session<T> {
                 .read()
                 .unwrap()
                 .is_local_to_remote_clipboard_allowed()
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn is_text_clipboard_required(&self) -> bool {
+        *self.server_clipboard_enabled.read().unwrap()
+            && *self.server_keyboard_enabled.read().unwrap()
+            && !self.lc.read().unwrap().disable_clipboard.v
+            && crate::clipboard::is_local_to_remote_clipboard_allowed(
+                crate::clipboard::ClipboardSide::Client,
+            )
     }
 
     #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
@@ -526,6 +536,11 @@ impl<T: InvokeUiSession> Session<T> {
 
     pub fn set_custom_fps(&self, custom_fps: i32) {
         let msg = self.lc.write().unwrap().set_custom_fps(custom_fps, true);
+        self.send(Data::Message(msg));
+    }
+
+    pub fn set_capture_backend(&self, value: String) {
+        let msg = self.lc.write().unwrap().set_capture_backend(value, true);
         self.send(Data::Message(msg));
     }
 
@@ -716,6 +731,10 @@ impl<T: InvokeUiSession> Session<T> {
 
     pub fn input_os_password(&self, pass: String, activate: bool) {
         input_os_password(pass, activate, self.clone());
+    }
+
+    pub fn show_sign_in(&self) {
+        show_sign_in(self.clone());
     }
 
     #[cfg(not(feature = "flutter"))]

@@ -605,7 +605,7 @@ class FfiModel with ChangeNotifier {
         close();
         Future.delayed(Duration.zero, () async {
           final ts = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-          String? outputFile = await FilePicker.platform.saveFile(
+          String? outputFile = await FilePicker.saveFile(
             dialogTitle: '${translate('Save as')}...',
             fileName: 'screenshot_$ts.png',
             allowedExtensions: ['png'],
@@ -855,8 +855,10 @@ class FfiModel with ChangeNotifier {
       case kUrlActionClose:
         debugPrint("closing all instances");
         Future.microtask(() async {
-          await rustDeskWinManager.closeAllSubWindows();
-          windowManager.close();
+          if (await rustDeskWinManager.closeAllSessionWindows()) {
+            await windowManager.setPreventClose(false);
+            await windowManager.close();
+          }
         });
         break;
       default:
@@ -1947,14 +1949,23 @@ class FfiModel with ChangeNotifier {
     } catch (e) {
       //
     }
-    await tryMoveToScreenAndSetFullscreen(screenRectList[0]);
+    await tryMoveToScreenAndSetFullscreen(
+      screenRectList[0],
+      targetWindowId: parent.target?.hostWindowId,
+    );
 
     final length = _pi.displays.length < screenRectList.length
         ? _pi.displays.length
         : screenRectList.length;
     for (var i = 1; i < length; i++) {
-      openMonitorInNewTabOrWindow(i, peerId, _pi,
-          screenRect: screenRectList[i]);
+      openMonitorInNewTabOrWindow(
+        i,
+        peerId,
+        _pi,
+        screenRect: screenRectList[i],
+        sourceWindowId: parent.target?.hostWindowId,
+        sourceSessionId: sessionId.toString(),
+      );
     }
   }
 
@@ -4077,6 +4088,24 @@ class QualityMonitorData {
   String? codecFormat;
   String? chroma;
   String? connectionType;
+  String? transportMtu;
+  String? transportRttMs;
+  String? transportLostPackets;
+  String? datagramPayload;
+  String? negotiatedDatagramPayload;
+  String? quicProtocol;
+  String? quicVideoTransport;
+  String? quicReassemblyDrops;
+  String? quicReassemblyReasons;
+  String? quicReassemblyFrame;
+  String? quicReassemblyTiming;
+  String? quicKeyframeRequests;
+  String? quicReceiverRecovery;
+  String? quicSenderRecovery;
+  String? quicSenderAdmission;
+  String? quicSenderFrame;
+  String? quicSenderSpace;
+  String? quicDisposableDrops;
   String? hostVersion;
   String? clientVersion;
   String? decoder;
@@ -4154,13 +4183,20 @@ class QualityMonitorModel with ChangeNotifier {
   }
 
   Future<String?> _clientVersion() async {
-    if (version.isNotEmpty) return version;
-    final value = await bind.mainGetVersion();
+    var value = '';
+    try {
+      value = await bind.mainGetVersion();
+    } catch (_) {
+      //
+    }
+    if (value.isEmpty) {
+      value = version;
+    }
     return value.isEmpty ? null : value;
   }
 
   String? _hostVersion() {
-    final value = parent.target?.ffiModel.pi.version;
+    final value = parent.target?.ffiModel.pi.fullVersion;
     return value == null || value.isEmpty ? null : value;
   }
 
@@ -4174,6 +4210,24 @@ class QualityMonitorModel with ChangeNotifier {
     _data.codecFormat = null;
     _data.chroma = null;
     _data.connectionType = null;
+    _data.transportMtu = null;
+    _data.transportRttMs = null;
+    _data.transportLostPackets = null;
+    _data.datagramPayload = null;
+    _data.negotiatedDatagramPayload = null;
+    _data.quicProtocol = null;
+    _data.quicVideoTransport = null;
+    _data.quicReassemblyDrops = null;
+    _data.quicReassemblyReasons = null;
+    _data.quicReassemblyFrame = null;
+    _data.quicReassemblyTiming = null;
+    _data.quicKeyframeRequests = null;
+    _data.quicReceiverRecovery = null;
+    _data.quicSenderRecovery = null;
+    _data.quicSenderAdmission = null;
+    _data.quicSenderFrame = null;
+    _data.quicSenderSpace = null;
+    _data.quicDisposableDrops = null;
     _data.hostVersion = null;
     _data.clientVersion = null;
     _data.decoder = null;
@@ -4369,11 +4423,84 @@ class QualityMonitorModel with ChangeNotifier {
           (evt['connection_type'] as String).isNotEmpty) {
         _data.connectionType = evt['connection_type'];
       }
+      if (evt.containsKey('transport_mtu') &&
+          (evt['transport_mtu'] as String).isNotEmpty) {
+        _data.transportMtu = evt['transport_mtu'];
+      }
+      if (evt.containsKey('transport_rtt_ms') &&
+          (evt['transport_rtt_ms'] as String).isNotEmpty) {
+        _data.transportRttMs = evt['transport_rtt_ms'];
+      }
+      if (evt.containsKey('transport_lost_packets') &&
+          (evt['transport_lost_packets'] as String).isNotEmpty) {
+        _data.transportLostPackets = evt['transport_lost_packets'];
+      }
+      if (evt.containsKey('datagram_payload') &&
+          (evt['datagram_payload'] as String).isNotEmpty) {
+        _data.datagramPayload = evt['datagram_payload'];
+      }
+      if (evt.containsKey('negotiated_datagram_payload') &&
+          (evt['negotiated_datagram_payload'] as String).isNotEmpty) {
+        _data.negotiatedDatagramPayload = evt['negotiated_datagram_payload'];
+      }
+      if (evt.containsKey('quic_protocol') &&
+          (evt['quic_protocol'] as String).isNotEmpty) {
+        _data.quicProtocol = evt['quic_protocol'];
+      }
+      if (evt.containsKey('quic_video_transport') &&
+          (evt['quic_video_transport'] as String).isNotEmpty) {
+        _data.quicVideoTransport = evt['quic_video_transport'];
+      }
+      if (evt.containsKey('quic_reassembly_drops') &&
+          (evt['quic_reassembly_drops'] as String).isNotEmpty) {
+        _data.quicReassemblyDrops = evt['quic_reassembly_drops'];
+      }
+      if (evt.containsKey('quic_reassembly_reasons') &&
+          (evt['quic_reassembly_reasons'] as String).isNotEmpty) {
+        _data.quicReassemblyReasons = evt['quic_reassembly_reasons'];
+      }
+      if (evt.containsKey('quic_reassembly_frame') &&
+          (evt['quic_reassembly_frame'] as String).isNotEmpty) {
+        _data.quicReassemblyFrame = evt['quic_reassembly_frame'];
+      }
+      if (evt.containsKey('quic_reassembly_timing') &&
+          (evt['quic_reassembly_timing'] as String).isNotEmpty) {
+        _data.quicReassemblyTiming = evt['quic_reassembly_timing'];
+      }
+      if (evt.containsKey('quic_keyframe_requests') &&
+          (evt['quic_keyframe_requests'] as String).isNotEmpty) {
+        _data.quicKeyframeRequests = evt['quic_keyframe_requests'];
+      }
+      if (evt.containsKey('quic_receiver_recovery') &&
+          (evt['quic_receiver_recovery'] as String).isNotEmpty) {
+        _data.quicReceiverRecovery = evt['quic_receiver_recovery'];
+      }
+      if (evt.containsKey('quic_sender_recovery') &&
+          (evt['quic_sender_recovery'] as String).isNotEmpty) {
+        _data.quicSenderRecovery = evt['quic_sender_recovery'];
+      }
+      if (evt.containsKey('quic_sender_admission') &&
+          (evt['quic_sender_admission'] as String).isNotEmpty) {
+        _data.quicSenderAdmission = evt['quic_sender_admission'];
+      }
+      if (evt.containsKey('quic_sender_frame') &&
+          (evt['quic_sender_frame'] as String).isNotEmpty) {
+        _data.quicSenderFrame = evt['quic_sender_frame'];
+      }
+      if (evt.containsKey('quic_sender_space') &&
+          (evt['quic_sender_space'] as String).isNotEmpty) {
+        _data.quicSenderSpace = evt['quic_sender_space'];
+      }
+      if (evt.containsKey('quic_disposable_drops') &&
+          (evt['quic_disposable_drops'] as String).isNotEmpty) {
+        _data.quicDisposableDrops = evt['quic_disposable_drops'];
+      }
       final hostVersion = _hostVersion();
       if (hostVersion != null) {
         _data.hostVersion = hostVersion;
       }
-      if (version.isNotEmpty) {
+      if ((_data.clientVersion == null || _data.clientVersion!.isEmpty) &&
+          version.isNotEmpty) {
         _data.clientVersion = version;
       }
       if (evt.containsKey('decoder') &&
@@ -4538,6 +4665,7 @@ class FFI {
   var version = '';
   var connType = ConnType.defaultConn;
   var closed = false;
+  int? hostWindowId;
   Future<void> Function(FFI ffi, String peerId)? onAuthenticated;
 
   /// dialogManager use late to ensure init after main page binding [globalKey]
@@ -4568,6 +4696,7 @@ class FFI {
   // Terminal model registry for multiple terminals
   final Map<int, TerminalModel> _terminalModels = {};
   int _sessionEventGeneration = 0;
+  int _sessionStartGeneration = 0;
 
   // Getter for terminal models
   Map<int, TerminalModel> get terminalModels => _terminalModels;
@@ -4613,7 +4742,7 @@ class FFI {
   }
 
   /// Start with the given [id]. Only transfer file if [isFileTransfer], only view camera if [isViewCamera], only port forward if [isPortForward].
-  void start(
+  Future<void> start(
     String id, {
     bool isFileTransfer = false,
     bool isViewCamera = false,
@@ -4630,7 +4759,11 @@ class FFI {
     List<int>? displays,
     bool attachExisting = false,
     String? cachedPeerData,
-  }) {
+    int? hostWindowId,
+    String? transferSourceSessionId,
+  }) async {
+    this.hostWindowId = hostWindowId;
+    final sessionStartGeneration = ++_sessionStartGeneration;
     closed = false;
     if (isMobile) mobileReset();
     assert(
@@ -4661,21 +4794,42 @@ class FFI {
     // If tabWindowId != null, this session is a "tab -> window" one.
     // Else this session is a new one.
     if (isNewPeer && !attachExisting) {
-      // ignore: unused_local_variable
-      final addRes = bind.sessionAddSync(
-        sessionId: sessionId,
-        id: id,
-        isFileTransfer: isFileTransfer,
-        isViewCamera: isViewCamera,
-        isPortForward: isPortForward,
-        isRdp: isRdp,
-        isTerminal: isTerminal,
-        switchUuid: switchUuid ?? '',
-        forceRelay: forceRelay ?? false,
-        password: password ?? '',
-        isSharedPassword: isSharedPassword ?? false,
-        connToken: connToken,
-      );
+      final addRes = isMobile
+          ? await bind.sessionAddAsync(
+              sessionId: sessionId,
+              id: id,
+              isFileTransfer: isFileTransfer,
+              isViewCamera: isViewCamera,
+              isPortForward: isPortForward,
+              isRdp: isRdp,
+              isTerminal: isTerminal,
+              switchUuid: switchUuid ?? '',
+              forceRelay: forceRelay ?? false,
+              password: password ?? '',
+              isSharedPassword: isSharedPassword ?? false,
+              connToken: connToken,
+            )
+          : bind.sessionAddSync(
+              sessionId: sessionId,
+              id: id,
+              isFileTransfer: isFileTransfer,
+              isViewCamera: isViewCamera,
+              isPortForward: isPortForward,
+              isRdp: isRdp,
+              isTerminal: isTerminal,
+              switchUuid: switchUuid ?? '',
+              forceRelay: forceRelay ?? false,
+              password: password ?? '',
+              isSharedPassword: isSharedPassword ?? false,
+              connToken: connToken,
+            );
+      if (addRes.isNotEmpty) {
+        throw StateError(addRes);
+      }
+      if (closed || sessionStartGeneration != _sessionStartGeneration) {
+        await bind.sessionClose(sessionId: sessionId);
+        return;
+      }
     } else if (display != null) {
       if (displays == null) {
         debugPrint(
@@ -4761,7 +4915,14 @@ class FFI {
         // Get the cached data and handle the cached data.
         Future.delayed(Duration.zero, () async {
           if (sessionEventGeneration != _sessionEventGeneration) return;
-          final args = jsonEncode({'id': id, 'close': display == null});
+          final args = jsonEncode({
+            'id': id,
+            if (transferSourceSessionId != null)
+              'session_id': transferSourceSessionId
+            else if (display == null)
+              'session_id': sessionId.toString(),
+            'close': display == null,
+          });
           final cachedData = await DesktopMultiWindow.invokeMethod(
               tabWindowId, kWindowEventGetCachedSessionData, args);
           if (cachedData == null) {
@@ -4868,6 +5029,7 @@ class FFI {
   /// Close the remote session.
   Future<void> close(
       {bool closeSession = true, bool saveCanvasConfig = true}) async {
+    ++_sessionStartGeneration;
     closed = true;
     chatModel.close();
     // Close all terminal models
@@ -5031,6 +5193,10 @@ class PeerInfo with ChangeNotifier {
       platformAdditions[kPlatformAdditionsIddImpl] == 'rustdesk_idd';
   bool get isAmyuniIdd =>
       platformAdditions[kPlatformAdditionsIddImpl] == 'amyuni_idd';
+  String get fullVersion =>
+      platformAdditions[kPlatformAdditionsFullVersion] as String? ?? version;
+  bool get supportCaptureBackend =>
+      platformAdditions[kPlatformAdditionsSupportCaptureBackend] == true;
 
   Display? tryGetDisplay({int? display}) {
     if (displays.isEmpty) {

@@ -1,11 +1,10 @@
 use hbb_common::{
     anyhow,
     bytes::{Bytes, BytesMut},
-    bytes_codec::BytesCodec,
     config, log,
     tcp::{DynTcpStream, FramedStream},
     tokio::{self, net::UdpSocket, sync::mpsc, sync::oneshot},
-    tokio_util, ResultType, Stream,
+    ResultType, Stream,
 };
 use kcp_sys::{
     endpoint::KcpEndpoint,
@@ -21,11 +20,9 @@ pub struct KcpStream {
 
 impl KcpStream {
     fn create_framed(stream: stream::KcpStream, local_addr: Option<SocketAddr>) -> Stream {
-        Stream::Tcp(FramedStream(
-            tokio_util::codec::Framed::new(DynTcpStream(Box::new(stream)), BytesCodec::new()),
+        Stream::Tcp(FramedStream::from_dyn(
+            DynTcpStream(Box::new(stream)),
             local_addr.unwrap_or(config::Config::get_any_listen_addr(true)),
-            None,
-            0,
         ))
     }
 

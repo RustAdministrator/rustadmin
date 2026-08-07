@@ -12,6 +12,7 @@ import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/pages/connection_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_setting_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
+import 'package:flutter_hbb/desktop/session_tab.dart';
 import 'package:flutter_hbb/desktop/widgets/first_run_wizard.dart';
 import 'package:flutter_hbb/desktop/widgets/update_progress.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
@@ -95,10 +96,6 @@ class _DesktopHomePageState extends State<DesktopHomePage>
           alignment: Alignment.center,
           child: loadPowered(context),
         ),
-      Align(
-        alignment: Alignment.center,
-        child: loadLogo(),
-      ),
       buildTip(context),
       if (!isOutgoingOnly) buildIDBoard(context),
       if (!isOutgoingOnly) buildPasswordBoard(context),
@@ -829,11 +826,10 @@ class _DesktopHomePageState extends State<DesktopHomePage>
     Get.put<RxBool>(svcStopped, tag: 'stop-service');
     rustDeskWinManager.registerActiveWindowListener(onActiveWindowChanged);
     if (isMacOS) {
-      RdPlatformChannel.instance.setMacOSConnectionMenuHandler(
-          (windowId, peerId) async =>
-              await rustDeskWinManager.activateRemoteDesktopWindow(
-                  windowId, peerId) ||
-              await rustDeskWinManager.activateRemoteDesktop(peerId));
+      RdPlatformChannel.instance.setMacOSTabMenuHandler(
+        activateTab: rustDeskWinManager.activateTab,
+        setTabsInFullscreen: rustDeskWinManager.setTabsInFullscreen,
+      );
     }
 
     screenToMap(window_size.Screen screen) => {
@@ -882,6 +878,9 @@ class _DesktopHomePageState extends State<DesktopHomePage>
             (await window_size.getScreenList()).map(screenToMap).toList());
       } else if (call.method == kWindowActionRebuild) {
         reloadCurrentWindow();
+      } else if (call.method == kWindowEventSetTabsInFullscreen) {
+        await rustDeskWinManager.setTabsInFullscreen(call.arguments == true);
+        return true;
       } else if (call.method == kWindowEventShow) {
         await rustDeskWinManager.registerActiveWindow(call.arguments["id"]);
       } else if (call.method == kWindowEventHide) {
@@ -919,6 +918,27 @@ class _DesktopHomePageState extends State<DesktopHomePage>
           await rustDeskWinManager.moveTabToNewWindow(
               windowId, args[1], args[2], windowType);
         }
+      } else if (call.method == kWindowEventMoveTabToMainWindow) {
+        final args = jsonDecode(call.arguments);
+        final bridge = MainWindowSessionBridge.current;
+        if (bridge != null) {
+          return bridge.moveRemoteSessionFromDetachedWindow(
+            sourceWindowId: args['window_id'] as int,
+            peerId: args['id'] as String,
+            sessionId: args['session_id'].toString(),
+          );
+        }
+        return false;
+      } else if (call.method == kWindowEventGetCachedSessionData) {
+        final args = jsonDecode(call.arguments);
+        final bridge = MainWindowSessionBridge.current;
+        if (bridge != null) {
+          return bridge.getCachedRemoteSession(
+            peerId: args['id'] as String,
+            sessionId: args['session_id']?.toString(),
+            close: args['close'] == true,
+          );
+        }
       } else if (call.method == kWindowEventOpenMonitorSession) {
         final args = jsonDecode(call.arguments);
         final windowId = args['window_id'] as int;
@@ -926,14 +946,28 @@ class _DesktopHomePageState extends State<DesktopHomePage>
         final display = args['display'] as int;
         final displayCount = args['display_count'] as int;
         final windowType = args['window_type'] as int;
+        final sourceSessionId = args['source_session_id']?.toString();
         final screenRect = parseParamScreenRect(args);
         await rustDeskWinManager.openMonitorSession(
-            windowId, peerId, display, displayCount, screenRect, windowType);
+          windowId,
+          peerId,
+          display,
+          displayCount,
+          screenRect,
+          windowType,
+          sourceSessionId: sourceSessionId,
+        );
       } else if (call.method == kWindowEventRemoteWindowCoords) {
         final windowId = int.tryParse(call.arguments);
         if (windowId != null) {
-          return jsonEncode(
-              await rustDeskWinManager.getOtherRemoteWindowCoords(windowId));
+          final coords =
+              await rustDeskWinManager.getOtherRemoteWindowCoords(windowId);
+          final mainCoords =
+              await MainWindowSessionBridge.current?.getRemoteWindowCoords();
+          if (mainCoords != null) {
+            coords.add(mainCoords);
+          }
+          return jsonEncode(coords);
         }
       }
     });

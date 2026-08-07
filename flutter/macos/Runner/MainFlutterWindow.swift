@@ -4,14 +4,14 @@ import FlutterMacOS
 import desktop_multi_window
 // import bitsdojo_window_macos
 
+import app_links
 import desktop_drop
 import device_info_plus
 import flutter_custom_cursor
 import package_info_plus
 import screen_retriever
-import sqflite
+import sqflite_darwin
 // import tray_manager
-import uni_links_desktop
 import url_launcher_macos
 import wakelock_plus
 import window_manager
@@ -34,33 +34,34 @@ class RelativeMouseState {
     private init() {}
 }
 
-private struct ConnectionMenuEntry {
+private struct TabMenuEntry {
     let windowId: Int
-    let peerId: String
+    let tabId: String
     let title: String
     let selected: Bool
 }
 
-private final class ConnectionMenuSelection: NSObject {
+private final class TabMenuSelection: NSObject {
     let windowId: Int
-    let peerId: String
+    let tabId: String
 
-    init(windowId: Int, peerId: String) {
+    init(windowId: Int, tabId: String) {
         self.windowId = windowId
-        self.peerId = peerId
+        self.tabId = tabId
     }
 }
 
-private final class ConnectionMenuManager: NSObject {
-    static let shared = ConnectionMenuManager()
+private final class TabMenuManager: NSObject {
+    static let shared = TabMenuManager()
 
     private var mainChannel: FlutterMethodChannel?
-    private var entriesByWindowId: [Int: [ConnectionMenuEntry]] = [:]
-    private let connectionsMenu = NSMenu(title: "Connections")
-    private weak var connectionsMenuItem: NSMenuItem?
+    private var entriesByWindowId: [Int: [TabMenuEntry]] = [:]
+    private var tabsInFullscreen = false
+    private let tabsMenu = NSMenu(title: "Tabs")
+    private weak var tabsMenuItem: NSMenuItem?
 
     private override init() {
-        connectionsMenu.autoenablesItems = false
+        tabsMenu.autoenablesItems = false
         super.init()
     }
 
@@ -70,17 +71,21 @@ private final class ConnectionMenuManager: NSObject {
         }
     }
 
-    func update(windowId: Int, rawEntries: [[String: Any]]) {
-        assert(Thread.isMainThread, "Connection menu updates must run on the main thread")
+    func update(windowId: Int, rawEntries: [[String: Any]], tabsInFullscreen: Bool?) {
+        assert(Thread.isMainThread, "Tab menu updates must run on the main thread")
         ensureMenuInstalled()
 
-        let entries = rawEntries.compactMap { raw -> ConnectionMenuEntry? in
-            guard let peerId = raw["peerId"] as? String, !peerId.isEmpty else {
+        if let tabsInFullscreen = tabsInFullscreen {
+            self.tabsInFullscreen = tabsInFullscreen
+        }
+
+        let entries = rawEntries.compactMap { raw -> TabMenuEntry? in
+            guard let tabId = raw["tabId"] as? String, !tabId.isEmpty else {
                 return nil
             }
-            let title = (raw["title"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? peerId
-            let selected = boolValue(raw["selected"]) ?? false
-            return ConnectionMenuEntry(windowId: windowId, peerId: peerId, title: title, selected: selected)
+            let title = (raw["title"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? tabId
+            let selected = Self.boolValue(raw["selected"]) ?? false
+            return TabMenuEntry(windowId: windowId, tabId: tabId, title: title, selected: selected)
         }
 
         if entries.isEmpty {
@@ -92,8 +97,15 @@ private final class ConnectionMenuManager: NSObject {
         rebuildMenu()
     }
 
+    func updateTabsInFullscreen(_ value: Bool) {
+        assert(Thread.isMainThread, "Tab menu updates must run on the main thread")
+        tabsInFullscreen = value
+        ensureMenuInstalled()
+        rebuildMenu()
+    }
+
     private func ensureMenuInstalled() {
-        guard connectionsMenuItem == nil else { return }
+        guard tabsMenuItem == nil else { return }
         guard let windowMenu = NSApplication.shared.windowsMenu
             ?? NSApplication.shared.mainMenu?.item(withTitle: "Window")?.submenu else {
             return
@@ -103,8 +115,8 @@ private final class ConnectionMenuManager: NSObject {
             NSApplication.shared.windowsMenu = windowMenu
         }
 
-        let item = NSMenuItem(title: "Connections", action: nil, keyEquivalent: "")
-        item.submenu = connectionsMenu
+        let item = NSMenuItem(title: "Tabs", action: nil, keyEquivalent: "")
+        item.submenu = tabsMenu
 
         if let separatorIndex = windowMenu.items.firstIndex(where: { $0.isSeparatorItem }) {
             windowMenu.insertItem(item, at: separatorIndex)
@@ -113,17 +125,27 @@ private final class ConnectionMenuManager: NSObject {
             windowMenu.addItem(item)
         }
 
-        connectionsMenuItem = item
+        tabsMenuItem = item
     }
 
     private func rebuildMenu() {
-        connectionsMenu.removeAllItems()
+        tabsMenu.removeAllItems()
+
+        let visibilityItem = NSMenuItem(
+            title: "Tabs in fullscreen",
+            action: #selector(toggleTabsInFullscreen(_:)),
+            keyEquivalent: ""
+        )
+        visibilityItem.target = self
+        visibilityItem.state = tabsInFullscreen ? .on : .off
+        tabsMenu.addItem(visibilityItem)
+        tabsMenu.addItem(NSMenuItem.separator())
 
         let sortedWindowIds = entriesByWindowId.keys.sorted()
         if sortedWindowIds.isEmpty {
-            let emptyItem = NSMenuItem(title: "No Connections", action: nil, keyEquivalent: "")
+            let emptyItem = NSMenuItem(title: "No Tabs", action: nil, keyEquivalent: "")
             emptyItem.isEnabled = false
-            connectionsMenu.addItem(emptyItem)
+            tabsMenu.addItem(emptyItem)
             return
         }
 
@@ -133,30 +155,38 @@ private final class ConnectionMenuManager: NSObject {
                 continue
             }
             if addedAnyItem {
-                connectionsMenu.addItem(NSMenuItem.separator())
+                tabsMenu.addItem(NSMenuItem.separator())
             }
             for entry in entries {
-                let item = NSMenuItem(title: entry.title, action: #selector(selectConnection(_:)), keyEquivalent: "")
+                let item = NSMenuItem(title: entry.title, action: #selector(selectTab(_:)), keyEquivalent: "")
                 item.target = self
                 item.state = entry.selected ? .on : .off
-                item.representedObject = ConnectionMenuSelection(windowId: entry.windowId, peerId: entry.peerId)
-                connectionsMenu.addItem(item)
+                item.representedObject = TabMenuSelection(windowId: entry.windowId, tabId: entry.tabId)
+                tabsMenu.addItem(item)
                 addedAnyItem = true
             }
         }
     }
 
-    @objc private func selectConnection(_ sender: NSMenuItem) {
-        guard let selection = sender.representedObject as? ConnectionMenuSelection else {
+    @objc private func selectTab(_ sender: NSMenuItem) {
+        guard let selection = sender.representedObject as? TabMenuSelection else {
             return
         }
-        mainChannel?.invokeMethod("activateConnection", arguments: [
+        mainChannel?.invokeMethod("activateTab", arguments: [
             "windowId": selection.windowId,
-            "peerId": selection.peerId,
+            "tabId": selection.tabId,
         ])
     }
 
-    private func boolValue(_ value: Any?) -> Bool? {
+    @objc private func toggleTabsInFullscreen(_ sender: NSMenuItem) {
+        tabsInFullscreen.toggle()
+        rebuildMenu()
+        mainChannel?.invokeMethod("setTabsInFullscreen", arguments: [
+            "value": tabsInFullscreen,
+        ])
+    }
+
+    static func boolValue(_ value: Any?) -> Bool? {
         if let value = value as? Bool {
             return value
         }
@@ -195,13 +225,13 @@ class MainFlutterWindow: NSWindow {
             // DesktopLifecyclePlugin.register(with: controller.registrar(forPlugin: "DesktopLifecyclePlugin"))
             // Note: copy below from above RegisterGeneratedPlugins
             self.setMethodHandler(registrar: controller.registrar(forPlugin: "RustDeskPlugin"))
+            AppLinksMacosPlugin.register(with: controller.registrar(forPlugin: "AppLinksMacosPlugin"))
             DesktopDropPlugin.register(with: controller.registrar(forPlugin: "DesktopDropPlugin"))
             DeviceInfoPlusMacosPlugin.register(with: controller.registrar(forPlugin: "DeviceInfoPlusMacosPlugin"))
             FlutterCustomCursorPlugin.register(with: controller.registrar(forPlugin: "FlutterCustomCursorPlugin"))
             FPPPackageInfoPlusPlugin.register(with: controller.registrar(forPlugin: "FPPPackageInfoPlusPlugin"))
             SqflitePlugin.register(with: controller.registrar(forPlugin: "SqflitePlugin"))
             // TrayManagerPlugin.register(with: controller.registrar(forPlugin: "TrayManagerPlugin"))
-            UniLinksDesktopPlugin.register(with: controller.registrar(forPlugin: "UniLinksDesktopPlugin"))
             UrlLauncherPlugin.register(with: controller.registrar(forPlugin: "UrlLauncherPlugin"))
             WakelockPlusMacosPlugin.register(with: controller.registrar(forPlugin: "WakelockPlusMacosPlugin"))
             WindowSizePlugin.register(with: controller.registrar(forPlugin: "WindowSizePlugin"))
@@ -322,7 +352,7 @@ class MainFlutterWindow: NSWindow {
     public func setMethodHandler(registrar: FlutterPluginRegistrar, isMainWindow: Bool = false) {
         let channel = FlutterMethodChannel(name: "org.rustdesk.rustdesk/host", binaryMessenger: registrar.messenger)
         if isMainWindow {
-            ConnectionMenuManager.shared.setMainChannel(channel)
+            TabMenuManager.shared.setMainChannel(channel)
         }
         channel.setMethodCallHandler({
             (call, result) -> Void in
@@ -422,14 +452,27 @@ class MainFlutterWindow: NSWindow {
                     self.disableNativeRelativeMouseMode()
                     result(true)
 
-                case "updateConnectionMenu":
+                case "updateTabMenu":
                     guard let argMap = call.arguments as? [String: Any],
-                          let windowId = ConnectionMenuManager.intValue(argMap["windowId"]),
+                          let windowId = TabMenuManager.intValue(argMap["windowId"]),
                           let entries = argMap["entries"] as? [[String: Any]] else {
                         result(false)
                         break
                     }
-                    ConnectionMenuManager.shared.update(windowId: windowId, rawEntries: entries)
+                    TabMenuManager.shared.update(
+                        windowId: windowId,
+                        rawEntries: entries,
+                        tabsInFullscreen: TabMenuManager.boolValue(argMap["tabsInFullscreen"])
+                    )
+                    result(true)
+
+                case "updateTabsInFullscreen":
+                    guard let argMap = call.arguments as? [String: Any],
+                          let value = TabMenuManager.boolValue(argMap["value"]) else {
+                        result(false)
+                        break
+                    }
+                    TabMenuManager.shared.updateTabsInFullscreen(value)
                     result(true)
 
                 default:

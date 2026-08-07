@@ -732,6 +732,83 @@ impl InvokeUiSession for FlutterHandler {
                     "connection_type",
                     &status.connection_type.map_or(NULL, |it| it.to_string()),
                 ),
+                (
+                    "transport_mtu",
+                    &status.transport_mtu.map_or(NULL, |it| it.to_string()),
+                ),
+                (
+                    "transport_rtt_ms",
+                    &status.transport_rtt_ms.map_or(NULL, |it| it.to_string()),
+                ),
+                (
+                    "transport_lost_packets",
+                    &status
+                        .transport_lost_packets
+                        .map_or(NULL, |it| it.to_string()),
+                ),
+                (
+                    "datagram_payload",
+                    &status.datagram_payload.map_or(NULL, |it| it.to_string()),
+                ),
+                (
+                    "negotiated_datagram_payload",
+                    &status
+                        .negotiated_datagram_payload
+                        .map_or(NULL, |it| it.to_string()),
+                ),
+                ("quic_protocol", &status.quic_protocol.map_or(NULL, |it| it)),
+                (
+                    "quic_video_transport",
+                    &status.quic_video_transport.map_or(NULL, |it| it),
+                ),
+                (
+                    "quic_reassembly_drops",
+                    &status
+                        .quic_reassembly_drops
+                        .map_or(NULL, |it| it.to_string()),
+                ),
+                (
+                    "quic_reassembly_reasons",
+                    &status.quic_reassembly_reasons.map_or(NULL, |it| it),
+                ),
+                (
+                    "quic_reassembly_frame",
+                    &status.quic_reassembly_frame.map_or(NULL, |it| it),
+                ),
+                (
+                    "quic_reassembly_timing",
+                    &status.quic_reassembly_timing.map_or(NULL, |it| it),
+                ),
+                (
+                    "quic_keyframe_requests",
+                    &status
+                        .quic_keyframe_requests
+                        .map_or(NULL, |it| it.to_string()),
+                ),
+                (
+                    "quic_receiver_recovery",
+                    &status.quic_receiver_recovery.map_or(NULL, |it| it),
+                ),
+                (
+                    "quic_sender_recovery",
+                    &status.quic_sender_recovery.map_or(NULL, |it| it),
+                ),
+                (
+                    "quic_sender_admission",
+                    &status.quic_sender_admission.map_or(NULL, |it| it),
+                ),
+                (
+                    "quic_sender_frame",
+                    &status.quic_sender_frame.map_or(NULL, |it| it),
+                ),
+                (
+                    "quic_sender_space",
+                    &status.quic_sender_space.map_or(NULL, |it| it),
+                ),
+                (
+                    "quic_disposable_drops",
+                    &status.quic_disposable_drops.map_or(NULL, |it| it),
+                ),
                 ("decoder", &status.decoder.map_or(NULL, |it| it)),
                 ("renderer", &status.renderer.map_or(NULL, |it| it)),
                 (
@@ -1428,8 +1505,10 @@ pub fn session_add(
         // The same session is added before?
         bail!("same session id is found");
     }
+    log::info!("session-add stage=session-id-available");
 
     LocalConfig::set_remote_id(&id);
+    log::info!("session-add stage=remote-id-saved");
 
     let mut preset_password = password.clone();
     let shared_password = if is_shared_password {
@@ -1464,9 +1543,11 @@ pub fn session_add(
         shared_password,
         conn_token,
     );
+    log::info!("session-add stage=login-config-initialized");
 
     let session = Arc::new(session.clone());
     sessions::insert_session(session_id.to_owned(), conn_type, session.clone());
+    log::info!("session-add stage=session-inserted");
 
     Ok(session)
 }

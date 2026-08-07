@@ -201,7 +201,11 @@ impl CapturerWgc {
             .CreateCaptureSession(&item)
             .map_err(to_io_error)?;
         let _ = session.SetIsBorderRequired(false);
-        let _ = session.SetIsCursorCaptureEnabled(true);
+        // Cursor updates use the separate low-latency cursor channel. Fail WGC
+        // initialization if Windows cannot honor that capture policy.
+        session
+            .SetIsCursorCaptureEnabled(crate::common::CAPTURE_CURSOR_EMBEDDED)
+            .map_err(to_io_error)?;
         let _ = session.SetMinUpdateInterval(TimeSpan { Duration: 0 });
         session.StartCapture().map_err(to_io_error)?;
 

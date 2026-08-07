@@ -7,6 +7,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 import 'package:flutter_hbb/models/state_model.dart';
+import 'package:window_manager/window_manager.dart';
 
 import '../../consts.dart';
 import '../../common/widgets/overlay.dart';
@@ -22,6 +23,7 @@ import '../../utils/image.dart';
 import '../widgets/remote_toolbar.dart';
 import '../widgets/kb_layout_type_chooser.dart';
 import '../widgets/tabbar_widget.dart';
+import '../session_tab.dart';
 
 import 'package:flutter_hbb/native/custom_cursor.dart'
     if (dart.library.html) 'package:flutter_hbb/web/custom_cursor.dart';
@@ -35,6 +37,18 @@ const Duration _kDesktopSessionLifecycleStaleThreshold = Duration(seconds: 30);
 const Duration _kDesktopSessionEventLoopStaleThreshold = Duration(seconds: 45);
 const Duration _kDesktopSessionEventLoopCheckInterval = Duration(seconds: 5);
 
+void initializeDesktopRemoteInputSource() {
+  bind.mainInitInputSource();
+  stateGlobal.getInputSource(force: true);
+}
+
+bool shouldRearmDesktopRemoteInputOnPointerDown({
+  required bool isWindowsPlatform,
+  required bool cursorOverImage,
+}) {
+  return !isWindowsPlatform && !cursorOverImage;
+}
+
 class RemotePage extends StatefulWidget {
   RemotePage({
     Key? key,
@@ -42,6 +56,7 @@ class RemotePage extends StatefulWidget {
     required this.toolbarState,
     this.sessionId,
     this.tabWindowId,
+    this.transferSourceSessionId,
     this.password,
     this.display,
     this.displays,
@@ -50,6 +65,8 @@ class RemotePage extends StatefulWidget {
     this.forceRelay,
     this.isSharedPassword,
     this.pendingCachedPeerData,
+    this.sessionTabKey,
+    this.windowHost,
   }) : super(key: key) {
     initSharedStates(id);
   }
@@ -57,6 +74,7 @@ class RemotePage extends StatefulWidget {
   final String id;
   final SessionID? sessionId;
   final int? tabWindowId;
+  final String? transferSourceSessionId;
   final int? display;
   final List<int>? displays;
   final String? password;
@@ -65,6 +83,8 @@ class RemotePage extends StatefulWidget {
   final bool? forceRelay;
   final bool? isSharedPassword;
   final String? pendingCachedPeerData;
+  final SessionTabKey? sessionTabKey;
+  final SessionWindowHost? windowHost;
   final SimpleWrapper<State<RemotePage>?> _lastState = SimpleWrapper(null);
   final DesktopTabController? tabController;
 
@@ -74,6 +94,29 @@ class RemotePage extends StatefulWidget {
     final state = _lastState.value;
     if (state is _RemotePageState) {
       state.reconnectIfStaleOnActivation();
+    }
+  }
+
+  void requestKeyboardFocus({bool preserveEditableTextFocus = false}) {
+    final state = _lastState.value;
+    if (state is _RemotePageState) {
+      state.scheduleKeyboardFocus(
+        preserveEditableTextFocus: preserveEditableTextFocus,
+      );
+    }
+  }
+
+  void activateKeyboardInput() {
+    final state = _lastState.value;
+    if (state is _RemotePageState) {
+      state.activateKeyboardInput();
+    }
+  }
+
+  Future<void> prepareForSessionTransfer() async {
+    final state = _lastState.value;
+    if (state is _RemotePageState) {
+      await state.prepareForSessionTransfer();
     }
   }
 
@@ -89,6 +132,7 @@ class _RemotePageState extends State<RemotePage>
     with
         AutomaticKeepAliveClientMixin,
         MultiWindowListener,
+        WindowListener,
         WidgetsBindingObserver,
         TickerProviderStateMixin {
   Timer? _timer;
@@ -97,6 +141,7 @@ class _RemotePageState extends State<RemotePage>
   DateTime? _lifecycleSuspendedAt;
   bool _staleSessionRestartInProgress = false;
   bool _disposed = false;
+  int _keyboardFocusGeneration = 0;
   String keyboardMode = "legacy";
   bool _isWindowBlur = false;
   final _cursorOverImage = false.obs;
@@ -127,6 +172,97 @@ class _RemotePageState extends State<RemotePage>
   late FFI _ffi;
 
   SessionID get sessionId => _ffi.sessionId;
+  String get _sessionRegistrationKey =>
+      widget.sessionTabKey?.value ?? widget.id;
+  String get _tabControllerKey {
+    final controller = widget.tabController;
+    if (controller != null) {
+      for (final tab in controller.state.value.tabs) {
+        if (identical(tab.page, widget)) {
+          return tab.key;
+        }
+      }
+    }
+    return widget.sessionTabKey?.value ?? widget.id;
+  }
+
+  bool get _isActiveTab {
+    final controller = widget.tabController;
+    if (controller == null) {
+      return true;
+    }
+    final tabState = controller.state.value;
+    if (tabState.tabs.isEmpty ||
+        tabState.selected < 0 ||
+        tabState.selected >= tabState.tabs.length) {
+      return false;
+    }
+    return identical(tabState.selectedTabInfo.page, widget);
+  }
+
+  bool get _hasEditableTextFocus {
+    final context = FocusManager.instance.primaryFocus?.context;
+    if (context == null) {
+      return false;
+    }
+    return context.widget is EditableText ||
+        context.findAncestorWidgetOfExactType<EditableText>() != null;
+  }
+
+  void _requestKeyboardFocusNow({
+    required bool preserveEditableTextFocus,
+  }) {
+    if (!mounted ||
+        !shouldRestoreRemoteKeyboardFocus(
+          windowBlurred: _isWindowBlur,
+          canRequestFocus: _rawKeyFocusNode.canRequestFocus,
+          activeTab: _isActiveTab,
+          editableTextFocused:
+              preserveEditableTextFocus && _hasEditableTextFocus,
+        )) {
+      return;
+    }
+    if (!_rawKeyFocusNode.hasFocus) {
+      _rawKeyFocusNode.requestFocus();
+    }
+  }
+
+  void scheduleKeyboardFocus({bool preserveEditableTextFocus = false}) {
+    final generation = ++_keyboardFocusGeneration;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || generation != _keyboardFocusGeneration) {
+        return;
+      }
+      _requestKeyboardFocusNow(
+        preserveEditableTextFocus: preserveEditableTextFocus,
+      );
+    });
+  }
+
+  void activateKeyboardInput() {
+    scheduleKeyboardFocus();
+    // Switching tabs does not necessarily move the pointer, so Flutter may
+    // omit a fresh MouseRegion enter event. Re-arm native Source 1 when the
+    // activated page already knows that the pointer is over its image.
+    if (_cursorOverImage.value) {
+      _ffi.inputModel.enterOrLeave(true);
+    }
+  }
+
+  void _handleToolbarMenuFocusChanged(bool menuOpen) {
+    _keyboardFocusGeneration += 1;
+    _rawKeyFocusNode.canRequestFocus = !menuOpen;
+    if (!menuOpen) {
+      scheduleKeyboardFocus(preserveEditableTextFocus: true);
+    }
+  }
+
+  Future<void> prepareForSessionTransfer() async {
+    // Stop the native renderer before the destination registers a texture for
+    // this same Rust session/display. Closing a still-registered plugin texture
+    // can race the render thread and crash inside texture_rgba_renderer.
+    await _ffi.textureModel.onRemotePageDispose(true);
+  }
 
   _RemotePageState(String id) {
     _initStates(id);
@@ -142,10 +278,13 @@ class _RemotePageState extends State<RemotePage>
   @override
   void initState() {
     super.initState();
+    // Detached sessions initialize this in DesktopRemoteScreen, but sessions
+    // hosted by the main window construct RemotePage directly.
+    initializeDesktopRemoteInputSource();
     WidgetsBinding.instance.addObserver(this);
     _startEventLoopStaleCheckTimer();
     _ffi = FFI(widget.sessionId);
-    Get.put<FFI>(_ffi, tag: widget.id);
+    Get.put<FFI>(_ffi, tag: _sessionRegistrationKey);
     _ffi.imageModel.addCallbackOnFirstImage((String peerId) {
       _ffi.canvasModel.activateLocalCursor();
       showKBLayoutTypeChooserIfNeeded(
@@ -165,6 +304,8 @@ class _RemotePageState extends State<RemotePage>
       displays: widget.displays,
       attachExisting: widget.pendingCachedPeerData != null,
       cachedPeerData: widget.pendingCachedPeerData,
+      hostWindowId: widget.windowHost?.windowId,
+      transferSourceSessionId: widget.transferSourceSessionId,
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
@@ -187,6 +328,9 @@ class _RemotePageState extends State<RemotePage>
           sessionId: sessionId, arg: kOptionZoomCursor);
     });
     DesktopMultiWindow.addListener(this);
+    if (widget.windowHost?.isMainWindow == true) {
+      windowManager.addListener(this);
+    }
     // if (!_isCustomCursorInited) {
     //   customCursorController.registerNeedUpdateCursorCallback(
     //       (String? lastKey, String? currentKey) async {
@@ -202,7 +346,7 @@ class _RemotePageState extends State<RemotePage>
     _blockableOverlayState.applyFfi(_ffi);
     // Call onSelected in post frame callback, since we cannot guarantee that the callback will not call setState.
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      widget.tabController?.onSelected?.call(widget.id);
+      widget.tabController?.onSelected?.call(_tabControllerKey);
     });
 
     // Register callback to cancel debounce timer when relative mouse mode is disabled
@@ -228,6 +372,12 @@ class _RemotePageState extends State<RemotePage>
               'desktop lifecycle resume after ${elapsed.inSeconds}s event-loop gap'));
         }
       }
+      return;
+    }
+    if (state == AppLifecycleState.hidden &&
+        widget.windowHost?.isMainWindow == true) {
+      // Hiding the main window to the tray keeps embedded sessions alive. The
+      // event-loop gap detector still recovers a genuinely suspended session.
       return;
     }
     if (state == AppLifecycleState.hidden ||
@@ -308,6 +458,7 @@ class _RemotePageState extends State<RemotePage>
         forceRelay: widget.forceRelay,
         display: widget.display,
         displays: widget.displays,
+        hostWindowId: widget.windowHost?.windowId,
       );
       _ffi.ffiModel.updateEventListener(sessionId, widget.id);
       if (!isWeb) bind.pluginSyncUi(syncTo: kAppTypeDesktopRemote);
@@ -331,6 +482,7 @@ class _RemotePageState extends State<RemotePage>
   @override
   void onWindowBlur() {
     super.onWindowBlur();
+    _keyboardFocusGeneration += 1;
     // On windows, we use `focus` way to handle keyboard better.
     // Now on Linux, there's some rdev issues which will break the input.
     // We disable the `focus` way for non-Windows temporarily.
@@ -358,6 +510,7 @@ class _RemotePageState extends State<RemotePage>
       _isWindowBlur = false;
     }
     stateGlobal.isFocused.value = true;
+    scheduleKeyboardFocus(preserveEditableTextFocus: true);
 
     // Restore relative mouse mode constraints when window regains focus.
     if (_ffi.inputModel.relativeMouseMode.value) {
@@ -375,6 +528,7 @@ class _RemotePageState extends State<RemotePage>
       _isWindowBlur = false;
     }
     WakelockManager.enable(_uniqueKey);
+    scheduleKeyboardFocus(preserveEditableTextFocus: true);
     // Update pointer lock center when window is restored
     _updatePointerLockCenterIfNeeded();
   }
@@ -434,7 +588,12 @@ class _RemotePageState extends State<RemotePage>
   void onWindowEnterFullScreen() {
     super.onWindowEnterFullScreen();
     if (isMacOS) {
-      stateGlobal.setFullscreen(true);
+      final host = widget.windowHost;
+      if (host == null) {
+        stateGlobal.setFullscreen(true);
+      } else {
+        host.syncFullscreenState(true);
+      }
     }
   }
 
@@ -442,14 +601,21 @@ class _RemotePageState extends State<RemotePage>
   void onWindowLeaveFullScreen() {
     super.onWindowLeaveFullScreen();
     if (isMacOS) {
-      stateGlobal.setFullscreen(false);
+      final host = widget.windowHost;
+      if (host == null) {
+        stateGlobal.setFullscreen(false);
+      } else {
+        host.syncFullscreenState(false);
+      }
     }
   }
 
   @override
   Future<void> dispose() async {
     _disposed = true;
-    final closeSession = closeSessionOnDispose.remove(widget.id) ?? true;
+    _keyboardFocusGeneration += 1;
+    final closeSession =
+        closeSessionOnDispose.remove(_sessionRegistrationKey) ?? true;
 
     WidgetsBinding.instance.removeObserver(this);
     _eventLoopStaleCheckTimer?.cancel();
@@ -467,12 +633,15 @@ class _RemotePageState extends State<RemotePage>
     // Clear callback reference to prevent memory leaks and stale references
     _ffi.inputModel.onRelativeMouseModeDisabled = null;
     // Relative mouse mode cleanup is centralized in FFI.close(closeSession: ...).
-    _ffi.textureModel.onRemotePageDispose(closeSession);
+    await _ffi.textureModel.onRemotePageDispose(true);
     if (closeSession) {
       // ensure we leave this session, this is a double check
       _ffi.inputModel.enterOrLeave(false);
     }
     DesktopMultiWindow.removeListener(this);
+    if (widget.windowHost?.isMainWindow == true) {
+      windowManager.removeListener(this);
+    }
     _ffi.dialogManager.hideMobileActionsOverlay();
     _ffi.imageModel.disposeImage();
     _ffi.cursorModel.disposeImages();
@@ -485,7 +654,7 @@ class _RemotePageState extends State<RemotePage>
           overlays: SystemUiOverlay.values);
     }
     WakelockManager.disable(_uniqueKey);
-    await Get.delete<FFI>(tag: widget.id);
+    await Get.delete<FFI>(tag: _sessionRegistrationKey);
     removeSharedStates(widget.id);
   }
 
@@ -535,6 +704,9 @@ class _RemotePageState extends State<RemotePage>
               _onWindowPointerState4Toolbar = null;
             }
           },
+          onMenuFocusChanged: _handleToolbarMenuFocusChanged,
+          onCloseConnection: () => closeConnection(id: _tabControllerKey),
+          windowHost: widget.windowHost,
           setRemoteState: setState,
         );
 
@@ -688,9 +860,7 @@ class _RemotePageState extends State<RemotePage>
 
     // See [onWindowBlur].
     if (!isWindows) {
-      if (!_rawKeyFocusNode.hasFocus) {
-        _rawKeyFocusNode.requestFocus();
-      }
+      _requestKeyboardFocusNow(preserveEditableTextFocus: false);
       _ffi.inputModel.enterOrLeave(true);
     }
   }
@@ -777,9 +947,17 @@ class _RemotePageState extends State<RemotePage>
               "Unexpected status: onPointerDown is triggered while the remote window is in blur status");
           _isWindowBlur = false;
         }
-        if (!_rawKeyFocusNode.hasFocus) {
-          _rawKeyFocusNode.requestFocus();
+        // macOS can omit MouseRegion.onEnter after a window/tab transition.
+        // Recover the native Source 1 grab on the first canvas click without
+        // releasing tracked modifiers on every normal pointer-down.
+        if (shouldRearmDesktopRemoteInputOnPointerDown(
+          isWindowsPlatform: isWindows,
+          cursorOverImage: _cursorOverImage.value,
+        )) {
+          _cursorOverImage.value = true;
+          _ffi.inputModel.enterOrLeave(true);
         }
+        _requestKeyboardFocusNow(preserveEditableTextFocus: false);
       },
       inputModel: _ffi.inputModel,
       child: child,

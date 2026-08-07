@@ -6,6 +6,7 @@ import 'package:debounce_throttle/debounce_throttle.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
@@ -206,46 +207,13 @@ class DraggableMobileActions extends StatelessWidget {
               child: Card(
                   color: Colors.transparent,
                   shadowColor: Colors.transparent,
-                  child: Container(
-                    decoration: BoxDecoration(
-                        color: MyTheme.accent.withOpacity(0.4),
-                        borderRadius:
-                            BorderRadius.all(Radius.circular(4.0 * scale))),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: [
-                        IconButton(
-                            color: Colors.white,
-                            onPressed: onBackPressed,
-                            splashRadius: kDesktopIconButtonSplashRadius,
-                            icon: const Icon(Icons.arrow_back),
-                            iconSize: 24 * scale),
-                        IconButton(
-                            color: Colors.white,
-                            onPressed: onHomePressed,
-                            splashRadius: kDesktopIconButtonSplashRadius,
-                            icon: const Icon(Icons.home),
-                            iconSize: 24 * scale),
-                        IconButton(
-                            color: Colors.white,
-                            onPressed: onRecentPressed,
-                            splashRadius: kDesktopIconButtonSplashRadius,
-                            icon: const Icon(Icons.more_horiz),
-                            iconSize: 24 * scale),
-                        const VerticalDivider(
-                          width: 0,
-                          thickness: 2,
-                          indent: 10,
-                          endIndent: 10,
-                        ),
-                        IconButton(
-                            color: Colors.white,
-                            onPressed: onHidePressed,
-                            splashRadius: kDesktopIconButtonSplashRadius,
-                            icon: const Icon(Icons.keyboard_arrow_down),
-                            iconSize: 24 * scale),
-                      ],
-                    ),
+                  child: MobileRemoteAndroidActionsBar(
+                    scale: scale,
+                    onBack: onBackPressed,
+                    onHome: onHomePressed,
+                    onRecent: onRecentPressed,
+                    onHide: onHidePressed,
+                    splashRadius: kDesktopIconButtonSplashRadius,
                   )));
         });
   }
@@ -570,6 +538,10 @@ class QualityMonitor extends StatelessWidget {
       {Key? key, this.onGripPanUpdate})
       : super(key: key);
 
+  Widget _compactTextScale(Widget child) => isMobile
+      ? MediaQuery.withClampedTextScaling(maxScaleFactor: 1, child: child)
+      : child;
+
   String _pipelineLabel(String? value) {
     if (value == null || value.isEmpty) {
       return '-';
@@ -581,6 +553,8 @@ class QualityMonitor extends StatelessWidget {
         return 'WGC helper CPU';
       case 'DXGI Desktop Duplication':
         return 'DXGI';
+      case 'DXGI Desktop Duplication Helper (CPU)':
+        return 'DXGI helper CPU';
       case 'Windows Magnification API':
         return 'WinMag CPU';
       case 'Windows GDI':
@@ -666,30 +640,54 @@ class QualityMonitor extends StatelessWidget {
 
   Widget _row(String info, String? value, {Color? rightColor}) {
     final valueText = value ?? '';
-    return Row(
-      children: [
-        Expanded(
+    final compact = isMobile;
+    return SizedBox(
+      height: compact ? 11 : null,
+      child: Row(
+        children: [
+          Expanded(
             flex: 8,
-            child: AutoSizeText(info,
-                style: TextStyle(color: Color.fromARGB(255, 210, 210, 210)),
-                textAlign: TextAlign.right,
-                maxLines: 1)),
-        Spacer(flex: 1),
-        Expanded(
+            child: _compactTextScale(
+              AutoSizeText(info,
+                  minFontSize: compact ? 7 : 8,
+                  style: TextStyle(
+                      color: const Color.fromARGB(255, 210, 210, 210),
+                      fontSize: compact ? 9 : null,
+                      height: compact ? 1 : null),
+                  textAlign: TextAlign.right,
+                  maxLines: 1),
+            ),
+          ),
+          const Spacer(flex: 1),
+          Expanded(
             flex: 8,
-            child: AutoSizeText(valueText,
-                style: TextStyle(color: rightColor ?? Colors.white),
-                maxLines: 1)),
-      ],
+            child: _compactTextScale(
+              AutoSizeText(valueText,
+                  minFontSize: compact ? 7 : 8,
+                  style: TextStyle(
+                      color: rightColor ?? Colors.white,
+                      fontSize: compact ? 9 : null,
+                      height: compact ? 1 : null),
+                  maxLines: 1),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
   Widget _section(String title) {
+    final compact = isMobile;
     return Padding(
-      padding: const EdgeInsets.only(top: 5, bottom: 1),
-      child: Text(title,
-          style: const TextStyle(
-              color: Color.fromARGB(210, 210, 210, 210), fontSize: 10)),
+      padding: EdgeInsets.only(
+          top: compact ? 2 : 5, bottom: compact ? 0 : 1),
+      child: _compactTextScale(
+        Text(title,
+            style: TextStyle(
+                color: const Color.fromARGB(210, 210, 210, 210),
+                fontSize: compact ? 8 : 10,
+                height: compact ? 1 : null)),
+      ),
     );
   }
 
@@ -704,10 +702,11 @@ class QualityMonitor extends StatelessWidget {
                     IgnorePointer(
                       child: Container(
                         constraints: BoxConstraints(
-                          maxWidth:
-                              qualityMonitorModel.extendedDetails ? 240 : 200,
+                          maxWidth: isMobile
+                              ? (qualityMonitorModel.extendedDetails ? 196 : 176)
+                              : (qualityMonitorModel.extendedDetails ? 240 : 200),
                         ),
-                        padding: const EdgeInsets.all(8),
+                        padding: EdgeInsets.all(isMobile ? 4 : 8),
                         color: MyTheme.canvasColor.withAlpha(150),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -722,6 +721,100 @@ class QualityMonitor extends StatelessWidget {
                                 rightColor: Colors.green),
                             _row("Path",
                                 qualityMonitorModel.data.connectionType ?? '-'),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.quicProtocol != null)
+                              _row("QUIC App",
+                                  qualityMonitorModel.data.quicProtocol),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.quicVideoTransport !=
+                                    null)
+                              _row("Video TX", qualityMonitorModel
+                                  .data.quicVideoTransport),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.transportMtu != null)
+                              _row("Path MTU",
+                                  qualityMonitorModel.data.transportMtu),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.datagramPayload != null)
+                              _row("QUIC DATAGRAM max",
+                                  qualityMonitorModel.data.datagramPayload),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.negotiatedDatagramPayload !=
+                                    null)
+                              _row("QUIC negotiated cap", qualityMonitorModel
+                                  .data.negotiatedDatagramPayload),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.transportRttMs != null)
+                              _row("QUIC RTT",
+                                  '${qualityMonitorModel.data.transportRttMs}ms'),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.transportLostPackets !=
+                                    null)
+                              _row("Lost", qualityMonitorModel
+                                  .data.transportLostPackets),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.quicReassemblyDrops !=
+                                    null)
+                              _row("Reassembly drops", qualityMonitorModel
+                                  .data.quicReassemblyDrops),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.quicReassemblyReasons !=
+                                    null)
+                              _row("RX E/V/O/P", qualityMonitorModel
+                                  .data.quicReassemblyReasons),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.quicReassemblyFrame !=
+                                    null)
+                              _row("RX frame", qualityMonitorModel
+                                  .data.quicReassemblyFrame),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.quicReassemblyTiming !=
+                                    null)
+                              _row("RX L/P/G", qualityMonitorModel
+                                  .data.quicReassemblyTiming),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.quicKeyframeRequests !=
+                                    null)
+                              _row("KF requests", qualityMonitorModel
+                                  .data.quicKeyframeRequests),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.quicReceiverRecovery !=
+                                    null)
+                              _row("RX gap/drop", qualityMonitorModel
+                                  .data.quicReceiverRecovery),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.quicSenderRecovery !=
+                                    null)
+                              _row("TX drop/reset", qualityMonitorModel
+                                  .data.quicSenderRecovery),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.quicSenderAdmission !=
+                                    null)
+                              _row("TX sent/reject", qualityMonitorModel
+                                  .data.quicSenderAdmission),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.quicSenderFrame != null)
+                              _row("TX frame", qualityMonitorModel
+                                  .data.quicSenderFrame),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel.data.quicSenderSpace != null)
+                              _row("TX space", qualityMonitorModel
+                                  .data.quicSenderSpace),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.quicDisposableDrops !=
+                                    null)
+                              _row("A/M drops", qualityMonitorModel
+                                  .data.quicDisposableDrops),
                             if (qualityMonitorModel.extendedDetails)
                               _row("Direct",
                                   qualityMonitorModel.data.direct ?? '-'),
@@ -1069,7 +1162,8 @@ class _QualityMonitorHoverFadeState extends State<QualityMonitorHoverFade> {
 
   @override
   Widget build(BuildContext context) => MouseRegion(
-        opaque: false,
+        opaque: true,
+        hitTestBehavior: HitTestBehavior.translucent,
         onEnter: _handleEnter,
         onExit: _handleExit,
         child: AnimatedOpacity(

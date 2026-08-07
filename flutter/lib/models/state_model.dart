@@ -7,12 +7,21 @@ import './platform_model.dart';
 
 enum SvcStatus { notReady, connecting, ready }
 
+bool shouldShowDesktopTabBar({
+  required bool fullscreen,
+  required bool tabsInFullscreen,
+}) {
+  return !fullscreen || tabsInFullscreen;
+}
+
 class StateGlobal {
   int _windowId = -1;
   final RxBool _fullscreen = false.obs;
   bool _isMinimized = false;
   final RxBool isMaximized = false.obs;
   final RxBool _showTabBar = true.obs;
+  final RxBool _tabsInFullscreen = false.obs;
+  bool _tabsInFullscreenInitialized = false;
   final RxDouble _resizeEdgeSize = RxDouble(windowResizeEdgeSize);
   final RxDouble _windowBorderWidth = RxDouble(kWindowBorderWidth);
   final RxBool showRemoteToolBar = false.obs;
@@ -49,8 +58,17 @@ class StateGlobal {
   int get windowId => _windowId;
   RxBool get fullscreen => _fullscreen;
   bool get isMinimized => _isMinimized;
-  double get tabBarHeight => fullscreen.isTrue ? 0 : kDesktopRemoteTabBarHeight;
+  double get tabBarHeight =>
+      showTabBar.isTrue ? kDesktopRemoteTabBarHeight : 0;
   RxBool get showTabBar => _showTabBar;
+  RxBool get tabsInFullscreen {
+    if (!_tabsInFullscreenInitialized) {
+      _tabsInFullscreen.value =
+          mainGetLocalBoolOptionSync(kOptionAllowTabsInFullscreen);
+      _tabsInFullscreenInitialized = true;
+    }
+    return _tabsInFullscreen;
+  }
   RxDouble get resizeEdgeSize => _resizeEdgeSize;
   RxDouble get windowBorderWidth => _windowBorderWidth;
 
@@ -85,16 +103,31 @@ class StateGlobal {
 
   setMinimized(bool v) => _isMinimized = v;
 
+  setTabsInFullscreen(bool v) {
+    _tabsInFullscreenInitialized = true;
+    _tabsInFullscreen.value = v;
+    refreshTabBarVisibility();
+  }
+
+  refreshTabBarVisibility() {
+    _showTabBar.value = shouldShowDesktopTabBar(
+      fullscreen: _fullscreen.value,
+      tabsInFullscreen: tabsInFullscreen.value,
+    );
+  }
+
   setFullscreen(bool v, {bool procWnd = true}) {
     if (_fullscreen.value != v) {
       _fullscreen.value = v;
-      _showTabBar.value = !_fullscreen.value;
       if (isWebDesktop) {
         procFullscreenWeb();
       } else {
         procFullscreenNative(procWnd);
       }
     }
+    // Recompute even when the fullscreen flag did not change. A tab can move
+    // between window isolates while the destination remains fullscreen.
+    refreshTabBarVisibility();
   }
 
   procFullscreenWeb() {
@@ -145,6 +178,7 @@ class StateGlobal {
     if (isWebDesktop) {
       platformFFI.setFullscreenCallback((v) {
         _fullscreen.value = v;
+        refreshTabBarVisibility();
       });
     }
   }

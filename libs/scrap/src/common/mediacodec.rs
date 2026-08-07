@@ -1,21 +1,31 @@
 use hbb_common::{anyhow::Error, bail, log, ResultType};
-use ndk::media::media_codec::{MediaCodec, MediaCodecDirection, MediaFormat};
+use ndk::media::{
+    media_codec::{
+        DequeuedInputBufferResult, DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection,
+    },
+    media_format::MediaFormat,
+};
 use std::ops::Deref;
 use std::{
-    io::Write,
+    collections::VecDeque,
+    ops::Range,
     sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::ImageFormat;
-use crate::{
-    codec::{EncoderApi, EncoderCfg},
-    CodecFormat, I420ToABGR, I420ToARGB, ImageRgb,
-};
+use crate::{CodecFormat, I420ToABGR, I420ToARGB, ImageRgb, NV12ToABGR, NV12ToARGB};
 
 /// MediaCodec mime type name
 const H264_MIME_TYPE: &str = "video/avc";
 const H265_MIME_TYPE: &str = "video/hevc";
+const COLOR_FORMAT_YUV420_PLANAR: i32 = 19;
+const COLOR_FORMAT_YUV420_SEMIPLANAR: i32 = 21;
+const MAX_PENDING_INPUTS: usize = 16;
+const MAX_PENDING_INPUT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_INPUT_DEQUEUE_EVENTS: usize = 4;
+const MAX_OUTPUT_DEQUEUE_EVENTS: usize = 4;
+const MAX_IN_FLIGHT_FRAMES: usize = 128;
 // const VP8_MIME_TYPE: &str = "video/x-vnd.on2.vp8";
 // const VP9_MIME_TYPE: &str = "video/x-vnd.on2.vp9";
 
@@ -24,9 +34,39 @@ const H265_MIME_TYPE: &str = "video/hevc";
 pub static H264_DECODER_SUPPORT: AtomicBool = AtomicBool::new(false);
 pub static H265_DECODER_SUPPORT: AtomicBool = AtomicBool::new(false);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MediaCodecDecodeOutcome {
+    FrameReady { frame_id: Option<u64> },
+    OutputPending,
+    InputBackpressure,
+}
+
+struct PendingInput {
+    data: Vec<u8>,
+    frame_id: u64,
+}
+
 pub struct MediaCodecDecoder {
     decoder: MediaCodec,
     name: String,
+    decoded_frames: u64,
+    last_diag_log: Option<Instant>,
+    pending_inputs: VecDeque<PendingInput>,
+    pending_input_bytes: usize,
+    in_flight_frames: VecDeque<(i64, u64)>,
+    next_input_token: u64,
+}
+
+struct OutputLayout {
+    coded_w: usize,
+    coded_h: usize,
+    visible_w: usize,
+    visible_h: usize,
+    stride: usize,
+    slice_height: usize,
+    crop_left: usize,
+    crop_top: usize,
+    color_format: i32,
 }
 
 impl Deref for MediaCodecDecoder {
@@ -38,115 +78,297 @@ impl Deref for MediaCodecDecoder {
 }
 
 impl MediaCodecDecoder {
-    pub fn new(format: CodecFormat) -> Option<MediaCodecDecoder> {
+    pub fn new(
+        format: CodecFormat,
+        dimensions: Option<(usize, usize)>,
+    ) -> Option<MediaCodecDecoder> {
+        let Some((width, height)) = dimensions.filter(|(width, height)| *width > 0 && *height > 0)
+        else {
+            log::warn!("MediaCodec decoder requires a valid remote video size");
+            return None;
+        };
         match format {
-            CodecFormat::H264 => create_media_codec(H264_MIME_TYPE, MediaCodecDirection::Decoder),
-            CodecFormat::H265 => create_media_codec(H265_MIME_TYPE, MediaCodecDirection::Decoder),
+            CodecFormat::H264 => {
+                create_media_codec(H264_MIME_TYPE, MediaCodecDirection::Decoder, width, height)
+            }
+            CodecFormat::H265 => {
+                create_media_codec(H265_MIME_TYPE, MediaCodecDirection::Decoder, width, height)
+            }
             _ => {
-                log::error!("Unsupported codec format: {}", format);
+                log::error!("Unsupported codec format: {:?}", format);
                 None
             }
         }
     }
 
     // rgb [in/out] fmt and stride must be set in ImageRgb
-    pub fn decode(&mut self, data: &[u8], rgb: &mut ImageRgb) -> ResultType<bool> {
-        // take dst_stride into account please
-        let dst_stride = rgb.stride();
-        match self.dequeue_input_buffer(Duration::from_millis(10))? {
-            Some(mut input_buffer) => {
-                let mut buf = input_buffer.buffer_mut();
-                if data.len() > buf.len() {
-                    log::error!("Failed to decode, the input data size is bigger than input buf");
-                    bail!("The input data size is bigger than input buf");
-                }
-                buf.write_all(&data)?;
-                self.queue_input_buffer(input_buffer, 0, data.len(), 0, 0)?;
-            }
-            None => {
-                log::debug!("Failed to dequeue_input_buffer: No available input_buffer");
-            }
-        };
+    pub fn decode(
+        &mut self,
+        data: &[u8],
+        frame_id: u64,
+        rgb: &mut ImageRgb,
+    ) -> ResultType<MediaCodecDecodeOutcome> {
+        let total_start = Instant::now();
+        let input_start = Instant::now();
+        self.enqueue_input(data, frame_id)?;
+        let input_backpressure = self.queue_pending_inputs()?;
+        let input_queue_elapsed = input_start.elapsed();
 
-        return match self.dequeue_output_buffer(Duration::from_millis(100))? {
-            Some(output_buffer) => {
-                let res_format = self.output_format();
-                let w = res_format
-                    .i32("width")
-                    .ok_or(Error::msg("Failed to dequeue_output_buffer, width is None"))?
-                    as usize;
-                let h = res_format.i32("height").ok_or(Error::msg(
-                    "Failed to dequeue_output_buffer, height is None",
-                ))? as usize;
-                let stride = res_format.i32("stride").ok_or(Error::msg(
-                    "Failed to dequeue_output_buffer, stride is None",
-                ))?;
-                let buf = output_buffer.buffer();
-                let bps = 4;
-                let u = buf.len() * 2 / 3;
-                let v = buf.len() * 5 / 6;
-                rgb.raw.resize(h * w * bps, 0);
-                let y_ptr = buf.as_ptr();
-                let u_ptr = buf[u..].as_ptr();
-                let v_ptr = buf[v..].as_ptr();
-                unsafe {
-                    match rgb.fmt() {
-                        ImageFormat::ARGB => {
-                            I420ToARGB(
-                                y_ptr,
-                                stride,
-                                u_ptr,
-                                stride / 2,
-                                v_ptr,
-                                stride / 2,
-                                rgb.raw.as_mut_ptr(),
-                                (w * bps) as _,
-                                w as _,
-                                h as _,
-                            );
+        let output_dequeue_start = Instant::now();
+        for attempt in 0..MAX_OUTPUT_DEQUEUE_EVENTS {
+            let timeout = if attempt == 0 {
+                Duration::from_millis(100)
+            } else {
+                Duration::ZERO
+            };
+            match self.decoder.dequeue_output_buffer(timeout)? {
+                DequeuedOutputBufferInfoResult::Buffer(output_buffer) => {
+                    let output_dequeue_elapsed = output_dequeue_start.elapsed();
+                    let presentation_time_us = output_buffer.info().presentation_time_us();
+                    let res_format = self.decoder.output_format();
+                    let convert_start = Instant::now();
+                    let convert_result: ResultType<(OutputLayout, usize, usize)> = (|| {
+                        let layout = output_layout(&res_format)?;
+                        let raw_buffer = output_buffer.buffer();
+                        let range = output_buffer_range(
+                            raw_buffer.len(),
+                            output_buffer.info().offset(),
+                            output_buffer.info().size(),
+                        )?;
+                        if range.is_empty() {
+                            return Ok((layout, 0, raw_buffer.len()));
                         }
-                        ImageFormat::ARGB => {
-                            I420ToABGR(
-                                y_ptr,
-                                stride,
-                                u_ptr,
-                                stride / 2,
-                                v_ptr,
-                                stride / 2,
-                                rgb.raw.as_mut_ptr(),
-                                (w * bps) as _,
-                                w as _,
-                                h as _,
-                            );
-                        }
-                        _ => {
-                            bail!("Unsupported image format");
-                        }
+                        let buf = &raw_buffer[range];
+                        copy_output_to_rgba(buf, &layout, rgb)?;
+                        Ok((layout, buf.len(), raw_buffer.len()))
+                    })(
+                    );
+                    let convert_elapsed = convert_start.elapsed();
+                    self.decoder.release_output_buffer(output_buffer, false)?;
+                    let (layout, output_bytes, output_capacity) = convert_result?;
+                    let output_frame_id = self
+                        .in_flight_frames
+                        .iter()
+                        .position(|(token, _)| *token == presentation_time_us)
+                        .and_then(|position| self.in_flight_frames.remove(position))
+                        .map(|(_, frame_id)| frame_id);
+                    if output_bytes == 0 {
+                        log::debug!("MediaCodec returned an empty output buffer");
+                        continue;
+                    }
+                    if output_frame_id.is_none() {
+                        log::warn!(
+                            "MediaCodec output has no matching input token: decoder={}, codec={}, presentation_time_us={}",
+                            self.name,
+                            self.codec_label(),
+                            presentation_time_us
+                        );
+                    }
+                    self.decoded_frames = self.decoded_frames.saturating_add(1);
+                    if self.should_log_diag() {
+                        log::info!(
+                            "diag android mediacodec frame: decoder={}, codec={}, coded={}x{}, visible={}x{}, stride={}, slice_height={}, crop=({},{}), color_format={}, input_queue_ms={}, output_dequeue_ms={}, convert_ms={}, total_ms={}, input_bytes={}, output_bytes={}, output_capacity={}, dst_stride={}, pending_inputs={}, render_path=rgba-soft, output_format={:?}",
+                            self.name,
+                            self.codec_label(),
+                            layout.coded_w,
+                            layout.coded_h,
+                            layout.visible_w,
+                            layout.visible_h,
+                            layout.stride,
+                            layout.slice_height,
+                            layout.crop_left,
+                            layout.crop_top,
+                            layout.color_format,
+                            input_queue_elapsed.as_millis(),
+                            output_dequeue_elapsed.as_millis(),
+                            convert_elapsed.as_millis(),
+                            total_start.elapsed().as_millis(),
+                            data.len(),
+                            output_bytes,
+                            output_capacity,
+                            rgba_stride(layout.visible_w, rgb.align()),
+                            self.pending_inputs.len(),
+                            res_format,
+                        );
+                    }
+                    return Ok(MediaCodecDecodeOutcome::FrameReady {
+                        frame_id: output_frame_id,
+                    });
+                }
+                DequeuedOutputBufferInfoResult::TryAgainLater => break,
+                DequeuedOutputBufferInfoResult::OutputFormatChanged => {
+                    log::info!(
+                        "MediaCodec output format changed: decoder={}, codec={}, format={:?}",
+                        self.name,
+                        self.codec_label(),
+                        self.decoder.output_format()
+                    );
+                }
+                DequeuedOutputBufferInfoResult::OutputBuffersChanged => {
+                    log::debug!(
+                        "MediaCodec output buffers changed: decoder={}, codec={}",
+                        self.name,
+                        self.codec_label()
+                    );
+                }
+            }
+        }
+        Ok(if input_backpressure || !self.pending_inputs.is_empty() {
+            MediaCodecDecodeOutcome::InputBackpressure
+        } else {
+            MediaCodecDecodeOutcome::OutputPending
+        })
+    }
+
+    fn enqueue_input(&mut self, data: &[u8], frame_id: u64) -> ResultType<()> {
+        if self.pending_inputs.len() >= MAX_PENDING_INPUTS
+            || self.pending_input_bytes.saturating_add(data.len()) > MAX_PENDING_INPUT_BYTES
+        {
+            bail!(
+                "MediaCodec input queue limit exceeded: pending={}, pending_bytes={}, input_bytes={}",
+                self.pending_inputs.len(),
+                self.pending_input_bytes,
+                data.len()
+            );
+        }
+        self.pending_input_bytes = self.pending_input_bytes.saturating_add(data.len());
+        self.pending_inputs.push_back(PendingInput {
+            data: data.to_vec(),
+            frame_id,
+        });
+        Ok(())
+    }
+
+    fn queue_pending_inputs(&mut self) -> ResultType<bool> {
+        for attempt in 0..MAX_INPUT_DEQUEUE_EVENTS {
+            if self.pending_inputs.is_empty() {
+                return Ok(false);
+            }
+            let timeout = if attempt == 0 {
+                Duration::from_millis(10)
+            } else {
+                Duration::ZERO
+            };
+            let token = self.next_input_token();
+            match self.decoder.dequeue_input_buffer(timeout)? {
+                DequeuedInputBufferResult::Buffer(mut input_buffer) => {
+                    let Some(pending) = self.pending_inputs.pop_front() else {
+                        return Ok(false);
+                    };
+                    self.pending_input_bytes =
+                        self.pending_input_bytes.saturating_sub(pending.data.len());
+                    let buf = input_buffer.buffer_mut();
+                    if pending.data.len() > buf.len() {
+                        bail!(
+                            "MediaCodec input exceeds buffer capacity: input_bytes={}, capacity={}",
+                            pending.data.len(),
+                            buf.len()
+                        );
+                    }
+                    for (destination, source) in buf.iter_mut().zip(pending.data.iter()) {
+                        destination.write(*source);
+                    }
+                    self.decoder.queue_input_buffer(
+                        input_buffer,
+                        0,
+                        pending.data.len(),
+                        token as u64,
+                        0,
+                    )?;
+                    self.in_flight_frames.push_back((token, pending.frame_id));
+                    while self.in_flight_frames.len() > MAX_IN_FLIGHT_FRAMES {
+                        self.in_flight_frames.pop_front();
                     }
                 }
-                self.release_output_buffer(output_buffer, false)?;
-                Ok(true)
+                DequeuedInputBufferResult::TryAgainLater => return Ok(true),
             }
-            None => {
-                log::debug!("Failed to dequeue_output: No available dequeue_output");
-                Ok(false)
-            }
+        }
+        Ok(!self.pending_inputs.is_empty())
+    }
+
+    fn next_input_token(&mut self) -> i64 {
+        self.next_input_token = if self.next_input_token >= i64::MAX as u64 {
+            1
+        } else {
+            self.next_input_token.saturating_add(1).max(1)
         };
+        self.next_input_token as i64
+    }
+
+    fn codec_label(&self) -> &'static str {
+        match self.name.as_str() {
+            H264_MIME_TYPE => "H264",
+            H265_MIME_TYPE => "H265",
+            _ => "unknown",
+        }
+    }
+
+    fn should_log_diag(&mut self) -> bool {
+        if self.decoded_frames <= 3 {
+            return true;
+        }
+        if self
+            .last_diag_log
+            .map(|last| last.elapsed() < Duration::from_secs(5))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        self.last_diag_log = Some(Instant::now());
+        true
     }
 }
 
-fn create_media_codec(name: &str, direction: MediaCodecDirection) -> Option<MediaCodecDecoder> {
+fn output_buffer_range(buffer_len: usize, offset: i32, size: i32) -> ResultType<Range<usize>> {
+    if offset < 0 || size < 0 {
+        bail!(
+            "Invalid MediaCodec output buffer range: offset={}, size={}, capacity={}",
+            offset,
+            size,
+            buffer_len
+        );
+    }
+    let start = offset as usize;
+    let end = start.checked_add(size as usize).ok_or_else(|| {
+        Error::msg(format!(
+            "MediaCodec output buffer range overflow: offset={}, size={}, capacity={}",
+            offset, size, buffer_len
+        ))
+    })?;
+    if end > buffer_len {
+        bail!(
+            "MediaCodec output buffer range exceeds capacity: offset={}, size={}, capacity={}",
+            offset,
+            size,
+            buffer_len
+        );
+    }
+    Ok(start..end)
+}
+
+fn create_media_codec(
+    name: &str,
+    direction: MediaCodecDirection,
+    width: usize,
+    height: usize,
+) -> Option<MediaCodecDecoder> {
     let codec = MediaCodec::from_decoder_type(name)?;
-    let media_format = MediaFormat::new();
+    let mut media_format = MediaFormat::new();
     media_format.set_str("mime", name);
-    media_format.set_i32("width", 0);
-    media_format.set_i32("height", 0);
-    media_format.set_i32("color-format", 19); // COLOR_FormatYUV420Planar
+    media_format.set_i32("width", width as i32);
+    media_format.set_i32("height", height as i32);
+    media_format.set_i32("color-format", COLOR_FORMAT_YUV420_PLANAR);
     if let Err(e) = codec.configure(&media_format, None, direction) {
         log::error!("Failed to init decoder: {:?}", e);
         return None;
     };
-    log::error!("decoder init success");
+    log::info!(
+        "MediaCodec decoder configure success: mime={}, size={}x{}, requested_color_format={}",
+        name,
+        width,
+        height,
+        COLOR_FORMAT_YUV420_PLANAR
+    );
     if let Err(e) = codec.start() {
         log::error!("Failed to start decoder: {:?}", e);
         return None;
@@ -155,17 +377,253 @@ fn create_media_codec(name: &str, direction: MediaCodecDirection) -> Option<Medi
     return Some(MediaCodecDecoder {
         decoder: codec,
         name: name.to_owned(),
+        decoded_frames: 0,
+        last_diag_log: None,
+        pending_inputs: VecDeque::new(),
+        pending_input_bytes: 0,
+        in_flight_frames: VecDeque::new(),
+        next_input_token: 0,
     });
 }
 
+fn positive_i32(format: &MediaFormat, key: &str) -> Option<usize> {
+    format
+        .i32(key)
+        .filter(|value| *value > 0)
+        .map(|value| value as usize)
+}
+
+fn output_layout(format: &MediaFormat) -> ResultType<OutputLayout> {
+    let coded_w = positive_i32(format, "width").ok_or(Error::msg(
+        "Failed to dequeue_output_buffer, width is invalid",
+    ))?;
+    let coded_h = positive_i32(format, "height").ok_or(Error::msg(
+        "Failed to dequeue_output_buffer, height is invalid",
+    ))?;
+    let stride = positive_i32(format, "stride").unwrap_or(coded_w);
+    let slice_height = positive_i32(format, "slice-height").unwrap_or(coded_h);
+    let crop_left = format.i32("crop-left").unwrap_or(0).max(0) as usize;
+    let crop_top = format.i32("crop-top").unwrap_or(0).max(0) as usize;
+    let crop_right = format
+        .i32("crop-right")
+        .unwrap_or(coded_w.saturating_sub(1) as i32);
+    let crop_bottom = format
+        .i32("crop-bottom")
+        .unwrap_or(coded_h.saturating_sub(1) as i32);
+    if crop_right < crop_left as i32
+        || crop_bottom < crop_top as i32
+        || crop_right >= coded_w as i32
+        || crop_bottom >= coded_h as i32
+    {
+        bail!(
+            "Invalid MediaCodec output crop: coded={}x{}, crop=({},{} - {},{})",
+            coded_w,
+            coded_h,
+            crop_left,
+            crop_top,
+            crop_right,
+            crop_bottom
+        );
+    }
+    let visible_w = crop_right as usize - crop_left + 1;
+    let visible_h = crop_bottom as usize - crop_top + 1;
+    let color_format = format
+        .i32("color-format")
+        .unwrap_or(COLOR_FORMAT_YUV420_PLANAR);
+    Ok(OutputLayout {
+        coded_w,
+        coded_h,
+        visible_w,
+        visible_h,
+        stride,
+        slice_height,
+        crop_left,
+        crop_top,
+        color_format,
+    })
+}
+
+fn rgba_stride(width: usize, align: usize) -> usize {
+    let bytes = width * 4;
+    if align <= 1 {
+        bytes
+    } else {
+        (bytes + align - 1) & !(align - 1)
+    }
+}
+
+fn copy_output_to_rgba(buf: &[u8], layout: &OutputLayout, rgb: &mut ImageRgb) -> ResultType<()> {
+    match layout.color_format {
+        COLOR_FORMAT_YUV420_PLANAR => copy_i420_output_to_rgba(buf, layout, rgb),
+        COLOR_FORMAT_YUV420_SEMIPLANAR => copy_nv12_output_to_rgba(buf, layout, rgb),
+        _ => bail!(
+            "Unsupported MediaCodec output color format: {}, layout={}x{} stride={} slice_height={}",
+            layout.color_format,
+            layout.visible_w,
+            layout.visible_h,
+            layout.stride,
+            layout.slice_height
+        ),
+    }
+}
+
+fn copy_i420_output_to_rgba(
+    buf: &[u8],
+    layout: &OutputLayout,
+    rgb: &mut ImageRgb,
+) -> ResultType<()> {
+    let uv_stride = (layout.stride + 1) / 2;
+    let uv_height = (layout.slice_height + 1) / 2;
+    let y_size = layout.stride * layout.slice_height;
+    let uv_size = uv_stride * uv_height;
+    let min_size = y_size + uv_size * 2;
+    if buf.len() < min_size {
+        bail!(
+            "MediaCodec I420 output too small: bytes={}, required={}, stride={}, slice_height={}",
+            buf.len(),
+            min_size,
+            layout.stride,
+            layout.slice_height
+        );
+    }
+    let dst_stride = rgba_stride(layout.visible_w, rgb.align());
+    rgb.w = layout.visible_w;
+    rgb.h = layout.visible_h;
+    rgb.raw.resize(layout.visible_h * dst_stride, 0);
+    let y_offset = layout.crop_top * layout.stride + layout.crop_left;
+    let uv_offset = (layout.crop_top / 2) * uv_stride + layout.crop_left / 2;
+    let y_ptr = unsafe { buf.as_ptr().add(y_offset) };
+    let u_ptr = unsafe { buf.as_ptr().add(y_size + uv_offset) };
+    let v_ptr = unsafe { buf.as_ptr().add(y_size + uv_size + uv_offset) };
+    let res = unsafe {
+        match rgb.fmt() {
+            ImageFormat::ARGB => I420ToARGB(
+                y_ptr,
+                layout.stride as _,
+                u_ptr,
+                uv_stride as _,
+                v_ptr,
+                uv_stride as _,
+                rgb.raw.as_mut_ptr(),
+                dst_stride as _,
+                layout.visible_w as _,
+                layout.visible_h as _,
+            ),
+            ImageFormat::ABGR => I420ToABGR(
+                y_ptr,
+                layout.stride as _,
+                u_ptr,
+                uv_stride as _,
+                v_ptr,
+                uv_stride as _,
+                rgb.raw.as_mut_ptr(),
+                dst_stride as _,
+                layout.visible_w as _,
+                layout.visible_h as _,
+            ),
+            ImageFormat::Raw => bail!("Unsupported MediaCodec image format: Raw"),
+        }
+    };
+    if res != 0 {
+        bail!("I420 to RGBA conversion failed: {}", res);
+    }
+    Ok(())
+}
+
+fn copy_nv12_output_to_rgba(
+    buf: &[u8],
+    layout: &OutputLayout,
+    rgb: &mut ImageRgb,
+) -> ResultType<()> {
+    let y_size = layout.stride * layout.slice_height;
+    let uv_height = (layout.slice_height + 1) / 2;
+    let min_size = y_size + layout.stride * uv_height;
+    if buf.len() < min_size {
+        bail!(
+            "MediaCodec NV12 output too small: bytes={}, required={}, stride={}, slice_height={}",
+            buf.len(),
+            min_size,
+            layout.stride,
+            layout.slice_height
+        );
+    }
+    let dst_stride = rgba_stride(layout.visible_w, rgb.align());
+    rgb.w = layout.visible_w;
+    rgb.h = layout.visible_h;
+    rgb.raw.resize(layout.visible_h * dst_stride, 0);
+    let y_offset = layout.crop_top * layout.stride + layout.crop_left;
+    let uv_offset = (layout.crop_top / 2) * layout.stride + (layout.crop_left / 2) * 2;
+    let y_ptr = unsafe { buf.as_ptr().add(y_offset) };
+    let uv_ptr = unsafe { buf.as_ptr().add(y_size + uv_offset) };
+    let res = unsafe {
+        match rgb.fmt() {
+            ImageFormat::ARGB => NV12ToARGB(
+                y_ptr,
+                layout.stride as _,
+                uv_ptr,
+                layout.stride as _,
+                rgb.raw.as_mut_ptr(),
+                dst_stride as _,
+                layout.visible_w as _,
+                layout.visible_h as _,
+            ),
+            ImageFormat::ABGR => NV12ToABGR(
+                y_ptr,
+                layout.stride as _,
+                uv_ptr,
+                layout.stride as _,
+                rgb.raw.as_mut_ptr(),
+                dst_stride as _,
+                layout.visible_w as _,
+                layout.visible_h as _,
+            ),
+            ImageFormat::Raw => bail!("Unsupported MediaCodec image format: Raw"),
+        }
+    };
+    if res != 0 {
+        bail!("NV12 to RGBA conversion failed: {}", res);
+    }
+    Ok(())
+}
+
+pub fn update_decoder_support(infos: &crate::android::ffi::MediaCodecInfos) {
+    let supports = |mime_type: &str| {
+        infos.codecs.iter().any(|codec| {
+            !codec.is_encoder
+                && codec.hw == Some(true)
+                && codec.yuv420
+                && codec.mime_type == mime_type
+        })
+    };
+    let h264 = supports(H264_MIME_TYPE);
+    let h265 = supports(H265_MIME_TYPE);
+    H264_DECODER_SUPPORT.store(h264, Ordering::SeqCst);
+    H265_DECODER_SUPPORT.store(h265, Ordering::SeqCst);
+    log::info!(
+        "Android MediaCodec decoder capabilities: h264={}, h265={}, codec_entries={}",
+        h264,
+        h265,
+        infos.codecs.len()
+    );
+}
+
 pub fn check_mediacodec() {
-    std::thread::spawn(move || {
-        // check decoders
-        let decoders = MediaCodecDecoder::new_decoders();
-        H264_DECODER_SUPPORT.swap(decoders.h264.is_some(), Ordering::SeqCst);
-        H265_DECODER_SUPPORT.swap(decoders.h265.is_some(), Ordering::SeqCst);
-        decoders.h264.map(|d| d.stop());
-        decoders.h265.map(|d| d.stop());
-        // TODO encoders
-    });
+    if let Some(infos) = crate::android::ffi::get_codec_info() {
+        update_decoder_support(&infos);
+    } else {
+        log::info!("Android MediaCodec capability check is waiting for the Java codec list");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::output_buffer_range;
+
+    #[test]
+    fn output_buffer_range_validates_offset_size_and_capacity() {
+        assert_eq!(output_buffer_range(64, 8, 16).unwrap(), 8..24);
+        assert!(output_buffer_range(64, -1, 16).is_err());
+        assert!(output_buffer_range(64, 8, -1).is_err());
+        assert!(output_buffer_range(64, 60, 8).is_err());
+    }
 }

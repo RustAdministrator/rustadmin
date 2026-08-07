@@ -1,0 +1,17 @@
+# These values belong in the existing RustAdmin options table.
+# QUIC runs over UDP and falls back only for classified reachability failures.
+[options]
+remote-transport = "quic-preferred"
+disable-udp = "N"
+quic-listen-address = "0.0.0.0"
+quic-listen-port = "48100"
+quic-connect-timeout-ms = "5000"
+quic-keepalive-interval-ms = "5000"
+quic-enable-ipv6 = "Y"
+quic-file-bandwidth-mbps = "20"
+
+# Routed peers remain session-specific and are entered as their LAN/VPN
+# IP or domain in the normal connection field, for example:
+# peer-address = "10.20.30.2"
+# peer-port = "48100"
+# pairing-mode = "pinned-key"

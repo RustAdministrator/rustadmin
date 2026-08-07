@@ -6,6 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/transport_mode.dart';
 import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/consts.dart';
@@ -20,6 +21,7 @@ import 'package:flutter_hbb/models/server_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/plugin/manager.dart';
 import 'package:flutter_hbb/plugin/widgets/desktop_settings.dart';
+import 'package:flutter_hbb/utils/multi_window_manager.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -440,6 +442,7 @@ class _GeneralState extends State<_General> {
         theme(),
         _Card(title: 'Language', children: [language()]),
         if (!isWeb) hwcodec(),
+        if (isWindows) processPriority(),
         if (!isWeb) audio(context),
         if (!isWeb) record(context),
         if (!isWeb) WaylandCard(),
@@ -518,6 +521,20 @@ class _GeneralState extends State<_General> {
           'Open connection in new tab',
           kOptionOpenNewConnInTabs,
           isServer: false,
+        ),
+        _OptionCheckBox(
+          context,
+          'Open remote sessions in main window',
+          kOptionOpenRemoteSessionsInMainWindow,
+          isServer: false,
+        ),
+        _OptionCheckBox(
+          context,
+          'Tabs in fullscreen',
+          kOptionAllowTabsInFullscreen,
+          isServer: false,
+          optSetter: (_, value) =>
+              rustDeskWinManager.setTabsInFullscreen(value),
         ),
         // though this is related to GUI, but opengl problem affects all users, so put in config rather than local
         if (isLinux)
@@ -687,6 +704,30 @@ class _GeneralState extends State<_General> {
     );
   }
 
+  Widget processPriority() {
+    const priorities = <String, String>{
+      'normal': 'Normal',
+      'above-normal': 'Above normal',
+      'high': 'High',
+    };
+    var current = bind.mainGetOptionSync(key: kOptionProcessPriority);
+    if (!priorities.containsKey(current)) {
+      current = 'normal';
+    }
+    return _Card(title: 'Process priority', children: [
+      ComboBox(
+        keys: priorities.keys.toList(),
+        values: priorities.values.map(translate).toList(),
+        initialKey: current,
+        enabled: !isOptionFixed(kOptionProcessPriority),
+        onChanged: (value) async {
+          await bind.mainSetOption(key: kOptionProcessPriority, value: value);
+          setState(() {});
+        },
+      ).marginOnly(left: _kContentHMargin),
+    ]);
+  }
+
   Widget audio(BuildContext context) {
     if (bind.isOutgoingOnly()) {
       return const Offstage();
@@ -788,7 +829,7 @@ class _GeneralState extends State<_General> {
                                 initialDirectory = user_dir;
                               }
                               String? selectedDirectory =
-                                  await FilePicker.platform.getDirectoryPath(
+                                  await FilePicker.getDirectoryPath(
                                       initialDirectory: initialDirectory);
                               if (selectedDirectory != null) {
                                 await bind.mainSetLocalOption(
@@ -1928,7 +1969,10 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
           ),
         );
 
-    final outgoingOnly = bind.isOutgoingOnly();
+    final transportMode = remoteTransportPreferenceFromOptions(
+      remoteTransport: bind.mainGetOptionSync(key: kOptionRemoteTransport),
+      disableUdp: bind.mainGetOptionSync(key: kOptionDisableUdp),
+    );
 
     final divider = const Divider(height: 1, indent: 16, endIndent: 16);
     return _Card(
@@ -1965,6 +2009,47 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
                     'Use WebSocket',
                     '${translate('websocket_tip')}\n\n${translate('server-oss-not-support-tip')}',
                     kOptionAllowWebSocket),
+              if (!isWeb) divider,
+              if (!isWeb)
+                listTile(
+                  icon: Icons.speed_outlined,
+                  title: 'Transport',
+                  showTooltip: true,
+                  tooltipMessage: translate('enable-quic-tip'),
+                  trailing: PopupMenuButton<RemoteTransportPreference>(
+                    initialValue: transportMode,
+                    enabled: !locked &&
+                        !isOptionFixed(kOptionRemoteTransport) &&
+                        !isOptionFixed(kOptionDisableUdp),
+                    tooltip: translate('Transport'),
+                    onSelected: (mode) async {
+                      await bind.mainSetOption(
+                        key: kOptionRemoteTransport,
+                        value: remoteTransportOption(mode),
+                      );
+                      await bind.mainSetOption(
+                        key: kOptionDisableUdp,
+                        value: disableUdpOption(mode),
+                      );
+                      setState(() {});
+                    },
+                    itemBuilder: (context) => RemoteTransportPreference.values
+                        .map((mode) => PopupMenuItem(
+                              value: mode,
+                              child:
+                                  Text(translate(remoteTransportLabel(mode))),
+                            ))
+                        .toList(),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(translate(remoteTransportLabel(transportMode))),
+                        const SizedBox(width: 4),
+                        const Icon(Icons.arrow_drop_down),
+                      ],
+                    ),
+                  ),
+                ),
               if (!isWeb)
                 futureBuilder(
                   future: bind.mainIsUsingPublicServer(),
@@ -1981,29 +2066,6 @@ class _NetworkState extends State<_Network> with AutomaticKeepAliveClientMixin {
                               'Allow insecure TLS fallback',
                               'allow-insecure-tls-fallback-tip',
                               kOptionAllowInsecureTLSFallback),
-                          if (!outgoingOnly) divider,
-                          if (!outgoingOnly)
-                            listTile(
-                              icon: Icons.lan_outlined,
-                              title: 'Disable UDP',
-                              showTooltip: true,
-                              tooltipMessage:
-                                  '${translate('disable-udp-tip')}\n\n${translate('server-oss-not-support-tip')}',
-                              trailing: Switch(
-                                value: bind.mainGetOptionSync(
-                                        key: kOptionDisableUdp) ==
-                                    'Y',
-                                onChanged:
-                                    locked || isOptionFixed(kOptionDisableUdp)
-                                        ? null
-                                        : (value) async {
-                                            await bind.mainSetOption(
-                                                key: kOptionDisableUdp,
-                                                value: value ? 'Y' : 'N');
-                                            setState(() {});
-                                          },
-                              ),
-                            ),
                         ],
                       );
                     }

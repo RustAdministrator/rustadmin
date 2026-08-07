@@ -7,7 +7,8 @@ use super::{input_service::*, *};
 #[cfg(feature = "unix-file-copy-paste")]
 use crate::clipboard::try_empty_clipboard_files;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-use crate::clipboard::{update_clipboard, ClipboardSide};
+use crate::clipboard::update_clipboard;
+use crate::clipboard::ClipboardSide;
 #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
 use crate::clipboard_file::*;
 #[cfg(target_os = "android")]
@@ -38,8 +39,11 @@ use hbb_common::{
     futures::{SinkExt, StreamExt},
     get_time, get_version_number,
     message_proto::{
-        option_message::BoolOption, permission_info::Permission, supported_decoding::PreferCodec,
+        option_message::{BoolOption, CaptureBackend},
+        permission_info::Permission,
+        supported_decoding::PreferCodec,
         SessionPermissionRequest, SessionPermissionResponse, VideoFeedback, VideoFrame,
+        VideoReferenceRefresh,
     },
     password_security::{self as password, ApproveMode},
     sha2::{Digest, Sha256},
@@ -79,6 +83,17 @@ use crate::virtual_display_manager;
 pub type Sender = mpsc::UnboundedSender<(Instant, Arc<Message>)>;
 type QueuedVideoMessage = (Instant, Arc<Message>);
 const VIDEO_QUEUE_CAPACITY: usize = 8;
+const SERVER_ASYNC_OUTBOX_CAPACITY: usize = 256;
+const SERVER_VIDEO_LATEST_KEY_FALLBACK: u64 = 1 << 63;
+const SERVER_CLOSE_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+
+fn server_video_latest_key(frame: &VideoFrame) -> u64 {
+    if frame.stream_id != 0 {
+        frame.stream_id
+    } else {
+        SERVER_VIDEO_LATEST_KEY_FALLBACK | u64::from(frame.display as u32)
+    }
+}
 
 struct VideoQueueInner {
     messages: std::sync::Mutex<VecDeque<QueuedVideoMessage>>,
@@ -714,6 +729,10 @@ impl VideoDeliveryController {
                     Some(now)
                 };
             state.phase = VideoDeliveryPhase::Healthy;
+            // A decoded frame proves that the last reference refresh reached the
+            // peer. Allow a new scoped recovery request immediately if the path
+            // loses the next reference instead of waiting out the old cooldown.
+            state.last_refresh_at = None;
         }
         let first_render =
             state.highest_render_submitted_frame_id == 0 && feedback.render_submitted_frame_id > 0;
@@ -766,6 +785,46 @@ impl VideoDeliveryController {
         actions
     }
 
+    fn on_reference_refresh_request(
+        &mut self,
+        request: &VideoReferenceRefresh,
+        now: Instant,
+        network_delay_ms: u32,
+    ) -> Result<Option<VideoRecoveryAction>, &'static str> {
+        if !valid_video_reference_refresh(request) {
+            return Err("invalid request");
+        }
+        let Some(state) = self.by_display.get_mut(&request.display) else {
+            return Err("unknown display");
+        };
+        if state.stream_id != request.stream_id {
+            return Err("stale stream");
+        }
+        let refresh_cooldown = Self::refresh_cooldown(network_delay_ms);
+        if state
+            .last_refresh_at
+            .is_some_and(|last| now.saturating_duration_since(last) < refresh_cooldown)
+        {
+            return Ok(None);
+        }
+        let previous_phase = state.phase;
+        let progress_at = state.decode_pending_since.unwrap_or(state.first_sent_at);
+        let stalled = now.saturating_duration_since(progress_at);
+        state.phase = VideoDeliveryPhase::Recovering;
+        state.last_refresh_at = Some(now);
+        state.recovery_count = state.recovery_count.saturating_add(1);
+        state.latest_stall_ms = stalled.as_millis().min(u64::MAX as u128) as u64;
+        Ok(Some(VideoRecoveryAction {
+            display: request.display,
+            stream_id: state.stream_id,
+            highest_sent_frame_id: state.highest_sent_frame_id,
+            highest_decoded_frame_id: state.highest_decoded_frame_id,
+            highest_render_submitted_frame_id: state.highest_render_submitted_frame_id,
+            stalled_ms: stalled.as_millis(),
+            previous_phase,
+        }))
+    }
+
     fn status(&self, display: i32) -> Option<VideoDeliveryStatus> {
         let state = self.by_display.get(&display).or_else(|| {
             self.by_display.values().max_by_key(|state| {
@@ -790,6 +849,10 @@ fn valid_video_feedback(feedback: &VideoFeedback) -> bool {
         && feedback.received_frame_id != 0
         && feedback.decoded_frame_id <= feedback.received_frame_id
         && feedback.render_submitted_frame_id <= feedback.decoded_frame_id
+}
+
+fn valid_video_reference_refresh(request: &VideoReferenceRefresh) -> bool {
+    request.stream_id != 0 && request.display >= 0 && request.received_frame_id != 0
 }
 
 fn video_feedback_regressed(previous: &VideoFeedback, next: &VideoFeedback) -> bool {
@@ -1112,6 +1175,7 @@ fn stream_misc_kind(misc: &Misc) -> &'static str {
     match &misc.union {
         Some(misc::Union::RefreshVideo(_)) => "Misc::RefreshVideo",
         Some(misc::Union::RefreshVideoDisplay(_)) => "Misc::RefreshVideoDisplay",
+        Some(misc::Union::VideoReferenceRefresh(_)) => "Misc::VideoReferenceRefresh",
         Some(misc::Union::VideoReceived(_)) => "Misc::VideoReceived",
         Some(misc::Union::CloseReason(_)) => "Misc::CloseReason",
         Some(misc::Union::ChatMessage(_)) => "Misc::ChatMessage",
@@ -1136,6 +1200,8 @@ impl Connection {
         #[cfg(target_os = "android")]
         let control_permissions = None;
         let _raii_id = raii::ConnectionID::new(id);
+        let stream = stream
+            .into_duplex_with_context(SERVER_ASYNC_OUTBOX_CAPACITY, format!("host_conn={id}"));
         let _raii_control_permissions_id =
             raii::ControlPermissionsID::new(id, &control_permissions);
         let hash = Hash {
@@ -1320,9 +1386,10 @@ impl Connection {
         };
         let mut send_timeout_ms =
             initial_send_timeout_ms(file_transfer_conn, port_forward_conn, terminal_conn);
+        let tcp_write_pacing = Config::get_option(keys::OPTION_TCP_WRITE_PACING) == "Y";
         conn.stream.set_send_timeout(send_timeout_ms);
         log::info!(
-            "#{} diag conn run loop: addr={}, authorized={}, auth_kind={}, remote={}, file_transfer={}, view_camera={}, terminal={}, port_forward={}, display_idx={}, send_timeout_ms={}, steady_send_timeout_ms={}, startup_timeout_window_ms={}, video_ack_required={}",
+            "#{} diag conn run loop: addr={}, authorized={}, auth_kind={}, remote={}, file_transfer={}, view_camera={}, terminal={}, port_forward={}, display_idx={}, send_timeout_ms={}, steady_send_timeout_ms={}, startup_timeout_window_ms={}, video_ack_required={}, tcp_write_pacing={}",
             conn.inner.id(),
             addr,
             conn.authorized,
@@ -1338,7 +1405,8 @@ impl Connection {
             startup_send_timeout_until
                 .map(|until| until.saturating_duration_since(Instant::now()).as_millis())
                 .unwrap_or(0),
-            conn.video_ack_required
+            conn.video_ack_required,
+            tcp_write_pacing
         );
 
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1655,7 +1723,20 @@ impl Connection {
                         }
                         continue;
                     }
-                    if let Err(err) = conn.stream.send(&value as &Message).await {
+                    let send_result = if let Some(message::Union::VideoFrame(frame)) = &value.union {
+                        conn.stream
+                            .send_latest(
+                                server_video_latest_key(frame),
+                                "VideoFrame",
+                                &value as &Message,
+                            )
+                            .await
+                    } else {
+                        conn.stream
+                            .send_ordering_tagged("VideoOrdering", &value as &Message)
+                            .await
+                    };
+                    if let Err(err) = send_result {
                         let kind = stream_message_kind(&value);
                         if is_video_frame {
                             log::warn!(
@@ -1699,7 +1780,7 @@ impl Connection {
                         first_video_frame_sent = true;
                         if let Some(message::Union::VideoFrame(vf)) = &value.union {
                             log::info!(
-                                "#{} diag first video frame sent to stream: display={}, stream_id={}, frame_id={}, capture_ms={}, queue_latency_ms={}, video_ack_required={}",
+                                "#{} diag first video frame queued to async stream: display={}, stream_id={}, frame_id={}, capture_ms={}, queue_latency_ms={}, video_ack_required={}",
                                 conn.inner.id(),
                                 vf.display,
                                 vf.stream_id,
@@ -2981,14 +3062,8 @@ impl Connection {
             pi.hostname = DEVICE_NAME.lock().unwrap().clone();
             pi.platform = "Android".into();
         }
-        #[cfg(all(target_os = "macos", not(feature = "unix-file-copy-paste")))]
         let mut platform_additions = serde_json::Map::new();
-        #[cfg(any(
-            target_os = "windows",
-            target_os = "linux",
-            all(target_os = "macos", feature = "unix-file-copy-paste")
-        ))]
-        let mut platform_additions = serde_json::Map::new();
+        platform_additions.insert("full_version".into(), json!(crate::FULL_VERSION));
         #[cfg(target_os = "linux")]
         {
             if crate::platform::current_is_wayland() {
@@ -3014,6 +3089,7 @@ impl Connection {
                 "supported_privacy_mode_impl".into(),
                 json!(privacy_mode::get_supported_privacy_mode_impl()),
             );
+            platform_additions.insert("support_capture_backend".into(), json!(true));
         }
         #[cfg(target_os = "macos")]
         {
@@ -3046,7 +3122,6 @@ impl Connection {
             platform_additions.insert("support_view_camera".into(), json!(true));
         }
 
-        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         if !platform_additions.is_empty() {
             pi.platform_additions = serde_json::to_string(&platform_additions).unwrap_or("".into());
         }
@@ -3161,6 +3236,11 @@ impl Connection {
                 self.send(msg_out).await;
             }
 
+            #[cfg(windows)]
+            {
+                crate::platform::windows::log_lock_screen_state("connection-login");
+                super::display_service::log_windows_displays("connection-login");
+            }
             try_activate_screen();
 
             match super::display_service::update_get_sync_displays_on_login().await {
@@ -3978,6 +4058,52 @@ impl Connection {
                 feedback.stream_id,
                 feedback.render_submitted_frame_id
             );
+        }
+    }
+
+    fn handle_video_reference_refresh(&mut self, request: VideoReferenceRefresh) {
+        let now = Instant::now();
+        match self
+            .video_delivery
+            .on_reference_refresh_request(&request, now, self.network_delay)
+        {
+            Ok(Some(action)) => {
+                log::warn!(
+                    "#{} diag video reference refresh requested by peer: display={}, stream_id={}, received={}, dropped={}, sent={}, decoded={}, render_submitted={}, stalled_ms={}, previous_phase={:?}",
+                    self.inner.id(),
+                    request.display,
+                    request.stream_id,
+                    request.received_frame_id,
+                    request.dropped_frames,
+                    action.highest_sent_frame_id,
+                    action.highest_decoded_frame_id,
+                    action.highest_render_submitted_frame_id,
+                    action.stalled_ms,
+                    action.previous_phase
+                );
+                self.refresh_video_reference(action.display as usize);
+            }
+            Ok(None) => {
+                log::debug!(
+                    "#{} suppressed video reference refresh by cooldown: display={}, stream_id={}, received={}, dropped={}",
+                    self.inner.id(),
+                    request.display,
+                    request.stream_id,
+                    request.received_frame_id,
+                    request.dropped_frames
+                );
+            }
+            Err(reason) => {
+                log::warn!(
+                    "#{} ignored video reference refresh: reason={}, display={}, stream_id={}, received={}, dropped={}",
+                    self.inner.id(),
+                    reason,
+                    request.display,
+                    request.stream_id,
+                    request.received_frame_id,
+                    request.dropped_frames
+                );
+            }
         }
     }
 
@@ -5035,6 +5161,9 @@ impl Connection {
                     Some(misc::Union::VideoFeedback(feedback)) => {
                         self.handle_video_feedback(feedback);
                     }
+                    Some(misc::Union::VideoReferenceRefresh(request)) => {
+                        self.handle_video_reference_refresh(request);
+                    }
                     Some(misc::Union::RestartRemoteDevice(_)) => {
                         #[cfg(not(any(target_os = "android", target_os = "ios")))]
                         if self.restart {
@@ -6030,6 +6159,17 @@ impl Connection {
                 video_qos.user_custom_fps(self.inner.id(), fps);
             }
         }
+        if let Ok(backend) = o.capture_backend.enum_value() {
+            if backend != CaptureBackend::CaptureBackendNotSet {
+                video_service::set_capture_backend_preference(backend);
+                log::info!(
+                    "#{} capture backend override requested: {:?}",
+                    self.inner.id(),
+                    backend
+                );
+                self.refresh_video_display(None);
+            }
+        }
         if let Some(q) = o.supported_decoding.clone().take() {
             log::info!(
                 "#{} supported_decoding update: h264={}, h265={}, vp9={}, av1={}, video_feedback={}, prefer={:?}",
@@ -6475,7 +6615,24 @@ impl Connection {
         }
         let mut msg_out = Message::new();
         msg_out.set_misc(misc);
-        self.send(msg_out).await;
+        match time::timeout(
+            SERVER_CLOSE_SEND_TIMEOUT,
+            self.stream.send_tagged_and_wait("CloseReason", &msg_out),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => log::warn!(
+                "#{} failed to send close reason: {}",
+                self.inner.id(),
+                error
+            ),
+            Err(_) => log::warn!(
+                "#{} timed out waiting for close reason write after {}ms",
+                self.inner.id(),
+                SERVER_CLOSE_SEND_TIMEOUT.as_millis()
+            ),
+        }
         raii::AuthedConnID::check_remove_session(self.inner.id(), self.session_key());
     }
 
@@ -7989,6 +8146,23 @@ mod test {
     }
 
     #[test]
+    fn video_latest_key_changes_with_stream_and_has_zero_id_fallback() {
+        let mut frame = VideoFrame {
+            stream_id: 7,
+            display: 3,
+            ..Default::default()
+        };
+        assert_eq!(server_video_latest_key(&frame), 7);
+        frame.stream_id = 8;
+        assert_eq!(server_video_latest_key(&frame), 8);
+        frame.stream_id = 0;
+        assert_eq!(
+            server_video_latest_key(&frame),
+            SERVER_VIDEO_LATEST_KEY_FALLBACK | 3
+        );
+    }
+
+    #[test]
     fn video_feedback_requires_ordered_pipeline_progress() {
         assert!(valid_video_feedback(&VideoFeedback {
             stream_id: 7,
@@ -8083,6 +8257,109 @@ mod test {
         );
         assert!(retry.is_empty());
         assert_eq!(controller.status(0).unwrap().recovery_count, 1);
+    }
+
+    #[test]
+    fn video_reference_refresh_request_is_scoped_and_rate_limited() {
+        let start = Instant::now();
+        let mut controller = VideoDeliveryController::default();
+        controller.on_frame_sent(
+            &VideoFrame {
+                stream_id: 7,
+                frame_id: 10,
+                display: 0,
+                ..Default::default()
+            },
+            start,
+        );
+        let request = VideoReferenceRefresh {
+            display: 0,
+            stream_id: 7,
+            received_frame_id: 9,
+            dropped_frames: 1,
+            ..Default::default()
+        };
+        let action = controller
+            .on_reference_refresh_request(&request, start + Duration::from_millis(10), 10)
+            .unwrap()
+            .unwrap();
+        assert_eq!(action.display, 0);
+        assert_eq!(action.stream_id, 7);
+        assert_eq!(controller.status(0).unwrap().recovery_count, 1);
+
+        assert!(controller
+            .on_reference_refresh_request(&request, start + Duration::from_millis(100), 10)
+            .unwrap()
+            .is_none());
+        assert_eq!(controller.status(0).unwrap().recovery_count, 1);
+    }
+
+    #[test]
+    fn video_reference_refresh_request_rejects_stale_stream() {
+        let start = Instant::now();
+        let mut controller = VideoDeliveryController::default();
+        controller.on_frame_sent(
+            &VideoFrame {
+                stream_id: 8,
+                frame_id: 10,
+                display: 0,
+                ..Default::default()
+            },
+            start,
+        );
+        let request = VideoReferenceRefresh {
+            display: 0,
+            stream_id: 7,
+            received_frame_id: 9,
+            dropped_frames: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            controller.on_reference_refresh_request(&request, start, 10),
+            Err("stale stream")
+        );
+    }
+
+    #[test]
+    fn decoded_feedback_releases_reference_refresh_cooldown() {
+        let start = Instant::now();
+        let mut controller = VideoDeliveryController::default();
+        controller.on_frame_sent(
+            &VideoFrame {
+                stream_id: 7,
+                frame_id: 10,
+                display: 0,
+                ..Default::default()
+            },
+            start,
+        );
+        let request = VideoReferenceRefresh {
+            display: 0,
+            stream_id: 7,
+            received_frame_id: 9,
+            dropped_frames: 1,
+            ..Default::default()
+        };
+        assert!(controller
+            .on_reference_refresh_request(&request, start + Duration::from_millis(10), 10)
+            .unwrap()
+            .is_some());
+
+        controller.on_feedback(
+            &VideoFeedback {
+                display: 0,
+                stream_id: 7,
+                received_frame_id: 10,
+                decoded_frame_id: 10,
+                render_submitted_frame_id: 10,
+                ..Default::default()
+            },
+            start + Duration::from_millis(20),
+        );
+        assert!(controller
+            .on_reference_refresh_request(&request, start + Duration::from_millis(100), 10)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -8462,6 +8739,17 @@ mod test {
         let mut msg = Message::new();
         msg.set_misc(misc);
         assert_eq!(stream_message_kind(&msg), "Misc::RefreshVideoDisplay");
+
+        let mut misc = Misc::new();
+        misc.set_video_reference_refresh(VideoReferenceRefresh {
+            display: 0,
+            stream_id: 7,
+            received_frame_id: 1,
+            ..Default::default()
+        });
+        let mut msg = Message::new();
+        msg.set_misc(misc);
+        assert_eq!(stream_message_kind(&msg), "Misc::VideoReferenceRefresh");
     }
 
     #[test]

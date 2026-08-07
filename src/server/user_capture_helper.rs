@@ -28,7 +28,48 @@ const STATUS_ERROR: u32 = 3;
 const BACKEND_UNKNOWN: u32 = 0;
 const BACKEND_WGC_CPU: u32 = 1;
 const BACKEND_GDI_CPU: u32 = 2;
+const BACKEND_DXGI_CPU: u32 = 3;
 const GDI_BOOTSTRAP_AFTER: Duration = Duration::from_millis(500);
+
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UserCaptureBackend {
+    Dxgi = 1,
+    Wgc = 2,
+}
+
+impl UserCaptureBackend {
+    fn from_raw(value: u32) -> Option<Self> {
+        match value {
+            // The helper was WGC-only before the backend selector was added.
+            0 => Some(Self::Wgc),
+            value if value == Self::Dxgi as u32 => Some(Self::Dxgi),
+            value if value == Self::Wgc as u32 => Some(Self::Wgc),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Dxgi => "DXGI",
+            Self::Wgc => "WGC",
+        }
+    }
+
+    fn capture_backend(self) -> u32 {
+        match self {
+            Self::Dxgi => BACKEND_DXGI_CPU,
+            Self::Wgc => BACKEND_WGC_CPU,
+        }
+    }
+
+    fn capture_backend_name(self) -> &'static str {
+        match self {
+            Self::Dxgi => "DXGI Desktop Duplication",
+            Self::Wgc => "Windows Graphics Capture",
+        }
+    }
+}
 
 const fn align_up(value: usize, align: usize) -> usize {
     (value + align - 1) / align * align
@@ -44,6 +85,8 @@ const MIN_SHMEM_LEN: usize = ADDR_FRAME + FRAME_ALIGN;
 struct CaptureCommand {
     exit: u32,
     generation: u32,
+    backend: u32,
+    process_priority: u32,
     current_display: usize,
     timeout_ms: u32,
 }
@@ -182,7 +225,8 @@ fn validate_frame_length(shmem_len: usize, length: usize) -> bool {
     length > 0 && length <= shmem_len.saturating_sub(ADDR_FRAME)
 }
 
-fn create_wgc_capturer(
+fn create_backend_capturer(
+    backend: UserCaptureBackend,
     current_display: usize,
 ) -> ResultType<(Box<dyn TraitCapturer>, usize, usize)> {
     let mut displays = Display::all().with_context(|| "Failed to enumerate displays")?;
@@ -196,12 +240,27 @@ fn create_wgc_capturer(
     let display = displays.remove(current_display);
     let width = display.width();
     let height = display.height();
-    if !scrap::CapturerWgc::is_supported() {
-        bail!("WGC is not supported");
+    match backend {
+        UserCaptureBackend::Dxgi => {
+            let capturer =
+                Capturer::new(display).with_context(|| "Failed to create DXGI capturer")?;
+            #[cfg(feature = "vram")]
+            let capturer = {
+                let mut capturer = capturer;
+                capturer.set_output_texture(false);
+                capturer
+            };
+            Ok((Box::new(capturer), width, height))
+        }
+        UserCaptureBackend::Wgc => {
+            if !scrap::CapturerWgc::is_supported() {
+                bail!("WGC is not supported");
+            }
+            let capturer = scrap::CapturerWgc::new(display)
+                .with_context(|| "Failed to create WGC capturer")?;
+            Ok((Box::new(capturer), width, height))
+        }
     }
-    let capturer =
-        scrap::CapturerWgc::new(display).with_context(|| "Failed to create WGC capturer")?;
-    Ok((Box::new(capturer), width, height))
 }
 
 fn create_gdi_capturer(
@@ -254,6 +313,8 @@ pub mod server {
     fn run_capture_loop(shmem: &crate::portable_service::SharedMemory) {
         let mut capturer: Option<Box<dyn TraitCapturer>> = None;
         let mut active_generation = u32::MAX;
+        let mut active_backend: Option<UserCaptureBackend> = None;
+        let mut active_process_priority = u32::MAX;
         let mut active_display = usize::MAX;
         let mut width = 0usize;
         let mut height = 0usize;
@@ -262,6 +323,7 @@ pub mod server {
         let mut primary_frames = 0u32;
         let mut primary_no_frame_since: Option<Instant> = None;
         let mut primary_backend = "Windows Graphics Capture";
+        let mut primary_backend_id = BACKEND_UNKNOWN;
         let mut primary_is_gdi = false;
         let mut gdi_fallback: Option<Box<dyn TraitCapturer>> = None;
         let mut gdi_fallback_frames = 0u32;
@@ -272,22 +334,51 @@ pub mod server {
                 log::info!("User capture helper exit requested");
                 break;
             }
+            let Some(requested_backend) = UserCaptureBackend::from_raw(command.backend) else {
+                write_frame_info(
+                    shmem,
+                    CaptureFrameInfo {
+                        counter,
+                        status: STATUS_ERROR,
+                        length: 0,
+                        width: 0,
+                        height: 0,
+                        backend: BACKEND_UNKNOWN,
+                    },
+                );
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            };
+            if active_process_priority != command.process_priority {
+                let priority =
+                    crate::platform::windows::ProcessPriority::from_raw(command.process_priority);
+                crate::platform::windows::apply_current_process_priority(
+                    priority,
+                    "user-capture-helper",
+                );
+                active_process_priority = command.process_priority;
+            }
             let recreate = capturer.is_none()
                 || active_generation != command.generation
+                || active_backend != Some(requested_backend)
                 || active_display != command.current_display;
             if recreate {
-                let new_backend = match create_wgc_capturer(command.current_display) {
+                let new_backend = match create_backend_capturer(
+                    requested_backend,
+                    command.current_display,
+                ) {
                     Ok((new_capturer, new_width, new_height)) => (
                         new_capturer,
                         new_width,
                         new_height,
-                        "Windows Graphics Capture",
+                        requested_backend.capture_backend_name(),
                         false,
                     ),
-                    Err(wgc_err) => {
+                    Err(primary_err) => {
                         log::warn!(
-                            "User capture helper failed to create WGC capturer, trying GDI fallback: {}",
-                            wgc_err
+                            "User capture helper failed to create {} capturer, trying GDI fallback: {}",
+                            requested_backend.as_str(),
+                            primary_err
                         );
                         match create_gdi_capturer(command.current_display) {
                             Ok((new_capturer, new_width, new_height)) => {
@@ -327,11 +418,17 @@ pub mod server {
                 );
                 capturer = Some(new_capturer);
                 active_generation = command.generation;
+                active_backend = Some(requested_backend);
                 active_display = command.current_display;
                 width = new_width;
                 height = new_height;
                 primary_backend = new_backend_name;
                 primary_is_gdi = new_is_gdi;
+                primary_backend_id = if primary_is_gdi {
+                    BACKEND_GDI_CPU
+                } else {
+                    requested_backend.capture_backend()
+                };
                 would_block_samples = 0;
                 primary_frames = 0;
                 primary_no_frame_since = None;
@@ -346,11 +443,7 @@ pub mod server {
                         length: 0,
                         width,
                         height,
-                        backend: if primary_is_gdi {
-                            BACKEND_GDI_CPU
-                        } else {
-                            BACKEND_WGC_CPU
-                        },
+                        backend: primary_backend_id,
                     },
                 );
             }
@@ -381,11 +474,7 @@ pub mod server {
                                 length: 0,
                                 width,
                                 height,
-                                backend: if primary_is_gdi {
-                                    BACKEND_GDI_CPU
-                                } else {
-                                    BACKEND_WGC_CPU
-                                },
+                                backend: primary_backend_id,
                             },
                         );
                         std::thread::sleep(timeout);
@@ -421,11 +510,7 @@ pub mod server {
                             length: data.len(),
                             width,
                             height,
-                            backend: if primary_is_gdi {
-                                BACKEND_GDI_CPU
-                            } else {
-                                BACKEND_WGC_CPU
-                            },
+                            backend: primary_backend_id,
                         },
                     );
                 }
@@ -443,11 +528,7 @@ pub mod server {
                             length: 0,
                             width,
                             height,
-                            backend: if primary_is_gdi {
-                                BACKEND_GDI_CPU
-                            } else {
-                                BACKEND_WGC_CPU
-                            },
+                            backend: primary_backend_id,
                         },
                     );
                 }
@@ -561,11 +642,7 @@ pub mod server {
                                 length: 0,
                                 width,
                                 height,
-                                backend: if primary_is_gdi {
-                                    BACKEND_GDI_CPU
-                                } else {
-                                    BACKEND_WGC_CPU
-                                },
+                                backend: primary_backend_id,
                             },
                         );
                     }
@@ -585,11 +662,7 @@ pub mod server {
                             length: 0,
                             width,
                             height,
-                            backend: if primary_is_gdi {
-                                BACKEND_GDI_CPU
-                            } else {
-                                BACKEND_WGC_CPU
-                            },
+                            backend: primary_backend_id,
                         },
                     );
                     std::thread::sleep(Duration::from_millis(100));
@@ -610,6 +683,7 @@ pub mod client {
         shmem_name: String,
         shmem: crate::portable_service::SharedMemory,
         process: HANDLE,
+        requested_backend: UserCaptureBackend,
         current_display: usize,
         generation: u32,
         width: usize,
@@ -621,7 +695,12 @@ pub mod client {
     unsafe impl Send for UserCaptureHelperCapturer {}
 
     impl UserCaptureHelperCapturer {
-        pub fn new(current_display: usize, width: usize, height: usize) -> ResultType<Self> {
+        fn new(
+            requested_backend: UserCaptureBackend,
+            current_display: usize,
+            width: usize,
+            height: usize,
+        ) -> ResultType<Self> {
             let shmem_name = next_shmem_name();
             let shmem_size = shmem_size_for_display(width, height);
             let shmem = crate::portable_service::SharedMemory::create(&shmem_name, shmem_size)?;
@@ -645,6 +724,9 @@ pub mod client {
                 CaptureCommand {
                     exit: 0,
                     generation,
+                    backend: requested_backend as u32,
+                    process_priority: crate::platform::windows::configured_process_priority()
+                        .as_raw(),
                     current_display,
                     timeout_ms: 33,
                 },
@@ -680,7 +762,8 @@ pub mod client {
                 bail!("Failed to launch user capture helper");
             }
             log::info!(
-                "Launched user capture helper: backend=WGC helper CPU, display={}, session={}, shmem={}, size={}",
+                "Launched user capture helper: requested_backend={} helper CPU, display={}, session={}, shmem={}, size={}",
+                requested_backend.as_str(),
                 current_display,
                 session_id,
                 shmem_name,
@@ -690,12 +773,13 @@ pub mod client {
                 shmem_name,
                 shmem,
                 process,
+                requested_backend,
                 current_display,
                 generation,
                 width,
                 height,
                 last_counter: 0,
-                last_backend: BACKEND_UNKNOWN,
+                last_backend: requested_backend.capture_backend(),
             })
         }
 
@@ -704,6 +788,9 @@ pub mod client {
             command.timeout_ms = timeout.as_millis().clamp(1, u32::MAX as u128) as u32;
             command.exit = 0;
             command.generation = self.generation;
+            command.backend = self.requested_backend as u32;
+            command.process_priority =
+                crate::platform::windows::configured_process_priority().as_raw();
             command.current_display = self.current_display;
             write_command(&self.shmem, command);
         }
@@ -795,6 +882,7 @@ pub mod client {
             match self.last_backend {
                 BACKEND_WGC_CPU => "Windows Graphics Capture Helper (CPU)",
                 BACKEND_GDI_CPU => "Windows GDI Helper (CPU)",
+                BACKEND_DXGI_CPU => "DXGI Desktop Duplication Helper (CPU)",
                 _ => "User Capture Helper (CPU)",
             }
         }
@@ -812,15 +900,44 @@ pub mod client {
         fn set_output_texture(&mut self, _texture: bool) {}
     }
 
-    pub fn create_capturer(
+    pub(crate) fn create_capturer(
+        backend: UserCaptureBackend,
         current_display: usize,
         width: usize,
         height: usize,
     ) -> ResultType<Box<dyn TraitCapturer>> {
         Ok(Box::new(UserCaptureHelperCapturer::new(
+            backend,
             current_display,
             width,
             height,
         )?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_backend_command_values_round_trip() {
+        for backend in [UserCaptureBackend::Dxgi, UserCaptureBackend::Wgc] {
+            assert_eq!(UserCaptureBackend::from_raw(backend as u32), Some(backend));
+        }
+        assert_eq!(
+            UserCaptureBackend::from_raw(0),
+            Some(UserCaptureBackend::Wgc)
+        );
+        assert_eq!(UserCaptureBackend::from_raw(u32::MAX), None);
+    }
+
+    #[test]
+    fn capture_backend_telemetry_values_are_distinct() {
+        assert_ne!(UserCaptureBackend::Dxgi.capture_backend(), BACKEND_GDI_CPU);
+        assert_ne!(UserCaptureBackend::Wgc.capture_backend(), BACKEND_GDI_CPU);
+        assert_ne!(
+            UserCaptureBackend::Dxgi.capture_backend(),
+            UserCaptureBackend::Wgc.capture_backend()
+        );
     }
 }

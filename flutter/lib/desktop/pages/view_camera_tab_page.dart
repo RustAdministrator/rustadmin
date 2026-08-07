@@ -515,6 +515,8 @@ class _ViewCameraTabPageState extends State<ViewCameraTabPage> {
       }
     } else if (call.method == kWindowEventSetFullscreen) {
       stateGlobal.setFullscreen(call.arguments == 'true');
+    } else if (call.method == kWindowEventSetTabsInFullscreen) {
+      rustDeskWinManager.applyTabsInFullscreen(call.arguments == true);
     }
     _update_remote_count();
     return returnValue;

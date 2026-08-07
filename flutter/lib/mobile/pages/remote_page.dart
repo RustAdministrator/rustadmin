@@ -8,6 +8,7 @@ import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/mobile/widgets/floating_mouse.dart';
 import 'package:flutter_hbb/mobile/widgets/floating_mouse_widgets.dart';
 import 'package:flutter_hbb/mobile/widgets/gesture_help.dart';
+import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_keyboard_visibility/flutter_keyboard_visibility.dart';
 import 'package:flutter_svg/svg.dart';
@@ -22,6 +23,7 @@ import '../../models/input_model.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../../utils/image.dart';
+import '../widgets/custom_image_quality_widget.dart';
 import '../widgets/dialog.dart';
 import '../widgets/custom_scale_widget.dart';
 
@@ -91,21 +93,16 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     gFFI.ffiModel.updateEventListener(sessionId, widget.id);
-    gFFI.start(
-      widget.id,
-      password: widget.password,
-      isSharedPassword: widget.isSharedPassword,
-      forceRelay: widget.forceRelay,
-    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
       gFFI.dialogManager
           .showLoading(translate('Connecting...'), onCancel: closeConnection);
+      unawaited(_startConnection());
     });
     WakelockManager.enable(_uniqueKey);
     _physicalFocusNode.requestFocus();
     gFFI.inputModel.listenToMouse(true);
-    gFFI.qualityMonitorModel.checkShowQualityMonitor(sessionId);
     keyboardSubscription =
         keyboardVisibilityController.onChange.listen(onSoftKeyboardChanged);
     gFFI.chatModel
@@ -121,6 +118,25 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
           isKeyboardVisible: keyboardVisibilityController.isVisible);
     });
     WidgetsBinding.instance.addObserver(this);
+  }
+
+  Future<void> _startConnection() async {
+    try {
+      await gFFI.start(
+        widget.id,
+        password: widget.password,
+        isSharedPassword: widget.isSharedPassword,
+        forceRelay: widget.forceRelay,
+      );
+      if (!mounted || gFFI.closed) return;
+      unawaited(gFFI.qualityMonitorModel.checkShowQualityMonitor(sessionId));
+    } catch (e, stackTrace) {
+      debugPrint('Failed to start mobile session: $e\n$stackTrace');
+      if (!mounted) return;
+      gFFI.dialogManager.dismissAll();
+      showToast(translate('Failed to connect'));
+      closeConnection();
+    }
   }
 
   @override
@@ -469,99 +485,46 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
   Widget getBottomAppBar() {
     final ffiModel = Provider.of<FfiModel>(context);
-    return BottomAppBar(
-      elevation: 10,
-      color: MyTheme.accent,
-      child: Row(
-        mainAxisSize: MainAxisSize.max,
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: <Widget>[
-          Row(
-              children: <Widget>[
-                    IconButton(
-                      color: Colors.white,
-                      icon: Icon(Icons.clear),
-                      onPressed: () {
-                        clientClose(sessionId, gFFI);
-                      },
-                    ),
-                    IconButton(
-                      color: Colors.white,
-                      icon: Icon(Icons.tv),
-                      onPressed: () {
-                        setState(() => _showEdit = false);
-                        showOptions(context, widget.id, gFFI.dialogManager);
-                      },
-                    )
-                  ] +
-                  (isWebDesktop || ffiModel.viewOnly || !ffiModel.keyboard
-                      ? []
-                      : gFFI.ffiModel.isPeerAndroid
-                          ? [
-                              IconButton(
-                                  color: Colors.white,
-                                  icon: Icon(Icons.keyboard),
-                                  onPressed: openKeyboard),
-                              IconButton(
-                                color: Colors.white,
-                                icon: const Icon(Icons.build),
-                                onPressed: () => gFFI.dialogManager
-                                    .toggleMobileActionsOverlay(ffi: gFFI),
-                              )
-                            ]
-                          : [
-                              IconButton(
-                                  color: Colors.white,
-                                  icon: Icon(Icons.keyboard),
-                                  onPressed: openKeyboard),
-                              IconButton(
-                                color: Colors.white,
-                                icon: Icon(gFFI.ffiModel.touchMode
-                                    ? Icons.touch_app
-                                    : Icons.mouse),
-                                onPressed: () => setState(
-                                    () => _showGestureHelp = !_showGestureHelp),
-                              ),
-                            ]) +
-                  (isWeb
-                      ? []
-                      : <Widget>[
-                          futureBuilder(
-                              future: gFFI.invokeMethod(
-                                  "get_value", "KEY_IS_SUPPORT_VOICE_CALL"),
-                              hasData: (isSupportVoiceCall) => IconButton(
-                                    color: Colors.white,
-                                    icon: isAndroid && isSupportVoiceCall
-                                        ? SvgPicture.asset('assets/chat.svg',
-                                            colorFilter: ColorFilter.mode(
-                                                Colors.white, BlendMode.srcIn))
-                                        : Icon(Icons.message),
-                                    onPressed: () =>
-                                        isAndroid && isSupportVoiceCall
-                                            ? showChatOptions(widget.id)
-                                            : onPressedTextChat(widget.id),
-                                  ))
-                        ]) +
-                  [
-                    IconButton(
-                      color: Colors.white,
-                      icon: Icon(Icons.more_vert),
-                      onPressed: () {
-                        setState(() => _showEdit = false);
-                        showActions(widget.id);
-                      },
-                    ),
-                  ]),
-          Obx(() => IconButton(
-                color: Colors.white,
-                icon: Icon(Icons.expand_more),
-                onPressed: gFFI.ffiModel.waitForFirstImage.isTrue
-                    ? null
-                    : () {
-                        setState(() => _showBar = !_showBar);
-                      },
-              )),
-        ],
+    final chatButton = isWeb
+        ? null
+        : futureBuilder(
+            future: gFFI.invokeMethod(
+                "get_value", "KEY_IS_SUPPORT_VOICE_CALL"),
+            hasData: (isSupportVoiceCall) => IconButton(
+                  tooltip: translate('Chat'),
+                  color: Colors.white,
+                  icon: isAndroid && isSupportVoiceCall
+                      ? SvgPicture.asset('assets/chat.svg',
+                          colorFilter:
+                              ColorFilter.mode(Colors.white, BlendMode.srcIn))
+                      : Icon(Icons.message),
+                  onPressed: () => isAndroid && isSupportVoiceCall
+                      ? showChatOptions(widget.id)
+                      : onPressedTextChat(widget.id),
+                ));
+    return Obx(
+      () => MobileRemoteBottomBar(
+        onDisconnect: () => clientClose(sessionId, gFFI),
+        onOptions: () {
+          setState(() => _showEdit = false);
+          showOptions(context, widget.id, gFFI.dialogManager);
+        },
+        onKeyboard: openKeyboard,
+        onMobileActions: () =>
+            gFFI.dialogManager.toggleMobileActionsOverlay(ffi: gFFI),
+        onGestureHelp: () =>
+            setState(() => _showGestureHelp = !_showGestureHelp),
+        onMore: () {
+          setState(() => _showEdit = false);
+          showActions(widget.id);
+        },
+        onHide: () => setState(() => _showBar = !_showBar),
+        showInputControls:
+            !isWebDesktop && !ffiModel.viewOnly && ffiModel.keyboard,
+        peerIsAndroid: ffiModel.isPeerAndroid,
+        touchMode: ffiModel.touchMode,
+        waitForFirstImage: ffiModel.waitForFirstImage.isTrue,
+        chatButton: chatButton,
       ),
     );
   }
@@ -680,43 +643,22 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   }
 
   void showActions(String id) async {
-    final size = MediaQuery.of(context).size;
-    final x = 120.0;
-    final y = size.height;
     final mobileActionMenus = _getMobileActionMenus();
     final menus = toolbarControls(context, id, gFFI);
-
-    final List<PopupMenuEntry<int>> more = [
-      ...mobileActionMenus
-          .asMap()
-          .entries
-          .map((e) =>
-              PopupMenuItem<int>(child: e.value.getChild(), value: e.key))
-          .toList(),
-      if (mobileActionMenus.isNotEmpty) PopupMenuDivider(),
-      ...menus
-          .asMap()
-          .entries
-          .map((e) => PopupMenuItem<int>(
-              child: e.value.getChild(),
-              value: e.key + mobileActionMenus.length))
-          .toList(),
-    ];
-    () async {
-      var index = await showMenu(
-        context: context,
-        position: RelativeRect.fromLTRB(x, y, x, y),
-        items: more,
-        elevation: 8,
-      );
-      if (index != null) {
-        if (index < mobileActionMenus.length) {
-          mobileActionMenus[index].onPressed?.call();
-        } else if (index < mobileActionMenus.length + more.length) {
-          menus[index - mobileActionMenus.length].onPressed?.call();
-        }
-      }
-    }();
+    await showMobileRemotePopupMenu(context, [
+      for (final menu in mobileActionMenus)
+        MobileRemoteMenuItem(
+          child: menu.getChild(),
+          onPressed: menu.onPressed,
+        ),
+      for (var i = 0; i < menus.length; i++)
+        MobileRemoteMenuItem(
+          child: menus[i].getChild(),
+          onPressed: menus[i].onPressed,
+          dividerBefore:
+              (i == 0 && mobileActionMenus.isNotEmpty) || menus[i].divider,
+        ),
+    ]);
   }
 
   onPressedTextChat(String id) {
@@ -770,24 +712,14 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
               onPressVoiceCall),
     ];
 
-    final menuItems = menus
-        .asMap()
-        .entries
-        .map((e) => PopupMenuItem<int>(child: e.value.getChild(), value: e.key))
-        .toList();
     Future.delayed(Duration.zero, () async {
-      final size = MediaQuery.of(context).size;
-      final x = 120.0;
-      final y = size.height;
-      var index = await showMenu(
-        context: context,
-        position: RelativeRect.fromLTRB(x, y, x, y),
-        items: menuItems,
-        elevation: 8,
-      );
-      if (index != null && index < menus.length) {
-        menus[index].onPressed?.call();
-      }
+      await showMobileRemotePopupMenu(context, [
+        for (final menu in menus)
+          MobileRemoteMenuItem(
+            child: menu.getChild(),
+            onPressed: menu.onPressed,
+          ),
+      ]);
     });
   }
 
@@ -852,27 +784,6 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
 
   InputModel get inputModel => gFFI.inputModel;
 
-  Widget wrap(String text, void Function() onPressed,
-      {bool? active, IconData? icon}) {
-    return TextButton(
-        style: TextButton.styleFrom(
-          minimumSize: Size(0, 0),
-          padding: EdgeInsets.symmetric(vertical: 10, horizontal: 9.75),
-          //adds padding inside the button
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          //limits the touch area to the button area
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(4.0),
-          ),
-          backgroundColor: active == true ? MyTheme.accent80 : null,
-        ),
-        child: icon != null
-            ? Icon(icon, size: 14, color: Colors.white)
-            : Text(translate(text),
-                style: TextStyle(color: Colors.white, fontSize: 11)),
-        onPressed: onPressed);
-  }
-
   _updateRect() {
     RenderObject? renderObject = _key.currentContext?.findRenderObject();
     if (renderObject == null) {
@@ -899,156 +810,53 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
           .keyHelpToolsVisibilityChanged(null, widget.keyboardIsVisible);
       return Offstage();
     }
-    final size = MediaQuery.of(context).size;
 
     final pi = gFFI.ffiModel.pi;
     final isMac = pi.platform == kPeerPlatformMacOS;
     final isWin = pi.platform == kPeerPlatformWindows;
     final isLinux = pi.platform == kPeerPlatformLinux;
-    final modifiers = <Widget>[
-      wrap('Ctrl ', () {
-        setState(() => inputModel.ctrl = !inputModel.ctrl);
-      }, active: inputModel.ctrl),
-      wrap(' Alt ', () {
-        setState(() => inputModel.alt = !inputModel.alt);
-      }, active: inputModel.alt),
-      wrap('Shift', () {
-        setState(() => inputModel.shift = !inputModel.shift);
-      }, active: inputModel.shift),
-      wrap(isMac ? ' Cmd ' : ' Win ', () {
-        setState(() => inputModel.command = !inputModel.command);
-      }, active: inputModel.command),
-    ];
-    final keys = <Widget>[
-      wrap(
-          ' Fn ',
-          () => setState(
-                () {
-                  _fn = !_fn;
-                  if (_fn) {
-                    _more = false;
-                  }
-                },
-              ),
-          active: _fn),
-      wrap(
-          '',
-          () => setState(
-                () => _pin = !_pin,
-              ),
-          active: _pin,
-          icon: Icons.push_pin),
-      wrap(
-          ' ... ',
-          () => setState(
-                () {
-                  _more = !_more;
-                  if (_more) {
-                    _fn = false;
-                  }
-                },
-              ),
-          active: _more),
-    ];
-    final fn = <Widget>[
-      SizedBox(width: 9999),
-    ];
-    for (var i = 1; i <= 12; ++i) {
-      final name = 'F$i';
-      fn.add(wrap(name, () {
-        inputModel.inputKey('VK_$name');
-      }));
-    }
-    final more = <Widget>[
-      SizedBox(width: 9999),
-      wrap('Esc', () {
-        inputModel.inputKey('VK_ESCAPE');
-      }),
-      wrap('Tab', () {
-        inputModel.inputKey('VK_TAB');
-      }),
-      wrap('Home', () {
-        inputModel.inputKey('VK_HOME');
-      }),
-      wrap('End', () {
-        inputModel.inputKey('VK_END');
-      }),
-      wrap('Ins', () {
-        inputModel.inputKey('VK_INSERT');
-      }),
-      wrap('Del', () {
-        inputModel.inputKey('VK_DELETE');
-      }),
-      wrap('PgUp', () {
-        inputModel.inputKey('VK_PRIOR');
-      }),
-      wrap('PgDn', () {
-        inputModel.inputKey('VK_NEXT');
-      }),
-      // to-do: support PrtScr on Mac
-      if (isWin || isLinux)
-        wrap('PrtScr', () {
-          inputModel.inputKey('VK_SNAPSHOT');
-        }),
-      if (isWin || isLinux)
-        wrap('ScrollLock', () {
-          inputModel.inputKey('VK_SCROLL');
-        }),
-      if (isWin || isLinux)
-        wrap('Pause', () {
-          inputModel.inputKey('VK_PAUSE');
-        }),
-      if (isWin || isLinux)
-        // Maybe it's better to call it "Menu"
-        // https://en.wikipedia.org/wiki/Menu_key
-        wrap('Menu', () {
-          inputModel.inputKey('Apps');
-        }),
-      wrap('Enter', () {
-        inputModel.inputKey('VK_ENTER');
-      }),
-      SizedBox(width: 9999),
-      wrap('', () {
-        inputModel.inputKey('VK_LEFT');
-      }, icon: Icons.keyboard_arrow_left),
-      wrap('', () {
-        inputModel.inputKey('VK_UP');
-      }, icon: Icons.keyboard_arrow_up),
-      wrap('', () {
-        inputModel.inputKey('VK_DOWN');
-      }, icon: Icons.keyboard_arrow_down),
-      wrap('', () {
-        inputModel.inputKey('VK_RIGHT');
-      }, icon: Icons.keyboard_arrow_right),
-      wrap(isMac ? 'Cmd+C' : 'Ctrl+C', () {
-        sendPrompt(isMac, 'VK_C');
-      }),
-      wrap(isMac ? 'Cmd+V' : 'Ctrl+V', () {
-        sendPrompt(isMac, 'VK_V');
-      }),
-      wrap(isMac ? 'Cmd+S' : 'Ctrl+S', () {
-        sendPrompt(isMac, 'VK_S');
-      }),
-    ];
-    final space = size.width > 320 ? 4.0 : 2.0;
     // 500 ms is long enough for this widget to be built!
     Future.delayed(Duration(milliseconds: 500), () {
       _updateRect();
     });
-    return Container(
-        key: _key,
-        color: Color(0xAA000000),
-        padding: EdgeInsets.only(
-            top: _keyboardVisibilityController.isVisible ? 24 : 4, bottom: 8),
-        child: Wrap(
-          spacing: space,
-          runSpacing: space,
-          children: <Widget>[SizedBox(width: 9999)] +
-              modifiers +
-              keys +
-              (_fn ? fn : []) +
-              (_more ? more : []),
-        ));
+    return MobileRemoteKeyHelpTools(
+      key: _key,
+      keyboardIsVisible: _keyboardVisibilityController.isVisible,
+      ctrlActive: inputModel.ctrl,
+      altActive: inputModel.alt,
+      shiftActive: inputModel.shift,
+      commandActive: inputModel.command,
+      functionKeysActive: _fn,
+      pinned: _pin,
+      moreKeysActive: _more,
+      isMac: isMac,
+      showWindowsLinuxKeys: isWin || isLinux,
+      onCtrl: () => setState(() => inputModel.ctrl = !inputModel.ctrl),
+      onAlt: () => setState(() => inputModel.alt = !inputModel.alt),
+      onShift: () => setState(() => inputModel.shift = !inputModel.shift),
+      onCommand: () =>
+          setState(() => inputModel.command = !inputModel.command),
+      onFunctionKeys: () {
+        setState(() {
+          _fn = !_fn;
+          if (_fn) {
+            _more = false;
+          }
+        });
+      },
+      onPin: () => setState(() => _pin = !_pin),
+      onMoreKeys: () {
+        setState(() {
+          _more = !_more;
+          if (_more) {
+            _fn = false;
+          }
+        });
+      },
+      onKeyPressed: inputModel.inputKey,
+      onShortcutPressed: (key) => sendPrompt(isMac, key),
+      labelBuilder: translate,
+    );
   }
 }
 
@@ -1181,8 +989,10 @@ void showOptions(
   List<TRadioMenu<String>> viewStyleRadios =
       await toolbarViewStyle(context, id, gFFI);
   List<TRadioMenu<String>> imageQualityRadios =
-      await toolbarImageQuality(context, id, gFFI);
+      await toolbarImageQuality(context, id, gFFI, openCustomDialog: false);
   List<TRadioMenu<String>> codecRadios = await toolbarCodec(context, id, gFFI);
+  List<TRadioMenu<String>> captureBackendRadios =
+      await toolbarCaptureBackend(gFFI);
   List<TRadioMenu<String>> qualityMonitorRadios =
       await toolbarQualityMonitorPosition(gFFI);
   List<TRadioMenu<String>> qualityMonitorDetailsRadios =
@@ -1204,206 +1014,131 @@ void showOptions(
   }
 
   dialogManager.show((setState, close, context) {
-    var viewStyle =
-        (viewStyleRadios.isNotEmpty ? viewStyleRadios[0].groupValue : '').obs;
-    var imageQuality =
-        (imageQualityRadios.isNotEmpty ? imageQualityRadios[0].groupValue : '')
-            .obs;
-    var codec = (codecRadios.isNotEmpty ? codecRadios[0].groupValue : '').obs;
-    var qualityMonitor = (qualityMonitorRadios.isNotEmpty
-            ? qualityMonitorRadios[0].groupValue
-            : '')
-        .obs;
-    var qualityMonitorDetails = (qualityMonitorDetailsRadios.isNotEmpty
-            ? qualityMonitorDetailsRadios[0].groupValue
-            : '')
-        .obs;
-    var clipboard =
-        (clipboardRadios.isNotEmpty ? clipboardRadios[0].groupValue : '').obs;
-    final radios = [
-      for (var e in viewStyleRadios)
-        Obx(() => getRadio<String>(
-            e.child,
-            e.value,
-            viewStyle.value,
-            e.onChanged != null
-                ? (v) {
-                    e.onChanged?.call(v);
-                    if (v != null) viewStyle.value = v;
-                  }
-                : null)),
-      // Show custom scale controls when custom view style is selected
-      Obx(() => viewStyle.value == kRemoteViewStyleCustom
-          ? MobileCustomScaleControls(ffi: gFFI)
-          : const SizedBox.shrink()),
-      const Divider(color: MyTheme.border),
-      for (var e in imageQualityRadios)
-        Obx(() => getRadio<String>(
-            e.child,
-            e.value,
-            imageQuality.value,
-            e.onChanged != null
-                ? (v) {
-                    e.onChanged?.call(v);
-                    if (v != null) imageQuality.value = v;
-                  }
-                : null)),
-      const Divider(color: MyTheme.border),
-      for (var e in codecRadios)
-        Obx(() => getRadio<String>(
-            e.child,
-            e.value,
-            codec.value,
-            e.onChanged != null
-                ? (v) {
-                    e.onChanged?.call(v);
-                    if (v != null && e.enabled) codec.value = v;
-                  }
-                : null)),
-      if (codecRadios.isNotEmpty) const Divider(color: MyTheme.border),
-      if (qualityMonitorRadios.isNotEmpty)
-        Align(
-          alignment: Alignment.centerLeft,
-          child: Padding(
-            padding: const EdgeInsets.only(left: 16, top: 4, bottom: 4),
-            child: Text(translate('Quality monitor')),
-          ),
-        ),
-      for (var e in qualityMonitorRadios)
-        Obx(() => getRadio<String>(
-            e.child,
-            e.value,
-            qualityMonitor.value,
-            e.onChanged != null
-                ? (v) {
-                    e.onChanged?.call(v);
-                    if (v != null) qualityMonitor.value = v;
-                  }
-                : null)),
-      if (qualityMonitorDetailsRadios.isNotEmpty)
-        const Divider(color: MyTheme.border),
-      if (qualityMonitorDetailsRadios.isNotEmpty)
-        Align(
-          alignment: Alignment.centerLeft,
-          child: Padding(
-            padding: const EdgeInsets.only(left: 16, top: 4, bottom: 4),
-            child: Text(translate('Quality monitor details')),
-          ),
-        ),
-      for (var e in qualityMonitorDetailsRadios)
-        Obx(() => getRadio<String>(
-            e.child,
-            e.value,
-            qualityMonitorDetails.value,
-            e.onChanged != null
-                ? (v) {
-                    e.onChanged?.call(v);
-                    if (v != null) qualityMonitorDetails.value = v;
-                  }
-                : null)),
-      if (qualityMonitorRadios.isNotEmpty ||
-          qualityMonitorDetailsRadios.isNotEmpty)
-        const Divider(color: MyTheme.border),
-      for (var e in clipboardRadios)
-        Obx(() => getRadio<String>(
-            e.child,
-            e.value,
-            clipboard.value,
-            e.onChanged != null
-                ? (v) {
-                    e.onChanged?.call(v);
-                    if (v != null) clipboard.value = v;
-                  }
-                : null)),
-      if (clipboardRadios.isNotEmpty) const Divider(color: MyTheme.border),
-    ];
-    final rxCursorToggleValues = cursorToggles.map((e) => e.value.obs).toList();
-    final cursorTogglesList = cursorToggles
-        .asMap()
-        .entries
-        .map((e) => Obx(() => CheckboxListTile(
-            contentPadding: EdgeInsets.zero,
-            visualDensity: VisualDensity.compact,
-            value: rxCursorToggleValues[e.key].value,
-            onChanged: e.value.onChanged != null
-                ? (v) {
-                    e.value.onChanged?.call(v);
-                    if (v != null) rxCursorToggleValues[e.key].value = v;
-                  }
-                : null,
-            title: e.value.child)))
-        .toList();
-
-    final rxToggleValues = displayToggles.map((e) => e.value.obs).toList();
-    final displayTogglesList = displayToggles
-        .asMap()
-        .entries
-        .map((e) => Obx(() => CheckboxListTile(
-            contentPadding: EdgeInsets.zero,
-            visualDensity: VisualDensity.compact,
-            value: rxToggleValues[e.key].value,
-            onChanged: e.value.onChanged != null
-                ? (v) {
-                    e.value.onChanged?.call(v);
-                    if (v != null) rxToggleValues[e.key].value = v;
-                  }
-                : null,
-            title: e.value.child)))
-        .toList();
-    final toggles = [
-      ...cursorTogglesList,
-      if (cursorToggles.isNotEmpty) const Divider(color: MyTheme.border),
-      ...displayTogglesList,
-    ];
-
-    Widget privacyModeWidget = Offstage();
-    if (privacyModeList.length > 1) {
-      privacyModeWidget = ListTile(
-        contentPadding: EdgeInsets.zero,
-        visualDensity: VisualDensity.compact,
-        title: Text(translate('Privacy mode')),
-        onTap: () => setPrivacyModeDialog(
-            dialogManager, privacyModeList, privacyModeState),
+    MobileRemoteRadioSection radioSection(
+      String sectionId,
+      List<TRadioMenu<String>> source, {
+      Widget? heading,
+      bool honorEnabled = false,
+      Widget Function(String value)? selectionDetailsBuilder,
+    }) {
+      return MobileRemoteRadioSection(
+        id: sectionId,
+        value: source.isEmpty ? '' : source.first.groupValue,
+        heading: heading,
+        selectionDetailsBuilder: selectionDetailsBuilder,
+        items: [
+          for (final item in source)
+            MobileRemoteRadioItem(
+              value: item.value,
+              child: item.child,
+              onChanged: item.onChanged,
+              commitSelection: !honorEnabled || item.enabled,
+            ),
+        ],
       );
     }
 
-    var popupDialogMenus = List<Widget>.empty(growable: true);
     final resolution = getResolutionMenu(gFFI, id);
-    if (resolution != null) {
-      popupDialogMenus.add(ListTile(
-        contentPadding: EdgeInsets.zero,
-        visualDensity: VisualDensity.compact,
-        title: resolution.child,
-        onTap: () {
-          close();
-          resolution.onPressed?.call();
-        },
-      ));
-    }
     final virtualDisplayMenu = getVirtualDisplayMenu(gFFI, id);
-    if (virtualDisplayMenu != null) {
-      popupDialogMenus.add(ListTile(
-        contentPadding: EdgeInsets.zero,
-        visualDensity: VisualDensity.compact,
-        title: virtualDisplayMenu.child,
-        onTap: () {
-          close();
-          virtualDisplayMenu.onPressed?.call();
-        },
-      ));
-    }
-    if (popupDialogMenus.isNotEmpty) {
-      popupDialogMenus.add(const Divider(color: MyTheme.border));
-    }
-
     return CustomAlertDialog(
-      content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: displays +
-              radios +
-              popupDialogMenus +
-              toggles +
-              [privacyModeWidget]),
+      content: MobileRemoteOptionsContent(
+        header: displays,
+        radioSections: [
+          radioSection(
+            'view-style',
+            viewStyleRadios,
+            heading: Text(translate('Scale')),
+            selectionDetailsBuilder: (value) =>
+                value == kRemoteViewStyleCustom
+                    ? MobileCustomScaleControls(ffi: gFFI)
+                    : const SizedBox.shrink(),
+          ),
+          radioSection(
+            'image-quality',
+            imageQualityRadios,
+            heading: Text(translate('Image Quality')),
+            selectionDetailsBuilder: (value) =>
+                value == kRemoteImageQualityCustom
+                    ? MobileCustomImageQualityControls(
+                        key: const ValueKey('mobile-custom-image-quality'),
+                        peerId: id,
+                        ffi: gFFI,
+                      )
+                    : const SizedBox.shrink(),
+          ),
+          radioSection(
+            'codec',
+            codecRadios,
+            heading: Text(translate('Codec')),
+            honorEnabled: true,
+          ),
+          radioSection(
+            'capture-backend',
+            captureBackendRadios,
+            heading: Text(translate('Capture')),
+          ),
+          radioSection(
+            'quality-monitor',
+            qualityMonitorRadios,
+            heading: Text(translate('Quality monitor')),
+          ),
+          radioSection(
+            'quality-monitor-details',
+            qualityMonitorDetailsRadios,
+            heading: Text(translate('Quality monitor details')),
+          ),
+          radioSection(
+            'clipboard',
+            clipboardRadios,
+            heading: Text(translate('Clipboard')),
+          ),
+        ],
+        actions: [
+          if (resolution != null)
+            MobileRemoteActionItem(
+              child: resolution.child,
+              onPressed: () {
+                close();
+                resolution.onPressed?.call();
+              },
+            ),
+          if (virtualDisplayMenu != null)
+            MobileRemoteActionItem(
+              child: virtualDisplayMenu.child,
+              onPressed: () {
+                close();
+                virtualDisplayMenu.onPressed?.call();
+              },
+            ),
+        ],
+        toggles: [
+          for (var i = 0; i < cursorToggles.length; i++)
+            MobileRemoteToggleItem(
+              id: 'cursor-$i',
+              value: cursorToggles[i].value,
+              child: cursorToggles[i].child,
+              onChanged: cursorToggles[i].onChanged,
+            ),
+          for (var i = 0; i < displayToggles.length; i++)
+            MobileRemoteToggleItem(
+              id: 'display-$i',
+              value: displayToggles[i].value,
+              child: displayToggles[i].child,
+              onChanged: displayToggles[i].onChanged,
+              dividerBefore: i == 0 && cursorToggles.isNotEmpty,
+            ),
+        ],
+        footer: [
+          if (privacyModeList.length > 1)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              visualDensity: VisualDensity.compact,
+              title: Text(translate('Privacy mode')),
+              onTap: () => setPrivacyModeDialog(
+                  dialogManager, privacyModeList, privacyModeState),
+            ),
+        ],
+      ),
     );
   }, clickMaskDismiss: true, backDismiss: true).then((value) {
     _disableAndroidSoftKeyboard();

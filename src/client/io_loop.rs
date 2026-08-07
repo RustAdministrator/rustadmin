@@ -57,7 +57,74 @@ const NO_VIDEO_START_TIMEOUT: Duration = Duration::from_secs(15);
 const NO_VIDEO_START_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const NO_VIDEO_START_MAX_REFRESHES: usize = 6;
 const NO_VIDEO_START_STALLED_LOG_INTERVAL: Duration = Duration::from_secs(30);
+const STARTUP_KEYFRAME_REFRESH_INTERVAL: Duration = Duration::from_millis(750);
 const FPS_CONTROL_SUMMARY_LOG_INTERVAL: Duration = Duration::from_secs(30);
+const CLIENT_ASYNC_OUTBOX_CAPACITY: usize = 256;
+const CLIENT_VIDEO_FEEDBACK_LATEST_KEY_BASE: u64 = 1 << 32;
+const CLIENT_CLOSE_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+
+fn client_outbound_message_kind(message: &Message) -> &'static str {
+    if let Some(message::Union::Misc(misc)) = &message.union {
+        if matches!(&misc.union, Some(misc::Union::VideoFeedback(_))) {
+            return "Misc::VideoFeedback";
+        }
+        return "Misc";
+    }
+    "Message"
+}
+
+fn client_outbound_latest_key(message: &Message) -> Option<u64> {
+    let Some(message::Union::Misc(misc)) = &message.union else {
+        return None;
+    };
+    let Some(misc::Union::VideoFeedback(feedback)) = &misc.union else {
+        return None;
+    };
+    Some(CLIENT_VIDEO_FEEDBACK_LATEST_KEY_BASE | u64::from(feedback.display as u32))
+}
+
+fn should_wait_for_startup_keyframe(
+    frame_id: u64,
+    payload_stats: Option<(usize, usize, bool)>,
+) -> bool {
+    frame_id != 0 && payload_stats.is_some_and(|(_, _, has_keyframe)| !has_keyframe)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StartupKeyframeAction {
+    Wait,
+    Refresh { attempt: usize, dropped_deltas: u64 },
+}
+
+#[derive(Default)]
+struct StartupKeyframeRecovery {
+    last_refresh: Option<Instant>,
+    refresh_count: usize,
+    dropped_deltas: u64,
+}
+
+impl StartupKeyframeRecovery {
+    fn observe_delta(&mut self, now: Instant) -> StartupKeyframeAction {
+        self.dropped_deltas = self.dropped_deltas.saturating_add(1);
+        let refresh_due = self
+            .last_refresh
+            .map(|last| now.saturating_duration_since(last) >= STARTUP_KEYFRAME_REFRESH_INTERVAL)
+            .unwrap_or(true);
+        if !refresh_due {
+            return StartupKeyframeAction::Wait;
+        }
+        self.last_refresh = Some(now);
+        self.refresh_count = self.refresh_count.saturating_add(1);
+        StartupKeyframeAction::Refresh {
+            attempt: self.refresh_count,
+            dropped_deltas: self.dropped_deltas,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum NoVideoStartupAction {
@@ -148,6 +215,7 @@ pub struct Remote<T: InvokeUiSession> {
     last_update_jobs_status: (Instant, HashMap<i32, u64>),
     is_connected: bool,
     first_frame: bool,
+    startup_keyframe_recovery: StartupKeyframeRecovery,
     #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
     client_conn_id: i32, // used for file clipboard
     data_count: Arc<AtomicUsize>,
@@ -204,6 +272,7 @@ impl<T: InvokeUiSession> Remote<T> {
             last_update_jobs_status: (Instant::now(), Default::default()),
             is_connected: false,
             first_frame: false,
+            startup_keyframe_recovery: StartupKeyframeRecovery::default(),
             #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
             client_conn_id: 0,
             data_count: Arc::new(AtomicUsize::new(0)),
@@ -275,6 +344,13 @@ impl<T: InvokeUiSession> Remote<T> {
                 self.handler
                     .set_connection_type(peer.is_secured(), direct, stream_type); // flutter -> connection_ready
                 self.handler.update_direct(Some(direct));
+                let peer_id = self.handler.get_id();
+                let diagnostic_context = {
+                    let login = self.handler.lc.read().unwrap();
+                    format!("viewer_peer={} session={}", peer_id, login.session_id)
+                };
+                peer =
+                    peer.into_duplex_with_context(CLIENT_ASYNC_OUTBOX_CAPACITY, diagnostic_context);
                 if conn_type == ConnType::DEFAULT_CONN || conn_type == ConnType::VIEW_CAMERA {
                     self.handler
                         .set_fingerprint(crate::common::pk_to_fingerprint(pk.unwrap_or_default()));
@@ -554,12 +630,143 @@ impl<T: InvokeUiSession> Remote<T> {
                             let fps_mode = if fixed_fps { "fixed" } else { "adaptive" }.to_owned();
                             let auto_fps = if fixed_fps { None } else { lc.last_auto_fps };
                             drop(lc);
+                            #[cfg(feature = "quic-transport")]
+                            let quic_stats = peer.quic_stats();
                             self.handler.update_quality_status(QualityStatus {
                                 speed: Some(speed),
                                 fps,
                                 chroma,
                                 codec_format,
                                 connection_type: Some(stream_type.to_owned()),
+                                #[cfg(feature = "quic-transport")]
+                                transport_mtu: quic_stats.map(|stats| stats.current_mtu),
+                                #[cfg(feature = "quic-transport")]
+                                transport_rtt_ms: quic_stats
+                                    .map(|stats| stats.rtt_us.saturating_add(500) / 1_000),
+                                #[cfg(feature = "quic-transport")]
+                                transport_lost_packets: quic_stats
+                                    .map(|stats| stats.lost_packets),
+                                #[cfg(feature = "quic-transport")]
+                                datagram_payload: quic_stats
+                                    .and_then(|stats| stats.max_datagram_size),
+                                #[cfg(feature = "quic-transport")]
+                                negotiated_datagram_payload: quic_stats
+                                    .and_then(|stats| stats.negotiated_datagram_size),
+                                #[cfg(feature = "quic-transport")]
+                                quic_protocol: quic_stats.and_then(|stats| {
+                                    (stats.application_protocol != 0)
+                                        .then(|| format!("v{}", stats.application_protocol))
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_video_transport: quic_stats.map(|stats| {
+                                    if stats.reliable_keyframes {
+                                        "DATAGRAM + reliable KF".to_owned()
+                                    } else {
+                                        "DATAGRAM".to_owned()
+                                    }
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_reassembly_drops: quic_stats
+                                    .map(|stats| stats.video_reassembly_drops),
+                                #[cfg(feature = "quic-transport")]
+                                quic_reassembly_reasons: quic_stats.map(|stats| {
+                                    format!(
+                                        "{}/{}/{}/{}",
+                                        stats.video_reassembly_expired,
+                                        stats.video_reassembly_evicted,
+                                        stats.video_reassembly_obsolete,
+                                        stats.video_reassembly_pre_keyframe,
+                                    )
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_reassembly_frame: quic_stats.map(|stats| {
+                                    format!(
+                                        "{}KB/{}f miss {}",
+                                        stats.video_reassembly_last_frame_bytes / 1024,
+                                        stats.video_reassembly_last_frame_fragments,
+                                        stats.video_reassembly_missing_fragments,
+                                    )
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_reassembly_timing: quic_stats.map(|stats| {
+                                    format!(
+                                        "{}/{}/{}ms",
+                                        stats.video_reassembly_last_us / 1000,
+                                        stats.video_reassembly_max_us / 1000,
+                                        stats.video_reassembly_max_gap_us / 1000,
+                                    )
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_keyframe_requests: quic_stats
+                                    .map(|stats| stats.video_keyframe_requests),
+                                #[cfg(feature = "quic-transport")]
+                                quic_receiver_recovery: quic_stats.map(|stats| {
+                                    format!(
+                                        "{}/{}",
+                                        stats.video_source_frame_gaps,
+                                        stats.video_recovery_suppressed_frames
+                                    )
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_sender_recovery: quic_stats.map(|stats| {
+                                    format!(
+                                        "{}/{}",
+                                        stats.video_sender_replacements,
+                                        stats.video_sender_reference_resets
+                                    )
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_sender_admission: quic_stats.and_then(|stats| {
+                                    (stats.video_datagram_frames_sent > 0
+                                        || stats.video_datagram_frames_rejected > 0)
+                                        .then(|| {
+                                            format!(
+                                                "{}/{}",
+                                                stats.video_datagram_frames_sent,
+                                                stats.video_datagram_frames_rejected,
+                                            )
+                                        })
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_sender_frame: quic_stats.and_then(|stats| {
+                                    (stats.video_datagram_frames_sent > 0
+                                        || stats.video_datagram_frames_rejected > 0)
+                                        .then(|| {
+                                            format!(
+                                                "{}KB/{}f peak {}KB/{}f",
+                                                stats.video_datagram_frame_bytes / 1024,
+                                                stats.video_datagram_frame_fragments,
+                                                stats.video_datagram_frame_bytes_peak / 1024,
+                                                stats.video_datagram_frame_fragments_peak,
+                                            )
+                                        })
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_sender_space: quic_stats.and_then(|stats| {
+                                    (stats.video_datagram_frames_sent > 0
+                                        || stats.video_datagram_frames_rejected > 0)
+                                        .then(|| {
+                                            format!(
+                                                "q {}/{}KB free {}/{}KB",
+                                                stats.datagram_send_buffer_queued / 1024,
+                                                stats.video_datagram_queue_budget / 1024,
+                                                stats.datagram_send_buffer_space / 1024,
+                                                stats.datagram_send_buffer_space_min / 1024,
+                                            )
+                                        })
+                                }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_disposable_drops: quic_stats.and_then(|stats| {
+                                    (stats.audio_datagram_drops > 0
+                                        || stats.mouse_datagram_drops > 0)
+                                        .then(|| {
+                                            format!(
+                                                "{}/{}",
+                                                stats.audio_datagram_drops,
+                                                stats.mouse_datagram_drops,
+                                            )
+                                        })
+                                }),
                                 decoder,
                                 renderer,
                                 decode_fps,
@@ -791,7 +998,23 @@ impl<T: InvokeUiSession> Remote<T> {
         misc.set_close_reason(reason.to_owned());
         let mut msg = Message::new();
         msg.set_misc(misc);
-        allow_err!(peer.send(&msg).await);
+        match tokio::time::timeout(
+            CLIENT_CLOSE_SEND_TIMEOUT,
+            peer.send_tagged_and_wait("CloseReason", &msg),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                log::warn!("failed to send close reason: {error}");
+            }
+            Err(_) => {
+                log::warn!(
+                    "timed out waiting for close reason write after {}ms",
+                    CLIENT_CLOSE_SEND_TIMEOUT.as_millis()
+                );
+            }
+        }
         self.sent_close_reason = true;
     }
 
@@ -836,7 +1059,23 @@ impl<T: InvokeUiSession> Remote<T> {
                     },
                     _ => {}
                 }
-                allow_err!(peer.send(&msg).await);
+                let kind = client_outbound_message_kind(&msg);
+                let send_result = if let Some(key) = client_outbound_latest_key(&msg) {
+                    peer.send_latest(key, kind, &msg).await
+                } else {
+                    peer.send_tagged(kind, &msg).await
+                };
+                match send_result {
+                    Ok(()) => {}
+                    Err(err) => {
+                        log::warn!(
+                            "diag client stream enqueue failed: id={}, kind={}, err={}",
+                            self.handler.get_id(),
+                            kind,
+                            err
+                        );
+                    }
+                }
             }
             Data::SendFiles((id, r#type, path, to, file_num, include_hidden, is_remote)) => {
                 log::info!("send files, is remote {}", is_remote);
@@ -1240,12 +1479,12 @@ impl<T: InvokeUiSession> Remote<T> {
             Data::ResetDecoder(display) => match display {
                 Some(display) => {
                     if let Some(v) = self.video_threads.get_mut(&display) {
-                        v.video_sender.send(MediaData::Reset).ok();
+                        v.video_sender.send(MediaData::Reset(None)).ok();
                     }
                 }
                 None => {
                     for (_, v) in self.video_threads.iter_mut() {
-                        v.video_sender.send(MediaData::Reset).ok();
+                        v.video_sender.send(MediaData::Reset(None)).ok();
                     }
                 }
             },
@@ -1714,8 +1953,38 @@ impl<T: InvokeUiSession> Remote<T> {
             match msg_in.union {
                 Some(message::Union::VideoFrame(vf)) => {
                     if !self.first_frame {
+                        let payload_stats = scrap::codec::video_frame_payload_stats(&vf);
                         let (payload_bytes, frame_count, has_keyframe) =
-                            scrap::codec::video_frame_payload_stats(&vf).unwrap_or((0, 0, false));
+                            payload_stats.unwrap_or((0, 0, false));
+                        if should_wait_for_startup_keyframe(vf.frame_id, payload_stats) {
+                            if let StartupKeyframeAction::Refresh {
+                                attempt,
+                                dropped_deltas,
+                            } = self.startup_keyframe_recovery.observe_delta(Instant::now())
+                            {
+                                log::warn!(
+                                    "diag video startup keyframe recovery: display={}, stream_id={}, frame_id={}, format={:?}, payload_bytes={}, dropped_deltas={}, refresh_attempt={}",
+                                    vf.display,
+                                    vf.stream_id,
+                                    vf.frame_id,
+                                    CodecFormat::from(&vf),
+                                    payload_bytes,
+                                    dropped_deltas,
+                                    attempt
+                                );
+                                let refresh = client::LoginConfigHandler::refresh();
+                                if let Err(error) = peer.send(&refresh).await {
+                                    log::warn!(
+                                        "diag video startup keyframe request failed: display={}, stream_id={}, attempt={}, err={}",
+                                        vf.display,
+                                        vf.stream_id,
+                                        attempt,
+                                        error
+                                    );
+                                }
+                            }
+                            return true;
+                        }
                         log::info!(
                             "diag first video frame received from stream: display={}, stream_id={}, frame_id={}, capture_ms={}, format={:?}, payload_bytes={}, frame_count={}, keyframe={}",
                             vf.display,
@@ -1728,6 +1997,7 @@ impl<T: InvokeUiSession> Remote<T> {
                             has_keyframe
                         );
                         self.first_frame = true;
+                        self.startup_keyframe_recovery.reset();
                         self.handler.close_success();
                         self.handler.adapt_size();
                         self.send_toggle_virtual_display_msg(peer).await;
@@ -2312,7 +2582,9 @@ impl<T: InvokeUiSession> Remote<T> {
                     Some(misc::Union::SwitchDisplay(s)) => {
                         self.handler.handle_peer_switch_display(&s);
                         if let Some(thread) = self.video_threads.get_mut(&(s.display as usize)) {
-                            thread.video_sender.send(MediaData::Reset).ok();
+                            let dimensions = (s.width > 0 && s.height > 0)
+                                .then_some((s.width as usize, s.height as usize));
+                            thread.video_sender.send(MediaData::Reset(dimensions)).ok();
                         }
 
                         let mut scale = 1.0;
@@ -3040,8 +3312,10 @@ impl Drop for VideoThread {
 #[cfg(test)]
 mod tests {
     use super::{
-        session_permission_response_msgbox_type, NoVideoStartupAction, NoVideoStartupWatchdog,
-        NO_VIDEO_START_MAX_REFRESHES, NO_VIDEO_START_REFRESH_INTERVAL, NO_VIDEO_START_TIMEOUT,
+        session_permission_response_msgbox_type, should_wait_for_startup_keyframe,
+        NoVideoStartupAction, NoVideoStartupWatchdog, StartupKeyframeAction,
+        StartupKeyframeRecovery, NO_VIDEO_START_MAX_REFRESHES, NO_VIDEO_START_REFRESH_INTERVAL,
+        NO_VIDEO_START_TIMEOUT, STARTUP_KEYFRAME_REFRESH_INTERVAL,
     };
     use hbb_common::tokio::time::{Duration, Instant};
 
@@ -3049,6 +3323,46 @@ mod tests {
     fn permission_response_dialogs_do_not_close_session_on_ok() {
         assert!(session_permission_response_msgbox_type(true).contains("custom"));
         assert!(session_permission_response_msgbox_type(false).contains("custom"));
+    }
+
+    #[test]
+    fn startup_video_waits_for_keyframe_only_for_stamped_encoded_frames() {
+        assert!(should_wait_for_startup_keyframe(2, Some((512, 1, false))));
+        assert!(!should_wait_for_startup_keyframe(1, Some((4096, 1, true))));
+        assert!(!should_wait_for_startup_keyframe(0, Some((512, 1, false))));
+        assert!(!should_wait_for_startup_keyframe(2, None));
+    }
+
+    #[test]
+    fn startup_keyframe_recovery_retries_at_a_bounded_rate() {
+        let mut recovery = StartupKeyframeRecovery::default();
+        let start = Instant::now();
+        assert_eq!(
+            recovery.observe_delta(start),
+            StartupKeyframeAction::Refresh {
+                attempt: 1,
+                dropped_deltas: 1
+            }
+        );
+        assert_eq!(
+            recovery.observe_delta(start + STARTUP_KEYFRAME_REFRESH_INTERVAL / 2),
+            StartupKeyframeAction::Wait
+        );
+        assert_eq!(
+            recovery.observe_delta(start + STARTUP_KEYFRAME_REFRESH_INTERVAL),
+            StartupKeyframeAction::Refresh {
+                attempt: 2,
+                dropped_deltas: 3
+            }
+        );
+        recovery.reset();
+        assert_eq!(
+            recovery.observe_delta(start + STARTUP_KEYFRAME_REFRESH_INTERVAL),
+            StartupKeyframeAction::Refresh {
+                attempt: 1,
+                dropped_deltas: 1
+            }
+        );
     }
 
     #[test]

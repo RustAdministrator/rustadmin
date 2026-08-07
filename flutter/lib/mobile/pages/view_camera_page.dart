@@ -20,6 +20,8 @@ import '../../models/input_model.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../../utils/image.dart';
+import '../widgets/custom_image_quality_widget.dart';
+import '../widgets/custom_scale_widget.dart';
 
 final initText = '1' * 1024;
 
@@ -87,22 +89,16 @@ class _ViewCameraPageState extends State<ViewCameraPage>
   void initState() {
     super.initState();
     gFFI.ffiModel.updateEventListener(sessionId, widget.id);
-    gFFI.start(
-      widget.id,
-      isViewCamera: true,
-      password: widget.password,
-      isSharedPassword: widget.isSharedPassword,
-      forceRelay: widget.forceRelay,
-    );
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
       gFFI.dialogManager
           .showLoading(translate('Connecting...'), onCancel: closeConnection);
+      unawaited(_startConnection());
     });
     WakelockManager.enable(_uniqueKey);
     _physicalFocusNode.requestFocus();
     gFFI.inputModel.listenToMouse(true);
-    gFFI.qualityMonitorModel.checkShowQualityMonitor(sessionId);
     gFFI.chatModel
         .changeCurrentKey(MessageKey(widget.id, ChatModel.clientModeID));
     _blockableOverlayState.applyFfi(gFFI);
@@ -116,6 +112,26 @@ class _ViewCameraPageState extends State<ViewCameraPage>
           isKeyboardVisible: keyboardVisibilityController.isVisible);
     });
     WidgetsBinding.instance.addObserver(this);
+  }
+
+  Future<void> _startConnection() async {
+    try {
+      await gFFI.start(
+        widget.id,
+        isViewCamera: true,
+        password: widget.password,
+        isSharedPassword: widget.isSharedPassword,
+        forceRelay: widget.forceRelay,
+      );
+      if (!mounted || gFFI.closed) return;
+      unawaited(gFFI.qualityMonitorModel.checkShowQualityMonitor(sessionId));
+    } catch (e, stackTrace) {
+      debugPrint('Failed to start mobile camera session: $e\n$stackTrace');
+      if (!mounted) return;
+      gFFI.dialogManager.dismissAll();
+      showToast(translate('Failed to connect'));
+      closeConnection();
+    }
   }
 
   @override
@@ -626,8 +642,10 @@ void showOptions(
   List<TRadioMenu<String>> viewStyleRadios =
       await toolbarViewStyle(context, id, gFFI);
   List<TRadioMenu<String>> imageQualityRadios =
-      await toolbarImageQuality(context, id, gFFI);
+      await toolbarImageQuality(context, id, gFFI, openCustomDialog: false);
   List<TRadioMenu<String>> codecRadios = await toolbarCodec(context, id, gFFI);
+  List<TRadioMenu<String>> captureBackendRadios =
+      await toolbarCaptureBackend(gFFI);
   List<TRadioMenu<String>> qualityMonitorRadios =
       await toolbarQualityMonitorPosition(gFFI);
   List<TRadioMenu<String>> qualityMonitorDetailsRadios =
@@ -644,6 +662,10 @@ void showOptions(
         (imageQualityRadios.isNotEmpty ? imageQualityRadios[0].groupValue : '')
             .obs;
     var codec = (codecRadios.isNotEmpty ? codecRadios[0].groupValue : '').obs;
+    var captureBackend = (captureBackendRadios.isNotEmpty
+            ? captureBackendRadios[0].groupValue
+            : '')
+        .obs;
     var qualityMonitor = (qualityMonitorRadios.isNotEmpty
             ? qualityMonitorRadios[0].groupValue
             : '')
@@ -654,7 +676,18 @@ void showOptions(
         .obs;
     var clipboard =
         (clipboardRadios.isNotEmpty ? clipboardRadios[0].groupValue : '').obs;
+    Widget radioSectionTitle(String label) {
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: Padding(
+          padding: const EdgeInsets.only(left: 16, top: 4, bottom: 4),
+          child: Text(translate(label)),
+        ),
+      );
+    }
+
     final radios = [
+      if (viewStyleRadios.isNotEmpty) radioSectionTitle('Scale'),
       for (var e in viewStyleRadios)
         Obx(() => getRadio<String>(
             e.child,
@@ -666,7 +699,11 @@ void showOptions(
                     if (v != null) viewStyle.value = v;
                   }
                 : null)),
+      Obx(() => viewStyle.value == kRemoteViewStyleCustom
+          ? MobileCustomScaleControls(ffi: gFFI)
+          : const SizedBox.shrink()),
       const Divider(color: MyTheme.border),
+      if (imageQualityRadios.isNotEmpty) radioSectionTitle('Image Quality'),
       for (var e in imageQualityRadios)
         Obx(() => getRadio<String>(
             e.child,
@@ -678,7 +715,15 @@ void showOptions(
                     if (v != null) imageQuality.value = v;
                   }
                 : null)),
+      Obx(() => imageQuality.value == kRemoteImageQualityCustom
+          ? MobileCustomImageQualityControls(
+              key: const ValueKey('mobile-camera-custom-image-quality'),
+              peerId: id,
+              ffi: gFFI,
+            )
+          : const SizedBox.shrink()),
       const Divider(color: MyTheme.border),
+      if (codecRadios.isNotEmpty) radioSectionTitle('Codec'),
       for (var e in codecRadios)
         Obx(() => getRadio<String>(
             e.child,
@@ -691,6 +736,27 @@ void showOptions(
                   }
                 : null)),
       if (codecRadios.isNotEmpty) const Divider(color: MyTheme.border),
+      if (captureBackendRadios.isNotEmpty)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Padding(
+            padding: const EdgeInsets.only(left: 16, top: 4, bottom: 4),
+            child: Text(translate('Capture')),
+          ),
+        ),
+      for (var e in captureBackendRadios)
+        Obx(() => getRadio<String>(
+            e.child,
+            e.value,
+            captureBackend.value,
+            e.onChanged != null
+                ? (v) {
+                    e.onChanged?.call(v);
+                    if (v != null) captureBackend.value = v;
+                  }
+                : null)),
+      if (captureBackendRadios.isNotEmpty)
+        const Divider(color: MyTheme.border),
       if (qualityMonitorRadios.isNotEmpty)
         Align(
           alignment: Alignment.centerLeft,
@@ -734,6 +800,14 @@ void showOptions(
       if (qualityMonitorRadios.isNotEmpty ||
           qualityMonitorDetailsRadios.isNotEmpty)
         const Divider(color: MyTheme.border),
+      if (clipboardRadios.isNotEmpty)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Padding(
+            padding: const EdgeInsets.only(left: 16, top: 4, bottom: 4),
+            child: Text(translate('Clipboard')),
+          ),
+        ),
       for (var e in clipboardRadios)
         Obx(() => getRadio<String>(
             e.child,

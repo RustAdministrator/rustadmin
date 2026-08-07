@@ -54,6 +54,9 @@ const String kPlatformAdditionsAmyuniVirtualDisplays =
 const String kPlatformAdditionsHasFileClipboard = "has_file_clipboard";
 const String kPlatformAdditionsSupportedPrivacyModeImpl =
     "supported_privacy_mode_impl";
+const String kPlatformAdditionsFullVersion = "full_version";
+const String kPlatformAdditionsSupportCaptureBackend =
+    "support_capture_backend";
 
 const String kPeerPlatformWindows = "Windows";
 const String kPeerPlatformLinux = "Linux";
@@ -99,8 +102,10 @@ const String kWindowEventGetRemoteList = "get_remote_list";
 const String kWindowEventGetSessionIdList = "get_session_id_list";
 const String kWindowEventRemoteWindowCoords = "remote_window_coords";
 const String kWindowEventSetFullscreen = "set_fullscreen";
+const String kWindowEventSetTabsInFullscreen = "set_tabs_in_fullscreen";
 
 const String kWindowEventMoveTabToNewWindow = "move_tab_to_new_window";
+const String kWindowEventMoveTabToMainWindow = "move_tab_to_main_window";
 const String kWindowEventGetCachedSessionData = "get_cached_session_data";
 const String kWindowEventOpenMonitorSession = "open_monitor_session";
 
@@ -111,7 +116,10 @@ const String kOptionImageQuality = "image_quality";
 const String kOptionCustomImageQuality = "custom_image_quality";
 const String kOptionCustomFps = "custom-fps";
 const String kOptionCustomFpsMode = "custom-fps-mode";
+const String kOptionCaptureBackend = "capture-backend";
 const String kOptionOpenNewConnInTabs = "enable-open-new-connections-in-tabs";
+const String kOptionOpenRemoteSessionsInMainWindow =
+    "enable-open-remote-sessions-in-main-window";
 const String kOptionTextureRender = "use-texture-render";
 const String kOptionD3DRender = "allow-d3d-render";
 const String kOptionOpenInTabs = "allow-open-in-tabs";
@@ -136,10 +144,13 @@ const String kLanDiscoveryModeStandard = "standard";
 const String kOptionAllowAutoDisconnect = "allow-auto-disconnect";
 const String kOptionAutoDisconnectTimeout = "auto-disconnect-timeout";
 const String kOptionEnableHwcodec = "enable-hwcodec";
+const String kOptionProcessPriority = "process-priority";
 const String kOptionAllowAutoRecordIncoming = "allow-auto-record-incoming";
 const String kOptionAllowAutoRecordOutgoing = "allow-auto-record-outgoing";
 const String kOptionVideoSaveDirectory = "video-save-directory";
 const String kOptionAllowClipboardDebug = "allow-clipboard-debug";
+const String kOptionEnableAndroidDiagnosticLogging =
+    "enable-android-diagnostic-logging";
 const String kOptionAccessMode = "access-mode";
 const String kOptionEnableKeyboard = "enable-keyboard";
 // "Settings -> Security -> Permissions"
@@ -274,6 +285,7 @@ const String kOptionPeerCardUiType = "peer-card-ui-type";
 const String kOptionCurrentAbName = "current-ab-name";
 const String kOptionEnableConfirmClosingTabs = "enable-confirm-closing-tabs";
 const String kOptionAllowAlwaysSoftwareRender = "allow-always-software-render";
+const String kOptionAllowTabsInFullscreen = "allow-tabs-in-fullscreen";
 const String kOptionEnableCheckUpdate = "enable-check-update";
 const String kOptionAllowAutoUpdate = "allow-auto-update";
 const String kOptionAllowLinuxHeadless = "allow-linux-headless";
@@ -295,6 +307,7 @@ const String kOptionEnableShowTerminalExtraKeys =
 const String kOptionAllowWebSocket = "allow-websocket";
 const String kOptionAllowInsecureTLSFallback = "allow-insecure-tls-fallback";
 const String kOptionDisableUdp = "disable-udp";
+const String kOptionRemoteTransport = "remote-transport";
 const String kOptionEnableFlutterHttpOnRust = "enable-flutter-http-on-rust";
 
 // builtin options

@@ -20,7 +20,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:get/get.dart';
 import 'package:get/get_rx/src/rx_workers/utils/debouncer.dart';
 import 'package:provider/provider.dart';
-import 'package:uni_links/uni_links.dart';
+import 'package:app_links/app_links.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
@@ -1261,16 +1261,10 @@ class CustomAlertDialog extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // request focus
-    FocusScopeNode scopeNode = FocusScopeNode();
-    Future.delayed(Duration.zero, () {
-      if (!scopeNode.hasFocus) scopeNode.requestFocus();
-    });
     bool tabTapped = false;
     if (isAndroid) gFFI.invokeMethod("enable_soft_keyboard", true);
 
     return FocusScope(
-      node: scopeNode,
       autofocus: true,
       onKey: (node, key) {
         if (key.logicalKey == LogicalKeyboardKey.escape) {
@@ -1286,7 +1280,7 @@ class CustomAlertDialog extends StatelessWidget {
           return KeyEventResult.handled;
         } else if (key.logicalKey == LogicalKeyboardKey.tab) {
           if (key is RawKeyDownEvent) {
-            scopeNode.nextFocus();
+            node.nextFocus();
             tabTapped = true;
           }
           return KeyEventResult.handled;
@@ -2479,6 +2473,7 @@ Future<bool> restoreWindowPosition(WindowType type,
 }
 
 var webInitialLink = "";
+final AppLinks appLinks = AppLinks();
 
 /// Initialize uni links for macos/windows
 ///
@@ -2491,7 +2486,8 @@ Future<bool> initUniLinks() async {
   }
   // check cold boot
   try {
-    final initialLink = await getInitialLink();
+    final initialUri = await appLinks.getInitialLink();
+    final initialLink = initialUri?.toString();
     print("initialLink: $initialLink");
     if (initialLink == null || initialLink.isEmpty) {
       return false;
@@ -2518,16 +2514,12 @@ StreamSubscription? listenUniLinks({handleByFlutter = true}) {
     return null;
   }
 
-  final sub = uriLinkStream.listen((Uri? uri) {
+  final sub = appLinks.uriLinkStream.listen((Uri uri) {
     debugPrint("A uri was received: $uri. handleByFlutter $handleByFlutter");
-    if (uri != null) {
-      if (handleByFlutter) {
-        handleUriLink(uri: uri);
-      } else {
-        bind.sendUrlScheme(url: uri.toString());
-      }
+    if (handleByFlutter) {
+      handleUriLink(uri: uri);
     } else {
-      print("uni listen error: uri is empty.");
+      bind.sendUrlScheme(url: uri.toString());
     }
   }, onError: (err) {
     print("uni links error: $err");
@@ -3190,15 +3182,19 @@ Future<void> onActiveWindowChanged() async {
   print(
       "[MultiWindowHandler] active window changed: ${rustDeskWinManager.getActiveWindows()}");
   if (rustDeskWinManager.getActiveWindows().isEmpty) {
+    if (shouldHideMainWindowOnClose() &&
+        rustDeskWinManager.hasMainRemoteSessions) {
+      return;
+    }
     // close all sub windows
     try {
       if (isLinux) {
         await Future.wait([
           saveWindowPosition(WindowType.Main),
-          rustDeskWinManager.closeAllSubWindows()
+          rustDeskWinManager.closeAllSessionWindows(confirm: false)
         ]);
       } else {
-        await rustDeskWinManager.closeAllSubWindows();
+        await rustDeskWinManager.closeAllSessionWindows(confirm: false);
       }
     } catch (err) {
       debugPrintStack(label: "$err");
@@ -3812,10 +3808,13 @@ openMonitorInTheSameTab(int i, FFI ffi, PeerInfo pi,
 //
 // screenRect is used to move the new window to the specified screen and set fullscreen.
 openMonitorInNewTabOrWindow(int i, String peerId, PeerInfo pi,
-    {Rect? screenRect}) {
+    {Rect? screenRect,
+    int? sourceWindowId,
+    String? sourceSessionId}) {
   final args = {
-    'window_id': stateGlobal.windowId,
+    'window_id': sourceWindowId ?? stateGlobal.windowId,
     'peer_id': peerId,
+    if (sourceSessionId != null) 'source_session_id': sourceSessionId,
     'display': i,
     'display_count': pi.displays.length,
     'window_type': (kWindowType ?? WindowType.RemoteDesktop).index,
@@ -3846,12 +3845,16 @@ setNewConnectWindowFrame(int windowId, String peerId, int preSessionCount,
   }
 }
 
-tryMoveToScreenAndSetFullscreen(Rect? screenRect) async {
+tryMoveToScreenAndSetFullscreen(Rect? screenRect, {int? targetWindowId}) async {
   if (screenRect == null) {
     return;
   }
-  final wc = WindowController.fromWindowId(stateGlobal.windowId);
-  final curFrame = await wc.getFrame();
+  final resolvedWindowId = targetWindowId ?? stateGlobal.windowId;
+  final isMainTarget = resolvedWindowId == kMainWindowId;
+  final wc = isMainTarget ? null : WindowController.fromWindowId(resolvedWindowId);
+  final curFrame = isMainTarget
+      ? (await windowManager.getPosition()) & (await windowManager.getSize())
+      : await wc!.getFrame();
   final frame =
       Rect.fromLTWH(screenRect.left + 30, screenRect.top + 30, 600, 400);
   if (stateGlobal.fullscreen.isTrue &&
@@ -3861,10 +3864,20 @@ tryMoveToScreenAndSetFullscreen(Rect? screenRect) async {
       curFrame.height >= frame.height) {
     return;
   }
-  await wc.setFrame(frame);
+  if (isMainTarget) {
+    await windowManager.setPosition(frame.topLeft);
+    await windowManager.setSize(frame.size);
+  } else {
+    await wc!.setFrame(frame);
+  }
   // An duration is needed to avoid the window being restored after fullscreen.
   Future.delayed(Duration(milliseconds: 300), () async {
-    stateGlobal.setFullscreen(true);
+    if (isMainTarget) {
+      stateGlobal.setFullscreen(true, procWnd: false);
+      await windowManager.setFullScreen(true);
+    } else {
+      stateGlobal.setFullscreen(true);
+    }
   });
 }
 
@@ -4157,24 +4170,10 @@ Widget loadPowered(BuildContext context) {
 
 // max 300 x 60
 Widget loadLogo() {
-  return FutureBuilder<ByteData>(
-      future: rootBundle.load('assets/logo.png'),
-      builder: (BuildContext context, AsyncSnapshot<ByteData> snapshot) {
-        if (snapshot.hasData) {
-          final image = Image.asset(
-            'assets/logo.png',
-            fit: BoxFit.contain,
-            errorBuilder: (ctx, error, stackTrace) {
-              return Container();
-            },
-          );
-          return Container(
-            constraints: BoxConstraints(maxWidth: 300, maxHeight: 60),
-            child: image,
-          ).marginOnly(left: 12, right: 12, top: 12);
-        }
-        return const Offstage();
-      });
+  return Container(
+    constraints: BoxConstraints(maxWidth: 300, maxHeight: 60),
+    child: SvgPicture.asset('assets/icon.svg', fit: BoxFit.contain),
+  ).marginOnly(left: 12, right: 12, top: 12);
 }
 
 Widget loadIcon(double size) {

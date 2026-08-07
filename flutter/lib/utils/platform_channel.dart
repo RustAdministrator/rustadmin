@@ -2,25 +2,26 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/main.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/consts.dart';
 
 enum SystemWindowTheme { light, dark }
 
-class MacOSConnectionMenuEntry {
+class MacOSTabMenuEntry {
   final int windowId;
-  final String peerId;
+  final String tabId;
   final String title;
   final bool selected;
 
-  const MacOSConnectionMenuEntry({
+  const MacOSTabMenuEntry({
     required this.windowId,
-    required this.peerId,
+    required this.tabId,
     required this.title,
     required this.selected,
   });
 
   Map<String, Object> toJson() => {
         'windowId': windowId,
-        'peerId': peerId,
+        'tabId': tabId,
         'title': title,
         'selected': selected,
       };
@@ -37,17 +38,27 @@ class RdPlatformChannel {
   final MethodChannel _hostMethodChannel =
       MethodChannel("org.rustdesk.rustdesk/host");
 
-  void setMacOSConnectionMenuHandler(
-      Future<bool> Function(int windowId, String peerId) handler) {
+  void setMacOSTabMenuHandler({
+    required Future<bool> Function(int windowId, String tabId) activateTab,
+    required Future<void> Function(bool value) setTabsInFullscreen,
+  }) {
     assert(isMacOS);
     _hostMethodChannel.setMethodCallHandler((call) async {
       switch (call.method) {
-        case 'activateConnection':
+        case 'activateTab':
           final args = call.arguments as Map<dynamic, dynamic>? ?? {};
           final windowId = args['windowId'];
-          final peerId = args['peerId'];
-          if (windowId is int && peerId is String && peerId.isNotEmpty) {
-            return await handler(windowId, peerId);
+          final tabId = args['tabId'];
+          if (windowId is int && tabId is String && tabId.isNotEmpty) {
+            return await activateTab(windowId, tabId);
+          }
+          return false;
+        case 'setTabsInFullscreen':
+          final args = call.arguments as Map<dynamic, dynamic>? ?? {};
+          final value = args['value'];
+          if (value is bool) {
+            await setTabsInFullscreen(value);
+            return true;
           }
           return false;
         default:
@@ -56,15 +67,27 @@ class RdPlatformChannel {
     });
   }
 
-  Future<void> updateMacOSConnectionMenu(
-      int windowId, List<MacOSConnectionMenuEntry> entries) {
+  Future<void> updateMacOSTabMenu(
+      int windowId, List<MacOSTabMenuEntry> entries) {
     if (!isMacOS) {
       return Future.value();
     }
-    return _hostMethodChannel.invokeMethod("updateConnectionMenu", {
+    return _hostMethodChannel.invokeMethod("updateTabMenu", {
       "windowId": windowId,
       "entries": entries.map((entry) => entry.toJson()).toList(),
+      "tabsInFullscreen":
+          mainGetLocalBoolOptionSync(kOptionAllowTabsInFullscreen),
     });
+  }
+
+  Future<void> updateMacOSTabsInFullscreen(bool value) {
+    if (!isMacOS) {
+      return Future.value();
+    }
+    return _hostMethodChannel.invokeMethod(
+      "updateTabsInFullscreen",
+      {"value": value},
+    );
   }
 
   /// Bump the position of the mouse cursor, if applicable

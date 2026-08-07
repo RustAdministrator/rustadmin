@@ -28,6 +28,7 @@ typedef HandleEvent = Future<void> Function(Map<String, dynamic> evt);
 /// FFI wrapper around the native Rust core.
 /// Hides the platform differences.
 class PlatformFFI {
+  static const _flutterDiagnosticMaxBytes = 2 * 1024 * 1024;
   String _dir = '';
   // _homeDir is only needed for Android and IOS.
   String _homeDir = '';
@@ -35,6 +36,9 @@ class PlatformFFI {
   late Rustadmin _ffiBind;
   late String _appType;
   StreamEventHandler? _eventCallback;
+  File? _flutterDiagnosticFile;
+  bool _androidDiagnosticLoggingEnabled = true;
+  bool _androidDiagnosticHandlersInstalled = false;
 
   PlatformFFI._();
 
@@ -166,7 +170,11 @@ class PlatformFFI {
       try {
         if (isAndroid) {
           // only support for android
-          _homeDir = (await ExternalPath.getExternalStorageDirectories())[0];
+          final directories =
+              await ExternalPath.getExternalStorageDirectories();
+          if (directories != null && directories.isNotEmpty) {
+            _homeDir = directories.first;
+          }
         } else if (isIOS) {
           // The previous code was `_homeDir = (await getDownloadsDirectory())?.path ?? '';`,
           // which provided the `downloads` path in the sandbox.
@@ -228,6 +236,13 @@ class PlatformFFI {
         appDir: _dir,
         customClientConfig: '',
       );
+      if (isAndroid) {
+        final enabled = option2bool(
+            kOptionEnableAndroidDiagnosticLogging,
+            _ffiBind.mainGetLocalOption(
+                key: kOptionEnableAndroidDiagnosticLogging));
+        setAndroidDiagnosticLoggingEnabled(enabled);
+      }
     } catch (e) {
       debugPrintStack(label: 'initialize failed: $e');
     }
@@ -294,8 +309,74 @@ class PlatformFFI {
     return await _toAndroidChannel.invokeMethod(method, arguments);
   }
 
+  Future<String?> exportAndroidDiagnostics() async {
+    if (!isAndroid) return null;
+    return _toAndroidChannel.invokeMethod<String>('export_diagnostics');
+  }
+
+  Future<void> clearAndroidDiagnostics() async {
+    if (!isAndroid) return;
+    await _toAndroidChannel.invokeMethod<void>('clear_diagnostics');
+  }
+
   void syncAndroidServiceAppDirConfigPath() {
     invokeMethod(AndroidChannel.kSyncAppDirConfigPath, _dir);
+  }
+
+  void setAndroidDiagnosticLoggingEnabled(bool enabled) {
+    _androidDiagnosticLoggingEnabled = enabled;
+    if (_dir.isEmpty) return;
+    try {
+      if (enabled && _flutterDiagnosticFile == null) {
+        final directory = Directory('$_dir/diagnostics')
+          ..createSync(recursive: true);
+        _flutterDiagnosticFile = File('${directory.path}/flutter-errors.log');
+        _rotateFlutterDiagnosticFileIfNeeded();
+      }
+
+      if (!_androidDiagnosticHandlersInstalled) {
+        _androidDiagnosticHandlersInstalled = true;
+        final previousFlutterHandler = FlutterError.onError;
+        FlutterError.onError = (details) {
+          _appendFlutterDiagnostic(
+              'FlutterError', details.exception, details.stack);
+          previousFlutterHandler?.call(details);
+        };
+
+        final previousPlatformHandler = PlatformDispatcher.instance.onError;
+        PlatformDispatcher.instance.onError = (error, stack) {
+          _appendFlutterDiagnostic('PlatformDispatcher', error, stack);
+          return previousPlatformHandler?.call(error, stack) ?? false;
+        };
+      }
+    } catch (_) {
+      _flutterDiagnosticFile = null;
+    }
+  }
+
+  void _appendFlutterDiagnostic(
+      String source, Object error, StackTrace? stack) {
+    if (!_androidDiagnosticLoggingEnabled) return;
+    final file = _flutterDiagnosticFile;
+    if (file == null) return;
+    try {
+      _rotateFlutterDiagnosticFileIfNeeded();
+      var entry = '${DateTime.now().toUtc().toIso8601String()} '
+          '[$source] $error\n${stack ?? ''}\n';
+      if (entry.length > 64 * 1024) {
+        entry = '${entry.substring(0, 64 * 1024)}\n[truncated]\n';
+      }
+      file.writeAsStringSync(entry, mode: FileMode.append, flush: true);
+    } catch (_) {}
+  }
+
+  void _rotateFlutterDiagnosticFileIfNeeded() {
+    final file = _flutterDiagnosticFile;
+    if (file == null || !file.existsSync()) return;
+    if (file.lengthSync() < _flutterDiagnosticMaxBytes) return;
+    final previous = File('${file.path}.1');
+    if (previous.existsSync()) previous.deleteSync();
+    file.renameSync(previous.path);
   }
 
   void setFullscreenCallback(void Function(bool) fun) {}

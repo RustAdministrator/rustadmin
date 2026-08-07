@@ -61,6 +61,9 @@ const SHMEM_PARENT_DIR: &str = "portable_service_shmem";
 const SHMEM_NAME_MAX_LEN: usize = 64;
 const MAX_NACK: usize = 3;
 const PORTABLE_SERVICE_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
+const PORTABLE_SERVICE_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_SECURE_CAPTURE_RECOVERY_FAILURES: u64 = 3;
+const SECURE_CAPTURE_RECOVERY_BACKOFF: Duration = Duration::from_secs(15);
 const MAX_DXGI_FAIL_TIME: usize = 5;
 
 #[inline]
@@ -578,11 +581,12 @@ pub mod server {
         }
     }
 
-    fn capture_desktop_state() -> (bool, bool, bool) {
+    fn capture_desktop_state() -> (bool, bool, bool, bool) {
         (
             crate::platform::windows::is_prelogin(),
             crate::platform::windows::is_locked(),
             crate::platform::windows::desktop_changed(),
+            crate::platform::windows::is_logon_ui_for_capture(),
         )
     }
 
@@ -624,7 +628,7 @@ pub mod server {
                 let current_display = (*para).current_display;
                 let timeout_ms = (*para).timeout_ms;
                 if c.is_none() {
-                    let (prelogin, locked, desktop_changed) = capture_desktop_state();
+                    let (prelogin, locked, desktop_changed, logon_ui) = capture_desktop_state();
                     let Ok(mut displays) = display_service::try_get_displays() else {
                         log::error!("Failed to get displays");
                         *EXIT.lock().unwrap() = true;
@@ -640,20 +644,21 @@ pub mod server {
                     display_height = display.height();
                     match Capturer::new(display) {
                         Ok(mut v) => {
-                            let force_gdi = prelogin || locked || desktop_changed;
+                            let force_gdi = prelogin || locked || desktop_changed || logon_ui;
                             let mut forced_gdi = false;
                             if force_gdi || dxgi_failed_times > MAX_DXGI_FAIL_TIME {
                                 dxgi_failed_times = 0;
                                 forced_gdi = v.set_gdi();
                             }
                             log::info!(
-                                "portable service capture created: display={}, size={}x{}, prelogin={}, locked={}, desktop_changed={}, force_gdi={}, forced_gdi={}, backend={}, is_gdi={}",
+                                "portable service capture created: display={}, size={}x{}, prelogin={}, locked={}, desktop_changed={}, logon_ui={}, force_gdi={}, forced_gdi={}, backend={}, is_gdi={}",
                                 current_display,
                                 display_width,
                                 display_height,
                                 prelogin,
                                 locked,
                                 desktop_changed,
+                                logon_ui,
                                 force_gdi,
                                 forced_gdi,
                                 v.capture_backend(),
@@ -890,13 +895,19 @@ pub mod client {
     use scrap::PixelBuffer;
 
     lazy_static::lazy_static! {
-        static ref RUNNING: Arc<Mutex<bool>> = Default::default();
-        static ref STARTING: Arc<Mutex<bool>> = Default::default();
-        static ref STARTING_TOKEN: AtomicU64 = AtomicU64::new(0);
+        static ref LIFECYCLE: Arc<Mutex<PortableServiceLifecycle>> = Default::default();
+        static ref NEXT_LIFECYCLE_GENERATION: AtomicU64 = AtomicU64::new(0);
+        static ref IPC_RUNTIME_GENERATION: AtomicU64 = AtomicU64::new(0);
+        static ref SECURE_CAPTURE_GENERATION: AtomicU64 = AtomicU64::new(0);
+        static ref SECURE_DESKTOP_HELPER_GENERATION: AtomicU64 = AtomicU64::new(0);
+        static ref FIRST_FRAME_GENERATION: AtomicU64 = AtomicU64::new(0);
+        static ref SECURE_CAPTURE_RECOVERY_FAILURES: AtomicU64 = AtomicU64::new(0);
+        static ref LAST_SECURE_CAPTURE_RECOVERY_FAILURE: Mutex<Option<std::time::Instant>> =
+            Default::default();
         static ref SHMEM: Arc<Mutex<Option<SharedMemory>>> = Default::default();
         static ref SHMEM_RUNTIME_NAME: Arc<Mutex<Option<String>>> = Default::default();
         static ref IPC_RUNTIME_TOKEN: Arc<Mutex<Option<String>>> = Default::default();
-        static ref SENDER : Mutex<mpsc::UnboundedSender<ipc::Data>> = Mutex::new(client::start_ipc_server());
+        static ref SENDER : Mutex<mpsc::UnboundedSender<PortableServiceCommand>> = Mutex::new(client::start_ipc_server());
         static ref QUICK_SUPPORT: Arc<Mutex<bool>> = Default::default();
         static ref INPUT_VIA_HELPER: AtomicBool = AtomicBool::new(false);
     }
@@ -904,7 +915,106 @@ pub mod client {
     pub enum StartPara {
         Direct,
         ElevatedDirect,
+        SecureDesktop,
         Logon(String, String),
+    }
+
+    #[derive(Debug)]
+    enum PortableServiceCommand {
+        Send(Data),
+        ShutdownGeneration(u64),
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum LifecycleState {
+        Stopped,
+        Starting,
+        Ready,
+    }
+
+    impl Default for LifecycleState {
+        fn default() -> Self {
+            Self::Stopped
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    struct PortableServiceLifecycle {
+        state: LifecycleState,
+        generation: u64,
+    }
+
+    fn mark_generation_ready(generation: u64) -> bool {
+        let mut lifecycle = LIFECYCLE.lock().unwrap();
+        if generation == 0
+            || lifecycle.generation != generation
+            || lifecycle.state != LifecycleState::Starting
+        {
+            return false;
+        }
+        lifecycle.state = LifecycleState::Ready;
+        true
+    }
+
+    fn clear_generation_if_current(generation: u64, reason: &str) -> bool {
+        let mut lifecycle = LIFECYCLE.lock().unwrap();
+        if generation == 0 || lifecycle.generation != generation {
+            log::debug!(
+                "Ignore stale portable service state clear: generation={}, current_generation={}, reason={}",
+                generation,
+                lifecycle.generation,
+                reason
+            );
+            return false;
+        }
+        lifecycle.state = LifecycleState::Stopped;
+        drop(lifecycle);
+        let secure_capture_generation = SECURE_CAPTURE_GENERATION
+            .compare_exchange(generation, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        let secure_owner_generation = SECURE_DESKTOP_HELPER_GENERATION
+            .compare_exchange(generation, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok();
+        if secure_capture_generation || secure_owner_generation {
+            let _ = FIRST_FRAME_GENERATION.compare_exchange(
+                generation,
+                0,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+        }
+        INPUT_VIA_HELPER.store(false, Ordering::SeqCst);
+        log::info!(
+            "Portable service generation stopped: generation={}, reason={}",
+            generation,
+            reason
+        );
+        true
+    }
+
+    fn record_secure_capture_recovery_failure(reason: &str, generation: u64) -> u64 {
+        let failures = SECURE_CAPTURE_RECOVERY_FAILURES.fetch_add(1, Ordering::SeqCst) + 1;
+        *LAST_SECURE_CAPTURE_RECOVERY_FAILURE.lock().unwrap() = Some(std::time::Instant::now());
+        log::warn!(
+            "Portable secure capture recovery failure: generation={}, failures={}/{}, reason={}",
+            generation,
+            failures,
+            MAX_SECURE_CAPTURE_RECOVERY_FAILURES,
+            reason
+        );
+        failures
+    }
+
+    fn first_frame_timed_out(
+        first_frame_received: bool,
+        elapsed: Duration,
+        timeout: Duration,
+    ) -> bool {
+        !first_frame_received && elapsed >= timeout
+    }
+
+    fn recovery_allowed(failures: u64, backoff_elapsed: bool) -> bool {
+        failures < MAX_SECURE_CAPTURE_RECOVERY_FAILURES || backoff_elapsed
     }
 
     fn has_running_portable_service_process() -> bool {
@@ -929,7 +1039,10 @@ pub mod client {
     }
 
     fn start_para_routes_input_via_helper(para: &StartPara) -> bool {
-        matches!(para, StartPara::ElevatedDirect | StartPara::Logon(_, _))
+        matches!(
+            para,
+            StartPara::ElevatedDirect | StartPara::SecureDesktop | StartPara::Logon(_, _)
+        )
     }
 
     fn should_use_helper_capture_for_desktop_state(
@@ -937,8 +1050,9 @@ pub mod client {
         prelogin: bool,
         locked: bool,
         desktop_changed: bool,
+        logon_ui: bool,
     ) -> bool {
-        portable_service_running && (prelogin || locked || desktop_changed)
+        portable_service_running && (prelogin || locked || desktop_changed || logon_ui)
     }
 
     pub(crate) fn start_para_for_quick_support_process(elevated: bool) -> StartPara {
@@ -950,7 +1064,7 @@ pub mod client {
     }
 
     fn routes_input_via_helper() -> bool {
-        *RUNNING.lock().unwrap() && INPUT_VIA_HELPER.load(Ordering::SeqCst)
+        running() && INPUT_VIA_HELPER.load(Ordering::SeqCst)
     }
 
     fn start_direct_portable_service_process(portable_service_arg: &str) -> ResultType<()> {
@@ -1040,6 +1154,7 @@ pub mod client {
         *shmem_lock = None;
         let runtime_name = SHMEM_RUNTIME_NAME.lock().unwrap().take();
         *runtime_token = None;
+        IPC_RUNTIME_GENERATION.store(0, Ordering::SeqCst);
         drop(runtime_token);
         drop(shmem_lock);
         if let Some(name) = runtime_name.as_deref() {
@@ -1050,21 +1165,26 @@ pub mod client {
     }
 
     #[inline]
-    fn consume_runtime_ipc_token_if_match(candidate: &str) -> (bool, Option<String>) {
+    fn consume_runtime_ipc_token_if_match(candidate: &str) -> (bool, Option<String>, Option<u64>) {
         let mut token = IPC_RUNTIME_TOKEN.lock().unwrap();
         if !token
             .as_deref()
             .is_some_and(|expected| ipc::constant_time_ipc_token_eq(expected, candidate))
         {
-            return (false, None);
+            return (false, None, None);
         }
         let mut shmem_lock = SHMEM.lock().unwrap();
         let matched_shmem_name = SHMEM_RUNTIME_NAME.lock().unwrap().clone();
+        let generation = IPC_RUNTIME_GENERATION.load(Ordering::SeqCst);
         *token = None;
         if let Some(shmem) = shmem_lock.as_mut() {
             clear_ipc_token_in_shmem(shmem);
         }
-        (true, matched_shmem_name)
+        (
+            true,
+            matched_shmem_name,
+            (generation != 0).then_some(generation),
+        )
     }
 
     #[inline]
@@ -1117,20 +1237,51 @@ pub mod client {
         std::thread::spawn(move || {
             std::thread::sleep(PORTABLE_SERVICE_STARTUP_TIMEOUT);
             let should_reset = {
-                // Guard against stale watchdogs from previous launches:
-                // only the watchdog that matches the latest STARTING_TOKEN may reset STARTING.
-                let current_token = STARTING_TOKEN.load(Ordering::SeqCst);
-                // Keep lock guards in explicit short scopes to make it obvious
-                // there is no nested lock ordering (and to avoid Copilot false positives).
-                let starting = { *STARTING.lock().unwrap() };
-                let running = { *RUNNING.lock().unwrap() };
-                current_token == launch_token && starting && !running
+                let mut lifecycle = LIFECYCLE.lock().unwrap();
+                if lifecycle.generation == launch_token
+                    && lifecycle.state == LifecycleState::Starting
+                {
+                    lifecycle.state = LifecycleState::Stopped;
+                    true
+                } else {
+                    false
+                }
             };
             if should_reset {
-                log::warn!(
-                    "Portable service startup timeout before IPC ready, reset STARTING state"
+                let secure_capture_generation =
+                    SECURE_CAPTURE_GENERATION.load(Ordering::SeqCst) == launch_token;
+                if secure_capture_generation {
+                    let failures = record_secure_capture_recovery_failure(
+                        "startup timeout before authenticated IPC readiness",
+                        launch_token,
+                    );
+                    log::warn!(
+                        "Portable secure capture helper startup timeout before IPC ready: generation={}, failures={}/{}",
+                        launch_token,
+                        failures,
+                        MAX_SECURE_CAPTURE_RECOVERY_FAILURES
+                    );
+                } else {
+                    log::warn!(
+                        "Portable service startup timeout before IPC ready: generation={}",
+                        launch_token
+                    );
+                }
+                if secure_capture_generation {
+                    let _ = SECURE_CAPTURE_GENERATION.compare_exchange(
+                        launch_token,
+                        0,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    );
+                }
+                let _ = SECURE_DESKTOP_HELPER_GENERATION.compare_exchange(
+                    launch_token,
+                    0,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
                 );
-                *STARTING.lock().unwrap() = false;
+                INPUT_VIA_HELPER.store(false, Ordering::SeqCst);
             }
         });
     }
@@ -1142,22 +1293,26 @@ pub mod client {
     pub(crate) fn start_portable_service(para: StartPara) -> ResultType<()> {
         log::info!("start portable service");
         let input_via_helper = start_para_routes_input_via_helper(&para);
+        let secure_capture_launch = matches!(&para, StartPara::SecureDesktop);
         let launch_token = {
-            // Keep lock guards in explicit short scopes to make it obvious
-            // there is no nested lock ordering (and to avoid Copilot false positives).
-            let running = { *RUNNING.lock().unwrap() };
-            let mut starting = STARTING.lock().unwrap();
-            if *starting && !running && !has_running_portable_service_process() {
+            let mut lifecycle = LIFECYCLE.lock().unwrap();
+            if lifecycle.state == LifecycleState::Starting
+                && !has_running_portable_service_process()
+            {
                 log::warn!(
                     "Detected stale portable service STARTING state without running process, reset it"
                 );
-                *starting = false;
+                lifecycle.state = LifecycleState::Stopped;
             }
-            if *starting || running {
+            if lifecycle.state != LifecycleState::Stopped {
                 bail!("already running");
             }
-            *starting = true;
-            STARTING_TOKEN.fetch_add(1, Ordering::SeqCst) + 1
+            let generation = NEXT_LIFECYCLE_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+            *lifecycle = PortableServiceLifecycle {
+                state: LifecycleState::Starting,
+                generation,
+            };
+            generation
         };
         let start_result = (|| -> ResultType<()> {
             clear_runtime_shmem_state();
@@ -1191,6 +1346,24 @@ pub mod client {
                 shmem_size,
             )?);
             *SHMEM_RUNTIME_NAME.lock().unwrap() = Some(shmem_name);
+            IPC_RUNTIME_GENERATION.store(launch_token, Ordering::SeqCst);
+            SECURE_CAPTURE_GENERATION.store(
+                if secure_capture_launch {
+                    launch_token
+                } else {
+                    0
+                },
+                Ordering::SeqCst,
+            );
+            SECURE_DESKTOP_HELPER_GENERATION.store(
+                if secure_capture_launch {
+                    launch_token
+                } else {
+                    0
+                },
+                Ordering::SeqCst,
+            );
+            FIRST_FRAME_GENERATION.store(0, Ordering::SeqCst);
             shutdown_hooks::add_shutdown_hook(drop_portable_service_shared_memory);
             let shmem_name = SHMEM_RUNTIME_NAME
                 .lock()
@@ -1227,7 +1400,7 @@ pub mod client {
                         bail!("{}", e);
                     }
                 }
-                StartPara::ElevatedDirect => {
+                StartPara::ElevatedDirect | StartPara::SecureDesktop => {
                     if let Err(e) = start_elevated_portable_service_process(&shmem_name) {
                         clear_runtime_shmem_state();
                         bail!("{}", e);
@@ -1306,13 +1479,18 @@ pub mod client {
                     }
                 }
             }
+            log::info!(
+                "Portable service process spawned: generation={}, shmem_name={}, input_via_helper={}",
+                launch_token,
+                shmem_name,
+                input_via_helper
+            );
             schedule_starting_timeout_reset(launch_token);
             INPUT_VIA_HELPER.store(input_via_helper, Ordering::SeqCst);
             Ok(())
         })();
         if start_result.is_err() {
-            *STARTING.lock().unwrap() = false;
-            INPUT_VIA_HELPER.store(false, Ordering::SeqCst);
+            clear_generation_if_current(launch_token, "process launch failed");
         }
         start_result
     }
@@ -1331,35 +1509,155 @@ pub mod client {
         *QUICK_SUPPORT.lock().unwrap()
     }
 
+    pub fn lifecycle() -> LifecycleState {
+        LIFECYCLE.lock().unwrap().state
+    }
+
+    fn ready_generation() -> Option<u64> {
+        let lifecycle = LIFECYCLE.lock().unwrap();
+        (lifecycle.state == LifecycleState::Ready).then_some(lifecycle.generation)
+    }
+
+    pub fn ready_for_capture() -> bool {
+        ready_generation().is_some()
+    }
+
+    pub fn secure_capture_recovery_allowed() -> bool {
+        let failures = SECURE_CAPTURE_RECOVERY_FAILURES.load(Ordering::SeqCst);
+        let backoff_elapsed = LAST_SECURE_CAPTURE_RECOVERY_FAILURE
+            .lock()
+            .unwrap()
+            .is_some_and(|last| last.elapsed() >= SECURE_CAPTURE_RECOVERY_BACKOFF);
+        let allowed = recovery_allowed(failures, backoff_elapsed);
+        if failures >= MAX_SECURE_CAPTURE_RECOVERY_FAILURES && backoff_elapsed {
+            SECURE_CAPTURE_RECOVERY_FAILURES
+                .store(MAX_SECURE_CAPTURE_RECOVERY_FAILURES - 1, Ordering::SeqCst);
+            log::warn!(
+                "Portable secure capture recovery backoff elapsed; allowing one retry after {}s",
+                SECURE_CAPTURE_RECOVERY_BACKOFF.as_secs()
+            );
+        }
+        allowed
+    }
+
+    pub fn reset_secure_capture_recovery_failures(reason: &str) {
+        let previous = SECURE_CAPTURE_RECOVERY_FAILURES.swap(0, Ordering::SeqCst);
+        *LAST_SECURE_CAPTURE_RECOVERY_FAILURE.lock().unwrap() = None;
+        SECURE_CAPTURE_GENERATION.store(0, Ordering::SeqCst);
+        if previous > 0 {
+            log::info!(
+                "Portable secure capture recovery counter reset: previous_failures={}, reason={}",
+                previous,
+                reason
+            );
+        }
+    }
+
+    fn mark_secure_capture_first_frame(generation: u64, elapsed: Duration) {
+        if ready_generation() != Some(generation) {
+            return;
+        }
+        FIRST_FRAME_GENERATION.store(generation, Ordering::SeqCst);
+        reset_secure_capture_recovery_failures("first frame received");
+        log::info!(
+            "Portable secure capture first frame consumed: generation={}, elapsed_ms={}",
+            generation,
+            elapsed.as_millis()
+        );
+    }
+
+    fn send_generation_shutdown(generation: u64, reason: &str) {
+        if let Err(err) = SENDER
+            .lock()
+            .unwrap()
+            .send(PortableServiceCommand::ShutdownGeneration(generation))
+        {
+            log::warn!(
+                "Failed to request portable service generation shutdown: generation={}, reason={}, err={}",
+                generation,
+                reason,
+                err
+            );
+        }
+    }
+
+    pub fn stop_secure_capture_helper(reason: &str) -> bool {
+        let Some(generation) = ready_generation() else {
+            return false;
+        };
+        let owner_generation = SECURE_DESKTOP_HELPER_GENERATION.load(Ordering::SeqCst);
+        if generation == 0 || owner_generation != generation {
+            log::debug!(
+                "Keep non-owned portable service generation running: generation={}, secure_owner_generation={}, reason={}",
+                generation,
+                owner_generation,
+                reason
+            );
+            return false;
+        }
+        if !clear_generation_if_current(generation, reason) {
+            return false;
+        }
+        send_generation_shutdown(generation, reason);
+        log::info!(
+            "Portable secure capture helper stop requested: generation={}, reason={}",
+            generation,
+            reason
+        );
+        true
+    }
+
+    fn request_secure_capture_restart(generation: u64, reason: &str) -> bool {
+        if !clear_generation_if_current(generation, reason) {
+            return false;
+        }
+        let failures = record_secure_capture_recovery_failure(reason, generation);
+        send_generation_shutdown(generation, reason);
+        if failures >= MAX_SECURE_CAPTURE_RECOVERY_FAILURES {
+            log::error!(
+                "Portable secure capture fast recovery exhausted: failures={}, retry_backoff_s={}",
+                failures,
+                SECURE_CAPTURE_RECOVERY_BACKOFF.as_secs()
+            );
+        }
+        true
+    }
+
     pub struct CapturerPortable {
         width: usize,
         height: usize,
+        generation: u64,
+        started_at: std::time::Instant,
+        first_frame_received: bool,
     }
 
     impl CapturerPortable {
-        pub fn new(current_display: usize) -> Self
+        pub fn new(current_display: usize) -> ResultType<Self>
         where
             Self: Sized,
         {
+            let generation = ready_generation()
+                .ok_or_else(|| anyhow!("portable service IPC is not ready for capture"))?;
             let mut option = SHMEM.lock().unwrap();
-            if let Some(shmem) = option.as_mut() {
-                unsafe {
-                    libc::memset(
-                        shmem.as_ptr().add(ADDR_CURSOR_PARA) as _,
-                        0,
-                        shmem.len().saturating_sub(ADDR_CURSOR_PARA) as _,
-                    );
-                }
-                utils::set_para(
-                    shmem,
-                    CapturerPara {
-                        recreate: true,
-                        current_display,
-                        timeout_ms: 33,
-                    },
+            let shmem = option
+                .as_mut()
+                .ok_or_else(|| anyhow!("portable service shared memory is unavailable"))?;
+            unsafe {
+                libc::memset(
+                    shmem.as_ptr().add(ADDR_CURSOR_PARA) as _,
+                    0,
+                    shmem.len().saturating_sub(ADDR_CURSOR_PARA) as _,
                 );
-                shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(TRUE));
             }
+            utils::set_para(
+                shmem,
+                CapturerPara {
+                    recreate: true,
+                    current_display,
+                    timeout_ms: 33,
+                },
+            );
+            shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(TRUE));
             let (mut width, mut height) = (0, 0);
             if let Ok(displays) = display_service::try_get_displays() {
                 if let Some(display) = displays.get(current_display) {
@@ -1367,12 +1665,41 @@ pub mod client {
                     height = display.height();
                 }
             }
-            CapturerPortable { width, height }
+            if width == 0 || height == 0 {
+                bail!(
+                    "portable service display geometry is invalid: display={}, size={}x{}",
+                    current_display,
+                    width,
+                    height
+                );
+            }
+            log::info!(
+                "Portable secure capture shared-memory capturer armed: generation={}, display={}, size={}x{}, first_frame_timeout_ms={}",
+                generation,
+                current_display,
+                width,
+                height,
+                PORTABLE_SERVICE_FIRST_FRAME_TIMEOUT.as_millis()
+            );
+            SECURE_CAPTURE_GENERATION.store(generation, Ordering::SeqCst);
+            Ok(CapturerPortable {
+                width,
+                height,
+                generation,
+                started_at: std::time::Instant::now(),
+                first_frame_received: false,
+            })
         }
     }
 
     impl TraitCapturer for CapturerPortable {
         fn frame<'a>(&'a mut self, timeout: Duration) -> std::io::Result<Frame<'a>> {
+            if ready_generation() != Some(self.generation) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "portable service generation is no longer ready".to_string(),
+                ));
+            }
             let mut lock = SHMEM.lock().unwrap();
             let shmem = lock.as_mut().ok_or(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -1423,12 +1750,31 @@ pub mod client {
                     }
                     let frame_ptr = base.add(ADDR_CAPTURE_FRAME);
                     let data = slice::from_raw_parts(frame_ptr, frame_len);
+                    if !self.first_frame_received {
+                        self.first_frame_received = true;
+                        mark_secure_capture_first_frame(self.generation, self.started_at.elapsed());
+                    }
                     Ok(Frame::PixelBuffer(PixelBuffer::with_BGRA(
                         data,
                         self.width,
                         self.height,
                     )))
                 } else {
+                    if first_frame_timed_out(
+                        self.first_frame_received,
+                        self.started_at.elapsed(),
+                        PORTABLE_SERVICE_FIRST_FRAME_TIMEOUT,
+                    ) {
+                        drop(lock);
+                        request_secure_capture_restart(
+                            self.generation,
+                            "first frame timeout after IPC readiness",
+                        );
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "portable service first frame timeout".to_string(),
+                        ));
+                    }
                     let ptr = base.add(ADDR_CAPTURE_WOULDBLOCK);
                     let wouldblock = utils::ptr_to_i32(ptr);
                     if wouldblock == TRUE {
@@ -1468,14 +1814,14 @@ pub mod client {
         fn set_output_texture(&mut self, _texture: bool) {}
     }
 
-    pub(super) fn start_ipc_server() -> mpsc::UnboundedSender<Data> {
-        let (tx, rx) = mpsc::unbounded_channel::<Data>();
+    fn start_ipc_server() -> mpsc::UnboundedSender<PortableServiceCommand> {
+        let (tx, rx) = mpsc::unbounded_channel::<PortableServiceCommand>();
         std::thread::spawn(move || start_ipc_server_async(rx));
         tx
     }
 
     #[tokio::main(flavor = "current_thread")]
-    async fn start_ipc_server_async(rx: mpsc::UnboundedReceiver<Data>) {
+    async fn start_ipc_server_async(rx: mpsc::UnboundedReceiver<PortableServiceCommand>) {
         use DataPortableService::*;
         let rx = Arc::new(tokio::sync::Mutex::new(rx));
         let postfix = IPC_SUFFIX;
@@ -1495,15 +1841,17 @@ pub mod client {
                                     }
                                     let mut consumed_token: Option<String> = None;
                                     let mut consumed_token_shmem_name: Option<String> = None;
+                                    let mut consumed_generation: Option<u64> = None;
                                     let handshake_result =
                                         ipc::portable_service_ipc_handshake_as_server(
                                             &mut stream,
                                             |token| {
-                                                let (matched, matched_shmem_name) =
+                                                let (matched, matched_shmem_name, generation) =
                                                     consume_runtime_ipc_token_if_match(token);
                                                 if matched {
                                                     consumed_token = Some(token.to_owned());
                                                     consumed_token_shmem_name = matched_shmem_name;
+                                                    consumed_generation = generation;
                                                     true
                                                 } else {
                                                     false
@@ -1517,7 +1865,12 @@ pub mod client {
                                                 token,
                                                 consumed_token_shmem_name.as_deref(),
                                             );
-                                            *STARTING.lock().unwrap() = false;
+                                            if let Some(generation) = consumed_generation {
+                                                clear_generation_if_current(
+                                                    generation,
+                                                    "IPC handshake failed",
+                                                );
+                                            }
                                         }
                                         log::warn!(
                                             "Rejected portable service ipc connection due to token handshake failure: postfix={}, err={}",
@@ -1526,7 +1879,17 @@ pub mod client {
                                         );
                                         continue;
                                     }
-                                    log::info!("Got portable service ipc connection");
+                                    let Some(generation) = consumed_generation else {
+                                        log::warn!(
+                                            "Rejected portable service IPC connection without a launch generation"
+                                        );
+                                        continue;
+                                    };
+                                    log::info!(
+                                        "Portable service IPC authenticated: generation={}, shmem_name={}",
+                                        generation,
+                                        consumed_token_shmem_name.as_deref().unwrap_or("unknown")
+                                    );
                                     let rx_clone = rx.clone();
                                     tokio::spawn(async move {
                                         let mut stream = stream;
@@ -1552,8 +1915,12 @@ pub mod client {
                                                             }
                                                             Pong => {
                                                                 nack = 0;
-                                                                *RUNNING.lock().unwrap() = true;
-                                                                *STARTING.lock().unwrap() = false;
+                                                                if mark_generation_ready(generation) {
+                                                                    log::info!(
+                                                                        "Portable service IPC ready: generation={}",
+                                                                        generation
+                                                                    );
+                                                                }
                                                             },
                                                             ConnCount(None) => {
                                                                 if !quick_support() {
@@ -1584,14 +1951,53 @@ pub mod client {
                                                     }
                                                     stream.send(&Data::DataPortableService(Ping)).await.ok();
                                                 }
-                                                Some(data) = rx.recv() => {
-                                                    allow_err!(stream.send(&data).await);
+                                                Some(command) = rx.recv() => {
+                                                    match command {
+                                                        PortableServiceCommand::Send(data) => {
+                                                            allow_err!(stream.send(&data).await);
+                                                        }
+                                                        PortableServiceCommand::ShutdownGeneration(target_generation) => {
+                                                            if target_generation == generation {
+                                                                log::warn!(
+                                                                    "Request portable service generation shutdown: generation={}",
+                                                                    generation
+                                                                );
+                                                                allow_err!(
+                                                                    stream
+                                                                        .send(&Data::DataPortableService(ConnCount(Some(0))))
+                                                                        .await
+                                                                );
+                                                            } else {
+                                                                log::debug!(
+                                                                    "Ignore stale portable service shutdown command: target_generation={}, active_generation={}",
+                                                                    target_generation,
+                                                                    generation
+                                                                );
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
-                                        *RUNNING.lock().unwrap() = false;
-                                        *STARTING.lock().unwrap() = false;
-                                        INPUT_VIA_HELPER.store(false, Ordering::SeqCst);
+                                        let secure_capture_generation =
+                                            SECURE_CAPTURE_GENERATION.load(Ordering::SeqCst)
+                                                == generation;
+                                        let first_frame_received =
+                                            FIRST_FRAME_GENERATION.load(Ordering::SeqCst)
+                                                == generation;
+                                        let cleared = clear_generation_if_current(
+                                            generation,
+                                            "IPC connection closed",
+                                        );
+                                        if cleared
+                                            && secure_capture_generation
+                                            && !first_frame_received
+                                        {
+                                            record_secure_capture_recovery_failure(
+                                                "IPC connection closed before first frame",
+                                                generation,
+                                            );
+                                        }
                                     });
                                 }
                                 Err(err) => {
@@ -1622,7 +2028,7 @@ pub mod client {
     fn ipc_send(data: Data) -> ResultType<()> {
         let sender = SENDER.lock().unwrap();
         sender
-            .send(data)
+            .send(PortableServiceCommand::Send(data))
             .map_err(|e| anyhow!("ipc send error:{:?}", e))
     }
 
@@ -1665,26 +2071,37 @@ pub mod client {
         display: scrap::Display,
         portable_service_running: bool,
     ) -> ResultType<Box<dyn TraitCapturer>> {
-        if portable_service_running != RUNNING.lock().unwrap().clone() {
-            log::info!("portable service status mismatch");
+        let helper_ready = ready_for_capture();
+        if portable_service_running != helper_ready {
+            log::info!(
+                "portable service status mismatch: requested_running={}, lifecycle={:?}",
+                portable_service_running,
+                lifecycle()
+            );
         }
         let prelogin = crate::platform::windows::is_prelogin();
         let locked = crate::platform::windows::is_locked();
         let desktop_changed = crate::platform::windows::desktop_changed();
+        let logon_ui = crate::platform::windows::is_logon_ui_for_capture();
         if should_use_helper_capture_for_desktop_state(
             portable_service_running,
             prelogin,
             locked,
             desktop_changed,
+            logon_ui,
         ) {
             log::info!(
-                "Portable secure desktop capture: use SYSTEM helper shared-memory capturer, display={}, prelogin={}, locked={}, desktop_changed={}",
+                "Portable secure desktop capture: use SYSTEM helper shared-memory capturer, display={}, prelogin={}, locked={}, desktop_changed={}, logon_ui={}",
                 current_display,
                 prelogin,
                 locked,
-                desktop_changed
+                desktop_changed,
+                logon_ui
             );
-            return Ok(Box::new(CapturerPortable::new(current_display)));
+            if !helper_ready {
+                bail!("portable service IPC is not ready for secure capture");
+            }
+            return Ok(Box::new(CapturerPortable::new(current_display)?));
         }
         // WARNING: Be extremely careful changing the portable primary-display path.
         // RustAdmin 2.0.1.81 regressed here after upstream IPC changes restored
@@ -1704,7 +2121,7 @@ pub mod client {
     }
 
     pub fn get_cursor_info(pci: PCURSORINFO) -> BOOL {
-        if RUNNING.lock().unwrap().clone() {
+        if running() {
             let mut option = SHMEM.lock().unwrap();
             option
                 .as_mut()
@@ -1775,13 +2192,11 @@ pub mod client {
     }
 
     pub fn running() -> bool {
-        RUNNING.lock().unwrap().clone()
+        lifecycle() == LifecycleState::Ready
     }
 
     pub fn active() -> bool {
-        let running = { *RUNNING.lock().unwrap() };
-        let starting = { *STARTING.lock().unwrap() };
-        running || starting
+        lifecycle() != LifecycleState::Stopped
     }
 
     #[cfg(test)]
@@ -1792,17 +2207,35 @@ pub mod client {
         static TEST_STATE_LOCK: Mutex<()> = Mutex::new(());
 
         struct InputRouteStateGuard {
-            running: bool,
+            lifecycle: PortableServiceLifecycle,
             input_via_helper: bool,
+            recovery_failures: u64,
+            first_frame_generation: u64,
+            secure_capture_generation: u64,
+            secure_desktop_helper_generation: u64,
+            last_recovery_failure: Option<std::time::Instant>,
         }
 
         impl InputRouteStateGuard {
             fn set(running: bool, input_via_helper: bool) -> Self {
                 let guard = Self {
-                    running: *RUNNING.lock().unwrap(),
+                    lifecycle: *LIFECYCLE.lock().unwrap(),
                     input_via_helper: INPUT_VIA_HELPER.load(Ordering::SeqCst),
+                    recovery_failures: SECURE_CAPTURE_RECOVERY_FAILURES.load(Ordering::SeqCst),
+                    first_frame_generation: FIRST_FRAME_GENERATION.load(Ordering::SeqCst),
+                    secure_capture_generation: SECURE_CAPTURE_GENERATION.load(Ordering::SeqCst),
+                    secure_desktop_helper_generation: SECURE_DESKTOP_HELPER_GENERATION
+                        .load(Ordering::SeqCst),
+                    last_recovery_failure: *LAST_SECURE_CAPTURE_RECOVERY_FAILURE.lock().unwrap(),
                 };
-                *RUNNING.lock().unwrap() = running;
+                *LIFECYCLE.lock().unwrap() = PortableServiceLifecycle {
+                    state: if running {
+                        LifecycleState::Ready
+                    } else {
+                        LifecycleState::Stopped
+                    },
+                    generation: u64::from(running),
+                };
                 INPUT_VIA_HELPER.store(input_via_helper, Ordering::SeqCst);
                 guard
             }
@@ -1810,9 +2243,124 @@ pub mod client {
 
         impl Drop for InputRouteStateGuard {
             fn drop(&mut self) {
-                *RUNNING.lock().unwrap() = self.running;
+                *LIFECYCLE.lock().unwrap() = self.lifecycle;
                 INPUT_VIA_HELPER.store(self.input_via_helper, Ordering::SeqCst);
+                SECURE_CAPTURE_RECOVERY_FAILURES.store(self.recovery_failures, Ordering::SeqCst);
+                FIRST_FRAME_GENERATION.store(self.first_frame_generation, Ordering::SeqCst);
+                SECURE_CAPTURE_GENERATION.store(self.secure_capture_generation, Ordering::SeqCst);
+                SECURE_DESKTOP_HELPER_GENERATION
+                    .store(self.secure_desktop_helper_generation, Ordering::SeqCst);
+                *LAST_SECURE_CAPTURE_RECOVERY_FAILURE.lock().unwrap() = self.last_recovery_failure;
             }
+        }
+
+        #[test]
+        fn test_lifecycle_rejects_stale_generation_transitions() {
+            let _lock = TEST_STATE_LOCK.lock().unwrap();
+            let _guard = InputRouteStateGuard::set(false, false);
+            *LIFECYCLE.lock().unwrap() = PortableServiceLifecycle {
+                state: LifecycleState::Starting,
+                generation: 41,
+            };
+
+            assert!(!mark_generation_ready(40));
+            assert_eq!(lifecycle(), LifecycleState::Starting);
+            assert!(mark_generation_ready(41));
+            assert_eq!(lifecycle(), LifecycleState::Ready);
+
+            *LIFECYCLE.lock().unwrap() = PortableServiceLifecycle {
+                state: LifecycleState::Starting,
+                generation: 42,
+            };
+            assert!(!clear_generation_if_current(41, "stale test disconnect"));
+            assert_eq!(lifecycle(), LifecycleState::Starting);
+            assert!(mark_generation_ready(42));
+            assert_eq!(lifecycle(), LifecycleState::Ready);
+        }
+
+        #[test]
+        fn test_first_frame_timeout_and_recovery_limit() {
+            assert!(!first_frame_timed_out(
+                false,
+                Duration::from_millis(4999),
+                Duration::from_secs(5)
+            ));
+            assert!(first_frame_timed_out(
+                false,
+                Duration::from_secs(5),
+                Duration::from_secs(5)
+            ));
+            assert!(!first_frame_timed_out(
+                true,
+                Duration::from_secs(10),
+                Duration::from_secs(5)
+            ));
+            assert!(recovery_allowed(
+                MAX_SECURE_CAPTURE_RECOVERY_FAILURES - 1,
+                false
+            ));
+            assert!(!recovery_allowed(
+                MAX_SECURE_CAPTURE_RECOVERY_FAILURES,
+                false
+            ));
+            assert!(recovery_allowed(MAX_SECURE_CAPTURE_RECOVERY_FAILURES, true));
+        }
+
+        #[test]
+        fn test_first_frame_reset_preserves_secure_helper_owner_generation() {
+            let _lock = TEST_STATE_LOCK.lock().unwrap();
+            let _guard = InputRouteStateGuard::set(true, true);
+            *LIFECYCLE.lock().unwrap() = PortableServiceLifecycle {
+                state: LifecycleState::Ready,
+                generation: 71,
+            };
+            SECURE_CAPTURE_GENERATION.store(71, Ordering::SeqCst);
+            SECURE_DESKTOP_HELPER_GENERATION.store(71, Ordering::SeqCst);
+            FIRST_FRAME_GENERATION.store(71, Ordering::SeqCst);
+            SECURE_CAPTURE_RECOVERY_FAILURES.store(2, Ordering::SeqCst);
+            *LAST_SECURE_CAPTURE_RECOVERY_FAILURE.lock().unwrap() = Some(std::time::Instant::now());
+
+            reset_secure_capture_recovery_failures("test first frame");
+
+            assert_eq!(SECURE_CAPTURE_GENERATION.load(Ordering::SeqCst), 0);
+            assert_eq!(SECURE_DESKTOP_HELPER_GENERATION.load(Ordering::SeqCst), 71);
+            assert_eq!(FIRST_FRAME_GENERATION.load(Ordering::SeqCst), 71);
+            assert_eq!(SECURE_CAPTURE_RECOVERY_FAILURES.load(Ordering::SeqCst), 0);
+            assert!(LAST_SECURE_CAPTURE_RECOVERY_FAILURE
+                .lock()
+                .unwrap()
+                .is_none());
+        }
+
+        #[test]
+        fn test_generation_stop_clears_only_matching_secure_capture_marker() {
+            let _lock = TEST_STATE_LOCK.lock().unwrap();
+            let _guard = InputRouteStateGuard::set(true, true);
+            *LIFECYCLE.lock().unwrap() = PortableServiceLifecycle {
+                state: LifecycleState::Ready,
+                generation: 83,
+            };
+            SECURE_CAPTURE_GENERATION.store(83, Ordering::SeqCst);
+            SECURE_DESKTOP_HELPER_GENERATION.store(82, Ordering::SeqCst);
+            FIRST_FRAME_GENERATION.store(83, Ordering::SeqCst);
+
+            assert!(!stop_secure_capture_helper("mismatched secure owner"));
+            assert_eq!(lifecycle(), LifecycleState::Ready);
+            assert!(!clear_generation_if_current(82, "stale secure stop"));
+            assert_eq!(SECURE_CAPTURE_GENERATION.load(Ordering::SeqCst), 83);
+            assert_eq!(SECURE_DESKTOP_HELPER_GENERATION.load(Ordering::SeqCst), 82);
+            assert_eq!(lifecycle(), LifecycleState::Ready);
+
+            SECURE_DESKTOP_HELPER_GENERATION.store(83, Ordering::SeqCst);
+            assert!(clear_generation_if_current(
+                83,
+                "interactive desktop restored"
+            ));
+            assert_eq!(SECURE_CAPTURE_GENERATION.load(Ordering::SeqCst), 0);
+            assert_eq!(SECURE_DESKTOP_HELPER_GENERATION.load(Ordering::SeqCst), 0);
+            assert_eq!(FIRST_FRAME_GENERATION.load(Ordering::SeqCst), 0);
+            assert_eq!(lifecycle(), LifecycleState::Stopped);
+            assert!(!routes_input_via_helper());
         }
 
         #[test]
@@ -1821,6 +2369,9 @@ pub mod client {
             assert!(!start_para_routes_input_via_helper(&StartPara::Direct));
             assert!(start_para_routes_input_via_helper(
                 &StartPara::ElevatedDirect
+            ));
+            assert!(start_para_routes_input_via_helper(
+                &StartPara::SecureDesktop
             ));
             assert!(start_para_routes_input_via_helper(&StartPara::Logon(
                 "user".to_owned(),
@@ -1842,19 +2393,22 @@ pub mod client {
         #[test]
         fn test_portable_helper_capture_only_for_secure_or_changed_desktop() {
             assert!(!should_use_helper_capture_for_desktop_state(
-                false, true, true, true
+                false, true, true, true, true
             ));
             assert!(!should_use_helper_capture_for_desktop_state(
-                true, false, false, false
+                true, false, false, false, false
             ));
             assert!(should_use_helper_capture_for_desktop_state(
-                true, true, false, false
+                true, true, false, false, false
             ));
             assert!(should_use_helper_capture_for_desktop_state(
-                true, false, true, false
+                true, false, true, false, false
             ));
             assert!(should_use_helper_capture_for_desktop_state(
-                true, false, false, true
+                true, false, false, true, false
+            ));
+            assert!(should_use_helper_capture_for_desktop_state(
+                true, false, false, false, true
             ));
         }
 

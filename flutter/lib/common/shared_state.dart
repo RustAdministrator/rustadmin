@@ -339,7 +339,14 @@ class UnreadChatCountState {
   static RxInt find(String id) => Get.find<RxInt>(tag: tag(id));
 }
 
+final Map<String, int> _sharedStateLeaseCounts = {};
+
 initSharedStates(String id) {
+  final leaseCount = _sharedStateLeaseCounts[id] ?? 0;
+  _sharedStateLeaseCounts[id] = leaseCount + 1;
+  if (leaseCount > 0) {
+    return;
+  }
   PrivacyModeState.init(id);
   BlockInputState.init(id);
   CurrentDisplayState.init(id);
@@ -354,6 +361,12 @@ initSharedStates(String id) {
 }
 
 removeSharedStates(String id) {
+  final leaseCount = _sharedStateLeaseCounts[id] ?? 0;
+  if (leaseCount > 1) {
+    _sharedStateLeaseCounts[id] = leaseCount - 1;
+    return;
+  }
+  _sharedStateLeaseCounts.remove(id);
   PrivacyModeState.delete(id);
   BlockInputState.delete(id);
   CurrentDisplayState.delete(id);

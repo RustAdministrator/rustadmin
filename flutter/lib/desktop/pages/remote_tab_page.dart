@@ -12,6 +12,7 @@ import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/desktop/pages/remote_page.dart';
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
+import 'package:flutter_hbb/desktop/session_tab.dart';
 import 'package:flutter_hbb/desktop/widgets/material_mod_popup_menu.dart'
     as mod_menu;
 import 'package:flutter_hbb/desktop/widgets/popup_menu.dart';
@@ -57,7 +58,14 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
     RemoteCountState.init();
     peerId = params['id'];
     final sessionId = params['session_id'];
+    final sessionTabKey = sessionId == null || peerId == null
+        ? null
+        : SessionTabKey.remoteDesktop(
+            peerId: peerId!,
+            sessionId: sessionId.toString(),
+          );
     final tabWindowId = params['tab_window_id'];
+    final sourceSessionId = params['source_session_id']?.toString();
     final display = params['display'];
     final displays = params['displays'];
     final screenRect = parseParamScreenRect(params);
@@ -71,6 +79,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
         if (remotePage is RemotePage) {
           final ffi = remotePage.ffi;
           bind.setCurSessionId(sessionId: ffi.sessionId);
+          remotePage.activateKeyboardInput();
         }
         WindowController.fromWindowId(params['windowId'])
             .setTitle(getWindowNameWithId(id));
@@ -78,6 +87,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
       };
       tabController.add(TabInfo(
         key: peerId!,
+        sessionKey: sessionTabKey,
         label: peerId!,
         selectedIcon: selectedIcon,
         unselectedIcon: unselectedIcon,
@@ -91,10 +101,11 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
           tabController.closeBy(peerId!);
         },
         page: RemotePage(
-          key: ValueKey(peerId),
+          key: ValueKey(sessionTabKey?.value ?? peerId),
           id: peerId!,
           sessionId: sessionId == null ? null : SessionID(sessionId),
           tabWindowId: tabWindowId,
+          transferSourceSessionId: sourceSessionId,
           display: display,
           displays: displays?.cast<int>(),
           password: params['password'],
@@ -104,6 +115,8 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
           forceRelay: params['forceRelay'],
           isSharedPassword: params['isSharedPassword'],
           pendingCachedPeerData: params['pending_cached_peer_data'],
+          sessionTabKey: sessionTabKey,
+          windowHost: DetachedSessionWindowHost(params['windowId']),
         ),
       ));
       _update_remote_count();
@@ -135,7 +148,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
   @override
   void dispose() {
     if (isMacOS) {
-      unawaited(RdPlatformChannel.instance.updateMacOSConnectionMenu(
+      unawaited(RdPlatformChannel.instance.updateMacOSTabMenu(
         windowId(),
         const [],
       ));
@@ -301,6 +314,29 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
       menu.insert(1, splitAction);
     }
 
+    menu.insert(
+      1,
+      MenuEntryButton<String>(
+        childBuilder: (TextStyle? style) => Text(
+          translate('Move tab to main window'),
+          style: style,
+        ),
+        proc: () async {
+          await DesktopMultiWindow.invokeMethod(
+            kMainWindowId,
+            kWindowEventMoveTabToMainWindow,
+            jsonEncode({
+              'window_id': windowId(),
+              'id': key,
+              'session_id': sessionId.toString(),
+            }),
+          );
+          cancelFunc();
+        },
+        padding: padding,
+      ),
+    );
+
     if (perms['restart'] != false &&
         (pi.platform == kPeerPlatformLinux ||
             pi.platform == kPeerPlatformWindows ||
@@ -319,6 +355,11 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
     }
 
     if (perms['keyboard'] != false && !ffi.ffiModel.viewOnly) {
+      if (pi.platform == kPeerPlatformWindows) {
+        menu.add(RemoteMenuEntry.showSignIn(sessionId, padding,
+            dismissFunc: cancelFunc));
+      }
+
       menu.add(RemoteMenuEntry.insertLock(sessionId, padding,
           dismissFunc: cancelFunc));
 
@@ -414,17 +455,17 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
   Future<void> _publishConnectionMenu() async {
     final tabs = tabController.state.value.tabs;
     final selected = tabController.state.value.selected;
-    final entries = <MacOSConnectionMenuEntry>[];
+    final entries = <MacOSTabMenuEntry>[];
     for (var i = 0; i < tabs.length; i++) {
       final key = tabs[i].key;
-      entries.add(MacOSConnectionMenuEntry(
+      entries.add(MacOSTabMenuEntry(
         windowId: windowId(),
-        peerId: key,
+        tabId: key,
         title: DesktopTab.tablabelGetter(key).value,
         selected: i == selected,
       ));
     }
-    await RdPlatformChannel.instance.updateMacOSConnectionMenu(
+    await RdPlatformChannel.instance.updateMacOSTabMenu(
       windowId(),
       entries,
     );
@@ -473,9 +514,16 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
       final switchUuid = args['switch_uuid'];
       final sessionId = args['session_id'];
       final tabWindowId = args['tab_window_id'];
+      final sourceSessionId = args['source_session_id']?.toString();
       final display = args['display'];
       final displays = args['displays'];
       final screenRect = parseParamScreenRect(args);
+      final sessionTabKey = sessionId == null
+          ? null
+          : SessionTabKey.remoteDesktop(
+              peerId: id,
+              sessionId: sessionId.toString(),
+            );
       final prePeerCount = tabController.length;
       Future.delayed(Duration.zero, () async {
         if (stateGlobal.fullscreen.isTrue) {
@@ -491,6 +539,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
       ConnectionTypeState.init(id);
       tabController.add(TabInfo(
         key: id,
+        sessionKey: sessionTabKey,
         label: id,
         selectedIcon: selectedIcon,
         unselectedIcon: unselectedIcon,
@@ -504,10 +553,11 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
           tabController.closeBy(id);
         },
         page: RemotePage(
-          key: ValueKey(id),
+          key: ValueKey(sessionTabKey?.value ?? id),
           id: id,
           sessionId: sessionId == null ? null : SessionID(sessionId),
           tabWindowId: tabWindowId,
+          transferSourceSessionId: sourceSessionId,
           display: display,
           displays: displays?.cast<int>(),
           password: args['password'],
@@ -517,6 +567,8 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
           forceRelay: args['forceRelay'],
           isSharedPassword: args['isSharedPassword'],
           pendingCachedPeerData: args['pending_cached_peer_data'],
+          sessionTabKey: sessionTabKey,
+          windowHost: DetachedSessionWindowHost(windowId()),
         ),
       ));
     } else if (call.method == kWindowDisableGrabKeyboard) {
@@ -558,18 +610,36 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
       // Ready to show new window and close old tab.
       final args = jsonDecode(call.arguments);
       final id = args['id'];
+      final requestedSessionId = args['session_id']?.toString();
       final close = args['close'];
+      RemotePage? remotePage;
       try {
-        final remotePage = tabController.state.value.tabs
-            .firstWhere((tab) => tab.key == id)
-            .page as RemotePage;
-        returnValue = remotePage.ffi.ffiModel.cachedPeerData.toString();
+        remotePage = tabController.state.value.tabs
+            .map((tab) => tab.page)
+            .whereType<RemotePage>()
+            .firstWhere((page) =>
+                page.id == id &&
+                (requestedSessionId == null ||
+                    page.ffi.sessionId.toString() == requestedSessionId));
+        final cachedData = remotePage.ffi.ffiModel.cachedPeerData.toString();
+        if (close == true) {
+          final page = remotePage;
+          returnValue = await prepareRemoteSessionTransfer(
+            cachedData: cachedData,
+            releaseSourceTextures: page.prepareForSessionTransfer,
+            detachSourceTab: () {
+              closeSessionOnDispose[
+                  page.sessionTabKey?.value ?? page.id] = false;
+              final tab = tabController.state.value.tabs
+                  .firstWhere((tab) => identical(tab.page, page));
+              tabController.closeBy(tab.key);
+            },
+          );
+        } else {
+          returnValue = cachedData;
+        }
       } catch (e) {
         debugPrint('Failed to get cached session data: $e');
-      }
-      if (close && returnValue != null) {
-        closeSessionOnDispose[id] = false;
-        tabController.closeBy(id);
       }
     } else if (call.method == kWindowEventRemoteWindowCoords) {
       final remotePage =
@@ -597,6 +667,8 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
       }
     } else if (call.method == kWindowEventSetFullscreen) {
       stateGlobal.setFullscreen(call.arguments == 'true');
+    } else if (call.method == kWindowEventSetTabsInFullscreen) {
+      rustDeskWinManager.applyTabsInFullscreen(call.arguments == true);
     }
     _update_remote_count();
     return returnValue;

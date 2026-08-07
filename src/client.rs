@@ -55,7 +55,11 @@ use hbb_common::{
     fs::JobType,
     futures::future::{select_ok, FutureExt},
     get_version_number, log,
-    message_proto::{option_message::BoolOption, supported_decoding::PreferCodec, *},
+    message_proto::{
+        option_message::{BoolOption, CaptureBackend},
+        supported_decoding::PreferCodec,
+        *,
+    },
     protobuf::{Message as _, MessageField},
     rand,
     rendezvous_proto::*,
@@ -79,7 +83,7 @@ use hbb_common::{
 };
 pub use helper::*;
 use scrap::{
-    codec::Decoder,
+    codec::{DecodeOutcome, Decoder},
     record::{Recorder, RecorderContext},
     CodecFormat, ImageFormat, ImageRgb, ImageTexture,
 };
@@ -104,6 +108,8 @@ pub const SEC30: Duration = Duration::from_secs(30);
 pub const VIDEO_QUEUE_SIZE: usize = 120;
 const VIDEO_FEEDBACK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 const MAX_DECODE_FAIL_COUNTER: usize = 3;
+#[cfg(feature = "quic-transport")]
+const AUTO_QUIC_RACE_TIMEOUT: Duration = Duration::from_millis(1_500);
 
 #[cfg(target_os = "linux")]
 pub const LOGIN_MSG_DESKTOP_NOT_INITED: &str = "Desktop env is not inited";
@@ -185,6 +191,19 @@ fn pending_peer_trust_from_status(
             Some(PendingPeerTrust::new(pk, true))
         }
     }
+}
+
+#[cfg(feature = "quic-transport")]
+fn authenticated_peer_allows_quic_pin(
+    signing_key_was_trusted: bool,
+    trust_was_confirmed: bool,
+    pairing_was_proven: bool,
+    paired_viewer_was_confirmed: bool,
+) -> bool {
+    signing_key_was_trusted
+        || trust_was_confirmed
+        || pairing_was_proven
+        || paired_viewer_was_confirmed
 }
 
 #[cfg(not(target_os = "ios"))]
@@ -361,8 +380,9 @@ impl Client {
                 interface.clone(),
             )
             .await?;
+            let transport = if conn.is_quic() { "QUIC/UDP" } else { "TCP" };
             return Ok((
-                (conn, true, Some(pk), None, "TCP"),
+                (conn, true, Some(pk), None, transport),
                 (0, "".to_owned()),
                 false,
             ));
@@ -377,8 +397,9 @@ impl Client {
                 interface.clone(),
             )
             .await?;
+            let transport = if conn.is_quic() { "QUIC/UDP" } else { "TCP" };
             return Ok((
-                (conn, true, Some(pk), None, "TCP"),
+                (conn, true, Some(pk), None, transport),
                 (0, "".to_owned()),
                 false,
             ));
@@ -816,6 +837,32 @@ impl Client {
         }
         log::info!("peer address: {}, timeout: {}", peer, connect_timeout);
         let start = std::time::Instant::now();
+        let peer_config_id = interface.get_id();
+
+        #[cfg(feature = "quic-transport")]
+        let quic_only = hbb_common::transport::configuration::NetworkTransportConfig::load()?.mode
+            == hbb_common::transport::configuration::RemoteTransportMode::QuicOnly;
+        #[cfg(feature = "quic-transport")]
+        let had_quic_trust = crate::quic_transport::has_paired_peer(&peer_config_id)?;
+        #[cfg(feature = "quic-transport")]
+        if quic_only && interface.is_force_relay() {
+            bail!("QUIC only mode cannot use the configured TCP relay path");
+        }
+        #[cfg(feature = "quic-transport")]
+        let quic_candidate = if !interface.is_force_relay()
+            && crate::common::is_safe_rendezvous_peer_hint(peer, is_local)
+        {
+            let peer_config_id = peer_config_id.clone();
+            let peer_address = peer.to_string();
+            Some(
+                async move {
+                    crate::quic_transport::connect_pretrusted(&peer_config_id, &peer_address).await
+                }
+                .boxed(),
+            )
+        } else {
+            None
+        };
 
         let mut connect_futures = Vec::new();
         if crate::common::is_safe_rendezvous_peer_hint(peer, is_local) {
@@ -833,20 +880,79 @@ impl Client {
                 peer
             );
         }
+        if is_local {
+            log::info!(
+                "Local/routed peer detected; TCP and available UDP/KCP candidates remain eligible"
+            );
+        }
         if let Some(udp_socket_nat) = udp_socket_nat {
             connect_futures.push(udp_nat_connect(udp_socket_nat, "UDP", connect_timeout).boxed());
         }
         if let Some(udp_socket_v6) = udp_socket_v6 {
             connect_futures.push(udp_nat_connect(udp_socket_v6, "IPv6", connect_timeout).boxed());
         }
-        // Run all connection attempts concurrently, return the first successful one
-        let (mut conn, kcp, mut typ) = if connect_futures.is_empty() {
-            (Err(anyhow!("No trusted direct path available")), None, "")
-        } else {
-            match select_ok(connect_futures).await {
-                Ok(conn) => (Ok(conn.0 .0), conn.0 .1, conn.0 .2),
-                Err(e) => (Err(e), None, ""),
+        let legacy_candidate = async move {
+            if connect_futures.is_empty() {
+                Err(anyhow!("No trusted direct path available"))
+            } else {
+                select_ok(connect_futures)
+                    .await
+                    .map(|candidate| candidate.0)
             }
+        };
+        #[cfg(feature = "quic-transport")]
+        let (mut conn, mut kcp, mut typ) = {
+            let into_legacy =
+                |result: ResultType<(Stream, Option<KcpStream>, &'static str)>| match result {
+                    Ok((stream, kcp, typ)) => (Ok(stream), kcp, typ),
+                    Err(error) => (Err(error), None, ""),
+                };
+            if let Some(mut quic_candidate) = quic_candidate {
+                if quic_only {
+                    match quic_candidate.await? {
+                        Some(stream) => (Ok(stream), None, "QUIC/UDP"),
+                        None => bail!("QUIC only mode requires a confirmed peer identity"),
+                    }
+                } else {
+                    let deadline = Instant::now() + AUTO_QUIC_RACE_TIMEOUT;
+                    tokio::pin!(legacy_candidate);
+                    tokio::select! {
+                        quic = &mut quic_candidate => match quic? {
+                            Some(stream) => (Ok(stream), None, "QUIC/UDP"),
+                            None => into_legacy(legacy_candidate.await),
+                        },
+                        legacy = &mut legacy_candidate => match legacy {
+                            Ok(legacy) => {
+                                match tokio::time::timeout_at(deadline, &mut quic_candidate).await {
+                                    Ok(Ok(Some(stream))) => (Ok(stream), None, "QUIC/UDP"),
+                                    Ok(Ok(None)) => into_legacy(Ok(legacy)),
+                                    Ok(Err(error)) => return Err(error),
+                                    Err(_) => {
+                                        log::info!(
+                                            "QUIC candidate did not complete within {}ms; using the ready legacy direct path",
+                                            AUTO_QUIC_RACE_TIMEOUT.as_millis()
+                                        );
+                                        into_legacy(Ok(legacy))
+                                    }
+                                }
+                            }
+                            Err(legacy_error) => match quic_candidate.await? {
+                                Some(stream) => (Ok(stream), None, "QUIC/UDP"),
+                                None => into_legacy(Err(legacy_error)),
+                            },
+                        },
+                    }
+                }
+            } else if quic_only {
+                bail!("QUIC only mode has no safe direct endpoint candidate");
+            } else {
+                into_legacy(legacy_candidate.await)
+            }
+        };
+        #[cfg(not(feature = "quic-transport"))]
+        let (mut conn, mut kcp, mut typ) = match legacy_candidate.await {
+            Ok((stream, kcp, typ)) => (Ok(stream), kcp, typ),
+            Err(error) => (Err(error), None, ""),
         };
 
         let mut direct = !conn.is_err();
@@ -869,6 +975,7 @@ impl Client {
                 }
                 typ = "Relay";
                 direct = false;
+                kcp = None;
             } else {
                 bail!("Failed to make direct connection to remote desktop");
             }
@@ -879,27 +986,107 @@ impl Client {
             start.elapsed(),
             punch_type
         );
-        let peer_config_id = interface.get_id();
-        let res = Self::secure_connection(
-            peer_id,
-            peer_id,
-            &peer_config_id,
-            signed_id_pk,
-            key,
-            &interface,
-            &mut conn,
-        )
-        .await;
-        let pk: Option<Vec<u8>> = match res {
-            Ok(pk) => pk,
-            Err(e) => {
-                // this direct is mainly used by on_establish_connection_error, so we update it here before bail
-                interface.update_direct(Some(direct));
-                bail!(e);
+        let pk = if conn.is_quic() {
+            #[cfg(feature = "quic-transport")]
+            {
+                let quic_pk = Self::secure_direct_connection(
+                    peer_id,
+                    &peer_config_id,
+                    &mut conn,
+                    interface.clone(),
+                )
+                .await?;
+                Self::validate_rendezvous_peer_identity(peer_id, &signed_id_pk, key, &quic_pk)?;
+                Some(quic_pk)
+            }
+            #[cfg(not(feature = "quic-transport"))]
+            unreachable!()
+        } else {
+            match Self::secure_connection(
+                peer_id,
+                peer_id,
+                &peer_config_id,
+                signed_id_pk,
+                key,
+                &interface,
+                &mut conn,
+            )
+            .await
+            {
+                Ok(pk) => pk,
+                Err(e) => {
+                    // this direct is mainly used by on_establish_connection_error, so we update it here before bail
+                    interface.update_direct(Some(direct));
+                    bail!(e);
+                }
             }
         };
+        #[cfg(feature = "quic-transport")]
+        if direct && !conn.is_quic() && !had_quic_trust {
+            let promotion = tokio::time::timeout(
+                AUTO_QUIC_RACE_TIMEOUT,
+                crate::quic_transport::connect_pretrusted(&peer_config_id, &peer.to_string()),
+            )
+            .await;
+            match promotion {
+                Ok(Ok(Some(mut quic))) => {
+                let quic_pk = Self::secure_direct_connection(
+                    peer_id,
+                    &peer_config_id,
+                    &mut quic,
+                    interface.clone(),
+                )
+                .await?;
+                if pk.as_deref() != Some(quic_pk.as_slice()) {
+                    bail!(
+                        "Handshake failed: QUIC upgrade identity does not match the paired rendezvous identity"
+                    );
+                }
+                let bootstrap_transport = typ;
+                conn = quic;
+                kcp = None;
+                typ = "QUIC/UDP";
+                log::info!(
+                    "Promoted the confirmed rendezvous direct connection from {bootstrap_transport} to QUIC without a user reconnect"
+                );
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => return Err(error),
+                Err(_) => log::info!(
+                    "QUIC promotion did not complete within {}ms; keeping the authenticated {typ} session",
+                    AUTO_QUIC_RACE_TIMEOUT.as_millis()
+                ),
+            }
+        }
         log::debug!("{} punch secure_connection ok", punch_type);
         Ok((conn, direct, pk, kcp, typ))
+    }
+
+    #[cfg(feature = "quic-transport")]
+    fn validate_rendezvous_peer_identity(
+        peer_id: &str,
+        signed_id_pk: &[u8],
+        key: &str,
+        direct_sign_pk: &[u8],
+    ) -> ResultType<()> {
+        let key = if key.is_empty() {
+            Config::get_bootstrap_key()
+        } else {
+            key.to_owned()
+        };
+        let rs_pk = get_rs_pk(&key).ok_or_else(|| {
+            anyhow!("Handshake failed: no valid rendezvous signing key is configured")
+        })?;
+        if signed_id_pk.is_empty() {
+            bail!("Handshake failed: missing public key from rendezvous server");
+        }
+        let (signed_peer_id, signed_peer_pk) = decode_id_pk(signed_id_pk, &rs_pk).map_err(|e| {
+            anyhow!("Handshake failed: invalid public key from rendezvous server: {e}")
+        })?;
+        if signed_peer_id != peer_id || signed_peer_pk.as_slice() != direct_sign_pk {
+            bail!("Handshake failed: QUIC peer identity does not match rendezvous identity");
+        }
+        Ok(())
     }
 
     /// Establish secure connection with the server.
@@ -939,19 +1126,37 @@ impl Client {
                 let Some(message::Union::SignedId(si)) = msg_in.union else {
                     bail!("Handshake failed: invalid message type");
                 };
-                let secure_id = decode_secure_signed_id(&si.id, &sign_pk)
+                let mut secure_id = decode_secure_signed_id(&si.id, &sign_pk)
                     .map_err(|e| anyhow!("Handshake failed: invalid signed peer key: {e}"))?;
+                #[cfg(feature = "quic-transport")]
+                crate::common::attach_secure_quic_identity(&mut secure_id, &pk, &si.quic_identity)?;
+                #[cfg(feature = "quic-transport")]
+                if conn.is_quic() {
+                    let certificate =
+                        secure_id.quic_certificate_der.as_deref().ok_or_else(|| {
+                            anyhow!(
+                                "Handshake failed: QUIC peer omitted its signed TLS certificate"
+                            )
+                        })?;
+                    crate::common::validate_quic_peer_binding(conn, &pk, certificate)?;
+                }
                 if secure_id.id != peer_id {
                     bail!("Handshake failed: peer id mismatch");
                 }
+                let signing_key_status = crate::common::trusted_peer_signing_key_status(
+                    peer_id,
+                    peer_config_id,
+                    option_pk.as_deref().unwrap_or_default(),
+                )?;
+                let signing_key_was_trusted = matches!(
+                    &signing_key_status,
+                    crate::common::TrustedPeerSigningKeyStatus::Trusted
+                );
                 let mut pending_trust = pending_peer_trust_from_status(
-                    crate::common::trusted_peer_signing_key_status(
-                        peer_id,
-                        peer_config_id,
-                        option_pk.as_deref().unwrap_or_default(),
-                    )?,
+                    signing_key_status,
                     option_pk.as_deref().unwrap_or_default(),
                 );
+                let mut trust_was_confirmed = false;
                 if let Some(pending) = pending_trust.as_ref() {
                     if !secure_id.pairing_required {
                         if pending.replace_existing_pin {
@@ -974,6 +1179,7 @@ impl Client {
                             )
                             .await?;
                         crate::common::pin_trusted_peer_signing_key(peer_id, peer_config_id, &pk)?;
+                        trust_was_confirmed = true;
                         pending_trust = None;
                     }
                 }
@@ -996,6 +1202,15 @@ impl Client {
                     )?)
                 } else {
                     None
+                };
+                #[cfg(feature = "quic-transport")]
+                let quic_identity = if secure_id.quic_certificate_der.is_some() {
+                    crate::common::create_direct_quic_identity(
+                        &Config::get_id(),
+                        &asymmetric_value,
+                    )?
+                } else {
+                    Bytes::new()
                 };
                 let mut pairing_was_proven = false;
                 let pairing_proof = if let Some(pairing_salt) = secure_id.pairing_salt {
@@ -1028,6 +1243,8 @@ impl Client {
                         pairing_proof,
                         initiator_signed_id.as_ref().map(|value| value.as_ref()),
                     )?,
+                    #[cfg(feature = "quic-transport")]
+                    quic_identity,
                     ..Default::default()
                 });
                 timeout(CONNECT_TIMEOUT, conn.send(&msg_out)).await??;
@@ -1075,9 +1292,34 @@ impl Client {
                         peer_config_id,
                         &pk,
                     )?;
+                    trust_was_confirmed = true;
                 }
                 if pairing_was_proven && initiator_signed_id.is_some() {
                     crate::common::set_confirmed_rendezvous_paired_viewer(peer_config_id, true);
+                    #[cfg(feature = "quic-transport")]
+                    if secure_id.quic_certificate_der.is_some() {
+                        crate::common::set_confirmed_direct_paired_viewer(peer_config_id, true);
+                    }
+                }
+                #[cfg(feature = "quic-transport")]
+                if authenticated_peer_allows_quic_pin(
+                    signing_key_was_trusted,
+                    trust_was_confirmed,
+                    pairing_was_proven,
+                    crate::common::has_confirmed_rendezvous_paired_viewer(peer_config_id)
+                        || crate::common::has_confirmed_direct_paired_viewer(peer_config_id),
+                ) {
+                    if let Some(certificate) = secure_id.quic_certificate_der.as_deref() {
+                        crate::common::set_confirmed_direct_paired_viewer(peer_config_id, true);
+                        crate::quic_transport::remember_paired_peer(peer_id, pk, certificate)?;
+                        if peer_config_id != peer_id {
+                            crate::quic_transport::remember_paired_peer(
+                                peer_config_id,
+                                pk,
+                                certificate,
+                            )?;
+                        }
+                    }
                 }
             }
             None => {
@@ -1101,22 +1343,42 @@ impl Client {
                 let Some(message::Union::SignedId(si)) = msg_in.union else {
                     bail!("Handshake failed: invalid message type");
                 };
-                let direct_id = decode_direct_id_pk(&si.id)
+                let mut direct_id = decode_direct_id_pk(&si.id)
                     .map_err(|e| anyhow!("Handshake failed: invalid direct peer key: {e}"))?;
+                #[cfg(feature = "quic-transport")]
+                crate::common::attach_direct_quic_identity(&mut direct_id, &si.quic_identity)?;
+                #[cfg(feature = "quic-transport")]
+                if conn.is_quic() {
+                    let certificate =
+                        direct_id.quic_certificate_der.as_deref().ok_or_else(|| {
+                            anyhow!(
+                                "Handshake failed: QUIC peer omitted its signed TLS certificate"
+                            )
+                        })?;
+                    crate::common::validate_quic_peer_binding(
+                        conn,
+                        &direct_id.sign_pk,
+                        certificate,
+                    )?;
+                }
                 let peer_id = direct_id.id;
                 let sign_pk = direct_id.sign_pk;
                 let their_pk_b = direct_id.box_pk;
                 if peer_id.is_empty() {
                     bail!("Handshake failed: empty peer id");
                 }
-                let mut pending_trust = pending_peer_trust_from_status(
-                    crate::common::trusted_peer_signing_key_status(
-                        &peer_id,
-                        peer_config_id,
-                        &sign_pk,
-                    )?,
+                let signing_key_status = crate::common::trusted_peer_signing_key_status(
+                    &peer_id,
+                    peer_config_id,
                     &sign_pk,
+                )?;
+                let signing_key_was_trusted = matches!(
+                    &signing_key_status,
+                    crate::common::TrustedPeerSigningKeyStatus::Trusted
                 );
+                let mut pending_trust =
+                    pending_peer_trust_from_status(signing_key_status, &sign_pk);
+                let mut trust_was_confirmed = false;
                 if let Some(pending) = pending_trust.as_ref() {
                     if !direct_id.pairing_required {
                         if pending.replace_existing_pin {
@@ -1143,6 +1405,7 @@ impl Client {
                             peer_config_id,
                             &sign_pk,
                         )?;
+                        trust_was_confirmed = true;
                         pending_trust = None;
                     }
                 }
@@ -1164,6 +1427,15 @@ impl Client {
                     )?)
                 } else {
                     None
+                };
+                #[cfg(feature = "quic-transport")]
+                let quic_identity = if direct_id.quic_certificate_der.is_some() {
+                    crate::common::create_direct_quic_identity(
+                        &Config::get_id(),
+                        &asymmetric_value,
+                    )?
+                } else {
+                    Bytes::new()
                 };
                 let mut pairing_was_proven = false;
                 let pairing_proof = if let Some(pairing_salt) = direct_id.pairing_salt {
@@ -1196,6 +1468,8 @@ impl Client {
                         pairing_proof,
                         initiator_signed_id.as_ref().map(|value| value.as_ref()),
                     )?,
+                    #[cfg(feature = "quic-transport")]
+                    quic_identity,
                     ..Default::default()
                 });
                 timeout(CONNECT_TIMEOUT, conn.send(&msg_out)).await??;
@@ -1245,9 +1519,32 @@ impl Client {
                         peer_config_id,
                         &sign_pk,
                     )?;
+                    trust_was_confirmed = true;
                 }
                 if pairing_was_proven && initiator_signed_id.is_some() {
                     crate::common::set_confirmed_direct_paired_viewer(peer_config_id, true);
+                }
+                #[cfg(feature = "quic-transport")]
+                if authenticated_peer_allows_quic_pin(
+                    signing_key_was_trusted,
+                    trust_was_confirmed,
+                    pairing_was_proven,
+                    crate::common::has_confirmed_direct_paired_viewer(peer_config_id),
+                ) {
+                    if let Some(certificate) = direct_id.quic_certificate_der.as_deref() {
+                        crate::quic_transport::remember_paired_peer(
+                            &peer_id,
+                            sign_pk,
+                            certificate,
+                        )?;
+                        if peer_config_id != peer_id {
+                            crate::quic_transport::remember_paired_peer(
+                                peer_config_id,
+                                sign_pk,
+                                certificate,
+                            )?;
+                        }
+                    }
                 }
                 log::info!("Established direct secure connection to {peer} as {peer_id}");
                 Ok(sign_pk.to_vec())
@@ -1284,11 +1581,18 @@ impl Client {
     ) -> ResultType<(Stream, Vec<u8>)> {
         let had_confirmed_pairing =
             crate::common::has_confirmed_direct_paired_viewer(peer_config_id);
-        let mut conn = connect_tcp_local(connect_addr, None, CONNECT_TIMEOUT).await?;
-        match Self::secure_direct_connection(peer, peer_config_id, &mut conn, interface.clone())
-            .await
+        #[cfg(feature = "quic-transport")]
+        let had_quic_trust = crate::quic_transport::has_paired_peer(peer_config_id)?;
+        let mut conn = Self::connect_direct_transport(peer_config_id, connect_addr).await?;
+        let (conn, pk) = match Self::secure_direct_connection(
+            peer,
+            peer_config_id,
+            &mut conn,
+            interface.clone(),
+        )
+        .await
         {
-            Ok(pk) => Ok((conn, pk)),
+            Ok(pk) => (conn, pk),
             Err(err) => {
                 let pairing_was_cleared = had_confirmed_pairing
                     && !crate::common::has_confirmed_direct_paired_viewer(peer_config_id);
@@ -1298,12 +1602,122 @@ impl Client {
                 log::info!(
                     "Remembered direct pairing for {peer_config_id} was refused; retrying with local pairing passphrase"
                 );
-                let mut conn = connect_tcp_local(connect_addr, None, CONNECT_TIMEOUT).await?;
-                let pk = Self::secure_direct_connection(peer, peer_config_id, &mut conn, interface)
-                    .await?;
-                Ok((conn, pk))
+                let mut conn = Self::connect_direct_transport(peer_config_id, connect_addr).await?;
+                let pk = Self::secure_direct_connection(
+                    peer,
+                    peer_config_id,
+                    &mut conn,
+                    interface.clone(),
+                )
+                .await?;
+                (conn, pk)
             }
+        };
+        #[cfg(feature = "quic-transport")]
+        {
+            if had_quic_trust && !conn.is_quic() {
+                return Ok((conn, pk));
+            }
+            Self::promote_confirmed_direct_to_quic(
+                peer,
+                peer_config_id,
+                connect_addr,
+                conn,
+                pk,
+                interface,
+            )
+            .await
         }
+        #[cfg(not(feature = "quic-transport"))]
+        Ok((conn, pk))
+    }
+
+    async fn connect_direct_transport(
+        peer_config_id: &str,
+        connect_addr: &str,
+    ) -> ResultType<Stream> {
+        #[cfg(feature = "quic-transport")]
+        {
+            let mode = hbb_common::transport::configuration::NetworkTransportConfig::load()?.mode;
+            if mode == hbb_common::transport::configuration::RemoteTransportMode::Tcp {
+                return connect_tcp_local(connect_addr, None, CONNECT_TIMEOUT).await;
+            }
+            let mut quic = Box::pin(crate::quic_transport::connect_pretrusted(
+                peer_config_id,
+                connect_addr,
+            ));
+            if mode == hbb_common::transport::configuration::RemoteTransportMode::QuicOnly {
+                return quic
+                    .await?
+                    .ok_or_else(|| anyhow!("QUIC only mode requires a confirmed peer identity"));
+            }
+            let mut tcp = Box::pin(connect_tcp_local(connect_addr, None, CONNECT_TIMEOUT));
+            let deadline = Instant::now() + AUTO_QUIC_RACE_TIMEOUT;
+            return tokio::select! {
+                quic_result = &mut quic => match quic_result? {
+                    Some(stream) => Ok(stream),
+                    None => tcp.await,
+                },
+                tcp_result = &mut tcp => match tcp_result {
+                    Ok(stream) => match tokio::time::timeout_at(deadline, &mut quic).await {
+                        Ok(Ok(Some(quic))) => Ok(quic),
+                        Ok(Ok(None)) => Ok(stream),
+                        Ok(Err(error)) => Err(error),
+                        Err(_) => {
+                            log::info!(
+                                "QUIC candidate did not complete within {}ms; using the ready TCP direct path",
+                                AUTO_QUIC_RACE_TIMEOUT.as_millis()
+                            );
+                            Ok(stream)
+                        }
+                    },
+                    Err(tcp_error) => match quic.await? {
+                        Some(stream) => Ok(stream),
+                        None => Err(tcp_error),
+                    },
+                },
+            };
+        }
+        #[cfg(not(feature = "quic-transport"))]
+        connect_tcp_local(connect_addr, None, CONNECT_TIMEOUT).await
+    }
+
+    #[cfg(feature = "quic-transport")]
+    async fn promote_confirmed_direct_to_quic(
+        peer: &str,
+        peer_config_id: &str,
+        connect_addr: &str,
+        conn: Stream,
+        pk: Vec<u8>,
+        interface: impl Interface,
+    ) -> ResultType<(Stream, Vec<u8>)> {
+        if conn.is_quic() {
+            return Ok((conn, pk));
+        }
+        let promotion = tokio::time::timeout(
+            AUTO_QUIC_RACE_TIMEOUT,
+            crate::quic_transport::connect_pretrusted(peer_config_id, connect_addr),
+        )
+        .await;
+        let mut quic = match promotion {
+            Ok(Ok(Some(stream))) => stream,
+            Ok(Ok(None)) => return Ok((conn, pk)),
+            Ok(Err(error)) => return Err(error),
+            Err(_) => {
+                log::info!(
+                    "QUIC promotion did not complete within {}ms; keeping the authenticated TCP session",
+                    AUTO_QUIC_RACE_TIMEOUT.as_millis()
+                );
+                return Ok((conn, pk));
+            }
+        };
+        let quic_pk =
+            Self::secure_direct_connection(peer, peer_config_id, &mut quic, interface).await?;
+        if quic_pk != pk {
+            bail!("Handshake failed: QUIC upgrade identity does not match the paired TCP identity");
+        }
+        log::info!("Promoted the confirmed direct connection to QUIC without a user reconnect");
+        Ok((quic, quic_pk))
     }
 
     /// Request a relay connection to the server.
@@ -2039,13 +2453,16 @@ impl AudioHandler {
 /// Video handler for the [`Client`].
 pub struct VideoHandler {
     decoder: Decoder,
+    decoder_dimensions: Option<(usize, usize)>,
     pub rgb: ImageRgb,
     pub texture: ImageTexture,
     recorder: Arc<Mutex<Option<Recorder>>>,
     record: bool,
     _display: usize, // useful for debug
     fail_counter: usize,
+    decode_wait_counter: usize,
     first_frame: bool,
+    stream_id: u64,
 }
 
 impl VideoHandler {
@@ -2060,7 +2477,11 @@ impl VideoHandler {
     }
 
     /// Create a new video handler.
-    pub fn new(format: CodecFormat, _display: usize) -> Self {
+    pub fn new(
+        format: CodecFormat,
+        _display: usize,
+        decoder_dimensions: Option<(usize, usize)>,
+    ) -> Self {
         let luid = Self::get_adapter_luid();
         log::info!("new video handler for display #{_display}, format: {format:?}, luid: {luid:?}");
         let rgba_format =
@@ -2070,14 +2491,17 @@ impl VideoHandler {
                 ImageFormat::ARGB
             };
         VideoHandler {
-            decoder: Decoder::new(format, luid),
+            decoder: Decoder::new(format, luid, decoder_dimensions),
+            decoder_dimensions,
             rgb: ImageRgb::new(rgba_format, crate::get_dst_align_rgba()),
             texture: Default::default(),
             recorder: Default::default(),
             record: false,
             _display,
             fail_counter: 0,
+            decode_wait_counter: 0,
             first_frame: true,
+            stream_id: 0,
         }
     }
 
@@ -2092,65 +2516,95 @@ impl VideoHandler {
         vf: VideoFrame,
         pixelbuffer: &mut bool,
         chroma: &mut Option<Chroma>,
-    ) -> ResultType<bool> {
+    ) -> ResultType<DecodeOutcome> {
         let format = CodecFormat::from(&vf);
         let stream_id = vf.stream_id;
         let frame_id = vf.frame_id;
         let capture_time_ms = vf.capture_time_ms;
-        if format != self.decoder.format() {
-            self.reset(Some(format));
+        let stream_changed = stream_id != 0 && self.stream_id != 0 && stream_id != self.stream_id;
+        if format != self.decoder.format() || stream_changed {
+            self.reset(Some(format), None);
         }
+        self.stream_id = stream_id;
         match &vf.union {
             Some(frame) => {
                 let res = self.decoder.handle_video_frame(
                     frame,
+                    frame_id,
                     &mut self.rgb,
                     &mut self.texture,
                     pixelbuffer,
                     chroma,
                 );
-                if res.as_ref().is_ok_and(|x| *x) {
-                    if self.first_frame {
-                        log::info!(
-                            "diag first video frame decoded: display={}, stream_id={}, frame_id={}, capture_ms={}, format={:?}, pixelbuffer={}, chroma={:?}, rgb={}x{}, texture={}x{}, decoder_valid={}",
-                            self._display,
-                            stream_id,
-                            frame_id,
-                            capture_time_ms,
-                            self.decoder.format(),
-                            *pixelbuffer,
-                            chroma,
-                            self.rgb.w,
-                            self.rgb.h,
-                            self.texture.w,
-                            self.texture.h,
-                            self.decoder.valid()
-                        );
-                    }
-                    self.fail_counter = 0;
-                } else {
-                    if self.fail_counter < usize::MAX {
-                        if self.first_frame && self.fail_counter < MAX_DECODE_FAIL_COUNTER {
-                            log::error!(
-                                "diag first video frame decode failed: display={}, format={:?}, pixelbuffer={}, chroma={:?}, decoder_valid={}, err={:?}",
+                match &res {
+                    Ok(DecodeOutcome::FrameReady {
+                        frame_id: decoded_frame_id,
+                    }) => {
+                        let decoded_frame_id = decoded_frame_id.unwrap_or(frame_id);
+                        if self.first_frame {
+                            log::info!(
+                                "diag first video frame decoded: display={}, stream_id={}, frame_id={}, capture_ms={}, format={:?}, pixelbuffer={}, chroma={:?}, rgb={}x{}, texture={}x{}, decoder_valid={}",
                                 self._display,
+                                stream_id,
+                                decoded_frame_id,
+                                capture_time_ms,
                                 self.decoder.format(),
                                 *pixelbuffer,
                                 chroma,
-                                self.decoder.valid(),
-                                res.as_ref().err()
+                                self.rgb.w,
+                                self.rgb.h,
+                                self.texture.w,
+                                self.texture.h,
+                                self.decoder.valid()
                             );
-                            self.fail_counter = MAX_DECODE_FAIL_COUNTER;
-                        } else {
-                            self.fail_counter += 1;
                         }
-                        log::error!(
-                            "Failed to handle video frame, fail counter: {}",
-                            self.fail_counter
-                        );
+                        self.fail_counter = 0;
+                        self.decode_wait_counter = 0;
+                        self.first_frame = false;
+                    }
+                    Ok(DecodeOutcome::OutputPending | DecodeOutcome::InputBackpressure) => {
+                        self.decode_wait_counter = self.decode_wait_counter.saturating_add(1);
+                        if self.first_frame
+                            && (self.decode_wait_counter == 1
+                                || self.decode_wait_counter == 10
+                                || self.decode_wait_counter % 30 == 0)
+                        {
+                            log::warn!(
+                                "diag video decoder is waiting for output: display={}, stream_id={}, frame_id={}, format={:?}, backend={}, decoder_valid={}, attempt={}, state={:?}",
+                                self._display,
+                                stream_id,
+                                frame_id,
+                                self.decoder.format(),
+                                self.decoder.backend(),
+                                self.decoder.valid(),
+                                self.decode_wait_counter,
+                                res.as_ref().ok()
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        if self.fail_counter < usize::MAX {
+                            if self.first_frame {
+                                log::error!(
+                                    "diag first video frame decode failed: display={}, format={:?}, pixelbuffer={}, chroma={:?}, decoder_valid={}, err={error:?}",
+                                    self._display,
+                                    self.decoder.format(),
+                                    *pixelbuffer,
+                                    chroma,
+                                    self.decoder.valid()
+                                );
+                                self.fail_counter = MAX_DECODE_FAIL_COUNTER;
+                            } else {
+                                self.fail_counter += 1;
+                            }
+                            log::error!(
+                                "Failed to handle video frame, fail counter: {}",
+                                self.fail_counter
+                            );
+                        }
+                        self.first_frame = false;
                     }
                 }
-                self.first_frame = false;
                 if self.record {
                     self.recorder.lock().unwrap().as_mut().map(|r| {
                         let (w, h) = if *pixelbuffer {
@@ -2163,12 +2617,16 @@ impl VideoHandler {
                 }
                 res
             }
-            _ => Ok(false),
+            _ => Ok(DecodeOutcome::OutputPending),
         }
     }
 
     /// Reset the decoder, change format if it is Some
-    pub fn reset(&mut self, format: Option<CodecFormat>) {
+    pub fn reset(
+        &mut self,
+        format: Option<CodecFormat>,
+        decoder_dimensions: Option<(usize, usize)>,
+    ) {
         log::info!(
             "reset video handler for display #{}, format: {format:?}",
             self._display
@@ -2177,9 +2635,14 @@ impl VideoHandler {
         self.rgb.set_align(crate::get_dst_align_rgba());
         let luid = Self::get_adapter_luid();
         let format = format.unwrap_or(self.decoder.format());
-        self.decoder = Decoder::new(format, luid);
+        if decoder_dimensions.is_some() {
+            self.decoder_dimensions = decoder_dimensions;
+        }
+        self.decoder = Decoder::new(format, luid, self.decoder_dimensions);
         self.fail_counter = 0;
+        self.decode_wait_counter = 0;
         self.first_frame = true;
+        self.stream_id = 0;
     }
 
     /// Start or stop screen record.
@@ -2304,6 +2767,17 @@ impl Deref for LoginConfigHandler {
 }
 
 impl LoginConfigHandler {
+    pub fn capture_backend_from_value(value: &str) -> CaptureBackend {
+        match value.to_ascii_lowercase().as_str() {
+            "dxgi" => CaptureBackend::CaptureBackendDxgi,
+            "wgc" => CaptureBackend::CaptureBackendWgc,
+            "winmag" => CaptureBackend::CaptureBackendWinMag,
+            "gdi" => CaptureBackend::CaptureBackendGdi,
+            "auto" | "" => CaptureBackend::CaptureBackendAuto,
+            _ => CaptureBackend::CaptureBackendAuto,
+        }
+    }
+
     /// Initialize the login config handler.
     ///
     /// # Arguments
@@ -2840,6 +3314,15 @@ impl LoginConfigHandler {
                 *self.custom_fps.lock().unwrap() = Some(custom_fps as _);
             }
         }
+        let capture_backend = self.get_option(keys::OPTION_CAPTURE_BACKEND);
+        msg.capture_backend = Self::capture_backend_from_value(&capture_backend).into();
+        if !capture_backend.is_empty() {
+            log::info!(
+                "capture_backend initial option send: id={}, value={}",
+                self.id,
+                capture_backend
+            );
+        }
         let view_only = self.get_toggle_option("view-only");
         if view_only {
             msg.disable_keyboard = BoolOption::Yes.into();
@@ -3068,6 +3551,43 @@ impl LoginConfigHandler {
             self.save_config(config);
         }
         *self.custom_fps.lock().unwrap() = Some(custom_fps as _);
+        msg_out
+    }
+
+    pub fn set_capture_backend(&mut self, value: String, save_config: bool) -> Message {
+        let normalized = match value.to_ascii_lowercase().as_str() {
+            "dxgi" => "dxgi",
+            "wgc" => "wgc",
+            "winmag" => "winmag",
+            "gdi" => "gdi",
+            _ => "auto",
+        };
+        let capture_backend = Self::capture_backend_from_value(normalized);
+        let mut misc = Misc::new();
+        misc.set_option(OptionMessage {
+            capture_backend: capture_backend.into(),
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_misc(misc);
+        if save_config {
+            let mut config = self.load_config();
+            if normalized == "auto" {
+                config.options.remove(keys::OPTION_CAPTURE_BACKEND);
+            } else {
+                config.options.insert(
+                    keys::OPTION_CAPTURE_BACKEND.to_owned(),
+                    normalized.to_owned(),
+                );
+            }
+            self.save_config(config);
+        }
+        log::info!(
+            "capture_backend option send: id={}, value={}, wire={:?}",
+            self.id,
+            normalized,
+            capture_backend
+        );
         msg_out
     }
 
@@ -3445,7 +3965,7 @@ pub enum MediaData {
     VideoFrame(Box<VideoFrame>),
     AudioFrame(Box<AudioFrame>),
     AudioFormat(AudioFormat),
-    Reset,
+    Reset(Option<(usize, usize)>),
     RecordScreen(bool),
 }
 
@@ -3549,14 +4069,14 @@ impl VideoFeedbackTracker {
         if self.stream_id == 0 || self.received_frame_id == 0 {
             return None;
         }
-        let decode_progress = self.decoded_frame_id > self.last_sent_decoded_frame_id;
-        let render_submit_progress =
-            self.render_submitted_frame_id > self.last_sent_render_submitted_frame_id;
+        let first_decode = self.decoded_frame_id != 0 && self.last_sent_decoded_frame_id == 0;
+        let first_render_submit =
+            self.render_submitted_frame_id != 0 && self.last_sent_render_submitted_frame_id == 0;
         let interval_elapsed = self
             .last_sent
             .map(|last| now.saturating_duration_since(last) >= VIDEO_FEEDBACK_INTERVAL)
             .unwrap_or(true);
-        if !force && !decode_progress && !render_submit_progress && !interval_elapsed {
+        if !force && !first_decode && !first_render_submit && !interval_elapsed {
             return None;
         }
         self.last_sent = Some(now);
@@ -3660,7 +4180,21 @@ pub fn start_video_thread<F, T>(
                         let start = std::time::Instant::now();
                         let format = CodecFormat::from(&vf);
                         if video_handler.is_none() {
-                            let mut handler = VideoHandler::new(format, display);
+                            let decoder_dimensions = session
+                                .lc
+                                .read()
+                                .unwrap()
+                                .peer_info
+                                .as_ref()
+                                .and_then(|peer_info| peer_info.displays.get(display))
+                                .and_then(|display| {
+                                    (display.width > 0 && display.height > 0).then_some((
+                                        display.width as usize,
+                                        display.height as usize,
+                                    ))
+                                });
+                            let mut handler =
+                                VideoHandler::new(format, display, decoder_dimensions);
                             let record_state = session.lc.read().unwrap().record_state;
                             let record_permission = session.lc.read().unwrap().record_permission;
                             let id = session.lc.read().unwrap().id.clone();
@@ -3675,11 +4209,14 @@ pub fn start_video_thread<F, T>(
                             let mut tmp_chroma = None;
                             let format_changed = handler.decoder.format() != format;
                             match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
-                                Ok(true) => {
+                                Ok(DecodeOutcome::FrameReady {
+                                    frame_id: decoded_frame_id,
+                                }) => {
+                                    let decoded_frame_id = decoded_frame_id.unwrap_or(frame_id);
                                     let decode_time = start.elapsed();
                                     video_feedback.lock().unwrap().record_decoded(
                                         stream_id,
-                                        frame_id,
+                                        decoded_frame_id,
                                         decode_time,
                                     );
                                     *decoder_backend.write().unwrap() =
@@ -3708,7 +4245,7 @@ pub fn start_video_thread<F, T>(
                                     );
                                     video_feedback.lock().unwrap().record_render_submitted(
                                         stream_id,
-                                        frame_id,
+                                        decoded_frame_id,
                                         render_submit_start.elapsed(),
                                         video_queue.read().unwrap().len(),
                                     );
@@ -3745,7 +4282,9 @@ pub fn start_video_thread<F, T>(
                                     log::error!("handle video frame error, {}", e);
                                     session.refresh_video(display as _);
                                 }
-                                _ => {}
+                                Ok(
+                                    DecodeOutcome::OutputPending | DecodeOutcome::InputBackpressure,
+                                ) => {}
                             }
                         }
 
@@ -3770,9 +4309,9 @@ pub fn start_video_thread<F, T>(
                             ));
                         }
                     }
-                    MediaData::Reset => {
+                    MediaData::Reset(decoder_dimensions) => {
                         if let Some(handler) = video_handler.as_mut() {
-                            handler.reset(None);
+                            handler.reset(None, decoder_dimensions);
                             *decoder_backend.write().unwrap() = Some(handler.decoder_backend());
                         }
                     }
@@ -4065,6 +4604,16 @@ fn activate_os(interface: &impl Interface, send_left_click: bool) {
     */
 }
 
+fn send_show_sign_in_key(interface: &impl Interface) {
+    let mut key_event = KeyEvent::new();
+    key_event.mode = KeyboardMode::Legacy.into();
+    key_event.press = true;
+    key_event.set_control_key(ControlKey::Return);
+    let mut msg_out = Message::new();
+    msg_out.set_key_event(key_event);
+    interface.send(Data::Message(msg_out));
+}
+
 /// Input the OS's password.
 ///
 /// # Arguments
@@ -4075,6 +4624,14 @@ fn activate_os(interface: &impl Interface, send_left_click: bool) {
 pub fn input_os_password(p: String, activate: bool, interface: impl Interface) {
     std::thread::spawn(move || {
         _input_os_password(p, activate, interface);
+    });
+}
+
+pub fn show_sign_in(interface: impl Interface) {
+    std::thread::spawn(move || {
+        activate_os(&interface, false);
+        std::thread::sleep(Duration::from_millis(150));
+        send_show_sign_in_key(&interface);
     });
 }
 
@@ -5036,7 +5593,7 @@ mod video_feedback_tests {
     }
 
     #[test]
-    fn feedback_reports_later_decode_progress_before_periodic_interval() {
+    fn feedback_coalesces_later_decode_progress_until_periodic_interval() {
         let start = std::time::Instant::now();
         let mut tracker = VideoFeedbackTracker::default();
 
@@ -5052,9 +5609,12 @@ mod video_feedback_tests {
         tracker.record_decoded(7, 2, std::time::Duration::from_micros(125));
         tracker.record_render_submitted(7, 2, std::time::Duration::from_micros(35), 0);
 
-        let progressed = tracker
+        assert!(tracker
             .take_due_at(start + std::time::Duration::from_millis(11), false)
-            .expect("decode/render progress must not wait for another received frame");
+            .is_none());
+        let progressed = tracker
+            .take_due_at(start + VIDEO_FEEDBACK_INTERVAL, false)
+            .expect("decode/render progress must be reported at the periodic interval");
         assert_eq!(progressed.received_frame_id, 2);
         assert_eq!(progressed.decoded_frame_id, 2);
         assert_eq!(progressed.render_submitted_frame_id, 2);
@@ -5104,6 +5664,26 @@ mod security_tests {
     const SECURITY_TEST_CONNECT_ATTEMPT_TIMEOUT_MS: u64 = 250;
 
     static TEST_CLIENT_SECURITY_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(feature = "quic-transport")]
+    #[test]
+    fn trusted_signing_key_allows_persisting_signed_quic_identity() {
+        assert!(authenticated_peer_allows_quic_pin(
+            true, false, false, false
+        ));
+        assert!(authenticated_peer_allows_quic_pin(
+            false, true, false, false
+        ));
+        assert!(authenticated_peer_allows_quic_pin(
+            false, false, true, false
+        ));
+        assert!(authenticated_peer_allows_quic_pin(
+            false, false, false, true
+        ));
+        assert!(!authenticated_peer_allows_quic_pin(
+            false, false, false, false
+        ));
+    }
 
     fn lock_security_tests() -> std::sync::MutexGuard<'static, ()> {
         TEST_CLIENT_SECURITY_LOCK
@@ -5658,6 +6238,40 @@ mod security_tests {
         assert_eq!(server, format!("hbbs.example.test:{RENDEZVOUS_PORT}"));
         assert!(alternates.is_empty());
         assert!(contained);
+    }
+
+    #[cfg(feature = "quic-transport")]
+    #[test]
+    fn test_quic_candidate_must_match_rendezvous_identity() {
+        let (peer_sign_pk, _) = sign::gen_keypair();
+        let (rendezvous_pk, rendezvous_sk) = sign::gen_keypair();
+        let signed_binding =
+            create_rendezvous_signed_peer_binding("peer-id", &peer_sign_pk.0, &rendezvous_sk);
+        let rendezvous_key = crate::common::encode64(rendezvous_pk.0);
+
+        Client::validate_rendezvous_peer_identity(
+            "peer-id",
+            &signed_binding,
+            &rendezvous_key,
+            &peer_sign_pk.0,
+        )
+        .unwrap();
+
+        let (other_peer_pk, _) = sign::gen_keypair();
+        assert!(Client::validate_rendezvous_peer_identity(
+            "peer-id",
+            &signed_binding,
+            &rendezvous_key,
+            &other_peer_pk.0,
+        )
+        .is_err());
+        assert!(Client::validate_rendezvous_peer_identity(
+            "other-peer",
+            &signed_binding,
+            &rendezvous_key,
+            &peer_sign_pk.0,
+        )
+        .is_err());
     }
 
     #[tokio::test]

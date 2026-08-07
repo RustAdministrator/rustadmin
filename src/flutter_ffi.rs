@@ -36,6 +36,9 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+#[cfg(target_os = "android")]
+mod android_diagnostics;
+
 pub type SessionID = uuid::Uuid;
 
 lazy_static::lazy_static! {
@@ -192,15 +195,13 @@ fn initialize(app_dir: &str, custom_client_config: &str) {
     }
     #[cfg(target_os = "android")]
     {
-        // flexi_logger can't work when android_logger initialized.
-        #[cfg(debug_assertions)]
-        android_logger::init_once(
-            android_logger::Config::default()
-                .with_max_level(log::LevelFilter::Debug) // limit log level
-                .with_tag("ffi"), // logs will show under mytag tag
+        let diagnostic_logging = config::option2bool(
+            android_diagnostics::OPTION_ENABLE_ANDROID_DIAGNOSTIC_LOGGING,
+            &config::LocalConfig::get_option(
+                android_diagnostics::OPTION_ENABLE_ANDROID_DIAGNOSTIC_LOGGING,
+            ),
         );
-        #[cfg(not(debug_assertions))]
-        hbb_common::init_log(false, "");
+        android_diagnostics::init(app_dir, diagnostic_logging);
         #[cfg(feature = "mediacodec")]
         scrap::mediacodec::check_mediacodec();
         crate::common::test_rendezvous_server();
@@ -288,6 +289,15 @@ pub fn session_add_sync(
     is_shared_password: bool,
     conn_token: Option<String>,
 ) -> SyncReturn<String> {
+    let started = Instant::now();
+    log::info!(
+        "session-add begin file_transfer={} view_camera={} port_forward={} rdp={} terminal={}",
+        is_file_transfer,
+        is_view_camera,
+        is_port_forward,
+        is_rdp,
+        is_terminal
+    );
     let add_res = session_add(
         &session_id,
         &id,
@@ -309,10 +319,50 @@ pub fn session_add_sync(
     }
 
     if let Err(e) = add_res {
+        log::error!(
+            "session-add end ok=false elapsed_ms={} error={}",
+            started.elapsed().as_millis(),
+            e
+        );
         SyncReturn(format!("Failed to add session with id {}, {}", &id, e))
     } else {
+        log::info!(
+            "session-add end ok=true elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
         SyncReturn("".to_owned())
     }
+}
+
+pub fn session_add_async(
+    session_id: SessionID,
+    id: String,
+    is_file_transfer: bool,
+    is_view_camera: bool,
+    is_port_forward: bool,
+    is_rdp: bool,
+    is_terminal: bool,
+    switch_uuid: String,
+    force_relay: bool,
+    password: String,
+    is_shared_password: bool,
+    conn_token: Option<String>,
+) -> String {
+    session_add_sync(
+        session_id,
+        id,
+        is_file_transfer,
+        is_view_camera,
+        is_port_forward,
+        is_rdp,
+        is_terminal,
+        switch_uuid,
+        force_relay,
+        password,
+        is_shared_password,
+        conn_token,
+    )
+    .0
 }
 
 pub fn session_start(
@@ -715,6 +765,12 @@ pub fn session_set_custom_fps(session_id: SessionID, fps: i32) {
     }
 }
 
+pub fn session_set_capture_backend(session_id: SessionID, value: String) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.set_capture_backend(value);
+    }
+}
+
 pub fn session_get_trackpad_speed(session_id: SessionID) -> Option<i32> {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         Some(session.get_trackpad_speed())
@@ -890,6 +946,12 @@ pub fn session_get_peer_option(session_id: SessionID, name: String) -> String {
 pub fn session_input_os_password(session_id: SessionID, value: String) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         session.input_os_password(value, true);
+    }
+}
+
+pub fn session_show_sign_in(session_id: SessionID) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.show_sign_in();
     }
 }
 
@@ -1152,6 +1214,8 @@ pub fn main_show_option(_key: String) -> SyncReturn<bool> {
 }
 
 pub fn main_set_option(key: String, value: String) {
+    #[cfg(windows)]
+    let is_process_priority = key.eq(crate::platform::windows::OPTION_PROCESS_PRIORITY);
     #[cfg(target_os = "android")]
     if key.eq(config::keys::OPTION_ENABLE_KEYBOARD) {
         crate::ui_cm_interface::switch_permission_all(
@@ -1189,6 +1253,10 @@ pub fn main_set_option(key: String, value: String) {
         crate::common::test_rendezvous_server();
     } else {
         set_option(key, value.clone());
+    }
+    #[cfg(windows)]
+    if is_process_priority {
+        crate::platform::windows::apply_configured_process_priority("flutter-gui");
     }
 }
 
@@ -1969,7 +2037,14 @@ pub fn main_set_env(key: String, value: Option<String>) -> SyncReturn<()> {
 pub fn main_set_local_option(key: String, value: String) {
     let is_texture_render_key = key.eq(config::keys::OPTION_TEXTURE_RENDER);
     let is_d3d_render_key = key.eq(config::keys::OPTION_ALLOW_D3D_RENDER);
-    set_local_option(key, value.clone());
+    #[cfg(target_os = "android")]
+    let is_android_diagnostic_logging =
+        key.eq(android_diagnostics::OPTION_ENABLE_ANDROID_DIAGNOSTIC_LOGGING);
+    set_local_option(key.clone(), value.clone());
+    #[cfg(target_os = "android")]
+    if is_android_diagnostic_logging {
+        android_diagnostics::set_enabled(config::option2bool(&key, &value));
+    }
     if is_texture_render_key {
         let session_event = [("v", &value)];
         for session in sessions::get_sessions() {

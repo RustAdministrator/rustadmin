@@ -29,7 +29,10 @@ use std::{
     },
     path::*,
     ptr::null_mut,
-    sync::{atomic::Ordering, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, Instant},
 };
 #[cfg(not(debug_assertions))]
@@ -45,8 +48,9 @@ use winapi::{
         },
         minwinbase::STILL_ACTIVE,
         processthreadsapi::{
-            GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess, OpenProcess,
-            OpenProcessToken, ProcessIdToSessionId, PROCESS_INFORMATION, STARTUPINFOW,
+            GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess, GetPriorityClass,
+            OpenProcess, OpenProcessToken, ProcessIdToSessionId, SetPriorityClass,
+            PROCESS_INFORMATION, STARTUPINFOW,
         },
         securitybaseapi::{
             AllocateAndInitializeSid, DuplicateToken, EqualSid, FreeSid, GetTokenInformation,
@@ -108,6 +112,86 @@ pub use acl::{
 pub const FLUTTER_RUNNER_WIN32_WINDOW_CLASS: &'static str = "FLUTTER_RUNNER_WIN32_WINDOW"; // main window, install window
 pub const EXPLORER_EXE: &'static str = "explorer.exe";
 pub const SET_FOREGROUND_WINDOW: &'static str = "SET_FOREGROUND_WINDOW";
+pub const OPTION_PROCESS_PRIORITY: &str = "process-priority";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessPriority {
+    Normal,
+    AboveNormal,
+    High,
+}
+
+impl ProcessPriority {
+    pub fn from_option(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "above-normal" => Self::AboveNormal,
+            "high" => Self::High,
+            _ => Self::Normal,
+        }
+    }
+
+    pub fn option_value(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::AboveNormal => "above-normal",
+            Self::High => "high",
+        }
+    }
+
+    pub fn from_raw(value: u32) -> Self {
+        match value {
+            1 => Self::AboveNormal,
+            2 => Self::High,
+            _ => Self::Normal,
+        }
+    }
+
+    pub fn as_raw(self) -> u32 {
+        match self {
+            Self::Normal => 0,
+            Self::AboveNormal => 1,
+            Self::High => 2,
+        }
+    }
+
+    fn class(self) -> DWORD {
+        match self {
+            Self::Normal => NORMAL_PRIORITY_CLASS,
+            Self::AboveNormal => ABOVE_NORMAL_PRIORITY_CLASS,
+            Self::High => HIGH_PRIORITY_CLASS,
+        }
+    }
+}
+
+pub fn configured_process_priority() -> ProcessPriority {
+    ProcessPriority::from_option(&Config::get_option(OPTION_PROCESS_PRIORITY))
+}
+
+pub fn apply_configured_process_priority(role: &str) -> bool {
+    apply_current_process_priority(configured_process_priority(), role)
+}
+
+pub fn apply_current_process_priority(priority: ProcessPriority, role: &str) -> bool {
+    let requested = priority.class();
+    let process = unsafe { GetCurrentProcess() };
+    if unsafe { SetPriorityClass(process, requested) } == FALSE {
+        log::warn!(
+            "Failed to set Windows process priority: role={}, requested={}, error={}",
+            role,
+            priority.option_value(),
+            io::Error::last_os_error()
+        );
+        return false;
+    }
+    let effective = unsafe { GetPriorityClass(process) };
+    log::info!(
+        "Windows process priority applied: role={}, requested={}, effective_class=0x{:x}",
+        role,
+        priority.option_value(),
+        effective
+    );
+    true
+}
 
 const REG_NAME_INSTALL_DESKTOPSHORTCUTS: &str = "DESKTOPSHORTCUTS";
 const REG_NAME_INSTALL_STARTMENUSHORTCUTS: &str = "STARTMENUSHORTCUTS";
@@ -970,6 +1054,8 @@ fn launch_process_in_session(
 }
 
 fn preferred_server_launch_mode(session_id: DWORD) -> ServerLaunchMode {
+    static ADMINISTRATOR_PROTECTION_LOGGED: AtomicBool = AtomicBool::new(false);
+
     if session_id == u32::MAX {
         return ServerLaunchMode::Privileged;
     }
@@ -980,8 +1066,12 @@ fn preferred_server_launch_mode(session_id: DWORD) -> ServerLaunchMode {
     if unsafe { is_session_locked(session_id) == TRUE } {
         return ServerLaunchMode::Privileged;
     }
-    if administrator_protection_enabled() {
-        return ServerLaunchMode::InteractiveUser;
+    if administrator_protection_enabled()
+        && !ADMINISTRATOR_PROTECTION_LOGGED.swap(true, Ordering::Relaxed)
+    {
+        log::debug!(
+            "Administrator Protection detected; retaining privileged server and using per-capture user helpers"
+        );
     }
     ServerLaunchMode::Privileged
 }
@@ -1178,7 +1268,11 @@ pub fn send_sas() {
 
 lazy_static::lazy_static! {
     static ref SUPPRESS: Arc<Mutex<Instant>> = Arc::new(Mutex::new(Instant::now()));
+    static ref LOGON_UI_CAPTURE_CACHE: Arc<Mutex<Option<(Instant, bool)>>> =
+        Arc::new(Mutex::new(None));
 }
+
+const LOGON_UI_CAPTURE_CACHE_TTL: Duration = Duration::from_millis(200);
 
 pub fn desktop_changed() -> bool {
     unsafe { inputDesktopSelected() == FALSE }
@@ -1192,6 +1286,7 @@ pub fn try_change_desktop() -> bool {
                 let mut s = SUPPRESS.lock().unwrap();
                 if s.elapsed() > std::time::Duration::from_secs(3) {
                     log::error!("Failed to switch desktop: {}", io::Error::last_os_error());
+                    log_lock_screen_state("desktop-switch-failed");
                     *s = Instant::now();
                 }
             } else {
@@ -1199,11 +1294,39 @@ pub fn try_change_desktop() -> bool {
                     "Desktop switched: input_access_mask=0x{:08x}",
                     inputDesktopAccessMask()
                 );
+                log_lock_screen_state("desktop-switched");
             }
             return res;
         }
     }
     return false;
+}
+
+pub fn log_lock_screen_state(context: &str) {
+    let process_session = get_current_process_session_id();
+    let active_session = unsafe { get_current_session(share_rdp()) };
+    let locked = process_session
+        .map(|session_id| unsafe { is_session_locked(session_id) == TRUE })
+        .unwrap_or(false);
+    let logon_ui = match is_logon_ui() {
+        Ok(v) => v.to_string(),
+        Err(err) => format!("error: {err}"),
+    };
+    let username = get_current_session_username().unwrap_or_else(|| "<unknown>".to_owned());
+    log::info!(
+        "windows lock/logon state [{}]: installed={}, root={}, share_rdp={}, active_session={}, process_session={:?}, username={}, prelogin={}, locked={}, logon_ui={}, desktop_changed={}",
+        context,
+        is_installed(),
+        is_root(),
+        is_share_rdp(),
+        active_session,
+        process_session,
+        username,
+        is_prelogin(),
+        locked,
+        logon_ui,
+        desktop_changed(),
+    );
 }
 
 fn share_rdp() -> BOOL {
@@ -1431,6 +1554,30 @@ pub fn is_logon_ui() -> ResultType<bool> {
     Ok(pids
         .into_iter()
         .any(|pid| get_session_id_of_process(pid) == Some(current_sid)))
+}
+
+/// Capture must not fall back to an interactive-only backend when process
+/// enumeration is unavailable on a desktop transition. The SYSTEM helper is
+/// valid on both desktops, while WGC/DXGI user helpers are not.
+pub fn is_logon_ui_for_capture() -> bool {
+    let now = Instant::now();
+    if let Some((checked_at, is_logon_ui)) = *LOGON_UI_CAPTURE_CACHE.lock().unwrap() {
+        if now.saturating_duration_since(checked_at) < LOGON_UI_CAPTURE_CACHE_TTL {
+            return is_logon_ui;
+        }
+    }
+    let is_logon_ui = match is_logon_ui() {
+        Ok(is_logon_ui) => is_logon_ui,
+        Err(err) => {
+            log::warn!(
+                "failed to query LogonUI for capture routing; using secure desktop helper: {}",
+                err
+            );
+            true
+        }
+    };
+    *LOGON_UI_CAPTURE_CACHE.lock().unwrap() = Some((now, is_logon_ui));
+    is_logon_ui
 }
 
 pub fn is_root() -> bool {
@@ -4763,6 +4910,26 @@ pub(super) fn get_pids_with_first_arg_by_wmic<S1: AsRef<str>, S2: AsRef<str>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_priority_option_values_round_trip() {
+        for priority in [
+            ProcessPriority::Normal,
+            ProcessPriority::AboveNormal,
+            ProcessPriority::High,
+        ] {
+            assert_eq!(
+                ProcessPriority::from_option(priority.option_value()),
+                priority
+            );
+            assert_eq!(ProcessPriority::from_raw(priority.as_raw()), priority);
+        }
+        assert_eq!(
+            ProcessPriority::from_option("invalid"),
+            ProcessPriority::Normal
+        );
+        assert_eq!(ProcessPriority::from_raw(u32::MAX), ProcessPriority::Normal);
+    }
 
     // Test-only reusable Win32 HANDLE RAII helper.
     // If a future non-test path needs the same pattern, move it out of this test module.

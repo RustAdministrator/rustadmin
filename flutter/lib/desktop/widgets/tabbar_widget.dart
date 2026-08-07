@@ -10,6 +10,7 @@ import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/pages/remote_page.dart';
 import 'package:flutter_hbb/desktop/pages/view_camera_page.dart';
+import 'package:flutter_hbb/desktop/session_tab.dart';
 import 'package:flutter_hbb/main.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
@@ -28,7 +29,9 @@ const double _kActionIconSize = 12;
 
 class TabInfo {
   final String key; // Notice: cm use client_id.toString() as key
+  final SessionTabKey? sessionKey;
   final String label;
+  final bool translateLabel;
   final IconData? selectedIcon;
   final IconData? unselectedIcon;
   final bool closable;
@@ -38,7 +41,9 @@ class TabInfo {
 
   TabInfo(
       {required this.key,
+      this.sessionKey,
       required this.label,
+      this.translateLabel = true,
       this.selectedIcon,
       this.unselectedIcon,
       this.closable = true,
@@ -433,20 +438,17 @@ class _DesktopTabState extends State<DesktopTab>
   @override
   void onWindowClose() async {
     mainWindowClose() async => await windowManager.hide();
-    mainWindowExit() async {
-      await rustDeskWinManager.closeAllSubWindows();
+    Future<bool> mainWindowExit() async {
+      if (!await rustDeskWinManager.closeAllSessionWindows()) {
+        return false;
+      }
       await windowManager.setPreventClose(false);
       await windowManager.close();
+      return true;
     }
     notMainWindowClose(WindowController windowController) async {
       if (controller.length != 0) {
         debugPrint("close not empty multiwindow from taskbar");
-        if (isWindows) {
-          await windowController.show();
-          await windowController.focus();
-          final res = await onWindowCloseButton?.call() ?? true;
-          if (!res) return;
-        }
         controller.clear();
       }
       await windowController.hide();
@@ -474,16 +476,33 @@ class _DesktopTabState extends State<DesktopTab>
 
     // Hide to tray when possible, otherwise exit cleanly.
     if (isMainWindow) {
-      if (rustDeskWinManager.getActiveWindows().contains(kMainWindowId)) {
-        await rustDeskWinManager.unregisterActiveWindow(kMainWindowId);
-      }
-      if (!shouldHideMainWindowOnClose()) {
-        await mainWindowExit();
+      if (shouldCloseMainWindowWithSessions(
+        hasHostedRemoteSessions: rustDeskWinManager.hasMainRemoteSessions,
+      )) {
+        if (!await mainWindowExit()) {
+          return;
+        }
+        if (rustDeskWinManager.getActiveWindows().contains(kMainWindowId)) {
+          await rustDeskWinManager.unregisterActiveWindow(kMainWindowId);
+        }
         super.onWindowClose();
         return;
       }
+      if (!shouldHideMainWindowOnClose()) {
+        if (!await mainWindowExit()) {
+          return;
+        }
+        if (rustDeskWinManager.getActiveWindows().contains(kMainWindowId)) {
+          await rustDeskWinManager.unregisterActiveWindow(kMainWindowId);
+        }
+        super.onWindowClose();
+        return;
+      }
+      if (rustDeskWinManager.getActiveWindows().contains(kMainWindowId)) {
+        await rustDeskWinManager.unregisterActiveWindow(kMainWindowId);
+      }
       // macOS specific workaround, the window is not hiding when in fullscreen.
-      else if (isMacOS && await windowManager.isFullScreen()) {
+      if (isMacOS && await windowManager.isFullScreen()) {
         await windowManager.setFullScreen(false);
         await macOSWindowClose(
           () async => await windowManager.isFullScreen(),
@@ -493,23 +512,26 @@ class _DesktopTabState extends State<DesktopTab>
         await mainWindowClose();
       }
     } else {
-      // it's safe to hide the subwindow
       final controller = WindowController.fromWindowId(kWindowId!);
+      if (this.controller.length != 0) {
+        await controller.show();
+        await controller.focus();
+        if (!await (onWindowCloseButton?.call() ?? Future.value(true))) {
+          return;
+        }
+      }
       if (isMacOS) {
         // onWindowClose() maybe called multiple times because of loopCloseWindow() in remote_tab_page.dart.
         // use ??=  to make sure the value is set on first call.
-
-        if (await onWindowCloseButton?.call() ?? true) {
-          if (await controller.isFullScreen()) {
-            await controller.setFullscreen(false);
-            stateGlobal.setFullscreen(false, procWnd: false);
-            await macOSWindowClose(
-              () async => await controller.isFullScreen(),
-              () async => await notMainWindowClose(controller),
-            );
-          } else {
-            await notMainWindowClose(controller);
-          }
+        if (await controller.isFullScreen()) {
+          await controller.setFullscreen(false);
+          stateGlobal.setFullscreen(false, procWnd: false);
+          await macOSWindowClose(
+            () async => await controller.isFullScreen(),
+            () async => await notMainWindowClose(controller),
+          );
+        } else {
+          await notMainWindowClose(controller);
         }
       } else {
         await notMainWindowClose(controller);
@@ -999,6 +1021,7 @@ class _ListView extends StatelessWidget {
                     index: index,
                     tabInfoKey: tab.key,
                     label: label,
+                    translateLabel: tab.translateLabel,
                     tabType: controller.tabType,
                     selectedIcon: tab.selectedIcon,
                     unselectedIcon: tab.unselectedIcon,
@@ -1036,6 +1059,7 @@ class _Tab extends StatefulWidget {
   final int index;
   final String tabInfoKey;
   final Rx<String> label;
+  final bool translateLabel;
   final DesktopTabType tabType;
   final IconData? selectedIcon;
   final IconData? unselectedIcon;
@@ -1055,6 +1079,7 @@ class _Tab extends StatefulWidget {
     required this.index,
     required this.tabInfoKey,
     required this.label,
+    required this.translateLabel,
     required this.tabType,
     this.selectedIcon,
     this.unselectedIcon,
@@ -1095,10 +1120,12 @@ class _TabState extends State<_Tab> with RestorationMixin {
       return ConstrainedBox(
           constraints: BoxConstraints(maxWidth: widget.maxLabelWidth ?? 200),
           child: Tooltip(
-            message:
-                widget.tabType == DesktopTabType.main ? '' : widget.label.value,
+            message: widget.tabType == DesktopTabType.main &&
+                    widget.translateLabel
+                ? ''
+                : widget.label.value,
             child: Text(
-              widget.tabType == DesktopTabType.main
+              widget.tabType == DesktopTabType.main && widget.translateLabel
                   ? translate(widget.label.value)
                   : widget.label.value,
               textAlign: TextAlign.center,
