@@ -189,7 +189,14 @@ set(RUSTDESK_LIB_BUILD_TYPE $<IF:$<CONFIG:Debug>,debug,release>)
 string(TOLOWER ${CMAKE_BUILD_TYPE} ${RUSTDESK_LIB_BUILD_TYPE})
 message(STATUS "rustdesk lib build type: ${RUSTDESK_LIB_BUILD_TYPE}")
 
-set(RUSTDESK_LIB "../../target/${RUSTDESK_LIB_BUILD_TYPE}/liblibrustdesk.so")
+if(DEFINED ENV{CARGO_TARGET_DIR} AND NOT "$ENV{CARGO_TARGET_DIR}" STREQUAL "")
+  file(TO_CMAKE_PATH "$ENV{CARGO_TARGET_DIR}" RUSTDESK_TARGET_DIR)
+else()
+  set(RUSTDESK_TARGET_DIR "../../target")
+endif()
+set(RUSTDESK_LIB
+    "${RUSTDESK_TARGET_DIR}/${RUSTDESK_LIB_BUILD_TYPE}/liblibrustdesk.so")
+message(STATUS "rustdesk lib path: ${RUSTDESK_LIB}")
 install(FILES "${RUSTDESK_LIB}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
 COMPONENT Runtime RENAME librustdesk.so)
 
