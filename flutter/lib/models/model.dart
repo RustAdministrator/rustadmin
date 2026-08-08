@@ -41,6 +41,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:vector_math/vector_math.dart' show Vector2;
 
 import '../common.dart';
+import '../mobile/mobile_viewport.dart';
 import '../utils/image.dart' as img;
 import '../common/widgets/dialog.dart';
 import 'input_model.dart';
@@ -901,6 +902,10 @@ class FfiModel with ChangeNotifier {
             updateCursorPos: updateCursorPos);
       }
       _rect = newRect;
+      if (isMobileClient &&
+          parent.target?.connType == ConnType.defaultConn) {
+        parent.target?.canvasModel.requestMobileViewFit();
+      }
       // Await updateViewStyle to ensure view geometry is fully updated before
       // updating pointer lock center. This prevents stale center calculations.
       await parent.target?.canvasModel
@@ -2668,6 +2673,9 @@ class CanvasModel with ChangeNotifier {
   // to avoid hammering a non-functional Bump Mouse
   bool _bumpMouseIsWorking = true;
   ViewStyle _lastViewStyle = ViewStyle.defaultViewStyle();
+  MobileRemoteViewScaleMode _mobileViewScaleMode =
+      MobileRemoteViewScaleMode.fitHeight;
+  bool _mobileFitPending = true;
 
   Timer? _timerMobileFocusCanvasCursor;
   Timer? _timerMobileRestoreCanvasOffset;
@@ -2697,7 +2705,10 @@ class CanvasModel with ChangeNotifier {
   ScrollStyle get scrollStyle => _scrollStyle;
   int get edgeScrollEdgeThickness => _edgeScrollEdgeThickness;
   ViewStyle get viewStyle => _lastViewStyle;
+  MobileRemoteViewScaleMode get mobileViewScaleMode => _mobileViewScaleMode;
   RxBool get imageOverflow => _imageOverflow;
+  bool get _usesMobileRemoteViewport =>
+      isMobileClient && parent.target?.connType == ConnType.defaultConn;
 
   _resetScroll() => setScrollPercent(0.0, 0.0);
 
@@ -2736,7 +2747,7 @@ class CanvasModel with ChangeNotifier {
     // If minimized, w or h may be negative here.
     double w = size.width - leftToEdge - rightToEdge;
     double h = size.height - topToEdge - bottomToEdge;
-    if (isMobile) {
+    if (isMobileClient) {
       // Account for horizontal safe area insets on both orientations.
       w = w - mediaData.padding.left - mediaData.padding.right;
       // Vertically, subtract the bottom keyboard inset (viewInsets.bottom) and any
@@ -2776,7 +2787,99 @@ class CanvasModel with ChangeNotifier {
 
   updateSize() => _size = getSize();
 
+  Size _mobileTextureSize() => Size(
+        getDisplayWidth().toDouble(),
+        getDisplayHeight().toDouble(),
+      );
+
+  double _mobileMinimumScale() => mobileRemoteMinimumCanvasScale(
+        texture: _mobileTextureSize(),
+        viewport: size,
+      );
+
+  void requestMobileViewFit({MobileRemoteViewScaleMode? mode}) {
+    if (mode != null) {
+      _mobileViewScaleMode = mode;
+    }
+    _mobileFitPending = true;
+  }
+
+  void applyMobileViewScaleMode(MobileRemoteViewScaleMode mode) {
+    requestMobileViewFit(mode: mode);
+    updateSize();
+    _applyPendingMobileFit();
+    notifyListeners();
+  }
+
+  void _applyPendingMobileFit() {
+    final texture = _mobileTextureSize();
+    if (texture.width <= 0 ||
+        texture.height <= 0 ||
+        size.width <= 0 ||
+        size.height <= 0) {
+      return;
+    }
+    _devicePixelRatio = ui.window.devicePixelRatio;
+    _scale = mobileRemoteScaleForMode(
+      mode: _mobileViewScaleMode,
+      texture: texture,
+      viewport: size,
+      devicePixelRatio: _devicePixelRatio,
+    );
+    _scale = max(_scale, _mobileMinimumScale());
+    final offset = mobileRemoteClampCanvasOffset(
+      proposed: Offset(
+        (size.width - texture.width * _scale) / 2,
+        (size.height - texture.height * _scale) / 2,
+      ),
+      texture: texture,
+      viewport: size,
+      scale: _scale,
+    );
+    final adjust = getAdjustY();
+    _x = offset.dx;
+    _y = offset.dy - adjust;
+    _mobileFitPending = false;
+    _updateImageOverflow();
+  }
+
+  void _clampMobileCanvas() {
+    final texture = _mobileTextureSize();
+    _scale = max(_scale, _mobileMinimumScale());
+    final adjust = getAdjustY();
+    final offset = mobileRemoteClampCanvasOffset(
+      proposed: Offset(_x, _y + adjust),
+      texture: texture,
+      viewport: size,
+      scale: _scale,
+    );
+    _x = offset.dx;
+    _y = offset.dy - adjust;
+    _updateImageOverflow();
+  }
+
+  void _updateImageOverflow() {
+    final texture = _mobileTextureSize();
+    final overflow = texture.width * _scale > size.width ||
+        texture.height * _scale > size.height;
+    if (_imageOverflow.value != overflow) {
+      _imageOverflow.value = overflow;
+    }
+  }
+
   updateViewStyle({refreshMousePos = true, notify = true}) async {
+    if (_usesMobileRemoteViewport) {
+      updateSize();
+      if (_mobileFitPending) {
+        _applyPendingMobileFit();
+      } else {
+        _clampMobileCanvas();
+      }
+      if (notify) {
+        notifyListeners();
+      }
+      return;
+    }
     final style = await bind.sessionGetViewStyle(sessionId: sessionId);
     if (style == null) {
       return;
@@ -3185,14 +3288,21 @@ class CanvasModel with ChangeNotifier {
 
   panX(double dx) {
     _x += dx;
-    if (isMobile) {
+    if (_usesMobileRemoteViewport) {
+      isMobileCanvasChanged = true;
+      updateSize();
+      _clampMobileCanvas();
+    } else if (isMobile) {
       isMobileCanvasChanged = true;
     }
     notifyListeners();
   }
 
   resetOffset() {
-    if (isWebDesktop) {
+    if (_usesMobileRemoteViewport) {
+      requestMobileViewFit();
+      updateViewStyle();
+    } else if (isWebDesktop) {
       updateViewStyle();
     } else {
       _resetCanvasOffset(getDisplayWidth(), getDisplayHeight());
@@ -3202,7 +3312,11 @@ class CanvasModel with ChangeNotifier {
 
   panY(double dy) {
     _y += dy;
-    if (isMobile) {
+    if (_usesMobileRemoteViewport) {
+      isMobileCanvasChanged = true;
+      updateSize();
+      _clampMobileCanvas();
+    } else if (isMobile) {
       isMobileCanvasChanged = true;
     }
     notifyListeners();
@@ -3212,11 +3326,18 @@ class CanvasModel with ChangeNotifier {
   updateScale(double v, Offset focalPoint) {
     if (parent.target?.imageModel.image == null) return;
     final s = _scale;
-    _scale *= v;
-    final maxs = parent.target?.imageModel.maxScale ?? 1;
-    final mins = parent.target?.imageModel.minScale ?? 1;
-    if (_scale > maxs) _scale = maxs;
-    if (_scale < mins) _scale = mins;
+    final proposedScale = _scale * v;
+    if (!proposedScale.isFinite || proposedScale <= 0) return;
+    if (_usesMobileRemoteViewport) {
+      updateSize();
+      _scale = max(proposedScale, _mobileMinimumScale());
+    } else {
+      _scale = proposedScale;
+      final maxs = parent.target?.imageModel.maxScale ?? 1;
+      final mins = parent.target?.imageModel.minScale ?? 1;
+      if (_scale > maxs) _scale = maxs;
+      if (_scale < mins) _scale = mins;
+    }
     // (focalPoint.dx - _x_1) / s1 + displayOriginX = (focalPoint.dx - _x_2) / s2 + displayOriginX
     // _x_2 = focalPoint.dx - (focalPoint.dx - _x_1) / s1 * s2
     _x = focalPoint.dx - (focalPoint.dx - _x) / s * _scale;
@@ -3224,7 +3345,11 @@ class CanvasModel with ChangeNotifier {
     // (focalPoint.dy - _y_1 - adjust) / s1 + displayOriginY = (focalPoint.dy - _y_2 - adjust) / s2 + displayOriginY
     // _y_2 = focalPoint.dy - adjust - (focalPoint.dy - _y_1 - adjust) / s1 * s2
     _y = focalPoint.dy - adjust - (focalPoint.dy - _y - adjust) / s * _scale;
-    if (isMobile) {
+    if (_usesMobileRemoteViewport) {
+      isMobileCanvasChanged = true;
+      _mobileFitPending = false;
+      _clampMobileCanvas();
+    } else if (isMobile) {
       isMobileCanvasChanged = true;
     }
     notifyListeners();
@@ -3232,6 +3357,13 @@ class CanvasModel with ChangeNotifier {
 
   // For reset canvas to the last view style
   reset() {
+    if (_usesMobileRemoteViewport) {
+      requestMobileViewFit();
+      updateSize();
+      _applyPendingMobileFit();
+      notifyListeners();
+      return;
+    }
     _scale = _lastViewStyle.scale;
     _devicePixelRatio = ui.window.devicePixelRatio;
     if (kIgnoreDpi && _lastViewStyle.style == kRemoteViewStyleOriginal) {
@@ -3247,6 +3379,8 @@ class CanvasModel with ChangeNotifier {
     _y = 0;
     _scale = 1.0;
     _lastViewStyle = ViewStyle.defaultViewStyle();
+    _mobileViewScaleMode = MobileRemoteViewScaleMode.fitHeight;
+    _mobileFitPending = true;
     _timerMobileFocusCanvasCursor?.cancel();
     _timerMobileRestoreCanvasOffset?.cancel();
     _offsetBeforeMobileSoftKeyboard = null;

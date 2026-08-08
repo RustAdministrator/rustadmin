@@ -63,6 +63,7 @@ final isWebOnWindows = isWebOnWindows_;
 final isWebOnLinux = isWebOnLinux_;
 final isWebOnMacOs = isWebOnMacOS_;
 var isMobile = isAndroid || isIOS;
+bool get isMobileClient => isMobile || (isWeb && !isWebDesktop);
 var version = '';
 int androidVersion = 0;
 

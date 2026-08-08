@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
@@ -23,9 +25,9 @@ import '../../models/input_model.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../../utils/image.dart';
+import '../mobile_viewport.dart';
 import '../widgets/custom_image_quality_widget.dart';
 import '../widgets/dialog.dart';
-import '../widgets/custom_scale_widget.dart';
 
 final initText = '1' * 1024;
 
@@ -62,7 +64,6 @@ class RemotePage extends StatefulWidget {
 
 class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   Timer? _timer;
-  bool _showBar = !isWebDesktop;
   bool _showGestureHelp = false;
   String _value = '';
   Orientation? _currentOrientation;
@@ -76,6 +77,10 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   final FocusNode _mobileFocusNode = FocusNode();
   final FocusNode _physicalFocusNode = FocusNode();
   var _showEdit = false; // use soft keyboard
+  var _showCustomButtonEditor = false;
+  var _quickKeyOrder = List<MobileRemoteQuickKey>.of(
+    mobileRemoteDefaultQuickKeyOrder,
+  );
 
   InputModel get inputModel => gFFI.inputModel;
   SessionID get sessionId => gFFI.sessionId;
@@ -366,17 +371,14 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     });
   }
 
-  Widget _bottomWidget() => _showGestureHelp
-      ? getGestureHelp()
-      : (_showBar && gFFI.ffiModel.pi.displays.isNotEmpty
-          ? getBottomAppBar()
-          : Offstage());
+  Widget _bottomWidget() =>
+      _showGestureHelp ? getGestureHelp() : const Offstage();
 
   @override
   Widget build(BuildContext context) {
     final keyboardIsVisible =
         keyboardVisibilityController.isVisible && _showEdit;
-    final showActionButton = !_showBar || keyboardIsVisible || _showGestureHelp;
+    final showActionButton = keyboardIsVisible || _showGestureHelp;
 
     return WillPopScope(
       onWillPop: () async {
@@ -393,9 +395,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
               : FloatingActionButton(
                   mini: !keyboardIsVisible,
                   child: Icon(
-                    (keyboardIsVisible || _showGestureHelp)
-                        ? Icons.expand_more
-                        : Icons.expand_less,
+                    Icons.expand_more,
                     color: Colors.white,
                   ),
                   backgroundColor: MyTheme.accent,
@@ -408,8 +408,6 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                         _physicalFocusNode.requestFocus();
                       } else if (_showGestureHelp) {
                         _showGestureHelp = false;
-                      } else {
-                        _showBar = !_showBar;
                       }
                     });
                   }),
@@ -483,7 +481,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     );
   }
 
-  Widget getBottomAppBar() {
+  Widget getFloatingToolbar() {
     final ffiModel = Provider.of<FfiModel>(context);
     final chatButton = isWeb
         ? null
@@ -492,18 +490,19 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                 "get_value", "KEY_IS_SUPPORT_VOICE_CALL"),
             hasData: (isSupportVoiceCall) => IconButton(
                   tooltip: translate('Chat'),
-                  color: Colors.white,
+                  color: mobileRemoteToolbarForegroundColor(context),
                   icon: isAndroid && isSupportVoiceCall
                       ? SvgPicture.asset('assets/chat.svg',
-                          colorFilter:
-                              ColorFilter.mode(Colors.white, BlendMode.srcIn))
+                          colorFilter: ColorFilter.mode(
+                              mobileRemoteToolbarForegroundColor(context),
+                              BlendMode.srcIn))
                       : Icon(Icons.message),
                   onPressed: () => isAndroid && isSupportVoiceCall
                       ? showChatOptions(widget.id)
                       : onPressedTextChat(widget.id),
                 ));
     return Obx(
-      () => MobileRemoteBottomBar(
+      () => MobileRemoteToolbar(
         onDisconnect: () => clientClose(sessionId, gFFI),
         onOptions: () {
           setState(() => _showEdit = false);
@@ -518,7 +517,6 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
           setState(() => _showEdit = false);
           showActions(widget.id);
         },
-        onHide: () => setState(() => _showBar = !_showBar),
         showInputControls:
             !isWebDesktop && !ffiModel.viewOnly && ffiModel.keyboard,
         peerIsAndroid: ffiModel.isPeerAndroid,
@@ -536,16 +534,23 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
   Widget getBodyForMobile() {
     final keyboardIsVisible = keyboardVisibilityController.isVisible;
-    return Container(
+    return Listener(
+      onPointerSignal: (event) {
+        if (event is! PointerScrollEvent || event.scrollDelta.dy == 0) return;
+        final factor = math.exp(-event.scrollDelta.dy / 200);
+        gFFI.canvasModel.updateScale(factor, event.localPosition);
+      },
+      child: Container(
         color: MyTheme.canvasColor,
         child: Stack(children: () {
           final paints = [
-            ImagePaint(ffiModel: gFFI.ffiModel),
+            const ImagePaint(),
             PositionedQualityMonitor(
                 qualityMonitorModel: gFFI.qualityMonitorModel),
             KeyHelpTools(
                 keyboardIsVisible: keyboardIsVisible,
-                showGestureHelp: _showGestureHelp),
+                showGestureHelp: _showGestureHelp,
+                quickKeyOrder: _quickKeyOrder),
             SizedBox(
               width: 0,
               height: 0,
@@ -589,13 +594,30 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
               ffi: gFFI,
             ));
           }
+          if (gFFI.ffiModel.pi.displays.isNotEmpty) {
+            paints.add(
+              Positioned.fill(
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: getFloatingToolbar(),
+                ),
+              ),
+            );
+          }
+          if (_showCustomButtonEditor) {
+            paints.add(
+              Positioned.fill(child: _buildCustomButtonEditor(context)),
+            );
+          }
           return paints;
-        }()));
+        }()),
+      ),
+    );
   }
 
   Widget getBodyForDesktopWithListener() {
     final ffiModel = Provider.of<FfiModel>(context);
-    var paints = <Widget>[ImagePaint(ffiModel: ffiModel)];
+    var paints = <Widget>[const ImagePaint()];
     if (showCursorPaint) {
       final cursor = bind.sessionGetToggleOptionSync(
           sessionId: sessionId, arg: 'show-remote-cursor');
@@ -645,20 +667,130 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   void showActions(String id) async {
     final mobileActionMenus = _getMobileActionMenus();
     final menus = toolbarControls(context, id, gFFI);
-    await showMobileRemotePopupMenu(context, [
-      for (final menu in mobileActionMenus)
-        MobileRemoteMenuItem(
-          child: menu.getChild(),
-          onPressed: menu.onPressed,
+    gFFI.dialogManager.show((setDialogState, close, dialogContext) {
+      MobileRemoteActionItem actionItem(TTextMenu menu) =>
+          MobileRemoteActionItem(
+            child: menu.getChild(),
+            onPressed: menu.onPressed == null
+                ? null
+                : () {
+                    close();
+                    Future<void>.delayed(Duration.zero, menu.onPressed!);
+                  },
+          );
+
+      return CustomAlertDialog(
+        contentBoxConstraints: BoxConstraints(
+          maxWidth: 500,
+          maxHeight: MediaQuery.sizeOf(dialogContext).height * 0.9,
         ),
-      for (var i = 0; i < menus.length; i++)
-        MobileRemoteMenuItem(
-          child: menus[i].getChild(),
-          onPressed: menus[i].onPressed,
-          dividerBefore:
-              (i == 0 && mobileActionMenus.isNotEmpty) || menus[i].divider,
+        content: MobileRemoteActionsContent(
+          sections: [
+            if (mobileActionMenus.isNotEmpty)
+              MobileRemoteActionSection(
+                id: 'android',
+                title: Text(translate('Android device actions')),
+                actions: [for (final menu in mobileActionMenus) actionItem(menu)],
+              ),
+            MobileRemoteActionSection(
+              id: 'session',
+              title: Text(translate('Session actions')),
+              actions: [for (final menu in menus) actionItem(menu)],
+            ),
+          ],
+          navigationItems: [
+            if (!gFFI.ffiModel.viewOnly)
+              MobileRemoteNavigationItem(
+                id: 'custom-buttons',
+                child: Text(translate('Customize keyboard buttons')),
+                onPressed: () {
+                  close();
+                  setState(() => _showCustomButtonEditor = true);
+                },
+              ),
+          ],
         ),
-    ]);
+      );
+    }, clickMaskDismiss: true, backDismiss: true).then((_) {
+      _disableAndroidSoftKeyboard();
+    });
+  }
+
+  Widget _buildCustomButtonEditor(BuildContext context) {
+    final isMac = gFFI.ffiModel.pi.platform == kPeerPlatformMacOS;
+    return Material(
+      color: Theme.of(context).colorScheme.surface,
+      child: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+              child: Row(
+                children: [
+                  IconButton(
+                    key: const Key('mobile-remote-custom-buttons-back'),
+                    tooltip: translate('Back'),
+                    style: IconButton.styleFrom(
+                      backgroundColor:
+                          Theme.of(context).colorScheme.surfaceContainerHighest,
+                      shape: const CircleBorder(),
+                    ),
+                    onPressed: () =>
+                        setState(() => _showCustomButtonEditor = false),
+                    icon: const Icon(Icons.arrow_back),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      translate('Customize keyboard buttons'),
+                      style: Theme.of(context).textTheme.titleLarge,
+                    ),
+                  ),
+                  TextButton.icon(
+                    key: const Key('mobile-remote-custom-buttons-reset'),
+                    onPressed: () => setState(() {
+                      _quickKeyOrder = List<MobileRemoteQuickKey>.of(
+                        mobileRemoteDefaultQuickKeyOrder,
+                      );
+                    }),
+                    icon: const Icon(Icons.restart_alt),
+                    label: Text(translate('Reset')),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: ReorderableListView.builder(
+                key: const Key('mobile-remote-custom-buttons-list'),
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+                itemCount: _quickKeyOrder.length,
+                onReorderItem: (oldIndex, newIndex) {
+                  setState(() {
+                    final item = _quickKeyOrder.removeAt(oldIndex);
+                    _quickKeyOrder.insert(newIndex, item);
+                  });
+                },
+                itemBuilder: (context, index) {
+                  final item = _quickKeyOrder[index];
+                  return Card(
+                    key: ValueKey(item),
+                    child: ListTile(
+                      leading: const Icon(Icons.drag_handle),
+                      title: Text(
+                        mobileRemoteQuickKeyLabel(item, isMac: isMac),
+                      ),
+                      subtitle: Text(translate('Drag to reorder')),
+                      trailing: Text('${index + 1}'),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   onPressedTextChat(String id) {
@@ -764,12 +896,16 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 class KeyHelpTools extends StatefulWidget {
   final bool keyboardIsVisible;
   final bool showGestureHelp;
+  final List<MobileRemoteQuickKey> quickKeyOrder;
 
   /// need to show by external request, etc [keyboardIsVisible] or [changeTouchMode]
   bool get requestShow => keyboardIsVisible || showGestureHelp;
 
-  KeyHelpTools(
-      {required this.keyboardIsVisible, required this.showGestureHelp});
+  const KeyHelpTools({
+    required this.keyboardIsVisible,
+    required this.showGestureHelp,
+    required this.quickKeyOrder,
+  });
 
   @override
   State<KeyHelpTools> createState() => _KeyHelpToolsState();
@@ -778,8 +914,6 @@ class KeyHelpTools extends StatefulWidget {
 class _KeyHelpToolsState extends State<KeyHelpTools> {
   var _more = true;
   var _fn = false;
-  var _pin = false;
-  final _keyboardVisibilityController = KeyboardVisibilityController();
   final _key = GlobalKey();
 
   InputModel get inputModel => gFFI.inputModel;
@@ -805,7 +939,7 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
         inputModel.shift ||
         inputModel.command;
 
-    if (!_pin && !hasModifierOn && !widget.requestShow) {
+    if (!hasModifierOn && !widget.requestShow) {
       gFFI.cursorModel
           .keyHelpToolsVisibilityChanged(null, widget.keyboardIsVisible);
       return Offstage();
@@ -821,16 +955,15 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
     });
     return MobileRemoteKeyHelpTools(
       key: _key,
-      keyboardIsVisible: _keyboardVisibilityController.isVisible,
       ctrlActive: inputModel.ctrl,
       altActive: inputModel.alt,
       shiftActive: inputModel.shift,
       commandActive: inputModel.command,
       functionKeysActive: _fn,
-      pinned: _pin,
       moreKeysActive: _more,
       isMac: isMac,
       showWindowsLinuxKeys: isWin || isLinux,
+      quickKeyOrder: widget.quickKeyOrder,
       onCtrl: () => setState(() => inputModel.ctrl = !inputModel.ctrl),
       onAlt: () => setState(() => inputModel.alt = !inputModel.alt),
       onShift: () => setState(() => inputModel.shift = !inputModel.shift),
@@ -844,7 +977,6 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
           }
         });
       },
-      onPin: () => setState(() => _pin = !_pin),
       onMoreKeys: () {
         setState(() {
           _more = !_more;
@@ -861,15 +993,15 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
 }
 
 class ImagePaint extends StatelessWidget {
-  final FfiModel ffiModel;
-  ImagePaint({Key? key, required this.ffiModel}) : super(key: key);
+  const ImagePaint({Key? key}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
     final m = Provider.of<ImageModel>(context);
     final c = Provider.of<CanvasModel>(context);
+    final ffiModel = Provider.of<FfiModel>(context);
     var s = c.scale;
-    if (ffiModel.isPeerLinux) {
+    if (!isMobileClient && ffiModel.isPeerLinux) {
       final displays = ffiModel.pi.getCurDisplays();
       if (displays.isNotEmpty) {
         s = s / displays[0].scale;
@@ -878,7 +1010,13 @@ class ImagePaint extends StatelessWidget {
     final adjust = c.getAdjustY();
     return CustomPaint(
       painter: ImagePainter(
-          image: m.image, x: c.x / s, y: (c.y + adjust) / s, scale: s),
+          image: m.image,
+          x: c.x / s,
+          y: (c.y + adjust) / s,
+          scale: s,
+          filterQuality: isMobileClient
+              ? mobileRemoteTextureFilterQuality(logicalScale: s)
+              : null),
     );
   }
 }
@@ -986,8 +1124,16 @@ void showOptions(
     displays.add(const Divider(color: MyTheme.border));
   }
 
-  List<TRadioMenu<String>> viewStyleRadios =
-      await toolbarViewStyle(context, id, gFFI);
+  final selectedViewMode = gFFI.canvasModel.mobileViewScaleMode;
+  final viewStyleRadios = <TRadioMenu<String>>[
+    for (final mode in MobileRemoteViewScaleMode.values)
+      TRadioMenu<String>(
+        child: Text(translate(mode.label)),
+        value: mode.value,
+        groupValue: selectedViewMode.value,
+        onChanged: (_) => gFFI.canvasModel.applyMobileViewScaleMode(mode),
+      ),
+  ];
   List<TRadioMenu<String>> imageQualityRadios =
       await toolbarImageQuality(context, id, gFFI, openCustomDialog: false);
   List<TRadioMenu<String>> codecRadios = await toolbarCodec(context, id, gFFI);
@@ -1041,6 +1187,10 @@ void showOptions(
     final resolution = getResolutionMenu(gFFI, id);
     final virtualDisplayMenu = getVirtualDisplayMenu(gFFI, id);
     return CustomAlertDialog(
+      contentBoxConstraints: BoxConstraints(
+        maxWidth: 500,
+        maxHeight: MediaQuery.sizeOf(context).height * 0.9,
+      ),
       content: MobileRemoteOptionsContent(
         header: displays,
         radioSections: [
@@ -1048,10 +1198,6 @@ void showOptions(
             'view-style',
             viewStyleRadios,
             heading: Text(translate('Scale')),
-            selectionDetailsBuilder: (value) =>
-                value == kRemoteViewStyleCustom
-                    ? MobileCustomScaleControls(ffi: gFFI)
-                    : const SizedBox.shrink(),
           ),
           radioSection(
             'image-quality',
@@ -1134,6 +1280,7 @@ void showOptions(
               contentPadding: EdgeInsets.zero,
               visualDensity: VisualDensity.compact,
               title: Text(translate('Privacy mode')),
+              trailing: const Icon(Icons.chevron_right),
               onTap: () => setPrivacyModeDialog(
                   dialogManager, privacyModeList, privacyModeState),
             ),
