@@ -1,7 +1,12 @@
+#[cfg(not(target_os = "ios"))]
 use crate::server::ServerPtr;
+#[cfg(not(target_os = "ios"))]
+use hbb_common::config::option2bool;
+#[cfg(not(target_os = "ios"))]
+use hbb_common::transport::quic::{peer_certificate_pin, CertificatePin, QuicServerEndpoint};
 use hbb_common::{
     anyhow::{anyhow, bail, Context},
-    config::{option2bool, Config},
+    config::Config,
     rand::{rngs::OsRng, RngCore},
     tokio,
     transport::{
@@ -10,16 +15,17 @@ use hbb_common::{
         identity::{default_identity_directory, LocalTlsIdentity},
         pairing::{FileTrustedPeerStore, PairingCandidate, TrustedPeerStore},
         quic::{
-            peer_certificate_pin, AuthenticatedControlChannel, CertificatePin, DeviceIdentity,
-            QuicClientEndpoint, QuicServerEndpoint, QuicTransportError, QuicTransportOptions,
+            AuthenticatedControlChannel, DeviceIdentity, QuicClientEndpoint, QuicTransportError,
+            QuicTransportOptions,
         },
     },
     ResultType, Stream,
 };
+#[cfg(not(target_os = "ios"))]
+use std::{sync::Arc, time::Duration};
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 pub async fn connect_pretrusted(
@@ -164,6 +170,7 @@ async fn connect_pretrusted_inner(
     Ok(Stream::from_quic(application))
 }
 
+#[cfg(not(target_os = "ios"))]
 pub async fn run_direct_server(server: ServerPtr) {
     loop {
         if let Err(error) = run_direct_server_once(server.clone()).await {
@@ -173,6 +180,7 @@ pub async fn run_direct_server(server: ServerPtr) {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
 async fn run_direct_server_once(server: ServerPtr) -> ResultType<()> {
     let config = NetworkTransportConfig::load()?;
     if config.mode == RemoteTransportMode::Tcp

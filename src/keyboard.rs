@@ -7,7 +7,6 @@ use crate::ui::CUR_SESSION;
 use crate::ui_session_interface::{InvokeUiSession, Session};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::{client::get_key_state, common::GrabState};
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
 use hbb_common::log;
 use hbb_common::message_proto::*;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
