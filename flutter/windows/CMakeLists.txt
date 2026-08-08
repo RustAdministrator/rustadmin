@@ -63,6 +63,12 @@ endfunction()
 set(FLUTTER_MANAGED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/flutter")
 add_subdirectory(${FLUTTER_MANAGED_DIR})
 
+# The Flutter tool keeps its target selection in its managed subdirectory.
+# Surface that build-time-only value to the native runner, which uses it to
+# distinguish explicitly opted-in prototype targets from the product client.
+get_directory_property(RUSTADMIN_FLUTTER_TOOL_ENVIRONMENT
+  DIRECTORY "${FLUTTER_MANAGED_DIR}" DEFINITION FLUTTER_TOOL_ENVIRONMENT)
+
 # Application build; see runner/CMakeLists.txt.
 add_subdirectory("runner")
 

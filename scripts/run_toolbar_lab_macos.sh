@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/run_toolbar_lab_macos.sh [--clean] [--hwcodec] [--screencapturekit] [--skip-cargo] [--device DEVICE] [-- FLUTTER_RUN_ARGS...]
+Usage: scripts/run_toolbar_lab_macos.sh [--clean] [--hwcodec] [--screencapturekit] [--skip-cargo] [--device DEVICE] [--target DART_TARGET] [-- FLUTTER_RUN_ARGS...]
 
 Environment overrides:
   RUSTDESK_FLUTTER_ROOT       Flutter SDK root. Default: first flutter in PATH
@@ -18,6 +18,7 @@ hwcodec=0
 screencapturekit=0
 skip_cargo=0
 device="macos"
+target="lib/prototyping/main_toolbar_lab.dart"
 flutter_args=()
 
 while [[ $# -gt 0 ]]; do
@@ -34,6 +35,15 @@ while [[ $# -gt 0 ]]; do
         exit 2
       fi
       device="$1"
+      ;;
+    --target)
+      shift
+      if [[ $# -eq 0 ]]; then
+        echo "--target requires a value." >&2
+        usage
+        exit 2
+      fi
+      target="$1"
       ;;
     --)
       shift
@@ -109,5 +119,5 @@ fi
 
 (
   cd "$flutter_dir"
-  flutter run -d "$device" -t lib/prototyping/main_toolbar_lab.dart "${flutter_args[@]}"
+  flutter run -d "$device" -t "$target" "${flutter_args[@]}"
 )

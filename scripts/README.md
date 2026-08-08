@@ -71,6 +71,12 @@ Toolbar lab:
 .\scripts\run_toolbar_lab_windows.ps1
 ```
 
+Mobile remote UI lab:
+
+```powershell
+.\scripts\run_mobile_remote_lab_windows.ps1
+```
+
 Final bundle:
 
 ```text
@@ -127,6 +133,12 @@ Toolbar lab:
 
 ```bash
 scripts/run_toolbar_lab_linux.sh
+```
+
+Mobile remote UI lab:
+
+```bash
+scripts/run_mobile_remote_lab.sh
 ```
 
 Validation tests:
@@ -187,6 +199,12 @@ Toolbar lab:
 
 ```bash
 scripts/run_toolbar_lab_macos.sh
+```
+
+Mobile remote UI lab:
+
+```bash
+scripts/run_mobile_remote_lab.sh
 ```
 
 Validation tests:

@@ -123,6 +123,10 @@ add_executable(${BINARY_NAME}
 # that need different build settings.
 apply_standard_settings(${BINARY_NAME})
 
+if("$ENV{RUSTADMIN_FLUTTER_LAB}" STREQUAL "1")
+  target_compile_definitions(${BINARY_NAME} PRIVATE RUSTADMIN_FLUTTER_LAB=1)
+endif()
+
 # Add dependency libraries. Add any application-specific dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter)
 target_link_libraries(${BINARY_NAME} PRIVATE PkgConfig::GTK)
@@ -184,21 +188,25 @@ foreach(bundled_library ${PLUGIN_BUNDLED_LIBRARIES})
     COMPONENT Runtime)
 endforeach(bundled_library)
 
-# flutter_rust_bridge
-set(RUSTDESK_LIB_BUILD_TYPE $<IF:$<CONFIG:Debug>,debug,release>)
-string(TOLOWER ${CMAKE_BUILD_TYPE} ${RUSTDESK_LIB_BUILD_TYPE})
-message(STATUS "rustdesk lib build type: ${RUSTDESK_LIB_BUILD_TYPE}")
-
-if(DEFINED ENV{CARGO_TARGET_DIR} AND NOT "$ENV{CARGO_TARGET_DIR}" STREQUAL "")
-  file(TO_CMAKE_PATH "$ENV{CARGO_TARGET_DIR}" RUSTDESK_TARGET_DIR)
+if("$ENV{RUSTADMIN_FLUTTER_LAB}" STREQUAL "1")
+  message(STATUS "RustAdmin Flutter lab: skipping the Rust core library")
 else()
-  set(RUSTDESK_TARGET_DIR "../../target")
+  # flutter_rust_bridge
+  set(RUSTDESK_LIB_BUILD_TYPE $<IF:$<CONFIG:Debug>,debug,release>)
+  string(TOLOWER ${CMAKE_BUILD_TYPE} ${RUSTDESK_LIB_BUILD_TYPE})
+  message(STATUS "rustdesk lib build type: ${RUSTDESK_LIB_BUILD_TYPE}")
+
+  if(DEFINED ENV{CARGO_TARGET_DIR} AND NOT "$ENV{CARGO_TARGET_DIR}" STREQUAL "")
+    file(TO_CMAKE_PATH "$ENV{CARGO_TARGET_DIR}" RUSTDESK_TARGET_DIR)
+  else()
+    set(RUSTDESK_TARGET_DIR "../../target")
+  endif()
+  set(RUSTDESK_LIB
+      "${RUSTDESK_TARGET_DIR}/${RUSTDESK_LIB_BUILD_TYPE}/liblibrustdesk.so")
+  message(STATUS "rustdesk lib path: ${RUSTDESK_LIB}")
+  install(FILES "${RUSTDESK_LIB}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+  COMPONENT Runtime RENAME librustdesk.so)
 endif()
-set(RUSTDESK_LIB
-    "${RUSTDESK_TARGET_DIR}/${RUSTDESK_LIB_BUILD_TYPE}/liblibrustdesk.so")
-message(STATUS "rustdesk lib path: ${RUSTDESK_LIB}")
-install(FILES "${RUSTDESK_LIB}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
-COMPONENT Runtime RENAME librustdesk.so)
 
 # Fully re-copy the assets directory on each build to avoid having stale files
 # from a previous install.

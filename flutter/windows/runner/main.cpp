@@ -76,8 +76,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   HWND hwnd = ::FindWindowW(getWindowClassName(), app_name.c_str());
   if (hwnd != NULL) {
     // Allow multiple flutter instances when being executed by parameters
-    // contained in whitelists.
+    // contained in whitelists. The Mobile Remote Lab is also an explicitly
+    // opted-in development target: it must coexist with the normal client or
+    // the native guard exits before Flutter can establish its debug service.
     bool allow_multiple_instances = false;
+#if defined(RUSTADMIN_ALLOW_MULTIPLE_INSTANCES)
+    allow_multiple_instances = true;
+#endif
     for (auto& whitelist_param : parameters_white_list) {
       allow_multiple_instances =
           allow_multiple_instances ||
