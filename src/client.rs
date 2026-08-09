@@ -286,6 +286,9 @@ impl Client {
                 }
             }
             Ok(x) => {
+                if peer_online::is_direct_peer(peer) {
+                    peer_online::record_direct_peer_reachable(peer);
+                }
                 // Set x.2 to true only in the connect() function to indicate that direct_failures needs to be updated; everywhere else it should be set to false.
                 if x.2 {
                     let direct_failures = interface.get_lch().read().unwrap().direct_failures;
@@ -5473,14 +5476,201 @@ async fn hc_connection_(
 
 pub mod peer_online {
     use hbb_common::{
-        anyhow::bail,
-        config::{Config, CONNECT_TIMEOUT, READ_TIMEOUT},
+        anyhow::{bail, Context},
+        config::{Config, CONNECT_TIMEOUT, READ_TIMEOUT, RELAY_PORT},
         log,
         rendezvous_proto::*,
         sleep,
-        socket_client::connect_tcp,
+        socket_client::{connect_tcp, connect_tcp_local},
+        tokio::task::JoinSet,
         ResultType, Stream,
     };
+    use std::{
+        collections::HashMap,
+        sync::Mutex,
+        time::{Duration, Instant},
+    };
+
+    const DIRECT_PROBE_TIMEOUT_MS: u64 = 1_000;
+    const DIRECT_PROBE_CONCURRENCY: usize = 8;
+    const DIRECT_STATUS_CACHE_TTL: Duration = Duration::from_secs(20);
+    const DIRECT_STATUS_CACHE_RETENTION: Duration = Duration::from_secs(300);
+    const MAX_DIRECT_STATUS_CACHE_ENTRIES: usize = 1_024;
+
+    #[derive(Clone, Copy)]
+    struct CachedDirectStatus {
+        online: bool,
+        checked_at: Instant,
+    }
+
+    lazy_static::lazy_static! {
+        static ref DIRECT_STATUS_CACHE: Mutex<HashMap<String, CachedDirectStatus>> =
+            Mutex::new(HashMap::new());
+        static ref ACTIVE_DIRECT_SESSIONS: Mutex<HashMap<String, usize>> =
+            Mutex::new(HashMap::new());
+    }
+
+    pub(super) struct DirectPeerSessionGuard {
+        peer: String,
+    }
+
+    impl Drop for DirectPeerSessionGuard {
+        fn drop(&mut self) {
+            let mut sessions = ACTIVE_DIRECT_SESSIONS.lock().unwrap();
+            if let Some(count) = sessions.get_mut(&self.peer) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    sessions.remove(&self.peer);
+                }
+            }
+        }
+    }
+
+    pub(super) fn is_direct_peer(peer: &str) -> bool {
+        hbb_common::is_ip_str(peer) || hbb_common::is_domain_port_str(peer)
+    }
+
+    fn direct_connect_addr(peer: &str) -> Option<String> {
+        if hbb_common::is_ip_str(peer) {
+            Some(crate::check_port(peer, RELAY_PORT + 1))
+        } else if hbb_common::is_domain_port_str(peer) {
+            Some(peer.to_owned())
+        } else {
+            None
+        }
+    }
+
+    fn cache_direct_status(peer: String, online: bool) {
+        let now = Instant::now();
+        let mut cache = DIRECT_STATUS_CACHE.lock().unwrap();
+        cache.retain(|_, status| {
+            now.saturating_duration_since(status.checked_at) <= DIRECT_STATUS_CACHE_RETENTION
+        });
+        if cache.len() >= MAX_DIRECT_STATUS_CACHE_ENTRIES && !cache.contains_key(&peer) {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, status)| status.checked_at)
+                .map(|(peer, _)| peer.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+        cache.insert(
+            peer,
+            CachedDirectStatus {
+                online,
+                checked_at: now,
+            },
+        );
+    }
+
+    fn cached_direct_status(peer: &str) -> Option<bool> {
+        if has_active_direct_session(peer) {
+            return Some(true);
+        }
+        let now = Instant::now();
+        DIRECT_STATUS_CACHE
+            .lock()
+            .unwrap()
+            .get(peer)
+            .filter(|status| {
+                now.saturating_duration_since(status.checked_at) <= DIRECT_STATUS_CACHE_TTL
+            })
+            .map(|status| status.online)
+    }
+
+    pub(super) fn record_direct_peer_reachable(peer: &str) {
+        if is_direct_peer(peer) {
+            cache_direct_status(peer.to_owned(), true);
+        }
+    }
+
+    fn has_active_direct_session(peer: &str) -> bool {
+        ACTIVE_DIRECT_SESSIONS
+            .lock()
+            .unwrap()
+            .get(peer)
+            .copied()
+            .unwrap_or_default()
+            > 0
+    }
+
+    pub(super) fn track_direct_peer_session(peer: &str) -> Option<DirectPeerSessionGuard> {
+        if !is_direct_peer(peer) {
+            return None;
+        }
+        {
+            let mut sessions = ACTIVE_DIRECT_SESSIONS.lock().unwrap();
+            *sessions.entry(peer.to_owned()).or_default() += 1;
+        }
+        record_direct_peer_reachable(peer);
+        Some(DirectPeerSessionGuard {
+            peer: peer.to_owned(),
+        })
+    }
+
+    fn partition_peer_ids(ids: Vec<String>) -> (Vec<String>, Vec<String>) {
+        ids.into_iter().partition(|peer| is_direct_peer(peer))
+    }
+
+    async fn probe_direct_peer(peer: &str) -> bool {
+        let Some(connect_addr) = direct_connect_addr(peer) else {
+            return false;
+        };
+        connect_tcp_local(connect_addr, None, DIRECT_PROBE_TIMEOUT_MS)
+            .await
+            .is_ok()
+    }
+
+    async fn query_direct_states(ids: Vec<String>) -> (Vec<String>, Vec<String>) {
+        let mut onlines = Vec::new();
+        let mut offlines = Vec::new();
+        let mut uncached = Vec::new();
+        let mut probes = JoinSet::new();
+
+        for peer in ids {
+            if let Some(online) = cached_direct_status(&peer) {
+                if online {
+                    onlines.push(peer);
+                } else {
+                    offlines.push(peer);
+                }
+                continue;
+            }
+            uncached.push(peer);
+        }
+
+        let mut pending = uncached.into_iter();
+        for peer in pending.by_ref().take(DIRECT_PROBE_CONCURRENCY) {
+            probes.spawn(async move {
+                let online = probe_direct_peer(&peer).await;
+                (peer, online)
+            });
+        }
+
+        while let Some(result) = probes.join_next().await {
+            match result {
+                Ok((peer, online)) => {
+                    let online = online || has_active_direct_session(&peer);
+                    cache_direct_status(peer.clone(), online);
+                    if online {
+                        onlines.push(peer);
+                    } else {
+                        offlines.push(peer);
+                    }
+                }
+                Err(error) => log::debug!("Direct peer status probe task failed: {error}"),
+            }
+            if let Some(peer) = pending.next() {
+                probes.spawn(async move {
+                    let online = probe_direct_peer(&peer).await;
+                    (peer, online)
+                });
+            }
+        }
+
+        (onlines, offlines)
+    }
 
     pub async fn query_online_states<F: FnOnce(Vec<String>, Vec<String>)>(ids: Vec<String>, f: F) {
         let test = false;
@@ -5490,15 +5680,21 @@ pub mod peer_online {
             let offlines = onlines.drain((onlines.len() / 2)..).collect();
             f(onlines, offlines)
         } else {
+            let (direct_ids, rendezvous_ids) = partition_peer_ids(ids);
+            let (mut onlines, mut offlines) = query_direct_states(direct_ids).await;
             let query_timeout = std::time::Duration::from_millis(3_000);
-            match query_online_states_(&ids, query_timeout).await {
-                Ok((onlines, offlines)) => {
-                    f(onlines, offlines);
-                }
-                Err(e) => {
-                    log::debug!("query onlines, {}", &e);
+            if !rendezvous_ids.is_empty() {
+                match query_online_states_(&rendezvous_ids, query_timeout).await {
+                    Ok((mut rendezvous_onlines, mut rendezvous_offlines)) => {
+                        onlines.append(&mut rendezvous_onlines);
+                        offlines.append(&mut rendezvous_offlines);
+                    }
+                    Err(error) => {
+                        log::debug!("Failed to query rendezvous peer states: {error}");
+                    }
                 }
             }
+            f(onlines, offlines);
         }
     }
 
@@ -5521,33 +5717,29 @@ pub mod peer_online {
     }
 
     async fn query_online_states_(
-        ids: &Vec<String>,
+        ids: &[String],
         timeout: std::time::Duration,
     ) -> ResultType<(Vec<String>, Vec<String>)> {
         let mut msg_out = RendezvousMessage::new();
         let licence_key = crate::get_key(true).await;
         msg_out.set_online_request(OnlineRequest {
             id: Config::get_id(),
-            peers: ids.clone(),
+            peers: ids.to_vec(),
             licence_key,
             ..Default::default()
         });
 
-        let mut socket = match create_online_stream().await {
-            Ok(s) => s,
-            Err(e) => {
-                log::debug!("Failed to create peers online stream, {e}");
-                return Ok((vec![], ids.clone()));
-            }
-        };
+        let mut socket = create_online_stream()
+            .await
+            .context("Failed to create peers online stream")?;
         // TODO: Use long connections to avoid socket creation
         // If we use a Arc<Mutex<Option<FramedStream>>> to hold and reuse the previous socket,
         // we may face the following error:
         // An established connection was aborted by the software in your host machine. (os error 10053)
-        if let Err(e) = socket.send(&msg_out).await {
-            log::debug!("Failed to send peers online states query, {e}");
-            return Ok((vec![], ids.clone()));
-        }
+        socket
+            .send(&msg_out)
+            .await
+            .context("Failed to send peers online states query")?;
         // Retry for 2 times to get the online response
         for _ in 0..2 {
             if let Some(msg_in) =
@@ -5556,19 +5748,7 @@ pub mod peer_online {
             {
                 match msg_in.union {
                     Some(rendezvous_message::Union::OnlineResponse(online_response)) => {
-                        let states = online_response.states;
-                        let mut onlines = Vec::new();
-                        let mut offlines = Vec::new();
-                        for i in 0..ids.len() {
-                            // bytes index from left to right
-                            let bit_value = 0x01 << (7 - i % 8);
-                            if (states[i / 8] & bit_value) == bit_value {
-                                onlines.push(ids[i].clone());
-                            } else {
-                                offlines.push(ids[i].clone());
-                            }
-                        }
-                        return Ok((onlines, offlines));
+                        return decode_online_states(ids, &online_response.states);
                     }
                     _ => {
                         // ignore
@@ -5583,9 +5763,141 @@ pub mod peer_online {
         bail!("Failed to query online states, no online response");
     }
 
+    fn decode_online_states(
+        ids: &[String],
+        states: &[u8],
+    ) -> ResultType<(Vec<String>, Vec<String>)> {
+        let required_state_bytes = (ids.len() + 7) / 8;
+        if states.len() < required_state_bytes {
+            bail!(
+                "Online response state bitmap is too short: expected at least {}, got {}",
+                required_state_bytes,
+                states.len()
+            );
+        }
+        let mut onlines = Vec::new();
+        let mut offlines = Vec::new();
+        for (index, id) in ids.iter().enumerate() {
+            // Server presence bits are encoded from the most significant bit.
+            let bit_value = 0x01 << (7 - index % 8);
+            if (states[index / 8] & bit_value) == bit_value {
+                onlines.push(id.clone());
+            } else {
+                offlines.push(id.clone());
+            }
+        }
+        Ok((onlines, offlines))
+    }
+
     #[cfg(test)]
     mod tests {
         use hbb_common::tokio;
+
+        #[test]
+        fn test_direct_status_partitions_direct_and_rendezvous_peers() {
+            let (direct, rendezvous) = super::partition_peer_ids(vec![
+                "192.0.2.10".to_owned(),
+                "example.invalid:32100".to_owned(),
+                "123456789".to_owned(),
+            ]);
+            assert_eq!(direct, ["192.0.2.10", "example.invalid:32100"]);
+            assert_eq!(rendezvous, ["123456789"]);
+            assert_eq!(
+                super::direct_connect_addr("192.0.2.10"),
+                Some(format!("192.0.2.10:{}", hbb_common::config::RELAY_PORT + 1))
+            );
+            assert_eq!(
+                super::direct_connect_addr("example.invalid:32100"),
+                Some("example.invalid:32100".to_owned())
+            );
+            assert_eq!(super::direct_connect_addr("123456789"), None);
+        }
+
+        #[test]
+        fn test_direct_status_rejects_short_bitmap() {
+            let ids = (0..9).map(|value| value.to_string()).collect::<Vec<_>>();
+            assert!(super::decode_online_states(&ids, &[0xff]).is_err());
+        }
+
+        #[test]
+        fn test_direct_status_decodes_bitmap_in_peer_order() {
+            let ids = ["one".to_owned(), "two".to_owned(), "three".to_owned()];
+            let (onlines, offlines) =
+                super::decode_online_states(&ids, &[0b1010_0000]).expect("valid bitmap");
+            assert_eq!(onlines, ["one", "three"]);
+            assert_eq!(offlines, ["two"]);
+        }
+
+        #[tokio::test]
+        async fn test_direct_status_reports_listening_endpoint_online() {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind listener");
+            let endpoint = listener.local_addr().expect("listener address").to_string();
+            let accept = tokio::spawn(async move {
+                listener.accept().await.expect("accept probe");
+            });
+
+            assert!(super::probe_direct_peer(&endpoint).await);
+            accept.await.expect("probe accept task");
+        }
+
+        #[tokio::test]
+        async fn test_direct_status_reports_refused_endpoint_offline() {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind listener");
+            let endpoint = listener.local_addr().expect("listener address").to_string();
+            drop(listener);
+
+            assert!(!super::probe_direct_peer(&endpoint).await);
+        }
+
+        #[tokio::test]
+        async fn test_direct_status_query_does_not_require_rendezvous() {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind listener");
+            let endpoint = listener.local_addr().expect("listener address").to_string();
+            let expected_endpoint = endpoint.clone();
+            let accept = tokio::spawn(async move {
+                listener.accept().await.expect("accept probe");
+            });
+            let mut result = None;
+
+            super::query_online_states(vec![endpoint], |onlines, offlines| {
+                result = Some((onlines, offlines));
+            })
+            .await;
+
+            accept.await.expect("probe accept task");
+            let (onlines, offlines) = result.expect("online-state callback");
+            assert_eq!(onlines, [expected_endpoint]);
+            assert!(offlines.is_empty());
+        }
+
+        #[test]
+        fn test_direct_status_successful_session_updates_cache() {
+            let peer = "192.0.2.20:32101";
+            super::record_direct_peer_reachable(peer);
+            assert_eq!(super::cached_direct_status(peer), Some(true));
+        }
+
+        #[test]
+        fn test_direct_status_active_session_is_authoritative() {
+            let peer = "192.0.2.21:32101";
+            super::cache_direct_status(peer.to_owned(), false);
+            let first = super::track_direct_peer_session(peer).expect("direct peer session");
+            let second =
+                super::track_direct_peer_session(peer).expect("second direct peer session");
+
+            assert!(super::has_active_direct_session(peer));
+            assert_eq!(super::cached_direct_status(peer), Some(true));
+            drop(first);
+            assert!(super::has_active_direct_session(peer));
+            drop(second);
+            assert!(!super::has_active_direct_session(peer));
+        }
 
         #[tokio::test]
         async fn test_query_onlines() {
