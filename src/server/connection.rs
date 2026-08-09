@@ -6132,10 +6132,12 @@ impl Connection {
                 image_quality = q.value();
             }
             if image_quality > 0 {
-                video_service::VIDEO_QOS
-                    .lock()
-                    .unwrap()
-                    .user_image_quality(self.inner.id(), image_quality);
+                let mut video_qos = video_service::VIDEO_QOS.lock().unwrap();
+                if q == ImageQuality::NotSet {
+                    video_qos.user_image_quality(self.inner.id(), image_quality);
+                } else {
+                    video_qos.user_preset_image_quality(self.inner.id(), image_quality);
+                }
             }
         }
         if o.custom_fps != 0 {

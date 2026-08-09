@@ -1930,7 +1930,6 @@ customImageQualityDialog(SessionID sessionId, String id, FFI ffi) async {
   String initFpsMode = kCustomFpsModeAdaptive;
   bool qualitySet = false;
   bool fpsSet = false;
-  bool fpsModeSet = false;
 
   bool? direct;
   try {
@@ -1956,11 +1955,8 @@ customImageQualityDialog(SessionID sessionId, String id, FFI ffi) async {
           sessionId: sessionId, value: quality.toInt());
     }
     if (fpsMode != null) {
-      fpsModeSet = true;
       initFpsMode =
           fpsMode == kCustomFpsModeFixed ? fpsMode : kCustomFpsModeAdaptive;
-      await bind.sessionPeerOption(
-          sessionId: sessionId, name: kOptionCustomFpsMode, value: initFpsMode);
     }
     if (fps != null) {
       fpsSet = true;
@@ -1977,11 +1973,6 @@ customImageQualityDialog(SessionID sessionId, String id, FFI ffi) async {
       fpsSet = true;
       await bind.sessionSetCustomFps(
           sessionId: sessionId, fps: fpsForMode(initFps, initFpsMode));
-    }
-    if (!hideFps && !fpsModeSet) {
-      fpsModeSet = true;
-      await bind.sessionPeerOption(
-          sessionId: sessionId, name: kOptionCustomFpsMode, value: initFpsMode);
     }
   }
 

@@ -472,10 +472,10 @@ Future<List<TRadioMenu<String>>> toolbarImageQuality(
       child: Text(translate('Custom')),
       value: kRemoteImageQualityCustom,
       groupValue: groupValue,
-      onChanged: (value) {
-        onChanged(value);
+      onChanged: (value) async {
+        await onChanged(value);
         if (openCustomDialog) {
-          customImageQualityDialog(ffi.sessionId, id, ffi);
+          await customImageQualityDialog(ffi.sessionId, id, ffi);
         }
       },
     ),
