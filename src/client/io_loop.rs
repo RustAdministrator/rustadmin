@@ -336,6 +336,8 @@ impl<T: InvokeUiSession> Remote<T> {
         .await
         {
             Ok(((mut peer, direct, pk, kcp, stream_type), (feedback, rendezvous_server))) => {
+                let _direct_peer_session =
+                    client::peer_online::track_direct_peer_session(&self.handler.get_id());
                 self.handler
                     .connection_round_state
                     .lock()
