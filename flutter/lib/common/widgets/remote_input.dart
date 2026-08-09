@@ -359,13 +359,13 @@ class _RawTouchGestureDetectorRegionState
     if (isNotTouchBasedDevice()) {
       return;
     }
+    if (ffi.cursorModel.shouldBlock(d.localPosition.dx, d.localPosition.dy)) {
+      return;
+    }
     if (handleTouch) {
       if (lastTapDownDetails != null) {
         await ffi.cursorModel.move(lastTapDownDetails.localPosition.dx,
             lastTapDownDetails.localPosition.dy);
-      }
-      if (ffi.cursorModel.shouldBlock(d.localPosition.dx, d.localPosition.dy)) {
-        return;
       }
       if (!ffi.cursorModel.isInRemoteRect(d.localPosition)) {
         return;

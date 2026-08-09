@@ -27,7 +27,7 @@ static char *CopyCString(const char *value) {
     return copy;
 }
 
-extern "C" char *MacPasteboardCopyTypeNames() {
+static char *MacPasteboardCopyTypeNamesOnMainThread() {
     @autoreleasepool {
         @try {
             NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
@@ -35,24 +35,15 @@ extern "C" char *MacPasteboardCopyTypeNames() {
                 return NULL;
             }
 
-            NSMutableArray<NSString *> *names = [NSMutableArray array];
-            NSArray *items = [pasteboard pasteboardItems];
-            if (items != nil) {
-                for (NSPasteboardItem *item in items) {
-                    NSArray *types = [item types];
-                    for (NSString *type in types) {
-                        if (type != nil) {
-                            [names addObject:type];
-                        }
-                    }
-                }
-            }
-            if ([names count] == 0) {
-                NSArray *types = [pasteboard types];
-                for (NSString *type in types) {
-                    if (type != nil) {
-                        [names addObject:type];
-                    }
+            // Ask AppKit for one combined type snapshot. Iterating
+            // pasteboardItems and querying each item's types races Apple's
+            // Universal Clipboard cache updates and can trap in
+            // __NSFastEnumerationMutationHandler.
+            NSArray<NSPasteboardType> *types = [[pasteboard types] copy];
+            NSMutableArray<NSString *> *names = [NSMutableArray arrayWithCapacity:[types count]];
+            for (NSString *type in types) {
+                if (type != nil) {
+                    [names addObject:type];
                 }
             }
 
@@ -63,6 +54,20 @@ extern "C" char *MacPasteboardCopyTypeNames() {
             return NULL;
         }
     }
+}
+
+extern "C" char *MacPasteboardCopyTypeNames() {
+    if ([NSThread isMainThread]) {
+        return MacPasteboardCopyTypeNamesOnMainThread();
+    }
+
+    // NSPasteboard is an AppKit object. Keep its mutable internal type cache on
+    // AppKit's main thread even though clipboard polling runs on a Rust worker.
+    __block char *result = NULL;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        result = MacPasteboardCopyTypeNamesOnMainThread();
+    });
+    return result;
 }
 
 extern "C" void MacFreeCString(char *value) {

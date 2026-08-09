@@ -3647,8 +3647,8 @@ class CursorModel with ChangeNotifier {
   String peerId = '';
   WeakReference<FFI> parent;
 
-  // Only for mobile, touch mode
-  // To block touch event above the KeyHelpTools
+  // Only for mobile.
+  // Block remote input events above the KeyHelpTools in every input mode.
   //
   // A better way is to not listen events from the KeyHelpTools.
   // But we're now using a Container(child: Stack(...)) to wrap the KeyHelpTools,
@@ -3773,7 +3773,7 @@ class CursorModel with ChangeNotifier {
 
   get scale => parent.target?.canvasModel.scale ?? 1.0;
 
-  // mobile Soft keyboard, block touch event from the KeyHelpTools
+  // Mobile: block remote input events originating over KeyHelpTools.
   shouldBlock(double x, double y) {
     if (_blockEvents) {
       return true;
@@ -3785,10 +3785,6 @@ class CursorModel with ChangeNotifier {
       }
     }
 
-    // For help tools rectangle, only block touch event when in touch mode.
-    if (!(parent.target?.ffiModel.touchMode ?? false)) {
-      return false;
-    }
     if (_keyHelpToolsRect != null &&
         isPointInRect(offset, _keyHelpToolsRect!)) {
       return true;

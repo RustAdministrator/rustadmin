@@ -54,33 +54,46 @@ void main() {
       find.byKey(const Key('mobile-remote-toolbar-opacity')),
     );
     expect(opacity.opacity, 0.2);
+    expect(opacity.duration, const Duration(seconds: 3));
+
+    await tester.tap(find.byTooltip('Display and session options'));
+    await tester.pump();
+    final restoredOpacity = tester.widget<AnimatedOpacity>(
+      find.byKey(const Key('mobile-remote-toolbar-opacity')),
+    );
+    expect(restoredOpacity.opacity, 1.0);
+    expect(restoredOpacity.duration, Duration.zero);
   });
 
   testWidgets('quick keys stay in one square scrollable row', (tester) async {
+    var remotePanUpdates = 0;
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
           body: Center(
             child: SizedBox(
               width: 180,
-              child: MobileRemoteKeyHelpTools(
-                ctrlActive: false,
-                altActive: false,
-                shiftActive: false,
-                commandActive: false,
-                functionKeysActive: true,
-                moreKeysActive: false,
-                isMac: false,
-                showWindowsLinuxKeys: true,
-                quickKeyOrder: mobileRemoteDefaultQuickKeyOrder,
-                onCtrl: () {},
-                onAlt: () {},
-                onShift: () {},
-                onCommand: () {},
-                onFunctionKeys: () {},
-                onMoreKeys: () {},
-                onKeyPressed: (_) {},
-                onShortcutPressed: (_) {},
+              child: GestureDetector(
+                onPanUpdate: (_) => remotePanUpdates += 1,
+                child: MobileRemoteKeyHelpTools(
+                  ctrlActive: false,
+                  altActive: false,
+                  shiftActive: false,
+                  commandActive: false,
+                  functionKeysActive: true,
+                  moreKeysActive: false,
+                  isMac: false,
+                  showWindowsLinuxKeys: true,
+                  quickKeyOrder: mobileRemoteDefaultQuickKeyOrder,
+                  onCtrl: () {},
+                  onAlt: () {},
+                  onShift: () {},
+                  onCommand: () {},
+                  onFunctionKeys: () {},
+                  onMoreKeys: () {},
+                  onKeyPressed: (_) {},
+                  onShortcutPressed: (_) {},
+                ),
               ),
             ),
           ),
@@ -104,6 +117,7 @@ void main() {
     await tester.pump();
     expect(state.position.pixels, greaterThan(0));
     await gesture.up();
+    expect(remotePanUpdates, 0);
 
     state.position.jumpTo(0);
     final mouse = await tester.startGesture(
@@ -120,7 +134,7 @@ void main() {
     final firstButton = tester.getSize(
       find.byKey(const Key('mobile-remote-quick-ctrl')),
     );
-    expect(firstButton, const Size.square(36));
+    expect(firstButton, const Size.square(39.6));
     expect(find.byIcon(Icons.push_pin), findsNothing);
   });
 

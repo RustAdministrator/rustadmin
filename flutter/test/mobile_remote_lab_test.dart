@@ -416,6 +416,14 @@ void main() {
           .opacity,
       closeTo(0.2, 0.001),
     );
+    expect(
+      tester
+          .widget<AnimatedOpacity>(
+            find.byKey(const Key('mobile-remote-toolbar-opacity')),
+          )
+          .duration,
+      const Duration(seconds: 3),
+    );
 
     await tester.tap(find.byTooltip('Display and session options'));
     await tester.pump();
@@ -426,6 +434,14 @@ void main() {
           )
           .opacity,
       1.0,
+    );
+    expect(
+      tester
+          .widget<AnimatedOpacity>(
+            find.byKey(const Key('mobile-remote-toolbar-opacity')),
+          )
+          .duration,
+      Duration.zero,
     );
   });
 
@@ -594,6 +610,10 @@ void main() {
     final strip = tester.getRect(
       find.byKey(const Key('mobile-remote-key-help-tools')),
     );
+    final systemKeyboard = tester.getRect(
+      find.byKey(const Key('mobile-lab-system-keyboard')),
+    );
+    expect(strip.bottom, closeTo(systemKeyboard.top, 0.01));
     final stripSurface = tester.widget<Container>(
       find.byKey(const Key('mobile-remote-key-help-strip')),
     );
@@ -604,11 +624,11 @@ void main() {
     final alt = tester.getRect(
       find.byKey(const Key('mobile-remote-quick-alt')),
     );
-    expect(ctrl.width, closeTo(36, 0.01));
-    expect(ctrl.height, closeTo(36, 0.01));
+    expect(ctrl.width, closeTo(39.6, 0.01));
+    expect(ctrl.height, closeTo(39.6, 0.01));
     expect(ctrl.top - strip.top, closeTo(6, 0.01));
     expect(strip.bottom - ctrl.bottom, closeTo(6, 0.01));
-    expect(alt.left - ctrl.right, closeTo(2, 0.01));
+    expect(alt.left - ctrl.right, closeTo(4, 0.01));
     expect(find.byIcon(Icons.push_pin), findsNothing);
 
     final ctrlButton = tester.widget<TextButton>(
