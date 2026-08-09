@@ -938,6 +938,12 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
 
   InputModel get inputModel => gFFI.inputModel;
 
+  void _scheduleRectUpdate() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _updateRect();
+    });
+  }
+
   _updateRect() {
     RenderObject? renderObject = _key.currentContext?.findRenderObject();
     if (renderObject == null) {
@@ -969,10 +975,7 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
     final isMac = pi.platform == kPeerPlatformMacOS;
     final isWin = pi.platform == kPeerPlatformWindows;
     final isLinux = pi.platform == kPeerPlatformLinux;
-    // 500 ms is long enough for this widget to be built!
-    Future.delayed(Duration(milliseconds: 500), () {
-      _updateRect();
-    });
+    _scheduleRectUpdate();
     return MobileRemoteKeyHelpTools(
       key: _key,
       ctrlActive: inputModel.ctrl,

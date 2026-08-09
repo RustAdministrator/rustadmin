@@ -115,6 +115,11 @@ pub(crate) fn clipboard_direction_policy_from_option_value(
 // This format is used to store the flag in the clipboard.
 const RUSTDESK_CLIPBOARD_OWNER_FORMAT: &'static str = "dyn.com.rustdesk.owner";
 
+// Apple publishes this marker when the general pasteboard contains a lazy
+// Universal Clipboard value whose payload still lives on another device.
+#[cfg(any(test, target_os = "macos"))]
+const MACOS_REMOTE_CLIPBOARD_FORMAT: &str = "com.apple.is-remote-clipboard";
+
 // Add special format for Excel XML Spreadsheet
 const CLIPBOARD_FORMAT_EXCEL_XML_SPREADSHEET: &'static str = "XML Spreadsheet";
 
@@ -744,6 +749,13 @@ fn contains_rustdesk_owner_format_name(names: &[String]) -> bool {
         .any(|name| name.eq_ignore_ascii_case(RUSTDESK_CLIPBOARD_OWNER_FORMAT))
 }
 
+#[cfg(any(test, target_os = "macos"))]
+fn contains_macos_remote_clipboard_format_name(names: &[String]) -> bool {
+    names
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(MACOS_REMOTE_CLIPBOARD_FORMAT))
+}
+
 #[cfg(any(test, target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn contains_preserved_native_format_name(names: &[String]) -> bool {
     names
@@ -783,6 +795,26 @@ where
     preserved.sort_unstable();
     preserved.dedup();
     Some(preserved.join("|"))
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn macos_external_opaque_signature_from_format_names<F>(
+    change_count: isize,
+    names: &[String],
+    is_plain_text: F,
+) -> Option<String>
+where
+    F: Fn(&str) -> bool,
+{
+    // Do not materialize an Apple Universal Clipboard promise in a background
+    // polling loop. Reading its payload triggers Handoff and macOS's
+    // "Pasting from ..." UI, and can create a clipboard relay loop when the
+    // same value also carries RustAdmin's owner marker.
+    if contains_macos_remote_clipboard_format_name(names) {
+        return Some(format!("macos:{change_count}:remote-promise"));
+    }
+    external_preserved_native_formats_signature_with_text_classifier(names, is_plain_text)
+        .map(|signature| format!("macos:{change_count}:{signature}"))
 }
 
 #[cfg(not(target_os = "android"))]
@@ -1276,13 +1308,11 @@ mod platform_clipboard {
             let after = pasteboard_change_count()?;
             last_change_count = after;
             if before == after {
-                return Ok(
-                    super::external_preserved_native_formats_signature_with_text_classifier(
-                        &names,
-                        type_conforms_to_plain_text,
-                    )
-                    .map(|signature| format!("macos:{after}:{signature}")),
-                );
+                return Ok(super::macos_external_opaque_signature_from_format_names(
+                    after,
+                    &names,
+                    type_conforms_to_plain_text,
+                ));
             }
             log::debug!(
                 "macOS pasteboard changed during format inspection, retrying ({}/{})",
@@ -2716,6 +2746,21 @@ mod clipboard_timing_tests {
         assert!(contains_preserved_native_format_name(&names));
         assert!(!contains_external_preserved_native_format_name(&names));
         assert!(external_preserved_native_formats_signature(&names).is_none());
+    }
+
+    #[test]
+    fn macos_remote_clipboard_promise_is_not_materialized_even_with_rustdesk_owner() {
+        let names = vec![
+            "public.utf8-plain-text".to_owned(),
+            RUSTDESK_CLIPBOARD_OWNER_FORMAT.to_owned(),
+            MACOS_REMOTE_CLIPBOARD_FORMAT.to_owned(),
+        ];
+
+        assert!(contains_macos_remote_clipboard_format_name(&names));
+        assert_eq!(
+            macos_external_opaque_signature_from_format_names(2882, &names, |_| false).as_deref(),
+            Some("macos:2882:remote-promise")
+        );
     }
 }
 

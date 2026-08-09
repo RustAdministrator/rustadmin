@@ -558,7 +558,7 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
     IconData? icon,
   }) {
     return SizedBox.square(
-      dimension: 36,
+      dimension: 36 * 1.1,
       child: TextButton(
         style: TextButton.styleFrom(
           minimumSize: Size.zero,
@@ -590,7 +590,7 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const spacing = 2.0;
+    const spacing = 4.0;
     final quickButtons = <MobileRemoteQuickKey, Widget>{
       MobileRemoteQuickKey.ctrl: KeyedSubtree(
         key: const Key('mobile-remote-quick-ctrl'),

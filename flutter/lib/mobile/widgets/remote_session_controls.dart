@@ -556,7 +556,7 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
     IconData? icon,
   }) {
     return SizedBox.square(
-      dimension: 36,
+      dimension: 36 * 1.1,
       child: TextButton(
         style: TextButton.styleFrom(
           minimumSize: Size.zero,
@@ -588,7 +588,7 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const spacing = 2.0;
+    const spacing = 4.0;
     final quickButtons = <MobileRemoteQuickKey, Widget>{
       MobileRemoteQuickKey.ctrl: KeyedSubtree(
         key: const Key('mobile-remote-quick-ctrl'),
@@ -759,6 +759,7 @@ class _MobileKeyHelpScrollStripState extends State<_MobileKeyHelpScrollStrip> {
   }
 
   void _onPointerDown(PointerDownEvent event) {
+    if (event.kind != PointerDeviceKind.mouse) return;
     _dragPointer = event.pointer;
     _lastPointerPosition = event.position;
   }
@@ -806,7 +807,6 @@ class _MobileKeyHelpScrollStripState extends State<_MobileKeyHelpScrollStrip> {
         key: const Key('mobile-remote-key-help-scroll'),
         controller: _controller,
         scrollDirection: Axis.horizontal,
-        physics: const NeverScrollableScrollPhysics(),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
