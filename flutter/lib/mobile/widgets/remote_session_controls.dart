@@ -368,7 +368,9 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
                       curve: Curves.easeOutCubic,
                       child: AnimatedOpacity(
                         key: const Key('mobile-remote-toolbar-opacity'),
-                        duration: _dimDuration,
+                        duration: _toolbarOpacity == 1.0
+                            ? Duration.zero
+                            : _dimDuration,
                         opacity: _toolbarOpacity * (_collapsed ? 0.9 : 1.0),
                         child: Material(
                           key: const Key('mobile-remote-floating-toolbar'),

@@ -235,7 +235,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
       _timer = Timer(kMobileDelaySoftKeyboardFocus, () {
         SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual,
             overlays: SystemUiOverlay.values);
-        _mobileFocusNode.requestFocus();
+        _requestMobileSoftKeyboard();
       });
     }
     // update for Scaffold
@@ -351,6 +351,18 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     inputModel.inputKey(char);
   }
 
+  void _requestMobileSoftKeyboard() {
+    if (!mounted || !_showEdit) return;
+    _mobileFocusNode.requestFocus();
+    if (!isIOS) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_showEdit || !_mobileFocusNode.hasFocus) return;
+      unawaited(
+        SystemChannels.textInput.invokeMethod<void>('TextInput.show'),
+      );
+    });
+  }
+
   void openKeyboard() {
     gFFI.invokeMethod("enable_soft_keyboard", true);
     // destroy first, so that our _value trick can work
@@ -366,7 +378,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
       _timer = Timer(kMobileDelaySoftKeyboardFocus, () {
         SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual,
             overlays: SystemUiOverlay.values);
-        _mobileFocusNode.requestFocus();
+        _requestMobileSoftKeyboard();
       });
     });
   }
@@ -547,10 +559,6 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
             const ImagePaint(),
             PositionedQualityMonitor(
                 qualityMonitorModel: gFFI.qualityMonitorModel),
-            KeyHelpTools(
-                keyboardIsVisible: keyboardIsVisible,
-                showGestureHelp: _showGestureHelp,
-                quickKeyOrder: _quickKeyOrder),
             SizedBox(
               width: 0,
               height: 0,
@@ -604,6 +612,18 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
               ),
             );
           }
+          paints.add(
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: KeyHelpTools(
+                keyboardIsVisible: keyboardIsVisible,
+                showGestureHelp: _showGestureHelp,
+                quickKeyOrder: _quickKeyOrder,
+              ),
+            ),
+          );
           if (_showCustomButtonEditor) {
             paints.add(
               Positioned.fill(child: _buildCustomButtonEditor(context)),

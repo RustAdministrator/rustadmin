@@ -54,6 +54,15 @@ void main() {
       find.byKey(const Key('mobile-remote-toolbar-opacity')),
     );
     expect(opacity.opacity, 0.2);
+    expect(opacity.duration, const Duration(seconds: 3));
+
+    await tester.tap(find.byTooltip('Display and session options'));
+    await tester.pump();
+    final restoredOpacity = tester.widget<AnimatedOpacity>(
+      find.byKey(const Key('mobile-remote-toolbar-opacity')),
+    );
+    expect(restoredOpacity.opacity, 1.0);
+    expect(restoredOpacity.duration, Duration.zero);
   });
 
   testWidgets('quick keys stay in one square scrollable row', (tester) async {

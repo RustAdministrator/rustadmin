@@ -2022,6 +2022,7 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       ['⇧', 'Z', 'X', 'C', 'V', 'B', 'N', 'M', '⌫'],
     ];
     return Material(
+      key: const Key('mobile-lab-system-keyboard'),
       color: Theme.of(context).colorScheme.surfaceContainerHigh,
       elevation: 8,
       child: Padding(

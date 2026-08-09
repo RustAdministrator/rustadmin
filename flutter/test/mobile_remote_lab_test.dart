@@ -416,6 +416,14 @@ void main() {
           .opacity,
       closeTo(0.2, 0.001),
     );
+    expect(
+      tester
+          .widget<AnimatedOpacity>(
+            find.byKey(const Key('mobile-remote-toolbar-opacity')),
+          )
+          .duration,
+      const Duration(seconds: 3),
+    );
 
     await tester.tap(find.byTooltip('Display and session options'));
     await tester.pump();
@@ -426,6 +434,14 @@ void main() {
           )
           .opacity,
       1.0,
+    );
+    expect(
+      tester
+          .widget<AnimatedOpacity>(
+            find.byKey(const Key('mobile-remote-toolbar-opacity')),
+          )
+          .duration,
+      Duration.zero,
     );
   });
 
@@ -594,6 +610,10 @@ void main() {
     final strip = tester.getRect(
       find.byKey(const Key('mobile-remote-key-help-tools')),
     );
+    final systemKeyboard = tester.getRect(
+      find.byKey(const Key('mobile-lab-system-keyboard')),
+    );
+    expect(strip.bottom, closeTo(systemKeyboard.top, 0.01));
     final stripSurface = tester.widget<Container>(
       find.byKey(const Key('mobile-remote-key-help-strip')),
     );
