@@ -137,11 +137,6 @@ class _MobileCustomImageQualityControlsState
         ? kCustomFpsModeFixed
         : kCustomFpsModeAdaptive;
     try {
-      await bind.sessionPeerOption(
-        sessionId: _sessionId,
-        name: kOptionCustomFpsMode,
-        value: _fpsMode,
-      );
       await bind.sessionSetCustomFps(
         sessionId: _sessionId,
         fps: _fpsForMode(_fps),

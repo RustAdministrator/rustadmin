@@ -108,6 +108,12 @@ pub const SEC30: Duration = Duration::from_secs(30);
 pub const VIDEO_QUEUE_SIZE: usize = 120;
 const VIDEO_FEEDBACK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 const MAX_DECODE_FAIL_COUNTER: usize = 3;
+const DEFAULT_CUSTOM_IMAGE_QUALITY: i32 = 50;
+const MIN_CUSTOM_IMAGE_QUALITY: i32 = 10;
+const MAX_CUSTOM_IMAGE_QUALITY: i32 = 0xFFF;
+const DEFAULT_CUSTOM_FPS: i32 = 30;
+const MIN_CUSTOM_FPS: i32 = 5;
+const MAX_CUSTOM_FPS: i32 = 120;
 #[cfg(feature = "quic-transport")]
 const AUTO_QUIC_RACE_TIMEOUT: Duration = Duration::from_millis(1_500);
 
@@ -3282,36 +3288,29 @@ impl LoginConfigHandler {
             }
         }
         let q = self.image_quality.clone();
-        if let Some(q) = self.get_image_quality_enum(&q, ignore_default) {
-            msg.image_quality = q.into();
-        } else if q == "custom" {
-            let config = self.load_config();
-            let allow_more = !crate::using_public_server() || self.direct == Some(true);
-            let quality = if config.custom_image_quality.is_empty() {
-                50
-            } else {
-                let mut quality = config.custom_image_quality[0];
-                if !allow_more && quality > 100 {
-                    quality = 50;
-                }
-                quality
-            };
-            msg.custom_image_quality = quality << 8;
-            #[cfg(feature = "flutter")]
-            if let Some(custom_fps) = self.options.get("custom-fps") {
-                let mut custom_fps = custom_fps.parse().unwrap_or(30);
-                if !allow_more && custom_fps > 30 {
-                    custom_fps = 30;
-                }
-                let fixed_fps = self.get_option(keys::OPTION_CUSTOM_FPS_MODE) == "fixed";
-                msg.custom_fps = if fixed_fps { -custom_fps } else { custom_fps };
+        let allow_more = !crate::using_public_server() || self.direct == Some(true);
+        if let Some(profile) =
+            Self::image_quality_option_for_config(&self.config, &q, ignore_default, allow_more)
+        {
+            msg.image_quality = profile.image_quality;
+            msg.custom_image_quality = profile.custom_image_quality;
+            msg.custom_fps = profile.custom_fps;
+            if q == "custom" {
+                let custom_fps = profile
+                    .custom_fps
+                    .checked_abs()
+                    .unwrap_or(DEFAULT_CUSTOM_FPS) as usize;
                 log::info!(
                     "custom_fps initial option send: mode={}, fps={}, wire={}",
-                    if fixed_fps { "fixed" } else { "adaptive" },
+                    if profile.custom_fps < 0 {
+                        "fixed"
+                    } else {
+                        "adaptive"
+                    },
                     custom_fps,
-                    msg.custom_fps
+                    profile.custom_fps
                 );
-                *self.custom_fps.lock().unwrap() = Some(custom_fps as _);
+                *self.custom_fps.lock().unwrap() = Some(custom_fps);
             }
         }
         let capture_backend = self.get_option(keys::OPTION_CAPTURE_BACKEND);
@@ -3388,7 +3387,7 @@ impl LoginConfigHandler {
     ///
     /// * `q` - The image quality option.
     /// * `ignore_default` - Ignore the default value.
-    fn get_image_quality_enum(&self, q: &str, ignore_default: bool) -> Option<ImageQuality> {
+    fn get_image_quality_enum(q: &str, ignore_default: bool) -> Option<ImageQuality> {
         if q == "low" {
             Some(ImageQuality::Low)
         } else if q == "best" {
@@ -3402,6 +3401,67 @@ impl LoginConfigHandler {
         } else {
             None
         }
+    }
+
+    fn image_quality_option_for_config(
+        config: &PeerConfig,
+        value: &str,
+        ignore_default: bool,
+        allow_more: bool,
+    ) -> Option<OptionMessage> {
+        if let Some(q) = Self::get_image_quality_enum(value, ignore_default) {
+            return Some(OptionMessage {
+                image_quality: q.into(),
+                custom_fps: if ignore_default {
+                    0
+                } else {
+                    DEFAULT_CUSTOM_FPS
+                },
+                ..Default::default()
+            });
+        }
+        if value != "custom" {
+            return None;
+        }
+
+        let mut quality = config
+            .custom_image_quality
+            .first()
+            .copied()
+            .unwrap_or(DEFAULT_CUSTOM_IMAGE_QUALITY)
+            .clamp(MIN_CUSTOM_IMAGE_QUALITY, MAX_CUSTOM_IMAGE_QUALITY);
+        if !allow_more && quality > 100 {
+            quality = DEFAULT_CUSTOM_IMAGE_QUALITY;
+        }
+
+        let mut custom_fps = config
+            .options
+            .get(keys::OPTION_CUSTOM_FPS)
+            .and_then(|value| value.parse::<i32>().ok())
+            .and_then(i32::checked_abs)
+            .unwrap_or(DEFAULT_CUSTOM_FPS)
+            .clamp(MIN_CUSTOM_FPS, MAX_CUSTOM_FPS);
+        if !allow_more && custom_fps > DEFAULT_CUSTOM_FPS {
+            custom_fps = DEFAULT_CUSTOM_FPS;
+        }
+        let fixed_fps = config
+            .options
+            .get(keys::OPTION_CUSTOM_FPS_MODE)
+            .is_some_and(|mode| mode == "fixed");
+
+        Some(OptionMessage {
+            custom_image_quality: quality << 8,
+            custom_fps: if fixed_fps { -custom_fps } else { custom_fps },
+            ..Default::default()
+        })
+    }
+
+    fn message_with_option(option: OptionMessage) -> Message {
+        let mut misc = Misc::new();
+        misc.set_option(option);
+        let mut msg = Message::new();
+        msg.set_misc(misc);
+        msg
     }
 
     /// Get the status of a toggle option.
@@ -3475,21 +3535,19 @@ impl LoginConfigHandler {
     ///
     /// # Arguments
     ///
-    /// * `bitrate` - The given bitrate.
-    /// * `quantizer` - The given quantizer.
-    pub fn save_custom_image_quality(&mut self, image_quality: i32) -> Message {
-        let mut misc = Misc::new();
-        misc.set_option(OptionMessage {
-            custom_image_quality: image_quality << 8,
-            ..Default::default()
-        });
-        let mut msg_out = Message::new();
-        msg_out.set_misc(misc);
+    /// * `image_quality` - The custom bitrate percentage.
+    pub fn save_custom_image_quality(&mut self, image_quality: i32) -> Option<Message> {
+        let image_quality = image_quality.clamp(MIN_CUSTOM_IMAGE_QUALITY, MAX_CUSTOM_IMAGE_QUALITY);
         let mut config = self.load_config();
-        config.image_quality = "custom".to_owned();
         config.custom_image_quality = vec![image_quality as _];
         self.save_config(config);
-        msg_out
+        if self.image_quality != "custom" {
+            return None;
+        }
+
+        let allow_more = !crate::using_public_server() || self.direct == Some(true);
+        Self::image_quality_option_for_config(&self.config, "custom", false, allow_more)
+            .map(Self::message_with_option)
     }
 
     /// Save the given image quality to the config.
@@ -3498,21 +3556,18 @@ impl LoginConfigHandler {
     ///
     /// * `value` - The image quality.
     pub fn save_image_quality(&mut self, value: String) -> Option<Message> {
-        let mut res = None;
-        if let Some(q) = self.get_image_quality_enum(&value, false) {
-            let mut misc = Misc::new();
-            misc.set_option(OptionMessage {
-                image_quality: q.into(),
-                ..Default::default()
-            });
-            let mut msg_out = Message::new();
-            msg_out.set_misc(misc);
-            res = Some(msg_out);
-        }
         let mut config = self.load_config();
+        let allow_more = !crate::using_public_server() || self.direct == Some(true);
+        let option = Self::image_quality_option_for_config(&config, &value, false, allow_more)?;
         config.image_quality = value;
         self.save_config(config);
-        res
+        let active_fps = option
+            .custom_fps
+            .checked_abs()
+            .unwrap_or(DEFAULT_CUSTOM_FPS) as usize;
+        *self.custom_fps.lock().unwrap() = Some(active_fps);
+        self.last_auto_fps = None;
+        Some(Self::message_with_option(option))
     }
 
     pub fn save_trackpad_speed(&mut self, speed: i32) {
@@ -3526,32 +3581,38 @@ impl LoginConfigHandler {
     /// # Arguments
     ///
     /// * `fps` - The given fps.
-    /// * `save_config` - Save the config.
-    pub fn set_custom_fps(&mut self, fps: i32, save_config: bool) -> Message {
-        let custom_fps = fps.checked_abs().unwrap_or(30).clamp(5, 120);
+    pub fn set_custom_fps(&mut self, fps: i32) -> Option<Message> {
+        let custom_fps = fps
+            .checked_abs()
+            .unwrap_or(DEFAULT_CUSTOM_FPS)
+            .clamp(MIN_CUSTOM_FPS, MAX_CUSTOM_FPS);
         let wire_custom_fps = if fps < 0 { -custom_fps } else { custom_fps };
-        let mut misc = Misc::new();
-        misc.set_option(OptionMessage {
-            custom_fps: wire_custom_fps,
-            ..Default::default()
-        });
+        let mut config = self.load_config();
+        let is_custom_profile = config.image_quality == "custom";
+        config
+            .options
+            .insert(keys::OPTION_CUSTOM_FPS.to_owned(), custom_fps.to_string());
+        config.options.insert(
+            keys::OPTION_CUSTOM_FPS_MODE.to_owned(),
+            if fps < 0 { "fixed" } else { "adaptive" }.to_owned(),
+        );
+        self.save_config(config);
+        if !is_custom_profile {
+            return None;
+        }
+
         log::info!(
             "custom_fps option send: mode={}, fps={}, wire={}",
             if fps < 0 { "fixed" } else { "adaptive" },
             custom_fps,
             wire_custom_fps
         );
-        let mut msg_out = Message::new();
-        msg_out.set_misc(misc);
-        if save_config {
-            let mut config = self.load_config();
-            config
-                .options
-                .insert("custom-fps".to_owned(), custom_fps.to_string());
-            self.save_config(config);
-        }
         *self.custom_fps.lock().unwrap() = Some(custom_fps as _);
-        msg_out
+        self.last_auto_fps = None;
+        Some(Self::message_with_option(OptionMessage {
+            custom_fps: wire_custom_fps,
+            ..Default::default()
+        }))
     }
 
     pub fn set_capture_backend(&mut self, value: String, save_config: bool) -> Message {
@@ -5647,6 +5708,91 @@ mod video_feedback_tests {
         assert_eq!(reset.stream_id, 8);
         assert_eq!(reset.received_frame_id, 1);
         assert_eq!(reset.dropped_frames, 0);
+    }
+}
+
+#[cfg(test)]
+mod quality_profile_tests {
+    use super::*;
+
+    fn custom_config(quality: i32, fps: i32, mode: &str) -> PeerConfig {
+        let mut config = PeerConfig::default();
+        config.image_quality = "custom".to_owned();
+        config.custom_image_quality = vec![quality];
+        config
+            .options
+            .insert(keys::OPTION_CUSTOM_FPS.to_owned(), fps.to_string());
+        config
+            .options
+            .insert(keys::OPTION_CUSTOM_FPS_MODE.to_owned(), mode.to_owned());
+        config
+    }
+
+    #[test]
+    fn custom_profile_is_sent_as_one_complete_option() {
+        let config = custom_config(125, 15, "fixed");
+
+        let option =
+            LoginConfigHandler::image_quality_option_for_config(&config, "custom", false, true)
+                .unwrap();
+
+        assert_eq!(option.image_quality.enum_value(), Ok(ImageQuality::NotSet));
+        assert_eq!(option.custom_image_quality, 125 << 8);
+        assert_eq!(option.custom_fps, -15);
+    }
+
+    #[test]
+    fn preset_profile_carries_legacy_adaptive_fps_reset() {
+        let config = custom_config(125, 15, "fixed");
+
+        let option =
+            LoginConfigHandler::image_quality_option_for_config(&config, "best", false, true)
+                .unwrap();
+
+        assert_eq!(option.image_quality.enum_value(), Ok(ImageQuality::Best));
+        assert_eq!(option.custom_image_quality, 0);
+        assert_eq!(option.custom_fps, DEFAULT_CUSTOM_FPS);
+        assert_eq!(config.custom_image_quality, vec![125]);
+        assert_eq!(
+            config
+                .options
+                .get(keys::OPTION_CUSTOM_FPS_MODE)
+                .map(String::as_str),
+            Some("fixed")
+        );
+    }
+
+    #[test]
+    fn default_balanced_profile_can_stay_implicit_on_login() {
+        let config = custom_config(125, 15, "fixed");
+
+        assert!(LoginConfigHandler::image_quality_option_for_config(
+            &config, "balanced", true, true,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn restricted_path_clamps_custom_values_without_rewriting_saved_values() {
+        let config = custom_config(200, 120, "adaptive");
+
+        let option =
+            LoginConfigHandler::image_quality_option_for_config(&config, "custom", false, false)
+                .unwrap();
+
+        assert_eq!(
+            option.custom_image_quality,
+            DEFAULT_CUSTOM_IMAGE_QUALITY << 8
+        );
+        assert_eq!(option.custom_fps, DEFAULT_CUSTOM_FPS);
+        assert_eq!(config.custom_image_quality, vec![200]);
+        assert_eq!(
+            config
+                .options
+                .get(keys::OPTION_CUSTOM_FPS)
+                .map(String::as_str),
+            Some("120")
+        );
     }
 }
 

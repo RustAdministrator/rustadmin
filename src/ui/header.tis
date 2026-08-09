@@ -472,7 +472,11 @@ function handle_custom_image_quality() {
             return;
         }
         if (!res.bitrate) return;
+        var wasCustom = handler.get_image_quality() == "custom";
         handler.save_custom_image_quality(res.bitrate);
+        if (!wasCustom) {
+            handler.save_image_quality("custom");
+        }
         toggleMenuState();
       });
 }

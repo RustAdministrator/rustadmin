@@ -625,8 +625,8 @@ impl<T: InvokeUiSession> Remote<T> {
                                 Some(self.video_format.clone())
                             };
                             let lc = self.handler.lc.read().unwrap();
-                            let fixed_fps =
-                                lc.get_option(config::keys::OPTION_CUSTOM_FPS_MODE) == "fixed";
+                            let fixed_fps = lc.image_quality == "custom"
+                                && lc.get_option(config::keys::OPTION_CUSTOM_FPS_MODE) == "fixed";
                             let fps_mode = if fixed_fps { "fixed" } else { "adaptive" }.to_owned();
                             let auto_fps = if fixed_fps { None } else { lc.last_auto_fps };
                             drop(lc);
@@ -1663,16 +1663,19 @@ impl<T: InvokeUiSession> Remote<T> {
                 v.fps_control.inactive_counter = 0;
             }
         });
-        let fixed_fps = self
-            .handler
-            .lc
-            .read()
-            .unwrap()
-            .get_option(config::keys::OPTION_CUSTOM_FPS_MODE)
-            == "fixed";
-        let custom_fps = self.handler.lc.read().unwrap().custom_fps.clone();
+        let lc = self.handler.lc.read().unwrap();
+        let custom_profile = lc.image_quality == "custom";
+        let fixed_fps =
+            custom_profile && lc.get_option(config::keys::OPTION_CUSTOM_FPS_MODE) == "fixed";
+        let custom_fps = lc.custom_fps.clone();
+        let last_auto_fps = lc.last_auto_fps;
+        drop(lc);
         let custom_fps = custom_fps.lock().unwrap().clone();
-        let mut custom_fps = custom_fps.unwrap_or(30);
+        let mut custom_fps = if custom_profile {
+            custom_fps.unwrap_or(30)
+        } else {
+            30
+        };
         if custom_fps < 5 || custom_fps > 120 {
             custom_fps = 30;
         }
@@ -1683,7 +1686,6 @@ impl<T: InvokeUiSession> Remote<T> {
             .map(|v| v.1.video_queue.read().unwrap().len())
             .max()
             .unwrap_or_default();
-        let last_auto_fps = self.handler.lc.read().unwrap().last_auto_fps;
         let min_decode_fps = self
             .video_threads
             .iter()

@@ -512,21 +512,15 @@ impl<T: InvokeUiSession> Session<T> {
             .write()
             .unwrap()
             .save_custom_image_quality(custom_image_quality);
-        self.send(Data::Message(msg));
-    }
-
-    pub fn save_image_quality(&self, value: String) {
-        let msg = self.lc.write().unwrap().save_image_quality(value.clone());
         if let Some(msg) = msg {
             self.send(Data::Message(msg));
         }
-        if value != "custom" {
-            let last_auto_fps = self.lc.read().unwrap().last_auto_fps;
-            if last_auto_fps.unwrap_or(usize::MAX) >= 30 {
-                // non custom quality use 30 fps
-                let msg = self.lc.write().unwrap().set_custom_fps(30, false);
-                self.send(Data::Message(msg));
-            }
+    }
+
+    pub fn save_image_quality(&self, value: String) {
+        let msg = self.lc.write().unwrap().save_image_quality(value);
+        if let Some(msg) = msg {
+            self.send(Data::Message(msg));
         }
     }
 
@@ -535,8 +529,10 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     pub fn set_custom_fps(&self, custom_fps: i32) {
-        let msg = self.lc.write().unwrap().set_custom_fps(custom_fps, true);
-        self.send(Data::Message(msg));
+        let msg = self.lc.write().unwrap().set_custom_fps(custom_fps);
+        if let Some(msg) = msg {
+            self.send(Data::Message(msg));
+        }
     }
 
     pub fn set_capture_backend(&self, value: String) {

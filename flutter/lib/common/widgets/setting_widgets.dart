@@ -6,57 +6,195 @@ import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:get/get.dart';
 
-customImageQualityWidget(
-    {required double initQuality,
-    required double initFps,
-    required String initFpsMode,
-    required Function(double)? setQuality,
-    required Function(double)? setFps,
-    required Function(String)? setFpsMode,
-    required bool showFps,
-    required bool showMoreQuality}) {
-  if (initQuality < kMinQuality ||
-      initQuality > (showMoreQuality ? kMaxMoreQuality : kMaxQuality)) {
-    initQuality = kDefaultQuality;
-  }
-  if (initFps < kMinFps || initFps > kMaxFps) {
-    initFps = kDefaultFps;
-  }
-  final qualityValue = initQuality.obs;
-  final fpsValue = initFps.obs;
-  final fpsModeValue = (initFpsMode == kCustomFpsModeFixed
-          ? initFpsMode
-          : kCustomFpsModeAdaptive)
-      .obs;
-
-  final RxBool moreQualityChecked = RxBool(qualityValue.value > kMaxQuality);
-  final debouncerQuality = Debouncer<double>(
-    Duration(milliseconds: 1000),
-    onChanged: setQuality,
-    initialValue: qualityValue.value,
+Widget customImageQualityWidget({
+  required double initQuality,
+  required double initFps,
+  required String initFpsMode,
+  required Function(double)? setQuality,
+  required Function(double)? setFps,
+  required Function(String)? setFpsMode,
+  required bool showFps,
+  required bool showMoreQuality,
+}) {
+  return CustomImageQualityWidget(
+    initQuality: initQuality,
+    initFps: initFps,
+    initFpsMode: initFpsMode,
+    setQuality: setQuality,
+    setFps: setFps,
+    setFpsMode: setFpsMode,
+    showFps: showFps,
+    showMoreQuality: showMoreQuality,
   );
-  final debouncerFps = Debouncer<double>(
-    Duration(milliseconds: 1000),
-    onChanged: setFps,
-    initialValue: fpsValue.value,
-  );
+}
 
-  onMoreChanged(bool? value) {
-    if (value == null) return;
-    moreQualityChecked.value = value;
-    if (!value && qualityValue.value > 100) {
-      qualityValue.value = 100;
+class CustomImageQualityWidget extends StatefulWidget {
+  const CustomImageQualityWidget({
+    super.key,
+    required this.initQuality,
+    required this.initFps,
+    required this.initFpsMode,
+    required this.setQuality,
+    required this.setFps,
+    required this.setFpsMode,
+    required this.showFps,
+    required this.showMoreQuality,
+    this.translateText,
+  });
+
+  final double initQuality;
+  final double initFps;
+  final String initFpsMode;
+  final Function(double)? setQuality;
+  final Function(double)? setFps;
+  final Function(String)? setFpsMode;
+  final bool showFps;
+  final bool showMoreQuality;
+  final String Function(String)? translateText;
+
+  @override
+  State<CustomImageQualityWidget> createState() =>
+      _CustomImageQualityWidgetState();
+}
+
+class _CustomImageQualityWidgetState extends State<CustomImageQualityWidget> {
+  late final RxDouble _qualityValue;
+  late final RxDouble _fpsValue;
+  late final RxString _fpsModeValue;
+  late final RxBool _moreQualityChecked;
+  late Debouncer<double> _debouncerQuality;
+  late Debouncer<double> _debouncerFps;
+
+  double _normalizedQuality(double value, bool showMoreQuality) {
+    if (value < kMinQuality ||
+        value > (showMoreQuality ? kMaxMoreQuality : kMaxQuality)) {
+      return kDefaultQuality;
     }
-    debouncerQuality.value = qualityValue.value;
+    return value;
   }
 
-  return Column(
-    children: [
-      Obx(() => Row(
+  double _normalizedFps(double value) {
+    if (value < kMinFps || value > kMaxFps) {
+      return kDefaultFps;
+    }
+    return value;
+  }
+
+  Debouncer<double> _qualityDebouncer(double initialValue) {
+    return Debouncer<double>(
+      const Duration(milliseconds: 1000),
+      onChanged: (value) {
+        if (mounted) {
+          widget.setQuality?.call(value);
+        }
+      },
+      initialValue: initialValue,
+    );
+  }
+
+  Debouncer<double> _fpsDebouncer(double initialValue) {
+    return Debouncer<double>(
+      const Duration(milliseconds: 1000),
+      onChanged: (value) {
+        if (mounted) {
+          widget.setFps?.call(value);
+        }
+      },
+      initialValue: initialValue,
+    );
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    final quality = _normalizedQuality(
+      widget.initQuality,
+      widget.showMoreQuality,
+    );
+    final fps = _normalizedFps(widget.initFps);
+    _qualityValue = quality.obs;
+    _fpsValue = fps.obs;
+    _fpsModeValue =
+        (widget.initFpsMode == kCustomFpsModeFixed
+                ? kCustomFpsModeFixed
+                : kCustomFpsModeAdaptive)
+            .obs;
+    _moreQualityChecked = RxBool(quality > kMaxQuality);
+    _debouncerQuality = _qualityDebouncer(quality);
+    _debouncerFps = _fpsDebouncer(fps);
+  }
+
+  @override
+  void didUpdateWidget(covariant CustomImageQualityWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.initQuality != widget.initQuality ||
+        oldWidget.showMoreQuality != widget.showMoreQuality) {
+      final quality = _normalizedQuality(
+        widget.initQuality,
+        widget.showMoreQuality,
+      );
+      _debouncerQuality.cancel();
+      _debouncerQuality = _qualityDebouncer(quality);
+      _qualityValue.value = quality;
+      _moreQualityChecked.value = quality > kMaxQuality;
+    }
+    if (oldWidget.initFps != widget.initFps) {
+      final fps = _normalizedFps(widget.initFps);
+      _debouncerFps.cancel();
+      _debouncerFps = _fpsDebouncer(fps);
+      _fpsValue.value = fps;
+    }
+    if (oldWidget.initFpsMode != widget.initFpsMode) {
+      _fpsModeValue.value = widget.initFpsMode == kCustomFpsModeFixed
+          ? kCustomFpsModeFixed
+          : kCustomFpsModeAdaptive;
+    }
+  }
+
+  @override
+  void dispose() {
+    _debouncerQuality.cancel();
+    _debouncerFps.cancel();
+    _qualityValue.close();
+    _fpsValue.close();
+    _fpsModeValue.close();
+    _moreQualityChecked.close();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final qualityValue = _qualityValue;
+    final fpsValue = _fpsValue;
+    final fpsModeValue = _fpsModeValue;
+    final moreQualityChecked = _moreQualityChecked;
+    final debouncerQuality = _debouncerQuality;
+    final debouncerFps = _debouncerFps;
+    final setQuality = widget.setQuality;
+    final setFps = widget.setFps;
+    final setFpsMode = widget.setFpsMode;
+    final showFps = widget.showFps;
+    final showMoreQuality = widget.showMoreQuality;
+    final translateText = widget.translateText ?? translate;
+
+    void onMoreChanged(bool? value) {
+      if (value == null) return;
+      moreQualityChecked.value = value;
+      if (!value && qualityValue.value > 100) {
+        qualityValue.value = 100;
+      }
+      debouncerQuality.value = qualityValue.value;
+    }
+
+    return Column(
+      children: [
+        Obx(
+          () => Row(
             children: [
               Expanded(
                 flex: 3,
                 child: Slider(
+                  key: const Key('custom-image-quality-slider'),
                   value: qualityValue.value,
                   min: kMinQuality,
                   max: moreQualityChecked.value ? kMaxMoreQuality : kMaxQuality,
@@ -72,36 +210,39 @@ customImageQualityWidget(
                 ),
               ),
               Expanded(
-                  flex: 1,
-                  child: Text(
-                    '${qualityValue.value.round()}%',
-                    style: const TextStyle(fontSize: 15),
-                  )),
+                flex: 1,
+                child: Text(
+                  '${qualityValue.value.round()}%',
+                  style: const TextStyle(fontSize: 15),
+                ),
+              ),
               Expanded(
-                  flex: isMobile ? 2 : 1,
-                  child: Text(
-                    translate('Bitrate'),
-                    style: const TextStyle(fontSize: 15),
-                  )),
+                flex: isMobile ? 2 : 1,
+                child: Text(
+                  translateText('Bitrate'),
+                  style: const TextStyle(fontSize: 15),
+                ),
+              ),
               // mobile doesn't have enough space
               if (showMoreQuality && !isMobile)
                 Expanded(
-                    flex: 1,
-                    child: Row(
-                      children: [
-                        Checkbox(
-                          value: moreQualityChecked.value,
-                          onChanged: onMoreChanged,
-                        ),
-                        Expanded(
-                          child: Text(translate('More')),
-                        )
-                      ],
-                    ))
+                  flex: 1,
+                  child: Row(
+                    children: [
+                      Checkbox(
+                        value: moreQualityChecked.value,
+                        onChanged: onMoreChanged,
+                      ),
+                      Expanded(child: Text(translateText('More'))),
+                    ],
+                  ),
+                ),
             ],
-          )),
-      if (showMoreQuality && isMobile)
-        Obx(() => Row(
+          ),
+        ),
+        if (showMoreQuality && isMobile)
+          Obx(
+            () => Row(
               children: [
                 Expanded(
                   child: Align(
@@ -112,19 +253,20 @@ customImageQualityWidget(
                     ),
                   ),
                 ),
-                Expanded(
-                  child: Text(translate('More')),
-                )
+                Expanded(child: Text(translateText('More'))),
               ],
-            )),
-      if (showFps)
-        Column(
-          children: [
-            Obx(() => Row(
+            ),
+          ),
+        if (showFps)
+          Column(
+            children: [
+              Obx(
+                () => Row(
                   children: [
                     Expanded(
                       flex: 3,
                       child: Slider(
+                        key: const Key('custom-image-fps-slider'),
                         value: fpsValue.value,
                         min: kMinFps,
                         max: kMaxFps,
@@ -138,106 +280,113 @@ customImageQualityWidget(
                       ),
                     ),
                     Expanded(
-                        flex: 1,
-                        child: Text(
-                          '${fpsValue.value.round()}',
-                          style: const TextStyle(fontSize: 15),
-                        )),
-                    Expanded(
-                        flex: 2,
-                        child: Text(
-                          translate('FPS'),
-                          style: const TextStyle(fontSize: 15),
-                        ))
-                  ],
-                )),
-            Obx(() {
-              void selectFpsMode(String value) {
-                fpsModeValue.value = value;
-                setFpsMode?.call(value);
-              }
-
-              if (isMobile) {
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      translate('FPS mode'),
-                      style: const TextStyle(fontSize: 15),
+                      flex: 1,
+                      child: Text(
+                        '${fpsValue.value.round()}',
+                        style: const TextStyle(fontSize: 15),
+                      ),
                     ),
-                    const SizedBox(height: 6),
-                    SizedBox(
-                      width: double.infinity,
-                      child: SegmentedButton<String>(
-                        expandedInsets: EdgeInsets.zero,
-                        showSelectedIcon: false,
-                        segments: [
-                          ButtonSegment(
+                    Expanded(
+                      flex: 2,
+                      child: Text(
+                        translateText('FPS'),
+                        style: const TextStyle(fontSize: 15),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Obx(() {
+                void selectFpsMode(String value) {
+                  fpsModeValue.value = value;
+                  setFpsMode?.call(value);
+                }
+
+                if (isMobile) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        translateText('FPS mode'),
+                        style: const TextStyle(fontSize: 15),
+                      ),
+                      const SizedBox(height: 6),
+                      SizedBox(
+                        width: double.infinity,
+                        child: SegmentedButton<String>(
+                          key: const Key('custom-image-fps-mode-segmented'),
+                          expandedInsets: EdgeInsets.zero,
+                          showSelectedIcon: false,
+                          segments: [
+                            ButtonSegment(
+                              value: kCustomFpsModeAdaptive,
+                              label: Text(
+                                translateText('Adaptive FPS cap'),
+                                maxLines: 2,
+                                textAlign: TextAlign.center,
+                              ),
+                            ),
+                            ButtonSegment(
+                              value: kCustomFpsModeFixed,
+                              label: Text(
+                                translateText('Fixed FPS'),
+                                maxLines: 2,
+                                textAlign: TextAlign.center,
+                              ),
+                            ),
+                          ],
+                          selected: {fpsModeValue.value},
+                          onSelectionChanged: setFpsMode == null
+                              ? null
+                              : (values) => selectFpsMode(values.first),
+                        ),
+                      ),
+                    ],
+                  );
+                }
+
+                return Row(
+                  children: [
+                    Expanded(
+                      flex: 1,
+                      child: Text(
+                        translateText('FPS mode'),
+                        style: const TextStyle(fontSize: 15),
+                      ),
+                    ),
+                    Expanded(
+                      flex: 3,
+                      child: DropdownButton<String>(
+                        key: const Key('custom-image-fps-mode-dropdown'),
+                        value: fpsModeValue.value,
+                        isExpanded: true,
+                        onChanged: setFpsMode == null
+                            ? null
+                            : (value) {
+                                if (value != null) {
+                                  selectFpsMode(value);
+                                }
+                              },
+                        items: [
+                          DropdownMenuItem(
                             value: kCustomFpsModeAdaptive,
-                            label: Text(
-                              translate('Adaptive FPS cap'),
-                              maxLines: 2,
-                              textAlign: TextAlign.center,
-                            ),
+                            child: Text(translateText('Adaptive FPS cap')),
                           ),
-                          ButtonSegment(
+                          DropdownMenuItem(
                             value: kCustomFpsModeFixed,
-                            label: Text(
-                              translate('Fixed FPS'),
-                              maxLines: 2,
-                              textAlign: TextAlign.center,
-                            ),
+                            child: Text(translateText('Fixed FPS')),
                           ),
                         ],
-                        selected: {fpsModeValue.value},
-                        onSelectionChanged: setFpsMode == null
-                            ? null
-                            : (values) => selectFpsMode(values.first),
                       ),
                     ),
                   ],
                 );
-              }
-
-              return Row(
-                children: [
-                  Expanded(
-                      flex: 1,
-                      child: Text(
-                        translate('FPS mode'),
-                        style: const TextStyle(fontSize: 15),
-                      )),
-                  Expanded(
-                    flex: 3,
-                    child: DropdownButton<String>(
-                      value: fpsModeValue.value,
-                      isExpanded: true,
-                      onChanged: setFpsMode == null
-                          ? null
-                          : (value) {
-                              if (value != null) {
-                                selectFpsMode(value);
-                              }
-                            },
-                      items: [
-                        DropdownMenuItem(
-                          value: kCustomFpsModeAdaptive,
-                          child: Text(translate('Adaptive FPS cap')),
-                        ),
-                        DropdownMenuItem(
-                          value: kCustomFpsModeFixed,
-                          child: Text(translate('Fixed FPS')),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              );
-            }),
-          ],
-        ),
-    ],
-  );
+              }),
+            ],
+          ),
+      ],
+    );
+  }
 }
 
 customImageQualitySetting() {

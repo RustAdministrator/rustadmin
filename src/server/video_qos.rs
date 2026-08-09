@@ -399,6 +399,18 @@ impl VideoQoS {
         }
     }
 
+    pub fn user_preset_image_quality(&mut self, id: i32, image_quality: i32) {
+        if let Some(user) = self.users.get_mut(&id) {
+            user.custom_fps = None;
+            user.fixed_fps = None;
+            user.auto_adjust_fps = None;
+        } else {
+            return;
+        }
+        self.user_image_quality(id, image_quality);
+        self.adjust_displays_for_user(id);
+    }
+
     pub fn user_record(&mut self, id: i32, v: bool) {
         if let Some(user) = self.users.get_mut(&id) {
             user.record = v;
@@ -903,6 +915,36 @@ mod tests {
         assert!(!qos.startup_safe_mode(MONITOR_SERVICE));
         assert_eq!(qos.ratio(MONITOR_SERVICE), BR_BALANCED);
         assert_eq!(qos.fps(MONITOR_SERVICE), 30);
+    }
+
+    #[test]
+    fn preset_quality_clears_custom_fps_state() {
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
+        qos.user_fixed_fps(1, 60);
+        qos.user_auto_adjust_fps(1, 20);
+
+        qos.user_preset_image_quality(1, ImageQuality::Balanced.value());
+
+        let user = qos.users.get(&1).unwrap();
+        assert_eq!(user.custom_fps, None);
+        assert_eq!(user.fixed_fps, None);
+        assert_eq!(user.auto_adjust_fps, None);
+        assert_eq!(
+            user.quality.map(|(_, quality)| quality),
+            Some(Quality::Balanced)
+        );
+    }
+
+    #[test]
+    fn custom_quality_keeps_custom_fps_state() {
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
+        qos.user_fixed_fps(1, 60);
+
+        qos.user_image_quality(1, 75 << 8);
+
+        let user = qos.users.get(&1).unwrap();
+        assert_eq!(user.custom_fps, Some(60));
+        assert_eq!(user.fixed_fps, Some(60));
     }
 
     #[test]
