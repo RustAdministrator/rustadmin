@@ -1,11 +1,22 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  Future<void> pumpToolbar(WidgetTester tester) => tester.pumpWidget(
+  Future<void> pumpToolbar(
+    WidgetTester tester, {
+    ThemeData? theme,
+    MobileRemoteToolbarFadeSettings fadeSettings =
+        MobileRemoteToolbarFadeSettings.defaults,
+  }) => tester.pumpWidget(
     MaterialApp(
+      theme: theme,
+      darkTheme: theme,
+      themeMode: theme?.brightness == Brightness.dark
+          ? ThemeMode.dark
+          : ThemeMode.light,
       home: Scaffold(
         body: SizedBox(
           width: 320,
@@ -20,11 +31,82 @@ void main() {
             peerIsAndroid: false,
             touchMode: true,
             waitForFirstImage: false,
+            fadeSettings: fadeSettings,
           ),
         ),
       ),
     ),
   );
+
+  testWidgets('toolbar uses theme surface and icon-colored outline', (
+    tester,
+  ) async {
+    await pumpToolbar(tester, theme: ThemeData.dark());
+    await tester.pumpAndSettle();
+    var material = tester.widget<Material>(
+      find.byKey(const Key('mobile-remote-floating-toolbar')),
+    );
+    expect(material.color, Colors.black);
+    expect((material.shape as StadiumBorder).side.color, Colors.white);
+
+    await pumpToolbar(tester, theme: ThemeData.light());
+    await tester.pumpAndSettle();
+    material = tester.widget<Material>(
+      find.byKey(const Key('mobile-remote-floating-toolbar')),
+    );
+    expect(material.color, Colors.white);
+    expect((material.shape as StadiumBorder).side.color, Colors.black87);
+  });
+
+  testWidgets('toolbar fade settings control speed and minimum opacity', (
+    tester,
+  ) async {
+    await pumpToolbar(
+      tester,
+      fadeSettings: const MobileRemoteToolbarFadeSettings(
+        minimumOpacityPercent: 60,
+        fadeDurationMs: 500,
+      ),
+    );
+    await tester.pump(const Duration(seconds: 1));
+    var opacity = tester.widget<AnimatedOpacity>(
+      find.byKey(const Key('mobile-remote-toolbar-opacity')),
+    );
+    expect(opacity.opacity, 0.6);
+    expect(opacity.duration, const Duration(milliseconds: 500));
+
+    await pumpToolbar(
+      tester,
+      fadeSettings: const MobileRemoteToolbarFadeSettings(
+        minimumOpacityPercent: 100,
+        fadeDurationMs: 5000,
+      ),
+    );
+    await tester.pump(const Duration(seconds: 10));
+    opacity = tester.widget<AnimatedOpacity>(
+      find.byKey(const Key('mobile-remote-toolbar-opacity')),
+    );
+    expect(opacity.opacity, 1.0);
+    expect(opacity.duration, Duration.zero);
+  });
+
+  test('toolbar fade settings normalize stored values', () {
+    expect(
+      MobileRemoteToolbarFadeSettings.fromStored(
+        minimumOpacityPercent: '200',
+        fadeDurationMs: '-1',
+      ),
+      const MobileRemoteToolbarFadeSettings(
+        minimumOpacityPercent: 100,
+        fadeDurationMs: 0,
+      ),
+    );
+    expect(normalizeMobileRemoteScrollStyle('unknown'), kRemoteScrollStyleAuto);
+    expect(
+      normalizeMobileRemoteScrollStyle(kRemoteScrollStyleEdgeAcceleration),
+      kRemoteScrollStyleEdgeAcceleration,
+    );
+  });
 
   testWidgets('floating toolbar drags, changes axis, collapses, and dims', (
     tester,

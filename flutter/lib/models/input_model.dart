@@ -406,8 +406,10 @@ class InputModel {
   bool get isViewCamera => parent.target!.connType == ConnType.viewCamera;
   int get trackpadSpeed => _trackpadSpeed;
   bool get useEdgeScroll =>
-      parent.target!.canvasModel.scrollStyle == ScrollStyle.scrolledge ||
-      parent.target!.canvasModel.scrollStyle == ScrollStyle.scrolledgeaccel;
+      !(isMobileClient && isViewCamera) &&
+      (parent.target!.canvasModel.scrollStyle == ScrollStyle.scrolledge ||
+          parent.target!.canvasModel.scrollStyle ==
+              ScrollStyle.scrolledgeaccel);
 
   /// Check if the connected server supports relative mouse mode.
   bool get isRelativeMouseModeSupported => _relativeMouse.isSupported;

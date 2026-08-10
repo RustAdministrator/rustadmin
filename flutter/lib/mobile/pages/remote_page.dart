@@ -31,6 +31,17 @@ import '../widgets/dialog.dart';
 
 final initText = '1' * 1024;
 
+MobileRemoteToolbarFadeSettings _toolbarFadeSettingsFromUserDefaults() {
+  return MobileRemoteToolbarFadeSettings.fromStored(
+    minimumOpacityPercent: bind.mainGetUserDefaultOption(
+      key: kOptionMobileRemoteToolbarMinimumOpacityPercent,
+    ),
+    fadeDurationMs: bind.mainGetUserDefaultOption(
+      key: kOptionMobileRemoteToolbarFadeDurationMs,
+    ),
+  );
+}
+
 // Workaround for Android (default input method, Microsoft SwiftKey keyboard) when using physical keyboard.
 // When connecting a physical keyboard, `KeyEvent.physicalKey.usbHidUsage` are wrong is using Microsoft SwiftKey keyboard.
 // https://github.com/flutter/flutter/issues/159384
@@ -62,7 +73,8 @@ class RemotePage extends StatefulWidget {
   State<RemotePage> createState() => _RemotePageState(id);
 }
 
-class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
+class _RemotePageState extends State<RemotePage>
+    with WidgetsBindingObserver, TickerProviderStateMixin {
   Timer? _timer;
   bool _showGestureHelp = false;
   String _value = '';
@@ -78,6 +90,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   final FocusNode _physicalFocusNode = FocusNode();
   var _showEdit = false; // use soft keyboard
   var _showCustomButtonEditor = false;
+  var _toolbarFadeSettings = MobileRemoteToolbarFadeSettings.defaults;
   var _quickKeyOrder = List<MobileRemoteQuickKey>.of(
     mobileRemoteDefaultQuickKeyOrder,
   );
@@ -97,6 +110,8 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
+    _toolbarFadeSettings = _toolbarFadeSettingsFromUserDefaults();
+    gFFI.canvasModel.initializeEdgeScrollFallback(this);
     gFFI.ffiModel.updateEventListener(sessionId, widget.id);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -134,6 +149,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         forceRelay: widget.forceRelay,
       );
       if (!mounted || gFFI.closed) return;
+      await _refreshToolbarFadeSettings();
       unawaited(gFFI.qualityMonitorModel.checkShowQualityMonitor(sessionId));
     } catch (e, stackTrace) {
       debugPrint('Failed to start mobile session: $e\n$stackTrace');
@@ -144,9 +160,38 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     }
   }
 
+  Future<void> _refreshToolbarFadeSettings() async {
+    final defaults = _toolbarFadeSettingsFromUserDefaults();
+    try {
+      final storedOpacity = await bind.sessionGetPeerOption(
+        sessionId: sessionId,
+        name: kOptionMobileRemoteToolbarMinimumOpacityPercent,
+      );
+      final storedDuration = await bind.sessionGetPeerOption(
+        sessionId: sessionId,
+        name: kOptionMobileRemoteToolbarFadeDurationMs,
+      );
+      final settings = MobileRemoteToolbarFadeSettings.fromStored(
+        minimumOpacityPercent: storedOpacity.isEmpty
+            ? defaults.minimumOpacityPercent.toString()
+            : storedOpacity,
+        fadeDurationMs: storedDuration.isEmpty
+            ? defaults.fadeDurationMs.toString()
+            : storedDuration,
+        fallback: defaults,
+      );
+      if (mounted && settings != _toolbarFadeSettings) {
+        setState(() => _toolbarFadeSettings = settings);
+      }
+    } catch (error) {
+      debugPrint('Failed to load mobile toolbar fade settings: $error');
+    }
+  }
+
   @override
   Future<void> dispose() async {
     WidgetsBinding.instance.removeObserver(this);
+    gFFI.canvasModel.disposeEdgeScrollFallback();
     unawaited(bind.sessionClose(sessionId: gFFI.sessionId));
     // https://github.com/flutter/flutter/issues/64935
     super.dispose();
@@ -518,7 +563,17 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         onDisconnect: () => clientClose(sessionId, gFFI),
         onOptions: () {
           setState(() => _showEdit = false);
-          showOptions(context, widget.id, gFFI.dialogManager);
+          showOptions(
+            context,
+            widget.id,
+            gFFI.dialogManager,
+            toolbarFadeSettings: _toolbarFadeSettings,
+            onToolbarFadeSettingsChanged: (settings) {
+              if (mounted) {
+                setState(() => _toolbarFadeSettings = settings);
+              }
+            },
+          );
         },
         onKeyboard: openKeyboard,
         onMobileActions: () =>
@@ -535,6 +590,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
         touchMode: ffiModel.touchMode,
         waitForFirstImage: ffiModel.waitForFirstImage.isTrue,
         chatButton: chatButton,
+        fadeSettings: _toolbarFadeSettings,
       ),
     );
   }
@@ -1096,7 +1152,13 @@ class CursorPaint extends StatelessWidget {
 }
 
 void showOptions(
-    BuildContext context, String id, OverlayDialogManager dialogManager) async {
+  BuildContext context,
+  String id,
+  OverlayDialogManager dialogManager, {
+  required MobileRemoteToolbarFadeSettings toolbarFadeSettings,
+  required ValueChanged<MobileRemoteToolbarFadeSettings>
+      onToolbarFadeSettingsChanged,
+}) async {
   var displays = <Widget>[];
   final pi = gFFI.ffiModel.pi;
   final image = gFFI.ffiModel.getConnectionImageText();
@@ -1155,6 +1217,75 @@ void showOptions(
         value: mode.value,
         groupValue: selectedViewMode.value,
         onChanged: (_) => gFFI.canvasModel.applyMobileViewScaleMode(mode),
+      ),
+  ];
+  final selectedScrollStyle = normalizeMobileRemoteScrollStyle(
+    await bind.sessionGetScrollStyle(sessionId: gFFI.sessionId) ?? '',
+  );
+  final scrollStyleRadios = <TRadioMenu<String>>[
+    for (final entry in <(String, String)>[
+      (kRemoteScrollStyleAuto, 'ScrollAuto'),
+      (kRemoteScrollStyleEdge, 'ScrollEdge'),
+      (kRemoteScrollStyleEdgeAcceleration, 'ScrollEdgeAcceleration'),
+    ])
+      TRadioMenu<String>(
+        child: Text(translate(entry.$2)),
+        value: entry.$1,
+        groupValue: selectedScrollStyle,
+        onChanged: (value) async {
+          if (value == null) return;
+          await bind.sessionSetScrollStyle(
+            sessionId: gFFI.sessionId,
+            value: value,
+          );
+          await gFFI.canvasModel.updateScrollStyle();
+        },
+      ),
+  ];
+  var activeToolbarFadeSettings = toolbarFadeSettings;
+  final toolbarOpacityRadios = <TRadioMenu<String>>[
+    for (final percent
+        in MobileRemoteToolbarFadeSettings.opacityPresets)
+      TRadioMenu<String>(
+        child: Text(mobileRemoteToolbarOpacityLabel(percent)),
+        value: percent.toString(),
+        groupValue:
+            activeToolbarFadeSettings.minimumOpacityPercent.toString(),
+        onChanged: (value) async {
+          final percent = int.tryParse(value ?? '');
+          if (percent == null) return;
+          activeToolbarFadeSettings = activeToolbarFadeSettings.copyWith(
+            minimumOpacityPercent: percent,
+          );
+          onToolbarFadeSettingsChanged(activeToolbarFadeSettings);
+          await bind.sessionPeerOption(
+            sessionId: gFFI.sessionId,
+            name: kOptionMobileRemoteToolbarMinimumOpacityPercent,
+            value: percent.toString(),
+          );
+        },
+      ),
+  ];
+  final toolbarFadeSpeedRadios = <TRadioMenu<String>>[
+    for (final durationMs
+        in MobileRemoteToolbarFadeSettings.fadeDurationPresetsMs)
+      TRadioMenu<String>(
+        child: Text(mobileRemoteToolbarFadeSpeedLabel(durationMs)),
+        value: durationMs.toString(),
+        groupValue: activeToolbarFadeSettings.fadeDurationMs.toString(),
+        onChanged: (value) async {
+          final durationMs = int.tryParse(value ?? '');
+          if (durationMs == null) return;
+          activeToolbarFadeSettings = activeToolbarFadeSettings.copyWith(
+            fadeDurationMs: durationMs,
+          );
+          onToolbarFadeSettingsChanged(activeToolbarFadeSettings);
+          await bind.sessionPeerOption(
+            sessionId: gFFI.sessionId,
+            name: kOptionMobileRemoteToolbarFadeDurationMs,
+            value: durationMs.toString(),
+          );
+        },
       ),
   ];
   List<TRadioMenu<String>> imageQualityRadios =
@@ -1221,6 +1352,21 @@ void showOptions(
             'view-style',
             viewStyleRadios,
             heading: Text(translate('Scale')),
+          ),
+          radioSection(
+            'scroll-style',
+            scrollStyleRadios,
+            heading: Text(translate('Screen scrolling')),
+          ),
+          radioSection(
+            'toolbar-minimum-opacity',
+            toolbarOpacityRadios,
+            heading: Text(translate('Toolbar minimum opacity')),
+          ),
+          radioSection(
+            'toolbar-fade-speed',
+            toolbarFadeSpeedRadios,
+            heading: Text(translate('Toolbar fade speed')),
           ),
           radioSection(
             'image-quality',

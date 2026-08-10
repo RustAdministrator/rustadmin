@@ -98,4 +98,47 @@ void main() {
     );
     expect(oppositeCorner.dy, closeTo(0, 0.000001));
   });
+
+  test('edge acceleration follows depth into the device viewport edge', () {
+    expect(
+      mobileRemoteDeviceEdgeScrollAxisFactor(
+        pointerPosition: 0,
+        viewportExtent: 400,
+        edgeThickness: 100,
+      ),
+      -1,
+    );
+    expect(
+      mobileRemoteDeviceEdgeScrollAxisFactor(
+        pointerPosition: 50,
+        viewportExtent: 400,
+        edgeThickness: 100,
+      ),
+      closeTo(-0.5, 0.000001),
+    );
+    expect(
+      mobileRemoteDeviceEdgeScrollAxisFactor(
+        pointerPosition: 200,
+        viewportExtent: 400,
+        edgeThickness: 100,
+      ),
+      0,
+    );
+    expect(
+      mobileRemoteDeviceEdgeScrollAxisFactor(
+        pointerPosition: 350,
+        viewportExtent: 400,
+        edgeThickness: 100,
+      ),
+      closeTo(0.5, 0.000001),
+    );
+    expect(
+      mobileRemoteDeviceEdgeScrollAxisFactor(
+        pointerPosition: 400,
+        viewportExtent: 400,
+        edgeThickness: 100,
+      ),
+      1,
+    );
+  });
 }

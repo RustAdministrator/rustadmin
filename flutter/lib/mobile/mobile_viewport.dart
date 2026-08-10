@@ -79,3 +79,25 @@ Offset mobileRemoteClampCanvasOffset({
     clampAxis(proposed.dy, texture.height, viewport.height),
   );
 }
+
+double mobileRemoteDeviceEdgeScrollAxisFactor({
+  required double pointerPosition,
+  required double viewportExtent,
+  required double edgeThickness,
+}) {
+  if (viewportExtent <= 0 || edgeThickness <= 0) {
+    return 0;
+  }
+  final thickness = math.min(edgeThickness, viewportExtent / 2);
+  if (pointerPosition < thickness) {
+    return -((thickness - pointerPosition) / thickness)
+        .clamp(0.0, 1.0)
+        .toDouble();
+  }
+  if (pointerPosition >= viewportExtent - thickness) {
+    return ((pointerPosition - (viewportExtent - thickness)) / thickness)
+        .clamp(0.0, 1.0)
+        .toDouble();
+  }
+  return 0;
+}

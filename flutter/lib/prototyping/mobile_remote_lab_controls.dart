@@ -8,8 +8,8 @@ const mobileRemoteAccentActiveColor = Color(0xAA0071FF);
 
 Color mobileRemoteToolbarBackgroundColor(BuildContext context) {
   return Theme.of(context).brightness == Brightness.dark
-      ? const Color(0xFF424242)
-      : const Color(0xFFE0E0E0);
+      ? Colors.black
+      : Colors.white;
 }
 
 Color mobileRemoteToolbarForegroundColor(BuildContext context) {
@@ -380,7 +380,13 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
                           elevation: 6,
                           shadowColor: Colors.black54,
                           clipBehavior: Clip.antiAlias,
-                          shape: const StadiumBorder(),
+                          shape: StadiumBorder(
+                            side: BorderSide(
+                              color: mobileRemoteToolbarForegroundColor(
+                                context,
+                              ),
+                            ),
+                          ),
                           child: Flex(
                             direction: _vertical
                                 ? Axis.vertical

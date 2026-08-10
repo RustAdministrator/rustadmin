@@ -213,6 +213,10 @@ const String kOptionRemoteToolbarPinnedDimDelayMs =
     "remote-toolbar-pinned-dim-delay-ms";
 const String kOptionRemoteToolbarPinnedDimDurationMs =
     "remote-toolbar-pinned-dim-duration-ms";
+const String kOptionMobileRemoteToolbarMinimumOpacityPercent =
+    "mobile-remote-toolbar-minimum-opacity-percent";
+const String kOptionMobileRemoteToolbarFadeDurationMs =
+    "mobile-remote-toolbar-fade-duration-ms";
 const int kDefaultRemoteToolbarRevealZonePx = 36;
 const int kMinRemoteToolbarRevealZonePx = 8;
 const int kMaxRemoteToolbarRevealZonePx = 160;
@@ -228,6 +232,13 @@ const int kMaxRemoteToolbarPinnedDimDelayMs = 5000;
 const int kDefaultRemoteToolbarPinnedDimDurationMs = 3000;
 const int kMinRemoteToolbarPinnedDimDurationMs = 0;
 const int kMaxRemoteToolbarPinnedDimDurationMs = 10000;
+
+const int kDefaultMobileRemoteToolbarMinimumOpacityPercent = 20;
+const int kMinMobileRemoteToolbarMinimumOpacityPercent = 10;
+const int kMaxMobileRemoteToolbarMinimumOpacityPercent = 100;
+const int kDefaultMobileRemoteToolbarFadeDurationMs = 3000;
+const int kMinMobileRemoteToolbarFadeDurationMs = 0;
+const int kMaxMobileRemoteToolbarFadeDurationMs = 5000;
 
 String normalizeQualityMonitorPosition(String value) {
   switch (value) {

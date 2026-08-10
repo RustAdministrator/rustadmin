@@ -18,6 +18,7 @@ import '../../consts.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../widgets/dialog.dart';
+import '../widgets/remote_session_controls.dart';
 import 'home_page.dart';
 import 'scan_page.dart';
 
@@ -1378,6 +1379,17 @@ class _DisplayPage extends StatefulWidget {
 }
 
 class __DisplayPageState extends State<_DisplayPage> {
+  MobileRemoteToolbarFadeSettings _toolbarFadeSettings() {
+    return MobileRemoteToolbarFadeSettings.fromStored(
+      minimumOpacityPercent: bind.mainGetUserDefaultOption(
+        key: kOptionMobileRemoteToolbarMinimumOpacityPercent,
+      ),
+      fadeDurationMs: bind.mainGetUserDefaultOption(
+        key: kOptionMobileRemoteToolbarFadeDurationMs,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final Map codecsJson = jsonDecode(bind.mainSupportedHwdecodings());
@@ -1420,6 +1432,73 @@ class __DisplayPageState extends State<_DisplayPage> {
                   : (value) async {
                       await bind.mainSetUserDefaultOption(
                           key: kOptionViewStyle, value: value);
+                    },
+            ),
+            _getPopupDialogRadioEntry(
+              title: 'Default Screen Scrolling',
+              list: [
+                _RadioEntry('ScrollAuto', kRemoteScrollStyleAuto),
+                _RadioEntry('ScrollEdge', kRemoteScrollStyleEdge),
+                _RadioEntry(
+                  'ScrollEdgeAcceleration',
+                  kRemoteScrollStyleEdgeAcceleration,
+                ),
+              ],
+              getter: () => normalizeMobileRemoteScrollStyle(
+                bind.mainGetUserDefaultOption(key: kOptionScrollStyle),
+              ),
+              asyncSetter: isOptionFixed(kOptionScrollStyle)
+                  ? null
+                  : (value) async {
+                      await bind.mainSetUserDefaultOption(
+                        key: kOptionScrollStyle,
+                        value: value,
+                      );
+                    },
+            ),
+            _getPopupDialogRadioEntry(
+              title: 'Toolbar Minimum Opacity',
+              list: [
+                for (final percent
+                    in MobileRemoteToolbarFadeSettings.opacityPresets)
+                  _RadioEntry(
+                    mobileRemoteToolbarOpacityLabel(percent),
+                    percent.toString(),
+                  ),
+              ],
+              getter: () =>
+                  _toolbarFadeSettings().minimumOpacityPercent.toString(),
+              asyncSetter: isOptionFixed(
+                kOptionMobileRemoteToolbarMinimumOpacityPercent,
+              )
+                  ? null
+                  : (value) async {
+                      await bind.mainSetUserDefaultOption(
+                        key: kOptionMobileRemoteToolbarMinimumOpacityPercent,
+                        value: value,
+                      );
+                    },
+            ),
+            _getPopupDialogRadioEntry(
+              title: 'Toolbar Fade Speed',
+              list: [
+                for (final durationMs
+                    in MobileRemoteToolbarFadeSettings.fadeDurationPresetsMs)
+                  _RadioEntry(
+                    mobileRemoteToolbarFadeSpeedLabel(durationMs),
+                    durationMs.toString(),
+                  ),
+              ],
+              getter: () => _toolbarFadeSettings().fadeDurationMs.toString(),
+              asyncSetter: isOptionFixed(
+                kOptionMobileRemoteToolbarFadeDurationMs,
+              )
+                  ? null
+                  : (value) async {
+                      await bind.mainSetUserDefaultOption(
+                        key: kOptionMobileRemoteToolbarFadeDurationMs,
+                        value: value,
+                      );
                     },
             ),
             _getPopupDialogRadioEntry(

@@ -354,16 +354,16 @@ void main() {
     expect(verticalRect.height > verticalRect.width, isTrue);
   });
 
-  testWidgets('floating toolbar uses theme-aware gray surfaces', (
+  testWidgets('floating toolbar uses theme-aware black and white surfaces', (
     tester,
   ) async {
     final toolbar = find.byKey(const Key('mobile-remote-floating-toolbar'));
 
     await pumpPreview(tester, theme: mobileRemoteLabTheme(Brightness.light));
-    expect(tester.widget<Material>(toolbar).color, const Color(0xFFE0E0E0));
+    expect(tester.widget<Material>(toolbar).color, Colors.white);
 
     await pumpPreview(tester, theme: mobileRemoteLabTheme(Brightness.dark));
-    expect(tester.widget<Material>(toolbar).color, const Color(0xFF424242));
+    expect(tester.widget<Material>(toolbar).color, Colors.black);
   });
 
   testWidgets('vertical toolbar fits a compact landscape phone', (

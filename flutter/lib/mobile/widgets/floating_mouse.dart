@@ -409,6 +409,15 @@ class _FloatingMouseState extends State<FloatingMouse> {
         positionInRemoteDisplay = _getPositionFromMouseRetEvt(evt);
       }
 
+      if (_inputModel.useEdgeScroll) {
+        _canvasScrollState.tryCancel();
+        widget.ffi.canvasModel.edgeScrollMouse(
+          mouseGlobalPosition.dx,
+          mouseGlobalPosition.dy,
+        );
+        return;
+      }
+
       // Check if need to start auto canvas scroll
       // If:
       // 1. The mouse is near the edge of the screen.

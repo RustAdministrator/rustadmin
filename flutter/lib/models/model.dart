@@ -2609,7 +2609,10 @@ class EdgeScrollFallbackState {
             (_kEdgeAccelerationMaxSpeedPxPerSecond * seconds);
         if (!_owner.performEdgeScroll(delta)) {
           stop();
-        } else {
+        } else if (!_owner._usesMobileRemoteViewport) {
+          // Desktop scroll containers need their pointer position remapped.
+          // On mobile this would move the peer cursor while only the viewport
+          // is supposed to move, and can clamp it to a remote-screen corner.
           _owner.syncRemoteCursorAfterViewportScroll();
         }
       } else {
@@ -2619,7 +2622,10 @@ class EdgeScrollFallbackState {
         var delta = _encroachment *
             (kSpeedFactor * thisTickElapsed.inMilliseconds / kFrameTime);
 
-        _owner.performEdgeScroll(delta);
+        final moved = _owner.performEdgeScroll(delta);
+        if (_owner._usesMobileRemoteViewport && !moved) {
+          stop();
+        }
       }
 
       _lastTotalElapsed = totalElapsed;
@@ -2635,6 +2641,10 @@ class EdgeScrollFallbackState {
 
   void stop() {
     _ticker.stop();
+  }
+
+  void dispose() {
+    _ticker.dispose();
   }
 }
 
@@ -2972,6 +2982,13 @@ class CanvasModel with ChangeNotifier {
         style != null ? ScrollStyle.fromString(style) : ScrollStyle.scrollauto;
     cancelEdgeScroll();
 
+    if (_scrollStyle == ScrollStyle.scrolledge ||
+        _scrollStyle == ScrollStyle.scrolledgeaccel) {
+      rearmEdgeScroll();
+    } else {
+      _edgeScrollState = EdgeScrollState.inactive;
+    }
+
     if (_scrollStyle != ScrollStyle.scrollauto) {
       _resetScroll();
     }
@@ -3078,8 +3095,19 @@ class CanvasModel with ChangeNotifier {
   }
 
   void initializeEdgeScrollFallback(TickerProvider tickerProvider) {
+    if (_edgeScrollFallbackInitialized) {
+      _edgeScrollFallbackState.dispose();
+    }
     _edgeScrollFallbackState = EdgeScrollFallbackState(this, tickerProvider);
     _edgeScrollFallbackInitialized = true;
+  }
+
+  void disposeEdgeScrollFallback() {
+    _edgeScrollState = EdgeScrollState.inactive;
+    if (_edgeScrollFallbackInitialized) {
+      _edgeScrollFallbackState.dispose();
+      _edgeScrollFallbackInitialized = false;
+    }
   }
 
   void disableEdgeScroll() {
@@ -3112,14 +3140,26 @@ class CanvasModel with ChangeNotifier {
   }
 
   void edgeScrollMouse(double x, double y) async {
+    final mobileViewportCanScroll =
+        _usesMobileRemoteViewport && _imageOverflow.isTrue;
     if (!_edgeScrollFallbackInitialized ||
         (_edgeScrollState == EdgeScrollState.inactive) ||
         (size.width == 0 || size.height == 0) ||
-        !(_horizontal.hasClients || _vertical.hasClients)) {
+        !(mobileViewportCanScroll ||
+            _horizontal.hasClients ||
+            _vertical.hasClients)) {
       return;
     }
 
-    if (_edgeScrollState == EdgeScrollState.armed) {
+    final edgeThickness = min(
+      _edgeScrollEdgeThickness.toDouble(),
+      min(size.width, size.height) / 2,
+    );
+
+    if (_edgeScrollState == EdgeScrollState.armed &&
+        _usesMobileRemoteViewport) {
+      _edgeScrollState = EdgeScrollState.active;
+    } else if (_edgeScrollState == EdgeScrollState.armed) {
       // Edge scroll is armed to become active once the cursor
       // is observed within the rectangle interior to the
       // edge scroll regions. If the user has just moved the
@@ -3127,7 +3167,7 @@ class CanvasModel with ChangeNotifier {
       // doesn't happen yet.
       final clientArea = Rect.fromLTWH(0, 0, size.width, size.height);
 
-      final innerZone = clientArea.deflate(_edgeScrollEdgeThickness.toDouble());
+      final innerZone = clientArea.deflate(edgeThickness);
 
       if (innerZone.contains(Offset(x, y))) {
         _edgeScrollState = EdgeScrollState.active;
@@ -3137,33 +3177,39 @@ class CanvasModel with ChangeNotifier {
       }
     }
 
-    var dxOffset = 0.0;
-    var dyOffset = 0.0;
-
-    if (x < _edgeScrollEdgeThickness) {
-      dxOffset = x - _edgeScrollEdgeThickness;
-    } else if (x >= size.width - _edgeScrollEdgeThickness) {
-      dxOffset = x - (size.width - _edgeScrollEdgeThickness);
-    }
-
-    if (y < _edgeScrollEdgeThickness) {
-      dyOffset = y - _edgeScrollEdgeThickness;
-    } else if (y >= size.height - _edgeScrollEdgeThickness) {
-      dyOffset = y - (size.height - _edgeScrollEdgeThickness);
-    }
-
-    final encroachment = Vector2(dxOffset, dyOffset);
+    final deviceEdgeFactor = Vector2(
+      mobileRemoteDeviceEdgeScrollAxisFactor(
+        pointerPosition: x,
+        viewportExtent: size.width,
+        edgeThickness: edgeThickness,
+      ),
+      mobileRemoteDeviceEdgeScrollAxisFactor(
+        pointerPosition: y,
+        viewportExtent: size.height,
+        edgeThickness: edgeThickness,
+      ),
+    );
+    final encroachment = deviceEdgeFactor * edgeThickness;
 
     if (_usesEdgeAcceleration) {
-      final edgeAccelerationFactor = _computeEdgeAccelerationFactor(
-        x: x,
-        y: y,
-      );
+      final edgeAccelerationFactor = _usesMobileRemoteViewport
+          ? deviceEdgeFactor
+          : _computeEdgeAccelerationFactor(x: x, y: y);
       if (edgeAccelerationFactor.length2 == 0) {
         _edgeScrollFallbackState.stop();
       } else {
         _edgeScrollFallbackState
             .setEdgeAccelerationFactor(edgeAccelerationFactor);
+        _edgeScrollFallbackState.start();
+      }
+      return;
+    }
+
+    if (_usesMobileRemoteViewport) {
+      if (encroachment.length2 == 0) {
+        _edgeScrollFallbackState.stop();
+      } else {
+        _edgeScrollFallbackState.setEncroachment(encroachment);
         _edgeScrollFallbackState.start();
       }
       return;
@@ -3258,6 +3304,20 @@ class CanvasModel with ChangeNotifier {
   }
 
   bool performEdgeScroll(Vector2 delta) {
+    if (_usesMobileRemoteViewport) {
+      final previousX = _x;
+      final previousY = _y;
+      _x -= delta.x;
+      _y -= delta.y;
+      _clampMobileCanvas();
+      if (_x == previousX && _y == previousY) {
+        return false;
+      }
+      isMobileCanvasChanged = true;
+      notifyListeners();
+      return true;
+    }
+
     var (scrollPixel, max) = getScrollInfo();
     final previousX = scrollPixel.x;
     final previousY = scrollPixel.y;
@@ -3873,6 +3933,7 @@ class CursorModel with ChangeNotifier {
     double dy = delta.dy;
     if (parent.target?.imageModel.image == null) return;
     final scale = parent.target?.canvasModel.scale ?? 1.0;
+    final useEdgeScroll = parent.target?.inputModel.useEdgeScroll ?? false;
     dx /= scale;
     dy /= scale;
     final r = getVisibleRect();
@@ -3948,10 +4009,10 @@ class CursorModel with ChangeNotifier {
     dy = newPos.y - _y;
     _x = newPos.x;
     _y = newPos.y;
-    if (tryMoveCanvasX && dx != 0) {
+    if (tryMoveCanvasX && dx != 0 && !useEdgeScroll) {
       parent.target?.canvasModel.panX(-dx * scale);
     }
-    if (tryMoveCanvasY && dy != 0) {
+    if (tryMoveCanvasY && dy != 0 && !useEdgeScroll) {
       parent.target?.canvasModel.panY(-dy * scale);
     }
 

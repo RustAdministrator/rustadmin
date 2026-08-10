@@ -402,6 +402,16 @@ class _RawTouchGestureDetectorRegionState
         await ffi.cursorModel.move(size.width / 2, size.height / 2);
       }
     }
+    if (inputModel.useEdgeScroll) {
+      ffi.canvasModel.rearmEdgeScroll();
+      // Edge modes are driven by the finger's position in the device viewport.
+      // A remote cursor position moves when the canvas scrolls and must not be
+      // fed back into edge detection.
+      ffi.canvasModel.edgeScrollMouse(
+        d.localPosition.dx,
+        d.localPosition.dy,
+      );
+    }
   }
 
   onOneFingerPanUpdate(DragUpdateDetails d) async {
@@ -419,11 +429,19 @@ class _RawTouchGestureDetectorRegionState
       await inputModel.sendMobileRelativeMouseMove(d.delta.dx, d.delta.dy);
     } else {
       await ffi.cursorModel.updatePan(d.delta, d.localPosition, handleTouch);
+      if (inputModel.useEdgeScroll) {
+        // Keep using device-local coordinates as the remote canvas moves.
+        ffi.canvasModel.edgeScrollMouse(
+          d.localPosition.dx,
+          d.localPosition.dy,
+        );
+      }
     }
   }
 
   onOneFingerPanEnd(DragEndDetails d) async {
     _touchModePanStarted = false;
+    ffi.canvasModel.cancelEdgeScroll();
     if (isNotTouchBasedDevice()) {
       return;
     }
@@ -444,6 +462,7 @@ class _RawTouchGestureDetectorRegionState
   // double-click problem on iPad with magic mouse.
   onOneFingerPanCancel() {
     _touchModePanStarted = false;
+    ffi.canvasModel.cancelEdgeScroll();
   }
 
   // scale + pan event
