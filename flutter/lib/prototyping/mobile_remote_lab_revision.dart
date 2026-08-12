@@ -2,6 +2,6 @@
 /// `flutter/lib/prototyping/`.
 ///
 /// It is intentionally independent from RustAdmin's production revision.
-const mobileRemoteLabRevision = 9;
+const mobileRemoteLabRevision = 10;
 
 const mobileRemoteLabRevisionLabel = 'Lab r$mobileRemoteLabRevision';

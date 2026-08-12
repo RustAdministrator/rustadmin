@@ -69,15 +69,27 @@ Offset mobileRemoteClampCanvasOffset({
     if (contentExtent <= viewportExtent) {
       return (viewportExtent - contentExtent) / 2;
     }
-    return value
-        .clamp(viewportExtent / 2 - contentExtent, viewportExtent / 2)
-        .toDouble();
+    return value.clamp(viewportExtent - contentExtent, 0.0).toDouble();
   }
 
   return Offset(
     clampAxis(proposed.dx, texture.width, viewport.width),
     clampAxis(proposed.dy, texture.height, viewport.height),
   );
+}
+
+double mobileRemoteUsableViewportHeight({
+  required double screenHeight,
+  required double topInset,
+  required double keyboardInset,
+  double? keyHelpTop,
+}) {
+  final safeTop = math.max(topInset, 0.0);
+  final keyboardTop = screenHeight - math.max(keyboardInset, 0.0);
+  final usableBottom = keyHelpTop == null
+      ? keyboardTop
+      : math.min(keyHelpTop, keyboardTop);
+  return math.max(usableBottom - safeTop, 0.0);
 }
 
 double mobileRemoteDeviceEdgeScrollAxisFactor({

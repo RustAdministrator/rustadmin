@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
-import 'package:flutter_hbb/prototyping/mobile_remote_lab_controls.dart';
+import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_hbb/prototyping/mobile_remote_lab_page.dart';
 import 'package:flutter_hbb/prototyping/mobile_remote_lab_revision.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -70,7 +70,7 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  test('calculates native-texture fit, zoom, and corner-centering bounds', () {
+  test('calculates native-texture fit, zoom, and no-overscan bounds', () {
     const texture = Size(2560, 1440);
     const viewport = Size(393, 873);
     const devicePixelRatio = 3.0;
@@ -143,11 +143,11 @@ void main() {
       viewport: viewport,
       scale: fitHeight,
     );
-    expect(leftCorner.dx, closeTo(viewport.width / 2, 0.000001));
+    expect(leftCorner.dx, closeTo(0, 0.000001));
     expect(leftCorner.dy, closeTo(0, 0.000001));
     expect(
       rightCorner.dx,
-      closeTo(viewport.width / 2 - texture.width * fitHeight, 0.000001),
+      closeTo(viewport.width - texture.width * fitHeight, 0.000001),
     );
     expect(rightCorner.dy, closeTo(0, 0.000001));
   });
@@ -199,7 +199,7 @@ void main() {
       await tester.tap(find.byTooltip('Display and session options'));
       await tester.pumpAndSettle();
       await tester.tap(
-        find.byKey(const Key('mobile-lab-options-open-view-style')),
+        find.byKey(const Key('mobile-remote-options-open-view-style')),
       );
       await tester.pumpAndSettle();
       await tester.tap(find.text('Fit All'));
@@ -216,7 +216,7 @@ void main() {
     },
   );
 
-  testWidgets('clamps gesture panning at centred remote corners', (
+  testWidgets('clamps gesture panning at remote screen edges', (
     tester,
   ) async {
     await pumpPreview(tester);
@@ -231,7 +231,7 @@ void main() {
     var textureRect = tester.getRect(texture);
     expect(
       textureRect.left,
-      closeTo(canvasRect.left + canvasRect.width / 2, 0.01),
+      closeTo(canvasRect.left, 0.01),
     );
 
     await tester.drag(canvas, const Offset(-10000, 0));
@@ -239,7 +239,7 @@ void main() {
     textureRect = tester.getRect(texture);
     expect(
       textureRect.right,
-      closeTo(canvasRect.left + canvasRect.width / 2, 0.01),
+      closeTo(canvasRect.right, 0.01),
     );
   });
 
@@ -292,7 +292,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(
       tester.getRect(texture).left,
-      closeTo(canvasRect.left + canvasRect.width / 2, 0.01),
+      closeTo(canvasRect.left, 0.01),
     );
 
     // A parent rebuild is not a new connection and must not re-apply Fit
@@ -301,7 +301,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(
       tester.getRect(texture).left,
-      closeTo(canvasRect.left + canvasRect.width / 2, 0.01),
+      closeTo(canvasRect.left, 0.01),
     );
   });
 
@@ -475,6 +475,53 @@ void main() {
     expect(find.text('F12'), findsOneWidget);
   });
 
+  testWidgets(
+    'keyboard hides toolbar and makes custom-key top the canvas edge',
+    (tester) async {
+      await pumpPreview(tester);
+      await tester.pumpAndSettle();
+
+      final canvas = find.byKey(const Key('mobile-lab-remote-canvas'));
+      final texture = find.byKey(const Key('mobile-lab-remote-texture'));
+      final fullCanvasRect = tester.getRect(canvas);
+
+      await tester.tap(find.byTooltip('Keyboard'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const Key('mobile-remote-floating-toolbar')),
+        findsNothing,
+      );
+      final keyboardCanvasRect = tester.getRect(canvas);
+      final customKeysRect = tester.getRect(
+        find.byKey(const Key('mobile-remote-key-help-tools')),
+      );
+      expect(keyboardCanvasRect.bottom, closeTo(customKeysRect.top, 0.01));
+      expect(keyboardCanvasRect.height, lessThan(fullCanvasRect.height));
+
+      await tester.drag(canvas, const Offset(0, -10000));
+      await tester.pumpAndSettle();
+      expect(
+        tester.getRect(texture).bottom,
+        closeTo(keyboardCanvasRect.bottom, 0.01),
+      );
+
+      await tester.tap(find.byTooltip('Hide keyboard'));
+      await tester.pumpAndSettle();
+
+      final restoredCanvasRect = tester.getRect(canvas);
+      expect(restoredCanvasRect.height, closeTo(fullCanvasRect.height, 0.01));
+      expect(
+        tester.getRect(texture).bottom,
+        closeTo(restoredCanvasRect.bottom, 0.01),
+      );
+      expect(
+        find.byKey(const Key('mobile-remote-floating-toolbar')),
+        findsOneWidget,
+      );
+    },
+  );
+
   testWidgets('uses mobile drill-down menus for Lab option and action groups', (
     tester,
   ) async {
@@ -487,8 +534,11 @@ void main() {
     );
     final previewRect = tester.getRect(find.byType(MobileRemotePreview));
     expect(panelRect.height / previewRect.height, closeTo(0.90, 0.01));
-    expect(find.byKey(const Key('mobile-lab-options-root')), findsOneWidget);
+    expect(find.byKey(const Key('mobile-remote-options-root')), findsOneWidget);
     expect(find.text('View scale'), findsOneWidget);
+    expect(find.text('Screen scrolling'), findsOneWidget);
+    expect(find.text('Toolbar minimum opacity'), findsOneWidget);
+    expect(find.text('Toolbar fade speed'), findsOneWidget);
     expect(find.text('Image quality'), findsOneWidget);
     expect(find.text('Codec'), findsOneWidget);
     expect(find.text('Capture'), findsOneWidget);
@@ -499,11 +549,11 @@ void main() {
     expect(find.text('Session controls'), findsOneWidget);
 
     await tester.tap(
-      find.byKey(const Key('mobile-lab-options-open-view-style')),
+      find.byKey(const Key('mobile-remote-options-open-view-style')),
     );
     await tester.pumpAndSettle();
     expect(
-      find.byKey(const Key('mobile-lab-options-submenu-view-style')),
+      find.byKey(const Key('mobile-remote-options-submenu-view-style')),
       findsOneWidget,
     );
     expect(find.text('Fit All'), findsOneWidget);
@@ -513,12 +563,12 @@ void main() {
     expect(find.text('Scale custom'), findsNothing);
     await tester.tap(find.text('Fit All'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('mobile-lab-options-back')));
+    await tester.tap(find.byKey(const Key('mobile-remote-options-back')));
     await tester.pumpAndSettle();
-    expect(find.byKey(const Key('mobile-lab-options-root')), findsOneWidget);
+    expect(find.byKey(const Key('mobile-remote-options-root')), findsOneWidget);
 
     final sessionControls = find.byKey(
-      const Key('mobile-lab-options-open-session-controls'),
+      const Key('mobile-remote-options-open-session-controls'),
     );
     await tester.ensureVisible(sessionControls);
     await tester.tap(sessionControls);
@@ -566,7 +616,7 @@ void main() {
     await tester.tap(find.byTooltip('Display and session options'));
     await tester.pumpAndSettle();
     final sessionControls = find.byKey(
-      const Key('mobile-lab-options-open-session-controls'),
+      const Key('mobile-remote-options-open-session-controls'),
     );
     await tester.ensureVisible(sessionControls);
     await tester.tap(sessionControls);
@@ -711,7 +761,7 @@ void main() {
     await tester.pumpAndSettle();
 
     await tester.tap(
-      find.byKey(const Key('mobile-lab-options-open-image-quality')),
+      find.byKey(const Key('mobile-remote-options-open-image-quality')),
     );
     await tester.pumpAndSettle();
 

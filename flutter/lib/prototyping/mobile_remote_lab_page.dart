@@ -6,7 +6,9 @@ import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_hbb/prototyping/mobile_remote_lab_controls.dart';
+import 'package:flutter_hbb/consts.dart';
+import 'package:flutter_hbb/mobile/mobile_viewport.dart';
+import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_hbb/prototyping/mobile_remote_lab_revision.dart';
 import 'package:path/path.dart' as path;
 
@@ -44,11 +46,19 @@ class RemoteLabMonitor {
       imagePath.isEmpty ? null : FileImage(File(imagePath));
 }
 
-/// Mobile view policies operate on decoded remote texture pixels. They are
-/// deliberately Lab-owned rather than aliases for the production view styles.
+/// Lab labels for the production mobile view policies.
 enum MobileRemoteLabViewScaleMode { fitAll, fitWidth, fitHeight, oneToOne }
 
 extension MobileRemoteLabViewScaleModeDetails on MobileRemoteLabViewScaleMode {
+  MobileRemoteViewScaleMode get productionMode => switch (this) {
+    MobileRemoteLabViewScaleMode.fitAll => MobileRemoteViewScaleMode.fitAll,
+    MobileRemoteLabViewScaleMode.fitWidth =>
+      MobileRemoteViewScaleMode.fitWidth,
+    MobileRemoteLabViewScaleMode.fitHeight =>
+      MobileRemoteViewScaleMode.fitHeight,
+    MobileRemoteLabViewScaleMode.oneToOne => MobileRemoteViewScaleMode.oneToOne,
+  };
+
   String get value => switch (this) {
     MobileRemoteLabViewScaleMode.fitAll => 'fit-all',
     MobileRemoteLabViewScaleMode.fitWidth => 'fit-width',
@@ -74,33 +84,21 @@ double mobileRemoteLabScaleForMode({
   required Size texture,
   required Size viewport,
   required double devicePixelRatio,
-}) {
-  if (texture.width <= 0 ||
-      texture.height <= 0 ||
-      viewport.width <= 0 ||
-      viewport.height <= 0) {
-    return 1;
-  }
-  final widthScale = viewport.width / texture.width;
-  final heightScale = viewport.height / texture.height;
-  return switch (mode) {
-    MobileRemoteLabViewScaleMode.fitAll => math.min(widthScale, heightScale),
-    MobileRemoteLabViewScaleMode.fitWidth => widthScale,
-    MobileRemoteLabViewScaleMode.fitHeight => heightScale,
-    MobileRemoteLabViewScaleMode.oneToOne => 1 / math.max(devicePixelRatio, 1),
-  };
-}
+}) => mobileRemoteScaleForMode(
+  mode: mode.productionMode,
+  texture: texture,
+  viewport: viewport,
+  devicePixelRatio: devicePixelRatio,
+);
 
 /// Do not let gesture zoom go below Fit All for the active remote texture.
 /// When the combined desktop is selected, [texture] contains all monitors.
 double mobileRemoteLabMinimumCanvasScale({
   required Size texture,
   required Size viewport,
-}) => mobileRemoteLabScaleForMode(
-  mode: MobileRemoteLabViewScaleMode.fitAll,
+}) => mobileRemoteMinimumCanvasScale(
   texture: texture,
   viewport: viewport,
-  devicePixelRatio: 1,
 );
 
 /// Choose bilinear sampling while the rendered texture is smaller than its
@@ -108,31 +106,20 @@ double mobileRemoteLabMinimumCanvasScale({
 /// pixel-perfect enlargement.
 FilterQuality mobileRemoteLabTextureFilterQuality({
   required double logicalScale,
-}) => logicalScale < 1 ? FilterQuality.low : FilterQuality.none;
+}) => mobileRemoteTextureFilterQuality(logicalScale: logicalScale);
 
-/// Clamp panning so either remote corner may reach the viewport centre, but
-/// never farther. A fully fitting texture remains centred on that axis.
+/// Use the production mobile clamp so Lab geometry cannot drift from the app.
 Offset mobileRemoteLabClampCanvasOffset({
   required Offset proposed,
   required Size texture,
   required Size viewport,
   required double scale,
-}) {
-  double clampAxis(double value, double textureExtent, double viewportExtent) {
-    final contentExtent = textureExtent * scale;
-    if (contentExtent <= viewportExtent) {
-      return (viewportExtent - contentExtent) / 2;
-    }
-    return value
-        .clamp(viewportExtent / 2 - contentExtent, viewportExtent / 2)
-        .toDouble();
-  }
-
-  return Offset(
-    clampAxis(proposed.dx, texture.width, viewport.width),
-    clampAxis(proposed.dy, texture.height, viewport.height),
-  );
-}
+}) => mobileRemoteClampCanvasOffset(
+  proposed: proposed,
+  texture: texture,
+  viewport: viewport,
+  scale: scale,
+);
 
 enum RemoteLabScenario {
   windowsFullAccess,
@@ -760,6 +747,8 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
   late bool _connected;
   bool _showToolbar = true;
   bool _showKeyboard = false;
+  String _scrollStyle = kRemoteScrollStyleAuto;
+  var _toolbarFadeSettings = MobileRemoteToolbarFadeSettings.defaults;
   bool _keyboardCtrl = false;
   bool _keyboardAlt = false;
   bool _keyboardShift = false;
@@ -836,49 +825,62 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       backgroundColor: _canvasColor,
       body: Stack(
         children: [
-          Positioned.fill(child: _buildRemoteCanvas(context)),
-          Positioned(left: 10, top: 10, child: _buildScreenLabel(context)),
-          if (_showToolbar && _connected)
-            Positioned.fill(
-              child: SafeArea(
-                top: false,
-                minimum: const EdgeInsets.all(8),
-                child: _buildFloatingToolbar(context),
-              ),
+          Positioned.fill(
+            child: Column(
+              children: [
+                Expanded(
+                  child: Stack(
+                    children: [
+                      Positioned.fill(child: _buildRemoteCanvas(context)),
+                      Positioned(
+                        left: 10,
+                        top: 10,
+                        child: _buildScreenLabel(context),
+                      ),
+                      if (_showToolbar && _connected && !_showKeyboard)
+                        Positioned.fill(
+                          child: SafeArea(
+                            top: false,
+                            minimum: const EdgeInsets.all(8),
+                            child: _buildFloatingToolbar(context),
+                          ),
+                        ),
+                      if (widget.scenario == RemoteLabScenario.connecting)
+                        Positioned.fill(child: _buildConnecting(context)),
+                      if (!_connected &&
+                          widget.scenario != RemoteLabScenario.connecting)
+                        Positioned.fill(child: _buildDisconnected(context)),
+                      if (_showGestureHelp)
+                        Positioned.fill(child: _buildGestureHelp(context)),
+                      if (_showAndroidActions && _connected)
+                        Positioned(
+                          left: 96,
+                          bottom: 12,
+                          width: 200,
+                          height: 45,
+                          child: MobileRemoteAndroidActionsBar(
+                            scale: 1,
+                            onBack: () => _showPreviewAction('Back'),
+                            onHome: () => _showPreviewAction('Home'),
+                            onRecent: () => _showPreviewAction('Apps'),
+                            onHide: () {
+                              setState(() {
+                                _showAndroidActions = false;
+                              });
+                            },
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                if (_showKeyboard && _connected) _buildKeyboard(context),
+              ],
             ),
-          if (widget.scenario == RemoteLabScenario.connecting)
-            Positioned.fill(child: _buildConnecting(context)),
-          if (!_connected && widget.scenario != RemoteLabScenario.connecting)
-            Positioned.fill(child: _buildDisconnected(context)),
-          if (_showGestureHelp)
-            Positioned.fill(child: _buildGestureHelp(context)),
-          if (_showKeyboard && _connected)
-            Align(
-              alignment: Alignment.bottomCenter,
-              child: _buildKeyboard(context),
-            ),
+          ),
           if (_showCustomButtonEditor)
             Positioned.fill(child: _buildCustomButtonEditor(context))
           else if (_panel != null)
             Positioned.fill(child: _buildPanel(context)),
-          if (_showAndroidActions && _connected)
-            Positioned(
-              left: 96,
-              bottom: 12,
-              width: 200,
-              height: 45,
-              child: MobileRemoteAndroidActionsBar(
-                scale: 1,
-                onBack: () => _showPreviewAction('Back'),
-                onHome: () => _showPreviewAction('Home'),
-                onRecent: () => _showPreviewAction('Apps'),
-                onHide: () {
-                  setState(() {
-                    _showAndroidActions = false;
-                  });
-                },
-              ),
-            ),
         ],
       ),
     );
@@ -1260,6 +1262,7 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       peerIsAndroid: widget.scenario.peerIsAndroid,
       touchMode: _touchMode,
       waitForFirstImage: false,
+      fadeSettings: _toolbarFadeSettings,
       chatButton: IconButton(
         tooltip: 'Chat',
         color: mobileRemoteToolbarForegroundColor(context),
@@ -1353,6 +1356,57 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
               (candidate) => candidate.value == value,
             );
             _selectViewScaleMode(mode);
+          },
+        ),
+        _radioSection(
+          'screen-scrolling',
+          _scrollStyle,
+          const [
+            (kRemoteScrollStyleAuto, 'Auto'),
+            (kRemoteScrollStyleEdge, 'Edge'),
+            (kRemoteScrollStyleEdgeAcceleration, 'Edge acceleration'),
+          ],
+          heading: 'Screen scrolling',
+          onChanged: (value) => setState(() => _scrollStyle = value),
+        ),
+        _radioSection(
+          'toolbar-minimum-opacity',
+          _toolbarFadeSettings.minimumOpacityPercent.toString(),
+          [
+            for (final opacity
+                in MobileRemoteToolbarFadeSettings.opacityPresets)
+              (
+                opacity.toString(),
+                mobileRemoteToolbarOpacityLabel(opacity),
+              ),
+          ],
+          heading: 'Toolbar minimum opacity',
+          onChanged: (value) {
+            setState(() {
+              _toolbarFadeSettings = _toolbarFadeSettings.copyWith(
+                minimumOpacityPercent: int.parse(value),
+              );
+            });
+          },
+        ),
+        _radioSection(
+          'toolbar-fade-speed',
+          _toolbarFadeSettings.fadeDurationMs.toString(),
+          [
+            for (final duration
+                in MobileRemoteToolbarFadeSettings.fadeDurationPresetsMs)
+              (
+                duration.toString(),
+                mobileRemoteToolbarFadeSpeedLabel(duration),
+              ),
+          ],
+          heading: 'Toolbar fade speed',
+          onChanged: (value) {
+            setState(() {
+              _toolbarFadeSettings = _toolbarFadeSettings.copyWith(
+                fadeDurationMs: int.parse(value),
+              );
+            });
           },
         ),
         _radioSection(

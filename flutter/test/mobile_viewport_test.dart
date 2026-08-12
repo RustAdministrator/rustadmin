@@ -72,7 +72,7 @@ void main() {
     );
   });
 
-  test('limits overscan to centred remote corners', () {
+  test('clamps remote screen edges without empty overscan', () {
     const texture = Size(2560, 1440);
     const viewport = Size(393, 873);
     const scale = 873 / 1440;
@@ -90,13 +90,41 @@ void main() {
       scale: scale,
     );
 
-    expect(firstCorner.dx, closeTo(viewport.width / 2, 0.000001));
+    expect(firstCorner.dx, closeTo(0, 0.000001));
     expect(firstCorner.dy, closeTo(0, 0.000001));
     expect(
       oppositeCorner.dx,
-      closeTo(viewport.width / 2 - texture.width * scale, 0.000001),
+      closeTo(viewport.width - texture.width * scale, 0.000001),
     );
     expect(oppositeCorner.dy, closeTo(0, 0.000001));
+  });
+
+  test('uses custom-key top as keyboard viewport bottom', () {
+    expect(
+      mobileRemoteUsableViewportHeight(
+        screenHeight: 852,
+        topInset: 59,
+        keyboardInset: 300,
+        keyHelpTop: 500,
+      ),
+      441,
+    );
+    expect(
+      mobileRemoteUsableViewportHeight(
+        screenHeight: 852,
+        topInset: 59,
+        keyboardInset: 300,
+      ),
+      493,
+    );
+    expect(
+      mobileRemoteUsableViewportHeight(
+        screenHeight: 852,
+        topInset: 59,
+        keyboardInset: 0,
+      ),
+      793,
+    );
   });
 
   test('edge acceleration follows depth into the device viewport edge', () {

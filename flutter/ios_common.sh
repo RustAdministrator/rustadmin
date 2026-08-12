@@ -15,7 +15,7 @@ if [[ "${EXPECTED_PLATFORM}" == "7" ]]; then
   SDK_NAME="iphonesimulator"
 fi
 
-: "${IPHONEOS_DEPLOYMENT_TARGET:=13.0}"
+: "${IPHONEOS_DEPLOYMENT_TARGET:=15.0}"
 export IPHONEOS_DEPLOYMENT_TARGET
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

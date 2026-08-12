@@ -658,7 +658,7 @@ class _RemotePageState extends State<RemotePage>
               ffi: gFFI,
             ));
           }
-          if (gFFI.ffiModel.pi.displays.isNotEmpty) {
+          if (gFFI.ffiModel.pi.displays.isNotEmpty && !keyboardIsVisible) {
             paints.add(
               Positioned.fill(
                 child: Padding(
