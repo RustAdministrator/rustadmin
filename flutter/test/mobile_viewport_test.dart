@@ -50,6 +50,14 @@ void main() {
         mobileRemoteMinimumCanvasScale(texture: texture, viewport: viewport),
         closeTo(393 / 2560, 0.000001),
       );
+      expect(
+        mobileRemoteMinimumEdgeScrollScale(
+          texture: texture,
+          viewport: viewport,
+          edgeThickness: 100,
+        ),
+        closeTo((873 + 200) / 1440, 0.000001),
+      );
     },
   );
 
@@ -124,6 +132,47 @@ void main() {
         keyboardInset: 0,
       ),
       793,
+    );
+  });
+
+  test('mobile pointer mapping follows the moved canvas on both axes', () {
+    const texturePosition = Offset(1200, 800);
+    const canvasOffset = Offset(-700, -450);
+    const scale = 0.75;
+    final viewportPosition = mobileRemoteViewportPositionFromTexture(
+      texturePosition: texturePosition,
+      canvasOffset: canvasOffset,
+      scale: scale,
+    );
+    expect(viewportPosition, const Offset(200, 150));
+    expect(
+      mobileRemoteTexturePositionFromViewport(
+        viewportPosition: viewportPosition,
+        canvasOffset: canvasOffset,
+        scale: scale,
+      ),
+      texturePosition,
+    );
+  });
+
+  test('cursor follows canvas scrolling and stops at remote edges', () {
+    expect(
+      mobileRemoteCursorAfterCanvasScroll(
+        currentRemotePosition: const Offset(1200, 700),
+        canvasDelta: const Offset(-30, -60),
+        scale: 0.5,
+        remoteBounds: const Rect.fromLTWH(0, 0, 2560, 1440),
+      ),
+      const Offset(1260, 820),
+    );
+    expect(
+      mobileRemoteCursorAfterCanvasScroll(
+        currentRemotePosition: const Offset(2550, 1430),
+        canvasDelta: const Offset(-30, -60),
+        scale: 0.5,
+        remoteBounds: const Rect.fromLTWH(0, 0, 2560, 1440),
+      ),
+      const Offset(2559, 1439),
     );
   });
 

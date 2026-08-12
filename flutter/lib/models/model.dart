@@ -2719,6 +2719,10 @@ class CanvasModel with ChangeNotifier {
   RxBool get imageOverflow => _imageOverflow;
   bool get _usesMobileRemoteViewport =>
       isMobileClient && parent.target?.connType == ConnType.defaultConn;
+  bool get _usesMobileEdgeScroll =>
+      _usesMobileRemoteViewport &&
+      (_scrollStyle == ScrollStyle.scrolledge ||
+          _scrollStyle == ScrollStyle.scrolledgeaccel);
 
   _resetScroll() => setScrollPercent(0.0, 0.0);
 
@@ -2793,10 +2797,24 @@ class CanvasModel with ChangeNotifier {
         getDisplayHeight().toDouble(),
       );
 
-  double _mobileMinimumScale() => mobileRemoteMinimumCanvasScale(
-        texture: _mobileTextureSize(),
+  double _mobileMinimumScale() {
+    final texture = _mobileTextureSize();
+    final fitAll = mobileRemoteMinimumCanvasScale(
+      texture: texture,
+      viewport: size,
+    );
+    if (!_usesMobileEdgeScroll) {
+      return fitAll;
+    }
+    return max(
+      fitAll,
+      mobileRemoteMinimumEdgeScrollScale(
+        texture: texture,
         viewport: size,
-      );
+        edgeThickness: _edgeScrollEdgeThickness.toDouble(),
+      ),
+    );
+  }
 
   void requestMobileViewFit({MobileRemoteViewScaleMode? mode}) {
     if (mode != null) {
@@ -2846,7 +2864,24 @@ class CanvasModel with ChangeNotifier {
 
   void _clampMobileCanvas() {
     final texture = _mobileTextureSize();
-    _scale = max(_scale, _mobileMinimumScale());
+    final minimumScale = _mobileMinimumScale();
+    if (_scale < minimumScale) {
+      final previousScale = _scale;
+      if (previousScale.isFinite && previousScale > 0) {
+        final viewportCenter = size.center(Offset.zero);
+        final textureAtCenter = mobileRemoteTexturePositionFromViewport(
+          viewportPosition: viewportCenter,
+          canvasOffset: Offset(_x, _y),
+          scale: previousScale,
+        );
+        _scale = minimumScale;
+        final centeredOffset = viewportCenter - textureAtCenter * _scale;
+        _x = centeredOffset.dx;
+        _y = centeredOffset.dy;
+      } else {
+        _scale = minimumScale;
+      }
+    }
     final adjust = getAdjustY();
     final offset = mobileRemoteClampCanvasOffset(
       proposed: Offset(_x, _y + adjust),
@@ -2967,6 +3002,7 @@ class CanvasModel with ChangeNotifier {
   }
 
   Future<void> updateScrollStyle() async {
+    final previousScrollStyle = _scrollStyle;
     final style = await bind.sessionGetScrollStyle(sessionId: sessionId);
 
     _scrollStyle =
@@ -2982,6 +3018,17 @@ class CanvasModel with ChangeNotifier {
 
     if (_scrollStyle != ScrollStyle.scrollauto) {
       _resetScroll();
+    }
+
+    if (_usesMobileRemoteViewport) {
+      updateSize();
+      if (_usesMobileEdgeScroll) {
+        _clampMobileCanvas();
+      } else if (previousScrollStyle == ScrollStyle.scrolledge ||
+          previousScrollStyle == ScrollStyle.scrolledgeaccel) {
+        requestMobileViewFit();
+        _applyPendingMobileFit();
+      }
     }
 
     notifyListeners();
@@ -3304,6 +3351,9 @@ class CanvasModel with ChangeNotifier {
       if (_x == previousX && _y == previousY) {
         return false;
       }
+      parent.target?.cursorModel.followMobileViewportScroll(
+        Offset(_x - previousX, _y - previousY),
+      );
       isMobileCanvasChanged = true;
       notifyListeners();
       return true;
@@ -3782,6 +3832,18 @@ class CursorModel with ChangeNotifier {
 
   Offset get offset => Offset(_x, _y);
 
+  Offset get mobileViewportPosition {
+    final canvasModel = parent.target?.canvasModel;
+    if (canvasModel == null) {
+      return Offset.zero;
+    }
+    return mobileRemoteViewportPositionFromTexture(
+      texturePosition: Offset(x, y),
+      canvasOffset: Offset(canvasModel.x, canvasModel.y),
+      scale: canvasModel.scale,
+    );
+  }
+
   double get hotx => _hotx;
   double get hoty => _hoty;
 
@@ -3869,6 +3931,36 @@ class CursorModel with ChangeNotifier {
 
   Future<void> syncCursorPosition() async {
     await parent.target?.inputModel.moveMouse(_x, _y);
+  }
+
+  void followMobileViewportScroll(Offset canvasDelta) {
+    final target = parent.target;
+    final rect = target?.ffiModel.rect;
+    final canvasModel = target?.canvasModel;
+    if (target == null ||
+        rect == null ||
+        canvasModel == null ||
+        target.ffiModel.viewOnly ||
+        !target.ffiModel.keyboard) {
+      return;
+    }
+    final farEdgeInset = target.ffiModel.pi.platform == kPeerPlatformWindows
+        ? 0.0
+        : 1.0;
+    final next = mobileRemoteCursorAfterCanvasScroll(
+      currentRemotePosition: Offset(_x, _y),
+      canvasDelta: canvasDelta,
+      scale: canvasModel.scale,
+      remoteBounds: rect,
+      farEdgeInset: farEdgeInset,
+    );
+    if (next.dx == _x && next.dy == _y) {
+      return;
+    }
+    _x = next.dx;
+    _y = next.dy;
+    unawaited(target.inputModel.moveMouse(_x, _y));
+    notifyListeners();
   }
 
   bool isInRemoteRect(Offset offset) {

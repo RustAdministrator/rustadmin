@@ -18,6 +18,7 @@ import '../../models/state_model.dart';
 import 'relative_mouse_model.dart';
 import '../common.dart';
 import '../consts.dart';
+import '../mobile/mobile_viewport.dart';
 
 /// Mouse button enum.
 enum MouseButtons { left, right, wheel, back }
@@ -1740,6 +1741,11 @@ class InputModel {
 
     y -= CanvasModel.topToEdge;
     x -= CanvasModel.leftToEdge;
+    final mobileView = ui.PlatformDispatcher.instance.implicitView;
+    if (isMobileClient && mobileView != null) {
+      x -= mobileView.padding.left / mobileView.devicePixelRatio;
+      y -= mobileView.padding.top / mobileView.devicePixelRatio;
+    }
     if (isMove) {
       final canvasModel = parent.target!.canvasModel;
 
@@ -1812,7 +1818,15 @@ class InputModel {
     var nearBottom = (canvas.size.height - y) < nearThr;
     final imageWidth = rect.width * canvas.scale;
     final imageHeight = rect.height * canvas.scale;
-    if (canvas.scrollStyle != ScrollStyle.scrollauto) {
+    if (isMobileClient) {
+      final texturePosition = mobileRemoteTexturePositionFromViewport(
+        viewportPosition: Offset(x, y),
+        canvasOffset: Offset(canvas.x, canvas.y),
+        scale: canvas.scale,
+      );
+      x = texturePosition.dx;
+      y = texturePosition.dy;
+    } else if (canvas.scrollStyle != ScrollStyle.scrollauto) {
       x += imageWidth * canvas.scrollX;
       y += imageHeight * canvas.scrollY;
 
@@ -1823,13 +1837,14 @@ class InputModel {
       if (canvas.size.height > imageHeight) {
         y -= ((canvas.size.height - imageHeight) / 2);
       }
+      x /= canvas.scale;
+      y /= canvas.scale;
     } else {
       x -= canvas.x;
       y -= canvas.y;
+      x /= canvas.scale;
+      y /= canvas.scale;
     }
-
-    x /= canvas.scale;
-    y /= canvas.scale;
     if (canvas.scale > 0 && canvas.scale < 1) {
       final step = 1.0 / canvas.scale - 1;
       if (nearRight) {

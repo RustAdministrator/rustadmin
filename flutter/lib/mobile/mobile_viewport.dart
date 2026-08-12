@@ -54,6 +54,27 @@ double mobileRemoteMinimumCanvasScale({
   devicePixelRatio: 1,
 );
 
+double mobileRemoteMinimumEdgeScrollScale({
+  required Size texture,
+  required Size viewport,
+  required double edgeThickness,
+}) {
+  if (texture.width <= 0 ||
+      texture.height <= 0 ||
+      viewport.width <= 0 ||
+      viewport.height <= 0) {
+    return 1;
+  }
+  final margin = math.min(
+    math.max(edgeThickness, 0.0),
+    math.min(viewport.width, viewport.height) / 2,
+  );
+  return math.max(
+    (viewport.width + margin * 2) / texture.width,
+    (viewport.height + margin * 2) / texture.height,
+  );
+}
+
 FilterQuality mobileRemoteTextureFilterQuality({
   required double logicalScale,
 }) => logicalScale < 1 ? FilterQuality.low : FilterQuality.none;
@@ -75,6 +96,51 @@ Offset mobileRemoteClampCanvasOffset({
   return Offset(
     clampAxis(proposed.dx, texture.width, viewport.width),
     clampAxis(proposed.dy, texture.height, viewport.height),
+  );
+}
+
+Offset mobileRemoteTexturePositionFromViewport({
+  required Offset viewportPosition,
+  required Offset canvasOffset,
+  required double scale,
+}) {
+  if (!scale.isFinite || scale <= 0) {
+    return Offset.zero;
+  }
+  return Offset(
+    (viewportPosition.dx - canvasOffset.dx) / scale,
+    (viewportPosition.dy - canvasOffset.dy) / scale,
+  );
+}
+
+Offset mobileRemoteViewportPositionFromTexture({
+  required Offset texturePosition,
+  required Offset canvasOffset,
+  required double scale,
+}) => Offset(
+  canvasOffset.dx + texturePosition.dx * scale,
+  canvasOffset.dy + texturePosition.dy * scale,
+);
+
+Offset mobileRemoteCursorAfterCanvasScroll({
+  required Offset currentRemotePosition,
+  required Offset canvasDelta,
+  required double scale,
+  required Rect remoteBounds,
+  double farEdgeInset = 1,
+}) {
+  if (!scale.isFinite || scale <= 0 || remoteBounds.isEmpty) {
+    return currentRemotePosition;
+  }
+  final maxX = math.max(remoteBounds.left, remoteBounds.right - farEdgeInset);
+  final maxY = math.max(remoteBounds.top, remoteBounds.bottom - farEdgeInset);
+  return Offset(
+    (currentRemotePosition.dx - canvasDelta.dx / scale)
+        .clamp(remoteBounds.left, maxX)
+        .toDouble(),
+    (currentRemotePosition.dy - canvasDelta.dy / scale)
+        .clamp(remoteBounds.top, maxY)
+        .toDouble(),
   );
 }
 

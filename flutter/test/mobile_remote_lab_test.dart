@@ -70,6 +70,11 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  test('reports the composed RustAdmin release version', () {
+    expect(mobileRemoteLabVersion, '2.0.5.001');
+    expect(mobileRemoteLabRevisionLabel, '2.0.5.001 · Lab r12');
+  });
+
   test('calculates native-texture fit, zoom, and no-overscan bounds', () {
     const texture = Size(2560, 1440);
     const viewport = Size(393, 873);
@@ -152,6 +157,41 @@ void main() {
     expect(rightCorner.dy, closeTo(0, 0.000001));
   });
 
+  test('calculates four-direction Lab edge scrolling from device edges', () {
+    const viewport = Size(393, 873);
+    const elapsed = Duration(milliseconds: 100);
+    expect(
+      mobileRemoteLabEdgeScrollDelta(
+        pointerPosition: const Offset(0, 0),
+        viewport: viewport,
+        edgeThickness: 100,
+        elapsed: elapsed,
+        accelerated: false,
+      ),
+      const Offset(-60, -60),
+    );
+    expect(
+      mobileRemoteLabEdgeScrollDelta(
+        pointerPosition: const Offset(393, 873),
+        viewport: viewport,
+        edgeThickness: 100,
+        elapsed: elapsed,
+        accelerated: true,
+      ),
+      const Offset(180, 180),
+    );
+    expect(
+      mobileRemoteLabEdgeScrollDelta(
+        pointerPosition: const Offset(196.5, 436.5),
+        viewport: viewport,
+        edgeThickness: 100,
+        elapsed: elapsed,
+        accelerated: true,
+      ),
+      Offset.zero,
+    );
+  });
+
   testWidgets('switches between individual and combined monitor views', (
     tester,
   ) async {
@@ -215,6 +255,57 @@ void main() {
       expect(textureRect.height, closeTo(1440, 0.01));
     },
   );
+
+  testWidgets('edge modes preserve panning range on both canvas axes', (
+    tester,
+  ) async {
+    await pumpPreview(tester);
+    await tester.pumpAndSettle();
+
+    final canvas = find.byKey(const Key('mobile-lab-remote-canvas'));
+    final texture = find.byKey(const Key('mobile-lab-remote-texture'));
+    final canvasRect = tester.getRect(canvas);
+    expect(tester.getRect(texture).height, closeTo(canvasRect.height, 0.01));
+
+    await tester.tap(find.byTooltip('Display and session options'));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const Key('mobile-remote-options-open-screen-scrolling')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edge'));
+    await tester.pumpAndSettle();
+
+    final edgeTextureRect = tester.getRect(texture);
+    expect(edgeTextureRect.width, greaterThan(canvasRect.width));
+    expect(edgeTextureRect.height, greaterThan(canvasRect.height));
+    expect(edgeTextureRect.top, lessThan(canvasRect.top));
+    expect(edgeTextureRect.bottom, greaterThan(canvasRect.bottom));
+
+    await tester.tapAt(const Offset(4, 4));
+    await tester.pumpAndSettle();
+    final beforeScroll = tester.getRect(texture);
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: canvasRect.center);
+    await mouse.moveTo(
+      Offset(canvasRect.right - 1, canvasRect.bottom - 1),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    final afterScroll = tester.getRect(texture);
+    expect(afterScroll.left, lessThan(beforeScroll.left));
+    expect(afterScroll.top, lessThan(beforeScroll.top));
+    await mouse.removePointer();
+
+    await tester.tap(find.byTooltip('Display and session options'));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const Key('mobile-remote-options-open-screen-scrolling')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Auto'));
+    await tester.pumpAndSettle();
+    expect(tester.getRect(texture).height, closeTo(canvasRect.height, 0.01));
+  });
 
   testWidgets('clamps gesture panning at remote screen edges', (
     tester,

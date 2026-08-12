@@ -404,13 +404,10 @@ class _RawTouchGestureDetectorRegionState
     }
     if (inputModel.useEdgeScroll) {
       ffi.canvasModel.rearmEdgeScroll();
-      // Edge modes are driven by the finger's position in the device viewport.
-      // A remote cursor position moves when the canvas scrolls and must not be
-      // fed back into edge detection.
-      ffi.canvasModel.edgeScrollMouse(
-        d.localPosition.dx,
-        d.localPosition.dy,
-      );
+      final edgePosition = !handleTouch && !inputModel.relativeMouseMode.value
+          ? ffi.cursorModel.mobileViewportPosition
+          : d.localPosition;
+      ffi.canvasModel.edgeScrollMouse(edgePosition.dx, edgePosition.dy);
     }
   }
 
@@ -430,11 +427,10 @@ class _RawTouchGestureDetectorRegionState
     } else {
       await ffi.cursorModel.updatePan(d.delta, d.localPosition, handleTouch);
       if (inputModel.useEdgeScroll) {
-        // Keep using device-local coordinates as the remote canvas moves.
-        ffi.canvasModel.edgeScrollMouse(
-          d.localPosition.dx,
-          d.localPosition.dy,
-        );
+        final edgePosition = handleTouch
+            ? d.localPosition
+            : ffi.cursorModel.mobileViewportPosition;
+        ffi.canvasModel.edgeScrollMouse(edgePosition.dx, edgePosition.dy);
       }
     }
   }

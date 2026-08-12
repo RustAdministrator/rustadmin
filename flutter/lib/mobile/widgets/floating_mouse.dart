@@ -411,9 +411,10 @@ class _FloatingMouseState extends State<FloatingMouse> {
 
       if (_inputModel.useEdgeScroll) {
         _canvasScrollState.tryCancel();
+        final safeAreaPadding = MediaQuery.paddingOf(context);
         widget.ffi.canvasModel.edgeScrollMouse(
-          mouseGlobalPosition.dx,
-          mouseGlobalPosition.dy,
+          mouseGlobalPosition.dx - safeAreaPadding.left,
+          mouseGlobalPosition.dy - safeAreaPadding.top,
         );
         return;
       }

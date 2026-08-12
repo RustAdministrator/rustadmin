@@ -121,6 +121,39 @@ Offset mobileRemoteLabClampCanvasOffset({
   scale: scale,
 );
 
+Offset mobileRemoteLabEdgeScrollDelta({
+  required Offset pointerPosition,
+  required Size viewport,
+  required double edgeThickness,
+  required Duration elapsed,
+  required bool accelerated,
+}) {
+  final effectiveThickness = math.min(
+    math.max(edgeThickness, 0),
+    math.min(viewport.width, viewport.height) / 2,
+  ).toDouble();
+  if (effectiveThickness <= 0 || elapsed <= Duration.zero) {
+    return Offset.zero;
+  }
+  final factor = Offset(
+    mobileRemoteDeviceEdgeScrollAxisFactor(
+      pointerPosition: pointerPosition.dx,
+      viewportExtent: viewport.width,
+      edgeThickness: effectiveThickness,
+    ),
+    mobileRemoteDeviceEdgeScrollAxisFactor(
+      pointerPosition: pointerPosition.dy,
+      viewportExtent: viewport.height,
+      edgeThickness: effectiveThickness,
+    ),
+  );
+  final seconds = elapsed.inMicroseconds / Duration.microsecondsPerSecond;
+  // These match production's 0.1 edge-depth step at 60 Hz and its
+  // accelerated maximum of 1800 logical pixels per second.
+  final speed = accelerated ? 1800.0 : effectiveThickness * 6.0;
+  return factor * speed * seconds;
+}
+
 enum RemoteLabScenario {
   windowsFullAccess,
   androidPeer,
@@ -729,6 +762,7 @@ class MobileRemotePreview extends StatefulWidget {
 
 class _MobileRemotePreviewState extends State<MobileRemotePreview> {
   static const _allMonitors = -1;
+  static const _edgeScrollThickness = 100.0;
 
   int _selectedMonitor = 0;
   var _viewScaleMode = MobileRemoteLabViewScaleMode.fitHeight;
@@ -744,6 +778,9 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
   double? _gestureStartScale;
   Offset? _gestureStartOffset;
   Offset? _gestureStartFocalPoint;
+  Timer? _edgeScrollTimer;
+  Offset? _edgePointerPosition;
+  DateTime? _lastEdgeScrollTick;
   late bool _connected;
   bool _showToolbar = true;
   bool _showKeyboard = false;
@@ -772,6 +809,12 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
   }
 
   @override
+  void dispose() {
+    _stopEdgeScroll();
+    super.dispose();
+  }
+
+  @override
   void didUpdateWidget(covariant MobileRemotePreview oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (_selectedMonitor >= widget.monitors.length) {
@@ -794,6 +837,7 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       _panel = null;
       _actionSubmenu = null;
       _showCustomButtonEditor = false;
+      _stopEdgeScroll();
       _resetView();
     }
   }
@@ -915,50 +959,55 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
           texture: texture,
           devicePixelRatio: devicePixelRatio,
         );
-        return Listener(
-          onPointerSignal: _connected ? _onCanvasPointerSignal : null,
-          child: GestureDetector(
-            key: const Key('mobile-lab-remote-canvas'),
-            behavior: HitTestBehavior.opaque,
-            trackpadScrollCausesScale: true,
-            onScaleStart: _connected ? _onCanvasScaleStart : null,
-            onScaleUpdate: _connected ? _onCanvasScaleUpdate : null,
-            onScaleEnd: _connected ? _onCanvasScaleEnd : null,
-            child: ClipRect(
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  const ColoredBox(color: Colors.black),
-                  Positioned(
-                    left: 0,
-                    top: 0,
-                    child: Transform(
-                      alignment: Alignment.topLeft,
-                      transform: Matrix4.identity()
-                        ..setTranslationRaw(
-                          _canvasOffset.dx,
-                          _canvasOffset.dy,
-                          0,
-                        )
-                        ..scaleByDouble(
-                          _canvasScale,
-                          _canvasScale,
-                          _canvasScale,
-                          1,
+        return MouseRegion(
+          onExit: (_) => _stopEdgeScroll(),
+          child: Listener(
+            onPointerSignal: _connected ? _onCanvasPointerSignal : null,
+            onPointerHover: _connected ? _onCanvasEdgePointer : null,
+            onPointerMove: _connected ? _onCanvasEdgePointer : null,
+            child: GestureDetector(
+              key: const Key('mobile-lab-remote-canvas'),
+              behavior: HitTestBehavior.opaque,
+              trackpadScrollCausesScale: true,
+              onScaleStart: _connected ? _onCanvasScaleStart : null,
+              onScaleUpdate: _connected ? _onCanvasScaleUpdate : null,
+              onScaleEnd: _connected ? _onCanvasScaleEnd : null,
+              child: ClipRect(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    const ColoredBox(color: Colors.black),
+                    Positioned(
+                      left: 0,
+                      top: 0,
+                      child: Transform(
+                        alignment: Alignment.topLeft,
+                        transform: Matrix4.identity()
+                          ..setTranslationRaw(
+                            _canvasOffset.dx,
+                            _canvasOffset.dy,
+                            0,
+                          )
+                          ..scaleByDouble(
+                            _canvasScale,
+                            _canvasScale,
+                            _canvasScale,
+                            1,
+                          ),
+                        child: SizedBox(
+                          key: const Key('mobile-lab-remote-texture'),
+                          width: texture.width,
+                          height: texture.height,
+                          child: _selectedMonitor == _allMonitors
+                              ? _buildCombinedDesktop()
+                              : _buildSingleMonitor(
+                                  widget.monitors[_selectedMonitor],
+                                ),
                         ),
-                      child: SizedBox(
-                        key: const Key('mobile-lab-remote-texture'),
-                        width: texture.width,
-                        height: texture.height,
-                        child: _selectedMonitor == _allMonitors
-                            ? _buildCombinedDesktop()
-                            : _buildSingleMonitor(
-                                widget.monitors[_selectedMonitor],
-                              ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
@@ -1039,7 +1088,18 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       texture: texture,
       viewport: viewport,
     );
-    return math.max(scale, minimum).toDouble();
+    final effectiveMinimum = _scrollStyle == kRemoteScrollStyleEdge ||
+            _scrollStyle == kRemoteScrollStyleEdgeAcceleration
+        ? math.max(
+            minimum,
+            mobileRemoteMinimumEdgeScrollScale(
+              texture: texture,
+              viewport: viewport,
+              edgeThickness: _edgeScrollThickness,
+            ),
+          )
+        : minimum;
+    return math.max(scale, effectiveMinimum).toDouble();
   }
 
   void _onCanvasScaleStart(ScaleStartDetails details) {
@@ -1125,6 +1185,85 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
     _gestureStartScale = null;
     _gestureStartOffset = null;
     _gestureStartFocalPoint = null;
+  }
+
+  bool get _usesEdgeScroll =>
+      _scrollStyle == kRemoteScrollStyleEdge ||
+      _scrollStyle == kRemoteScrollStyleEdgeAcceleration;
+
+  void _onCanvasEdgePointer(PointerEvent event) {
+    if (!_usesEdgeScroll || _canvasViewport == null) {
+      _stopEdgeScroll();
+      return;
+    }
+    _edgePointerPosition = event.localPosition;
+    final delta = mobileRemoteLabEdgeScrollDelta(
+      pointerPosition: event.localPosition,
+      viewport: _canvasViewport!,
+      edgeThickness: _edgeScrollThickness,
+      elapsed: const Duration(milliseconds: 16),
+      accelerated:
+          _scrollStyle == kRemoteScrollStyleEdgeAcceleration,
+    );
+    if (delta == Offset.zero) {
+      _stopEdgeScroll(clearPointer: false);
+      return;
+    }
+    _lastEdgeScrollTick = DateTime.now();
+    _edgeScrollTimer ??= Timer.periodic(
+      const Duration(milliseconds: 16),
+      (_) => _performEdgeScrollTick(),
+    );
+  }
+
+  void _performEdgeScrollTick() {
+    final pointer = _edgePointerPosition;
+    final viewport = _canvasViewport;
+    final texture = _canvasTexture;
+    final previousTick = _lastEdgeScrollTick;
+    if (!_usesEdgeScroll ||
+        pointer == null ||
+        viewport == null ||
+        texture == null ||
+        previousTick == null) {
+      _stopEdgeScroll();
+      return;
+    }
+    final now = DateTime.now();
+    final elapsed = now.difference(previousTick);
+    _lastEdgeScrollTick = now;
+    final delta = mobileRemoteLabEdgeScrollDelta(
+      pointerPosition: pointer,
+      viewport: viewport,
+      edgeThickness: _edgeScrollThickness,
+      elapsed: elapsed,
+      accelerated:
+          _scrollStyle == kRemoteScrollStyleEdgeAcceleration,
+    );
+    final offset = mobileRemoteLabClampCanvasOffset(
+      proposed: _canvasOffset - delta,
+      texture: texture,
+      viewport: viewport,
+      scale: _canvasScale,
+    );
+    if (offset == _canvasOffset) {
+      _stopEdgeScroll(clearPointer: false);
+      return;
+    }
+    setState(() {
+      _manualCanvasTransform = true;
+      _canvasFitPending = false;
+      _canvasOffset = offset;
+    });
+  }
+
+  void _stopEdgeScroll({bool clearPointer = true}) {
+    _edgeScrollTimer?.cancel();
+    _edgeScrollTimer = null;
+    _lastEdgeScrollTick = null;
+    if (clearPointer) {
+      _edgePointerPosition = null;
+    }
   }
 
   Widget _buildSingleMonitor(RemoteLabMonitor monitor) {
@@ -1367,7 +1506,12 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
             (kRemoteScrollStyleEdgeAcceleration, 'Edge acceleration'),
           ],
           heading: 'Screen scrolling',
-          onChanged: (value) => setState(() => _scrollStyle = value),
+          onChanged: (value) => setState(() {
+            _stopEdgeScroll();
+            _scrollStyle = value;
+            _manualCanvasTransform = false;
+            _canvasFitPending = true;
+          }),
         ),
         _radioSection(
           'toolbar-minimum-opacity',
