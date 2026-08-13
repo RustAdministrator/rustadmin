@@ -2,11 +2,11 @@
 /// `flutter/lib/prototyping/`.
 ///
 /// The composed release version represented by Cargo/Flutter base version
-/// 2.0.5 and RustAdmin build revision 001.
-const mobileRemoteLabVersion = '2.0.5.001';
+/// 2.0.5 and RustAdmin build revision 002.
+const mobileRemoteLabVersion = '2.0.5.002';
 
 /// It is intentionally independent from RustAdmin's production revision.
-const mobileRemoteLabRevision = 12;
+const mobileRemoteLabRevision = 13;
 
 const mobileRemoteLabRevisionLabel =
     '$mobileRemoteLabVersion · Lab r$mobileRemoteLabRevision';

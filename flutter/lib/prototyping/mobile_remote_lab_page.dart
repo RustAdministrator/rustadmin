@@ -28,7 +28,6 @@ ThemeData mobileRemoteLabTheme(Brightness brightness) {
     scaffoldBackgroundColor: colorScheme.surface,
   );
 }
-
 class RemoteLabMonitor {
   const RemoteLabMonitor({
     required this.name,
@@ -785,7 +784,9 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
   bool _showToolbar = true;
   bool _showKeyboard = false;
   String _scrollStyle = kRemoteScrollStyleAuto;
-  var _toolbarFadeSettings = MobileRemoteToolbarFadeSettings.defaults;
+  var _toolbarTransparencySettings =
+      MobileRemoteToolbarTransparencySettings.defaults;
+  var _cursorInertiaSettings = MobileCursorInertiaSettings.defaults;
   bool _keyboardCtrl = false;
   bool _keyboardAlt = false;
   bool _keyboardShift = false;
@@ -1401,7 +1402,10 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       peerIsAndroid: widget.scenario.peerIsAndroid,
       touchMode: _touchMode,
       waitForFirstImage: false,
-      fadeSettings: _toolbarFadeSettings,
+      cursorPosition: _edgePointerPosition == null
+          ? null
+          : _edgePointerPosition! - const Offset(8, 8),
+      transparencySettings: _toolbarTransparencySettings,
       chatButton: IconButton(
         tooltip: 'Chat',
         color: mobileRemoteToolbarForegroundColor(context),
@@ -1514,41 +1518,34 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
           }),
         ),
         _radioSection(
-          'toolbar-minimum-opacity',
-          _toolbarFadeSettings.minimumOpacityPercent.toString(),
+          'toolbar-cursor-overlap-opacity',
+          _toolbarTransparencySettings.overlapOpacityPercent.toString(),
           [
             for (final opacity
-                in MobileRemoteToolbarFadeSettings.opacityPresets)
-              (
-                opacity.toString(),
-                mobileRemoteToolbarOpacityLabel(opacity),
-              ),
+                in MobileRemoteToolbarTransparencySettings.opacityPresets)
+              (opacity.toString(), mobileRemoteToolbarOpacityLabel(opacity)),
           ],
-          heading: 'Toolbar minimum opacity',
+          heading: 'Toolbar opacity under cursor',
           onChanged: (value) {
             setState(() {
-              _toolbarFadeSettings = _toolbarFadeSettings.copyWith(
-                minimumOpacityPercent: int.parse(value),
-              );
+              _toolbarTransparencySettings = _toolbarTransparencySettings
+                  .copyWith(overlapOpacityPercent: int.parse(value));
             });
           },
         ),
         _radioSection(
-          'toolbar-fade-speed',
-          _toolbarFadeSettings.fadeDurationMs.toString(),
+          'cursor-inertia-time',
+          _cursorInertiaSettings.durationMs.toString(),
           [
             for (final duration
-                in MobileRemoteToolbarFadeSettings.fadeDurationPresetsMs)
-              (
-                duration.toString(),
-                mobileRemoteToolbarFadeSpeedLabel(duration),
-              ),
+                in MobileCursorInertiaSettings.durationPresetsMs)
+              (duration.toString(), mobileCursorInertiaDurationLabel(duration)),
           ],
-          heading: 'Toolbar fade speed',
+          heading: 'Cursor inertia time',
           onChanged: (value) {
             setState(() {
-              _toolbarFadeSettings = _toolbarFadeSettings.copyWith(
-                fadeDurationMs: int.parse(value),
+              _cursorInertiaSettings = _cursorInertiaSettings.copyWith(
+                durationMs: int.parse(value),
               );
             });
           },

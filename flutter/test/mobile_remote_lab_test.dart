@@ -71,8 +71,8 @@ void main() {
   }
 
   test('reports the composed RustAdmin release version', () {
-    expect(mobileRemoteLabVersion, '2.0.5.001');
-    expect(mobileRemoteLabRevisionLabel, '2.0.5.001 · Lab r12');
+    expect(mobileRemoteLabVersion, '2.0.5.002');
+    expect(mobileRemoteLabRevisionLabel, '2.0.5.002 · Lab r13');
   });
 
   test('calculates native-texture fit, zoom, and no-overscan bounds', () {
@@ -475,66 +475,66 @@ void main() {
     expect(verticalRect.height <= previewRect.height, isTrue);
   });
 
-  testWidgets('floating toolbar can be dragged and fades while idle', (
-    tester,
-  ) async {
-    await pumpPreview(tester);
+  testWidgets(
+    'floating toolbar can be dragged and remains immediately opaque',
+    (tester) async {
+      await pumpPreview(tester);
 
-    final toolbar = find.byKey(const Key('mobile-remote-floating-toolbar'));
-    final preview = find.byType(MobileRemotePreview);
-    await tester.tap(find.byTooltip('Vertical toolbar'));
-    await tester.pumpAndSettle();
+      final toolbar = find.byKey(const Key('mobile-remote-floating-toolbar'));
+      final preview = find.byType(MobileRemotePreview);
+      await tester.tap(find.byTooltip('Vertical toolbar'));
+      await tester.pumpAndSettle();
 
-    final initialRect = tester.getRect(toolbar);
-    await tester.drag(toolbar, const Offset(100, -180));
-    await tester.pumpAndSettle();
+      final initialRect = tester.getRect(toolbar);
+      await tester.drag(toolbar, const Offset(100, -180));
+      await tester.pumpAndSettle();
 
-    final movedRect = tester.getRect(toolbar);
-    final previewRect = tester.getRect(preview);
-    expect(movedRect.left, greaterThan(initialRect.left));
-    expect(movedRect.top, lessThan(initialRect.top));
-    expect(movedRect.left, greaterThanOrEqualTo(previewRect.left));
-    expect(movedRect.top, greaterThanOrEqualTo(previewRect.top));
-    expect(movedRect.right, lessThanOrEqualTo(previewRect.right));
-    expect(movedRect.bottom, lessThanOrEqualTo(previewRect.bottom));
+      final movedRect = tester.getRect(toolbar);
+      final previewRect = tester.getRect(preview);
+      expect(movedRect.left, greaterThan(initialRect.left));
+      expect(movedRect.top, lessThan(initialRect.top));
+      expect(movedRect.left, greaterThanOrEqualTo(previewRect.left));
+      expect(movedRect.top, greaterThanOrEqualTo(previewRect.top));
+      expect(movedRect.right, lessThanOrEqualTo(previewRect.right));
+      expect(movedRect.bottom, lessThanOrEqualTo(previewRect.bottom));
 
-    await tester.pump(const Duration(milliseconds: 1001));
-    expect(
-      tester
-          .widget<AnimatedOpacity>(
-            find.byKey(const Key('mobile-remote-toolbar-opacity')),
-          )
-          .opacity,
-      closeTo(0.2, 0.001),
-    );
-    expect(
-      tester
-          .widget<AnimatedOpacity>(
-            find.byKey(const Key('mobile-remote-toolbar-opacity')),
-          )
-          .duration,
-      const Duration(seconds: 3),
-    );
+      expect(
+        tester
+            .widget<AnimatedOpacity>(
+              find.byKey(const Key('mobile-remote-toolbar-opacity')),
+            )
+            .opacity,
+        1.0,
+      );
+      expect(
+        tester
+            .widget<AnimatedOpacity>(
+              find.byKey(const Key('mobile-remote-toolbar-opacity')),
+            )
+            .duration,
+        Duration.zero,
+      );
 
-    await tester.tap(find.byTooltip('Display and session options'));
-    await tester.pump();
-    expect(
-      tester
-          .widget<AnimatedOpacity>(
-            find.byKey(const Key('mobile-remote-toolbar-opacity')),
-          )
-          .opacity,
-      1.0,
-    );
-    expect(
-      tester
-          .widget<AnimatedOpacity>(
-            find.byKey(const Key('mobile-remote-toolbar-opacity')),
-          )
-          .duration,
-      Duration.zero,
-    );
-  });
+      await tester.tap(find.byTooltip('Display and session options'));
+      await tester.pump();
+      expect(
+        tester
+            .widget<AnimatedOpacity>(
+              find.byKey(const Key('mobile-remote-toolbar-opacity')),
+            )
+            .opacity,
+        1.0,
+      );
+      expect(
+        tester
+            .widget<AnimatedOpacity>(
+              find.byKey(const Key('mobile-remote-toolbar-opacity')),
+            )
+            .duration,
+        Duration.zero,
+      );
+    },
+  );
 
   testWidgets('keyboard controls stay in one horizontally scrollable row', (
     tester,
@@ -628,8 +628,8 @@ void main() {
     expect(find.byKey(const Key('mobile-remote-options-root')), findsOneWidget);
     expect(find.text('View scale'), findsOneWidget);
     expect(find.text('Screen scrolling'), findsOneWidget);
-    expect(find.text('Toolbar minimum opacity'), findsOneWidget);
-    expect(find.text('Toolbar fade speed'), findsOneWidget);
+    expect(find.text('Toolbar opacity under cursor'), findsOneWidget);
+    expect(find.text('Cursor inertia time'), findsOneWidget);
     expect(find.text('Image quality'), findsOneWidget);
     expect(find.text('Codec'), findsOneWidget);
     expect(find.text('Capture'), findsOneWidget);

@@ -9,7 +9,6 @@ enum GestureState {
   twoFingerScale,
   threeFingerVerticalDrag
 }
-
 class CustomTouchGestureRecognizer extends ScaleGestureRecognizer {
   CustomTouchGestureRecognizer({
     Object? debugOwner,
@@ -461,96 +460,142 @@ class HoldTapMoveGestureRecognizer extends GestureRecognizer {
   String get debugDescription => 'double tap';
 }
 
-class DoubleFinerTapGestureRecognizer extends GestureRecognizer {
-  DoubleFinerTapGestureRecognizer({
+class MobileTapHoldGestureRecognizer extends OneSequenceGestureRecognizer {
+  MobileTapHoldGestureRecognizer({
     Object? debugOwner,
     Set<PointerDeviceKind>? supportedDevices,
-  }) : super(
-          debugOwner: debugOwner,
-          supportedDevices: supportedDevices,
-        );
+  }) : super(debugOwner: debugOwner, supportedDevices: supportedDevices);
 
-  GestureTapDownCallback? onDoubleFinerTapDown;
-  GestureTapDownCallback? onDoubleFinerTap;
-  GestureTapCancelCallback? onDoubleFinerTapCancel;
+  GestureTapDownCallback? onOneFingerDown;
+  GestureTapDownCallback? onOneFingerHoldStart;
+  GestureDragUpdateCallback? onOneFingerHoldMove;
+  GestureTapCancelCallback? onOneFingerHoldEnd;
+  GestureTapDownCallback? onTwoFingerTap;
+  GestureTapDownCallback? onTwoFingerDown;
+  GestureTapDownCallback? onTwoFingerHoldStart;
+  GestureTapCancelCallback? onTwoFingerHoldEnd;
+  GestureTapCancelCallback? onTwoFingerCancel;
 
-  Timer? _firstTapTimer;
-  _TapTracker? _firstTap;
-
-  PointerDownEvent? _lastPointerDownEvent;
-
-  var _isStart = false;
-
-  final Set<int> _upTap = {};
-
-  final Map<int, _TapTracker> _trackers = <int, _TapTracker>{};
+  final Map<int, PointerDownEvent> _pointers = <int, PointerDownEvent>{};
+  Timer? _holdTimer;
+  TapDownDetails? _centroidDetails;
+  bool _sawTwoPointers = false;
+  bool _oneFingerHoldActive = false;
+  bool _holdActive = false;
+  bool _finishing = false;
 
   @override
   bool isPointerAllowed(PointerDownEvent event) {
-    if (_firstTap == null) {
-      switch (event.buttons) {
-        case kPrimaryButton:
-          if (onDoubleFinerTapDown == null &&
-              onDoubleFinerTap == null &&
-              onDoubleFinerTapCancel == null) {
-            return false;
-          }
-          break;
-        default:
-          return false;
-      }
+    if (event.buttons != kPrimaryButton ||
+        (onOneFingerHoldStart == null &&
+            onTwoFingerTap == null &&
+            onTwoFingerHoldStart == null)) {
+      return false;
     }
     return super.isPointerAllowed(event);
   }
 
   @override
   void addAllowedPointer(PointerDownEvent event) {
-    debugPrint("addAllowedPointer");
-    if (_isStart) {
-      // second
-      if (onDoubleFinerTapDown != null) {
-        final TapDownDetails details = TapDownDetails(
-          globalPosition: event.position,
-          localPosition: event.localPosition,
-          kind: getKindForPointer(event.pointer),
-        );
-        invokeCallback<void>(
-            'onDoubleFinerTapDown', () => onDoubleFinerTapDown!(details));
-      }
-    } else {
-      // first tap
-      _isStart = true;
-      _lastPointerDownEvent = event;
-      _startFirstTapDownTimer();
+    super.addAllowedPointer(event);
+    if (_oneFingerHoldActive) {
+      resolvePointer(event.pointer, GestureDisposition.rejected);
+      stopTrackingPointer(event.pointer);
+      return;
     }
-    _trackTap(event);
+    if (_pointers.length >= 2) {
+      _pointers[event.pointer] = event;
+      _finish(GestureDisposition.rejected, notifyCancel: true);
+      return;
+    }
+    _pointers[event.pointer] = event;
+    if (_pointers.length == 1) {
+      final details = _detailsForEvent(event);
+      invokeCallback<void>(
+        'onOneFingerDown',
+        () => onOneFingerDown?.call(details),
+      );
+      _holdTimer = Timer(kLongPressTimeout, _recognizeOneFingerHold);
+      return;
+    }
+
+    _sawTwoPointers = true;
+    _holdTimer?.cancel();
+    _centroidDetails = _buildCentroidDetails();
+    final details = _centroidDetails;
+    if (details != null) {
+      invokeCallback<void>(
+        'onTwoFingerDown',
+        () => onTwoFingerDown?.call(details),
+      );
+    }
+    _holdTimer = Timer(kLongPressTimeout, _recognizeHold);
   }
 
-  void _trackTap(PointerDownEvent event) {
-    final _TapTracker tracker = _TapTracker(
-      event: event,
-      entry: GestureBinding.instance.gestureArena.add(event.pointer, this),
-      doubleTapMinTime: kDoubleTapMinTime,
-      gestureSettings: gestureSettings,
-    );
-    _trackers[event.pointer] = tracker;
-    // debugPrint("_trackers:$_trackers");
-    tracker.startTrackingPointer(_handleEvent, event.transform);
-
-    _registerTap(tracker);
-  }
-
-  void _handleEvent(PointerEvent event) {
-    final _TapTracker tracker = _trackers[event.pointer]!;
+  @override
+  void handleEvent(PointerEvent event) {
+    final down = _pointers[event.pointer];
+    if (down == null || _finishing) return;
     if (event is PointerUpEvent) {
-      debugPrint("PointerUpEvent");
-      _upTap.add(tracker.pointer);
+      if (_oneFingerHoldActive) {
+        invokeCallback<void>(
+          'onOneFingerHoldEnd',
+          () => onOneFingerHoldEnd?.call(),
+        );
+        _oneFingerHoldActive = false;
+        _finish(GestureDisposition.accepted);
+      } else if (_holdActive) {
+        invokeCallback<void>(
+          'onTwoFingerHoldEnd',
+          () => onTwoFingerHoldEnd?.call(),
+        );
+        _holdActive = false;
+        _finish(GestureDisposition.accepted);
+      } else if (_sawTwoPointers) {
+        _holdTimer?.cancel();
+        resolve(GestureDisposition.accepted);
+        final details = _centroidDetails;
+        if (details != null) {
+          invokeCallback<void>(
+            'onTwoFingerTap',
+            () => onTwoFingerTap?.call(details),
+          );
+        }
+        _finish(GestureDisposition.accepted);
+      } else {
+        _finish(GestureDisposition.rejected);
+      }
     } else if (event is PointerMoveEvent) {
-      if (!tracker.isWithinGlobalTolerance(event, kDoubleTapTouchSlop)) {
-        _reject(tracker);
+      if (_oneFingerHoldActive) {
+        invokeCallback<void>(
+          'onOneFingerHoldMove',
+          () => onOneFingerHoldMove?.call(
+            DragUpdateDetails(
+              globalPosition: event.position,
+              localPosition: event.localPosition,
+              delta: event.localDelta,
+            ),
+          ),
+        );
+      } else if (!_holdActive &&
+          (event.position - down.position).distance > kTouchSlop) {
+        _finish(GestureDisposition.rejected, notifyCancel: _sawTwoPointers);
       }
     } else if (event is PointerCancelEvent) {
-      _reject(tracker);
+      if (_oneFingerHoldActive) {
+        invokeCallback<void>(
+          'onOneFingerHoldEnd',
+          () => onOneFingerHoldEnd?.call(),
+        );
+        _oneFingerHoldActive = false;
+      } else if (_holdActive) {
+        invokeCallback<void>(
+          'onTwoFingerHoldEnd',
+          () => onTwoFingerHoldEnd?.call(),
+        );
+        _holdActive = false;
+      }
+      _finish(GestureDisposition.rejected, notifyCancel: _sawTwoPointers);
     }
   }
 
@@ -559,102 +604,91 @@ class DoubleFinerTapGestureRecognizer extends GestureRecognizer {
 
   @override
   void rejectGesture(int pointer) {
-    _TapTracker? tracker = _trackers[pointer];
-    // If tracker isn't in the list, check if this is the first tap tracker
-    if (tracker == null && _firstTap != null && _firstTap!.pointer == pointer) {
-      tracker = _firstTap;
-    }
-    // If tracker is still null, we rejected ourselves already
-    if (tracker != null) {
-      _reject(tracker);
-    }
-  }
-
-  void _reject(_TapTracker tracker) {
-    _trackers.remove(tracker.pointer);
-    tracker.entry.resolve(GestureDisposition.rejected);
-    _freezeTracker(tracker);
-    if (_firstTap != null) {
-      if (tracker == _firstTap) {
-        _reset();
-      } else {
-        _checkCancel();
-        if (_trackers.isEmpty) {
-          _reset();
-        }
-      }
+    if (!_finishing && _pointers.containsKey(pointer)) {
+      _finish(GestureDisposition.rejected, notifyCancel: _sawTwoPointers);
     }
   }
 
   @override
   void dispose() {
-    _reset();
+    _cancelTimers();
     super.dispose();
   }
 
-  void _reset() {
-    _stopFirstTapUpTimer();
-    _firstTap = null;
-    _clearTrackers();
-  }
-
-  void _registerTap(_TapTracker tracker) {
-    GestureBinding.instance.gestureArena.hold(tracker.pointer);
-    // Note, order is important below in order for the clear -> reject logic to
-    // work properly.
-  }
-
-  void _clearTrackers() {
-    _trackers.values.toList().forEach(_reject);
-    assert(_trackers.isEmpty);
-  }
-
-  void _freezeTracker(_TapTracker tracker) {
-    tracker.stopTrackingPointer(_handleEvent);
-  }
-
-  void _startFirstTapDownTimer() {
-    _firstTapTimer ??= Timer(kDoubleTapTimeout, _timeoutCheck);
-  }
-
-  void _stopFirstTapUpTimer() {
-    if (_firstTapTimer != null) {
-      _firstTapTimer!.cancel();
-      _firstTapTimer = null;
+  void _recognizeHold() {
+    if (_finishing || _pointers.length != 2 || _holdActive) return;
+    _holdActive = true;
+    resolve(GestureDisposition.accepted);
+    final details = _centroidDetails;
+    if (details != null) {
+      invokeCallback<void>(
+        'onTwoFingerHoldStart',
+        () => onTwoFingerHoldStart?.call(details),
+      );
     }
   }
 
-  void _timeoutCheck() {
-    _isStart = false;
-    if (_upTap.length == 2) {
-      _resolve();
-    } else {
-      _reset();
-    }
-    _upTap.clear();
+  void _recognizeOneFingerHold() {
+    if (_finishing || _pointers.length != 1 || _oneFingerHoldActive) return;
+    _oneFingerHoldActive = true;
+    resolve(GestureDisposition.accepted);
+    final event = _pointers.values.single;
+    final details = _detailsForEvent(event);
+    invokeCallback<void>(
+      'onOneFingerHoldStart',
+      () => onOneFingerHoldStart?.call(details),
+    );
   }
 
-  void _resolve() {
-    // TODO tap down details
-    if (onDoubleFinerTap != null) {
-      onDoubleFinerTap!(TapDownDetails(
-        kind: _lastPointerDownEvent?.kind,
-      ));
-    }
-    _trackers.forEach((key, value) {
-      value.entry.resolve(GestureDisposition.accepted);
-    });
-    _reset();
+  TapDownDetails _detailsForEvent(PointerDownEvent event) => TapDownDetails(
+        globalPosition: event.position,
+        localPosition: event.localPosition,
+        kind: event.kind,
+      );
+
+  TapDownDetails _buildCentroidDetails() {
+    final events = _pointers.values.toList(growable: false);
+    final first = events[0];
+    final second = events[1];
+    return TapDownDetails(
+      globalPosition: (first.position + second.position) / 2,
+      localPosition: (first.localPosition + second.localPosition) / 2,
+      kind: first.kind,
+    );
   }
 
-  void _checkCancel() {
-    if (onDoubleFinerTapCancel != null) {
-      invokeCallback<void>('onHoldDragCancel', onDoubleFinerTapCancel!);
+  void _finish(GestureDisposition disposition, {bool notifyCancel = false}) {
+    if (_finishing) return;
+    _finishing = true;
+    _cancelTimers();
+    if (notifyCancel) {
+      invokeCallback<void>(
+        'onTwoFingerCancel',
+        () => onTwoFingerCancel?.call(),
+      );
     }
+    resolve(disposition);
+    for (final pointer in _pointers.keys.toList(growable: false)) {
+      stopTrackingPointer(pointer);
+    }
+    _pointers.clear();
+    _centroidDetails = null;
+    _sawTwoPointers = false;
+    _oneFingerHoldActive = false;
+    _holdActive = false;
+    _finishing = false;
+  }
+
+  void _cancelTimers() {
+    _holdTimer?.cancel();
+    _holdTimer = null;
   }
 
   @override
-  String get debugDescription => 'double tap';
+  void didStopTrackingLastPointer(int pointer) {}
+
+  @override
+  String get debugDescription => 'mobile tap or hold';
 }
 
 /// TapTracker helps track individual tap sequences as part of a
@@ -745,45 +779,55 @@ RawGestureDetector getMixinGestureDetector({
   GestureDragUpdateCallback? onThreeFingerVerticalDragUpdate,
 }) {
   return RawGestureDetector(
-      child: child,
-      gestures: <Type, GestureRecognizerFactory>{
-        // Official
-        TapGestureRecognizer:
-            GestureRecognizerFactoryWithHandlers<TapGestureRecognizer>(
-                () => TapGestureRecognizer(), (instance) {
+    child: child,
+    gestures: <Type, GestureRecognizerFactory>{
+      // Official
+      TapGestureRecognizer:
+          GestureRecognizerFactoryWithHandlers<TapGestureRecognizer>(
+        () => TapGestureRecognizer(),
+        (instance) {
           instance.onTapUp = onTapUp;
-        }),
-        DoubleTapGestureRecognizer:
-            GestureRecognizerFactoryWithHandlers<DoubleTapGestureRecognizer>(
-                () => DoubleTapGestureRecognizer(), (instance) {
+        },
+      ),
+      DoubleTapGestureRecognizer:
+          GestureRecognizerFactoryWithHandlers<DoubleTapGestureRecognizer>(
+        () => DoubleTapGestureRecognizer(),
+        (instance) {
           instance
             ..onDoubleTapDown = onDoubleTapDown
             ..onDoubleTap = onDoubleTap;
-        }),
-        LongPressGestureRecognizer:
-            GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
-                () => LongPressGestureRecognizer(), (instance) {
+        },
+      ),
+      LongPressGestureRecognizer:
+          GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
+        () => LongPressGestureRecognizer(),
+        (instance) {
           instance
             ..onLongPressDown = onLongPressDown
             ..onLongPress = onLongPress;
-        }),
-        // Customized
-        HoldTapMoveGestureRecognizer:
-            GestureRecognizerFactoryWithHandlers<HoldTapMoveGestureRecognizer>(
-                () => HoldTapMoveGestureRecognizer(),
-                (instance) => instance
-                  ..onHoldDragStart = onHoldDragStart
-                  ..onHoldDragUpdate = onHoldDragUpdate
-                  ..onHoldDragCancel = onHoldDragCancel
-                  ..onHoldDragEnd = onHoldDragEnd),
-        DoubleFinerTapGestureRecognizer: GestureRecognizerFactoryWithHandlers<
-                DoubleFinerTapGestureRecognizer>(
-            () => DoubleFinerTapGestureRecognizer(), (instance) {
-          instance.onDoubleFinerTap = onDoubleFinerTap;
-        }),
-        CustomTouchGestureRecognizer:
-            GestureRecognizerFactoryWithHandlers<CustomTouchGestureRecognizer>(
-                () => CustomTouchGestureRecognizer(), (instance) {
+        },
+      ),
+      // Customized
+      HoldTapMoveGestureRecognizer:
+          GestureRecognizerFactoryWithHandlers<HoldTapMoveGestureRecognizer>(
+        () => HoldTapMoveGestureRecognizer(),
+        (instance) => instance
+          ..onHoldDragStart = onHoldDragStart
+          ..onHoldDragUpdate = onHoldDragUpdate
+          ..onHoldDragCancel = onHoldDragCancel
+          ..onHoldDragEnd = onHoldDragEnd,
+      ),
+      MobileTapHoldGestureRecognizer:
+          GestureRecognizerFactoryWithHandlers<MobileTapHoldGestureRecognizer>(
+        () => MobileTapHoldGestureRecognizer(),
+        (instance) {
+          instance.onTwoFingerTap = onDoubleFinerTap;
+        },
+      ),
+      CustomTouchGestureRecognizer:
+          GestureRecognizerFactoryWithHandlers<CustomTouchGestureRecognizer>(
+        () => CustomTouchGestureRecognizer(),
+        (instance) {
           instance
             ..onOneFingerPanStart = onOneFingerPanStart
             ..onOneFingerPanUpdate = onOneFingerPanUpdate

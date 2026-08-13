@@ -8,8 +8,9 @@ void main() {
   Future<void> pumpToolbar(
     WidgetTester tester, {
     ThemeData? theme,
-    MobileRemoteToolbarFadeSettings fadeSettings =
-        MobileRemoteToolbarFadeSettings.defaults,
+    Offset? cursorPosition,
+    MobileRemoteToolbarTransparencySettings transparencySettings =
+        MobileRemoteToolbarTransparencySettings.defaults,
   }) => tester.pumpWidget(
     MaterialApp(
       theme: theme,
@@ -31,7 +32,8 @@ void main() {
             peerIsAndroid: false,
             touchMode: true,
             waitForFirstImage: false,
-            fadeSettings: fadeSettings,
+            cursorPosition: cursorPosition,
+            transparencySettings: transparencySettings,
           ),
         ),
       ),
@@ -58,31 +60,31 @@ void main() {
     expect((material.shape as StadiumBorder).side.color, Colors.black87);
   });
 
-  testWidgets('toolbar fade settings control speed and minimum opacity', (
+  testWidgets('toolbar transparency follows cursor overlap immediately', (
     tester,
   ) async {
     await pumpToolbar(
       tester,
-      fadeSettings: const MobileRemoteToolbarFadeSettings(
-        minimumOpacityPercent: 60,
-        fadeDurationMs: 500,
+      cursorPosition: const Offset(160, 580),
+      transparencySettings: const MobileRemoteToolbarTransparencySettings(
+        overlapOpacityPercent: 60,
       ),
     );
-    await tester.pump(const Duration(seconds: 1));
+    await tester.pump();
     var opacity = tester.widget<AnimatedOpacity>(
       find.byKey(const Key('mobile-remote-toolbar-opacity')),
     );
     expect(opacity.opacity, 0.6);
-    expect(opacity.duration, const Duration(milliseconds: 500));
+    expect(opacity.duration, Duration.zero);
 
     await pumpToolbar(
       tester,
-      fadeSettings: const MobileRemoteToolbarFadeSettings(
-        minimumOpacityPercent: 100,
-        fadeDurationMs: 5000,
+      cursorPosition: const Offset(10, 10),
+      transparencySettings: const MobileRemoteToolbarTransparencySettings(
+        overlapOpacityPercent: 60,
       ),
     );
-    await tester.pump(const Duration(seconds: 10));
+    await tester.pump();
     opacity = tester.widget<AnimatedOpacity>(
       find.byKey(const Key('mobile-remote-toolbar-opacity')),
     );
@@ -90,16 +92,16 @@ void main() {
     expect(opacity.duration, Duration.zero);
   });
 
-  test('toolbar fade settings normalize stored values', () {
+  test('mobile toolbar and inertia settings normalize stored values', () {
     expect(
-      MobileRemoteToolbarFadeSettings.fromStored(
-        minimumOpacityPercent: '200',
-        fadeDurationMs: '-1',
+      MobileRemoteToolbarTransparencySettings.fromStored(
+        overlapOpacityPercent: '200',
       ),
-      const MobileRemoteToolbarFadeSettings(
-        minimumOpacityPercent: 100,
-        fadeDurationMs: 0,
-      ),
+      const MobileRemoteToolbarTransparencySettings(overlapOpacityPercent: 100),
+    );
+    expect(
+      MobileCursorInertiaSettings.fromStored('-1'),
+      const MobileCursorInertiaSettings(durationMs: 0),
     );
     expect(normalizeMobileRemoteScrollStyle('unknown'), kRemoteScrollStyleAuto);
     expect(
@@ -108,7 +110,7 @@ void main() {
     );
   });
 
-  testWidgets('floating toolbar drags, changes axis, collapses, and dims', (
+  testWidgets('floating toolbar drags, changes axis, and collapses', (
     tester,
   ) async {
     await pumpToolbar(tester);
@@ -130,21 +132,14 @@ void main() {
 
     await tester.tap(find.byTooltip('Show toolbar'));
     await tester.pumpAndSettle();
-    await tester.pump(const Duration(seconds: 1));
-    await tester.pump(const Duration(seconds: 3));
     final opacity = tester.widget<AnimatedOpacity>(
       find.byKey(const Key('mobile-remote-toolbar-opacity')),
     );
-    expect(opacity.opacity, 0.2);
-    expect(opacity.duration, const Duration(seconds: 3));
+    expect(opacity.opacity, 1.0);
+    expect(opacity.duration, Duration.zero);
 
     await tester.tap(find.byTooltip('Display and session options'));
     await tester.pump();
-    final restoredOpacity = tester.widget<AnimatedOpacity>(
-      find.byKey(const Key('mobile-remote-toolbar-opacity')),
-    );
-    expect(restoredOpacity.opacity, 1.0);
-    expect(restoredOpacity.duration, Duration.zero);
   });
 
   testWidgets('quick keys stay in one square scrollable row', (tester) async {

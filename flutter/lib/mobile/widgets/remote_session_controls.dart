@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
@@ -13,7 +11,6 @@ Color mobileRemoteToolbarBackgroundColor(BuildContext context) {
       ? Colors.black
       : Colors.white;
 }
-
 Color mobileRemoteToolbarForegroundColor(BuildContext context) {
   return Theme.of(context).brightness == Brightness.dark
       ? Colors.white
@@ -35,65 +32,86 @@ Color mobileRemoteQuickKeyStripBackgroundColor(BuildContext context) {
 enum MobileRemoteToolbarAxis { horizontal, vertical }
 
 @immutable
-class MobileRemoteToolbarFadeSettings {
-  const MobileRemoteToolbarFadeSettings({
-    required this.minimumOpacityPercent,
-    required this.fadeDurationMs,
+class MobileRemoteToolbarTransparencySettings {
+  const MobileRemoteToolbarTransparencySettings({
+    required this.overlapOpacityPercent,
   });
 
-  static const defaults = MobileRemoteToolbarFadeSettings(
-    minimumOpacityPercent: kDefaultMobileRemoteToolbarMinimumOpacityPercent,
-    fadeDurationMs: kDefaultMobileRemoteToolbarFadeDurationMs,
+  static const defaults = MobileRemoteToolbarTransparencySettings(
+    overlapOpacityPercent: kDefaultMobileRemoteToolbarOverlapOpacityPercent,
   );
 
   static const opacityPresets = <int>[10, 20, 40, 60, 80, 100];
-  static const fadeDurationPresetsMs = <int>[0, 500, 1500, 3000, 5000];
 
-  final int minimumOpacityPercent;
-  final int fadeDurationMs;
+  final int overlapOpacityPercent;
 
-  double get minimumOpacity => minimumOpacityPercent / 100;
-  Duration get fadeDuration => Duration(milliseconds: fadeDurationMs);
-  bool get fadingEnabled => minimumOpacityPercent < 100;
+  double get overlapOpacity => overlapOpacityPercent / 100;
 
-  factory MobileRemoteToolbarFadeSettings.fromStored({
-    required String minimumOpacityPercent,
-    required String fadeDurationMs,
-    MobileRemoteToolbarFadeSettings fallback = defaults,
+  factory MobileRemoteToolbarTransparencySettings.fromStored({
+    required String overlapOpacityPercent,
+    MobileRemoteToolbarTransparencySettings fallback = defaults,
   }) {
-    final opacity = int.tryParse(minimumOpacityPercent);
-    final duration = int.tryParse(fadeDurationMs);
-    return MobileRemoteToolbarFadeSettings(
-      minimumOpacityPercent: (opacity ?? fallback.minimumOpacityPercent)
+    final opacity = int.tryParse(overlapOpacityPercent);
+    return MobileRemoteToolbarTransparencySettings(
+      overlapOpacityPercent: (opacity ?? fallback.overlapOpacityPercent)
           .clamp(
-            kMinMobileRemoteToolbarMinimumOpacityPercent,
-            kMaxMobileRemoteToolbarMinimumOpacityPercent,
+            kMinMobileRemoteToolbarOverlapOpacityPercent,
+            kMaxMobileRemoteToolbarOverlapOpacityPercent,
           )
           .toInt(),
-      fadeDurationMs: (duration ?? fallback.fadeDurationMs).clamp(
-        kMinMobileRemoteToolbarFadeDurationMs,
-        kMaxMobileRemoteToolbarFadeDurationMs,
-      ).toInt(),
     );
   }
 
-  MobileRemoteToolbarFadeSettings copyWith({
-    int? minimumOpacityPercent,
-    int? fadeDurationMs,
-  }) => MobileRemoteToolbarFadeSettings(
-    minimumOpacityPercent:
-        minimumOpacityPercent ?? this.minimumOpacityPercent,
-    fadeDurationMs: fadeDurationMs ?? this.fadeDurationMs,
+  MobileRemoteToolbarTransparencySettings copyWith({
+    int? overlapOpacityPercent,
+  }) => MobileRemoteToolbarTransparencySettings(
+    overlapOpacityPercent: overlapOpacityPercent ?? this.overlapOpacityPercent,
   );
 
   @override
   bool operator ==(Object other) =>
-      other is MobileRemoteToolbarFadeSettings &&
-      other.minimumOpacityPercent == minimumOpacityPercent &&
-      other.fadeDurationMs == fadeDurationMs;
+      other is MobileRemoteToolbarTransparencySettings &&
+      other.overlapOpacityPercent == overlapOpacityPercent;
 
   @override
-  int get hashCode => Object.hash(minimumOpacityPercent, fadeDurationMs);
+  int get hashCode => overlapOpacityPercent.hashCode;
+}
+
+@immutable
+class MobileCursorInertiaSettings {
+  const MobileCursorInertiaSettings({required this.durationMs});
+
+  static const defaults = MobileCursorInertiaSettings(
+    durationMs: kDefaultMobileCursorInertiaDurationMs,
+  );
+  static const durationPresetsMs = <int>[0, 50, 100, 150, 250, 400];
+
+  final int durationMs;
+
+  factory MobileCursorInertiaSettings.fromStored(
+    String durationMs, {
+    MobileCursorInertiaSettings fallback = defaults,
+  }) {
+    final duration = int.tryParse(durationMs);
+    return MobileCursorInertiaSettings(
+      durationMs: (duration ?? fallback.durationMs)
+          .clamp(
+            kMinMobileCursorInertiaDurationMs,
+            kMaxMobileCursorInertiaDurationMs,
+          )
+          .toInt(),
+    );
+  }
+
+  MobileCursorInertiaSettings copyWith({int? durationMs}) =>
+      MobileCursorInertiaSettings(durationMs: durationMs ?? this.durationMs);
+
+  @override
+  bool operator ==(Object other) =>
+      other is MobileCursorInertiaSettings && other.durationMs == durationMs;
+
+  @override
+  int get hashCode => durationMs.hashCode;
 }
 
 String normalizeMobileRemoteScrollStyle(String value) => switch (value) {
@@ -102,19 +120,11 @@ String normalizeMobileRemoteScrollStyle(String value) => switch (value) {
   _ => kRemoteScrollStyleAuto,
 };
 
-String mobileRemoteToolbarOpacityLabel(int percent) => percent == 100
-    ? '100% (fading disabled)'
-    : '$percent%';
+String mobileRemoteToolbarOpacityLabel(int percent) =>
+    percent == 100 ? '100% (transparency disabled)' : '$percent%';
 
-String mobileRemoteToolbarFadeSpeedLabel(int durationMs) =>
-    switch (durationMs) {
-      0 => 'Instant',
-      500 => 'Fast (0.5 s)',
-      1500 => 'Normal (1.5 s)',
-      3000 => 'Slow (3 s)',
-      5000 => 'Very slow (5 s)',
-      _ => '${durationMs / 1000} s',
-    };
+String mobileCursorInertiaDurationLabel(int durationMs) =>
+    durationMs == 0 ? 'Off' : '$durationMs ms';
 
 class MobileRemoteToolbar extends StatefulWidget {
   const MobileRemoteToolbar({
@@ -130,7 +140,9 @@ class MobileRemoteToolbar extends StatefulWidget {
     this.onGestureHelp,
     this.onMobileActions,
     this.chatButton,
-    this.fadeSettings = MobileRemoteToolbarFadeSettings.defaults,
+    this.cursorPosition,
+    this.transparencySettings =
+        MobileRemoteToolbarTransparencySettings.defaults,
   });
 
   final VoidCallback onDisconnect;
@@ -144,7 +156,8 @@ class MobileRemoteToolbar extends StatefulWidget {
   final VoidCallback? onGestureHelp;
   final VoidCallback? onMobileActions;
   final Widget? chatButton;
-  final MobileRemoteToolbarFadeSettings fadeSettings;
+  final Offset? cursorPosition;
+  final MobileRemoteToolbarTransparencySettings transparencySettings;
 
   @override
   State<MobileRemoteToolbar> createState() => _MobileRemoteToolbarState();
@@ -153,64 +166,12 @@ class MobileRemoteToolbar extends StatefulWidget {
 class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
   static const _iconSize = 24.0;
   static const _maximumButtonExtent = 48.0;
-  static const _dimDelay = Duration(milliseconds: 1000);
 
   var _axis = MobileRemoteToolbarAxis.horizontal;
   var _collapsed = false;
   Offset? _position;
-  Timer? _dimTimer;
-  var _toolbarOpacity = 1.0;
-  var _pointerOverToolbar = false;
 
   bool get _vertical => _axis == MobileRemoteToolbarAxis.vertical;
-
-  @override
-  void initState() {
-    super.initState();
-    _scheduleDim();
-  }
-
-  @override
-  void dispose() {
-    _dimTimer?.cancel();
-    super.dispose();
-  }
-
-  @override
-  void didUpdateWidget(covariant MobileRemoteToolbar oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.fadeSettings == widget.fadeSettings) return;
-    if (!widget.fadeSettings.fadingEnabled) {
-      _showToolbarOpaque();
-      return;
-    }
-    if (_toolbarOpacity < 1.0) {
-      setState(() => _toolbarOpacity = widget.fadeSettings.minimumOpacity);
-    }
-    _scheduleDim();
-  }
-
-  void _showToolbarOpaque() {
-    _dimTimer?.cancel();
-    if (!mounted || _toolbarOpacity == 1.0) return;
-    setState(() => _toolbarOpacity = 1.0);
-  }
-
-  void _scheduleDim() {
-    _dimTimer?.cancel();
-    if (!widget.fadeSettings.fadingEnabled) {
-      if (mounted && _toolbarOpacity != 1.0) {
-        setState(() => _toolbarOpacity = 1.0);
-      }
-      return;
-    }
-    _dimTimer = Timer(_dimDelay, () {
-      if (!mounted || _pointerOverToolbar) return;
-      setState(
-        () => _toolbarOpacity = widget.fadeSettings.minimumOpacity,
-      );
-    });
-  }
 
   Offset _initialPosition(BoxConstraints constraints, Size toolbarSize) {
     final maxLeft = (constraints.maxWidth - toolbarSize.width)
@@ -244,7 +205,6 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
     BoxConstraints constraints,
     Size toolbarSize,
   ) {
-    _showToolbarOpaque();
     final currentPosition = _clampPosition(
       _position ?? _initialPosition(constraints, toolbarSize),
       constraints,
@@ -430,75 +390,45 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
           constraints,
           toolbarSize,
         );
+        final toolbarRect = position & toolbarSize;
+        final cursorOverlapsToolbar =
+            widget.cursorPosition != null &&
+            toolbarRect.contains(widget.cursorPosition!);
+        final toolbarOpacity = cursorOverlapsToolbar
+            ? widget.transparencySettings.overlapOpacity
+            : 1.0;
 
         return Stack(
           children: [
             Positioned(
               left: position.dx,
               top: position.dy,
-              child: Listener(
-                onPointerDown: (_) => _showToolbarOpaque(),
-                onPointerMove: (_) => _showToolbarOpaque(),
-                onPointerUp: (_) {
-                  if (!_pointerOverToolbar) _scheduleDim();
-                },
-                onPointerCancel: (_) {
-                  if (!_pointerOverToolbar) _scheduleDim();
-                },
-                child: MouseRegion(
-                  onEnter: (_) {
-                    _pointerOverToolbar = true;
-                    _showToolbarOpaque();
-                  },
-                  onExit: (_) {
-                    _pointerOverToolbar = false;
-                    _scheduleDim();
-                  },
-                  onHover: (_) => _showToolbarOpaque(),
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.opaque,
-                    onPanStart: (_) => _showToolbarOpaque(),
-                    onPanUpdate: (details) => _updateToolbarPosition(
-                      details,
-                      constraints,
-                      toolbarSize,
-                    ),
-                    onPanEnd: (_) {
-                      if (!_pointerOverToolbar) _scheduleDim();
-                    },
-                    onPanCancel: () {
-                      if (!_pointerOverToolbar) _scheduleDim();
-                    },
-                    child: AnimatedSize(
-                      duration: const Duration(milliseconds: 180),
-                      curve: Curves.easeOutCubic,
-                      child: AnimatedOpacity(
-                        key: const Key('mobile-remote-toolbar-opacity'),
-                        duration: _toolbarOpacity == 1.0
-                            ? Duration.zero
-                            : widget.fadeSettings.fadeDuration,
-                        opacity: _toolbarOpacity,
-                        child: Material(
-                          key: const Key('mobile-remote-floating-toolbar'),
-                          color: mobileRemoteToolbarBackgroundColor(context),
-                          elevation: 6,
-                          shadowColor: Colors.black54,
-                          clipBehavior: Clip.antiAlias,
-                          shape: StadiumBorder(
-                            side: BorderSide(
-                              color: mobileRemoteToolbarForegroundColor(
-                                context,
-                              ),
-                            ),
-                          ),
-                          child: Flex(
-                            direction: _vertical
-                                ? Axis.vertical
-                                : Axis.horizontal,
-                            mainAxisSize: MainAxisSize.min,
-                            children: items,
-                          ),
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onPanUpdate: (details) =>
+                    _updateToolbarPosition(details, constraints, toolbarSize),
+                child: AnimatedSize(
+                  duration: const Duration(milliseconds: 180),
+                  curve: Curves.easeOutCubic,
+                  child: AnimatedOpacity(
+                    key: const Key('mobile-remote-toolbar-opacity'),
+                    duration: Duration.zero,
+                    opacity: toolbarOpacity,
+                    child: Material(
+                      key: const Key('mobile-remote-floating-toolbar'),
+                      color: mobileRemoteToolbarBackgroundColor(context),
+                      elevation: 6,
+                      shadowColor: Colors.black54,
+                      clipBehavior: Clip.antiAlias,
+                      shape: StadiumBorder(
+                        side: BorderSide(
+                          color: mobileRemoteToolbarForegroundColor(context),
                         ),
+                      ),
+                      child: Flex(
+                        direction: _vertical ? Axis.vertical : Axis.horizontal,
+                        mainAxisSize: MainAxisSize.min,
+                        children: items,
                       ),
                     ),
                   ),
