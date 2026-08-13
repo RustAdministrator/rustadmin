@@ -116,6 +116,11 @@ void main() {
     await pumpToolbar(tester);
     await tester.pump();
 
+    expect(
+      tester.getCenter(find.byTooltip('Collapse toolbar')).dx,
+      lessThan(tester.getCenter(find.byTooltip('Disconnect')).dx),
+    );
+
     final toolbar = find.byKey(const Key('mobile-remote-floating-toolbar'));
     final before = tester.getTopLeft(toolbar);
     await tester.drag(toolbar, const Offset(-60, -80));

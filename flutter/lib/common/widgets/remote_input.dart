@@ -151,7 +151,7 @@ class _RawTouchGestureDetectorRegionState
   Widget build(BuildContext context) {
     return RawGestureDetector(
       child: widget.child,
-      gestures: makeGestures(context),
+      gestures: makeGestures(),
     );
   }
 
@@ -515,7 +515,7 @@ class _RawTouchGestureDetectorRegionState
     }
   }
 
-  onOneFingerPanStart(BuildContext context, DragStartDetails d) async {
+  onOneFingerPanStart(DragStartDetails d) async {
     _stopCursorInertia();
     _lastOneFingerPanPosition = d.localPosition;
     final TapDownDetails? lastTapDownDetails = _lastTapDownDetails;
@@ -556,17 +556,9 @@ class _RawTouchGestureDetectorRegionState
         await inputModel.sendMouse('down', MouseButtons.left);
       }
       await ffi.cursorModel.move(d.localPosition.dx, d.localPosition.dy);
-    } else {
-      final offset = ffi.cursorModel.offset;
-      final cursorX = offset.dx;
-      final cursorY = offset.dy;
-      final visible =
-          ffi.cursorModel.getVisibleRect().inflate(1); // extend edges
-      final size = MediaQueryData.fromView(View.of(context)).size;
-      if (!visible.contains(Offset(cursorX, cursorY))) {
-        await ffi.cursorModel.move(size.width / 2, size.height / 2);
-      }
     }
+    // Mouse mode deliberately does not map the new touch position to the
+    // remote screen. Its updates continue from the current remote cursor.
     if (inputModel.useEdgeScroll) {
       ffi.canvasModel.rearmEdgeScroll();
       final edgePosition = !handleTouch && !inputModel.relativeMouseMode.value
@@ -712,7 +704,7 @@ class _RawTouchGestureDetectorRegionState
           }
         };
 
-  makeGestures(BuildContext context) {
+  makeGestures() {
     return <Type, GestureRecognizerFactory>{
       // Official
       TapGestureRecognizer:
@@ -764,8 +756,7 @@ class _RawTouchGestureDetectorRegionState
           GestureRecognizerFactoryWithHandlers<CustomTouchGestureRecognizer>(
             () => CustomTouchGestureRecognizer(),
             (instance) {
-              instance.onOneFingerPanStart = (DragStartDetails d) =>
-                  onOneFingerPanStart(context, d);
+              instance.onOneFingerPanStart = onOneFingerPanStart;
               instance
                 ..onOneFingerPanUpdate = onOneFingerPanUpdate
                 ..onOneFingerPanEnd = onOneFingerPanEnd

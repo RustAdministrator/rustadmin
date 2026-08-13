@@ -290,9 +290,17 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
     final items = <Widget>[
       _iconButton(
         extent: extent,
-        tooltip: 'Disconnect',
-        icon: Icons.clear,
-        onPressed: widget.onDisconnect,
+        tooltip: 'Collapse toolbar',
+        icon: _vertical
+            ? Icons.keyboard_arrow_right
+            : Icons.keyboard_arrow_down,
+        onPressed: widget.waitForFirstImage
+            ? null
+            : () {
+                setState(() {
+                  _collapsed = true;
+                });
+              },
       ),
       _iconButton(
         extent: extent,
@@ -339,17 +347,9 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
       _orientationButton(extent),
       _iconButton(
         extent: extent,
-        tooltip: 'Collapse toolbar',
-        icon: _vertical
-            ? Icons.keyboard_arrow_right
-            : Icons.keyboard_arrow_down,
-        onPressed: widget.waitForFirstImage
-            ? null
-            : () {
-                setState(() {
-                  _collapsed = true;
-                });
-              },
+        tooltip: 'Disconnect',
+        icon: Icons.clear,
+        onPressed: widget.onDisconnect,
       ),
     ]);
     return items;
