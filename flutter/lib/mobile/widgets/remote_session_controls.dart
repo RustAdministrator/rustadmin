@@ -126,6 +126,11 @@ String mobileRemoteToolbarOpacityLabel(int percent) =>
 String mobileCursorInertiaDurationLabel(int durationMs) =>
     durationMs == 0 ? 'Off' : '$durationMs ms';
 
+Rect mobileRemoteToolbarOverlapRect({
+  required Rect toolbarRect,
+  required double toolbarThickness,
+}) => toolbarRect.inflate(toolbarThickness.clamp(0.0, double.infinity) / 2);
+
 class MobileRemoteToolbar extends StatefulWidget {
   const MobileRemoteToolbar({
     super.key,
@@ -391,9 +396,13 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
           toolbarSize,
         );
         final toolbarRect = position & toolbarSize;
+        final toolbarOverlapRect = mobileRemoteToolbarOverlapRect(
+          toolbarRect: toolbarRect,
+          toolbarThickness: extent,
+        );
         final cursorOverlapsToolbar =
             widget.cursorPosition != null &&
-            toolbarRect.contains(widget.cursorPosition!);
+            toolbarOverlapRect.contains(widget.cursorPosition!);
         final toolbarOpacity = cursorOverlapsToolbar
             ? widget.transparencySettings.overlapOpacity
             : 1.0;

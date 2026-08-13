@@ -2723,6 +2723,17 @@ class CanvasModel with ChangeNotifier {
       _usesMobileRemoteViewport &&
       (_scrollStyle == ScrollStyle.scrolledge ||
           _scrollStyle == ScrollStyle.scrolledgeaccel);
+  MobileRemoteScrollDirections get mobileViewportScrollDirections {
+    if (!_usesMobileRemoteViewport) {
+      return MobileRemoteScrollDirections.all;
+    }
+    return mobileRemoteScrollDirections(
+      canvasOffset: Offset(_x, _y + getAdjustY()),
+      texture: _mobileTextureSize(),
+      viewport: size,
+      scale: _scale,
+    );
+  }
 
   _resetScroll() => setScrollPercent(0.0, 0.0);
 
@@ -3045,6 +3056,10 @@ class CanvasModel with ChangeNotifier {
 
   void updateEdgeScrollEdgeThickness(int newThickness) {
     _edgeScrollEdgeThickness = newThickness;
+    if (_usesMobileEdgeScroll) {
+      updateSize();
+      _clampMobileCanvas();
+    }
     notifyListeners();
   }
 
@@ -3193,6 +3208,7 @@ class CanvasModel with ChangeNotifier {
       _edgeScrollEdgeThickness.toDouble(),
       min(size.width, size.height) / 2,
     );
+    final mobileDirections = mobileViewportScrollDirections;
 
     if (_edgeScrollState == EdgeScrollState.armed &&
         _usesMobileRemoteViewport) {
@@ -3232,10 +3248,16 @@ class CanvasModel with ChangeNotifier {
             mobileRemoteEdgeScrollAxisDirection(
               pointerPosition: x,
               viewportExtent: size.width,
+              edgeThickness: _edgeScrollEdgeThickness.toDouble(),
+              canScrollTowardStart: mobileDirections.left,
+              canScrollTowardEnd: mobileDirections.right,
             ),
             mobileRemoteEdgeScrollAxisDirection(
               pointerPosition: y,
               viewportExtent: size.height,
+              edgeThickness: _edgeScrollEdgeThickness.toDouble(),
+              canScrollTowardStart: mobileDirections.up,
+              canScrollTowardEnd: mobileDirections.down,
             ),
           )
         : deviceEdgeFactor;
@@ -3247,10 +3269,16 @@ class CanvasModel with ChangeNotifier {
               mobileRemoteEdgeAccelerationAxisFactor(
                 pointerPosition: x,
                 viewportExtent: size.width,
+                edgeThickness: _edgeScrollEdgeThickness.toDouble(),
+                canScrollTowardStart: mobileDirections.left,
+                canScrollTowardEnd: mobileDirections.right,
               ),
               mobileRemoteEdgeAccelerationAxisFactor(
                 pointerPosition: y,
                 viewportExtent: size.height,
+                edgeThickness: _edgeScrollEdgeThickness.toDouble(),
+                canScrollTowardStart: mobileDirections.up,
+                canScrollTowardEnd: mobileDirections.down,
               ),
             )
           : _computeEdgeAccelerationFactor(x: x, y: y);
@@ -4056,6 +4084,8 @@ class CursorModel with ChangeNotifier {
       final nextViewportPosition = mobileRemoteClampCursorToNeutralRegion(
         pointerPosition: currentViewportPosition + delta,
         viewport: canvasModel!.size,
+        edgeThickness: canvasModel.edgeScrollEdgeThickness.toDouble(),
+        directions: canvasModel.mobileViewportScrollDirections,
       );
       final clampedDelta = nextViewportPosition - currentViewportPosition;
       dx = clampedDelta.dx;

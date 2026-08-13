@@ -72,8 +72,8 @@ void main() {
   }
 
   test('reports the composed RustAdmin release version', () {
-    expect(mobileRemoteLabVersion, '2.0.5.005');
-    expect(mobileRemoteLabRevisionLabel, '2.0.5.005 · Lab r14');
+    expect(mobileRemoteLabVersion, '2.0.5.007');
+    expect(mobileRemoteLabRevisionLabel, '2.0.5.007 · Lab r15');
   });
 
   test('calculates native-texture fit, zoom, and no-overscan bounds', () {
@@ -194,7 +194,10 @@ void main() {
     expect(
       mobileRemoteLabEdgeScrollDelta(
         pointerPosition: Offset(
-          mobileRemoteNeutralCursorRect(viewport).right,
+          mobileRemoteNeutralCursorRect(
+            viewport: viewport,
+            edgeThickness: 100,
+          ).right,
           viewport.height / 2,
         ),
         viewport: viewport,
@@ -206,7 +209,7 @@ void main() {
     );
     expect(
       mobileRemoteLabEdgeScrollDelta(
-        pointerPosition: const Offset(305.6666666667, 436.5),
+        pointerPosition: const Offset(326.3333333333, 436.5),
         viewport: viewport,
         edgeThickness: 100,
         elapsed: elapsed,
@@ -681,6 +684,19 @@ void main() {
     await tester.tap(find.byKey(const Key('mobile-remote-options-back')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('mobile-remote-options-root')), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const Key('mobile-remote-options-open-screen-scrolling')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edge'));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const Key('mobile-lab-edge-thickness')),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const Key('mobile-remote-options-back')));
+    await tester.pumpAndSettle();
 
     final sessionControls = find.byKey(
       const Key('mobile-remote-options-open-session-controls'),

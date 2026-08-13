@@ -230,6 +230,8 @@ class _RawTouchGestureDetectorRegionState
     final targetPosition = mobileRemoteClampCursorToNeutralRegion(
       pointerPosition: currentPosition,
       viewport: ffi.canvasModel.size,
+      edgeThickness: ffi.canvasModel.edgeScrollEdgeThickness.toDouble(),
+      directions: ffi.canvasModel.mobileViewportScrollDirections,
     );
     final delta = targetPosition - currentPosition;
     if (delta == Offset.zero) return;
@@ -279,6 +281,8 @@ class _RawTouchGestureDetectorRegionState
           final returnDelta = mobileRemoteAccelerationReturnDelta(
             pointerPosition: currentPosition,
             viewport: ffi.canvasModel.size,
+            edgeThickness: ffi.canvasModel.edgeScrollEdgeThickness.toDouble(),
+            directions: ffi.canvasModel.mobileViewportScrollDirections,
             frameDuration: frameDuration,
             remainingDuration: remaining,
           );

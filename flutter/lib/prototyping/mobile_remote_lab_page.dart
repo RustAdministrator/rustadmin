@@ -7,6 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/consts.dart';
+import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
 import 'package:flutter_hbb/mobile/mobile_viewport.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_hbb/prototyping/mobile_remote_lab_revision.dart';
@@ -126,6 +127,7 @@ Offset mobileRemoteLabEdgeScrollDelta({
   required double edgeThickness,
   required Duration elapsed,
   required bool accelerated,
+  MobileRemoteScrollDirections directions = MobileRemoteScrollDirections.all,
 }) {
   final effectiveThickness = math.min(
     math.max(edgeThickness, 0),
@@ -139,20 +141,32 @@ Offset mobileRemoteLabEdgeScrollDelta({
           mobileRemoteEdgeAccelerationAxisFactor(
             pointerPosition: pointerPosition.dx,
             viewportExtent: viewport.width,
+            edgeThickness: edgeThickness,
+            canScrollTowardStart: directions.left,
+            canScrollTowardEnd: directions.right,
           ),
           mobileRemoteEdgeAccelerationAxisFactor(
             pointerPosition: pointerPosition.dy,
             viewportExtent: viewport.height,
+            edgeThickness: edgeThickness,
+            canScrollTowardStart: directions.up,
+            canScrollTowardEnd: directions.down,
           ),
         )
       : Offset(
           mobileRemoteEdgeScrollAxisDirection(
             pointerPosition: pointerPosition.dx,
             viewportExtent: viewport.width,
+            edgeThickness: edgeThickness,
+            canScrollTowardStart: directions.left,
+            canScrollTowardEnd: directions.right,
           ),
           mobileRemoteEdgeScrollAxisDirection(
             pointerPosition: pointerPosition.dy,
             viewportExtent: viewport.height,
+            edgeThickness: edgeThickness,
+            canScrollTowardStart: directions.up,
+            canScrollTowardEnd: directions.down,
           ),
         );
   final seconds = elapsed.inMicroseconds / Duration.microsecondsPerSecond;
@@ -770,7 +784,7 @@ class MobileRemotePreview extends StatefulWidget {
 
 class _MobileRemotePreviewState extends State<MobileRemotePreview> {
   static const _allMonitors = -1;
-  static const _edgeScrollThickness = 100.0;
+  var _edgeScrollThickness = 100.0;
 
   int _selectedMonitor = 0;
   var _viewScaleMode = MobileRemoteLabViewScaleMode.fitHeight;
@@ -1201,17 +1215,35 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       _scrollStyle == kRemoteScrollStyleEdge ||
       _scrollStyle == kRemoteScrollStyleEdgeAcceleration;
 
+  MobileRemoteScrollDirections _canvasScrollDirections(
+    Size viewport,
+    Size texture,
+  ) => mobileRemoteScrollDirections(
+    canvasOffset: _canvasOffset,
+    texture: texture,
+    viewport: viewport,
+    scale: _canvasScale,
+  );
+
   void _onCanvasEdgePointer(PointerEvent event) {
-    if (!_usesEdgeScroll || _canvasViewport == null) {
+    if (!_usesEdgeScroll ||
+        _canvasViewport == null ||
+        _canvasTexture == null) {
       _stopEdgeScroll();
       return;
     }
+    final directions = _canvasScrollDirections(
+      _canvasViewport!,
+      _canvasTexture!,
+    );
     final pointerPosition =
         _scrollStyle == kRemoteScrollStyleEdgeAcceleration
         ? event.localPosition
         : mobileRemoteClampCursorToNeutralRegion(
             pointerPosition: event.localPosition,
             viewport: _canvasViewport!,
+            edgeThickness: _edgeScrollThickness,
+            directions: directions,
           );
     _edgePointerPosition = pointerPosition;
     final delta = mobileRemoteLabEdgeScrollDelta(
@@ -1221,6 +1253,7 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       elapsed: const Duration(milliseconds: 16),
       accelerated:
           _scrollStyle == kRemoteScrollStyleEdgeAcceleration,
+      directions: directions,
     );
     if (delta == Offset.zero) {
       _stopEdgeScroll(clearPointer: false);
@@ -1256,6 +1289,7 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       elapsed: elapsed,
       accelerated:
           _scrollStyle == kRemoteScrollStyleEdgeAcceleration,
+      directions: _canvasScrollDirections(viewport, texture),
     );
     final offset = mobileRemoteLabClampCanvasOffset(
       proposed: _canvasOffset - delta,
@@ -1532,6 +1566,37 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
             _manualCanvasTransform = false;
             _canvasFitPending = true;
           }),
+          selectionDetailsBuilder: (value) {
+            final usesEdgeThickness = value == kRemoteScrollStyleEdge ||
+                value == kRemoteScrollStyleEdgeAcceleration;
+            if (!usesEdgeThickness) return const SizedBox.shrink();
+            return EdgeThicknessControl(
+              key: const Key('mobile-lab-edge-thickness'),
+              value: _edgeScrollThickness,
+              onChanged: (value) {
+                setState(() {
+                  _stopEdgeScroll();
+                  _edgeScrollThickness = value.roundToDouble();
+                  _canvasFitPending = false;
+                  final viewport = _canvasViewport;
+                  final texture = _canvasTexture;
+                  if (viewport != null && texture != null) {
+                    _canvasScale = _clampCanvasScale(
+                      _canvasScale,
+                      texture,
+                      _canvasDevicePixelRatio,
+                    );
+                    _canvasOffset = mobileRemoteLabClampCanvasOffset(
+                      proposed: _canvasOffset,
+                      texture: texture,
+                      viewport: viewport,
+                      scale: _canvasScale,
+                    );
+                  }
+                });
+              },
+            );
+          },
         ),
         _radioSection(
           'toolbar-cursor-overlap-opacity',

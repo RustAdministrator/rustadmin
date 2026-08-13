@@ -31,6 +31,7 @@ import './popup_menu.dart';
 import './kb_layout_type_chooser.dart';
 import 'package:flutter_hbb/utils/scale.dart';
 import 'package:flutter_hbb/common/widgets/custom_scale_base.dart';
+import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
 
 class ToolbarImagePointerState {
   final bool insideImage;
@@ -2239,6 +2240,18 @@ class _DisplayMenuState extends State<_DisplayMenu> {
         state.setState(() {});
       }
 
+      onChangeEdgeThickness(double value) {
+        final thickness = value.round();
+        widget.ffi.canvasModel.updateEdgeScrollEdgeThickness(thickness);
+        unawaited(bind.sessionSetEdgeScrollEdgeThickness(
+          sessionId: ffi.sessionId,
+          value: thickness,
+        ));
+      }
+
+      final usesEdgeThickness = groupValue == kRemoteScrollStyleEdge ||
+          groupValue == kRemoteScrollStyleEdgeAcceleration;
+
       return Obx(() => Column(children: [
             RdoMenuButton<String>(
               child: Text(translate('ScrollAuto')),
@@ -2277,6 +2290,13 @@ class _DisplayMenuState extends State<_DisplayMenu> {
                     : null,
                 ffi: widget.ffi,
               ),
+              if (usesEdgeThickness)
+                EdgeThicknessControl(
+                  key: const Key('desktop-toolbar-edge-thickness'),
+                  value: widget.ffi.canvasModel.edgeScrollEdgeThickness
+                      .toDouble(),
+                  onChanged: onChangeEdgeThickness,
+                ),
             ],
             Divider(),
           ]));
@@ -2580,7 +2600,6 @@ class _RectValueThumbShape extends SliderComponentShape {
   final double width;
   final double height;
   final double radius;
-  final String unit;
   // Optional mapper to compute display value from normalized position [0,1]
   // If null, falls back to linear interpolation between min and max.
   final int Function(double normalized)? displayValueForNormalized;
@@ -2592,7 +2611,6 @@ class _RectValueThumbShape extends SliderComponentShape {
     required this.height,
     required this.radius,
     this.displayValueForNormalized,
-    this.unit = '%',
   });
 
   @override
@@ -2638,7 +2656,7 @@ class _RectValueThumbShape extends SliderComponentShape {
         ? displayValueForNormalized!(value)
         : (min + value * (max - min)).round();
     final TextSpan span = TextSpan(
-      text: '$displayValue$unit',
+      text: '$displayValue%',
       style: const TextStyle(
         color: Colors.white,
         fontSize: 12,
@@ -4132,57 +4150,4 @@ Widget _buildPointerTrackWidget(BuildContext context, Widget child, FFI? ffi) {
     openMenusLeft: menuLifecycle.openMenusLeft,
     child: tracked,
   );
-}
-
-class EdgeThicknessControl extends StatelessWidget {
-  final double value;
-  final ValueChanged<double>? onChanged;
-  final ColorScheme? colorScheme;
-
-  const EdgeThicknessControl({
-    Key? key,
-    required this.value,
-    this.onChanged,
-    this.colorScheme,
-  }) : super(key: key);
-
-  static const double kMin = 20;
-  static const double kMax = 300;
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = this.colorScheme ?? Theme.of(context).colorScheme;
-
-    final slider = SliderTheme(
-      data: SliderTheme.of(context).copyWith(
-        activeTrackColor: colorScheme.primary,
-        thumbColor: colorScheme.primary,
-        overlayColor: colorScheme.primary.withOpacity(0.1),
-        showValueIndicator: ShowValueIndicator.never,
-        thumbShape: _RectValueThumbShape(
-          min: EdgeThicknessControl.kMin,
-          max: EdgeThicknessControl.kMax,
-          width: 52,
-          height: 24,
-          radius: 4,
-          unit: 'px',
-        ),
-      ),
-      child: Semantics(
-        value: value.toInt().toString(),
-        child: Slider(
-          value: value,
-          min: EdgeThicknessControl.kMin,
-          max: EdgeThicknessControl.kMax,
-          divisions:
-              (EdgeThicknessControl.kMax - EdgeThicknessControl.kMin).round(),
-          semanticFormatterCallback: (double newValue) =>
-              "${newValue.round()}px",
-          onChanged: onChanged,
-        ),
-      ),
-    );
-
-    return slider;
-  }
 }

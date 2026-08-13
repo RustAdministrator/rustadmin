@@ -1,6 +1,7 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/consts.dart';
+import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -90,6 +91,16 @@ void main() {
     );
     expect(opacity.opacity, 1.0);
     expect(opacity.duration, Duration.zero);
+  });
+
+  test('toolbar overlap area extends by half its thickness', () {
+    expect(
+      mobileRemoteToolbarOverlapRect(
+        toolbarRect: const Rect.fromLTWH(100, 500, 120, 48),
+        toolbarThickness: 48,
+      ),
+      const Rect.fromLTRB(76, 476, 244, 572),
+    );
   });
 
   test('mobile toolbar and inertia settings normalize stored values', () {
@@ -290,5 +301,29 @@ void main() {
     await tester.tap(find.byTooltip('Back to actions'));
     await tester.pump();
     expect(find.byKey(const Key('mobile-remote-actions-root')), findsOneWidget);
+  });
+
+  testWidgets('shared edge-size control reports session slider changes', (
+    tester,
+  ) async {
+    double? changedValue;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: EdgeThicknessControl(
+            value: 100,
+            onChanged: (value) => changedValue = value,
+          ),
+        ),
+      ),
+    );
+
+    await tester.drag(
+      find.byKey(const Key('edge-thickness-slider')),
+      const Offset(80, 0),
+    );
+    await tester.pump();
+    expect(changedValue, isNotNull);
+    expect(changedValue!, greaterThan(100));
   });
 }

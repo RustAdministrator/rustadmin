@@ -176,46 +176,82 @@ void main() {
     );
   });
 
-  test('fixed edge mode uses the center third as its cursor region', () {
-    const viewport = Size(300, 600);
-    final neutralRect = mobileRemoteNeutralCursorRect(viewport);
-    expect(neutralRect.left, closeTo(100, 0.000001));
-    expect(neutralRect.top, closeTo(200, 0.000001));
-    expect(neutralRect.right, closeTo(200, 0.000001));
-    expect(neutralRect.bottom, closeTo(400, 0.000001));
-    final clamped = mobileRemoteClampCursorToNeutralRegion(
-      pointerPosition: const Offset(20, 580),
-      viewport: viewport,
+  test(
+    'fixed edge mode uses the configured bands around its cursor region',
+    () {
+      const viewport = Size(300, 600);
+      final neutralRect = mobileRemoteNeutralCursorRect(
+        viewport: viewport,
+        edgeThickness: 100,
+      );
+      expect(neutralRect.left, closeTo(100, 0.000001));
+      expect(neutralRect.top, closeTo(100, 0.000001));
+      expect(neutralRect.right, closeTo(200, 0.000001));
+      expect(neutralRect.bottom, closeTo(500, 0.000001));
+      final clamped = mobileRemoteClampCursorToNeutralRegion(
+        pointerPosition: const Offset(20, 580),
+        viewport: viewport,
+        edgeThickness: 100,
+      );
+      expect(clamped.dx, closeTo(100, 0.000001));
+      expect(clamped.dy, closeTo(500, 0.000001));
+      expect(
+        mobileRemoteClampCursorToNeutralRegion(
+          pointerPosition: const Offset(150, 300),
+          viewport: viewport,
+          edgeThickness: 100,
+        ),
+        const Offset(150, 300),
+      );
+      expect(
+        mobileRemoteEdgeScrollAxisDirection(
+          pointerPosition: 100,
+          viewportExtent: 300,
+          edgeThickness: 100,
+          canScrollTowardStart: true,
+          canScrollTowardEnd: true,
+        ),
+        -1,
+      );
+      expect(
+        mobileRemoteEdgeScrollAxisDirection(
+          pointerPosition: 150,
+          viewportExtent: 300,
+          edgeThickness: 100,
+          canScrollTowardStart: true,
+          canScrollTowardEnd: true,
+        ),
+        0,
+      );
+      expect(
+        mobileRemoteEdgeScrollAxisDirection(
+          pointerPosition: neutralRect.right,
+          viewportExtent: 300,
+          edgeThickness: 100,
+          canScrollTowardStart: true,
+          canScrollTowardEnd: true,
+        ),
+        1,
+      );
+    },
+  );
+
+  test('edge size clamps independently on each viewport axis', () {
+    final neutralRect = mobileRemoteNeutralCursorRect(
+      viewport: const Size(800, 300),
+      edgeThickness: 250,
     );
-    expect(clamped.dx, closeTo(100, 0.000001));
-    expect(clamped.dy, closeTo(400, 0.000001));
+    expect(neutralRect.left, 250);
+    expect(neutralRect.right, 550);
+    expect(neutralRect.top, 149.5);
+    expect(neutralRect.bottom, 150.5);
     expect(
       mobileRemoteClampCursorToNeutralRegion(
-        pointerPosition: const Offset(150, 300),
-        viewport: viewport,
+        pointerPosition: const Offset(400, 20),
+        viewport: const Size(800, 300),
+        edgeThickness: 250,
       ),
-      const Offset(150, 300),
-    );
-    expect(
-      mobileRemoteEdgeScrollAxisDirection(
-        pointerPosition: 100,
-        viewportExtent: 300,
-      ),
-      -1,
-    );
-    expect(
-      mobileRemoteEdgeScrollAxisDirection(
-        pointerPosition: 150,
-        viewportExtent: 300,
-      ),
-      0,
-    );
-    expect(
-      mobileRemoteEdgeScrollAxisDirection(
-        pointerPosition: neutralRect.right,
-        viewportExtent: 300,
-      ),
-      1,
+      const Offset(400, 149.5),
     );
   });
 
@@ -224,6 +260,9 @@ void main() {
       mobileRemoteEdgeAccelerationAxisFactor(
         pointerPosition: 100,
         viewportExtent: 300,
+        edgeThickness: 100,
+        canScrollTowardStart: true,
+        canScrollTowardEnd: true,
       ),
       0,
     );
@@ -231,6 +270,9 @@ void main() {
       mobileRemoteEdgeAccelerationAxisFactor(
         pointerPosition: 200 / 3,
         viewportExtent: 300,
+        edgeThickness: 100,
+        canScrollTowardStart: true,
+        canScrollTowardEnd: true,
       ),
       closeTo(-0.5, 0.000001),
     );
@@ -238,6 +280,9 @@ void main() {
       mobileRemoteEdgeAccelerationAxisFactor(
         pointerPosition: 100 / 3,
         viewportExtent: 300,
+        edgeThickness: 100,
+        canScrollTowardStart: true,
+        canScrollTowardEnd: true,
       ),
       -1,
     );
@@ -245,6 +290,9 @@ void main() {
       mobileRemoteEdgeAccelerationAxisFactor(
         pointerPosition: 0,
         viewportExtent: 300,
+        edgeThickness: 100,
+        canScrollTowardStart: true,
+        canScrollTowardEnd: true,
       ),
       -1,
     );
@@ -252,6 +300,9 @@ void main() {
       mobileRemoteEdgeAccelerationAxisFactor(
         pointerPosition: 700 / 3,
         viewportExtent: 300,
+        edgeThickness: 100,
+        canScrollTowardStart: true,
+        canScrollTowardEnd: true,
       ),
       closeTo(0.5, 0.000001),
     );
@@ -259,6 +310,9 @@ void main() {
       mobileRemoteEdgeAccelerationAxisFactor(
         pointerPosition: 800 / 3,
         viewportExtent: 300,
+        edgeThickness: 100,
+        canScrollTowardStart: true,
+        canScrollTowardEnd: true,
       ),
       1,
     );
@@ -267,20 +321,84 @@ void main() {
   test('acceleration cursor returns to neutral as inertia expires', () {
     const viewport = Size(300, 600);
     final first = mobileRemoteAccelerationReturnDelta(
-      pointerPosition: const Offset(40, 500),
+      pointerPosition: const Offset(40, 580),
       viewport: viewport,
+      edgeThickness: 100,
+      directions: MobileRemoteScrollDirections.all,
       frameDuration: const Duration(milliseconds: 25),
       remainingDuration: const Duration(milliseconds: 100),
     );
     expect(first.dx, closeTo(15, 0.000001));
-    expect(first.dy, closeTo(-25, 0.000001));
+    expect(first.dy, closeTo(-20, 0.000001));
     final second = mobileRemoteAccelerationReturnDelta(
-      pointerPosition: const Offset(55, 475),
+      pointerPosition: const Offset(55, 560),
       viewport: viewport,
+      edgeThickness: 100,
+      directions: MobileRemoteScrollDirections.all,
       frameDuration: const Duration(milliseconds: 75),
       remainingDuration: const Duration(milliseconds: 75),
     );
     expect(second.dx, closeTo(45, 0.000001));
-    expect(second.dy, closeTo(-75, 0.000001));
+    expect(second.dy, closeTo(-60, 0.000001));
+  });
+
+  test('remote edges extend the neutral region toward the device edge', () {
+    const viewport = Size(300, 600);
+    const texture = Size(900, 1200);
+    final atRemoteLeft = mobileRemoteScrollDirections(
+      canvasOffset: const Offset(0, -300),
+      texture: texture,
+      viewport: viewport,
+      scale: 1,
+    );
+    expect(atRemoteLeft.left, isFalse);
+    expect(atRemoteLeft.right, isTrue);
+    expect(atRemoteLeft.up, isTrue);
+    expect(atRemoteLeft.down, isTrue);
+
+    final neutralRect = mobileRemoteNeutralCursorRect(
+      viewport: viewport,
+      edgeThickness: 100,
+      directions: atRemoteLeft,
+    );
+    expect(neutralRect.left, 0);
+    expect(neutralRect.right, 200);
+    expect(
+      mobileRemoteClampCursorToNeutralRegion(
+        pointerPosition: const Offset(20, 300),
+        viewport: viewport,
+        edgeThickness: 100,
+        directions: atRemoteLeft,
+      ),
+      const Offset(20, 300),
+    );
+    expect(
+      mobileRemoteEdgeScrollAxisDirection(
+        pointerPosition: 0,
+        viewportExtent: viewport.width,
+        edgeThickness: 100,
+        canScrollTowardStart: atRemoteLeft.left,
+        canScrollTowardEnd: atRemoteLeft.right,
+      ),
+      0,
+    );
+  });
+
+  test('acceleration return leaves a cursor at a reached remote edge', () {
+    const directions = MobileRemoteScrollDirections(
+      left: true,
+      right: false,
+      up: true,
+      down: true,
+    );
+    final delta = mobileRemoteAccelerationReturnDelta(
+      pointerPosition: const Offset(280, 300),
+      viewport: const Size(300, 600),
+      edgeThickness: 100,
+      directions: directions,
+      frameDuration: const Duration(milliseconds: 100),
+      remainingDuration: const Duration(milliseconds: 100),
+    );
+    expect(delta, Offset.zero);
   });
 }

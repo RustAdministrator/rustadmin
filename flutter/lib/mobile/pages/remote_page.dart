@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/common/widgets/toolbar.dart';
+import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/mobile/widgets/floating_mouse.dart';
 import 'package:flutter_hbb/mobile/widgets/floating_mouse_widgets.dart';
@@ -1286,6 +1287,8 @@ void showOptions(
   final selectedScrollStyle = normalizeMobileRemoteScrollStyle(
     await bind.sessionGetScrollStyle(sessionId: gFFI.sessionId) ?? '',
   );
+  var activeEdgeThickness =
+      gFFI.canvasModel.edgeScrollEdgeThickness.toDouble();
   final scrollStyleRadios = <TRadioMenu<String>>[
     for (final entry in <(String, String)>[
       (kRemoteScrollStyleAuto, 'ScrollAuto'),
@@ -1433,6 +1436,27 @@ void showOptions(
                   'scroll-style',
                   scrollStyleRadios,
                   heading: Text(translate('Screen scrolling')),
+                  selectionDetailsBuilder: (value) {
+                    final usesEdgeThickness =
+                        value == kRemoteScrollStyleEdge ||
+                        value == kRemoteScrollStyleEdgeAcceleration;
+                    if (!usesEdgeThickness) return const SizedBox.shrink();
+                    return EdgeThicknessControl(
+                      key: const Key('mobile-remote-edge-thickness'),
+                      value: activeEdgeThickness,
+                      onChanged: (value) {
+                        final thickness = value.round();
+                        activeEdgeThickness = thickness.toDouble();
+                        gFFI.canvasModel.updateEdgeScrollEdgeThickness(
+                          thickness,
+                        );
+                        unawaited(bind.sessionSetEdgeScrollEdgeThickness(
+                          sessionId: gFFI.sessionId,
+                          value: thickness,
+                        ));
+                      },
+                    );
+                  },
                 ),
                 radioSection(
                   'toolbar-cursor-overlap-opacity',

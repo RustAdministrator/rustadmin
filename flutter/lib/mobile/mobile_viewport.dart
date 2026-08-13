@@ -180,66 +180,150 @@ double mobileRemoteDeviceEdgeScrollAxisFactor({
   return 0;
 }
 
-const double kMobileRemoteNeutralCursorFraction = 1 / 3;
 const double kMobileRemoteAccelerationRampFraction = 2 / 3;
 
-Rect mobileRemoteNeutralCursorRect(Size viewport) {
+class MobileRemoteScrollDirections {
+  const MobileRemoteScrollDirections({
+    required this.left,
+    required this.right,
+    required this.up,
+    required this.down,
+  });
+
+  static const all = MobileRemoteScrollDirections(
+    left: true,
+    right: true,
+    up: true,
+    down: true,
+  );
+
+  final bool left;
+  final bool right;
+  final bool up;
+  final bool down;
+}
+
+MobileRemoteScrollDirections mobileRemoteScrollDirections({
+  required Offset canvasOffset,
+  required Size texture,
+  required Size viewport,
+  required double scale,
+  double epsilon = 0.01,
+}) {
+  final contentWidth = texture.width * scale;
+  final contentHeight = texture.height * scale;
+  final minimumX = viewport.width - contentWidth;
+  final minimumY = viewport.height - contentHeight;
+  return MobileRemoteScrollDirections(
+    left: contentWidth > viewport.width && canvasOffset.dx < -epsilon,
+    right:
+        contentWidth > viewport.width && canvasOffset.dx > minimumX + epsilon,
+    up: contentHeight > viewport.height && canvasOffset.dy < -epsilon,
+    down:
+        contentHeight > viewport.height && canvasOffset.dy > minimumY + epsilon,
+  );
+}
+
+double _mobileRemoteAxisEdgeThickness(
+  double viewportExtent,
+  double edgeThickness,
+) {
+  const minimumNeutralExtent = 1.0;
+  final maximumThickness = math.max(
+    (viewportExtent - minimumNeutralExtent) / 2,
+    0.0,
+  );
+  return math.min(math.max(edgeThickness, 0), maximumThickness);
+}
+
+Rect mobileRemoteNeutralCursorRect({
+  required Size viewport,
+  required double edgeThickness,
+  MobileRemoteScrollDirections directions = MobileRemoteScrollDirections.all,
+}) {
   if (viewport.width <= 0 || viewport.height <= 0) {
     return Rect.zero;
   }
+  final horizontalThickness = _mobileRemoteAxisEdgeThickness(
+    viewport.width,
+    edgeThickness,
+  );
+  final verticalThickness = _mobileRemoteAxisEdgeThickness(
+    viewport.height,
+    edgeThickness,
+  );
   return Rect.fromLTRB(
-    viewport.width * kMobileRemoteNeutralCursorFraction,
-    viewport.height * kMobileRemoteNeutralCursorFraction,
-    viewport.width * (1 - kMobileRemoteNeutralCursorFraction),
-    viewport.height * (1 - kMobileRemoteNeutralCursorFraction),
+    directions.left ? horizontalThickness : 0,
+    directions.up ? verticalThickness : 0,
+    directions.right ? viewport.width - horizontalThickness : viewport.width,
+    directions.down ? viewport.height - verticalThickness : viewport.height,
   );
 }
 
 Offset mobileRemoteClampCursorToNeutralRegion({
   required Offset pointerPosition,
   required Size viewport,
+  required double edgeThickness,
+  MobileRemoteScrollDirections directions = MobileRemoteScrollDirections.all,
 }) {
-  final neutralRect = mobileRemoteNeutralCursorRect(viewport);
-  if (neutralRect.isEmpty) return pointerPosition;
+  if (viewport.width <= 0 || viewport.height <= 0) return pointerPosition;
+  final neutralRect = mobileRemoteNeutralCursorRect(
+    viewport: viewport,
+    edgeThickness: edgeThickness,
+    directions: directions,
+  );
   return Offset(
     pointerPosition.dx.clamp(neutralRect.left, neutralRect.right).toDouble(),
     pointerPosition.dy.clamp(neutralRect.top, neutralRect.bottom).toDouble(),
   );
 }
 
-/// Fixed-speed edge scrolling starts when the local cursor reaches the
-/// boundary of the centered neutral third of the viewport.
+/// Fixed-speed edge scrolling starts when the local cursor enters a configured
+/// edge band whose direction still has remote canvas available to scroll.
 double mobileRemoteEdgeScrollAxisDirection({
   required double pointerPosition,
   required double viewportExtent,
+  required double edgeThickness,
+  required bool canScrollTowardStart,
+  required bool canScrollTowardEnd,
 }) {
   if (viewportExtent <= 0) return 0;
-  final neutralStart = viewportExtent * kMobileRemoteNeutralCursorFraction;
-  final neutralEnd = viewportExtent * (1 - kMobileRemoteNeutralCursorFraction);
-  if (pointerPosition <= neutralStart) return -1;
-  if (pointerPosition >= neutralEnd) return 1;
+  final thickness = _mobileRemoteAxisEdgeThickness(
+    viewportExtent,
+    edgeThickness,
+  );
+  if (canScrollTowardStart && pointerPosition <= thickness) return -1;
+  if (canScrollTowardEnd && pointerPosition >= viewportExtent - thickness) {
+    return 1;
+  }
   return 0;
 }
 
-/// Acceleration is zero in the centered third. Each outer third is an
-/// acceleration band. The factor reaches full speed after two thirds of that
-/// band, leaving the final third at the maximum speed near the device edge.
+/// Acceleration is zero outside the configured edge bands. The factor reaches
+/// full speed after two thirds of a band, leaving its final third at maximum
+/// speed near the device edge.
 double mobileRemoteEdgeAccelerationAxisFactor({
   required double pointerPosition,
   required double viewportExtent,
+  required double edgeThickness,
+  required bool canScrollTowardStart,
+  required bool canScrollTowardEnd,
 }) {
   if (viewportExtent <= 0) return 0;
-  final outerBand = viewportExtent * kMobileRemoteNeutralCursorFraction;
+  final outerBand = _mobileRemoteAxisEdgeThickness(
+    viewportExtent,
+    edgeThickness,
+  );
   final neutralStart = outerBand;
   final neutralEnd = viewportExtent - outerBand;
   final rampExtent = outerBand * kMobileRemoteAccelerationRampFraction;
   if (rampExtent <= 0) return 0;
-  if (pointerPosition < neutralStart) {
+  if (canScrollTowardStart && pointerPosition < neutralStart) {
     return -((neutralStart - pointerPosition) / rampExtent)
         .clamp(0.0, 1.0)
         .toDouble();
   }
-  if (pointerPosition > neutralEnd) {
+  if (canScrollTowardEnd && pointerPosition > neutralEnd) {
     return ((pointerPosition - neutralEnd) / rampExtent)
         .clamp(0.0, 1.0)
         .toDouble();
@@ -252,6 +336,8 @@ double mobileRemoteEdgeAccelerationAxisFactor({
 Offset mobileRemoteAccelerationReturnDelta({
   required Offset pointerPosition,
   required Size viewport,
+  required double edgeThickness,
+  required MobileRemoteScrollDirections directions,
   required Duration frameDuration,
   required Duration remainingDuration,
 }) {
@@ -261,6 +347,8 @@ Offset mobileRemoteAccelerationReturnDelta({
   final target = mobileRemoteClampCursorToNeutralRegion(
     pointerPosition: pointerPosition,
     viewport: viewport,
+    edgeThickness: edgeThickness,
+    directions: directions,
   );
   final fraction =
       (frameDuration.inMicroseconds / remainingDuration.inMicroseconds)
