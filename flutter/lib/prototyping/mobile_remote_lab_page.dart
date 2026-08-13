@@ -134,18 +134,27 @@ Offset mobileRemoteLabEdgeScrollDelta({
   if (effectiveThickness <= 0 || elapsed <= Duration.zero) {
     return Offset.zero;
   }
-  final factor = Offset(
-    mobileRemoteDeviceEdgeScrollAxisFactor(
-      pointerPosition: pointerPosition.dx,
-      viewportExtent: viewport.width,
-      edgeThickness: effectiveThickness,
-    ),
-    mobileRemoteDeviceEdgeScrollAxisFactor(
-      pointerPosition: pointerPosition.dy,
-      viewportExtent: viewport.height,
-      edgeThickness: effectiveThickness,
-    ),
-  );
+  final factor = accelerated
+      ? Offset(
+          mobileRemoteEdgeAccelerationAxisFactor(
+            pointerPosition: pointerPosition.dx,
+            viewportExtent: viewport.width,
+          ),
+          mobileRemoteEdgeAccelerationAxisFactor(
+            pointerPosition: pointerPosition.dy,
+            viewportExtent: viewport.height,
+          ),
+        )
+      : Offset(
+          mobileRemoteEdgeScrollAxisDirection(
+            pointerPosition: pointerPosition.dx,
+            viewportExtent: viewport.width,
+          ),
+          mobileRemoteEdgeScrollAxisDirection(
+            pointerPosition: pointerPosition.dy,
+            viewportExtent: viewport.height,
+          ),
+        );
   final seconds = elapsed.inMicroseconds / Duration.microsecondsPerSecond;
   // These match production's 0.1 edge-depth step at 60 Hz and its
   // accelerated maximum of 1800 logical pixels per second.
@@ -1197,9 +1206,16 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       _stopEdgeScroll();
       return;
     }
-    _edgePointerPosition = event.localPosition;
+    final pointerPosition =
+        _scrollStyle == kRemoteScrollStyleEdgeAcceleration
+        ? event.localPosition
+        : mobileRemoteClampCursorToNeutralRegion(
+            pointerPosition: event.localPosition,
+            viewport: _canvasViewport!,
+          );
+    _edgePointerPosition = pointerPosition;
     final delta = mobileRemoteLabEdgeScrollDelta(
-      pointerPosition: event.localPosition,
+      pointerPosition: pointerPosition,
       viewport: _canvasViewport!,
       edgeThickness: _edgeScrollThickness,
       elapsed: const Duration(milliseconds: 16),

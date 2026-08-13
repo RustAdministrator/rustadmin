@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
+import 'package:flutter_hbb/mobile/mobile_viewport.dart';
 import 'package:flutter_hbb/prototyping/mobile_remote_lab_page.dart';
 import 'package:flutter_hbb/prototyping/mobile_remote_lab_revision.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -71,8 +72,8 @@ void main() {
   }
 
   test('reports the composed RustAdmin release version', () {
-    expect(mobileRemoteLabVersion, '2.0.5.002');
-    expect(mobileRemoteLabRevisionLabel, '2.0.5.002 · Lab r13');
+    expect(mobileRemoteLabVersion, '2.0.5.005');
+    expect(mobileRemoteLabRevisionLabel, '2.0.5.005 · Lab r14');
   });
 
   test('calculates native-texture fit, zoom, and no-overscan bounds', () {
@@ -189,6 +190,29 @@ void main() {
         accelerated: true,
       ),
       Offset.zero,
+    );
+    expect(
+      mobileRemoteLabEdgeScrollDelta(
+        pointerPosition: Offset(
+          mobileRemoteNeutralCursorRect(viewport).right,
+          viewport.height / 2,
+        ),
+        viewport: viewport,
+        edgeThickness: 100,
+        elapsed: elapsed,
+        accelerated: false,
+      ),
+      const Offset(60, 0),
+    );
+    expect(
+      mobileRemoteLabEdgeScrollDelta(
+        pointerPosition: const Offset(305.6666666667, 436.5),
+        viewport: viewport,
+        edgeThickness: 100,
+        elapsed: elapsed,
+        accelerated: true,
+      ).dx,
+      closeTo(90, 0.000001),
     );
   });
 

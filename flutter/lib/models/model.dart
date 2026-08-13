@@ -3227,11 +3227,32 @@ class CanvasModel with ChangeNotifier {
         edgeThickness: edgeThickness,
       ),
     );
-    final encroachment = deviceEdgeFactor * edgeThickness;
+    final fixedEdgeFactor = _usesMobileRemoteViewport
+        ? Vector2(
+            mobileRemoteEdgeScrollAxisDirection(
+              pointerPosition: x,
+              viewportExtent: size.width,
+            ),
+            mobileRemoteEdgeScrollAxisDirection(
+              pointerPosition: y,
+              viewportExtent: size.height,
+            ),
+          )
+        : deviceEdgeFactor;
+    final encroachment = fixedEdgeFactor * edgeThickness;
 
     if (_usesEdgeAcceleration) {
       final edgeAccelerationFactor = _usesMobileRemoteViewport
-          ? deviceEdgeFactor
+          ? Vector2(
+              mobileRemoteEdgeAccelerationAxisFactor(
+                pointerPosition: x,
+                viewportExtent: size.width,
+              ),
+              mobileRemoteEdgeAccelerationAxisFactor(
+                pointerPosition: y,
+                viewportExtent: size.height,
+              ),
+            )
           : _computeEdgeAccelerationFactor(x: x, y: y);
       if (edgeAccelerationFactor.length2 == 0) {
         _edgeScrollFallbackState.stop();
@@ -4025,8 +4046,21 @@ class CursorModel with ChangeNotifier {
     double dx = delta.dx;
     double dy = delta.dy;
     if (parent.target?.imageModel.image == null) return;
-    final scale = parent.target?.canvasModel.scale ?? 1.0;
+    final canvasModel = parent.target?.canvasModel;
+    final scale = canvasModel?.scale ?? 1.0;
     final useEdgeScroll = parent.target?.inputModel.useEdgeScroll ?? false;
+    if (useEdgeScroll &&
+        canvasModel?._usesMobileRemoteViewport == true &&
+        canvasModel?.scrollStyle == ScrollStyle.scrolledge) {
+      final currentViewportPosition = mobileViewportPosition;
+      final nextViewportPosition = mobileRemoteClampCursorToNeutralRegion(
+        pointerPosition: currentViewportPosition + delta,
+        viewport: canvasModel!.size,
+      );
+      final clampedDelta = nextViewportPosition - currentViewportPosition;
+      dx = clampedDelta.dx;
+      dy = clampedDelta.dy;
+    }
     dx /= scale;
     dy /= scale;
     final r = getVisibleRect();

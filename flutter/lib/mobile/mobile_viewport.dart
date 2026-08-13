@@ -179,3 +179,92 @@ double mobileRemoteDeviceEdgeScrollAxisFactor({
   }
   return 0;
 }
+
+const double kMobileRemoteNeutralCursorFraction = 1 / 3;
+const double kMobileRemoteAccelerationRampFraction = 2 / 3;
+
+Rect mobileRemoteNeutralCursorRect(Size viewport) {
+  if (viewport.width <= 0 || viewport.height <= 0) {
+    return Rect.zero;
+  }
+  return Rect.fromLTRB(
+    viewport.width * kMobileRemoteNeutralCursorFraction,
+    viewport.height * kMobileRemoteNeutralCursorFraction,
+    viewport.width * (1 - kMobileRemoteNeutralCursorFraction),
+    viewport.height * (1 - kMobileRemoteNeutralCursorFraction),
+  );
+}
+
+Offset mobileRemoteClampCursorToNeutralRegion({
+  required Offset pointerPosition,
+  required Size viewport,
+}) {
+  final neutralRect = mobileRemoteNeutralCursorRect(viewport);
+  if (neutralRect.isEmpty) return pointerPosition;
+  return Offset(
+    pointerPosition.dx.clamp(neutralRect.left, neutralRect.right).toDouble(),
+    pointerPosition.dy.clamp(neutralRect.top, neutralRect.bottom).toDouble(),
+  );
+}
+
+/// Fixed-speed edge scrolling starts when the local cursor reaches the
+/// boundary of the centered neutral third of the viewport.
+double mobileRemoteEdgeScrollAxisDirection({
+  required double pointerPosition,
+  required double viewportExtent,
+}) {
+  if (viewportExtent <= 0) return 0;
+  final neutralStart = viewportExtent * kMobileRemoteNeutralCursorFraction;
+  final neutralEnd = viewportExtent * (1 - kMobileRemoteNeutralCursorFraction);
+  if (pointerPosition <= neutralStart) return -1;
+  if (pointerPosition >= neutralEnd) return 1;
+  return 0;
+}
+
+/// Acceleration is zero in the centered third. Each outer third is an
+/// acceleration band. The factor reaches full speed after two thirds of that
+/// band, leaving the final third at the maximum speed near the device edge.
+double mobileRemoteEdgeAccelerationAxisFactor({
+  required double pointerPosition,
+  required double viewportExtent,
+}) {
+  if (viewportExtent <= 0) return 0;
+  final outerBand = viewportExtent * kMobileRemoteNeutralCursorFraction;
+  final neutralStart = outerBand;
+  final neutralEnd = viewportExtent - outerBand;
+  final rampExtent = outerBand * kMobileRemoteAccelerationRampFraction;
+  if (rampExtent <= 0) return 0;
+  if (pointerPosition < neutralStart) {
+    return -((neutralStart - pointerPosition) / rampExtent)
+        .clamp(0.0, 1.0)
+        .toDouble();
+  }
+  if (pointerPosition > neutralEnd) {
+    return ((pointerPosition - neutralEnd) / rampExtent)
+        .clamp(0.0, 1.0)
+        .toDouble();
+  }
+  return 0;
+}
+
+/// Returns the per-frame correction that brings an acceleration-mode cursor
+/// back to the neutral region exactly as the remaining inertia reaches zero.
+Offset mobileRemoteAccelerationReturnDelta({
+  required Offset pointerPosition,
+  required Size viewport,
+  required Duration frameDuration,
+  required Duration remainingDuration,
+}) {
+  if (frameDuration <= Duration.zero || remainingDuration <= Duration.zero) {
+    return Offset.zero;
+  }
+  final target = mobileRemoteClampCursorToNeutralRegion(
+    pointerPosition: pointerPosition,
+    viewport: viewport,
+  );
+  final fraction =
+      (frameDuration.inMicroseconds / remainingDuration.inMicroseconds)
+          .clamp(0.0, 1.0)
+          .toDouble();
+  return (target - pointerPosition) * fraction;
+}

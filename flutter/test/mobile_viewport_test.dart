@@ -176,46 +176,111 @@ void main() {
     );
   });
 
-  test('edge acceleration follows depth into the device viewport edge', () {
+  test('fixed edge mode uses the center third as its cursor region', () {
+    const viewport = Size(300, 600);
+    final neutralRect = mobileRemoteNeutralCursorRect(viewport);
+    expect(neutralRect.left, closeTo(100, 0.000001));
+    expect(neutralRect.top, closeTo(200, 0.000001));
+    expect(neutralRect.right, closeTo(200, 0.000001));
+    expect(neutralRect.bottom, closeTo(400, 0.000001));
+    final clamped = mobileRemoteClampCursorToNeutralRegion(
+      pointerPosition: const Offset(20, 580),
+      viewport: viewport,
+    );
+    expect(clamped.dx, closeTo(100, 0.000001));
+    expect(clamped.dy, closeTo(400, 0.000001));
     expect(
-      mobileRemoteDeviceEdgeScrollAxisFactor(
-        pointerPosition: 0,
-        viewportExtent: 400,
-        edgeThickness: 100,
+      mobileRemoteClampCursorToNeutralRegion(
+        pointerPosition: const Offset(150, 300),
+        viewport: viewport,
+      ),
+      const Offset(150, 300),
+    );
+    expect(
+      mobileRemoteEdgeScrollAxisDirection(
+        pointerPosition: 100,
+        viewportExtent: 300,
       ),
       -1,
     );
     expect(
-      mobileRemoteDeviceEdgeScrollAxisFactor(
-        pointerPosition: 50,
-        viewportExtent: 400,
-        edgeThickness: 100,
-      ),
-      closeTo(-0.5, 0.000001),
-    );
-    expect(
-      mobileRemoteDeviceEdgeScrollAxisFactor(
-        pointerPosition: 200,
-        viewportExtent: 400,
-        edgeThickness: 100,
+      mobileRemoteEdgeScrollAxisDirection(
+        pointerPosition: 150,
+        viewportExtent: 300,
       ),
       0,
     );
     expect(
-      mobileRemoteDeviceEdgeScrollAxisFactor(
-        pointerPosition: 350,
-        viewportExtent: 400,
-        edgeThickness: 100,
+      mobileRemoteEdgeScrollAxisDirection(
+        pointerPosition: neutralRect.right,
+        viewportExtent: 300,
+      ),
+      1,
+    );
+  });
+
+  test('edge acceleration ramps over two thirds of each outer band', () {
+    expect(
+      mobileRemoteEdgeAccelerationAxisFactor(
+        pointerPosition: 100,
+        viewportExtent: 300,
+      ),
+      0,
+    );
+    expect(
+      mobileRemoteEdgeAccelerationAxisFactor(
+        pointerPosition: 200 / 3,
+        viewportExtent: 300,
+      ),
+      closeTo(-0.5, 0.000001),
+    );
+    expect(
+      mobileRemoteEdgeAccelerationAxisFactor(
+        pointerPosition: 100 / 3,
+        viewportExtent: 300,
+      ),
+      -1,
+    );
+    expect(
+      mobileRemoteEdgeAccelerationAxisFactor(
+        pointerPosition: 0,
+        viewportExtent: 300,
+      ),
+      -1,
+    );
+    expect(
+      mobileRemoteEdgeAccelerationAxisFactor(
+        pointerPosition: 700 / 3,
+        viewportExtent: 300,
       ),
       closeTo(0.5, 0.000001),
     );
     expect(
-      mobileRemoteDeviceEdgeScrollAxisFactor(
-        pointerPosition: 400,
-        viewportExtent: 400,
-        edgeThickness: 100,
+      mobileRemoteEdgeAccelerationAxisFactor(
+        pointerPosition: 800 / 3,
+        viewportExtent: 300,
       ),
       1,
     );
+  });
+
+  test('acceleration cursor returns to neutral as inertia expires', () {
+    const viewport = Size(300, 600);
+    final first = mobileRemoteAccelerationReturnDelta(
+      pointerPosition: const Offset(40, 500),
+      viewport: viewport,
+      frameDuration: const Duration(milliseconds: 25),
+      remainingDuration: const Duration(milliseconds: 100),
+    );
+    expect(first.dx, closeTo(15, 0.000001));
+    expect(first.dy, closeTo(-25, 0.000001));
+    final second = mobileRemoteAccelerationReturnDelta(
+      pointerPosition: const Offset(55, 475),
+      viewport: viewport,
+      frameDuration: const Duration(milliseconds: 75),
+      remainingDuration: const Duration(milliseconds: 75),
+    );
+    expect(second.dx, closeTo(45, 0.000001));
+    expect(second.dy, closeTo(-75, 0.000001));
   });
 }

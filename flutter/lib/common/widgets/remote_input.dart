@@ -11,6 +11,7 @@ import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/input_model.dart';
+import 'package:flutter_hbb/mobile/mobile_viewport.dart';
 
 import './gestures.dart';
 
@@ -187,7 +188,7 @@ class _RawTouchGestureDetectorRegionState
     if (cancelEdgeScroll) ffi.canvasModel.cancelEdgeScroll();
   }
 
-  void _startCursorInertia(DragEndDetails details) {
+  bool _startCursorInertia(DragEndDetails details) {
     _stopCursorInertia(cancelEdgeScroll: false);
     final durationMs = widget.cursorInertiaDurationMs
         .clamp(
@@ -198,7 +199,7 @@ class _RawTouchGestureDetectorRegionState
     var velocity = details.velocity.pixelsPerSecond;
     if (durationMs <= 0 || velocity.distance < 50) {
       ffi.canvasModel.cancelEdgeScroll();
-      return;
+      return false;
     }
     const maximumVelocity = 3000.0;
     if (velocity.distance > maximumVelocity) {
@@ -214,6 +215,25 @@ class _RawTouchGestureDetectorRegionState
       const Duration(milliseconds: 16),
       (_) => _runCursorInertiaTick(generation, durationMs),
     );
+    return true;
+  }
+
+  bool get _returnsAccelerationCursorToNeutral =>
+      !handleTouch &&
+      !inputModel.relativeMouseMode.value &&
+      inputModel.useEdgeScroll &&
+      ffi.canvasModel.scrollStyle == ScrollStyle.scrolledgeaccel;
+
+  Future<void> _returnAccelerationCursorToNeutral() async {
+    if (!_returnsAccelerationCursorToNeutral) return;
+    final currentPosition = ffi.cursorModel.mobileViewportPosition;
+    final targetPosition = mobileRemoteClampCursorToNeutralRegion(
+      pointerPosition: currentPosition,
+      viewport: ffi.canvasModel.size,
+    );
+    final delta = targetPosition - currentPosition;
+    if (delta == Offset.zero) return;
+    await ffi.cursorModel.updatePan(delta, targetPosition, false);
   }
 
   Future<void> _runCursorInertiaTick(int generation, int durationMs) async {
@@ -254,6 +274,23 @@ class _RawTouchGestureDetectorRegionState
           _cursorInertiaLocalPosition,
           false,
         );
+        if (_returnsAccelerationCursorToNeutral) {
+          final currentPosition = ffi.cursorModel.mobileViewportPosition;
+          final returnDelta = mobileRemoteAccelerationReturnDelta(
+            pointerPosition: currentPosition,
+            viewport: ffi.canvasModel.size,
+            frameDuration: frameDuration,
+            remainingDuration: remaining,
+          );
+          if (returnDelta != Offset.zero) {
+            _cursorInertiaLocalPosition += returnDelta;
+            await ffi.cursorModel.updatePan(
+              returnDelta,
+              currentPosition + returnDelta,
+              false,
+            );
+          }
+        }
         if (inputModel.useEdgeScroll) {
           final edgePosition = ffi.cursorModel.mobileViewportPosition;
           ffi.canvasModel.edgeScrollMouse(edgePosition.dx, edgePosition.dy);
@@ -561,10 +598,9 @@ class _RawTouchGestureDetectorRegionState
     // remote screen. Its updates continue from the current remote cursor.
     if (inputModel.useEdgeScroll) {
       ffi.canvasModel.rearmEdgeScroll();
-      final edgePosition = !handleTouch && !inputModel.relativeMouseMode.value
-          ? ffi.cursorModel.mobileViewportPosition
-          : d.localPosition;
-      ffi.canvasModel.edgeScrollMouse(edgePosition.dx, edgePosition.dy);
+      if (handleTouch) {
+        ffi.canvasModel.edgeScrollMouse(d.localPosition.dx, d.localPosition.dy);
+      }
     }
   }
 
@@ -608,7 +644,9 @@ class _RawTouchGestureDetectorRegionState
         await inputModel.sendMouse('up', MouseButtons.left);
       }
     } else {
-      _startCursorInertia(d);
+      if (!_startCursorInertia(d)) {
+        await _returnAccelerationCursorToNeutral();
+      }
     }
   }
 
