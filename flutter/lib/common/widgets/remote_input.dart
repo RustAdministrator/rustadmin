@@ -14,6 +14,7 @@ import 'package:flutter_hbb/models/input_model.dart';
 import 'package:flutter_hbb/mobile/mobile_viewport.dart';
 
 import './gestures.dart';
+import './mobile_gesture_controller.dart';
 
 class RawKeyFocusScope extends StatelessWidget {
   final FocusNode? focusNode;
@@ -55,13 +56,6 @@ class RawKeyFocusScope extends StatelessWidget {
     );
   }
 }
-// For virtual mouse when using the mouse mode on mobile.
-// Special hold-drag mode: one finger holds a button (left/right button), another finger pans.
-// This flag is to override the scale gesture to a pan gesture.
-bool isSpecialHoldDragActive = false;
-// Cache the last focal point to calculate deltas in special hold-drag mode.
-Offset _lastSpecialHoldDragFocalPoint = Offset.zero;
-
 Offset mobileCursorInertiaFrameDelta({
   required Offset velocityPixelsPerSecond,
   required Duration elapsedBeforeFrame,
@@ -110,7 +104,7 @@ class _RawTouchGestureDetectorRegionState
   // Timestamp of the last long press event.
   int _cacheLongPressPositionTs = 0;
   double _mouseScrollIntegral = 0; // mouse scroll speed controller
-  double _scale = 1;
+  final MobileWheelAccumulator _twoFingerWheel = MobileWheelAccumulator();
 
   // Workaround tap down event when two fingers are used to scale(mobile)
   TapDownDetails? _lastTapDownDetails;
@@ -496,7 +490,13 @@ class _RawTouchGestureDetectorRegionState
   }
 
   onTwoFingerDown(TapDownDetails d) {
+    onTwoFingerSequenceStart();
+  }
+
+  onTwoFingerSequenceStart() {
     _stopCursorInertia();
+    _lastTapDownDetails = null;
+    _twoFingerWheel.reset();
   }
 
   onTwoFingerTap(TapDownDetails d) async {
@@ -532,7 +532,7 @@ class _RawTouchGestureDetectorRegionState
       return;
     }
     if (!handleTouch) {
-      if (isSpecialHoldDragActive) return;
+      if (inputModel.mobileSpecialHoldDragActive) return;
       await inputModel.sendMouse('down', MouseButtons.left);
     }
   }
@@ -542,7 +542,7 @@ class _RawTouchGestureDetectorRegionState
       return;
     }
     if (!handleTouch) {
-      if (isSpecialHoldDragActive) return;
+      if (inputModel.mobileSpecialHoldDragActive) return;
       await ffi.cursorModel.updatePan(d.delta, d.localPosition, handleTouch);
     }
   }
@@ -658,41 +658,23 @@ class _RawTouchGestureDetectorRegionState
   // or rejected by the gesture arena. Without this, the flag can remain
   // stuck in the "started" state and cause issues such as the Magic Mouse
   // double-click problem on iPad with magic mouse.
-  onOneFingerPanCancel() {
+  onOneFingerPanCancel() async {
+    final releaseLeftDrag = handleTouch &&
+        _touchModePanStarted &&
+        !inputModel.relativeMouseMode.value;
     _touchModePanStarted = false;
     ffi.canvasModel.cancelEdgeScroll();
-  }
-
-  // scale + pan event
-  onTwoFingerScaleStart(ScaleStartDetails d) {
-    _stopCursorInertia();
-    _lastTapDownDetails = null;
-    if (isNotTouchBasedDevice()) {
-      return;
-    }
-    if (isSpecialHoldDragActive) {
-      // Initialize the last focal point to calculate deltas manually.
-      _lastSpecialHoldDragFocalPoint = d.focalPoint;
+    if (releaseLeftDrag) {
+      await inputModel.sendMouse('up', MouseButtons.left);
     }
   }
 
-  onTwoFingerScaleUpdate(ScaleUpdateDetails d) async {
+  onTwoFingerViewportZoomUpdate(MobileTwoFingerMotionUpdate d) async {
     if (isNotTouchBasedDevice()) {
       return;
     }
-
-    // If in special drag mode, perform a pan instead of a scale.
-    if (isSpecialHoldDragActive) {
-      // Calculate delta manually to avoid the jumpy behavior.
-      final delta = d.focalPoint - _lastSpecialHoldDragFocalPoint;
-      _lastSpecialHoldDragFocalPoint = d.focalPoint;
-      await ffi.cursorModel.updatePan(delta * 2.0, d.focalPoint, handleTouch);
-      return;
-    }
-
     if ((isDesktop || isWebDesktop)) {
-      final scale = ((d.scale - _scale) * 1000).toInt();
-      _scale = d.scale;
+      final scale = ((d.scaleDelta - 1) * 1000).toInt();
 
       if (scale != 0) {
         if (widget.isCamera) return;
@@ -703,15 +685,13 @@ class _RawTouchGestureDetectorRegionState
                     .toJson()));
       }
     } else {
-      // mobile
-      ffi.canvasModel.updateScale(d.scale / _scale, d.focalPoint);
-      _scale = d.scale;
+      ffi.canvasModel.updateScale(d.scaleDelta, d.focalPoint);
       ffi.canvasModel.panX(d.focalPointDelta.dx);
       ffi.canvasModel.panY(d.focalPointDelta.dy);
     }
   }
 
-  onTwoFingerScaleEnd(ScaleEndDetails d) async {
+  onTwoFingerViewportZoomEnd() async {
     if (isNotTouchBasedDevice()) {
       return;
     }
@@ -721,15 +701,34 @@ class _RawTouchGestureDetectorRegionState
           sessionId: sessionId,
           msg: json.encode(
               PointerEventToRust(kPointerEventKindTouch, 'scale', 0).toJson()));
-    } else {
-      // mobile
-      _scale = 1;
-      // No idea why we need to set the view style to "" here.
-      // bind.sessionSetViewStyle(sessionId: sessionId, value: "");
     }
-    if (!isSpecialHoldDragActive) {
-      await inputModel.sendMouse('up', MouseButtons.left);
+  }
+
+  onTwoFingerRemoteWheelUpdate(MobileTwoFingerMotionUpdate d) {
+    if (isNotTouchBasedDevice()) return;
+    final steps = _twoFingerWheel.add(d.focalPointDelta.dy);
+    if (steps != 0) {
+      inputModel.scroll(steps);
     }
+  }
+
+  onTwoFingerRemoteWheelEnd() {
+    _twoFingerWheel.reset();
+  }
+
+  onTwoFingerViewportPanUpdate(MobileTwoFingerMotionUpdate d) {
+    if (isNotTouchBasedDevice() || isDesktop || isWebDesktop) return;
+    ffi.canvasModel.panX(d.focalPointDelta.dx);
+    ffi.canvasModel.panY(d.focalPointDelta.dy);
+  }
+
+  onTwoFingerSpecialHoldDragUpdate(DragUpdateDetails d) async {
+    if (isNotTouchBasedDevice()) return;
+    await ffi.cursorModel.updatePan(
+      d.delta * 2.0,
+      d.localPosition,
+      handleTouch,
+    );
   }
 
   get onHoldDragCancel => null;
@@ -796,16 +795,28 @@ class _RawTouchGestureDetectorRegionState
           ),
       CustomTouchGestureRecognizer:
           GestureRecognizerFactoryWithHandlers<CustomTouchGestureRecognizer>(
-            () => CustomTouchGestureRecognizer(),
+            () => CustomTouchGestureRecognizer(
+              enableTwoFingerRemoteWheel: isMobile,
+              isSpecialHoldDragActive: () =>
+                  inputModel.mobileSpecialHoldDragActive,
+            ),
             (instance) {
               instance.onOneFingerPanStart = onOneFingerPanStart;
               instance
                 ..onOneFingerPanUpdate = onOneFingerPanUpdate
                 ..onOneFingerPanEnd = onOneFingerPanEnd
                 ..onOneFingerPanCancel = onOneFingerPanCancel
-                ..onTwoFingerScaleStart = onTwoFingerScaleStart
-                ..onTwoFingerScaleUpdate = onTwoFingerScaleUpdate
-                ..onTwoFingerScaleEnd = onTwoFingerScaleEnd
+                ..onTwoFingerSequenceStart = onTwoFingerSequenceStart
+                ..onTwoFingerViewportZoomUpdate =
+                    onTwoFingerViewportZoomUpdate
+                ..onTwoFingerViewportZoomEnd = onTwoFingerViewportZoomEnd
+                ..onTwoFingerRemoteWheelUpdate =
+                    onTwoFingerRemoteWheelUpdate
+                ..onTwoFingerRemoteWheelEnd = onTwoFingerRemoteWheelEnd
+                ..onTwoFingerViewportPanUpdate =
+                    onTwoFingerViewportPanUpdate
+                ..onTwoFingerSpecialHoldDragUpdate =
+                    onTwoFingerSpecialHoldDragUpdate
                 ..onThreeFingerVerticalDragUpdate =
                     onThreeFingerVerticalDragUpdate;
             },

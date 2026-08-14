@@ -8,6 +8,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
+import 'package:flutter_hbb/common/widgets/mobile_gesture_controller.dart';
 import 'package:flutter_hbb/mobile/mobile_viewport.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_hbb/prototyping/mobile_remote_lab_revision.dart';
@@ -797,9 +798,11 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
   // A Fit action is deliberately a one-shot transform request. It must never
   // become a persistent constraint on subsequent pinch or pan input.
   var _canvasFitPending = true;
-  double? _gestureStartScale;
-  Offset? _gestureStartOffset;
-  Offset? _gestureStartFocalPoint;
+  final _twoFingerMotion = MobileTwoFingerMotionController();
+  final _twoFingerWheel = MobileWheelAccumulator();
+  var _gesturePointerCount = 0;
+  Offset? _localCursorPosition;
+  var _remoteWheelSteps = 0;
   Timer? _edgeScrollTimer;
   Offset? _edgePointerPosition;
   DateTime? _lastEdgeScrollTick;
@@ -1030,6 +1033,43 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
                         ),
                       ),
                     ),
+                    if (_localCursorPosition != null)
+                      Positioned(
+                        left: _localCursorPosition!.dx - 7,
+                        top: _localCursorPosition!.dy - 7,
+                        child: const IgnorePointer(
+                          child: DecoratedBox(
+                            key: Key('mobile-lab-local-cursor'),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              shape: BoxShape.circle,
+                              boxShadow: [
+                                BoxShadow(color: Colors.black, blurRadius: 3),
+                              ],
+                            ),
+                            child: SizedBox.square(dimension: 14),
+                          ),
+                        ),
+                      ),
+                    Positioned(
+                      right: 10,
+                      top: 10,
+                      child: Material(
+                        key: const Key('mobile-lab-remote-wheel-counter'),
+                        color: Colors.black54,
+                        borderRadius: BorderRadius.circular(12),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
+                          ),
+                          child: Text(
+                            'Remote wheel: $_remoteWheelSteps',
+                            style: const TextStyle(color: Colors.white70),
+                          ),
+                        ),
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -1112,57 +1152,114 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       texture: texture,
       viewport: viewport,
     );
-    final effectiveMinimum = _scrollStyle == kRemoteScrollStyleEdge ||
-            _scrollStyle == kRemoteScrollStyleEdgeAcceleration
-        ? math.max(
-            minimum,
-            mobileRemoteMinimumEdgeScrollScale(
-              texture: texture,
-              viewport: viewport,
-              edgeThickness: _edgeScrollThickness,
-            ),
-          )
-        : minimum;
-    return math.max(scale, effectiveMinimum).toDouble();
+    return math.max(scale, minimum).toDouble();
   }
 
   void _onCanvasScaleStart(ScaleStartDetails details) {
-    _gestureStartScale = _canvasScale;
-    _gestureStartOffset = _canvasOffset;
-    _gestureStartFocalPoint = details.localFocalPoint;
+    _gesturePointerCount = details.pointerCount;
+    if (details.pointerCount >= 2) {
+      _twoFingerMotion.start(scale: 1, focalPoint: details.focalPoint);
+      _twoFingerWheel.reset();
+    }
   }
 
   void _onCanvasScaleUpdate(ScaleUpdateDetails details) {
     final viewport = _canvasViewport;
     final texture = _canvasTexture;
-    final startScale = _gestureStartScale;
-    final startOffset = _gestureStartOffset;
-    final startFocalPoint = _gestureStartFocalPoint;
-    if (viewport == null ||
-        texture == null ||
-        startScale == null ||
-        startOffset == null ||
-        startFocalPoint == null) {
+    if (viewport == null || texture == null) return;
+
+    if (details.pointerCount == 1) {
+      final proposed = (_localCursorPosition ?? details.localFocalPoint) +
+          details.focalPointDelta;
+      setState(() {
+        _gesturePointerCount = 1;
+        _localCursorPosition = Offset(
+          proposed.dx.clamp(0, viewport.width),
+          proposed.dy.clamp(0, viewport.height),
+        );
+      });
       return;
     }
+    if (details.pointerCount < 2) return;
+
+    if (_gesturePointerCount < 2) {
+      _twoFingerMotion.start(
+        scale: details.scale,
+        focalPoint: details.focalPoint,
+      );
+      _twoFingerWheel.reset();
+      _gesturePointerCount = details.pointerCount;
+      return;
+    }
+    _gesturePointerCount = details.pointerCount;
+    final update = _twoFingerMotion.update(
+      scale: details.scale,
+      focalPoint: details.focalPoint,
+      localFocalPoint: details.localFocalPoint,
+      enableRemoteWheel: true,
+    );
+    switch (update.kind) {
+      case MobileTwoFingerMotionKind.pending:
+        return;
+      case MobileTwoFingerMotionKind.viewportZoom:
+        _applyTwoFingerZoom(update, viewport, texture);
+        return;
+      case MobileTwoFingerMotionKind.remoteWheel:
+        final steps = _twoFingerWheel.add(update.focalPointDelta.dy);
+        if (steps != 0) {
+          setState(() {
+            _remoteWheelSteps += steps;
+          });
+        }
+        return;
+      case MobileTwoFingerMotionKind.viewportPan:
+        _applyTwoFingerPan(update, viewport, texture);
+        return;
+    }
+  }
+
+  void _applyTwoFingerZoom(
+    MobileTwoFingerMotionUpdate update,
+    Size viewport,
+    Size texture,
+  ) {
     final scale = _clampCanvasScale(
-      startScale * details.scale,
+      _canvasScale * update.scaleDelta,
       texture,
       _canvasDevicePixelRatio,
     );
-    final scaleRatio = scale / startScale;
-    final proposedOffset =
-        details.localFocalPoint - (startFocalPoint - startOffset) * scaleRatio;
+    final scaleRatio = scale / _canvasScale;
+    final proposedOffset = update.localFocalPoint -
+        (update.localFocalPoint - _canvasOffset) * scaleRatio +
+        update.focalPointDelta;
     final offset = mobileRemoteLabClampCanvasOffset(
       proposed: proposedOffset,
       texture: texture,
       viewport: viewport,
       scale: scale,
     );
-    _canvasFitPending = false;
     setState(() {
       _manualCanvasTransform = true;
+      _canvasFitPending = false;
       _canvasScale = scale;
+      _canvasOffset = offset;
+    });
+  }
+
+  void _applyTwoFingerPan(
+    MobileTwoFingerMotionUpdate update,
+    Size viewport,
+    Size texture,
+  ) {
+    final offset = mobileRemoteLabClampCanvasOffset(
+      proposed: _canvasOffset + update.focalPointDelta,
+      texture: texture,
+      viewport: viewport,
+      scale: _canvasScale,
+    );
+    setState(() {
+      _manualCanvasTransform = true;
+      _canvasFitPending = false;
       _canvasOffset = offset;
     });
   }
@@ -1206,9 +1303,9 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
   }
 
   void _onCanvasScaleEnd(ScaleEndDetails details) {
-    _gestureStartScale = null;
-    _gestureStartOffset = null;
-    _gestureStartFocalPoint = null;
+    _gesturePointerCount = 0;
+    _twoFingerMotion.reset();
+    _twoFingerWheel.reset();
   }
 
   bool get _usesEdgeScroll =>
@@ -2403,7 +2500,10 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
               ),
               const SizedBox(height: 10),
               const Text(
-                'Drag to pan • wheel or pinch to zoom\nTap anywhere to close',
+                'One finger moves the cursor • pinch zooms the view\n'
+                'Two fingers move vertically for remote wheel scrolling\n'
+                'Two fingers move sideways to pan the local viewport\n'
+                'Tap anywhere to close',
                 textAlign: TextAlign.center,
                 style: TextStyle(color: Colors.white70),
               ),

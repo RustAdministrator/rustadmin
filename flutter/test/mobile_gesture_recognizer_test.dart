@@ -1,6 +1,7 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common/widgets/gestures.dart';
+import 'package:flutter_hbb/common/widgets/mobile_gesture_controller.dart';
 import 'package:flutter_hbb/common/widgets/remote_input.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -24,6 +25,84 @@ void main() {
     expect(first + second, const Offset(50, -25));
   });
 
+  test('two-finger controller separates wheel, zoom, and viewport pan', () {
+    final controller = MobileTwoFingerMotionController();
+
+    controller.start(scale: 1, focalPoint: Offset.zero);
+    expect(
+      controller
+          .update(
+            scale: 1.25,
+            focalPoint: const Offset(0, 15),
+            localFocalPoint: const Offset(0, 15),
+            enableRemoteWheel: true,
+          )
+          .kind,
+      MobileTwoFingerMotionKind.pending,
+    );
+    final wheel = controller.update(
+      scale: 1,
+      focalPoint: const Offset(0, 30),
+      localFocalPoint: const Offset(0, 30),
+      enableRemoteWheel: true,
+    );
+    expect(wheel.kind, MobileTwoFingerMotionKind.remoteWheel);
+    expect(wheel.focalPointDelta, const Offset(0, 30));
+
+    controller.reset();
+    controller.start(scale: 1, focalPoint: Offset.zero);
+    expect(
+      controller
+          .update(
+            scale: 1.25,
+            focalPoint: const Offset(-5, 0),
+            localFocalPoint: const Offset(-5, 0),
+            enableRemoteWheel: true,
+          )
+          .kind,
+      MobileTwoFingerMotionKind.pending,
+    );
+    final zoom = controller.update(
+      scale: 1.5,
+      focalPoint: Offset.zero,
+      localFocalPoint: Offset.zero,
+      enableRemoteWheel: true,
+    );
+    expect(zoom.kind, MobileTwoFingerMotionKind.viewportZoom);
+    expect(zoom.scaleDelta, 1.5);
+    expect(
+      controller
+          .update(
+            scale: 1,
+            focalPoint: const Offset(0, 30),
+            localFocalPoint: const Offset(0, 30),
+            enableRemoteWheel: true,
+          )
+          .kind,
+      MobileTwoFingerMotionKind.viewportZoom,
+    );
+
+    controller.reset();
+    controller.start(scale: 1, focalPoint: Offset.zero);
+    final pan = controller.update(
+      scale: 1,
+      focalPoint: const Offset(30, 0),
+      localFocalPoint: const Offset(30, 0),
+      enableRemoteWheel: true,
+    );
+    expect(pan.kind, MobileTwoFingerMotionKind.viewportPan);
+  });
+
+  test('wheel accumulator preserves sub-step movement', () {
+    final accumulator = MobileWheelAccumulator(logicalPixelsPerStep: 8);
+    expect(accumulator.add(3), 0);
+    expect(accumulator.add(3), 0);
+    expect(accumulator.add(3), 1);
+    expect(accumulator.add(-17), -2);
+    accumulator.reset();
+    expect(accumulator.add(7), 0);
+  });
+
   Future<void> pumpTarget(
     WidgetTester tester, {
     required GestureTapDownCallback onTwoFingerTap,
@@ -31,7 +110,12 @@ void main() {
     required GestureTapCancelCallback onTwoFingerHoldEnd,
     required VoidCallback onOrdinaryTap,
     VoidCallback? onOrdinaryLongPress,
-    GestureScaleUpdateCallback? onTwoFingerScaleUpdate,
+    GestureDragStartCallback? onOneFingerPanStart,
+    GestureDragEndCallback? onOneFingerPanEnd,
+    GestureDragCancelCallback? onOneFingerPanCancel,
+    ValueChanged<MobileTwoFingerMotionUpdate>? onTwoFingerZoomUpdate,
+    ValueChanged<MobileTwoFingerMotionUpdate>? onTwoFingerWheelUpdate,
+    ValueChanged<MobileTwoFingerMotionUpdate>? onTwoFingerPanUpdate,
   }) {
     return tester.pumpWidget(
       MaterialApp(
@@ -63,9 +147,16 @@ void main() {
                     GestureRecognizerFactoryWithHandlers<
                       CustomTouchGestureRecognizer
                     >(
-                      CustomTouchGestureRecognizer.new,
-                      (recognizer) => recognizer.onTwoFingerScaleUpdate =
-                          onTwoFingerScaleUpdate,
+                      () => CustomTouchGestureRecognizer(
+                        enableTwoFingerRemoteWheel: true,
+                      ),
+                      (recognizer) => recognizer
+                        ..onOneFingerPanStart = onOneFingerPanStart
+                        ..onOneFingerPanEnd = onOneFingerPanEnd
+                        ..onOneFingerPanCancel = onOneFingerPanCancel
+                        ..onTwoFingerViewportZoomUpdate = onTwoFingerZoomUpdate
+                        ..onTwoFingerRemoteWheelUpdate = onTwoFingerWheelUpdate
+                        ..onTwoFingerViewportPanUpdate = onTwoFingerPanUpdate,
                     ),
               },
               child: const ColoredBox(color: Colors.black),
@@ -93,9 +184,9 @@ void main() {
       onTwoFingerHoldEnd: () {},
     );
 
-    final first = await tester.startGesture(const Offset(380, 280), pointer: 1);
+    final first = await tester.startGesture(const Offset(380, 300), pointer: 1);
     final second = await tester.startGesture(
-      const Offset(420, 320),
+      const Offset(420, 300),
       pointer: 2,
     );
     await first.up();
@@ -124,9 +215,9 @@ void main() {
       onOrdinaryLongPress: () => ordinaryLongPresses += 1,
     );
 
-    final first = await tester.startGesture(const Offset(380, 280), pointer: 1);
+    final first = await tester.startGesture(const Offset(380, 300), pointer: 1);
     final second = await tester.startGesture(
-      const Offset(420, 320),
+      const Offset(420, 300),
       pointer: 2,
     );
     await tester.pump(kLongPressTimeout + const Duration(milliseconds: 1));
@@ -165,37 +256,107 @@ void main() {
     expect(twoFingerHolds, 0);
   });
 
-  testWidgets('two-finger motion cancels tap and hold recognition', (
+  testWidgets('parallel vertical two-finger motion emits only remote wheel', (
     tester,
   ) async {
-    var twoFingerTaps = 0;
-    var holdStarts = 0;
-    var scaleUpdates = 0;
+    var zoomUpdates = 0;
+    var wheelUpdates = 0;
+    var panUpdates = 0;
     await pumpTarget(
       tester,
       onOrdinaryTap: () {},
-      onTwoFingerTap: (_) => twoFingerTaps += 1,
-      onTwoFingerHoldStart: (_) => holdStarts += 1,
+      onTwoFingerTap: (_) {},
+      onTwoFingerHoldStart: (_) {},
       onTwoFingerHoldEnd: () {},
-      onTwoFingerScaleUpdate: (_) => scaleUpdates += 1,
+      onTwoFingerZoomUpdate: (_) => zoomUpdates += 1,
+      onTwoFingerWheelUpdate: (_) => wheelUpdates += 1,
+      onTwoFingerPanUpdate: (_) => panUpdates += 1,
     );
 
-    final first = await tester.startGesture(const Offset(380, 280), pointer: 1);
+    final first = await tester.startGesture(const Offset(380, 300), pointer: 1);
     final second = await tester.startGesture(
-      const Offset(420, 320),
+      const Offset(420, 300),
       pointer: 2,
     );
-    await first.moveBy(const Offset(40, 0));
-    await second.moveBy(const Offset(-20, 0));
-    await first.moveBy(const Offset(10, 5));
+    await first.moveBy(const Offset(0, 30));
+    await second.moveBy(const Offset(0, 30));
+    await first.moveBy(const Offset(0, 10));
+    await second.moveBy(const Offset(0, 10));
     await tester.pump();
-    await tester.pump(kLongPressTimeout + const Duration(milliseconds: 1));
     await first.up();
     await second.up();
-    await tester.pump(const Duration(milliseconds: 201));
 
-    expect(twoFingerTaps, 0);
-    expect(holdStarts, 0);
-    expect(scaleUpdates, greaterThan(0));
+    expect(wheelUpdates, greaterThan(0));
+    expect(zoomUpdates, 0);
+    expect(panUpdates, 0);
+  });
+
+  testWidgets('two-finger pinch emits only viewport zoom', (tester) async {
+    var zoomUpdates = 0;
+    var wheelUpdates = 0;
+    var panUpdates = 0;
+    await pumpTarget(
+      tester,
+      onOrdinaryTap: () {},
+      onTwoFingerTap: (_) {},
+      onTwoFingerHoldStart: (_) {},
+      onTwoFingerHoldEnd: () {},
+      onTwoFingerZoomUpdate: (_) => zoomUpdates += 1,
+      onTwoFingerWheelUpdate: (_) => wheelUpdates += 1,
+      onTwoFingerPanUpdate: (_) => panUpdates += 1,
+    );
+
+    final first = await tester.startGesture(const Offset(380, 300), pointer: 1);
+    final second = await tester.startGesture(
+      const Offset(420, 300),
+      pointer: 2,
+    );
+    await first.moveBy(const Offset(-12, 0));
+    await second.moveBy(const Offset(12, 0));
+    await first.moveBy(const Offset(-8, 0));
+    await second.moveBy(const Offset(8, 0));
+    await first.moveBy(const Offset(-8, 0));
+    await second.moveBy(const Offset(8, 0));
+    await tester.pump();
+    await first.up();
+    await second.up();
+
+    expect(zoomUpdates, greaterThan(0));
+    expect(wheelUpdates, 0);
+    expect(panUpdates, 0);
+  });
+
+  testWidgets('adding a second finger ends one-finger cursor ownership', (
+    tester,
+  ) async {
+    var oneFingerStarts = 0;
+    var oneFingerEnds = 0;
+    await pumpTarget(
+      tester,
+      onOrdinaryTap: () {},
+      onTwoFingerTap: (_) {},
+      onTwoFingerHoldStart: (_) {},
+      onTwoFingerHoldEnd: () {},
+      onOneFingerPanStart: (_) => oneFingerStarts += 1,
+      onOneFingerPanEnd: (_) => oneFingerEnds += 1,
+      onTwoFingerZoomUpdate: (_) {},
+    );
+
+    final first = await tester.startGesture(const Offset(380, 300), pointer: 1);
+    await first.moveBy(const Offset(30, 0));
+    await first.moveBy(const Offset(10, 0));
+    await tester.pump();
+    final second = await tester.startGesture(
+      const Offset(420, 300),
+      pointer: 2,
+    );
+    await first.moveBy(const Offset(-12, 0));
+    await second.moveBy(const Offset(12, 0));
+    await tester.pump();
+    await first.up();
+    await second.up();
+
+    expect(oneFingerStarts, 1);
+    expect(oneFingerEnds, 1);
   });
 }

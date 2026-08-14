@@ -385,6 +385,8 @@ class InputModel {
 
   // Relative mouse mode (for games/3D apps).
   final relativeMouseMode = false.obs;
+  // Session-scoped ownership for the two-finger virtual-button drag gesture.
+  bool mobileSpecialHoldDragActive = false;
   late final RelativeMouseModel _relativeMouse;
   // Callback to cancel external throttle timer when relative mouse mode is disabled.
   VoidCallback? onRelativeMouseModeDisabled;

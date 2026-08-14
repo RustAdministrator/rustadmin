@@ -2809,21 +2809,9 @@ class CanvasModel with ChangeNotifier {
       );
 
   double _mobileMinimumScale() {
-    final texture = _mobileTextureSize();
-    final fitAll = mobileRemoteMinimumCanvasScale(
-      texture: texture,
+    return mobileRemoteMinimumCanvasScale(
+      texture: _mobileTextureSize(),
       viewport: size,
-    );
-    if (!_usesMobileEdgeScroll) {
-      return fitAll;
-    }
-    return max(
-      fitAll,
-      mobileRemoteMinimumEdgeScrollScale(
-        texture: texture,
-        viewport: size,
-        edgeThickness: _edgeScrollEdgeThickness.toDouble(),
-      ),
     );
   }
 
@@ -3013,7 +3001,6 @@ class CanvasModel with ChangeNotifier {
   }
 
   Future<void> updateScrollStyle() async {
-    final previousScrollStyle = _scrollStyle;
     final style = await bind.sessionGetScrollStyle(sessionId: sessionId);
 
     _scrollStyle =
@@ -3033,13 +3020,7 @@ class CanvasModel with ChangeNotifier {
 
     if (_usesMobileRemoteViewport) {
       updateSize();
-      if (_usesMobileEdgeScroll) {
-        _clampMobileCanvas();
-      } else if (previousScrollStyle == ScrollStyle.scrolledge ||
-          previousScrollStyle == ScrollStyle.scrolledgeaccel) {
-        requestMobileViewFit();
-        _applyPendingMobileFit();
-      }
+      _clampMobileCanvas();
     }
 
     notifyListeners();

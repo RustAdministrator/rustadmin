@@ -50,14 +50,6 @@ void main() {
         mobileRemoteMinimumCanvasScale(texture: texture, viewport: viewport),
         closeTo(393 / 2560, 0.000001),
       );
-      expect(
-        mobileRemoteMinimumEdgeScrollScale(
-          texture: texture,
-          viewport: viewport,
-          edgeThickness: 100,
-        ),
-        closeTo((873 + 200) / 1440, 0.000001),
-      );
     },
   );
 

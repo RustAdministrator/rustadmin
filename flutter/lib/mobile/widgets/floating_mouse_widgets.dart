@@ -10,7 +10,6 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 
 import 'package:flutter_hbb/common.dart';
-import 'package:flutter_hbb/common/widgets/remote_input.dart';
 import 'package:flutter_hbb/models/input_model.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
@@ -53,7 +52,7 @@ class _FloatingMouseWidgetsState extends State<FloatingMouseWidgets> {
     _virtualMouseMode = widget.ffi.ffiModel.virtualMouseMode;
     _virtualMouseMode.addListener(_onVirtualMouseModeChanged);
     _cursorModel.blockEvents = false;
-    isSpecialHoldDragActive = false;
+    _inputModel.mobileSpecialHoldDragActive = false;
   }
 
   void _onVirtualMouseModeChanged() {
@@ -67,7 +66,7 @@ class _FloatingMouseWidgetsState extends State<FloatingMouseWidgets> {
     _virtualMouseMode.removeListener(_onVirtualMouseModeChanged);
     super.dispose();
     _cursorModel.blockEvents = false;
-    isSpecialHoldDragActive = false;
+    _inputModel.mobileSpecialHoldDragActive = false;
   }
 
   @override
@@ -576,7 +575,7 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
           // Start a timer. If it fires, it's a hold.
           _tapDownTimer?.cancel();
           _tapDownTimer = Timer(_pressTimeout, () {
-            isSpecialHoldDragActive = true;
+            _inputModel.mobileSpecialHoldDragActive = true;
             () async {
               await _cursorModel.syncCursorPosition();
               await _inputModel
@@ -604,8 +603,8 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
                         }));
           } else {
             // If it's not a quick tap, it could be a hold or drag.
-            // If it was a hold, isSpecialHoldDragActive is true.
-            if (isSpecialHoldDragActive) {
+            // If it was a hold, mobileSpecialHoldDragActive is true.
+            if (_inputModel.mobileSpecialHoldDragActive) {
               _inputModel
                   .tapUp(_isLeft ? MouseButtons.left : MouseButtons.right);
             }
@@ -614,7 +613,7 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
           if (_isDragging) {
             _trySavePosition();
           }
-          isSpecialHoldDragActive = false;
+          _inputModel.mobileSpecialHoldDragActive = false;
         },
         onPointerCancel: (event) {
           _cursorModel.blockEvents = false;
@@ -623,10 +622,10 @@ class _FloatingLeftRightButtonState extends State<FloatingLeftRightButton> {
           });
           _tapDownTimer?.cancel();
           _tapDownTimer = null;
-          if (isSpecialHoldDragActive) {
+          if (_inputModel.mobileSpecialHoldDragActive) {
             _inputModel.tapUp(_isLeft ? MouseButtons.left : MouseButtons.right);
           }
-          isSpecialHoldDragActive = false;
+          _inputModel.mobileSpecialHoldDragActive = false;
           if (_isDragging) {
             _trySavePosition();
           }

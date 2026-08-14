@@ -71,9 +71,56 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  Future<void> moveTwoFingers(
+    WidgetTester tester,
+    Finder target,
+    Offset delta,
+  ) async {
+    final center = tester.getCenter(target);
+    final first = await tester.startGesture(
+      center - const Offset(20, 0),
+      pointer: 41,
+    );
+    final second = await tester.startGesture(
+      center + const Offset(20, 0),
+      pointer: 42,
+    );
+    final step = delta / 4;
+    for (var i = 0; i < 4; i++) {
+      await first.moveBy(step);
+      await second.moveBy(step);
+    }
+    await first.up();
+    await second.up();
+    await tester.pumpAndSettle();
+  }
+
+  Future<void> pinchOut(
+    WidgetTester tester,
+    Finder target, {
+    required int firstPointer,
+  }) async {
+    final center = tester.getCenter(target);
+    final first = await tester.startGesture(
+      center - const Offset(20, 0),
+      pointer: firstPointer,
+    );
+    final second = await tester.startGesture(
+      center + const Offset(20, 0),
+      pointer: firstPointer + 1,
+    );
+    for (var i = 0; i < 4; i++) {
+      await first.moveBy(const Offset(-10, 0));
+      await second.moveBy(const Offset(10, 0));
+    }
+    await first.up();
+    await second.up();
+    await tester.pumpAndSettle();
+  }
+
   test('reports the composed RustAdmin release version', () {
-    expect(mobileRemoteLabVersion, '2.0.5.007');
-    expect(mobileRemoteLabRevisionLabel, '2.0.5.007 · Lab r15');
+    expect(mobileRemoteLabVersion, '2.0.5.008');
+    expect(mobileRemoteLabRevisionLabel, '2.0.5.008 · Lab r16');
   });
 
   test('calculates native-texture fit, zoom, and no-overscan bounds', () {
@@ -283,7 +330,7 @@ void main() {
     },
   );
 
-  testWidgets('edge modes preserve panning range on both canvas axes', (
+  testWidgets('edge modes preserve zoom and scroll only available axes', (
     tester,
   ) async {
     await pumpPreview(tester);
@@ -292,7 +339,8 @@ void main() {
     final canvas = find.byKey(const Key('mobile-lab-remote-canvas'));
     final texture = find.byKey(const Key('mobile-lab-remote-texture'));
     final canvasRect = tester.getRect(canvas);
-    expect(tester.getRect(texture).height, closeTo(canvasRect.height, 0.01));
+    final initialTextureRect = tester.getRect(texture);
+    expect(initialTextureRect.height, closeTo(canvasRect.height, 0.01));
 
     await tester.tap(find.byTooltip('Display and session options'));
     await tester.pumpAndSettle();
@@ -304,23 +352,19 @@ void main() {
     await tester.pumpAndSettle();
 
     final edgeTextureRect = tester.getRect(texture);
-    expect(edgeTextureRect.width, greaterThan(canvasRect.width));
-    expect(edgeTextureRect.height, greaterThan(canvasRect.height));
-    expect(edgeTextureRect.top, lessThan(canvasRect.top));
-    expect(edgeTextureRect.bottom, greaterThan(canvasRect.bottom));
+    expect(edgeTextureRect, initialTextureRect);
+    expect(edgeTextureRect.height, closeTo(canvasRect.height, 0.01));
 
     await tester.tapAt(const Offset(4, 4));
     await tester.pumpAndSettle();
     final beforeScroll = tester.getRect(texture);
     final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
     await mouse.addPointer(location: canvasRect.center);
-    await mouse.moveTo(
-      Offset(canvasRect.right - 1, canvasRect.bottom - 1),
-    );
+    await mouse.moveTo(Offset(canvasRect.right - 1, canvasRect.bottom - 1));
     await tester.pump(const Duration(milliseconds: 100));
     final afterScroll = tester.getRect(texture);
     expect(afterScroll.left, lessThan(beforeScroll.left));
-    expect(afterScroll.top, lessThan(beforeScroll.top));
+    expect(afterScroll.top, closeTo(beforeScroll.top, 0.01));
     await mouse.removePointer();
 
     await tester.tap(find.byTooltip('Display and session options'));
@@ -334,7 +378,51 @@ void main() {
     expect(tester.getRect(texture).height, closeTo(canvasRect.height, 0.01));
   });
 
-  testWidgets('clamps gesture panning at remote screen edges', (
+  testWidgets('pinch zoom works in Edge and Edge acceleration modes', (
+    tester,
+  ) async {
+    await pumpPreview(tester);
+    await tester.pumpAndSettle();
+
+    final canvas = find.byKey(const Key('mobile-lab-remote-canvas'));
+    final texture = find.byKey(const Key('mobile-lab-remote-texture'));
+
+    await tester.tap(find.byTooltip('Display and session options'));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const Key('mobile-remote-options-open-screen-scrolling')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edge'));
+    await tester.pumpAndSettle();
+    await tester.tapAt(const Offset(4, 4));
+    await tester.pumpAndSettle();
+
+    final beforeEdgePinch = tester.getRect(texture);
+    await pinchOut(tester, canvas, firstPointer: 51);
+    final afterEdgePinch = tester.getRect(texture);
+    expect(afterEdgePinch.width, greaterThan(beforeEdgePinch.width));
+
+    await tester.tap(find.byTooltip('Display and session options'));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const Key('mobile-remote-options-open-screen-scrolling')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Edge acceleration'));
+    await tester.pumpAndSettle();
+    await tester.tapAt(const Offset(4, 4));
+    await tester.pumpAndSettle();
+
+    final beforeAccelerationPinch = tester.getRect(texture);
+    await pinchOut(tester, canvas, firstPointer: 61);
+    expect(
+      tester.getRect(texture).width,
+      greaterThan(beforeAccelerationPinch.width),
+    );
+  });
+
+  testWidgets('clamps two-finger viewport panning at remote screen edges', (
     tester,
   ) async {
     await pumpPreview(tester);
@@ -344,20 +432,44 @@ void main() {
     final canvasRect = tester.getRect(canvas);
     final texture = find.byKey(const Key('mobile-lab-remote-texture'));
 
-    await tester.drag(canvas, const Offset(10000, 0));
-    await tester.pumpAndSettle();
+    await moveTwoFingers(tester, canvas, const Offset(10000, 0));
     var textureRect = tester.getRect(texture);
+    expect(textureRect.left, closeTo(canvasRect.left, 0.01));
+
+    await moveTwoFingers(tester, canvas, const Offset(-10000, 0));
+    textureRect = tester.getRect(texture);
+    expect(textureRect.right, closeTo(canvasRect.right, 0.01));
+  });
+
+  testWidgets('two-finger vertical motion increments remote wheel counter', (
+    tester,
+  ) async {
+    await pumpPreview(tester);
+    await tester.pumpAndSettle();
+
+    final counter = find.byKey(const Key('mobile-lab-remote-wheel-counter'));
     expect(
-      textureRect.left,
-      closeTo(canvasRect.left, 0.01),
+      tester
+          .widget<Text>(
+            find.descendant(of: counter, matching: find.byType(Text)),
+          )
+          .data,
+      'Remote wheel: 0',
     );
 
-    await tester.drag(canvas, const Offset(-10000, 0));
-    await tester.pumpAndSettle();
-    textureRect = tester.getRect(texture);
+    await moveTwoFingers(
+      tester,
+      find.byKey(const Key('mobile-lab-remote-canvas')),
+      const Offset(0, 80),
+    );
+
     expect(
-      textureRect.right,
-      closeTo(canvasRect.right, 0.01),
+      tester
+          .widget<Text>(
+            find.descendant(of: counter, matching: find.byType(Text)),
+          )
+          .data,
+      isNot('Remote wheel: 0'),
     );
   });
 
@@ -406,21 +518,14 @@ void main() {
     final canvasRect = tester.getRect(canvas);
     final texture = find.byKey(const Key('mobile-lab-remote-texture'));
 
-    await tester.drag(canvas, const Offset(10000, 0));
-    await tester.pumpAndSettle();
-    expect(
-      tester.getRect(texture).left,
-      closeTo(canvasRect.left, 0.01),
-    );
+    await moveTwoFingers(tester, canvas, const Offset(10000, 0));
+    expect(tester.getRect(texture).left, closeTo(canvasRect.left, 0.01));
 
     // A parent rebuild is not a new connection and must not re-apply Fit
     // Height over the user's transform.
     await pumpPreview(tester);
     await tester.pumpAndSettle();
-    expect(
-      tester.getRect(texture).left,
-      closeTo(canvasRect.left, 0.01),
-    );
+    expect(tester.getRect(texture).left, closeTo(canvasRect.left, 0.01));
   });
 
   testWidgets('supports disconnect, reconnect, and toolbar collapse', (
@@ -617,8 +722,7 @@ void main() {
       expect(keyboardCanvasRect.bottom, closeTo(customKeysRect.top, 0.01));
       expect(keyboardCanvasRect.height, lessThan(fullCanvasRect.height));
 
-      await tester.drag(canvas, const Offset(0, -10000));
-      await tester.pumpAndSettle();
+      await moveTwoFingers(tester, canvas, const Offset(-10000, -10000));
       expect(
         tester.getRect(texture).bottom,
         closeTo(keyboardCanvasRect.bottom, 0.01),
@@ -691,10 +795,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Edge'));
     await tester.pumpAndSettle();
-    expect(
-      find.byKey(const Key('mobile-lab-edge-thickness')),
-      findsOneWidget,
-    );
+    expect(find.byKey(const Key('mobile-lab-edge-thickness')), findsOneWidget);
     await tester.tap(find.byKey(const Key('mobile-remote-options-back')));
     await tester.pumpAndSettle();
 

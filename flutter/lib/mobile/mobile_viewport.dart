@@ -54,27 +54,6 @@ double mobileRemoteMinimumCanvasScale({
   devicePixelRatio: 1,
 );
 
-double mobileRemoteMinimumEdgeScrollScale({
-  required Size texture,
-  required Size viewport,
-  required double edgeThickness,
-}) {
-  if (texture.width <= 0 ||
-      texture.height <= 0 ||
-      viewport.width <= 0 ||
-      viewport.height <= 0) {
-    return 1;
-  }
-  final margin = math.min(
-    math.max(edgeThickness, 0.0),
-    math.min(viewport.width, viewport.height) / 2,
-  );
-  return math.max(
-    (viewport.width + margin * 2) / texture.width,
-    (viewport.height + margin * 2) / texture.height,
-  );
-}
-
 FilterQuality mobileRemoteTextureFilterQuality({
   required double logicalScale,
 }) => logicalScale < 1 ? FilterQuality.low : FilterQuality.none;
