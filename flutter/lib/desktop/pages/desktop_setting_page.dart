@@ -3476,22 +3476,12 @@ class _AboutState extends State<_About> {
                   SelectionArea(
                       child: Text('${translate('Fingerprint')}: $fingerprint')
                           .marginSymmetric(vertical: 4.0)),
-                const SelectionArea(child: Text(kRustAdminForkSummary))
-                    .marginSymmetric(vertical: 4.0),
                 InkWell(
                     onTap: () {
                       launchUrlString(kRustAdminSourceUrl);
                     },
                     child: Text(
                       'Source code',
-                      style: linkStyle,
-                    ).marginSymmetric(vertical: 4.0)),
-                InkWell(
-                    onTap: () {
-                      launchUrlString(kRustDeskUpstreamUrl);
-                    },
-                    child: Text(
-                      'Upstream project',
                       style: linkStyle,
                     ).marginSymmetric(vertical: 4.0)),
                 Container(
@@ -3506,7 +3496,7 @@ class _AboutState extends State<_About> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              rustAdminLegalNotice(runtimeLicense: license),
+                              rustAdminLicenseNotice(runtimeLicense: license),
                               style: const TextStyle(color: Colors.white),
                             ),
                             Text(

@@ -2814,15 +2814,11 @@ impl<T: InvokeUiSession> Remote<T> {
                     _ => {}
                 },
                 Some(message::Union::MessageBox(msgbox)) => {
-                    let mut link = msgbox.link;
-                    if let Some(v) = config::HELPER_URL.get(&link as &str) {
-                        link = v.to_string();
-                    } else {
-                        log::warn!("Message box ignore link {} for security", &link);
-                        link = "".to_string();
+                    if !msgbox.link.is_empty() {
+                        log::warn!("Message box ignored external link");
                     }
                     self.handler
-                        .msgbox(&msgbox.msgtype, &msgbox.title, &msgbox.text, &link);
+                        .msgbox(&msgbox.msgtype, &msgbox.title, &msgbox.text, "");
                 }
                 Some(message::Union::VoiceCallRequest(request)) => {
                     if request.is_connect {

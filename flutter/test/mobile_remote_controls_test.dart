@@ -10,8 +10,12 @@ void main() {
     WidgetTester tester, {
     ThemeData? theme,
     Offset? cursorPosition,
+    List<MobileRemoteToolbarMonitor> monitors = const [],
     MobileRemoteToolbarTransparencySettings transparencySettings =
         MobileRemoteToolbarTransparencySettings.defaults,
+    MobileRemoteToolbarPlacementSettings placementSettings =
+        MobileRemoteToolbarPlacementSettings.defaults,
+    ValueChanged<MobileRemoteToolbarPlacementSettings>? onPlacementChanged,
   }) => tester.pumpWidget(
     MaterialApp(
       theme: theme,
@@ -33,8 +37,11 @@ void main() {
             peerIsAndroid: false,
             touchMode: true,
             waitForFirstImage: false,
+            monitors: monitors,
             cursorPosition: cursorPosition,
             transparencySettings: transparencySettings,
+            placementSettings: placementSettings,
+            onPlacementChanged: onPlacementChanged,
           ),
         ),
       ),
@@ -112,19 +119,72 @@ void main() {
     );
     expect(
       MobileCursorInertiaSettings.fromStored('-1'),
-      const MobileCursorInertiaSettings(durationMs: 0),
+      const MobileCursorInertiaSettings(durationMs: 100),
+    );
+    expect(
+      MobileCursorInertiaSettings.fromStored('5000'),
+      const MobileCursorInertiaSettings(durationMs: 1000),
     );
     expect(normalizeMobileRemoteScrollStyle('unknown'), kRemoteScrollStyleAuto);
     expect(
       normalizeMobileRemoteScrollStyle(kRemoteScrollStyleEdgeAcceleration),
       kRemoteScrollStyleEdgeAcceleration,
     );
+    expect(
+      MobileRemoteToolbarPlacementSettings.fromStored('vertical,0.25,0.75'),
+      const MobileRemoteToolbarPlacementSettings(
+        axis: MobileRemoteToolbarAxis.vertical,
+        horizontalPosition: 0.25,
+        verticalPosition: 0.75,
+      ),
+    );
+    expect(
+      MobileRemoteToolbarPlacementSettings.fromStored(
+        'horizontal,-1,2',
+      ).storedValue,
+      'horizontal,0.000000,1.000000',
+    );
+  });
+
+  testWidgets('cursor inertia control uses the 100-1000 ms slider range', (
+    tester,
+  ) async {
+    var changed = 0;
+    var committed = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MobileCursorInertiaControl(
+            durationMs: 150,
+            onChanged: (value) => changed = value,
+            onChangeEnd: (value) => committed = value,
+          ),
+        ),
+      ),
+    );
+
+    final slider = tester.widget<Slider>(
+      find.byKey(const Key('mobile-cursor-inertia-slider')),
+    );
+    expect(slider.min, 100);
+    expect(slider.max, 1000);
+    expect(slider.divisions, 18);
+    expect(find.text('150 ms'), findsOneWidget);
+
+    await tester.drag(
+      find.byKey(const Key('mobile-cursor-inertia-slider')),
+      const Offset(200, 0),
+    );
+    await tester.pump();
+    expect(changed, inInclusiveRange(100, 1000));
+    expect(committed, changed);
   });
 
   testWidgets('floating toolbar drags, changes axis, and collapses', (
     tester,
   ) async {
-    await pumpToolbar(tester);
+    var placement = MobileRemoteToolbarPlacementSettings.defaults;
+    await pumpToolbar(tester, onPlacementChanged: (value) => placement = value);
     await tester.pump();
 
     expect(
@@ -138,9 +198,11 @@ void main() {
     await tester.pumpAndSettle();
     final after = tester.getTopLeft(toolbar);
     expect(after.dy, lessThan(before.dy));
+    expect(placement.verticalPosition, lessThan(1));
 
     await tester.tap(find.byTooltip('Vertical toolbar'));
     await tester.pumpAndSettle();
+    expect(placement.axis, MobileRemoteToolbarAxis.vertical);
     expect(find.text('V'), findsOneWidget);
     await tester.tap(find.byTooltip('Collapse toolbar'));
     await tester.pumpAndSettle();
@@ -156,6 +218,37 @@ void main() {
 
     await tester.tap(find.byTooltip('Display and session options'));
     await tester.pump();
+  });
+
+  testWidgets('toolbar exposes direct monitor buttons', (tester) async {
+    var selected = -1;
+    await pumpToolbar(
+      tester,
+      monitors: [
+        MobileRemoteToolbarMonitor(
+          value: 0,
+          label: '1',
+          tooltip: '#1 monitor',
+          selected: true,
+          onPressed: () => selected = 0,
+        ),
+        MobileRemoteToolbarMonitor(
+          value: 1,
+          label: '2',
+          tooltip: '#2 monitor',
+          selected: false,
+          onPressed: () => selected = 1,
+        ),
+      ],
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('mobile-remote-monitor-0')),
+      findsOneWidget,
+    );
+    await tester.tap(find.byTooltip('#2 monitor'));
+    expect(selected, 1);
   });
 
   testWidgets('quick keys stay in one square scrollable row', (tester) async {
@@ -229,6 +322,55 @@ void main() {
     );
     expect(firstButton, const Size.square(39.6));
     expect(find.byIcon(Icons.push_pin), findsNothing);
+  });
+
+  testWidgets('quick keys use theme-aware gray button surfaces', (
+    tester,
+  ) async {
+    Future<Color?> buttonColor(ThemeData theme) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: theme,
+          darkTheme: theme,
+          themeMode: theme.brightness == Brightness.dark
+              ? ThemeMode.dark
+              : ThemeMode.light,
+          home: Scaffold(
+            body: MobileRemoteKeyHelpTools(
+              ctrlActive: false,
+              altActive: false,
+              shiftActive: false,
+              commandActive: false,
+              functionKeysActive: false,
+              moreKeysActive: false,
+              isMac: false,
+              showWindowsLinuxKeys: true,
+              quickKeyOrder: mobileRemoteDefaultQuickKeyOrder,
+              onCtrl: () {},
+              onAlt: () {},
+              onShift: () {},
+              onCommand: () {},
+              onFunctionKeys: () {},
+              onMoreKeys: () {},
+              onKeyPressed: (_) {},
+              onShortcutPressed: (_) {},
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final button = tester.widget<TextButton>(
+        find.descendant(
+          of: find.byKey(const Key('mobile-remote-quick-ctrl')),
+          matching: find.byType(TextButton),
+        ),
+      );
+      return button.style?.backgroundColor?.resolve({});
+    }
+
+    expect(await buttonColor(ThemeData.dark()), const Color(0xFF424242));
+    await tester.pumpWidget(const SizedBox.shrink());
+    expect(await buttonColor(ThemeData.light()), const Color(0xFFE0E0E0));
   });
 
   testWidgets('options use in-dialog submenus with an internal back button', (

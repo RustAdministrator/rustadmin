@@ -40,11 +40,21 @@ _toolbarTransparencySettingsFromUserDefaults() {
     ),
   );
 }
+
 MobileCursorInertiaSettings _cursorInertiaSettingsFromUserDefaults() {
   return MobileCursorInertiaSettings.fromStored(
     bind.mainGetUserDefaultOption(key: kOptionMobileCursorInertiaDurationMs),
   );
 }
+
+MobileRemoteToolbarPlacementSettings _toolbarPlacementFromLocalOption() {
+  return MobileRemoteToolbarPlacementSettings.fromStored(
+    bind.mainGetLocalOption(key: kOptionMobileRemoteToolbarPlacement),
+  );
+}
+
+bool _showMonitorsInMobileToolbarFromUserDefaults() =>
+    bind.mainGetUserDefaultOption(key: kKeyShowMonitorsToolbar) == 'Y';
 
 // Workaround for Android (default input method, Microsoft SwiftKey keyboard) when using physical keyboard.
 // When connecting a physical keyboard, `KeyEvent.physicalKey.usbHidUsage` are wrong is using Microsoft SwiftKey keyboard.
@@ -96,7 +106,10 @@ class _RemotePageState extends State<RemotePage>
   var _showCustomButtonEditor = false;
   var _toolbarTransparencySettings =
       MobileRemoteToolbarTransparencySettings.defaults;
+  var _toolbarPlacementSettings =
+      MobileRemoteToolbarPlacementSettings.defaults;
   var _cursorInertiaSettings = MobileCursorInertiaSettings.defaults;
+  var _showMonitorsInToolbar = false;
   var _quickKeyOrder = List<MobileRemoteQuickKey>.of(
     mobileRemoteDefaultQuickKeyOrder,
   );
@@ -118,7 +131,10 @@ class _RemotePageState extends State<RemotePage>
     super.initState();
     _toolbarTransparencySettings =
         _toolbarTransparencySettingsFromUserDefaults();
+    _toolbarPlacementSettings = _toolbarPlacementFromLocalOption();
     _cursorInertiaSettings = _cursorInertiaSettingsFromUserDefaults();
+    _showMonitorsInToolbar =
+        _showMonitorsInMobileToolbarFromUserDefaults();
     gFFI.canvasModel.initializeEdgeScrollFallback(this);
     gFFI.ffiModel.updateEventListener(sessionId, widget.id);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -602,46 +618,99 @@ class _RemotePageState extends State<RemotePage>
             ),
           );
     return Obx(
-      () => MobileRemoteToolbar(
-        onDisconnect: () => clientClose(sessionId, gFFI),
-        onOptions: () {
-          setState(() => _showEdit = false);
-          showOptions(
-            context,
-            widget.id,
-            gFFI.dialogManager,
-            toolbarTransparencySettings: _toolbarTransparencySettings,
-            onToolbarTransparencySettingsChanged: (settings) {
-              if (mounted) {
-                setState(() => _toolbarTransparencySettings = settings);
-              }
-            },
-            cursorInertiaSettings: _cursorInertiaSettings,
-            onCursorInertiaSettingsChanged: (settings) {
-              if (mounted) {
-                setState(() => _cursorInertiaSettings = settings);
-              }
-            },
-          );
-        },
-        onKeyboard: openKeyboard,
-        onMobileActions: () =>
-            gFFI.dialogManager.toggleMobileActionsOverlay(ffi: gFFI),
-        onGestureHelp: () =>
-            setState(() => _showGestureHelp = !_showGestureHelp),
-        onMore: () {
-          setState(() => _showEdit = false);
-          showActions(widget.id);
-        },
-        showInputControls:
-            !isWebDesktop && !ffiModel.viewOnly && ffiModel.keyboard,
-        peerIsAndroid: ffiModel.isPeerAndroid,
-        touchMode: ffiModel.touchMode,
-        waitForFirstImage: ffiModel.waitForFirstImage.isTrue,
-        chatButton: chatButton,
-        cursorPosition: cursorModel.mobileViewportPosition - const Offset(8, 8),
-        transparencySettings: _toolbarTransparencySettings,
-      ),
+      () {
+        final pi = ffiModel.pi;
+        final currentDisplay = CurrentDisplayState.find(widget.id).value;
+        final monitors = !_showMonitorsInToolbar || pi.displays.length <= 1
+            ? const <MobileRemoteToolbarMonitor>[]
+            : <MobileRemoteToolbarMonitor>[
+                for (var index = 0; index < pi.displays.length; index++)
+                  MobileRemoteToolbarMonitor(
+                    value: index,
+                    label: '${index + 1}',
+                    tooltip: '#${index + 1} ${translate('Monitor')}',
+                    selected: currentDisplay == index,
+                    onPressed: () {
+                      if (currentDisplay != index) {
+                        openMonitorInTheSameTab(index, gFFI, pi);
+                      }
+                    },
+                  ),
+                if (!isWeb && pi.isSupportMultiDisplay)
+                  MobileRemoteToolbarMonitor(
+                    value: kAllDisplayValue,
+                    label: translate('All'),
+                    tooltip: translate('all monitors'),
+                    selected: currentDisplay == kAllDisplayValue,
+                    allDisplays: true,
+                    onPressed: () {
+                      if (currentDisplay != kAllDisplayValue) {
+                        openMonitorInTheSameTab(kAllDisplayValue, gFFI, pi);
+                      }
+                    },
+                  ),
+              ];
+        return MobileRemoteToolbar(
+          onDisconnect: () => clientClose(sessionId, gFFI),
+          onOptions: () {
+            setState(() => _showEdit = false);
+            showOptions(
+              context,
+              widget.id,
+              gFFI.dialogManager,
+              toolbarTransparencySettings: _toolbarTransparencySettings,
+              onToolbarTransparencySettingsChanged: (settings) {
+                if (mounted) {
+                  setState(() => _toolbarTransparencySettings = settings);
+                }
+              },
+              showMonitorsInToolbar: _showMonitorsInToolbar,
+              onShowMonitorsInToolbarChanged: (value) {
+                if (mounted) {
+                  setState(() => _showMonitorsInToolbar = value);
+                }
+              },
+              cursorInertiaSettings: _cursorInertiaSettings,
+              onCursorInertiaSettingsChanged: (settings) {
+                if (mounted) {
+                  setState(() => _cursorInertiaSettings = settings);
+                }
+              },
+            );
+          },
+          onKeyboard: openKeyboard,
+          onMobileActions: () =>
+              gFFI.dialogManager.toggleMobileActionsOverlay(ffi: gFFI),
+          onGestureHelp: () =>
+              setState(() => _showGestureHelp = !_showGestureHelp),
+          onMore: () {
+            setState(() => _showEdit = false);
+            showActions(widget.id);
+          },
+          showInputControls:
+              !isWebDesktop && !ffiModel.viewOnly && ffiModel.keyboard,
+          peerIsAndroid: ffiModel.isPeerAndroid,
+          touchMode: ffiModel.touchMode,
+          waitForFirstImage: ffiModel.waitForFirstImage.isTrue,
+          chatButton: chatButton,
+          monitors: monitors,
+          cursorPosition:
+              cursorModel.mobileViewportPosition - const Offset(8, 8),
+          transparencySettings: _toolbarTransparencySettings,
+          placementSettings: _toolbarPlacementSettings,
+          onPlacementChanged: (settings) {
+            if (mounted) {
+              setState(() => _toolbarPlacementSettings = settings);
+            }
+            unawaited(
+              bind.mainSetLocalOption(
+                key: kOptionMobileRemoteToolbarPlacement,
+                value: settings.storedValue,
+              ),
+            );
+          },
+        );
+      },
     );
   }
 
@@ -706,12 +775,16 @@ class _RemotePageState extends State<RemotePage>
             } else {
               paints.add(FloatingMouseWidgets(ffi: gFFI));
             }
-            if (gFFI.ffiModel.pi.displays.isNotEmpty && !keyboardIsVisible) {
+            if (gFFI.ffiModel.pi.displays.isNotEmpty) {
               paints.add(
                 Positioned.fill(
-                  child: Padding(
-                    padding: const EdgeInsets.all(8),
-                    child: getFloatingToolbar(),
+                  child: Visibility(
+                    visible: !keyboardIsVisible,
+                    maintainState: true,
+                    child: Padding(
+                      padding: const EdgeInsets.all(8),
+                      child: getFloatingToolbar(),
+                    ),
                   ),
                 ),
               );
@@ -1004,7 +1077,9 @@ class _RemotePageState extends State<RemotePage>
               onTouchModeChange: (t) {
                 gFFI.ffiModel.toggleTouchMode();
                 final v = gFFI.ffiModel.touchMode ? 'Y' : 'N';
-                bind.mainSetLocalOption(key: kOptionTouchMode, value: v);
+                unawaited(
+                  bind.mainSetLocalOption(key: kOptionTouchMode, value: v),
+                );
               },
               virtualMouseMode: gFFI.ffiModel.virtualMouseMode,
               inputModel: gFFI.inputModel,
@@ -1220,6 +1295,8 @@ void showOptions(
   required MobileRemoteToolbarTransparencySettings toolbarTransparencySettings,
   required ValueChanged<MobileRemoteToolbarTransparencySettings>
   onToolbarTransparencySettingsChanged,
+  required bool showMonitorsInToolbar,
+  required ValueChanged<bool> onShowMonitorsInToolbarChanged,
   required MobileCursorInertiaSettings cursorInertiaSettings,
   required ValueChanged<MobileCursorInertiaSettings>
   onCursorInertiaSettingsChanged,
@@ -1309,6 +1386,7 @@ void showOptions(
         },
       ),
   ];
+  var activeShowMonitorsInToolbar = showMonitorsInToolbar;
   var activeToolbarTransparencySettings = toolbarTransparencySettings;
   final toolbarOpacityRadios = <TRadioMenu<String>>[
     for (final percent
@@ -1335,27 +1413,6 @@ void showOptions(
       ),
   ];
   var activeCursorInertiaSettings = cursorInertiaSettings;
-  final cursorInertiaRadios = <TRadioMenu<String>>[
-    for (final durationMs in MobileCursorInertiaSettings.durationPresetsMs)
-      TRadioMenu<String>(
-        child: Text(mobileCursorInertiaDurationLabel(durationMs)),
-        value: durationMs.toString(),
-        groupValue: activeCursorInertiaSettings.durationMs.toString(),
-        onChanged: (value) async {
-          final durationMs = int.tryParse(value ?? '');
-          if (durationMs == null) return;
-          activeCursorInertiaSettings = activeCursorInertiaSettings.copyWith(
-            durationMs: durationMs,
-          );
-          onCursorInertiaSettingsChanged(activeCursorInertiaSettings);
-          await bind.sessionPeerOption(
-            sessionId: gFFI.sessionId,
-            name: kOptionMobileCursorInertiaDurationMs,
-            value: durationMs.toString(),
-          );
-        },
-      ),
-  ];
   List<TRadioMenu<String>> imageQualityRadios = await toolbarImageQuality(
     context,
     id,
@@ -1425,7 +1482,28 @@ void showOptions(
               maxHeight: MediaQuery.sizeOf(context).height * 0.9,
             ),
             content: MobileRemoteOptionsContent(
-              header: displays,
+              header: [
+                ...displays,
+                if (pi.displays.length > 1)
+                  CheckboxListTile(
+                    key: const Key('mobile-remote-show-monitors-toolbar'),
+                    contentPadding: EdgeInsets.zero,
+                    visualDensity: VisualDensity.compact,
+                    value: activeShowMonitorsInToolbar,
+                    title: Text(translate('show_monitors_tip')),
+                    onChanged: (value) async {
+                      if (value == null) return;
+                      setState(
+                        () => activeShowMonitorsInToolbar = value,
+                      );
+                      await bind.mainSetUserDefaultOption(
+                        key: kKeyShowMonitorsToolbar,
+                        value: value ? 'Y' : 'N',
+                      );
+                      onShowMonitorsInToolbarChanged(value);
+                    },
+                  ),
+              ],
               radioSections: [
                 radioSection(
                   'view-style',
@@ -1440,21 +1518,49 @@ void showOptions(
                     final usesEdgeThickness =
                         value == kRemoteScrollStyleEdge ||
                         value == kRemoteScrollStyleEdgeAcceleration;
-                    if (!usesEdgeThickness) return const SizedBox.shrink();
-                    return EdgeThicknessControl(
-                      key: const Key('mobile-remote-edge-thickness'),
-                      value: activeEdgeThickness,
-                      onChanged: (value) {
-                        final thickness = value.round();
-                        activeEdgeThickness = thickness.toDouble();
-                        gFFI.canvasModel.updateEdgeScrollEdgeThickness(
-                          thickness,
-                        );
-                        unawaited(bind.sessionSetEdgeScrollEdgeThickness(
-                          sessionId: gFFI.sessionId,
-                          value: thickness,
-                        ));
-                      },
+                    return Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (usesEdgeThickness)
+                          EdgeThicknessControl(
+                            key: const Key('mobile-remote-edge-thickness'),
+                            value: activeEdgeThickness,
+                            onChanged: (value) {
+                              final thickness = value.round();
+                              activeEdgeThickness = thickness.toDouble();
+                              gFFI.canvasModel.updateEdgeScrollEdgeThickness(
+                                thickness,
+                              );
+                              unawaited(bind.sessionSetEdgeScrollEdgeThickness(
+                                sessionId: gFFI.sessionId,
+                                value: thickness,
+                              ));
+                            },
+                          ),
+                        const SizedBox(height: 8),
+                        Text(translate('Cursor inertia time')),
+                        MobileCursorInertiaControl(
+                          key: const Key('mobile-remote-cursor-inertia'),
+                          durationMs: activeCursorInertiaSettings.durationMs,
+                          onChanged: (durationMs) {
+                            activeCursorInertiaSettings =
+                                activeCursorInertiaSettings.copyWith(
+                              durationMs: durationMs,
+                            );
+                            onCursorInertiaSettingsChanged(
+                              activeCursorInertiaSettings,
+                            );
+                          },
+                          onChangeEnd: (durationMs) {
+                            unawaited(bind.sessionPeerOption(
+                              sessionId: gFFI.sessionId,
+                              name: kOptionMobileCursorInertiaDurationMs,
+                              value: durationMs.toString(),
+                            ));
+                          },
+                        ),
+                      ],
                     );
                   },
                 ),
@@ -1462,11 +1568,6 @@ void showOptions(
                   'toolbar-cursor-overlap-opacity',
                   toolbarOpacityRadios,
                   heading: Text(translate('Toolbar opacity under cursor')),
-                ),
-                radioSection(
-                  'cursor-inertia-time',
-                  cursorInertiaRadios,
-                  heading: Text(translate('Cursor inertia time')),
                 ),
                 radioSection(
                   'image-quality',

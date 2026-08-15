@@ -812,7 +812,10 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
   String _scrollStyle = kRemoteScrollStyleAuto;
   var _toolbarTransparencySettings =
       MobileRemoteToolbarTransparencySettings.defaults;
+  var _toolbarPlacementSettings =
+      MobileRemoteToolbarPlacementSettings.defaults;
   var _cursorInertiaSettings = MobileCursorInertiaSettings.defaults;
+  bool _showMonitorsInToolbar = false;
   bool _keyboardCtrl = false;
   bool _keyboardAlt = false;
   bool _keyboardShift = false;
@@ -908,12 +911,16 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
                         top: 10,
                         child: _buildScreenLabel(context),
                       ),
-                      if (_showToolbar && _connected && !_showKeyboard)
+                      if (_showToolbar && _connected)
                         Positioned.fill(
                           child: SafeArea(
                             top: false,
                             minimum: const EdgeInsets.all(8),
-                            child: _buildFloatingToolbar(context),
+                            child: Visibility(
+                              visible: !_showKeyboard,
+                              maintainState: true,
+                              child: _buildFloatingToolbar(context),
+                            ),
                           ),
                         ),
                       if (widget.scenario == RemoteLabScenario.connecting)
@@ -1549,10 +1556,34 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       peerIsAndroid: widget.scenario.peerIsAndroid,
       touchMode: _touchMode,
       waitForFirstImage: false,
+      monitors: !_showMonitorsInToolbar || widget.monitors.length <= 1
+          ? const []
+          : [
+              for (var index = 0; index < widget.monitors.length; index++)
+                MobileRemoteToolbarMonitor(
+                  value: index,
+                  label: '${index + 1}',
+                  tooltip: '#${index + 1} monitor',
+                  selected: _selectedMonitor == index,
+                  onPressed: () => _selectMonitor(index),
+                ),
+              MobileRemoteToolbarMonitor(
+                value: _allMonitors,
+                label: 'All',
+                tooltip: 'All monitors',
+                selected: _selectedMonitor == _allMonitors,
+                allDisplays: true,
+                onPressed: () => _selectMonitor(_allMonitors),
+              ),
+            ],
       cursorPosition: _edgePointerPosition == null
           ? null
           : _edgePointerPosition! - const Offset(8, 8),
       transparencySettings: _toolbarTransparencySettings,
+      placementSettings: _toolbarPlacementSettings,
+      onPlacementChanged: (settings) {
+        setState(() => _toolbarPlacementSettings = settings);
+      },
       chatButton: IconButton(
         tooltip: 'Chat',
         color: mobileRemoteToolbarForegroundColor(context),
@@ -1630,6 +1661,18 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
               ),
           ],
         ),
+        if (widget.monitors.length > 1)
+          CheckboxListTile(
+            key: const Key('mobile-remote-show-monitors-toolbar'),
+            contentPadding: EdgeInsets.zero,
+            visualDensity: VisualDensity.compact,
+            value: _showMonitorsInToolbar,
+            title: const Text('Show monitors in toolbar'),
+            onChanged: (value) {
+              if (value == null) return;
+              setState(() => _showMonitorsInToolbar = value);
+            },
+          ),
         const Divider(),
       ],
       radioSections: [
@@ -1666,32 +1709,53 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
           selectionDetailsBuilder: (value) {
             final usesEdgeThickness = value == kRemoteScrollStyleEdge ||
                 value == kRemoteScrollStyleEdgeAcceleration;
-            if (!usesEdgeThickness) return const SizedBox.shrink();
-            return EdgeThicknessControl(
-              key: const Key('mobile-lab-edge-thickness'),
-              value: _edgeScrollThickness,
-              onChanged: (value) {
-                setState(() {
-                  _stopEdgeScroll();
-                  _edgeScrollThickness = value.roundToDouble();
-                  _canvasFitPending = false;
-                  final viewport = _canvasViewport;
-                  final texture = _canvasTexture;
-                  if (viewport != null && texture != null) {
-                    _canvasScale = _clampCanvasScale(
-                      _canvasScale,
-                      texture,
-                      _canvasDevicePixelRatio,
-                    );
-                    _canvasOffset = mobileRemoteLabClampCanvasOffset(
-                      proposed: _canvasOffset,
-                      texture: texture,
-                      viewport: viewport,
-                      scale: _canvasScale,
-                    );
-                  }
-                });
-              },
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (usesEdgeThickness)
+                  EdgeThicknessControl(
+                    key: const Key('mobile-lab-edge-thickness'),
+                    value: _edgeScrollThickness,
+                    onChanged: (value) {
+                      setState(() {
+                        _stopEdgeScroll();
+                        _edgeScrollThickness = value.roundToDouble();
+                        _canvasFitPending = false;
+                        final viewport = _canvasViewport;
+                        final texture = _canvasTexture;
+                        if (viewport != null && texture != null) {
+                          _canvasScale = _clampCanvasScale(
+                            _canvasScale,
+                            texture,
+                            _canvasDevicePixelRatio,
+                          );
+                          _canvasOffset = mobileRemoteLabClampCanvasOffset(
+                            proposed: _canvasOffset,
+                            texture: texture,
+                            viewport: viewport,
+                            scale: _canvasScale,
+                          );
+                        }
+                      });
+                    },
+                  ),
+                const SizedBox(height: 8),
+                const Text('Cursor inertia time'),
+                MobileCursorInertiaControl(
+                  key: const Key('mobile-lab-cursor-inertia'),
+                  durationMs: _cursorInertiaSettings.durationMs,
+                  onChanged: (_) {},
+                  onChangeEnd: (durationMs) {
+                    setState(() {
+                      _cursorInertiaSettings =
+                          _cursorInertiaSettings.copyWith(
+                        durationMs: durationMs,
+                      );
+                    });
+                  },
+                ),
+              ],
             );
           },
         ),
@@ -1708,23 +1772,6 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
             setState(() {
               _toolbarTransparencySettings = _toolbarTransparencySettings
                   .copyWith(overlapOpacityPercent: int.parse(value));
-            });
-          },
-        ),
-        _radioSection(
-          'cursor-inertia-time',
-          _cursorInertiaSettings.durationMs.toString(),
-          [
-            for (final duration
-                in MobileCursorInertiaSettings.durationPresetsMs)
-              (duration.toString(), mobileCursorInertiaDurationLabel(duration)),
-          ],
-          heading: 'Cursor inertia time',
-          onChanged: (value) {
-            setState(() {
-              _cursorInertiaSettings = _cursorInertiaSettings.copyWith(
-                durationMs: int.parse(value),
-              );
             });
           },
         ),

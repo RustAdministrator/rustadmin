@@ -142,8 +142,8 @@ pub const SCRAP_UBUNTU_HIGHER_REQUIRED: &str = "ubuntu-21-04-required";
 pub const SCRAP_OTHER_VERSION_OR_X11_REQUIRED: &str = "wayland-requires-higher-linux-version";
 #[cfg(target_os = "linux")]
 pub const SCRAP_XDP_PORTAL_UNAVAILABLE: &str = "xdp-portal-unavailable";
+#[cfg(target_os = "linux")]
 pub const SCRAP_X11_REQUIRED: &str = "x11 expected";
-pub const SCRAP_X11_REF_URL: &str = "https://rustdesk.com/docs/en/manual/linux/#x11-required";
 pub const CLIPBOARD_DIRECTION_TOGGLE_PREFIX: &str = "clipboard-direction:";
 
 #[cfg(not(any(target_os = "linux", target_os = "ios")))]
@@ -4735,66 +4735,55 @@ struct LoginErrorMsgBox {
     msgtype: &'static str,
     title: &'static str,
     text: &'static str,
-    link: &'static str,
     try_again: bool,
 }
 
 lazy_static::lazy_static! {
     static ref LOGIN_ERROR_MAP: Arc<HashMap<&'static str, LoginErrorMsgBox>> = {
-        use config::LINK_HEADLESS_LINUX_SUPPORT;
         let map = HashMap::from([(LOGIN_SCREEN_WAYLAND, LoginErrorMsgBox{
             msgtype: "error",
             title: "Login Error",
             text: "Login screen using Wayland is not supported",
-            link: "https://rustdesk.com/docs/en/manual/linux/#login-screen",
             try_again: true,
         }), (LOGIN_MSG_DESKTOP_SESSION_NOT_READY, LoginErrorMsgBox{
             msgtype: "session-login",
             title: "",
             text: "",
-            link: "",
             try_again: true,
         }), (LOGIN_MSG_DESKTOP_XSESSION_FAILED, LoginErrorMsgBox{
             msgtype: "session-re-login",
             title: "",
             text: "",
-            link: "",
             try_again: true,
         }), (LOGIN_MSG_DESKTOP_SESSION_ANOTHER_USER, LoginErrorMsgBox{
             msgtype: "info-nocancel",
             title: "another_user_login_title_tip",
             text: "another_user_login_text_tip",
-            link: "",
             try_again: false,
         }), (LOGIN_MSG_DESKTOP_XORG_NOT_FOUND, LoginErrorMsgBox{
             msgtype: "info-nocancel",
             title: "xorg_not_found_title_tip",
             text: "xorg_not_found_text_tip",
-            link: LINK_HEADLESS_LINUX_SUPPORT,
             try_again: true,
         }), (LOGIN_MSG_DESKTOP_NO_DESKTOP, LoginErrorMsgBox{
             msgtype: "info-nocancel",
             title: "no_desktop_title_tip",
             text: "no_desktop_text_tip",
-            link: LINK_HEADLESS_LINUX_SUPPORT,
             try_again: true,
         }), (LOGIN_MSG_DESKTOP_SESSION_NOT_READY_PASSWORD_EMPTY, LoginErrorMsgBox{
             msgtype: "session-login-password",
             title: "",
             text: "",
-            link: "",
             try_again: true,
         }), (LOGIN_MSG_DESKTOP_SESSION_NOT_READY_PASSWORD_WRONG, LoginErrorMsgBox{
             msgtype: "session-login-re-password",
             title: "",
             text: "",
-            link: "",
             try_again: true,
         }), (LOGIN_MSG_NO_PASSWORD_ACCESS, LoginErrorMsgBox{
             msgtype: "wait-remote-accept-nook",
             title: "Prompt",
             text: "Please wait for the remote side to accept your session request...",
-            link: "",
             try_again: true,
         })]);
         Arc::new(map)
@@ -4827,23 +4816,14 @@ pub fn handle_login_error(
         true
     } else if LOGIN_ERROR_MAP.contains_key(err) {
         if let Some(msgbox_info) = LOGIN_ERROR_MAP.get(err) {
-            interface.msgbox(
-                msgbox_info.msgtype,
-                msgbox_info.title,
-                msgbox_info.text,
-                msgbox_info.link,
-            );
+            interface.msgbox(msgbox_info.msgtype, msgbox_info.title, msgbox_info.text, "");
             msgbox_info.try_again
         } else {
             // unreachable!
             false
         }
     } else {
-        if err.contains(SCRAP_X11_REQUIRED) {
-            interface.msgbox("error", "Login Error", err, SCRAP_X11_REF_URL);
-        } else {
-            interface.msgbox("error", "Login Error", err, "");
-        }
+        interface.msgbox("error", "Login Error", err, "");
         false
     }
 }

@@ -11,6 +11,7 @@ Color mobileRemoteToolbarBackgroundColor(BuildContext context) {
       ? Colors.black
       : Colors.white;
 }
+
 Color mobileRemoteToolbarForegroundColor(BuildContext context) {
   return Theme.of(context).brightness == Brightness.dark
       ? Colors.white
@@ -29,7 +30,107 @@ Color mobileRemoteQuickKeyStripBackgroundColor(BuildContext context) {
       : const Color(0x80FFFFFF);
 }
 
+Color mobileRemoteQuickKeyButtonBackgroundColor(BuildContext context) {
+  return Theme.of(context).brightness == Brightness.dark
+      ? const Color(0xFF424242)
+      : const Color(0xFFE0E0E0);
+}
+
 enum MobileRemoteToolbarAxis { horizontal, vertical }
+
+@immutable
+class MobileRemoteToolbarPlacementSettings {
+  const MobileRemoteToolbarPlacementSettings({
+    required this.axis,
+    required this.horizontalPosition,
+    required this.verticalPosition,
+  });
+
+  static const defaults = MobileRemoteToolbarPlacementSettings(
+    axis: MobileRemoteToolbarAxis.horizontal,
+    horizontalPosition: 0.5,
+    verticalPosition: 1.0,
+  );
+
+  final MobileRemoteToolbarAxis axis;
+  final double horizontalPosition;
+  final double verticalPosition;
+
+  factory MobileRemoteToolbarPlacementSettings.fromStored(
+    String value, {
+    MobileRemoteToolbarPlacementSettings fallback = defaults,
+  }) {
+    final fields = value.split(',');
+    if (fields.length != 3) return fallback;
+    final axis = switch (fields[0]) {
+      'vertical' => MobileRemoteToolbarAxis.vertical,
+      'horizontal' => MobileRemoteToolbarAxis.horizontal,
+      _ => fallback.axis,
+    };
+    final horizontalPosition = double.tryParse(fields[1]);
+    final verticalPosition = double.tryParse(fields[2]);
+    return MobileRemoteToolbarPlacementSettings(
+      axis: axis,
+      horizontalPosition: _normalizedPosition(
+        horizontalPosition,
+        fallback.horizontalPosition,
+      ),
+      verticalPosition: _normalizedPosition(
+        verticalPosition,
+        fallback.verticalPosition,
+      ),
+    );
+  }
+
+  static double _normalizedPosition(double? value, double fallback) {
+    if (value == null || !value.isFinite) return fallback;
+    return value.clamp(0.0, 1.0).toDouble();
+  }
+
+  String get storedValue =>
+      '${axis == MobileRemoteToolbarAxis.vertical ? 'vertical' : 'horizontal'},'
+      '${horizontalPosition.toStringAsFixed(6)},'
+      '${verticalPosition.toStringAsFixed(6)}';
+
+  MobileRemoteToolbarPlacementSettings copyWith({
+    MobileRemoteToolbarAxis? axis,
+    double? horizontalPosition,
+    double? verticalPosition,
+  }) => MobileRemoteToolbarPlacementSettings(
+    axis: axis ?? this.axis,
+    horizontalPosition: horizontalPosition ?? this.horizontalPosition,
+    verticalPosition: verticalPosition ?? this.verticalPosition,
+  );
+
+  @override
+  bool operator ==(Object other) =>
+      other is MobileRemoteToolbarPlacementSettings &&
+      other.axis == axis &&
+      other.horizontalPosition == horizontalPosition &&
+      other.verticalPosition == verticalPosition;
+
+  @override
+  int get hashCode => Object.hash(axis, horizontalPosition, verticalPosition);
+}
+
+@immutable
+class MobileRemoteToolbarMonitor {
+  const MobileRemoteToolbarMonitor({
+    required this.value,
+    required this.label,
+    required this.tooltip,
+    required this.selected,
+    required this.onPressed,
+    this.allDisplays = false,
+  });
+
+  final int value;
+  final String label;
+  final String tooltip;
+  final bool selected;
+  final VoidCallback onPressed;
+  final bool allDisplays;
+}
 
 @immutable
 class MobileRemoteToolbarTransparencySettings {
@@ -84,7 +185,6 @@ class MobileCursorInertiaSettings {
   static const defaults = MobileCursorInertiaSettings(
     durationMs: kDefaultMobileCursorInertiaDurationMs,
   );
-  static const durationPresetsMs = <int>[0, 50, 100, 150, 250, 400];
 
   final int durationMs;
 
@@ -123,8 +223,86 @@ String normalizeMobileRemoteScrollStyle(String value) => switch (value) {
 String mobileRemoteToolbarOpacityLabel(int percent) =>
     percent == 100 ? '100% (transparency disabled)' : '$percent%';
 
-String mobileCursorInertiaDurationLabel(int durationMs) =>
-    durationMs == 0 ? 'Off' : '$durationMs ms';
+String mobileCursorInertiaDurationLabel(int durationMs) => '$durationMs ms';
+
+class MobileCursorInertiaControl extends StatefulWidget {
+  const MobileCursorInertiaControl({
+    super.key,
+    required this.durationMs,
+    this.onChanged,
+    this.onChangeEnd,
+  });
+
+  static const int stepMs = 50;
+
+  final int durationMs;
+  final ValueChanged<int>? onChanged;
+  final ValueChanged<int>? onChangeEnd;
+
+  @override
+  State<MobileCursorInertiaControl> createState() =>
+      _MobileCursorInertiaControlState();
+}
+
+class _MobileCursorInertiaControlState
+    extends State<MobileCursorInertiaControl> {
+  late int _durationMs = _normalized(widget.durationMs);
+
+  int _normalized(int value) => value
+      .clamp(
+        kMinMobileCursorInertiaDurationMs,
+        kMaxMobileCursorInertiaDurationMs,
+      )
+      .toInt();
+
+  @override
+  void didUpdateWidget(covariant MobileCursorInertiaControl oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.durationMs != widget.durationMs) {
+      _durationMs = _normalized(widget.durationMs);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Align(
+          alignment: Alignment.centerRight,
+          child: Text(mobileCursorInertiaDurationLabel(_durationMs)),
+        ),
+        Semantics(
+          label: 'Cursor inertia time',
+          value: mobileCursorInertiaDurationLabel(_durationMs),
+          child: Slider(
+            key: const Key('mobile-cursor-inertia-slider'),
+            value: _durationMs.toDouble(),
+            min: kMinMobileCursorInertiaDurationMs.toDouble(),
+            max: kMaxMobileCursorInertiaDurationMs.toDouble(),
+            divisions:
+                (kMaxMobileCursorInertiaDurationMs -
+                    kMinMobileCursorInertiaDurationMs) ~/
+                MobileCursorInertiaControl.stepMs,
+            label: mobileCursorInertiaDurationLabel(_durationMs),
+            semanticFormatterCallback: (value) =>
+                mobileCursorInertiaDurationLabel(value.round()),
+            onChanged: widget.onChanged == null
+                ? null
+                : (value) {
+                    final durationMs = value.round();
+                    setState(() => _durationMs = durationMs);
+                    widget.onChanged!(durationMs);
+                  },
+            onChangeEnd: widget.onChangeEnd == null
+                ? null
+                : (value) => widget.onChangeEnd!(value.round()),
+          ),
+        ),
+      ],
+    );
+  }
+}
 
 Rect mobileRemoteToolbarOverlapRect({
   required Rect toolbarRect,
@@ -145,9 +323,12 @@ class MobileRemoteToolbar extends StatefulWidget {
     this.onGestureHelp,
     this.onMobileActions,
     this.chatButton,
+    this.monitors = const [],
     this.cursorPosition,
     this.transparencySettings =
         MobileRemoteToolbarTransparencySettings.defaults,
+    this.placementSettings = MobileRemoteToolbarPlacementSettings.defaults,
+    this.onPlacementChanged,
   });
 
   final VoidCallback onDisconnect;
@@ -161,8 +342,11 @@ class MobileRemoteToolbar extends StatefulWidget {
   final VoidCallback? onGestureHelp;
   final VoidCallback? onMobileActions;
   final Widget? chatButton;
+  final List<MobileRemoteToolbarMonitor> monitors;
   final Offset? cursorPosition;
   final MobileRemoteToolbarTransparencySettings transparencySettings;
+  final MobileRemoteToolbarPlacementSettings placementSettings;
+  final ValueChanged<MobileRemoteToolbarPlacementSettings>? onPlacementChanged;
 
   @override
   State<MobileRemoteToolbar> createState() => _MobileRemoteToolbarState();
@@ -172,20 +356,32 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
   static const _iconSize = 24.0;
   static const _maximumButtonExtent = 48.0;
 
-  var _axis = MobileRemoteToolbarAxis.horizontal;
   var _collapsed = false;
-  Offset? _position;
+  late var _placementSettings = widget.placementSettings;
 
-  bool get _vertical => _axis == MobileRemoteToolbarAxis.vertical;
+  bool get _vertical =>
+      _placementSettings.axis == MobileRemoteToolbarAxis.vertical;
 
-  Offset _initialPosition(BoxConstraints constraints, Size toolbarSize) {
+  @override
+  void didUpdateWidget(covariant MobileRemoteToolbar oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.placementSettings != widget.placementSettings &&
+        widget.placementSettings != _placementSettings) {
+      _placementSettings = widget.placementSettings;
+    }
+  }
+
+  Offset _position(BoxConstraints constraints, Size toolbarSize) {
     final maxLeft = (constraints.maxWidth - toolbarSize.width)
         .clamp(0.0, double.infinity)
         .toDouble();
     final maxTop = (constraints.maxHeight - toolbarSize.height)
         .clamp(0.0, double.infinity)
         .toDouble();
-    return Offset(maxLeft / 2, maxTop);
+    return Offset(
+      maxLeft * _placementSettings.horizontalPosition,
+      maxTop * _placementSettings.verticalPosition,
+    );
   }
 
   Offset _clampPosition(
@@ -211,17 +407,35 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
     Size toolbarSize,
   ) {
     final currentPosition = _clampPosition(
-      _position ?? _initialPosition(constraints, toolbarSize),
+      _position(constraints, toolbarSize),
       constraints,
       toolbarSize,
     );
+    final nextPosition = _clampPosition(
+      currentPosition + details.delta,
+      constraints,
+      toolbarSize,
+    );
+    final maxLeft = (constraints.maxWidth - toolbarSize.width)
+        .clamp(0.0, double.infinity)
+        .toDouble();
+    final maxTop = (constraints.maxHeight - toolbarSize.height)
+        .clamp(0.0, double.infinity)
+        .toDouble();
     setState(() {
-      _position = _clampPosition(
-        currentPosition + details.delta,
-        constraints,
-        toolbarSize,
+      _placementSettings = _placementSettings.copyWith(
+        horizontalPosition: maxLeft == 0
+            ? _placementSettings.horizontalPosition
+            : nextPosition.dx / maxLeft,
+        verticalPosition: maxTop == 0
+            ? _placementSettings.verticalPosition
+            : nextPosition.dy / maxTop,
       );
     });
+  }
+
+  void _commitPlacement() {
+    widget.onPlacementChanged?.call(_placementSettings);
   }
 
   Widget _iconButton({
@@ -272,11 +486,15 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
         padding: EdgeInsets.zero,
         splashRadius: extent / 2,
         onPressed: () {
-          setState(() {
-            _axis = _vertical
+          final placementSettings = _placementSettings.copyWith(
+            axis: _vertical
                 ? MobileRemoteToolbarAxis.horizontal
-                : MobileRemoteToolbarAxis.vertical;
+                : MobileRemoteToolbarAxis.vertical,
+          );
+          setState(() {
+            _placementSettings = placementSettings;
           });
+          widget.onPlacementChanged?.call(placementSettings);
         },
         icon: Text(
           _vertical ? 'V' : 'H',
@@ -287,6 +505,43 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
             height: 1,
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _monitorButton(MobileRemoteToolbarMonitor monitor, double extent) {
+    final foreground = monitor.selected
+        ? mobileRemoteAccentColor
+        : mobileRemoteToolbarForegroundColor(context);
+    return SizedBox.square(
+      dimension: extent,
+      child: IconButton(
+        key: ValueKey('mobile-remote-monitor-${monitor.value}'),
+        tooltip: monitor.tooltip,
+        color: foreground,
+        iconSize: _iconSize,
+        padding: EdgeInsets.zero,
+        splashRadius: extent / 2,
+        onPressed: monitor.onPressed,
+        icon: monitor.allDisplays
+            ? const Icon(Icons.grid_view)
+            : Stack(
+                alignment: Alignment.center,
+                children: [
+                  const Icon(Icons.desktop_windows, size: 27),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 3),
+                    child: Text(
+                      monitor.label,
+                      style: TextStyle(
+                        color: foreground,
+                        fontSize: 9,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
       ),
     );
   }
@@ -313,6 +568,7 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
         icon: Icons.tv,
         onPressed: widget.onOptions,
       ),
+      for (final monitor in widget.monitors) _monitorButton(monitor, extent),
     ];
     if (widget.showInputControls) {
       items.add(
@@ -391,7 +647,7 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
             ? Size(extent, extent * itemCount)
             : Size(extent * itemCount, extent);
         final position = _clampPosition(
-          _position ?? _initialPosition(constraints, toolbarSize),
+          _position(constraints, toolbarSize),
           constraints,
           toolbarSize,
         );
@@ -416,6 +672,8 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
                 behavior: HitTestBehavior.opaque,
                 onPanUpdate: (details) =>
                     _updateToolbarPosition(details, constraints, toolbarSize),
+                onPanEnd: (_) => _commitPlacement(),
+                onPanCancel: _commitPlacement,
                 child: AnimatedSize(
                   duration: const Duration(milliseconds: 180),
                   curve: Curves.easeOutCubic,
@@ -616,7 +874,7 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
           backgroundColor: active
               ? mobileRemoteToolbarActiveBackgroundColor(context)
-              : mobileRemoteToolbarBackgroundColor(context),
+              : mobileRemoteQuickKeyButtonBackgroundColor(context),
         ),
         onPressed: onPressed,
         child: icon != null

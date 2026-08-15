@@ -9,22 +9,13 @@ const int kAllVirtualDisplay = -1;
 
 const String kRustAdminSourceUrl =
     'https://github.com/RustAdministrator/rustadmin';
-const String kRustDeskUpstreamUrl = 'https://github.com/rustdesk/rustdesk';
-const String kRustAdminForkSummary =
-    'RustAdmin is an independent administrator- and security-oriented fork of RustDesk.';
-const String kRustAdminUpstreamAttribution =
-    'Portions are based on RustDesk by Purslane Ltd. and RustDesk contributors.';
 const String kRustAdminLicenseNotice =
     'Licensed under the GNU Affero General Public License v3.0.';
-const String kRustAdminNoEndorsementNotice =
-    'This project is not affiliated with or endorsed by RustDesk.';
 
-String rustAdminLegalNotice({String runtimeLicense = ''}) {
+String rustAdminLicenseNotice({String runtimeLicense = ''}) {
   final lines = [
     'Copyright (C) ${DateTime.now().year} RustAdministrator.',
-    kRustAdminUpstreamAttribution,
     kRustAdminLicenseNotice,
-    kRustAdminNoEndorsementNotice,
   ];
   final normalizedLicense = runtimeLicense.trim();
   if (normalizedLicense.isNotEmpty) {
@@ -215,6 +206,8 @@ const String kOptionRemoteToolbarPinnedDimDurationMs =
     "remote-toolbar-pinned-dim-duration-ms";
 const String kOptionMobileRemoteToolbarOverlapOpacityPercent =
     "mobile-remote-toolbar-minimum-opacity-percent";
+const String kOptionMobileRemoteToolbarPlacement =
+    "mobile-remote-toolbar-placement";
 const String kOptionMobileCursorInertiaDurationMs =
     "mobile-cursor-inertia-duration-ms";
 const int kDefaultRemoteToolbarRevealZonePx = 36;
@@ -237,7 +230,7 @@ const int kDefaultMobileRemoteToolbarOverlapOpacityPercent = 20;
 const int kMinMobileRemoteToolbarOverlapOpacityPercent = 10;
 const int kMaxMobileRemoteToolbarOverlapOpacityPercent = 100;
 const int kDefaultMobileCursorInertiaDurationMs = 150;
-const int kMinMobileCursorInertiaDurationMs = 0;
+const int kMinMobileCursorInertiaDurationMs = 100;
 const int kMaxMobileCursorInertiaDurationMs = 1000;
 
 String normalizeQualityMonitorPosition(String value) {

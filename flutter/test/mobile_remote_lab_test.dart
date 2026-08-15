@@ -119,8 +119,8 @@ void main() {
   }
 
   test('reports the composed RustAdmin release version', () {
-    expect(mobileRemoteLabVersion, '2.0.5.008');
-    expect(mobileRemoteLabRevisionLabel, '2.0.5.008 · Lab r16');
+    expect(mobileRemoteLabVersion, '2.0.5.010');
+    expect(mobileRemoteLabRevisionLabel, '2.0.5.010 · Lab r18');
   });
 
   test('calculates native-texture fit, zoom, and no-overscan bounds', () {
@@ -707,6 +707,14 @@ void main() {
       final canvas = find.byKey(const Key('mobile-lab-remote-canvas'));
       final texture = find.byKey(const Key('mobile-lab-remote-texture'));
       final fullCanvasRect = tester.getRect(canvas);
+      await tester.tap(find.byTooltip('Vertical toolbar'));
+      await tester.pumpAndSettle();
+      final toolbar = find.byKey(
+        const Key('mobile-remote-floating-toolbar'),
+      );
+      await tester.drag(toolbar, const Offset(-40, -80));
+      await tester.pumpAndSettle();
+      final toolbarPosition = tester.getTopLeft(toolbar);
 
       await tester.tap(find.byTooltip('Keyboard'));
       await tester.pumpAndSettle();
@@ -741,6 +749,16 @@ void main() {
         find.byKey(const Key('mobile-remote-floating-toolbar')),
         findsOneWidget,
       );
+      expect(find.text('V'), findsOneWidget);
+      final restoredToolbarPosition = tester.getTopLeft(toolbar);
+      expect(
+        restoredToolbarPosition.dx,
+        closeTo(toolbarPosition.dx, 0.01),
+      );
+      expect(
+        restoredToolbarPosition.dy,
+        closeTo(toolbarPosition.dy, 0.01),
+      );
     },
   );
 
@@ -760,7 +778,7 @@ void main() {
     expect(find.text('View scale'), findsOneWidget);
     expect(find.text('Screen scrolling'), findsOneWidget);
     expect(find.text('Toolbar opacity under cursor'), findsOneWidget);
-    expect(find.text('Cursor inertia time'), findsOneWidget);
+    expect(find.text('Cursor inertia time'), findsNothing);
     expect(find.text('Image quality'), findsOneWidget);
     expect(find.text('Codec'), findsOneWidget);
     expect(find.text('Capture'), findsOneWidget);
@@ -769,6 +787,8 @@ void main() {
     expect(find.text('Resolution'), findsOneWidget);
     expect(find.text('Virtual display'), findsOneWidget);
     expect(find.text('Session controls'), findsOneWidget);
+    final showMonitors = find.text('Show monitors in toolbar');
+    expect(showMonitors, findsOneWidget);
 
     await tester.tap(
       find.byKey(const Key('mobile-remote-options-open-view-style')),
@@ -793,12 +813,21 @@ void main() {
       find.byKey(const Key('mobile-remote-options-open-screen-scrolling')),
     );
     await tester.pumpAndSettle();
+    expect(find.text('Cursor inertia time'), findsOneWidget);
+    final inertiaSlider = tester.widget<Slider>(
+      find.byKey(const Key('mobile-cursor-inertia-slider')),
+    );
+    expect(inertiaSlider.min, 100);
+    expect(inertiaSlider.max, 1000);
     await tester.tap(find.text('Edge'));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('mobile-lab-edge-thickness')), findsOneWidget);
     await tester.tap(find.byKey(const Key('mobile-remote-options-back')));
     await tester.pumpAndSettle();
 
+    await tester.ensureVisible(showMonitors);
+    await tester.tap(showMonitors);
+    await tester.pumpAndSettle();
     final sessionControls = find.byKey(
       const Key('mobile-remote-options-open-session-controls'),
     );
@@ -810,6 +839,14 @@ void main() {
 
     await tester.tapAt(const Offset(4, 4));
     await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('mobile-remote-monitor-0')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('mobile-remote-monitor--1')),
+      findsOneWidget,
+    );
     await tester.tap(find.byTooltip('More actions'));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('mobile-lab-actions-root')), findsOneWidget);
@@ -924,7 +961,7 @@ void main() {
     );
     expect(
       ctrlButton.style!.backgroundColor!.resolve(<WidgetState>{}),
-      mobileRemoteToolbarBackgroundColor(quickButtonContext),
+      mobileRemoteQuickKeyButtonBackgroundColor(quickButtonContext),
     );
     expect(
       (ctrlButton.style!.backgroundColor!.resolve(<WidgetState>{})!.a * 255)

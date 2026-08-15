@@ -1236,13 +1236,6 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                 leading: const Icon(Icons.delete_outline),
               ),
             SettingsTile(
-              title: Text('Attribution'),
-              description: Text(
-                '$kRustAdminForkSummary\n${rustAdminLegalNotice()}',
-              ),
-              leading: Icon(Icons.article_outlined),
-            ),
-            SettingsTile(
               onPressed: (context) async {
                 await launchUrl(Uri.parse(kRustAdminSourceUrl));
               },
@@ -1255,20 +1248,6 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                 ),
               ),
               leading: Icon(Icons.code),
-            ),
-            SettingsTile(
-              onPressed: (context) async {
-                await launchUrl(Uri.parse(kRustDeskUpstreamUrl));
-              },
-              title: Text('Upstream project'),
-              value: Padding(
-                padding: EdgeInsets.symmetric(vertical: 8),
-                child: Text(
-                  'github.com/rustdesk/rustdesk',
-                  style: TextStyle(decoration: TextDecoration.underline),
-                ),
-              ),
-              leading: Icon(Icons.source),
             ),
             SettingsTile(
               title: Text(translate("Build Date")),
@@ -1413,11 +1392,6 @@ void showAbout(OverlayDialogManager dialogManager) {
                     final appVersion = (snapshot.data ?? version);
                     return Text('Version: $appVersion');
                   }),
-              Padding(
-                padding: EdgeInsets.symmetric(vertical: 12),
-                child: Text(kRustAdminForkSummary),
-              ),
-              Text(rustAdminLegalNotice()),
               InkWell(
                   onTap: () async {
                     await launchUrl(Uri.parse(kRustAdminSourceUrl));
@@ -1425,17 +1399,6 @@ void showAbout(OverlayDialogManager dialogManager) {
                   child: Padding(
                     padding: EdgeInsets.only(top: 12, bottom: 8),
                     child: Text('Source code',
-                        style: TextStyle(
-                          decoration: TextDecoration.underline,
-                        )),
-                  )),
-              InkWell(
-                  onTap: () async {
-                    await launchUrl(Uri.parse(kRustDeskUpstreamUrl));
-                  },
-                  child: Padding(
-                    padding: EdgeInsets.symmetric(vertical: 8),
-                    child: Text('Upstream project',
                         style: TextStyle(
                           decoration: TextDecoration.underline,
                         )),
@@ -1483,6 +1446,92 @@ class __DisplayPageState extends State<_DisplayPage> {
   MobileCursorInertiaSettings _cursorInertiaSettings() {
     return MobileCursorInertiaSettings.fromStored(
       bind.mainGetUserDefaultOption(key: kOptionMobileCursorInertiaDurationMs),
+    );
+  }
+
+  SettingsTile _mobileScreenScrollingTile() {
+    final entries = <_RadioEntry>[
+      _RadioEntry('ScrollAuto', kRemoteScrollStyleAuto),
+      _RadioEntry('ScrollEdge', kRemoteScrollStyleEdge),
+      _RadioEntry(
+        'ScrollEdgeAcceleration',
+        kRemoteScrollStyleEdgeAcceleration,
+      ),
+    ];
+    final scrollStyle = normalizeMobileRemoteScrollStyle(
+      bind.mainGetUserDefaultOption(key: kOptionScrollStyle),
+    ).obs;
+    final inertiaDurationMs = _cursorInertiaSettings().durationMs.obs;
+    final scrollStyleFixed = isOptionFixed(kOptionScrollStyle);
+    final inertiaFixed = isOptionFixed(kOptionMobileCursorInertiaDurationMs);
+
+    void showDialog() {
+      gFFI.dialogManager.show(
+        (setState, close, context) => CustomAlertDialog(
+          title: Text(translate('Default Screen Scrolling')),
+          content: Obx(
+            () => Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final entry in entries)
+                  getRadio(
+                    Text(translate(entry.label)),
+                    entry.value,
+                    scrollStyle.value,
+                    scrollStyleFixed
+                        ? null
+                        : (String? value) async {
+                            if (value == null) return;
+                            await bind.mainSetUserDefaultOption(
+                              key: kOptionScrollStyle,
+                              value: value,
+                            );
+                            scrollStyle.value = value;
+                          },
+                  ),
+                const Divider(),
+                Text(translate('Cursor inertia time')),
+                MobileCursorInertiaControl(
+                  key: const Key('mobile-default-cursor-inertia'),
+                  durationMs: inertiaDurationMs.value,
+                  onChanged: inertiaFixed ? null : (_) {},
+                  onChangeEnd: inertiaFixed
+                      ? null
+                      : (durationMs) async {
+                          inertiaDurationMs.value = durationMs;
+                          await bind.mainSetUserDefaultOption(
+                            key: kOptionMobileCursorInertiaDurationMs,
+                            value: durationMs.toString(),
+                          );
+                        },
+                ),
+              ],
+            ),
+          ),
+        ),
+        backDismiss: true,
+        clickMaskDismiss: true,
+      );
+    }
+
+    return SettingsTile(
+      title: Text(translate('Default Screen Scrolling')),
+      onPressed: scrollStyleFixed && inertiaFixed
+          ? null
+          : (context) => showDialog(),
+      value: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Obx(() {
+          final styleLabel = entries
+              .firstWhere((entry) => entry.value == scrollStyle.value)
+              .label;
+          return Text(
+            '${translate(styleLabel)} · '
+            '${mobileCursorInertiaDurationLabel(inertiaDurationMs.value)}',
+          );
+        }),
+      ),
     );
   }
 
@@ -1534,28 +1583,7 @@ class __DisplayPageState extends State<_DisplayPage> {
                         );
                       },
               ),
-              _getPopupDialogRadioEntry(
-                title: 'Default Screen Scrolling',
-                list: [
-                  _RadioEntry('ScrollAuto', kRemoteScrollStyleAuto),
-                  _RadioEntry('ScrollEdge', kRemoteScrollStyleEdge),
-                  _RadioEntry(
-                    'ScrollEdgeAcceleration',
-                    kRemoteScrollStyleEdgeAcceleration,
-                  ),
-                ],
-                getter: () => normalizeMobileRemoteScrollStyle(
-                  bind.mainGetUserDefaultOption(key: kOptionScrollStyle),
-                ),
-                asyncSetter: isOptionFixed(kOptionScrollStyle)
-                    ? null
-                    : (value) async {
-                        await bind.mainSetUserDefaultOption(
-                          key: kOptionScrollStyle,
-                          value: value,
-                        );
-                      },
-              ),
+              _mobileScreenScrollingTile(),
               _getPopupDialogRadioEntry(
                 title: 'Toolbar Opacity Under Cursor',
                 list: [
@@ -1577,26 +1605,6 @@ class __DisplayPageState extends State<_DisplayPage> {
                     : (value) async {
                         await bind.mainSetUserDefaultOption(
                           key: kOptionMobileRemoteToolbarOverlapOpacityPercent,
-                          value: value,
-                        );
-                      },
-              ),
-              _getPopupDialogRadioEntry(
-                title: 'Cursor Inertia Time',
-                list: [
-                  for (final durationMs
-                      in MobileCursorInertiaSettings.durationPresetsMs)
-                    _RadioEntry(
-                      mobileCursorInertiaDurationLabel(durationMs),
-                      durationMs.toString(),
-                    ),
-                ],
-                getter: () => _cursorInertiaSettings().durationMs.toString(),
-                asyncSetter: isOptionFixed(kOptionMobileCursorInertiaDurationMs)
-                    ? null
-                    : (value) async {
-                        await bind.mainSetUserDefaultOption(
-                          key: kOptionMobileCursorInertiaDurationMs,
                           value: value,
                         );
                       },
