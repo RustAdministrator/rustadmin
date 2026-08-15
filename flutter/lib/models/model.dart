@@ -4610,14 +4610,16 @@ class QualityMonitorModel with ChangeNotifier {
     notifyListeners();
   }
 
-  void updateFloatingPosition(Offset position) {
+  void updateFloatingPosition(Offset position, {bool persist = true}) {
     final sessionId = parent.target?.sessionId;
     if (sessionId == null) return;
     final rounded =
         Offset(position.dx.roundToDouble(), position.dy.roundToDouble());
-    if (_floatingPosition == rounded) return;
-    _floatingPosition = rounded;
-    notifyListeners();
+    if (_floatingPosition != rounded) {
+      _floatingPosition = rounded;
+      notifyListeners();
+    }
+    if (!persist) return;
     _floatingPositionStoreTimer?.cancel();
     _floatingPositionStoreTimer =
         Timer(const Duration(milliseconds: 300), () {
@@ -4626,6 +4628,18 @@ class QualityMonitorModel with ChangeNotifier {
           name: kOptionQualityMonitorFloatingPosition,
           value: _formatFloatingPosition(rounded));
     });
+  }
+
+  Future<void> commitFloatingPosition() async {
+    _floatingPositionStoreTimer?.cancel();
+    _floatingPositionStoreTimer = null;
+    final sessionId = parent.target?.sessionId;
+    final position = _floatingPosition;
+    if (sessionId == null || position == null) return;
+    await bind.sessionPeerOption(
+        sessionId: sessionId,
+        name: kOptionQualityMonitorFloatingPosition,
+        value: _formatFloatingPosition(position));
   }
 
   checkShowQualityMonitor(SessionID sessionId) async {
