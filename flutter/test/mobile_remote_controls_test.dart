@@ -1,5 +1,6 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
@@ -478,17 +479,32 @@ void main() {
 
     await tester.pumpWidget(
       MaterialApp(
-        home: Scaffold(
-          body: Center(
-            child: FractionallySizedBox(
-              widthFactor: 0.9,
-              heightFactor: 0.9,
-              child: MobileRemoteOptionsContent(radioSections: sections),
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              key: const Key('open-options-dialog'),
+              onPressed: () => showDialog<void>(
+                context: context,
+                builder: (dialogContext) => CustomAlertDialog(
+                  scrollable: false,
+                  contentBoxConstraints: BoxConstraints(
+                    maxWidth: 500,
+                    maxHeight:
+                        MediaQuery.sizeOf(dialogContext).height * 0.9,
+                  ),
+                  content: MobileRemoteOptionsContent(
+                    radioSections: sections,
+                  ),
+                ),
+              ),
+              child: const Text('Open options'),
             ),
           ),
         ),
       ),
     );
+    await tester.tap(find.byKey(const Key('open-options-dialog')));
+    await tester.pumpAndSettle();
     expect(tester.takeException(), isNull);
 
     tester.view.physicalSize = const Size(800, 360);
@@ -499,6 +515,7 @@ void main() {
       of: find.byKey(const Key('mobile-remote-options-scroll')),
       matching: find.byType(Scrollable),
     );
+    expect(scrollable, findsOneWidget);
     final state = tester.state<ScrollableState>(scrollable);
     expect(state.position.maxScrollExtent, greaterThan(0));
 
