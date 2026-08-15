@@ -923,9 +923,80 @@ class QualityMonitor extends StatelessWidget {
                           onDetailsChanged: qualityMonitorModel.setDetails,
                         ),
                       ),
+                    Positioned(
+                      top: 0,
+                      right: 0,
+                      child: QualityMonitorDetailsToggle(
+                        details: qualityMonitorModel.details,
+                        onDetailsChanged: qualityMonitorModel.setDetails,
+                      ),
+                    ),
                   ],
                 )
               : const SizedBox.shrink()));
+}
+
+class QualityMonitorDetailsToggle extends StatelessWidget {
+  final String details;
+  final Future<void> Function(String details) onDetailsChanged;
+
+  const QualityMonitorDetailsToggle({
+    Key? key,
+    required this.details,
+    required this.onDetailsChanged,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    final extended = details == kQualityMonitorDetailsExtended;
+    final nextDetails = extended
+        ? kQualityMonitorDetailsBasic
+        : kQualityMonitorDetailsExtended;
+    final currentLabel = extended ? 'ADV' : 'STD';
+    final currentName = extended ? 'Advanced' : 'Standard';
+    final nextName = extended ? 'Standard' : 'Advanced';
+    const radius = BorderRadius.all(Radius.circular(3));
+
+    return Semantics(
+      button: true,
+      label: 'Quality monitor details',
+      value: currentName,
+      child: Tooltip(
+        message: 'Switch to $nextName details',
+        child: Material(
+          color: MyTheme.canvasColor.withAlpha(220),
+          shape: const RoundedRectangleBorder(
+            borderRadius: radius,
+            side: BorderSide(color: Color.fromARGB(150, 210, 210, 210)),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            key: const Key('quality-monitor-details-toggle'),
+            borderRadius: radius,
+            onTap: () => unawaited(onDetailsChanged(nextDetails)),
+            child: SizedBox(
+              width: isMobile ? 38 : 42,
+              height: isMobile ? 18 : 20,
+              child: Center(
+                child: MediaQuery.withClampedTextScaling(
+                  maxScaleFactor: 1,
+                  child: Text(
+                    currentLabel,
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: isMobile ? 8 : 9,
+                      fontWeight: FontWeight.w600,
+                      height: 1,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class QualityMonitorGrip extends StatelessWidget {

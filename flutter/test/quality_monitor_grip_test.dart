@@ -60,6 +60,76 @@ void main() {
     expect(dragUpdate, isNotNull);
   });
 
+  testWidgets('quality monitor details toggle switches STD and ADV',
+      (tester) async {
+    String? selected;
+
+    Future<void> pumpToggle(String details) => tester.pumpWidget(MaterialApp(
+          home: Scaffold(
+            body: Align(
+              alignment: Alignment.topLeft,
+              child: QualityMonitorDetailsToggle(
+                details: details,
+                onDetailsChanged: (value) async => selected = value,
+              ),
+            ),
+          ),
+        ));
+
+    await pumpToggle(kQualityMonitorDetailsBasic);
+    expect(find.text('STD'), findsOneWidget);
+    await tester.tap(
+      find.byKey(const Key('quality-monitor-details-toggle')),
+    );
+    await tester.pump();
+    expect(selected, kQualityMonitorDetailsExtended);
+
+    selected = null;
+    await pumpToggle(kQualityMonitorDetailsExtended);
+    expect(find.text('ADV'), findsOneWidget);
+    await tester.tap(
+      find.byKey(const Key('quality-monitor-details-toggle')),
+    );
+    await tester.pump();
+    expect(selected, kQualityMonitorDetailsBasic);
+  });
+
+  testWidgets('quality monitor details toggle blocks pointer passthrough',
+      (tester) async {
+    var backgroundDownCount = 0;
+    String? selected;
+
+    await tester.pumpWidget(MaterialApp(
+      home: Stack(
+        children: [
+          Positioned.fill(
+            child: Listener(
+              behavior: HitTestBehavior.opaque,
+              onPointerDown: (_) => backgroundDownCount++,
+              child: const SizedBox.expand(),
+            ),
+          ),
+          Positioned(
+            left: 20,
+            top: 20,
+            child: QualityMonitorDetailsToggle(
+              details: kQualityMonitorDetailsBasic,
+              onDetailsChanged: (value) async => selected = value,
+            ),
+          ),
+        ],
+      ),
+    ));
+
+    await tester.tap(
+      find.byKey(const Key('quality-monitor-details-toggle')),
+    );
+    await tester.pump();
+
+    expect(selected, kQualityMonitorDetailsExtended);
+    expect(backgroundDownCount, 0);
+  });
+
   testWidgets('quality monitor grip blocks remote pointer passthrough',
       (tester) async {
     var backgroundDownCount = 0;

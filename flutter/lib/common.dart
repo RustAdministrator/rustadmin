@@ -1247,6 +1247,7 @@ class CustomAlertDialog extends StatelessWidget {
       this.actions,
       this.contentPadding,
       this.contentBoxConstraints = const BoxConstraints(maxWidth: 500),
+      this.scrollable = true,
       this.onSubmit,
       this.onCancel})
       : super(key: key);
@@ -1257,6 +1258,7 @@ class CustomAlertDialog extends StatelessWidget {
   final List<Widget>? actions;
   final double? contentPadding;
   final BoxConstraints contentBoxConstraints;
+  final bool scrollable;
   final Function()? onSubmit;
   final Function()? onCancel;
 
@@ -1289,7 +1291,7 @@ class CustomAlertDialog extends StatelessWidget {
         return KeyEventResult.ignored;
       },
       child: AlertDialog(
-          scrollable: true,
+          scrollable: scrollable,
           title: title,
           content: ConstrainedBox(
             constraints: contentBoxConstraints,

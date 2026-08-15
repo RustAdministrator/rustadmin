@@ -1514,6 +1514,7 @@ class MobileRemoteOptionsContent extends StatefulWidget {
 
 class _MobileRemoteOptionsContentState
     extends State<MobileRemoteOptionsContent> {
+  final _scrollController = ScrollController();
   late Map<String, String> _radioValues;
   late Map<String, bool> _toggleValues;
   String? _selectedSectionId;
@@ -1534,6 +1535,12 @@ class _MobileRemoteOptionsContentState
     }
   }
 
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
   void _resetValues() {
     _radioValues = {
       for (final section in widget.radioSections) section.id: section.value,
@@ -1550,6 +1557,17 @@ class _MobileRemoteOptionsContentState
       if (section.id == id) return section;
     }
     return null;
+  }
+
+  void _showView({String? sectionId, bool showToggles = false}) {
+    setState(() {
+      _selectedSectionId = sectionId;
+      _showToggles = showToggles;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      _scrollController.jumpTo(0);
+    });
   }
 
   Widget _backHeader(BuildContext context, String title, VoidCallback onBack) {
@@ -1612,7 +1630,7 @@ class _MobileRemoteOptionsContentState
         _rootMenuItem(
           key: Key('mobile-remote-options-open-${section.id}'),
           title: section.heading ?? Text(section.id),
-          onTap: () => setState(() => _selectedSectionId = section.id),
+          onTap: () => _showView(sectionId: section.id),
         ),
       );
     }
@@ -1632,7 +1650,7 @@ class _MobileRemoteOptionsContentState
         _rootMenuItem(
           key: const Key('mobile-remote-options-open-session-controls'),
           title: const Text('Session controls'),
-          onTap: () => setState(() => _showToggles = true),
+          onTap: () => _showView(showToggles: true),
         ),
       );
     }
@@ -1659,7 +1677,7 @@ class _MobileRemoteOptionsContentState
           section.heading is Text
               ? ((section.heading as Text).data ?? section.id)
               : section.id,
-          () => setState(() => _selectedSectionId = null),
+          _showView,
         ),
         RadioGroup<String>(
           groupValue: selectedValue,
@@ -1700,7 +1718,7 @@ class _MobileRemoteOptionsContentState
         _backHeader(
           context,
           'Session controls',
-          () => setState(() => _showToggles = false),
+          _showView,
         ),
         for (final toggle in widget.toggles) ...[
           if (toggle.dividerBefore) const Divider(),
@@ -1726,8 +1744,17 @@ class _MobileRemoteOptionsContentState
   @override
   Widget build(BuildContext context) {
     final section = _selectedSection;
-    if (section != null) return _buildRadioSection(context, section);
-    if (_showToggles) return _buildToggles(context);
-    return _buildRoot(context);
+    final content = section != null
+        ? _buildRadioSection(context, section)
+        : _showToggles
+        ? _buildToggles(context)
+        : _buildRoot(context);
+    return SingleChildScrollView(
+      key: const Key('mobile-remote-options-scroll'),
+      controller: _scrollController,
+      primary: false,
+      physics: const ClampingScrollPhysics(),
+      child: content,
+    );
   }
 }
