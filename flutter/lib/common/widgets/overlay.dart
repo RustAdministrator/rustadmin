@@ -1076,6 +1076,7 @@ class QualityMonitorDetailsToggle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final extended = details == kQualityMonitorDetailsExtended;
+    final foreground = mobileRemoteToolbarForegroundColor(context);
     final nextDetails = extended
         ? kQualityMonitorDetailsBasic
         : kQualityMonitorDetailsExtended;
@@ -1092,14 +1093,16 @@ class QualityMonitorDetailsToggle extends StatelessWidget {
           type: MaterialType.transparency,
           child: InkWell(
             key: const Key('quality-monitor-details-toggle'),
+            borderRadius: BorderRadius.circular(3),
             onTap: () => unawaited(onDetailsChanged(nextDetails)),
             child: Container(
               width: isMobile ? 38 : 42,
               height: isMobile ? 20 : 24,
-              decoration: const BoxDecoration(
-                border: Border(
-                  left: BorderSide(color: Color.fromARGB(150, 210, 210, 210)),
-                ),
+              margin: const EdgeInsets.all(2),
+              decoration: BoxDecoration(
+                color: foreground.withAlpha(extended ? 36 : 22),
+                border: Border.all(color: foreground.withAlpha(120)),
+                borderRadius: BorderRadius.circular(3),
               ),
               alignment: Alignment.center,
               child: MediaQuery.withClampedTextScaling(
@@ -1107,7 +1110,7 @@ class QualityMonitorDetailsToggle extends StatelessWidget {
                 child: Text(
                   currentLabel,
                   style: TextStyle(
-                    color: Colors.white,
+                    color: foreground,
                     fontSize: isMobile ? 8 : 9,
                     fontWeight: FontWeight.w600,
                     height: 1,

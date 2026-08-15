@@ -97,6 +97,42 @@ void main() {
     expect(selected, kQualityMonitorDetailsBasic);
   });
 
+  testWidgets('quality monitor details toggle remains visible in light theme',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      theme: ThemeData.light(),
+      home: Scaffold(
+        body: Align(
+          alignment: Alignment.topLeft,
+          child: QualityMonitorDetailsToggle(
+            details: kQualityMonitorDetailsExtended,
+            onDetailsChanged: (_) async {},
+          ),
+        ),
+      ),
+    ));
+
+    final toggle = find.byKey(const Key('quality-monitor-details-toggle'));
+    final label = tester.widget<Text>(find.descendant(
+      of: toggle,
+      matching: find.text('ADV'),
+    ));
+    final container = tester.widget<Container>(find.descendant(
+      of: toggle,
+      matching: find.byType(Container),
+    ));
+    final decoration = container.decoration as BoxDecoration;
+
+    expect(label.style?.color, isNot(Colors.white));
+    expect(decoration.color?.a, greaterThan(0));
+    expect(decoration.border, isA<Border>());
+    final border = decoration.border! as Border;
+    expect(border.top.style, BorderStyle.solid);
+    expect(border.right.style, BorderStyle.solid);
+    expect(border.bottom.style, BorderStyle.solid);
+    expect(border.left.style, BorderStyle.solid);
+  });
+
   testWidgets('quality monitor details toggle blocks pointer passthrough',
       (tester) async {
     var backgroundDownCount = 0;
