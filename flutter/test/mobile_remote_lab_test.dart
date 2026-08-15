@@ -119,8 +119,8 @@ void main() {
   }
 
   test('reports the composed RustAdmin release version', () {
-    expect(mobileRemoteLabVersion, '2.0.5.010');
-    expect(mobileRemoteLabRevisionLabel, '2.0.5.010 · Lab r18');
+    expect(mobileRemoteLabVersion, '2.0.5.011');
+    expect(mobileRemoteLabRevisionLabel, '2.0.5.011 · Lab r19');
   });
 
   test('calculates native-texture fit, zoom, and no-overscan bounds', () {
@@ -850,6 +850,17 @@ void main() {
     await tester.tap(find.byTooltip('More actions'));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('mobile-lab-actions-root')), findsOneWidget);
+    await tester.tap(
+      find.byKey(const Key('mobile-lab-actions-open-keyboard')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Legacy mode'), findsOneWidget);
+    expect(find.text('Map mode'), findsOneWidget);
+    expect(find.text('Translate mode beta'), findsOneWidget);
+    expect(find.text('Reverse mouse wheel'), findsOneWidget);
+    expect(find.text('Trackpad speed'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('mobile-lab-actions-back')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('mobile-lab-actions-open-session')));
     await tester.pumpAndSettle();
     expect(find.text('OS Password'), findsOneWidget);
@@ -1076,6 +1087,14 @@ void main() {
     await tester.tap(find.byTooltip('More actions'));
     await tester.pumpAndSettle();
     expect(find.text('Android device actions'), findsOneWidget);
+    await tester.tap(
+      find.byKey(const Key('mobile-lab-actions-open-keyboard')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Legacy mode'), findsOneWidget);
+    expect(find.text('Map mode'), findsNothing);
+    await tester.tap(find.byKey(const Key('mobile-lab-actions-back')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('mobile-lab-actions-open-android')));
     await tester.pumpAndSettle();
     expect(find.text('Volume up'), findsOneWidget);

@@ -373,6 +373,49 @@ void main() {
     expect(await buttonColor(ThemeData.light()), const Color(0xFFE0E0E0));
   });
 
+  testWidgets('custom arrow buttons send the matching named control keys', (
+    tester,
+  ) async {
+    final sentKeys = <String>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MobileRemoteKeyHelpTools(
+            ctrlActive: false,
+            altActive: false,
+            shiftActive: false,
+            commandActive: false,
+            functionKeysActive: false,
+            moreKeysActive: true,
+            isMac: false,
+            showWindowsLinuxKeys: true,
+            quickKeyOrder: mobileRemoteDefaultQuickKeyOrder,
+            onCtrl: () {},
+            onAlt: () {},
+            onShift: () {},
+            onCommand: () {},
+            onFunctionKeys: () {},
+            onMoreKeys: () {},
+            onKeyPressed: sentKeys.add,
+            onShortcutPressed: (_) {},
+          ),
+        ),
+      ),
+    );
+
+    for (final entry in const <(IconData, String)>[
+      (Icons.keyboard_arrow_left, 'VK_LEFT'),
+      (Icons.keyboard_arrow_up, 'VK_UP'),
+      (Icons.keyboard_arrow_down, 'VK_DOWN'),
+      (Icons.keyboard_arrow_right, 'VK_RIGHT'),
+    ]) {
+      await tester.ensureVisible(find.byIcon(entry.$1));
+      await tester.tap(find.byIcon(entry.$1));
+      await tester.pump();
+      expect(sentKeys.last, entry.$2);
+    }
+  });
+
   testWidgets('options use in-dialog submenus with an internal back button', (
     tester,
   ) async {
@@ -443,6 +486,67 @@ void main() {
     await tester.tap(find.byTooltip('Back to actions'));
     await tester.pump();
     expect(find.byKey(const Key('mobile-remote-actions-root')), findsOneWidget);
+  });
+
+  testWidgets('keyboard submenu updates modes and keyboard toggles', (
+    tester,
+  ) async {
+    String? selectedMode;
+    bool? reverseWheel;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MobileRemoteActionsContent(
+            sections: [
+              MobileRemoteActionSection(
+                id: 'keyboard',
+                title: const Text('Keyboard settings'),
+                content: MobileRemoteKeyboardSettingsContent(
+                  mode: 'map',
+                  modes: [
+                    MobileRemoteRadioItem(
+                      value: 'legacy',
+                      child: const Text('Legacy mode'),
+                      onChanged: (value) => selectedMode = value,
+                    ),
+                    MobileRemoteRadioItem(
+                      value: 'map',
+                      child: const Text('Map mode'),
+                      onChanged: (value) => selectedMode = value,
+                    ),
+                  ],
+                  toggles: [
+                    MobileRemoteToggleItem(
+                      id: 'reverse-wheel',
+                      value: false,
+                      child: const Text('Reverse mouse wheel'),
+                      onChanged: (value) => reverseWheel = value,
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(
+      find.byKey(const Key('mobile-remote-actions-open-keyboard')),
+    );
+    await tester.pump();
+    expect(
+      find.byKey(const Key('mobile-remote-keyboard-settings')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Legacy mode'));
+    await tester.pump();
+    expect(selectedMode, 'legacy');
+
+    await tester.tap(find.text('Reverse mouse wheel'));
+    await tester.pump();
+    expect(reverseWheel, isTrue);
   });
 
   testWidgets('shared edge-size control reports session slider changes', (

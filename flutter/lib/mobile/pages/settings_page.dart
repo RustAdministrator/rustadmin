@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_setting_page.dart';
 import 'package:get/get.dart';
@@ -104,6 +105,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   var _isUsingPublicServer = false;
   var _allowAskForNoteAtEndOfConnection = false;
   var _preventSleepWhileConnected = true;
+  var _allowClipboardDebug = false;
   var _diagnosticLogging = true;
 
   _SettingsState() {
@@ -162,6 +164,8 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
         mainGetLocalBoolOptionSync(kOptionAllowAskForNoteAtEndOfConnection);
     _preventSleepWhileConnected =
         mainGetLocalBoolOptionSync(kOptionKeepAwakeDuringOutgoingSessions);
+    _allowClipboardDebug =
+        mainGetLocalBoolOptionSync(kOptionAllowClipboardDebug);
     _showTerminalExtraKeys =
         mainGetLocalBoolOptionSync(kOptionEnableShowTerminalExtraKeys);
     _diagnosticLogging = option2bool(
@@ -938,7 +942,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                         });
                       },
               ),
-            if (isAndroid && !disabledSettings && !_hideNetwork)
+            if (!disabledSettings && !_hideNetwork)
               _getPopupDialogRadioEntry(
                 title: 'Transport',
                 list: RemoteTransportPreference.values
@@ -996,6 +1000,23 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                   });
                 },
               ),
+            SettingsTile.switchTile(
+              title: Text(translate('Clipboard debug diagnostics')),
+              initialValue: _allowClipboardDebug,
+              onToggle: isOptionFixed(kOptionAllowClipboardDebug)
+                  ? null
+                  : (value) async {
+                      await mainSetLocalBoolOption(
+                        kOptionAllowClipboardDebug,
+                        value,
+                      );
+                      setState(() {
+                        _allowClipboardDebug = mainGetLocalBoolOptionSync(
+                          kOptionAllowClipboardDebug,
+                        );
+                      });
+                    },
+            ),
             SettingsTile(
               title: Text(translate('Language')),
               leading: Icon(Icons.translate),
@@ -1462,8 +1483,21 @@ class __DisplayPageState extends State<_DisplayPage> {
       bind.mainGetUserDefaultOption(key: kOptionScrollStyle),
     ).obs;
     final inertiaDurationMs = _cursorInertiaSettings().durationMs.obs;
+    final edgeThickness =
+        (double.tryParse(
+                  bind.mainGetUserDefaultOption(
+                    key: kOptionEdgeScrollEdgeThickness,
+                  ),
+                ) ??
+                100.0)
+            .clamp(EdgeThicknessControl.kMin, EdgeThicknessControl.kMax)
+            .toDouble()
+            .obs;
     final scrollStyleFixed = isOptionFixed(kOptionScrollStyle);
     final inertiaFixed = isOptionFixed(kOptionMobileCursorInertiaDurationMs);
+    final edgeThicknessFixed = isOptionFixed(
+      kOptionEdgeScrollEdgeThickness,
+    );
 
     void showDialog() {
       gFFI.dialogManager.show(
@@ -1488,6 +1522,23 @@ class __DisplayPageState extends State<_DisplayPage> {
                               value: value,
                             );
                             scrollStyle.value = value;
+                          },
+                  ),
+                if (scrollStyle.value == kRemoteScrollStyleEdge ||
+                    scrollStyle.value == kRemoteScrollStyleEdgeAcceleration)
+                  EdgeThicknessControl(
+                    key: const Key('mobile-default-edge-thickness'),
+                    value: edgeThickness.value,
+                    onChanged: edgeThicknessFixed
+                        ? null
+                        : (value) {
+                            edgeThickness.value = value;
+                            unawaited(
+                              bind.mainSetUserDefaultOption(
+                                key: kOptionEdgeScrollEdgeThickness,
+                                value: value.round().toString(),
+                              ),
+                            );
                           },
                   ),
                 const Divider(),
@@ -1517,7 +1568,7 @@ class __DisplayPageState extends State<_DisplayPage> {
 
     return SettingsTile(
       title: Text(translate('Default Screen Scrolling')),
-      onPressed: scrollStyleFixed && inertiaFixed
+      onPressed: scrollStyleFixed && inertiaFixed && edgeThicknessFixed
           ? null
           : (context) => showDialog(),
       value: Padding(
@@ -1532,6 +1583,51 @@ class __DisplayPageState extends State<_DisplayPage> {
           );
         }),
       ),
+    );
+  }
+
+  SettingsTile _defaultTrackpadSpeedTile() {
+    final initialSpeed =
+        (int.tryParse(
+                  bind.mainGetUserDefaultOption(key: kKeyTrackpadSpeed),
+                ) ??
+                kDefaultTrackpadSpeed)
+            .clamp(kMinTrackpadSpeed, kMaxTrackpadSpeed)
+            .toInt();
+    final speed = SimpleWrapper(initialSpeed);
+
+    Future<void> showDialog() async {
+      await gFFI.dialogManager.show(
+        (setState, close, context) => CustomAlertDialog(
+          title: Text(translate('Default trackpad speed')),
+          content: TrackpadSpeedWidget(
+            value: speed,
+            onDebouncer: (value) {
+              bind.mainSetUserDefaultOption(
+                key: kKeyTrackpadSpeed,
+                value: value.toString(),
+              );
+            },
+          ),
+          actions: [
+            dialogButton('Close', onPressed: () => close()),
+          ],
+        ),
+        backDismiss: true,
+        clickMaskDismiss: true,
+      );
+      if (mounted) setState(() {});
+    }
+
+    return SettingsTile(
+      title: Text(translate('Default trackpad speed')),
+      value: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Text('$initialSpeed%'),
+      ),
+      onPressed: isOptionFixed(kKeyTrackpadSpeed)
+          ? null
+          : (context) => showDialog(),
     );
   }
 
@@ -1584,6 +1680,7 @@ class __DisplayPageState extends State<_DisplayPage> {
                       },
               ),
               _mobileScreenScrollingTile(),
+              _defaultTrackpadSpeedTile(),
               _getPopupDialogRadioEntry(
                 title: 'Toolbar Opacity Under Cursor',
                 list: [

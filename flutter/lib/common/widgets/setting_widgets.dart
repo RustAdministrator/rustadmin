@@ -467,8 +467,7 @@ List<Widget> ServerConfigImportExportWidgets(
 List<(String, String)> otherDefaultSettings() {
   List<(String, String)> v = [
     ('View Mode', kOptionViewOnly),
-    if ((isDesktop || isWebDesktop))
-      ('show_monitors_tip', kKeyShowMonitorsToolbar),
+    ('show_monitors_tip', kKeyShowMonitorsToolbar),
     if ((isDesktop || isWebDesktop))
       ('Collapse toolbar', kOptionCollapseToolbar),
     ('Show remote cursor', kOptionShowRemoteCursor),

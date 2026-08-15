@@ -828,10 +828,6 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
         child: Text(translate('True color (4:4:4)'))));
   }
 
-  if (isDefaultConn && isMobile) {
-    v.addAll(toolbarKeyboardToggles(ffi));
-  }
-
   // view mode (mobile only, desktop is in keyboard menu)
   if (isDefaultConn && isMobile && versionCmp(pi.version, '1.2.0') >= 0) {
     v.add(TToggleMenu(

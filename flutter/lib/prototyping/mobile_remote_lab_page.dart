@@ -767,7 +767,7 @@ class _MobileRemoteLabPageState extends State<MobileRemoteLabPage> {
 
 enum _RemotePanel { displays, chat, actions }
 
-enum _LabActionSubmenu { android, session }
+enum _LabActionSubmenu { keyboard, android, session }
 
 class MobileRemotePreview extends StatefulWidget {
   const MobileRemotePreview({
@@ -822,6 +822,9 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
   bool _keyboardCommand = false;
   bool _keyboardFunctionKeys = false;
   bool _keyboardMoreKeys = true;
+  String _keyboardMode = kKeyMapMode;
+  bool _reverseMouseWheel = false;
+  bool _swapMouseButtons = false;
   var _quickKeyOrder = List<MobileRemoteQuickKey>.of(
     mobileRemoteDefaultQuickKeyOrder,
   );
@@ -1894,18 +1897,6 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
           onChanged: (_) {},
         ),
         MobileRemoteToggleItem(
-          id: 'reverse-wheel',
-          value: false,
-          child: const Text('Reverse mouse wheel'),
-          onChanged: enabled ? (_) {} : null,
-        ),
-        MobileRemoteToggleItem(
-          id: 'swap-buttons',
-          value: false,
-          child: const Text('Swap left and right mouse buttons'),
-          onChanged: enabled ? (_) {} : null,
-        ),
-        MobileRemoteToggleItem(
           id: 'view-mode',
           value: widget.scenario.viewOnly,
           child: const Text('View Mode'),
@@ -2144,6 +2135,98 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
   Widget _buildActionsPanel(BuildContext context) {
     final submenu = _actionSubmenu;
     if (submenu != null) {
+      if (submenu == _LabActionSubmenu.keyboard) {
+        final enabled = !widget.scenario.viewOnly;
+        final currentMode = widget.scenario.peerIsAndroid
+            ? kKeyLegacyMode
+            : _keyboardMode;
+        return Column(
+          key: const Key('mobile-lab-actions-keyboard'),
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _menuBackHeader(
+              context,
+              'Keyboard settings',
+              () => setState(() => _actionSubmenu = null),
+            ),
+            MobileRemoteKeyboardSettingsContent(
+              mode: currentMode,
+              modes: [
+                MobileRemoteRadioItem(
+                  value: kKeyLegacyMode,
+                  child: const Text('Legacy mode'),
+                  onChanged: enabled && !widget.scenario.peerIsAndroid
+                      ? (value) {
+                          if (value != null) {
+                            setState(() => _keyboardMode = value);
+                          }
+                        }
+                      : null,
+                ),
+                if (!widget.scenario.peerIsAndroid)
+                  MobileRemoteRadioItem(
+                    value: kKeyMapMode,
+                    child: const Text('Map mode'),
+                    onChanged: enabled
+                        ? (value) {
+                            if (value != null) {
+                              setState(() => _keyboardMode = value);
+                            }
+                          }
+                        : null,
+                  ),
+                if (!widget.scenario.peerIsAndroid)
+                  MobileRemoteRadioItem(
+                    value: kKeyTranslateMode,
+                    child: const Text('Translate mode beta'),
+                    onChanged: enabled
+                        ? (value) {
+                            if (value != null) {
+                              setState(() => _keyboardMode = value);
+                            }
+                          }
+                        : null,
+                  ),
+              ],
+              toggles: [
+                MobileRemoteToggleItem(
+                  id: 'reverse-wheel',
+                  value: _reverseMouseWheel,
+                  child: const Text('Reverse mouse wheel'),
+                  onChanged: enabled
+                      ? (value) {
+                          if (value != null) {
+                            setState(() => _reverseMouseWheel = value);
+                          }
+                        }
+                      : null,
+                ),
+                MobileRemoteToggleItem(
+                  id: 'swap-buttons',
+                  value: _swapMouseButtons,
+                  child: const Text('Swap left and right mouse buttons'),
+                  onChanged: enabled
+                      ? (value) {
+                          if (value != null) {
+                            setState(() => _swapMouseButtons = value);
+                          }
+                        }
+                      : null,
+                ),
+              ],
+              actions: [
+                MobileRemoteActionItem(
+                  child: const Text('Trackpad speed'),
+                  onPressed: enabled
+                      ? () => _showPreviewAction('Trackpad speed')
+                      : null,
+                ),
+              ],
+            ),
+          ],
+        );
+      }
       final title = submenu == _LabActionSubmenu.android
           ? 'Android device actions'
           : 'Session actions';
@@ -2185,6 +2268,15 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       children: [
         Text('More actions', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 8),
+        ListTile(
+          key: const Key('mobile-lab-actions-open-keyboard'),
+          contentPadding: EdgeInsets.zero,
+          visualDensity: VisualDensity.compact,
+          title: const Text('Keyboard settings'),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () =>
+              setState(() => _actionSubmenu = _LabActionSubmenu.keyboard),
+        ),
         if (widget.scenario.peerIsAndroid)
           ListTile(
             key: const Key('mobile-lab-actions-open-android'),

@@ -1239,12 +1239,14 @@ class MobileRemoteActionSection {
   const MobileRemoteActionSection({
     required this.id,
     required this.title,
-    required this.actions,
-  });
+    this.actions = const [],
+    this.content,
+  }) : assert(actions.length > 0 || content != null);
 
   final String id;
   final Widget title;
   final List<MobileRemoteActionItem> actions;
+  final Widget? content;
 }
 
 class MobileRemoteNavigationItem {
@@ -1316,13 +1318,16 @@ class _MobileRemoteActionsContentState
             ],
           ),
           const SizedBox(height: 8),
-          for (final action in section.actions)
-            ListTile(
-              contentPadding: EdgeInsets.zero,
-              visualDensity: VisualDensity.compact,
-              title: action.child,
-              onTap: action.onPressed,
-            ),
+          if (section.content != null)
+            section.content!
+          else
+            for (final action in section.actions)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                visualDensity: VisualDensity.compact,
+                title: action.child,
+                onTap: action.onPressed,
+              ),
         ],
       );
     }
@@ -1340,7 +1345,7 @@ class _MobileRemoteActionsContentState
         ),
         const SizedBox(height: 8),
         for (final section in widget.sections)
-          if (section.actions.isNotEmpty)
+          if (section.actions.isNotEmpty || section.content != null)
             ListTile(
               key: Key('mobile-remote-actions-open-${section.id}'),
               contentPadding: EdgeInsets.zero,
@@ -1357,6 +1362,127 @@ class _MobileRemoteActionsContentState
             title: item.child,
             trailing: const Icon(Icons.chevron_right),
             onTap: item.onPressed,
+          ),
+      ],
+    );
+  }
+}
+
+class MobileRemoteKeyboardSettingsContent extends StatefulWidget {
+  const MobileRemoteKeyboardSettingsContent({
+    super.key,
+    required this.mode,
+    required this.modes,
+    this.toggles = const [],
+    this.actions = const [],
+    this.modeHeading = 'Keyboard mode',
+  });
+
+  final String mode;
+  final List<MobileRemoteRadioItem> modes;
+  final List<MobileRemoteToggleItem> toggles;
+  final List<MobileRemoteActionItem> actions;
+  final String modeHeading;
+
+  @override
+  State<MobileRemoteKeyboardSettingsContent> createState() =>
+      _MobileRemoteKeyboardSettingsContentState();
+}
+
+class _MobileRemoteKeyboardSettingsContentState
+    extends State<MobileRemoteKeyboardSettingsContent> {
+  late String _mode;
+  late Map<String, bool> _toggleValues;
+
+  @override
+  void initState() {
+    super.initState();
+    _resetValues();
+  }
+
+  @override
+  void didUpdateWidget(
+    covariant MobileRemoteKeyboardSettingsContent oldWidget,
+  ) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.mode != widget.mode || oldWidget.toggles != widget.toggles) {
+      _resetValues();
+    }
+  }
+
+  void _resetValues() {
+    _mode = widget.mode;
+    _toggleValues = {
+      for (final toggle in widget.toggles) toggle.id: toggle.value,
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      key: const Key('mobile-remote-keyboard-settings'),
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (widget.modes.isNotEmpty) ...[
+          Text(
+            widget.modeHeading,
+            style: Theme.of(context).textTheme.labelLarge,
+          ),
+          RadioGroup<String>(
+            groupValue: _mode,
+            onChanged: (value) {
+              if (value == null) return;
+              final item = widget.modes.firstWhere(
+                (candidate) => candidate.value == value,
+              );
+              item.onChanged?.call(value);
+              if (item.commitSelection && item.onChanged != null) {
+                setState(() => _mode = value);
+              }
+            },
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final item in widget.modes)
+                  RadioListTile<String>(
+                    contentPadding: EdgeInsets.zero,
+                    visualDensity: VisualDensity.compact,
+                    value: item.value,
+                    enabled: item.onChanged != null,
+                    title: item.child,
+                  ),
+              ],
+            ),
+          ),
+        ],
+        if (widget.modes.isNotEmpty &&
+            (widget.toggles.isNotEmpty || widget.actions.isNotEmpty))
+          const Divider(),
+        for (final toggle in widget.toggles) ...[
+          if (toggle.dividerBefore) const Divider(),
+          CheckboxListTile(
+            contentPadding: EdgeInsets.zero,
+            visualDensity: VisualDensity.compact,
+            value: _toggleValues[toggle.id] ?? toggle.value,
+            onChanged: toggle.onChanged == null
+                ? null
+                : (value) {
+                    toggle.onChanged?.call(value);
+                    if (value != null) {
+                      setState(() => _toggleValues[toggle.id] = value);
+                    }
+                  },
+            title: toggle.child,
+          ),
+        ],
+        for (final action in widget.actions)
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            visualDensity: VisualDensity.compact,
+            title: action.child,
+            trailing: const Icon(Icons.chevron_right),
+            onTap: action.onPressed,
           ),
       ],
     );

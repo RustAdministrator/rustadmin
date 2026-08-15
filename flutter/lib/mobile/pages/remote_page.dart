@@ -865,6 +865,42 @@ class _RemotePageState extends State<RemotePage>
   void showActions(String id) async {
     final mobileActionMenus = _getMobileActionMenus();
     final menus = toolbarControls(context, id, gFFI);
+    final keyboardToggles = toolbarKeyboardToggles(gFFI);
+    final currentKeyboardMode =
+        await bind.sessionGetKeyboardMode(sessionId: gFFI.sessionId) ??
+        kKeyLegacyMode;
+    const keyboardModeLabels = <String, String>{
+      kKeyLegacyMode: 'Legacy mode',
+      kKeyMapMode: 'Map mode',
+      kKeyTranslateMode: 'Translate mode',
+    };
+    final keyboardModes = <MobileRemoteRadioItem>[
+      for (final entry in keyboardModeLabels.entries)
+        if ((gFFI.ffiModel.isPeerAndroid
+                ? entry.key == kKeyLegacyMode
+                : bind.sessionIsKeyboardModeSupported(
+                    sessionId: gFFI.sessionId,
+                    mode: entry.key,
+                  )))
+          MobileRemoteRadioItem(
+            value: entry.key,
+            child: Text(
+              translate(entry.value) +
+                  (entry.key == kKeyTranslateMode ? ' beta' : ''),
+            ),
+            onChanged: gFFI.ffiModel.viewOnly
+                ? null
+                : (value) async {
+                    if (value == null) return;
+                    await bind.sessionSetKeyboardMode(
+                      sessionId: gFFI.sessionId,
+                      value: value,
+                    );
+                    await gFFI.inputModel.updateKeyboardMode();
+                  },
+          ),
+    ];
+    if (!mounted) return;
     gFFI.dialogManager
         .show(
           (setDialogState, close, dialogContext) {
@@ -886,6 +922,40 @@ class _RemotePageState extends State<RemotePage>
               ),
               content: MobileRemoteActionsContent(
                 sections: [
+                  if (gFFI.ffiModel.keyboard)
+                    MobileRemoteActionSection(
+                      id: 'keyboard',
+                      title: Text(translate('Keyboard Settings')),
+                      content: MobileRemoteKeyboardSettingsContent(
+                        mode: currentKeyboardMode,
+                        modes: keyboardModes,
+                        modeHeading: translate('Keyboard mode'),
+                        toggles: [
+                          for (var i = 0; i < keyboardToggles.length; i++)
+                            MobileRemoteToggleItem(
+                              id: 'keyboard-$i',
+                              value: keyboardToggles[i].value,
+                              child: keyboardToggles[i].child,
+                              onChanged: keyboardToggles[i].onChanged,
+                            ),
+                        ],
+                        actions: [
+                          if (!gFFI.ffiModel.viewOnly)
+                            MobileRemoteActionItem(
+                              child: Text(translate('Trackpad speed')),
+                              onPressed: () {
+                                close();
+                                Future<void>.delayed(Duration.zero, () {
+                                  trackpadSpeedDialog(
+                                    gFFI.sessionId,
+                                    gFFI,
+                                  );
+                                });
+                              },
+                            ),
+                        ],
+                      ),
+                    ),
                   if (mobileActionMenus.isNotEmpty)
                     MobileRemoteActionSection(
                       id: 'android',
@@ -894,11 +964,12 @@ class _RemotePageState extends State<RemotePage>
                         for (final menu in mobileActionMenus) actionItem(menu),
                       ],
                     ),
-                  MobileRemoteActionSection(
-                    id: 'session',
-                    title: Text(translate('Session actions')),
-                    actions: [for (final menu in menus) actionItem(menu)],
-                  ),
+                  if (menus.isNotEmpty)
+                    MobileRemoteActionSection(
+                      id: 'session',
+                      title: Text(translate('Session actions')),
+                      actions: [for (final menu in menus) actionItem(menu)],
+                    ),
                 ],
                 navigationItems: [
                   if (!gFFI.ffiModel.viewOnly)
@@ -1086,24 +1157,6 @@ class _RemotePageState extends State<RemotePage>
             )));
   }
 
-  // * Currently mobile does not enable map mode
-  // void changePhysicalKeyboardInputMode() async {
-  //   var current = await bind.sessionGetKeyboardMode(id: widget.id) ?? "legacy";
-  //   gFFI.dialogManager.show((setState, close) {
-  //     void setMode(String? v) async {
-  //       await bind.sessionSetKeyboardMode(id: widget.id, value: v ?? "");
-  //       setState(() => current = v ?? '');
-  //       Future.delayed(Duration(milliseconds: 300), close);
-  //     }
-  //
-  //     return CustomAlertDialog(
-  //         title: Text(translate('Physical Keyboard Input Mode')),
-  //         content: Column(mainAxisSize: MainAxisSize.min, children: [
-  //           getRadio('Legacy mode', 'legacy', current, setMode),
-  //           getRadio('Map mode', 'map', current, setMode),
-  //         ]));
-  //   }, clickMaskDismiss: true);
-  // }
 }
 
 class KeyHelpTools extends StatefulWidget {
