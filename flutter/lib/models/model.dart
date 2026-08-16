@@ -41,6 +41,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:vector_math/vector_math.dart' show Vector2;
 
 import '../common.dart';
+import '../common/peer_trust_error.dart';
 import '../mobile/mobile_viewport.dart';
 import '../utils/image.dart' as img;
 import '../common/widgets/dialog.dart';
@@ -1047,7 +1048,7 @@ class FfiModel with ChangeNotifier {
     } else if (type == 'error' &&
         title == 'Connection Error' &&
         text is String &&
-        text.startsWith('Handshake failed: peer identity changed')) {
+        isResettablePeerTrustError(text)) {
       showPeerIdentityChangedDialog(sessionId, dialogManager, text);
     } else if (type == 're-input-password') {
       wrongPasswordDialog(sessionId, dialogManager, type, title, text);
