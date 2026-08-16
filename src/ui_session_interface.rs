@@ -1491,7 +1491,13 @@ impl<T: InvokeUiSession> Session<T> {
 
     pub fn reset_peer_trust(&self) -> bool {
         let peer_id = self.lc.read().unwrap().get_id().to_owned();
-        crate::common::clear_pinned_peer_signing_key(&peer_id)
+        match crate::common::reset_peer_pairing_trust(&peer_id) {
+            Ok(()) => true,
+            Err(error) => {
+                log::error!("Failed to reset paired trust for {peer_id}: {error}");
+                false
+            }
+        }
     }
 
     fn try_auto_start_job_str(is_reconnected: bool, job_str: &str) -> Option<String> {

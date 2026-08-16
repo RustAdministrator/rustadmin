@@ -2624,7 +2624,22 @@ pub fn main_device_name(name: String) {
     *crate::common::DEVICE_NAME.lock().unwrap() = name;
 }
 
+pub fn main_reset_peer_trust(id: String) -> SyncReturn<bool> {
+    let reset = match crate::common::reset_peer_pairing_trust(&id) {
+        Ok(()) => true,
+        Err(error) => {
+            log::error!("Failed to reset paired trust for {id}: {error}");
+            false
+        }
+    };
+    SyncReturn(reset)
+}
+
 pub fn main_remove_peer(id: String) {
+    if let Err(error) = crate::common::reset_peer_pairing_trust(&id) {
+        log::error!("Refusing to remove host {id} without clearing its paired trust: {error}");
+        return;
+    }
     PeerConfig::remove(&id);
 }
 

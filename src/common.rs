@@ -2620,19 +2620,38 @@ pub fn trust_peer_signing_key_after_pairing(
     Ok(())
 }
 
-pub fn clear_pinned_peer_signing_key(peer_config_id: &str) -> bool {
-    let mut config = PeerConfig::load(peer_config_id);
-    if config
-        .options
-        .remove(PEER_OPTION_PINNED_SIGNING_KEY)
-        .is_some()
-    {
-        config.store(peer_config_id);
-        log::info!("Cleared pinned peer signing key for {}", peer_config_id);
-        true
-    } else {
-        false
+fn clear_peer_pairing_options(config: &mut PeerConfig) -> bool {
+    let mut changed = false;
+    for option in [
+        PEER_OPTION_PINNED_SIGNING_KEY,
+        PEER_OPTION_DIRECT_PAIRED_VIEWER_CONFIRMED,
+        PEER_OPTION_RENDEZVOUS_PAIRED_VIEWER_CONFIRMED,
+    ] {
+        changed |= config.options.remove(option).is_some();
     }
+    changed
+}
+
+fn clear_peer_pairing_state(peer_config_id: &str) -> bool {
+    let mut config = PeerConfig::load(peer_config_id);
+    let changed = clear_peer_pairing_options(&mut config);
+    if changed {
+        config.store(peer_config_id);
+        log::info!("Cleared paired trust state for {peer_config_id}");
+    }
+    changed
+}
+
+pub fn reset_peer_pairing_trust(peer_config_id: &str) -> ResultType<()> {
+    let mut peer_config_ids = vec![peer_config_id.to_owned()];
+    #[cfg(feature = "quic-transport")]
+    peer_config_ids.extend(crate::quic_transport::forget_paired_peer(peer_config_id)?);
+    peer_config_ids.sort();
+    peer_config_ids.dedup();
+    for id in peer_config_ids {
+        clear_peer_pairing_state(&id);
+    }
+    Ok(())
 }
 
 fn paired_viewer_confirmed_option(scope: &str) -> Option<&'static str> {
@@ -5255,6 +5274,40 @@ mod tests {
         assert!(!has_confirmed_rendezvous_paired_viewer(&peer_config_id));
 
         PeerConfig::remove(&peer_config_id);
+    }
+
+    #[test]
+    fn test_clear_peer_pairing_options_preserves_host_options() {
+        let mut config = PeerConfig::default();
+        config.options.insert(
+            PEER_OPTION_PINNED_SIGNING_KEY.to_owned(),
+            encode_pinned_peer_signing_key(&[7u8; 32]),
+        );
+        config.options.insert(
+            PEER_OPTION_DIRECT_PAIRED_VIEWER_CONFIRMED.to_owned(),
+            hbb_common::get_time().to_string(),
+        );
+        config.options.insert(
+            PEER_OPTION_RENDEZVOUS_PAIRED_VIEWER_CONFIRMED.to_owned(),
+            hbb_common::get_time().to_string(),
+        );
+        config
+            .options
+            .insert("alias".to_owned(), "Preserved host".to_owned());
+
+        assert!(clear_peer_pairing_options(&mut config));
+        assert!(!config.options.contains_key(PEER_OPTION_PINNED_SIGNING_KEY));
+        assert!(!config
+            .options
+            .contains_key(PEER_OPTION_DIRECT_PAIRED_VIEWER_CONFIRMED));
+        assert!(!config
+            .options
+            .contains_key(PEER_OPTION_RENDEZVOUS_PAIRED_VIEWER_CONFIRMED));
+        assert_eq!(
+            config.options.get("alias").map(String::as_str),
+            Some("Preserved host")
+        );
+        assert!(!clear_peer_pairing_options(&mut config));
     }
 
     #[test]

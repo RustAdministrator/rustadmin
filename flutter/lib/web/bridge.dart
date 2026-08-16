@@ -1247,6 +1247,17 @@ class RustadminImpl {
     throw UnimplementedError("mainDeviceName");
   }
 
+  bool mainResetPeerTrust({required String id, dynamic hint}) {
+    for (final key in const [
+      'pinned-signing-key',
+      'direct-paired-viewer-confirmed',
+      'rendezvous-paired-viewer-confirmed',
+    ]) {
+      mainSetPeerOptionSync(id: id, key: key, value: '', hint: hint);
+    }
+    return true;
+  }
+
   Future<void> mainRemovePeer({required String id, dynamic hint}) {
     return Future(
         () => js.context.callMethod('setByName', ['remove_peer', id]));

@@ -3060,44 +3060,22 @@ void manageKnownHostsDialog() async {
                     : null,
                 isOutline: true)
             .marginOnly(top: 12)),
-        Obx(() => dialogButton(translate("Clear pinned keys"),
-                onPressed: hasSelectedWhere((host) => host.hasPinnedKey)
-                    ? () {
+        Obx(() => dialogButton(translate("Reset paired trust"),
+                onPressed: selectedHosts.isEmpty
+                    ? null
+                    : () {
                         confirmManageKnownHostsDialog(
-                          content: '${translate('Clear pinned keys')}?',
-                          hosts: hosts,
-                          selectedHosts: selectedHosts,
-                          action: (id) => bind.mainSetPeerOption(
-                              id: id,
-                              key: KnownHost.pinnedSigningKey,
-                              value: ''),
-                        );
-                      }
-                    : null,
-                isOutline: true)
-            .marginOnly(top: 12)),
-        Obx(() => dialogButton(translate("Clear pairing memory"),
-                onPressed: hasSelectedWhere((host) =>
-                        host.hasDirectPairingMemory ||
-                        host.hasRendezvousPairingMemory)
-                    ? () {
-                        confirmManageKnownHostsDialog(
-                          content: '${translate('Clear pairing memory')}?',
+                          content: '${translate('Reset paired trust')}?',
                           hosts: hosts,
                           selectedHosts: selectedHosts,
                           action: (id) async {
-                            await bind.mainSetPeerOption(
-                                id: id,
-                                key: KnownHost.directPairingConfirmed,
-                                value: '');
-                            await bind.mainSetPeerOption(
-                                id: id,
-                                key: KnownHost.rendezvousPairingConfirmed,
-                                value: '');
+                            final ok = bind.mainResetPeerTrust(id: id);
+                            if (!ok) {
+                              showToast(translate('Failed'));
+                            }
                           },
                         );
-                      }
-                    : null,
+                      },
                 isOutline: true)
             .marginOnly(top: 12)),
         Obx(() => dialogButton(translate("Delete"),

@@ -825,6 +825,41 @@ abstract class BasePeerCard extends StatelessWidget {
   }
 
   @protected
+  MenuEntryBase<String> _resetPairedTrustAction(String id) {
+    return MenuEntryButton<String>(
+      childBuilder: (TextStyle? style) => Row(
+        children: [
+          Text(
+            translate('Reset paired trust'),
+            style: style,
+          ),
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: Transform.scale(
+                scale: 0.8,
+                child: const Icon(Icons.key_off),
+              ),
+            ).marginOnly(right: 4),
+          ),
+        ],
+      ),
+      proc: () {
+        CommonConfirmDialog(
+          gFFI.dialogManager,
+          '${translate('Reset paired trust for')} "${peer.alias.isEmpty ? formatID(peer.id) : peer.alias}"?',
+          () async {
+            final ok = bind.mainResetPeerTrust(id: id);
+            showToast(translate(ok ? 'Successful' : 'Failed'));
+          },
+        );
+      },
+      padding: menuPadding,
+      dismissOnClicked: true,
+    );
+  }
+
+  @protected
   MenuEntryBase<String> _removeAction(String id) {
     return MenuEntryButton<String>(
       childBuilder: (TextStyle? style) => Row(
@@ -1083,6 +1118,9 @@ class RecentPeerCard extends BasePeerCard {
       menuItems.add(_addToAb(peer));
     }
 
+    if (!isWeb) {
+      menuItems.add(_resetPairedTrustAction(peer.id));
+    }
     menuItems.add(MenuEntryDivider());
     menuItems.add(_removeAction(peer.id));
     return menuItems;
@@ -1144,6 +1182,9 @@ class FavoritePeerCard extends BasePeerCard {
       menuItems.add(_addToAb(peer));
     }
 
+    if (!isWeb) {
+      menuItems.add(_resetPairedTrustAction(peer.id));
+    }
     menuItems.add(MenuEntryDivider());
     menuItems.add(_removeAction(peer.id));
     return menuItems;
@@ -1204,6 +1245,9 @@ class DiscoveredPeerCard extends BasePeerCard {
       menuItems.add(_addToAb(peer));
     }
 
+    if (!isWeb) {
+      menuItems.add(_resetPairedTrustAction(peer.id));
+    }
     menuItems.add(MenuEntryDivider());
     menuItems.add(_removeAction(peer.id));
     return menuItems;
@@ -1274,6 +1318,9 @@ class AddressBookPeerCard extends BasePeerCard {
       menuItems.add(_addToAb(peer));
     }
     menuItems.add(_existIn());
+    if (!isWeb) {
+      menuItems.add(_resetPairedTrustAction(peer.id));
+    }
     if (gFFI.abModel.current.canWrite()) {
       menuItems.add(MenuEntryDivider());
       menuItems.add(_removeAction(peer.id));
@@ -1416,6 +1463,9 @@ class MyGroupPeerCard extends BasePeerCard {
       menuItems.add(_addToAb(peer));
     }
     menuItems.add(_connectionPropertiesAction(peer.id));
+    if (!isWeb) {
+      menuItems.add(_resetPairedTrustAction(peer.id));
+    }
     return menuItems;
   }
 

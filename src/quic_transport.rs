@@ -13,7 +13,7 @@ use hbb_common::{
         application::{ApplicationQuicRole, QuicApplicationStream},
         configuration::{NetworkTransportConfig, RemoteTransportMode},
         identity::{default_identity_directory, LocalTlsIdentity},
-        pairing::{FileTrustedPeerStore, PairingCandidate, TrustedPeerStore},
+        pairing::{FileTrustedPeerStore, PairingCandidate, PairingError, TrustedPeerStore},
         quic::{
             AuthenticatedControlChannel, DeviceIdentity, QuicClientEndpoint, QuicTransportError,
             QuicTransportOptions,
@@ -21,12 +21,12 @@ use hbb_common::{
     },
     ResultType, Stream,
 };
-#[cfg(not(target_os = "ios"))]
-use std::{sync::Arc, time::Duration};
 use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     time::{SystemTime, UNIX_EPOCH},
 };
+#[cfg(not(target_os = "ios"))]
+use std::{sync::Arc, time::Duration};
 
 pub async fn connect_pretrusted(
     peer_id: &str,
@@ -309,6 +309,20 @@ pub fn has_paired_peer(peer_id: &str) -> ResultType<bool> {
     let config = NetworkTransportConfig::load()?;
     let store = FileTrustedPeerStore::new(&config.trusted_peer_store)?;
     Ok(store.load(peer_id)?.is_some())
+}
+
+pub fn forget_paired_peer(peer_id: &str) -> ResultType<Vec<String>> {
+    let config = NetworkTransportConfig::load()?;
+    let mut store = FileTrustedPeerStore::new(&config.trusted_peer_store)?;
+    let removed_ids = match store.remove_peer_and_aliases(peer_id) {
+        Ok(removed_ids) => removed_ids,
+        Err(PairingError::InvalidPeerId) => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    for removed_id in &removed_ids {
+        hbb_common::log::info!("Removed confirmed QUIC identity for peer {removed_id}");
+    }
+    Ok(removed_ids)
 }
 
 pub fn remember_paired_peer(
