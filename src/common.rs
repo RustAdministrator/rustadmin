@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     future::Future,
     net::{IpAddr, SocketAddr, ToSocketAddrs},
     sync::{Arc, Mutex, RwLock},
@@ -2640,6 +2640,130 @@ fn clear_peer_pairing_state(peer_config_id: &str) -> bool {
         log::info!("Cleared paired trust state for {peer_config_id}");
     }
     changed
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct PeerSecurityEntry {
+    pub id: String,
+    pub alias: String,
+    pub username: String,
+    pub hostname: String,
+    pub platform: String,
+    pub last_updated_unix_ms: u64,
+    pub has_peer_config: bool,
+    pub has_password: bool,
+    pub has_pinned_key: bool,
+    pub pinned_key_fingerprint: String,
+    pub has_direct_pairing_memory: bool,
+    pub has_rendezvous_pairing_memory: bool,
+    pub has_quic_identity: bool,
+    pub quic_identity_fingerprint: String,
+    pub quic_confirmed_at_unix_ms: u64,
+}
+
+impl PeerSecurityEntry {
+    fn from_peer_config(id: String, modified_at_unix_ms: u64, config: &PeerConfig) -> Self {
+        let pinned_key = config
+            .options
+            .get(PEER_OPTION_PINNED_SIGNING_KEY)
+            .filter(|value| !value.is_empty());
+        let pinned_key_fingerprint = pinned_key
+            .and_then(|value| decode_pinned_peer_signing_key(value).ok())
+            .map(pk_to_fingerprint)
+            .unwrap_or_default();
+        Self {
+            id,
+            alias: config.options.get("alias").cloned().unwrap_or_default(),
+            username: config.info.username.clone(),
+            hostname: config.info.hostname.clone(),
+            platform: config.info.platform.clone(),
+            last_updated_unix_ms: modified_at_unix_ms,
+            has_peer_config: true,
+            has_password: !config.password.is_empty(),
+            has_pinned_key: pinned_key.is_some(),
+            pinned_key_fingerprint,
+            has_direct_pairing_memory: config
+                .options
+                .get(PEER_OPTION_DIRECT_PAIRED_VIEWER_CONFIRMED)
+                .is_some_and(|value| !value.is_empty()),
+            has_rendezvous_pairing_memory: config
+                .options
+                .get(PEER_OPTION_RENDEZVOUS_PAIRED_VIEWER_CONFIRMED)
+                .is_some_and(|value| !value.is_empty()),
+            has_quic_identity: false,
+            quic_identity_fingerprint: String::new(),
+            quic_confirmed_at_unix_ms: 0,
+        }
+    }
+
+    #[cfg(feature = "quic-transport")]
+    fn apply_quic_record(&mut self, record: &hbb_common::transport::pairing::TrustedPeerRecord) {
+        self.has_quic_identity = true;
+        self.quic_identity_fingerprint = pk_to_fingerprint(record.identity_key.to_vec());
+        self.quic_confirmed_at_unix_ms = record.confirmed_at_unix_ms;
+        self.last_updated_unix_ms = self.last_updated_unix_ms.max(record.confirmed_at_unix_ms);
+    }
+
+    #[cfg(feature = "quic-transport")]
+    fn from_quic_record(record: &hbb_common::transport::pairing::TrustedPeerRecord) -> Self {
+        let mut entry = Self {
+            id: record.peer_id.clone(),
+            alias: String::new(),
+            username: String::new(),
+            hostname: String::new(),
+            platform: String::new(),
+            last_updated_unix_ms: 0,
+            has_peer_config: false,
+            has_password: false,
+            has_pinned_key: false,
+            pinned_key_fingerprint: String::new(),
+            has_direct_pairing_memory: false,
+            has_rendezvous_pairing_memory: false,
+            has_quic_identity: false,
+            quic_identity_fingerprint: String::new(),
+            quic_confirmed_at_unix_ms: 0,
+        };
+        entry.apply_quic_record(record);
+        entry
+    }
+}
+
+pub fn peer_security_entries() -> ResultType<Vec<PeerSecurityEntry>> {
+    let mut entries = BTreeMap::<String, PeerSecurityEntry>::new();
+    for (id, modified_at, _) in PeerConfig::get_vec_id_modified_time_path(&None) {
+        let modified_at_unix_ms = modified_at
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        let config = PeerConfig::load(&id);
+        entries.insert(
+            id.clone(),
+            PeerSecurityEntry::from_peer_config(id, modified_at_unix_ms, &config),
+        );
+    }
+
+    #[cfg(feature = "quic-transport")]
+    for record in crate::quic_transport::paired_peers()? {
+        match entries.get_mut(&record.peer_id) {
+            Some(entry) => entry.apply_quic_record(&record),
+            None => {
+                entries.insert(
+                    record.peer_id.clone(),
+                    PeerSecurityEntry::from_quic_record(&record),
+                );
+            }
+        }
+    }
+
+    let mut entries = entries.into_values().collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        right
+            .last_updated_unix_ms
+            .cmp(&left.last_updated_unix_ms)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(entries)
 }
 
 pub fn reset_peer_pairing_trust(peer_config_id: &str) -> ResultType<()> {
@@ -5308,6 +5432,81 @@ mod tests {
             Some("Preserved host")
         );
         assert!(!clear_peer_pairing_options(&mut config));
+    }
+
+    #[test]
+    fn test_peer_security_entry_exposes_metadata_without_raw_credentials() {
+        let mut config = PeerConfig::default();
+        config.password = vec![9u8; 32];
+        config.info.username = "alice".to_owned();
+        config.info.hostname = "workstation".to_owned();
+        config.info.platform = "Windows".to_owned();
+        config
+            .options
+            .insert("alias".to_owned(), "Office PC".to_owned());
+        config.options.insert(
+            PEER_OPTION_PINNED_SIGNING_KEY.to_owned(),
+            encode_pinned_peer_signing_key(&[7u8; 32]),
+        );
+        config.options.insert(
+            PEER_OPTION_DIRECT_PAIRED_VIEWER_CONFIRMED.to_owned(),
+            "123".to_owned(),
+        );
+
+        let entry = PeerSecurityEntry::from_peer_config("peer-1".to_owned(), 456, &config);
+        assert_eq!(entry.id, "peer-1");
+        assert_eq!(entry.alias, "Office PC");
+        assert_eq!(entry.username, "alice");
+        assert_eq!(entry.hostname, "workstation");
+        assert_eq!(entry.platform, "Windows");
+        assert_eq!(entry.last_updated_unix_ms, 456);
+        assert!(entry.has_peer_config);
+        assert!(entry.has_password);
+        assert!(entry.has_pinned_key);
+        assert_eq!(
+            entry.pinned_key_fingerprint,
+            pk_to_fingerprint(vec![7u8; 32])
+        );
+        assert!(entry.has_direct_pairing_memory);
+        assert!(!entry.has_rendezvous_pairing_memory);
+        assert!(!entry.has_quic_identity);
+
+        let encoded = serde_json::to_string(&entry).unwrap();
+        assert!(!encoded.contains("\"password\""));
+        assert!(!encoded.contains("pinned-signing-key"));
+    }
+
+    #[cfg(feature = "quic-transport")]
+    #[test]
+    fn test_peer_security_entry_merges_quic_only_and_config_records() {
+        use hbb_common::transport::pairing::{PairingCandidate, TrustedPeerRecord};
+
+        fn record(peer_id: &str, confirmed_at_unix_ms: u64) -> TrustedPeerRecord {
+            let candidate =
+                PairingCandidate::new(peer_id.to_owned(), [8u8; 32], vec![1u8, 2, 3, 4]).unwrap();
+            let fingerprint = candidate.fingerprint();
+            candidate
+                .confirm(&fingerprint, confirmed_at_unix_ms)
+                .unwrap()
+        }
+
+        let record = record("192.0.2.10", 789);
+        let orphan = PeerSecurityEntry::from_quic_record(&record);
+        assert_eq!(orphan.id, "192.0.2.10");
+        assert!(!orphan.has_peer_config);
+        assert!(orphan.has_quic_identity);
+        assert_eq!(orphan.last_updated_unix_ms, 789);
+        assert_eq!(
+            orphan.quic_identity_fingerprint,
+            pk_to_fingerprint(vec![8u8; 32])
+        );
+
+        let config = PeerConfig::default();
+        let mut merged = PeerSecurityEntry::from_peer_config("192.0.2.10".to_owned(), 456, &config);
+        merged.apply_quic_record(&record);
+        assert!(merged.has_peer_config);
+        assert!(merged.has_quic_identity);
+        assert_eq!(merged.last_updated_unix_ms, 789);
     }
 
     #[test]

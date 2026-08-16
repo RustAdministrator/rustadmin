@@ -2635,6 +2635,19 @@ pub fn main_reset_peer_trust(id: String) -> SyncReturn<bool> {
     SyncReturn(reset)
 }
 
+pub fn main_list_peer_security_entries() -> String {
+    match crate::common::peer_security_entries() {
+        Ok(entries) => serde_json::to_string(&entries).unwrap_or_else(|error| {
+            log::error!("Failed to encode peer security entries: {error}");
+            "[]".to_owned()
+        }),
+        Err(error) => {
+            log::error!("Failed to list peer security entries: {error}");
+            "[]".to_owned()
+        }
+    }
+}
+
 pub fn main_remove_peer(id: String) {
     if let Err(error) = crate::common::reset_peer_pairing_trust(&id) {
         log::error!("Refusing to remove host {id} without clearing its paired trust: {error}");

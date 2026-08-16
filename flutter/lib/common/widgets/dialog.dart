@@ -3044,8 +3044,15 @@ void manageKnownHostsDialog() async {
     }
 
     return CustomAlertDialog(
-      title: Text(translate("Manage known hosts")),
-      content: knownHostsTable(hosts, selectedHosts),
+      title: Text(translate("Stored peer security")),
+      content: Obx(
+        () => hosts.isEmpty
+            ? Padding(
+                padding: const EdgeInsets.symmetric(vertical: 24),
+                child: Text(translate('No stored peer security entries')),
+              )
+            : knownHostsTable(context, hosts, selectedHosts),
+      ),
       actions: [
         Obx(() => dialogButton(translate("Forget passwords"),
                 onPressed: hasSelectedWhere((host) => host.hasPassword)
@@ -3061,11 +3068,12 @@ void manageKnownHostsDialog() async {
                 isOutline: true)
             .marginOnly(top: 12)),
         Obx(() => dialogButton(translate("Reset paired trust"),
-                onPressed: selectedHosts.isEmpty
-                    ? null
-                    : () {
+                onPressed: hasSelectedWhere((host) => host.hasPairingTrust)
+                    ? () {
                         confirmManageKnownHostsDialog(
-                          content: '${translate('Reset paired trust')}?',
+                          content: translate(
+                            'Reset paired trust for the selected entries and linked QUIC aliases?',
+                          ),
                           hosts: hosts,
                           selectedHosts: selectedHosts,
                           action: (id) async {
@@ -3075,21 +3083,24 @@ void manageKnownHostsDialog() async {
                             }
                           },
                         );
-                      },
+                      }
+                    : null,
                 isOutline: true)
             .marginOnly(top: 12)),
-        Obx(() => dialogButton(translate("Delete"),
+        Obx(() => dialogButton(translate("Delete stored entries"),
                 onPressed: selectedHosts.isEmpty
                     ? null
                     : () {
                         confirmManageKnownHostsDialog(
-                          content: '${translate('Delete selected hosts')}?',
+                          content: translate(
+                            'Delete the selected stored entries and linked QUIC aliases?',
+                          ),
                           hosts: hosts,
                           selectedHosts: selectedHosts,
                           action: (id) => bind.mainRemovePeer(id: id),
                         );
                       },
-                isOutline: false)
+                isOutline: true)
             .marginOnly(top: 12)),
         dialogButton(translate("Close"), onPressed: close, isOutline: true)
             .marginOnly(top: 12),
@@ -3100,37 +3111,80 @@ void manageKnownHostsDialog() async {
 }
 
 class KnownHost {
-  static const pinnedSigningKey = 'pinned-signing-key';
-  static const directPairingConfirmed = 'direct-paired-viewer-confirmed';
-  static const rendezvousPairingConfirmed =
-      'rendezvous-paired-viewer-confirmed';
-
-  final Peer peer;
+  final String id;
+  final String alias;
+  final String username;
+  final String hostname;
+  final String platform;
+  final int lastUpdatedUnixMs;
+  final bool hasPeerConfig;
   final bool hasPassword;
   final bool hasPinnedKey;
+  final String pinnedKeyFingerprint;
   final bool hasDirectPairingMemory;
   final bool hasRendezvousPairingMemory;
+  final bool hasQuicIdentity;
+  final String quicIdentityFingerprint;
+  final int quicConfirmedAtUnixMs;
 
   KnownHost({
-    required this.peer,
+    required this.id,
+    required this.alias,
+    required this.username,
+    required this.hostname,
+    required this.platform,
+    required this.lastUpdatedUnixMs,
+    required this.hasPeerConfig,
     required this.hasPassword,
     required this.hasPinnedKey,
+    required this.pinnedKeyFingerprint,
     required this.hasDirectPairingMemory,
     required this.hasRendezvousPairingMemory,
+    required this.hasQuicIdentity,
+    required this.quicIdentityFingerprint,
+    required this.quicConfirmedAtUnixMs,
   });
 
-  String get id => peer.id;
+  factory KnownHost.fromJson(Map<String, dynamic> json) {
+    int readInt(String key) {
+      final value = json[key];
+      if (value is int) return value;
+      return int.tryParse(value?.toString() ?? '') ?? 0;
+    }
+
+    return KnownHost(
+      id: json['id']?.toString() ?? '',
+      alias: json['alias']?.toString() ?? '',
+      username: json['username']?.toString() ?? '',
+      hostname: json['hostname']?.toString() ?? '',
+      platform: json['platform']?.toString() ?? '',
+      lastUpdatedUnixMs: readInt('last_updated_unix_ms'),
+      hasPeerConfig: json['has_peer_config'] == true,
+      hasPassword: json['has_password'] == true,
+      hasPinnedKey: json['has_pinned_key'] == true,
+      pinnedKeyFingerprint:
+          json['pinned_key_fingerprint']?.toString() ?? '',
+      hasDirectPairingMemory:
+          json['has_direct_pairing_memory'] == true,
+      hasRendezvousPairingMemory:
+          json['has_rendezvous_pairing_memory'] == true,
+      hasQuicIdentity: json['has_quic_identity'] == true,
+      quicIdentityFingerprint:
+          json['quic_identity_fingerprint']?.toString() ?? '',
+      quicConfirmedAtUnixMs: readInt('quic_confirmed_at_unix_ms'),
+    );
+  }
 
   String get displayName {
-    if (peer.alias.isNotEmpty) return peer.alias;
-    if (peer.hostname.isNotEmpty) return peer.hostname;
-    return peer.id;
+    if (alias.isNotEmpty) return alias;
+    if (hostname.isNotEmpty) return hostname;
+    return id;
   }
 
   String get userAndHost {
     final parts = [
-      if (peer.username.isNotEmpty) peer.username,
-      if (peer.hostname.isNotEmpty) peer.hostname,
+      if (username.isNotEmpty) username,
+      if (hostname.isNotEmpty) hostname,
     ];
     return parts.isEmpty ? '-' : parts.join('@');
   }
@@ -3143,35 +3197,71 @@ class KnownHost {
     return scopes.isEmpty ? '-' : scopes.join(', ');
   }
 
+  bool get hasPairingTrust =>
+      hasPinnedKey ||
+      hasDirectPairingMemory ||
+      hasRendezvousPairingMemory ||
+      hasQuicIdentity;
+
+  String get storedSecurity {
+    final values = <String>[
+      if (hasPeerConfig) translate('Host record'),
+      if (hasPassword) translate('Password'),
+      if (hasPinnedKey) translate('Signing key'),
+      if (hasDirectPairingMemory) translate('Direct pairing'),
+      if (hasRendezvousPairingMemory) translate('Rendezvous pairing'),
+      if (hasQuicIdentity) translate('QUIC identity'),
+    ];
+    return values.isEmpty ? '-' : values.join(', ');
+  }
+
+  String get deviceSummary {
+    final values = <String>[
+      if (userAndHost != '-') userAndHost,
+      if (platform.isNotEmpty) platform,
+      if (!hasPeerConfig) translate('QUIC-only record'),
+    ];
+    return values.isEmpty ? '-' : values.join(' · ');
+  }
+
+  String get identitySummary {
+    final values = <String>[
+      if (hasPinnedKey)
+        '${translate('Signing')}: ${pinnedKeyFingerprint.isEmpty ? translate('Invalid') : pinnedKeyFingerprint}',
+      if (hasQuicIdentity)
+        '${translate('QUIC')}: ${quicIdentityFingerprint.isEmpty ? translate('Invalid') : quicIdentityFingerprint}',
+    ];
+    return values.isEmpty ? '-' : values.join('\n');
+  }
+
+  String get lastUpdated {
+    if (lastUpdatedUnixMs <= 0) return '-';
+    return DateTime.fromMillisecondsSinceEpoch(lastUpdatedUnixMs)
+        .toLocal()
+        .toString()
+        .split('.')
+        .first;
+  }
+
   static Future<List<KnownHost>> get() async {
     final List<KnownHost> hosts = List.empty(growable: true);
     try {
-      final hostsJson = await bind.mainLoadRecentPeersForAb(filter: '[]');
+      final hostsJson = await bind.mainListPeerSecurityEntries();
       if (hostsJson.isEmpty) return hosts;
       final hostsList = json.decode(hostsJson);
       if (hostsList is! List) return hosts;
       for (final host in hostsList) {
         if (host is! Map<String, dynamic>) continue;
-        final peer = Peer.fromJson(host);
-        if (peer.id.isEmpty) continue;
-        final pinnedKey =
-            await bind.mainGetPeerOption(id: peer.id, key: pinnedSigningKey);
-        final directMemory = await bind.mainGetPeerOption(
-            id: peer.id, key: directPairingConfirmed);
-        final rendezvousMemory = await bind.mainGetPeerOption(
-            id: peer.id, key: rendezvousPairingConfirmed);
-        hosts.add(KnownHost(
-          peer: peer,
-          hasPassword: peer.hash.isNotEmpty,
-          hasPinnedKey: pinnedKey.isNotEmpty,
-          hasDirectPairingMemory: directMemory.isNotEmpty,
-          hasRendezvousPairingMemory: rendezvousMemory.isNotEmpty,
-        ));
+        final entry = KnownHost.fromJson(host);
+        if (entry.id.isNotEmpty) hosts.add(entry);
       }
     } catch (e) {
       print(e.toString());
     }
-    hosts.sort((a, b) => a.displayName.compareTo(b.displayName));
+    hosts.sort((a, b) {
+      final time = b.lastUpdatedUnixMs.compareTo(a.lastUpdatedUnixMs);
+      return time != 0 ? time : a.id.compareTo(b.id);
+    });
     return hosts;
   }
 }
@@ -3238,7 +3328,8 @@ Widget pairedViewersTable(
   );
 }
 
-Widget knownHostsTable(RxList<KnownHost> hosts, RxList<String> selectedHosts) {
+Widget knownHostsTable(BuildContext context, RxList<KnownHost> hosts,
+    RxList<String> selectedHosts) {
   RxBool selectAll = false.obs;
   setSelectAll() {
     if (selectedHosts.isNotEmpty && selectedHosts.length == hosts.length) {
@@ -3254,8 +3345,17 @@ Widget knownHostsTable(RxList<KnownHost> hosts, RxList<String> selectedHosts) {
   selectedHosts.listen((_) {
     setSelectAll();
   });
-  return FittedBox(
-    child: Obx(() => DataTable(
+  return ConstrainedBox(
+    constraints: BoxConstraints(
+      maxWidth: 1120,
+      maxHeight: MediaQuery.sizeOf(context).height * 0.55,
+    ),
+    child: SingleChildScrollView(
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Obx(() => DataTable(
+          dataRowMinHeight: 48,
+          dataRowMaxHeight: 72,
           columns: [
             DataColumn(
                 label: Checkbox(
@@ -3273,11 +3373,10 @@ Widget knownHostsTable(RxList<KnownHost> hosts, RxList<String> selectedHosts) {
             )),
             DataColumn(label: Text(translate('Name'))),
             DataColumn(label: Text(translate('ID'))),
-            DataColumn(label: Text(translate('User/Host'))),
-            DataColumn(label: Text(translate('Platform'))),
-            DataColumn(label: Text(translate('Password'))),
-            DataColumn(label: Text(translate('Pinned key'))),
-            DataColumn(label: Text(translate('Pairing memory'))),
+            DataColumn(label: Text(translate('Device'))),
+            DataColumn(label: Text(translate('Stored security'))),
+            DataColumn(label: Text(translate('Last updated'))),
+            DataColumn(label: Text(translate('Identity fingerprints'))),
           ],
           rows: hosts.map((host) {
             return DataRow(cells: [
@@ -3294,16 +3393,29 @@ Widget knownHostsTable(RxList<KnownHost> hosts, RxList<String> selectedHosts) {
                 },
               )),
               DataCell(Text(host.displayName)),
-              DataCell(Text(host.id)),
-              DataCell(Text(host.userAndHost)),
-              DataCell(
-                  Text(host.peer.platform.isEmpty ? '-' : host.peer.platform)),
-              DataCell(Text(translate(host.hasPassword ? 'Yes' : 'No'))),
-              DataCell(Text(translate(host.hasPinnedKey ? 'Yes' : 'No'))),
-              DataCell(Text(host.pairingMemory)),
+              DataCell(SelectableText(host.id)),
+              DataCell(Text(host.deviceSummary)),
+              DataCell(SizedBox(
+                width: 210,
+                child: Text(host.storedSecurity),
+              )),
+              DataCell(Text(host.lastUpdated)),
+              DataCell(Tooltip(
+                message: host.identitySummary,
+                child: SizedBox(
+                  width: 250,
+                  child: Text(
+                    host.identitySummary,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              )),
             ]);
           }).toList(),
         )),
+      ),
+    ),
   );
 }
 

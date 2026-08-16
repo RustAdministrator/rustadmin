@@ -1080,6 +1080,23 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
               ),
           ],
         ),
+        if (!disabledSettings && !hideSecuritySettings)
+          SettingsSection(
+            title: Text(translate('Security')),
+            tiles: [
+              SettingsTile(
+                title: Text(translate('Stored peer security')),
+                description: Text(
+                  translate(
+                    'View and remove saved host, password, pairing, and QUIC identity records.',
+                  ),
+                ),
+                leading: const Icon(Icons.security_outlined),
+                trailing: const Icon(Icons.arrow_forward_ios),
+                onPressed: (context) => manageKnownHostsDialog(),
+              ),
+            ],
+          ),
         if (isAndroid)
           SettingsSection(
             title: Text(translate('Hardware Codec')),

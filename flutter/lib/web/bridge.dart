@@ -1258,6 +1258,10 @@ class RustadminImpl {
     return true;
   }
 
+  Future<String> mainListPeerSecurityEntries({dynamic hint}) {
+    return Future.value('[]');
+  }
+
   Future<void> mainRemovePeer({required String id, dynamic hint}) {
     return Future(
         () => js.context.callMethod('setByName', ['remove_peer', id]));

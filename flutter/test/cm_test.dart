@@ -37,7 +37,6 @@ final testClients = [
 bool _testShouldBlockRustAdminGuiForActiveSessions = false;
 String _testRemoteModifyControlPermission = '';
 String _testKnownHostsJson = '';
-Map<String, Map<String, String>> _testPeerOptions = {};
 
 class _TestRustadminImpl implements Rustadmin {
   String _mainGetCommon(String key) {
@@ -83,11 +82,7 @@ class _TestRustadminImpl implements Rustadmin {
           return Future<String>.value('Y');
         }
         return Future<String>.value('');
-      case #mainGetPeerOption:
-        final id = invocation.namedArguments[#id] as String;
-        final key = invocation.namedArguments[#key] as String;
-        return Future<String>.value(_testPeerOptions[id]?[key] ?? '');
-      case #mainLoadRecentPeersForAb:
+      case #mainListPeerSecurityEntries:
         return Future<String>.value(_testKnownHostsJson);
       case #mainGetPeerSync:
         return '{"info":{}}';
@@ -170,7 +165,6 @@ Future<void> _initConnectionManagerTest() async {
   _testShouldBlockRustAdminGuiForActiveSessions = false;
   _testRemoteModifyControlPermission = '';
   _testKnownHostsJson = '';
-  _testPeerOptions = {};
   platformFFI.initForTest(_TestRustadminImpl());
   await initGlobalFFI();
 }
@@ -265,7 +259,7 @@ void main() {
     }
   });
 
-  test('known hosts expose password, pinned key, and pairing memory', () async {
+  test('stored peer security includes config and QUIC-only records', () async {
     isTest = true;
     platformFFI.initForTest(_TestRustadminImpl());
     _testKnownHostsJson = jsonEncode([
@@ -273,7 +267,16 @@ void main() {
         'id': 'peer-b',
         'hostname': 'beta',
         'platform': 'Linux',
-        'hash': '',
+        'last_updated_unix_ms': 100,
+        'has_peer_config': true,
+        'has_password': false,
+        'has_pinned_key': false,
+        'pinned_key_fingerprint': '',
+        'has_direct_pairing_memory': false,
+        'has_rendezvous_pairing_memory': true,
+        'has_quic_identity': false,
+        'quic_identity_fingerprint': '',
+        'quic_confirmed_at_unix_ms': 0,
       },
       {
         'id': 'peer-a',
@@ -281,31 +284,82 @@ void main() {
         'username': 'alice',
         'hostname': 'alpha',
         'platform': 'Windows',
-        'hash': 'saved',
+        'last_updated_unix_ms': 200,
+        'has_peer_config': true,
+        'has_password': true,
+        'has_pinned_key': true,
+        'pinned_key_fingerprint': 'signing fingerprint',
+        'has_direct_pairing_memory': true,
+        'has_rendezvous_pairing_memory': false,
+        'has_quic_identity': true,
+        'quic_identity_fingerprint': 'quic fingerprint',
+        'quic_confirmed_at_unix_ms': 200,
+      },
+      {
+        'id': '192.0.2.10',
+        'last_updated_unix_ms': 50,
+        'has_peer_config': false,
+        'has_password': false,
+        'has_pinned_key': false,
+        'pinned_key_fingerprint': '',
+        'has_direct_pairing_memory': false,
+        'has_rendezvous_pairing_memory': false,
+        'has_quic_identity': true,
+        'quic_identity_fingerprint': 'orphan fingerprint',
+        'quic_confirmed_at_unix_ms': 50,
       },
     ]);
-    _testPeerOptions = {
-      'peer-a': {
-        KnownHost.pinnedSigningKey: 'pinned',
-        KnownHost.directPairingConfirmed: '123',
-      },
-      'peer-b': {
-        KnownHost.rendezvousPairingConfirmed: '456',
-      },
-    };
 
     final hosts = await KnownHost.get();
 
-    expect(hosts.map((host) => host.id), ['peer-a', 'peer-b']);
+    expect(hosts.map((host) => host.id), [
+      'peer-a',
+      'peer-b',
+      '192.0.2.10',
+    ]);
     expect(hosts.first.displayName, 'Alias A');
     expect(hosts.first.userAndHost, 'alice@alpha');
     expect(hosts.first.hasPassword, isTrue);
     expect(hosts.first.hasPinnedKey, isTrue);
     expect(hosts.first.hasDirectPairingMemory, isTrue);
     expect(hosts.first.hasRendezvousPairingMemory, isFalse);
-    expect(hosts.last.hasPassword, isFalse);
-    expect(hosts.last.hasPinnedKey, isFalse);
-    expect(hosts.last.hasRendezvousPairingMemory, isTrue);
+    expect(hosts.first.hasQuicIdentity, isTrue);
+    expect(hosts.first.identitySummary, contains('quic fingerprint'));
+    expect(hosts[1].hasRendezvousPairingMemory, isTrue);
+    expect(hosts.last.hasPeerConfig, isFalse);
+    expect(hosts.last.hasQuicIdentity, isTrue);
+    expect(hosts.last.deviceSummary, contains('QUIC-only record'));
+  });
+
+  testWidgets('stored peer security table renders orphan QUIC records',
+      (tester) async {
+    isTest = true;
+    platformFFI.initForTest(_TestRustadminImpl());
+    final hosts = <KnownHost>[
+      KnownHost.fromJson({
+        'id': '192.0.2.10',
+        'last_updated_unix_ms': 50,
+        'has_peer_config': false,
+        'has_quic_identity': true,
+        'quic_identity_fingerprint': 'orphan fingerprint',
+        'quic_confirmed_at_unix_ms': 50,
+      }),
+    ].obs;
+
+    await tester.pumpWidget(MaterialApp(
+      home: Builder(
+        builder: (context) => knownHostsTable(
+          context,
+          hosts,
+          <String>[].obs,
+        ),
+      ),
+    ));
+
+    expect(find.text('192.0.2.10'), findsWidgets);
+    expect(find.textContaining('QUIC-only record'), findsOneWidget);
+    expect(find.textContaining('orphan fingerprint'), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 
   test('cursor cache data keeps independent height and y hotspot', () {

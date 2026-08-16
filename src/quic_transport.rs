@@ -13,7 +13,10 @@ use hbb_common::{
         application::{ApplicationQuicRole, QuicApplicationStream},
         configuration::{NetworkTransportConfig, RemoteTransportMode},
         identity::{default_identity_directory, LocalTlsIdentity},
-        pairing::{FileTrustedPeerStore, PairingCandidate, PairingError, TrustedPeerStore},
+        pairing::{
+            FileTrustedPeerStore, PairingCandidate, PairingError, TrustedPeerRecord,
+            TrustedPeerStore,
+        },
         quic::{
             AuthenticatedControlChannel, DeviceIdentity, QuicClientEndpoint, QuicTransportError,
             QuicTransportOptions,
@@ -309,6 +312,12 @@ pub fn has_paired_peer(peer_id: &str) -> ResultType<bool> {
     let config = NetworkTransportConfig::load()?;
     let store = FileTrustedPeerStore::new(&config.trusted_peer_store)?;
     Ok(store.load(peer_id)?.is_some())
+}
+
+pub fn paired_peers() -> ResultType<Vec<TrustedPeerRecord>> {
+    let config = NetworkTransportConfig::load()?;
+    let store = FileTrustedPeerStore::new(&config.trusted_peer_store)?;
+    store.load_all().map_err(Into::into)
 }
 
 pub fn forget_paired_peer(peer_id: &str) -> ResultType<Vec<String>> {

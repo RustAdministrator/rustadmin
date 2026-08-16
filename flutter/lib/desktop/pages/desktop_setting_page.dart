@@ -1344,6 +1344,11 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
     return _Card(title: 'Security', children: [
       shareRdp(context, enabled),
       peerPairingPassphrase(context, enabled),
+      _SubButton(
+        'Stored peer security',
+        manageKnownHostsDialog,
+        enabled,
+      ),
       _OptionCheckBox(context, 'Allow unverified peer trust',
           kOptionAllowUnverifiedPeerTrust,
           enabled: enabled,
@@ -1641,14 +1646,6 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                                   }
                                 : null,
                             child: Text(translate('Manage paired viewers')),
-                          ).marginOnly(bottom: 8),
-                          OutlinedButton(
-                            onPressed: enabled && !locked
-                                ? () {
-                                    manageKnownHostsDialog();
-                                  }
-                                : null,
-                            child: Text(translate('Manage known hosts')),
                           ),
                         ],
                       ),
