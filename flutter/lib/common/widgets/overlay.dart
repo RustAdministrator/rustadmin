@@ -532,10 +532,15 @@ class IOSDraggableState extends State<IOSDraggable> {
 
 class QualityMonitor extends StatelessWidget {
   final QualityMonitorModel qualityMonitorModel;
-  final GestureDragUpdateCallback? onGripPanUpdate;
+  final GestureDragUpdateCallback? onHeaderPanUpdate;
+  final GestureDragEndCallback? onHeaderPanEnd;
+  final GestureDragCancelCallback? onHeaderPanCancel;
 
   const QualityMonitor(this.qualityMonitorModel,
-      {Key? key, this.onGripPanUpdate})
+      {Key? key,
+      this.onHeaderPanUpdate,
+      this.onHeaderPanEnd,
+      this.onHeaderPanCancel})
       : super(key: key);
 
   Widget _compactTextScale(Widget child) => isMobile
@@ -711,7 +716,7 @@ class QualityMonitor extends StatelessWidget {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            _section("Network"),
+                            SizedBox(height: isMobile ? 20 : 24),
                             _row(
                                 "Speed", qualityMonitorModel.data.speed ?? '-'),
                             // let delay be 0 if fps is 0
@@ -913,32 +918,38 @@ class QualityMonitor extends StatelessWidget {
                         ),
                       ),
                     ),
-                    if (onGripPanUpdate != null)
-                      Positioned(
-                        top: 0,
-                        left: 0,
-                        child: QualityMonitorGrip(
-                          details: qualityMonitorModel.details,
-                          onPanUpdate: onGripPanUpdate!,
-                          onDetailsChanged: qualityMonitorModel.setDetails,
-                        ),
+                    Positioned(
+                      top: 0,
+                      left: 0,
+                      right: 0,
+                      child: QualityMonitorHeader(
+                        details: qualityMonitorModel.details,
+                        onPanUpdate: onHeaderPanUpdate,
+                        onPanEnd: onHeaderPanEnd,
+                        onPanCancel: onHeaderPanCancel,
+                        onDetailsChanged: qualityMonitorModel.setDetails,
                       ),
+                    ),
                   ],
                 )
               : const SizedBox.shrink()));
 }
 
-class QualityMonitorGrip extends StatelessWidget {
+class QualityMonitorHeader extends StatelessWidget {
   final String details;
-  final GestureDragUpdateCallback onPanUpdate;
+  final GestureDragUpdateCallback? onPanUpdate;
+  final GestureDragEndCallback? onPanEnd;
+  final GestureDragCancelCallback? onPanCancel;
   final Future<void> Function(String details) onDetailsChanged;
 
-  const QualityMonitorGrip(
-      {Key? key,
-      required this.details,
-      required this.onPanUpdate,
-      required this.onDetailsChanged})
-      : super(key: key);
+  const QualityMonitorHeader({
+    Key? key,
+    required this.details,
+    this.onPanUpdate,
+    this.onPanEnd,
+    this.onPanCancel,
+    required this.onDetailsChanged,
+  }) : super(key: key);
 
   Future<void> _showDetailsMenu(
       BuildContext context, Offset globalPosition) async {
@@ -985,26 +996,133 @@ class QualityMonitorGrip extends StatelessWidget {
       );
 
   @override
-  Widget build(BuildContext context) => MouseRegion(
-        cursor: SystemMouseCursors.move,
-        child: Listener(
+  Widget build(BuildContext context) {
+    final foreground = mobileRemoteToolbarForegroundColor(context);
+    final height = isMobile ? 20.0 : 24.0;
+    final canDrag = onPanUpdate != null;
+    final radius = BorderRadius.circular(4);
+
+    return MouseRegion(
+      cursor: canDrag ? SystemMouseCursors.move : MouseCursor.defer,
+      child: Listener(
+        behavior: HitTestBehavior.opaque,
+        onPointerDown: (event) {
+          if (event.buttons & kSecondaryMouseButton != 0) {
+            _showDetailsMenu(context, event.position);
+          }
+        },
+        child: GestureDetector(
+          key: const Key('quality-monitor-header'),
           behavior: HitTestBehavior.opaque,
-          onPointerDown: (event) {
-            if (event.buttons & kSecondaryMouseButton != 0) {
-              _showDetailsMenu(context, event.position);
-            }
-          },
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onPanUpdate: onPanUpdate,
-            child: Container(
-              width: 16,
-              height: 16,
-              color: MyTheme.canvasColor.withAlpha(180),
+          onPanUpdate: onPanUpdate,
+          onPanEnd: onPanEnd,
+          onPanCancel: onPanCancel,
+          child: Material(
+            color: mobileRemoteToolbarBackgroundColor(context),
+            elevation: 2,
+            shadowColor: Colors.black54,
+            shape: RoundedRectangleBorder(
+              borderRadius: radius,
+              side: BorderSide(color: foreground.withAlpha(170)),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: SizedBox(
+              height: height,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      child: MediaQuery.withClampedTextScaling(
+                        maxScaleFactor: 1,
+                        child: AutoSizeText(
+                          translate('Quality monitor'),
+                          minFontSize: 7,
+                          maxLines: 1,
+                          style: TextStyle(
+                            color: foreground,
+                            fontSize: isMobile ? 9 : 10,
+                            fontWeight: FontWeight.w500,
+                            height: 1,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  QualityMonitorDetailsToggle(
+                    details: details,
+                    onDetailsChanged: onDetailsChanged,
+                  ),
+                ],
+              ),
             ),
           ),
         ),
-      );
+      ),
+    );
+  }
+}
+
+class QualityMonitorDetailsToggle extends StatelessWidget {
+  final String details;
+  final Future<void> Function(String details) onDetailsChanged;
+
+  const QualityMonitorDetailsToggle({
+    Key? key,
+    required this.details,
+    required this.onDetailsChanged,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    final extended = details == kQualityMonitorDetailsExtended;
+    final foreground = mobileRemoteToolbarForegroundColor(context);
+    final nextDetails = extended
+        ? kQualityMonitorDetailsBasic
+        : kQualityMonitorDetailsExtended;
+    final currentLabel = extended ? 'ADV' : 'STD';
+    final currentName = extended ? 'Advanced' : 'Standard';
+    final nextName = extended ? 'Standard' : 'Advanced';
+    return Semantics(
+      button: true,
+      label: 'Quality monitor details',
+      value: currentName,
+      child: Tooltip(
+        message: 'Switch to $nextName details',
+        child: Material(
+          type: MaterialType.transparency,
+          child: InkWell(
+            key: const Key('quality-monitor-details-toggle'),
+            borderRadius: BorderRadius.circular(3),
+            onTap: () => unawaited(onDetailsChanged(nextDetails)),
+            child: Container(
+              width: isMobile ? 38 : 42,
+              height: isMobile ? 20 : 24,
+              margin: const EdgeInsets.all(2),
+              decoration: BoxDecoration(
+                color: foreground.withAlpha(extended ? 36 : 22),
+                border: Border.all(color: foreground.withAlpha(120)),
+                borderRadius: BorderRadius.circular(3),
+              ),
+              alignment: Alignment.center,
+              child: MediaQuery.withClampedTextScaling(
+                maxScaleFactor: 1,
+                child: Text(
+                  currentLabel,
+                  style: TextStyle(
+                    color: foreground,
+                    fontSize: isMobile ? 8 : 9,
+                    fontWeight: FontWeight.w600,
+                    height: 1,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class QualityMonitorHoverFade extends StatefulWidget {
@@ -1194,14 +1312,17 @@ class _PositionedQualityMonitorState extends State<PositionedQualityMonitor> {
   bool _boundsUpdateScheduled = false;
 
   static const _inset = 10.0;
-  static const _monitorWidth = 200.0;
   static const _basicHeight = 180.0;
   static const _extendedHeight = 420.0;
 
-  double _boundedWidth(BoxConstraints constraints) {
+  double _monitorWidth(bool extended) => isMobile
+      ? (extended ? 196.0 : 176.0)
+      : (extended ? 240.0 : 200.0);
+
+  double _boundedWidth(BoxConstraints constraints, bool extended) {
     return constraints.hasBoundedWidth
         ? constraints.maxWidth
-        : _monitorWidth + _inset * 2;
+        : _monitorWidth(extended) + _inset * 2;
   }
 
   double _boundedHeight(BoxConstraints constraints, bool extended) {
@@ -1211,29 +1332,30 @@ class _PositionedQualityMonitorState extends State<PositionedQualityMonitor> {
 
   Offset _fixedOrigin(
       BoxConstraints constraints, String position, bool extended) {
-    final width = _boundedWidth(constraints);
+    final width = _boundedWidth(constraints, extended);
     final height = _boundedHeight(constraints, extended);
+    final monitorWidth = _monitorWidth(extended);
     final monitorHeight = extended ? _extendedHeight : _basicHeight;
     switch (position) {
       case kQualityMonitorPositionTopLeft:
         return const Offset(_inset, _inset);
       case kQualityMonitorPositionBottomRight:
         return Offset(
-            width - _monitorWidth - _inset, height - monitorHeight - _inset);
+            width - monitorWidth - _inset, height - monitorHeight - _inset);
       case kQualityMonitorPositionBottomLeft:
         return Offset(_inset, height - monitorHeight - _inset);
       case kQualityMonitorPositionTopRight:
       default:
-        return Offset(width - _monitorWidth - _inset, _inset);
+        return Offset(width - monitorWidth - _inset, _inset);
     }
   }
 
   Offset _clampPosition(
       BoxConstraints constraints, Offset position, bool extended) {
-    final width = _boundedWidth(constraints);
+    final width = _boundedWidth(constraints, extended);
     final height = _boundedHeight(constraints, extended);
     final monitorHeight = extended ? _extendedHeight : _basicHeight;
-    final maxX = math.max(0.0, width - _monitorWidth);
+    final maxX = math.max(0.0, width - _monitorWidth(extended));
     final maxY = math.max(0.0, height - monitorHeight);
     return Offset(position.dx.clamp(0.0, maxX).toDouble(),
         position.dy.clamp(0.0, maxY).toDouble());
@@ -1285,14 +1407,19 @@ class _PositionedQualityMonitorState extends State<PositionedQualityMonitor> {
                     child: QualityMonitorHoverFade(
                       child: QualityMonitor(
                         qualityMonitorModel,
-                        onGripPanUpdate: (details) {
+                        onHeaderPanUpdate: (details) {
                           final base = qualityMonitorModel.floatingPosition ??
                               _fixedOrigin(constraints,
                                   qualityMonitorModel.position, extended);
                           qualityMonitorModel.updateFloatingPosition(
                               _clampPosition(constraints,
-                                  base + details.delta, extended));
+                                  base + details.delta, extended),
+                              persist: false);
                         },
+                        onHeaderPanEnd: (_) => unawaited(
+                            qualityMonitorModel.commitFloatingPosition()),
+                        onHeaderPanCancel: () => unawaited(
+                            qualityMonitorModel.commitFloatingPosition()),
                       ),
                     ),
                   );

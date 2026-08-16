@@ -1,5 +1,6 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
@@ -449,6 +450,168 @@ void main() {
 
     await tester.tap(find.byTooltip('Back to options'));
     await tester.pump();
+    expect(find.byKey(const Key('mobile-remote-options-root')), findsOneWidget);
+  });
+
+  testWidgets('options remain scrollable after rotating to landscape', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(360, 800);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+
+    final sections = [
+      for (var i = 0; i < 12; i++)
+        MobileRemoteRadioSection(
+          id: 'section-$i',
+          value: 'value-$i',
+          heading: Text('Section $i'),
+          items: [
+            MobileRemoteRadioItem(
+              value: 'value-$i',
+              child: Text('Value $i'),
+              onChanged: (_) {},
+            ),
+          ],
+        ),
+    ];
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              key: const Key('open-options-dialog'),
+              onPressed: () => showDialog<void>(
+                context: context,
+                builder: (dialogContext) => CustomAlertDialog(
+                  scrollable: false,
+                  contentBoxConstraints: BoxConstraints(
+                    maxWidth: 500,
+                    maxHeight:
+                        MediaQuery.sizeOf(dialogContext).height * 0.9,
+                  ),
+                  content: MobileRemoteOptionsContent(
+                    radioSections: sections,
+                  ),
+                ),
+              ),
+              child: const Text('Open options'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.byKey(const Key('open-options-dialog')));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    tester.view.physicalSize = const Size(800, 360);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+
+    final scrollable = find.descendant(
+      of: find.byKey(const Key('mobile-remote-options-scroll')),
+      matching: find.byType(Scrollable),
+    );
+    expect(scrollable, findsOneWidget);
+    final state = tester.state<ScrollableState>(scrollable);
+    expect(state.position.maxScrollExtent, greaterThan(0));
+
+    await tester.drag(
+      find.byKey(const Key('mobile-remote-options-scroll')),
+      const Offset(0, -240),
+    );
+    await tester.pump();
+    expect(state.position.pixels, greaterThan(0));
+  });
+
+  testWidgets('options reset scroll and allow tall submenu content', (
+    tester,
+  ) async {
+    final sections = [
+      for (var i = 0; i < 8; i++)
+        MobileRemoteRadioSection(
+          id: 'section-$i',
+          value: 'value-$i',
+          heading: Text('Section $i'),
+          items: [
+            MobileRemoteRadioItem(
+              value: 'value-$i',
+              child: Text('Value $i'),
+              onChanged: (_) {},
+            ),
+          ],
+        ),
+      MobileRemoteRadioSection(
+        id: 'custom-quality',
+        value: 'custom',
+        heading: const Text('Custom quality'),
+        selectionDetailsBuilder: (_) => Column(
+          children: [
+            for (var i = 0; i < 12; i++)
+              SizedBox(height: 48, child: Text('Custom control $i')),
+          ],
+        ),
+        items: [
+          MobileRemoteRadioItem(
+            value: 'custom',
+            child: const Text('Custom'),
+            onChanged: (_) {},
+          ),
+        ],
+      ),
+    ];
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: SizedBox(
+              width: 500,
+              height: 260,
+              child: MobileRemoteOptionsContent(radioSections: sections),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final scrollable = find.descendant(
+      of: find.byKey(const Key('mobile-remote-options-scroll')),
+      matching: find.byType(Scrollable),
+    );
+    final state = tester.state<ScrollableState>(scrollable);
+    final openCustom = find.byKey(
+      const Key('mobile-remote-options-open-custom-quality'),
+    );
+    await tester.ensureVisible(openCustom);
+    expect(state.position.pixels, greaterThan(0));
+    await tester.tap(openCustom);
+    await tester.pump();
+
+    expect(state.position.pixels, 0);
+    expect(
+      find.byKey(
+        const Key('mobile-remote-options-submenu-custom-quality'),
+      ),
+      findsOneWidget,
+    );
+    expect(state.position.maxScrollExtent, greaterThan(0));
+
+    await tester.drag(
+      find.byKey(const Key('mobile-remote-options-scroll')),
+      const Offset(0, -240),
+    );
+    await tester.pump();
+    expect(state.position.pixels, greaterThan(0));
+
+    state.position.jumpTo(0);
+    await tester.pump();
+    await tester.tap(find.byTooltip('Back to options'));
+    await tester.pump();
+    expect(state.position.pixels, 0);
     expect(find.byKey(const Key('mobile-remote-options-root')), findsOneWidget);
   });
 

@@ -4931,6 +4931,39 @@ mod tests {
         assert_eq!(ProcessPriority::from_raw(u32::MAX), ProcessPriority::Normal);
     }
 
+    #[test]
+    fn cursor_outline_centers_source_inside_expanded_stride() {
+        const WIDTH: usize = 2;
+        const HEIGHT: usize = 2;
+        const OUT_WIDTH: usize = WIDTH + 2;
+        const OUT_HEIGHT: usize = HEIGHT + 2;
+
+        let mut input = vec![0u8; WIDTH * HEIGHT * 4];
+        input[3] = u8::MAX;
+        let mut output = vec![0u8; OUT_WIDTH * OUT_HEIGHT * 4];
+
+        unsafe {
+            drawOutline(
+                output.as_mut_ptr(),
+                input.as_ptr(),
+                WIDTH as i32,
+                HEIGHT as i32,
+                output.len() as i32,
+            );
+        }
+
+        let cursor_pixel = (OUT_WIDTH + 1) * 4;
+        assert_eq!(&output[cursor_pixel..cursor_pixel + 4], &[0, 0, 0, 255]);
+        for y in 0..OUT_HEIGHT {
+            let right_edge = (y * OUT_WIDTH + OUT_WIDTH - 1) * 4;
+            assert_eq!(
+                &output[right_edge..right_edge + 4],
+                &[0, 0, 0, 0],
+                "cursor pixels must not wrap into the right border"
+            );
+        }
+    }
+
     // Test-only reusable Win32 HANDLE RAII helper.
     // If a future non-test path needs the same pattern, move it out of this test module.
     //

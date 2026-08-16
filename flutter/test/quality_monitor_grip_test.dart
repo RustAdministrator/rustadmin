@@ -23,26 +23,28 @@ void main() {
     platformFFI.initForTest(_TestRustadminImpl());
   });
 
-  testWidgets('quality monitor grip switches details from its context menu',
+  testWidgets('quality monitor header switches details from its context menu',
       (tester) async {
     String? selected;
     DragUpdateDetails? dragUpdate;
+    var dragEndCount = 0;
 
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
         body: Align(
           alignment: Alignment.topLeft,
-          child: QualityMonitorGrip(
+          child: QualityMonitorHeader(
             details: kQualityMonitorDetailsBasic,
             onPanUpdate: (details) => dragUpdate = details,
+            onPanEnd: (_) => dragEndCount++,
             onDetailsChanged: (details) async => selected = details,
           ),
         ),
       ),
     ));
 
-    final grip = find.byType(QualityMonitorGrip);
-    await tester.tap(grip,
+    final header = find.byType(QualityMonitorHeader);
+    await tester.tap(header,
         kind: PointerDeviceKind.mouse, buttons: kSecondaryMouseButton);
     await tester.pumpAndSettle();
 
@@ -55,17 +57,168 @@ void main() {
     await tester.pumpAndSettle();
     expect(selected, kQualityMonitorDetailsExtended);
 
-    await tester.drag(grip, const Offset(8, 6));
+    await tester.drag(header, const Offset(8, 6));
     await tester.pumpAndSettle();
     expect(dragUpdate, isNotNull);
+    expect(dragEndCount, 1);
   });
 
-  testWidgets('quality monitor grip blocks remote pointer passthrough',
+  testWidgets('quality monitor details toggle switches STD and ADV',
+      (tester) async {
+    String? selected;
+
+    Future<void> pumpToggle(String details) => tester.pumpWidget(MaterialApp(
+          home: Scaffold(
+            body: Align(
+              alignment: Alignment.topLeft,
+              child: QualityMonitorDetailsToggle(
+                details: details,
+                onDetailsChanged: (value) async => selected = value,
+              ),
+            ),
+          ),
+        ));
+
+    await pumpToggle(kQualityMonitorDetailsBasic);
+    expect(find.text('STD'), findsOneWidget);
+    await tester.tap(
+      find.byKey(const Key('quality-monitor-details-toggle')),
+    );
+    await tester.pump();
+    expect(selected, kQualityMonitorDetailsExtended);
+
+    selected = null;
+    await pumpToggle(kQualityMonitorDetailsExtended);
+    expect(find.text('ADV'), findsOneWidget);
+    await tester.tap(
+      find.byKey(const Key('quality-monitor-details-toggle')),
+    );
+    await tester.pump();
+    expect(selected, kQualityMonitorDetailsBasic);
+  });
+
+  testWidgets('quality monitor details toggle remains visible in light theme',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      theme: ThemeData.light(),
+      home: Scaffold(
+        body: Align(
+          alignment: Alignment.topLeft,
+          child: QualityMonitorDetailsToggle(
+            details: kQualityMonitorDetailsExtended,
+            onDetailsChanged: (_) async {},
+          ),
+        ),
+      ),
+    ));
+
+    final toggle = find.byKey(const Key('quality-monitor-details-toggle'));
+    final label = tester.widget<Text>(find.descendant(
+      of: toggle,
+      matching: find.text('ADV'),
+    ));
+    final container = tester.widget<Container>(find.descendant(
+      of: toggle,
+      matching: find.byType(Container),
+    ));
+    final decoration = container.decoration as BoxDecoration;
+
+    expect(label.style?.color, isNot(Colors.white));
+    expect(decoration.color?.a, greaterThan(0));
+    expect(decoration.border, isA<Border>());
+    final border = decoration.border! as Border;
+    expect(border.top.style, BorderStyle.solid);
+    expect(border.right.style, BorderStyle.solid);
+    expect(border.bottom.style, BorderStyle.solid);
+    expect(border.left.style, BorderStyle.solid);
+  });
+
+  testWidgets('quality monitor details toggle blocks pointer passthrough',
+      (tester) async {
+    var backgroundDownCount = 0;
+    String? selected;
+
+    await tester.pumpWidget(MaterialApp(
+      home: Stack(
+        children: [
+          Positioned.fill(
+            child: Listener(
+              behavior: HitTestBehavior.opaque,
+              onPointerDown: (_) => backgroundDownCount++,
+              child: const SizedBox.expand(),
+            ),
+          ),
+          Positioned(
+            left: 20,
+            top: 20,
+            child: QualityMonitorDetailsToggle(
+              details: kQualityMonitorDetailsBasic,
+              onDetailsChanged: (value) async => selected = value,
+            ),
+          ),
+        ],
+      ),
+    ));
+
+    await tester.tap(
+      find.byKey(const Key('quality-monitor-details-toggle')),
+    );
+    await tester.pump();
+
+    expect(selected, kQualityMonitorDetailsExtended);
+    expect(backgroundDownCount, 0);
+  });
+
+  testWidgets('quality monitor toggle taps and header-style drags stay distinct',
+      (tester) async {
+    String? selected;
+    var dragUpdateCount = 0;
+    var dragEndCount = 0;
+
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(
+            width: 190,
+            child: QualityMonitorHeader(
+              details: kQualityMonitorDetailsBasic,
+              onPanUpdate: (_) => dragUpdateCount++,
+              onPanEnd: (_) => dragEndCount++,
+              onDetailsChanged: (value) async => selected = value,
+            ),
+          ),
+        ),
+      ),
+    ));
+
+    final toggle = find.byKey(const Key('quality-monitor-details-toggle'));
+    await tester.tap(toggle);
+    await tester.pump();
+    expect(selected, kQualityMonitorDetailsExtended);
+    expect(dragUpdateCount, 0);
+    expect(dragEndCount, 0);
+
+    selected = null;
+    final drag = await tester.startGesture(tester.getCenter(toggle));
+    await drag.moveBy(const Offset(24, 12));
+    await tester.pump();
+    await drag.moveBy(const Offset(24, 12));
+    await tester.pump();
+    await drag.up();
+    await tester.pumpAndSettle();
+
+    expect(selected, isNull);
+    expect(dragUpdateCount, greaterThan(0));
+    expect(dragEndCount, 1);
+  });
+
+  testWidgets('quality monitor header blocks remote pointer passthrough',
       (tester) async {
     var backgroundDownCount = 0;
     var backgroundMoveCount = 0;
     var backgroundUpCount = 0;
-    var gripMoveCount = 0;
+    var headerMoveCount = 0;
     const settings = QualityMonitorFadeSettings(
       opacity: 0.5,
       delay: Duration(milliseconds: 1000),
@@ -89,10 +242,13 @@ void main() {
             top: 20,
             child: QualityMonitorHoverFade(
               settingsProvider: () => settings,
-              child: QualityMonitorGrip(
-                details: kQualityMonitorDetailsBasic,
-                onPanUpdate: (_) => gripMoveCount++,
-                onDetailsChanged: (_) async {},
+              child: SizedBox(
+                width: 190,
+                child: QualityMonitorHeader(
+                  details: kQualityMonitorDetailsBasic,
+                  onPanUpdate: (_) => headerMoveCount++,
+                  onDetailsChanged: (_) async {},
+                ),
               ),
             ),
           ),
@@ -100,16 +256,16 @@ void main() {
       ),
     ));
 
-    final grip = find.byType(QualityMonitorGrip);
+    final header = find.byType(QualityMonitorHeader);
     final gesture = await tester.startGesture(
-      tester.getCenter(grip),
+      tester.getCenter(header),
       kind: PointerDeviceKind.mouse,
     );
     await gesture.moveBy(const Offset(8, 6));
     await gesture.up();
     await tester.pumpAndSettle();
 
-    expect(gripMoveCount, greaterThan(0));
+    expect(headerMoveCount, greaterThan(0));
     expect(backgroundDownCount, 0);
     expect(backgroundMoveCount, 0);
     expect(backgroundUpCount, 0);

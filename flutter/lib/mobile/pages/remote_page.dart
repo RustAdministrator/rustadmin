@@ -1530,6 +1530,7 @@ void showOptions(
           final resolution = getResolutionMenu(gFFI, id);
           final virtualDisplayMenu = getVirtualDisplayMenu(gFFI, id);
           return CustomAlertDialog(
+            scrollable: false,
             contentBoxConstraints: BoxConstraints(
               maxWidth: 500,
               maxHeight: MediaQuery.sizeOf(context).height * 0.9,
