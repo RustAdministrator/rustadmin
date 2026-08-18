@@ -95,7 +95,14 @@ class _ToolbarMenuLifecycleScope extends InheritedWidget {
 bool shouldOpenToolbarMenuOnActivation({
   required bool targetMenuOpen,
   required bool menuGroupOpen,
+  required bool targetMenuClosing,
 }) {
+  // Flutter keeps MenuController.isOpen true until the closing animation's
+  // completion callback removes the overlay. Reopen an anchor that is already
+  // closing instead of spending the first activation asking it to close again.
+  if (targetMenuClosing) {
+    return true;
+  }
   // The group owns the visible overlay. If it reports that every menu is
   // closed, always open the target even if its private controller retained a
   // stale open state. MenuController.open() safely closes and reopens an
@@ -3635,6 +3642,8 @@ class _IconSubmenuButton extends StatefulWidget {
 class _IconSubmenuButtonState extends State<_IconSubmenuButton> {
   bool hover = false;
   bool _pointerMenuToggleHandled = false;
+  bool _reopenAfterClose = false;
+  AnimationStatus _menuAnimationStatus = AnimationStatus.dismissed;
   final MenuController _menuController = MenuController();
   final FocusNode _focusNode = FocusNode(debugLabel: 'toolbarMenuButton');
 
@@ -3653,14 +3662,38 @@ class _IconSubmenuButtonState extends State<_IconSubmenuButton> {
     MenuController controller,
     _ToolbarMenuLifecycleScope? menuLifecycle,
   ) {
+    final targetMenuClosing = controller.isOpen &&
+        (_menuAnimationStatus == AnimationStatus.reverse ||
+            _menuAnimationStatus == AnimationStatus.dismissed);
     final shouldOpen = shouldOpenToolbarMenuOnActivation(
       targetMenuOpen: controller.isOpen,
       menuGroupOpen: menuLifecycle?.isMenuGroupOpen() ?? controller.isOpen,
+      targetMenuClosing: targetMenuClosing,
     );
     if (shouldOpen) {
+      if (targetMenuClosing) {
+        // Opening immediately would be undone by Flutter's pending close
+        // completion callback. Preserve this activation and reopen once the
+        // old overlay has actually been removed.
+        _reopenAfterClose = true;
+        return;
+      }
+      _reopenAfterClose = false;
       controller.open();
     } else {
+      _reopenAfterClose = false;
       controller.close();
+    }
+  }
+
+  void _handleMenuClosed(_ToolbarMenuLifecycleScope? menuLifecycle) {
+    menuLifecycle?.onMenuClose();
+    if (!_reopenAfterClose) {
+      return;
+    }
+    _reopenAfterClose = false;
+    if (mounted && !_menuController.isOpen) {
+      _menuController.open();
     }
   }
 
@@ -3699,7 +3732,10 @@ class _IconSubmenuButtonState extends State<_IconSubmenuButton> {
             _topLevelToolbarMenuAlignmentOffset(context, widget.menuStyle),
         consumeOutsideTap: false,
         onOpen: menuLifecycle?.onMenuOpen,
-        onClose: menuLifecycle?.onMenuClose,
+        onClose: () => _handleMenuClosed(menuLifecycle),
+        onAnimationStatusChanged: (status) {
+          _menuAnimationStatus = status;
+        },
         menuChildren: _toolbarMenuChildren(
           context,
           widget.menuStyle,

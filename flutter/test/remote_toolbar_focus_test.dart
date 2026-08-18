@@ -114,6 +114,7 @@ void main() {
       shouldOpenToolbarMenuOnActivation(
         targetMenuOpen: false,
         menuGroupOpen: false,
+        targetMenuClosing: false,
       ),
       isTrue,
     );
@@ -121,6 +122,7 @@ void main() {
       shouldOpenToolbarMenuOnActivation(
         targetMenuOpen: true,
         menuGroupOpen: false,
+        targetMenuClosing: false,
       ),
       isTrue,
       reason: 'no visible group menu must make the first click open the target',
@@ -129,6 +131,7 @@ void main() {
       shouldOpenToolbarMenuOnActivation(
         targetMenuOpen: false,
         menuGroupOpen: true,
+        targetMenuClosing: false,
       ),
       isTrue,
       reason: 'a sibling menu should switch to the target on the first click',
@@ -137,9 +140,19 @@ void main() {
       shouldOpenToolbarMenuOnActivation(
         targetMenuOpen: true,
         menuGroupOpen: true,
+        targetMenuClosing: false,
       ),
       isFalse,
       reason: 'clicking the visibly open target should close it',
+    );
+    expect(
+      shouldOpenToolbarMenuOnActivation(
+        targetMenuOpen: true,
+        menuGroupOpen: true,
+        targetMenuClosing: true,
+      ),
+      isTrue,
+      reason: 'a closing target must reopen on the first activation',
     );
   });
 
@@ -266,6 +279,41 @@ void main() {
     expect(rawKeyFocusNode.canRequestFocus, isTrue);
     expect(find.text('Scale original'), findsNothing);
 
+    await tester.tap(
+      find.byTooltip('Display Settings'),
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Scale original'), findsOneWidget);
+
+    // Flutter keeps MenuController.isOpen true until its asynchronous close
+    // completion removes the overlay. Dispatch the next mouse activation in
+    // that interval and verify that it reopens on the first activation.
+    final groupController = tester
+        .widget<RawMenuAnchorGroup>(find.byType(RawMenuAnchorGroup))
+        .controller;
+    groupController.close();
+    expect(groupController.isOpen, isTrue);
+
+    final menuButtonCenter = tester.getCenter(
+      find.byTooltip('Display Settings'),
+    );
+    final pointer = TestPointer(91, PointerDeviceKind.mouse, 91);
+    tester.binding.handlePointerEvent(
+      pointer.addPointer(location: menuButtonCenter),
+    );
+    tester.binding.handlePointerEvent(pointer.down(menuButtonCenter));
+    tester.binding.handlePointerEvent(pointer.up());
+    tester.binding.handlePointerEvent(pointer.removePointer());
+    await tester.pumpAndSettle();
+
+    expect(find.text('Scale original'), findsOneWidget);
+
+    await tester.tapAt(const Offset(10, 550), kind: PointerDeviceKind.mouse);
+    await tester.pumpAndSettle();
+    expect(menuFocusChanges, [true, false, true, false]);
+    expect(find.text('Scale original'), findsNothing);
+
     await state.setPin(true);
     await tester.pump();
     await tester.pump(const Duration(seconds: 5));
@@ -279,13 +327,13 @@ void main() {
     await gesture.up();
     await tester.pumpAndSettle();
 
-    expect(menuFocusChanges, [true, false, true]);
+    expect(menuFocusChanges, [true, false, true, false, true]);
     expect(find.text('Scale original'), findsOneWidget);
 
     await tester.tap(find.byTooltip('Close').hitTestable().first);
     await tester.pumpAndSettle();
 
-    expect(menuFocusChanges, [true, false, true, false]);
+    expect(menuFocusChanges, [true, false, true, false, true, false]);
     expect(find.text('Scale original'), findsNothing);
     expect(closeCount, 1);
   });
