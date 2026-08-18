@@ -715,22 +715,8 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     );
   }
 
-  bool _shouldOpenVerticalMenusLeft(BuildContext context) {
-    if (!widget.state.vertical.value) {
-      return false;
-    }
-
-    final mediaWidth = MediaQueryData.fromView(View.of(context)).size.width;
-    final renderObj = _toolbarKey.currentContext?.findRenderObject();
-    final toolbarWidth = renderObj is RenderBox
-        ? renderObj.size.width
-        : _ToolbarTheme.buttonSize + _ToolbarTheme.buttonVMargin * 2;
-    final toolbarLeft = renderObj is RenderBox
-        ? renderObj.localToGlobal(Offset.zero).dx
-        : _fractionX.value * math.max(0, mediaWidth - toolbarWidth);
-    final toolbarCenter = toolbarLeft + toolbarWidth * 0.5;
-    return toolbarCenter >= mediaWidth * 0.5;
-  }
+  bool _shouldOpenVerticalMenusLeft() =>
+      widget.state.vertical.value && _fractionX.value >= 0.5;
 
   void _closeMenus() {
     _menuController.close();
@@ -1061,10 +1047,11 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   void _handleToolbarPointerDown() {
     // Synthesized pointer streams from nested remote-control clients do not
     // always deliver hover/enter before the button event. Treat pointer-down
-    // as an explicit toolbar interaction so a fade cannot race menu opening.
-    // Do not change opacity here: rebuilding the pressed menu button between
-    // pointer-down and pointer-up cancels its gesture recognizer.
+    // as an explicit toolbar interaction. Menu activation happens in the raw
+    // pointer-up listener, so restoring opacity here cannot lose the click if
+    // this rebuild cancels the TextButton gesture recognizer.
     _cancelAutoHide();
+    _showPinnedToolbarOpaque();
     _setVisible(true);
     widget.ffi.canvasModel.cancelEdgeScroll();
   }
@@ -1243,7 +1230,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
                     onMenuPointerEnter: _handleMenuPointerEnter,
                     onMenuPointerExit: _handleMenuPointerExit,
                     verticalToolbar: widget.state.vertical.value,
-                    openMenusLeft: _shouldOpenVerticalMenusLeft(context),
+                    openMenusLeft: _shouldOpenVerticalMenusLeft(),
                     child: flutter_widgets.RawMenuAnchorGroup(
                       controller: _menuController,
                       child: currentShape,
@@ -3749,15 +3736,20 @@ class _IconSubmenuButtonState extends State<_IconSubmenuButton> {
               if ((event.buttons & kPrimaryButton) == 0) {
                 return;
               }
-              // Opening the target anchor immediately lets RawMenuAnchorGroup
-              // close its sibling without losing this pointer gesture when
-              // the old overlay is removed.
               _pointerMenuToggleHandled = true;
-              _toggleMenu(controller, menuLifecycle);
             },
-            onPointerUp: (_) => WidgetsBinding.instance.addPostFrameCallback(
-              (_) => _pointerMenuToggleHandled = false,
-            ),
+            onPointerUp: (_) {
+              if (!_pointerMenuToggleHandled) {
+                return;
+              }
+              // Open after pointer-down dismissal and dimming work completes.
+              // The raw listener keeps this path reliable even when closing a
+              // sibling overlay cancels the TextButton gesture recognizer.
+              _toggleMenu(controller, menuLifecycle);
+              WidgetsBinding.instance.addPostFrameCallback(
+                (_) => _pointerMenuToggleHandled = false,
+              );
+            },
             onPointerCancel: (_) => _pointerMenuToggleHandled = false,
             child: TextButton(
               focusNode: _focusNode,

@@ -14,6 +14,8 @@ import 'package:provider/provider.dart';
 
 class _TestRustadminImpl implements Rustadmin {
   int initInputSourceCalls = 0;
+  String toolbarDragX = '';
+  String toolbarOrientation = '';
 
   @override
   dynamic noSuchMethod(Invocation invocation) {
@@ -36,6 +38,13 @@ class _TestRustadminImpl implements Rustadmin {
       return null;
     }
     if (name == #sessionGetOption) {
+      final option = invocation.namedArguments[#arg];
+      if (option == 'remote-menubar-drag-x') {
+        return Future<String?>.value(toolbarDragX);
+      }
+      if (option == 'remote-menubar-orientation') {
+        return Future<String?>.value(toolbarOrientation);
+      }
       return Future<String?>.value('');
     }
     if (name == #sessionGetViewStyle ||
@@ -162,6 +171,12 @@ void main() {
     const peerId = 'toolbar-focus-test-peer';
     initSharedStates(peerId);
     addTearDown(() => removeSharedStates(peerId));
+    testImpl.toolbarDragX = '0.0';
+    testImpl.toolbarOrientation = 'vertical';
+    addTearDown(() {
+      testImpl.toolbarDragX = '';
+      testImpl.toolbarOrientation = '';
+    });
 
     final rawKeyFocusNode = FocusNode(debugLabel: 'testRawKeyFocusNode');
     addTearDown(rawKeyFocusNode.dispose);
@@ -239,6 +254,27 @@ void main() {
     expect(rawKeyFocusNode.canRequestFocus, isFalse);
     expect(find.text('Scale original'), findsOneWidget);
     expect(find.text('Tabs in fullscreen'), findsOneWidget);
+
+    final toolbarButtonRect = tester.getRect(
+      find.byTooltip('Display Settings'),
+    );
+    final rootMenuItemRect = tester.getRect(find.text('Scale original'));
+    expect(
+      rootMenuItemRect.left,
+      greaterThan(toolbarButtonRect.right),
+      reason: 'a fresh left-side vertical toolbar must open menus to its right',
+    );
+
+    final imageQualityItem = find.text('Image Quality');
+    final imageQualityRect = tester.getRect(imageQualityItem);
+    await tester.tap(imageQualityItem, kind: PointerDeviceKind.mouse);
+    await tester.pumpAndSettle();
+    final submenuItemRect = tester.getRect(find.text('Good image quality'));
+    expect(
+      submenuItemRect.left,
+      greaterThan(imageQualityRect.right),
+      reason: 'vertical toolbar submenus must advance horizontally',
+    );
 
     await tester.tap(
       find.byTooltip('Chat'),
@@ -319,11 +355,23 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
 
     final dimmedMenuButton = find.byTooltip('Display Settings');
+    AnimatedOpacity toolbarOpacity() => tester.widget<AnimatedOpacity>(
+          find
+              .ancestor(
+                of: dimmedMenuButton,
+                matching: find.byType(AnimatedOpacity),
+              )
+              .first,
+        );
+    expect(toolbarOpacity().opacity, lessThan(1.0));
+
     final gesture = await tester.startGesture(
       tester.getCenter(dimmedMenuButton),
-      kind: PointerDeviceKind.touch,
+      kind: PointerDeviceKind.mouse,
     );
     await tester.pump();
+    expect(toolbarOpacity().opacity, 1.0);
+    expect(find.text('Scale original'), findsNothing);
     await gesture.up();
     await tester.pumpAndSettle();
 
