@@ -921,7 +921,7 @@ class _RemotePageState extends State<RemotePage>
                 maxHeight: MediaQuery.sizeOf(dialogContext).height * 0.9,
               ),
               content: MobileRemoteActionsContent(
-                sections: [
+                primarySections: [
                   if (gFFI.ffiModel.keyboard)
                     MobileRemoteActionSection(
                       id: 'keyboard',
@@ -956,6 +956,8 @@ class _RemotePageState extends State<RemotePage>
                         ],
                       ),
                     ),
+                ],
+                sections: [
                   if (mobileActionMenus.isNotEmpty)
                     MobileRemoteActionSection(
                       id: 'android',
@@ -964,13 +966,8 @@ class _RemotePageState extends State<RemotePage>
                         for (final menu in mobileActionMenus) actionItem(menu),
                       ],
                     ),
-                  if (menus.isNotEmpty)
-                    MobileRemoteActionSection(
-                      id: 'session',
-                      title: Text(translate('Session actions')),
-                      actions: [for (final menu in menus) actionItem(menu)],
-                    ),
                 ],
+                actions: [for (final menu in menus) actionItem(menu)],
                 navigationItems: [
                   if (!gFFI.ffiModel.viewOnly)
                     MobileRemoteNavigationItem(
@@ -1507,6 +1504,7 @@ void showOptions(
             String sectionId,
             List<TRadioMenu<String>> source, {
             Widget? heading,
+            String? submenuId,
             bool honorEnabled = false,
             Widget Function(String value)? selectionDetailsBuilder,
           }) {
@@ -1514,6 +1512,7 @@ void showOptions(
               id: sectionId,
               value: source.isEmpty ? '' : source.first.groupValue,
               heading: heading,
+              submenuId: submenuId,
               selectionDetailsBuilder: selectionDetailsBuilder,
               items: [
                 for (final item in source)
@@ -1651,11 +1650,13 @@ void showOptions(
                   'quality-monitor',
                   qualityMonitorRadios,
                   heading: Text(translate('Quality monitor')),
+                  submenuId: 'quality-monitor',
                 ),
                 radioSection(
                   'quality-monitor-details',
                   qualityMonitorDetailsRadios,
                   heading: Text(translate('Quality monitor details')),
+                  submenuId: 'quality-monitor',
                 ),
                 radioSection(
                   'clipboard',

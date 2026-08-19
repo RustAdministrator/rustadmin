@@ -767,7 +767,7 @@ class _MobileRemoteLabPageState extends State<MobileRemoteLabPage> {
 
 enum _RemotePanel { displays, chat, actions }
 
-enum _LabActionSubmenu { keyboard, android, session }
+enum _LabActionSubmenu { keyboard, android }
 
 class MobileRemotePreview extends StatefulWidget {
   const MobileRemotePreview({
@@ -1817,11 +1817,11 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
           ('top-left', 'Top left'),
           ('bottom-right', 'Bottom right'),
           ('bottom-left', 'Bottom left'),
-        ], heading: 'Quality monitor'),
+        ], heading: 'Quality monitor', submenuId: 'quality-monitor'),
         _radioSection('quality-monitor-details', 'basic', const [
           ('basic', 'Basic'),
           ('extended', 'Extended'),
-        ], heading: 'Quality monitor details'),
+        ], heading: 'Quality monitor details', submenuId: 'quality-monitor'),
         _radioSection(
           'clipboard',
           enabled ? 'bidirectional' : 'off',
@@ -1949,6 +1949,7 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
     String selected,
     List<(String, String)> values, {
     String? heading,
+    String? submenuId,
     bool enabled = true,
     ValueChanged<String>? onChanged,
     Widget Function(String value)? selectionDetailsBuilder,
@@ -1957,6 +1958,7 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       id: id,
       value: selected,
       heading: heading == null ? null : Text(heading),
+      submenuId: submenuId,
       selectionDetailsBuilder: selectionDetailsBuilder,
       items: [
         for (final value in values)
@@ -2227,12 +2229,6 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
           ],
         );
       }
-      final title = submenu == _LabActionSubmenu.android
-          ? 'Android device actions'
-          : 'Session actions';
-      final actions = submenu == _LabActionSubmenu.android
-          ? _androidActions
-          : _sessionActions;
       return Column(
         key: Key('mobile-lab-actions-$submenu'),
         mainAxisSize: MainAxisSize.min,
@@ -2240,10 +2236,10 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
         children: [
           _menuBackHeader(
             context,
-            title,
+            'Android device actions',
             () => setState(() => _actionSubmenu = null),
           ),
-          for (final action in actions)
+          for (final action in _androidActions)
             ListTile(
               contentPadding: EdgeInsets.zero,
               visualDensity: VisualDensity.compact,
@@ -2277,6 +2273,15 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
           onTap: () =>
               setState(() => _actionSubmenu = _LabActionSubmenu.keyboard),
         ),
+        if (!widget.scenario.viewOnly)
+          ListTile(
+            key: const Key('mobile-lab-actions-open-custom-buttons'),
+            contentPadding: EdgeInsets.zero,
+            visualDensity: VisualDensity.compact,
+            title: const Text('Customize keyboard buttons'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => setState(() => _showCustomButtonEditor = true),
+          ),
         if (widget.scenario.peerIsAndroid)
           ListTile(
             key: const Key('mobile-lab-actions-open-android'),
@@ -2287,23 +2292,20 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
             onTap: () =>
                 setState(() => _actionSubmenu = _LabActionSubmenu.android),
           ),
-        ListTile(
-          key: const Key('mobile-lab-actions-open-session'),
-          contentPadding: EdgeInsets.zero,
-          visualDensity: VisualDensity.compact,
-          title: const Text('Session actions'),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () =>
-              setState(() => _actionSubmenu = _LabActionSubmenu.session),
-        ),
-        if (!widget.scenario.viewOnly)
+        for (final action in _sessionActions)
           ListTile(
-            key: const Key('mobile-lab-actions-open-custom-buttons'),
+            key: Key('mobile-lab-session-action-$action'),
             contentPadding: EdgeInsets.zero,
             visualDensity: VisualDensity.compact,
-            title: const Text('Customize keyboard buttons'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => setState(() => _showCustomButtonEditor = true),
+            title: Text(action),
+            onTap: () {
+              if (action == 'Reset canvas') _resetView();
+              setState(() {
+                _panel = null;
+                _actionSubmenu = null;
+              });
+              _showPreviewAction(action);
+            },
           ),
       ],
     );

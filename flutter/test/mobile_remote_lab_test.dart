@@ -120,7 +120,7 @@ void main() {
 
   test('reports the composed RustAdmin release version', () {
     expect(mobileRemoteLabVersion, '2.0.5.011');
-    expect(mobileRemoteLabRevisionLabel, '2.0.5.011 · Lab r19');
+    expect(mobileRemoteLabRevisionLabel, '2.0.5.011 · Lab r21');
   });
 
   test('calculates native-texture fit, zoom, and no-overscan bounds', () {
@@ -786,7 +786,9 @@ void main() {
     expect(find.text('Clipboard'), findsOneWidget);
     expect(find.text('Resolution'), findsOneWidget);
     expect(find.text('Virtual display'), findsOneWidget);
-    expect(find.text('Session controls'), findsOneWidget);
+    expect(find.text('Session controls'), findsNothing);
+    expect(find.text('Show remote cursor'), findsOneWidget);
+    expect(find.text('Privacy mode'), findsOneWidget);
     final showMonitors = find.text('Show monitors in toolbar');
     expect(showMonitors, findsOneWidget);
 
@@ -825,17 +827,20 @@ void main() {
     await tester.tap(find.byKey(const Key('mobile-remote-options-back')));
     await tester.pumpAndSettle();
 
+    await tester.tap(
+      find.byKey(const Key('mobile-remote-options-open-quality-monitor')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Disabled'), findsOneWidget);
+    expect(find.text('Quality monitor details'), findsOneWidget);
+    expect(find.text('Basic'), findsOneWidget);
+    expect(find.text('Extended'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('mobile-remote-options-back')));
+    await tester.pumpAndSettle();
+
     await tester.ensureVisible(showMonitors);
     await tester.tap(showMonitors);
     await tester.pumpAndSettle();
-    final sessionControls = find.byKey(
-      const Key('mobile-remote-options-open-session-controls'),
-    );
-    await tester.ensureVisible(sessionControls);
-    await tester.tap(sessionControls);
-    await tester.pumpAndSettle();
-    expect(find.text('Show remote cursor'), findsOneWidget);
-    expect(find.text('Privacy mode'), findsOneWidget);
 
     await tester.tapAt(const Offset(4, 4));
     await tester.pumpAndSettle();
@@ -843,6 +848,10 @@ void main() {
       find.byKey(const ValueKey('mobile-remote-monitor-0')),
       findsOneWidget,
     );
+    final firstMonitorLabel = tester.widget<Text>(
+      find.byKey(const ValueKey('mobile-remote-monitor-label-0')),
+    );
+    expect(firstMonitorLabel.data, '1');
     expect(
       find.byKey(const ValueKey('mobile-remote-monitor--1')),
       findsOneWidget,
@@ -850,9 +859,22 @@ void main() {
     await tester.tap(find.byTooltip('More actions'));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('mobile-lab-actions-root')), findsOneWidget);
-    await tester.tap(
-      find.byKey(const Key('mobile-lab-actions-open-keyboard')),
-    );
+    final keyboardY = tester
+        .getTopLeft(find.byKey(const Key('mobile-lab-actions-open-keyboard')))
+        .dy;
+    final customizeY = tester
+        .getTopLeft(
+          find.byKey(const Key('mobile-lab-actions-open-custom-buttons')),
+        )
+        .dy;
+    final firstSessionActionY = tester
+        .getTopLeft(
+          find.byKey(const Key('mobile-lab-session-action-Request Elevation')),
+        )
+        .dy;
+    expect(keyboardY, lessThan(customizeY));
+    expect(customizeY, lessThan(firstSessionActionY));
+    await tester.tap(find.byKey(const Key('mobile-lab-actions-open-keyboard')));
     await tester.pumpAndSettle();
     expect(find.text('Legacy mode'), findsOneWidget);
     expect(find.text('Map mode'), findsOneWidget);
@@ -861,8 +883,7 @@ void main() {
     expect(find.text('Trackpad speed'), findsOneWidget);
     await tester.tap(find.byKey(const Key('mobile-lab-actions-back')));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('mobile-lab-actions-open-session')));
-    await tester.pumpAndSettle();
+    expect(find.text('Session actions'), findsNothing);
     expect(find.text('OS Password'), findsOneWidget);
     expect(find.text('Reset canvas'), findsOneWidget);
     expect(find.text('Restart remote device'), findsOneWidget);
@@ -895,12 +916,7 @@ void main() {
     await pumpPreview(tester, scenario: RemoteLabScenario.viewOnly);
     await tester.tap(find.byTooltip('Display and session options'));
     await tester.pumpAndSettle();
-    final sessionControls = find.byKey(
-      const Key('mobile-remote-options-open-session-controls'),
-    );
-    await tester.ensureVisible(sessionControls);
-    await tester.tap(sessionControls);
-    await tester.pumpAndSettle();
+    expect(find.text('Session controls'), findsNothing);
     expect(find.text('View Mode'), findsOneWidget);
     expect(find.text('Show remote cursor'), findsOneWidget);
 
@@ -908,8 +924,7 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('More actions'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('mobile-lab-actions-open-session')));
-    await tester.pumpAndSettle();
+    expect(find.text('Session actions'), findsNothing);
     expect(find.text('OS Password'), findsNothing);
     expect(find.text('Send clipboard keystrokes'), findsNothing);
     expect(find.text('Block user input'), findsNothing);
@@ -1012,6 +1027,9 @@ void main() {
 
     await tester.tap(find.byTooltip('More actions'));
     await tester.pumpAndSettle();
+    await tester.ensureVisible(
+      find.byKey(const Key('mobile-lab-actions-open-custom-buttons')),
+    );
     await tester.tap(
       find.byKey(const Key('mobile-lab-actions-open-custom-buttons')),
     );
@@ -1087,9 +1105,7 @@ void main() {
     await tester.tap(find.byTooltip('More actions'));
     await tester.pumpAndSettle();
     expect(find.text('Android device actions'), findsOneWidget);
-    await tester.tap(
-      find.byKey(const Key('mobile-lab-actions-open-keyboard')),
-    );
+    await tester.tap(find.byKey(const Key('mobile-lab-actions-open-keyboard')));
     await tester.pumpAndSettle();
     expect(find.text('Legacy mode'), findsOneWidget);
     expect(find.text('Map mode'), findsNothing);
@@ -1101,8 +1117,7 @@ void main() {
     expect(find.text('Power'), findsOneWidget);
     await tester.tap(find.byKey(const Key('mobile-lab-actions-back')));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('mobile-lab-actions-open-session')));
-    await tester.pumpAndSettle();
+    expect(find.text('Session actions'), findsNothing);
     expect(find.text('Copy Fingerprint'), findsOneWidget);
   });
 
@@ -1137,7 +1152,7 @@ void main() {
 
     await tester.tap(find.byTooltip('More actions'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('mobile-lab-actions-open-session')));
+    await tester.ensureVisible(find.text('OS Password'));
     await tester.pumpAndSettle();
     expect(
       find.descendant(of: viewport, matching: find.text('OS Password')),

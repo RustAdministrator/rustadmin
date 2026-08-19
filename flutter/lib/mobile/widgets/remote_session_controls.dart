@@ -355,6 +355,8 @@ class MobileRemoteToolbar extends StatefulWidget {
 class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
   static const _iconSize = 24.0;
   static const _maximumButtonExtent = 48.0;
+  static const _maximumVerticalButtonExtent =
+      _iconSize + (_maximumButtonExtent - _iconSize) * 0.5;
 
   var _collapsed = false;
   late var _placementSettings = widget.placementSettings;
@@ -528,15 +530,26 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
             : Stack(
                 alignment: Alignment.center,
                 children: [
-                  const Icon(Icons.desktop_windows, size: 27),
+                  const Icon(Icons.desktop_windows_outlined, size: 27),
                   Padding(
                     padding: const EdgeInsets.only(bottom: 3),
-                    child: Text(
-                      monitor.label,
-                      style: TextStyle(
-                        color: foreground,
-                        fontSize: 9,
-                        fontWeight: FontWeight.w700,
+                    child: SizedBox(
+                      width: 14,
+                      height: 10,
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(
+                          monitor.label,
+                          key: ValueKey(
+                            'mobile-remote-monitor-label-${monitor.value}',
+                          ),
+                          style: TextStyle(
+                            color: foreground,
+                            fontSize: 9,
+                            fontWeight: FontWeight.w700,
+                            height: 1,
+                          ),
+                        ),
                       ),
                     ),
                   ),
@@ -624,9 +637,11 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
         final availableExtent = _vertical
             ? constraints.maxHeight
             : constraints.maxWidth;
+        final maximumExtent =
+            _vertical ? _maximumVerticalButtonExtent : _maximumButtonExtent;
         final extent = availableExtent.isFinite && availableExtent > 0
-            ? (availableExtent / itemCount).clamp(0.0, _maximumButtonExtent)
-            : _maximumButtonExtent;
+            ? (availableExtent / itemCount).clamp(0.0, maximumExtent)
+            : maximumExtent;
         final items = _collapsed
             ? [
                 _iconButton(
@@ -1200,6 +1215,7 @@ class MobileRemoteRadioSection {
     required this.value,
     required this.items,
     this.heading,
+    this.submenuId,
     this.selectionDetailsBuilder,
     this.dividerAfter = true,
   });
@@ -1208,8 +1224,11 @@ class MobileRemoteRadioSection {
   final String value;
   final List<MobileRemoteRadioItem> items;
   final Widget? heading;
+  final String? submenuId;
   final Widget Function(String value)? selectionDetailsBuilder;
   final bool dividerAfter;
+
+  String get resolvedSubmenuId => submenuId ?? id;
 }
 
 class MobileRemoteToggleItem {
@@ -1265,12 +1284,16 @@ class MobileRemoteActionsContent extends StatefulWidget {
   const MobileRemoteActionsContent({
     super.key,
     this.title = 'More actions',
+    this.primarySections = const [],
     this.sections = const [],
+    this.actions = const [],
     this.navigationItems = const [],
   });
 
   final String title;
+  final List<MobileRemoteActionSection> primarySections;
   final List<MobileRemoteActionSection> sections;
+  final List<MobileRemoteActionItem> actions;
   final List<MobileRemoteNavigationItem> navigationItems;
 
   @override
@@ -1285,7 +1308,10 @@ class _MobileRemoteActionsContentState
   MobileRemoteActionSection? get _section {
     final id = _sectionId;
     if (id == null) return null;
-    for (final section in widget.sections) {
+    for (final section in [
+      ...widget.primarySections,
+      ...widget.sections,
+    ]) {
       if (section.id == id) return section;
     }
     return null;
@@ -1344,7 +1370,7 @@ class _MobileRemoteActionsContentState
           ),
         ),
         const SizedBox(height: 8),
-        for (final section in widget.sections)
+        for (final section in widget.primarySections)
           if (section.actions.isNotEmpty || section.content != null)
             ListTile(
               key: Key('mobile-remote-actions-open-${section.id}'),
@@ -1362,6 +1388,23 @@ class _MobileRemoteActionsContentState
             title: item.child,
             trailing: const Icon(Icons.chevron_right),
             onTap: item.onPressed,
+          ),
+        for (final section in widget.sections)
+          if (section.actions.isNotEmpty || section.content != null)
+            ListTile(
+              key: Key('mobile-remote-actions-open-${section.id}'),
+              contentPadding: EdgeInsets.zero,
+              visualDensity: VisualDensity.compact,
+              title: section.title,
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => setState(() => _sectionId = section.id),
+            ),
+        for (final action in widget.actions)
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            visualDensity: VisualDensity.compact,
+            title: action.child,
+            onTap: action.onPressed,
           ),
       ],
     );
@@ -1518,7 +1561,6 @@ class _MobileRemoteOptionsContentState
   late Map<String, String> _radioValues;
   late Map<String, bool> _toggleValues;
   String? _selectedSectionId;
-  var _showToggles = false;
 
   @override
   void initState() {
@@ -1550,19 +1592,18 @@ class _MobileRemoteOptionsContentState
     };
   }
 
-  MobileRemoteRadioSection? get _selectedSection {
+  List<MobileRemoteRadioSection> get _selectedSections {
     final id = _selectedSectionId;
-    if (id == null) return null;
-    for (final section in widget.radioSections) {
-      if (section.id == id) return section;
-    }
-    return null;
+    if (id == null) return const [];
+    return [
+      for (final section in widget.radioSections)
+        if (section.resolvedSubmenuId == id) section,
+    ];
   }
 
-  void _showView({String? sectionId, bool showToggles = false}) {
+  void _showView({String? sectionId}) {
     setState(() {
       _selectedSectionId = sectionId;
-      _showToggles = showToggles;
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !_scrollController.hasClients) return;
@@ -1624,13 +1665,16 @@ class _MobileRemoteOptionsContentState
       ...widget.header,
     ];
 
+    final addedSubmenus = <String>{};
     for (final section in widget.radioSections) {
       if (section.items.isEmpty) continue;
+      final submenuId = section.resolvedSubmenuId;
+      if (!addedSubmenus.add(submenuId)) continue;
       children.add(
         _rootMenuItem(
-          key: Key('mobile-remote-options-open-${section.id}'),
+          key: Key('mobile-remote-options-open-$submenuId'),
           title: section.heading ?? Text(section.id),
-          onTap: () => _showView(sectionId: section.id),
+          onTap: () => _showView(sectionId: submenuId),
         ),
       );
     }
@@ -1645,12 +1689,23 @@ class _MobileRemoteOptionsContentState
         ),
       );
     }
-    if (widget.toggles.isNotEmpty) {
+    for (final toggle in widget.toggles) {
+      if (toggle.dividerBefore) children.add(const Divider());
       children.add(
-        _rootMenuItem(
-          key: const Key('mobile-remote-options-open-session-controls'),
-          title: const Text('Session controls'),
-          onTap: () => _showView(showToggles: true),
+        CheckboxListTile(
+          key: Key('mobile-remote-options-toggle-${toggle.id}'),
+          contentPadding: EdgeInsets.zero,
+          visualDensity: VisualDensity.compact,
+          value: _toggleValues[toggle.id] ?? toggle.value,
+          onChanged: toggle.onChanged == null
+              ? null
+              : (value) {
+                  toggle.onChanged?.call(value);
+                  if (value != null) {
+                    setState(() => _toggleValues[toggle.id] = value);
+                  }
+                },
+          title: toggle.child,
         ),
       );
     }
@@ -1662,80 +1717,68 @@ class _MobileRemoteOptionsContentState
     );
   }
 
-  Widget _buildRadioSection(
+  Widget _buildRadioSections(
     BuildContext context,
-    MobileRemoteRadioSection section,
+    List<MobileRemoteRadioSection> sections,
   ) {
-    final selectedValue = _radioValues[section.id] ?? section.value;
-    final detailsBuilder = section.selectionDetailsBuilder;
+    final firstSection = sections.first;
     return Column(
-      key: Key('mobile-remote-options-submenu-${section.id}'),
+      key: Key(
+        'mobile-remote-options-submenu-${firstSection.resolvedSubmenuId}',
+      ),
       mainAxisSize: MainAxisSize.min,
       children: [
         _backHeader(
           context,
-          section.heading is Text
-              ? ((section.heading as Text).data ?? section.id)
-              : section.id,
+          firstSection.heading is Text
+              ? ((firstSection.heading as Text).data ?? firstSection.id)
+              : firstSection.id,
           _showView,
         ),
-        RadioGroup<String>(
-          groupValue: selectedValue,
-          onChanged: (value) {
-            if (value == null) return;
-            final item = section.items.firstWhere(
-              (candidate) => candidate.value == value,
-            );
-            item.onChanged?.call(value);
-            if (item.commitSelection && item.onChanged != null) {
-              setState(() => _radioValues[section.id] = value);
-            }
-          },
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              for (final item in section.items)
-                RadioListTile<String>(
-                  contentPadding: EdgeInsets.zero,
-                  visualDensity: VisualDensity.compact,
-                  value: item.value,
-                  enabled: item.onChanged != null,
-                  title: item.child,
-                ),
-            ],
+        for (var index = 0; index < sections.length; index++) ...[
+          if (index > 0) ...[
+            const Divider(),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: DefaultTextStyle.merge(
+                style: Theme.of(context).textTheme.titleSmall,
+                child: sections[index].heading ?? Text(sections[index].id),
+              ),
+            ),
+            const SizedBox(height: 4),
+          ],
+          RadioGroup<String>(
+            groupValue:
+                _radioValues[sections[index].id] ?? sections[index].value,
+            onChanged: (value) {
+              if (value == null) return;
+              final section = sections[index];
+              final item = section.items.firstWhere(
+                (candidate) => candidate.value == value,
+              );
+              item.onChanged?.call(value);
+              if (item.commitSelection && item.onChanged != null) {
+                setState(() => _radioValues[section.id] = value);
+              }
+            },
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final item in sections[index].items)
+                  RadioListTile<String>(
+                    contentPadding: EdgeInsets.zero,
+                    visualDensity: VisualDensity.compact,
+                    value: item.value,
+                    enabled: item.onChanged != null,
+                    title: item.child,
+                  ),
+              ],
+            ),
           ),
-        ),
-        if (detailsBuilder != null) detailsBuilder(selectedValue),
-      ],
-    );
-  }
-
-  Widget _buildToggles(BuildContext context) {
-    return Column(
-      key: const Key('mobile-remote-options-session-controls'),
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        _backHeader(
-          context,
-          'Session controls',
-          _showView,
-        ),
-        for (final toggle in widget.toggles) ...[
-          if (toggle.dividerBefore) const Divider(),
-          CheckboxListTile(
-            contentPadding: EdgeInsets.zero,
-            visualDensity: VisualDensity.compact,
-            value: _toggleValues[toggle.id] ?? toggle.value,
-            onChanged: toggle.onChanged == null
-                ? null
-                : (value) {
-                    toggle.onChanged?.call(value);
-                    if (value != null) {
-                      setState(() => _toggleValues[toggle.id] = value);
-                    }
-                  },
-            title: toggle.child,
-          ),
+          if (sections[index].selectionDetailsBuilder != null)
+            sections[index].selectionDetailsBuilder!(
+              _radioValues[sections[index].id] ?? sections[index].value,
+            ),
         ],
       ],
     );
@@ -1743,11 +1786,9 @@ class _MobileRemoteOptionsContentState
 
   @override
   Widget build(BuildContext context) {
-    final section = _selectedSection;
-    final content = section != null
-        ? _buildRadioSection(context, section)
-        : _showToggles
-        ? _buildToggles(context)
+    final sections = _selectedSections;
+    final content = sections.isNotEmpty
+        ? _buildRadioSections(context, sections)
         : _buildRoot(context);
     return SingleChildScrollView(
       key: const Key('mobile-remote-options-scroll'),

@@ -205,6 +205,11 @@ void main() {
     await tester.pumpAndSettle();
     expect(placement.axis, MobileRemoteToolbarAxis.vertical);
     expect(find.text('V'), findsOneWidget);
+    final verticalIconGap =
+        tester.getCenter(find.byTooltip('Display and session options')).dy -
+        tester.getCenter(find.byTooltip('Collapse toolbar')).dy -
+        24;
+    expect(verticalIconGap, 12);
     await tester.tap(find.byTooltip('Collapse toolbar'));
     await tester.pumpAndSettle();
     expect(find.byTooltip('Show toolbar'), findsOneWidget);
@@ -453,6 +458,77 @@ void main() {
     expect(find.byKey(const Key('mobile-remote-options-root')), findsOneWidget);
   });
 
+  testWidgets('options group related sections and expose toggles at root', (
+    tester,
+  ) async {
+    bool? showCursor;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MobileRemoteOptionsContent(
+            radioSections: [
+              MobileRemoteRadioSection(
+                id: 'quality-monitor',
+                submenuId: 'quality-monitor',
+                value: 'disabled',
+                heading: const Text('Quality monitor'),
+                items: [
+                  MobileRemoteRadioItem(
+                    value: 'disabled',
+                    child: const Text('Disabled'),
+                    onChanged: (_) {},
+                  ),
+                ],
+              ),
+              MobileRemoteRadioSection(
+                id: 'quality-monitor-details',
+                submenuId: 'quality-monitor',
+                value: 'basic',
+                heading: const Text('Quality monitor details'),
+                items: [
+                  MobileRemoteRadioItem(
+                    value: 'basic',
+                    child: const Text('Basic'),
+                    onChanged: (_) {},
+                  ),
+                  MobileRemoteRadioItem(
+                    value: 'extended',
+                    child: const Text('Extended'),
+                    onChanged: (_) {},
+                  ),
+                ],
+              ),
+            ],
+            toggles: [
+              MobileRemoteToggleItem(
+                id: 'show-cursor',
+                value: true,
+                child: const Text('Show remote cursor'),
+                onChanged: (value) => showCursor = value,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('Quality monitor'), findsOneWidget);
+    expect(find.text('Quality monitor details'), findsNothing);
+    expect(find.text('Session controls'), findsNothing);
+    expect(find.text('Show remote cursor'), findsOneWidget);
+    await tester.tap(find.text('Show remote cursor'));
+    expect(showCursor, isFalse);
+
+    await tester.tap(
+      find.byKey(const Key('mobile-remote-options-open-quality-monitor')),
+    );
+    await tester.pump();
+    expect(find.text('Disabled'), findsOneWidget);
+    expect(find.text('Quality monitor details'), findsOneWidget);
+    expect(find.text('Basic'), findsOneWidget);
+    expect(find.text('Extended'), findsOneWidget);
+  });
+
   testWidgets('options remain scrollable after rotating to landscape', (
     tester,
   ) async {
@@ -615,23 +691,44 @@ void main() {
     expect(find.byKey(const Key('mobile-remote-options-root')), findsOneWidget);
   });
 
-  testWidgets('more actions are grouped into navigable submenus', (
+  testWidgets('more actions expose session actions in the root menu', (
     tester,
   ) async {
+    var reset = false;
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
           body: MobileRemoteActionsContent(
+            primarySections: [
+              MobileRemoteActionSection(
+                id: 'keyboard',
+                title: const Text('Keyboard settings'),
+                content: const Text('Keyboard content'),
+              ),
+            ],
             sections: [
               MobileRemoteActionSection(
-                id: 'session',
-                title: const Text('Session actions'),
+                id: 'android',
+                title: const Text('Android device actions'),
                 actions: [
                   MobileRemoteActionItem(
-                    child: const Text('Reset canvas'),
+                    child: const Text('Home'),
                     onPressed: () {},
                   ),
                 ],
+              ),
+            ],
+            actions: [
+              MobileRemoteActionItem(
+                child: const Text('Reset canvas'),
+                onPressed: () => reset = true,
+              ),
+            ],
+            navigationItems: [
+              MobileRemoteNavigationItem(
+                id: 'custom-buttons',
+                child: const Text('Customize keyboard buttons'),
+                onPressed: () {},
               ),
             ],
           ),
@@ -639,15 +736,33 @@ void main() {
       ),
     );
 
-    await tester.tap(
-      find.byKey(const Key('mobile-remote-actions-open-session')),
-    );
-    await tester.pump();
     expect(find.text('Reset canvas'), findsOneWidget);
-    expect(find.byTooltip('Back to actions'), findsOneWidget);
-
-    await tester.tap(find.byTooltip('Back to actions'));
-    await tester.pump();
+    expect(find.text('Session actions'), findsNothing);
+    expect(
+      find.byKey(const Key('mobile-remote-actions-open-session')),
+      findsNothing,
+    );
+    final keyboardY = tester
+        .getTopLeft(
+          find.byKey(const Key('mobile-remote-actions-open-keyboard')),
+        )
+        .dy;
+    final customizeY = tester
+        .getTopLeft(
+          find.byKey(const Key('mobile-remote-actions-open-custom-buttons')),
+        )
+        .dy;
+    final androidY = tester
+        .getTopLeft(
+          find.byKey(const Key('mobile-remote-actions-open-android')),
+        )
+        .dy;
+    final resetY = tester.getTopLeft(find.text('Reset canvas')).dy;
+    expect(keyboardY, lessThan(customizeY));
+    expect(customizeY, lessThan(androidY));
+    expect(androidY, lessThan(resetY));
+    await tester.tap(find.text('Reset canvas'));
+    expect(reset, isTrue);
     expect(find.byKey(const Key('mobile-remote-actions-root')), findsOneWidget);
   });
 

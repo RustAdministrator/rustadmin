@@ -6,7 +6,7 @@
 const mobileRemoteLabVersion = '2.0.5.011';
 
 /// It is intentionally independent from RustAdmin's production revision.
-const mobileRemoteLabRevision = 19;
+const mobileRemoteLabRevision = 21;
 
 const mobileRemoteLabRevisionLabel =
     '$mobileRemoteLabVersion · Lab r$mobileRemoteLabRevision';
