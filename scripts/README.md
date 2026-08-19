@@ -42,7 +42,9 @@ Optional overrides:
 ```
 
 Use `-NoHwCodec` to build without the `hwcodec` feature.
-Use `-Clean` to force-refresh Flutter metadata and Windows build intermediates.
+Use `-Clean` to force-refresh Flutter metadata, Windows build intermediates,
+and shared generated Flutter assets. This prevents debug-only assets from a
+Lab run, such as `kernel_blob.bin`, from entering a release bundle.
 The Windows build and validation scripts set `RUSTDESK_WINDOWS_CODEC_ROOT` and
 `CMAKE_PREFIX_PATH` from `-DepsRoot`, so clean machines do not fall back to an
 incomplete Visual Studio vcpkg prefix.

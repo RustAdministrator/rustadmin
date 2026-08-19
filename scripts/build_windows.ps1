@@ -476,8 +476,14 @@ Write-VersionFile $VersionInfo
 Push-Location $FlutterDir
 try {
     if ($Clean -or (Test-StaleFlutterMetadata)) {
-        Write-Host "Refreshing Windows Flutter metadata..."
-        Remove-Item -Recurse -Force ".dart_tool", ".flutter-plugins-dependencies", "build\windows" -ErrorAction SilentlyContinue
+        Write-Host "Refreshing Windows Flutter metadata and generated assets..."
+        Remove-Item -Recurse -Force `
+            ".dart_tool", `
+            ".flutter-plugins-dependencies", `
+            "build\windows", `
+            "build\flutter_assets", `
+            "build\native_assets\windows" `
+            -ErrorAction SilentlyContinue
     }
     Invoke-NativeCommand { & $FlutterBat pub get } "flutter pub get"
 }
@@ -505,11 +511,16 @@ finally {
     Pop-Location
 }
 
+$BundleDir = Join-Path $FlutterDir "build\windows\x64\runner\Release"
+$UnexpectedKernelBlob = Join-Path $BundleDir "data\flutter_assets\kernel_blob.bin"
+if (Test-Path $UnexpectedKernelBlob) {
+    throw "Release bundle contains debug-only Flutter asset '$UnexpectedKernelBlob'. Rebuild with -Clean."
+}
+
 $StaleRuntimeIcon = Join-Path $FlutterDir "build\windows\x64\runner\Release\data\flutter_assets\assets\icon.ico"
 Remove-Item -Force $StaleRuntimeIcon -ErrorAction SilentlyContinue
 
 Write-Host "Windows bundle:"
-$BundleDir = Join-Path $FlutterDir "build\windows\x64\runner\Release"
 Write-Host $BundleDir
 Copy-WindowsRuntimeDependencies $BundleDir $DepsRoot
 New-ReleaseZip $VersionInfo
