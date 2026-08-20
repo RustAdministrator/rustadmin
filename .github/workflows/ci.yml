@@ -138,6 +138,7 @@ jobs:
           --build-root "${RUNNER_TEMP}/rustadmin-builder-build"
           --install-prefix "${prefix_root}"
           --build-types Release
+          --only libyuv,libvpx,aom,opus
         )
         python3 rustadmin-builder/build.py "${common_args[@]}" --build
         python3 rustadmin-builder/build.py "${common_args[@]}" --verify-prefix
