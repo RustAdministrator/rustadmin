@@ -8713,11 +8713,11 @@ mod test {
             );
         }
         assert!(controller
-            .poll_recovery(start + Duration::from_millis(1_649), 10)
+            .poll_recovery(start + Duration::from_millis(1_249), 10)
             .is_empty());
         assert_eq!(
             controller
-                .poll_recovery(start + Duration::from_millis(1_650), 10)
+                .poll_recovery(start + Duration::from_millis(1_250), 10)
                 .len(),
             1
         );
@@ -8725,7 +8725,7 @@ mod test {
         let status = controller.status(0).unwrap();
         assert_eq!(status.phase, VideoDeliveryPhase::Recovering);
         assert_eq!(status.recovery_count, 2);
-        assert_eq!(status.latest_stall_ms, 900);
+        assert_eq!(status.latest_stall_ms, 500);
     }
 
     #[test]
