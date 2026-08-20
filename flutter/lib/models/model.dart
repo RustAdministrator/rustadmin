@@ -43,6 +43,7 @@ import 'package:vector_math/vector_math.dart' show Vector2;
 import '../common.dart';
 import '../common/peer_trust_error.dart';
 import '../mobile/mobile_viewport.dart';
+import '../mobile/android_vpn_controller.dart';
 import '../utils/image.dart' as img;
 import '../common/widgets/dialog.dart';
 import 'input_model.dart';
@@ -2787,7 +2788,7 @@ class CanvasModel with ChangeNotifier {
   bool _bumpMouseIsWorking = true;
   ViewStyle _lastViewStyle = ViewStyle.defaultViewStyle();
   MobileRemoteViewScaleMode _mobileViewScaleMode =
-      MobileRemoteViewScaleMode.fitHeight;
+      kDefaultMobileRemoteViewScaleMode;
   bool _mobileFitPending = true;
 
   Timer? _timerMobileFocusCanvasCursor;
@@ -2962,6 +2963,15 @@ class CanvasModel with ChangeNotifier {
     _y = offset.dy - adjust;
     _mobileFitPending = false;
     _updateImageOverflow();
+    if (isAndroid) {
+      unawaited(
+        bind.mainSetCommon(
+          key: 'debug-probe-log',
+          value:
+              'Android mobile viewport fit: mode=${_mobileViewScaleMode.value}, viewport=${size.width}x${size.height}, texture=${texture.width}x${texture.height}, scale=$_scale',
+        ),
+      );
+    }
   }
 
   void _clampMobileCanvas() {
@@ -3613,7 +3623,7 @@ class CanvasModel with ChangeNotifier {
     _y = 0;
     _scale = 1.0;
     _lastViewStyle = ViewStyle.defaultViewStyle();
-    _mobileViewScaleMode = MobileRemoteViewScaleMode.fitHeight;
+    _mobileViewScaleMode = kDefaultMobileRemoteViewScaleMode;
     _mobileFitPending = true;
     _timerMobileFocusCanvasCursor?.cancel();
     _timerMobileRestoreCanvasOffset?.cancel();
@@ -5236,6 +5246,16 @@ class FFI {
       cursorModel.peerId = id;
     }
 
+    if (isAndroid) {
+      final attached = await AndroidVpnSessionCoordinator.instance.attach(
+        id,
+        sessionId.toString(),
+      );
+      if (!attached) {
+        throw StateError('Failed to protect the outgoing Android session');
+      }
+    }
+
     final isNewPeer = tabWindowId == null;
     // If tabWindowId != null, this session is a "tab -> window" one.
     // Else this session is a new one.
@@ -5512,6 +5532,9 @@ class FFI {
     inputModel.disposeRelativeMouseMode();
     if (closeSession) {
       await bind.sessionClose(sessionId: sessionId);
+    }
+    if (isAndroid) {
+      await AndroidVpnSessionCoordinator.instance.release();
     }
     debugPrint('model $id closed');
     id = '';

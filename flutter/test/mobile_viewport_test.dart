@@ -3,6 +3,22 @@ import 'package:flutter_hbb/mobile/mobile_viewport.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('fresh mobile view contains a wide remote screen in portrait', () {
+    const texture = Size(2560, 1440);
+    const viewport = Size(393, 873);
+    expect(kDefaultMobileRemoteViewScaleMode, MobileRemoteViewScaleMode.fitAll);
+
+    final scale = mobileRemoteScaleForMode(
+      mode: kDefaultMobileRemoteViewScaleMode,
+      texture: texture,
+      viewport: viewport,
+      devicePixelRatio: 3,
+    );
+
+    expect(texture.width * scale, closeTo(viewport.width, 0.000001));
+    expect(texture.height * scale, lessThanOrEqualTo(viewport.height));
+  });
+
   test(
     'calculates one-shot mobile view scales from decoded texture pixels',
     () {

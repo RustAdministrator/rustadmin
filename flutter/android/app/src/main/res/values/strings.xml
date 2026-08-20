@@ -1,4 +1,9 @@
 <resources>
     <string name="app_name">RustAdmin</string>
     <string name="accessibility_service_description">Allow other devices to control your phone using virtual touch, when RustAdmin screen sharing is established</string>
+    <string name="outgoing_session_channel">Remote sessions</string>
+    <string name="outgoing_session_title">RustAdmin remote session</string>
+    <string name="outgoing_session_active">Remote session is active</string>
+    <string name="outgoing_session_background">The session will close after 10 minutes in the background</string>
+    <string name="outgoing_session_disconnect">Disconnect</string>
 </resources>

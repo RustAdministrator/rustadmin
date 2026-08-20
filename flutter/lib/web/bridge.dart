@@ -1542,6 +1542,14 @@ class RustadminImpl {
         js.context.callMethod('setByName', ['query_onlines', jsonEncode(ids)]));
   }
 
+  Future<String> mainProbePeerOnline({
+    required String id,
+    required bool forceRefresh,
+    dynamic hint,
+  }) {
+    return Future.value('unknown');
+  }
+
   // Dup to the function in hbb_common, lib.rs
   // Maybe we need to move this function to js part.
   int versionToNumber({required String v, dynamic hint}) {

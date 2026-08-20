@@ -97,6 +97,7 @@ pub struct ChangeDisplayRecord {
     height: i32,
 }
 
+#[derive(Clone, Copy)]
 enum ConnectionState {
     Connecting,
     Connected,
@@ -1473,6 +1474,13 @@ impl<T: InvokeUiSession> Session<T> {
         self.confirm_direct_trust_response(false);
         self.submit_direct_pairing_passphrase_response(None);
         self.send(Data::Close);
+    }
+
+    pub fn is_connection_alive(&self) -> bool {
+        !matches!(
+            self.connection_round_state.lock().unwrap().state,
+            ConnectionState::Disconnected
+        )
     }
 
     pub fn confirm_direct_trust_response(&self, approved: bool) {

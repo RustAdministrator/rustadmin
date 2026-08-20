@@ -1,0 +1,7 @@
+<resources>
+    <string name="outgoing_session_channel">Удалённые сеансы</string>
+    <string name="outgoing_session_title">Удалённый сеанс RustAdmin</string>
+    <string name="outgoing_session_active">Удалённый сеанс активен</string>
+    <string name="outgoing_session_background">Сеанс будет закрыт через 10 минут в фоне</string>
+    <string name="outgoing_session_disconnect">Отключить</string>
+</resources>

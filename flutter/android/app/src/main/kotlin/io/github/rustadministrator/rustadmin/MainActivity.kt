@@ -15,6 +15,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.ClipboardManager
+import android.content.pm.PackageManager
 import android.os.Bundle
 import android.os.Build
 import android.os.IBinder
@@ -29,7 +30,9 @@ import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.util.DisplayMetrics
 import androidx.annotation.RequiresApi
+import androidx.core.app.ActivityCompat
 import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import org.json.JSONObject
 import com.hjq.permissions.XXPermissions
@@ -57,6 +60,7 @@ class MainActivity : FlutterActivity() {
     )
 
     companion object {
+        private const val REQ_WIREGUARD_CONTROL_PERMISSION = 3401
         var flutterMethodChannel: MethodChannel? = null
         private var _rdClipboardManager: RdClipboardManager? = null
         val rdClipboardManager: RdClipboardManager?
@@ -69,6 +73,7 @@ class MainActivity : FlutterActivity() {
     private val remoteVideoTextures = mutableMapOf<Int, RemoteVideoTexture>()
 
     private var isAudioStart = false
+    private var pendingWireGuardPermissionResult: MethodChannel.Result? = null
     private val audioRecordHandle = AudioRecordHandle(this, { false }, { isAudioStart })
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -127,11 +132,55 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         Log.e(logTag, "onDestroy")
+        pendingWireGuardPermissionResult?.success(false)
+        pendingWireGuardPermissionResult = null
         releaseAllRemoteVideoTextures()
         mainService?.let {
             unbindService(serviceConnection)
         }
         super.onDestroy()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQ_WIREGUARD_CONTROL_PERMISSION) return
+        val granted = grantResults.isNotEmpty() &&
+            grantResults[0] == PackageManager.PERMISSION_GRANTED
+        pendingWireGuardPermissionResult?.success(granted)
+        pendingWireGuardPermissionResult = null
+    }
+
+    private fun requestWireGuardControlPermission(result: MethodChannel.Result) {
+        if (!WireGuardController.isInstalled(this)) {
+            result.success(false)
+            return
+        }
+        if (ContextCompat.checkSelfPermission(
+                this,
+                WireGuardController.CONTROL_PERMISSION,
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            result.success(true)
+            return
+        }
+        if (pendingWireGuardPermissionResult != null) {
+            result.error(
+                "wireguard-permission-pending",
+                "A WireGuard control permission request is already active",
+                null,
+            )
+            return
+        }
+        pendingWireGuardPermissionResult = result
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(WireGuardController.CONTROL_PERMISSION),
+            REQ_WIREGUARD_CONTROL_PERMISSION,
+        )
     }
 
     private val serviceConnection = object : ServiceConnection {
@@ -422,6 +471,48 @@ class MainActivity : FlutterActivity() {
                         }
                     }
                 }
+                "vpn_network_snapshot" -> {
+                    result.success(
+                        WireGuardController.networkSnapshot(
+                            this,
+                            call.argument<String>("peer").orEmpty(),
+                        ),
+                    )
+                }
+                "wireguard_status" -> {
+                    result.success(WireGuardController.integrationStatus(this))
+                }
+                "wireguard_request_control_permission" -> {
+                    requestWireGuardControlPermission(result)
+                }
+                "wireguard_set_tunnel" -> {
+                    val tunnelName = call.argument<String>("tunnel").orEmpty()
+                    val up = call.argument<Boolean>("up")
+                    result.success(
+                        up != null && WireGuardController.setTunnelState(
+                            this,
+                            tunnelName,
+                            up,
+                        ),
+                    )
+                }
+                "outgoing_session_attach" -> {
+                    val sessionId = call.argument<String>("session_id").orEmpty()
+                    val tunnelName = call.argument<String>("tunnel").orEmpty()
+                    val ownsTunnel = call.argument<Boolean>("owns_tunnel") == true
+                    result.success(
+                        OutgoingSessionService.attach(
+                            this,
+                            sessionId,
+                            tunnelName,
+                            ownsTunnel,
+                        ),
+                    )
+                }
+                "outgoing_session_release" -> {
+                    OutgoingSessionService.release(this)
+                    result.success(true)
+                }
                 GET_VALUE -> {
                     if (call.arguments is String) {
                         if (call.arguments == KEY_IS_SUPPORT_VOICE_CALL) {
@@ -684,6 +775,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onStop() {
         super.onStop()
+        OutgoingSessionService.onAppBackground(this)
         val disableFloatingWindow = FFI.getLocalOption("disable-floating-window") == "Y"
         if (!disableFloatingWindow && MainService.isReady) {
             startService(Intent(this, FloatingWindowService::class.java))
@@ -692,6 +784,8 @@ class MainActivity : FlutterActivity() {
 
     override fun onStart() {
         super.onStart()
+        OutgoingSessionService.onAppForeground(this)
         stopService(Intent(this, FloatingWindowService::class.java))
     }
+
 }

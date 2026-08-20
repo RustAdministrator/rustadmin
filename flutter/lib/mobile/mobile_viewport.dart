@@ -6,6 +6,8 @@ import 'package:flutter/widgets.dart';
 /// subsequent gesture zooming and panning remain unconstrained by that mode.
 enum MobileRemoteViewScaleMode { fitAll, fitWidth, fitHeight, oneToOne }
 
+const kDefaultMobileRemoteViewScaleMode = MobileRemoteViewScaleMode.fitAll;
+
 extension MobileRemoteViewScaleModeDetails on MobileRemoteViewScaleMode {
   String get value => switch (this) {
     MobileRemoteViewScaleMode.fitAll => 'fit-all',

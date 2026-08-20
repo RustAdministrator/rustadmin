@@ -1483,6 +1483,8 @@ class _PeerConnectionProperties {
   String qualityMonitorDetails;
   String keyboardMode;
   String clipboardDirection;
+  bool androidVpnPreconnect;
+  String androidWireGuardTunnel;
 
   _PeerConnectionProperties({
     required this.imageQuality,
@@ -1493,6 +1495,8 @@ class _PeerConnectionProperties {
     required this.qualityMonitorDetails,
     required this.keyboardMode,
     required this.clipboardDirection,
+    required this.androidVpnPreconnect,
+    required this.androidWireGuardTunnel,
   });
 
   static Future<_PeerConnectionProperties> load(String id) async {
@@ -1512,6 +1516,15 @@ class _PeerConnectionProperties {
         await bind.mainGetPeerOption(id: id, key: 'keyboard_mode'));
     final clipboardDirection = normalizeClipboardDirectionPolicy(
         await bind.mainGetPeerOption(id: id, key: kOptionClipboardDirection));
+    final androidVpnPreconnect = isAndroid
+        ? option2bool(kOptionAndroidVpnPreconnect,
+            await bind.mainGetPeerOption(
+                id: id, key: kOptionAndroidVpnPreconnect))
+        : false;
+    final androidWireGuardTunnel = isAndroid
+        ? await bind.mainGetPeerOption(
+            id: id, key: kOptionAndroidWireGuardTunnel)
+        : '';
     return _PeerConnectionProperties(
       imageQuality: imageQuality,
       customImageQuality: customImageQuality,
@@ -1521,6 +1534,8 @@ class _PeerConnectionProperties {
       qualityMonitorDetails: qualityMonitorDetails,
       keyboardMode: keyboardMode,
       clipboardDirection: clipboardDirection,
+      androidVpnPreconnect: androidVpnPreconnect,
+      androidWireGuardTunnel: androidWireGuardTunnel,
     );
   }
 
@@ -1557,6 +1572,18 @@ class _PeerConnectionProperties {
       value: bool2option(kOptionDisableClipboard,
           clipboardDirection == kClipboardDirectionOff),
     );
+    if (isAndroid) {
+      await bind.mainSetPeerOption(
+        id: id,
+        key: kOptionAndroidVpnPreconnect,
+        value: bool2option(kOptionAndroidVpnPreconnect, androidVpnPreconnect),
+      );
+      await bind.mainSetPeerOption(
+        id: id,
+        key: kOptionAndroidWireGuardTunnel,
+        value: androidWireGuardTunnel,
+      );
+    }
   }
 }
 
@@ -1642,6 +1669,8 @@ Future<void> _showConnectionPropertiesDialog(String id) async {
   final properties = await _PeerConnectionProperties.load(id);
   final customQualityController =
       TextEditingController(text: properties.customImageQuality.toString());
+  final wireGuardTunnelController =
+      TextEditingController(text: properties.androidWireGuardTunnel);
 
   await Future<void>.delayed(Duration.zero);
   final dialogContext = globalKey.currentContext;
@@ -1666,6 +1695,14 @@ Future<void> _showConnectionPropertiesDialog(String id) async {
               properties.customImageQuality = quality
                   .clamp(kMinQuality.toInt(), kMaxMoreQuality.toInt())
                   .toInt();
+              properties.androidWireGuardTunnel =
+                  wireGuardTunnelController.text.trim();
+              if (isAndroid &&
+                  properties.androidVpnPreconnect &&
+                  properties.androidWireGuardTunnel.isEmpty) {
+                showToast(translate('WireGuard tunnel name is required'));
+                return;
+              }
               await properties.save(id);
               showToast(translate('Successful'));
               close();
@@ -1681,6 +1718,28 @@ Future<void> _showConnectionPropertiesDialog(String id) async {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisSize: MainAxisSize.min,
                     children: [
+                      if (isAndroid) _propertiesSection('VPN'),
+                      if (isAndroid)
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(
+                              translate('Start WireGuard when unavailable')),
+                          value: properties.androidVpnPreconnect,
+                          onChanged: (value) {
+                            setState(
+                                () => properties.androidVpnPreconnect = value);
+                          },
+                        ),
+                      if (isAndroid && properties.androidVpnPreconnect)
+                        TextField(
+                          controller: wireGuardTunnelController,
+                          autocorrect: false,
+                          enableSuggestions: false,
+                          maxLength: 128,
+                          decoration: InputDecoration(
+                            labelText: translate('WireGuard tunnel name'),
+                          ),
+                        ).marginOnly(bottom: 8),
                       _propertiesSection('Video'),
                       DropdownButtonFormField<String>(
                         value: properties.imageQuality,
@@ -1836,6 +1895,7 @@ Future<void> _showConnectionPropertiesDialog(String id) async {
     );
   } finally {
     customQualityController.dispose();
+    wireGuardTunnelController.dispose();
   }
 }
 

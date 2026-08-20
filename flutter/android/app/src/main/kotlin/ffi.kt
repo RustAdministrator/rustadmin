@@ -28,6 +28,9 @@ object FFI {
     external fun getBuildinOption(key: String): String
     external fun onClipboardUpdate(clips: ByteBuffer)
     external fun isServiceClipboardEnabled(): Boolean
+    external fun isOutgoingSessionActive(sessionId: String): Boolean
+    external fun closeOutgoingSession(sessionId: String): Boolean
+    external fun logDiagnostic(level: String, message: String)
     external fun setRemoteVideoSurface(display: Int, surface: Surface): Boolean
     external fun clearRemoteVideoSurface(display: Int)
 }

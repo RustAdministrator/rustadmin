@@ -33,6 +33,7 @@ import 'mobile/pages/file_manager_page.dart';
 import 'mobile/pages/remote_page.dart';
 import 'mobile/pages/view_camera_page.dart';
 import 'mobile/pages/terminal_page.dart';
+import 'mobile/android_vpn_controller.dart';
 import 'desktop/pages/remote_page.dart' as desktop_remote;
 import 'desktop/pages/file_manager_page.dart' as desktop_file_manager;
 import 'desktop/pages/view_camera_page.dart' as desktop_view_camera;
@@ -2885,6 +2886,23 @@ connect(BuildContext context, String id,
   forceRelay = id != oldId || forceRelay;
   assert(!(isFileTransfer && isTcpTunneling && isRDP),
       "more than one connect type");
+
+  if (isAndroid &&
+      !forceRelay &&
+      await AndroidVpnSessionCoordinator.instance.isEnabled(id)) {
+    const loadingTag = 'android-vpn-preconnect';
+    gFFI.dialogManager.showLoading(
+      translate('Checking peer availability and VPN'),
+      showCancel: false,
+      tag: loadingTag,
+    );
+    final vpnResult = await AndroidVpnSessionCoordinator.instance.prepare(id);
+    gFFI.dialogManager.dismissByTag(loadingTag);
+    if (!vpnResult.proceed) {
+      showToast(translate(vpnResult.message));
+      return;
+    }
+  }
 
   if (isDesktop) {
     if (desktopType == DesktopType.main) {
