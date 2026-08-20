@@ -81,6 +81,27 @@ jobs:
         git clone --depth=1 --branch "${ref}" \
           "https://github.com/${repository}.git" ../hbb_common
 
+    - name: Checkout hwcodec
+      shell: bash
+      env:
+        HWCODEC_OWNER: ${{ github.event.pull_request.head.repo.owner.login }}
+        HWCODEC_HEAD_REF: ${{ github.head_ref }}
+      run: |
+        repository="RustAdministrator/hwcodec"
+        ref="main"
+        if [[ -n "${HWCODEC_OWNER}" && -n "${HWCODEC_HEAD_REF}" ]]; then
+          candidate="${HWCODEC_OWNER}/hwcodec"
+          if git ls-remote --exit-code --heads \
+            "https://github.com/${candidate}.git" \
+            "${HWCODEC_HEAD_REF}" >/dev/null 2>&1; then
+            repository="${candidate}"
+            ref="${HWCODEC_HEAD_REF}"
+          fi
+        fi
+        echo "Using hwcodec repository=${repository}, ref=${ref}"
+        git clone --depth=1 --branch "${ref}" \
+          "https://github.com/${repository}.git" ../hwcodec
+
     - name: Install prerequisites
       shell: bash
       run: |
