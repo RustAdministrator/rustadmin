@@ -146,6 +146,26 @@ jobs:
           # aarch64-unknown-linux-gnu) sudo apt-get -y update ; sudo apt-get -y install gcc-aarch64-linux-gnu ;;
         esac
 
+    - name: Configure Linux codec pkg-config
+      if: matrix.job.target == 'x86_64-unknown-linux-gnu'
+      shell: bash
+      run: |
+        multiarch="$(gcc -print-multiarch)"
+        cat > pkgconfig/libyuv.pc <<EOF
+        prefix=/usr
+        libdir=\${prefix}/lib/${multiarch}
+        includedir=\${prefix}/include
+
+        Name: libyuv
+        Description: Ubuntu libyuv development package
+        Version: 0
+        Libs: -L\${libdir} -lyuv
+        Cflags: -I\${includedir}
+        EOF
+        export PKG_CONFIG_PATH="${PWD}/pkgconfig:${PKG_CONFIG_PATH:-}"
+        pkg-config --validate libyuv
+        pkg-config --exists libyuv vpx aom opus
+
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
       with:
