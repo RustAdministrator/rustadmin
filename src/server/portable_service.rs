@@ -66,6 +66,26 @@ const MAX_SECURE_CAPTURE_RECOVERY_FAILURES: u64 = 3;
 const SECURE_CAPTURE_RECOVERY_BACKOFF: Duration = Duration::from_secs(15);
 const MAX_DXGI_FAIL_TIME: usize = 5;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptureDesktopRebindAction {
+    None,
+    Recreate,
+    Retry,
+}
+
+fn capture_desktop_rebind_action(
+    desktop_changed: bool,
+    selection_succeeded: bool,
+) -> CaptureDesktopRebindAction {
+    if !desktop_changed {
+        CaptureDesktopRebindAction::None
+    } else if selection_succeeded {
+        CaptureDesktopRebindAction::Recreate
+    } else {
+        CaptureDesktopRebindAction::Retry
+    }
+}
+
 #[inline]
 fn is_valid_portable_service_shmem_name(name: &str) -> bool {
     !name.is_empty()
@@ -609,12 +629,13 @@ pub mod server {
     }
 
     fn run_capture(shmem: Arc<SharedMemory>) {
-        let mut c = None;
+        let mut c: Option<Capturer> = None;
         let mut last_current_display = usize::MAX;
         let mut last_timeout_ms: i32 = 33;
         let mut spf = Duration::from_millis(last_timeout_ms as _);
         let mut first_frame_captured = false;
         let mut dxgi_failed_times = 0;
+        let mut force_gdi_after_rebind = false;
         let mut display_width = 0;
         let mut display_height = 0;
         loop {
@@ -627,6 +648,26 @@ pub mod server {
                 let recreate = (*para).recreate;
                 let current_display = (*para).current_display;
                 let timeout_ms = (*para).timeout_ms;
+                let desktop_changed = crate::platform::windows::desktop_changed();
+                let desktop_selected = desktop_changed && crate::platform::try_change_desktop();
+                match capture_desktop_rebind_action(desktop_changed, desktop_selected) {
+                    CaptureDesktopRebindAction::None => {}
+                    CaptureDesktopRebindAction::Recreate => {
+                        log::info!(
+                            "portable service capture rebound to the current input desktop; recreating backend={}",
+                            c.as_ref().map(|capturer| capturer.capture_backend()).unwrap_or("none")
+                        );
+                        c = None;
+                        first_frame_captured = false;
+                        dxgi_failed_times = 0;
+                        force_gdi_after_rebind = true;
+                    }
+                    CaptureDesktopRebindAction::Retry => {
+                        shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(TRUE));
+                        std::thread::sleep(spf);
+                        continue;
+                    }
+                }
                 if c.is_none() {
                     let (prelogin, locked, desktop_changed, logon_ui) = capture_desktop_state();
                     let Ok(mut displays) = display_service::try_get_displays() else {
@@ -644,7 +685,11 @@ pub mod server {
                     display_height = display.height();
                     match Capturer::new(display) {
                         Ok(mut v) => {
-                            let force_gdi = prelogin || locked || desktop_changed || logon_ui;
+                            let force_gdi = force_gdi_after_rebind
+                                || prelogin
+                                || locked
+                                || desktop_changed
+                                || logon_ui;
                             let mut forced_gdi = false;
                             if force_gdi || dxgi_failed_times > MAX_DXGI_FAIL_TIME {
                                 dxgi_failed_times = 0;
@@ -667,6 +712,7 @@ pub mod server {
                             c = {
                                 last_current_display = current_display;
                                 first_frame_captured = false;
+                                force_gdi_after_rebind = false;
                                 utils::set_para(
                                     &shmem,
                                     CapturerPara {
@@ -2462,7 +2508,26 @@ pub struct FrameInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_valid_capture_frame_length, ADDR_CAPTURE_FRAME};
+    use super::{
+        capture_desktop_rebind_action, is_valid_capture_frame_length, CaptureDesktopRebindAction,
+        ADDR_CAPTURE_FRAME,
+    };
+
+    #[test]
+    fn secure_desktop_rebind_never_keeps_a_stale_capture() {
+        assert_eq!(
+            capture_desktop_rebind_action(false, false),
+            CaptureDesktopRebindAction::None
+        );
+        assert_eq!(
+            capture_desktop_rebind_action(true, true),
+            CaptureDesktopRebindAction::Recreate
+        );
+        assert_eq!(
+            capture_desktop_rebind_action(true, false),
+            CaptureDesktopRebindAction::Retry
+        );
+    }
 
     #[test]
     fn test_is_valid_capture_frame_length_rejects_zero_length() {

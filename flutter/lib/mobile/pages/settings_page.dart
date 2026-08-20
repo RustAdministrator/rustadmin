@@ -82,6 +82,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   var _peerPairingPassphraseSet = false;
   var _enableRecordSession = false;
   var _enableHardwareCodec = false;
+  var _useTextureRender = false;
   var _allowWebSocket = false;
   var _allowIdRelayServer = false;
   var _autoRecordIncomingSession = false;
@@ -129,6 +130,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
         bind.mainGetOptionSync(key: kOptionEnableRecordSession));
     _enableHardwareCodec = option2bool(kOptionEnableHwcodec,
         bind.mainGetOptionSync(key: kOptionEnableHwcodec));
+    _useTextureRender = bind.mainGetUseTextureRender();
     _allowWebSocket = mainGetBoolOptionSync(kOptionAllowWebSocket);
     _allowIdRelayServer = mainGetBoolOptionSync(kOptionAllowIdRelayServer);
     _allowInsecureTlsFallback =
@@ -1116,6 +1118,20 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                         });
                       },
               ),
+              if (bind.mainHasGpuTextureRender())
+                SettingsTile.switchTile(
+                  title: Text(translate('Use texture rendering')),
+                  description: Text(translate('texture_render_tip')),
+                  initialValue: _useTextureRender,
+                  onToggle: (v) async {
+                    await bind.mainSetLocalOption(
+                      key: kOptionTextureRender,
+                      value: v ? 'Y' : 'N',
+                    );
+                    final actual = bind.mainGetUseTextureRender();
+                    setState(() => _useTextureRender = actual);
+                  },
+                ),
             ],
           ),
         if (isAndroid)
