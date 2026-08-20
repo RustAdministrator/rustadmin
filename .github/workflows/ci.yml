@@ -81,12 +81,6 @@ jobs:
         git clone --depth=1 --branch "${ref}" \
           "https://github.com/${repository}.git" ../hbb_common
 
-    - name: Checkout rustadmin-builder
-      uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      with:
-        repository: RustAdministrator/rustadmin-builder
-        path: rustadmin-builder
-
     - name: Install prerequisites
       shell: bash
       run: |
@@ -102,6 +96,7 @@ jobs:
                gcc \
                git \
                g++ \
+               libaom-dev \
                libpam0g-dev \
                libasound2-dev \
                libunwind-dev \
@@ -109,9 +104,12 @@ jobs:
                libgstreamer-plugins-base1.0-dev \
                libgtk-3-dev \
                libtool \
+               libopus-dev \
                libpulse-dev \
                libva-dev \
                libvdpau-dev \
+               libvpx-dev \
+               libyuv-dev \
                libxcb-randr0-dev \
                libxcb-shape0-dev \
                libxcb-xfixes0-dev \
@@ -126,24 +124,6 @@ jobs:
           # arm-unknown-linux-*) sudo apt-get -y update ; sudo apt-get -y install gcc-arm-linux-gnueabihf ;;
           # aarch64-unknown-linux-gnu) sudo apt-get -y update ; sudo apt-get -y install gcc-aarch64-linux-gnu ;;
         esac
-
-    - name: Build native dependencies with rustadmin-builder
-      shell: bash
-      run: |
-        prefix_root="${RUNNER_TEMP}/rustadmin-native"
-        common_args=(
-          --target linux
-          --archs native
-          --src-root "${RUNNER_TEMP}/rustadmin-builder-src"
-          --build-root "${RUNNER_TEMP}/rustadmin-builder-build"
-          --install-prefix "${prefix_root}"
-          --build-types Release
-          --only libyuv,libvpx,aom,opus
-        )
-        python3 rustadmin-builder/build.py "${common_args[@]}" --build
-        python3 rustadmin-builder/build.py "${common_args[@]}" --verify-prefix
-        echo "CMAKE_PREFIX_PATH=${prefix_root}/Release" >> "$GITHUB_ENV"
-        echo "PKG_CONFIG_PATH=${prefix_root}/Release/lib/pkgconfig" >> "$GITHUB_ENV"
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -166,7 +146,7 @@ jobs:
 
     - name: Build
       shell: bash
-      run: cargo build --locked --target="${{ matrix.job.target }}"
+      run: cargo build --locked --features linux-pkg-config --target="${{ matrix.job.target }}"
 
     - name: clean
       shell: bash
@@ -230,4 +210,4 @@ jobs:
 
     - name: Run tests
       shell: bash
-      run: cargo test --locked --target="${{ matrix.job.target }}" ${{ steps.test-options.outputs.CARGO_TEST_OPTIONS }}
+      run: cargo test --locked --features linux-pkg-config --target="${{ matrix.job.target }}" ${{ steps.test-options.outputs.CARGO_TEST_OPTIONS }}
