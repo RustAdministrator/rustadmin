@@ -235,6 +235,10 @@ pub struct Decoder {
     h265_media_codec: Option<MediaCodecDecoder>,
     #[cfg(feature = "mediacodec")]
     media_codec_fallback: bool,
+    #[cfg(feature = "mediacodec")]
+    media_codec_display: usize,
+    #[cfg(feature = "mediacodec")]
+    media_codec_dimensions: Option<(usize, usize)>,
     format: CodecFormat,
     valid: bool,
     #[cfg(feature = "hwcodec")]
@@ -713,6 +717,7 @@ impl Decoder {
         format: CodecFormat,
         _luid: Option<i64>,
         _dimensions: Option<(usize, usize)>,
+        _display: usize,
     ) -> Decoder {
         log::info!(
             "try create new decoder, format: {format:?}, _luid: {_luid:?}, dimensions: {_dimensions:?}"
@@ -780,7 +785,7 @@ impl Decoder {
                 }
                 #[cfg(feature = "mediacodec")]
                 if !valid && enable_hwcodec_option() {
-                    h264_media_codec = MediaCodecDecoder::new(format, _dimensions);
+                    h264_media_codec = MediaCodecDecoder::new(format, _dimensions, _display);
                     if h264_media_codec.is_none() {
                         log::error!("create H264 media codec decoder failed");
                     }
@@ -806,7 +811,7 @@ impl Decoder {
                 }
                 #[cfg(feature = "mediacodec")]
                 if !valid && enable_hwcodec_option() {
-                    h265_media_codec = MediaCodecDecoder::new(format, _dimensions);
+                    h265_media_codec = MediaCodecDecoder::new(format, _dimensions, _display);
                     if h265_media_codec.is_none() {
                         log::error!("create H265 media codec decoder failed");
                     }
@@ -850,6 +855,10 @@ impl Decoder {
             h265_media_codec,
             #[cfg(feature = "mediacodec")]
             media_codec_fallback: false,
+            #[cfg(feature = "mediacodec")]
+            media_codec_display: _display,
+            #[cfg(feature = "mediacodec")]
+            media_codec_dimensions: _dimensions,
             format,
             valid,
             #[cfg(feature = "hwcodec")]
@@ -995,8 +1004,17 @@ impl Decoder {
                         .map(DecodeOutcome::from_ready);
                 }
                 #[cfg(feature = "mediacodec")]
+                self.sync_mediacodec_surface(CodecFormat::H264);
+                #[cfg(feature = "mediacodec")]
                 if let Some(decoder) = &mut self.h264_media_codec {
-                    match Decoder::handle_mediacodec_video_frame(decoder, h264s, frame_id, rgb) {
+                    match Decoder::handle_mediacodec_video_frame(
+                        decoder,
+                        h264s,
+                        frame_id,
+                        rgb,
+                        _texture,
+                        _pixelbuffer,
+                    ) {
                         Ok(outcome) => return Ok(outcome),
                         Err(error) => {
                             log::warn!(
@@ -1035,8 +1053,17 @@ impl Decoder {
                         .map(DecodeOutcome::from_ready);
                 }
                 #[cfg(feature = "mediacodec")]
+                self.sync_mediacodec_surface(CodecFormat::H265);
+                #[cfg(feature = "mediacodec")]
                 if let Some(decoder) = &mut self.h265_media_codec {
-                    match Decoder::handle_mediacodec_video_frame(decoder, h265s, frame_id, rgb) {
+                    match Decoder::handle_mediacodec_video_frame(
+                        decoder,
+                        h265s,
+                        frame_id,
+                        rgb,
+                        _texture,
+                        _pixelbuffer,
+                    ) {
                         Ok(outcome) => return Ok(outcome),
                         Err(error) => {
                             log::warn!(
@@ -1170,7 +1197,16 @@ impl Decoder {
         frames: &EncodedVideoFrames,
         frame_id: u64,
         rgb: &mut ImageRgb,
+        texture: &mut ImageTexture,
+        pixelbuffer: &mut bool,
     ) -> ResultType<DecodeOutcome> {
+        if decoder.uses_surface_output() {
+            *pixelbuffer = false;
+            let (width, height) = decoder.output_size();
+            texture.texture = std::ptr::null_mut();
+            texture.w = width;
+            texture.h = height;
+        }
         let mut outcome = DecodeOutcome::OutputPending;
         for frame in frames.frames.iter() {
             let decoded: DecodeOutcome = decoder.decode(&frame.data, frame_id, rgb)?.into();
@@ -1183,6 +1219,53 @@ impl Decoder {
             }
         }
         Ok(outcome)
+    }
+
+    #[cfg(feature = "mediacodec")]
+    fn sync_mediacodec_surface(&mut self, format: CodecFormat) {
+        let generation = crate::mediacodec::output_surface_generation(self.media_codec_display);
+        let decoder = match format {
+            CodecFormat::H264 => self.h264_media_codec.as_mut(),
+            CodecFormat::H265 => self.h265_media_codec.as_mut(),
+            _ => None,
+        };
+        let Some(decoder) = decoder else {
+            return;
+        };
+        if decoder.surface_generation() == generation || decoder.update_output_surface() {
+            return;
+        }
+        let replacement = MediaCodecDecoder::new(
+            format,
+            self.media_codec_dimensions,
+            self.media_codec_display,
+        );
+        if replacement.is_none() {
+            log::warn!(
+                "Failed to recreate Android MediaCodec decoder after output surface change: display={}, format={:?}, generation={}",
+                self.media_codec_display,
+                format,
+                generation
+            );
+            return;
+        }
+        let surface_output = replacement
+            .as_ref()
+            .map(MediaCodecDecoder::uses_surface_output)
+            .unwrap_or(false);
+        match format {
+            CodecFormat::H264 => self.h264_media_codec = replacement,
+            CodecFormat::H265 => self.h265_media_codec = replacement,
+            _ => return,
+        }
+        self.media_codec_fallback = false;
+        log::info!(
+            "Android MediaCodec decoder recreated after output surface change: display={}, format={:?}, generation={}, render_path={}",
+            self.media_codec_display,
+            format,
+            generation,
+            if surface_output { "surface-texture" } else { "rgba-soft" }
+        );
     }
 
     fn preference(id: Option<&str>) -> (PreferCodec, Chroma) {

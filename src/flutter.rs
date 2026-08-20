@@ -204,6 +204,8 @@ struct SessionHandler {
     // We need this variable to check if the display is in use before pushing rgba to flutter.
     displays: Vec<usize>,
     renderer: VideoRenderer,
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
+    texture_notified: RwLock<HashSet<usize>>,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -529,6 +531,8 @@ impl VideoRenderer {
 impl SessionHandler {
     pub fn on_waiting_for_image_dialog_show(&self) {
         self.renderer.reset_all_display_render_type();
+        #[cfg(all(target_os = "android", feature = "mediacodec"))]
+        self.texture_notified.write().unwrap().clear();
         // rgba array render will notify every frame
     }
 }
@@ -1055,13 +1059,31 @@ impl InvokeUiSession for FlutterHandler {
     }
 
     #[inline]
-    #[cfg(feature = "vram")]
+    #[cfg(all(
+        feature = "vram",
+        not(all(target_os = "android", feature = "mediacodec"))
+    ))]
     fn on_texture(&self, display: usize, texture: *mut c_void) {
         if !self.use_texture_render.load(Ordering::Relaxed) {
             return;
         }
         for (_, session) in self.session_handlers.read().unwrap().iter() {
             if session.renderer.on_texture(display, texture) {
+                if let Some(stream) = &session.event_stream {
+                    stream.add(EventToUI::Texture(display, true));
+                }
+            }
+        }
+    }
+
+    #[inline]
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
+    fn on_texture(&self, display: usize, _texture: *mut c_void) {
+        if !self.use_texture_render.load(Ordering::Relaxed) {
+            return;
+        }
+        for session in self.session_handlers.read().unwrap().values() {
+            if session.texture_notified.write().unwrap().insert(display) {
                 if let Some(stream) = &session.event_stream {
                     stream.add(EventToUI::Texture(display, true));
                 }

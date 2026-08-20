@@ -768,7 +768,7 @@ class _RemotePageState extends State<RemotePage>
               ),
             ];
             if (showCursorPaint) {
-              paints.add(CursorPaint(widget.id));
+              paints.add(mobileRemoteCursorOverlay(widget.id));
             }
             if (gFFI.ffiModel.touchMode) {
               paints.add(FloatingMouse(ffi: gFFI));
@@ -820,7 +820,7 @@ class _RemotePageState extends State<RemotePage>
       final cursor = bind.sessionGetToggleOptionSync(
           sessionId: sessionId, arg: 'show-remote-cursor');
       if (ffiModel.keyboard || cursor) {
-        paints.add(CursorPaint(widget.id));
+        paints.add(mobileRemoteCursorOverlay(widget.id));
       }
     }
     return Container(
@@ -1258,8 +1258,126 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
   }
 }
 
-class ImagePaint extends StatelessWidget {
+class ImagePaint extends StatefulWidget {
   const ImagePaint({Key? key}) : super(key: key);
+
+  @override
+  State<ImagePaint> createState() => _ImagePaintState();
+}
+
+class _ImagePaintState extends State<ImagePaint> {
+  int? _textureId;
+  int? _textureDisplay;
+  int? _textureWidth;
+  int? _textureHeight;
+  int? _queuedDisplay;
+  int? _queuedWidth;
+  int? _queuedHeight;
+  bool _targetUpdateScheduled = false;
+  int _targetGeneration = 0;
+
+  void _queueTextureTarget(int? display, int? width, int? height) {
+    if (_queuedDisplay == display &&
+        _queuedWidth == width &&
+        _queuedHeight == height) {
+      return;
+    }
+    _queuedDisplay = display;
+    _queuedWidth = width;
+    _queuedHeight = height;
+    if (_targetUpdateScheduled) return;
+    _targetUpdateScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _targetUpdateScheduled = false;
+      if (!mounted) return;
+      final nextDisplay = _queuedDisplay;
+      final nextWidth = _queuedWidth;
+      final nextHeight = _queuedHeight;
+      _targetGeneration++;
+      final generation = _targetGeneration;
+      if (nextDisplay == null || nextWidth == null || nextHeight == null) {
+        unawaited(_releaseTexture());
+      } else if (_textureId == null ||
+          _textureDisplay != nextDisplay ||
+          _textureWidth != nextWidth ||
+          _textureHeight != nextHeight) {
+        unawaited(_createTexture(
+          generation,
+          nextDisplay,
+          nextWidth,
+          nextHeight,
+        ));
+      }
+    });
+  }
+
+  Future<void> _createTexture(
+    int generation,
+    int display,
+    int width,
+    int height,
+  ) async {
+    final textureId = await platformFFI.createAndroidRemoteVideoTexture(
+      display: display,
+      width: width,
+      height: height,
+    );
+    if (textureId == null) return;
+    if (!mounted || generation != _targetGeneration) {
+      await platformFFI.releaseAndroidRemoteVideoTexture(
+        display: display,
+        textureId: textureId,
+      );
+      return;
+    }
+    final oldTextureId = _textureId;
+    final oldDisplay = _textureDisplay;
+    setState(() {
+      _textureId = textureId;
+      _textureDisplay = display;
+      _textureWidth = width;
+      _textureHeight = height;
+    });
+    if (oldTextureId != null && oldDisplay != null) {
+      await platformFFI.releaseAndroidRemoteVideoTexture(
+        display: oldDisplay,
+        textureId: oldTextureId,
+      );
+    }
+    await bind.sessionRefresh(sessionId: gFFI.sessionId, display: display);
+  }
+
+  Future<void> _releaseTexture() async {
+    final textureId = _textureId;
+    final display = _textureDisplay;
+    if (textureId == null || display == null) return;
+    if (mounted) {
+      setState(() {
+        _textureId = null;
+        _textureDisplay = null;
+        _textureWidth = null;
+        _textureHeight = null;
+      });
+    }
+    await platformFFI.releaseAndroidRemoteVideoTexture(
+      display: display,
+      textureId: textureId,
+    );
+  }
+
+  @override
+  void dispose() {
+    _targetGeneration++;
+    final textureId = _textureId;
+    final display = _textureDisplay;
+    if (textureId != null && display != null) {
+      unawaited(platformFFI.releaseAndroidRemoteVideoTexture(
+        display: display,
+        textureId: textureId,
+      ));
+    }
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1274,7 +1392,7 @@ class ImagePaint extends StatelessWidget {
       }
     }
     final adjust = c.getAdjustY();
-    return CustomPaint(
+    final softwarePaint = CustomPaint(
       painter: ImagePainter(
           image: m.image,
           x: c.x / s,
@@ -1284,8 +1402,47 @@ class ImagePaint extends StatelessWidget {
               ? mobileRemoteTextureFilterQuality(logicalScale: s)
               : null),
     );
+    final display = ffiModel.pi.currentDisplay;
+    final displayInfo = ffiModel.pi.tryGetDisplayIfNotAllDisplay();
+    if (!isAndroid ||
+        !m.useTextureRender ||
+        displayInfo == null ||
+        displayInfo.width <= 0 ||
+        displayInfo.height <= 0) {
+      _queueTextureTarget(null, null, null);
+      return softwarePaint;
+    }
+    _queueTextureTarget(display, displayInfo.width, displayInfo.height);
+    final textureId = _textureId;
+    if (textureId == null ||
+        !m.androidSurfaceTextureActive ||
+        _textureDisplay != display ||
+        _textureWidth != displayInfo.width ||
+        _textureHeight != displayInfo.height) {
+      return softwarePaint;
+    }
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Positioned(
+          left: c.x,
+          top: c.y + adjust,
+          width: displayInfo.width * s,
+          height: displayInfo.height * s,
+          child: Texture(
+            textureId: textureId,
+            filterQuality:
+                mobileRemoteTextureFilterQuality(logicalScale: s),
+          ),
+        ),
+      ],
+    );
   }
 }
+
+Widget mobileRemoteCursorOverlay(String id) => Positioned.fill(
+      child: IgnorePointer(child: CursorPaint(id)),
+    );
 
 class CursorPaint extends StatelessWidget {
   late final String id;
@@ -1486,6 +1643,19 @@ void showOptions(
     id,
     gFFI,
   );
+  if (isAndroid && bind.mainHasGpuTextureRender()) {
+    displayToggles.add(TToggleMenu(
+      value: gFFI.imageModel.useTextureRender,
+      onChanged: (value) async {
+        if (value == null) return;
+        await bind.mainSetLocalOption(
+          key: kOptionTextureRender,
+          value: value ? 'Y' : 'N',
+        );
+      },
+      child: Text(translate('Use texture rendering')),
+    ));
+  }
 
   List<TToggleMenu> privacyModeList = [];
   // privacy mode

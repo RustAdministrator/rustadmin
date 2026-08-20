@@ -30,6 +30,7 @@ const BACKEND_WGC_CPU: u32 = 1;
 const BACKEND_GDI_CPU: u32 = 2;
 const BACKEND_DXGI_CPU: u32 = 3;
 const GDI_BOOTSTRAP_AFTER: Duration = Duration::from_millis(500);
+const WOULD_BLOCK_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -319,7 +320,8 @@ pub mod server {
         let mut width = 0usize;
         let mut height = 0usize;
         let mut counter = 0u32;
-        let mut would_block_samples = 0u32;
+        let mut would_block_samples_since_log = 0u32;
+        let mut last_would_block_log: Option<Instant> = None;
         let mut primary_frames = 0u32;
         let mut primary_no_frame_since: Option<Instant> = None;
         let mut primary_backend = "Windows Graphics Capture";
@@ -429,7 +431,8 @@ pub mod server {
                 } else {
                     requested_backend.capture_backend()
                 };
-                would_block_samples = 0;
+                would_block_samples_since_log = 0;
+                last_would_block_log = None;
                 primary_frames = 0;
                 primary_no_frame_since = None;
                 gdi_fallback = None;
@@ -501,7 +504,6 @@ pub mod server {
                     gdi_fallback = None;
                     gdi_fallback_frames = 0;
                     primary_no_frame_since = None;
-                    would_block_samples = 0;
                     write_frame_info(
                         shmem,
                         CaptureFrameInfo {
@@ -533,14 +535,20 @@ pub mod server {
                     );
                 }
                 Some(Err(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    would_block_samples = would_block_samples.saturating_add(1);
+                    would_block_samples_since_log = would_block_samples_since_log.saturating_add(1);
                     let first_no_frame = *primary_no_frame_since.get_or_insert_with(Instant::now);
-                    if would_block_samples == 1 || would_block_samples % 60 == 0 {
+                    let now = Instant::now();
+                    if last_would_block_log
+                        .map(|last| now.saturating_duration_since(last) >= WOULD_BLOCK_LOG_INTERVAL)
+                        .unwrap_or(true)
+                    {
                         log::debug!(
-                            "User capture helper {} would block, samples={}",
+                            "User capture helper {} would block: samples_since_log={}",
                             primary_backend,
-                            would_block_samples,
+                            would_block_samples_since_log,
                         );
+                        would_block_samples_since_log = 0;
+                        last_would_block_log = Some(now);
                     }
                     if primary_frames == 0
                         && !primary_is_gdi

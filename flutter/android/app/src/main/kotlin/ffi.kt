@@ -3,6 +3,7 @@
 package ffi
 
 import android.content.Context
+import android.view.Surface
 import java.nio.ByteBuffer
 
 import io.github.rustadministrator.rustadmin.RdClipboardManager
@@ -27,4 +28,6 @@ object FFI {
     external fun getBuildinOption(key: String): String
     external fun onClipboardUpdate(clips: ByteBuffer)
     external fun isServiceClipboardEnabled(): Boolean
+    external fun setRemoteVideoSurface(display: Int, surface: Surface): Boolean
+    external fun clearRemoteVideoSurface(display: Int)
 }

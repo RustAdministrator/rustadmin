@@ -749,9 +749,10 @@ impl<T: InvokeUiSession> Remote<T> {
                                         || stats.video_datagram_frames_rejected > 0)
                                         .then(|| {
                                             format!(
-                                                "q {}/{}KB free {}/{}KB",
+                                                "q {}/{}KB age {}ms free {}/{}KB",
                                                 stats.datagram_send_buffer_queued / 1024,
                                                 stats.video_datagram_queue_budget / 1024,
+                                                stats.video_datagram_queue_delay_us / 1000,
                                                 stats.datagram_send_buffer_space / 1024,
                                                 stats.datagram_send_buffer_space_min / 1024,
                                             )
@@ -3210,7 +3211,10 @@ impl<T: InvokeUiSession> Remote<T> {
                 if pixelbuffer {
                     handler.on_rgba(display, data);
                 } else {
-                    #[cfg(all(feature = "vram", feature = "flutter"))]
+                    #[cfg(any(
+                        all(feature = "vram", feature = "flutter"),
+                        all(target_os = "android", feature = "mediacodec")
+                    ))]
                     handler.on_texture(display, _texture);
                 }
             },

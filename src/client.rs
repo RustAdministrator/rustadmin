@@ -2500,7 +2500,7 @@ impl VideoHandler {
                 ImageFormat::ARGB
             };
         VideoHandler {
-            decoder: Decoder::new(format, luid, decoder_dimensions),
+            decoder: Decoder::new(format, luid, decoder_dimensions, _display),
             decoder_dimensions,
             rgb: ImageRgb::new(rgba_format, crate::get_dst_align_rgba()),
             texture: Default::default(),
@@ -2647,7 +2647,7 @@ impl VideoHandler {
         if decoder_dimensions.is_some() {
             self.decoder_dimensions = decoder_dimensions;
         }
-        self.decoder = Decoder::new(format, luid, self.decoder_dimensions);
+        self.decoder = Decoder::new(format, luid, self.decoder_dimensions, self._display);
         self.fail_counter = 0;
         self.decode_wait_counter = 0;
         self.first_frame = true;

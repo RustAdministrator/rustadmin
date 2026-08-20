@@ -36,6 +36,7 @@ import com.hjq.permissions.XXPermissions
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.view.TextureRegistry
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
@@ -50,6 +51,11 @@ import kotlin.concurrent.thread
 
 
 class MainActivity : FlutterActivity() {
+    private data class RemoteVideoTexture(
+        val producer: TextureRegistry.SurfaceProducer,
+        val textureId: Long,
+    )
+
     companion object {
         var flutterMethodChannel: MethodChannel? = null
         private var _rdClipboardManager: RdClipboardManager? = null
@@ -60,6 +66,7 @@ class MainActivity : FlutterActivity() {
     private val channelTag = "mChannel"
     private val logTag = "mMainActivity"
     private var mainService: MainService? = null
+    private val remoteVideoTextures = mutableMapOf<Int, RemoteVideoTexture>()
 
     private var isAudioStart = false
     private val audioRecordHandle = AudioRecordHandle(this, { false }, { isAudioStart })
@@ -75,7 +82,7 @@ class MainActivity : FlutterActivity() {
             flutterEngine.dartExecutor.binaryMessenger,
             channelTag
         )
-        initFlutterChannel(flutterMethodChannel!!)
+        initFlutterChannel(flutterMethodChannel!!, flutterEngine)
         thread {
             try {
                 setCodecInfo()
@@ -120,6 +127,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         Log.e(logTag, "onDestroy")
+        releaseAllRemoteVideoTextures()
         mainService?.let {
             unbindService(serviceConnection)
         }
@@ -139,10 +147,126 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun initFlutterChannel(flutterMethodChannel: MethodChannel) {
+    private fun createRemoteVideoTexture(
+        flutterEngine: FlutterEngine,
+        display: Int,
+        width: Int,
+        height: Int,
+    ): Long? {
+        if (width <= 0 || height <= 0) return null
+
+        val producer = flutterEngine.renderer.createSurfaceProducer(
+            TextureRegistry.SurfaceLifecycle.manual
+        )
+        producer.setSize(width, height)
+        val textureId = producer.id()
+        if (!FFI.setRemoteVideoSurface(display, producer.surface)) {
+            producer.release()
+            return null
+        }
+
+        val previous = remoteVideoTextures.put(
+            display,
+            RemoteVideoTexture(producer, textureId),
+        )
+        producer.setCallback(object : TextureRegistry.SurfaceProducer.Callback {
+            override fun onSurfaceCleanup() {
+                val current = remoteVideoTextures[display]
+                if (current?.textureId != textureId) return
+                FFI.clearRemoteVideoSurface(display)
+                Log.i(
+                    logTag,
+                    "Remote video surface cleanup: display=$display, textureId=$textureId",
+                )
+            }
+
+            override fun onSurfaceAvailable() {
+                val current = remoteVideoTextures[display]
+                if (current?.textureId != textureId) return
+                if (FFI.setRemoteVideoSurface(display, producer.surface)) {
+                    Log.i(
+                        logTag,
+                        "Remote video surface restored: display=$display, textureId=$textureId",
+                    )
+                } else {
+                    Log.e(
+                        logTag,
+                        "Failed to restore remote video surface: display=$display, textureId=$textureId",
+                    )
+                }
+            }
+        })
+        previous?.producer?.release()
+        Log.i(
+            logTag,
+            "Remote video texture ready: display=$display, textureId=$textureId, size=${width}x$height",
+        )
+        return textureId
+    }
+
+    private fun releaseRemoteVideoTexture(display: Int, textureId: Long): Boolean {
+        val current = remoteVideoTextures[display] ?: return false
+        if (current.textureId != textureId) return false
+        remoteVideoTextures.remove(display)
+        FFI.clearRemoteVideoSurface(display)
+        current.producer.release()
+        Log.i(logTag, "Remote video texture released: display=$display, textureId=$textureId")
+        return true
+    }
+
+    private fun releaseAllRemoteVideoTextures() {
+        val textures = remoteVideoTextures.toMap()
+        remoteVideoTextures.clear()
+        textures.forEach { (display, texture) ->
+            FFI.clearRemoteVideoSurface(display)
+            texture.producer.release()
+        }
+    }
+
+    private fun initFlutterChannel(
+        flutterMethodChannel: MethodChannel,
+        flutterEngine: FlutterEngine,
+    ) {
         flutterMethodChannel.setMethodCallHandler { call, result ->
             // make sure result will be invoked, otherwise flutter will await forever
             when (call.method) {
+                "create_remote_video_texture" -> {
+                    val display = call.argument<Int>("display")
+                    val width = call.argument<Int>("width")
+                    val height = call.argument<Int>("height")
+                    if (display == null || width == null || height == null) {
+                        result.error(
+                            "invalid_remote_video_texture",
+                            "display, width and height are required",
+                            null,
+                        )
+                        return@setMethodCallHandler
+                    }
+                    val textureId = createRemoteVideoTexture(
+                        flutterEngine,
+                        display,
+                        width,
+                        height,
+                    )
+                    if (textureId == null) {
+                        result.error(
+                            "remote_video_texture_failed",
+                            "Failed to register the Android video surface",
+                            null,
+                        )
+                    } else {
+                        result.success(textureId)
+                    }
+                }
+                "release_remote_video_texture" -> {
+                    val display = call.argument<Int>("display")
+                    val textureId = call.argument<Number>("texture_id")?.toLong()
+                    if (display == null || textureId == null) {
+                        result.success(false)
+                    } else {
+                        result.success(releaseRemoteVideoTexture(display, textureId))
+                    }
+                }
                 "init_service" -> {
                     Intent(activity, MainService::class.java).also {
                         bindService(it, serviceConnection, Context.BIND_AUTO_CREATE)

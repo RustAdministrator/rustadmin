@@ -2315,6 +2315,25 @@ class VirtualMouseMode with ChangeNotifier {
   }
 }
 
+Size? remoteRenderableFrameSize({
+  required Size? softwareFrameSize,
+  required bool androidTextureActive,
+  required Size? androidTextureFrameSize,
+}) {
+  if (androidTextureActive &&
+      androidTextureFrameSize != null &&
+      androidTextureFrameSize.width > 0 &&
+      androidTextureFrameSize.height > 0) {
+    return androidTextureFrameSize;
+  }
+  if (softwareFrameSize != null &&
+      softwareFrameSize.width > 0 &&
+      softwareFrameSize.height > 0) {
+    return softwareFrameSize;
+  }
+  return null;
+}
+
 class ImageModel with ChangeNotifier {
   ui.Image? _image;
 
@@ -2325,6 +2344,10 @@ class ImageModel with ChangeNotifier {
   late final SessionID sessionId;
 
   bool _useTextureRender = false;
+  bool _androidSurfaceTextureActive = false;
+  int? _androidSurfaceTextureDisplay;
+  Size? _androidSurfaceTextureFrameSize;
+  bool _interactionGeometryInitialized = false;
 
   WeakReference<FFI> parent;
 
@@ -2335,6 +2358,17 @@ class ImageModel with ChangeNotifier {
   }
 
   get useTextureRender => _useTextureRender;
+  get androidSurfaceTextureActive => _androidSurfaceTextureActive;
+  Size? get renderFrameSize => remoteRenderableFrameSize(
+        softwareFrameSize: _image == null
+            ? null
+            : Size(_image!.width.toDouble(), _image!.height.toDouble()),
+        androidTextureActive: _androidSurfaceTextureActive &&
+            _androidSurfaceTextureDisplay ==
+                parent.target?.ffiModel.pi.currentDisplay,
+        androidTextureFrameSize: _androidSurfaceTextureFrameSize,
+      );
+  bool get hasRenderableFrame => renderFrameSize != null;
 
   addCallbackOnFirstImage(Function(String) cb) => callbacksOnFirstImage.add(cb);
 
@@ -2386,42 +2420,89 @@ class ImageModel with ChangeNotifier {
   }
 
   update(ui.Image? image) async {
-    if (_image == null && image != null) {
+    if (!_interactionGeometryInitialized && image != null) {
       if (isDesktop || isWebDesktop) {
         await parent.target?.canvasModel.updateViewStyle();
         await parent.target?.canvasModel.updateScrollStyle();
         await parent.target?.canvasModel.initializeEdgeScrollEdgeThickness();
       }
-      if (parent.target != null) {
-        await initializeCursorAndCanvas(parent.target!);
-      }
+      await _ensureInteractionGeometry();
     }
     _image?.dispose();
     _image = image;
-    if (image != null) notifyListeners();
+    if (image == null) {
+      _androidSurfaceTextureActive = false;
+      _androidSurfaceTextureDisplay = null;
+      _androidSurfaceTextureFrameSize = null;
+      _interactionGeometryInitialized = false;
+    } else {
+      notifyListeners();
+    }
+  }
+
+  Future<void> onAndroidSurfaceTextureFrame(int display, bool active) async {
+    if (!active) {
+      setAndroidSurfaceTextureActive(false);
+      return;
+    }
+    final ffi = parent.target;
+    if (ffi == null || ffi.ffiModel.pi.currentDisplay != display) {
+      return;
+    }
+    final rect = ffi.ffiModel.pi.getDisplayRect(display);
+    if (rect == null || rect.width <= 0 || rect.height <= 0) {
+      return;
+    }
+    final frameSize = Size(rect.width, rect.height);
+    final changed = !_androidSurfaceTextureActive ||
+        _androidSurfaceTextureDisplay != display ||
+        _androidSurfaceTextureFrameSize != frameSize;
+    _androidSurfaceTextureActive = true;
+    _androidSurfaceTextureDisplay = display;
+    _androidSurfaceTextureFrameSize = frameSize;
+    await _ensureInteractionGeometry();
+    if (changed) {
+      notifyListeners();
+    }
+  }
+
+  Future<void> _ensureInteractionGeometry() async {
+    if (_interactionGeometryInitialized) return;
+    final ffi = parent.target;
+    if (ffi == null) return;
+    _interactionGeometryInitialized = true;
+    await initializeCursorAndCanvas(ffi);
   }
 
   // mobile only
   double get maxScale {
-    if (_image == null) return 1.5;
+    final frameSize = renderFrameSize;
+    if (frameSize == null) return 1.5;
     final size = parent.target!.canvasModel.getSize();
-    final xscale = size.width / _image!.width;
-    final yscale = size.height / _image!.height;
+    final xscale = size.width / frameSize.width;
+    final yscale = size.height / frameSize.height;
     return max(1.5, max(xscale, yscale));
   }
 
   // mobile only
   double get minScale {
-    if (_image == null) return 1.5;
+    final frameSize = renderFrameSize;
+    if (frameSize == null) return 1.5;
     final size = parent.target!.canvasModel.getSize();
-    final xscale = size.width / _image!.width;
-    final yscale = size.height / _image!.height;
+    final xscale = size.width / frameSize.width;
+    final yscale = size.height / frameSize.height;
     return min(xscale, yscale) / 1.5;
   }
 
   updateUserTextureRender() {
     final preValue = _useTextureRender;
-    _useTextureRender = isDesktop && bind.mainGetUseTextureRender();
+    _useTextureRender =
+        (isDesktop || isAndroid) && bind.mainGetUseTextureRender();
+    if (!_useTextureRender) {
+      _androidSurfaceTextureActive = false;
+      _androidSurfaceTextureDisplay = null;
+      _androidSurfaceTextureFrameSize = null;
+    }
     if (preValue != _useTextureRender) {
       notifyListeners();
     }
@@ -2429,12 +2510,33 @@ class ImageModel with ChangeNotifier {
 
   setUseTextureRender(bool value) {
     _useTextureRender = value;
+    if (!value) {
+      _androidSurfaceTextureActive = false;
+      _androidSurfaceTextureDisplay = null;
+      _androidSurfaceTextureFrameSize = null;
+    }
     notifyListeners();
+  }
+
+  setAndroidSurfaceTextureActive(bool value) {
+    final changed = _androidSurfaceTextureActive != value ||
+        (!value && (_androidSurfaceTextureDisplay != null ||
+            _androidSurfaceTextureFrameSize != null));
+    _androidSurfaceTextureActive = value;
+    if (!value) {
+      _androidSurfaceTextureDisplay = null;
+      _androidSurfaceTextureFrameSize = null;
+    }
+    if (changed) notifyListeners();
   }
 
   void disposeImage() {
     _image?.dispose();
     _image = null;
+    _androidSurfaceTextureActive = false;
+    _androidSurfaceTextureDisplay = null;
+    _androidSurfaceTextureFrameSize = null;
+    _interactionGeometryInitialized = false;
   }
 }
 
@@ -3456,7 +3558,7 @@ class CanvasModel with ChangeNotifier {
 
   // mobile only
   updateScale(double v, Offset focalPoint) {
-    if (parent.target?.imageModel.image == null) return;
+    if (parent.target?.imageModel.hasRenderableFrame != true) return;
     final s = _scale;
     final proposedScale = _scale * v;
     if (!proposedScale.isFinite || proposedScale <= 0) return;
@@ -4055,7 +4157,7 @@ class CursorModel with ChangeNotifier {
     }
     double dx = delta.dx;
     double dy = delta.dy;
-    if (parent.target?.imageModel.image == null) return;
+    if (parent.target?.imageModel.hasRenderableFrame != true) return;
     final canvasModel = parent.target?.canvasModel;
     final scale = canvasModel?.scale ?? 1.0;
     final useEdgeScroll = parent.target?.inputModel.useEdgeScroll ?? false;
@@ -5297,6 +5399,9 @@ class FFI {
           }
         } else if (message is EventToUI_Rgba) {
           final display = message.field0;
+          if (isAndroid) {
+            imageModel.setAndroidSurfaceTextureActive(false);
+          }
           // Fetch the image buffer from rust codes.
           final sz = platformFFI.getRgbaSize(sessionId, display);
           if (sz == 0) {
@@ -5318,6 +5423,12 @@ class FFI {
           if (gpuTexture && !hasGpuTextureRender) {
             debugPrint('the gpuTexture is not supported.');
             return;
+          }
+          if (isAndroid) {
+            await imageModel.onAndroidSurfaceTextureFrame(
+              display,
+              gpuTexture,
+            );
           }
           textureModel.setTextureType(display: display, gpuTexture: gpuTexture);
           onEvent2UIRgba();
@@ -5381,7 +5492,7 @@ class FFI {
       model.dispose();
     }
     _terminalModels.clear();
-    if (saveCanvasConfig && imageModel.image != null && !isWebDesktop) {
+    if (saveCanvasConfig && imageModel.hasRenderableFrame && !isWebDesktop) {
       await setCanvasConfig(
           sessionId,
           cursorModel.x,

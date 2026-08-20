@@ -319,6 +319,38 @@ class PlatformFFI {
     await _toAndroidChannel.invokeMethod<void>('clear_diagnostics');
   }
 
+  Future<int?> createAndroidRemoteVideoTexture({
+    required int display,
+    required int width,
+    required int height,
+  }) async {
+    if (!isAndroid) return null;
+    try {
+      return await _toAndroidChannel.invokeMethod<int>(
+        'create_remote_video_texture',
+        {'display': display, 'width': width, 'height': height},
+      );
+    } on PlatformException catch (error) {
+      debugPrint('Failed to create Android remote video texture: $error');
+      return null;
+    }
+  }
+
+  Future<void> releaseAndroidRemoteVideoTexture({
+    required int display,
+    required int textureId,
+  }) async {
+    if (!isAndroid) return;
+    try {
+      await _toAndroidChannel.invokeMethod<bool>(
+        'release_remote_video_texture',
+        {'display': display, 'texture_id': textureId},
+      );
+    } on PlatformException catch (error) {
+      debugPrint('Failed to release Android remote video texture: $error');
+    }
+  }
+
   void syncAndroidServiceAppDirConfigPath() {
     invokeMethod(AndroidChannel.kSyncAppDirConfigPath, _dir);
   }

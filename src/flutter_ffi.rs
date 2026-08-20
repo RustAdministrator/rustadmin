@@ -3310,7 +3310,10 @@ pub fn main_has_file_clipboard() -> SyncReturn<bool> {
 }
 
 pub fn main_has_gpu_texture_render() -> SyncReturn<bool> {
-    SyncReturn(cfg!(feature = "vram"))
+    SyncReturn(cfg!(any(
+        feature = "vram",
+        all(target_os = "android", feature = "mediacodec")
+    )))
 }
 
 pub fn cm_init() {

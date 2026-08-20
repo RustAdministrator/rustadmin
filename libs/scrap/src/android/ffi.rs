@@ -1,7 +1,7 @@
 use jni::objects::JByteBuffer;
 use jni::objects::JString;
 use jni::objects::JValue;
-use jni::sys::jboolean;
+use jni::sys::{jboolean, jint};
 use jni::JNIEnv;
 use jni::{
     objects::{GlobalRef, JClass, JObject},
@@ -265,6 +265,50 @@ pub extern "system" fn Java_ffi_FFI_setCodecInfo(env: JNIEnv, _class: JClass, in
             crate::mediacodec::update_decoder_support(&infos);
             *MEDIA_CODEC_INFOS.write().unwrap() = Some(infos);
         }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_ffi_FFI_setRemoteVideoSurface(
+    env: JNIEnv,
+    _class: JClass,
+    display: jint,
+    surface: JObject,
+) -> jboolean {
+    #[cfg(feature = "mediacodec")]
+    {
+        if display < 0 || surface.is_null() {
+            return 0;
+        }
+        let window = unsafe {
+            ndk::native_window::NativeWindow::from_surface(
+                env.get_native_interface(),
+                surface.as_raw(),
+            )
+        };
+        if let Some(window) = window {
+            crate::mediacodec::set_output_surface(display as usize, window);
+            return 1;
+        }
+        log::warn!(
+            "Failed to create ANativeWindow for Android remote video surface: display={}",
+            display
+        );
+    }
+    #[cfg(not(feature = "mediacodec"))]
+    let _ = (env, display, surface);
+    0
+}
+
+#[no_mangle]
+pub extern "system" fn Java_ffi_FFI_clearRemoteVideoSurface(
+    _env: JNIEnv,
+    _class: JClass,
+    display: jint,
+) {
+    #[cfg(feature = "mediacodec")]
+    if display >= 0 {
+        crate::mediacodec::clear_output_surface(display as usize);
     }
 }
 
