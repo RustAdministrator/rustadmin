@@ -308,6 +308,15 @@ void main() {
     await tester.pumpAndSettle();
     final label = tester.widget<Text>(find.text('QM'));
     expect(label.style?.color, Colors.white);
+    final activeButton = tester.widget<IconButton>(button);
+    expect(
+      activeButton.style?.backgroundColor?.resolve(const {}),
+      mobileRemoteAccentColor,
+    );
+    expect(
+      activeButton.style?.backgroundColor?.resolve({WidgetState.pressed}),
+      mobileRemoteAccentColor,
+    );
 
     await tester.tap(find.byTooltip('Vertical toolbar'));
     await tester.pumpAndSettle();
@@ -315,6 +324,45 @@ void main() {
     await tester.tap(find.byTooltip('Collapse toolbar'));
     await tester.pumpAndSettle();
     expect(button, findsNothing);
+  });
+
+  testWidgets('active QM stays opaque when the cursor overlaps its button', (
+    tester,
+  ) async {
+    const transparency = MobileRemoteToolbarTransparencySettings(
+      overlapOpacityPercent: 30,
+    );
+    await pumpToolbar(
+      tester,
+      qualityMonitorVisible: true,
+      transparencySettings: transparency,
+    );
+    await tester.pumpAndSettle();
+    final button = find.byKey(const Key('mobile-remote-quality-monitor'));
+    final buttonCenter = tester.getCenter(button);
+
+    await pumpToolbar(
+      tester,
+      cursorPosition: buttonCenter,
+      qualityMonitorVisible: true,
+      transparencySettings: transparency,
+    );
+    await tester.pump();
+    var opacity = tester.widget<AnimatedOpacity>(
+      find.byKey(const Key('mobile-remote-toolbar-opacity')),
+    );
+    expect(opacity.opacity, 1.0);
+
+    await pumpToolbar(
+      tester,
+      cursorPosition: buttonCenter,
+      transparencySettings: transparency,
+    );
+    await tester.pump();
+    opacity = tester.widget<AnimatedOpacity>(
+      find.byKey(const Key('mobile-remote-toolbar-opacity')),
+    );
+    expect(opacity.opacity, 0.3);
   });
 
   testWidgets('quick keys stay in one square scrollable row', (tester) async {

@@ -607,10 +607,17 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
           color: foreground,
           padding: EdgeInsets.zero,
           splashRadius: extent / 2,
-          style: IconButton.styleFrom(
-            backgroundColor: widget.qualityMonitorVisible
-                ? mobileRemoteAccentColor
-                : Colors.transparent,
+          style: ButtonStyle(
+            backgroundColor: WidgetStatePropertyAll(
+              widget.qualityMonitorVisible
+                  ? mobileRemoteAccentColor
+                  : Colors.transparent,
+            ),
+            overlayColor: WidgetStatePropertyAll(
+              widget.qualityMonitorVisible
+                  ? Colors.white.withValues(alpha: 0.16)
+                  : mobileRemoteAccentActiveColor,
+            ),
           ),
           onPressed: widget.onQualityMonitor,
           icon: MediaQuery.withClampedTextScaling(
@@ -739,9 +746,19 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
           toolbarRect: toolbarRect,
           toolbarThickness: extent,
         );
+        final qualityMonitorButtonOffset = _vertical
+            ? Offset(0, extent * 2)
+            : Offset(extent * 2, 0);
+        final qualityMonitorButtonRect =
+            (position + qualityMonitorButtonOffset) & Size.square(extent);
+        final cursorOverlapsActiveQualityMonitor =
+            widget.qualityMonitorVisible &&
+            widget.cursorPosition != null &&
+            qualityMonitorButtonRect.contains(widget.cursorPosition!);
         final cursorOverlapsToolbar =
             widget.cursorPosition != null &&
-            toolbarOverlapRect.contains(widget.cursorPosition!);
+            toolbarOverlapRect.contains(widget.cursorPosition!) &&
+            !cursorOverlapsActiveQualityMonitor;
         final toolbarOpacity = cursorOverlapsToolbar
             ? widget.transparencySettings.overlapOpacity
             : 1.0;
