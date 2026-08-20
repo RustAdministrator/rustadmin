@@ -17,6 +17,8 @@ void main() {
     MobileRemoteToolbarPlacementSettings placementSettings =
         MobileRemoteToolbarPlacementSettings.defaults,
     ValueChanged<MobileRemoteToolbarPlacementSettings>? onPlacementChanged,
+    bool qualityMonitorVisible = false,
+    VoidCallback? onQualityMonitor,
   }) => tester.pumpWidget(
     MaterialApp(
       theme: theme,
@@ -38,6 +40,8 @@ void main() {
             peerIsAndroid: false,
             touchMode: true,
             waitForFirstImage: false,
+            qualityMonitorVisible: qualityMonitorVisible,
+            onQualityMonitor: onQualityMonitor ?? () {},
             monitors: monitors,
             cursorPosition: cursorPosition,
             transparencySettings: transparencySettings,
@@ -226,6 +230,34 @@ void main() {
     await tester.pump();
   });
 
+  testWidgets('collapse arrow follows toolbar orientation and nearest edge', (
+    tester,
+  ) async {
+    await pumpToolbar(tester);
+    await tester.pumpAndSettle();
+
+    final toolbar = find.byKey(const Key('mobile-remote-floating-toolbar'));
+    expect(find.byIcon(Icons.keyboard_arrow_down), findsOneWidget);
+
+    await tester.drag(toolbar, const Offset(0, -500));
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.keyboard_arrow_up), findsOneWidget);
+    await tester.tap(find.byTooltip('Collapse toolbar'));
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.keyboard_arrow_down), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Show toolbar'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Vertical toolbar'));
+    await tester.pumpAndSettle();
+    await tester.drag(toolbar, const Offset(-200, 0));
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.keyboard_arrow_left), findsOneWidget);
+    await tester.tap(find.byTooltip('Collapse toolbar'));
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.keyboard_arrow_right), findsOneWidget);
+  });
+
   testWidgets('toolbar exposes direct monitor buttons', (tester) async {
     var selected = -1;
     await pumpToolbar(
@@ -255,6 +287,34 @@ void main() {
     );
     await tester.tap(find.byTooltip('#2 monitor'));
     expect(selected, 1);
+  });
+
+  testWidgets('toolbar exposes a reactive QM toggle', (tester) async {
+    var toggleCount = 0;
+    await pumpToolbar(tester, onQualityMonitor: () => toggleCount++);
+    await tester.pumpAndSettle();
+
+    final button = find.byKey(const Key('mobile-remote-quality-monitor'));
+    expect(button, findsOneWidget);
+    expect(find.text('QM'), findsOneWidget);
+    await tester.tap(button);
+    expect(toggleCount, 1);
+
+    await pumpToolbar(
+      tester,
+      qualityMonitorVisible: true,
+      onQualityMonitor: () => toggleCount++,
+    );
+    await tester.pumpAndSettle();
+    final label = tester.widget<Text>(find.text('QM'));
+    expect(label.style?.color, Colors.white);
+
+    await tester.tap(find.byTooltip('Vertical toolbar'));
+    await tester.pumpAndSettle();
+    expect(button, findsOneWidget);
+    await tester.tap(find.byTooltip('Collapse toolbar'));
+    await tester.pumpAndSettle();
+    expect(button, findsNothing);
   });
 
   testWidgets('quick keys stay in one square scrollable row', (tester) async {

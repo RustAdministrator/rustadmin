@@ -4542,6 +4542,7 @@ class QualityMonitorData {
   String? quicReassemblyFrame;
   String? quicReassemblyTiming;
   String? quicKeyframeRequests;
+  String? quicKeyframeBarrier;
   String? quicReceiverRecovery;
   String? quicSenderRecovery;
   String? quicSenderAdmission;
@@ -4589,6 +4590,7 @@ class QualityMonitorModel with ChangeNotifier {
 
   QualityMonitorModel(this.parent);
   var _show = false;
+  final showListenable = ValueNotifier<bool>(false);
   var _position = kQualityMonitorPositionTopRight;
   var _details = kQualityMonitorDetailsBasic;
   Offset? _floatingPosition;
@@ -4664,6 +4666,7 @@ class QualityMonitorModel with ChangeNotifier {
     _data.quicReassemblyFrame = null;
     _data.quicReassemblyTiming = null;
     _data.quicKeyframeRequests = null;
+    _data.quicKeyframeBarrier = null;
     _data.quicReceiverRecovery = null;
     _data.quicSenderRecovery = null;
     _data.quicSenderAdmission = null;
@@ -4775,7 +4778,8 @@ class QualityMonitorModel with ChangeNotifier {
             '');
     final hostVersion = _hostVersion();
     final clientVersion = await _clientVersion();
-    if (_show != show ||
+    final showChanged = _show != show;
+    if (showChanged ||
         _position != position ||
         _details != details ||
         _floatingPosition != floatingPosition ||
@@ -4783,6 +4787,9 @@ class QualityMonitorModel with ChangeNotifier {
         _data.clientVersion != clientVersion ||
         dataReset) {
       _show = show;
+      if (showChanged) {
+        showListenable.value = show;
+      }
       _position = position;
       _details = details;
       _floatingPosition = floatingPosition;
@@ -4927,6 +4934,10 @@ class QualityMonitorModel with ChangeNotifier {
           (evt['quic_keyframe_requests'] as String).isNotEmpty) {
         _data.quicKeyframeRequests = evt['quic_keyframe_requests'];
       }
+      if (evt.containsKey('quic_keyframe_barrier') &&
+          (evt['quic_keyframe_barrier'] as String).isNotEmpty) {
+        _data.quicKeyframeBarrier = evt['quic_keyframe_barrier'];
+      }
       if (evt.containsKey('quic_receiver_recovery') &&
           (evt['quic_receiver_recovery'] as String).isNotEmpty) {
         _data.quicReceiverRecovery = evt['quic_receiver_recovery'];
@@ -5062,6 +5073,7 @@ class QualityMonitorModel with ChangeNotifier {
   @override
   void dispose() {
     _floatingPositionStoreTimer?.cancel();
+    showListenable.dispose();
     super.dispose();
   }
 }

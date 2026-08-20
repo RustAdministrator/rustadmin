@@ -593,6 +593,14 @@ class _RemotePageState extends State<RemotePage>
     );
   }
 
+  Future<void> _toggleQualityMonitor() async {
+    await bind.sessionToggleOption(
+      sessionId: sessionId,
+      value: 'show-quality-monitor',
+    );
+    await gFFI.qualityMonitorModel.checkShowQualityMonitor(sessionId);
+  }
+
   Widget getFloatingToolbar() {
     final ffiModel = Provider.of<FfiModel>(context);
     final cursorModel = Provider.of<CursorModel>(context);
@@ -617,8 +625,10 @@ class _RemotePageState extends State<RemotePage>
                   : onPressedTextChat(widget.id),
             ),
           );
-    return Obx(
-      () {
+    return ListenableBuilder(
+      listenable: gFFI.qualityMonitorModel.showListenable,
+      builder: (context, _) => Obx(
+        () {
         final pi = ffiModel.pi;
         final currentDisplay = CurrentDisplayState.find(widget.id).value;
         final monitors = !_showMonitorsInToolbar || pi.displays.length <= 1
@@ -692,6 +702,9 @@ class _RemotePageState extends State<RemotePage>
           peerIsAndroid: ffiModel.isPeerAndroid,
           touchMode: ffiModel.touchMode,
           waitForFirstImage: ffiModel.waitForFirstImage.isTrue,
+          qualityMonitorVisible: gFFI.qualityMonitorModel.showListenable.value,
+          onQualityMonitor: () => unawaited(_toggleQualityMonitor()),
+          qualityMonitorTooltip: translate('Quality monitor'),
           chatButton: chatButton,
           monitors: monitors,
           cursorPosition:
@@ -710,7 +723,8 @@ class _RemotePageState extends State<RemotePage>
             );
           },
         );
-      },
+        },
+      ),
     );
   }
 

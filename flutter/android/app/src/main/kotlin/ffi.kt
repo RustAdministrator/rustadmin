@@ -31,6 +31,14 @@ object FFI {
     external fun isOutgoingSessionActive(sessionId: String): Boolean
     external fun closeOutgoingSession(sessionId: String): Boolean
     external fun logDiagnostic(level: String, message: String)
-    external fun setRemoteVideoSurface(display: Int, surface: Surface): Boolean
+    external fun setRemoteVideoSurface(
+        display: Int,
+        surface: Surface,
+        refreshPeriodNanos: Long,
+    ): Boolean
     external fun clearRemoteVideoSurface(display: Int)
+    external fun updateRemoteVideoRefreshPeriod(
+        display: Int,
+        refreshPeriodNanos: Long,
+    ): Boolean
 }

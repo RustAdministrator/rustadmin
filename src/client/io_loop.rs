@@ -686,7 +686,9 @@ impl<T: InvokeUiSession> Remote<T> {
                                 }),
                                 #[cfg(feature = "quic-transport")]
                                 quic_video_transport: quic_stats.map(|stats| {
-                                    if stats.reliable_keyframes {
+                                    if stats.reliable_keyframe_barrier {
+                                        "DATAGRAM + reliable KF barrier".to_owned()
+                                    } else if stats.reliable_keyframes {
                                         "DATAGRAM + reliable KF".to_owned()
                                     } else {
                                         "DATAGRAM".to_owned()
@@ -726,6 +728,18 @@ impl<T: InvokeUiSession> Remote<T> {
                                 #[cfg(feature = "quic-transport")]
                                 quic_keyframe_requests: quic_stats
                                     .map(|stats| stats.video_keyframe_requests),
+                                #[cfg(feature = "quic-transport")]
+                                quic_keyframe_barrier: quic_stats.and_then(|stats| {
+                                    stats.reliable_keyframe_barrier.then(|| {
+                                        format!(
+                                            "{}/{}/{}/{}",
+                                            stats.video_keyframe_barrier_held,
+                                            stats.video_keyframe_barrier_released,
+                                            stats.video_keyframe_barrier_timeouts,
+                                            stats.video_keyframe_barrier_overflows,
+                                        )
+                                    })
+                                }),
                                 #[cfg(feature = "quic-transport")]
                                 quic_receiver_recovery: quic_stats.map(|stats| {
                                     format!(

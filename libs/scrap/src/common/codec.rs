@@ -948,6 +948,7 @@ impl Decoder {
         &mut self,
         frame: &video_frame::Union,
         frame_id: u64,
+        _capture_time_ms: u64,
         rgb: &mut ImageRgb,
         _texture: &mut ImageTexture,
         _pixelbuffer: &mut bool,
@@ -1011,6 +1012,7 @@ impl Decoder {
                         decoder,
                         h264s,
                         frame_id,
+                        _capture_time_ms,
                         rgb,
                         _texture,
                         _pixelbuffer,
@@ -1060,6 +1062,7 @@ impl Decoder {
                         decoder,
                         h265s,
                         frame_id,
+                        _capture_time_ms,
                         rgb,
                         _texture,
                         _pixelbuffer,
@@ -1196,6 +1199,7 @@ impl Decoder {
         decoder: &mut MediaCodecDecoder,
         frames: &EncodedVideoFrames,
         frame_id: u64,
+        capture_time_ms: u64,
         rgb: &mut ImageRgb,
         texture: &mut ImageTexture,
         pixelbuffer: &mut bool,
@@ -1209,7 +1213,9 @@ impl Decoder {
         }
         let mut outcome = DecodeOutcome::OutputPending;
         for frame in frames.frames.iter() {
-            let decoded: DecodeOutcome = decoder.decode(&frame.data, frame_id, rgb)?.into();
+            let decoded: DecodeOutcome = decoder
+                .decode(&frame.data, frame_id, capture_time_ms, rgb)?
+                .into();
             match decoded {
                 ready @ DecodeOutcome::FrameReady { .. } => outcome = ready,
                 DecodeOutcome::InputBackpressure if outcome == DecodeOutcome::OutputPending => {

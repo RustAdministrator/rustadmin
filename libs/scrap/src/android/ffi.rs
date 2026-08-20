@@ -1,7 +1,7 @@
 use jni::objects::JByteBuffer;
 use jni::objects::JString;
 use jni::objects::JValue;
-use jni::sys::{jboolean, jint};
+use jni::sys::{jboolean, jint, jlong};
 use jni::JNIEnv;
 use jni::{
     objects::{GlobalRef, JClass, JObject},
@@ -274,6 +274,7 @@ pub extern "system" fn Java_ffi_FFI_setRemoteVideoSurface(
     _class: JClass,
     display: jint,
     surface: JObject,
+    refresh_period_ns: jlong,
 ) -> jboolean {
     #[cfg(feature = "mediacodec")]
     {
@@ -287,7 +288,7 @@ pub extern "system" fn Java_ffi_FFI_setRemoteVideoSurface(
             )
         };
         if let Some(window) = window {
-            crate::mediacodec::set_output_surface(display as usize, window);
+            crate::mediacodec::set_output_surface(display as usize, window, refresh_period_ns);
             return 1;
         }
         log::warn!(
@@ -296,7 +297,7 @@ pub extern "system" fn Java_ffi_FFI_setRemoteVideoSurface(
         );
     }
     #[cfg(not(feature = "mediacodec"))]
-    let _ = (env, display, surface);
+    let _ = (env, display, surface, refresh_period_ns);
     0
 }
 
@@ -310,6 +311,27 @@ pub extern "system" fn Java_ffi_FFI_clearRemoteVideoSurface(
     if display >= 0 {
         crate::mediacodec::clear_output_surface(display as usize);
     }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_ffi_FFI_updateRemoteVideoRefreshPeriod(
+    _env: JNIEnv,
+    _class: JClass,
+    display: jint,
+    refresh_period_ns: jlong,
+) -> jboolean {
+    #[cfg(feature = "mediacodec")]
+    if display >= 0
+        && crate::mediacodec::update_output_surface_refresh_period(
+            display as usize,
+            refresh_period_ns,
+        )
+    {
+        return 1;
+    }
+    #[cfg(not(feature = "mediacodec"))]
+    let _ = (display, refresh_period_ns);
+    0
 }
 
 pub fn get_codec_info() -> Option<MediaCodecInfos> {

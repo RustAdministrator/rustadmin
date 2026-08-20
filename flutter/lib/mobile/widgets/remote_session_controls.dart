@@ -319,6 +319,8 @@ class MobileRemoteToolbar extends StatefulWidget {
     required this.peerIsAndroid,
     required this.touchMode,
     required this.waitForFirstImage,
+    required this.qualityMonitorVisible,
+    required this.onQualityMonitor,
     this.onKeyboard,
     this.onGestureHelp,
     this.onMobileActions,
@@ -329,6 +331,7 @@ class MobileRemoteToolbar extends StatefulWidget {
         MobileRemoteToolbarTransparencySettings.defaults,
     this.placementSettings = MobileRemoteToolbarPlacementSettings.defaults,
     this.onPlacementChanged,
+    this.qualityMonitorTooltip = 'Quality monitor',
   });
 
   final VoidCallback onDisconnect;
@@ -338,6 +341,8 @@ class MobileRemoteToolbar extends StatefulWidget {
   final bool peerIsAndroid;
   final bool touchMode;
   final bool waitForFirstImage;
+  final bool qualityMonitorVisible;
+  final VoidCallback onQualityMonitor;
   final VoidCallback? onKeyboard;
   final VoidCallback? onGestureHelp;
   final VoidCallback? onMobileActions;
@@ -347,6 +352,7 @@ class MobileRemoteToolbar extends StatefulWidget {
   final MobileRemoteToolbarTransparencySettings transparencySettings;
   final MobileRemoteToolbarPlacementSettings placementSettings;
   final ValueChanged<MobileRemoteToolbarPlacementSettings>? onPlacementChanged;
+  final String qualityMonitorTooltip;
 
   @override
   State<MobileRemoteToolbar> createState() => _MobileRemoteToolbarState();
@@ -363,6 +369,32 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
 
   bool get _vertical =>
       _placementSettings.axis == MobileRemoteToolbarAxis.vertical;
+
+  bool get _collapseTowardPositiveEdge => _vertical
+      ? _placementSettings.horizontalPosition >= 0.5
+      : _placementSettings.verticalPosition >= 0.5;
+
+  IconData get _collapseIcon {
+    if (_vertical) {
+      return _collapseTowardPositiveEdge
+          ? Icons.keyboard_arrow_right
+          : Icons.keyboard_arrow_left;
+    }
+    return _collapseTowardPositiveEdge
+        ? Icons.keyboard_arrow_down
+        : Icons.keyboard_arrow_up;
+  }
+
+  IconData get _expandIcon {
+    if (_vertical) {
+      return _collapseTowardPositiveEdge
+          ? Icons.keyboard_arrow_left
+          : Icons.keyboard_arrow_right;
+    }
+    return _collapseTowardPositiveEdge
+        ? Icons.keyboard_arrow_up
+        : Icons.keyboard_arrow_down;
+  }
 
   @override
   void didUpdateWidget(covariant MobileRemoteToolbar oldWidget) {
@@ -559,14 +591,51 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
     );
   }
 
+  Widget _qualityMonitorButton(double extent) {
+    final foreground = widget.qualityMonitorVisible
+        ? Colors.white
+        : mobileRemoteToolbarForegroundColor(context);
+    return Semantics(
+      button: true,
+      toggled: widget.qualityMonitorVisible,
+      label: widget.qualityMonitorTooltip,
+      child: SizedBox.square(
+        dimension: extent,
+        child: IconButton(
+          key: const Key('mobile-remote-quality-monitor'),
+          tooltip: widget.qualityMonitorTooltip,
+          color: foreground,
+          padding: EdgeInsets.zero,
+          splashRadius: extent / 2,
+          style: IconButton.styleFrom(
+            backgroundColor: widget.qualityMonitorVisible
+                ? mobileRemoteAccentColor
+                : Colors.transparent,
+          ),
+          onPressed: widget.onQualityMonitor,
+          icon: MediaQuery.withClampedTextScaling(
+            maxScaleFactor: 1,
+            child: Text(
+              'QM',
+              style: TextStyle(
+                color: foreground,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                height: 1,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   List<Widget> _expandedItems(double extent) {
     final items = <Widget>[
       _iconButton(
         extent: extent,
         tooltip: 'Collapse toolbar',
-        icon: _vertical
-            ? Icons.keyboard_arrow_right
-            : Icons.keyboard_arrow_down,
+        icon: _collapseIcon,
         onPressed: widget.waitForFirstImage
             ? null
             : () {
@@ -581,6 +650,7 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
         icon: Icons.tv,
         onPressed: widget.onOptions,
       ),
+      _qualityMonitorButton(extent),
       for (final monitor in widget.monitors) _monitorButton(monitor, extent),
     ];
     if (widget.showInputControls) {
@@ -647,9 +717,7 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
                 _iconButton(
                   extent: extent,
                   tooltip: 'Show toolbar',
-                  icon: _vertical
-                      ? Icons.keyboard_arrow_left
-                      : Icons.keyboard_arrow_up,
+                  icon: _expandIcon,
                   onPressed: () {
                     setState(() {
                       _collapsed = false;

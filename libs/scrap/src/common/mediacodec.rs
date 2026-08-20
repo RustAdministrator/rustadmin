@@ -18,6 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use super::video_presentation_clock::VideoPresentationClock;
 use crate::ImageFormat;
 use crate::{CodecFormat, I420ToABGR, I420ToARGB, ImageRgb, NV12ToABGR, NV12ToARGB};
 
@@ -43,6 +44,7 @@ pub static H265_DECODER_SUPPORT: AtomicBool = AtomicBool::new(false);
 struct OutputSurface {
     generation: u64,
     window: NativeWindow,
+    refresh_period_ns: i64,
 }
 
 lazy_static! {
@@ -51,16 +53,21 @@ lazy_static! {
 
 static NEXT_SURFACE_GENERATION: AtomicU64 = AtomicU64::new(1);
 
-pub fn set_output_surface(display: usize, window: NativeWindow) -> u64 {
+pub fn set_output_surface(display: usize, window: NativeWindow, refresh_period_ns: i64) -> u64 {
     let generation = NEXT_SURFACE_GENERATION.fetch_add(1, Ordering::SeqCst);
-    OUTPUT_SURFACES
-        .write()
-        .unwrap()
-        .insert(display, OutputSurface { generation, window });
-    log::info!(
-        "Android MediaCodec output surface registered: display={}, generation={}",
+    OUTPUT_SURFACES.write().unwrap().insert(
         display,
-        generation
+        OutputSurface {
+            generation,
+            window,
+            refresh_period_ns,
+        },
+    );
+    log::info!(
+        "Android MediaCodec output surface registered: display={}, generation={}, refresh_period_ns={}",
+        display,
+        generation,
+        refresh_period_ns
     );
     generation
 }
@@ -75,13 +82,37 @@ pub fn clear_output_surface(display: usize) {
     }
 }
 
-fn output_surface(display: usize) -> (Option<NativeWindow>, u64) {
+pub fn update_output_surface_refresh_period(display: usize, refresh_period_ns: i64) -> bool {
+    let mut surfaces = OUTPUT_SURFACES.write().unwrap();
+    let Some(surface) = surfaces.get_mut(&display) else {
+        return false;
+    };
+    surface.refresh_period_ns = refresh_period_ns;
+    true
+}
+
+fn output_surface_refresh_period(display: usize) -> i64 {
     OUTPUT_SURFACES
         .read()
         .unwrap()
         .get(&display)
-        .map(|surface| (Some(surface.window.clone()), surface.generation))
-        .unwrap_or((None, 0))
+        .map(|surface| surface.refresh_period_ns)
+        .unwrap_or(0)
+}
+
+fn output_surface(display: usize) -> (Option<NativeWindow>, u64, i64) {
+    OUTPUT_SURFACES
+        .read()
+        .unwrap()
+        .get(&display)
+        .map(|surface| {
+            (
+                Some(surface.window.clone()),
+                surface.generation,
+                surface.refresh_period_ns,
+            )
+        })
+        .unwrap_or((None, 0, 0))
 }
 
 pub fn output_surface_generation(display: usize) -> u64 {
@@ -103,6 +134,7 @@ pub enum MediaCodecDecodeOutcome {
 struct PendingInput {
     data: Vec<u8>,
     frame_id: u64,
+    capture_time_ms: u64,
 }
 
 pub struct MediaCodecDecoder {
@@ -112,7 +144,7 @@ pub struct MediaCodecDecoder {
     last_diag_log: Option<Instant>,
     pending_inputs: VecDeque<PendingInput>,
     pending_input_bytes: usize,
-    in_flight_frames: VecDeque<(i64, u64)>,
+    in_flight_frames: VecDeque<(i64, u64, u64)>,
     next_input_token: u64,
     display: usize,
     width: usize,
@@ -120,6 +152,7 @@ pub struct MediaCodecDecoder {
     surface_output: bool,
     surface_generation: u64,
     output_surface: Option<NativeWindow>,
+    presentation_clock: VideoPresentationClock,
 }
 
 struct OutputLayout {
@@ -168,11 +201,12 @@ impl MediaCodecDecoder {
         &mut self,
         data: &[u8],
         frame_id: u64,
+        capture_time_ms: u64,
         rgb: &mut ImageRgb,
     ) -> ResultType<MediaCodecDecodeOutcome> {
         let total_start = Instant::now();
         let input_start = Instant::now();
-        self.enqueue_input(data, frame_id)?;
+        self.enqueue_input(data, frame_id, capture_time_ms)?;
         let input_backpressure = self.queue_pending_inputs()?;
         let input_queue_elapsed = input_start.elapsed();
 
@@ -189,19 +223,38 @@ impl MediaCodecDecoder {
                     let presentation_time_us = output_buffer.info().presentation_time_us();
                     let res_format = self.decoder.output_format();
                     if self.surface_output {
-                        let release_mode = if let Some(timestamp_ns) = monotonic_now_ns() {
-                            self.decoder
-                                .release_output_buffer_at_time(output_buffer, timestamp_ns)?;
-                            "vsync-monotonic"
-                        } else {
-                            self.decoder.release_output_buffer(output_buffer, true)?;
-                            "immediate-fallback"
-                        };
-                        let output_frame_id = self.take_output_frame_id(presentation_time_us);
+                        self.presentation_clock
+                            .update_refresh_period(output_surface_refresh_period(self.display));
+                        let output_metadata = self.output_frame_metadata(presentation_time_us);
+                        let (release_mode, presentation_reset, presentation_lead_us) =
+                            if let Some(now_ns) = monotonic_now_ns() {
+                                let schedule = self
+                                    .presentation_clock
+                                    .schedule(output_metadata.map(|(_, value)| value), now_ns);
+                                self.decoder.release_output_buffer_at_time(
+                                    output_buffer,
+                                    schedule.target_ns,
+                                )?;
+                                (
+                                    if schedule.source_clock {
+                                        "source-clock-scheduled"
+                                    } else {
+                                        "immediate-no-source-clock"
+                                    },
+                                    schedule.reset,
+                                    schedule.target_ns.saturating_sub(now_ns) / 1_000,
+                                )
+                            } else {
+                                self.decoder.release_output_buffer(output_buffer, true)?;
+                                ("immediate-no-monotonic-clock", false, 0)
+                            };
+                        let output_frame_id = self
+                            .take_output_frame_metadata(presentation_time_us)
+                            .map(|(frame_id, _)| frame_id);
                         self.decoded_frames = self.decoded_frames.saturating_add(1);
                         if self.should_log_diag() {
                             log::info!(
-                                "diag android mediacodec frame: decoder={}, codec={}, visible={}x{}, input_queue_ms={}, output_dequeue_ms={}, total_ms={}, input_bytes={}, pending_inputs={}, render_path=surface-texture, release_mode={}, surface_generation={}, output_format={:?}",
+                                "diag android mediacodec frame: decoder={}, codec={}, visible={}x{}, input_queue_ms={}, output_dequeue_ms={}, total_ms={}, input_bytes={}, pending_inputs={}, render_path=surface-texture, release_mode={}, presentation_reset={}, presentation_lead_us={}, refresh_period_ns={}, surface_generation={}, output_format={:?}",
                                 self.name,
                                 self.codec_label(),
                                 self.width,
@@ -212,6 +265,9 @@ impl MediaCodecDecoder {
                                 data.len(),
                                 self.pending_inputs.len(),
                                 release_mode,
+                                presentation_reset,
+                                presentation_lead_us,
+                                self.presentation_clock.refresh_period_ns(),
                                 self.surface_generation,
                                 res_format,
                             );
@@ -240,7 +296,9 @@ impl MediaCodecDecoder {
                     let convert_elapsed = convert_start.elapsed();
                     self.decoder.release_output_buffer(output_buffer, false)?;
                     let (layout, output_bytes, output_capacity) = convert_result?;
-                    let output_frame_id = self.take_output_frame_id(presentation_time_us);
+                    let output_frame_id = self
+                        .take_output_frame_metadata(presentation_time_us)
+                        .map(|(frame_id, _)| frame_id);
                     if output_bytes == 0 {
                         log::debug!("MediaCodec returned an empty output buffer");
                         continue;
@@ -309,14 +367,21 @@ impl MediaCodecDecoder {
         })
     }
 
-    fn take_output_frame_id(&mut self, presentation_time_us: i64) -> Option<u64> {
+    fn output_frame_metadata(&self, presentation_time_us: i64) -> Option<(u64, u64)> {
+        self.in_flight_frames
+            .iter()
+            .find(|(token, _, _)| *token == presentation_time_us)
+            .map(|(_, frame_id, capture_time_ms)| (*frame_id, *capture_time_ms))
+    }
+
+    fn take_output_frame_metadata(&mut self, presentation_time_us: i64) -> Option<(u64, u64)> {
         let index = self
             .in_flight_frames
             .iter()
-            .position(|(token, _)| *token == presentation_time_us)?;
+            .position(|(token, _, _)| *token == presentation_time_us)?;
         self.in_flight_frames
             .remove(index)
-            .map(|(_, frame_id)| frame_id)
+            .map(|(_, frame_id, capture_time_ms)| (frame_id, capture_time_ms))
     }
 
     pub fn uses_surface_output(&self) -> bool {
@@ -332,7 +397,7 @@ impl MediaCodecDecoder {
     }
 
     pub fn update_output_surface(&mut self) -> bool {
-        let (surface, generation) = output_surface(self.display);
+        let (surface, generation, refresh_period_ns) = output_surface(self.display);
         if generation == self.surface_generation {
             return true;
         }
@@ -346,6 +411,8 @@ impl MediaCodecDecoder {
             Ok(()) => {
                 self.output_surface = Some(surface);
                 self.surface_generation = generation;
+                self.presentation_clock
+                    .update_refresh_period(refresh_period_ns);
                 log::info!(
                     "Android MediaCodec output surface updated: display={}, generation={}, decoder={}",
                     self.display,
@@ -367,7 +434,12 @@ impl MediaCodecDecoder {
         }
     }
 
-    fn enqueue_input(&mut self, data: &[u8], frame_id: u64) -> ResultType<()> {
+    fn enqueue_input(
+        &mut self,
+        data: &[u8],
+        frame_id: u64,
+        capture_time_ms: u64,
+    ) -> ResultType<()> {
         if self.pending_inputs.len() >= MAX_PENDING_INPUTS
             || self.pending_input_bytes.saturating_add(data.len()) > MAX_PENDING_INPUT_BYTES
         {
@@ -382,6 +454,7 @@ impl MediaCodecDecoder {
         self.pending_inputs.push_back(PendingInput {
             data: data.to_vec(),
             frame_id,
+            capture_time_ms,
         });
         Ok(())
     }
@@ -422,7 +495,11 @@ impl MediaCodecDecoder {
                         token as u64,
                         0,
                     )?;
-                    self.in_flight_frames.push_back((token, pending.frame_id));
+                    self.in_flight_frames.push_back((
+                        token,
+                        pending.frame_id,
+                        pending.capture_time_ms,
+                    ));
                     while self.in_flight_frames.len() > MAX_IN_FLIGHT_FRAMES {
                         self.in_flight_frames.pop_front();
                     }
@@ -499,7 +576,7 @@ fn create_media_codec(
     height: usize,
     display: usize,
 ) -> Option<MediaCodecDecoder> {
-    let (registered_surface, surface_generation) = output_surface(display);
+    let (registered_surface, surface_generation, refresh_period_ns) = output_surface(display);
     let texture_render_enabled = hbb_common::config::LocalConfig::get_option(
         hbb_common::config::keys::OPTION_TEXTURE_RENDER,
     ) != "N";
@@ -559,6 +636,7 @@ fn create_media_codec(
         surface_output,
         surface_generation,
         output_surface,
+        presentation_clock: VideoPresentationClock::new(refresh_period_ns),
     })
 }
 

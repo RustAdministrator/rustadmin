@@ -16,6 +16,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.content.ClipboardManager
 import android.content.pm.PackageManager
+import android.hardware.display.DisplayManager
 import android.os.Bundle
 import android.os.Build
 import android.os.IBinder
@@ -51,6 +52,7 @@ import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.concurrent.thread
+import kotlin.math.roundToLong
 
 
 class MainActivity : FlutterActivity() {
@@ -71,6 +73,31 @@ class MainActivity : FlutterActivity() {
     private val logTag = "mMainActivity"
     private var mainService: MainService? = null
     private val remoteVideoTextures = mutableMapOf<Int, RemoteVideoTexture>()
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = Unit
+
+        override fun onDisplayRemoved(displayId: Int) = Unit
+
+        override fun onDisplayChanged(displayId: Int) {
+            val currentDisplayId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                display?.displayId
+            } else {
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay.displayId
+            }
+            if (currentDisplayId != null && displayId != currentDisplayId) return
+            val refreshPeriodNanos = currentDisplayRefreshPeriodNanos()
+            remoteVideoTextures.keys.forEach { remoteDisplay ->
+                FFI.updateRemoteVideoRefreshPeriod(remoteDisplay, refreshPeriodNanos)
+            }
+            if (remoteVideoTextures.isNotEmpty()) {
+                Log.i(
+                    logTag,
+                    "Remote video refresh period updated: refreshPeriodNanos=$refreshPeriodNanos",
+                )
+            }
+        }
+    }
 
     private var isAudioStart = false
     private var pendingWireGuardPermissionResult: MethodChannel.Result? = null
@@ -124,6 +151,8 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        displayManager.registerDisplayListener(displayListener, null)
         if (_rdClipboardManager == null) {
             _rdClipboardManager = RdClipboardManager(getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
             FFI.setClipboardManager(_rdClipboardManager!!)
@@ -132,6 +161,8 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         Log.e(logTag, "onDestroy")
+        val displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        displayManager.unregisterDisplayListener(displayListener)
         pendingWireGuardPermissionResult?.success(false)
         pendingWireGuardPermissionResult = null
         releaseAllRemoteVideoTextures()
@@ -209,7 +240,8 @@ class MainActivity : FlutterActivity() {
         )
         producer.setSize(width, height)
         val textureId = producer.id()
-        if (!FFI.setRemoteVideoSurface(display, producer.surface)) {
+        val refreshPeriodNanos = currentDisplayRefreshPeriodNanos()
+        if (!FFI.setRemoteVideoSurface(display, producer.surface, refreshPeriodNanos)) {
             producer.release()
             return null
         }
@@ -232,7 +264,11 @@ class MainActivity : FlutterActivity() {
             override fun onSurfaceAvailable() {
                 val current = remoteVideoTextures[display]
                 if (current?.textureId != textureId) return
-                if (FFI.setRemoteVideoSurface(display, producer.surface)) {
+                if (FFI.setRemoteVideoSurface(
+                        display,
+                        producer.surface,
+                        currentDisplayRefreshPeriodNanos(),
+                    )) {
                     Log.i(
                         logTag,
                         "Remote video surface restored: display=$display, textureId=$textureId",
@@ -248,9 +284,24 @@ class MainActivity : FlutterActivity() {
         previous?.producer?.release()
         Log.i(
             logTag,
-            "Remote video texture ready: display=$display, textureId=$textureId, size=${width}x$height",
+            "Remote video texture ready: display=$display, textureId=$textureId, size=${width}x$height, refreshPeriodNanos=$refreshPeriodNanos",
         )
         return textureId
+    }
+
+    @Suppress("DEPRECATION")
+    private fun currentDisplayRefreshPeriodNanos(): Long {
+        val refreshRate = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display?.refreshRate ?: 60f
+        } else {
+            windowManager.defaultDisplay.refreshRate
+        }
+        val normalizedRefreshRate = if (refreshRate.isFinite() && refreshRate in 30f..250f) {
+            refreshRate
+        } else {
+            60f
+        }
+        return (1_000_000_000.0 / normalizedRefreshRate).roundToLong()
     }
 
     private fun releaseRemoteVideoTexture(display: Int, textureId: Long): Boolean {

@@ -791,6 +791,12 @@ class QualityMonitor extends StatelessWidget {
                                   .data.quicKeyframeRequests),
                             if (qualityMonitorModel.extendedDetails &&
                                 qualityMonitorModel
+                                        .data.quicKeyframeBarrier !=
+                                    null)
+                              _row("KF H/R/T/O", qualityMonitorModel
+                                  .data.quicKeyframeBarrier),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
                                         .data.quicReceiverRecovery !=
                                     null)
                               _row("RX gap/drop", qualityMonitorModel

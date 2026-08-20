@@ -2540,6 +2540,7 @@ impl VideoHandler {
                 let res = self.decoder.handle_video_frame(
                     frame,
                     frame_id,
+                    capture_time_ms,
                     &mut self.rgb,
                     &mut self.texture,
                     pixelbuffer,

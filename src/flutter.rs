@@ -790,6 +790,10 @@ impl InvokeUiSession for FlutterHandler {
                         .map_or(NULL, |it| it.to_string()),
                 ),
                 (
+                    "quic_keyframe_barrier",
+                    &status.quic_keyframe_barrier.map_or(NULL, |it| it),
+                ),
+                (
                     "quic_receiver_recovery",
                     &status.quic_receiver_recovery.map_or(NULL, |it| it),
                 ),

@@ -42,6 +42,8 @@ pub mod hwcodec;
 #[cfg(feature = "mediacodec")]
 pub mod mediacodec;
 pub mod vpxcodec;
+#[cfg(feature = "mediacodec")]
+mod video_presentation_clock;
 #[cfg(feature = "vram")]
 pub mod vram;
 pub use self::convert::*;
