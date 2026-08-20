@@ -69,12 +69,24 @@ jobs:
     - name: Checkout hbb_common
       shell: bash
       env:
-        HBB_COMMON_REF: ${{ github.base_ref }}
+        HBB_COMMON_OWNER: ${{ github.event.pull_request.head.repo.owner.login }}
+        HBB_COMMON_HEAD_REF: ${{ github.head_ref }}
+        HBB_COMMON_BASE_REF: ${{ github.base_ref }}
       run: |
-        ref="${HBB_COMMON_REF:-main}"
-        git clone --depth=1 --branch "$ref" \
-          https://github.com/RustAdministrator/hbb_common.git \
-          ../hbb_common
+        repository="RustAdministrator/hbb_common"
+        ref="${HBB_COMMON_BASE_REF:-main}"
+        if [[ -n "${HBB_COMMON_OWNER}" && -n "${HBB_COMMON_HEAD_REF}" ]]; then
+          candidate="${HBB_COMMON_OWNER}/hbb_common"
+          if git ls-remote --exit-code --heads \
+            "https://github.com/${candidate}.git" \
+            "${HBB_COMMON_HEAD_REF}" >/dev/null 2>&1; then
+            repository="${candidate}"
+            ref="${HBB_COMMON_HEAD_REF}"
+          fi
+        fi
+        echo "Using hbb_common repository=${repository}, ref=${ref}"
+        git clone --depth=1 --branch "${ref}" \
+          "https://github.com/${repository}.git" ../hbb_common
 
     - name: Install prerequisites
       shell: bash
