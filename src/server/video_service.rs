@@ -609,7 +609,7 @@ impl WindowsCaptureDesktopState {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 fn keep_privileged_stream_for_secure_transition(
     using_privileged_secure_capture: bool,
     requires_secure_capture: bool,
