@@ -66,6 +66,16 @@ jobs:
       with:
         submodules: recursive
 
+    - name: Checkout hbb_common
+      shell: bash
+      env:
+        HBB_COMMON_REF: ${{ github.base_ref }}
+      run: |
+        ref="${HBB_COMMON_REF:-main}"
+        git clone --depth=1 --branch "$ref" \
+          https://github.com/RustAdministrator/hbb_common.git \
+          ../hbb_common
+
     - name: Install prerequisites
       shell: bash
       run: |
