@@ -189,11 +189,6 @@ jobs:
       shell: bash
       run: cargo build --locked --features linux-pkg-config --target="${{ matrix.job.target }}"
 
-    - name: clean
-      shell: bash
-      run: |
-        cargo clean
-
     # - name: Strip debug information from executable
     #   id: strip
     #   shell: bash
