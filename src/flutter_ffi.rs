@@ -770,6 +770,12 @@ pub fn session_set_custom_fps(session_id: SessionID, fps: i32) {
     }
 }
 
+pub fn session_set_video_profile(session_id: SessionID, value: String) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.set_video_profile(value);
+    }
+}
+
 pub fn session_set_capture_backend(session_id: SessionID, value: String) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         session.set_capture_backend(value);

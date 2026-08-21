@@ -3,6 +3,7 @@ use hbb_common::{
 };
 
 pub(crate) const MOVIE_DEFAULT_TARGET_FPS: u32 = 60;
+pub(crate) const MOVIE_PLAYOUT_DELAY_MS: u32 = 50;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum VideoProfile {
@@ -60,6 +61,19 @@ impl EffectiveMovieMode {
             (VideoProfile::Standard, _) => Self::Off,
             (VideoProfile::Movie, true) => Self::Full,
             (VideoProfile::Movie, false) => Self::UnsupportedPeer,
+        }
+    }
+
+    pub(crate) fn for_viewer(
+        profile: VideoProfile,
+        host_supported: bool,
+        full_transport: bool,
+    ) -> Self {
+        match (profile, host_supported, full_transport) {
+            (VideoProfile::Standard, _, _) => Self::Off,
+            (VideoProfile::Movie, false, _) => Self::UnsupportedPeer,
+            (VideoProfile::Movie, true, true) => Self::Full,
+            (VideoProfile::Movie, true, false) => Self::CompatibilityTransport,
         }
     }
 
@@ -127,6 +141,10 @@ mod tests {
         assert_eq!(
             EffectiveMovieMode::for_request(VideoProfile::Movie, true),
             EffectiveMovieMode::Full
+        );
+        assert_eq!(
+            EffectiveMovieMode::for_viewer(VideoProfile::Movie, true, false),
+            EffectiveMovieMode::CompatibilityTransport
         );
         assert_eq!(
             EffectiveMovieMode::UnsupportedPeer.fallback_reason(),

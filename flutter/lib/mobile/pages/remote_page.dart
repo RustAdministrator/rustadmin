@@ -1640,6 +1640,8 @@ void showOptions(
     gFFI,
     openCustomDialog: false,
   );
+  List<TRadioMenu<String>> videoProfileRadios =
+      await toolbarVideoProfile(gFFI);
   List<TRadioMenu<String>> codecRadios = await toolbarCodec(context, id, gFFI);
   List<TRadioMenu<String>> captureBackendRadios = await toolbarCaptureBackend(
     gFFI,
@@ -1805,6 +1807,20 @@ void showOptions(
                   'toolbar-cursor-overlap-opacity',
                   toolbarOpacityRadios,
                   heading: Text(translate('Toolbar opacity under cursor')),
+                ),
+                radioSection(
+                  'video-profile',
+                  videoProfileRadios,
+                  heading: Text(translate('Video profile')),
+                  selectionDetailsBuilder: (value) =>
+                      value == kVideoProfileMovie
+                          ? MobileCustomImageQualityControls(
+                              key: const ValueKey('mobile-movie-target-fps'),
+                              peerId: id,
+                              ffi: gFFI,
+                              movieTargetOnly: true,
+                            )
+                          : const SizedBox.shrink(),
                 ),
                 radioSection(
                   'image-quality',

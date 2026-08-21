@@ -24,7 +24,7 @@ use crate::{
         new_voice_call_request, new_voice_call_response, start_audio_thread, MediaData, MediaSender,
     },
     display_service, ipc, privacy_mode,
-    video_profile::{EffectiveMovieMode, VideoProfile},
+    video_profile::{EffectiveMovieMode, VideoProfile, MOVIE_PLAYOUT_DELAY_MS},
     video_service, VERSION,
 };
 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -1973,6 +1973,9 @@ impl Connection {
                             capture_frame,
                             encoder_backend,
                             encoder_input,
+                            target_fps,
+                            pacing_fps,
+                            host_pipeline_p95_us,
                         ) = {
                             let video_qos = video_service::VIDEO_QOS.lock().unwrap();
                             let video_service_name = video_service::get_service_name(
@@ -1986,12 +1989,17 @@ impl Connection {
                                 encoder_input,
                             ) =
                                 video_qos.pipeline_status(&video_service_name);
+                            let (target_fps, pacing_fps, host_pipeline_p95_us) =
+                                video_qos.movie_runtime_status(&video_service_name);
                             (
                                 video_qos.bitrate(&video_service_name),
                                 capture_backend.unwrap_or_default(),
                                 capture_frame.unwrap_or_default(),
                                 encoder_backend.unwrap_or_default(),
                                 encoder_input.unwrap_or_default(),
+                                target_fps,
+                                pacing_fps,
+                                host_pipeline_p95_us,
                             )
                         };
                         let delivery_status = conn.video_delivery.status(conn.display_idx as i32);
@@ -2012,6 +2020,31 @@ impl Connection {
                             video_stall_ms: delivery_status
                                 .map(|status| status.latest_stall_ms)
                                 .unwrap_or_default(),
+                            requested_video_profile: conn
+                                .requested_video_profile
+                                .config_value()
+                                .to_owned(),
+                            effective_video_profile: conn
+                                .effective_movie_mode
+                                .profile_label()
+                                .to_owned(),
+                            target_fps,
+                            pacing_fps,
+                            host_pipeline_p95_us,
+                            movie_fallback_reason: match conn
+                                .effective_movie_mode
+                                .fallback_reason()
+                            {
+                                "none" => String::new(),
+                                reason => reason.to_owned(),
+                            },
+                            movie_playout_delay_ms: if conn.requested_video_profile
+                                == VideoProfile::Movie
+                            {
+                                MOVIE_PLAYOUT_DELAY_MS
+                            } else {
+                                0
+                            },
                             ..Default::default()
                         });
                         conn.send(msg_out.into()).await;

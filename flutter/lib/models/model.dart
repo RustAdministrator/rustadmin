@@ -4549,6 +4549,7 @@ class QualityMonitorData {
   String? quicSenderFrame;
   String? quicSenderSpace;
   String? quicDisposableDrops;
+  String? quicVideoQueueTargetMs;
   String? hostVersion;
   String? clientVersion;
   String? decoder;
@@ -4570,9 +4571,17 @@ class QualityMonitorData {
   String? videoDecodeTimeUs;
   String? videoRenderSubmitTimeUs;
   String? videoFeedbackQueue;
+  String? displayRefresh;
   String? videoDeliveryPhase;
   String? videoRecoveryCount;
   String? videoStallMs;
+  String? requestedVideoProfile;
+  String? effectiveVideoProfile;
+  String? movieTargetFps;
+  String? moviePacingFps;
+  String? movieHostPipelineP95Us;
+  String? movieFallbackReason;
+  String? moviePlayoutDelayMs;
 
   String? get codecLabel {
     final codec = codecFormat;
@@ -4673,6 +4682,7 @@ class QualityMonitorModel with ChangeNotifier {
     _data.quicSenderFrame = null;
     _data.quicSenderSpace = null;
     _data.quicDisposableDrops = null;
+    _data.quicVideoQueueTargetMs = null;
     _data.hostVersion = null;
     _data.clientVersion = null;
     _data.decoder = null;
@@ -4694,9 +4704,17 @@ class QualityMonitorModel with ChangeNotifier {
     _data.videoDecodeTimeUs = null;
     _data.videoRenderSubmitTimeUs = null;
     _data.videoFeedbackQueue = null;
+    _data.displayRefresh = null;
     _data.videoDeliveryPhase = null;
     _data.videoRecoveryCount = null;
     _data.videoStallMs = null;
+    _data.requestedVideoProfile = null;
+    _data.effectiveVideoProfile = null;
+    _data.movieTargetFps = null;
+    _data.moviePacingFps = null;
+    _data.movieHostPipelineP95Us = null;
+    _data.movieFallbackReason = null;
+    _data.moviePlayoutDelayMs = null;
     return true;
   }
 
@@ -4842,6 +4860,25 @@ class QualityMonitorModel with ChangeNotifier {
     return entries.map((e) => '${e.key}:${e.value}').join(' ');
   }
 
+  String? _formatDisplayRefresh(String? value) {
+    if (value == null || value.isEmpty) return null;
+    final formatted = <String>[];
+    for (final token in value.split(' ')) {
+      final separator = token.indexOf(':');
+      final prefix = separator < 0 ? '' : token.substring(0, separator + 1);
+      final raw = separator < 0 ? token : token.substring(separator + 1);
+      final millihz = int.tryParse(raw);
+      if (millihz == null || millihz <= 0) {
+        formatted.add('$prefix-');
+        continue;
+      }
+      final hz = (millihz / 1000)
+          .toStringAsFixed(millihz % 1000 == 0 ? 0 : 2);
+      formatted.add('$prefix$hz');
+    }
+    return formatted.isEmpty ? null : formatted.join(' ');
+  }
+
   updateQualityStatus(Map<String, dynamic> evt) {
     try {
       if (evt.containsKey('speed') && (evt['speed'] as String).isNotEmpty) {
@@ -4962,6 +4999,10 @@ class QualityMonitorModel with ChangeNotifier {
           (evt['quic_disposable_drops'] as String).isNotEmpty) {
         _data.quicDisposableDrops = evt['quic_disposable_drops'];
       }
+      if (evt.containsKey('quic_video_queue_target_ms') &&
+          (evt['quic_video_queue_target_ms'] as String).isNotEmpty) {
+        _data.quicVideoQueueTargetMs = evt['quic_video_queue_target_ms'];
+      }
       final hostVersion = _hostVersion();
       if (hostVersion != null) {
         _data.hostVersion = hostVersion;
@@ -5049,6 +5090,12 @@ class QualityMonitorModel with ChangeNotifier {
         _data.videoFeedbackQueue =
             _displayMetricFromMap(evt['video_feedback_queue'] as String);
       }
+      if (evt.containsKey('display_refresh_millihz') &&
+          (evt['display_refresh_millihz'] as String).isNotEmpty) {
+        final millihz = _displayMetricFromMap(
+            evt['display_refresh_millihz'] as String);
+        _data.displayRefresh = _formatDisplayRefresh(millihz);
+      }
       if (evt.containsKey('video_delivery_phase') &&
           (evt['video_delivery_phase'] as String).isNotEmpty) {
         final phase = evt['video_delivery_phase'] as String;
@@ -5063,6 +5110,44 @@ class QualityMonitorModel with ChangeNotifier {
       if (evt.containsKey('video_stall_ms') &&
           (evt['video_stall_ms'] as String).isNotEmpty) {
         _data.videoStallMs = evt['video_stall_ms'];
+      }
+      if (evt.containsKey('requested_video_profile') &&
+          (evt['requested_video_profile'] as String).isNotEmpty) {
+        _data.requestedVideoProfile = evt['requested_video_profile'];
+        if (_data.requestedVideoProfile != kVideoProfileMovie) {
+          _data.movieTargetFps = null;
+          _data.moviePacingFps = null;
+          _data.movieHostPipelineP95Us = null;
+          _data.movieFallbackReason = null;
+          _data.moviePlayoutDelayMs = null;
+        }
+      }
+      if (evt.containsKey('effective_video_profile') &&
+          (evt['effective_video_profile'] as String).isNotEmpty) {
+        _data.effectiveVideoProfile = evt['effective_video_profile'];
+        if (_data.effectiveVideoProfile == 'movie-full') {
+          _data.movieFallbackReason = null;
+        }
+      }
+      if (evt.containsKey('movie_target_fps') &&
+          (evt['movie_target_fps'] as String).isNotEmpty) {
+        _data.movieTargetFps = evt['movie_target_fps'];
+      }
+      if (evt.containsKey('movie_pacing_fps') &&
+          (evt['movie_pacing_fps'] as String).isNotEmpty) {
+        _data.moviePacingFps = evt['movie_pacing_fps'];
+      }
+      if (evt.containsKey('movie_host_pipeline_p95_us') &&
+          (evt['movie_host_pipeline_p95_us'] as String).isNotEmpty) {
+        _data.movieHostPipelineP95Us = evt['movie_host_pipeline_p95_us'];
+      }
+      if (evt.containsKey('movie_fallback_reason') &&
+          (evt['movie_fallback_reason'] as String).isNotEmpty) {
+        _data.movieFallbackReason = evt['movie_fallback_reason'];
+      }
+      if (evt.containsKey('movie_playout_delay_ms') &&
+          (evt['movie_playout_delay_ms'] as String).isNotEmpty) {
+        _data.moviePlayoutDelayMs = evt['movie_playout_delay_ms'];
       }
       notifyListeners();
     } catch (e) {

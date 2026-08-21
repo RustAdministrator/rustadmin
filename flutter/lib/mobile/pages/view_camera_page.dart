@@ -643,6 +643,8 @@ void showOptions(
       await toolbarViewStyle(context, id, gFFI);
   List<TRadioMenu<String>> imageQualityRadios =
       await toolbarImageQuality(context, id, gFFI, openCustomDialog: false);
+  List<TRadioMenu<String>> videoProfileRadios =
+      await toolbarVideoProfile(gFFI);
   List<TRadioMenu<String>> codecRadios = await toolbarCodec(context, id, gFFI);
   List<TRadioMenu<String>> captureBackendRadios =
       await toolbarCaptureBackend(gFFI);
@@ -661,6 +663,10 @@ void showOptions(
     var imageQuality =
         (imageQualityRadios.isNotEmpty ? imageQualityRadios[0].groupValue : '')
             .obs;
+    var videoProfile = (videoProfileRadios.isNotEmpty
+            ? videoProfileRadios[0].groupValue
+            : kVideoProfileStandard)
+        .obs;
     var codec = (codecRadios.isNotEmpty ? codecRadios[0].groupValue : '').obs;
     var captureBackend = (captureBackendRadios.isNotEmpty
             ? captureBackendRadios[0].groupValue
@@ -701,6 +707,27 @@ void showOptions(
                 : null)),
       Obx(() => viewStyle.value == kRemoteViewStyleCustom
           ? MobileCustomScaleControls(ffi: gFFI)
+          : const SizedBox.shrink()),
+      const Divider(color: MyTheme.border),
+      if (videoProfileRadios.isNotEmpty) radioSectionTitle('Video profile'),
+      for (var e in videoProfileRadios)
+        Obx(() => getRadio<String>(
+            e.child,
+            e.value,
+            videoProfile.value,
+            e.onChanged != null
+                ? (v) {
+                    e.onChanged?.call(v);
+                    if (v != null) videoProfile.value = v;
+                  }
+                : null)),
+      Obx(() => videoProfile.value == kVideoProfileMovie
+          ? MobileCustomImageQualityControls(
+              key: const ValueKey('mobile-camera-movie-target-fps'),
+              peerId: id,
+              ffi: gFFI,
+              movieTargetOnly: true,
+            )
           : const SizedBox.shrink()),
       const Divider(color: MyTheme.border),
       if (imageQualityRadios.isNotEmpty) radioSectionTitle('Image Quality'),

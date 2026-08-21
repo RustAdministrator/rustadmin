@@ -13,10 +13,12 @@ class MobileCustomImageQualityControls extends StatefulWidget {
     super.key,
     required this.peerId,
     required this.ffi,
+    this.movieTargetOnly = false,
   });
 
   final String peerId;
   final FFI ffi;
+  final bool movieTargetOnly;
 
   @override
   State<MobileCustomImageQualityControls> createState() =>
@@ -30,6 +32,7 @@ class _MobileCustomImageQualityControlsState
   String _fpsMode = kCustomFpsModeAdaptive;
   bool _showFps = true;
   bool _showMoreQuality = true;
+  bool _movieMode = false;
   bool _loading = true;
 
   SessionID get _sessionId => widget.ffi.sessionId;
@@ -71,7 +74,13 @@ class _MobileCustomImageQualityControlsState
         sessionId: _sessionId,
         arg: kOptionCustomFps,
       );
-      var loadedFps = double.tryParse(fpsOption ?? '')?.abs() ?? kDefaultFps;
+      final videoProfile = await bind.sessionGetOption(
+        sessionId: _sessionId,
+        arg: kOptionVideoProfile,
+      );
+      final movieMode = videoProfile == kVideoProfileMovie;
+      var loadedFps = double.tryParse(fpsOption ?? '')?.abs() ??
+          (movieMode ? kMovieDefaultTargetFps : kDefaultFps);
       if (loadedFps < kMinFps || loadedFps > kMaxFps) {
         loadedFps = kDefaultFps;
       }
@@ -91,7 +100,8 @@ class _MobileCustomImageQualityControlsState
         _quality = loadedQuality;
         _fps = loadedFps;
         _fpsMode = loadedFpsMode;
-        _showFps = !hideFps;
+        _movieMode = movieMode;
+        _showFps = !hideFps && (widget.movieTargetOnly || !movieMode);
         _showMoreQuality = !hideMoreQuality;
         _loading = false;
       });
@@ -105,6 +115,7 @@ class _MobileCustomImageQualityControlsState
 
   int _fpsForMode(double fps) {
     final value = fps.round();
+    if (_movieMode) return value;
     return _fpsMode == kCustomFpsModeFixed ? -value : value;
   }
 
@@ -171,6 +182,9 @@ class _MobileCustomImageQualityControlsState
         setFpsMode: _setFpsMode,
         showFps: _showFps,
         showMoreQuality: _showMoreQuality,
+        showQuality: !widget.movieTargetOnly,
+        showFpsMode: !_movieMode,
+        fpsLabel: _movieMode ? 'Target FPS' : 'FPS',
       ),
     );
   }

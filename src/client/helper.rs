@@ -33,6 +33,7 @@ pub struct QualityStatus {
     pub quic_sender_frame: Option<String>,
     pub quic_sender_space: Option<String>,
     pub quic_disposable_drops: Option<String>,
+    pub quic_video_queue_target_ms: Option<u64>,
     pub decoder: Option<String>,
     pub renderer: Option<String>,
     pub capture_backend: Option<String>,
@@ -52,9 +53,17 @@ pub struct QualityStatus {
     pub video_decode_time_us: HashMap<usize, u32>,
     pub video_render_submit_time_us: HashMap<usize, u32>,
     pub video_feedback_queue: HashMap<usize, u32>,
+    pub display_refresh_millihz: HashMap<usize, u32>,
     pub video_delivery_phase: Option<String>,
     pub video_recovery_count: Option<u64>,
     pub video_stall_ms: Option<u64>,
+    pub requested_video_profile: Option<String>,
+    pub effective_video_profile: Option<String>,
+    pub movie_target_fps: Option<u32>,
+    pub movie_pacing_fps: Option<u32>,
+    pub movie_host_pipeline_p95_us: Option<u32>,
+    pub movie_fallback_reason: Option<String>,
+    pub movie_playout_delay_ms: Option<u32>,
 }
 
 #[inline]

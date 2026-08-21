@@ -2288,6 +2288,16 @@ fn run(vs: VideoService) -> ResultType<()> {
         &Config::get_option("allow-auto-record-incoming"),
     );
     let client_record = video_qos.record(&service_name);
+    video_qos.store_movie_runtime_status(
+        &service_name,
+        if full_movie_mode { movie_target_fps } else { 0 },
+        if full_movie_mode {
+            MOVIE_BOOTSTRAP_FPS.min(encoder_fps).max(1)
+        } else {
+            0
+        },
+        0,
+    );
     drop(video_qos);
     let (mut encoder, mut encoder_cfg, codec_format, use_i444, recorder) = match setup_encoder(
         &c,
@@ -2491,6 +2501,12 @@ fn run(vs: VideoService) -> ResultType<()> {
                 pacer.set_fps(controller.current_tier(), loop_started);
                 spf = pacer.period;
                 movie_bootstrap_released = true;
+                VIDEO_QOS.lock().unwrap().store_movie_runtime_status(
+                    &service_name,
+                    controller.target_fps(),
+                    controller.current_tier(),
+                    0,
+                );
                 log::info!(
                     "diag movie bootstrap released: service={}, pacing_fps={}, first_rendered={}, timeout={}",
                     service_name,
@@ -2519,6 +2535,12 @@ fn run(vs: VideoService) -> ResultType<()> {
                     host_missed_slots: host.missed_slots,
                     viewer,
                 };
+                VIDEO_QOS.lock().unwrap().store_movie_runtime_status(
+                    &service_name,
+                    controller.target_fps(),
+                    controller.current_tier(),
+                    host.pipeline_p95_us,
+                );
                 if let Some(decision) = controller.evaluate(cadence_sample) {
                     let recreate_started = Instant::now();
                     match recreate_encoder_at_fps(
@@ -2536,6 +2558,12 @@ fn run(vs: VideoService) -> ResultType<()> {
                             c.set_output_texture(encoder.input_texture());
                             pacer.set_fps(decision.current_fps, loop_started);
                             spf = pacer.period;
+                            VIDEO_QOS.lock().unwrap().store_movie_runtime_status(
+                                &service_name,
+                                controller.target_fps(),
+                                decision.current_fps,
+                                host.pipeline_p95_us,
+                            );
                             cadence_recreated = true;
                             host_diag.record_encoder_recreation();
                             VIDEO_QOS

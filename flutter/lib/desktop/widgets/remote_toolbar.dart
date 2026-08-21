@@ -2078,6 +2078,7 @@ class _DisplayMenuState extends State<_DisplayMenu> {
         _screenAdjustor.adjustWindow(context),
         viewStyle(customPercent: _customPercent),
         scrollStyle(state),
+        videoProfile(),
         imageQuality(),
         codec(),
         captureBackend(),
@@ -2305,6 +2306,26 @@ class _DisplayMenuState extends State<_DisplayMenu> {
           return _SubmenuButton(
             ffi: widget.ffi,
             child: Text(translate('Image Quality')),
+            menuChildren: v
+                .map((e) => RdoMenuButton<String>(
+                    value: e.value,
+                    groupValue: e.groupValue,
+                    onChanged: e.onChanged,
+                    child: e.child,
+                    ffi: ffi))
+                .toList(),
+          );
+        });
+  }
+
+  videoProfile() {
+    return futureBuilder(
+        future: toolbarVideoProfile(widget.ffi),
+        hasData: (data) {
+          final v = data as List<TRadioMenu<String>>;
+          return _SubmenuButton(
+            ffi: widget.ffi,
+            child: Text(translate('Video profile')),
             menuChildren: v
                 .map((e) => RdoMenuButton<String>(
                     value: e.value,

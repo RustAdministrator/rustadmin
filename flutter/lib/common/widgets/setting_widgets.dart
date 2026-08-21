@@ -15,6 +15,9 @@ Widget customImageQualityWidget({
   required Function(String)? setFpsMode,
   required bool showFps,
   required bool showMoreQuality,
+  bool showQuality = true,
+  bool showFpsMode = true,
+  String fpsLabel = 'FPS',
 }) {
   return CustomImageQualityWidget(
     initQuality: initQuality,
@@ -25,6 +28,9 @@ Widget customImageQualityWidget({
     setFpsMode: setFpsMode,
     showFps: showFps,
     showMoreQuality: showMoreQuality,
+    showQuality: showQuality,
+    showFpsMode: showFpsMode,
+    fpsLabel: fpsLabel,
   );
 }
 
@@ -39,6 +45,9 @@ class CustomImageQualityWidget extends StatefulWidget {
     required this.setFpsMode,
     required this.showFps,
     required this.showMoreQuality,
+    this.showQuality = true,
+    this.showFpsMode = true,
+    this.fpsLabel = 'FPS',
     this.translateText,
   });
 
@@ -50,6 +59,9 @@ class CustomImageQualityWidget extends StatefulWidget {
   final Function(String)? setFpsMode;
   final bool showFps;
   final bool showMoreQuality;
+  final bool showQuality;
+  final bool showFpsMode;
+  final String fpsLabel;
   final String Function(String)? translateText;
 
   @override
@@ -175,6 +187,8 @@ class _CustomImageQualityWidgetState extends State<CustomImageQualityWidget> {
     final setFpsMode = widget.setFpsMode;
     final showFps = widget.showFps;
     final showMoreQuality = widget.showMoreQuality;
+    final showQuality = widget.showQuality;
+    final showFpsMode = widget.showFpsMode;
     final translateText = widget.translateText ?? translate;
 
     void onMoreChanged(bool? value) {
@@ -188,7 +202,8 @@ class _CustomImageQualityWidgetState extends State<CustomImageQualityWidget> {
 
     return Column(
       children: [
-        Obx(
+        if (showQuality)
+          Obx(
           () => Row(
             children: [
               Expanded(
@@ -240,7 +255,7 @@ class _CustomImageQualityWidgetState extends State<CustomImageQualityWidget> {
             ],
           ),
         ),
-        if (showMoreQuality && isMobile)
+        if (showQuality && showMoreQuality && isMobile)
           Obx(
             () => Row(
               children: [
@@ -289,14 +304,15 @@ class _CustomImageQualityWidgetState extends State<CustomImageQualityWidget> {
                     Expanded(
                       flex: 2,
                       child: Text(
-                        translateText('FPS'),
+                        translateText(widget.fpsLabel),
                         style: const TextStyle(fontSize: 15),
                       ),
                     ),
                   ],
                 ),
               ),
-              Obx(() {
+              if (showFpsMode)
+                Obx(() {
                 void selectFpsMode(String value) {
                   fpsModeValue.value = value;
                   setFpsMode?.call(value);

@@ -11,6 +11,9 @@ void main() {
     Function(double)? setQuality,
     Function(double)? setFps,
     Function(String)? setFpsMode,
+    bool showQuality = true,
+    bool showFpsMode = true,
+    String fpsLabel = 'FPS',
   }) {
     return MaterialApp(
       home: Scaffold(
@@ -23,6 +26,9 @@ void main() {
           setFpsMode: setFpsMode,
           showFps: true,
           showMoreQuality: true,
+          showQuality: showQuality,
+          showFpsMode: showFpsMode,
+          fpsLabel: fpsLabel,
           translateText: (value) => value,
         ),
       ),
@@ -131,5 +137,26 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
 
     expect(qualityValues, [50]);
+  });
+
+  testWidgets('Movie target-only controls hide quality and FPS mode', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      controls(
+        fps: 60,
+        showQuality: false,
+        showFpsMode: false,
+        fpsLabel: 'Target FPS',
+      ),
+    );
+
+    expect(find.byKey(const Key('custom-image-quality-slider')), findsNothing);
+    expect(find.byKey(const Key('custom-image-fps-slider')), findsOneWidget);
+    expect(
+      find.byKey(const Key('custom-image-fps-mode-dropdown')),
+      findsNothing,
+    );
+    expect(find.text('Target FPS'), findsOneWidget);
   });
 }

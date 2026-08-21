@@ -10,7 +10,9 @@ use crate::{
     common::get_default_sound_input,
     input::{MOUSE_TYPE_MASK, MOUSE_TYPE_MOVE_RELATIVE},
     ui_session_interface::{InvokeUiSession, Session},
-    video_profile::VideoProfile,
+    video_profile::{
+        EffectiveMovieMode, VideoProfile, MOVIE_DEFAULT_TARGET_FPS, MOVIE_PLAYOUT_DELAY_MS,
+    },
 };
 #[cfg(feature = "unix-file-copy-paste")]
 use crate::{clipboard::try_empty_clipboard_files, clipboard_file::unix_file_clip};
@@ -632,6 +634,12 @@ impl<T: InvokeUiSession> Remote<T> {
                                     (*display, snapshot.queue_depth_frames)
                                 })
                                 .collect::<HashMap<usize, u32>>();
+                            let display_refresh_millihz = feedback_snapshots
+                                .iter()
+                                .map(|(display, snapshot)| {
+                                    (*display, snapshot.display_refresh_millihz)
+                                })
+                                .collect::<HashMap<usize, u32>>();
                             let decoder = self.video_thread_label(|thread| {
                                 *thread.decoder_backend.read().unwrap()
                             });
@@ -656,11 +664,53 @@ impl<T: InvokeUiSession> Remote<T> {
                             let lc = self.handler.lc.read().unwrap();
                             let fixed_fps = lc.image_quality == "custom"
                                 && lc.get_option(config::keys::OPTION_CUSTOM_FPS_MODE) == "fixed";
-                            let fps_mode = if fixed_fps { "fixed" } else { "adaptive" }.to_owned();
-                            let auto_fps = if fixed_fps { None } else { lc.last_auto_fps };
+                            let requested_video_profile = VideoProfile::from_config(
+                                &lc.get_option(config::keys::OPTION_VIDEO_PROFILE),
+                            );
+                            let movie_profile = requested_video_profile == VideoProfile::Movie;
+                            let host_movie_supported = lc.supported_encoding.movie_mode;
+                            let movie_target_fps = lc
+                                .get_option(config::keys::OPTION_CUSTOM_FPS)
+                                .parse::<i32>()
+                                .ok()
+                                .and_then(i32::checked_abs)
+                                .map(|fps| fps as u32)
+                                .unwrap_or(MOVIE_DEFAULT_TARGET_FPS)
+                                .clamp(1, 120);
+                            let fps_mode = if movie_profile {
+                                "movie"
+                            } else if fixed_fps {
+                                "fixed"
+                            } else {
+                                "adaptive"
+                            }
+                            .to_owned();
+                            let auto_fps = if fixed_fps || movie_profile {
+                                None
+                            } else {
+                                lc.last_auto_fps
+                            };
                             drop(lc);
                             #[cfg(feature = "quic-transport")]
                             let quic_stats = peer.quic_stats();
+                            #[cfg(feature = "quic-transport")]
+                            let full_movie_transport = quic_stats.is_some_and(|stats| {
+                                stats.application_protocol >= 4
+                                    && stats.reliable_keyframes
+                                    && stats.reliable_keyframe_barrier
+                            });
+                            #[cfg(not(feature = "quic-transport"))]
+                            let full_movie_transport = false;
+                            let effective_movie_mode = EffectiveMovieMode::for_viewer(
+                                requested_video_profile,
+                                host_movie_supported,
+                                full_movie_transport,
+                            );
+                            let movie_fallback_reason = match effective_movie_mode.fallback_reason()
+                            {
+                                "none" => None,
+                                reason => Some(reason),
+                            };
                             self.handler.update_quality_status(QualityStatus {
                                 speed: Some(speed),
                                 fps,
@@ -811,6 +861,10 @@ impl<T: InvokeUiSession> Remote<T> {
                                             )
                                         })
                                 }),
+                                #[cfg(feature = "quic-transport")]
+                                quic_video_queue_target_ms: quic_stats.map(|stats| {
+                                    stats.video_datagram_queue_target_us / 1_000
+                                }),
                                 decoder,
                                 renderer,
                                 decode_fps,
@@ -826,6 +880,17 @@ impl<T: InvokeUiSession> Remote<T> {
                                 video_decode_time_us,
                                 video_render_submit_time_us,
                                 video_feedback_queue,
+                                display_refresh_millihz,
+                                requested_video_profile: Some(
+                                    requested_video_profile.config_value().to_owned(),
+                                ),
+                                effective_video_profile: Some(
+                                    effective_movie_mode.profile_label().to_owned(),
+                                ),
+                                movie_target_fps: movie_profile.then_some(movie_target_fps),
+                                movie_fallback_reason: movie_fallback_reason.map(str::to_owned),
+                                movie_playout_delay_ms: movie_profile
+                                    .then_some(MOVIE_PLAYOUT_DELAY_MS),
                                 ..Default::default()
                             });
                         }

@@ -488,6 +488,9 @@ struct DisplayData {
     encoder_backend: Option<String>,
     encoder_input: Option<String>,
     adjust_ratio_instant: Instant,
+    movie_target_fps: u32,
+    movie_pacing_fps: u32,
+    movie_host_pipeline_p95_us: u32,
 }
 
 impl Default for DisplayData {
@@ -504,6 +507,9 @@ impl Default for DisplayData {
             encoder_backend: None,
             encoder_input: None,
             adjust_ratio_instant: Instant::now(),
+            movie_target_fps: 0,
+            movie_pacing_fps: 0,
+            movie_host_pipeline_p95_us: 0,
         }
     }
 }
@@ -603,6 +609,34 @@ impl VideoQoS {
                     display.capture_frame.clone(),
                     display.encoder_backend.clone(),
                     display.encoder_input.clone(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn store_movie_runtime_status(
+        &mut self,
+        video_service_name: &str,
+        target_fps: u32,
+        pacing_fps: u32,
+        host_pipeline_p95_us: u64,
+    ) {
+        if let Some(display) = self.displays.get_mut(video_service_name) {
+            display.movie_target_fps = target_fps;
+            display.movie_pacing_fps = pacing_fps;
+            display.movie_host_pipeline_p95_us =
+                host_pipeline_p95_us.min(u64::from(u32::MAX)) as u32;
+        }
+    }
+
+    pub(crate) fn movie_runtime_status(&self, video_service_name: &str) -> (u32, u32, u32) {
+        self.displays
+            .get(video_service_name)
+            .map(|display| {
+                (
+                    display.movie_target_fps,
+                    display.movie_pacing_fps,
+                    display.movie_host_pipeline_p95_us,
                 )
             })
             .unwrap_or_default()
@@ -1676,6 +1710,16 @@ mod tests {
         assert_eq!(metrics.max_decode_time_us, 3_000);
         assert_eq!(metrics.display_refresh_millihz, 120_000);
         assert!(!qos.movie_viewer_metrics(CAMERA_SERVICE).available);
+    }
+
+    #[test]
+    fn movie_runtime_status_is_scoped_to_the_video_service() {
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
+        qos.new_display(CAMERA_SERVICE.to_owned());
+        qos.store_movie_runtime_status(MONITOR_SERVICE, 60, 30, 8_500);
+
+        assert_eq!(qos.movie_runtime_status(MONITOR_SERVICE), (60, 30, 8_500));
+        assert_eq!(qos.movie_runtime_status(CAMERA_SERVICE), (0, 0, 0));
     }
 
     #[test]
