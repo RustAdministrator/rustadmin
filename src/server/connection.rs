@@ -4027,6 +4027,10 @@ impl Connection {
         // Revision 084 viewers already send valid feedback but predate the
         // explicit capability bit. Accept the message itself as proof.
         self.set_video_feedback_capability(true);
+        video_service::VIDEO_QOS
+            .lock()
+            .unwrap()
+            .user_video_feedback(self.inner.id(), &feedback);
 
         let now = Instant::now();
         let new_stream = previous
