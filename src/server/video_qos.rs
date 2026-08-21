@@ -106,6 +106,7 @@ struct UserData {
     video_startup_instant: Option<Instant>,
     last_transport_loss_at: Option<Instant>,
     video_profile: VideoProfile,
+    movie_transport_capable: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -379,6 +380,12 @@ impl VideoQoS {
             "video profile applied: user_id={id}, requested={}",
             profile.config_value()
         );
+    }
+
+    pub(crate) fn user_movie_transport_capability(&mut self, id: i32, capable: bool) {
+        if let Some(user) = self.users.get_mut(&id) {
+            user.movie_transport_capable = capable;
+        }
     }
 
     pub fn user_auto_adjust_fps(&mut self, id: i32, fps: u32) {
@@ -663,6 +670,16 @@ impl VideoQoS {
         let mut subscribers = self.subscribed_users(video_service_name).peekable();
         subscribers.peek().is_some()
             && subscribers.all(|user| user.video_profile == VideoProfile::Movie)
+    }
+
+    pub fn full_movie_mode(&self, video_service_name: &str) -> bool {
+        let mut subscribers = self.subscribed_users(video_service_name).peekable();
+        subscribers.peek().is_some()
+            && subscribers.all(|user| {
+                user.video_profile == VideoProfile::Movie
+                    && user.video_feedback_capable
+                    && user.movie_transport_capable
+            })
     }
 
     pub fn remove_display(&mut self, video_service_name: &str) {
@@ -969,9 +986,17 @@ mod tests {
 
         qos.user_video_profile(2, VideoProfile::Movie);
         assert!(qos.all_subscribers_request_movie(MONITOR_SERVICE));
+        assert!(!qos.full_movie_mode(MONITOR_SERVICE));
+
+        for id in [1, 2] {
+            qos.user_video_feedback_capability(id, true);
+            qos.user_movie_transport_capability(id, true);
+        }
+        assert!(qos.full_movie_mode(MONITOR_SERVICE));
 
         qos.user_video_profile(1, VideoProfile::Standard);
         assert!(!qos.all_subscribers_request_movie(MONITOR_SERVICE));
+        assert!(!qos.full_movie_mode(MONITOR_SERVICE));
     }
 
     #[test]

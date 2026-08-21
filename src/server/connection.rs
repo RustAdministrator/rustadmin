@@ -88,11 +88,19 @@ const VIDEO_QUEUE_CAPACITY: usize = 8;
 const SERVER_ASYNC_OUTBOX_CAPACITY: usize = 256;
 const SERVER_VIDEO_LATEST_KEY_FALLBACK: u64 = 1 << 63;
 const SERVER_CLOSE_SEND_TIMEOUT: Duration = Duration::from_secs(1);
-const MOVIE_MODE_HOST_CAPABLE: bool = false;
+const MOVIE_MODE_HOST_CAPABLE: bool = true;
 
 fn supported_encoding_with_movie_mode(mut encoding: SupportedEncoding) -> SupportedEncoding {
     encoding.movie_mode = MOVIE_MODE_HOST_CAPABLE;
     encoding
+}
+
+fn full_movie_quic_features_capable(
+    application_protocol: u16,
+    reliable_keyframes: bool,
+    reliable_keyframe_barrier: bool,
+) -> bool {
+    application_protocol >= 4 && reliable_keyframes && reliable_keyframe_barrier
 }
 
 fn server_video_latest_key(frame: &VideoFrame) -> u64 {
@@ -209,6 +217,14 @@ mod video_queue_tests {
         let mut message = Message::new();
         message.set_video_frame(frame);
         Arc::new(message)
+    }
+
+    #[test]
+    fn full_movie_gate_requires_v4_reliable_keyframes_and_barrier() {
+        assert!(!full_movie_quic_features_capable(3, true, true));
+        assert!(!full_movie_quic_features_capable(4, false, true));
+        assert!(!full_movie_quic_features_capable(4, true, false));
+        assert!(full_movie_quic_features_capable(4, true, true));
     }
 
     #[test]
@@ -3435,7 +3451,7 @@ impl Connection {
         }
     }
 
-    fn on_remote_authorized(&self) {
+    fn on_remote_authorized(&mut self) {
         self.update_codec_on_login();
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         if config::option2bool(
@@ -3848,7 +3864,7 @@ impl Connection {
         Self::is_permission_enabled_locally(enable_prefix_option)
     }
 
-    fn update_codec_on_login(&self) {
+    fn update_codec_on_login(&mut self) {
         use scrap::codec::{Encoder, EncodingUpdate::*};
         if let Some(o) = self.lr.clone().option.as_ref() {
             if let Some(q) = o.supported_decoding.clone().take() {
@@ -4123,7 +4139,37 @@ impl Connection {
         }
     }
 
-    fn set_video_feedback_capability(&self, capable: bool) {
+    fn movie_transport_capable(&self) -> bool {
+        #[cfg(feature = "quic-transport")]
+        if let Some(stats) = self.stream.quic_stats() {
+            return full_movie_quic_features_capable(
+                stats.application_protocol,
+                stats.reliable_keyframes,
+                stats.reliable_keyframe_barrier,
+            );
+        }
+        false
+    }
+
+    fn refresh_effective_movie_mode(&mut self) {
+        let transport_capable = self.movie_transport_capable();
+        let feedback_capable = self
+            .video_feedback_capable
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.effective_movie_mode = match self.requested_video_profile {
+            VideoProfile::Standard => EffectiveMovieMode::Off,
+            VideoProfile::Movie if !MOVIE_MODE_HOST_CAPABLE => EffectiveMovieMode::UnsupportedPeer,
+            VideoProfile::Movie if !feedback_capable => EffectiveMovieMode::ViewerOnly,
+            VideoProfile::Movie if !transport_capable => EffectiveMovieMode::CompatibilityTransport,
+            VideoProfile::Movie => EffectiveMovieMode::Full,
+        };
+        video_service::VIDEO_QOS
+            .lock()
+            .unwrap()
+            .user_movie_transport_capability(self.inner.id(), transport_capable);
+    }
+
+    fn set_video_feedback_capability(&mut self, capable: bool) {
         let previous = self
             .video_feedback_capable
             .swap(capable, std::sync::atomic::Ordering::Relaxed);
@@ -4134,6 +4180,7 @@ impl Connection {
             .lock()
             .unwrap()
             .user_video_feedback_capability(self.inner.id(), capable);
+        self.refresh_effective_movie_mode();
         log::info!(
             "#{} diag video feedback capability: {}",
             self.inner.id(),
@@ -6177,24 +6224,6 @@ impl Connection {
                 video_qos.user_custom_fps(self.inner.id(), fps);
             }
         }
-        if let Some(profile) = VideoProfile::from_wire_update(o.video_profile) {
-            if profile != self.requested_video_profile {
-                self.requested_video_profile = profile;
-                self.effective_movie_mode =
-                    EffectiveMovieMode::for_request(profile, MOVIE_MODE_HOST_CAPABLE);
-                video_service::VIDEO_QOS
-                    .lock()
-                    .unwrap()
-                    .user_video_profile(self.inner.id(), profile);
-                log::info!(
-                    "#{} video profile update: requested={}, effective={}, fallback={}",
-                    self.inner.id(),
-                    profile.config_value(),
-                    self.effective_movie_mode.profile_label(),
-                    self.effective_movie_mode.fallback_reason()
-                );
-            }
-        }
         if let Ok(backend) = o.capture_backend.enum_value() {
             if backend != CaptureBackend::CaptureBackendNotSet {
                 video_service::set_capture_backend_preference(backend);
@@ -6225,6 +6254,24 @@ impl Connection {
                 scrap::codec::Encoder::negotiated_codec(),
                 scrap::codec::Encoder::usable_encoding()
             );
+        }
+        if let Some(profile) = VideoProfile::from_wire_update(o.video_profile) {
+            if profile != self.requested_video_profile {
+                self.requested_video_profile = profile;
+                video_service::VIDEO_QOS
+                    .lock()
+                    .unwrap()
+                    .user_video_profile(self.inner.id(), profile);
+                self.refresh_effective_movie_mode();
+                log::info!(
+                    "#{} video profile update: requested={}, effective={}, fallback={}",
+                    self.inner.id(),
+                    profile.config_value(),
+                    self.effective_movie_mode.profile_label(),
+                    self.effective_movie_mode.fallback_reason()
+                );
+                self.refresh_video_display(None);
+            }
         }
         if let Ok(q) = o.lock_after_session_end.enum_value() {
             if q != BoolOption::NotSet {

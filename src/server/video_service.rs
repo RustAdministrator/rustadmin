@@ -403,6 +403,87 @@ impl VideoFrameController {
             }
         }
     }
+
+    fn drain_available(&mut self, fetched_conn_ids: &mut HashSet<i32>) -> usize {
+        if self.send_conn_ids.is_empty() {
+            return 0;
+        }
+        let receiver = {
+            match FRAME_FETCHED_NOTIFIERS
+                .lock()
+                .unwrap()
+                .get(&self.stream_key)
+            {
+                Some(notifier) => notifier.1.clone(),
+                None => return 0,
+            }
+        };
+        let Ok(mut receiver_guard) = receiver.try_lock() else {
+            return 0;
+        };
+        let mut drained = 0;
+        while let Ok((id, _)) = receiver_guard.try_recv() {
+            drained += 1;
+            if self.send_conn_ids.contains(&id) {
+                fetched_conn_ids.insert(id);
+            }
+        }
+        drained
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MoviePacerDecision {
+    scheduled_at: Instant,
+    missed_slots: u64,
+}
+
+#[derive(Debug)]
+struct MovieFramePacer {
+    period: Duration,
+    next_deadline: Instant,
+    skipped_slots: u64,
+}
+
+impl MovieFramePacer {
+    fn new(fps: u32, now: Instant) -> Self {
+        let fps = scrap::codec::normalized_encoder_fps(fps);
+        Self {
+            period: Duration::from_nanos(1_000_000_000 / u64::from(fps)),
+            next_deadline: now,
+            skipped_slots: 0,
+        }
+    }
+
+    fn plan_at(&mut self, now: Instant) -> MoviePacerDecision {
+        let mut scheduled_at = self.next_deadline;
+        let mut missed_slots = 0;
+        if now > scheduled_at {
+            let late = now.saturating_duration_since(scheduled_at);
+            missed_slots = late
+                .as_nanos()
+                .div_ceil(self.period.as_nanos())
+                .min(u128::from(u32::MAX)) as u32;
+            if missed_slots > 0 {
+                scheduled_at += self.period * missed_slots;
+                self.skipped_slots = self.skipped_slots.saturating_add(u64::from(missed_slots));
+            }
+        }
+        self.next_deadline = scheduled_at + self.period;
+        MoviePacerDecision {
+            scheduled_at,
+            missed_slots: u64::from(missed_slots),
+        }
+    }
+
+    fn wait_next(&mut self) -> MoviePacerDecision {
+        let decision = self.plan_at(Instant::now());
+        let now = Instant::now();
+        if now < decision.scheduled_at {
+            std::thread::sleep(decision.scheduled_at - now);
+        }
+        decision
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -456,6 +537,7 @@ struct HostVideoDiagnostics {
     last_loop_started: Option<Instant>,
     last_valid_capture: Option<Instant>,
     loop_iterations: usize,
+    pacing_missed_slots: u64,
     valid_capture: usize,
     invalid_capture: usize,
     would_block: usize,
@@ -483,6 +565,7 @@ impl HostVideoDiagnostics {
             last_loop_started: None,
             last_valid_capture: None,
             loop_iterations: 0,
+            pacing_missed_slots: 0,
             valid_capture: 0,
             invalid_capture: 0,
             would_block: 0,
@@ -530,6 +613,10 @@ impl HostVideoDiagnostics {
 
     fn record_loop_total(&mut self, elapsed: Duration) {
         self.loop_totals.record(elapsed);
+    }
+
+    fn record_pacing_missed_slots(&mut self, missed_slots: u64) {
+        self.pacing_missed_slots = self.pacing_missed_slots.saturating_add(missed_slots);
     }
 
     fn record_send_result(&mut self, send_conn_count: usize) {
@@ -593,7 +680,7 @@ impl HostVideoDiagnostics {
         let ack_wait = self.ack_waits.summary();
         let loop_total = self.loop_totals.summary();
         log::info!(
-            "diag host fps: service={}, source={:?}, display_idx={}, codec={:?}, hardware={}, bitrate={}, quality={:.3}, target_fps={:.1}, loop_rate={:.1}, capture_fps={:.1}, encoded_fps={:.1}, gdi={}, valid_capture={}, invalid_capture={}, would_block={}, encode_calls={}, repeat_encode_calls={}, sent_batches={}, sent_targets={}, empty_send_results={}, wait_frames={}, wait_timeouts={}, wait_avg_ms={}, wait_max_ms={}, loop_interval_p50_us={}, loop_interval_p95_us={}, loop_interval_max_us={}, capture_interval_p50_us={}, capture_interval_p95_us={}, capture_interval_max_us={}, capture_call_p50_us={}, capture_call_p95_us={}, capture_call_max_us={}, encode_pipeline_p50_us={}, encode_pipeline_p95_us={}, encode_pipeline_max_us={}, ack_wait_p50_us={}, ack_wait_p95_us={}, ack_wait_max_us={}, loop_total_p50_us={}, loop_total_p95_us={}, loop_total_max_us={}",
+            "diag host fps: service={}, source={:?}, display_idx={}, codec={:?}, hardware={}, bitrate={}, quality={:.3}, target_fps={:.1}, loop_rate={:.1}, capture_fps={:.1}, encoded_fps={:.1}, pacing_missed_slots={}, gdi={}, valid_capture={}, invalid_capture={}, would_block={}, encode_calls={}, repeat_encode_calls={}, sent_batches={}, sent_targets={}, empty_send_results={}, wait_frames={}, wait_timeouts={}, wait_avg_ms={}, wait_max_ms={}, loop_interval_p50_us={}, loop_interval_p95_us={}, loop_interval_max_us={}, capture_interval_p50_us={}, capture_interval_p95_us={}, capture_interval_max_us={}, capture_call_p50_us={}, capture_call_p95_us={}, capture_call_max_us={}, encode_pipeline_p50_us={}, encode_pipeline_p95_us={}, encode_pipeline_max_us={}, ack_wait_p50_us={}, ack_wait_p95_us={}, ack_wait_max_us={}, loop_total_p50_us={}, loop_total_p95_us={}, loop_total_max_us={}",
             service_name,
             source,
             display_idx,
@@ -605,6 +692,7 @@ impl HostVideoDiagnostics {
             loop_rate,
             capture_fps,
             encoded_fps,
+            self.pacing_missed_slots,
             gdi,
             self.valid_capture,
             self.invalid_capture,
@@ -1058,7 +1146,7 @@ mod tests {
         keep_privileged_stream_for_secure_transition, secure_capture_helper_ready,
         should_force_privileged_secure_capturer, stale_secure_capture_helper_on_user_desktop,
         stamp_video_frame, windows_capture_route, DurationSamples, HqReferenceRefreshPolicy,
-        ReferenceRefreshReason, VideoFrameController, VideoSource, VideoStreamKey,
+        MovieFramePacer, ReferenceRefreshReason, VideoFrameController, VideoSource, VideoStreamKey,
         WindowsCaptureRoute, DELIVERY_REFERENCE_REFRESH_COOLDOWN, HOST_VIDEO_DIAG_SAMPLE_CAPACITY,
         HQ_REFERENCE_REFRESH_COOLDOWN,
     };
@@ -1196,6 +1284,44 @@ mod tests {
             samples.summary().max_us,
             HOST_VIDEO_DIAG_SAMPLE_CAPACITY as u64 + 10
         );
+    }
+
+    #[test]
+    fn movie_pacer_uses_absolute_deadlines_without_catch_up_bursts() {
+        let start = Instant::now();
+        let mut pacer = MovieFramePacer::new(60, start);
+        let period = pacer.period;
+
+        let first = pacer.plan_at(start);
+        assert_eq!(first.scheduled_at, start);
+        assert_eq!(first.missed_slots, 0);
+
+        let late_now = start + period * 3 + period / 2;
+        let late = pacer.plan_at(late_now);
+        assert_eq!(late.scheduled_at, start + period * 4);
+        assert_eq!(late.missed_slots, 3);
+        assert_eq!(pacer.skipped_slots, 3);
+
+        let next = pacer.plan_at(late.scheduled_at);
+        assert_eq!(next.scheduled_at, start + period * 5);
+        assert_eq!(next.missed_slots, 0);
+        assert_eq!(next.scheduled_at - late.scheduled_at, period);
+    }
+
+    #[test]
+    fn movie_pacer_skips_a_partially_missed_slot() {
+        let start = Instant::now();
+        let mut pacer = MovieFramePacer::new(60, start);
+        let period = pacer.period;
+        let first = pacer.plan_at(start);
+
+        let late = pacer.plan_at(start + period + period / 2);
+        assert_eq!(late.scheduled_at, start + period * 2);
+        assert_eq!(late.missed_slots, 1);
+
+        let next = pacer.plan_at(late.scheduled_at);
+        assert_eq!(next.scheduled_at - late.scheduled_at, period);
+        assert_eq!(first.scheduled_at, start);
     }
 
     #[test]
@@ -2035,6 +2161,7 @@ fn run(vs: VideoService) -> ResultType<()> {
     let subscriber_ids = sp.subscriber_ids();
     let mut video_qos = VIDEO_QOS.lock().unwrap();
     video_qos.sync_subscribers(&service_name, subscriber_ids);
+    let full_movie_mode = video_qos.full_movie_mode(&service_name);
     let mut spf = video_qos.spf(&service_name);
     let encoder_fps = DEFAULT_ENCODER_FPS;
     let mut quality = video_qos.ratio(&service_name);
@@ -2137,6 +2264,14 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut frame_controller = VideoFrameController::new(vs.source, display_idx);
 
     let start = time::Instant::now();
+    let mut movie_pacer = full_movie_mode.then(|| MovieFramePacer::new(encoder_fps, start));
+    log::info!(
+        "diag video pacing mode: service={}, full_movie={}, encoder_fps={}, legacy_ack_wait={}",
+        service_name,
+        full_movie_mode,
+        encoder_fps,
+        !full_movie_mode
+    );
     let mut last_check_displays = time::Instant::now();
     #[cfg(windows)]
     let mut try_gdi = 1;
@@ -2454,6 +2589,10 @@ fn run(vs: VideoService) -> ResultType<()> {
                 bail!("Desktop changed");
             }
         }
+        let movie_schedule = movie_pacer.as_mut().map(MovieFramePacer::wait_next);
+        if let Some(schedule) = movie_schedule {
+            host_diag.record_pacing_missed_slots(schedule.missed_slots);
+        }
         let now = time::Instant::now();
         if vs.source.is_monitor() && last_check_displays.elapsed().as_millis() > 1000 {
             last_check_displays = now;
@@ -2487,10 +2626,17 @@ fn run(vs: VideoService) -> ResultType<()> {
 
         frame_controller.reset();
 
-        let time = now - start;
+        let time = movie_schedule
+            .map(|schedule| schedule.scheduled_at.saturating_duration_since(start))
+            .unwrap_or_else(|| now.saturating_duration_since(start));
         let ms = (time.as_secs() * 1000 + time.subsec_millis() as u64) as i64;
         let capture_call_started = Instant::now();
-        let captured_frame = c.frame(spf);
+        let capture_timeout = if movie_pacer.is_some() {
+            Duration::ZERO
+        } else {
+            spf
+        };
+        let captured_frame = c.frame(capture_timeout);
         host_diag.record_capture_call(capture_call_started.elapsed());
         let res = match captured_frame {
             Ok(frame) => {
@@ -2811,24 +2957,29 @@ fn run(vs: VideoService) -> ResultType<()> {
             }
         }
 
-        let mut fetched_conn_ids = HashSet::new();
-        let timeout_millis = 3_000u64;
-        let wait_begin = Instant::now();
-        while wait_begin.elapsed().as_millis() < timeout_millis as _ {
-            if vs.source.is_monitor() {
-                check_privacy_mode_changed(&sp, display_idx, &c)?;
+        if movie_pacer.is_some() {
+            let mut fetched_conn_ids = HashSet::new();
+            frame_controller.drain_available(&mut fetched_conn_ids);
+        } else {
+            let mut fetched_conn_ids = HashSet::new();
+            let timeout_millis = 3_000u64;
+            let wait_begin = Instant::now();
+            while wait_begin.elapsed().as_millis() < timeout_millis as _ {
+                if vs.source.is_monitor() {
+                    check_privacy_mode_changed(&sp, display_idx, &c)?;
+                }
+                frame_controller.try_wait_next(&mut fetched_conn_ids, 300);
+                // break if all connections have received current frame
+                if frame_controller.delivery_ready(&fetched_conn_ids) {
+                    break;
+                }
             }
-            frame_controller.try_wait_next(&mut fetched_conn_ids, 300);
-            // break if all connections have received current frame
-            if frame_controller.delivery_ready(&fetched_conn_ids) {
-                break;
-            }
+            host_diag.record_wait(
+                frame_controller.send_conn_ids.len(),
+                fetched_conn_ids.len(),
+                wait_begin.elapsed(),
+            );
         }
-        host_diag.record_wait(
-            frame_controller.send_conn_ids.len(),
-            fetched_conn_ids.len(),
-            wait_begin.elapsed(),
-        );
         DISPLAY_CONN_IDS
             .lock()
             .unwrap()
@@ -2837,7 +2988,7 @@ fn run(vs: VideoService) -> ResultType<()> {
         let elapsed = now.elapsed();
         // may need to enable frame(timeout)
         log::trace!("{:?} {:?}", time::Instant::now(), elapsed);
-        if elapsed < spf {
+        if movie_pacer.is_none() && elapsed < spf {
             std::thread::sleep(spf - elapsed);
         }
         host_diag.record_loop_total(loop_started.elapsed());
