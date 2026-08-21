@@ -1,4 +1,5 @@
 use super::*;
+use crate::video_profile::VideoProfile;
 use scrap::codec::{Quality, BR_BALANCED, BR_BEST, BR_SPEED};
 use std::{
     collections::{HashSet, VecDeque},
@@ -104,6 +105,7 @@ struct UserData {
     video_render_started: bool,
     video_startup_instant: Option<Instant>,
     last_transport_loss_at: Option<Instant>,
+    video_profile: VideoProfile,
 }
 
 #[derive(Debug, Clone)]
@@ -362,6 +364,21 @@ impl VideoQoS {
         }
         self.adjust_displays_for_user(id);
         log::info!("custom_fps fixed applied: user_id={id}, fps={fps}");
+    }
+
+    pub(crate) fn user_video_profile(&mut self, id: i32, profile: VideoProfile) {
+        let Some(user) = self.users.get_mut(&id) else {
+            log::warn!(
+                "video profile ignored: unknown_user_id={id}, requested={}",
+                profile.config_value()
+            );
+            return;
+        };
+        user.video_profile = profile;
+        log::info!(
+            "video profile applied: user_id={id}, requested={}",
+            profile.config_value()
+        );
     }
 
     pub fn user_auto_adjust_fps(&mut self, id: i32, fps: u32) {
@@ -640,6 +657,12 @@ impl VideoQoS {
                 self.fps(video_service_name)
             );
         }
+    }
+
+    pub fn all_subscribers_request_movie(&self, video_service_name: &str) -> bool {
+        let mut subscribers = self.subscribed_users(video_service_name).peekable();
+        subscribers.peek().is_some()
+            && subscribers.all(|user| user.video_profile == VideoProfile::Movie)
     }
 
     pub fn remove_display(&mut self, video_service_name: &str) {
@@ -934,6 +957,21 @@ mod tests {
 
         assert!(qos.startup_safe_mode(MONITOR_SERVICE));
         assert_eq!(qos.ratio(MONITOR_SERVICE), STARTUP_SAFE_RATIO);
+    }
+
+    #[test]
+    fn movie_profile_requires_every_active_subscriber() {
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1, 2]);
+        assert!(!qos.all_subscribers_request_movie(MONITOR_SERVICE));
+
+        qos.user_video_profile(1, VideoProfile::Movie);
+        assert!(!qos.all_subscribers_request_movie(MONITOR_SERVICE));
+
+        qos.user_video_profile(2, VideoProfile::Movie);
+        assert!(qos.all_subscribers_request_movie(MONITOR_SERVICE));
+
+        qos.user_video_profile(1, VideoProfile::Standard);
+        assert!(!qos.all_subscribers_request_movie(MONITOR_SERVICE));
     }
 
     #[test]

@@ -36,6 +36,7 @@ use crate::{
     secure_tcp,
     ui_interface::{get_builtin_option, resolve_avatar_url, use_texture_render},
     ui_session_interface::{InvokeUiSession, Session},
+    video_profile::VideoProfile,
     wrap_direct_public_key_symmetric_value_with_identity,
 };
 #[cfg(feature = "unix-file-copy-paste")]
@@ -3326,6 +3327,13 @@ impl LoginConfigHandler {
                 capture_backend
             );
         }
+        let video_profile = VideoProfile::from_config(&self.get_option(keys::OPTION_VIDEO_PROFILE));
+        msg.video_profile = video_profile.wire_value().into();
+        log::info!(
+            "video profile initial option send: id={}, requested={}",
+            self.id,
+            video_profile.config_value()
+        );
         let view_only = self.get_toggle_option("view-only");
         if view_only {
             msg.disable_keyboard = BoolOption::Yes.into();
@@ -3652,6 +3660,31 @@ impl LoginConfigHandler {
             self.id,
             normalized,
             capture_backend
+        );
+        msg_out
+    }
+
+    pub fn set_video_profile(&mut self, value: String, save_config: bool) -> Message {
+        let profile = VideoProfile::from_config(&value);
+        let mut misc = Misc::new();
+        misc.set_option(OptionMessage {
+            video_profile: profile.wire_value().into(),
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_misc(misc);
+        if save_config {
+            let mut config = self.load_config();
+            config.options.insert(
+                keys::OPTION_VIDEO_PROFILE.to_owned(),
+                profile.config_value().to_owned(),
+            );
+            self.save_config(config);
+        }
+        log::info!(
+            "video profile option send: id={}, requested={}",
+            self.id,
+            profile.config_value()
         );
         msg_out
     }

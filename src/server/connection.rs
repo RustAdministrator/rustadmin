@@ -23,7 +23,9 @@ use crate::{
     client::{
         new_voice_call_request, new_voice_call_response, start_audio_thread, MediaData, MediaSender,
     },
-    display_service, ipc, privacy_mode, video_service, VERSION,
+    display_service, ipc, privacy_mode,
+    video_profile::{EffectiveMovieMode, VideoProfile},
+    video_service, VERSION,
 };
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use crate::{common::DEVICE_NAME, flutter::connection_manager::start_channel};
@@ -86,6 +88,12 @@ const VIDEO_QUEUE_CAPACITY: usize = 8;
 const SERVER_ASYNC_OUTBOX_CAPACITY: usize = 256;
 const SERVER_VIDEO_LATEST_KEY_FALLBACK: u64 = 1 << 63;
 const SERVER_CLOSE_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+const MOVIE_MODE_HOST_CAPABLE: bool = false;
+
+fn supported_encoding_with_movie_mode(mut encoding: SupportedEncoding) -> SupportedEncoding {
+    encoding.movie_mode = MOVIE_MODE_HOST_CAPABLE;
+    encoding
+}
 
 fn server_video_latest_key(frame: &VideoFrame) -> u64 {
     if frame.stream_id != 0 {
@@ -1013,6 +1021,8 @@ pub struct Connection {
     tx_input: std_mpsc::Sender<MessageInput>,
     // handle input messages
     video_ack_required: bool,
+    requested_video_profile: VideoProfile,
+    effective_movie_mode: EffectiveMovieMode,
     server_audit_conn: String,
     server_audit_file: String,
     lr: LoginRequest,
@@ -1277,6 +1287,8 @@ impl Connection {
             show_my_cursor: false,
             tx_input,
             video_ack_required: false,
+            requested_video_profile: VideoProfile::Standard,
+            effective_movie_mode: EffectiveMovieMode::Off,
             server_audit_conn: "".to_owned(),
             server_audit_file: "".to_owned(),
             lr: Default::default(),
@@ -3201,7 +3213,8 @@ impl Connection {
         if self.file_transfer.is_some() || self.terminal {
             res.set_peer_info(pi);
         } else if self.view_camera {
-            let supported_encoding = scrap::codec::Encoder::supported_encoding();
+            let supported_encoding =
+                supported_encoding_with_movie_mode(scrap::codec::Encoder::supported_encoding());
             self.last_supported_encoding = Some(supported_encoding.clone());
             log::info!("peer info supported_encoding: {:?}", supported_encoding);
             pi.encoding = Some(supported_encoding).into();
@@ -3224,7 +3237,8 @@ impl Connection {
             res.set_peer_info(pi);
             self.update_codec_on_login();
         } else {
-            let supported_encoding = scrap::codec::Encoder::supported_encoding();
+            let supported_encoding =
+                supported_encoding_with_movie_mode(scrap::codec::Encoder::supported_encoding());
             self.last_supported_encoding = Some(supported_encoding.clone());
             log::info!("peer info supported_encoding: {:?}", supported_encoding);
             pi.encoding = Some(supported_encoding).into();
@@ -6163,6 +6177,24 @@ impl Connection {
                 video_qos.user_custom_fps(self.inner.id(), fps);
             }
         }
+        if let Some(profile) = VideoProfile::from_wire_update(o.video_profile) {
+            if profile != self.requested_video_profile {
+                self.requested_video_profile = profile;
+                self.effective_movie_mode =
+                    EffectiveMovieMode::for_request(profile, MOVIE_MODE_HOST_CAPABLE);
+                video_service::VIDEO_QOS
+                    .lock()
+                    .unwrap()
+                    .user_video_profile(self.inner.id(), profile);
+                log::info!(
+                    "#{} video profile update: requested={}, effective={}, fallback={}",
+                    self.inner.id(),
+                    profile.config_value(),
+                    self.effective_movie_mode.profile_label(),
+                    self.effective_movie_mode.fallback_reason()
+                );
+            }
+        }
         if let Ok(backend) = o.capture_backend.enum_value() {
             if backend != CaptureBackend::CaptureBackendNotSet {
                 video_service::set_capture_backend_preference(backend);
@@ -6575,7 +6607,7 @@ impl Connection {
         // But it's not necessary now and we have to consider two audio services(client, server).
         crate::audio_service::set_voice_call_input_device(None, true);
         log::info!(
-            "#{} Connection closed: {}; diag close: lock={}, authorized={}, auth_kind={}, remote={}, file_transfer={}, view_camera={}, terminal={}, port_forward={}, display_idx={}, services_subed={}, video_ack_required={}, last_supported_encoding={:?}, negotiated_codec={:?}, usable_encoding={:?}",
+            "#{} Connection closed: {}; diag close: lock={}, authorized={}, auth_kind={}, remote={}, file_transfer={}, view_camera={}, terminal={}, port_forward={}, display_idx={}, services_subed={}, video_ack_required={}, requested_video_profile={}, effective_video_profile={}, movie_fallback={}, last_supported_encoding={:?}, negotiated_codec={:?}, usable_encoding={:?}",
             self.inner.id(),
             reason,
             lock,
@@ -6589,6 +6621,9 @@ impl Connection {
             self.display_idx,
             self.services_subed,
             self.video_ack_required,
+            self.requested_video_profile.config_value(),
+            self.effective_movie_mode.profile_label(),
+            self.effective_movie_mode.fallback_reason(),
             &self.last_supported_encoding,
             scrap::codec::Encoder::negotiated_codec(),
             scrap::codec::Encoder::usable_encoding()
