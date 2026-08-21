@@ -69,6 +69,7 @@ pub const OPTION_REFERENCE_REFRESH: &'static str = "reference-refresh";
 const ENCODE_NO_VALID_FRAME: &str = "no valid frame";
 const HW_ENCODER_WARMUP_TIMEOUT: Duration = Duration::from_secs(3);
 const HOST_VIDEO_DIAG_INTERVAL: Duration = Duration::from_secs(5);
+const HOST_VIDEO_DIAG_SAMPLE_CAPACITY: usize = 512;
 const HQ_REFERENCE_REFRESH_BITRATE_MULTIPLIER: u32 = 3;
 const HQ_REFERENCE_REFRESH_BITRATE_DIVISOR: u32 = 2;
 const HQ_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_secs(6);
@@ -404,8 +405,57 @@ impl VideoFrameController {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct DurationSummary {
+    p50_us: u64,
+    p95_us: u64,
+    max_us: u64,
+}
+
+#[derive(Debug, Default)]
+struct DurationSamples {
+    samples_us: Vec<u64>,
+    next_index: usize,
+}
+
+impl DurationSamples {
+    fn record(&mut self, duration: Duration) {
+        let duration_us = u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+        if self.samples_us.len() < HOST_VIDEO_DIAG_SAMPLE_CAPACITY {
+            self.samples_us.push(duration_us);
+            return;
+        }
+        self.samples_us[self.next_index] = duration_us;
+        self.next_index = (self.next_index + 1) % HOST_VIDEO_DIAG_SAMPLE_CAPACITY;
+    }
+
+    fn summary(&self) -> DurationSummary {
+        if self.samples_us.is_empty() {
+            return DurationSummary::default();
+        }
+        let mut sorted = self.samples_us.clone();
+        sorted.sort_unstable();
+        DurationSummary {
+            p50_us: percentile_us(&sorted, 50),
+            p95_us: percentile_us(&sorted, 95),
+            max_us: sorted.last().copied().unwrap_or_default(),
+        }
+    }
+}
+
+fn percentile_us(sorted: &[u64], percentile: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let rank = sorted.len().saturating_mul(percentile).saturating_add(99) / 100;
+    sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
+}
+
 struct HostVideoDiagnostics {
     last_log: Instant,
+    last_loop_started: Option<Instant>,
+    last_valid_capture: Option<Instant>,
+    loop_iterations: usize,
     valid_capture: usize,
     invalid_capture: usize,
     would_block: usize,
@@ -418,12 +468,21 @@ struct HostVideoDiagnostics {
     wait_timeouts: usize,
     wait_total_ms: u128,
     wait_max_ms: u128,
+    loop_intervals: DurationSamples,
+    capture_intervals: DurationSamples,
+    capture_calls: DurationSamples,
+    encode_pipelines: DurationSamples,
+    ack_waits: DurationSamples,
+    loop_totals: DurationSamples,
 }
 
 impl HostVideoDiagnostics {
     fn new() -> Self {
         Self {
             last_log: Instant::now(),
+            last_loop_started: None,
+            last_valid_capture: None,
+            loop_iterations: 0,
             valid_capture: 0,
             invalid_capture: 0,
             would_block: 0,
@@ -436,7 +495,41 @@ impl HostVideoDiagnostics {
             wait_timeouts: 0,
             wait_total_ms: 0,
             wait_max_ms: 0,
+            loop_intervals: DurationSamples::default(),
+            capture_intervals: DurationSamples::default(),
+            capture_calls: DurationSamples::default(),
+            encode_pipelines: DurationSamples::default(),
+            ack_waits: DurationSamples::default(),
+            loop_totals: DurationSamples::default(),
         }
+    }
+
+    fn record_loop_start(&mut self, now: Instant) {
+        self.loop_iterations += 1;
+        if let Some(previous) = self.last_loop_started.replace(now) {
+            self.loop_intervals
+                .record(now.saturating_duration_since(previous));
+        }
+    }
+
+    fn record_valid_capture(&mut self, now: Instant) {
+        self.valid_capture += 1;
+        if let Some(previous) = self.last_valid_capture.replace(now) {
+            self.capture_intervals
+                .record(now.saturating_duration_since(previous));
+        }
+    }
+
+    fn record_capture_call(&mut self, elapsed: Duration) {
+        self.capture_calls.record(elapsed);
+    }
+
+    fn record_encode_pipeline(&mut self, elapsed: Duration) {
+        self.encode_pipelines.record(elapsed);
+    }
+
+    fn record_loop_total(&mut self, elapsed: Duration) {
+        self.loop_totals.record(elapsed);
     }
 
     fn record_send_result(&mut self, send_conn_count: usize) {
@@ -457,6 +550,7 @@ impl HostVideoDiagnostics {
         self.wait_frames += 1;
         self.wait_total_ms += elapsed_ms;
         self.wait_max_ms = self.wait_max_ms.max(elapsed_ms);
+        self.ack_waits.record(elapsed);
         if fetched < expected {
             self.wait_timeouts += 1;
         }
@@ -474,7 +568,8 @@ impl HostVideoDiagnostics {
         spf: Duration,
         gdi: bool,
     ) {
-        if self.last_log.elapsed() < HOST_VIDEO_DIAG_INTERVAL {
+        let window_elapsed = self.last_log.elapsed();
+        if window_elapsed < HOST_VIDEO_DIAG_INTERVAL {
             return;
         }
         let target_fps = if spf.as_nanos() == 0 {
@@ -487,8 +582,18 @@ impl HostVideoDiagnostics {
         } else {
             self.wait_total_ms / self.wait_frames as u128
         };
+        let window_secs = window_elapsed.as_secs_f64().max(f64::EPSILON);
+        let loop_rate = self.loop_iterations as f64 / window_secs;
+        let capture_fps = self.valid_capture as f64 / window_secs;
+        let encoded_fps = self.sent_batches as f64 / window_secs;
+        let loop_interval = self.loop_intervals.summary();
+        let capture_interval = self.capture_intervals.summary();
+        let capture_call = self.capture_calls.summary();
+        let encode_pipeline = self.encode_pipelines.summary();
+        let ack_wait = self.ack_waits.summary();
+        let loop_total = self.loop_totals.summary();
         log::info!(
-            "diag host fps: service={}, source={:?}, display_idx={}, codec={:?}, hardware={}, bitrate={}, quality={:.3}, target_fps={:.1}, gdi={}, valid_capture={}, invalid_capture={}, would_block={}, encode_calls={}, repeat_encode_calls={}, sent_batches={}, sent_targets={}, empty_send_results={}, wait_frames={}, wait_timeouts={}, wait_avg_ms={}, wait_max_ms={}",
+            "diag host fps: service={}, source={:?}, display_idx={}, codec={:?}, hardware={}, bitrate={}, quality={:.3}, target_fps={:.1}, loop_rate={:.1}, capture_fps={:.1}, encoded_fps={:.1}, gdi={}, valid_capture={}, invalid_capture={}, would_block={}, encode_calls={}, repeat_encode_calls={}, sent_batches={}, sent_targets={}, empty_send_results={}, wait_frames={}, wait_timeouts={}, wait_avg_ms={}, wait_max_ms={}, loop_interval_p50_us={}, loop_interval_p95_us={}, loop_interval_max_us={}, capture_interval_p50_us={}, capture_interval_p95_us={}, capture_interval_max_us={}, capture_call_p50_us={}, capture_call_p95_us={}, capture_call_max_us={}, encode_pipeline_p50_us={}, encode_pipeline_p95_us={}, encode_pipeline_max_us={}, ack_wait_p50_us={}, ack_wait_p95_us={}, ack_wait_max_us={}, loop_total_p50_us={}, loop_total_p95_us={}, loop_total_max_us={}",
             service_name,
             source,
             display_idx,
@@ -497,6 +602,9 @@ impl HostVideoDiagnostics {
             bitrate,
             quality,
             target_fps,
+            loop_rate,
+            capture_fps,
+            encoded_fps,
             gdi,
             self.valid_capture,
             self.invalid_capture,
@@ -509,7 +617,25 @@ impl HostVideoDiagnostics {
             self.wait_frames,
             self.wait_timeouts,
             wait_avg_ms,
-            self.wait_max_ms
+            self.wait_max_ms,
+            loop_interval.p50_us,
+            loop_interval.p95_us,
+            loop_interval.max_us,
+            capture_interval.p50_us,
+            capture_interval.p95_us,
+            capture_interval.max_us,
+            capture_call.p50_us,
+            capture_call.p95_us,
+            capture_call.max_us,
+            encode_pipeline.p50_us,
+            encode_pipeline.p95_us,
+            encode_pipeline.max_us,
+            ack_wait.p50_us,
+            ack_wait.p95_us,
+            ack_wait.max_us,
+            loop_total.p50_us,
+            loop_total.p95_us,
+            loop_total.max_us
         );
         *self = Self::new();
     }
@@ -931,9 +1057,10 @@ mod tests {
     use super::{
         keep_privileged_stream_for_secure_transition, secure_capture_helper_ready,
         should_force_privileged_secure_capturer, stale_secure_capture_helper_on_user_desktop,
-        stamp_video_frame, windows_capture_route, HqReferenceRefreshPolicy, ReferenceRefreshReason,
-        VideoFrameController, VideoSource, VideoStreamKey, WindowsCaptureRoute,
-        DELIVERY_REFERENCE_REFRESH_COOLDOWN, HQ_REFERENCE_REFRESH_COOLDOWN,
+        stamp_video_frame, windows_capture_route, DurationSamples, HqReferenceRefreshPolicy,
+        ReferenceRefreshReason, VideoFrameController, VideoSource, VideoStreamKey,
+        WindowsCaptureRoute, DELIVERY_REFERENCE_REFRESH_COOLDOWN, HOST_VIDEO_DIAG_SAMPLE_CAPACITY,
+        HQ_REFERENCE_REFRESH_COOLDOWN,
     };
     use hbb_common::message_proto::{option_message::CaptureBackend, VideoFrame};
     use std::{
@@ -1046,6 +1173,28 @@ mod tests {
         assert_eq!(
             (second.stream_id, second.frame_id, second.capture_time_ms),
             (17, 2, 57)
+        );
+    }
+
+    #[test]
+    fn duration_samples_report_percentiles_and_remain_bounded() {
+        let mut samples = DurationSamples::default();
+        for duration_us in 1..=100 {
+            samples.record(Duration::from_micros(duration_us));
+        }
+        let summary = samples.summary();
+        assert_eq!(
+            (summary.p50_us, summary.p95_us, summary.max_us),
+            (50, 95, 100)
+        );
+
+        for duration_us in 101..=(HOST_VIDEO_DIAG_SAMPLE_CAPACITY as u64 + 10) {
+            samples.record(Duration::from_micros(duration_us));
+        }
+        assert_eq!(samples.samples_us.len(), HOST_VIDEO_DIAG_SAMPLE_CAPACITY);
+        assert_eq!(
+            samples.summary().max_us,
+            HOST_VIDEO_DIAG_SAMPLE_CAPACITY as u64 + 10
         );
     }
 
@@ -2032,6 +2181,8 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut host_diag = HostVideoDiagnostics::new();
 
     while sp.ok() {
+        let loop_started = Instant::now();
+        host_diag.record_loop_start(loop_started);
         #[cfg(windows)]
         check_uac_switch(c.privacy_mode_id, c._capturer_privacy_mode_id)?;
         let qos_update = check_qos(
@@ -2334,7 +2485,10 @@ fn run(vs: VideoService) -> ResultType<()> {
 
         let time = now - start;
         let ms = (time.as_secs() * 1000 + time.subsec_millis() as u64) as i64;
-        let res = match c.frame(spf) {
+        let capture_call_started = Instant::now();
+        let captured_frame = c.frame(spf);
+        host_diag.record_capture_call(capture_call_started.elapsed());
+        let res = match captured_frame {
             Ok(frame) => {
                 repeat_encode_counter = 0;
                 if frame.valid() {
@@ -2343,7 +2497,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                         user_capture_helper_no_frame_since = None;
                         mag_no_frame_count = 0;
                     }
-                    host_diag.valid_capture += 1;
+                    host_diag.record_valid_capture(Instant::now());
                     let capture_frame = capture_frame_label(&frame);
                     let capture_frame_changed = {
                         let mut video_qos = VIDEO_QOS.lock().unwrap();
@@ -2403,6 +2557,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                         }
                     }
 
+                    let encode_pipeline_started = Instant::now();
                     let frame = frame.to(encoder.yuvfmt(), &mut yuv, &mut mid_data)?;
                     let send_conn_ids = handle_one_frame(
                         display_idx,
@@ -2420,6 +2575,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                         capture_width,
                         capture_height,
                     )?;
+                    host_diag.record_encode_pipeline(encode_pipeline_started.elapsed());
                     host_diag.record_send_result(send_conn_ids.len());
                     frame_controller.set_send(now, send_conn_ids);
                     send_counter += 1;
@@ -2538,6 +2694,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                     if repeat_encode_counter < repeat_encode_max {
                         repeat_encode_counter += 1;
                         host_diag.repeat_encode_calls += 1;
+                        let encode_pipeline_started = Instant::now();
                         let send_conn_ids = handle_one_frame(
                             display_idx,
                             &sp,
@@ -2554,6 +2711,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                             capture_width,
                             capture_height,
                         )?;
+                        host_diag.record_encode_pipeline(encode_pipeline_started.elapsed());
                         host_diag.record_send_result(send_conn_ids.len());
                         frame_controller.set_send(now, send_conn_ids);
                         send_counter += 1;
@@ -2678,6 +2836,7 @@ fn run(vs: VideoService) -> ResultType<()> {
         if elapsed < spf {
             std::thread::sleep(spf - elapsed);
         }
+        host_diag.record_loop_total(loop_started.elapsed());
         #[cfg(windows)]
         let current_gdi = c.is_gdi();
         #[cfg(not(windows))]
