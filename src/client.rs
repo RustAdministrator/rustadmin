@@ -7301,8 +7301,17 @@ mod security_tests {
     #[tokio::test]
     async fn test_secure_direct_connection_retries_after_removed_paired_viewer() {
         let _guard = lock_security_tests();
+        struct RestoreTransportMode(String);
+        impl Drop for RestoreTransportMode {
+            fn drop(&mut self) {
+                Config::set_option(keys::OPTION_REMOTE_TRANSPORT.to_owned(), self.0.clone());
+            }
+        }
+
         let saved_allow = Config::get_option(keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST);
         let saved_remember = Config::get_option(keys::OPTION_REMEMBER_PAIRED_VIEWERS);
+        let _restore_transport =
+            RestoreTransportMode(Config::get_option(keys::OPTION_REMOTE_TRANSPORT));
         let peer_id = format!("direct-peer-{}", Uuid::new_v4());
         let peer_config_id = format!("direct-config-{}", Uuid::new_v4());
         let (trusted_sign_pk, trusted_sign_sk) = sign::gen_keypair();
@@ -7316,9 +7325,19 @@ mod security_tests {
             keys::OPTION_REMEMBER_PAIRED_VIEWERS.to_owned(),
             "Y".to_owned(),
         );
+        Config::set_option(keys::OPTION_REMOTE_TRANSPORT.to_owned(), "tcp".to_owned());
         crate::common::pin_trusted_peer_signing_key(&peer_id, &peer_config_id, &trusted_sign_pk.0)
             .unwrap();
         crate::common::set_confirmed_direct_paired_viewer(&peer_config_id, true);
+        assert_eq!(
+            crate::common::trusted_peer_signing_key_status(
+                &peer_id,
+                &peer_config_id,
+                &trusted_sign_pk.0,
+            )
+            .unwrap(),
+            crate::common::TrustedPeerSigningKeyStatus::Trusted
+        );
 
         let interface = TestInterface::new(&peer_config_id, Some("local-secret"));
         let (addr, handle) = spawn_direct_handshake_peer_refuse_paired_then_accept_pairing(
