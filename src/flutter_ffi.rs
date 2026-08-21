@@ -478,17 +478,22 @@ pub fn will_session_close_close_session(session_id: SessionID) -> SyncReturn<boo
 
 pub fn session_close(session_id: SessionID) {
     log::info!("diag session_close FFI requested: session_id={session_id}");
+    if !close_outgoing_session(session_id) {
+        log::info!(
+            "diag session_close FFI ignored: session_id={session_id}, reason=missing_session"
+        );
+    }
+}
+
+fn close_outgoing_session(session_id: SessionID) -> bool {
     if let Some(session) = sessions::remove_session_by_session_id(&session_id) {
-        // `release_remote_keys` is not required for mobile platforms in common cases.
-        // But we still call it to make the code more stable.
         #[cfg(any(target_os = "android", target_os = "ios"))]
         crate::keyboard::release_remote_keys("map");
         session.close_event_stream(session_id);
         session.close();
+        true
     } else {
-        log::info!(
-            "diag session_close FFI ignored: session_id={session_id}, reason=missing_session"
-        );
+        false
     }
 }
 
@@ -3174,6 +3179,29 @@ pub fn query_onlines(ids: Vec<String>) {
     let _ = flutter::async_tasks::query_onlines(ids);
 }
 
+pub fn main_probe_peer_online(id: String, force_refresh: bool) -> String {
+    let runtime = hbb_common::tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build();
+    match runtime {
+        Ok(runtime) => {
+            let state = runtime.block_on(crate::client::peer_online::query_peer_online_state(
+                id.clone(),
+                force_refresh,
+            ));
+            log::info!(
+                "Android VPN peer availability probe: peer={id}, force_refresh={force_refresh}, state={}",
+                state.as_str()
+            );
+            state.as_str().to_owned()
+        }
+        Err(error) => {
+            log::error!("Failed to create peer availability probe runtime: {error}");
+            "unknown".to_owned()
+        }
+    }
+}
+
 pub fn version_to_number(v: String) -> SyncReturn<i64> {
     SyncReturn(hbb_common::get_version_number(&v))
 }
@@ -3310,7 +3338,10 @@ pub fn main_has_file_clipboard() -> SyncReturn<bool> {
 }
 
 pub fn main_has_gpu_texture_render() -> SyncReturn<bool> {
-    SyncReturn(cfg!(feature = "vram"))
+    SyncReturn(cfg!(any(
+        feature = "vram",
+        all(target_os = "android", feature = "mediacodec")
+    )))
 }
 
 pub fn cm_init() {
@@ -4082,5 +4113,57 @@ pub mod server_side {
         _class: JClass,
     ) -> jboolean {
         jboolean::from(crate::server::is_clipboard_service_ok())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_isOutgoingSessionActive(
+        env: JNIEnv,
+        _class: JClass,
+        session_id: JString,
+    ) -> jboolean {
+        let mut env = env;
+        let active = env
+            .get_string(&session_id)
+            .ok()
+            .and_then(|value| uuid::Uuid::parse_str(&String::from(value)).ok())
+            .and_then(|session_id| super::sessions::get_session_by_session_id(&session_id))
+            .is_some_and(|session| session.is_connection_alive());
+        jboolean::from(active)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_closeOutgoingSession(
+        env: JNIEnv,
+        _class: JClass,
+        session_id: JString,
+    ) -> jboolean {
+        let mut env = env;
+        let closed = env
+            .get_string(&session_id)
+            .ok()
+            .and_then(|value| uuid::Uuid::parse_str(&String::from(value)).ok())
+            .is_some_and(super::close_outgoing_session);
+        jboolean::from(closed)
+    }
+
+    #[no_mangle]
+    pub unsafe extern "system" fn Java_ffi_FFI_logDiagnostic(
+        env: JNIEnv,
+        _class: JClass,
+        level: JString,
+        message: JString,
+    ) {
+        let mut env = env;
+        let (Ok(level), Ok(message)) = (env.get_string(&level), env.get_string(&message)) else {
+            return;
+        };
+        let level = String::from(level);
+        let message = String::from(message);
+        match level.as_str() {
+            "error" => log::error!(target: "android.kotlin", "{message}"),
+            "warn" => log::warn!(target: "android.kotlin", "{message}"),
+            "debug" => log::debug!(target: "android.kotlin", "{message}"),
+            _ => log::info!(target: "android.kotlin", "{message}"),
+        }
     }
 }

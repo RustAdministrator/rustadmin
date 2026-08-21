@@ -1,6 +1,6 @@
-# RustAdmin QUIC Application Protocol Versions 2 and 3
+# RustAdmin QUIC Application Protocol Versions 2, 3, and 4
 
-Versions 2 and 3 extend the version 1 transport without changing the existing
+Versions 2, 3, and 4 extend the version 1 transport without changing the existing
 48-byte envelope or protobuf application payloads. All integers remain
 big-endian and all version 1 size, session, sequence, channel, and payload
 validation rules still apply.
@@ -9,14 +9,17 @@ validation rules still apply.
 
 Current endpoints advertise these values in order:
 
-1. `rustadmin-quic-v3`
-2. `rustadmin-quic-v2`
-3. `rustadmin-quic-v1`
+1. `rustadmin-quic-v4`
+2. `rustadmin-quic-v3`
+3. `rustadmin-quic-v2`
+4. `rustadmin-quic-v1`
 
 The selected ALPN is authenticated by the TLS 1.3 handshake and determines the
-application channel layout before any channel is opened. Version 2 and version
-3 retain the version 2 session offer range `2..=2` and capability
-`CAP_RELIABLE_KEYFRAMES` (`0x0040`); v3 changes only the recovery semantics.
+application channel layout before any channel is opened. Versions 2 through 4
+retain the version 2 session offer range `2..=2` and capability
+`CAP_RELIABLE_KEYFRAMES` (`0x0040`). Version 3 changes recovery semantics.
+Version 4 adds `CAP_RELIABLE_KEYFRAME_BARRIER` (`0x0080`) and the reference
+epoch described below.
 A connection that negotiates version 1 uses the unchanged version 1 offer and
 exactly five application streams. It never sends the new capability, channel,
 or message type to the old peer.
@@ -31,6 +34,8 @@ Compatibility matrix:
 | v3 + v2 + v1 | v3 + v2 + v1 | v3, six reliable streams with scoped recovery |
 | v3 + v2 + v1 | v2 + v1 | v2, six reliable streams |
 | v3 + v2 + v1 | v1 only | v1, five reliable streams |
+| v4 + v3 + v2 + v1 | v4 + v3 + v2 + v1 | v4, six streams with reliable-keyframe barrier |
+| v4 + v3 + v2 + v1 | v3 + v2 + v1 | v3, six streams with scoped recovery |
 
 ALPN downgrade is not accepted after negotiation. Certificate, device-key,
 pairing, or protocol errors remain fatal and are not converted into a TCP
@@ -106,6 +111,29 @@ remains available as an independent bounded path. V1 and v2 retain their
 legacy control message for compatibility, but use the same bounded client retry
 schedule.
 
+## Reliable-Keyframe Reference Barrier
+
+Version 4 prevents a delta DATAGRAM from reaching the decoder before the
+reliable keyframe that it references. The sender records the source frame ID of
+each keyframe accepted by the reliable-video writer and stores that value as the
+reference epoch on following delta-frame metadata. This use is limited to v4;
+v1 through v3 retain the previous timestamp semantics.
+
+The receiver delivers a reliable keyframe first, opens its reference epoch,
+then releases only contiguous completed deltas for that epoch. Complete deltas
+that arrive before their keyframe are held in a bounded buffer rather than
+being treated as a new source gap. The buffer permits at most 120 frames and
+16 MiB per connection, expires held data after two seconds without progress,
+handles duplicates and out-of-order arrival, and requests a scoped refresh on
+timeout or overflow. Media delivery from the reliable stream and DATAGRAM task
+is serialized only for this short handoff; network reads and frame reassembly
+remain independent.
+
+This is a zero-round-trip barrier. The sender does not wait for a keyframe ACK,
+so ordinary video latency does not acquire an RTT penalty. A v4 endpoint sends
+the new capability only after v4 ALPN negotiation. Negotiating v3 or older
+retains the former behavior and wire representation.
+
 ## Packet Sizing
 
 QUIC starts at the standards-compliant 1200-byte UDP payload. Quinn path MTU
@@ -120,4 +148,5 @@ lower.
 
 Quality Monitor reports the selected application version, reliable-keyframe
 mode, live DATAGRAM maximum, negotiated ceiling, path MTU, lost packets,
-reassembly drops, and keyframe-request count.
+reassembly drops, keyframe-request count, and v4 barrier held/released/timeout/
+overflow counters.

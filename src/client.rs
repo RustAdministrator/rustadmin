@@ -2500,7 +2500,7 @@ impl VideoHandler {
                 ImageFormat::ARGB
             };
         VideoHandler {
-            decoder: Decoder::new(format, luid, decoder_dimensions),
+            decoder: Decoder::new(format, luid, decoder_dimensions, _display),
             decoder_dimensions,
             rgb: ImageRgb::new(rgba_format, crate::get_dst_align_rgba()),
             texture: Default::default(),
@@ -2540,6 +2540,7 @@ impl VideoHandler {
                 let res = self.decoder.handle_video_frame(
                     frame,
                     frame_id,
+                    capture_time_ms,
                     &mut self.rgb,
                     &mut self.texture,
                     pixelbuffer,
@@ -2647,7 +2648,7 @@ impl VideoHandler {
         if decoder_dimensions.is_some() {
             self.decoder_dimensions = decoder_dimensions;
         }
-        self.decoder = Decoder::new(format, luid, self.decoder_dimensions);
+        self.decoder = Decoder::new(format, luid, self.decoder_dimensions, self._display);
         self.fail_counter = 0;
         self.decode_wait_counter = 0;
         self.first_frame = true;
@@ -5477,6 +5478,23 @@ pub mod peer_online {
     const DIRECT_STATUS_CACHE_RETENTION: Duration = Duration::from_secs(300);
     const MAX_DIRECT_STATUS_CACHE_ENTRIES: usize = 1_024;
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum PeerOnlineState {
+        Online,
+        Offline,
+        Unknown,
+    }
+
+    impl PeerOnlineState {
+        pub fn as_str(self) -> &'static str {
+            match self {
+                Self::Online => "online",
+                Self::Offline => "offline",
+                Self::Unknown => "unknown",
+            }
+        }
+    }
+
     #[derive(Clone, Copy)]
     struct CachedDirectStatus {
         online: bool,
@@ -5650,6 +5668,47 @@ pub mod peer_online {
         }
 
         (onlines, offlines)
+    }
+
+    pub async fn query_peer_online_state(peer: String, force_refresh: bool) -> PeerOnlineState {
+        if is_direct_peer(&peer) {
+            if has_active_direct_session(&peer) {
+                return PeerOnlineState::Online;
+            }
+            if !force_refresh {
+                if let Some(online) = cached_direct_status(&peer) {
+                    return if online {
+                        PeerOnlineState::Online
+                    } else {
+                        PeerOnlineState::Offline
+                    };
+                }
+            }
+            let online = probe_direct_peer(&peer).await;
+            cache_direct_status(peer, online);
+            return if online {
+                PeerOnlineState::Online
+            } else {
+                PeerOnlineState::Offline
+            };
+        }
+
+        let ids = vec![peer.clone()];
+        match query_online_states_(&ids, Duration::from_millis(3_000)).await {
+            Ok((onlines, offlines)) => {
+                if onlines.iter().any(|id| id == &peer) {
+                    PeerOnlineState::Online
+                } else if offlines.iter().any(|id| id == &peer) {
+                    PeerOnlineState::Offline
+                } else {
+                    PeerOnlineState::Unknown
+                }
+            }
+            Err(error) => {
+                log::debug!("Failed to probe peer {peer} availability: {error}");
+                PeerOnlineState::Unknown
+            }
+        }
     }
 
     pub async fn query_online_states<F: FnOnce(Vec<String>, Vec<String>)>(ids: Vec<String>, f: F) {
@@ -5831,6 +5890,36 @@ pub mod peer_online {
             drop(listener);
 
             assert!(!super::probe_direct_peer(&endpoint).await);
+        }
+
+        #[tokio::test]
+        async fn test_forced_direct_probe_bypasses_cached_offline_state() {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind listener");
+            let endpoint = listener.local_addr().expect("listener address").to_string();
+            super::cache_direct_status(endpoint.clone(), false);
+
+            assert_eq!(
+                super::query_peer_online_state(endpoint.clone(), false).await,
+                super::PeerOnlineState::Offline
+            );
+
+            let accept = tokio::spawn(async move {
+                listener.accept().await.expect("accept forced probe");
+            });
+            assert_eq!(
+                super::query_peer_online_state(endpoint, true).await,
+                super::PeerOnlineState::Online
+            );
+            accept.await.expect("forced probe accept task");
+        }
+
+        #[test]
+        fn test_peer_online_state_wire_values_are_stable() {
+            assert_eq!(super::PeerOnlineState::Online.as_str(), "online");
+            assert_eq!(super::PeerOnlineState::Offline.as_str(), "offline");
+            assert_eq!(super::PeerOnlineState::Unknown.as_str(), "unknown");
         }
 
         #[tokio::test]

@@ -181,7 +181,8 @@ pub fn get_option<T: AsRef<str>>(key: T) -> String {
 #[inline]
 pub fn use_texture_render() -> bool {
     #[cfg(target_os = "android")]
-    return false;
+    return cfg!(feature = "mediacodec")
+        && LocalConfig::get_option(config::keys::OPTION_TEXTURE_RENDER) != "N";
     #[cfg(target_os = "ios")]
     return false;
 

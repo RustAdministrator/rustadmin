@@ -112,6 +112,7 @@ enum ReferenceRefreshReason {
     StartupSafeEnded,
     SignificantBitrateIncrease,
     DeliveryRecovery,
+    SecureDesktopTransition,
 }
 
 #[derive(Debug)]
@@ -608,6 +609,22 @@ impl WindowsCaptureDesktopState {
     }
 }
 
+#[cfg(any(windows, test))]
+fn keep_privileged_stream_for_secure_transition(
+    using_privileged_secure_capture: bool,
+    requires_secure_capture: bool,
+) -> bool {
+    using_privileged_secure_capture && requires_secure_capture
+}
+
+#[cfg(any(windows, test))]
+fn stale_secure_capture_helper_on_user_desktop(
+    portable_service_running: bool,
+    requires_secure_capture: bool,
+) -> bool {
+    portable_service_running && !requires_secure_capture
+}
+
 #[cfg(windows)]
 fn should_use_user_capture_helper(portable_service_running: bool, privacy_mode_id: i32) -> bool {
     let privacy_mode_ok = privacy_mode_id == INVALID_PRIVACY_MODE_CONN_ID;
@@ -912,8 +929,9 @@ fn ensure_installed_secure_capture_helper(
 #[cfg(test)]
 mod tests {
     use super::{
-        secure_capture_helper_ready, should_force_privileged_secure_capturer, stamp_video_frame,
-        windows_capture_route, HqReferenceRefreshPolicy, ReferenceRefreshReason,
+        keep_privileged_stream_for_secure_transition, secure_capture_helper_ready,
+        should_force_privileged_secure_capturer, stale_secure_capture_helper_on_user_desktop,
+        stamp_video_frame, windows_capture_route, HqReferenceRefreshPolicy, ReferenceRefreshReason,
         VideoFrameController, VideoSource, VideoStreamKey, WindowsCaptureRoute,
         DELIVERY_REFERENCE_REFRESH_COOLDOWN, HQ_REFERENCE_REFRESH_COOLDOWN,
     };
@@ -953,6 +971,22 @@ mod tests {
         assert!(!secure_capture_helper_ready(false, false));
         assert!(secure_capture_helper_ready(true, false));
         assert!(secure_capture_helper_ready(false, true));
+    }
+
+    #[test]
+    fn privileged_secure_capture_keeps_stream_only_while_secure_state_remains() {
+        assert!(keep_privileged_stream_for_secure_transition(true, true));
+        assert!(!keep_privileged_stream_for_secure_transition(false, true));
+        assert!(!keep_privileged_stream_for_secure_transition(true, false));
+        assert!(!keep_privileged_stream_for_secure_transition(false, false));
+    }
+
+    #[test]
+    fn stale_secure_capture_helper_is_stopped_only_on_interactive_desktop() {
+        assert!(stale_secure_capture_helper_on_user_desktop(true, false));
+        assert!(!stale_secure_capture_helper_on_user_desktop(true, true));
+        assert!(!stale_secure_capture_helper_on_user_desktop(false, false));
+        assert!(!stale_secure_capture_helper_on_user_desktop(false, true));
     }
 
     #[test]
@@ -1793,7 +1827,30 @@ fn run(vs: VideoService) -> ResultType<()> {
     };
 
     #[cfg(windows)]
-    let last_portable_service_running = crate::portable_service::client::running();
+    let last_portable_service_running = {
+        let mut running = crate::portable_service::client::running();
+        let desktop_state = WindowsCaptureDesktopState::current();
+        if stale_secure_capture_helper_on_user_desktop(
+            running,
+            desktop_state.requires_secure_capture(),
+        ) {
+            let stop_requested = crate::portable_service::client::stop_secure_capture_helper(
+                "video service restarted on interactive desktop",
+            );
+            log::info!(
+                "video service started on interactive desktop with portable helper still ready; stop_requested={}, prelogin={}, locked={}, desktop_changed={}, logon_ui={}",
+                stop_requested,
+                desktop_state.prelogin,
+                desktop_state.locked,
+                desktop_state.desktop_changed,
+                desktop_state.logon_ui,
+            );
+            if stop_requested {
+                running = false;
+            }
+        }
+        running
+    };
     #[cfg(not(windows))]
     let last_portable_service_running = false;
 
@@ -1963,6 +2020,8 @@ fn run(vs: VideoService) -> ResultType<()> {
     let stream_id = next_video_stream_id();
     let mut next_frame_id = 1;
     let mut reference_refresh_pending = None;
+    #[cfg(windows)]
+    let mut secure_desktop_reference_refresh_pending = None;
     let mut reference_refresh_policy = HqReferenceRefreshPolicy::new(
         VIDEO_QOS.lock().unwrap().startup_safe_mode(&service_name),
         encoder.bitrate(),
@@ -1998,7 +2057,14 @@ fn run(vs: VideoService) -> ResultType<()> {
         }
         let delivery_refresh_reason = reference_refresh_policy
             .request_delivery_refresh(delivery_refresh_requested, Instant::now());
-        if let Some(reason) = delivery_refresh_reason.or(policy_refresh_reason) {
+        #[cfg(windows)]
+        let secure_desktop_refresh_reason = secure_desktop_reference_refresh_pending.take();
+        #[cfg(not(windows))]
+        let secure_desktop_refresh_reason: Option<ReferenceRefreshReason> = None;
+        if let Some(reason) = secure_desktop_refresh_reason
+            .or(delivery_refresh_reason)
+            .or(policy_refresh_reason)
+        {
             let refresh_started = Instant::now();
             match recreate_encoder_at_quality(&encoder_cfg, use_i444, quality) {
                 Ok(refreshed_encoder) => {
@@ -2123,6 +2189,10 @@ fn run(vs: VideoService) -> ResultType<()> {
                 );
                 let using_privileged_secure_capture =
                     c.capture_backend() == PORTABLE_SYSTEM_HELPER_CAPTURE_BACKEND;
+                let keep_privileged_stream = keep_privileged_stream_for_secure_transition(
+                    using_privileged_secure_capture,
+                    desktop_state.requires_secure_capture(),
+                );
                 log::info!(
                     "privileged secure capture desktop state changed: prelogin {}->{}, locked {}->{}, desktop_changed {}->{}, logon_ui {}->{}, portable_service_running={}, installed_secure_helper_active={}",
                     last_desktop_capture_state.prelogin,
@@ -2191,7 +2261,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                             "desktop state changed while using magnifier; keep magnifier on locked/secure desktop"
                         );
                     }
-                } else if !secure_exit_debounced {
+                } else if !secure_exit_debounced && !keep_privileged_stream {
                     if desktop_changed {
                         log::info!(
                             "input desktop changed; switch capture backend from current backend"
@@ -2199,6 +2269,13 @@ fn run(vs: VideoService) -> ResultType<()> {
                     }
                     log::info!("desktop state changed; switch capture backend");
                     bail!("SWITCH");
+                } else if keep_privileged_stream {
+                    log::info!(
+                        "privileged secure capture retained across desktop state change; stream_id={}, scheduling reference refresh",
+                        stream_id
+                    );
+                    secure_desktop_reference_refresh_pending =
+                        Some(ReferenceRefreshReason::SecureDesktopTransition);
                 }
             }
             let using_privileged_secure_capture =

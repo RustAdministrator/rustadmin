@@ -29,7 +29,10 @@ use hbb_common::{
 use rdev::{Event, EventType::*, KeyCode};
 #[cfg(feature = "flutter")]
 use serde_json::json;
-#[cfg(all(feature = "vram", feature = "flutter"))]
+#[cfg(any(
+    all(feature = "vram", feature = "flutter"),
+    all(target_os = "android", feature = "mediacodec")
+))]
 use std::ffi::c_void;
 use std::{
     collections::HashMap,
@@ -94,6 +97,7 @@ pub struct ChangeDisplayRecord {
     height: i32,
 }
 
+#[derive(Clone, Copy)]
 enum ConnectionState {
     Connecting,
     Connected,
@@ -1472,6 +1476,13 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Close);
     }
 
+    pub fn is_connection_alive(&self) -> bool {
+        !matches!(
+            self.connection_round_state.lock().unwrap().state,
+            ConnectionState::Disconnected
+        )
+    }
+
     pub fn confirm_direct_trust_response(&self, approved: bool) {
         if let Some(tx) = self.direct_trust_response.lock().unwrap().take() {
             let _ = tx.send(approved);
@@ -1820,7 +1831,10 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn on_voice_call_incoming(&self);
     fn get_rgba(&self, display: usize) -> *const u8;
     fn next_rgba(&self, display: usize);
-    #[cfg(all(feature = "vram", feature = "flutter"))]
+    #[cfg(any(
+        all(feature = "vram", feature = "flutter"),
+        all(target_os = "android", feature = "mediacodec")
+    ))]
     fn on_texture(&self, display: usize, texture: *mut c_void);
     fn set_multiple_windows_session(&self, sessions: Vec<WindowsSession>);
     fn set_current_display(&self, disp_idx: i32);

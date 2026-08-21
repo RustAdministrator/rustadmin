@@ -47,6 +47,8 @@ const HISTORY_DELAY_LEN: usize = 2;
 const ADJUST_RATIO_INTERVAL: usize = 3; // Adjust quality ratio every 3 seconds
 const DYNAMIC_SCREEN_THRESHOLD: usize = 2; // Allow increase quality ratio if encode more than 2 times in one second
 const DELAY_THRESHOLD_150MS: u32 = 150; // 150ms is the threshold for good network condition
+const TRANSPORT_LOSS_ADAPTATION_COOLDOWN: Duration = Duration::from_secs(1);
+const TRANSPORT_LOSS_SYNTHETIC_DELAY_MS: u32 = 500;
 
 #[derive(Default, Debug, Clone)]
 struct UserDelay {
@@ -101,6 +103,7 @@ struct UserData {
     video_feedback_capable: bool,
     video_render_started: bool,
     video_startup_instant: Option<Instant>,
+    last_transport_loss_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -445,6 +448,54 @@ impl VideoQoS {
             self.adjust_displays_for_user(id);
         }
         first_render
+    }
+
+    pub fn user_transport_loss(&mut self, id: i32, dropped_frames: u64) -> bool {
+        self.user_transport_loss_at(id, dropped_frames, Instant::now())
+    }
+
+    fn user_transport_loss_at(&mut self, id: i32, dropped_frames: u64, now: Instant) -> bool {
+        if dropped_frames == 0 {
+            return false;
+        }
+        let highest_fps = self.user_requested_fps(id);
+        let (previous_fps, next_fps) = {
+            let Some(user) = self.users.get_mut(&id) else {
+                return false;
+            };
+            if user.last_transport_loss_at.is_some_and(|last| {
+                now.saturating_duration_since(last) < TRANSPORT_LOSS_ADAPTATION_COOLDOWN
+            }) {
+                return false;
+            }
+            user.last_transport_loss_at = Some(now);
+            user.delay.quick_increase_fps_count = 0;
+            user.delay.increase_fps_count = 0;
+            user.delay.add_delay(TRANSPORT_LOSS_SYNTHETIC_DELAY_MS);
+            let previous_fps = user.delay.fps.unwrap_or(highest_fps);
+            let next_fps = previous_fps
+                .saturating_mul(3)
+                .saturating_div(4)
+                .clamp(MIN_FPS, highest_fps);
+            user.delay.fps = Some(next_fps);
+            (previous_fps, next_fps)
+        };
+
+        let affected_displays = self.display_names_for_user(id);
+        for display_name in &affected_displays {
+            self.adjust_fps(display_name);
+            self.adjust_ratio(display_name, true);
+        }
+        log::warn!(
+            "diag video qos transport loss: user_id={}, dropped_frames={}, fps_previous={}, fps_current={}, synthetic_delay_ms={}, displays={:?}",
+            id,
+            dropped_frames,
+            previous_fps,
+            next_fps,
+            TRANSPORT_LOSS_SYNTHETIC_DELAY_MS,
+            affected_displays,
+        );
+        true
     }
 
     pub fn user_network_delay(&mut self, id: i32, delay: u32) {
@@ -982,6 +1033,35 @@ mod tests {
 
         assert!(qos.user_video_frame_rendered(1));
         assert_eq!(qos.fps(MONITOR_SERVICE), MIN_FPS + 1);
+    }
+
+    #[test]
+    fn transport_loss_backs_off_adaptive_fps_and_ratio_with_cooldown() {
+        let now = Instant::now();
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
+        qos.set_support_changing_quality(MONITOR_SERVICE, true);
+        qos.store_bitrate(MONITOR_SERVICE, 4_000);
+        qos.user_video_feedback_capability(1, true);
+        qos.user_custom_fps(1, 60);
+        assert!(qos.user_video_frame_rendered(1));
+        assert_eq!(qos.fps(MONITOR_SERVICE), 60);
+        let initial_ratio = qos.displays.get(MONITOR_SERVICE).unwrap().ratio;
+
+        assert!(qos.user_transport_loss_at(1, 1, now));
+        assert_eq!(qos.fps(MONITOR_SERVICE), 45);
+        let first_loss_ratio = qos.displays.get(MONITOR_SERVICE).unwrap().ratio;
+        assert!(first_loss_ratio < initial_ratio);
+
+        assert!(!qos.user_transport_loss_at(1, 2, now + Duration::from_millis(999)));
+        assert_eq!(qos.fps(MONITOR_SERVICE), 45);
+        assert_eq!(
+            qos.displays.get(MONITOR_SERVICE).unwrap().ratio,
+            first_loss_ratio
+        );
+
+        assert!(qos.user_transport_loss_at(1, 2, now + TRANSPORT_LOSS_ADAPTATION_COOLDOWN,));
+        assert_eq!(qos.fps(MONITOR_SERVICE), 33);
+        assert!(qos.displays.get(MONITOR_SERVICE).unwrap().ratio < first_loss_ratio);
     }
 
     #[test]

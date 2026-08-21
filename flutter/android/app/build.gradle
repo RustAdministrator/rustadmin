@@ -148,4 +148,5 @@ dependencies {
     implementation 'com.github.getActivity:XXPermissions:18.5'
     implementation 'com.caverock:androidsvg-aar:1.4'
     implementation "rustls:rustls-platform-verifier:0.1.1"
+    testImplementation 'junit:junit:4.13.2'
 }

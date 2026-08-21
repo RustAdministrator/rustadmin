@@ -8,6 +8,7 @@ use crate::{
         QualityStatus, MILLI1, SEC30,
     },
     common::get_default_sound_input,
+    input::{MOUSE_TYPE_MASK, MOUSE_TYPE_MOVE_RELATIVE},
     ui_session_interface::{InvokeUiSession, Session},
 };
 #[cfg(feature = "unix-file-copy-paste")]
@@ -62,6 +63,11 @@ const FPS_CONTROL_SUMMARY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 const CLIENT_ASYNC_OUTBOX_CAPACITY: usize = 256;
 const CLIENT_VIDEO_FEEDBACK_LATEST_KEY_BASE: u64 = 1 << 32;
 const CLIENT_CLOSE_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+const CRITICAL_INPUT_RETRY_DELAYS: [Duration; 3] = [
+    Duration::from_millis(2),
+    Duration::from_millis(5),
+    Duration::from_millis(10),
+];
 
 fn client_outbound_message_kind(message: &Message) -> &'static str {
     if let Some(message::Union::Misc(misc)) = &message.union {
@@ -81,6 +87,25 @@ fn client_outbound_latest_key(message: &Message) -> Option<u64> {
         return None;
     };
     Some(CLIENT_VIDEO_FEEDBACK_LATEST_KEY_BASE | u64::from(feedback.display as u32))
+}
+
+fn is_critical_client_input(message: &Message) -> bool {
+    match message.union.as_ref() {
+        Some(message::Union::KeyEvent(_)) | Some(message::Union::PointerDeviceEvent(_)) => true,
+        Some(message::Union::MouseEvent(event)) => {
+            let event_type = event.mask & MOUSE_TYPE_MASK;
+            event_type != 0 && event_type != MOUSE_TYPE_MOVE_RELATIVE
+        }
+        _ => false,
+    }
+}
+
+fn is_would_block_error(error: &hbb_common::anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+    })
 }
 
 fn should_wait_for_startup_keyframe(
@@ -661,7 +686,9 @@ impl<T: InvokeUiSession> Remote<T> {
                                 }),
                                 #[cfg(feature = "quic-transport")]
                                 quic_video_transport: quic_stats.map(|stats| {
-                                    if stats.reliable_keyframes {
+                                    if stats.reliable_keyframe_barrier {
+                                        "DATAGRAM + reliable KF barrier".to_owned()
+                                    } else if stats.reliable_keyframes {
                                         "DATAGRAM + reliable KF".to_owned()
                                     } else {
                                         "DATAGRAM".to_owned()
@@ -701,6 +728,18 @@ impl<T: InvokeUiSession> Remote<T> {
                                 #[cfg(feature = "quic-transport")]
                                 quic_keyframe_requests: quic_stats
                                     .map(|stats| stats.video_keyframe_requests),
+                                #[cfg(feature = "quic-transport")]
+                                quic_keyframe_barrier: quic_stats.and_then(|stats| {
+                                    stats.reliable_keyframe_barrier.then(|| {
+                                        format!(
+                                            "{}/{}/{}/{}",
+                                            stats.video_keyframe_barrier_held,
+                                            stats.video_keyframe_barrier_released,
+                                            stats.video_keyframe_barrier_timeouts,
+                                            stats.video_keyframe_barrier_overflows,
+                                        )
+                                    })
+                                }),
                                 #[cfg(feature = "quic-transport")]
                                 quic_receiver_recovery: quic_stats.map(|stats| {
                                     format!(
@@ -749,9 +788,10 @@ impl<T: InvokeUiSession> Remote<T> {
                                         || stats.video_datagram_frames_rejected > 0)
                                         .then(|| {
                                             format!(
-                                                "q {}/{}KB free {}/{}KB",
+                                                "q {}/{}KB age {}ms free {}/{}KB",
                                                 stats.datagram_send_buffer_queued / 1024,
                                                 stats.video_datagram_queue_budget / 1024,
+                                                stats.video_datagram_queue_delay_us / 1000,
                                                 stats.datagram_send_buffer_space / 1024,
                                                 stats.datagram_send_buffer_space_min / 1024,
                                             )
@@ -1062,18 +1102,51 @@ impl<T: InvokeUiSession> Remote<T> {
                     _ => {}
                 }
                 let kind = client_outbound_message_kind(&msg);
-                let send_result = if let Some(key) = client_outbound_latest_key(&msg) {
-                    peer.send_latest(key, kind, &msg).await
-                } else {
-                    peer.send_tagged(kind, &msg).await
-                };
-                match send_result {
-                    Ok(()) => {}
-                    Err(err) => {
-                        log::warn!(
-                            "diag client stream enqueue failed: id={}, kind={}, err={}",
+                let critical_input = is_critical_client_input(&msg);
+                let mut retry_count = 0usize;
+                let send_result = loop {
+                    let result = if let Some(key) = client_outbound_latest_key(&msg) {
+                        peer.send_latest(key, kind, &msg).await
+                    } else {
+                        peer.send_tagged(kind, &msg).await
+                    };
+                    if critical_input
+                        && result.as_ref().is_err_and(is_would_block_error)
+                        && retry_count < CRITICAL_INPUT_RETRY_DELAYS.len()
+                    {
+                        let delay = CRITICAL_INPUT_RETRY_DELAYS[retry_count];
+                        retry_count += 1;
+                        log::debug!(
+                            "diag client critical input backpressure: id={}, kind={}, retry={}/{}, delay_ms={}",
                             self.handler.get_id(),
                             kind,
+                            retry_count,
+                            CRITICAL_INPUT_RETRY_DELAYS.len(),
+                            delay.as_millis()
+                        );
+                        time::sleep(delay).await;
+                        continue;
+                    }
+                    break result;
+                };
+                match send_result {
+                    Ok(()) => {
+                        if retry_count > 0 {
+                            log::debug!(
+                                "diag client critical input enqueue recovered: id={}, kind={}, retries={}",
+                                self.handler.get_id(),
+                                kind,
+                                retry_count
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "diag client stream enqueue failed: id={}, kind={}, critical_input={}, retries={}, err={}",
+                            self.handler.get_id(),
+                            kind,
+                            critical_input,
+                            retry_count,
                             err
                         );
                     }
@@ -3210,7 +3283,10 @@ impl<T: InvokeUiSession> Remote<T> {
                 if pixelbuffer {
                     handler.on_rgba(display, data);
                 } else {
-                    #[cfg(all(feature = "vram", feature = "flutter"))]
+                    #[cfg(any(
+                        all(feature = "vram", feature = "flutter"),
+                        all(target_os = "android", feature = "mediacodec")
+                    ))]
                     handler.on_texture(display, _texture);
                 }
             },
@@ -3312,12 +3388,55 @@ impl Drop for VideoThread {
 #[cfg(test)]
 mod tests {
     use super::{
-        session_permission_response_msgbox_type, should_wait_for_startup_keyframe,
-        NoVideoStartupAction, NoVideoStartupWatchdog, StartupKeyframeAction,
-        StartupKeyframeRecovery, NO_VIDEO_START_MAX_REFRESHES, NO_VIDEO_START_REFRESH_INTERVAL,
-        NO_VIDEO_START_TIMEOUT, STARTUP_KEYFRAME_REFRESH_INTERVAL,
+        is_critical_client_input, is_would_block_error, session_permission_response_msgbox_type,
+        should_wait_for_startup_keyframe, NoVideoStartupAction, NoVideoStartupWatchdog,
+        StartupKeyframeAction, StartupKeyframeRecovery, NO_VIDEO_START_MAX_REFRESHES,
+        NO_VIDEO_START_REFRESH_INTERVAL, NO_VIDEO_START_TIMEOUT, STARTUP_KEYFRAME_REFRESH_INTERVAL,
     };
+    use crate::input::{MOUSE_TYPE_DOWN, MOUSE_TYPE_MOVE_RELATIVE};
+    use hbb_common::message_proto::{message, KeyEvent, Message, MouseEvent, PointerDeviceEvent};
     use hbb_common::tokio::time::{Duration, Instant};
+
+    #[test]
+    fn critical_input_retry_excludes_disposable_mouse_movement() {
+        let mut message = Message::new();
+        message.set_key_event(KeyEvent::new());
+        assert!(is_critical_client_input(&message));
+
+        message.set_pointer_device_event(PointerDeviceEvent::new());
+        assert!(is_critical_client_input(&message));
+
+        message.set_mouse_event(MouseEvent {
+            mask: MOUSE_TYPE_DOWN,
+            ..Default::default()
+        });
+        assert!(is_critical_client_input(&message));
+
+        if let Some(message::Union::MouseEvent(event)) = message.union.as_mut() {
+            event.mask = 0;
+        }
+        assert!(!is_critical_client_input(&message));
+
+        if let Some(message::Union::MouseEvent(event)) = message.union.as_mut() {
+            event.mask = MOUSE_TYPE_MOVE_RELATIVE;
+        }
+        assert!(!is_critical_client_input(&message));
+    }
+
+    #[test]
+    fn critical_input_retry_only_recognizes_would_block() {
+        let would_block = hbb_common::anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "full",
+        ));
+        assert!(is_would_block_error(&would_block));
+
+        let broken_pipe = hbb_common::anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "closed",
+        ));
+        assert!(!is_would_block_error(&broken_pipe));
+    }
 
     #[test]
     fn permission_response_dialogs_do_not_close_session_on_ok() {

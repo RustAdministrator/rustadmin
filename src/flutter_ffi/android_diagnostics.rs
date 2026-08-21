@@ -1,5 +1,5 @@
 use android_logger::{AndroidLogger, Config};
-use hbb_common::log::{self, LevelFilter, Log, Metadata, Record};
+use hbb_common::log::{self, Level, LevelFilter, Log, Metadata, Record};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -158,7 +158,9 @@ impl AndroidDiagnosticLogger {
 
 impl Log for AndroidDiagnosticLogger {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        self.enabled.load(Ordering::Relaxed) && self.logcat.enabled(metadata)
+        self.enabled.load(Ordering::Relaxed)
+            && !(metadata.level() == Level::Debug && metadata.target().starts_with("quinn"))
+            && self.logcat.enabled(metadata)
     }
 
     fn log(&self, record: &Record<'_>) {

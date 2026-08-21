@@ -924,6 +924,17 @@ void androidChannelInit() {
             }
             break;
           }
+        case "outgoing_session_closed":
+          {
+            final reason = arguments is Map
+                ? arguments["reason"]?.toString() ?? ''
+                : '';
+            if (reason == 'background-timeout') {
+              showToast(translate('Session closed after 10 minutes in background'));
+            }
+            closeConnection();
+            break;
+          }
       }
     } catch (e) {
       debugPrintStack(label: "MethodCallHandler err:$e");

@@ -11,6 +11,23 @@ void main() {
     );
   });
 
+  test('recognizes passphrase-gated stale paired trust', () {
+    expect(
+      isResettablePeerTrustError(
+        'Handshake failed: trusted peer key changed or is invalid; '
+        'rendezvous pairing passphrase is required to repair trust',
+      ),
+      isTrue,
+    );
+    expect(
+      isResettablePeerTrustError(
+        'Handshake failed: trusted peer key changed or is invalid; '
+        'local or rendezvous pairing passphrase is required to repair trust',
+      ),
+      isTrue,
+    );
+  });
+
   test('recognizes resettable QUIC application identity mismatch', () {
     expect(
       isResettablePeerTrustError(
@@ -39,5 +56,18 @@ void main() {
       ),
       isFalse,
     );
+  });
+
+  test('does not offer trust reset for live-handshake identity conflicts', () {
+    for (final text in [
+      'Handshake failed: QUIC upgrade identity does not match the paired TCP identity',
+      'Handshake failed: QUIC upgrade identity does not match the paired rendezvous identity',
+      'Handshake failed: QUIC peer identity does not match rendezvous identity',
+      'Handshake failed: bootstrap trusted peer identity mismatch '
+          '(expected old, got new)',
+      'Handshake failed: pairing passphrase rejected',
+    ]) {
+      expect(isResettablePeerTrustError(text), isFalse, reason: text);
+    }
   });
 }

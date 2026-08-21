@@ -729,10 +729,6 @@ impl VideoDeliveryController {
                     Some(now)
                 };
             state.phase = VideoDeliveryPhase::Healthy;
-            // A decoded frame proves that the last reference refresh reached the
-            // peer. Allow a new scoped recovery request immediately if the path
-            // loses the next reference instead of waiting out the old cooldown.
-            state.last_refresh_at = None;
         }
         let first_render =
             state.highest_render_submitted_frame_id == 0 && feedback.render_submitted_frame_id > 0;
@@ -4063,10 +4059,16 @@ impl Connection {
 
     fn handle_video_reference_refresh(&mut self, request: VideoReferenceRefresh) {
         let now = Instant::now();
-        match self
-            .video_delivery
-            .on_reference_refresh_request(&request, now, self.network_delay)
-        {
+        let result =
+            self.video_delivery
+                .on_reference_refresh_request(&request, now, self.network_delay);
+        if result.is_ok() && request.dropped_frames > 0 {
+            video_service::VIDEO_QOS
+                .lock()
+                .unwrap()
+                .user_transport_loss(self.inner.id(), request.dropped_frames);
+        }
+        match result {
             Ok(Some(action)) => {
                 log::warn!(
                     "#{} diag video reference refresh requested by peer: display={}, stream_id={}, received={}, dropped={}, sent={}, decoded={}, render_submitted={}, stalled_ms={}, previous_phase={:?}",
@@ -8323,7 +8325,7 @@ mod test {
     }
 
     #[test]
-    fn decoded_feedback_releases_reference_refresh_cooldown() {
+    fn decoded_feedback_preserves_reference_refresh_cooldown() {
         let start = Instant::now();
         let mut controller = VideoDeliveryController::default();
         controller.on_frame_sent(
@@ -8360,6 +8362,14 @@ mod test {
         );
         assert!(controller
             .on_reference_refresh_request(&request, start + Duration::from_millis(100), 10)
+            .unwrap()
+            .is_none());
+        assert!(controller
+            .on_reference_refresh_request(
+                &request,
+                start + Duration::from_millis(10) + VideoDeliveryController::refresh_cooldown(10),
+                10,
+            )
             .unwrap()
             .is_some());
     }
@@ -8713,7 +8723,10 @@ mod test {
             );
         }
         assert!(controller
-            .poll_recovery(start + Duration::from_millis(1_649), 10)
+            .poll_recovery(start + Duration::from_millis(1_249), 10)
+            .is_empty());
+        assert!(controller
+            .poll_recovery(start + Duration::from_millis(1_250), 10)
             .is_empty());
         assert_eq!(
             controller

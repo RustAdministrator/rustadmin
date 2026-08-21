@@ -816,6 +816,7 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       MobileRemoteToolbarPlacementSettings.defaults;
   var _cursorInertiaSettings = MobileCursorInertiaSettings.defaults;
   bool _showMonitorsInToolbar = false;
+  bool _showQualityMonitor = false;
   bool _keyboardCtrl = false;
   bool _keyboardAlt = false;
   bool _keyboardShift = false;
@@ -1559,6 +1560,10 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       peerIsAndroid: widget.scenario.peerIsAndroid,
       touchMode: _touchMode,
       waitForFirstImage: false,
+      qualityMonitorVisible: _showQualityMonitor,
+      onQualityMonitor: () {
+        setState(() => _showQualityMonitor = !_showQualityMonitor);
+      },
       monitors: !_showMonitorsInToolbar || widget.monitors.length <= 1
           ? const []
           : [

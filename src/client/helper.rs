@@ -26,6 +26,7 @@ pub struct QualityStatus {
     pub quic_reassembly_frame: Option<String>,
     pub quic_reassembly_timing: Option<String>,
     pub quic_keyframe_requests: Option<u64>,
+    pub quic_keyframe_barrier: Option<String>,
     pub quic_receiver_recovery: Option<String>,
     pub quic_sender_recovery: Option<String>,
     pub quic_sender_admission: Option<String>,

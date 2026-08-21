@@ -1,18 +1,24 @@
-use hbb_common::{anyhow::Error, bail, log, ResultType};
+use hbb_common::{anyhow::Error, bail, libc, log, ResultType};
+use lazy_static::lazy_static;
 use ndk::media::{
     media_codec::{
         DequeuedInputBufferResult, DequeuedOutputBufferInfoResult, MediaCodec, MediaCodecDirection,
     },
     media_format::MediaFormat,
 };
+use ndk::native_window::NativeWindow;
 use std::ops::Deref;
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     ops::Range,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        RwLock,
+    },
     time::{Duration, Instant},
 };
 
+use super::video_presentation_clock::VideoPresentationClock;
 use crate::ImageFormat;
 use crate::{CodecFormat, I420ToABGR, I420ToARGB, ImageRgb, NV12ToABGR, NV12ToARGB};
 
@@ -21,6 +27,7 @@ const H264_MIME_TYPE: &str = "video/avc";
 const H265_MIME_TYPE: &str = "video/hevc";
 const COLOR_FORMAT_YUV420_PLANAR: i32 = 19;
 const COLOR_FORMAT_YUV420_SEMIPLANAR: i32 = 21;
+const COLOR_FORMAT_SURFACE: i32 = 0x7F000789;
 const MAX_PENDING_INPUTS: usize = 16;
 const MAX_PENDING_INPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_INPUT_DEQUEUE_EVENTS: usize = 4;
@@ -34,6 +41,89 @@ const MAX_IN_FLIGHT_FRAMES: usize = 128;
 pub static H264_DECODER_SUPPORT: AtomicBool = AtomicBool::new(false);
 pub static H265_DECODER_SUPPORT: AtomicBool = AtomicBool::new(false);
 
+struct OutputSurface {
+    generation: u64,
+    window: NativeWindow,
+    refresh_period_ns: i64,
+}
+
+lazy_static! {
+    static ref OUTPUT_SURFACES: RwLock<HashMap<usize, OutputSurface>> = RwLock::new(HashMap::new());
+}
+
+static NEXT_SURFACE_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+pub fn set_output_surface(display: usize, window: NativeWindow, refresh_period_ns: i64) -> u64 {
+    let generation = NEXT_SURFACE_GENERATION.fetch_add(1, Ordering::SeqCst);
+    OUTPUT_SURFACES.write().unwrap().insert(
+        display,
+        OutputSurface {
+            generation,
+            window,
+            refresh_period_ns,
+        },
+    );
+    log::info!(
+        "Android MediaCodec output surface registered: display={}, generation={}, refresh_period_ns={}",
+        display,
+        generation,
+        refresh_period_ns
+    );
+    generation
+}
+
+pub fn clear_output_surface(display: usize) {
+    if let Some(surface) = OUTPUT_SURFACES.write().unwrap().remove(&display) {
+        log::info!(
+            "Android MediaCodec output surface cleared: display={}, generation={}",
+            display,
+            surface.generation
+        );
+    }
+}
+
+pub fn update_output_surface_refresh_period(display: usize, refresh_period_ns: i64) -> bool {
+    let mut surfaces = OUTPUT_SURFACES.write().unwrap();
+    let Some(surface) = surfaces.get_mut(&display) else {
+        return false;
+    };
+    surface.refresh_period_ns = refresh_period_ns;
+    true
+}
+
+fn output_surface_refresh_period(display: usize) -> i64 {
+    OUTPUT_SURFACES
+        .read()
+        .unwrap()
+        .get(&display)
+        .map(|surface| surface.refresh_period_ns)
+        .unwrap_or(0)
+}
+
+fn output_surface(display: usize) -> (Option<NativeWindow>, u64, i64) {
+    OUTPUT_SURFACES
+        .read()
+        .unwrap()
+        .get(&display)
+        .map(|surface| {
+            (
+                Some(surface.window.clone()),
+                surface.generation,
+                surface.refresh_period_ns,
+            )
+        })
+        .unwrap_or((None, 0, 0))
+}
+
+pub fn output_surface_generation(display: usize) -> u64 {
+    OUTPUT_SURFACES
+        .read()
+        .unwrap()
+        .get(&display)
+        .map(|surface| surface.generation)
+        .unwrap_or(0)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MediaCodecDecodeOutcome {
     FrameReady { frame_id: Option<u64> },
@@ -44,6 +134,7 @@ pub enum MediaCodecDecodeOutcome {
 struct PendingInput {
     data: Vec<u8>,
     frame_id: u64,
+    capture_time_ms: u64,
 }
 
 pub struct MediaCodecDecoder {
@@ -53,8 +144,15 @@ pub struct MediaCodecDecoder {
     last_diag_log: Option<Instant>,
     pending_inputs: VecDeque<PendingInput>,
     pending_input_bytes: usize,
-    in_flight_frames: VecDeque<(i64, u64)>,
+    in_flight_frames: VecDeque<(i64, u64, u64)>,
     next_input_token: u64,
+    display: usize,
+    width: usize,
+    height: usize,
+    surface_output: bool,
+    surface_generation: u64,
+    output_surface: Option<NativeWindow>,
+    presentation_clock: VideoPresentationClock,
 }
 
 struct OutputLayout {
@@ -81,6 +179,7 @@ impl MediaCodecDecoder {
     pub fn new(
         format: CodecFormat,
         dimensions: Option<(usize, usize)>,
+        display: usize,
     ) -> Option<MediaCodecDecoder> {
         let Some((width, height)) = dimensions.filter(|(width, height)| *width > 0 && *height > 0)
         else {
@@ -88,12 +187,8 @@ impl MediaCodecDecoder {
             return None;
         };
         match format {
-            CodecFormat::H264 => {
-                create_media_codec(H264_MIME_TYPE, MediaCodecDirection::Decoder, width, height)
-            }
-            CodecFormat::H265 => {
-                create_media_codec(H265_MIME_TYPE, MediaCodecDirection::Decoder, width, height)
-            }
+            CodecFormat::H264 => create_media_codec(H264_MIME_TYPE, width, height, display),
+            CodecFormat::H265 => create_media_codec(H265_MIME_TYPE, width, height, display),
             _ => {
                 log::error!("Unsupported codec format: {:?}", format);
                 None
@@ -106,11 +201,12 @@ impl MediaCodecDecoder {
         &mut self,
         data: &[u8],
         frame_id: u64,
+        capture_time_ms: u64,
         rgb: &mut ImageRgb,
     ) -> ResultType<MediaCodecDecodeOutcome> {
         let total_start = Instant::now();
         let input_start = Instant::now();
-        self.enqueue_input(data, frame_id)?;
+        self.enqueue_input(data, frame_id, capture_time_ms)?;
         let input_backpressure = self.queue_pending_inputs()?;
         let input_queue_elapsed = input_start.elapsed();
 
@@ -126,6 +222,60 @@ impl MediaCodecDecoder {
                     let output_dequeue_elapsed = output_dequeue_start.elapsed();
                     let presentation_time_us = output_buffer.info().presentation_time_us();
                     let res_format = self.decoder.output_format();
+                    if self.surface_output {
+                        self.presentation_clock
+                            .update_refresh_period(output_surface_refresh_period(self.display));
+                        let output_metadata = self.output_frame_metadata(presentation_time_us);
+                        let (release_mode, presentation_reset, presentation_lead_us) =
+                            if let Some(now_ns) = monotonic_now_ns() {
+                                let schedule = self
+                                    .presentation_clock
+                                    .schedule(output_metadata.map(|(_, value)| value), now_ns);
+                                self.decoder.release_output_buffer_at_time(
+                                    output_buffer,
+                                    schedule.target_ns,
+                                )?;
+                                (
+                                    if schedule.source_clock {
+                                        "source-clock-scheduled"
+                                    } else {
+                                        "immediate-no-source-clock"
+                                    },
+                                    schedule.reset,
+                                    schedule.target_ns.saturating_sub(now_ns) / 1_000,
+                                )
+                            } else {
+                                self.decoder.release_output_buffer(output_buffer, true)?;
+                                ("immediate-no-monotonic-clock", false, 0)
+                            };
+                        let output_frame_id = self
+                            .take_output_frame_metadata(presentation_time_us)
+                            .map(|(frame_id, _)| frame_id);
+                        self.decoded_frames = self.decoded_frames.saturating_add(1);
+                        if self.should_log_diag() {
+                            log::info!(
+                                "diag android mediacodec frame: decoder={}, codec={}, visible={}x{}, input_queue_ms={}, output_dequeue_ms={}, total_ms={}, input_bytes={}, pending_inputs={}, render_path=surface-texture, release_mode={}, presentation_reset={}, presentation_lead_us={}, refresh_period_ns={}, surface_generation={}, output_format={:?}",
+                                self.name,
+                                self.codec_label(),
+                                self.width,
+                                self.height,
+                                input_queue_elapsed.as_millis(),
+                                output_dequeue_elapsed.as_millis(),
+                                total_start.elapsed().as_millis(),
+                                data.len(),
+                                self.pending_inputs.len(),
+                                release_mode,
+                                presentation_reset,
+                                presentation_lead_us,
+                                self.presentation_clock.refresh_period_ns(),
+                                self.surface_generation,
+                                res_format,
+                            );
+                        }
+                        return Ok(MediaCodecDecodeOutcome::FrameReady {
+                            frame_id: output_frame_id,
+                        });
+                    }
                     let convert_start = Instant::now();
                     let convert_result: ResultType<(OutputLayout, usize, usize)> = (|| {
                         let layout = output_layout(&res_format)?;
@@ -147,11 +297,8 @@ impl MediaCodecDecoder {
                     self.decoder.release_output_buffer(output_buffer, false)?;
                     let (layout, output_bytes, output_capacity) = convert_result?;
                     let output_frame_id = self
-                        .in_flight_frames
-                        .iter()
-                        .position(|(token, _)| *token == presentation_time_us)
-                        .and_then(|position| self.in_flight_frames.remove(position))
-                        .map(|(_, frame_id)| frame_id);
+                        .take_output_frame_metadata(presentation_time_us)
+                        .map(|(frame_id, _)| frame_id);
                     if output_bytes == 0 {
                         log::debug!("MediaCodec returned an empty output buffer");
                         continue;
@@ -220,7 +367,79 @@ impl MediaCodecDecoder {
         })
     }
 
-    fn enqueue_input(&mut self, data: &[u8], frame_id: u64) -> ResultType<()> {
+    fn output_frame_metadata(&self, presentation_time_us: i64) -> Option<(u64, u64)> {
+        self.in_flight_frames
+            .iter()
+            .find(|(token, _, _)| *token == presentation_time_us)
+            .map(|(_, frame_id, capture_time_ms)| (*frame_id, *capture_time_ms))
+    }
+
+    fn take_output_frame_metadata(&mut self, presentation_time_us: i64) -> Option<(u64, u64)> {
+        let index = self
+            .in_flight_frames
+            .iter()
+            .position(|(token, _, _)| *token == presentation_time_us)?;
+        self.in_flight_frames
+            .remove(index)
+            .map(|(_, frame_id, capture_time_ms)| (frame_id, capture_time_ms))
+    }
+
+    pub fn uses_surface_output(&self) -> bool {
+        self.surface_output
+    }
+
+    pub fn surface_generation(&self) -> u64 {
+        self.surface_generation
+    }
+
+    pub fn output_size(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
+    pub fn update_output_surface(&mut self) -> bool {
+        let (surface, generation, refresh_period_ns) = output_surface(self.display);
+        if generation == self.surface_generation {
+            return true;
+        }
+        let Some(surface) = surface else {
+            return false;
+        };
+        if !self.surface_output {
+            return false;
+        }
+        match self.decoder.set_output_surface(&surface) {
+            Ok(()) => {
+                self.output_surface = Some(surface);
+                self.surface_generation = generation;
+                self.presentation_clock
+                    .update_refresh_period(refresh_period_ns);
+                log::info!(
+                    "Android MediaCodec output surface updated: display={}, generation={}, decoder={}",
+                    self.display,
+                    generation,
+                    self.name
+                );
+                true
+            }
+            Err(error) => {
+                log::warn!(
+                    "Failed to update Android MediaCodec output surface: display={}, generation={}, decoder={}, error={:?}",
+                    self.display,
+                    generation,
+                    self.name,
+                    error
+                );
+                false
+            }
+        }
+    }
+
+    fn enqueue_input(
+        &mut self,
+        data: &[u8],
+        frame_id: u64,
+        capture_time_ms: u64,
+    ) -> ResultType<()> {
         if self.pending_inputs.len() >= MAX_PENDING_INPUTS
             || self.pending_input_bytes.saturating_add(data.len()) > MAX_PENDING_INPUT_BYTES
         {
@@ -235,6 +454,7 @@ impl MediaCodecDecoder {
         self.pending_inputs.push_back(PendingInput {
             data: data.to_vec(),
             frame_id,
+            capture_time_ms,
         });
         Ok(())
     }
@@ -275,7 +495,11 @@ impl MediaCodecDecoder {
                         token as u64,
                         0,
                     )?;
-                    self.in_flight_frames.push_back((token, pending.frame_id));
+                    self.in_flight_frames.push_back((
+                        token,
+                        pending.frame_id,
+                        pending.capture_time_ms,
+                    ));
                     while self.in_flight_frames.len() > MAX_IN_FLIGHT_FRAMES {
                         self.in_flight_frames.pop_front();
                     }
@@ -348,33 +572,56 @@ fn output_buffer_range(buffer_len: usize, offset: i32, size: i32) -> ResultType<
 
 fn create_media_codec(
     name: &str,
-    direction: MediaCodecDirection,
     width: usize,
     height: usize,
+    display: usize,
 ) -> Option<MediaCodecDecoder> {
-    let codec = MediaCodec::from_decoder_type(name)?;
-    let mut media_format = MediaFormat::new();
-    media_format.set_str("mime", name);
-    media_format.set_i32("width", width as i32);
-    media_format.set_i32("height", height as i32);
-    media_format.set_i32("color-format", COLOR_FORMAT_YUV420_PLANAR);
-    if let Err(e) = codec.configure(&media_format, None, direction) {
-        log::error!("Failed to init decoder: {:?}", e);
-        return None;
-    };
-    log::info!(
-        "MediaCodec decoder configure success: mime={}, size={}x{}, requested_color_format={}",
+    let (registered_surface, surface_generation, refresh_period_ns) = output_surface(display);
+    let texture_render_enabled = hbb_common::config::LocalConfig::get_option(
+        hbb_common::config::keys::OPTION_TEXTURE_RENDER,
+    ) != "N";
+    let requested_surface =
+        registered_surface.filter(|_| texture_render_enabled && surface_codec_supported(name));
+    let surface_requested = requested_surface.is_some();
+    let (codec, output_surface, surface_output) = match configure_media_codec(
         name,
         width,
         height,
-        COLOR_FORMAT_YUV420_PLANAR
-    );
-    if let Err(e) = codec.start() {
-        log::error!("Failed to start decoder: {:?}", e);
-        return None;
+        requested_surface.as_ref(),
+    ) {
+        Ok(codec) => (codec, requested_surface, surface_requested),
+        Err(error) if requested_surface.is_some() => {
+            log::warn!(
+                "Android MediaCodec surface configure failed, falling back to CPU output: display={}, mime={}, size={}x{}, error={:?}",
+                display,
+                name,
+                width,
+                height,
+                error
+            );
+            match configure_media_codec(name, width, height, None) {
+                Ok(codec) => (codec, None, false),
+                Err(error) => {
+                    log::error!("Failed to init MediaCodec decoder: {:?}", error);
+                    return None;
+                }
+            }
+        }
+        Err(error) => {
+            log::error!("Failed to init MediaCodec decoder: {:?}", error);
+            return None;
+        }
     };
-    log::debug!("Init decoder succeeded!: {:?}", name);
-    return Some(MediaCodecDecoder {
+    log::info!(
+        "MediaCodec decoder configure success: mime={}, size={}x{}, display={}, render_path={}, surface_generation={}",
+        name,
+        width,
+        height,
+        display,
+        if surface_output { "surface-texture" } else { "rgba-soft" },
+        surface_generation
+    );
+    Some(MediaCodecDecoder {
         decoder: codec,
         name: name.to_owned(),
         decoded_frames: 0,
@@ -383,7 +630,70 @@ fn create_media_codec(
         pending_input_bytes: 0,
         in_flight_frames: VecDeque::new(),
         next_input_token: 0,
-    });
+        display,
+        width,
+        height,
+        surface_output,
+        surface_generation,
+        output_surface,
+        presentation_clock: VideoPresentationClock::new(refresh_period_ns),
+    })
+}
+
+fn configure_media_codec(
+    name: &str,
+    width: usize,
+    height: usize,
+    surface: Option<&NativeWindow>,
+) -> ResultType<MediaCodec> {
+    let codec = MediaCodec::from_decoder_type(name)
+        .ok_or_else(|| Error::msg(format!("MediaCodec decoder is unavailable: {}", name)))?;
+    let mut media_format = MediaFormat::new();
+    media_format.set_str("mime", name);
+    media_format.set_i32("width", width as i32);
+    media_format.set_i32("height", height as i32);
+    media_format.set_i32(
+        "color-format",
+        if surface.is_some() {
+            COLOR_FORMAT_SURFACE
+        } else {
+            COLOR_FORMAT_YUV420_PLANAR
+        },
+    );
+    codec.configure(&media_format, surface, MediaCodecDirection::Decoder)?;
+    codec.start()?;
+    Ok(codec)
+}
+
+fn monotonic_now_ns() -> Option<i64> {
+    let mut timestamp = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut timestamp) } != 0 {
+        return None;
+    }
+    let seconds = timestamp.tv_sec as i64;
+    let nanoseconds = timestamp.tv_nsec as i64;
+    if seconds < 0 || !(0..1_000_000_000).contains(&nanoseconds) {
+        return None;
+    }
+    seconds
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add(nanoseconds))
+}
+
+fn surface_codec_supported(mime_type: &str) -> bool {
+    crate::android::ffi::get_codec_info()
+        .map(|infos| {
+            infos.codecs.iter().any(|codec| {
+                !codec.is_encoder
+                    && codec.hw == Some(true)
+                    && codec.surface
+                    && codec.mime_type == mime_type
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn positive_i32(format: &MediaFormat, key: &str) -> Option<usize> {
@@ -591,7 +901,7 @@ pub fn update_decoder_support(infos: &crate::android::ffi::MediaCodecInfos) {
         infos.codecs.iter().any(|codec| {
             !codec.is_encoder
                 && codec.hw == Some(true)
-                && codec.yuv420
+                && (codec.yuv420 || codec.surface)
                 && codec.mime_type == mime_type
         })
     };

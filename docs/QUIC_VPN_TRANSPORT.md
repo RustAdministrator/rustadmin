@@ -12,8 +12,9 @@ Implemented and tested:
 - Versioned, fixed-width, big-endian application headers
 - Session offer/accept negotiation with downgrade detection
 - Video fragmentation and bounded out-of-order reassembly
-- ALPN v2/v1 negotiation that preserves the exact five-stream v1 layout for old peers
+- ALPN v4/v3/v2/v1 negotiation that preserves the exact older layouts for old peers
 - A sixth high-priority v2 stream for reliable keyframes while delta frames remain disposable DATAGRAM traffic
+- A zero-RTT v4 reference-epoch barrier that holds early delta DATAGRAM frames until their reliable keyframe is delivered
 - Startup reassembly that preserves a partial keyframe and rate-limits repeated refresh requests
 - Version-aware startup gating so a v2 reliable keyframe cannot leave later DATAGRAM deltas blocked in the v1 reassembler state
 - Audio packet transport and a bounded jitter buffer with a PLC integration event
@@ -51,14 +52,17 @@ One authenticated QUIC connection represents one remote-access session:
 | Mouse movement | DATAGRAM | Disposable |
 | Audio | DATAGRAM | Low latency |
 | Video delta fragments | DATAGRAM | Disposable |
-| Video keyframes (v2) | Dedicated bidirectional stream | High, reliable bootstrap/recovery |
+| Video keyframes (v2+) | Dedicated bidirectional stream | High, reliable bootstrap/recovery |
 | Clipboard | Dedicated bidirectional stream | Medium |
 | File transfer | One or more dedicated streams | Low and rate limited |
 | Diagnostics | Dedicated bidirectional stream or DATAGRAM telemetry | Lowest |
 
 The application adapter parses bounded existing protobuf `Message` values before QUIC encryption, routes them to the appropriate channel, and reconstructs the original bytes on receive. Video and mouse queues are latest-only, audio is bounded and disposable, and each reliable class has an independent writer task. A display-ordering epoch blocks both video DATAGRAM transmission and reliable keyframes until the peer has queued the reliable `SwitchDisplay` update.
 
-New peers negotiate ALPN `rustadmin-quic-v2` and open six reliable streams. If either peer supports only `rustadmin-quic-v1`, TLS selects v1 and both sides retain exactly the previous five-stream layout. See `docs/QUIC_PROTOCOL_V2.md` and `docs/QUIC_PROTOCOL_V1.md`.
+New peers negotiate ALPN `rustadmin-quic-v4` and open six reliable streams. If
+either peer supports only an older ALPN, TLS selects the newest shared version
+and both sides retain that version's channel layout and semantics. See
+`docs/QUIC_PROTOCOL_V2.md` and `docs/QUIC_PROTOCOL_V1.md`.
 
 ## QUIC Library
 
@@ -113,7 +117,7 @@ See `docs/quic-vpn.example.toml`; its settings apply to any routed UDP path.
 2. Select `Auto (QUIC preferred)`. Allow the RustAdmin executable and UDP 48100 on the applicable firewall profile.
 3. Enable RustAdmin direct IP access on the host and configure the direct-pairing passphrase (or retain an already confirmed paired viewer).
 4. Enter the host routed IP in the normal connection field. QUIC and compatible legacy candidates start during the same connection action.
-5. Complete normal pairing if prompted. Extended Quality Monitor should show `Path QUIC/UDP`, `QUIC App v2` for a current pair (or `v1` for compatibility), `Video TX DATAGRAM + reliable KF`, path MTU, DATAGRAM limits, QUIC RTT, loss, and recovery counters when QUIC wins.
+5. Complete normal pairing if prompted. Extended Quality Monitor should show `Path QUIC/UDP`, `QUIC App v4` for a current pair (or an older negotiated version for compatibility), `Video TX DATAGRAM + reliable KF barrier`, path MTU, DATAGRAM limits, QUIC RTT, loss, recovery counters, and `KF H/R/T/O` barrier counters when QUIC wins.
 
 `remote-transport=tcp` forces the legacy path. `remote-transport=quic-only` is intended for diagnostics and fails instead of falling back. An explicit routed IP does not require a public relay.
 
@@ -155,7 +159,7 @@ cargo test --offline --features quic-transport --lib \
 - Connect timeout: verify the routed peer address, host firewall, and UDP port. A timeout alone cannot distinguish a dropped firewall packet from an unreachable peer.
 - Certificate or identity mismatch: TCP fallback is deliberately refused. Confirm the peer fingerprint and investigate a changed device identity or restored configuration.
 - Protocol mismatch: update the older peer; do not bypass negotiation.
-- Repeated frame timeouts: inspect current MTU, QUIC loss, live/negotiated DATAGRAM limits, reassembly drops, keyframe requests, and whether v2 reliable keyframes are active. Do not hardcode a 1500-byte datagram.
+- Repeated frame timeouts: inspect current MTU, QUIC loss, live/negotiated DATAGRAM limits, reassembly drops, keyframe requests, and whether v4 reliable-keyframe barrier mode is active. Rising `KF H/R` with zero `KF T/O` means the barrier is repairing harmless stream/DATAGRAM reordering; rising timeouts or overflows indicate a real stalled keyframe or an undersized bound. Do not hardcode a 1500-byte datagram.
 - Input works but media does not: verify QUIC DATAGRAM was negotiated, `max_datagram_size()` is present, and the Quality Monitor shows a nonzero Datagram value.
 - First connection remains TCP: inspect the classified QUIC candidate and promotion diagnostics. A network timeout may keep the authenticated legacy session; a certificate, identity, or protocol error must fail instead of downgrading.
 - Port 48100 is blocked: the Quality Monitor remains on `TCP`, and the log contains a classified QUIC reachability fallback. Open UDP 48100 on the relevant interface or configure the matching port at both peers.
@@ -171,5 +175,5 @@ cargo test --offline --features quic-transport --lib \
 6. Completed: extended Quality Monitor transport, MTU, DATAGRAM, RTT, and loss reporting.
 7. Completed: VPN-neutral QUIC-first candidate racing, bounded first-contact identity binding, same-session promotion, and unified transport UI.
 8. Completed in revision 118: ALPN-compatible reliable keyframe bootstrap, startup reassembly recovery, bounded repeated refresh, Android `ndk` 0.9 MediaCodec status handling, and expanded Quality Monitor truth fields.
-9. In progress: Windows/Android release builds and physical routed-UDP validation.
+9. In progress: ALPN v4 reliable-keyframe reference barrier, Windows/Android release builds, and physical routed-UDP validation.
 10. Pending: root-capable packet impairment matrix, in-session reconnect supervisor, and iOS build.

@@ -1,12 +1,5 @@
 name: CI
 
-env:
-#   MIN_SUPPORTED_RUST_VERSION: "1.46.0"
-#   CICD_INTERMEDIATES_DIR: "_cicd-intermediates"
-  VCPKG_BINARY_SOURCES: "clear"
-  # for multiarch gcc compatibility
-  VCPKG_COMMIT_ID: "120deac3062162151622ca4860575a33844ba10b"
-
 permissions:
   contents: read
 
@@ -66,6 +59,49 @@ jobs:
       with:
         submodules: recursive
 
+    - name: Checkout hbb_common
+      shell: bash
+      env:
+        HBB_COMMON_OWNER: ${{ github.event.pull_request.head.repo.owner.login }}
+        HBB_COMMON_HEAD_REF: ${{ github.head_ref }}
+        HBB_COMMON_BASE_REF: ${{ github.base_ref }}
+      run: |
+        repository="RustAdministrator/hbb_common"
+        ref="${HBB_COMMON_BASE_REF:-main}"
+        if [[ -n "${HBB_COMMON_OWNER}" && -n "${HBB_COMMON_HEAD_REF}" ]]; then
+          candidate="${HBB_COMMON_OWNER}/hbb_common"
+          if git ls-remote --exit-code --heads \
+            "https://github.com/${candidate}.git" \
+            "${HBB_COMMON_HEAD_REF}" >/dev/null 2>&1; then
+            repository="${candidate}"
+            ref="${HBB_COMMON_HEAD_REF}"
+          fi
+        fi
+        echo "Using hbb_common repository=${repository}, ref=${ref}"
+        git clone --depth=1 --branch "${ref}" \
+          "https://github.com/${repository}.git" ../hbb_common
+
+    - name: Checkout hwcodec
+      shell: bash
+      env:
+        HWCODEC_OWNER: ${{ github.event.pull_request.head.repo.owner.login }}
+        HWCODEC_HEAD_REF: ${{ github.head_ref }}
+      run: |
+        repository="RustAdministrator/hwcodec"
+        ref="main"
+        if [[ -n "${HWCODEC_OWNER}" && -n "${HWCODEC_HEAD_REF}" ]]; then
+          candidate="${HWCODEC_OWNER}/hwcodec"
+          if git ls-remote --exit-code --heads \
+            "https://github.com/${candidate}.git" \
+            "${HWCODEC_HEAD_REF}" >/dev/null 2>&1; then
+            repository="${candidate}"
+            ref="${HWCODEC_HEAD_REF}"
+          fi
+        fi
+        echo "Using hwcodec repository=${repository}, ref=${ref}"
+        git clone --depth=1 --branch "${ref}" \
+          "https://github.com/${repository}.git" ../hwcodec
+
     - name: Install prerequisites
       shell: bash
       run: |
@@ -74,42 +110,61 @@ jobs:
             sudo apt-get -y update
             sudo apt-get install -y \
                clang \
+               autoconf \
+               automake \
                cmake \
                curl \
                gcc \
                git \
                g++ \
+               libaom-dev \
                libpam0g-dev \
                libasound2-dev \
                libunwind-dev \
                libgstreamer1.0-dev \
                libgstreamer-plugins-base1.0-dev \
                libgtk-3-dev \
+               libtool \
+               libopus-dev \
                libpulse-dev \
                libva-dev \
                libvdpau-dev \
+               libvpx-dev \
+               libyuv-dev \
                libxcb-randr0-dev \
                libxcb-shape0-dev \
                libxcb-xfixes0-dev \
                libxdo-dev \
                libxfixes-dev \
                nasm \
+               ninja-build \
+               pkg-config \
+               python3 \
                wget
             ;;
           # arm-unknown-linux-*) sudo apt-get -y update ; sudo apt-get -y install gcc-arm-linux-gnueabihf ;;
           # aarch64-unknown-linux-gnu) sudo apt-get -y update ; sudo apt-get -y install gcc-aarch64-linux-gnu ;;
         esac
 
-    - name: Setup vcpkg with Github Actions binary cache
-      uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
-      with:
-        vcpkgDirectory: /opt/artifacts/vcpkg
-        vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
-
-    - name: Install vcpkg dependencies
-      run: |
-        "${VCPKG_ROOT}/vcpkg" install --x-install-root="${VCPKG_ROOT}/installed"
+    - name: Configure Linux codec pkg-config
+      if: matrix.job.target == 'x86_64-unknown-linux-gnu'
       shell: bash
+      run: |
+        multiarch="$(gcc -print-multiarch)"
+        cat > pkgconfig/libyuv.pc <<EOF
+        prefix=/usr
+        libdir=\${prefix}/lib/${multiarch}
+        includedir=\${prefix}/include
+
+        Name: libyuv
+        Description: Ubuntu libyuv development package
+        Version: 0
+        Libs: -L\${libdir} -lyuv
+        Cflags: -I\${includedir}
+        EOF
+        export PKG_CONFIG_PATH="${PWD}/pkgconfig:${PKG_CONFIG_PATH:-}"
+        pkg-config --validate libyuv
+        pkg-config --exists libyuv vpx aom opus
 
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -132,12 +187,7 @@ jobs:
 
     - name: Build
       shell: bash
-      run: cargo build --locked --target="${{ matrix.job.target }}"
-
-    - name: clean
-      shell: bash
-      run: |
-        cargo clean
+      run: cargo build --locked --features linux-pkg-config --target="${{ matrix.job.target }}"
 
     # - name: Strip debug information from executable
     #   id: strip
@@ -196,4 +246,4 @@ jobs:
 
     - name: Run tests
       shell: bash
-      run: cargo test --locked --target="${{ matrix.job.target }}" ${{ steps.test-options.outputs.CARGO_TEST_OPTIONS }}
+      run: cargo test --locked --features linux-pkg-config --target="${{ matrix.job.target }}" ${{ steps.test-options.outputs.CARGO_TEST_OPTIONS }}

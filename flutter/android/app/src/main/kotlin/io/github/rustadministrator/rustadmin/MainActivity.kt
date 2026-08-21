@@ -15,6 +15,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.content.ClipboardManager
+import android.content.pm.PackageManager
+import android.hardware.display.DisplayManager
 import android.os.Bundle
 import android.os.Build
 import android.os.IBinder
@@ -29,13 +31,16 @@ import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.util.DisplayMetrics
 import androidx.annotation.RequiresApi
+import androidx.core.app.ActivityCompat
 import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import org.json.JSONObject
 import com.hjq.permissions.XXPermissions
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.view.TextureRegistry
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
@@ -47,10 +52,17 @@ import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.concurrent.thread
+import kotlin.math.roundToLong
 
 
 class MainActivity : FlutterActivity() {
+    private data class RemoteVideoTexture(
+        val producer: TextureRegistry.SurfaceProducer,
+        val textureId: Long,
+    )
+
     companion object {
+        private const val REQ_WIREGUARD_CONTROL_PERMISSION = 3401
         var flutterMethodChannel: MethodChannel? = null
         private var _rdClipboardManager: RdClipboardManager? = null
         val rdClipboardManager: RdClipboardManager?
@@ -60,8 +72,35 @@ class MainActivity : FlutterActivity() {
     private val channelTag = "mChannel"
     private val logTag = "mMainActivity"
     private var mainService: MainService? = null
+    private val remoteVideoTextures = mutableMapOf<Int, RemoteVideoTexture>()
+    private val displayListener = object : DisplayManager.DisplayListener {
+        override fun onDisplayAdded(displayId: Int) = Unit
+
+        override fun onDisplayRemoved(displayId: Int) = Unit
+
+        override fun onDisplayChanged(displayId: Int) {
+            val currentDisplayId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                display?.displayId
+            } else {
+                @Suppress("DEPRECATION")
+                windowManager.defaultDisplay.displayId
+            }
+            if (currentDisplayId != null && displayId != currentDisplayId) return
+            val refreshPeriodNanos = currentDisplayRefreshPeriodNanos()
+            remoteVideoTextures.keys.forEach { remoteDisplay ->
+                FFI.updateRemoteVideoRefreshPeriod(remoteDisplay, refreshPeriodNanos)
+            }
+            if (remoteVideoTextures.isNotEmpty()) {
+                Log.i(
+                    logTag,
+                    "Remote video refresh period updated: refreshPeriodNanos=$refreshPeriodNanos",
+                )
+            }
+        }
+    }
 
     private var isAudioStart = false
+    private var pendingWireGuardPermissionResult: MethodChannel.Result? = null
     private val audioRecordHandle = AudioRecordHandle(this, { false }, { isAudioStart })
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -75,7 +114,7 @@ class MainActivity : FlutterActivity() {
             flutterEngine.dartExecutor.binaryMessenger,
             channelTag
         )
-        initFlutterChannel(flutterMethodChannel!!)
+        initFlutterChannel(flutterMethodChannel!!, flutterEngine)
         thread {
             try {
                 setCodecInfo()
@@ -112,6 +151,8 @@ class MainActivity : FlutterActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        displayManager.registerDisplayListener(displayListener, null)
         if (_rdClipboardManager == null) {
             _rdClipboardManager = RdClipboardManager(getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
             FFI.setClipboardManager(_rdClipboardManager!!)
@@ -120,10 +161,57 @@ class MainActivity : FlutterActivity() {
 
     override fun onDestroy() {
         Log.e(logTag, "onDestroy")
+        val displayManager = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        displayManager.unregisterDisplayListener(displayListener)
+        pendingWireGuardPermissionResult?.success(false)
+        pendingWireGuardPermissionResult = null
+        releaseAllRemoteVideoTextures()
         mainService?.let {
             unbindService(serviceConnection)
         }
         super.onDestroy()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQ_WIREGUARD_CONTROL_PERMISSION) return
+        val granted = grantResults.isNotEmpty() &&
+            grantResults[0] == PackageManager.PERMISSION_GRANTED
+        pendingWireGuardPermissionResult?.success(granted)
+        pendingWireGuardPermissionResult = null
+    }
+
+    private fun requestWireGuardControlPermission(result: MethodChannel.Result) {
+        if (!WireGuardController.isInstalled(this)) {
+            result.success(false)
+            return
+        }
+        if (ContextCompat.checkSelfPermission(
+                this,
+                WireGuardController.CONTROL_PERMISSION,
+            ) == PackageManager.PERMISSION_GRANTED
+        ) {
+            result.success(true)
+            return
+        }
+        if (pendingWireGuardPermissionResult != null) {
+            result.error(
+                "wireguard-permission-pending",
+                "A WireGuard control permission request is already active",
+                null,
+            )
+            return
+        }
+        pendingWireGuardPermissionResult = result
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(WireGuardController.CONTROL_PERMISSION),
+            REQ_WIREGUARD_CONTROL_PERMISSION,
+        )
     }
 
     private val serviceConnection = object : ServiceConnection {
@@ -139,10 +227,146 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun initFlutterChannel(flutterMethodChannel: MethodChannel) {
+    private fun createRemoteVideoTexture(
+        flutterEngine: FlutterEngine,
+        display: Int,
+        width: Int,
+        height: Int,
+    ): Long? {
+        if (width <= 0 || height <= 0) return null
+
+        val producer = flutterEngine.renderer.createSurfaceProducer(
+            TextureRegistry.SurfaceLifecycle.manual
+        )
+        producer.setSize(width, height)
+        val textureId = producer.id()
+        val refreshPeriodNanos = currentDisplayRefreshPeriodNanos()
+        if (!FFI.setRemoteVideoSurface(display, producer.surface, refreshPeriodNanos)) {
+            producer.release()
+            return null
+        }
+
+        val previous = remoteVideoTextures.put(
+            display,
+            RemoteVideoTexture(producer, textureId),
+        )
+        producer.setCallback(object : TextureRegistry.SurfaceProducer.Callback {
+            override fun onSurfaceCleanup() {
+                val current = remoteVideoTextures[display]
+                if (current?.textureId != textureId) return
+                FFI.clearRemoteVideoSurface(display)
+                Log.i(
+                    logTag,
+                    "Remote video surface cleanup: display=$display, textureId=$textureId",
+                )
+            }
+
+            override fun onSurfaceAvailable() {
+                val current = remoteVideoTextures[display]
+                if (current?.textureId != textureId) return
+                if (FFI.setRemoteVideoSurface(
+                        display,
+                        producer.surface,
+                        currentDisplayRefreshPeriodNanos(),
+                    )) {
+                    Log.i(
+                        logTag,
+                        "Remote video surface restored: display=$display, textureId=$textureId",
+                    )
+                } else {
+                    Log.e(
+                        logTag,
+                        "Failed to restore remote video surface: display=$display, textureId=$textureId",
+                    )
+                }
+            }
+        })
+        previous?.producer?.release()
+        Log.i(
+            logTag,
+            "Remote video texture ready: display=$display, textureId=$textureId, size=${width}x$height, refreshPeriodNanos=$refreshPeriodNanos",
+        )
+        return textureId
+    }
+
+    @Suppress("DEPRECATION")
+    private fun currentDisplayRefreshPeriodNanos(): Long {
+        val refreshRate = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display?.refreshRate ?: 60f
+        } else {
+            windowManager.defaultDisplay.refreshRate
+        }
+        val normalizedRefreshRate = if (refreshRate.isFinite() && refreshRate in 30f..250f) {
+            refreshRate
+        } else {
+            60f
+        }
+        return (1_000_000_000.0 / normalizedRefreshRate).roundToLong()
+    }
+
+    private fun releaseRemoteVideoTexture(display: Int, textureId: Long): Boolean {
+        val current = remoteVideoTextures[display] ?: return false
+        if (current.textureId != textureId) return false
+        remoteVideoTextures.remove(display)
+        FFI.clearRemoteVideoSurface(display)
+        current.producer.release()
+        Log.i(logTag, "Remote video texture released: display=$display, textureId=$textureId")
+        return true
+    }
+
+    private fun releaseAllRemoteVideoTextures() {
+        val textures = remoteVideoTextures.toMap()
+        remoteVideoTextures.clear()
+        textures.forEach { (display, texture) ->
+            FFI.clearRemoteVideoSurface(display)
+            texture.producer.release()
+        }
+    }
+
+    private fun initFlutterChannel(
+        flutterMethodChannel: MethodChannel,
+        flutterEngine: FlutterEngine,
+    ) {
         flutterMethodChannel.setMethodCallHandler { call, result ->
             // make sure result will be invoked, otherwise flutter will await forever
             when (call.method) {
+                "create_remote_video_texture" -> {
+                    val display = call.argument<Int>("display")
+                    val width = call.argument<Int>("width")
+                    val height = call.argument<Int>("height")
+                    if (display == null || width == null || height == null) {
+                        result.error(
+                            "invalid_remote_video_texture",
+                            "display, width and height are required",
+                            null,
+                        )
+                        return@setMethodCallHandler
+                    }
+                    val textureId = createRemoteVideoTexture(
+                        flutterEngine,
+                        display,
+                        width,
+                        height,
+                    )
+                    if (textureId == null) {
+                        result.error(
+                            "remote_video_texture_failed",
+                            "Failed to register the Android video surface",
+                            null,
+                        )
+                    } else {
+                        result.success(textureId)
+                    }
+                }
+                "release_remote_video_texture" -> {
+                    val display = call.argument<Int>("display")
+                    val textureId = call.argument<Number>("texture_id")?.toLong()
+                    if (display == null || textureId == null) {
+                        result.success(false)
+                    } else {
+                        result.success(releaseRemoteVideoTexture(display, textureId))
+                    }
+                }
                 "init_service" -> {
                     Intent(activity, MainService::class.java).also {
                         bindService(it, serviceConnection, Context.BIND_AUTO_CREATE)
@@ -297,6 +521,48 @@ class MainActivity : FlutterActivity() {
                             }
                         }
                     }
+                }
+                "vpn_network_snapshot" -> {
+                    result.success(
+                        WireGuardController.networkSnapshot(
+                            this,
+                            call.argument<String>("peer").orEmpty(),
+                        ),
+                    )
+                }
+                "wireguard_status" -> {
+                    result.success(WireGuardController.integrationStatus(this))
+                }
+                "wireguard_request_control_permission" -> {
+                    requestWireGuardControlPermission(result)
+                }
+                "wireguard_set_tunnel" -> {
+                    val tunnelName = call.argument<String>("tunnel").orEmpty()
+                    val up = call.argument<Boolean>("up")
+                    result.success(
+                        up != null && WireGuardController.setTunnelState(
+                            this,
+                            tunnelName,
+                            up,
+                        ),
+                    )
+                }
+                "outgoing_session_attach" -> {
+                    val sessionId = call.argument<String>("session_id").orEmpty()
+                    val tunnelName = call.argument<String>("tunnel").orEmpty()
+                    val ownsTunnel = call.argument<Boolean>("owns_tunnel") == true
+                    result.success(
+                        OutgoingSessionService.attach(
+                            this,
+                            sessionId,
+                            tunnelName,
+                            ownsTunnel,
+                        ),
+                    )
+                }
+                "outgoing_session_release" -> {
+                    OutgoingSessionService.release(this)
+                    result.success(true)
                 }
                 GET_VALUE -> {
                     if (call.arguments is String) {
@@ -560,6 +826,7 @@ class MainActivity : FlutterActivity() {
 
     override fun onStop() {
         super.onStop()
+        OutgoingSessionService.onAppBackground(this)
         val disableFloatingWindow = FFI.getLocalOption("disable-floating-window") == "Y"
         if (!disableFloatingWindow && MainService.isReady) {
             startService(Intent(this, FloatingWindowService::class.java))
@@ -568,6 +835,8 @@ class MainActivity : FlutterActivity() {
 
     override fun onStart() {
         super.onStart()
+        OutgoingSessionService.onAppForeground(this)
         stopService(Intent(this, FloatingWindowService::class.java))
     }
+
 }

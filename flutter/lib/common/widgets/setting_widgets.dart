@@ -396,37 +396,37 @@ customImageQualitySetting() {
 
   final initQuality =
       (double.tryParse(bind.mainGetUserDefaultOption(key: qualityKey)) ??
-          kDefaultQuality);
+      kDefaultQuality);
   final isQuanlityFixed = isOptionFixed(qualityKey);
   final initFps =
       (double.tryParse(bind.mainGetUserDefaultOption(key: fpsKey)) ??
-          kDefaultFps);
+      kDefaultFps);
   final isFpsFixed = isOptionFixed(fpsKey);
   final initFpsMode = bind.mainGetUserDefaultOption(key: fpsModeKey);
   final isFpsModeFixed = isOptionFixed(fpsModeKey);
 
   return customImageQualityWidget(
-      initQuality: initQuality,
-      initFps: initFps,
-      initFpsMode: initFpsMode,
-      setQuality: isQuanlityFixed
-          ? null
-          : (v) {
-              bind.mainSetUserDefaultOption(
-                  key: qualityKey, value: v.toString());
-            },
-      setFps: isFpsFixed
-          ? null
-          : (v) {
-              bind.mainSetUserDefaultOption(key: fpsKey, value: v.toString());
-            },
-      setFpsMode: isFpsModeFixed
-          ? null
-          : (v) {
-              bind.mainSetUserDefaultOption(key: fpsModeKey, value: v);
-            },
-      showFps: true,
-      showMoreQuality: true);
+    initQuality: initQuality,
+    initFps: initFps,
+    initFpsMode: initFpsMode,
+    setQuality: isQuanlityFixed
+        ? null
+        : (v) {
+            bind.mainSetUserDefaultOption(key: qualityKey, value: v.toString());
+          },
+    setFps: isFpsFixed
+        ? null
+        : (v) {
+            bind.mainSetUserDefaultOption(key: fpsKey, value: v.toString());
+          },
+    setFpsMode: isFpsModeFixed
+        ? null
+        : (v) {
+            bind.mainSetUserDefaultOption(key: fpsModeKey, value: v);
+          },
+    showFps: true,
+    showMoreQuality: true,
+  );
 }
 
 List<Widget> ServerConfigImportExportWidgets(
@@ -441,11 +441,11 @@ List<Widget> ServerConfigImportExportWidgets(
 
   export() {
     final text = ServerConfig(
-            idServer: controllers[0].text.trim(),
-            relayServer: controllers[1].text.trim(),
-            apiServer: controllers[2].text.trim(),
-            key: controllers[3].text.trim())
-        .encode();
+      idServer: controllers[0].text.trim(),
+      relayServer: controllers[1].text.trim(),
+      apiServer: controllers[2].text.trim(),
+      key: controllers[3].text.trim(),
+    ).encode();
     debugPrint("ServerConfig export: $text");
     Clipboard.setData(ClipboardData(text: text));
     showToast(translate('Export server configuration successfully'));
@@ -455,12 +455,17 @@ List<Widget> ServerConfigImportExportWidgets(
     Tooltip(
       message: translate('Import server config'),
       child: IconButton(
-          icon: Icon(Icons.paste, color: Colors.grey), onPressed: import),
+        icon: Icon(Icons.paste, color: Colors.grey),
+        onPressed: import,
+      ),
     ),
     Tooltip(
-        message: translate('Export Server Config'),
-        child: IconButton(
-            icon: Icon(Icons.copy, color: Colors.grey), onPressed: export))
+      message: translate('Export Server Config'),
+      child: IconButton(
+        icon: Icon(Icons.copy, color: Colors.grey),
+        onPressed: export,
+      ),
+    ),
   ];
 }
 
@@ -486,12 +491,12 @@ List<(String, String)> otherDefaultSettings() {
     if (isDesktop)
       (
         'Show displays as individual windows',
-        kKeyShowDisplaysAsIndividualWindows
+        kKeyShowDisplaysAsIndividualWindows,
       ),
     if (isDesktop)
       (
         'Use all my displays for the remote session',
-        kKeyUseAllMyDisplaysForTheRemoteSession
+        kKeyUseAllMyDisplaysForTheRemoteSession,
       ),
     ('Keep terminal sessions on disconnect', kOptionTerminalPersistent),
   ];
@@ -556,34 +561,34 @@ class TrackpadSpeedWidgetState extends State<TrackpadSpeedWidget> {
           ),
         ),
         Expanded(
-            flex: 1,
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 56,
-                  child: TextField(
-                    controller: _controller,
-                    keyboardType: TextInputType.number,
-                    textAlign: TextAlign.center,
-                    onSubmitted: (text) {
-                      int? v = int.tryParse(text);
-                      if (v != null) {
-                        updateValue(v);
-                      }
-                    },
-                    style: const TextStyle(fontSize: 13),
-                    decoration: InputDecoration(
-                      contentPadding:
-                          EdgeInsets.symmetric(vertical: 8.0, horizontal: 12.0),
+          flex: 1,
+          child: Row(
+            children: [
+              SizedBox(
+                width: 56,
+                child: TextField(
+                  controller: _controller,
+                  keyboardType: TextInputType.number,
+                  textAlign: TextAlign.center,
+                  onSubmitted: (text) {
+                    int? v = int.tryParse(text);
+                    if (v != null) {
+                      updateValue(v);
+                    }
+                  },
+                  style: const TextStyle(fontSize: 13),
+                  decoration: InputDecoration(
+                    contentPadding: EdgeInsets.symmetric(
+                      vertical: 8.0,
+                      horizontal: 12.0,
                     ),
                   ),
-                ).marginOnly(right: 8.0),
-                Text(
-                  '%',
-                  style: const TextStyle(fontSize: 15),
-                )
-              ],
-            )),
+                ),
+              ).marginOnly(right: 8.0),
+              Text('%', style: const TextStyle(fontSize: 15)),
+            ],
+          ),
+        ),
       ],
     );
   }
