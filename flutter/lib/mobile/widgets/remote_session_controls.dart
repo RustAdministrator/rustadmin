@@ -593,7 +593,7 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
 
   Widget _qualityMonitorButton(double extent) {
     final foreground = widget.qualityMonitorVisible
-        ? Colors.white
+        ? mobileRemoteAccentColor
         : mobileRemoteToolbarForegroundColor(context);
     return Semantics(
       button: true,
@@ -607,18 +607,6 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
           color: foreground,
           padding: EdgeInsets.zero,
           splashRadius: extent / 2,
-          style: ButtonStyle(
-            backgroundColor: WidgetStatePropertyAll(
-              widget.qualityMonitorVisible
-                  ? mobileRemoteAccentColor
-                  : Colors.transparent,
-            ),
-            overlayColor: WidgetStatePropertyAll(
-              widget.qualityMonitorVisible
-                  ? Colors.white.withValues(alpha: 0.16)
-                  : mobileRemoteAccentActiveColor,
-            ),
-          ),
           onPressed: widget.onQualityMonitor,
           icon: MediaQuery.withClampedTextScaling(
             maxScaleFactor: 1,

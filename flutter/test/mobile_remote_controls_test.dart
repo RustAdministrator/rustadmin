@@ -307,16 +307,13 @@ void main() {
     );
     await tester.pumpAndSettle();
     final label = tester.widget<Text>(find.text('QM'));
-    expect(label.style?.color, Colors.white);
+    expect(label.style?.color, mobileRemoteAccentColor);
     final activeButton = tester.widget<IconButton>(button);
-    expect(
-      activeButton.style?.backgroundColor?.resolve(const {}),
-      mobileRemoteAccentColor,
+    expect(activeButton.style?.backgroundColor, isNull);
+    final toolbar = tester.widget<Material>(
+      find.byKey(const Key('mobile-remote-floating-toolbar')),
     );
-    expect(
-      activeButton.style?.backgroundColor?.resolve({WidgetState.pressed}),
-      mobileRemoteAccentColor,
-    );
+    expect(toolbar.color, Colors.white);
 
     await tester.tap(find.byTooltip('Vertical toolbar'));
     await tester.pumpAndSettle();
