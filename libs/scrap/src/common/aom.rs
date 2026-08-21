@@ -46,6 +46,7 @@ pub struct AomEncoderConfig {
     pub width: u32,
     pub height: u32,
     pub quality: f32,
+    pub fps: u32,
     pub keyframe_interval: Option<usize>,
 }
 

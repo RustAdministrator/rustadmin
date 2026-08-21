@@ -1,5 +1,8 @@
 use crate::{
-    codec::{base_bitrate, codec_thread_num, enable_hwcodec_option, EncoderApi, EncoderCfg},
+    codec::{
+        base_bitrate, codec_thread_num, enable_hwcodec_option, normalized_encoder_fps, EncoderApi,
+        EncoderCfg, DEFAULT_ENCODER_FPS,
+    },
     convert::*,
     CodecFormat, EncodeInput, ImageFormat, ImageRgb, Pixfmt, HW_STRIDE_ALIGN,
 };
@@ -26,7 +29,7 @@ use hwcodec::{
 };
 
 const DEFAULT_PIXFMT: AVPixelFormat = AVPixelFormat::AV_PIX_FMT_NV12;
-pub const DEFAULT_FPS: i32 = 30;
+pub const DEFAULT_FPS: i32 = DEFAULT_ENCODER_FPS as i32;
 const DEFAULT_GOP: i32 = i32::MAX;
 const DEFAULT_HW_QUALITY: Quality = Quality_Default;
 pub const ERR_HEVC_POC: i32 = HwcodecErrno::HWCODEC_ERR_HEVC_COULD_NOT_FIND_POC as i32;
@@ -59,6 +62,7 @@ pub struct HwRamEncoderConfig {
     pub width: usize,
     pub height: usize,
     pub quality: f32,
+    pub fps: u32,
     pub keyframe_interval: Option<usize>,
     pub profile: HwEncoderProfile,
 }
@@ -92,7 +96,7 @@ impl EncoderApi for HwRamEncoder {
                     pixfmt: DEFAULT_PIXFMT,
                     align: HW_STRIDE_ALIGN as _,
                     kbs: bitrate as i32,
-                    fps: DEFAULT_FPS,
+                    fps: normalized_encoder_fps(config.fps) as i32,
                     gop,
                     quality: hw_quality,
                     rc,
@@ -253,6 +257,7 @@ mod tests {
             width: 1920,
             height: 1080,
             quality: 1.0,
+            fps: DEFAULT_ENCODER_FPS,
             keyframe_interval: None,
             profile,
         }
@@ -399,6 +404,7 @@ mod tests {
             width: WIDTH,
             height: HEIGHT,
             quality: 1.0,
+            fps: DEFAULT_ENCODER_FPS,
             keyframe_interval: Some(30),
             profile: HwEncoderProfile::HighQuality,
         };
@@ -511,6 +517,7 @@ mod tests {
             width: WIDTH,
             height: HEIGHT,
             quality: 0.25,
+            fps: DEFAULT_ENCODER_FPS,
             keyframe_interval: None,
             profile: HwEncoderProfile::Default,
         };

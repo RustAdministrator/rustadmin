@@ -49,6 +49,16 @@ lazy_static::lazy_static! {
 }
 
 pub const ENCODE_NEED_SWITCH: &'static str = "ENCODE_NEED_SWITCH";
+pub const DEFAULT_ENCODER_FPS: u32 = 30;
+pub const MAX_ENCODER_FPS: u32 = 120;
+
+pub fn normalized_encoder_fps(fps: u32) -> u32 {
+    if (1..=MAX_ENCODER_FPS).contains(&fps) {
+        fps
+    } else {
+        DEFAULT_ENCODER_FPS
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum EncoderCfg {
@@ -58,6 +68,19 @@ pub enum EncoderCfg {
     HWRAM(HwRamEncoderConfig),
     #[cfg(feature = "vram")]
     VRAM(VRamEncoderConfig),
+}
+
+impl EncoderCfg {
+    pub fn fps(&self) -> u32 {
+        match self {
+            Self::VPX(config) => config.fps,
+            Self::AOM(config) => config.fps,
+            #[cfg(feature = "hwcodec")]
+            Self::HWRAM(config) => config.fps,
+            #[cfg(feature = "vram")]
+            Self::VRAM(config) => config.fps,
+        }
+    }
 }
 
 pub trait EncoderApi {
@@ -1580,6 +1603,7 @@ pub fn test_av1() {
                     width,
                     height,
                     quality,
+                    fps: DEFAULT_ENCODER_FPS,
                     keyframe_interval,
                 }),
                 i444,
@@ -1647,6 +1671,27 @@ fn apply_codec_fallback(
 mod tests {
     use super::*;
 
+    #[test]
+    fn encoder_fps_is_explicit_and_bounded() {
+        assert_eq!(normalized_encoder_fps(0), DEFAULT_ENCODER_FPS);
+        assert_eq!(normalized_encoder_fps(30), 30);
+        assert_eq!(normalized_encoder_fps(60), 60);
+        assert_eq!(
+            normalized_encoder_fps(MAX_ENCODER_FPS + 1),
+            DEFAULT_ENCODER_FPS
+        );
+
+        let config = EncoderCfg::VPX(VpxEncoderConfig {
+            width: 1920,
+            height: 1080,
+            quality: 1.0,
+            fps: 60,
+            codec: VpxVideoCodecId::VP9,
+            keyframe_interval: None,
+        });
+        assert_eq!(config.fps(), 60);
+    }
+
     #[cfg(feature = "hwcodec")]
     #[test]
     fn high_quality_videotoolbox_backend_label_is_explicit() {
@@ -1656,6 +1701,7 @@ mod tests {
             width: 1920,
             height: 1080,
             quality: 1.0,
+            fps: DEFAULT_ENCODER_FPS,
             keyframe_interval: Some(30),
             profile: HwEncoderProfile::HighQuality,
         });

@@ -93,6 +93,7 @@ fn test_vpx(
         width: width as _,
         height: height as _,
         quality,
+        fps: 30,
         codec: codec_id,
         keyframe_interval: None,
     });
@@ -172,6 +173,7 @@ fn test_av1(
         width: width as _,
         height: height as _,
         quality,
+        fps: 30,
         keyframe_interval: None,
     });
     let mut encoder = AomEncoder::new(config, i444).unwrap();
@@ -263,6 +265,7 @@ mod hw {
                 width,
                 height,
                 quality,
+                fps: 30,
                 keyframe_interval: None,
                 profile: Default::default(),
             }),

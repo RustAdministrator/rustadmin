@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    codec::{enable_vram_option, EncoderApi, EncoderCfg},
+    codec::{enable_vram_option, normalized_encoder_fps, EncoderApi, EncoderCfg},
     hwcodec::{HwCodecConfig, ERR_NO_PACKET},
     AdapterDevice, CodecFormat, EncodeInput, EncodeYuvFormat, Pixfmt,
 };
@@ -40,6 +40,7 @@ pub struct VRamEncoderConfig {
     pub width: usize,
     pub height: usize,
     pub quality: f32,
+    pub fps: u32,
     pub feature: FeatureContext,
     pub keyframe_interval: Option<usize>,
 }
@@ -74,7 +75,7 @@ impl EncoderApi for VRamEncoder {
                         width: config.width as _,
                         height: config.height as _,
                         kbitrate: bitrate as _,
-                        framerate: 30,
+                        framerate: normalized_encoder_fps(config.fps) as i32,
                         gop,
                     },
                 };

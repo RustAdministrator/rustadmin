@@ -103,6 +103,7 @@ fn main() -> io::Result<()> {
             width,
             height,
             quality,
+            fps: 30,
             codec: vpx_codec,
             keyframe_interval: None,
         }),

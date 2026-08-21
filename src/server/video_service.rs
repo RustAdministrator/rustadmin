@@ -46,7 +46,7 @@ use scrap::hwcodec::{HwEncoderProfile, HwRamEncoder, HwRamEncoderConfig};
 use scrap::vram::{VRamEncoder, VRamEncoderConfig};
 use scrap::{
     aom::AomEncoderConfig,
-    codec::{Encoder, EncoderCfg},
+    codec::{Encoder, EncoderCfg, DEFAULT_ENCODER_FPS},
     record::{Recorder, RecorderContext},
     vpxcodec::{VpxEncoderConfig, VpxVideoCodecId},
     Capturer, CodecFormat, Display, EncodeInput, Pixfmt, TraitCapturer, TraitPixelBuffer,
@@ -2036,6 +2036,7 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut video_qos = VIDEO_QOS.lock().unwrap();
     video_qos.sync_subscribers(&service_name, subscriber_ids);
     let mut spf = video_qos.spf(&service_name);
+    let encoder_fps = DEFAULT_ENCODER_FPS;
     let mut quality = video_qos.ratio(&service_name);
     let record_incoming = config::option2bool(
         "allow-auto-record-incoming",
@@ -2052,6 +2053,7 @@ fn run(vs: VideoService) -> ResultType<()> {
         last_portable_service_running,
         vs.source,
         display_idx,
+        encoder_fps,
     ) {
         Ok(result) => result,
         Err(err) => {
@@ -2061,6 +2063,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                 height: c.height as _,
                 quality,
                 codec: VpxVideoCodecId::VP9,
+                fps: DEFAULT_ENCODER_FPS,
                 keyframe_interval: None,
             }));
             setup_encoder(
@@ -2072,6 +2075,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                 last_portable_service_running,
                 vs.source,
                 display_idx,
+                encoder_fps,
             )?
         }
     };
@@ -2904,6 +2908,7 @@ fn setup_encoder(
     last_portable_service_running: bool,
     source: VideoSource,
     display_idx: usize,
+    encoder_fps: u32,
 ) -> ResultType<(
     Encoder,
     EncoderCfg,
@@ -2918,6 +2923,7 @@ fn setup_encoder(
         client_record || record_incoming,
         last_portable_service_running,
         source,
+        encoder_fps,
     );
     Encoder::set_fallback(&encoder_cfg);
     let codec_format = Encoder::negotiated_codec();
@@ -2986,6 +2992,7 @@ fn get_encoder_config(
     record: bool,
     _portable_service: bool,
     _source: VideoSource,
+    encoder_fps: u32,
 ) -> EncoderCfg {
     #[cfg(all(windows, feature = "vram"))]
     if _portable_service || c.is_gdi() || c.is_cpu_only() || _source == VideoSource::Camera {
@@ -3013,6 +3020,7 @@ fn get_encoder_config(
                         width: c.width,
                         height: c.height,
                         quality,
+                        fps: encoder_fps,
                         feature,
                         keyframe_interval,
                     });
@@ -3030,6 +3038,7 @@ fn get_encoder_config(
                     width: c.width,
                     height: c.height,
                     quality,
+                    fps: encoder_fps,
                     keyframe_interval,
                     profile: if high_quality {
                         HwEncoderProfile::HighQuality
@@ -3048,6 +3057,7 @@ fn get_encoder_config(
                 width: c.width as _,
                 height: c.height as _,
                 quality,
+                fps: encoder_fps,
                 codec: VpxVideoCodecId::VP9,
                 keyframe_interval,
             })
@@ -3056,6 +3066,7 @@ fn get_encoder_config(
             width: c.width as _,
             height: c.height as _,
             quality,
+            fps: encoder_fps,
             codec: if format == CodecFormat::VP8 {
                 VpxVideoCodecId::VP8
             } else {
@@ -3073,6 +3084,7 @@ fn get_encoder_config(
                         width: c.width,
                         height: c.height,
                         quality,
+                        fps: encoder_fps,
                         keyframe_interval,
                         profile: Default::default(),
                     });
@@ -3083,6 +3095,7 @@ fn get_encoder_config(
                         width: c.width as _,
                         height: c.height as _,
                         quality,
+                        fps: encoder_fps,
                         codec: VpxVideoCodecId::VP9,
                         keyframe_interval,
                     });
@@ -3092,6 +3105,7 @@ fn get_encoder_config(
                 width: c.width as _,
                 height: c.height as _,
                 quality,
+                fps: encoder_fps,
                 keyframe_interval,
             })
         }
@@ -3099,6 +3113,7 @@ fn get_encoder_config(
             width: c.width as _,
             height: c.height as _,
             quality,
+            fps: encoder_fps,
             codec: VpxVideoCodecId::VP9,
             keyframe_interval,
         }),
