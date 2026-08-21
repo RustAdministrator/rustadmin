@@ -4167,6 +4167,36 @@ impl Connection {
             VideoProfile::Movie if !transport_capable => EffectiveMovieMode::CompatibilityTransport,
             VideoProfile::Movie => EffectiveMovieMode::Full,
         };
+        #[cfg(feature = "quic-transport")]
+        {
+            use hbb_common::transport::datagram::{
+                DEFAULT_VIDEO_DATAGRAM_QUEUE_TARGET, MIN_VIDEO_DATAGRAM_QUEUE_BYTES,
+                MOVIE_MIN_VIDEO_DATAGRAM_QUEUE_BYTES, MOVIE_VIDEO_DATAGRAM_QUEUE_TARGET,
+            };
+            let (target, minimum_bytes) = if self.effective_movie_mode == EffectiveMovieMode::Full {
+                (
+                    MOVIE_VIDEO_DATAGRAM_QUEUE_TARGET,
+                    MOVIE_MIN_VIDEO_DATAGRAM_QUEUE_BYTES,
+                )
+            } else {
+                (
+                    DEFAULT_VIDEO_DATAGRAM_QUEUE_TARGET,
+                    MIN_VIDEO_DATAGRAM_QUEUE_BYTES,
+                )
+            };
+            if self
+                .stream
+                .set_quic_video_datagram_queue_policy(target, minimum_bytes)
+            {
+                log::info!(
+                    "#{} Movie QUIC video queue policy: effective={}, target_ms={}, minimum_bytes={}",
+                    self.inner.id(),
+                    self.effective_movie_mode.profile_label(),
+                    target.as_millis(),
+                    minimum_bytes
+                );
+            }
+        }
         video_service::VIDEO_QOS
             .lock()
             .unwrap()

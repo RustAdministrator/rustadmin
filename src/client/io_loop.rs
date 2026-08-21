@@ -10,6 +10,7 @@ use crate::{
     common::get_default_sound_input,
     input::{MOUSE_TYPE_MASK, MOUSE_TYPE_MOVE_RELATIVE},
     ui_session_interface::{InvokeUiSession, Session},
+    video_profile::VideoProfile,
 };
 #[cfg(feature = "unix-file-copy-paste")]
 use crate::{clipboard::try_empty_clipboard_files, clipboard_file::unix_file_clip};
@@ -49,7 +50,7 @@ use std::{
     num::NonZeroI64,
     path::PathBuf,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, RwLock,
     },
 };
@@ -63,6 +64,7 @@ const FPS_CONTROL_SUMMARY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 const CLIENT_ASYNC_OUTBOX_CAPACITY: usize = 256;
 const CLIENT_VIDEO_FEEDBACK_LATEST_KEY_BASE: u64 = 1 << 32;
 const CLIENT_CLOSE_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+const MOVIE_VIDEO_QUEUE_MAX_FRAMES: usize = 8;
 const CRITICAL_INPUT_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(2),
     Duration::from_millis(5),
@@ -1744,7 +1746,27 @@ impl<T: InvokeUiSession> Remote<T> {
             custom_profile && lc.get_option(config::keys::OPTION_CUSTOM_FPS_MODE) == "fixed";
         let custom_fps = lc.custom_fps.clone();
         let last_auto_fps = lc.last_auto_fps;
+        let movie_profile =
+            VideoProfile::from_config(&lc.get_option(config::keys::OPTION_VIDEO_PROFILE))
+                == VideoProfile::Movie;
         drop(lc);
+        if movie_profile {
+            if log_summary {
+                let (decode_fps_by_display, queue_len_by_display, inactive_by_display) =
+                    self.fps_control_snapshot();
+                log::info!(
+                    "diag fps control: id={}, mode=movie-controller, direct={}, codec={:?}, real_fps={:?}, decode_fps={:?}, queue_len={:?}, inactive={:?}",
+                    self.handler.get_id(),
+                    direct,
+                    self.video_format,
+                    real_fps_map,
+                    decode_fps_by_display,
+                    queue_len_by_display,
+                    inactive_by_display
+                );
+            }
+            return;
+        }
         let custom_fps = custom_fps.lock().unwrap().clone();
         let mut custom_fps = if custom_profile {
             custom_fps.unwrap_or(30)
@@ -2089,8 +2111,59 @@ impl<T: InvokeUiSession> Remote<T> {
                     let Some(thread) = self.video_threads.get_mut(&display) else {
                         return true;
                     };
-                    let new_feedback_stream =
-                        thread.video_feedback.lock().unwrap().record_received(&vf);
+                    let movie_mode = VideoProfile::from_config(
+                        &self
+                            .handler
+                            .lc
+                            .read()
+                            .unwrap()
+                            .get_option(config::keys::OPTION_VIDEO_PROFILE),
+                    ) == VideoProfile::Movie;
+                    thread.movie_mode.store(movie_mode, Ordering::Relaxed);
+                    #[cfg(all(target_os = "android", feature = "mediacodec"))]
+                    scrap::mediacodec::set_movie_presentation_mode(display, movie_mode);
+                    let (new_feedback_stream, previous_received_frame_id) = {
+                        let mut feedback = thread.video_feedback.lock().unwrap();
+                        let previous_received_frame_id = feedback.snapshot().received_frame_id;
+                        (feedback.record_received(&vf), previous_received_frame_id)
+                    };
+                    if new_feedback_stream {
+                        thread
+                            .newest_capture_time_ms
+                            .store(vf.capture_time_ms, Ordering::Relaxed);
+                    } else if vf.frame_id > previous_received_frame_id {
+                        let previous_capture_time_ms =
+                            thread.newest_capture_time_ms.load(Ordering::Relaxed);
+                        let source_clock_regressed = client::movie_source_clock_regressed(
+                            previous_received_frame_id,
+                            &vf,
+                            previous_capture_time_ms,
+                        );
+                        if source_clock_regressed && movie_mode {
+                            thread
+                                .newest_capture_time_ms
+                                .store(vf.capture_time_ms, Ordering::Relaxed);
+                            *thread.discard_queue.write().unwrap() = true;
+                            if client::movie_video_refresh_due(
+                                &thread.movie_queue_refresh,
+                                std::time::Instant::now(),
+                            ) {
+                                self.handler.refresh_video(display as _);
+                            }
+                            log::warn!(
+                                "Movie source clock regressed: display={}, stream_id={}, frame_id={}, previous_capture_ms={}, current_capture_ms={}",
+                                display,
+                                vf.stream_id,
+                                vf.frame_id,
+                                previous_capture_time_ms,
+                                vf.capture_time_ms
+                            );
+                        } else {
+                            thread
+                                .newest_capture_time_ms
+                                .fetch_max(vf.capture_time_ms, Ordering::Relaxed);
+                        }
+                    }
                     if Self::contains_key_frame(&vf) {
                         thread
                             .video_sender
@@ -2098,12 +2171,38 @@ impl<T: InvokeUiSession> Remote<T> {
                             .ok();
                     } else {
                         let video_queue = thread.video_queue.read().unwrap();
+                        let mut dropped_frames = 0usize;
+                        if movie_mode {
+                            while video_queue.len() >= MOVIE_VIDEO_QUEUE_MAX_FRAMES {
+                                if video_queue.pop().is_none() {
+                                    break;
+                                }
+                                dropped_frames = dropped_frames.saturating_add(1);
+                            }
+                        }
                         if video_queue.force_push(vf).is_some() {
-                            drop(video_queue);
-                            thread.video_feedback.lock().unwrap().record_drop();
-                            self.handler.refresh_video(display as _);
+                            dropped_frames = dropped_frames.saturating_add(1);
                         } else {
                             thread.video_sender.send(MediaData::VideoQueue).ok();
+                        }
+                        drop(video_queue);
+                        if dropped_frames > 0 {
+                            if movie_mode {
+                                *thread.discard_queue.write().unwrap() = true;
+                            }
+                            thread
+                                .video_feedback
+                                .lock()
+                                .unwrap()
+                                .record_drops(dropped_frames);
+                            if !movie_mode
+                                || client::movie_video_refresh_due(
+                                    &thread.movie_queue_refresh,
+                                    std::time::Instant::now(),
+                                )
+                            {
+                                self.handler.refresh_video(display as _);
+                            }
                         }
                     }
                     thread
@@ -3247,6 +3346,9 @@ impl<T: InvokeUiSession> Remote<T> {
         let frame_resolution = Arc::new(RwLock::new(None));
         let frame_count = Arc::new(RwLock::new(0));
         let discard_queue = Arc::new(RwLock::new(false));
+        let movie_mode = Arc::new(AtomicBool::new(false));
+        let newest_capture_time_ms = Arc::new(AtomicU64::new(0));
+        let movie_queue_refresh = Arc::new(std::sync::Mutex::new(None));
         let video_feedback = Arc::new(std::sync::Mutex::new(
             client::VideoFeedbackTracker::default(),
         ));
@@ -3261,6 +3363,9 @@ impl<T: InvokeUiSession> Remote<T> {
             video_feedback: video_feedback.clone(),
             fps_control: Default::default(),
             discard_queue: discard_queue.clone(),
+            movie_mode: movie_mode.clone(),
+            newest_capture_time_ms: newest_capture_time_ms.clone(),
+            movie_queue_refresh: movie_queue_refresh.clone(),
         };
         let handler = self.handler.ui_handler.clone();
         crate::client::start_video_thread(
@@ -3275,6 +3380,9 @@ impl<T: InvokeUiSession> Remote<T> {
             self.chroma.clone(),
             discard_queue,
             video_feedback,
+            movie_mode,
+            newest_capture_time_ms,
+            movie_queue_refresh,
             move |display: usize,
                   data: &mut scrap::ImageRgb,
                   _texture: *mut c_void,
@@ -3375,6 +3483,9 @@ struct VideoThread {
     frame_count: Arc<RwLock<usize>>,
     video_feedback: Arc<std::sync::Mutex<client::VideoFeedbackTracker>>,
     discard_queue: Arc<RwLock<bool>>,
+    movie_mode: Arc<AtomicBool>,
+    newest_capture_time_ms: Arc<AtomicU64>,
+    movie_queue_refresh: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     fps_control: FpsControl,
 }
 

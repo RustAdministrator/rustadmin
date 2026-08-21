@@ -3,6 +3,7 @@ const MIN_REFRESH_PERIOD_NS: i64 = 4_000_000;
 const MAX_REFRESH_PERIOD_NS: i64 = 33_333_334;
 const MAX_FUTURE_LEAD_NS: i64 = 50_000_000;
 const LATE_TOLERANCE_PERIODS: i64 = 3;
+const MOVIE_PLAYOUT_DELAY_NS: i64 = 50_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PresentationSchedule {
@@ -18,6 +19,7 @@ pub struct VideoPresentationClock {
     anchor_target_ns: i64,
     last_capture_time_ms: u64,
     last_target_ns: i64,
+    movie_mode: bool,
 }
 
 impl VideoPresentationClock {
@@ -28,6 +30,7 @@ impl VideoPresentationClock {
             anchor_target_ns: 0,
             last_capture_time_ms: 0,
             last_target_ns: 0,
+            movie_mode: false,
         }
     }
 
@@ -41,6 +44,21 @@ impl VideoPresentationClock {
 
     pub fn refresh_period_ns(&self) -> i64 {
         self.refresh_period_ns
+    }
+
+    pub fn set_movie_mode(&mut self, enabled: bool) {
+        if self.movie_mode != enabled {
+            self.movie_mode = enabled;
+            self.reset_anchor();
+        }
+    }
+
+    pub fn playout_delay_ms(&self) -> u32 {
+        if self.movie_mode {
+            (MOVIE_PLAYOUT_DELAY_NS / 1_000_000) as u32
+        } else {
+            0
+        }
     }
 
     pub fn schedule(&mut self, capture_time_ms: Option<u64>, now_ns: i64) -> PresentationSchedule {
@@ -63,8 +81,13 @@ impl VideoPresentationClock {
         let source_regressed =
             self.anchor_capture_time_ms.is_some() && capture_time_ms < self.last_capture_time_ms;
         let mut reset = source_regressed || self.anchor_capture_time_ms.is_none();
+        let reset_lead_ns = if self.movie_mode {
+            MOVIE_PLAYOUT_DELAY_NS.max(self.refresh_period_ns)
+        } else {
+            self.refresh_period_ns
+        };
         let mut target_ns = if reset {
-            now_ns.saturating_add(self.refresh_period_ns)
+            now_ns.saturating_add(reset_lead_ns)
         } else {
             let anchor_capture_time_ms = self.anchor_capture_time_ms.unwrap_or(capture_time_ms);
             let elapsed_ms = capture_time_ms.saturating_sub(anchor_capture_time_ms);
@@ -80,7 +103,7 @@ impl VideoPresentationClock {
             now_ns.saturating_add(MAX_FUTURE_LEAD_NS.max(self.refresh_period_ns.saturating_mul(3)));
         if target_ns < late_limit_ns || target_ns > future_limit_ns {
             reset = true;
-            target_ns = now_ns.saturating_add(self.refresh_period_ns);
+            target_ns = now_ns.saturating_add(reset_lead_ns);
         } else {
             target_ns = target_ns.max(now_ns);
         }
@@ -146,6 +169,19 @@ mod tests {
         assert_eq!(first.target_ns, 10_008_333_333);
         assert!(first.source_clock);
         assert!(first.reset);
+        assert_eq!(second.target_ns - first.target_ns, 33_000_000);
+        assert!(!second.reset);
+    }
+
+    #[test]
+    fn movie_mode_adds_a_bounded_playout_lead() {
+        let mut clock = VideoPresentationClock::new(8_333_333);
+        clock.set_movie_mode(true);
+        let first = clock.schedule(Some(1_000), 10_000_000_000);
+        let second = clock.schedule(Some(1_033), 10_033_000_000);
+
+        assert_eq!(clock.playout_delay_ms(), 50);
+        assert_eq!(first.target_ns, 10_050_000_000);
         assert_eq!(second.target_ns - first.target_ns, 33_000_000);
         assert!(!second.reset);
     }

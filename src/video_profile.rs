@@ -2,6 +2,8 @@ use hbb_common::{
     message_proto::option_message::VideoProfile as WireVideoProfile, protobuf::EnumOrUnknown,
 };
 
+pub(crate) const MOVIE_DEFAULT_TARGET_FPS: u32 = 60;
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum VideoProfile {
     #[default]

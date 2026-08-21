@@ -1,5 +1,5 @@
 use super::*;
-use crate::video_profile::VideoProfile;
+use crate::video_profile::{VideoProfile, MOVIE_DEFAULT_TARGET_FPS};
 use scrap::codec::{Quality, BR_BALANCED, BR_BEST, BR_SPEED};
 use std::{
     collections::{HashSet, VecDeque},
@@ -34,7 +34,6 @@ pub const FPS: u32 = 30;
 pub const MIN_FPS: u32 = 1;
 pub const MAX_FPS: u32 = 120;
 pub const INIT_FPS: u32 = 15;
-pub(crate) const MOVIE_DEFAULT_TARGET_FPS: u32 = 60;
 const STARTUP_SAFE_WINDOW: Duration = Duration::from_secs(8);
 const STARTUP_SAFE_FPS: u32 = 5;
 const STARTUP_SAFE_RATIO: f32 = 0.25;
