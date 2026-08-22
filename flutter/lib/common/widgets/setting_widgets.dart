@@ -319,6 +319,7 @@ class _CustomImageQualityWidgetState extends State<CustomImageQualityWidget> {
                 const SizedBox(height: 6),
                 SizedBox(
                   width: double.infinity,
+                  height: isMobile ? 48 : 40,
                   child: SegmentedButton<String>(
                     key: const Key('custom-image-video-profile-segmented'),
                     expandedInsets: EdgeInsets.zero,
@@ -326,11 +327,25 @@ class _CustomImageQualityWidgetState extends State<CustomImageQualityWidget> {
                     segments: [
                       ButtonSegment(
                         value: kVideoProfileStandard,
-                        label: Text(translateText('Standard')),
+                        label: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Text(
+                            translateText('Standard'),
+                            maxLines: 1,
+                            softWrap: false,
+                          ),
+                        ),
                       ),
                       ButtonSegment(
                         value: kVideoProfileMovie,
-                        label: Text(translateText('Movie mode')),
+                        label: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Text(
+                            translateText('Movie mode'),
+                            maxLines: 1,
+                            softWrap: false,
+                          ),
+                        ),
                       ),
                     ],
                     selected: {videoProfileValue.value},

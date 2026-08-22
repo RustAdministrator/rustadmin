@@ -786,10 +786,21 @@ impl VideoQoS {
             );
             return;
         };
+        let changed = user.video_profile != profile;
+        if changed {
+            user.delay = UserDelay::default();
+            user.auto_adjust_fps = None;
+            user.last_transport_loss_at = None;
+            user.movie_feedback_by_display.clear();
+            user.video_render_started = false;
+        }
         user.video_profile = profile;
+        if changed {
+            self.adjust_displays_for_user(id);
+        }
         log::info!(
-            "video profile applied: user_id={id}, requested={}",
-            profile.config_value()
+            "video profile applied: user_id={id}, requested={}, adaptive_state_reset={changed}",
+            profile.config_value(),
         );
     }
 
@@ -1521,6 +1532,23 @@ mod tests {
         qos.user_video_profile(1, VideoProfile::Standard);
         assert!(!qos.all_subscribers_request_movie(MONITOR_SERVICE));
         assert!(!qos.full_movie_mode(MONITOR_SERVICE));
+    }
+
+    #[test]
+    fn profile_switch_resets_movie_transport_penalty_before_standard() {
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
+        qos.user_custom_fps(1, 85);
+        qos.user_video_profile(1, VideoProfile::Movie);
+        assert!(qos.user_transport_loss_at(1, 1, Instant::now()));
+        qos.users.get_mut(&1).unwrap().auto_adjust_fps = Some(40);
+        assert_eq!(qos.users.get(&1).unwrap().delay.fps, Some(63));
+
+        qos.user_video_profile(1, VideoProfile::Standard);
+        let user = qos.users.get(&1).unwrap();
+        assert!(user.delay.fps.is_none());
+        assert!(user.delay.delay_history.is_empty());
+        assert!(user.auto_adjust_fps.is_none());
+        assert!(user.last_transport_loss_at.is_none());
     }
 
     fn healthy_movie_sample(now: Instant, pipeline_us: u64) -> MovieCadenceSample {

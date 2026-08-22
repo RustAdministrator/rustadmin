@@ -14,28 +14,38 @@ void main() {
     Function(String)? setFpsMode,
     Function(String)? setVideoProfile,
     bool showQuality = true,
+    bool showFps = true,
     bool showFpsMode = true,
     bool showVideoProfile = false,
     String fpsLabel = 'FPS',
+    double width = 800,
+    double textScale = 1,
+    String Function(String)? translateText,
   }) {
     return MaterialApp(
       home: Scaffold(
-        body: CustomImageQualityWidget(
-          initQuality: quality,
-          initFps: fps,
-          initFpsMode: fpsMode,
-          initVideoProfile: videoProfile,
-          setQuality: setQuality,
-          setFps: setFps,
-          setFpsMode: setFpsMode,
-          setVideoProfile: setVideoProfile,
-          showFps: true,
-          showMoreQuality: true,
-          showQuality: showQuality,
-          showFpsMode: showFpsMode,
-          showVideoProfile: showVideoProfile,
-          fpsLabel: fpsLabel,
-          translateText: (value) => value,
+        body: MediaQuery(
+          data: MediaQueryData(textScaler: TextScaler.linear(textScale)),
+          child: SizedBox(
+            width: width,
+            child: CustomImageQualityWidget(
+              initQuality: quality,
+              initFps: fps,
+              initFpsMode: fpsMode,
+              initVideoProfile: videoProfile,
+              setQuality: setQuality,
+              setFps: setFps,
+              setFpsMode: setFpsMode,
+              setVideoProfile: setVideoProfile,
+              showFps: showFps,
+              showMoreQuality: true,
+              showQuality: showQuality,
+              showFpsMode: showFpsMode,
+              showVideoProfile: showVideoProfile,
+              fpsLabel: fpsLabel,
+              translateText: translateText ?? (value) => value,
+            ),
+          ),
         ),
       ),
     );
@@ -179,5 +189,40 @@ void main() {
       findsNothing,
     );
     expect(find.byKey(const Key('custom-image-quality-slider')), findsOneWidget);
+  });
+
+  testWidgets('video profile labels stay on one line at large text scale', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      controls(
+        showQuality: false,
+        showFps: false,
+        showVideoProfile: true,
+        setVideoProfile: (_) {},
+        width: 320,
+        textScale: 2,
+        translateText: (value) => switch (value) {
+          'Standard' => 'Стандартный',
+          'Movie mode' => 'Режим кино',
+          _ => value,
+        },
+      ),
+    );
+
+    expect(
+      tester
+          .getSize(
+            find.byKey(const Key('custom-image-video-profile-segmented')),
+          )
+          .height,
+      40,
+    );
+    for (final label in ['Стандартный', 'Режим кино']) {
+      final text = tester.widget<Text>(find.text(label));
+      expect(text.maxLines, 1);
+      expect(text.softWrap, isFalse);
+    }
+    expect(tester.takeException(), isNull);
   });
 }
