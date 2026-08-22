@@ -256,6 +256,14 @@ void main() {
     expect(rawKeyFocusNode.hasFocus, isTrue);
 
     expect(find.text('QM'), findsOneWidget);
+    final qmInk = find
+        .ancestor(of: find.text('QM'), matching: find.byType(Ink))
+        .first;
+    expect(
+      tester.getSize(qmInk),
+      const Size.square(32),
+      reason: 'QM must use the same stable square surface as toolbar icons',
+    );
     expect(ffi.qualityMonitorModel.showListenable.value, isFalse);
     await tester.tap(find.text('QM'));
     await tester.pumpAndSettle();

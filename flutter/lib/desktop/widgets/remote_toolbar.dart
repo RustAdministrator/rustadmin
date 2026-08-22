@@ -1480,14 +1480,18 @@ class _QualityMonitorMenu extends StatelessWidget {
       valueListenable: ffi.qualityMonitorModel.showListenable,
       builder: (context, visible, _) => _IconMenuButton(
         tooltip: 'Quality monitor',
-        icon: const Center(
-          child: Text(
-            'QM',
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 10,
-              fontWeight: FontWeight.w700,
-              height: 1,
+        icon: const SizedBox(
+          width: _ToolbarTheme.buttonSize,
+          height: _ToolbarTheme.buttonSize,
+          child: Center(
+            child: Text(
+              'QM',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 10,
+                fontWeight: FontWeight.w700,
+                height: 1,
+              ),
             ),
           ),
         ),
