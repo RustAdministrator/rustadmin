@@ -1341,6 +1341,13 @@ impl VideoQoS {
             .clamp(MIN_FPS, MAX_FPS)
     }
 
+    pub(crate) fn custom_encoder_fps(&self, video_service_name: &str) -> Option<u32> {
+        self.subscribed_users(video_service_name)
+            .filter_map(|user| user.custom_fps)
+            .max()
+            .map(|fps| fps.clamp(MIN_FPS, MAX_FPS))
+    }
+
     pub(crate) fn movie_viewer_metrics(&self, video_service_name: &str) -> MovieViewerMetrics {
         let Some(display_idx) = video_service_display_index(video_service_name) else {
             return MovieViewerMetrics::default();
@@ -2075,6 +2082,18 @@ mod tests {
         let user = qos.users.get(&1).unwrap();
         assert_eq!(user.custom_fps, Some(60));
         assert_eq!(user.fixed_fps, Some(60));
+    }
+
+    #[test]
+    fn encoder_fps_changes_only_for_custom_quality() {
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
+        assert_eq!(qos.custom_encoder_fps(MONITOR_SERVICE), None);
+
+        qos.user_fixed_fps(1, 85);
+        assert_eq!(qos.custom_encoder_fps(MONITOR_SERVICE), Some(85));
+
+        qos.user_preset_image_quality(1, ImageQuality::Balanced.value());
+        assert_eq!(qos.custom_encoder_fps(MONITOR_SERVICE), None);
     }
 
     #[test]

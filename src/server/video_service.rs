@@ -2278,7 +2278,11 @@ fn run(vs: VideoService) -> ResultType<()> {
     let encoder_fps = movie_cadence
         .as_ref()
         .map(MovieCadenceController::current_tier)
-        .unwrap_or(DEFAULT_ENCODER_FPS);
+        .unwrap_or_else(|| {
+            video_qos
+                .custom_encoder_fps(&service_name)
+                .unwrap_or(DEFAULT_ENCODER_FPS)
+        });
     let mut spf = movie_cadence
         .as_ref()
         .map(|controller| Duration::from_secs_f64(1.0 / f64::from(controller.current_tier())))
