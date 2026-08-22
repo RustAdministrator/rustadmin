@@ -125,6 +125,25 @@ fn diagnostic_roots() -> Vec<(String, PathBuf)> {
             PathBuf::from(app_dir).join("diagnostics"),
         ));
     }
+    #[cfg(windows)]
+    {
+        if let Some(system_root) = std::env::var_os("SystemRoot").map(PathBuf::from) {
+            roots.push((
+                "service-localservice".to_owned(),
+                system_root.join("ServiceProfiles/LocalService/AppData/Roaming/RustAdmin/log"),
+            ));
+            roots.push((
+                "service-systemprofile".to_owned(),
+                system_root.join("System32/config/systemprofile/AppData/Roaming/RustAdmin/log"),
+            ));
+        }
+        if let Some(program_data) = std::env::var_os("ProgramData").map(PathBuf::from) {
+            roots.push((
+                "service-programdata".to_owned(),
+                program_data.join("RustAdmin/log"),
+            ));
+        }
+    }
     roots
 }
 
