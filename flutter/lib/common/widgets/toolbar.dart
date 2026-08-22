@@ -449,6 +449,14 @@ Future<List<TRadioMenu<String>>> toolbarImageQuality(
       await bind.sessionGetImageQuality(sessionId: ffi.sessionId) ?? '';
   onChanged(String? value) async {
     if (value == null) return;
+    if (value != kRemoteImageQualityCustom) {
+      final videoProfile = await bind.sessionGetOption(
+          sessionId: ffi.sessionId, arg: kOptionVideoProfile);
+      if (videoProfile == kVideoProfileMovie) {
+        await bind.sessionSetVideoProfile(
+            sessionId: ffi.sessionId, value: kVideoProfileStandard);
+      }
+    }
     await bind.sessionSetImageQuality(sessionId: ffi.sessionId, value: value);
   }
 
@@ -479,34 +487,6 @@ Future<List<TRadioMenu<String>>> toolbarImageQuality(
         }
       },
     ),
-  ];
-}
-
-Future<List<TRadioMenu<String>>> toolbarVideoProfile(FFI ffi) async {
-  final sessionId = ffi.sessionId;
-  final value = await bind.sessionGetOption(
-          sessionId: sessionId, arg: kOptionVideoProfile) ??
-      '';
-  final groupValue = value == kVideoProfileMovie
-      ? kVideoProfileMovie
-      : kVideoProfileStandard;
-
-  Future<void> onChanged(String? value) async {
-    if (value == null) return;
-    await bind.sessionSetVideoProfile(sessionId: sessionId, value: value);
-  }
-
-  return [
-    TRadioMenu<String>(
-        child: Text(translate('Standard')),
-        value: kVideoProfileStandard,
-        groupValue: groupValue,
-        onChanged: onChanged),
-    TRadioMenu<String>(
-        child: Text(translate('Movie mode')),
-        value: kVideoProfileMovie,
-        groupValue: groupValue,
-        onChanged: onChanged),
   ];
 }
 

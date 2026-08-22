@@ -11,7 +11,8 @@ use crate::{
     input::{MOUSE_TYPE_MASK, MOUSE_TYPE_MOVE_RELATIVE},
     ui_session_interface::{InvokeUiSession, Session},
     video_profile::{
-        EffectiveMovieMode, VideoProfile, MOVIE_DEFAULT_TARGET_FPS, MOVIE_PLAYOUT_DELAY_MS,
+        viewer_full_movie_mode, EffectiveMovieMode, VideoProfile, MOVIE_DEFAULT_TARGET_FPS,
+        MOVIE_PLAYOUT_DELAY_MS,
     },
 };
 #[cfg(feature = "unix-file-copy-paste")]
@@ -667,7 +668,6 @@ impl<T: InvokeUiSession> Remote<T> {
                             let requested_video_profile = VideoProfile::from_config(
                                 &lc.get_option(config::keys::OPTION_VIDEO_PROFILE),
                             );
-                            let movie_profile = requested_video_profile == VideoProfile::Movie;
                             let host_movie_supported = lc.supported_encoding.movie_mode;
                             let movie_target_fps = lc
                                 .get_option(config::keys::OPTION_CUSTOM_FPS)
@@ -677,19 +677,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                 .map(|fps| fps as u32)
                                 .unwrap_or(MOVIE_DEFAULT_TARGET_FPS)
                                 .clamp(1, 120);
-                            let fps_mode = if movie_profile {
-                                "movie"
-                            } else if fixed_fps {
-                                "fixed"
-                            } else {
-                                "adaptive"
-                            }
-                            .to_owned();
-                            let auto_fps = if fixed_fps || movie_profile {
-                                None
-                            } else {
-                                lc.last_auto_fps
-                            };
+                            let last_auto_fps = lc.last_auto_fps;
                             drop(lc);
                             #[cfg(feature = "quic-transport")]
                             let quic_stats = peer.quic_stats();
@@ -706,6 +694,24 @@ impl<T: InvokeUiSession> Remote<T> {
                                 host_movie_supported,
                                 full_movie_transport,
                             );
+                            let full_movie_mode = viewer_full_movie_mode(
+                                requested_video_profile,
+                                host_movie_supported,
+                                full_movie_transport,
+                            );
+                            let fps_mode = if full_movie_mode {
+                                "movie"
+                            } else if fixed_fps {
+                                "fixed"
+                            } else {
+                                "adaptive"
+                            }
+                            .to_owned();
+                            let auto_fps = if fixed_fps || full_movie_mode {
+                                None
+                            } else {
+                                last_auto_fps
+                            };
                             let movie_fallback_reason = match effective_movie_mode.fallback_reason()
                             {
                                 "none" => None,
@@ -887,9 +893,11 @@ impl<T: InvokeUiSession> Remote<T> {
                                 effective_video_profile: Some(
                                     effective_movie_mode.profile_label().to_owned(),
                                 ),
-                                movie_target_fps: movie_profile.then_some(movie_target_fps),
+                                movie_target_fps: (requested_video_profile
+                                    == VideoProfile::Movie)
+                                    .then_some(movie_target_fps),
                                 movie_fallback_reason: movie_fallback_reason.map(str::to_owned),
-                                movie_playout_delay_ms: movie_profile
+                                movie_playout_delay_ms: full_movie_mode
                                     .then_some(MOVIE_PLAYOUT_DELAY_MS),
                                 ..Default::default()
                             });
@@ -1811,11 +1819,12 @@ impl<T: InvokeUiSession> Remote<T> {
             custom_profile && lc.get_option(config::keys::OPTION_CUSTOM_FPS_MODE) == "fixed";
         let custom_fps = lc.custom_fps.clone();
         let last_auto_fps = lc.last_auto_fps;
-        let movie_profile =
-            VideoProfile::from_config(&lc.get_option(config::keys::OPTION_VIDEO_PROFILE))
-                == VideoProfile::Movie;
         drop(lc);
-        if movie_profile {
+        let full_movie_mode = self
+            .video_threads
+            .iter()
+            .any(|(_, thread)| thread.movie_mode.load(Ordering::Relaxed));
+        if full_movie_mode {
             if log_summary {
                 let (decode_fps_by_display, queue_len_by_display, inactive_by_display) =
                     self.fps_control_snapshot();
@@ -2176,14 +2185,28 @@ impl<T: InvokeUiSession> Remote<T> {
                     let Some(thread) = self.video_threads.get_mut(&display) else {
                         return true;
                     };
-                    let movie_mode = VideoProfile::from_config(
-                        &self
-                            .handler
-                            .lc
-                            .read()
-                            .unwrap()
-                            .get_option(config::keys::OPTION_VIDEO_PROFILE),
-                    ) == VideoProfile::Movie;
+                    let (requested_video_profile, host_movie_supported) = {
+                        let lc = self.handler.lc.read().unwrap();
+                        (
+                            VideoProfile::from_config(
+                                &lc.get_option(config::keys::OPTION_VIDEO_PROFILE),
+                            ),
+                            lc.supported_encoding.movie_mode,
+                        )
+                    };
+                    #[cfg(feature = "quic-transport")]
+                    let full_movie_transport = peer.quic_stats().is_some_and(|stats| {
+                        stats.application_protocol >= 4
+                            && stats.reliable_keyframes
+                            && stats.reliable_keyframe_barrier
+                    });
+                    #[cfg(not(feature = "quic-transport"))]
+                    let full_movie_transport = false;
+                    let movie_mode = viewer_full_movie_mode(
+                        requested_video_profile,
+                        host_movie_supported,
+                        full_movie_transport,
+                    );
                     thread.movie_mode.store(movie_mode, Ordering::Relaxed);
                     #[cfg(all(target_os = "android", feature = "mediacodec"))]
                     scrap::mediacodec::set_movie_presentation_mode(display, movie_mode);

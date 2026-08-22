@@ -99,6 +99,15 @@ impl EffectiveMovieMode {
     }
 }
 
+pub(crate) fn viewer_full_movie_mode(
+    profile: VideoProfile,
+    host_supported: bool,
+    full_transport: bool,
+) -> bool {
+    EffectiveMovieMode::for_viewer(profile, host_supported, full_transport)
+        == EffectiveMovieMode::Full
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +171,8 @@ mod tests {
             EffectiveMovieMode::MixedSubscribers.fallback_reason(),
             "mixed-subscribers"
         );
+        assert!(!viewer_full_movie_mode(VideoProfile::Movie, false, true));
+        assert!(!viewer_full_movie_mode(VideoProfile::Movie, true, false));
+        assert!(viewer_full_movie_mode(VideoProfile::Movie, true, true));
     }
 }

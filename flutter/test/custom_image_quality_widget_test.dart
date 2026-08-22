@@ -8,11 +8,14 @@ void main() {
     double quality = 50,
     double fps = 30,
     String fpsMode = kCustomFpsModeAdaptive,
+    String videoProfile = kVideoProfileStandard,
     Function(double)? setQuality,
     Function(double)? setFps,
     Function(String)? setFpsMode,
+    Function(String)? setVideoProfile,
     bool showQuality = true,
     bool showFpsMode = true,
+    bool showVideoProfile = false,
     String fpsLabel = 'FPS',
   }) {
     return MaterialApp(
@@ -21,13 +24,16 @@ void main() {
           initQuality: quality,
           initFps: fps,
           initFpsMode: fpsMode,
+          initVideoProfile: videoProfile,
           setQuality: setQuality,
           setFps: setFps,
           setFpsMode: setFpsMode,
+          setVideoProfile: setVideoProfile,
           showFps: true,
           showMoreQuality: true,
           showQuality: showQuality,
           showFpsMode: showFpsMode,
+          showVideoProfile: showVideoProfile,
           fpsLabel: fpsLabel,
           translateText: (value) => value,
         ),
@@ -139,24 +145,39 @@ void main() {
     expect(qualityValues, [50]);
   });
 
-  testWidgets('Movie target-only controls hide quality and FPS mode', (
+  testWidgets('manual quality switches Standard and Movie beside FPS', (
     tester,
   ) async {
+    final profiles = <String>[];
     await tester.pumpWidget(
       controls(
         fps: 60,
-        showQuality: false,
-        showFpsMode: false,
-        fpsLabel: 'Target FPS',
+        showVideoProfile: true,
+        setVideoProfile: profiles.add,
       ),
     );
 
-    expect(find.byKey(const Key('custom-image-quality-slider')), findsNothing);
+    expect(find.byKey(const Key('custom-image-quality-slider')), findsOneWidget);
     expect(find.byKey(const Key('custom-image-fps-slider')), findsOneWidget);
+    expect(
+      find.byKey(const Key('custom-image-fps-mode-dropdown')),
+      findsOneWidget,
+    );
+
+    tester
+        .widget<SegmentedButton<String>>(
+          find.byKey(const Key('custom-image-video-profile-segmented')),
+        )
+        .onSelectionChanged
+        ?.call({kVideoProfileMovie});
+    await tester.pump();
+
+    expect(profiles, [kVideoProfileMovie]);
+    expect(find.text('Target FPS'), findsOneWidget);
     expect(
       find.byKey(const Key('custom-image-fps-mode-dropdown')),
       findsNothing,
     );
-    expect(find.text('Target FPS'), findsOneWidget);
+    expect(find.byKey(const Key('custom-image-quality-slider')), findsOneWidget);
   });
 }

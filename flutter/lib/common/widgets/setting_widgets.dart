@@ -10,26 +10,32 @@ Widget customImageQualityWidget({
   required double initQuality,
   required double initFps,
   required String initFpsMode,
+  String initVideoProfile = kVideoProfileStandard,
   required Function(double)? setQuality,
   required Function(double)? setFps,
   required Function(String)? setFpsMode,
+  Function(String)? setVideoProfile,
   required bool showFps,
   required bool showMoreQuality,
   bool showQuality = true,
   bool showFpsMode = true,
+  bool showVideoProfile = false,
   String fpsLabel = 'FPS',
 }) {
   return CustomImageQualityWidget(
     initQuality: initQuality,
     initFps: initFps,
     initFpsMode: initFpsMode,
+    initVideoProfile: initVideoProfile,
     setQuality: setQuality,
     setFps: setFps,
     setFpsMode: setFpsMode,
+    setVideoProfile: setVideoProfile,
     showFps: showFps,
     showMoreQuality: showMoreQuality,
     showQuality: showQuality,
     showFpsMode: showFpsMode,
+    showVideoProfile: showVideoProfile,
     fpsLabel: fpsLabel,
   );
 }
@@ -40,13 +46,16 @@ class CustomImageQualityWidget extends StatefulWidget {
     required this.initQuality,
     required this.initFps,
     required this.initFpsMode,
+    this.initVideoProfile = kVideoProfileStandard,
     required this.setQuality,
     required this.setFps,
     required this.setFpsMode,
+    this.setVideoProfile,
     required this.showFps,
     required this.showMoreQuality,
     this.showQuality = true,
     this.showFpsMode = true,
+    this.showVideoProfile = false,
     this.fpsLabel = 'FPS',
     this.translateText,
   });
@@ -54,13 +63,16 @@ class CustomImageQualityWidget extends StatefulWidget {
   final double initQuality;
   final double initFps;
   final String initFpsMode;
+  final String initVideoProfile;
   final Function(double)? setQuality;
   final Function(double)? setFps;
   final Function(String)? setFpsMode;
+  final Function(String)? setVideoProfile;
   final bool showFps;
   final bool showMoreQuality;
   final bool showQuality;
   final bool showFpsMode;
+  final bool showVideoProfile;
   final String fpsLabel;
   final String Function(String)? translateText;
 
@@ -73,6 +85,7 @@ class _CustomImageQualityWidgetState extends State<CustomImageQualityWidget> {
   late final RxDouble _qualityValue;
   late final RxDouble _fpsValue;
   late final RxString _fpsModeValue;
+  late final RxString _videoProfileValue;
   late final RxBool _moreQualityChecked;
   late Debouncer<double> _debouncerQuality;
   late Debouncer<double> _debouncerFps;
@@ -131,6 +144,11 @@ class _CustomImageQualityWidgetState extends State<CustomImageQualityWidget> {
                 ? kCustomFpsModeFixed
                 : kCustomFpsModeAdaptive)
             .obs;
+    _videoProfileValue =
+        (widget.initVideoProfile == kVideoProfileMovie
+                ? kVideoProfileMovie
+                : kVideoProfileStandard)
+            .obs;
     _moreQualityChecked = RxBool(quality > kMaxQuality);
     _debouncerQuality = _qualityDebouncer(quality);
     _debouncerFps = _fpsDebouncer(fps);
@@ -161,6 +179,11 @@ class _CustomImageQualityWidgetState extends State<CustomImageQualityWidget> {
           ? kCustomFpsModeFixed
           : kCustomFpsModeAdaptive;
     }
+    if (oldWidget.initVideoProfile != widget.initVideoProfile) {
+      _videoProfileValue.value = widget.initVideoProfile == kVideoProfileMovie
+          ? kVideoProfileMovie
+          : kVideoProfileStandard;
+    }
   }
 
   @override
@@ -170,6 +193,7 @@ class _CustomImageQualityWidgetState extends State<CustomImageQualityWidget> {
     _qualityValue.close();
     _fpsValue.close();
     _fpsModeValue.close();
+    _videoProfileValue.close();
     _moreQualityChecked.close();
     super.dispose();
   }
@@ -179,16 +203,19 @@ class _CustomImageQualityWidgetState extends State<CustomImageQualityWidget> {
     final qualityValue = _qualityValue;
     final fpsValue = _fpsValue;
     final fpsModeValue = _fpsModeValue;
+    final videoProfileValue = _videoProfileValue;
     final moreQualityChecked = _moreQualityChecked;
     final debouncerQuality = _debouncerQuality;
     final debouncerFps = _debouncerFps;
     final setQuality = widget.setQuality;
     final setFps = widget.setFps;
     final setFpsMode = widget.setFpsMode;
+    final setVideoProfile = widget.setVideoProfile;
     final showFps = widget.showFps;
     final showMoreQuality = widget.showMoreQuality;
     final showQuality = widget.showQuality;
     final showFpsMode = widget.showFpsMode;
+    final showVideoProfile = widget.showVideoProfile;
     final translateText = widget.translateText ?? translate;
 
     void onMoreChanged(bool? value) {
@@ -272,6 +299,50 @@ class _CustomImageQualityWidgetState extends State<CustomImageQualityWidget> {
               ],
             ),
           ),
+        if (showVideoProfile)
+          Obx(() {
+            void selectVideoProfile(String value) {
+              final normalized = value == kVideoProfileMovie
+                  ? kVideoProfileMovie
+                  : kVideoProfileStandard;
+              videoProfileValue.value = normalized;
+              setVideoProfile?.call(normalized);
+            }
+
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  translateText('Video profile'),
+                  style: const TextStyle(fontSize: 15),
+                ),
+                const SizedBox(height: 6),
+                SizedBox(
+                  width: double.infinity,
+                  child: SegmentedButton<String>(
+                    key: const Key('custom-image-video-profile-segmented'),
+                    expandedInsets: EdgeInsets.zero,
+                    showSelectedIcon: false,
+                    segments: [
+                      ButtonSegment(
+                        value: kVideoProfileStandard,
+                        label: Text(translateText('Standard')),
+                      ),
+                      ButtonSegment(
+                        value: kVideoProfileMovie,
+                        label: Text(translateText('Movie mode')),
+                      ),
+                    ],
+                    selected: {videoProfileValue.value},
+                    onSelectionChanged: setVideoProfile == null
+                        ? null
+                        : (values) => selectVideoProfile(values.first),
+                  ),
+                ),
+                const SizedBox(height: 6),
+              ],
+            );
+          }),
         if (showFps)
           Column(
             children: [
@@ -304,7 +375,10 @@ class _CustomImageQualityWidgetState extends State<CustomImageQualityWidget> {
                     Expanded(
                       flex: 2,
                       child: Text(
-                        translateText(widget.fpsLabel),
+                        translateText(showVideoProfile &&
+                                videoProfileValue.value == kVideoProfileMovie
+                            ? 'Target FPS'
+                            : widget.fpsLabel),
                         style: const TextStyle(fontSize: 15),
                       ),
                     ),
@@ -313,6 +387,10 @@ class _CustomImageQualityWidgetState extends State<CustomImageQualityWidget> {
               ),
               if (showFpsMode)
                 Obx(() {
+                if (showVideoProfile &&
+                    videoProfileValue.value == kVideoProfileMovie) {
+                  return const SizedBox.shrink();
+                }
                 void selectFpsMode(String value) {
                   fpsModeValue.value = value;
                   setFpsMode?.call(value);

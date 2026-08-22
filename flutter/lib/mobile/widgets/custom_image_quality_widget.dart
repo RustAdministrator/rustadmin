@@ -13,12 +13,10 @@ class MobileCustomImageQualityControls extends StatefulWidget {
     super.key,
     required this.peerId,
     required this.ffi,
-    this.movieTargetOnly = false,
   });
 
   final String peerId;
   final FFI ffi;
-  final bool movieTargetOnly;
 
   @override
   State<MobileCustomImageQualityControls> createState() =>
@@ -101,7 +99,7 @@ class _MobileCustomImageQualityControlsState
         _fps = loadedFps;
         _fpsMode = loadedFpsMode;
         _movieMode = movieMode;
-        _showFps = !hideFps && (widget.movieTargetOnly || !movieMode);
+        _showFps = !hideFps;
         _showMoreQuality = !hideMoreQuality;
         _loading = false;
       });
@@ -157,6 +155,25 @@ class _MobileCustomImageQualityControlsState
     }
   }
 
+  Future<void> _setVideoProfile(String value) async {
+    final normalized = value == kVideoProfileMovie
+        ? kVideoProfileMovie
+        : kVideoProfileStandard;
+    _movieMode = normalized == kVideoProfileMovie;
+    try {
+      await bind.sessionSetVideoProfile(
+        sessionId: _sessionId,
+        value: normalized,
+      );
+      await bind.sessionSetCustomFps(
+        sessionId: _sessionId,
+        fps: _fpsForMode(_fps),
+      );
+    } catch (error) {
+      debugPrint('Failed to set mobile video profile: $error');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) {
@@ -177,14 +194,16 @@ class _MobileCustomImageQualityControlsState
         initQuality: _quality,
         initFps: _fps,
         initFpsMode: _fpsMode,
+        initVideoProfile: _movieMode
+            ? kVideoProfileMovie
+            : kVideoProfileStandard,
         setQuality: _setQuality,
         setFps: _setFps,
         setFpsMode: _setFpsMode,
+        setVideoProfile: _setVideoProfile,
         showFps: _showFps,
         showMoreQuality: _showMoreQuality,
-        showQuality: !widget.movieTargetOnly,
-        showFpsMode: !_movieMode,
-        fpsLabel: _movieMode ? 'Target FPS' : 'FPS',
+        showVideoProfile: true,
       ),
     );
   }

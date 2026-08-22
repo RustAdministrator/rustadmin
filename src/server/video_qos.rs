@@ -207,8 +207,12 @@ impl MovieCadenceController {
         };
         let (dropped_delta, late_delta, presentation_dropped_delta) =
             self.viewer_counter_deltas(sample.viewer);
-        let host_pressure =
-            sample.host_pipeline_p95_us > frame_period_us * 85 / 100 || missed_ratio > 0.05;
+        let at_or_below_baseline = self.target_fps >= FPS && self.current_tier <= FPS;
+        let host_pressure = if at_or_below_baseline {
+            sample.host_pipeline_p95_us > frame_period_us * 95 / 100 || missed_ratio > 0.20
+        } else {
+            sample.host_pipeline_p95_us > frame_period_us * 85 / 100 || missed_ratio > 0.05
+        };
         let viewer_pressure = sample.viewer.available
             && (sample.viewer.max_queue_depth_frames > 3
                 || u64::from(sample.viewer.max_decode_time_us) > frame_period_us * 80 / 100
@@ -1564,6 +1568,24 @@ mod tests {
         assert_eq!(decision.previous_fps, 60);
         assert_eq!(decision.current_fps, 30);
         assert_eq!(decision.reason, MovieCadenceReason::HostCapacity);
+    }
+
+    #[test]
+    fn movie_cadence_keeps_thirty_for_bounded_startup_jitter() {
+        let start = Instant::now();
+        let mut controller = MovieCadenceController::new(85, 120_000, start);
+        assert_eq!(controller.current_tier(), 30);
+
+        let mut sample = healthy_movie_sample(start, 22_779);
+        sample.target_fps = 85;
+        sample.host_iterations = 14;
+        sample.host_missed_slots = 2;
+        sample.viewer.display_refresh_millihz = 120_000;
+        assert_eq!(controller.evaluate(sample), None);
+
+        sample.now += MOVIE_PRESSURE_DURATION;
+        assert_eq!(controller.evaluate(sample), None);
+        assert_eq!(controller.current_tier(), 30);
     }
 
     #[test]

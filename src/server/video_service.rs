@@ -471,7 +471,8 @@ impl MovieFramePacer {
             let late = now.saturating_duration_since(scheduled_at);
             missed_slots = late
                 .as_nanos()
-                .div_ceil(self.period.as_nanos())
+                .checked_div(self.period.as_nanos())
+                .unwrap_or_default()
                 .min(u128::from(u32::MAX)) as u32;
             if missed_slots > 0 {
                 scheduled_at += self.period * missed_slots;
@@ -1372,7 +1373,7 @@ mod tests {
     }
 
     #[test]
-    fn movie_pacer_uses_absolute_deadlines_without_catch_up_bursts() {
+    fn movie_pacer_uses_absolute_deadlines_with_bounded_catch_up() {
         let start = Instant::now();
         let mut pacer = MovieFramePacer::new(60, start);
         let period = pacer.period;
@@ -1383,28 +1384,28 @@ mod tests {
 
         let late_now = start + period * 3 + period / 2;
         let late = pacer.plan_at(late_now);
-        assert_eq!(late.scheduled_at, start + period * 4);
-        assert_eq!(late.missed_slots, 3);
-        assert_eq!(pacer.skipped_slots, 3);
+        assert_eq!(late.scheduled_at, start + period * 3);
+        assert_eq!(late.missed_slots, 2);
+        assert_eq!(pacer.skipped_slots, 2);
 
-        let next = pacer.plan_at(late.scheduled_at);
-        assert_eq!(next.scheduled_at, start + period * 5);
+        let next = pacer.plan_at(late_now);
+        assert_eq!(next.scheduled_at, start + period * 4);
         assert_eq!(next.missed_slots, 0);
         assert_eq!(next.scheduled_at - late.scheduled_at, period);
     }
 
     #[test]
-    fn movie_pacer_skips_a_partially_missed_slot() {
+    fn movie_pacer_does_not_drop_a_partially_elapsed_slot() {
         let start = Instant::now();
         let mut pacer = MovieFramePacer::new(60, start);
         let period = pacer.period;
         let first = pacer.plan_at(start);
 
         let late = pacer.plan_at(start + period + period / 2);
-        assert_eq!(late.scheduled_at, start + period * 2);
-        assert_eq!(late.missed_slots, 1);
+        assert_eq!(late.scheduled_at, start + period);
+        assert_eq!(late.missed_slots, 0);
 
-        let next = pacer.plan_at(late.scheduled_at);
+        let next = pacer.plan_at(start + period + period / 2);
         assert_eq!(next.scheduled_at - late.scheduled_at, period);
         assert_eq!(first.scheduled_at, start);
     }
