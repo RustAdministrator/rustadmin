@@ -2587,6 +2587,19 @@ pub fn main_get_home_dir() -> String {
     fs::get_home_as_string()
 }
 
+pub fn main_export_diagnostics(destination: String) -> String {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let result = crate::diagnostics::export(std::path::Path::new(&destination));
+        return match result {
+            Ok(report) => serde_json::json!({"ok": true, "report": report}).to_string(),
+            Err(error) => serde_json::json!({"ok": false, "error": error.to_string()}).to_string(),
+        };
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    serde_json::json!({"ok": false, "error": "desktop diagnostics are unavailable"}).to_string()
+}
+
 pub fn main_get_langs() -> String {
     get_langs()
 }

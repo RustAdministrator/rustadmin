@@ -791,6 +791,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("High", "Высокий"),
         ("Diagnostic logging", "Диагностические логи"),
         ("Export diagnostic report", "Отправить диагностический отчёт"),
+        ("Save diagnostic report", "Сохранить диагностический отчёт"),
         ("Create a private log ZIP and share it", "Создать ZIP с диагностикой и отправить его"),
         ("Delete diagnostic logs", "Удалить диагностические логи"),
     ].iter().cloned().collect();

@@ -352,6 +352,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("High", "High"),
         ("Diagnostic logging", "Diagnostic logging"),
         ("Export diagnostic report", "Export diagnostic report"),
+        ("Save diagnostic report", "Save diagnostic report"),
         ("Create a private log ZIP and share it", "Create a private log ZIP and share it"),
         ("Delete diagnostic logs", "Delete diagnostic logs"),
     ].iter().cloned().collect();
