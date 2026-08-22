@@ -33,6 +33,8 @@ const MAX_PENDING_INPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_INPUT_DEQUEUE_EVENTS: usize = 4;
 const MAX_OUTPUT_DEQUEUE_EVENTS: usize = 4;
 const MAX_IN_FLIGHT_FRAMES: usize = 128;
+const SURFACE_CONFIGURE_RETRY_DELAYS: [Duration; 2] =
+    [Duration::from_millis(20), Duration::from_millis(60)];
 // const VP8_MIME_TYPE: &str = "video/x-vnd.on2.vp8";
 // const VP9_MIME_TYPE: &str = "video/x-vnd.on2.vp9";
 
@@ -198,6 +200,17 @@ impl Deref for MediaCodecDecoder {
 
     fn deref(&self) -> &Self::Target {
         &self.decoder
+    }
+}
+
+impl Drop for MediaCodecDecoder {
+    fn drop(&mut self) {
+        if let Err(error) = self.decoder.stop() {
+            log::debug!(
+                "Android MediaCodec stop during decoder release returned: {:?}",
+                error
+            );
+        }
     }
 }
 
@@ -612,12 +625,28 @@ fn create_media_codec(
     let requested_surface =
         registered_surface.filter(|_| texture_render_enabled && surface_codec_supported(name));
     let surface_requested = requested_surface.is_some();
-    let (codec, output_surface, surface_output) = match configure_media_codec(
-        name,
-        width,
-        height,
-        requested_surface.as_ref(),
-    ) {
+    let mut configure_result =
+        configure_media_codec(name, width, height, requested_surface.as_ref());
+    if requested_surface.is_some() {
+        for (attempt, delay) in SURFACE_CONFIGURE_RETRY_DELAYS.iter().enumerate() {
+            if configure_result.is_ok() {
+                break;
+            }
+            log::warn!(
+                "Android MediaCodec surface configure retry: display={}, mime={}, size={}x{}, attempt={}, delay_ms={}",
+                display,
+                name,
+                width,
+                height,
+                attempt + 1,
+                delay.as_millis()
+            );
+            std::thread::sleep(*delay);
+            configure_result =
+                configure_media_codec(name, width, height, requested_surface.as_ref());
+        }
+    }
+    let (codec, output_surface, surface_output) = match configure_result {
         Ok(codec) => (codec, requested_surface, surface_requested),
         Err(error) if requested_surface.is_some() => {
             log::warn!(

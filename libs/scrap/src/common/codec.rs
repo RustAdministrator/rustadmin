@@ -653,6 +653,16 @@ pub fn video_frame_payload_stats(vf: &VideoFrame) -> Option<(usize, usize, bool)
 }
 
 impl Decoder {
+    #[cfg(feature = "mediacodec")]
+    pub fn release_media_codec(&mut self) {
+        let released_h264 = self.h264_media_codec.take().is_some();
+        let released_h265 = self.h265_media_codec.take().is_some();
+        let released = released_h264 || released_h265;
+        if released {
+            log::info!("released Android MediaCodec decoder before stream replacement");
+        }
+    }
+
     pub fn supported_decodings(
         id_for_perfer: Option<&str>,
         _use_texture_render: bool,

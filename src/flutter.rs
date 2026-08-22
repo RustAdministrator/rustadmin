@@ -1467,6 +1467,8 @@ impl FlutterHandler {
         let mut is_sent = false;
         let is_multi_sessions = self.is_multi_ui_session();
         for h in self.session_handlers.read().unwrap().values() {
+            #[cfg(all(target_os = "android", feature = "mediacodec"))]
+            h.texture_notified.write().unwrap().remove(&display);
             // The soft renderer does not support multi-displays session for now.
             if h.displays.len() > 1 {
                 continue;

@@ -211,12 +211,12 @@ impl MovieCadenceController {
         let host_pressure = if at_or_below_baseline {
             sample.host_pipeline_p95_us > frame_period_us * 95 / 100 || missed_ratio > 0.20
         } else {
-            sample.host_pipeline_p95_us > frame_period_us * 85 / 100 || missed_ratio > 0.05
+            sample.host_pipeline_p95_us > frame_period_us || missed_ratio > 0.10
         };
         let viewer_pressure = sample.viewer.available
             && (sample.viewer.max_queue_depth_frames > 3
-                || u64::from(sample.viewer.max_decode_time_us) > frame_period_us * 80 / 100
-                || u64::from(sample.viewer.max_render_submit_time_us) > frame_period_us * 80 / 100
+                || u64::from(sample.viewer.max_decode_time_us) > frame_period_us * 95 / 100
+                || u64::from(sample.viewer.max_render_submit_time_us) > frame_period_us * 95 / 100
                 || u64::from(sample.viewer.presentation_jitter_p95_us) > frame_period_us / 2);
         let delivery_pressure =
             dropped_delta > 0 || late_delta > 0 || presentation_dropped_delta > 0;
@@ -247,14 +247,21 @@ impl MovieCadenceController {
             return None;
         };
         let next_period_us = 1_000_000u64 / u64::from(next.max(1));
+        let (host_headroom_percent, viewer_headroom_percent) = if self.probation_complete {
+            (65, 65)
+        } else {
+            (95, 90)
+        };
         let healthy = sample.viewer.available
             && sample.viewer.all_rendered
             && sample.host_pipeline_p95_us > 0
-            && sample.host_pipeline_p95_us <= next_period_us * 65 / 100
+            && sample.host_pipeline_p95_us <= next_period_us * host_headroom_percent / 100
             && sample.host_missed_slots == 0
             && sample.viewer.max_queue_depth_frames <= 1
-            && u64::from(sample.viewer.max_decode_time_us) <= next_period_us * 65 / 100
-            && u64::from(sample.viewer.max_render_submit_time_us) <= next_period_us * 65 / 100;
+            && u64::from(sample.viewer.max_decode_time_us)
+                <= next_period_us * viewer_headroom_percent / 100
+            && u64::from(sample.viewer.max_render_submit_time_us)
+                <= next_period_us * viewer_headroom_percent / 100;
         if !healthy {
             self.healthy_since = None;
             return None;
@@ -1561,7 +1568,7 @@ mod tests {
         assert_eq!(controller.current_tier(), 60);
 
         let mut pressure = healthy_movie_sample(start + Duration::from_secs(3), 16_000);
-        pressure.host_missed_slots = 2;
+        pressure.host_missed_slots = 4;
         assert_eq!(controller.evaluate(pressure), None);
         pressure.now += MOVIE_PRESSURE_DURATION;
         let decision = controller.evaluate(pressure).unwrap();
@@ -1589,6 +1596,32 @@ mod tests {
     }
 
     #[test]
+    fn movie_cadence_probation_trials_forty_and_rolls_back_on_real_pressure() {
+        let start = Instant::now();
+        let mut controller = MovieCadenceController::new(85, 120_000, start);
+        let mut sample = healthy_movie_sample(start, 23_000);
+        sample.target_fps = 85;
+        sample.viewer.display_refresh_millihz = 120_000;
+        assert_eq!(controller.evaluate(sample), None);
+
+        sample.now += MOVIE_PROBATION_HEALTHY;
+        let promoted = controller.evaluate(sample).unwrap();
+        assert_eq!(promoted.previous_fps, 30);
+        assert_eq!(promoted.current_fps, 40);
+        assert_eq!(promoted.reason, MovieCadenceReason::ProbationComplete);
+
+        let mut pressure = sample;
+        pressure.now += Duration::from_secs(1);
+        pressure.host_pipeline_p95_us = 26_000;
+        assert_eq!(controller.evaluate(pressure), None);
+        pressure.now += MOVIE_PRESSURE_DURATION;
+        let rolled_back = controller.evaluate(pressure).unwrap();
+        assert_eq!(rolled_back.previous_fps, 40);
+        assert_eq!(rolled_back.current_fps, 30);
+        assert_eq!(rolled_back.reason, MovieCadenceReason::HostCapacity);
+    }
+
+    #[test]
     fn movie_cadence_requires_long_health_window_after_downshift() {
         let start = Instant::now();
         let mut controller = MovieCadenceController::new(60, 0, start);
@@ -1597,7 +1630,7 @@ mod tests {
 
         let pressure_started = start + Duration::from_secs(3);
         let mut pressure = healthy_movie_sample(pressure_started, 16_000);
-        pressure.host_missed_slots = 2;
+        pressure.host_missed_slots = 4;
         controller.evaluate(pressure);
         pressure.now += MOVIE_PRESSURE_DURATION;
         controller.evaluate(pressure);

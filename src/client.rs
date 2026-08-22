@@ -2684,6 +2684,8 @@ impl VideoHandler {
         if decoder_dimensions.is_some() {
             self.decoder_dimensions = decoder_dimensions;
         }
+        #[cfg(feature = "mediacodec")]
+        self.decoder.release_media_codec();
         self.decoder = Decoder::new(format, luid, self.decoder_dimensions, self._display);
         self.fail_counter = 0;
         self.decode_wait_counter = 0;
