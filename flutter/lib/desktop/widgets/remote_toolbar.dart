@@ -1305,6 +1305,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       windowHost: widget.windowHost,
       setFullscreen: _setFullscreen,
     ));
+    toolbarItems.add(_QualityMonitorMenu(ffi: widget.ffi));
     // Do not show keyboard for camera connection type.
     if (widget.ffi.connType == ConnType.defaultConn) {
       toolbarItems.add(_KeyboardMenu(id: widget.id, ffi: widget.ffi));
@@ -1457,6 +1458,48 @@ class _OrientationMenu extends StatelessWidget {
         hoverColor: _ToolbarTheme.hoverInactiveColor,
       );
     });
+  }
+}
+
+class _QualityMonitorMenu extends StatelessWidget {
+  final FFI ffi;
+
+  const _QualityMonitorMenu({Key? key, required this.ffi}) : super(key: key);
+
+  Future<void> _toggle() async {
+    await bind.sessionToggleOption(
+      sessionId: ffi.sessionId,
+      value: 'show-quality-monitor',
+    );
+    await ffi.qualityMonitorModel.checkShowQualityMonitor(ffi.sessionId);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: ffi.qualityMonitorModel.showListenable,
+      builder: (context, visible, _) => _IconMenuButton(
+        tooltip: 'Quality monitor',
+        icon: const Center(
+          child: Text(
+            'QM',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 10,
+              fontWeight: FontWeight.w700,
+              height: 1,
+            ),
+          ),
+        ),
+        onPressed: () => unawaited(_toggle()),
+        color: visible
+            ? _ToolbarTheme.blueColor
+            : _ToolbarTheme.inactiveColor,
+        hoverColor: visible
+            ? _ToolbarTheme.hoverBlueColor
+            : _ToolbarTheme.hoverInactiveColor,
+      ),
+    );
   }
 }
 
