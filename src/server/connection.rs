@@ -3,6 +3,7 @@ use super::login_failure_check::try_acquire_os_credential_login_gate;
 use super::login_failure_check::{
     evaluate_os_credential_policy, record_os_credential_failure, FailureScope,
 };
+use super::video_qos::VideoTransportLossSample;
 use super::{input_service::*, *};
 #[cfg(feature = "unix-file-copy-paste")]
 use crate::clipboard::try_empty_clipboard_files;
@@ -4133,7 +4134,15 @@ impl Connection {
             video_service::VIDEO_QOS
                 .lock()
                 .unwrap()
-                .user_transport_loss(self.inner.id(), request.dropped_frames);
+                .user_transport_loss(
+                    self.inner.id(),
+                    VideoTransportLossSample {
+                        display: request.display,
+                        stream_id: request.stream_id,
+                        received_frame_id: request.received_frame_id,
+                        dropped_frames: request.dropped_frames,
+                    },
+                );
         }
         match result {
             Ok(Some(action)) => {

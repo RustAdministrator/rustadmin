@@ -48,8 +48,15 @@ const HISTORY_DELAY_LEN: usize = 2;
 const ADJUST_RATIO_INTERVAL: usize = 3; // Adjust quality ratio every 3 seconds
 const DYNAMIC_SCREEN_THRESHOLD: usize = 2; // Allow increase quality ratio if encode more than 2 times in one second
 const DELAY_THRESHOLD_150MS: u32 = 150; // 150ms is the threshold for good network condition
-const TRANSPORT_LOSS_ADAPTATION_COOLDOWN: Duration = Duration::from_secs(1);
-const TRANSPORT_LOSS_SYNTHETIC_DELAY_MS: u32 = 500;
+const TRANSPORT_LOSS_WINDOW: Duration = Duration::from_secs(10);
+const TRANSPORT_LOSS_BACKOFF_COOLDOWN: Duration = Duration::from_secs(5);
+const TRANSPORT_LOSS_BURST_DROPS: u64 = 3;
+const TRANSPORT_LOSS_MIN_RATE_DROPS: u64 = 3;
+const TRANSPORT_LOSS_MIN_OBSERVED_FRAMES: u64 = 30;
+const TRANSPORT_LOSS_RATE_PERCENT: u64 = 3;
+const TRANSPORT_LOSS_BACKOFF_NUMERATOR: u32 = 7;
+const TRANSPORT_LOSS_BACKOFF_DENOMINATOR: u32 = 8;
+const MAX_TRANSPORT_LOSS_WINDOWS: usize = 16;
 pub(crate) const MOVIE_BOOTSTRAP_FPS: u32 = STARTUP_SAFE_FPS;
 pub(crate) const MOVIE_BOOTSTRAP_TIMEOUT: Duration = STARTUP_SAFE_WINDOW;
 const MOVIE_FEEDBACK_FRESHNESS: Duration = Duration::from_secs(2);
@@ -80,6 +87,54 @@ struct MovieViewerFeedback {
     presentation_dropped_frames: u64,
     presentation_jitter_p95_us: u32,
     updated_at: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TransportLossKey {
+    display: i32,
+    stream_id: u64,
+}
+
+#[derive(Clone, Debug)]
+struct TransportLossWindow {
+    first_frame_id: u64,
+    highest_frame_id: u64,
+    dropped_frames: u64,
+    started_at: Instant,
+    updated_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct VideoTransportLossSample {
+    pub(crate) display: i32,
+    pub(crate) stream_id: u64,
+    pub(crate) received_frame_id: u64,
+    pub(crate) dropped_frames: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransportLossBackoffReason {
+    Burst,
+    Rate,
+}
+
+impl TransportLossBackoffReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Burst => "burst",
+            Self::Rate => "rate",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TransportLossObservation {
+    key: TransportLossKey,
+    observed_frames: u64,
+    dropped_frames: u64,
+    loss_permille: u64,
+    reason: Option<TransportLossBackoffReason>,
+    stale: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -468,6 +523,92 @@ impl UserDelay {
     }
 }
 
+fn observe_transport_loss(
+    windows: &mut HashMap<TransportLossKey, TransportLossWindow>,
+    sample: VideoTransportLossSample,
+    now: Instant,
+) -> TransportLossObservation {
+    let key = TransportLossKey {
+        display: sample.display,
+        stream_id: sample.stream_id,
+    };
+    windows.retain(|existing, _| {
+        existing.display != sample.display || existing.stream_id == sample.stream_id
+    });
+
+    if windows
+        .get(&key)
+        .is_some_and(|window| sample.received_frame_id <= window.highest_frame_id)
+    {
+        return TransportLossObservation {
+            key,
+            observed_frames: 0,
+            dropped_frames: 0,
+            loss_permille: 0,
+            reason: None,
+            stale: true,
+        };
+    }
+
+    if !windows.contains_key(&key) && windows.len() >= MAX_TRANSPORT_LOSS_WINDOWS {
+        if let Some(oldest) = windows
+            .iter()
+            .min_by_key(|(_, window)| window.updated_at)
+            .map(|(key, _)| *key)
+        {
+            windows.remove(&oldest);
+        }
+    }
+
+    let window = windows.entry(key).or_insert(TransportLossWindow {
+        first_frame_id: sample.received_frame_id,
+        highest_frame_id: sample.received_frame_id,
+        dropped_frames: 0,
+        started_at: now,
+        updated_at: now,
+    });
+    if now.saturating_duration_since(window.started_at) >= TRANSPORT_LOSS_WINDOW {
+        *window = TransportLossWindow {
+            first_frame_id: sample.received_frame_id,
+            highest_frame_id: sample.received_frame_id,
+            dropped_frames: 0,
+            started_at: now,
+            updated_at: now,
+        };
+    }
+    window.highest_frame_id = sample.received_frame_id;
+    window.dropped_frames = window.dropped_frames.saturating_add(sample.dropped_frames);
+    window.updated_at = now;
+
+    let observed_frames = window
+        .highest_frame_id
+        .saturating_sub(window.first_frame_id)
+        .saturating_add(1)
+        .max(window.dropped_frames)
+        .max(1);
+    let loss_permille = window.dropped_frames.saturating_mul(1_000) / observed_frames;
+    let reason = if sample.dropped_frames >= TRANSPORT_LOSS_BURST_DROPS {
+        Some(TransportLossBackoffReason::Burst)
+    } else if window.dropped_frames >= TRANSPORT_LOSS_MIN_RATE_DROPS
+        && observed_frames >= TRANSPORT_LOSS_MIN_OBSERVED_FRAMES
+        && window.dropped_frames.saturating_mul(100)
+            >= observed_frames.saturating_mul(TRANSPORT_LOSS_RATE_PERCENT)
+    {
+        Some(TransportLossBackoffReason::Rate)
+    } else {
+        None
+    };
+
+    TransportLossObservation {
+        key,
+        observed_frames,
+        dropped_frames: window.dropped_frames,
+        loss_permille,
+        reason,
+        stale: false,
+    }
+}
+
 // User session data structure
 #[derive(Default, Debug, Clone)]
 struct UserData {
@@ -481,6 +622,7 @@ struct UserData {
     video_render_started: bool,
     video_startup_instant: Option<Instant>,
     last_transport_loss_at: Option<Instant>,
+    transport_loss_windows: HashMap<TransportLossKey, TransportLossWindow>,
     video_profile: VideoProfile,
     movie_transport_capable: bool,
     movie_feedback_by_display: HashMap<i32, MovieViewerFeedback>,
@@ -791,6 +933,7 @@ impl VideoQoS {
             user.delay = UserDelay::default();
             user.auto_adjust_fps = None;
             user.last_transport_loss_at = None;
+            user.transport_loss_windows.clear();
             user.movie_feedback_by_display.clear();
             user.video_render_started = false;
         }
@@ -926,35 +1069,81 @@ impl VideoQoS {
         first_render
     }
 
-    pub fn user_transport_loss(&mut self, id: i32, dropped_frames: u64) -> bool {
-        self.user_transport_loss_at(id, dropped_frames, Instant::now())
+    pub(crate) fn user_transport_loss(
+        &mut self,
+        id: i32,
+        sample: VideoTransportLossSample,
+    ) -> bool {
+        self.user_transport_loss_at(id, sample, Instant::now())
     }
 
-    fn user_transport_loss_at(&mut self, id: i32, dropped_frames: u64, now: Instant) -> bool {
-        if dropped_frames == 0 {
+    fn user_transport_loss_at(
+        &mut self,
+        id: i32,
+        sample: VideoTransportLossSample,
+        now: Instant,
+    ) -> bool {
+        if sample.dropped_frames == 0 {
             return false;
         }
         let highest_fps = self.user_requested_fps(id);
-        let (previous_fps, next_fps) = {
+        let (previous_fps, next_fps, observation, reason) = {
             let Some(user) = self.users.get_mut(&id) else {
                 return false;
             };
+            let observation = observe_transport_loss(&mut user.transport_loss_windows, sample, now);
+            if observation.stale {
+                log::debug!(
+                    "diag video qos transport loss ignored: user_id={}, display={}, stream_id={}, received_frame_id={}, dropped_frames={}, reason=stale-or-duplicate",
+                    id,
+                    sample.display,
+                    sample.stream_id,
+                    sample.received_frame_id,
+                    sample.dropped_frames,
+                );
+                return false;
+            }
+            let Some(reason) = observation.reason else {
+                log::debug!(
+                    "diag video qos transport loss observed: user_id={}, display={}, stream_id={}, received_frame_id={}, event_dropped={}, window_dropped={}, observed_frames={}, loss_permille={}, action=tolerated",
+                    id,
+                    sample.display,
+                    sample.stream_id,
+                    sample.received_frame_id,
+                    sample.dropped_frames,
+                    observation.dropped_frames,
+                    observation.observed_frames,
+                    observation.loss_permille,
+                );
+                return false;
+            };
+            user.transport_loss_windows.remove(&observation.key);
             if user.last_transport_loss_at.is_some_and(|last| {
-                now.saturating_duration_since(last) < TRANSPORT_LOSS_ADAPTATION_COOLDOWN
+                now.saturating_duration_since(last) < TRANSPORT_LOSS_BACKOFF_COOLDOWN
             }) {
+                log::debug!(
+                    "diag video qos transport loss observed: user_id={}, display={}, stream_id={}, received_frame_id={}, event_dropped={}, window_dropped={}, observed_frames={}, loss_permille={}, action=cooldown",
+                    id,
+                    sample.display,
+                    sample.stream_id,
+                    sample.received_frame_id,
+                    sample.dropped_frames,
+                    observation.dropped_frames,
+                    observation.observed_frames,
+                    observation.loss_permille,
+                );
                 return false;
             }
             user.last_transport_loss_at = Some(now);
             user.delay.quick_increase_fps_count = 0;
             user.delay.increase_fps_count = 0;
-            user.delay.add_delay(TRANSPORT_LOSS_SYNTHETIC_DELAY_MS);
             let previous_fps = user.delay.fps.unwrap_or(highest_fps);
             let next_fps = previous_fps
-                .saturating_mul(3)
-                .saturating_div(4)
+                .saturating_mul(TRANSPORT_LOSS_BACKOFF_NUMERATOR)
+                .saturating_div(TRANSPORT_LOSS_BACKOFF_DENOMINATOR)
                 .clamp(MIN_FPS, highest_fps);
             user.delay.fps = Some(next_fps);
-            (previous_fps, next_fps)
+            (previous_fps, next_fps, observation, reason)
         };
 
         let affected_displays = self.display_names_for_user(id);
@@ -963,12 +1152,18 @@ impl VideoQoS {
             self.adjust_ratio(display_name, true);
         }
         log::warn!(
-            "diag video qos transport loss: user_id={}, dropped_frames={}, fps_previous={}, fps_current={}, synthetic_delay_ms={}, displays={:?}",
+            "diag video qos transport loss backoff: user_id={}, display={}, stream_id={}, received_frame_id={}, event_dropped={}, window_dropped={}, observed_frames={}, loss_permille={}, reason={}, fps_previous={}, fps_current={}, displays={:?}",
             id,
-            dropped_frames,
+            sample.display,
+            sample.stream_id,
+            sample.received_frame_id,
+            sample.dropped_frames,
+            observation.dropped_frames,
+            observation.observed_frames,
+            observation.loss_permille,
+            reason.as_str(),
             previous_fps,
             next_fps,
-            TRANSPORT_LOSS_SYNTHETIC_DELAY_MS,
             affected_displays,
         );
         true
@@ -1499,6 +1694,20 @@ mod tests {
         qos
     }
 
+    fn transport_loss_sample(
+        display: i32,
+        stream_id: u64,
+        received_frame_id: u64,
+        dropped_frames: u64,
+    ) -> VideoTransportLossSample {
+        VideoTransportLossSample {
+            display,
+            stream_id,
+            received_frame_id,
+            dropped_frames,
+        }
+    }
+
     #[test]
     fn startup_safe_mode_caps_default_quality_ratio() {
         let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
@@ -1539,9 +1748,9 @@ mod tests {
         let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
         qos.user_custom_fps(1, 85);
         qos.user_video_profile(1, VideoProfile::Movie);
-        assert!(qos.user_transport_loss_at(1, 1, Instant::now()));
+        assert!(qos.user_transport_loss_at(1, transport_loss_sample(0, 7, 30, 3), Instant::now(),));
         qos.users.get_mut(&1).unwrap().auto_adjust_fps = Some(40);
-        assert_eq!(qos.users.get(&1).unwrap().delay.fps, Some(63));
+        assert_eq!(qos.users.get(&1).unwrap().delay.fps, Some(74));
 
         qos.user_video_profile(1, VideoProfile::Standard);
         let user = qos.users.get(&1).unwrap();
@@ -1549,6 +1758,7 @@ mod tests {
         assert!(user.delay.delay_history.is_empty());
         assert!(user.auto_adjust_fps.is_none());
         assert!(user.last_transport_loss_at.is_none());
+        assert!(user.transport_loss_windows.is_empty());
     }
 
     fn healthy_movie_sample(now: Instant, pipeline_us: u64) -> MovieCadenceSample {
@@ -1905,7 +2115,7 @@ mod tests {
     }
 
     #[test]
-    fn transport_loss_backs_off_adaptive_fps_and_ratio_with_cooldown() {
+    fn isolated_transport_loss_does_not_back_off_adaptive_fps() {
         let now = Instant::now();
         let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
         qos.set_support_changing_quality(MONITOR_SERVICE, true);
@@ -1916,21 +2126,105 @@ mod tests {
         assert_eq!(qos.fps(MONITOR_SERVICE), 60);
         let initial_ratio = qos.displays.get(MONITOR_SERVICE).unwrap().ratio;
 
-        assert!(qos.user_transport_loss_at(1, 1, now));
-        assert_eq!(qos.fps(MONITOR_SERVICE), 45);
-        let first_loss_ratio = qos.displays.get(MONITOR_SERVICE).unwrap().ratio;
-        assert!(first_loss_ratio < initial_ratio);
-
-        assert!(!qos.user_transport_loss_at(1, 2, now + Duration::from_millis(999)));
-        assert_eq!(qos.fps(MONITOR_SERVICE), 45);
+        assert!(!qos.user_transport_loss_at(1, transport_loss_sample(0, 7, 40, 1), now,));
+        assert_eq!(qos.fps(MONITOR_SERVICE), 60);
         assert_eq!(
             qos.displays.get(MONITOR_SERVICE).unwrap().ratio,
-            first_loss_ratio
+            initial_ratio
         );
+        assert!(qos.users.get(&1).unwrap().delay.delay_history.is_empty());
+    }
 
-        assert!(qos.user_transport_loss_at(1, 2, now + TRANSPORT_LOSS_ADAPTATION_COOLDOWN,));
-        assert_eq!(qos.fps(MONITOR_SERVICE), 33);
-        assert!(qos.displays.get(MONITOR_SERVICE).unwrap().ratio < first_loss_ratio);
+    #[test]
+    fn sparse_transport_losses_match_field_session_without_fps_collapse() {
+        let now = Instant::now();
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
+        qos.user_custom_fps(1, 104);
+        qos.user_video_feedback_capability(1, true);
+        assert!(qos.user_video_frame_rendered(1));
+
+        let samples = [(40, 2), (178, 10), (224, 13), (288, 18), (364, 24)];
+        for (frame_id, elapsed_secs) in samples {
+            assert!(!qos.user_transport_loss_at(
+                1,
+                transport_loss_sample(0, 6, frame_id, 1),
+                now + Duration::from_secs(elapsed_secs),
+            ));
+        }
+
+        assert_eq!(qos.fps(MONITOR_SERVICE), 104);
+        assert!(qos.users.get(&1).unwrap().last_transport_loss_at.is_none());
+    }
+
+    #[test]
+    fn transport_loss_burst_backs_off_once_without_synthetic_delay() {
+        let now = Instant::now();
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
+        qos.set_support_changing_quality(MONITOR_SERVICE, true);
+        qos.store_bitrate(MONITOR_SERVICE, 4_000);
+        qos.user_video_feedback_capability(1, true);
+        qos.user_custom_fps(1, 60);
+        assert!(qos.user_video_frame_rendered(1));
+        let initial_ratio = qos.displays.get(MONITOR_SERVICE).unwrap().ratio;
+
+        assert!(qos.user_transport_loss_at(1, transport_loss_sample(0, 7, 40, 3), now,));
+        assert_eq!(qos.fps(MONITOR_SERVICE), 52);
+        assert!(qos.displays.get(MONITOR_SERVICE).unwrap().ratio < initial_ratio);
+        assert!(qos.users.get(&1).unwrap().delay.delay_history.is_empty());
+
+        assert!(!qos.user_transport_loss_at(
+            1,
+            transport_loss_sample(0, 7, 80, 3),
+            now + Duration::from_secs(1),
+        ));
+        assert_eq!(qos.fps(MONITOR_SERVICE), 52);
+
+        assert!(!qos.user_transport_loss_at(
+            1,
+            transport_loss_sample(0, 7, 120, 1),
+            now + TRANSPORT_LOSS_BACKOFF_COOLDOWN + Duration::from_millis(1),
+        ));
+        assert_eq!(qos.fps(MONITOR_SERVICE), 52);
+    }
+
+    #[test]
+    fn transport_loss_rate_backoff_ignores_stale_requests_and_resets_on_new_stream() {
+        let now = Instant::now();
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
+        qos.user_custom_fps(1, 60);
+        qos.user_video_feedback_capability(1, true);
+        assert!(qos.user_video_frame_rendered(1));
+
+        assert!(!qos.user_transport_loss_at(1, transport_loss_sample(0, 7, 100, 1), now,));
+        assert!(!qos.user_transport_loss_at(
+            1,
+            transport_loss_sample(0, 7, 98, 1),
+            now + Duration::from_millis(10),
+        ));
+        assert!(!qos.user_transport_loss_at(
+            1,
+            transport_loss_sample(0, 7, 115, 1),
+            now + Duration::from_secs(1),
+        ));
+        assert!(qos.user_transport_loss_at(
+            1,
+            transport_loss_sample(0, 7, 130, 1),
+            now + Duration::from_secs(2),
+        ));
+        assert_eq!(qos.fps(MONITOR_SERVICE), 52);
+
+        assert!(!qos.user_transport_loss_at(
+            1,
+            transport_loss_sample(0, 8, 1, 1),
+            now + TRANSPORT_LOSS_BACKOFF_COOLDOWN + Duration::from_secs(1),
+        ));
+        assert_eq!(qos.fps(MONITOR_SERVICE), 52);
+        let user = qos.users.get(&1).unwrap();
+        assert_eq!(user.transport_loss_windows.len(), 1);
+        assert!(user.transport_loss_windows.contains_key(&TransportLossKey {
+            display: 0,
+            stream_id: 8,
+        }));
     }
 
     #[test]
