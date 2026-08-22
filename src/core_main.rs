@@ -695,6 +695,10 @@ pub fn core_main() -> Option<Vec<String>> {
                 println!("Installation and administrative privileges required!");
             }
             return None;
+        } else if args[0] == "--probe-hwcodec-config" {
+            #[cfg(feature = "hwcodec")]
+            println!("{}", scrap::hwcodec::check_available_hwcodec());
+            return None;
         } else if args[0] == "--check-hwcodec-config" {
             #[cfg(feature = "hwcodec")]
             crate::ipc::hwcodec_process();
@@ -973,6 +977,7 @@ mod tests {
             "--server",
             "--tray",
             "--cm",
+            "--probe-hwcodec-config",
             "--check-hwcodec-config",
             "--connect",
             "--deploy",
