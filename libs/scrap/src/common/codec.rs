@@ -97,6 +97,10 @@ pub trait EncoderApi {
 
     fn set_quality(&mut self, ratio: f32) -> ResultType<()>;
 
+    fn request_keyframe(&mut self) -> bool {
+        false
+    }
+
     fn bitrate(&self) -> u32;
 
     fn support_changing_quality(&self) -> bool;
@@ -132,8 +136,8 @@ impl UsableCodecs {
             PreferCodec::VP9 => self.vp9,
             PreferCodec::AV1 | PreferCodec::AV1_SW => self.av1,
             PreferCodec::AV1_HW => self.av1_hardware,
-            PreferCodec::H264 => self.h264,
-            PreferCodec::H265 => self.h265,
+            PreferCodec::H264 => self.h264 && self.h264_hardware,
+            PreferCodec::H265 => self.h265 && self.h265_hardware,
             PreferCodec::H264_HQ => self.h264_hq,
             PreferCodec::H265_HQ => self.h265_hq,
         }
@@ -219,11 +223,29 @@ fn auto_codec_for_usable(usable: UsableCodecs, av1_software_allowed: bool) -> Co
         CodecFormat::AV1
     } else if usable.h265_hardware {
         CodecFormat::H265
-    } else if usable.h264_hardware || usable.h264 {
+    } else if usable.h264_hardware {
         CodecFormat::H264
     } else {
         software_auto_codec(usable, av1_software_allowed)
     }
+}
+
+fn runtime_software_fallback_codec(
+    decodings: &HashMap<i32, SupportedDecoding>,
+) -> Option<CodecFormat> {
+    let has_peers = !decodings.is_empty();
+    let vp9_usable = has_peers && decodings.values().all(|decoding| decoding.ability_vp9 > 0);
+    if vp9_usable {
+        return Some(CodecFormat::VP9);
+    }
+    let vp8_usable = has_peers && decodings.values().all(|decoding| decoding.ability_vp8 > 0);
+    if vp8_usable {
+        // Runtime recovery deliberately avoids libaom AV1 because emergency
+        // fallback must prioritize realtime throughput. VP8 remains the
+        // compatibility floor only while every active peer advertises it.
+        return Some(CodecFormat::VP8);
+    }
+    None
 }
 
 impl Deref for Encoder {
@@ -323,8 +345,15 @@ impl Encoder {
                     codec: Box::new(hw),
                 }),
                 Err(e) => {
-                    log::error!("new hw encoder failed: {e:?}, fallback to VP9 for this session");
-                    Self::set_fallback_codec(CodecFormat::VP9);
+                    if let Some(fallback) = Self::set_software_fallback_codec() {
+                        log::error!(
+                            "new hw encoder failed: {e:?}, fallback to {fallback:?} for this session"
+                        );
+                    } else {
+                        log::error!(
+                            "new hw encoder failed: {e:?}, no peer-compatible VP8/VP9 fallback"
+                        );
+                    }
                     Err(e)
                 }
             },
@@ -334,8 +363,15 @@ impl Encoder {
                     codec: Box::new(tex),
                 }),
                 Err(e) => {
-                    log::error!("new vram encoder failed: {e:?}, fallback to VP9 for this session");
-                    Self::set_fallback_codec(CodecFormat::VP9);
+                    if let Some(fallback) = Self::set_software_fallback_codec() {
+                        log::error!(
+                            "new vram encoder failed: {e:?}, fallback to {fallback:?} for this session"
+                        );
+                    } else {
+                        log::error!(
+                            "new vram encoder failed: {e:?}, no peer-compatible VP8/VP9 fallback"
+                        );
+                    }
                     Err(e)
                 }
             },
@@ -404,16 +440,16 @@ impl Encoder {
         if enable_hwcodec_option() {
             if av1_useable {
                 av1hw_encoding =
-                    HwRamEncoder::try_get(CodecFormat::AV1).map_or(None, |c| Some(c.name));
+                    HwRamEncoder::try_get_hardware(CodecFormat::AV1).map_or(None, |c| Some(c.name));
             }
             if _all_support_h264_decoding {
-                h264hw_encoding =
-                    HwRamEncoder::try_get(CodecFormat::H264).map_or(None, |c| Some(c.name));
+                h264hw_encoding = HwRamEncoder::try_get_hardware(CodecFormat::H264)
+                    .map_or(None, |c| Some(c.name));
                 h264hq_encoding = HwRamEncoder::try_get_high_quality(CodecFormat::H264).is_some();
             }
             if _all_support_h265_decoding {
-                h265hw_encoding =
-                    HwRamEncoder::try_get(CodecFormat::H265).map_or(None, |c| Some(c.name));
+                h265hw_encoding = HwRamEncoder::try_get_hardware(CodecFormat::H265)
+                    .map_or(None, |c| Some(c.name));
                 h265hq_encoding = HwRamEncoder::try_get_high_quality(CodecFormat::H265).is_some();
             }
         }
@@ -461,7 +497,10 @@ impl Encoder {
             ..Default::default()
         });
 
-        // auto: hardware AV1 > H265 > H264, then software AV1 > VP9 > VP8.
+        // Distributed H.264/H.265 encoding is hardware/platform-only. Keep
+        // Auto on hardware AV1 > H265 > H264, then software AV1 > VP9 > VP8.
+        // Do not restore libx264/libx265 by treating generic H.26x availability
+        // as hardware; both the probe and this negotiation gate must agree.
         let av1_test = Config::get_option(hbb_common::config::keys::OPTION_AV1_TEST) != "N";
         let auto_codec = auto_codec_for_usable(usable, av1_test);
 
@@ -524,9 +563,9 @@ impl Encoder {
         };
         #[cfg(feature = "hwcodec")]
         if enable_hwcodec_option() {
-            encoding.av1_hw |= HwRamEncoder::try_get(CodecFormat::AV1).is_some();
-            encoding.h264 |= HwRamEncoder::try_get(CodecFormat::H264).is_some();
-            encoding.h265 |= HwRamEncoder::try_get(CodecFormat::H265).is_some();
+            encoding.av1_hw |= HwRamEncoder::try_get_hardware(CodecFormat::AV1).is_some();
+            encoding.h264 |= HwRamEncoder::try_get_hardware(CodecFormat::H264).is_some();
+            encoding.h265 |= HwRamEncoder::try_get_hardware(CodecFormat::H265).is_some();
             encoding.h264_hq |= HwRamEncoder::try_get_high_quality(CodecFormat::H264).is_some();
             encoding.h265_hq |= HwRamEncoder::try_get_high_quality(CodecFormat::H265).is_some();
         }
@@ -589,6 +628,16 @@ impl Encoder {
         }
     }
 
+    pub fn software_fallback_codec() -> Option<CodecFormat> {
+        runtime_software_fallback_codec(&PEER_DECODINGS.lock().unwrap())
+    }
+
+    pub fn set_software_fallback_codec() -> Option<CodecFormat> {
+        let fallback = Self::software_fallback_codec()?;
+        Self::set_fallback_codec(fallback);
+        Some(fallback)
+    }
+
     pub fn use_i444(config: &EncoderCfg) -> bool {
         let decodings = PEER_DECODINGS.lock().unwrap().clone();
         let prefer_i444 = decodings
@@ -636,10 +685,6 @@ impl Encoder {
                     }
                 } else if name.contains("mediacodec") {
                     "Hardware MediaCodec via FFmpeg"
-                } else if name == "libx264" {
-                    "Software libx264 H264 via FFmpeg"
-                } else if name == "libx265" {
-                    "Software libx265 H265 via FFmpeg"
                 } else {
                     "Hardware encoder via FFmpeg"
                 }
@@ -1743,32 +1788,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "hwcodec")]
-    #[test]
-    fn software_h26x_backend_labels_are_explicit() {
-        let config = |name: &str| {
-            EncoderCfg::HWRAM(HwRamEncoderConfig {
-                name: name.to_owned(),
-                mc_name: None,
-                width: 1920,
-                height: 1080,
-                quality: 1.0,
-                fps: DEFAULT_ENCODER_FPS,
-                keyframe_interval: None,
-                profile: HwEncoderProfile::Default,
-            })
-        };
-
-        assert_eq!(
-            Encoder::backend_label(&config("libx264")),
-            "Software libx264 H264 via FFmpeg"
-        );
-        assert_eq!(
-            Encoder::backend_label(&config("libx265")),
-            "Software libx265 H265 via FFmpeg"
-        );
-    }
-
     fn all_usable_codecs() -> UsableCodecs {
         UsableCodecs {
             vp8: true,
@@ -1998,39 +2017,24 @@ mod tests {
             ..all_usable_codecs()
         };
 
+        assert_eq!(auto_codec_for_usable(software_only, true), CodecFormat::AV1);
         assert_eq!(
-            auto_codec_for_usable(software_only, true),
-            CodecFormat::H264
-        );
-        let no_h264_software = UsableCodecs {
-            h264: false,
-            ..software_only
-        };
-        assert_eq!(
-            auto_codec_for_usable(no_h264_software, true),
-            CodecFormat::AV1
-        );
-        assert_eq!(
-            auto_codec_for_usable(no_h264_software, false),
+            auto_codec_for_usable(software_only, false),
             CodecFormat::VP9
         );
-        assert_eq!(
-            auto_codec_for_usable(
-                UsableCodecs {
-                    vp9: false,
-                    ..no_h264_software
-                },
-                false
-            ),
-            CodecFormat::VP8
-        );
+        let vp8_only = UsableCodecs {
+            av1: false,
+            vp9: false,
+            ..software_only
+        };
+        assert_eq!(auto_codec_for_usable(vp8_only, false), CodecFormat::VP8);
     }
 
     #[test]
-    fn software_h265_requires_an_explicit_preference() {
+    fn explicit_h26x_preferences_require_hardware_encoding() {
         let usable = UsableCodecs {
             av1_hardware: false,
-            h264: false,
+            h264: true,
             h264_hardware: false,
             h265: true,
             h265_hardware: false,
@@ -2039,9 +2043,36 @@ mod tests {
 
         assert_eq!(auto_codec_for_usable(usable, true), CodecFormat::AV1);
         assert_eq!(
-            preferred_explicit_codec(&decodings(&[PreferCodec::H265]), usable),
-            Some(PreferCodec::H265)
+            preferred_explicit_codec(&decodings(&[PreferCodec::H264]), usable),
+            None
         );
+        assert_eq!(
+            preferred_explicit_codec(&decodings(&[PreferCodec::H265]), usable),
+            None
+        );
+    }
+
+    #[test]
+    fn runtime_software_fallback_requires_a_mutual_vpx_codec() {
+        assert_eq!(
+            runtime_software_fallback_codec(&decodings(&[PreferCodec::Auto])),
+            Some(CodecFormat::VP9)
+        );
+
+        let mut legacy = decoding(PreferCodec::H264);
+        legacy.ability_vp9 = 0;
+        legacy.ability_vp8 = 1;
+        assert_eq!(
+            runtime_software_fallback_codec(&HashMap::from([(1, legacy.clone())])),
+            Some(CodecFormat::VP8)
+        );
+
+        legacy.ability_vp8 = 0;
+        assert_eq!(
+            runtime_software_fallback_codec(&HashMap::from([(1, legacy)])),
+            None
+        );
+        assert_eq!(runtime_software_fallback_codec(&HashMap::new()), None);
     }
 
     #[test]

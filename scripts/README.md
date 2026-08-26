@@ -37,11 +37,31 @@ Optional overrides:
 .\scripts\build_windows.ps1 `
   -FlutterRoot F:\GH\flutter-win `
   -DepsRoot F:\DVS `
+  -FFmpegRoot F:\FFmpeg-hardware-only `
   -CargoTargetDir F:\GH\rustdesk-target-win `
   -PubCache F:\GH\flutter-pub-cache-win
 ```
 
 Use `-NoHwCodec` to build without the `hwcodec` feature.
+Use `-FFmpegRoot` for a separately verified FFmpeg prefix. The build keeps
+other native dependencies under `-DepsRoot`, searches both prefixes, and
+packages runtime DLLs from both. Distributed RustAdmin builds must use an
+FFmpeg prefix without libx264/libx265 software encoders; H.264/H.265 encoding
+is hardware/platform-only and software fallback uses AV1/VP9/VP8.
+
+Build that prefix from the reviewed `ssh4net/ffmpeg-cmake` source with:
+
+```powershell
+.\scripts\build_windows_ffmpeg_hardware_only.ps1 `
+  -SourceRoot C:\rustadmin\ffmpeg-cmake `
+  -InstallPrefix C:\rustadmin\FFmpeg-hardware-only `
+  -DependencyPrefix C:\rustadmin\DVS\DVS `
+  -CMakeExe C:\rustadmin\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe `
+  -Clean
+```
+
+The script fails if a software H.26x encoder is registered, if GPL/nonfree is
+enabled, or if the native H.264/HEVC software decoders and parsers are absent.
 Use `-Clean` to force-refresh Flutter metadata, Windows build intermediates,
 and shared generated Flutter assets. This prevents debug-only assets from a
 Lab run, such as `kernel_blob.bin`, from entering a release bundle.

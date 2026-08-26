@@ -84,6 +84,7 @@ const HQ_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_secs(6);
 // Per-connection recovery is already rate-limited. Keep only a short
 // service-wide coalescing window so one lost refresh cannot create a 2s stall.
 const DELIVERY_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_millis(250);
+const IN_PLACE_REFERENCE_REFRESH_TIMEOUT: Duration = Duration::from_secs(1);
 #[cfg(windows)]
 const USER_CAPTURE_HELPER_STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
 #[cfg(windows)]
@@ -131,6 +132,7 @@ struct HqReferenceRefreshPolicy {
     reference_bitrate: u32,
     last_refresh: Option<Instant>,
     last_delivery_refresh_attempt: Option<Instant>,
+    delivery_refresh_pending: bool,
 }
 
 impl HqReferenceRefreshPolicy {
@@ -140,6 +142,7 @@ impl HqReferenceRefreshPolicy {
             reference_bitrate: bitrate,
             last_refresh: None,
             last_delivery_refresh_attempt: None,
+            delivery_refresh_pending: false,
         }
     }
 
@@ -174,6 +177,7 @@ impl HqReferenceRefreshPolicy {
     fn record_refresh(&mut self, bitrate: u32, now: Instant) {
         self.reference_bitrate = bitrate;
         self.last_refresh = Some(now);
+        self.delivery_refresh_pending = false;
     }
 
     fn request_delivery_refresh(
@@ -181,12 +185,21 @@ impl HqReferenceRefreshPolicy {
         requested: bool,
         now: Instant,
     ) -> Option<ReferenceRefreshReason> {
-        if !requested
-            || self
-                .last_delivery_refresh_attempt
-                .is_some_and(|last_attempt| {
-                    now.duration_since(last_attempt) < DELIVERY_REFERENCE_REFRESH_COOLDOWN
-                })
+        if requested
+            && !self.last_refresh.is_some_and(|last_refresh| {
+                now.saturating_duration_since(last_refresh) < DELIVERY_REFERENCE_REFRESH_COOLDOWN
+            })
+        {
+            self.delivery_refresh_pending = true;
+        }
+        if !self.delivery_refresh_pending {
+            return None;
+        }
+        if self
+            .last_delivery_refresh_attempt
+            .is_some_and(|last_attempt| {
+                now.duration_since(last_attempt) < DELIVERY_REFERENCE_REFRESH_COOLDOWN
+            })
         {
             return None;
         }
@@ -199,6 +212,7 @@ impl HqReferenceRefreshPolicy {
 struct PendingReferenceRefresh {
     reason: ReferenceRefreshReason,
     requested_at: Instant,
+    non_keyframe_frames: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1503,7 +1517,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_reference_refresh_requests_are_coalesced_per_service() {
+    fn recent_success_coalesces_delivery_refresh_for_all_viewers() {
         let now = Instant::now();
         let mut policy = HqReferenceRefreshPolicy::new(false, 1_000);
 
@@ -1511,6 +1525,7 @@ mod tests {
             policy.request_delivery_refresh(true, now),
             Some(ReferenceRefreshReason::DeliveryRecovery)
         );
+        policy.record_refresh(1_000, now);
         assert_eq!(
             policy.request_delivery_refresh(true, now + Duration::from_millis(100)),
             None
@@ -1519,7 +1534,29 @@ mod tests {
             policy.request_delivery_refresh(true, now + DELIVERY_REFERENCE_REFRESH_COOLDOWN),
             Some(ReferenceRefreshReason::DeliveryRecovery)
         );
-        assert_eq!(policy.request_delivery_refresh(false, now), None);
+        policy.record_refresh(1_000, now + DELIVERY_REFERENCE_REFRESH_COOLDOWN);
+        assert_eq!(
+            policy.request_delivery_refresh(
+                false,
+                now + DELIVERY_REFERENCE_REFRESH_COOLDOWN + Duration::from_millis(1)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn failed_delivery_reference_refresh_remains_pending() {
+        let now = Instant::now();
+        let mut policy = HqReferenceRefreshPolicy::new(false, 1_000);
+
+        assert_eq!(
+            policy.request_delivery_refresh(true, now),
+            Some(ReferenceRefreshReason::DeliveryRecovery)
+        );
+        assert_eq!(
+            policy.request_delivery_refresh(false, now + DELIVERY_REFERENCE_REFRESH_COOLDOWN),
+            Some(ReferenceRefreshReason::DeliveryRecovery)
+        );
     }
 }
 
@@ -2317,12 +2354,23 @@ fn run(vs: VideoService) -> ResultType<()> {
     ) {
         Ok(result) => result,
         Err(err) => {
-            log::error!("Failed to create encoder: {err:?}, fallback to VP9");
+            let Some(fallback) = Encoder::software_fallback_codec() else {
+                log::error!(
+                    "Failed to create encoder: {err:?}, no peer-compatible VP8/VP9 fallback"
+                );
+                return Err(err);
+            };
+            let vpx_codec = if fallback == CodecFormat::VP8 {
+                VpxVideoCodecId::VP8
+            } else {
+                VpxVideoCodecId::VP9
+            };
+            log::error!("Failed to create encoder: {err:?}, fallback to {fallback:?}");
             Encoder::set_fallback(&EncoderCfg::VPX(VpxEncoderConfig {
                 width: c.width as _,
                 height: c.height as _,
                 quality,
-                codec: VpxVideoCodecId::VP9,
+                codec: vpx_codec,
                 fps: encoder_fps,
                 keyframe_interval: None,
             }));
@@ -2488,10 +2536,11 @@ fn run(vs: VideoService) -> ResultType<()> {
         let movie_sample_state = if movie_cadence.is_some()
             && (!movie_bootstrap_released || movie_host_metrics.is_some())
         {
-            let video_qos = VIDEO_QOS.lock().unwrap();
+            let mut video_qos = VIDEO_QOS.lock().unwrap();
             Some((
                 video_qos.movie_viewer_metrics(&service_name),
                 video_qos.movie_target_fps(&service_name),
+                video_qos.movie_admission_pressure_at(&service_name, loop_started),
             ))
         } else {
             None
@@ -2539,6 +2588,9 @@ fn run(vs: VideoService) -> ResultType<()> {
                     host_iterations: host.iterations,
                     host_missed_slots: host.missed_slots,
                     viewer,
+                    local_admission_pressure: movie_sample_state
+                        .map(|state| state.2)
+                        .unwrap_or(false),
                 };
                 VIDEO_QOS.lock().unwrap().store_movie_runtime_status(
                     &service_name,
@@ -2580,6 +2632,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                             reference_refresh_pending = Some(PendingReferenceRefresh {
                                 reason: ReferenceRefreshReason::MovieCadenceChange,
                                 requested_at: recreate_started,
+                                non_keyframe_frames: 0,
                             });
                             repeat_encode_counter = 0;
                             encode_fail_counter = 0;
@@ -2629,6 +2682,54 @@ fn run(vs: VideoService) -> ResultType<()> {
                 }
             }
         }
+        let mut reference_recreated_after_timeout = false;
+        let timed_out_refresh = reference_refresh_pending.filter(|refresh| {
+            refresh.non_keyframe_frames > 0
+                && refresh.requested_at.elapsed() >= IN_PLACE_REFERENCE_REFRESH_TIMEOUT
+        });
+        if let Some(refresh) = timed_out_refresh {
+            let recreate_started = Instant::now();
+            match recreate_encoder_at_quality(&encoder_cfg, use_i444, quality) {
+                Ok(recreated) => {
+                    let bitrate = recreated.bitrate();
+                    log::warn!(
+                        "diag video reference refresh fell back to encoder recreation: service={}, display={}, codec={:?}, reason={:?}, waited_ms={}, non_keyframe_frames={}, bitrate={}",
+                        sp.name(),
+                        display_idx,
+                        codec_format,
+                        refresh.reason,
+                        refresh.requested_at.elapsed().as_millis(),
+                        refresh.non_keyframe_frames,
+                        bitrate,
+                    );
+                    encoder = recreated;
+                    VIDEO_QOS
+                        .lock()
+                        .unwrap()
+                        .store_bitrate(&service_name, bitrate);
+                    reference_refresh_policy.record_refresh(bitrate, recreate_started);
+                    reference_refresh_pending = Some(PendingReferenceRefresh {
+                        reason: refresh.reason,
+                        requested_at: recreate_started,
+                        non_keyframe_frames: 0,
+                    });
+                    repeat_encode_counter = 0;
+                    encode_fail_counter = 0;
+                    hw_no_valid_frame_since = None;
+                    reference_recreated_after_timeout = true;
+                }
+                Err(error) => {
+                    log::warn!(
+                        "diag video reference refresh recreation fallback failed: service={}, display={}, codec={:?}, reason={:?}, error={:?}",
+                        sp.name(),
+                        display_idx,
+                        codec_format,
+                        refresh.reason,
+                        error,
+                    );
+                }
+            }
+        }
         let reference_refresh_eligible = hq_reference_refresh_eligible(&encoder_cfg, codec_format);
         let policy_refresh_reason = reference_refresh_policy.evaluate(
             reference_refresh_eligible,
@@ -2649,7 +2750,7 @@ fn run(vs: VideoService) -> ResultType<()> {
         let refresh_reason = secure_desktop_refresh_reason
             .or(delivery_refresh_reason)
             .or(policy_refresh_reason);
-        if cadence_recreated {
+        if cadence_recreated || reference_recreated_after_timeout {
             if let Some(reason) = refresh_reason {
                 log::info!(
                     "diag video reference refresh coalesced with Movie cadence change: service={}, display={}, reason={:?}",
@@ -2660,47 +2761,70 @@ fn run(vs: VideoService) -> ResultType<()> {
             }
         } else if let Some(reason) = refresh_reason {
             let refresh_started = Instant::now();
-            match recreate_encoder_at_quality(&encoder_cfg, use_i444, quality) {
-                Ok(refreshed_encoder) => {
-                    let refreshed_bitrate = refreshed_encoder.bitrate();
-                    log::info!(
-                        "diag video reference refresh: service={}, display={}, codec={:?}, reason={:?}, ratio={}, bitrate_before={}, bitrate_after={}, qos_previous_bitrate={}, ratio_changed={}, startup_safe={}",
-                        sp.name(),
-                        display_idx,
-                        codec_format,
-                        reason,
-                        quality,
-                        encoder.bitrate(),
-                        refreshed_bitrate,
-                        qos_update.previous_bitrate,
-                        qos_update.ratio_changed,
-                        qos_update.startup_safe
-                    );
-                    encoder = refreshed_encoder;
-                    VIDEO_QOS
-                        .lock()
-                        .unwrap()
-                        .store_bitrate(&service_name, refreshed_bitrate);
-                    reference_refresh_policy.record_refresh(refreshed_bitrate, refresh_started);
-                    reference_refresh_pending = Some(PendingReferenceRefresh {
-                        reason,
-                        requested_at: refresh_started,
-                    });
-                    repeat_encode_counter = 0;
-                    encode_fail_counter = 0;
-                    hw_no_valid_frame_since = None;
-                }
-                Err(err) => {
-                    log::warn!(
-                        "diag video reference refresh failed: service={}, display={}, codec={:?}, reason={:?}, ratio={}, bitrate={}, err={:?}",
-                        sp.name(),
-                        display_idx,
-                        codec_format,
-                        reason,
-                        quality,
-                        encoder.bitrate(),
-                        err
-                    );
+            if encoder.request_keyframe() {
+                let bitrate = encoder.bitrate();
+                log::info!(
+                    "diag video reference refresh requested in-place: service={}, display={}, codec={:?}, reason={:?}, ratio={}, bitrate={}, qos_previous_bitrate={}, ratio_changed={}, startup_safe={}",
+                    sp.name(),
+                    display_idx,
+                    codec_format,
+                    reason,
+                    quality,
+                    bitrate,
+                    qos_update.previous_bitrate,
+                    qos_update.ratio_changed,
+                    qos_update.startup_safe
+                );
+                reference_refresh_policy.record_refresh(bitrate, refresh_started);
+                reference_refresh_pending = Some(PendingReferenceRefresh {
+                    reason,
+                    requested_at: refresh_started,
+                    non_keyframe_frames: 0,
+                });
+            } else {
+                match recreate_encoder_at_quality(&encoder_cfg, use_i444, quality) {
+                    Ok(refreshed_encoder) => {
+                        let refreshed_bitrate = refreshed_encoder.bitrate();
+                        log::info!(
+                            "diag video reference refresh recreated encoder: service={}, display={}, codec={:?}, reason={:?}, ratio={}, bitrate_before={}, bitrate_after={}, qos_previous_bitrate={}, ratio_changed={}, startup_safe={}",
+                            sp.name(),
+                            display_idx,
+                            codec_format,
+                            reason,
+                            quality,
+                            encoder.bitrate(),
+                            refreshed_bitrate,
+                            qos_update.previous_bitrate,
+                            qos_update.ratio_changed,
+                            qos_update.startup_safe
+                        );
+                        encoder = refreshed_encoder;
+                        VIDEO_QOS
+                            .lock()
+                            .unwrap()
+                            .store_bitrate(&service_name, refreshed_bitrate);
+                        reference_refresh_policy.record_refresh(refreshed_bitrate, refresh_started);
+                        reference_refresh_pending = Some(PendingReferenceRefresh {
+                            reason,
+                            requested_at: refresh_started,
+                            non_keyframe_frames: 0,
+                        });
+                        repeat_encode_counter = 0;
+                        encode_fail_counter = 0;
+                        hw_no_valid_frame_since = None;
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "diag video reference refresh failed: service={}, display={}, codec={:?}, reason={:?}, ratio={}, bitrate={}, err={:?}",
+                            sp.name(),
+                            display_idx,
+                            codec_format,
+                            reason,
+                            quality,
+                            encoder.bitrate(),
+                            err
+                        );
+                    }
                 }
             }
         }
@@ -3394,7 +3518,7 @@ fn setup_encoder(
         last_portable_service_running,
         source,
         encoder_fps,
-    );
+    )?;
     Encoder::set_fallback(&encoder_cfg);
     let codec_format = Encoder::negotiated_codec();
     let recorder = get_recorder(record_incoming, display_idx, source == VideoSource::Camera);
@@ -3495,7 +3619,7 @@ fn get_encoder_config(
     _portable_service: bool,
     _source: VideoSource,
     encoder_fps: u32,
-) -> EncoderCfg {
+) -> ResultType<EncoderCfg> {
     #[cfg(all(windows, feature = "vram"))]
     if _portable_service || c.is_gdi() || c.is_cpu_only() || _source == VideoSource::Camera {
         log::info!(
@@ -3517,7 +3641,7 @@ fn get_encoder_config(
             #[cfg(feature = "vram")]
             if !high_quality {
                 if let Some(feature) = VRamEncoder::try_get(&c.device(), negotiated_codec) {
-                    return EncoderCfg::VRAM(VRamEncoderConfig {
+                    return Ok(EncoderCfg::VRAM(VRamEncoderConfig {
                         device: c.device(),
                         width: c.width,
                         height: c.height,
@@ -3525,16 +3649,16 @@ fn get_encoder_config(
                         fps: encoder_fps,
                         feature,
                         keyframe_interval,
-                    });
+                    }));
                 }
             }
             #[cfg(feature = "hwcodec")]
             if let Some(hw) = if high_quality {
                 HwRamEncoder::try_get_high_quality(negotiated_codec)
             } else {
-                HwRamEncoder::try_get(negotiated_codec)
+                HwRamEncoder::try_get_hardware(negotiated_codec)
             } {
-                return EncoderCfg::HWRAM(HwRamEncoderConfig {
+                return Ok(EncoderCfg::HWRAM(HwRamEncoderConfig {
                     name: hw.name,
                     mc_name: hw.mc_name,
                     width: c.width,
@@ -3547,7 +3671,7 @@ fn get_encoder_config(
                     } else {
                         HwEncoderProfile::Default
                     },
-                });
+                }));
             }
             if high_quality {
                 log::warn!(
@@ -3555,16 +3679,26 @@ fn get_encoder_config(
                     negotiated_codec
                 );
             }
-            EncoderCfg::VPX(VpxEncoderConfig {
+            let Some(fallback) = Encoder::software_fallback_codec() else {
+                bail!(
+                    "no peer-compatible VP8/VP9 fallback after {:?} encoder became unavailable",
+                    negotiated_codec
+                );
+            };
+            Ok(EncoderCfg::VPX(VpxEncoderConfig {
                 width: c.width as _,
                 height: c.height as _,
                 quality,
                 fps: encoder_fps,
-                codec: VpxVideoCodecId::VP9,
+                codec: if fallback == CodecFormat::VP8 {
+                    VpxVideoCodecId::VP8
+                } else {
+                    VpxVideoCodecId::VP9
+                },
                 keyframe_interval,
-            })
+            }))
         }
-        format @ (CodecFormat::VP8 | CodecFormat::VP9) => EncoderCfg::VPX(VpxEncoderConfig {
+        format @ (CodecFormat::VP8 | CodecFormat::VP9) => Ok(EncoderCfg::VPX(VpxEncoderConfig {
             width: c.width as _,
             height: c.height as _,
             quality,
@@ -3575,12 +3709,12 @@ fn get_encoder_config(
                 VpxVideoCodecId::VP9
             },
             keyframe_interval,
-        }),
+        })),
         CodecFormat::AV1 => {
             #[cfg(feature = "hwcodec")]
             if Encoder::av1_hardware_allowed() {
-                if let Some(hw) = HwRamEncoder::try_get(CodecFormat::AV1) {
-                    return EncoderCfg::HWRAM(HwRamEncoderConfig {
+                if let Some(hw) = HwRamEncoder::try_get_hardware(CodecFormat::AV1) {
+                    return Ok(EncoderCfg::HWRAM(HwRamEncoderConfig {
                         name: hw.name,
                         mc_name: hw.mc_name,
                         width: c.width,
@@ -3589,36 +3723,45 @@ fn get_encoder_config(
                         fps: encoder_fps,
                         keyframe_interval,
                         profile: Default::default(),
-                    });
+                    }));
                 }
                 if Encoder::av1_hardware_required() {
                     log::warn!("AV1 hardware was requested but no hardware encoder is available");
-                    return EncoderCfg::VPX(VpxEncoderConfig {
+                    let Some(fallback) = Encoder::software_fallback_codec() else {
+                        bail!(
+                            "AV1 hardware was requested but no peer-compatible VP8/VP9 fallback is available"
+                        );
+                    };
+                    return Ok(EncoderCfg::VPX(VpxEncoderConfig {
                         width: c.width as _,
                         height: c.height as _,
                         quality,
                         fps: encoder_fps,
-                        codec: VpxVideoCodecId::VP9,
+                        codec: if fallback == CodecFormat::VP8 {
+                            VpxVideoCodecId::VP8
+                        } else {
+                            VpxVideoCodecId::VP9
+                        },
                         keyframe_interval,
-                    });
+                    }));
                 }
             }
-            EncoderCfg::AOM(AomEncoderConfig {
+            Ok(EncoderCfg::AOM(AomEncoderConfig {
                 width: c.width as _,
                 height: c.height as _,
                 quality,
                 fps: encoder_fps,
                 keyframe_interval,
-            })
+            }))
         }
-        _ => EncoderCfg::VPX(VpxEncoderConfig {
+        _ => Ok(EncoderCfg::VPX(VpxEncoderConfig {
             width: c.width as _,
             height: c.height as _,
             quality,
             fps: encoder_fps,
             codec: VpxVideoCodecId::VP9,
             keyframe_interval,
-        }),
+        })),
     }
 }
 
@@ -3780,25 +3923,32 @@ fn handle_one_frame(
                     ms
                 );
             }
-            if let Some(refresh) = reference_refresh_pending.take() {
-                log::info!(
-                    "diag video reference refresh encoded: service={}, display={}, reason={:?}, elapsed_ms={}, bitrate={}, payload_bytes={}, frame_count={}, keyframe={}",
-                    sp.name(),
-                    display,
-                    refresh.reason,
-                    refresh.requested_at.elapsed().as_millis(),
-                    encoder.bitrate(),
-                    payload_bytes,
-                    frame_count,
-                    has_keyframe
-                );
-                if !has_keyframe {
-                    log::warn!(
-                        "diag video reference refresh did not produce a keyframe: service={}, display={}, reason={:?}",
+            if let Some(mut refresh) = reference_refresh_pending.take() {
+                let elapsed_ms = refresh.requested_at.elapsed().as_millis();
+                if has_keyframe {
+                    log::info!(
+                        "diag video reference refresh encoded: service={}, display={}, reason={:?}, elapsed_ms={}, non_keyframe_frames={}, bitrate={}, payload_bytes={}, frame_count={}, keyframe=true",
                         sp.name(),
                         display,
-                        refresh.reason
+                        refresh.reason,
+                        elapsed_ms,
+                        refresh.non_keyframe_frames,
+                        encoder.bitrate(),
+                        payload_bytes,
+                        frame_count,
                     );
+                } else {
+                    refresh.non_keyframe_frames = refresh.non_keyframe_frames.saturating_add(1);
+                    if refresh.non_keyframe_frames == 1 {
+                        log::info!(
+                            "diag video reference refresh waiting for keyframe: service={}, display={}, reason={:?}, elapsed_ms={}",
+                            sp.name(),
+                            display,
+                            refresh.reason,
+                            elapsed_ms,
+                        );
+                    }
+                    *reference_refresh_pending = Some(refresh);
                 }
             }
         }
@@ -3821,10 +3971,16 @@ fn handle_one_frame(
                 }
                 *encode_fail_counter = 0;
                 *hw_no_valid_frame_since = None;
-                Encoder::set_fallback_codec(CodecFormat::VP9);
+                let Some(fallback) = Encoder::set_software_fallback_codec() else {
+                    log::error!(
+                        "hardware encoder warmup timed out with no peer-compatible VP8/VP9 fallback: elapsed_ms={}, error={e:?}",
+                        warmup_elapsed.as_millis(),
+                    );
+                    return Err(e);
+                };
                 log::error!(
-                    "switch due to hardware encoder warmup timeout: elapsed_ms={}, error={e:?}",
-                    warmup_elapsed.as_millis()
+                    "switch to {fallback:?} due to hardware encoder warmup timeout: elapsed_ms={}, error={e:?}",
+                    warmup_elapsed.as_millis(),
                 );
                 bail!("SWITCH");
             }
@@ -3854,18 +4010,28 @@ fn handle_one_frame(
             if (first && !repeat) || *encode_fail_counter >= max_fail_times {
                 *encode_fail_counter = 0;
                 if encoder.is_hardware() {
-                    Encoder::set_fallback_codec(CodecFormat::VP9);
+                    let Some(fallback) = Encoder::set_software_fallback_codec() else {
+                        log::error!(
+                            "hardware encoding failed with no peer-compatible VP8/VP9 fallback, first frame: {first}, error: {e:?}"
+                        );
+                        return Err(e);
+                    };
                     log::error!(
-                        "switch due to hardware encoding fails without disabling hwcodec availability, first frame: {first}, error: {e:?}"
+                        "switch to {fallback:?} due to hardware encoding fails without disabling hwcodec availability, first frame: {first}, error: {e:?}"
                     );
                     bail!("SWITCH");
                 }
             }
             match e.to_string().as_str() {
                 scrap::codec::ENCODE_NEED_SWITCH => {
-                    Encoder::set_fallback_codec(CodecFormat::VP9);
+                    let Some(fallback) = Encoder::set_software_fallback_codec() else {
+                        log::error!(
+                            "encoder requested a switch with no peer-compatible VP8/VP9 fallback: {e:?}"
+                        );
+                        return Err(e);
+                    };
                     log::error!(
-                        "switch due to encoder need switch without disabling hwcodec availability"
+                        "switch to {fallback:?} due to encoder need switch without disabling hwcodec availability"
                     );
                     bail!("SWITCH");
                 }

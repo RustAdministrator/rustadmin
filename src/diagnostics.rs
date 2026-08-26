@@ -4,19 +4,21 @@ use hbb_common::{
     regex::{escape, Regex},
     ResultType,
 };
-use serde_derive::Serialize;
+use serde_derive::{Deserialize, Serialize};
 use std::{
     fs::{self, File},
     io::{Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
-use zip::{write::FileOptions, CompressionMethod, ZipWriter};
+use zip::{write::FileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-const MAX_DIAGNOSTIC_FILES: usize = 64;
+const MAX_DIAGNOSTIC_FILES: usize = 160;
+const MAX_DIAGNOSTIC_FILES_PER_ROOT: usize = 32;
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_TOTAL_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_DIRECTORY_DEPTH: usize = 4;
+const DIAGNOSTIC_SUMMARY_ENTRY: &str = "summary.json";
 
 #[derive(Debug, Serialize)]
 pub struct DiagnosticExportReport {
@@ -25,6 +27,13 @@ pub struct DiagnosticExportReport {
     pub source_bytes: u64,
     pub archive_bytes: u64,
     pub truncated_files: usize,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct DiagnosticArchiveSummary {
+    files: usize,
+    source_bytes: u64,
+    truncated_files: usize,
 }
 
 #[derive(Debug)]
@@ -112,8 +121,59 @@ impl DiagnosticRedactor {
 }
 
 pub fn export(destination: &Path) -> ResultType<DiagnosticExportReport> {
+    #[cfg(windows)]
+    {
+        if !windows_diagnostic_export_is_elevated() && windows_service_logs_present() {
+            return export_with_windows_elevation(destination);
+        }
+    }
+    export_direct(destination)
+}
+
+fn export_direct(destination: &Path) -> ResultType<DiagnosticExportReport> {
     let roots = diagnostic_roots();
     export_from_roots(destination, &roots)
+}
+
+#[cfg(windows)]
+pub fn export_elevated_worker(destination: &Path) -> ResultType<DiagnosticExportReport> {
+    if !windows_diagnostic_export_is_elevated() {
+        bail!("elevated diagnostic worker requires an administrator token");
+    }
+    export_direct(destination)
+}
+
+#[cfg(windows)]
+fn windows_diagnostic_export_is_elevated() -> bool {
+    crate::platform::is_root() || crate::platform::is_elevated(None).unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn export_with_windows_elevation(destination: &Path) -> ResultType<DiagnosticExportReport> {
+    validate_destination(destination)?;
+    let executable = std::env::current_exe().context("failed to locate RustAdmin executable")?;
+    let status = runas::Command::new(executable)
+        .arg("--export-diagnostics-elevated")
+        .arg(destination)
+        .show(false)
+        .force_prompt(true)
+        .status()
+        .context("failed to start elevated diagnostic exporter")?;
+    if !status.success() {
+        bail!(
+            "elevated diagnostic exporter was cancelled or failed with status {}",
+            status
+        );
+    }
+    report_from_archive(destination)
+}
+
+#[cfg(windows)]
+fn windows_service_logs_present() -> bool {
+    crate::platform::is_installed()
+        || windows_service_roots()
+            .iter()
+            .any(|(_, root)| root.is_dir())
 }
 
 fn diagnostic_roots() -> Vec<(String, PathBuf)> {
@@ -127,23 +187,32 @@ fn diagnostic_roots() -> Vec<(String, PathBuf)> {
     }
     #[cfg(windows)]
     {
-        if let Some(system_root) = std::env::var_os("SystemRoot").map(PathBuf::from) {
-            roots.push((
-                "service-localservice".to_owned(),
-                system_root.join("ServiceProfiles/LocalService/AppData/Roaming/RustAdmin/log"),
-            ));
-            roots.push((
-                "service-systemprofile".to_owned(),
-                system_root.join("System32/config/systemprofile/AppData/Roaming/RustAdmin/log"),
-            ));
-        }
-        if let Some(program_data) = std::env::var_os("ProgramData").map(PathBuf::from) {
-            roots.push((
-                "service-programdata".to_owned(),
-                program_data.join("RustAdmin/log"),
-            ));
-        }
+        roots.extend(windows_service_roots());
     }
+    roots
+}
+
+#[cfg(windows)]
+fn windows_service_roots() -> Vec<(String, PathBuf)> {
+    let mut roots = Vec::new();
+    let system_root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    roots.push((
+        "service-localservice".to_owned(),
+        system_root.join("ServiceProfiles/LocalService/AppData/Roaming/RustAdmin/log"),
+    ));
+    roots.push((
+        "service-systemprofile".to_owned(),
+        system_root.join("System32/config/systemprofile/AppData/Roaming/RustAdmin/log"),
+    ));
+    let program_data = std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+    roots.push((
+        "service-programdata".to_owned(),
+        program_data.join("RustAdmin/log"),
+    ));
     roots
 }
 
@@ -155,7 +224,18 @@ fn export_from_roots(
     let redactor = DiagnosticRedactor::new()?;
     let mut files = Vec::new();
     for (label, root) in roots {
-        collect_files(root, root, label, 0, &mut files);
+        let mut root_files = Vec::new();
+        collect_files(root, root, label, 0, &mut root_files);
+        root_files.sort_by(|left, right| right.modified.cmp(&left.modified));
+        root_files.truncate(MAX_DIAGNOSTIC_FILES_PER_ROOT);
+        #[cfg(windows)]
+        if label == "service-localservice"
+            && crate::platform::is_installed()
+            && root_files.is_empty()
+        {
+            bail!("installed service logs are present but unavailable to diagnostic export");
+        }
+        files.extend(root_files);
     }
     files.sort_by(|left, right| right.modified.cmp(&left.modified));
     files.truncate(MAX_DIAGNOSTIC_FILES);
@@ -342,8 +422,39 @@ fn write_archive(
             truncated_files += 1;
         }
     }
+    let summary = DiagnosticArchiveSummary {
+        files: included_files,
+        source_bytes,
+        truncated_files,
+    };
+    zip.start_file(DIAGNOSTIC_SUMMARY_ENTRY, options)?;
+    zip.write_all(serde_json::to_string(&summary)?.as_bytes())?;
     zip.finish()?;
     Ok((included_files, source_bytes, truncated_files))
+}
+
+fn report_from_archive(destination: &Path) -> ResultType<DiagnosticExportReport> {
+    let archive_bytes = fs::metadata(destination)
+        .with_context(|| format!("failed to inspect {}", destination.display()))?
+        .len();
+    let mut archive = ZipArchive::new(
+        File::open(destination)
+            .with_context(|| format!("failed to open {}", destination.display()))?,
+    )?;
+    let mut summary_json = String::new();
+    archive
+        .by_name(DIAGNOSTIC_SUMMARY_ENTRY)
+        .context("elevated diagnostic archive has no summary")?
+        .read_to_string(&mut summary_json)?;
+    let summary: DiagnosticArchiveSummary = serde_json::from_str(&summary_json)
+        .context("elevated diagnostic archive summary is invalid")?;
+    Ok(DiagnosticExportReport {
+        path: destination.display().to_string(),
+        files: summary.files,
+        source_bytes: summary.source_bytes,
+        archive_bytes,
+        truncated_files: summary.truncated_files,
+    })
 }
 
 fn read_tail(path: &Path, limit: u64) -> ResultType<(Vec<u8>, bool)> {
@@ -386,7 +497,6 @@ fn temporary_archive_path(destination: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use std::io::Read;
-    use zip::ZipArchive;
 
     fn test_dir(name: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -437,6 +547,11 @@ mod tests {
         let report = export_from_roots(&output, &[("logs".to_owned(), directory.join("logs"))])
             .expect("export diagnostics");
         assert_eq!(report.files, 1);
+        let inspected = report_from_archive(&output).expect("inspect diagnostic archive");
+        assert_eq!(inspected.files, report.files);
+        assert_eq!(inspected.source_bytes, report.source_bytes);
+        assert_eq!(inspected.truncated_files, report.truncated_files);
+        assert_eq!(inspected.archive_bytes, report.archive_bytes);
         let mut archive =
             ZipArchive::new(File::open(&output).expect("open archive")).expect("read archive");
         let mut log = String::new();
@@ -447,6 +562,52 @@ mod tests {
             .expect("read log entry");
         assert!(!log.contains("private-value"));
         assert!(log.contains("message=ok"));
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn export_reserves_a_bounded_quota_for_each_log_root() {
+        let directory = test_dir("root-quota");
+        let interactive = directory.join("interactive");
+        let service = directory.join("service");
+        fs::create_dir_all(&interactive).expect("create interactive logs");
+        fs::create_dir_all(&service).expect("create service logs");
+        for index in 0..40 {
+            fs::write(
+                interactive.join(format!("interactive-{index}.log")),
+                b"interactive\n",
+            )
+            .expect("write interactive log");
+            fs::write(service.join(format!("service-{index}.log")), b"service\n")
+                .expect("write service log");
+        }
+        let output = directory.join("diagnostics.zip");
+
+        let report = export_from_roots(
+            &output,
+            &[
+                ("logs".to_owned(), interactive),
+                ("service-localservice".to_owned(), service),
+            ],
+        )
+        .expect("export diagnostics");
+        assert_eq!(report.files, MAX_DIAGNOSTIC_FILES_PER_ROOT * 2);
+
+        let mut archive =
+            ZipArchive::new(File::open(&output).expect("open archive")).expect("read archive");
+        let mut interactive_files = 0;
+        let mut service_files = 0;
+        for index in 0..archive.len() {
+            let name = archive
+                .by_index(index)
+                .expect("archive entry")
+                .name()
+                .to_owned();
+            interactive_files += usize::from(name.starts_with("logs/"));
+            service_files += usize::from(name.starts_with("service-localservice/"));
+        }
+        assert_eq!(interactive_files, MAX_DIAGNOSTIC_FILES_PER_ROOT);
+        assert_eq!(service_files, MAX_DIAGNOSTIC_FILES_PER_ROOT);
         fs::remove_dir_all(directory).expect("remove test directory");
     }
 }

@@ -73,6 +73,7 @@ pub struct HwRamEncoder {
     pub pixfmt: AVPixelFormat,
     bitrate: u32, //kbs
     config: HwRamEncoderConfig,
+    force_keyframe: bool,
 }
 
 impl EncoderApi for HwRamEncoder {
@@ -82,13 +83,20 @@ impl EncoderApi for HwRamEncoder {
     {
         match cfg {
             EncoderCfg::HWRAM(config) => {
+                // H.26x encoding is hardware/platform-only in distributed
+                // RustAdmin builds. Platform backends such as MediaCodec are
+                // accepted because the implementation is supplied by the OS
+                // or device vendor. Unknown names fail closed; do not restore
+                // libx264/libx265 or another CPU H.26x encoder here.
+                if !CodecInfo::is_hardware_encoder_name(&config.name) {
+                    bail!(
+                        "software or unreviewed FFmpeg encoder is disabled by distribution policy: {}",
+                        config.name
+                    );
+                }
                 let rc = Self::rate_control(&config);
                 let hw_quality = Self::encoder_quality(&config)?;
-                let pixfmt = if config.name == "libx265" {
-                    AVPixelFormat::AV_PIX_FMT_YUV420P
-                } else {
-                    DEFAULT_PIXFMT
-                };
+                let pixfmt = DEFAULT_PIXFMT;
                 let mut bitrate =
                     Self::bitrate(&config.name, config.width, config.height, config.quality);
                 bitrate = Self::check_bitrate_range(&config, bitrate);
@@ -124,6 +132,7 @@ impl EncoderApi for HwRamEncoder {
                         pixfmt: ctx.pixfmt,
                         bitrate,
                         config,
+                        force_keyframe: false,
                     }),
                     Err(_) => Err(anyhow!(format!("Failed to create encoder"))),
                 }
@@ -135,10 +144,14 @@ impl EncoderApi for HwRamEncoder {
     fn encode_to_message(&mut self, input: EncodeInput, ms: i64) -> ResultType<VideoFrame> {
         let mut vf = VideoFrame::new();
         let mut frames = Vec::new();
+        let force_keyframe = self.force_keyframe;
         for frame in self
-            .encode(input.yuv()?, ms)
+            .encode(input.yuv()?, ms, force_keyframe)
             .with_context(|| "Failed to encode")?
         {
+            if force_keyframe && frame.key == 1 {
+                self.force_keyframe = false;
+            }
             frames.push(EncodedVideoFrame {
                 data: Bytes::from(frame.data),
                 pts: frame.pts,
@@ -207,6 +220,14 @@ impl EncoderApi for HwRamEncoder {
         }
         self.config.quality = ratio;
         Ok(())
+    }
+
+    fn request_keyframe(&mut self) -> bool {
+        if !Self::supports_in_place_keyframe(&self.config.name) {
+            return false;
+        }
+        self.force_keyframe = true;
+        true
     }
 
     fn bitrate(&self) -> u32 {
@@ -298,6 +319,23 @@ mod tests {
         for name in ["h264_amf", "hevc_qsv", "av1_nvenc", "av1_videotoolbox"] {
             let config = encoder_config(name, HwEncoderProfile::HighQuality);
             assert!(HwRamEncoder::encoder_quality(&config).is_err());
+        }
+    }
+
+    #[test]
+    fn software_h26x_encoders_are_rejected_before_ffi() {
+        for name in ["libx264", "libx265", "libopenh264", "h264"] {
+            let result = HwRamEncoder::new(
+                EncoderCfg::HWRAM(encoder_config(name, HwEncoderProfile::Default)),
+                false,
+            );
+            let Err(error) = result else {
+                panic!("{name} unexpectedly passed the hardware-only encoder policy");
+            };
+            assert!(
+                error.to_string().contains("distribution policy"),
+                "{name}: {error}"
+            );
         }
     }
 
@@ -430,7 +468,11 @@ mod tests {
         for frame_index in 0..FRAME_COUNT {
             fill_nv12_frame(&mut yuv, &linesize, &offset, WIDTH, HEIGHT, frame_index);
             let frames = encoder
-                .encode(&yuv, (frame_index * 1_000 / DEFAULT_FPS as usize) as i64)
+                .encode(
+                    &yuv,
+                    (frame_index * 1_000 / DEFAULT_FPS as usize) as i64,
+                    false,
+                )
                 .unwrap_or_else(|err| {
                     panic!(
                         "{} did not produce low-delay output for frame {frame_index}: {err}",
@@ -573,6 +615,7 @@ mod tests {
                     .encode(
                         input.yuv().expect("converted frame was not CPU YUV"),
                         (frame_index * 1_000 / DEFAULT_FPS as usize) as i64,
+                        false,
                     )
                     .unwrap_or_else(|err| {
                         panic!(
@@ -823,9 +866,30 @@ mod tests {
     fn videotoolbox_high_quality_h265_profile_smoke() {
         compare_videotoolbox_profiles(CodecFormat::H265);
     }
+
+    #[test]
+    fn in_place_keyframes_are_limited_to_reviewed_ffmpeg_hardware_backends() {
+        for name in ["h264_nvenc", "hevc_nvenc", "h264_amf", "hevc_qsv"] {
+            assert!(HwRamEncoder::supports_in_place_keyframe(name), "{name}");
+        }
+        for name in [
+            "h264_mediacodec",
+            "hevc_vaapi",
+            "h264_videotoolbox",
+            "h264_mf",
+        ] {
+            assert!(!HwRamEncoder::supports_in_place_keyframe(name), "{name}");
+        }
+    }
 }
 
 impl HwRamEncoder {
+    fn supports_in_place_keyframe(name: &str) -> bool {
+        ["nvenc", "_amf", "_qsv"]
+            .iter()
+            .any(|backend| name.contains(backend))
+    }
+
     fn is_software_encoder(&self) -> bool {
         CodecInfo::is_software_encoder_name(&self.config.name)
     }
@@ -907,8 +971,13 @@ impl HwRamEncoder {
             .min_by_key(|encoder| encoder.priority)
     }
 
-    pub fn encode(&mut self, yuv: &[u8], ms: i64) -> ResultType<Vec<EncodeFrame>> {
-        match self.encoder.encode(yuv, ms) {
+    pub fn encode(
+        &mut self,
+        yuv: &[u8],
+        ms: i64,
+        force_keyframe: bool,
+    ) -> ResultType<Vec<EncodeFrame>> {
+        match self.encoder.encode(yuv, ms, force_keyframe) {
             Ok(v) => {
                 let mut data = Vec::<EncodeFrame>::new();
                 data.append(v);

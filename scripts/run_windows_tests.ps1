@@ -1,6 +1,7 @@
 param(
     [string]$FlutterRoot = "",
     [string]$DepsRoot = "",
+    [string]$FFmpegRoot = "",
     [string]$PubCache = "",
     [string]$CargoTargetDir = "",
     [string]$Features = "flutter,use_dasp",
@@ -43,11 +44,19 @@ if ([string]::IsNullOrWhiteSpace($DepsRoot)) {
 if (!(Test-Path $DepsRoot)) {
     throw "Dependency prefix was not found at '$DepsRoot'. Pass -DepsRoot or set RUSTDESK_WINDOWS_CODEC_ROOT."
 }
+if ([string]::IsNullOrWhiteSpace($FFmpegRoot)) {
+    $FFmpegRoot = $env:RUSTADMIN_WINDOWS_FFMPEG_ROOT
+}
+$CodecRoot = if ([string]::IsNullOrWhiteSpace($FFmpegRoot)) { $DepsRoot } else { $FFmpegRoot }
+if (!(Test-Path $CodecRoot)) {
+    throw "FFmpeg prefix was not found at '$CodecRoot'. Pass -FFmpegRoot or set RUSTADMIN_WINDOWS_FFMPEG_ROOT."
+}
+$DependencyRoots = @($CodecRoot, $DepsRoot) | Select-Object -Unique
 
 $env:PUB_CACHE = $PubCache
 $env:CARGO_TARGET_DIR = $CargoTargetDir
-$env:CMAKE_PREFIX_PATH = $DepsRoot
-$env:RUSTDESK_WINDOWS_CODEC_ROOT = $DepsRoot
+$env:CMAKE_PREFIX_PATH = $DependencyRoots -join ";"
+$env:RUSTDESK_WINDOWS_CODEC_ROOT = $CodecRoot
 New-Item -ItemType Directory -Force -Path $PubCache, $CargoTargetDir | Out-Null
 
 $SkipBridgeGenEffective = $SkipBridgeGen -or ($env:RUSTDESK_SKIP_BRIDGE_GEN -eq "1")

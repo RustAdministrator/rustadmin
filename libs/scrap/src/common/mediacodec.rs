@@ -267,35 +267,40 @@ impl MediaCodecDecoder {
                         self.presentation_clock
                             .set_movie_mode(movie_presentation_mode(self.display));
                         let output_metadata = self.output_frame_metadata(presentation_time_us);
-                        let (release_mode, presentation_reset, presentation_lead_us) =
-                            if let Some(now_ns) = monotonic_now_ns() {
-                                let schedule = self
-                                    .presentation_clock
-                                    .schedule(output_metadata.map(|(_, value)| value), now_ns);
-                                self.decoder.release_output_buffer_at_time(
-                                    output_buffer,
-                                    schedule.target_ns,
-                                )?;
-                                (
-                                    if schedule.source_clock {
-                                        "source-clock-scheduled"
-                                    } else {
-                                        "immediate-no-source-clock"
-                                    },
-                                    schedule.reset,
-                                    schedule.target_ns.saturating_sub(now_ns) / 1_000,
-                                )
-                            } else {
-                                self.decoder.release_output_buffer(output_buffer, true)?;
-                                ("immediate-no-monotonic-clock", false, 0)
-                            };
+                        let (
+                            release_mode,
+                            presentation_reset,
+                            presentation_reset_reason,
+                            presentation_capture_time_ms,
+                            presentation_lead_us,
+                        ) = if let Some(now_ns) = monotonic_now_ns() {
+                            let schedule = self
+                                .presentation_clock
+                                .schedule(output_metadata.map(|(_, value)| value), now_ns);
+                            self.decoder
+                                .release_output_buffer_at_time(output_buffer, schedule.target_ns)?;
+                            (
+                                if schedule.source_clock {
+                                    "source-clock-scheduled"
+                                } else {
+                                    "immediate-no-source-clock"
+                                },
+                                schedule.reset,
+                                schedule.reset_reason.as_str(),
+                                output_metadata.map(|(_, capture_time_ms)| capture_time_ms),
+                                schedule.target_ns.saturating_sub(now_ns) / 1_000,
+                            )
+                        } else {
+                            self.decoder.release_output_buffer(output_buffer, true)?;
+                            ("immediate-no-monotonic-clock", false, "none", None, 0)
+                        };
                         let output_frame_id = self
                             .take_output_frame_metadata(presentation_time_us)
                             .map(|(frame_id, _)| frame_id);
                         self.decoded_frames = self.decoded_frames.saturating_add(1);
                         if self.should_log_diag() {
                             log::info!(
-                                "diag android mediacodec frame: decoder={}, codec={}, visible={}x{}, input_queue_ms={}, output_dequeue_ms={}, total_ms={}, input_bytes={}, pending_inputs={}, render_path=surface-texture, release_mode={}, presentation_reset={}, presentation_lead_us={}, movie_playout_delay_ms={}, refresh_period_ns={}, surface_generation={}, output_format={:?}",
+                                "diag android mediacodec frame: decoder={}, codec={}, visible={}x{}, input_queue_ms={}, output_dequeue_ms={}, total_ms={}, input_bytes={}, pending_inputs={}, render_path=surface-texture, release_mode={}, presentation_reset={}, presentation_reset_reason={}, presentation_capture_time_ms={:?}, presentation_lead_us={}, movie_playout_delay_ms={}, refresh_period_ns={}, surface_generation={}, output_format={:?}",
                                 self.name,
                                 self.codec_label(),
                                 self.width,
@@ -307,6 +312,8 @@ impl MediaCodecDecoder {
                                 self.pending_inputs.len(),
                                 release_mode,
                                 presentation_reset,
+                                presentation_reset_reason,
+                                presentation_capture_time_ms,
                                 presentation_lead_us,
                                 self.presentation_clock.playout_delay_ms(),
                                 self.presentation_clock.refresh_period_ns(),

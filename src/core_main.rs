@@ -259,7 +259,49 @@ pub fn core_main() -> Option<Vec<String>> {
         #[cfg(windows)]
         {
             use crate::platform;
-            if args[0] == "--uninstall" {
+            if args[0] == "--export-diagnostics" {
+                if args.len() != 2 {
+                    log::error!("Diagnostic export requires one destination");
+                    std::process::exit(2);
+                }
+                match crate::diagnostics::export(std::path::Path::new(&args[1])) {
+                    Ok(report) => {
+                        log::info!(
+                            "Diagnostic export completed: files={}, source_bytes={}, archive_bytes={}, truncated_files={}",
+                            report.files,
+                            report.source_bytes,
+                            report.archive_bytes,
+                            report.truncated_files,
+                        );
+                        std::process::exit(0);
+                    }
+                    Err(error) => {
+                        log::error!("Diagnostic export failed: {error}");
+                        std::process::exit(1);
+                    }
+                }
+            } else if args[0] == "--export-diagnostics-elevated" {
+                if args.len() != 2 {
+                    log::error!("Elevated diagnostic export requires one destination");
+                    std::process::exit(2);
+                }
+                match crate::diagnostics::export_elevated_worker(std::path::Path::new(&args[1])) {
+                    Ok(report) => {
+                        log::info!(
+                            "Elevated diagnostic export completed: files={}, source_bytes={}, archive_bytes={}, truncated_files={}",
+                            report.files,
+                            report.source_bytes,
+                            report.archive_bytes,
+                            report.truncated_files,
+                        );
+                        std::process::exit(0);
+                    }
+                    Err(error) => {
+                        log::error!("Elevated diagnostic export failed: {error}");
+                        std::process::exit(1);
+                    }
+                }
+            } else if args[0] == "--uninstall" {
                 if let Err(err) = platform::uninstall_me(true) {
                     log::error!("Failed to uninstall: {}", err);
                 }

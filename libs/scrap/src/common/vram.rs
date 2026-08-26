@@ -241,7 +241,7 @@ impl VRamEncoder {
             .drain(..)
             .filter(|c| c.data_format == data_format)
             .collect();
-        if crate::hwcodec::HwRamEncoder::try_get(format).is_some() {
+        if crate::hwcodec::HwRamEncoder::try_get_hardware(format).is_some() {
             // has fallback, no need to require all adapters support
             v
         } else {

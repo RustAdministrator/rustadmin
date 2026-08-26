@@ -31,6 +31,7 @@ pub struct QualityStatus {
     pub quic_sender_recovery: Option<String>,
     pub quic_sender_admission: Option<String>,
     pub quic_sender_frame: Option<String>,
+    pub quic_sender_percentiles: Option<String>,
     pub quic_sender_space: Option<String>,
     pub quic_disposable_drops: Option<String>,
     pub quic_video_queue_target_ms: Option<u64>,
