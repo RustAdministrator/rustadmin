@@ -799,13 +799,13 @@ class QualityMonitor extends StatelessWidget {
                                 qualityMonitorModel
                                         .data.quicKeyframeBarrier !=
                                     null)
-                              _row("KF H/R/T/O", qualityMonitorModel
+                              _row("KF H/R/T/O/G", qualityMonitorModel
                                   .data.quicKeyframeBarrier),
                             if (qualityMonitorModel.extendedDetails &&
                                 qualityMonitorModel
                                         .data.quicReceiverRecovery !=
                                     null)
-                              _row("RX gap/drop", qualityMonitorModel
+                              _row("RX gap/sup/skip", qualityMonitorModel
                                   .data.quicReceiverRecovery),
                             if (qualityMonitorModel.extendedDetails &&
                                 qualityMonitorModel
@@ -822,6 +822,12 @@ class QualityMonitor extends StatelessWidget {
                                 qualityMonitorModel.data.quicSenderFrame != null)
                               _row("TX frame", qualityMonitorModel
                                   .data.quicSenderFrame),
+                            if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.quicSenderPercentiles !=
+                                    null)
+                              _row("TX D/R p95/99", qualityMonitorModel
+                                  .data.quicSenderPercentiles),
                             if (qualityMonitorModel.extendedDetails &&
                                 qualityMonitorModel.data.quicSenderSpace != null)
                               _row("TX space", qualityMonitorModel

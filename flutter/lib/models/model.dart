@@ -4547,6 +4547,7 @@ class QualityMonitorData {
   String? quicSenderRecovery;
   String? quicSenderAdmission;
   String? quicSenderFrame;
+  String? quicSenderPercentiles;
   String? quicSenderSpace;
   String? quicDisposableDrops;
   String? quicVideoQueueTargetMs;
@@ -4680,6 +4681,7 @@ class QualityMonitorModel with ChangeNotifier {
     _data.quicSenderRecovery = null;
     _data.quicSenderAdmission = null;
     _data.quicSenderFrame = null;
+    _data.quicSenderPercentiles = null;
     _data.quicSenderSpace = null;
     _data.quicDisposableDrops = null;
     _data.quicVideoQueueTargetMs = null;
@@ -4990,6 +4992,10 @@ class QualityMonitorModel with ChangeNotifier {
       if (evt.containsKey('quic_sender_frame') &&
           (evt['quic_sender_frame'] as String).isNotEmpty) {
         _data.quicSenderFrame = evt['quic_sender_frame'];
+      }
+      if (evt.containsKey('quic_sender_percentiles') &&
+          (evt['quic_sender_percentiles'] as String).isNotEmpty) {
+        _data.quicSenderPercentiles = evt['quic_sender_percentiles'];
       }
       if (evt.containsKey('quic_sender_space') &&
           (evt['quic_sender_space'] as String).isNotEmpty) {

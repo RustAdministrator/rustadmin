@@ -1,6 +1,7 @@
 param(
     [string]$FlutterRoot = "",
     [string]$DepsRoot = "",
+    [string]$FFmpegRoot = "",
     [string]$CargoTargetDir = "",
     [string]$PubCache = "",
     [string]$BridgeLlvmPath = "",
@@ -42,12 +43,20 @@ if (!(Test-Path $FlutterBat)) {
 if (!(Test-Path $DepsRoot)) {
     throw "Dependency prefix was not found at '$DepsRoot'. Pass -DepsRoot or set RUSTDESK_WINDOWS_CODEC_ROOT."
 }
+if ([string]::IsNullOrWhiteSpace($FFmpegRoot)) {
+    $FFmpegRoot = $env:RUSTADMIN_WINDOWS_FFMPEG_ROOT
+}
+$CodecRoot = if ([string]::IsNullOrWhiteSpace($FFmpegRoot)) { $DepsRoot } else { $FFmpegRoot }
+if (!(Test-Path $CodecRoot)) {
+    throw "FFmpeg prefix was not found at '$CodecRoot'. Pass -FFmpegRoot or set RUSTADMIN_WINDOWS_FFMPEG_ROOT."
+}
+$DependencyRoots = @($CodecRoot, $DepsRoot) | Select-Object -Unique
 
 $env:PATH = "$FlutterBin;$env:PATH"
 $env:PUB_CACHE = $PubCache
 $env:CARGO_TARGET_DIR = $CargoTargetDir
-$env:CMAKE_PREFIX_PATH = $DepsRoot
-$env:RUSTDESK_WINDOWS_CODEC_ROOT = $DepsRoot
+$env:CMAKE_PREFIX_PATH = $DependencyRoots -join ";"
+$env:RUSTDESK_WINDOWS_CODEC_ROOT = $CodecRoot
 
 New-Item -ItemType Directory -Force -Path $PubCache, $CargoTargetDir | Out-Null
 
@@ -414,7 +423,7 @@ function Get-ImportedDllNames {
 function Copy-WindowsRuntimeDependencies {
     param(
         [string]$BundleDir,
-        [string]$DepsRoot
+        [string[]]$DependencyRoots
     )
 
     $ImportTool = Resolve-BinaryImportTool
@@ -424,9 +433,11 @@ function Copy-WindowsRuntimeDependencies {
     }
 
     $SearchRoots = @(
-        (Join-Path $DepsRoot "bin"),
-        (Join-Path $DepsRoot "lib"),
-        $DepsRoot
+        foreach ($Root in $DependencyRoots) {
+            (Join-Path $Root "bin")
+            (Join-Path $Root "lib")
+            $Root
+        }
     ) | Where-Object { Test-Path $_ } | Select-Object -Unique
 
     if ($SearchRoots.Count -eq 0) {
@@ -522,5 +533,5 @@ Remove-Item -Force $StaleRuntimeIcon -ErrorAction SilentlyContinue
 
 Write-Host "Windows bundle:"
 Write-Host $BundleDir
-Copy-WindowsRuntimeDependencies $BundleDir $DepsRoot
+Copy-WindowsRuntimeDependencies $BundleDir $DependencyRoots
 New-ReleaseZip $VersionInfo

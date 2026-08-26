@@ -810,6 +810,10 @@ impl InvokeUiSession for FlutterHandler {
                     &status.quic_sender_frame.map_or(NULL, |it| it),
                 ),
                 (
+                    "quic_sender_percentiles",
+                    &status.quic_sender_percentiles.map_or(NULL, |it| it),
+                ),
+                (
                     "quic_sender_space",
                     &status.quic_sender_space.map_or(NULL, |it| it),
                 ),

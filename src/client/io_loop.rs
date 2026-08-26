@@ -67,6 +67,8 @@ const FPS_CONTROL_SUMMARY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 const CLIENT_ASYNC_OUTBOX_CAPACITY: usize = 256;
 const CLIENT_VIDEO_FEEDBACK_LATEST_KEY_BASE: u64 = 1 << 32;
 const CLIENT_CLOSE_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+const CLIENT_QUIC_CLOSE_ACK_TIMEOUT: Duration = Duration::from_millis(300);
+const CLIENT_QUIC_CLOSE_FALLBACK_DRAIN: Duration = Duration::from_millis(50);
 const MOVIE_VIDEO_QUEUE_MAX_FRAMES: usize = 8;
 const CRITICAL_INPUT_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(2),
@@ -790,20 +792,22 @@ impl<T: InvokeUiSession> Remote<T> {
                                 quic_keyframe_barrier: quic_stats.and_then(|stats| {
                                     stats.reliable_keyframe_barrier.then(|| {
                                         format!(
-                                            "{}/{}/{}/{}",
+                                            "{}/{}/{}/{}/{}",
                                             stats.video_keyframe_barrier_held,
                                             stats.video_keyframe_barrier_released,
                                             stats.video_keyframe_barrier_timeouts,
                                             stats.video_keyframe_barrier_overflows,
+                                            stats.video_keyframe_barrier_gap_events,
                                         )
                                     })
                                 }),
                                 #[cfg(feature = "quic-transport")]
                                 quic_receiver_recovery: quic_stats.map(|stats| {
                                     format!(
-                                        "{}/{}",
+                                        "{}/{}/{}",
                                         stats.video_source_frame_gaps,
-                                        stats.video_recovery_suppressed_frames
+                                        stats.video_recovery_suppressed_frames,
+                                        stats.video_keyframe_barrier_gap_skipped_frames,
                                     )
                                 }),
                                 #[cfg(feature = "quic-transport")]
@@ -817,19 +821,19 @@ impl<T: InvokeUiSession> Remote<T> {
                                 #[cfg(feature = "quic-transport")]
                                 quic_sender_admission: quic_stats.and_then(|stats| {
                                     (stats.video_datagram_frames_sent > 0
-                                        || stats.video_datagram_frames_rejected > 0)
+                                        || stats.video_datagram_frames_rejected_active > 0)
                                         .then(|| {
                                             format!(
                                                 "{}/{}",
                                                 stats.video_datagram_frames_sent,
-                                                stats.video_datagram_frames_rejected,
+                                                stats.video_datagram_frames_rejected_active,
                                             )
                                         })
                                 }),
                                 #[cfg(feature = "quic-transport")]
                                 quic_sender_frame: quic_stats.and_then(|stats| {
                                     (stats.video_datagram_frames_sent > 0
-                                        || stats.video_datagram_frames_rejected > 0)
+                                        || stats.video_datagram_frames_rejected_active > 0)
                                         .then(|| {
                                             format!(
                                                 "{}KB/{}f peak {}KB/{}f",
@@ -841,9 +845,23 @@ impl<T: InvokeUiSession> Remote<T> {
                                         })
                                 }),
                                 #[cfg(feature = "quic-transport")]
+                                quic_sender_percentiles: quic_stats.and_then(|stats| {
+                                    (stats.video_datagram_frame_bytes_p99 > 0
+                                        || stats.video_datagram_required_bytes_p99 > 0)
+                                        .then(|| {
+                                            format!(
+                                                "D {}/{}KB R {}/{}KB",
+                                                stats.video_datagram_frame_bytes_p95 / 1024,
+                                                stats.video_datagram_frame_bytes_p99 / 1024,
+                                                stats.video_datagram_required_bytes_p95 / 1024,
+                                                stats.video_datagram_required_bytes_p99 / 1024,
+                                            )
+                                        })
+                                }),
+                                #[cfg(feature = "quic-transport")]
                                 quic_sender_space: quic_stats.and_then(|stats| {
                                     (stats.video_datagram_frames_sent > 0
-                                        || stats.video_datagram_frames_rejected > 0)
+                                        || stats.video_datagram_frames_rejected_active > 0)
                                         .then(|| {
                                             format!(
                                                 "q {}/{}KB age {}ms free {}/{}KB",
@@ -1148,6 +1166,19 @@ impl<T: InvokeUiSession> Remote<T> {
                     self.sent_close_reason
                 );
                 self.send_close_reason(peer, "").await;
+                #[cfg(feature = "quic-transport")]
+                if peer.is_quic() {
+                    if peer.wait_quic_closed(CLIENT_QUIC_CLOSE_ACK_TIMEOUT).await {
+                        log::info!("diag client QUIC close acknowledged by peer");
+                    } else {
+                        log::warn!(
+                            "diag client QUIC close acknowledgement timed out after {}ms; sending transport close",
+                            CLIENT_QUIC_CLOSE_ACK_TIMEOUT.as_millis()
+                        );
+                        peer.begin_quic_teardown(b"client session closing");
+                        tokio::time::sleep(CLIENT_QUIC_CLOSE_FALLBACK_DRAIN).await;
+                    }
+                }
                 return false;
             }
             Data::Login((os_username, os_password, password, remember)) => {
@@ -2239,7 +2270,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                 self.handler.refresh_video(display as _);
                             }
                             log::warn!(
-                                "Movie source clock regressed: display={}, stream_id={}, frame_id={}, previous_capture_ms={}, current_capture_ms={}",
+                                "Movie source clock regressed; requesting full stream refresh: display={}, stream_id={}, frame_id={}, previous_capture_ms={}, current_capture_ms={}",
                                 display,
                                 vf.stream_id,
                                 vf.frame_id,
@@ -2276,19 +2307,23 @@ impl<T: InvokeUiSession> Remote<T> {
                         drop(video_queue);
                         if dropped_frames > 0 {
                             if movie_mode {
-                                *thread.discard_queue.write().unwrap() = true;
-                            }
-                            thread
-                                .video_feedback
-                                .lock()
-                                .unwrap()
-                                .record_drops(dropped_frames);
-                            if !movie_mode
-                                || client::movie_video_refresh_due(
+                                if !client::recover_movie_queue_drops(
+                                    &self.handler,
+                                    &thread.video_feedback,
                                     &thread.movie_queue_refresh,
-                                    std::time::Instant::now(),
-                                )
-                            {
+                                    display,
+                                    dropped_frames,
+                                    "arrival-overflow",
+                                ) {
+                                    *thread.discard_queue.write().unwrap() = true;
+                                    self.handler.refresh_video(display as _);
+                                }
+                            } else {
+                                thread
+                                    .video_feedback
+                                    .lock()
+                                    .unwrap()
+                                    .record_drops(dropped_frames);
                                 self.handler.refresh_video(display as _);
                             }
                         }

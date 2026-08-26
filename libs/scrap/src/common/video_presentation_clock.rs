@@ -6,10 +6,32 @@ const LATE_TOLERANCE_PERIODS: i64 = 3;
 const MOVIE_PLAYOUT_DELAY_NS: i64 = 50_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PresentationResetReason {
+    None,
+    Initial,
+    SourceRegressed,
+    Late,
+    Future,
+}
+
+impl PresentationResetReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Initial => "initial",
+            Self::SourceRegressed => "source-regressed",
+            Self::Late => "late",
+            Self::Future => "future",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PresentationSchedule {
     pub target_ns: i64,
     pub source_clock: bool,
     pub reset: bool,
+    pub reset_reason: PresentationResetReason,
 }
 
 #[derive(Debug)]
@@ -68,6 +90,7 @@ impl VideoPresentationClock {
                 target_ns: 0,
                 source_clock: false,
                 reset: false,
+                reset_reason: PresentationResetReason::None,
             };
         }
         let Some(capture_time_ms) = capture_time_ms else {
@@ -80,7 +103,14 @@ impl VideoPresentationClock {
 
         let source_regressed =
             self.anchor_capture_time_ms.is_some() && capture_time_ms < self.last_capture_time_ms;
-        let mut reset = source_regressed || self.anchor_capture_time_ms.is_none();
+        let mut reset_reason = if source_regressed {
+            PresentationResetReason::SourceRegressed
+        } else if self.anchor_capture_time_ms.is_none() {
+            PresentationResetReason::Initial
+        } else {
+            PresentationResetReason::None
+        };
+        let mut reset = reset_reason != PresentationResetReason::None;
         let reset_lead_ns = if self.movie_mode {
             MOVIE_PLAYOUT_DELAY_NS.max(self.refresh_period_ns)
         } else {
@@ -101,8 +131,13 @@ impl VideoPresentationClock {
         );
         let future_limit_ns =
             now_ns.saturating_add(MAX_FUTURE_LEAD_NS.max(self.refresh_period_ns.saturating_mul(3)));
-        if target_ns < late_limit_ns || target_ns > future_limit_ns {
+        if target_ns < late_limit_ns {
             reset = true;
+            reset_reason = PresentationResetReason::Late;
+            target_ns = now_ns.saturating_add(reset_lead_ns);
+        } else if target_ns > future_limit_ns {
+            reset = true;
+            reset_reason = PresentationResetReason::Future;
             target_ns = now_ns.saturating_add(reset_lead_ns);
         } else {
             target_ns = target_ns.max(now_ns);
@@ -120,6 +155,7 @@ impl VideoPresentationClock {
             target_ns,
             source_clock: true,
             reset,
+            reset_reason,
         }
     }
 
@@ -130,6 +166,7 @@ impl VideoPresentationClock {
             target_ns,
             source_clock: false,
             reset: false,
+            reset_reason: PresentationResetReason::None,
         }
     }
 
@@ -158,7 +195,7 @@ fn normalized_refresh_period(refresh_period_ns: i64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{VideoPresentationClock, DEFAULT_REFRESH_PERIOD_NS};
+    use super::{PresentationResetReason, VideoPresentationClock, DEFAULT_REFRESH_PERIOD_NS};
 
     #[test]
     fn schedules_sender_cadence_one_refresh_ahead() {
@@ -273,5 +310,33 @@ mod tests {
         assert!(first.reset);
         assert!(!late.reset);
         assert_eq!(late.target_ns, 80_050_000_000);
+    }
+
+    #[test]
+    fn movie_late_frame_restores_the_configured_playout_lead() {
+        let mut clock = VideoPresentationClock::new(16_666_667);
+        clock.set_movie_mode(true);
+        let _first = clock.schedule(Some(1_000), 90_000_000_000);
+        let late = clock.schedule(Some(1_033), 90_200_000_000);
+
+        assert!(late.reset);
+        assert_eq!(late.reset_reason, PresentationResetReason::Late);
+        assert_eq!(late.target_ns, 90_250_000_000);
+    }
+
+    #[test]
+    fn reports_future_and_source_regression_reset_reasons() {
+        let mut clock = VideoPresentationClock::new(16_666_667);
+        clock.set_movie_mode(true);
+        let initial = clock.schedule(Some(1_000), 100_000_000_000);
+        let future = clock.schedule(Some(1_200), 100_033_000_000);
+        let regressed = clock.schedule(Some(900), 100_100_000_000);
+
+        assert_eq!(initial.reset_reason, PresentationResetReason::Initial);
+        assert_eq!(future.reset_reason, PresentationResetReason::Future);
+        assert_eq!(
+            regressed.reset_reason,
+            PresentationResetReason::SourceRegressed
+        );
     }
 }

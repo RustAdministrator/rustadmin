@@ -4219,6 +4219,29 @@ impl VideoFeedbackTracker {
             .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
     }
 
+    fn movie_queue_reference_refresh(
+        &self,
+        display: usize,
+        dropped_frames: usize,
+    ) -> Option<VideoReferenceRefresh> {
+        let display = i32::try_from(display).ok()?;
+        if display != self.display
+            || self.stream_id == 0
+            || self.received_frame_id == 0
+            || dropped_frames == 0
+        {
+            return None;
+        }
+        Some(VideoReferenceRefresh {
+            display,
+            stream_id: self.stream_id,
+            received_frame_id: self.received_frame_id,
+            dropped_frames: u64::try_from(dropped_frames).unwrap_or(u64::MAX),
+            strict_recovery: true,
+            ..Default::default()
+        })
+    }
+
     pub(crate) fn record_display_refresh(&mut self, display_refresh_millihz: u32) {
         self.display_refresh_millihz = display_refresh_millihz;
     }
@@ -4305,6 +4328,59 @@ pub(crate) fn send_video_feedback<T: InvokeUiSession>(
     }
 }
 
+pub(crate) fn recover_movie_queue_drops<T: InvokeUiSession>(
+    session: &Session<T>,
+    tracker: &Arc<Mutex<VideoFeedbackTracker>>,
+    last_refresh: &Mutex<Option<std::time::Instant>>,
+    display: usize,
+    dropped_frames: usize,
+    reason: &'static str,
+) -> bool {
+    let request = {
+        let mut tracker = tracker.lock().unwrap();
+        tracker.record_drops(dropped_frames);
+        tracker.movie_queue_reference_refresh(display, dropped_frames)
+    };
+    send_video_feedback(session, tracker, true);
+    let Some(request) = request else {
+        log::warn!(
+            "Movie queue drop has no valid scoped recovery context: display={}, dropped={}, reason={}; falling back to full refresh",
+            display,
+            dropped_frames,
+            reason
+        );
+        return false;
+    };
+
+    // Keep feedback ahead of the advisory request on the reliable control
+    // channel so the host evaluates it against the current decode watermark.
+    if movie_video_refresh_due(last_refresh, std::time::Instant::now()) {
+        log::warn!(
+            "Movie queue drop requested scoped reference refresh: display={}, stream_id={}, received={}, dropped={}, strict=true, reason={}",
+            request.display,
+            request.stream_id,
+            request.received_frame_id,
+            request.dropped_frames,
+            reason
+        );
+        let mut misc = Misc::new();
+        misc.set_video_reference_refresh(request);
+        let mut message = Message::new();
+        message.set_misc(misc);
+        session.send(Data::Message(message));
+    } else {
+        log::debug!(
+            "Movie queue scoped reference refresh coalesced: display={}, stream_id={}, received={}, dropped={}, reason={}",
+            request.display,
+            request.stream_id,
+            request.received_frame_id,
+            request.dropped_frames,
+            reason
+        );
+    }
+    true
+}
+
 /// Start video thread.
 ///
 /// # Arguments
@@ -4370,15 +4446,17 @@ pub fn start_video_thread<F, T>(
                                     break Some(vf);
                                 };
                                 if stale_drops > 0 {
-                                    *discard_queue.write().unwrap() = true;
-                                    video_feedback.lock().unwrap().record_drops(stale_drops);
-                                    if movie_video_refresh_due(
+                                    if !recover_movie_queue_drops(
+                                        &session,
+                                        &video_feedback,
                                         &movie_queue_refresh,
-                                        std::time::Instant::now(),
+                                        display,
+                                        stale_drops,
+                                        "stale-obsolete",
                                     ) {
+                                        *discard_queue.write().unwrap() = true;
                                         session.refresh_video(display as _);
                                     }
-                                    send_video_feedback(&session, &video_feedback, true);
                                 }
                                 if discard_queue.read().unwrap().clone() {
                                     continue;
@@ -6188,6 +6266,30 @@ mod video_feedback_tests {
         tracker.record_received(&frame(7, 1, 0));
         tracker.record_drops(3);
         assert_eq!(tracker.snapshot().dropped_frames, 3);
+    }
+
+    #[test]
+    fn movie_queue_drop_builds_advisory_scoped_refresh() {
+        let mut tracker = VideoFeedbackTracker::default();
+        tracker.record_received(&frame(7, 42, 0));
+        let request = tracker.movie_queue_reference_refresh(0, 3).unwrap();
+
+        assert_eq!(request.display, 0);
+        assert_eq!(request.stream_id, 7);
+        assert_eq!(request.received_frame_id, 42);
+        assert_eq!(request.dropped_frames, 3);
+        assert!(request.strict_recovery);
+    }
+
+    #[test]
+    fn movie_queue_drop_rejects_invalid_scoped_refresh_context() {
+        let tracker = VideoFeedbackTracker::default();
+        assert!(tracker.movie_queue_reference_refresh(0, 1).is_none());
+
+        let mut tracker = VideoFeedbackTracker::default();
+        tracker.record_received(&frame(7, 42, 0));
+        assert!(tracker.movie_queue_reference_refresh(1, 1).is_none());
+        assert!(tracker.movie_queue_reference_refresh(0, 0).is_none());
     }
 
     #[test]

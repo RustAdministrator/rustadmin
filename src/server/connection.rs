@@ -3,7 +3,7 @@ use super::login_failure_check::try_acquire_os_credential_login_gate;
 use super::login_failure_check::{
     evaluate_os_credential_policy, record_os_credential_failure, FailureScope,
 };
-use super::video_qos::VideoTransportLossSample;
+use super::video_qos::{VideoDatagramAdmissionSample, VideoTransportLossSample};
 use super::{input_service::*, *};
 #[cfg(feature = "unix-file-copy-paste")]
 use crate::clipboard::try_empty_clipboard_files;
@@ -88,6 +88,8 @@ type QueuedVideoMessage = (Instant, Arc<Message>);
 const VIDEO_QUEUE_CAPACITY: usize = 8;
 const SERVER_ASYNC_OUTBOX_CAPACITY: usize = 256;
 const SERVER_VIDEO_LATEST_KEY_FALLBACK: u64 = 1 << 63;
+#[cfg(feature = "quic-transport")]
+const QUIC_COVERING_KEYFRAME_MAX_AGE_US: u64 = 250_000;
 const SERVER_CLOSE_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 const MOVIE_MODE_HOST_CAPABLE: bool = true;
 
@@ -226,6 +228,159 @@ mod video_queue_tests {
         assert!(!full_movie_quic_features_capable(4, false, true));
         assert!(!full_movie_quic_features_capable(4, true, false));
         assert!(full_movie_quic_features_capable(4, true, true));
+    }
+
+    #[test]
+    fn advisory_refresh_is_suppressed_when_keyframe_exceeds_half_cwnd() {
+        assert!(should_suppress_quic_advisory_refresh(
+            1, false, 0, 50_000, 30_000,
+        ));
+        assert!(should_suppress_quic_advisory_refresh(
+            1, false, 0, 12_000, 117_000,
+        ));
+        assert!(!should_suppress_quic_advisory_refresh(
+            1, false, 0, 60_000, 30_000,
+        ));
+    }
+
+    #[test]
+    fn suppressed_advisory_refresh_does_not_consume_recovery_state() {
+        let start = Instant::now();
+        let mut controller = VideoDeliveryController::default();
+        controller.on_frame_sent(
+            &VideoFrame {
+                display: 0,
+                stream_id: 7,
+                frame_id: 10,
+                ..Default::default()
+            },
+            start,
+        );
+        controller.on_feedback(
+            &VideoFeedback {
+                display: 0,
+                stream_id: 7,
+                received_frame_id: 8,
+                decoded_frame_id: 8,
+                render_submitted_frame_id: 8,
+                ..Default::default()
+            },
+            start,
+        );
+        let before = controller.snapshot_display(0);
+        let request = VideoReferenceRefresh {
+            display: 0,
+            stream_id: 7,
+            received_frame_id: 9,
+            dropped_frames: 1,
+            strict_recovery: false,
+            ..Default::default()
+        };
+        let action = controller
+            .on_reference_refresh_request(&request, start + Duration::from_millis(1), 10)
+            .unwrap()
+            .unwrap();
+        assert!(should_suppress_quic_advisory_refresh(
+            request.dropped_frames,
+            request.strict_recovery,
+            action.recovery_reissue,
+            12_000,
+            117_000,
+        ));
+        controller.restore_display(0, before.clone());
+        assert_eq!(controller.snapshot_display(0), before);
+
+        let strict = VideoReferenceRefresh {
+            strict_recovery: true,
+            ..request
+        };
+        let strict_action = controller
+            .on_reference_refresh_request(&strict, start + Duration::from_millis(2), 10)
+            .unwrap()
+            .unwrap();
+        assert!(!should_suppress_quic_advisory_refresh(
+            strict.dropped_frames,
+            strict.strict_recovery,
+            strict_action.recovery_reissue,
+            12_000,
+            117_000,
+        ));
+    }
+
+    #[test]
+    fn strict_and_reissued_refreshes_bypass_quic_cwnd_suppression() {
+        assert!(!should_suppress_quic_advisory_refresh(
+            1, true, 0, 10_000, 30_000,
+        ));
+        assert!(!should_suppress_quic_advisory_refresh(
+            1, false, 1, 10_000, 30_000,
+        ));
+        assert!(!should_suppress_quic_advisory_refresh(
+            0, false, 0, 10_000, 30_000,
+        ));
+    }
+
+    #[cfg(feature = "quic-transport")]
+    #[test]
+    fn strict_refresh_coalesces_only_with_a_fresh_covering_reliable_keyframe() {
+        let request = VideoReferenceRefresh {
+            display: 0,
+            stream_id: 7,
+            received_frame_id: 100,
+            strict_recovery: true,
+            ..Default::default()
+        };
+        let covering = hbb_common::transport::quic::ReliableKeyframeMark {
+            display: 0,
+            stream_id: 7,
+            barrier_epoch: 100,
+            age_us: 17_000,
+        };
+        assert!(should_coalesce_quic_strict_refresh(
+            &request,
+            Some(covering)
+        ));
+        assert!(!should_coalesce_quic_strict_refresh(
+            &VideoReferenceRefresh {
+                strict_recovery: false,
+                ..request.clone()
+            },
+            Some(covering),
+        ));
+        assert!(!should_coalesce_quic_strict_refresh(
+            &request,
+            Some(hbb_common::transport::quic::ReliableKeyframeMark {
+                barrier_epoch: 99,
+                ..covering
+            }),
+        ));
+        assert!(!should_coalesce_quic_strict_refresh(
+            &request,
+            Some(hbb_common::transport::quic::ReliableKeyframeMark {
+                stream_id: 8,
+                ..covering
+            }),
+        ));
+        assert!(!should_coalesce_quic_strict_refresh(
+            &request,
+            Some(hbb_common::transport::quic::ReliableKeyframeMark {
+                display: 1,
+                ..covering
+            }),
+        ));
+        assert!(!should_coalesce_quic_strict_refresh(
+            &request,
+            Some(hbb_common::transport::quic::ReliableKeyframeMark {
+                age_us: QUIC_COVERING_KEYFRAME_MAX_AGE_US + 1,
+                ..covering
+            }),
+        ));
+    }
+
+    #[test]
+    fn transport_counter_delta_handles_counter_reset() {
+        assert_eq!(transport_counter_delta(15, 10), 5);
+        assert_eq!(transport_counter_delta(3, 10), 3);
     }
 
     #[test]
@@ -589,10 +744,15 @@ const PENDING_PERMISSION_REQUEST_TIMEOUT_SECS: u64 = 120;
 const VIDEO_FEEDBACK_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_VIDEO_FEEDBACK_DISPLAYS: usize = 32;
 const VIDEO_DELIVERY_TICK_INTERVAL: Duration = Duration::from_millis(100);
+const QUIC_ADMISSION_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 const VIDEO_DELIVERY_DEFAULT_NETWORK_DELAY_MS: u32 = 250;
 const VIDEO_DELIVERY_MIN_PROGRESS_TIMEOUT: Duration = Duration::from_millis(500);
 const VIDEO_DELIVERY_MAX_PROGRESS_TIMEOUT: Duration = Duration::from_secs(4);
 const VIDEO_DELIVERY_MIN_REFRESH_COOLDOWN: Duration = Duration::from_secs(1);
+const VIDEO_DELIVERY_MAX_RECOVERY_REISSUES: u8 = 2;
+const VIDEO_DELIVERY_REISSUE_COOLDOWN_MULTIPLIER: u32 = 3;
+const VIDEO_DELIVERY_RECOVERY_CYCLE_COOLDOWN: Duration = Duration::from_secs(10);
+const QUIC_ADVISORY_REFRESH_CWND_MULTIPLIER: u64 = 2;
 // Feedback can be emitted after receive but before asynchronous decode/render.
 // Older viewers may never send the final same-frame update on an idle desktop.
 const VIDEO_DELIVERY_PIPELINE_SLACK_FRAMES: u64 = 2;
@@ -601,6 +761,23 @@ const VIDEO_DELIVERY_PIPELINE_SLACK_FRAMES: u64 = 2;
 struct VideoFeedbackDiagnostics {
     feedback: VideoFeedback,
     last_log: Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct QuicVideoSenderSnapshot {
+    replacements: u64,
+    reference_resets: u64,
+    reliable_keyframes: u64,
+    lost_packets: u64,
+    sent_packets: u64,
+}
+
+fn transport_counter_delta(current: u64, previous: u64) -> u64 {
+    if current >= previous {
+        current - previous
+    } else {
+        current
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -628,30 +805,46 @@ impl VideoDeliveryPhase {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct VideoDeliveryState {
     stream_id: u64,
+    host_highest_sent_frame_id: u64,
     highest_sent_frame_id: u64,
     highest_decoded_frame_id: u64,
     highest_render_submitted_frame_id: u64,
     first_sent_at: Instant,
     decode_pending_since: Option<Instant>,
     last_refresh_at: Option<Instant>,
+    feedback_observed: bool,
+    recovery_target_frame_id: Option<u64>,
+    recovery_generation: u64,
+    recovery_reissues: u8,
+    recovery_progress_at: Option<Instant>,
+    last_sent_advance_at: Instant,
+    recovery_cycle_cooldown_until: Option<Instant>,
     phase: VideoDeliveryPhase,
     recovery_count: u64,
     latest_stall_ms: u64,
 }
 
 impl VideoDeliveryState {
-    fn new(stream_id: u64, highest_sent_frame_id: u64, now: Instant) -> Self {
+    fn new(stream_id: u64, host_highest_sent_frame_id: u64, now: Instant) -> Self {
         Self {
             stream_id,
-            highest_sent_frame_id,
+            host_highest_sent_frame_id,
+            highest_sent_frame_id: host_highest_sent_frame_id,
             highest_decoded_frame_id: 0,
             highest_render_submitted_frame_id: 0,
             first_sent_at: now,
             decode_pending_since: Some(now),
             last_refresh_at: None,
+            feedback_observed: false,
+            recovery_target_frame_id: None,
+            recovery_generation: 0,
+            recovery_reissues: 0,
+            recovery_progress_at: None,
+            last_sent_advance_at: now,
+            recovery_cycle_cooldown_until: None,
             phase: VideoDeliveryPhase::Starting,
             recovery_count: 0,
             latest_stall_ms: 0,
@@ -675,6 +868,65 @@ struct VideoRecoveryAction {
     highest_render_submitted_frame_id: u64,
     stalled_ms: u128,
     previous_phase: VideoDeliveryPhase,
+    recovery_generation: u64,
+    recovery_reissue: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VideoReferenceRefreshError {
+    InvalidRequest,
+    UnknownDisplay,
+    StaleStream,
+    StaleRequest,
+}
+
+impl VideoReferenceRefreshError {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "invalid request",
+            Self::UnknownDisplay => "unknown display",
+            Self::StaleStream => "stale stream",
+            Self::StaleRequest => "stale request",
+        }
+    }
+}
+
+fn should_record_transport_loss(
+    result: &Result<Option<VideoRecoveryAction>, VideoReferenceRefreshError>,
+) -> bool {
+    matches!(
+        result,
+        Ok(_) | Err(VideoReferenceRefreshError::StaleRequest)
+    )
+}
+
+fn should_suppress_quic_advisory_refresh(
+    dropped_frames: u64,
+    strict_recovery: bool,
+    recovery_reissue: u8,
+    congestion_window_bytes: u64,
+    reliable_keyframe_last_bytes: u64,
+) -> bool {
+    dropped_frames > 0
+        && !strict_recovery
+        && recovery_reissue == 0
+        && reliable_keyframe_last_bytes > 0
+        && congestion_window_bytes
+            < reliable_keyframe_last_bytes.saturating_mul(QUIC_ADVISORY_REFRESH_CWND_MULTIPLIER)
+}
+
+#[cfg(feature = "quic-transport")]
+fn should_coalesce_quic_strict_refresh(
+    request: &VideoReferenceRefresh,
+    mark: Option<hbb_common::transport::quic::ReliableKeyframeMark>,
+) -> bool {
+    request.strict_recovery
+        && mark.is_some_and(|mark| {
+            mark.display == request.display
+                && mark.stream_id == request.stream_id
+                && mark.barrier_epoch >= request.received_frame_id
+                && mark.age_us <= QUIC_COVERING_KEYFRAME_MAX_AGE_US
+        })
 }
 
 #[derive(Default)]
@@ -699,6 +951,101 @@ impl VideoDeliveryController {
         Self::progress_timeout(network_delay_ms).max(VIDEO_DELIVERY_MIN_REFRESH_COOLDOWN)
     }
 
+    fn recovery_reissue_timeout(network_delay_ms: u32) -> Duration {
+        Self::refresh_cooldown(network_delay_ms)
+            .saturating_mul(VIDEO_DELIVERY_REISSUE_COOLDOWN_MULTIPLIER)
+    }
+
+    fn clear_recovery_cycle(state: &mut VideoDeliveryState) {
+        state.recovery_target_frame_id = None;
+        state.recovery_reissues = 0;
+        state.recovery_progress_at = None;
+    }
+
+    fn issue_recovery(
+        display: i32,
+        state: &mut VideoDeliveryState,
+        now: Instant,
+        network_delay_ms: u32,
+        stalled: Duration,
+    ) -> Option<VideoRecoveryAction> {
+        let refresh_cooldown = Self::refresh_cooldown(network_delay_ms);
+        let previous_phase = state.phase;
+        let recovery_reissue;
+
+        if !state.feedback_observed {
+            if state
+                .last_refresh_at
+                .is_some_and(|last| now.saturating_duration_since(last) < refresh_cooldown)
+            {
+                return None;
+            }
+            state.recovery_generation = state.recovery_generation.saturating_add(1);
+            state.recovery_target_frame_id = None;
+            state.recovery_reissues = 0;
+            state.recovery_progress_at = None;
+            recovery_reissue = 0;
+        } else if state
+            .recovery_target_frame_id
+            .is_some_and(|target| state.highest_decoded_frame_id <= target)
+        {
+            let retry_from = state
+                .recovery_progress_at
+                .into_iter()
+                .chain(state.last_refresh_at)
+                .max()
+                .unwrap_or(state.first_sent_at);
+            let retry_elapsed = now.saturating_duration_since(retry_from);
+            if retry_elapsed < Self::recovery_reissue_timeout(network_delay_ms) {
+                return None;
+            }
+            if state.recovery_reissues >= VIDEO_DELIVERY_MAX_RECOVERY_REISSUES {
+                Self::clear_recovery_cycle(state);
+                state.recovery_cycle_cooldown_until =
+                    now.checked_add(VIDEO_DELIVERY_RECOVERY_CYCLE_COOLDOWN);
+                state.phase = VideoDeliveryPhase::Healthy;
+                return None;
+            }
+            state.recovery_reissues = state.recovery_reissues.saturating_add(1);
+            recovery_reissue = state.recovery_reissues;
+        } else {
+            Self::clear_recovery_cycle(state);
+            state.phase = VideoDeliveryPhase::Healthy;
+            if state
+                .recovery_cycle_cooldown_until
+                .is_some_and(|until| now < until)
+                || state.host_highest_sent_frame_id == 0
+                || state
+                    .last_refresh_at
+                    .is_some_and(|last| now.saturating_duration_since(last) < refresh_cooldown)
+            {
+                return None;
+            }
+            state.recovery_cycle_cooldown_until = None;
+            state.recovery_generation = state.recovery_generation.saturating_add(1);
+            state.recovery_target_frame_id = Some(state.host_highest_sent_frame_id);
+            state.recovery_reissues = 0;
+            state.recovery_progress_at = Some(now);
+            recovery_reissue = 0;
+        }
+
+        state.phase = VideoDeliveryPhase::Recovering;
+        state.last_refresh_at = Some(now);
+        state.recovery_count = state.recovery_count.saturating_add(1);
+        state.latest_stall_ms = stalled.as_millis().min(u64::MAX as u128) as u64;
+        Some(VideoRecoveryAction {
+            display,
+            stream_id: state.stream_id,
+            highest_sent_frame_id: state.host_highest_sent_frame_id,
+            highest_decoded_frame_id: state.highest_decoded_frame_id,
+            highest_render_submitted_frame_id: state.highest_render_submitted_frame_id,
+            stalled_ms: stalled.as_millis(),
+            previous_phase,
+            recovery_generation: state.recovery_generation,
+            recovery_reissue,
+        })
+    }
+
     fn on_frame_sent(&mut self, frame: &VideoFrame, now: Instant) {
         if frame.stream_id == 0 || frame.frame_id == 0 || frame.display < 0 {
             return;
@@ -716,8 +1063,13 @@ impl VideoDeliveryController {
             *state = VideoDeliveryState::new(frame.stream_id, frame.frame_id, now);
             return;
         }
-        if frame.frame_id > state.highest_sent_frame_id
-            && state.highest_sent_frame_id <= state.highest_decoded_frame_id
+        let previous_host_frontier = state.host_highest_sent_frame_id;
+        if frame.frame_id > previous_host_frontier {
+            state.host_highest_sent_frame_id = frame.frame_id;
+            state.last_sent_advance_at = now;
+        }
+        if frame.frame_id > previous_host_frontier
+            && previous_host_frontier <= state.highest_decoded_frame_id
         {
             state.decode_pending_since = Some(now);
         }
@@ -730,12 +1082,14 @@ impl VideoDeliveryController {
         {
             return false;
         }
-        let state = self.by_display.entry(feedback.display).or_insert_with(|| {
-            VideoDeliveryState::new(feedback.stream_id, feedback.received_frame_id, now)
-        });
+        let state = self
+            .by_display
+            .entry(feedback.display)
+            .or_insert_with(|| VideoDeliveryState::new(feedback.stream_id, 0, now));
         if state.stream_id != feedback.stream_id {
-            *state = VideoDeliveryState::new(feedback.stream_id, feedback.received_frame_id, now);
+            *state = VideoDeliveryState::new(feedback.stream_id, 0, now);
         }
+        state.feedback_observed = true;
         if feedback.received_frame_id > state.highest_sent_frame_id
             && state.highest_sent_frame_id <= state.highest_decoded_frame_id
         {
@@ -747,13 +1101,25 @@ impl VideoDeliveryController {
         state.highest_sent_frame_id = state.highest_sent_frame_id.max(feedback.received_frame_id);
         if feedback.decoded_frame_id > state.highest_decoded_frame_id {
             state.highest_decoded_frame_id = feedback.decoded_frame_id;
+            state.recovery_cycle_cooldown_until = None;
+            if state.recovery_target_frame_id.is_some() {
+                state.recovery_progress_at = Some(now);
+            }
             state.decode_pending_since =
-                if state.highest_decoded_frame_id >= state.highest_sent_frame_id {
+                if state.highest_decoded_frame_id >= state.host_highest_sent_frame_id {
                     None
                 } else {
                     Some(now)
                 };
-            state.phase = VideoDeliveryPhase::Healthy;
+            if state
+                .recovery_target_frame_id
+                .is_some_and(|target| state.highest_decoded_frame_id > target)
+            {
+                Self::clear_recovery_cycle(state);
+                state.phase = VideoDeliveryPhase::Healthy;
+            } else if state.recovery_target_frame_id.is_none() {
+                state.phase = VideoDeliveryPhase::Healthy;
+            }
         }
         let first_render =
             state.highest_render_submitted_frame_id == 0 && feedback.render_submitted_frame_id > 0;
@@ -765,14 +1131,28 @@ impl VideoDeliveryController {
 
     fn poll_recovery(&mut self, now: Instant, network_delay_ms: u32) -> Vec<VideoRecoveryAction> {
         let progress_timeout = Self::progress_timeout(network_delay_ms);
-        let refresh_cooldown = Self::refresh_cooldown(network_delay_ms);
         let mut actions = Vec::new();
         for (&display, state) in self.by_display.iter_mut() {
-            if state.highest_sent_frame_id <= state.highest_decoded_frame_id {
+            if state.recovery_target_frame_id.is_some() {
+                let progress_at = state
+                    .recovery_progress_at
+                    .into_iter()
+                    .chain(state.last_refresh_at)
+                    .max()
+                    .unwrap_or(state.first_sent_at);
+                let stalled = now.saturating_duration_since(progress_at);
+                if let Some(action) =
+                    Self::issue_recovery(display, state, now, network_delay_ms, stalled)
+                {
+                    actions.push(action);
+                }
+                continue;
+            }
+            if state.host_highest_sent_frame_id <= state.highest_decoded_frame_id {
                 continue;
             }
             let undecoded_frames = state
-                .highest_sent_frame_id
+                .host_highest_sent_frame_id
                 .saturating_sub(state.highest_decoded_frame_id);
             if state.phase != VideoDeliveryPhase::Starting
                 && undecoded_frames <= VIDEO_DELIVERY_PIPELINE_SLACK_FRAMES
@@ -781,27 +1161,19 @@ impl VideoDeliveryController {
             }
             let progress_at = state.decode_pending_since.unwrap_or(state.first_sent_at);
             let stalled = now.saturating_duration_since(progress_at);
-            if stalled < progress_timeout
-                || state
-                    .last_refresh_at
-                    .is_some_and(|last| now.saturating_duration_since(last) < refresh_cooldown)
+            if stalled < progress_timeout {
+                continue;
+            }
+            if state.feedback_observed
+                && now.saturating_duration_since(state.last_sent_advance_at) >= progress_timeout
             {
                 continue;
             }
-            let previous_phase = state.phase;
-            state.phase = VideoDeliveryPhase::Recovering;
-            state.last_refresh_at = Some(now);
-            state.recovery_count = state.recovery_count.saturating_add(1);
-            state.latest_stall_ms = stalled.as_millis().min(u64::MAX as u128) as u64;
-            actions.push(VideoRecoveryAction {
-                display,
-                stream_id: state.stream_id,
-                highest_sent_frame_id: state.highest_sent_frame_id,
-                highest_decoded_frame_id: state.highest_decoded_frame_id,
-                highest_render_submitted_frame_id: state.highest_render_submitted_frame_id,
-                stalled_ms: stalled.as_millis(),
-                previous_phase,
-            });
+            if let Some(action) =
+                Self::issue_recovery(display, state, now, network_delay_ms, stalled)
+            {
+                actions.push(action);
+            }
         }
         actions
     }
@@ -811,39 +1183,34 @@ impl VideoDeliveryController {
         request: &VideoReferenceRefresh,
         now: Instant,
         network_delay_ms: u32,
-    ) -> Result<Option<VideoRecoveryAction>, &'static str> {
+    ) -> Result<Option<VideoRecoveryAction>, VideoReferenceRefreshError> {
         if !valid_video_reference_refresh(request) {
-            return Err("invalid request");
+            return Err(VideoReferenceRefreshError::InvalidRequest);
         }
         let Some(state) = self.by_display.get_mut(&request.display) else {
-            return Err("unknown display");
+            return Err(VideoReferenceRefreshError::UnknownDisplay);
         };
         if state.stream_id != request.stream_id {
-            return Err("stale stream");
+            return Err(VideoReferenceRefreshError::StaleStream);
         }
-        let refresh_cooldown = Self::refresh_cooldown(network_delay_ms);
-        if state
-            .last_refresh_at
-            .is_some_and(|last| now.saturating_duration_since(last) < refresh_cooldown)
-        {
-            return Ok(None);
+        if state.feedback_observed {
+            if request.received_frame_id <= state.highest_decoded_frame_id {
+                return Err(VideoReferenceRefreshError::StaleRequest);
+            }
         }
-        let previous_phase = state.phase;
-        let progress_at = state.decode_pending_since.unwrap_or(state.first_sent_at);
+        let progress_at = if state.recovery_target_frame_id.is_some() {
+            state
+                .recovery_progress_at
+                .into_iter()
+                .chain(state.last_refresh_at)
+                .max()
+                .unwrap_or(state.first_sent_at)
+        } else {
+            state.decode_pending_since.unwrap_or(state.first_sent_at)
+        };
         let stalled = now.saturating_duration_since(progress_at);
-        state.phase = VideoDeliveryPhase::Recovering;
-        state.last_refresh_at = Some(now);
-        state.recovery_count = state.recovery_count.saturating_add(1);
-        state.latest_stall_ms = stalled.as_millis().min(u64::MAX as u128) as u64;
-        Ok(Some(VideoRecoveryAction {
-            display: request.display,
-            stream_id: state.stream_id,
-            highest_sent_frame_id: state.highest_sent_frame_id,
-            highest_decoded_frame_id: state.highest_decoded_frame_id,
-            highest_render_submitted_frame_id: state.highest_render_submitted_frame_id,
-            stalled_ms: stalled.as_millis(),
-            previous_phase,
-        }))
+        let action = Self::issue_recovery(request.display, state, now, network_delay_ms, stalled);
+        Ok(action)
     }
 
     fn status(&self, display: i32) -> Option<VideoDeliveryStatus> {
@@ -861,6 +1228,18 @@ impl VideoDeliveryController {
             recovery_count: state.recovery_count,
             latest_stall_ms: state.latest_stall_ms,
         })
+    }
+
+    fn snapshot_display(&self, display: i32) -> Option<VideoDeliveryState> {
+        self.by_display.get(&display).cloned()
+    }
+
+    fn restore_display(&mut self, display: i32, state: Option<VideoDeliveryState>) {
+        if let Some(state) = state {
+            self.by_display.insert(display, state);
+        } else {
+            self.by_display.remove(&display);
+        }
     }
 }
 
@@ -1094,6 +1473,7 @@ pub struct Connection {
     video_feedback_by_display: HashMap<i32, VideoFeedbackDiagnostics>,
     video_feedback_capable: AtomicBool,
     video_delivery: VideoDeliveryController,
+    quic_video_sender_snapshot: Option<QuicVideoSenderSnapshot>,
 }
 
 impl ConnInner {
@@ -1354,6 +1734,7 @@ impl Connection {
             video_feedback_by_display: HashMap::new(),
             video_feedback_capable: AtomicBool::new(false),
             video_delivery: VideoDeliveryController::default(),
+            quic_video_sender_snapshot: None,
         };
         let addr = hbb_common::try_into_v4(addr);
         log::info!("#{} diag conn accepted: addr={}", conn.inner.id(), addr);
@@ -1439,6 +1820,7 @@ impl Connection {
         let mut second_timer = crate::rustdesk_interval(time::interval(Duration::from_secs(1)));
         let mut video_delivery_timer =
             crate::rustdesk_interval(time::interval(VIDEO_DELIVERY_TICK_INTERVAL));
+        let mut quic_admission_sample_at = Instant::now();
         let mut first_video_frame_sent = false;
         let mut stale_video_drop_log_at: Option<Instant> = None;
         let mut stale_video_drop_count = 0u64;
@@ -1917,7 +2299,7 @@ impl Connection {
                             .poll_recovery(Instant::now(), conn.network_delay);
                         for action in actions {
                             log::warn!(
-                                "#{} diag video delivery recovery: display={}, stream_id={}, sent={}, decoded={}, render_submitted={}, stalled_ms={}, network_delay_ms={}, previous_phase={:?}",
+                                "#{} diag video delivery recovery: display={}, stream_id={}, sent={}, decoded={}, render_submitted={}, stalled_ms={}, network_delay_ms={}, previous_phase={:?}, generation={}, reissue={}",
                                 conn.inner.id(),
                                 action.display,
                                 action.stream_id,
@@ -1926,10 +2308,19 @@ impl Connection {
                                 action.highest_render_submitted_frame_id,
                                 action.stalled_ms,
                                 conn.network_delay,
-                                action.previous_phase
+                                action.previous_phase,
+                                action.recovery_generation,
+                                action.recovery_reissue
                             );
                             conn.refresh_video_reference(action.display as usize);
                         }
+                    }
+                    let now = Instant::now();
+                    if now.saturating_duration_since(quic_admission_sample_at)
+                        >= QUIC_ADMISSION_SAMPLE_INTERVAL
+                    {
+                        conn.sample_quic_video_admission(now);
+                        quic_admission_sample_at = now;
                     }
                 }
                 _ = second_timer.tick() => {
@@ -4127,10 +4518,12 @@ impl Connection {
 
     fn handle_video_reference_refresh(&mut self, request: VideoReferenceRefresh) {
         let now = Instant::now();
+        #[cfg(feature = "quic-transport")]
+        let previous_delivery_state = self.video_delivery.snapshot_display(request.display);
         let result =
             self.video_delivery
                 .on_reference_refresh_request(&request, now, self.network_delay);
-        if result.is_ok() && request.dropped_frames > 0 {
+        if should_record_transport_loss(&result) && request.dropped_frames > 0 {
             video_service::VIDEO_QOS
                 .lock()
                 .unwrap()
@@ -4146,42 +4539,151 @@ impl Connection {
         }
         match result {
             Ok(Some(action)) => {
+                #[cfg(feature = "quic-transport")]
+                if let Some(stats) = self.stream.quic_stats() {
+                    if should_coalesce_quic_strict_refresh(
+                        &request,
+                        stats.reliable_keyframe_last_mark,
+                    ) {
+                        if let Some(mark) = stats.reliable_keyframe_last_mark {
+                            log::warn!(
+                                "#{} coalesced strict video reference refresh with reliable keyframe already in flight: display={}, stream_id={}, received={}, barrier_epoch={}, keyframe_age_us={}, generation={}",
+                                self.inner.id(),
+                                request.display,
+                                request.stream_id,
+                                request.received_frame_id,
+                                mark.barrier_epoch,
+                                mark.age_us,
+                                action.recovery_generation,
+                            );
+                        }
+                        return;
+                    }
+                    if should_suppress_quic_advisory_refresh(
+                        request.dropped_frames,
+                        request.strict_recovery,
+                        action.recovery_reissue,
+                        stats.congestion_window_bytes,
+                        stats.reliable_keyframe_last_bytes,
+                    ) {
+                        self.video_delivery
+                            .restore_display(request.display, previous_delivery_state);
+                        log::warn!(
+                            "#{} suppressed advisory video reference refresh under QUIC congestion without consuming recovery state: display={}, stream_id={}, received={}, dropped={}, cwnd={}, reliable_keyframe_last_bytes={}, required_cwnd={}, generation={}",
+                            self.inner.id(),
+                            request.display,
+                            request.stream_id,
+                            request.received_frame_id,
+                            request.dropped_frames,
+                            stats.congestion_window_bytes,
+                            stats.reliable_keyframe_last_bytes,
+                            stats
+                                .reliable_keyframe_last_bytes
+                                .saturating_mul(QUIC_ADVISORY_REFRESH_CWND_MULTIPLIER),
+                            action.recovery_generation,
+                        );
+                        return;
+                    }
+                }
                 log::warn!(
-                    "#{} diag video reference refresh requested by peer: display={}, stream_id={}, received={}, dropped={}, sent={}, decoded={}, render_submitted={}, stalled_ms={}, previous_phase={:?}",
+                    "#{} diag video reference refresh request accepted: display={}, stream_id={}, received={}, dropped={}, strict={}, sent={}, decoded={}, render_submitted={}, stalled_ms={}, previous_phase={:?}, generation={}, reissue={}",
                     self.inner.id(),
                     request.display,
                     request.stream_id,
                     request.received_frame_id,
                     request.dropped_frames,
+                    request.strict_recovery,
                     action.highest_sent_frame_id,
                     action.highest_decoded_frame_id,
                     action.highest_render_submitted_frame_id,
                     action.stalled_ms,
-                    action.previous_phase
+                    action.previous_phase,
+                    action.recovery_generation,
+                    action.recovery_reissue
                 );
                 self.refresh_video_reference(action.display as usize);
             }
             Ok(None) => {
                 log::debug!(
-                    "#{} suppressed video reference refresh by cooldown: display={}, stream_id={}, received={}, dropped={}",
+                    "#{} suppressed video reference refresh in current recovery cycle or cooldown: display={}, stream_id={}, received={}, dropped={}, strict={}",
                     self.inner.id(),
                     request.display,
                     request.stream_id,
                     request.received_frame_id,
-                    request.dropped_frames
+                    request.dropped_frames,
+                    request.strict_recovery,
                 );
             }
             Err(reason) => {
                 log::warn!(
-                    "#{} ignored video reference refresh: reason={}, display={}, stream_id={}, received={}, dropped={}",
+                    "#{} ignored video reference refresh: reason={}, display={}, stream_id={}, received={}, dropped={}, strict={}",
                     self.inner.id(),
-                    reason,
+                    reason.as_str(),
                     request.display,
                     request.stream_id,
                     request.received_frame_id,
-                    request.dropped_frames
+                    request.dropped_frames,
+                    request.strict_recovery,
                 );
             }
+        }
+    }
+
+    fn sample_quic_video_admission(&mut self, now: Instant) {
+        #[cfg(feature = "quic-transport")]
+        {
+            let Some(stats) = self.stream.quic_stats() else {
+                return;
+            };
+            let snapshot = QuicVideoSenderSnapshot {
+                replacements: stats.video_sender_replacements,
+                reference_resets: stats.video_sender_reference_resets,
+                reliable_keyframes: stats.reliable_keyframes_sent,
+                lost_packets: stats.lost_packets,
+                sent_packets: stats.sent_packets,
+            };
+            if let Some(previous) = self.quic_video_sender_snapshot {
+                let replacements =
+                    transport_counter_delta(snapshot.replacements, previous.replacements);
+                let reference_resets =
+                    transport_counter_delta(snapshot.reference_resets, previous.reference_resets);
+                if replacements > 0 || reference_resets > 0 {
+                    log::warn!(
+                        "#{} diag QUIC video sender replacement: replacements_delta={}, replacements_total={}, reference_resets_delta={}, reference_resets_total={}, reliable_keyframes_delta={}, lost_packets_delta={}, sent_packets_delta={}, cwnd={}, queued_bytes={}, queue_budget_bytes={}",
+                        self.inner.id(),
+                        replacements,
+                        snapshot.replacements,
+                        reference_resets,
+                        snapshot.reference_resets,
+                        transport_counter_delta(
+                            snapshot.reliable_keyframes,
+                            previous.reliable_keyframes,
+                        ),
+                        transport_counter_delta(snapshot.lost_packets, previous.lost_packets),
+                        transport_counter_delta(snapshot.sent_packets, previous.sent_packets),
+                        stats.congestion_window_bytes,
+                        stats.datagram_send_buffer_queued,
+                        stats.video_datagram_queue_budget,
+                    );
+                }
+            }
+            self.quic_video_sender_snapshot = Some(snapshot);
+            if self.effective_movie_mode != EffectiveMovieMode::Full {
+                return;
+            }
+            let sample = VideoDatagramAdmissionSample {
+                rejected_active: stats.video_datagram_frames_rejected_active,
+                frames_sent: stats.video_datagram_frames_sent,
+                queue_delay_us: stats.video_datagram_queue_delay_us,
+                queue_budget_bytes: stats.video_datagram_queue_budget,
+                queued_bytes: stats.datagram_send_buffer_queued,
+                datagram_bytes_p99: stats.video_datagram_frame_bytes_p99,
+                required_bytes_p99: stats.video_datagram_required_bytes_p99,
+            };
+            video_service::VIDEO_QOS
+                .lock()
+                .unwrap()
+                .user_datagram_admission_for_user_at(self.inner.id(), sample, now.into());
         }
     }
 
@@ -6719,6 +7221,9 @@ impl Connection {
             return;
         }
         self.closed = true;
+        #[cfg(feature = "quic-transport")]
+        self.stream
+            .begin_quic_teardown(b"rustadmin connection closing");
         // If voice A,B -> C, and A,B has voice call
         // B disconnects, C will reset the voice call input.
         //
@@ -8375,17 +8880,37 @@ mod test {
     }
 
     #[test]
-    fn video_delivery_startup_recovery_is_not_retried_for_same_pipeline_gap() {
+    fn video_delivery_recovery_cycle_is_not_reopened_without_decode_progress() {
         let start = Instant::now();
         let mut controller = VideoDeliveryController::default();
-        controller.on_frame_sent(
-            &VideoFrame {
+        for frame_id in 1..=4 {
+            controller.on_frame_sent(
+                &VideoFrame {
+                    stream_id: 7,
+                    frame_id,
+                    display: 0,
+                    ..Default::default()
+                },
+                start,
+            );
+        }
+        controller.on_feedback(
+            &VideoFeedback {
                 stream_id: 7,
-                frame_id: 1,
                 display: 0,
+                received_frame_id: 1,
                 ..Default::default()
             },
             start,
+        );
+        controller.on_frame_sent(
+            &VideoFrame {
+                stream_id: 7,
+                frame_id: 5,
+                display: 0,
+                ..Default::default()
+            },
+            start + Duration::from_millis(400),
         );
 
         assert!(controller
@@ -8398,6 +8923,8 @@ mod test {
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].display, 0);
         assert_eq!(actions[0].previous_phase, VideoDeliveryPhase::Starting);
+        assert_eq!(actions[0].recovery_generation, 1);
+        assert_eq!(actions[0].recovery_reissue, 0);
         assert_eq!(
             controller.status(0),
             Some(VideoDeliveryStatus {
@@ -8413,16 +8940,13 @@ mod test {
                 10,
             )
             .is_empty());
-        let retry = controller.poll_recovery(
-            start + VIDEO_DELIVERY_MIN_PROGRESS_TIMEOUT + Duration::from_secs(1),
-            10,
-        );
+        let retry = controller.poll_recovery(start + Duration::from_secs(2), 10);
         assert!(retry.is_empty());
         assert_eq!(controller.status(0).unwrap().recovery_count, 1);
     }
 
     #[test]
-    fn video_reference_refresh_request_is_scoped_and_rate_limited() {
+    fn video_reference_refresh_request_is_issued_once_per_unresolved_cycle() {
         let start = Instant::now();
         let mut controller = VideoDeliveryController::default();
         controller.on_frame_sent(
@@ -8430,6 +8954,17 @@ mod test {
                 stream_id: 7,
                 frame_id: 10,
                 display: 0,
+                ..Default::default()
+            },
+            start,
+        );
+        controller.on_feedback(
+            &VideoFeedback {
+                display: 0,
+                stream_id: 7,
+                received_frame_id: 8,
+                decoded_frame_id: 8,
+                render_submitted_frame_id: 8,
                 ..Default::default()
             },
             start,
@@ -8447,13 +8982,42 @@ mod test {
             .unwrap();
         assert_eq!(action.display, 0);
         assert_eq!(action.stream_id, 7);
+        assert_eq!(action.recovery_generation, 1);
         assert_eq!(controller.status(0).unwrap().recovery_count, 1);
 
         assert!(controller
-            .on_reference_refresh_request(&request, start + Duration::from_millis(100), 10)
+            .on_reference_refresh_request(&request, start + Duration::from_secs(2), 10)
             .unwrap()
             .is_none());
         assert_eq!(controller.status(0).unwrap().recovery_count, 1);
+
+        let reissue = controller
+            .on_reference_refresh_request(
+                &request,
+                start
+                    + Duration::from_millis(10)
+                    + VideoDeliveryController::recovery_reissue_timeout(10),
+                10,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(reissue.recovery_generation, 1);
+        assert_eq!(reissue.recovery_reissue, 1);
+
+        let mut newer_retry = request;
+        newer_retry.received_frame_id = 10;
+        assert!(controller
+            .on_reference_refresh_request(
+                &newer_retry,
+                start
+                    + Duration::from_millis(10)
+                    + VideoDeliveryController::recovery_reissue_timeout(10)
+                    + Duration::from_secs(1),
+                10,
+            )
+            .unwrap()
+            .is_none());
+        assert_eq!(controller.status(0).unwrap().recovery_count, 2);
     }
 
     #[test]
@@ -8478,12 +9042,12 @@ mod test {
         };
         assert_eq!(
             controller.on_reference_refresh_request(&request, start, 10),
-            Err("stale stream")
+            Err(VideoReferenceRefreshError::StaleStream)
         );
     }
 
     #[test]
-    fn decoded_feedback_preserves_reference_refresh_cooldown() {
+    fn video_reference_refresh_request_rejects_already_decoded_frame() {
         let start = Instant::now();
         let mut controller = VideoDeliveryController::default();
         controller.on_frame_sent(
@@ -8491,6 +9055,132 @@ mod test {
                 stream_id: 7,
                 frame_id: 10,
                 display: 0,
+                ..Default::default()
+            },
+            start,
+        );
+        controller.on_feedback(
+            &VideoFeedback {
+                stream_id: 7,
+                display: 0,
+                received_frame_id: 9,
+                decoded_frame_id: 9,
+                render_submitted_frame_id: 9,
+                ..Default::default()
+            },
+            start,
+        );
+        assert_eq!(
+            controller.on_reference_refresh_request(
+                &VideoReferenceRefresh {
+                    display: 0,
+                    stream_id: 7,
+                    received_frame_id: 9,
+                    dropped_frames: 1,
+                    ..Default::default()
+                },
+                start + Duration::from_secs(1),
+                10,
+            ),
+            Err(VideoReferenceRefreshError::StaleRequest)
+        );
+    }
+
+    #[test]
+    fn video_stream_replacement_resets_recovery_generation_and_request_history() {
+        let start = Instant::now();
+        let mut controller = VideoDeliveryController::default();
+        controller.on_frame_sent(
+            &VideoFrame {
+                stream_id: 7,
+                frame_id: 10,
+                display: 0,
+                ..Default::default()
+            },
+            start,
+        );
+        controller.on_feedback(
+            &VideoFeedback {
+                stream_id: 7,
+                display: 0,
+                received_frame_id: 8,
+                decoded_frame_id: 8,
+                render_submitted_frame_id: 8,
+                ..Default::default()
+            },
+            start,
+        );
+        assert!(controller
+            .on_reference_refresh_request(
+                &VideoReferenceRefresh {
+                    display: 0,
+                    stream_id: 7,
+                    received_frame_id: 9,
+                    dropped_frames: 1,
+                    ..Default::default()
+                },
+                start,
+                10,
+            )
+            .unwrap()
+            .is_some());
+
+        controller.on_frame_sent(
+            &VideoFrame {
+                stream_id: 8,
+                frame_id: 1,
+                display: 0,
+                ..Default::default()
+            },
+            start + Duration::from_secs(1),
+        );
+        controller.on_feedback(
+            &VideoFeedback {
+                stream_id: 8,
+                display: 0,
+                received_frame_id: 1,
+                ..Default::default()
+            },
+            start + Duration::from_secs(1),
+        );
+        let action = controller
+            .on_reference_refresh_request(
+                &VideoReferenceRefresh {
+                    display: 0,
+                    stream_id: 8,
+                    received_frame_id: 1,
+                    dropped_frames: 1,
+                    ..Default::default()
+                },
+                start + Duration::from_secs(2),
+                10,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(action.stream_id, 8);
+        assert_eq!(action.recovery_generation, 1);
+    }
+
+    #[test]
+    fn decoded_feedback_allows_a_newer_recovery_cycle_after_cooldown() {
+        let start = Instant::now();
+        let mut controller = VideoDeliveryController::default();
+        controller.on_frame_sent(
+            &VideoFrame {
+                stream_id: 7,
+                frame_id: 10,
+                display: 0,
+                ..Default::default()
+            },
+            start,
+        );
+        controller.on_feedback(
+            &VideoFeedback {
+                display: 0,
+                stream_id: 7,
+                received_frame_id: 8,
+                decoded_frame_id: 8,
+                render_submitted_frame_id: 8,
                 ..Default::default()
             },
             start,
@@ -8511,25 +9201,270 @@ mod test {
             &VideoFeedback {
                 display: 0,
                 stream_id: 7,
-                received_frame_id: 10,
-                decoded_frame_id: 10,
-                render_submitted_frame_id: 10,
+                received_frame_id: 11,
+                decoded_frame_id: 11,
+                render_submitted_frame_id: 11,
                 ..Default::default()
             },
             start + Duration::from_millis(20),
         );
-        assert!(controller
-            .on_reference_refresh_request(&request, start + Duration::from_millis(100), 10)
+        for frame_id in 12..=14 {
+            controller.on_frame_sent(
+                &VideoFrame {
+                    display: 0,
+                    stream_id: 7,
+                    frame_id,
+                    ..Default::default()
+                },
+                start + Duration::from_secs(2),
+            );
+        }
+        let next_request = VideoReferenceRefresh {
+            display: 0,
+            stream_id: 7,
+            received_frame_id: 13,
+            dropped_frames: 1,
+            ..Default::default()
+        };
+        let action = controller
+            .on_reference_refresh_request(&next_request, start + Duration::from_secs(2), 10)
             .unwrap()
-            .is_none());
+            .unwrap();
+        assert_eq!(action.recovery_generation, 2);
+        assert_eq!(controller.status(0).unwrap().recovery_count, 2);
+    }
+
+    #[test]
+    fn unresolved_recovery_reissues_are_bounded() {
+        let start = Instant::now();
+        let mut controller = VideoDeliveryController::default();
+        controller.on_frame_sent(
+            &VideoFrame {
+                display: 0,
+                stream_id: 7,
+                frame_id: 10,
+                ..Default::default()
+            },
+            start,
+        );
+        controller.on_feedback(
+            &VideoFeedback {
+                display: 0,
+                stream_id: 7,
+                received_frame_id: 8,
+                decoded_frame_id: 8,
+                render_submitted_frame_id: 8,
+                ..Default::default()
+            },
+            start,
+        );
+        let request = VideoReferenceRefresh {
+            display: 0,
+            stream_id: 7,
+            received_frame_id: 9,
+            dropped_frames: 1,
+            ..Default::default()
+        };
+        let first = controller
+            .on_reference_refresh_request(&request, start, 10)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.recovery_reissue, 0);
+
+        let retry_delay = VideoDeliveryController::recovery_reissue_timeout(10);
+        let first_retry = controller.poll_recovery(start + retry_delay, 10);
+        assert_eq!(first_retry.len(), 1);
+        assert_eq!(first_retry[0].recovery_reissue, 1);
+        let second_retry = controller.poll_recovery(start + retry_delay * 2, 10);
+        assert_eq!(second_retry.len(), 1);
+        assert_eq!(second_retry[0].recovery_reissue, 2);
+        assert!(controller
+            .poll_recovery(start + retry_delay * 3, 10)
+            .is_empty());
+        assert_eq!(controller.status(0).unwrap().recovery_count, 3);
+        assert!(controller.by_display[&0].recovery_target_frame_id.is_none());
+
+        let next_cycle = controller
+            .on_reference_refresh_request(
+                &VideoReferenceRefresh {
+                    received_frame_id: 10,
+                    ..request
+                },
+                start + retry_delay * 3 + VIDEO_DELIVERY_RECOVERY_CYCLE_COOLDOWN,
+                10,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(next_cycle.recovery_generation, 2);
+    }
+
+    #[test]
+    fn reference_refresh_without_feedback_keeps_legacy_cooldown() {
+        let start = Instant::now();
+        let mut controller = VideoDeliveryController::default();
+        controller.on_frame_sent(
+            &VideoFrame {
+                display: 0,
+                stream_id: 7,
+                frame_id: 10,
+                ..Default::default()
+            },
+            start,
+        );
+        let request = VideoReferenceRefresh {
+            display: 0,
+            stream_id: 7,
+            received_frame_id: 9,
+            dropped_frames: 1,
+            ..Default::default()
+        };
+        assert!(controller
+            .on_reference_refresh_request(&request, start, 10)
+            .unwrap()
+            .is_some());
         assert!(controller
             .on_reference_refresh_request(
                 &request,
-                start + Duration::from_millis(10) + VideoDeliveryController::refresh_cooldown(10),
+                start + VideoDeliveryController::refresh_cooldown(10),
                 10,
             )
             .unwrap()
             .is_some());
+        assert!(controller.by_display[&0].recovery_target_frame_id.is_none());
+    }
+
+    #[test]
+    fn recovery_target_uses_host_sent_frontier_not_peer_feedback() {
+        let start = Instant::now();
+        let mut controller = VideoDeliveryController::default();
+        controller.on_frame_sent(
+            &VideoFrame {
+                display: 0,
+                stream_id: 7,
+                frame_id: 10,
+                ..Default::default()
+            },
+            start,
+        );
+        controller.on_feedback(
+            &VideoFeedback {
+                display: 0,
+                stream_id: 7,
+                received_frame_id: 100,
+                decoded_frame_id: 8,
+                render_submitted_frame_id: 8,
+                ..Default::default()
+            },
+            start,
+        );
+        let action = controller
+            .on_reference_refresh_request(
+                &VideoReferenceRefresh {
+                    display: 0,
+                    stream_id: 7,
+                    received_frame_id: 99,
+                    dropped_frames: 1,
+                    ..Default::default()
+                },
+                start,
+                10,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(action.highest_sent_frame_id, 10);
+        assert_eq!(controller.by_display[&0].recovery_target_frame_id, Some(10));
+    }
+
+    #[test]
+    fn recovery_reissue_stall_age_uses_cycle_progress_not_session_age() {
+        let start = Instant::now();
+        let mut controller = VideoDeliveryController::default();
+        controller.on_frame_sent(
+            &VideoFrame {
+                display: 0,
+                stream_id: 7,
+                frame_id: 10,
+                ..Default::default()
+            },
+            start,
+        );
+        controller.on_feedback(
+            &VideoFeedback {
+                display: 0,
+                stream_id: 7,
+                received_frame_id: 8,
+                decoded_frame_id: 8,
+                render_submitted_frame_id: 8,
+                ..Default::default()
+            },
+            start,
+        );
+        let opened_at = start + Duration::from_secs(100);
+        controller
+            .on_reference_refresh_request(
+                &VideoReferenceRefresh {
+                    display: 0,
+                    stream_id: 7,
+                    received_frame_id: 9,
+                    dropped_frames: 1,
+                    ..Default::default()
+                },
+                opened_at,
+                10,
+            )
+            .unwrap()
+            .unwrap();
+        let retry_delay = VideoDeliveryController::recovery_reissue_timeout(10);
+        let action = controller.poll_recovery(opened_at + retry_delay, 10);
+        assert_eq!(action.len(), 1);
+        assert_eq!(action[0].stalled_ms, retry_delay.as_millis());
+    }
+
+    #[test]
+    fn idle_feedback_gap_does_not_start_automatic_recovery_cycle() {
+        let start = Instant::now();
+        let mut controller = VideoDeliveryController::default();
+        for frame_id in 1..=5 {
+            controller.on_frame_sent(
+                &VideoFrame {
+                    display: 0,
+                    stream_id: 7,
+                    frame_id,
+                    ..Default::default()
+                },
+                start,
+            );
+        }
+        controller.on_feedback(
+            &VideoFeedback {
+                display: 0,
+                stream_id: 7,
+                received_frame_id: 5,
+                decoded_frame_id: 2,
+                render_submitted_frame_id: 2,
+                ..Default::default()
+            },
+            start + Duration::from_millis(10),
+        );
+        assert!(controller
+            .poll_recovery(start + Duration::from_secs(1), 10)
+            .is_empty());
+        assert_eq!(controller.status(0).unwrap().recovery_count, 0);
+    }
+
+    #[test]
+    fn transport_loss_accounting_keeps_valid_stale_samples() {
+        assert!(should_record_transport_loss(&Ok(None)));
+        assert!(should_record_transport_loss(&Err(
+            VideoReferenceRefreshError::StaleRequest
+        )));
+        for error in [
+            VideoReferenceRefreshError::InvalidRequest,
+            VideoReferenceRefreshError::UnknownDisplay,
+            VideoReferenceRefreshError::StaleStream,
+        ] {
+            assert!(!should_record_transport_loss(&Err(error)));
+        }
     }
 
     #[test]
@@ -8838,7 +9773,7 @@ mod test {
             start + Duration::from_millis(100),
         );
 
-        for frame_id in 2..=4 {
+        for frame_id in 2..=3 {
             controller.on_frame_sent(
                 &VideoFrame {
                     stream_id: 7,
@@ -8849,6 +9784,15 @@ mod test {
                 start + Duration::from_millis(150),
             );
         }
+        controller.on_frame_sent(
+            &VideoFrame {
+                stream_id: 7,
+                frame_id: 4,
+                display: 0,
+                ..Default::default()
+            },
+            start + Duration::from_millis(600),
+        );
         assert!(controller
             .poll_recovery(start + Duration::from_millis(649), 10)
             .is_empty());
@@ -8858,18 +9802,27 @@ mod test {
                 .len(),
             1
         );
-        controller.on_feedback(
-            &VideoFeedback {
+        controller.on_frame_sent(
+            &VideoFrame {
                 stream_id: 7,
+                frame_id: 5,
                 display: 0,
-                received_frame_id: 4,
-                decoded_frame_id: 4,
-                render_submitted_frame_id: 4,
                 ..Default::default()
             },
             start + Duration::from_millis(700),
         );
-        for frame_id in 5..=7 {
+        controller.on_feedback(
+            &VideoFeedback {
+                stream_id: 7,
+                display: 0,
+                received_frame_id: 5,
+                decoded_frame_id: 5,
+                render_submitted_frame_id: 5,
+                ..Default::default()
+            },
+            start + Duration::from_millis(700),
+        );
+        for frame_id in 6..=7 {
             controller.on_frame_sent(
                 &VideoFrame {
                     stream_id: 7,
@@ -8880,11 +9833,17 @@ mod test {
                 start + Duration::from_millis(750),
             );
         }
+        controller.on_frame_sent(
+            &VideoFrame {
+                stream_id: 7,
+                frame_id: 8,
+                display: 0,
+                ..Default::default()
+            },
+            start + Duration::from_millis(1_600),
+        );
         assert!(controller
-            .poll_recovery(start + Duration::from_millis(1_249), 10)
-            .is_empty());
-        assert!(controller
-            .poll_recovery(start + Duration::from_millis(1_250), 10)
+            .poll_recovery(start + Duration::from_millis(1_649), 10)
             .is_empty());
         assert_eq!(
             controller
