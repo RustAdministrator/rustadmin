@@ -30,6 +30,7 @@ pub mod ipc;
 pub mod ui;
 mod version;
 pub use version::*;
+mod video_profile;
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
 mod bridge_generated;
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
@@ -47,6 +48,8 @@ mod clipboard_wayland_listener;
 #[cfg(not(any(target_os = "android", target_os = "ios", feature = "cli")))]
 pub mod core_main;
 mod custom_server;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod diagnostics;
 mod lang;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod port_forward;

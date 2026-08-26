@@ -16,6 +16,7 @@ class _TestRustadminImpl implements Rustadmin {
   int initInputSourceCalls = 0;
   String toolbarDragX = '';
   String toolbarOrientation = '';
+  bool qualityMonitorVisible = false;
 
   @override
   dynamic noSuchMethod(Invocation invocation) {
@@ -56,7 +57,15 @@ class _TestRustadminImpl implements Rustadmin {
       return Future<String>.value('{}');
     }
     if (name == #sessionGetToggleOption) {
-      return Future<bool?>.value(false);
+      final option = invocation.namedArguments[#arg];
+      return Future<bool?>.value(
+          option == 'show-quality-monitor' && qualityMonitorVisible);
+    }
+    if (name == #sessionToggleOption) {
+      if (invocation.namedArguments[#value] == 'show-quality-monitor') {
+        qualityMonitorVisible = !qualityMonitorVisible;
+      }
+      return Future<void>.value();
     }
     if (name == #mainSetLocalOption || name == #setLocalFlutterOption) {
       return Future<void>.value();
@@ -173,9 +182,11 @@ void main() {
     addTearDown(() => removeSharedStates(peerId));
     testImpl.toolbarDragX = '0.0';
     testImpl.toolbarOrientation = 'vertical';
+    testImpl.qualityMonitorVisible = false;
     addTearDown(() {
       testImpl.toolbarDragX = '';
       testImpl.toolbarOrientation = '';
+      testImpl.qualityMonitorVisible = false;
     });
 
     final rawKeyFocusNode = FocusNode(debugLabel: 'testRawKeyFocusNode');
@@ -243,6 +254,23 @@ void main() {
     rawKeyFocusNode.requestFocus();
     await tester.pump();
     expect(rawKeyFocusNode.hasFocus, isTrue);
+
+    expect(find.text('QM'), findsOneWidget);
+    final qmInk = find
+        .ancestor(of: find.text('QM'), matching: find.byType(Ink))
+        .first;
+    expect(
+      tester.getSize(qmInk),
+      const Size.square(32),
+      reason: 'QM must use the same stable square surface as toolbar icons',
+    );
+    expect(ffi.qualityMonitorModel.showListenable.value, isFalse);
+    await tester.tap(find.text('QM'));
+    await tester.pumpAndSettle();
+    expect(ffi.qualityMonitorModel.showListenable.value, isTrue);
+    await tester.tap(find.text('QM'));
+    await tester.pumpAndSettle();
+    expect(ffi.qualityMonitorModel.showListenable.value, isFalse);
 
     await tester.tap(
       find.byTooltip('Display Settings'),

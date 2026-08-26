@@ -449,6 +449,14 @@ Future<List<TRadioMenu<String>>> toolbarImageQuality(
       await bind.sessionGetImageQuality(sessionId: ffi.sessionId) ?? '';
   onChanged(String? value) async {
     if (value == null) return;
+    if (value != kRemoteImageQualityCustom) {
+      final videoProfile = await bind.sessionGetOption(
+          sessionId: ffi.sessionId, arg: kOptionVideoProfile);
+      if (videoProfile == kVideoProfileMovie) {
+        await bind.sessionSetVideoProfile(
+            sessionId: ffi.sessionId, value: kVideoProfileStandard);
+      }
+    }
     await bind.sessionSetImageQuality(sessionId: ffi.sessionId, value: value);
   }
 

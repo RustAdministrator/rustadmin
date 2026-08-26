@@ -1,4 +1,5 @@
 use super::*;
+use crate::video_profile::{VideoProfile, MOVIE_DEFAULT_TARGET_FPS};
 use scrap::codec::{Quality, BR_BALANCED, BR_BEST, BR_SPEED};
 use std::{
     collections::{HashSet, VecDeque},
@@ -47,8 +48,23 @@ const HISTORY_DELAY_LEN: usize = 2;
 const ADJUST_RATIO_INTERVAL: usize = 3; // Adjust quality ratio every 3 seconds
 const DYNAMIC_SCREEN_THRESHOLD: usize = 2; // Allow increase quality ratio if encode more than 2 times in one second
 const DELAY_THRESHOLD_150MS: u32 = 150; // 150ms is the threshold for good network condition
-const TRANSPORT_LOSS_ADAPTATION_COOLDOWN: Duration = Duration::from_secs(1);
-const TRANSPORT_LOSS_SYNTHETIC_DELAY_MS: u32 = 500;
+const TRANSPORT_LOSS_WINDOW: Duration = Duration::from_secs(10);
+const TRANSPORT_LOSS_BACKOFF_COOLDOWN: Duration = Duration::from_secs(5);
+const TRANSPORT_LOSS_BURST_DROPS: u64 = 3;
+const TRANSPORT_LOSS_MIN_RATE_DROPS: u64 = 3;
+const TRANSPORT_LOSS_MIN_OBSERVED_FRAMES: u64 = 30;
+const TRANSPORT_LOSS_RATE_PERCENT: u64 = 3;
+const TRANSPORT_LOSS_BACKOFF_NUMERATOR: u32 = 7;
+const TRANSPORT_LOSS_BACKOFF_DENOMINATOR: u32 = 8;
+const MAX_TRANSPORT_LOSS_WINDOWS: usize = 16;
+pub(crate) const MOVIE_BOOTSTRAP_FPS: u32 = STARTUP_SAFE_FPS;
+pub(crate) const MOVIE_BOOTSTRAP_TIMEOUT: Duration = STARTUP_SAFE_WINDOW;
+const MOVIE_FEEDBACK_FRESHNESS: Duration = Duration::from_secs(2);
+const MOVIE_PROBATION_HEALTHY: Duration = Duration::from_secs(2);
+const MOVIE_PRESSURE_DURATION: Duration = Duration::from_secs(2);
+const MOVIE_UPSHIFT_HEALTHY: Duration = Duration::from_secs(20);
+const MOVIE_MINIMUM_DWELL: Duration = Duration::from_secs(10);
+const MAX_MOVIE_FEEDBACK_DISPLAYS: usize = 16;
 
 #[derive(Default, Debug, Clone)]
 struct UserDelay {
@@ -58,6 +74,422 @@ struct UserDelay {
     rtt_calculator: RttCalculator,
     quick_increase_fps_count: usize,
     increase_fps_count: usize,
+}
+
+#[derive(Default, Debug, Clone)]
+struct MovieViewerFeedback {
+    queue_depth_frames: u32,
+    decode_time_us: u32,
+    render_submit_time_us: u32,
+    dropped_frames: u64,
+    display_refresh_millihz: u32,
+    presentation_late_frames: u64,
+    presentation_dropped_frames: u64,
+    presentation_jitter_p95_us: u32,
+    updated_at: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TransportLossKey {
+    display: i32,
+    stream_id: u64,
+}
+
+#[derive(Clone, Debug)]
+struct TransportLossWindow {
+    first_frame_id: u64,
+    highest_frame_id: u64,
+    dropped_frames: u64,
+    started_at: Instant,
+    updated_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct VideoTransportLossSample {
+    pub(crate) display: i32,
+    pub(crate) stream_id: u64,
+    pub(crate) received_frame_id: u64,
+    pub(crate) dropped_frames: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransportLossBackoffReason {
+    Burst,
+    Rate,
+}
+
+impl TransportLossBackoffReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Burst => "burst",
+            Self::Rate => "rate",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TransportLossObservation {
+    key: TransportLossKey,
+    observed_frames: u64,
+    dropped_frames: u64,
+    loss_permille: u64,
+    reason: Option<TransportLossBackoffReason>,
+    stale: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MovieViewerMetrics {
+    pub(crate) available: bool,
+    pub(crate) all_rendered: bool,
+    pub(crate) max_queue_depth_frames: u32,
+    pub(crate) max_decode_time_us: u32,
+    pub(crate) max_render_submit_time_us: u32,
+    pub(crate) dropped_frames: u64,
+    pub(crate) display_refresh_millihz: u32,
+    pub(crate) presentation_late_frames: u64,
+    pub(crate) presentation_dropped_frames: u64,
+    pub(crate) presentation_jitter_p95_us: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MovieCadenceSample {
+    pub(crate) now: Instant,
+    pub(crate) target_fps: u32,
+    pub(crate) host_pipeline_p95_us: u64,
+    pub(crate) host_iterations: u64,
+    pub(crate) host_missed_slots: u64,
+    pub(crate) viewer: MovieViewerMetrics,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MovieCadenceReason {
+    ProbationComplete,
+    HostCapacity,
+    ViewerCapacity,
+    DeliveryPressure,
+    HealthyUpshift,
+    TargetChanged,
+}
+
+impl MovieCadenceReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::ProbationComplete => "probation-complete",
+            Self::HostCapacity => "host-capacity",
+            Self::ViewerCapacity => "viewer-capacity",
+            Self::DeliveryPressure => "delivery-pressure",
+            Self::HealthyUpshift => "healthy-upshift",
+            Self::TargetChanged => "target-changed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MovieCadenceDecision {
+    pub(crate) previous_fps: u32,
+    pub(crate) current_fps: u32,
+    pub(crate) reason: MovieCadenceReason,
+}
+
+#[derive(Debug)]
+pub(crate) struct MovieCadenceController {
+    target_fps: u32,
+    tiers: Vec<u32>,
+    current_tier: u32,
+    last_change: Instant,
+    pressure_since: Option<Instant>,
+    healthy_since: Option<Instant>,
+    probation_complete: bool,
+    refresh_millihz: u32,
+    last_viewer_counters: Option<(u64, u64, u64)>,
+}
+
+impl MovieCadenceController {
+    pub(crate) fn new(target_fps: u32, refresh_millihz: u32, now: Instant) -> Self {
+        let target_fps = target_fps.clamp(MIN_FPS, MAX_FPS);
+        let tiers = movie_cadence_tiers(target_fps, refresh_millihz);
+        let current_tier = tiers
+            .iter()
+            .copied()
+            .find(|fps| *fps <= FPS)
+            .unwrap_or_else(|| tiers.last().copied().unwrap_or(target_fps));
+        Self {
+            target_fps,
+            tiers,
+            current_tier,
+            last_change: now,
+            pressure_since: None,
+            healthy_since: None,
+            probation_complete: current_tier == target_fps,
+            refresh_millihz,
+            last_viewer_counters: None,
+        }
+    }
+
+    pub(crate) fn target_fps(&self) -> u32 {
+        self.target_fps
+    }
+
+    pub(crate) fn current_tier(&self) -> u32 {
+        self.current_tier
+    }
+
+    pub(crate) fn reject_change(&mut self, previous_fps: u32, rejected_fps: u32, now: Instant) {
+        self.current_tier = previous_fps;
+        if rejected_fps > previous_fps {
+            self.tiers.retain(|fps| *fps <= previous_fps);
+            self.probation_complete = true;
+        }
+        self.last_change = now;
+        self.pressure_since = None;
+        self.healthy_since = None;
+    }
+
+    pub(crate) fn evaluate(&mut self, sample: MovieCadenceSample) -> Option<MovieCadenceDecision> {
+        if let Some(decision) = self.update_target(
+            sample.target_fps,
+            sample.viewer.display_refresh_millihz,
+            sample.now,
+        ) {
+            return Some(decision);
+        }
+        self.update_probation_tiers(sample.viewer.display_refresh_millihz);
+        let frame_period_us = 1_000_000u64 / u64::from(self.current_tier.max(1));
+        let missed_ratio = if sample.host_iterations == 0 {
+            0.0
+        } else {
+            sample.host_missed_slots as f64 / sample.host_iterations as f64
+        };
+        let (dropped_delta, late_delta, presentation_dropped_delta) =
+            self.viewer_counter_deltas(sample.viewer);
+        let at_or_below_baseline = self.target_fps >= FPS && self.current_tier <= FPS;
+        let host_pressure = if at_or_below_baseline {
+            sample.host_pipeline_p95_us > frame_period_us * 95 / 100 || missed_ratio > 0.20
+        } else {
+            sample.host_pipeline_p95_us > frame_period_us || missed_ratio > 0.10
+        };
+        let viewer_pressure = sample.viewer.available
+            && (sample.viewer.max_queue_depth_frames > 3
+                || u64::from(sample.viewer.max_decode_time_us) > frame_period_us * 95 / 100
+                || u64::from(sample.viewer.max_render_submit_time_us) > frame_period_us * 95 / 100
+                || u64::from(sample.viewer.presentation_jitter_p95_us) > frame_period_us / 2);
+        let delivery_pressure =
+            dropped_delta > 0 || late_delta > 0 || presentation_dropped_delta > 0;
+        let pressured = host_pressure || viewer_pressure || delivery_pressure;
+
+        if pressured {
+            self.healthy_since = None;
+            let pressure_since = *self.pressure_since.get_or_insert(sample.now);
+            if sample.now.saturating_duration_since(pressure_since) >= MOVIE_PRESSURE_DURATION {
+                let reason = if host_pressure {
+                    MovieCadenceReason::HostCapacity
+                } else if viewer_pressure {
+                    MovieCadenceReason::ViewerCapacity
+                } else {
+                    MovieCadenceReason::DeliveryPressure
+                };
+                if let Some(next) = self.next_lower_tier() {
+                    return self.change_tier(next, reason, sample.now);
+                }
+            }
+            return None;
+        }
+
+        self.pressure_since = None;
+        let Some(next) = self.next_higher_tier() else {
+            self.probation_complete = true;
+            self.healthy_since = None;
+            return None;
+        };
+        let next_period_us = 1_000_000u64 / u64::from(next.max(1));
+        let (host_headroom_percent, viewer_headroom_percent) = if self.probation_complete {
+            (65, 65)
+        } else {
+            (95, 90)
+        };
+        let healthy = sample.viewer.available
+            && sample.viewer.all_rendered
+            && sample.host_pipeline_p95_us > 0
+            && sample.host_pipeline_p95_us <= next_period_us * host_headroom_percent / 100
+            && sample.host_missed_slots == 0
+            && sample.viewer.max_queue_depth_frames <= 1
+            && u64::from(sample.viewer.max_decode_time_us)
+                <= next_period_us * viewer_headroom_percent / 100
+            && u64::from(sample.viewer.max_render_submit_time_us)
+                <= next_period_us * viewer_headroom_percent / 100;
+        if !healthy {
+            self.healthy_since = None;
+            return None;
+        }
+
+        let healthy_since = *self.healthy_since.get_or_insert(sample.now);
+        let healthy_required = if self.probation_complete {
+            MOVIE_UPSHIFT_HEALTHY
+        } else {
+            MOVIE_PROBATION_HEALTHY
+        };
+        if sample.now.saturating_duration_since(healthy_since) < healthy_required {
+            return None;
+        }
+        if self.probation_complete
+            && sample.now.saturating_duration_since(self.last_change) < MOVIE_MINIMUM_DWELL
+        {
+            return None;
+        }
+        let reason = if self.probation_complete {
+            MovieCadenceReason::HealthyUpshift
+        } else {
+            MovieCadenceReason::ProbationComplete
+        };
+        self.change_tier(next, reason, sample.now)
+    }
+
+    fn update_probation_tiers(&mut self, refresh_millihz: u32) {
+        if self.probation_complete
+            || refresh_millihz == 0
+            || refresh_millihz == self.refresh_millihz
+        {
+            return;
+        }
+        let tiers = movie_cadence_tiers(self.target_fps, refresh_millihz);
+        if tiers.contains(&self.current_tier) {
+            self.tiers = tiers;
+            self.refresh_millihz = refresh_millihz;
+        }
+    }
+
+    fn update_target(
+        &mut self,
+        target_fps: u32,
+        refresh_millihz: u32,
+        now: Instant,
+    ) -> Option<MovieCadenceDecision> {
+        let target_fps = target_fps.clamp(MIN_FPS, MAX_FPS);
+        if target_fps == self.target_fps {
+            return None;
+        }
+
+        let previous_target = self.target_fps;
+        self.target_fps = target_fps;
+        let mut tiers = movie_cadence_tiers(target_fps, refresh_millihz);
+        if target_fps > previous_target
+            && self.current_tier < target_fps
+            && !tiers.contains(&self.current_tier)
+        {
+            tiers.push(self.current_tier);
+            tiers.sort_unstable_by(|left, right| right.cmp(left));
+        }
+        self.tiers = tiers;
+        self.refresh_millihz = refresh_millihz;
+        self.pressure_since = None;
+        self.healthy_since = None;
+
+        if !self.tiers.contains(&self.current_tier) {
+            let next = self.tiers.first().copied().unwrap_or(target_fps);
+            return self.change_tier(next, MovieCadenceReason::TargetChanged, now);
+        }
+        self.probation_complete = self.current_tier >= target_fps;
+        None
+    }
+
+    fn viewer_counter_deltas(&mut self, viewer: MovieViewerMetrics) -> (u64, u64, u64) {
+        let current = (
+            viewer.dropped_frames,
+            viewer.presentation_late_frames,
+            viewer.presentation_dropped_frames,
+        );
+        let Some(previous) = self.last_viewer_counters.replace(current) else {
+            return (0, 0, 0);
+        };
+        (
+            monotonic_counter_delta(current.0, previous.0),
+            monotonic_counter_delta(current.1, previous.1),
+            monotonic_counter_delta(current.2, previous.2),
+        )
+    }
+
+    fn next_lower_tier(&self) -> Option<u32> {
+        let current = self
+            .tiers
+            .iter()
+            .position(|fps| *fps == self.current_tier)?;
+        self.tiers.get(current + 1).copied()
+    }
+
+    fn next_higher_tier(&self) -> Option<u32> {
+        let current = self
+            .tiers
+            .iter()
+            .position(|fps| *fps == self.current_tier)?;
+        current
+            .checked_sub(1)
+            .and_then(|index| self.tiers.get(index).copied())
+    }
+
+    fn change_tier(
+        &mut self,
+        next: u32,
+        reason: MovieCadenceReason,
+        now: Instant,
+    ) -> Option<MovieCadenceDecision> {
+        if next == self.current_tier {
+            return None;
+        }
+        let previous_fps = self.current_tier;
+        self.current_tier = next;
+        self.last_change = now;
+        self.pressure_since = None;
+        self.healthy_since = None;
+        self.probation_complete = true;
+        Some(MovieCadenceDecision {
+            previous_fps,
+            current_fps: next,
+            reason,
+        })
+    }
+}
+
+fn monotonic_counter_delta(current: u64, previous: u64) -> u64 {
+    if current >= previous {
+        current - previous
+    } else {
+        0
+    }
+}
+
+fn movie_cadence_tiers(target_fps: u32, refresh_millihz: u32) -> Vec<u32> {
+    const COMMON_TIERS: [u32; 8] = [60, 50, 48, 45, 40, 30, 25, 24];
+    let target_fps = target_fps.clamp(MIN_FPS, MAX_FPS);
+    let mut tiers: Vec<u32> = if refresh_millihz == 0 {
+        COMMON_TIERS
+            .into_iter()
+            .filter(|fps| *fps <= target_fps)
+            .take(1)
+            .collect()
+    } else {
+        COMMON_TIERS
+            .into_iter()
+            .filter(|fps| {
+                if *fps > target_fps {
+                    return false;
+                }
+                if *fps == FPS && target_fps >= FPS {
+                    return true;
+                }
+                let periods = refresh_millihz as f64 / (*fps as f64 * 1_000.0);
+                (periods - periods.round()).abs() <= 0.02
+            })
+            .collect()
+    };
+    if target_fps >= FPS && !tiers.contains(&FPS) {
+        tiers.push(FPS);
+    }
+    if tiers.is_empty() {
+        tiers.push(target_fps);
+    }
+    tiers.sort_unstable_by(|left, right| right.cmp(left));
+    tiers.dedup();
+    tiers
 }
 
 impl UserDelay {
@@ -91,6 +523,92 @@ impl UserDelay {
     }
 }
 
+fn observe_transport_loss(
+    windows: &mut HashMap<TransportLossKey, TransportLossWindow>,
+    sample: VideoTransportLossSample,
+    now: Instant,
+) -> TransportLossObservation {
+    let key = TransportLossKey {
+        display: sample.display,
+        stream_id: sample.stream_id,
+    };
+    windows.retain(|existing, _| {
+        existing.display != sample.display || existing.stream_id == sample.stream_id
+    });
+
+    if windows
+        .get(&key)
+        .is_some_and(|window| sample.received_frame_id <= window.highest_frame_id)
+    {
+        return TransportLossObservation {
+            key,
+            observed_frames: 0,
+            dropped_frames: 0,
+            loss_permille: 0,
+            reason: None,
+            stale: true,
+        };
+    }
+
+    if !windows.contains_key(&key) && windows.len() >= MAX_TRANSPORT_LOSS_WINDOWS {
+        if let Some(oldest) = windows
+            .iter()
+            .min_by_key(|(_, window)| window.updated_at)
+            .map(|(key, _)| *key)
+        {
+            windows.remove(&oldest);
+        }
+    }
+
+    let window = windows.entry(key).or_insert(TransportLossWindow {
+        first_frame_id: sample.received_frame_id,
+        highest_frame_id: sample.received_frame_id,
+        dropped_frames: 0,
+        started_at: now,
+        updated_at: now,
+    });
+    if now.saturating_duration_since(window.started_at) >= TRANSPORT_LOSS_WINDOW {
+        *window = TransportLossWindow {
+            first_frame_id: sample.received_frame_id,
+            highest_frame_id: sample.received_frame_id,
+            dropped_frames: 0,
+            started_at: now,
+            updated_at: now,
+        };
+    }
+    window.highest_frame_id = sample.received_frame_id;
+    window.dropped_frames = window.dropped_frames.saturating_add(sample.dropped_frames);
+    window.updated_at = now;
+
+    let observed_frames = window
+        .highest_frame_id
+        .saturating_sub(window.first_frame_id)
+        .saturating_add(1)
+        .max(window.dropped_frames)
+        .max(1);
+    let loss_permille = window.dropped_frames.saturating_mul(1_000) / observed_frames;
+    let reason = if sample.dropped_frames >= TRANSPORT_LOSS_BURST_DROPS {
+        Some(TransportLossBackoffReason::Burst)
+    } else if window.dropped_frames >= TRANSPORT_LOSS_MIN_RATE_DROPS
+        && observed_frames >= TRANSPORT_LOSS_MIN_OBSERVED_FRAMES
+        && window.dropped_frames.saturating_mul(100)
+            >= observed_frames.saturating_mul(TRANSPORT_LOSS_RATE_PERCENT)
+    {
+        Some(TransportLossBackoffReason::Rate)
+    } else {
+        None
+    };
+
+    TransportLossObservation {
+        key,
+        observed_frames,
+        dropped_frames: window.dropped_frames,
+        loss_permille,
+        reason,
+        stale: false,
+    }
+}
+
 // User session data structure
 #[derive(Default, Debug, Clone)]
 struct UserData {
@@ -104,6 +622,10 @@ struct UserData {
     video_render_started: bool,
     video_startup_instant: Option<Instant>,
     last_transport_loss_at: Option<Instant>,
+    transport_loss_windows: HashMap<TransportLossKey, TransportLossWindow>,
+    video_profile: VideoProfile,
+    movie_transport_capable: bool,
+    movie_feedback_by_display: HashMap<i32, MovieViewerFeedback>,
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +641,9 @@ struct DisplayData {
     encoder_backend: Option<String>,
     encoder_input: Option<String>,
     adjust_ratio_instant: Instant,
+    movie_target_fps: u32,
+    movie_pacing_fps: u32,
+    movie_host_pipeline_p95_us: u32,
 }
 
 impl Default for DisplayData {
@@ -135,6 +660,9 @@ impl Default for DisplayData {
             encoder_backend: None,
             encoder_input: None,
             adjust_ratio_instant: Instant::now(),
+            movie_target_fps: 0,
+            movie_pacing_fps: 0,
+            movie_host_pipeline_p95_us: 0,
         }
     }
 }
@@ -234,6 +762,34 @@ impl VideoQoS {
                     display.capture_frame.clone(),
                     display.encoder_backend.clone(),
                     display.encoder_input.clone(),
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn store_movie_runtime_status(
+        &mut self,
+        video_service_name: &str,
+        target_fps: u32,
+        pacing_fps: u32,
+        host_pipeline_p95_us: u64,
+    ) {
+        if let Some(display) = self.displays.get_mut(video_service_name) {
+            display.movie_target_fps = target_fps;
+            display.movie_pacing_fps = pacing_fps;
+            display.movie_host_pipeline_p95_us =
+                host_pipeline_p95_us.min(u64::from(u32::MAX)) as u32;
+        }
+    }
+
+    pub(crate) fn movie_runtime_status(&self, video_service_name: &str) -> (u32, u32, u32) {
+        self.displays
+            .get(video_service_name)
+            .map(|display| {
+                (
+                    display.movie_target_fps,
+                    display.movie_pacing_fps,
+                    display.movie_host_pipeline_p95_us,
                 )
             })
             .unwrap_or_default()
@@ -364,6 +920,69 @@ impl VideoQoS {
         log::info!("custom_fps fixed applied: user_id={id}, fps={fps}");
     }
 
+    pub(crate) fn user_video_profile(&mut self, id: i32, profile: VideoProfile) {
+        let Some(user) = self.users.get_mut(&id) else {
+            log::warn!(
+                "video profile ignored: unknown_user_id={id}, requested={}",
+                profile.config_value()
+            );
+            return;
+        };
+        let changed = user.video_profile != profile;
+        if changed {
+            user.delay = UserDelay::default();
+            user.auto_adjust_fps = None;
+            user.last_transport_loss_at = None;
+            user.transport_loss_windows.clear();
+            user.movie_feedback_by_display.clear();
+            user.video_render_started = false;
+        }
+        user.video_profile = profile;
+        if changed {
+            self.adjust_displays_for_user(id);
+        }
+        log::info!(
+            "video profile applied: user_id={id}, requested={}, adaptive_state_reset={changed}",
+            profile.config_value(),
+        );
+    }
+
+    pub(crate) fn user_movie_transport_capability(&mut self, id: i32, capable: bool) {
+        if let Some(user) = self.users.get_mut(&id) {
+            user.movie_transport_capable = capable;
+        }
+    }
+
+    pub(crate) fn user_video_feedback(&mut self, id: i32, feedback: &VideoFeedback) {
+        let Some(user) = self.users.get_mut(&id) else {
+            return;
+        };
+        if user.video_profile != VideoProfile::Movie {
+            return;
+        }
+        if !user
+            .movie_feedback_by_display
+            .contains_key(&feedback.display)
+            && user.movie_feedback_by_display.len() >= MAX_MOVIE_FEEDBACK_DISPLAYS
+        {
+            return;
+        }
+        user.movie_feedback_by_display.insert(
+            feedback.display,
+            MovieViewerFeedback {
+                queue_depth_frames: feedback.queue_depth_frames,
+                decode_time_us: feedback.decode_time_us,
+                render_submit_time_us: feedback.render_submit_time_us,
+                dropped_frames: feedback.dropped_frames,
+                display_refresh_millihz: feedback.display_refresh_millihz,
+                presentation_late_frames: feedback.presentation_late_frames,
+                presentation_dropped_frames: feedback.presentation_dropped_frames,
+                presentation_jitter_p95_us: feedback.presentation_jitter_p95_us,
+                updated_at: Some(Instant::now()),
+            },
+        );
+    }
+
     pub fn user_auto_adjust_fps(&mut self, id: i32, fps: u32) {
         if fps < MIN_FPS || fps > MAX_FPS {
             return;
@@ -450,35 +1069,81 @@ impl VideoQoS {
         first_render
     }
 
-    pub fn user_transport_loss(&mut self, id: i32, dropped_frames: u64) -> bool {
-        self.user_transport_loss_at(id, dropped_frames, Instant::now())
+    pub(crate) fn user_transport_loss(
+        &mut self,
+        id: i32,
+        sample: VideoTransportLossSample,
+    ) -> bool {
+        self.user_transport_loss_at(id, sample, Instant::now())
     }
 
-    fn user_transport_loss_at(&mut self, id: i32, dropped_frames: u64, now: Instant) -> bool {
-        if dropped_frames == 0 {
+    fn user_transport_loss_at(
+        &mut self,
+        id: i32,
+        sample: VideoTransportLossSample,
+        now: Instant,
+    ) -> bool {
+        if sample.dropped_frames == 0 {
             return false;
         }
         let highest_fps = self.user_requested_fps(id);
-        let (previous_fps, next_fps) = {
+        let (previous_fps, next_fps, observation, reason) = {
             let Some(user) = self.users.get_mut(&id) else {
                 return false;
             };
+            let observation = observe_transport_loss(&mut user.transport_loss_windows, sample, now);
+            if observation.stale {
+                log::debug!(
+                    "diag video qos transport loss ignored: user_id={}, display={}, stream_id={}, received_frame_id={}, dropped_frames={}, reason=stale-or-duplicate",
+                    id,
+                    sample.display,
+                    sample.stream_id,
+                    sample.received_frame_id,
+                    sample.dropped_frames,
+                );
+                return false;
+            }
+            let Some(reason) = observation.reason else {
+                log::debug!(
+                    "diag video qos transport loss observed: user_id={}, display={}, stream_id={}, received_frame_id={}, event_dropped={}, window_dropped={}, observed_frames={}, loss_permille={}, action=tolerated",
+                    id,
+                    sample.display,
+                    sample.stream_id,
+                    sample.received_frame_id,
+                    sample.dropped_frames,
+                    observation.dropped_frames,
+                    observation.observed_frames,
+                    observation.loss_permille,
+                );
+                return false;
+            };
+            user.transport_loss_windows.remove(&observation.key);
             if user.last_transport_loss_at.is_some_and(|last| {
-                now.saturating_duration_since(last) < TRANSPORT_LOSS_ADAPTATION_COOLDOWN
+                now.saturating_duration_since(last) < TRANSPORT_LOSS_BACKOFF_COOLDOWN
             }) {
+                log::debug!(
+                    "diag video qos transport loss observed: user_id={}, display={}, stream_id={}, received_frame_id={}, event_dropped={}, window_dropped={}, observed_frames={}, loss_permille={}, action=cooldown",
+                    id,
+                    sample.display,
+                    sample.stream_id,
+                    sample.received_frame_id,
+                    sample.dropped_frames,
+                    observation.dropped_frames,
+                    observation.observed_frames,
+                    observation.loss_permille,
+                );
                 return false;
             }
             user.last_transport_loss_at = Some(now);
             user.delay.quick_increase_fps_count = 0;
             user.delay.increase_fps_count = 0;
-            user.delay.add_delay(TRANSPORT_LOSS_SYNTHETIC_DELAY_MS);
             let previous_fps = user.delay.fps.unwrap_or(highest_fps);
             let next_fps = previous_fps
-                .saturating_mul(3)
-                .saturating_div(4)
+                .saturating_mul(TRANSPORT_LOSS_BACKOFF_NUMERATOR)
+                .saturating_div(TRANSPORT_LOSS_BACKOFF_DENOMINATOR)
                 .clamp(MIN_FPS, highest_fps);
             user.delay.fps = Some(next_fps);
-            (previous_fps, next_fps)
+            (previous_fps, next_fps, observation, reason)
         };
 
         let affected_displays = self.display_names_for_user(id);
@@ -487,12 +1152,18 @@ impl VideoQoS {
             self.adjust_ratio(display_name, true);
         }
         log::warn!(
-            "diag video qos transport loss: user_id={}, dropped_frames={}, fps_previous={}, fps_current={}, synthetic_delay_ms={}, displays={:?}",
+            "diag video qos transport loss backoff: user_id={}, display={}, stream_id={}, received_frame_id={}, event_dropped={}, window_dropped={}, observed_frames={}, loss_permille={}, reason={}, fps_previous={}, fps_current={}, displays={:?}",
             id,
-            dropped_frames,
+            sample.display,
+            sample.stream_id,
+            sample.received_frame_id,
+            sample.dropped_frames,
+            observation.dropped_frames,
+            observation.observed_frames,
+            observation.loss_permille,
+            reason.as_str(),
             previous_fps,
             next_fps,
-            TRANSPORT_LOSS_SYNTHETIC_DELAY_MS,
             affected_displays,
         );
         true
@@ -640,6 +1311,99 @@ impl VideoQoS {
                 self.fps(video_service_name)
             );
         }
+    }
+
+    pub fn all_subscribers_request_movie(&self, video_service_name: &str) -> bool {
+        let mut subscribers = self.subscribed_users(video_service_name).peekable();
+        subscribers.peek().is_some()
+            && subscribers.all(|user| user.video_profile == VideoProfile::Movie)
+    }
+
+    pub fn full_movie_mode(&self, video_service_name: &str) -> bool {
+        let mut subscribers = self.subscribed_users(video_service_name).peekable();
+        subscribers.peek().is_some()
+            && subscribers.all(|user| {
+                user.video_profile == VideoProfile::Movie
+                    && user.video_feedback_capable
+                    && user.movie_transport_capable
+            })
+    }
+
+    pub(crate) fn movie_target_fps(&self, video_service_name: &str) -> u32 {
+        self.subscribed_users(video_service_name)
+            .map(|user| {
+                user.custom_fps
+                    .unwrap_or(MOVIE_DEFAULT_TARGET_FPS)
+                    .clamp(MIN_FPS, MAX_FPS)
+            })
+            .min()
+            .unwrap_or(MOVIE_DEFAULT_TARGET_FPS)
+            .clamp(MIN_FPS, MAX_FPS)
+    }
+
+    pub(crate) fn custom_encoder_fps(&self, video_service_name: &str) -> Option<u32> {
+        self.subscribed_users(video_service_name)
+            .filter_map(|user| user.custom_fps)
+            .max()
+            .map(|fps| fps.clamp(MIN_FPS, MAX_FPS))
+    }
+
+    pub(crate) fn movie_viewer_metrics(&self, video_service_name: &str) -> MovieViewerMetrics {
+        let Some(display_idx) = video_service_display_index(video_service_name) else {
+            return MovieViewerMetrics::default();
+        };
+        let subscribers: Vec<&UserData> = self.subscribed_users(video_service_name).collect();
+        if subscribers.is_empty() {
+            return MovieViewerMetrics::default();
+        }
+
+        let mut metrics = MovieViewerMetrics {
+            available: true,
+            all_rendered: subscribers.iter().all(|user| user.video_render_started),
+            ..Default::default()
+        };
+        for user in subscribers {
+            let Some(feedback) = user.movie_feedback_by_display.get(&display_idx) else {
+                metrics.available = false;
+                continue;
+            };
+            if !feedback
+                .updated_at
+                .is_some_and(|updated| updated.elapsed() <= MOVIE_FEEDBACK_FRESHNESS)
+            {
+                metrics.available = false;
+                continue;
+            }
+            metrics.max_queue_depth_frames = metrics
+                .max_queue_depth_frames
+                .max(feedback.queue_depth_frames);
+            metrics.max_decode_time_us = metrics.max_decode_time_us.max(feedback.decode_time_us);
+            metrics.max_render_submit_time_us = metrics
+                .max_render_submit_time_us
+                .max(feedback.render_submit_time_us);
+            metrics.dropped_frames = metrics
+                .dropped_frames
+                .saturating_add(feedback.dropped_frames);
+            if feedback.display_refresh_millihz > 0 {
+                metrics.display_refresh_millihz = if metrics.display_refresh_millihz == 0 {
+                    feedback.display_refresh_millihz
+                } else {
+                    metrics
+                        .display_refresh_millihz
+                        .min(feedback.display_refresh_millihz)
+                };
+            }
+            metrics.presentation_late_frames = metrics
+                .presentation_late_frames
+                .saturating_add(feedback.presentation_late_frames);
+            metrics.presentation_dropped_frames = metrics
+                .presentation_dropped_frames
+                .saturating_add(feedback.presentation_dropped_frames);
+            metrics.presentation_jitter_p95_us = metrics
+                .presentation_jitter_p95_us
+                .max(feedback.presentation_jitter_p95_us);
+        }
+        metrics
     }
 
     pub fn remove_display(&mut self, video_service_name: &str) {
@@ -911,6 +1675,15 @@ impl VideoQoS {
     }
 }
 
+fn video_service_display_index(video_service_name: &str) -> Option<i32> {
+    video_service_name
+        .strip_prefix("monitor")
+        .or_else(|| video_service_name.strip_prefix("camera"))?
+        .trim_start_matches('-')
+        .parse()
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -928,12 +1701,325 @@ mod tests {
         qos
     }
 
+    fn transport_loss_sample(
+        display: i32,
+        stream_id: u64,
+        received_frame_id: u64,
+        dropped_frames: u64,
+    ) -> VideoTransportLossSample {
+        VideoTransportLossSample {
+            display,
+            stream_id,
+            received_frame_id,
+            dropped_frames,
+        }
+    }
+
     #[test]
     fn startup_safe_mode_caps_default_quality_ratio() {
         let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
 
         assert!(qos.startup_safe_mode(MONITOR_SERVICE));
         assert_eq!(qos.ratio(MONITOR_SERVICE), STARTUP_SAFE_RATIO);
+    }
+
+    #[test]
+    fn movie_profile_requires_every_active_subscriber() {
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1, 2]);
+        assert!(!qos.all_subscribers_request_movie(MONITOR_SERVICE));
+
+        qos.user_video_profile(1, VideoProfile::Movie);
+        assert!(!qos.all_subscribers_request_movie(MONITOR_SERVICE));
+
+        qos.user_video_profile(2, VideoProfile::Movie);
+        assert!(qos.all_subscribers_request_movie(MONITOR_SERVICE));
+        assert!(!qos.full_movie_mode(MONITOR_SERVICE));
+
+        for id in [1, 2] {
+            qos.user_video_feedback_capability(id, true);
+            qos.user_movie_transport_capability(id, true);
+        }
+        assert!(qos.full_movie_mode(MONITOR_SERVICE));
+        assert_eq!(qos.movie_target_fps(MONITOR_SERVICE), 60);
+
+        qos.user_custom_fps(1, 50);
+        assert_eq!(qos.movie_target_fps(MONITOR_SERVICE), 50);
+
+        qos.user_video_profile(1, VideoProfile::Standard);
+        assert!(!qos.all_subscribers_request_movie(MONITOR_SERVICE));
+        assert!(!qos.full_movie_mode(MONITOR_SERVICE));
+    }
+
+    #[test]
+    fn profile_switch_resets_movie_transport_penalty_before_standard() {
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
+        qos.user_custom_fps(1, 85);
+        qos.user_video_profile(1, VideoProfile::Movie);
+        assert!(qos.user_transport_loss_at(1, transport_loss_sample(0, 7, 30, 3), Instant::now(),));
+        qos.users.get_mut(&1).unwrap().auto_adjust_fps = Some(40);
+        assert_eq!(qos.users.get(&1).unwrap().delay.fps, Some(74));
+
+        qos.user_video_profile(1, VideoProfile::Standard);
+        let user = qos.users.get(&1).unwrap();
+        assert!(user.delay.fps.is_none());
+        assert!(user.delay.delay_history.is_empty());
+        assert!(user.auto_adjust_fps.is_none());
+        assert!(user.last_transport_loss_at.is_none());
+        assert!(user.transport_loss_windows.is_empty());
+    }
+
+    fn healthy_movie_sample(now: Instant, pipeline_us: u64) -> MovieCadenceSample {
+        MovieCadenceSample {
+            now,
+            target_fps: 60,
+            host_pipeline_p95_us: pipeline_us,
+            host_iterations: 30,
+            host_missed_slots: 0,
+            viewer: MovieViewerMetrics {
+                available: true,
+                all_rendered: true,
+                max_queue_depth_frames: 0,
+                max_decode_time_us: 2_000,
+                max_render_submit_time_us: 100,
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn movie_cadence_starts_at_thirty_and_promotes_after_probation() {
+        let start = Instant::now();
+        let mut controller = MovieCadenceController::new(60, 0, start);
+        assert_eq!(controller.current_tier(), 30);
+
+        assert_eq!(
+            controller.evaluate(healthy_movie_sample(start, 5_000)),
+            None
+        );
+        let decision = controller
+            .evaluate(healthy_movie_sample(start + MOVIE_PROBATION_HEALTHY, 5_000))
+            .unwrap();
+        assert_eq!(decision.previous_fps, 30);
+        assert_eq!(decision.current_fps, 60);
+        assert_eq!(decision.reason, MovieCadenceReason::ProbationComplete);
+    }
+
+    #[test]
+    fn movie_cadence_downshifts_only_after_sustained_pressure() {
+        let start = Instant::now();
+        let mut controller = MovieCadenceController::new(60, 0, start);
+        controller.evaluate(healthy_movie_sample(start, 5_000));
+        controller.evaluate(healthy_movie_sample(start + MOVIE_PROBATION_HEALTHY, 5_000));
+        assert_eq!(controller.current_tier(), 60);
+
+        let mut pressure = healthy_movie_sample(start + Duration::from_secs(3), 16_000);
+        pressure.host_missed_slots = 4;
+        assert_eq!(controller.evaluate(pressure), None);
+        pressure.now += MOVIE_PRESSURE_DURATION;
+        let decision = controller.evaluate(pressure).unwrap();
+        assert_eq!(decision.previous_fps, 60);
+        assert_eq!(decision.current_fps, 30);
+        assert_eq!(decision.reason, MovieCadenceReason::HostCapacity);
+    }
+
+    #[test]
+    fn movie_cadence_keeps_thirty_for_bounded_startup_jitter() {
+        let start = Instant::now();
+        let mut controller = MovieCadenceController::new(85, 120_000, start);
+        assert_eq!(controller.current_tier(), 30);
+
+        let mut sample = healthy_movie_sample(start, 22_779);
+        sample.target_fps = 85;
+        sample.host_iterations = 14;
+        sample.host_missed_slots = 2;
+        sample.viewer.display_refresh_millihz = 120_000;
+        assert_eq!(controller.evaluate(sample), None);
+
+        sample.now += MOVIE_PRESSURE_DURATION;
+        assert_eq!(controller.evaluate(sample), None);
+        assert_eq!(controller.current_tier(), 30);
+    }
+
+    #[test]
+    fn movie_cadence_probation_trials_forty_and_rolls_back_on_real_pressure() {
+        let start = Instant::now();
+        let mut controller = MovieCadenceController::new(85, 120_000, start);
+        let mut sample = healthy_movie_sample(start, 23_000);
+        sample.target_fps = 85;
+        sample.viewer.display_refresh_millihz = 120_000;
+        assert_eq!(controller.evaluate(sample), None);
+
+        sample.now += MOVIE_PROBATION_HEALTHY;
+        let promoted = controller.evaluate(sample).unwrap();
+        assert_eq!(promoted.previous_fps, 30);
+        assert_eq!(promoted.current_fps, 40);
+        assert_eq!(promoted.reason, MovieCadenceReason::ProbationComplete);
+
+        let mut pressure = sample;
+        pressure.now += Duration::from_secs(1);
+        pressure.host_pipeline_p95_us = 26_000;
+        assert_eq!(controller.evaluate(pressure), None);
+        pressure.now += MOVIE_PRESSURE_DURATION;
+        let rolled_back = controller.evaluate(pressure).unwrap();
+        assert_eq!(rolled_back.previous_fps, 40);
+        assert_eq!(rolled_back.current_fps, 30);
+        assert_eq!(rolled_back.reason, MovieCadenceReason::HostCapacity);
+    }
+
+    #[test]
+    fn movie_cadence_requires_long_health_window_after_downshift() {
+        let start = Instant::now();
+        let mut controller = MovieCadenceController::new(60, 0, start);
+        controller.evaluate(healthy_movie_sample(start, 5_000));
+        controller.evaluate(healthy_movie_sample(start + MOVIE_PROBATION_HEALTHY, 5_000));
+
+        let pressure_started = start + Duration::from_secs(3);
+        let mut pressure = healthy_movie_sample(pressure_started, 16_000);
+        pressure.host_missed_slots = 4;
+        controller.evaluate(pressure);
+        pressure.now += MOVIE_PRESSURE_DURATION;
+        controller.evaluate(pressure);
+        assert_eq!(controller.current_tier(), 30);
+
+        let healthy_started = pressure.now + Duration::from_secs(1);
+        assert_eq!(
+            controller.evaluate(healthy_movie_sample(healthy_started, 5_000)),
+            None
+        );
+        assert_eq!(
+            controller.evaluate(healthy_movie_sample(
+                healthy_started + MOVIE_UPSHIFT_HEALTHY - Duration::from_millis(1),
+                5_000,
+            )),
+            None
+        );
+        let decision = controller
+            .evaluate(healthy_movie_sample(
+                healthy_started + MOVIE_UPSHIFT_HEALTHY,
+                5_000,
+            ))
+            .unwrap();
+        assert_eq!(decision.current_fps, 60);
+        assert_eq!(decision.reason, MovieCadenceReason::HealthyUpshift);
+    }
+
+    #[test]
+    fn rejected_movie_upshift_is_not_retried() {
+        let start = Instant::now();
+        let mut controller = MovieCadenceController::new(60, 0, start);
+        controller.evaluate(healthy_movie_sample(start, 5_000));
+        let decision = controller
+            .evaluate(healthy_movie_sample(start + MOVIE_PROBATION_HEALTHY, 5_000))
+            .unwrap();
+        controller.reject_change(
+            decision.previous_fps,
+            decision.current_fps,
+            start + MOVIE_PROBATION_HEALTHY,
+        );
+
+        assert_eq!(controller.current_tier(), 30);
+        assert_eq!(
+            controller.evaluate(healthy_movie_sample(
+                start + MOVIE_PROBATION_HEALTHY + MOVIE_UPSHIFT_HEALTHY,
+                5_000,
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn movie_cadence_applies_runtime_target_changes() {
+        let start = Instant::now();
+        let mut controller = MovieCadenceController::new(60, 0, start);
+        controller.evaluate(healthy_movie_sample(start, 5_000));
+        controller.evaluate(healthy_movie_sample(start + MOVIE_PROBATION_HEALTHY, 5_000));
+        assert_eq!(controller.current_tier(), 60);
+
+        let mut lower_target = healthy_movie_sample(start + Duration::from_secs(3), 5_000);
+        lower_target.target_fps = 30;
+        let decision = controller.evaluate(lower_target).unwrap();
+        assert_eq!(decision.current_fps, 30);
+        assert_eq!(decision.reason, MovieCadenceReason::TargetChanged);
+
+        let mut higher_target = healthy_movie_sample(start + Duration::from_secs(4), 5_000);
+        higher_target.target_fps = 60;
+        assert_eq!(controller.evaluate(higher_target), None);
+        higher_target.now += MOVIE_PROBATION_HEALTHY;
+        let decision = controller.evaluate(higher_target).unwrap();
+        assert_eq!(decision.current_fps, 60);
+        assert_eq!(decision.reason, MovieCadenceReason::ProbationComplete);
+    }
+
+    #[test]
+    fn reset_viewer_counter_does_not_report_historical_drops() {
+        assert_eq!(monotonic_counter_delta(4, 10), 0);
+        assert_eq!(monotonic_counter_delta(11, 10), 1);
+    }
+
+    #[test]
+    fn movie_cadence_capacity_near_forty_five_does_not_oscillate() {
+        let start = Instant::now();
+        let mut controller = MovieCadenceController::new(60, 0, start);
+        for second in 0..30 {
+            let pipeline_us = if second % 2 == 0 { 20_000 } else { 23_000 };
+            assert_eq!(
+                controller.evaluate(healthy_movie_sample(
+                    start + Duration::from_secs(second),
+                    pipeline_us,
+                )),
+                None
+            );
+        }
+        assert_eq!(controller.current_tier(), 30);
+    }
+
+    #[test]
+    fn movie_cadence_uses_refresh_compatible_tier() {
+        let start = Instant::now();
+        let mut controller = MovieCadenceController::new(60, 90_000, start);
+        assert_eq!(controller.current_tier(), 30);
+        controller.evaluate(healthy_movie_sample(start, 8_000));
+        let decision = controller
+            .evaluate(healthy_movie_sample(start + MOVIE_PROBATION_HEALTHY, 8_000))
+            .unwrap();
+        assert_eq!(decision.current_fps, 45);
+    }
+
+    #[test]
+    fn movie_viewer_metrics_are_scoped_to_the_video_display() {
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
+        qos.user_video_profile(1, VideoProfile::Movie);
+        qos.user_video_feedback_capability(1, true);
+        qos.user_video_frame_rendered(1);
+        qos.user_video_feedback(
+            1,
+            &VideoFeedback {
+                display: 0,
+                queue_depth_frames: 2,
+                decode_time_us: 3_000,
+                render_submit_time_us: 200,
+                display_refresh_millihz: 120_000,
+                ..Default::default()
+            },
+        );
+
+        let metrics = qos.movie_viewer_metrics(MONITOR_SERVICE);
+        assert!(metrics.available);
+        assert!(metrics.all_rendered);
+        assert_eq!(metrics.max_queue_depth_frames, 2);
+        assert_eq!(metrics.max_decode_time_us, 3_000);
+        assert_eq!(metrics.display_refresh_millihz, 120_000);
+        assert!(!qos.movie_viewer_metrics(CAMERA_SERVICE).available);
+    }
+
+    #[test]
+    fn movie_runtime_status_is_scoped_to_the_video_service() {
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
+        qos.new_display(CAMERA_SERVICE.to_owned());
+        qos.store_movie_runtime_status(MONITOR_SERVICE, 60, 30, 8_500);
+
+        assert_eq!(qos.movie_runtime_status(MONITOR_SERVICE), (60, 30, 8_500));
+        assert_eq!(qos.movie_runtime_status(CAMERA_SERVICE), (0, 0, 0));
     }
 
     #[test]
@@ -999,6 +2085,18 @@ mod tests {
     }
 
     #[test]
+    fn encoder_fps_changes_only_for_custom_quality() {
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
+        assert_eq!(qos.custom_encoder_fps(MONITOR_SERVICE), None);
+
+        qos.user_fixed_fps(1, 85);
+        assert_eq!(qos.custom_encoder_fps(MONITOR_SERVICE), Some(85));
+
+        qos.user_preset_image_quality(1, ImageQuality::Balanced.value());
+        assert_eq!(qos.custom_encoder_fps(MONITOR_SERVICE), None);
+    }
+
+    #[test]
     fn first_render_feedback_releases_startup_safe_mode() {
         let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
         qos.user_video_feedback_capability(1, true);
@@ -1036,7 +2134,7 @@ mod tests {
     }
 
     #[test]
-    fn transport_loss_backs_off_adaptive_fps_and_ratio_with_cooldown() {
+    fn isolated_transport_loss_does_not_back_off_adaptive_fps() {
         let now = Instant::now();
         let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
         qos.set_support_changing_quality(MONITOR_SERVICE, true);
@@ -1047,21 +2145,105 @@ mod tests {
         assert_eq!(qos.fps(MONITOR_SERVICE), 60);
         let initial_ratio = qos.displays.get(MONITOR_SERVICE).unwrap().ratio;
 
-        assert!(qos.user_transport_loss_at(1, 1, now));
-        assert_eq!(qos.fps(MONITOR_SERVICE), 45);
-        let first_loss_ratio = qos.displays.get(MONITOR_SERVICE).unwrap().ratio;
-        assert!(first_loss_ratio < initial_ratio);
-
-        assert!(!qos.user_transport_loss_at(1, 2, now + Duration::from_millis(999)));
-        assert_eq!(qos.fps(MONITOR_SERVICE), 45);
+        assert!(!qos.user_transport_loss_at(1, transport_loss_sample(0, 7, 40, 1), now,));
+        assert_eq!(qos.fps(MONITOR_SERVICE), 60);
         assert_eq!(
             qos.displays.get(MONITOR_SERVICE).unwrap().ratio,
-            first_loss_ratio
+            initial_ratio
         );
+        assert!(qos.users.get(&1).unwrap().delay.delay_history.is_empty());
+    }
 
-        assert!(qos.user_transport_loss_at(1, 2, now + TRANSPORT_LOSS_ADAPTATION_COOLDOWN,));
-        assert_eq!(qos.fps(MONITOR_SERVICE), 33);
-        assert!(qos.displays.get(MONITOR_SERVICE).unwrap().ratio < first_loss_ratio);
+    #[test]
+    fn sparse_transport_losses_match_field_session_without_fps_collapse() {
+        let now = Instant::now();
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
+        qos.user_custom_fps(1, 104);
+        qos.user_video_feedback_capability(1, true);
+        assert!(qos.user_video_frame_rendered(1));
+
+        let samples = [(40, 2), (178, 10), (224, 13), (288, 18), (364, 24)];
+        for (frame_id, elapsed_secs) in samples {
+            assert!(!qos.user_transport_loss_at(
+                1,
+                transport_loss_sample(0, 6, frame_id, 1),
+                now + Duration::from_secs(elapsed_secs),
+            ));
+        }
+
+        assert_eq!(qos.fps(MONITOR_SERVICE), 104);
+        assert!(qos.users.get(&1).unwrap().last_transport_loss_at.is_none());
+    }
+
+    #[test]
+    fn transport_loss_burst_backs_off_once_without_synthetic_delay() {
+        let now = Instant::now();
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
+        qos.set_support_changing_quality(MONITOR_SERVICE, true);
+        qos.store_bitrate(MONITOR_SERVICE, 4_000);
+        qos.user_video_feedback_capability(1, true);
+        qos.user_custom_fps(1, 60);
+        assert!(qos.user_video_frame_rendered(1));
+        let initial_ratio = qos.displays.get(MONITOR_SERVICE).unwrap().ratio;
+
+        assert!(qos.user_transport_loss_at(1, transport_loss_sample(0, 7, 40, 3), now,));
+        assert_eq!(qos.fps(MONITOR_SERVICE), 52);
+        assert!(qos.displays.get(MONITOR_SERVICE).unwrap().ratio < initial_ratio);
+        assert!(qos.users.get(&1).unwrap().delay.delay_history.is_empty());
+
+        assert!(!qos.user_transport_loss_at(
+            1,
+            transport_loss_sample(0, 7, 80, 3),
+            now + Duration::from_secs(1),
+        ));
+        assert_eq!(qos.fps(MONITOR_SERVICE), 52);
+
+        assert!(!qos.user_transport_loss_at(
+            1,
+            transport_loss_sample(0, 7, 120, 1),
+            now + TRANSPORT_LOSS_BACKOFF_COOLDOWN + Duration::from_millis(1),
+        ));
+        assert_eq!(qos.fps(MONITOR_SERVICE), 52);
+    }
+
+    #[test]
+    fn transport_loss_rate_backoff_ignores_stale_requests_and_resets_on_new_stream() {
+        let now = Instant::now();
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
+        qos.user_custom_fps(1, 60);
+        qos.user_video_feedback_capability(1, true);
+        assert!(qos.user_video_frame_rendered(1));
+
+        assert!(!qos.user_transport_loss_at(1, transport_loss_sample(0, 7, 100, 1), now,));
+        assert!(!qos.user_transport_loss_at(
+            1,
+            transport_loss_sample(0, 7, 98, 1),
+            now + Duration::from_millis(10),
+        ));
+        assert!(!qos.user_transport_loss_at(
+            1,
+            transport_loss_sample(0, 7, 115, 1),
+            now + Duration::from_secs(1),
+        ));
+        assert!(qos.user_transport_loss_at(
+            1,
+            transport_loss_sample(0, 7, 130, 1),
+            now + Duration::from_secs(2),
+        ));
+        assert_eq!(qos.fps(MONITOR_SERVICE), 52);
+
+        assert!(!qos.user_transport_loss_at(
+            1,
+            transport_loss_sample(0, 8, 1, 1),
+            now + TRANSPORT_LOSS_BACKOFF_COOLDOWN + Duration::from_secs(1),
+        ));
+        assert_eq!(qos.fps(MONITOR_SERVICE), 52);
+        let user = qos.users.get(&1).unwrap();
+        assert_eq!(user.transport_loss_windows.len(), 1);
+        assert!(user.transport_loss_windows.contains_key(&TransportLossKey {
+            display: 0,
+            stream_id: 8,
+        }));
     }
 
     #[test]

@@ -1,5 +1,8 @@
 use crate::{
-    codec::{base_bitrate, codec_thread_num, enable_hwcodec_option, EncoderApi, EncoderCfg},
+    codec::{
+        base_bitrate, codec_thread_num, enable_hwcodec_option, normalized_encoder_fps, EncoderApi,
+        EncoderCfg, DEFAULT_ENCODER_FPS,
+    },
     convert::*,
     CodecFormat, EncodeInput, ImageFormat, ImageRgb, Pixfmt, HW_STRIDE_ALIGN,
 };
@@ -26,7 +29,7 @@ use hwcodec::{
 };
 
 const DEFAULT_PIXFMT: AVPixelFormat = AVPixelFormat::AV_PIX_FMT_NV12;
-pub const DEFAULT_FPS: i32 = 30;
+pub const DEFAULT_FPS: i32 = DEFAULT_ENCODER_FPS as i32;
 const DEFAULT_GOP: i32 = i32::MAX;
 const DEFAULT_HW_QUALITY: Quality = Quality_Default;
 pub const ERR_HEVC_POC: i32 = HwcodecErrno::HWCODEC_ERR_HEVC_COULD_NOT_FIND_POC as i32;
@@ -59,6 +62,7 @@ pub struct HwRamEncoderConfig {
     pub width: usize,
     pub height: usize,
     pub quality: f32,
+    pub fps: u32,
     pub keyframe_interval: Option<usize>,
     pub profile: HwEncoderProfile,
 }
@@ -80,6 +84,11 @@ impl EncoderApi for HwRamEncoder {
             EncoderCfg::HWRAM(config) => {
                 let rc = Self::rate_control(&config);
                 let hw_quality = Self::encoder_quality(&config)?;
+                let pixfmt = if config.name == "libx265" {
+                    AVPixelFormat::AV_PIX_FMT_YUV420P
+                } else {
+                    DEFAULT_PIXFMT
+                };
                 let mut bitrate =
                     Self::bitrate(&config.name, config.width, config.height, config.quality);
                 bitrate = Self::check_bitrate_range(&config, bitrate);
@@ -89,10 +98,10 @@ impl EncoderApi for HwRamEncoder {
                     mc_name: config.mc_name.clone(),
                     width: config.width as _,
                     height: config.height as _,
-                    pixfmt: DEFAULT_PIXFMT,
+                    pixfmt,
                     align: HW_STRIDE_ALIGN as _,
                     kbs: bitrate as i32,
-                    fps: DEFAULT_FPS,
+                    fps: normalized_encoder_fps(config.fps) as i32,
                     gop,
                     quality: hw_quality,
                     rc,
@@ -182,6 +191,9 @@ impl EncoderApi for HwRamEncoder {
     }
 
     fn set_quality(&mut self, ratio: f32) -> ResultType<()> {
+        if self.is_software_encoder() {
+            bail!("software FFmpeg encoders require recreation for bitrate changes");
+        }
         let mut bitrate = Self::bitrate(
             &self.config.name,
             self.config.width,
@@ -202,7 +214,7 @@ impl EncoderApi for HwRamEncoder {
     }
 
     fn support_changing_quality(&self) -> bool {
-        ["vaapi"].iter().all(|&x| !self.config.name.contains(x))
+        !self.is_software_encoder() && ["vaapi"].iter().all(|&x| !self.config.name.contains(x))
     }
 
     fn latency_free(&self) -> bool {
@@ -212,7 +224,7 @@ impl EncoderApi for HwRamEncoder {
     }
 
     fn is_hardware(&self) -> bool {
-        true
+        !self.is_software_encoder()
     }
 }
 
@@ -253,6 +265,7 @@ mod tests {
             width: 1920,
             height: 1080,
             quality: 1.0,
+            fps: DEFAULT_ENCODER_FPS,
             keyframe_interval: None,
             profile,
         }
@@ -399,6 +412,7 @@ mod tests {
             width: WIDTH,
             height: HEIGHT,
             quality: 1.0,
+            fps: DEFAULT_ENCODER_FPS,
             keyframe_interval: Some(30),
             profile: HwEncoderProfile::HighQuality,
         };
@@ -511,6 +525,7 @@ mod tests {
             width: WIDTH,
             height: HEIGHT,
             quality: 0.25,
+            fps: DEFAULT_ENCODER_FPS,
             keyframe_interval: None,
             profile: HwEncoderProfile::Default,
         };
@@ -811,6 +826,10 @@ mod tests {
 }
 
 impl HwRamEncoder {
+    fn is_software_encoder(&self) -> bool {
+        CodecInfo::is_software_encoder_name(&self.config.name)
+    }
+
     pub fn supports_high_quality_profile(name: &str) -> bool {
         (name.contains("nvenc") || name.contains("videotoolbox"))
             && (name.contains("h264") || name.contains("hevc"))
@@ -850,6 +869,21 @@ impl HwRamEncoder {
             _ => {}
         }
         info
+    }
+
+    pub fn try_get_hardware(format: CodecFormat) -> Option<CodecInfo> {
+        let encoders = HwCodecConfig::get()
+            .ram_encode
+            .into_iter()
+            .filter(|encoder| !encoder.is_software_encoder())
+            .collect();
+        let best = CodecInfo::prioritized(encoders);
+        match format {
+            CodecFormat::H264 => best.h264,
+            CodecFormat::H265 => best.h265,
+            CodecFormat::AV1 => best.av1,
+            _ => None,
+        }
     }
 
     pub fn try_get_high_quality(format: CodecFormat) -> Option<CodecInfo> {
@@ -894,7 +928,12 @@ impl HwRamEncoder {
     }
 
     pub fn bitrate(name: &str, width: usize, height: usize, ratio: f32) -> u32 {
-        Self::calc_bitrate(width, height, ratio, name.contains("h264"))
+        Self::calc_bitrate(
+            width,
+            height,
+            ratio,
+            name.contains("h264") || name.contains("x264"),
+        )
     }
 
     pub fn calc_bitrate(width: usize, height: usize, ratio: f32, h264: bool) -> u32 {

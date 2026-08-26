@@ -49,6 +49,16 @@ lazy_static::lazy_static! {
 }
 
 pub const ENCODE_NEED_SWITCH: &'static str = "ENCODE_NEED_SWITCH";
+pub const DEFAULT_ENCODER_FPS: u32 = 30;
+pub const MAX_ENCODER_FPS: u32 = 120;
+
+pub fn normalized_encoder_fps(fps: u32) -> u32 {
+    if (1..=MAX_ENCODER_FPS).contains(&fps) {
+        fps
+    } else {
+        DEFAULT_ENCODER_FPS
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum EncoderCfg {
@@ -58,6 +68,19 @@ pub enum EncoderCfg {
     HWRAM(HwRamEncoderConfig),
     #[cfg(feature = "vram")]
     VRAM(VRamEncoderConfig),
+}
+
+impl EncoderCfg {
+    pub fn fps(&self) -> u32 {
+        match self {
+            Self::VPX(config) => config.fps,
+            Self::AOM(config) => config.fps,
+            #[cfg(feature = "hwcodec")]
+            Self::HWRAM(config) => config.fps,
+            #[cfg(feature = "vram")]
+            Self::VRAM(config) => config.fps,
+        }
+    }
 }
 
 pub trait EncoderApi {
@@ -95,6 +118,8 @@ struct UsableCodecs {
     av1_hardware: bool,
     h264: bool,
     h265: bool,
+    h264_hardware: bool,
+    h265_hardware: bool,
     h264_hq: bool,
     h265_hq: bool,
 }
@@ -192,9 +217,9 @@ fn software_auto_codec(usable: UsableCodecs, av1_software_allowed: bool) -> Code
 fn auto_codec_for_usable(usable: UsableCodecs, av1_software_allowed: bool) -> CodecFormat {
     if usable.av1_hardware {
         CodecFormat::AV1
-    } else if usable.h265 {
+    } else if usable.h265_hardware {
         CodecFormat::H265
-    } else if usable.h264 {
+    } else if usable.h264_hardware || usable.h264 {
         CodecFormat::H264
     } else {
         software_auto_codec(usable, av1_software_allowed)
@@ -392,6 +417,19 @@ impl Encoder {
                 h265hq_encoding = HwRamEncoder::try_get_high_quality(CodecFormat::H265).is_some();
             }
         }
+        #[allow(unused_mut)]
+        let mut h264hw_available = false;
+        #[allow(unused_mut)]
+        let mut h265hw_available = false;
+        #[cfg(feature = "hwcodec")]
+        if enable_hwcodec_option() {
+            h264hw_available = _all_support_h264_decoding
+                && HwRamEncoder::try_get_hardware(CodecFormat::H264).is_some();
+            h265hw_available = _all_support_h265_decoding
+                && HwRamEncoder::try_get_hardware(CodecFormat::H265).is_some();
+        }
+        h264hw_available |= h264vram_encoding;
+        h265hw_available |= h265vram_encoding;
         let av1_hw_useable = av1_useable && av1hw_encoding.is_some();
         let h264_useable =
             _all_support_h264_decoding && (h264vram_encoding || h264hw_encoding.is_some());
@@ -407,6 +445,8 @@ impl Encoder {
             av1_hardware: av1_hw_useable,
             h264: h264_useable,
             h265: h265_useable,
+            h264_hardware: h264hw_available,
+            h265_hardware: h265hw_available,
             h264_hq: h264_hq_useable,
             h265_hq: h265_hq_useable,
         };
@@ -430,7 +470,7 @@ impl Encoder {
         *ENCODE_CODEC_PREFERENCE.lock().unwrap() = preference;
         if decodings.len() > 0 {
             log::info!(
-                "usable: vp8={vp8_useable}, vp9={vp9_useable}, av1={av1_useable}, av1_hw={av1_hw_useable}, h264={h264_useable}, h265={h265_useable}, h264_hq={h264_hq_useable}, h265_hq={h265_hq_useable}",
+                "usable: vp8={vp8_useable}, vp9={vp9_useable}, av1={av1_useable}, av1_hw={av1_hw_useable}, h264={h264_useable}, h265={h265_useable}, h264_hw={h264hw_available}, h265_hw={h265hw_available}, h264_hq={h264_hq_useable}, h265_hq={h265_hq_useable}",
             );
             log::info!(
                 "connection count: {}, used preference: {:?}, encoder: {:?}",
@@ -518,7 +558,7 @@ impl Encoder {
                     CodecFormat::VP9
                 } else if name.contains("av1") {
                     CodecFormat::AV1
-                } else if name.contains("h264") {
+                } else if name.contains("h264") || name.contains("x264") {
                     CodecFormat::H264
                 } else {
                     CodecFormat::H265
@@ -596,6 +636,10 @@ impl Encoder {
                     }
                 } else if name.contains("mediacodec") {
                     "Hardware MediaCodec via FFmpeg"
+                } else if name == "libx264" {
+                    "Software libx264 H264 via FFmpeg"
+                } else if name == "libx265" {
+                    "Software libx265 H265 via FFmpeg"
                 } else {
                     "Hardware encoder via FFmpeg"
                 }
@@ -630,6 +674,16 @@ pub fn video_frame_payload_stats(vf: &VideoFrame) -> Option<(usize, usize, bool)
 }
 
 impl Decoder {
+    #[cfg(feature = "mediacodec")]
+    pub fn release_media_codec(&mut self) {
+        let released_h264 = self.h264_media_codec.take().is_some();
+        let released_h265 = self.h265_media_codec.take().is_some();
+        let released = released_h264 || released_h265;
+        if released {
+            log::info!("released Android MediaCodec decoder before stream replacement");
+        }
+    }
+
     pub fn supported_decodings(
         id_for_perfer: Option<&str>,
         _use_texture_render: bool,
@@ -1580,6 +1634,7 @@ pub fn test_av1() {
                     width,
                     height,
                     quality,
+                    fps: DEFAULT_ENCODER_FPS,
                     keyframe_interval,
                 }),
                 i444,
@@ -1647,6 +1702,27 @@ fn apply_codec_fallback(
 mod tests {
     use super::*;
 
+    #[test]
+    fn encoder_fps_is_explicit_and_bounded() {
+        assert_eq!(normalized_encoder_fps(0), DEFAULT_ENCODER_FPS);
+        assert_eq!(normalized_encoder_fps(30), 30);
+        assert_eq!(normalized_encoder_fps(60), 60);
+        assert_eq!(
+            normalized_encoder_fps(MAX_ENCODER_FPS + 1),
+            DEFAULT_ENCODER_FPS
+        );
+
+        let config = EncoderCfg::VPX(VpxEncoderConfig {
+            width: 1920,
+            height: 1080,
+            quality: 1.0,
+            fps: 60,
+            codec: VpxVideoCodecId::VP9,
+            keyframe_interval: None,
+        });
+        assert_eq!(config.fps(), 60);
+    }
+
     #[cfg(feature = "hwcodec")]
     #[test]
     fn high_quality_videotoolbox_backend_label_is_explicit() {
@@ -1656,6 +1732,7 @@ mod tests {
             width: 1920,
             height: 1080,
             quality: 1.0,
+            fps: DEFAULT_ENCODER_FPS,
             keyframe_interval: Some(30),
             profile: HwEncoderProfile::HighQuality,
         });
@@ -1663,6 +1740,32 @@ mod tests {
         assert_eq!(
             Encoder::backend_label(&config),
             "Hardware VideoToolbox HQ via FFmpeg"
+        );
+    }
+
+    #[cfg(feature = "hwcodec")]
+    #[test]
+    fn software_h26x_backend_labels_are_explicit() {
+        let config = |name: &str| {
+            EncoderCfg::HWRAM(HwRamEncoderConfig {
+                name: name.to_owned(),
+                mc_name: None,
+                width: 1920,
+                height: 1080,
+                quality: 1.0,
+                fps: DEFAULT_ENCODER_FPS,
+                keyframe_interval: None,
+                profile: HwEncoderProfile::Default,
+            })
+        };
+
+        assert_eq!(
+            Encoder::backend_label(&config("libx264")),
+            "Software libx264 H264 via FFmpeg"
+        );
+        assert_eq!(
+            Encoder::backend_label(&config("libx265")),
+            "Software libx265 H265 via FFmpeg"
         );
     }
 
@@ -1674,6 +1777,8 @@ mod tests {
             av1_hardware: true,
             h264: true,
             h265: true,
+            h264_hardware: true,
+            h265_hardware: true,
             h264_hq: true,
             h265_hq: true,
         }
@@ -1863,6 +1968,7 @@ mod tests {
             auto_codec_for_usable(
                 UsableCodecs {
                     av1_hardware: false,
+                    h265_hardware: true,
                     ..all_usable_codecs()
                 },
                 true
@@ -1874,7 +1980,7 @@ mod tests {
             auto_codec_for_usable(
                 UsableCodecs {
                     av1_hardware: false,
-                    h265: false,
+                    h265_hardware: false,
                     ..all_usable_codecs()
                 },
                 true
@@ -1887,25 +1993,54 @@ mod tests {
     fn auto_codec_uses_software_order_after_hardware() {
         let software_only = UsableCodecs {
             av1_hardware: false,
-            h264: false,
-            h265: false,
+            h264_hardware: false,
+            h265_hardware: false,
             ..all_usable_codecs()
         };
 
-        assert_eq!(auto_codec_for_usable(software_only, true), CodecFormat::AV1);
         assert_eq!(
-            auto_codec_for_usable(software_only, false),
+            auto_codec_for_usable(software_only, true),
+            CodecFormat::H264
+        );
+        let no_h264_software = UsableCodecs {
+            h264: false,
+            ..software_only
+        };
+        assert_eq!(
+            auto_codec_for_usable(no_h264_software, true),
+            CodecFormat::AV1
+        );
+        assert_eq!(
+            auto_codec_for_usable(no_h264_software, false),
             CodecFormat::VP9
         );
         assert_eq!(
             auto_codec_for_usable(
                 UsableCodecs {
                     vp9: false,
-                    ..software_only
+                    ..no_h264_software
                 },
                 false
             ),
             CodecFormat::VP8
+        );
+    }
+
+    #[test]
+    fn software_h265_requires_an_explicit_preference() {
+        let usable = UsableCodecs {
+            av1_hardware: false,
+            h264: false,
+            h264_hardware: false,
+            h265: true,
+            h265_hardware: false,
+            ..all_usable_codecs()
+        };
+
+        assert_eq!(auto_codec_for_usable(usable, true), CodecFormat::AV1);
+        assert_eq!(
+            preferred_explicit_codec(&decodings(&[PreferCodec::H265]), usable),
+            Some(PreferCodec::H265)
         );
     }
 

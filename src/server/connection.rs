@@ -3,6 +3,7 @@ use super::login_failure_check::try_acquire_os_credential_login_gate;
 use super::login_failure_check::{
     evaluate_os_credential_policy, record_os_credential_failure, FailureScope,
 };
+use super::video_qos::VideoTransportLossSample;
 use super::{input_service::*, *};
 #[cfg(feature = "unix-file-copy-paste")]
 use crate::clipboard::try_empty_clipboard_files;
@@ -23,7 +24,9 @@ use crate::{
     client::{
         new_voice_call_request, new_voice_call_response, start_audio_thread, MediaData, MediaSender,
     },
-    display_service, ipc, privacy_mode, video_service, VERSION,
+    display_service, ipc, privacy_mode,
+    video_profile::{EffectiveMovieMode, VideoProfile, MOVIE_PLAYOUT_DELAY_MS},
+    video_service, VERSION,
 };
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use crate::{common::DEVICE_NAME, flutter::connection_manager::start_channel};
@@ -86,6 +89,20 @@ const VIDEO_QUEUE_CAPACITY: usize = 8;
 const SERVER_ASYNC_OUTBOX_CAPACITY: usize = 256;
 const SERVER_VIDEO_LATEST_KEY_FALLBACK: u64 = 1 << 63;
 const SERVER_CLOSE_SEND_TIMEOUT: Duration = Duration::from_secs(1);
+const MOVIE_MODE_HOST_CAPABLE: bool = true;
+
+fn supported_encoding_with_movie_mode(mut encoding: SupportedEncoding) -> SupportedEncoding {
+    encoding.movie_mode = MOVIE_MODE_HOST_CAPABLE;
+    encoding
+}
+
+fn full_movie_quic_features_capable(
+    application_protocol: u16,
+    reliable_keyframes: bool,
+    reliable_keyframe_barrier: bool,
+) -> bool {
+    application_protocol >= 4 && reliable_keyframes && reliable_keyframe_barrier
+}
 
 fn server_video_latest_key(frame: &VideoFrame) -> u64 {
     if frame.stream_id != 0 {
@@ -201,6 +218,14 @@ mod video_queue_tests {
         let mut message = Message::new();
         message.set_video_frame(frame);
         Arc::new(message)
+    }
+
+    #[test]
+    fn full_movie_gate_requires_v4_reliable_keyframes_and_barrier() {
+        assert!(!full_movie_quic_features_capable(3, true, true));
+        assert!(!full_movie_quic_features_capable(4, false, true));
+        assert!(!full_movie_quic_features_capable(4, true, false));
+        assert!(full_movie_quic_features_capable(4, true, true));
     }
 
     #[test]
@@ -1013,6 +1038,8 @@ pub struct Connection {
     tx_input: std_mpsc::Sender<MessageInput>,
     // handle input messages
     video_ack_required: bool,
+    requested_video_profile: VideoProfile,
+    effective_movie_mode: EffectiveMovieMode,
     server_audit_conn: String,
     server_audit_file: String,
     lr: LoginRequest,
@@ -1277,6 +1304,8 @@ impl Connection {
             show_my_cursor: false,
             tx_input,
             video_ack_required: false,
+            requested_video_profile: VideoProfile::Standard,
+            effective_movie_mode: EffectiveMovieMode::Off,
             server_audit_conn: "".to_owned(),
             server_audit_file: "".to_owned(),
             lr: Default::default(),
@@ -1945,6 +1974,9 @@ impl Connection {
                             capture_frame,
                             encoder_backend,
                             encoder_input,
+                            target_fps,
+                            pacing_fps,
+                            host_pipeline_p95_us,
                         ) = {
                             let video_qos = video_service::VIDEO_QOS.lock().unwrap();
                             let video_service_name = video_service::get_service_name(
@@ -1958,12 +1990,17 @@ impl Connection {
                                 encoder_input,
                             ) =
                                 video_qos.pipeline_status(&video_service_name);
+                            let (target_fps, pacing_fps, host_pipeline_p95_us) =
+                                video_qos.movie_runtime_status(&video_service_name);
                             (
                                 video_qos.bitrate(&video_service_name),
                                 capture_backend.unwrap_or_default(),
                                 capture_frame.unwrap_or_default(),
                                 encoder_backend.unwrap_or_default(),
                                 encoder_input.unwrap_or_default(),
+                                target_fps,
+                                pacing_fps,
+                                host_pipeline_p95_us,
                             )
                         };
                         let delivery_status = conn.video_delivery.status(conn.display_idx as i32);
@@ -1984,6 +2021,31 @@ impl Connection {
                             video_stall_ms: delivery_status
                                 .map(|status| status.latest_stall_ms)
                                 .unwrap_or_default(),
+                            requested_video_profile: conn
+                                .requested_video_profile
+                                .config_value()
+                                .to_owned(),
+                            effective_video_profile: conn
+                                .effective_movie_mode
+                                .profile_label()
+                                .to_owned(),
+                            target_fps,
+                            pacing_fps,
+                            host_pipeline_p95_us,
+                            movie_fallback_reason: match conn
+                                .effective_movie_mode
+                                .fallback_reason()
+                            {
+                                "none" => String::new(),
+                                reason => reason.to_owned(),
+                            },
+                            movie_playout_delay_ms: if conn.requested_video_profile
+                                == VideoProfile::Movie
+                            {
+                                MOVIE_PLAYOUT_DELAY_MS
+                            } else {
+                                0
+                            },
                             ..Default::default()
                         });
                         conn.send(msg_out.into()).await;
@@ -3201,7 +3263,8 @@ impl Connection {
         if self.file_transfer.is_some() || self.terminal {
             res.set_peer_info(pi);
         } else if self.view_camera {
-            let supported_encoding = scrap::codec::Encoder::supported_encoding();
+            let supported_encoding =
+                supported_encoding_with_movie_mode(scrap::codec::Encoder::supported_encoding());
             self.last_supported_encoding = Some(supported_encoding.clone());
             log::info!("peer info supported_encoding: {:?}", supported_encoding);
             pi.encoding = Some(supported_encoding).into();
@@ -3224,7 +3287,8 @@ impl Connection {
             res.set_peer_info(pi);
             self.update_codec_on_login();
         } else {
-            let supported_encoding = scrap::codec::Encoder::supported_encoding();
+            let supported_encoding =
+                supported_encoding_with_movie_mode(scrap::codec::Encoder::supported_encoding());
             self.last_supported_encoding = Some(supported_encoding.clone());
             log::info!("peer info supported_encoding: {:?}", supported_encoding);
             pi.encoding = Some(supported_encoding).into();
@@ -3421,7 +3485,7 @@ impl Connection {
         }
     }
 
-    fn on_remote_authorized(&self) {
+    fn on_remote_authorized(&mut self) {
         self.update_codec_on_login();
         #[cfg(any(target_os = "windows", target_os = "linux"))]
         if config::option2bool(
@@ -3834,7 +3898,7 @@ impl Connection {
         Self::is_permission_enabled_locally(enable_prefix_option)
     }
 
-    fn update_codec_on_login(&self) {
+    fn update_codec_on_login(&mut self) {
         use scrap::codec::{Encoder, EncodingUpdate::*};
         if let Some(o) = self.lr.clone().option.as_ref() {
             if let Some(q) = o.supported_decoding.clone().take() {
@@ -3997,6 +4061,10 @@ impl Connection {
         // Revision 084 viewers already send valid feedback but predate the
         // explicit capability bit. Accept the message itself as proof.
         self.set_video_feedback_capability(true);
+        video_service::VIDEO_QOS
+            .lock()
+            .unwrap()
+            .user_video_feedback(self.inner.id(), &feedback);
 
         let now = Instant::now();
         let new_stream = previous
@@ -4066,7 +4134,15 @@ impl Connection {
             video_service::VIDEO_QOS
                 .lock()
                 .unwrap()
-                .user_transport_loss(self.inner.id(), request.dropped_frames);
+                .user_transport_loss(
+                    self.inner.id(),
+                    VideoTransportLossSample {
+                        display: request.display,
+                        stream_id: request.stream_id,
+                        received_frame_id: request.received_frame_id,
+                        dropped_frames: request.dropped_frames,
+                    },
+                );
         }
         match result {
             Ok(Some(action)) => {
@@ -4109,7 +4185,67 @@ impl Connection {
         }
     }
 
-    fn set_video_feedback_capability(&self, capable: bool) {
+    fn movie_transport_capable(&self) -> bool {
+        #[cfg(feature = "quic-transport")]
+        if let Some(stats) = self.stream.quic_stats() {
+            return full_movie_quic_features_capable(
+                stats.application_protocol,
+                stats.reliable_keyframes,
+                stats.reliable_keyframe_barrier,
+            );
+        }
+        false
+    }
+
+    fn refresh_effective_movie_mode(&mut self) {
+        let transport_capable = self.movie_transport_capable();
+        let feedback_capable = self
+            .video_feedback_capable
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.effective_movie_mode = match self.requested_video_profile {
+            VideoProfile::Standard => EffectiveMovieMode::Off,
+            VideoProfile::Movie if !MOVIE_MODE_HOST_CAPABLE => EffectiveMovieMode::UnsupportedPeer,
+            VideoProfile::Movie if !feedback_capable => EffectiveMovieMode::ViewerOnly,
+            VideoProfile::Movie if !transport_capable => EffectiveMovieMode::CompatibilityTransport,
+            VideoProfile::Movie => EffectiveMovieMode::Full,
+        };
+        #[cfg(feature = "quic-transport")]
+        {
+            use hbb_common::transport::datagram::{
+                DEFAULT_VIDEO_DATAGRAM_QUEUE_TARGET, MIN_VIDEO_DATAGRAM_QUEUE_BYTES,
+                MOVIE_MIN_VIDEO_DATAGRAM_QUEUE_BYTES, MOVIE_VIDEO_DATAGRAM_QUEUE_TARGET,
+            };
+            let (target, minimum_bytes) = if self.effective_movie_mode == EffectiveMovieMode::Full {
+                (
+                    MOVIE_VIDEO_DATAGRAM_QUEUE_TARGET,
+                    MOVIE_MIN_VIDEO_DATAGRAM_QUEUE_BYTES,
+                )
+            } else {
+                (
+                    DEFAULT_VIDEO_DATAGRAM_QUEUE_TARGET,
+                    MIN_VIDEO_DATAGRAM_QUEUE_BYTES,
+                )
+            };
+            if self
+                .stream
+                .set_quic_video_datagram_queue_policy(target, minimum_bytes)
+            {
+                log::info!(
+                    "#{} Movie QUIC video queue policy: effective={}, target_ms={}, minimum_bytes={}",
+                    self.inner.id(),
+                    self.effective_movie_mode.profile_label(),
+                    target.as_millis(),
+                    minimum_bytes
+                );
+            }
+        }
+        video_service::VIDEO_QOS
+            .lock()
+            .unwrap()
+            .user_movie_transport_capability(self.inner.id(), transport_capable);
+    }
+
+    fn set_video_feedback_capability(&mut self, capable: bool) {
         let previous = self
             .video_feedback_capable
             .swap(capable, std::sync::atomic::Ordering::Relaxed);
@@ -4120,6 +4256,7 @@ impl Connection {
             .lock()
             .unwrap()
             .user_video_feedback_capability(self.inner.id(), capable);
+        self.refresh_effective_movie_mode();
         log::info!(
             "#{} diag video feedback capability: {}",
             self.inner.id(),
@@ -6194,6 +6331,24 @@ impl Connection {
                 scrap::codec::Encoder::usable_encoding()
             );
         }
+        if let Some(profile) = VideoProfile::from_wire_update(o.video_profile) {
+            if profile != self.requested_video_profile {
+                self.requested_video_profile = profile;
+                video_service::VIDEO_QOS
+                    .lock()
+                    .unwrap()
+                    .user_video_profile(self.inner.id(), profile);
+                self.refresh_effective_movie_mode();
+                log::info!(
+                    "#{} video profile update: requested={}, effective={}, fallback={}",
+                    self.inner.id(),
+                    profile.config_value(),
+                    self.effective_movie_mode.profile_label(),
+                    self.effective_movie_mode.fallback_reason()
+                );
+                self.refresh_video_display(None);
+            }
+        }
         if let Ok(q) = o.lock_after_session_end.enum_value() {
             if q != BoolOption::NotSet {
                 self.lock_after_session_end = q == BoolOption::Yes;
@@ -6575,7 +6730,7 @@ impl Connection {
         // But it's not necessary now and we have to consider two audio services(client, server).
         crate::audio_service::set_voice_call_input_device(None, true);
         log::info!(
-            "#{} Connection closed: {}; diag close: lock={}, authorized={}, auth_kind={}, remote={}, file_transfer={}, view_camera={}, terminal={}, port_forward={}, display_idx={}, services_subed={}, video_ack_required={}, last_supported_encoding={:?}, negotiated_codec={:?}, usable_encoding={:?}",
+            "#{} Connection closed: {}; diag close: lock={}, authorized={}, auth_kind={}, remote={}, file_transfer={}, view_camera={}, terminal={}, port_forward={}, display_idx={}, services_subed={}, video_ack_required={}, requested_video_profile={}, effective_video_profile={}, movie_fallback={}, last_supported_encoding={:?}, negotiated_codec={:?}, usable_encoding={:?}",
             self.inner.id(),
             reason,
             lock,
@@ -6589,6 +6744,9 @@ impl Connection {
             self.display_idx,
             self.services_subed,
             self.video_ack_required,
+            self.requested_video_profile.config_value(),
+            self.effective_movie_mode.profile_label(),
+            self.effective_movie_mode.fallback_reason(),
             &self.last_supported_encoding,
             scrap::codec::Encoder::negotiated_codec(),
             scrap::codec::Encoder::usable_encoding()

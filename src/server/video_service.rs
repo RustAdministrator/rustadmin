@@ -18,7 +18,15 @@
 // to-do:
 // https://slhck.info/video/2017/03/01/rate-control.html
 
-use super::{display_service::check_display_changed, service::ServiceTmpl, video_qos::VideoQoS, *};
+use super::{
+    display_service::check_display_changed,
+    service::ServiceTmpl,
+    video_qos::{
+        MovieCadenceController, MovieCadenceSample, VideoQoS, MOVIE_BOOTSTRAP_FPS,
+        MOVIE_BOOTSTRAP_TIMEOUT,
+    },
+    *,
+};
 #[cfg(target_os = "linux")]
 use crate::common::SimpleCallOnReturn;
 #[cfg(target_os = "linux")]
@@ -46,7 +54,7 @@ use scrap::hwcodec::{HwEncoderProfile, HwRamEncoder, HwRamEncoderConfig};
 use scrap::vram::{VRamEncoder, VRamEncoderConfig};
 use scrap::{
     aom::AomEncoderConfig,
-    codec::{Encoder, EncoderCfg},
+    codec::{Encoder, EncoderCfg, DEFAULT_ENCODER_FPS},
     record::{Recorder, RecorderContext},
     vpxcodec::{VpxEncoderConfig, VpxVideoCodecId},
     Capturer, CodecFormat, Display, EncodeInput, Pixfmt, TraitCapturer, TraitPixelBuffer,
@@ -69,6 +77,7 @@ pub const OPTION_REFERENCE_REFRESH: &'static str = "reference-refresh";
 const ENCODE_NO_VALID_FRAME: &str = "no valid frame";
 const HW_ENCODER_WARMUP_TIMEOUT: Duration = Duration::from_secs(3);
 const HOST_VIDEO_DIAG_INTERVAL: Duration = Duration::from_secs(5);
+const HOST_VIDEO_DIAG_SAMPLE_CAPACITY: usize = 512;
 const HQ_REFERENCE_REFRESH_BITRATE_MULTIPLIER: u32 = 3;
 const HQ_REFERENCE_REFRESH_BITRATE_DIVISOR: u32 = 2;
 const HQ_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_secs(6);
@@ -113,6 +122,7 @@ enum ReferenceRefreshReason {
     SignificantBitrateIncrease,
     DeliveryRecovery,
     SecureDesktopTransition,
+    MovieCadenceChange,
 }
 
 #[derive(Debug)]
@@ -402,10 +412,212 @@ impl VideoFrameController {
             }
         }
     }
+
+    fn drain_available(&mut self, fetched_conn_ids: &mut HashSet<i32>) -> usize {
+        if self.send_conn_ids.is_empty() {
+            return 0;
+        }
+        let receiver = {
+            match FRAME_FETCHED_NOTIFIERS
+                .lock()
+                .unwrap()
+                .get(&self.stream_key)
+            {
+                Some(notifier) => notifier.1.clone(),
+                None => return 0,
+            }
+        };
+        let Ok(mut receiver_guard) = receiver.try_lock() else {
+            return 0;
+        };
+        let mut drained = 0;
+        while let Ok((id, _)) = receiver_guard.try_recv() {
+            drained += 1;
+            if self.send_conn_ids.contains(&id) {
+                fetched_conn_ids.insert(id);
+            }
+        }
+        drained
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MoviePacerDecision {
+    scheduled_at: Instant,
+    missed_slots: u64,
+}
+
+#[derive(Debug)]
+struct MovieFramePacer {
+    period: Duration,
+    next_deadline: Instant,
+    skipped_slots: u64,
+}
+
+impl MovieFramePacer {
+    fn new(fps: u32, now: Instant) -> Self {
+        let fps = scrap::codec::normalized_encoder_fps(fps);
+        Self {
+            period: Duration::from_nanos(1_000_000_000 / u64::from(fps)),
+            next_deadline: now,
+            skipped_slots: 0,
+        }
+    }
+
+    fn plan_at(&mut self, now: Instant) -> MoviePacerDecision {
+        let mut scheduled_at = self.next_deadline;
+        let mut missed_slots = 0;
+        if now > scheduled_at {
+            let late = now.saturating_duration_since(scheduled_at);
+            missed_slots = late
+                .as_nanos()
+                .checked_div(self.period.as_nanos())
+                .unwrap_or_default()
+                .min(u128::from(u32::MAX)) as u32;
+            if missed_slots > 0 {
+                scheduled_at += self.period * missed_slots;
+                self.skipped_slots = self.skipped_slots.saturating_add(u64::from(missed_slots));
+            }
+        }
+        self.next_deadline = scheduled_at + self.period;
+        MoviePacerDecision {
+            scheduled_at,
+            missed_slots: u64::from(missed_slots),
+        }
+    }
+
+    fn wait_next(&mut self) -> MoviePacerDecision {
+        let decision = self.plan_at(Instant::now());
+        let now = Instant::now();
+        if now < decision.scheduled_at {
+            std::thread::sleep(decision.scheduled_at - now);
+        }
+        decision
+    }
+
+    fn set_fps(&mut self, fps: u32, now: Instant) {
+        let fps = scrap::codec::normalized_encoder_fps(fps);
+        self.period = Duration::from_nanos(1_000_000_000 / u64::from(fps));
+        self.next_deadline = now + self.period;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct DurationSummary {
+    p50_us: u64,
+    p95_us: u64,
+    max_us: u64,
+}
+
+#[derive(Debug, Default)]
+struct DurationSamples {
+    samples_us: Vec<u64>,
+    next_index: usize,
+}
+
+impl DurationSamples {
+    fn record(&mut self, duration: Duration) {
+        let duration_us = u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+        if self.samples_us.len() < HOST_VIDEO_DIAG_SAMPLE_CAPACITY {
+            self.samples_us.push(duration_us);
+            return;
+        }
+        self.samples_us[self.next_index] = duration_us;
+        self.next_index = (self.next_index + 1) % HOST_VIDEO_DIAG_SAMPLE_CAPACITY;
+    }
+
+    fn summary(&self) -> DurationSummary {
+        if self.samples_us.is_empty() {
+            return DurationSummary::default();
+        }
+        let mut sorted = self.samples_us.clone();
+        sorted.sort_unstable();
+        DurationSummary {
+            p50_us: percentile_us(&sorted, 50),
+            p95_us: percentile_us(&sorted, 95),
+            max_us: sorted.last().copied().unwrap_or_default(),
+        }
+    }
+}
+
+const MOVIE_CADENCE_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct MovieHostCadenceMetrics {
+    pipeline_p95_us: u64,
+    iterations: u64,
+    missed_slots: u64,
+}
+
+#[derive(Debug)]
+struct MovieHostCadenceWindow {
+    started_at: Instant,
+    iterations: u64,
+    missed_slots: u64,
+    capture: DurationSamples,
+    pipeline: DurationSamples,
+}
+
+impl MovieHostCadenceWindow {
+    fn new(now: Instant) -> Self {
+        Self {
+            started_at: now,
+            iterations: 0,
+            missed_slots: 0,
+            capture: DurationSamples::default(),
+            pipeline: DurationSamples::default(),
+        }
+    }
+
+    fn record_iteration(&mut self) {
+        self.iterations = self.iterations.saturating_add(1);
+    }
+
+    fn record_missed_slots(&mut self, missed_slots: u64) {
+        self.missed_slots = self.missed_slots.saturating_add(missed_slots);
+    }
+
+    fn record_pipeline(&mut self, elapsed: Duration) {
+        self.pipeline.record(elapsed);
+    }
+
+    fn record_capture(&mut self, elapsed: Duration) {
+        self.capture.record(elapsed);
+    }
+
+    fn take_if_due(&mut self, now: Instant) -> Option<MovieHostCadenceMetrics> {
+        if now.saturating_duration_since(self.started_at) < MOVIE_CADENCE_SAMPLE_INTERVAL {
+            return None;
+        }
+        let capture = std::mem::take(&mut self.capture).summary();
+        let pipeline = std::mem::take(&mut self.pipeline).summary();
+        let metrics = MovieHostCadenceMetrics {
+            pipeline_p95_us: capture.p95_us.saturating_add(pipeline.p95_us),
+            iterations: self.iterations,
+            missed_slots: self.missed_slots,
+        };
+        self.started_at = now;
+        self.iterations = 0;
+        self.missed_slots = 0;
+        Some(metrics)
+    }
+}
+
+fn percentile_us(sorted: &[u64], percentile: usize) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let rank = sorted.len().saturating_mul(percentile).saturating_add(99) / 100;
+    sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
 }
 
 struct HostVideoDiagnostics {
     last_log: Instant,
+    last_loop_started: Option<Instant>,
+    last_valid_capture: Option<Instant>,
+    loop_iterations: usize,
+    pacing_missed_slots: u64,
+    encoder_recreations: u64,
     valid_capture: usize,
     invalid_capture: usize,
     would_block: usize,
@@ -418,12 +630,23 @@ struct HostVideoDiagnostics {
     wait_timeouts: usize,
     wait_total_ms: u128,
     wait_max_ms: u128,
+    loop_intervals: DurationSamples,
+    capture_intervals: DurationSamples,
+    capture_calls: DurationSamples,
+    encode_pipelines: DurationSamples,
+    ack_waits: DurationSamples,
+    loop_totals: DurationSamples,
 }
 
 impl HostVideoDiagnostics {
     fn new() -> Self {
         Self {
             last_log: Instant::now(),
+            last_loop_started: None,
+            last_valid_capture: None,
+            loop_iterations: 0,
+            pacing_missed_slots: 0,
+            encoder_recreations: 0,
             valid_capture: 0,
             invalid_capture: 0,
             would_block: 0,
@@ -436,7 +659,49 @@ impl HostVideoDiagnostics {
             wait_timeouts: 0,
             wait_total_ms: 0,
             wait_max_ms: 0,
+            loop_intervals: DurationSamples::default(),
+            capture_intervals: DurationSamples::default(),
+            capture_calls: DurationSamples::default(),
+            encode_pipelines: DurationSamples::default(),
+            ack_waits: DurationSamples::default(),
+            loop_totals: DurationSamples::default(),
         }
+    }
+
+    fn record_loop_start(&mut self, now: Instant) {
+        self.loop_iterations += 1;
+        if let Some(previous) = self.last_loop_started.replace(now) {
+            self.loop_intervals
+                .record(now.saturating_duration_since(previous));
+        }
+    }
+
+    fn record_valid_capture(&mut self, now: Instant) {
+        self.valid_capture += 1;
+        if let Some(previous) = self.last_valid_capture.replace(now) {
+            self.capture_intervals
+                .record(now.saturating_duration_since(previous));
+        }
+    }
+
+    fn record_capture_call(&mut self, elapsed: Duration) {
+        self.capture_calls.record(elapsed);
+    }
+
+    fn record_encode_pipeline(&mut self, elapsed: Duration) {
+        self.encode_pipelines.record(elapsed);
+    }
+
+    fn record_loop_total(&mut self, elapsed: Duration) {
+        self.loop_totals.record(elapsed);
+    }
+
+    fn record_pacing_missed_slots(&mut self, missed_slots: u64) {
+        self.pacing_missed_slots = self.pacing_missed_slots.saturating_add(missed_slots);
+    }
+
+    fn record_encoder_recreation(&mut self) {
+        self.encoder_recreations = self.encoder_recreations.saturating_add(1);
     }
 
     fn record_send_result(&mut self, send_conn_count: usize) {
@@ -457,6 +722,7 @@ impl HostVideoDiagnostics {
         self.wait_frames += 1;
         self.wait_total_ms += elapsed_ms;
         self.wait_max_ms = self.wait_max_ms.max(elapsed_ms);
+        self.ack_waits.record(elapsed);
         if fetched < expected {
             self.wait_timeouts += 1;
         }
@@ -474,7 +740,8 @@ impl HostVideoDiagnostics {
         spf: Duration,
         gdi: bool,
     ) {
-        if self.last_log.elapsed() < HOST_VIDEO_DIAG_INTERVAL {
+        let window_elapsed = self.last_log.elapsed();
+        if window_elapsed < HOST_VIDEO_DIAG_INTERVAL {
             return;
         }
         let target_fps = if spf.as_nanos() == 0 {
@@ -487,8 +754,18 @@ impl HostVideoDiagnostics {
         } else {
             self.wait_total_ms / self.wait_frames as u128
         };
+        let window_secs = window_elapsed.as_secs_f64().max(f64::EPSILON);
+        let loop_rate = self.loop_iterations as f64 / window_secs;
+        let capture_fps = self.valid_capture as f64 / window_secs;
+        let encoded_fps = self.sent_batches as f64 / window_secs;
+        let loop_interval = self.loop_intervals.summary();
+        let capture_interval = self.capture_intervals.summary();
+        let capture_call = self.capture_calls.summary();
+        let encode_pipeline = self.encode_pipelines.summary();
+        let ack_wait = self.ack_waits.summary();
+        let loop_total = self.loop_totals.summary();
         log::info!(
-            "diag host fps: service={}, source={:?}, display_idx={}, codec={:?}, hardware={}, bitrate={}, quality={:.3}, target_fps={:.1}, gdi={}, valid_capture={}, invalid_capture={}, would_block={}, encode_calls={}, repeat_encode_calls={}, sent_batches={}, sent_targets={}, empty_send_results={}, wait_frames={}, wait_timeouts={}, wait_avg_ms={}, wait_max_ms={}",
+            "diag host fps: service={}, source={:?}, display_idx={}, codec={:?}, hardware={}, bitrate={}, quality={:.3}, target_fps={:.1}, loop_rate={:.1}, capture_fps={:.1}, encoded_fps={:.1}, pacing_missed_slots={}, encoder_recreations={}, gdi={}, valid_capture={}, invalid_capture={}, would_block={}, encode_calls={}, repeat_encode_calls={}, sent_batches={}, sent_targets={}, empty_send_results={}, wait_frames={}, wait_timeouts={}, wait_avg_ms={}, wait_max_ms={}, loop_interval_p50_us={}, loop_interval_p95_us={}, loop_interval_max_us={}, capture_interval_p50_us={}, capture_interval_p95_us={}, capture_interval_max_us={}, capture_call_p50_us={}, capture_call_p95_us={}, capture_call_max_us={}, encode_pipeline_p50_us={}, encode_pipeline_p95_us={}, encode_pipeline_max_us={}, ack_wait_p50_us={}, ack_wait_p95_us={}, ack_wait_max_us={}, loop_total_p50_us={}, loop_total_p95_us={}, loop_total_max_us={}",
             service_name,
             source,
             display_idx,
@@ -497,6 +774,11 @@ impl HostVideoDiagnostics {
             bitrate,
             quality,
             target_fps,
+            loop_rate,
+            capture_fps,
+            encoded_fps,
+            self.pacing_missed_slots,
+            self.encoder_recreations,
             gdi,
             self.valid_capture,
             self.invalid_capture,
@@ -509,7 +791,25 @@ impl HostVideoDiagnostics {
             self.wait_frames,
             self.wait_timeouts,
             wait_avg_ms,
-            self.wait_max_ms
+            self.wait_max_ms,
+            loop_interval.p50_us,
+            loop_interval.p95_us,
+            loop_interval.max_us,
+            capture_interval.p50_us,
+            capture_interval.p95_us,
+            capture_interval.max_us,
+            capture_call.p50_us,
+            capture_call.p95_us,
+            capture_call.max_us,
+            encode_pipeline.p50_us,
+            encode_pipeline.p95_us,
+            encode_pipeline.max_us,
+            ack_wait.p50_us,
+            ack_wait.p95_us,
+            ack_wait.max_us,
+            loop_total.p50_us,
+            loop_total.p95_us,
+            loop_total.max_us
         );
         *self = Self::new();
     }
@@ -931,9 +1231,10 @@ mod tests {
     use super::{
         keep_privileged_stream_for_secure_transition, secure_capture_helper_ready,
         should_force_privileged_secure_capturer, stale_secure_capture_helper_on_user_desktop,
-        stamp_video_frame, windows_capture_route, HqReferenceRefreshPolicy, ReferenceRefreshReason,
-        VideoFrameController, VideoSource, VideoStreamKey, WindowsCaptureRoute,
-        DELIVERY_REFERENCE_REFRESH_COOLDOWN, HQ_REFERENCE_REFRESH_COOLDOWN,
+        stamp_video_frame, windows_capture_route, DurationSamples, HqReferenceRefreshPolicy,
+        MovieFramePacer, MovieHostCadenceWindow, ReferenceRefreshReason, VideoFrameController,
+        VideoSource, VideoStreamKey, WindowsCaptureRoute, DELIVERY_REFERENCE_REFRESH_COOLDOWN,
+        HOST_VIDEO_DIAG_SAMPLE_CAPACITY, HQ_REFERENCE_REFRESH_COOLDOWN,
     };
     use hbb_common::message_proto::{option_message::CaptureBackend, VideoFrame};
     use std::{
@@ -1047,6 +1348,83 @@ mod tests {
             (second.stream_id, second.frame_id, second.capture_time_ms),
             (17, 2, 57)
         );
+    }
+
+    #[test]
+    fn duration_samples_report_percentiles_and_remain_bounded() {
+        let mut samples = DurationSamples::default();
+        for duration_us in 1..=100 {
+            samples.record(Duration::from_micros(duration_us));
+        }
+        let summary = samples.summary();
+        assert_eq!(
+            (summary.p50_us, summary.p95_us, summary.max_us),
+            (50, 95, 100)
+        );
+
+        for duration_us in 101..=(HOST_VIDEO_DIAG_SAMPLE_CAPACITY as u64 + 10) {
+            samples.record(Duration::from_micros(duration_us));
+        }
+        assert_eq!(samples.samples_us.len(), HOST_VIDEO_DIAG_SAMPLE_CAPACITY);
+        assert_eq!(
+            samples.summary().max_us,
+            HOST_VIDEO_DIAG_SAMPLE_CAPACITY as u64 + 10
+        );
+    }
+
+    #[test]
+    fn movie_pacer_uses_absolute_deadlines_with_bounded_catch_up() {
+        let start = Instant::now();
+        let mut pacer = MovieFramePacer::new(60, start);
+        let period = pacer.period;
+
+        let first = pacer.plan_at(start);
+        assert_eq!(first.scheduled_at, start);
+        assert_eq!(first.missed_slots, 0);
+
+        let late_now = start + period * 3 + period / 2;
+        let late = pacer.plan_at(late_now);
+        assert_eq!(late.scheduled_at, start + period * 3);
+        assert_eq!(late.missed_slots, 2);
+        assert_eq!(pacer.skipped_slots, 2);
+
+        let next = pacer.plan_at(late_now);
+        assert_eq!(next.scheduled_at, start + period * 4);
+        assert_eq!(next.missed_slots, 0);
+        assert_eq!(next.scheduled_at - late.scheduled_at, period);
+    }
+
+    #[test]
+    fn movie_pacer_does_not_drop_a_partially_elapsed_slot() {
+        let start = Instant::now();
+        let mut pacer = MovieFramePacer::new(60, start);
+        let period = pacer.period;
+        let first = pacer.plan_at(start);
+
+        let late = pacer.plan_at(start + period + period / 2);
+        assert_eq!(late.scheduled_at, start + period);
+        assert_eq!(late.missed_slots, 0);
+
+        let next = pacer.plan_at(start + period + period / 2);
+        assert_eq!(next.scheduled_at - late.scheduled_at, period);
+        assert_eq!(first.scheduled_at, start);
+    }
+
+    #[test]
+    fn movie_host_window_combines_capture_and_encode_pressure() {
+        let start = Instant::now();
+        let mut window = MovieHostCadenceWindow::new(start);
+        window.record_iteration();
+        window.record_missed_slots(1);
+        window.record_capture(Duration::from_millis(4));
+        window.record_pipeline(Duration::from_millis(6));
+
+        let metrics = window
+            .take_if_due(start + Duration::from_millis(500))
+            .unwrap();
+        assert_eq!(metrics.pipeline_p95_us, 10_000);
+        assert_eq!(metrics.iterations, 1);
+        assert_eq!(metrics.missed_slots, 1);
     }
 
     #[test]
@@ -1883,18 +2261,50 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut capture_backend = c.capture_backend();
     #[cfg(not(windows))]
     let capture_backend = "Unknown";
+    let start = time::Instant::now();
     let subscriber_ids = sp.subscriber_ids();
     let mut video_qos = VIDEO_QOS.lock().unwrap();
     video_qos.sync_subscribers(&service_name, subscriber_ids);
-    let mut spf = video_qos.spf(&service_name);
+    let full_movie_mode = video_qos.full_movie_mode(&service_name);
+    let movie_target_fps = video_qos.movie_target_fps(&service_name);
+    let initial_movie_metrics = video_qos.movie_viewer_metrics(&service_name);
+    let mut movie_cadence = full_movie_mode.then(|| {
+        MovieCadenceController::new(
+            movie_target_fps,
+            initial_movie_metrics.display_refresh_millihz,
+            start,
+        )
+    });
+    let encoder_fps = movie_cadence
+        .as_ref()
+        .map(MovieCadenceController::current_tier)
+        .unwrap_or_else(|| {
+            video_qos
+                .custom_encoder_fps(&service_name)
+                .unwrap_or(DEFAULT_ENCODER_FPS)
+        });
+    let mut spf = movie_cadence
+        .as_ref()
+        .map(|controller| Duration::from_secs_f64(1.0 / f64::from(controller.current_tier())))
+        .unwrap_or_else(|| video_qos.spf(&service_name));
     let mut quality = video_qos.ratio(&service_name);
     let record_incoming = config::option2bool(
         "allow-auto-record-incoming",
         &Config::get_option("allow-auto-record-incoming"),
     );
     let client_record = video_qos.record(&service_name);
+    video_qos.store_movie_runtime_status(
+        &service_name,
+        if full_movie_mode { movie_target_fps } else { 0 },
+        if full_movie_mode {
+            MOVIE_BOOTSTRAP_FPS.min(encoder_fps).max(1)
+        } else {
+            0
+        },
+        0,
+    );
     drop(video_qos);
-    let (mut encoder, encoder_cfg, codec_format, use_i444, recorder) = match setup_encoder(
+    let (mut encoder, mut encoder_cfg, codec_format, use_i444, recorder) = match setup_encoder(
         &c,
         service_name.clone(),
         quality,
@@ -1903,6 +2313,7 @@ fn run(vs: VideoService) -> ResultType<()> {
         last_portable_service_running,
         vs.source,
         display_idx,
+        encoder_fps,
     ) {
         Ok(result) => result,
         Err(err) => {
@@ -1912,6 +2323,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                 height: c.height as _,
                 quality,
                 codec: VpxVideoCodecId::VP9,
+                fps: encoder_fps,
                 keyframe_interval: None,
             }));
             setup_encoder(
@@ -1923,6 +2335,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                 last_portable_service_running,
                 vs.source,
                 display_idx,
+                encoder_fps,
             )?
         }
     };
@@ -1983,7 +2396,23 @@ fn run(vs: VideoService) -> ResultType<()> {
 
     let mut frame_controller = VideoFrameController::new(vs.source, display_idx);
 
-    let start = time::Instant::now();
+    let bootstrap_fps = MOVIE_BOOTSTRAP_FPS.min(encoder_fps).max(1);
+    let mut movie_pacer = full_movie_mode.then(|| MovieFramePacer::new(bootstrap_fps, start));
+    let mut movie_bootstrap_released = !full_movie_mode;
+    let mut movie_host_window = full_movie_mode.then(|| MovieHostCadenceWindow::new(start));
+    log::info!(
+        "diag video pacing mode: service={}, full_movie={}, target_fps={}, encoder_fps={}, pacing_fps={}, legacy_ack_wait={}",
+        service_name,
+        full_movie_mode,
+        movie_target_fps,
+        encoder_fps,
+        if full_movie_mode {
+            bootstrap_fps
+        } else {
+            encoder_fps
+        },
+        !full_movie_mode
+    );
     let mut last_check_displays = time::Instant::now();
     #[cfg(windows)]
     let mut try_gdi = 1;
@@ -2032,6 +2461,14 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut host_diag = HostVideoDiagnostics::new();
 
     while sp.ok() {
+        let loop_started = Instant::now();
+        let movie_host_metrics = movie_host_window
+            .as_mut()
+            .and_then(|window| window.take_if_due(loop_started));
+        if let Some(window) = movie_host_window.as_mut() {
+            window.record_iteration();
+        }
+        host_diag.record_loop_start(loop_started);
         #[cfg(windows)]
         check_uac_switch(c.privacy_mode_id, c._capturer_privacy_mode_id)?;
         let qos_update = check_qos(
@@ -2044,6 +2481,154 @@ fn run(vs: VideoService) -> ResultType<()> {
             &service_name,
             &sp,
         )?;
+        if let Some(pacer) = movie_pacer.as_ref() {
+            spf = pacer.period;
+        }
+
+        let movie_sample_state = if movie_cadence.is_some()
+            && (!movie_bootstrap_released || movie_host_metrics.is_some())
+        {
+            let video_qos = VIDEO_QOS.lock().unwrap();
+            Some((
+                video_qos.movie_viewer_metrics(&service_name),
+                video_qos.movie_target_fps(&service_name),
+            ))
+        } else {
+            None
+        };
+        let viewer_metrics = movie_sample_state.map(|state| state.0);
+        if !movie_bootstrap_released
+            && (viewer_metrics.is_some_and(|metrics| metrics.all_rendered)
+                || start.elapsed() >= MOVIE_BOOTSTRAP_TIMEOUT)
+        {
+            if let (Some(controller), Some(pacer)) = (movie_cadence.as_ref(), movie_pacer.as_mut())
+            {
+                pacer.set_fps(controller.current_tier(), loop_started);
+                spf = pacer.period;
+                movie_bootstrap_released = true;
+                VIDEO_QOS.lock().unwrap().store_movie_runtime_status(
+                    &service_name,
+                    controller.target_fps(),
+                    controller.current_tier(),
+                    0,
+                );
+                log::info!(
+                    "diag movie bootstrap released: service={}, pacing_fps={}, first_rendered={}, timeout={}",
+                    service_name,
+                    controller.current_tier(),
+                    viewer_metrics.is_some_and(|metrics| metrics.all_rendered),
+                    start.elapsed() >= MOVIE_BOOTSTRAP_TIMEOUT
+                );
+            }
+        }
+
+        let mut cadence_recreated = false;
+        if movie_bootstrap_released {
+            if let (Some(host), Some(viewer), Some(controller), Some(pacer)) = (
+                movie_host_metrics,
+                viewer_metrics,
+                movie_cadence.as_mut(),
+                movie_pacer.as_mut(),
+            ) {
+                let cadence_sample = MovieCadenceSample {
+                    now: loop_started,
+                    target_fps: movie_sample_state
+                        .map(|state| state.1)
+                        .unwrap_or(movie_target_fps),
+                    host_pipeline_p95_us: host.pipeline_p95_us,
+                    host_iterations: host.iterations,
+                    host_missed_slots: host.missed_slots,
+                    viewer,
+                };
+                VIDEO_QOS.lock().unwrap().store_movie_runtime_status(
+                    &service_name,
+                    controller.target_fps(),
+                    controller.current_tier(),
+                    host.pipeline_p95_us,
+                );
+                if let Some(decision) = controller.evaluate(cadence_sample) {
+                    let recreate_started = Instant::now();
+                    match recreate_encoder_at_fps(
+                        &encoder_cfg,
+                        use_i444,
+                        quality,
+                        decision.current_fps,
+                    ) {
+                        Ok((replacement, replacement_cfg)) => {
+                            let previous_bitrate = encoder.bitrate();
+                            let replacement_bitrate = replacement.bitrate();
+                            encoder = replacement;
+                            encoder_cfg = replacement_cfg;
+                            #[cfg(feature = "vram")]
+                            c.set_output_texture(encoder.input_texture());
+                            pacer.set_fps(decision.current_fps, loop_started);
+                            spf = pacer.period;
+                            VIDEO_QOS.lock().unwrap().store_movie_runtime_status(
+                                &service_name,
+                                controller.target_fps(),
+                                decision.current_fps,
+                                host.pipeline_p95_us,
+                            );
+                            cadence_recreated = true;
+                            host_diag.record_encoder_recreation();
+                            VIDEO_QOS
+                                .lock()
+                                .unwrap()
+                                .store_bitrate(&service_name, replacement_bitrate);
+                            reference_refresh_policy
+                                .record_refresh(replacement_bitrate, recreate_started);
+                            reference_refresh_pending = Some(PendingReferenceRefresh {
+                                reason: ReferenceRefreshReason::MovieCadenceChange,
+                                requested_at: recreate_started,
+                            });
+                            repeat_encode_counter = 0;
+                            encode_fail_counter = 0;
+                            hw_no_valid_frame_since = None;
+                            log::info!(
+                                "diag movie cadence change: service={}, target={}, previous={}, current={}, reason={}, pipeline_p95_us={}, missed_slots={}, host_iterations={}, queue_depth={}, decode_us={}, render_submit_us={}, bitrate_before={}, bitrate_after={}, recreate_ms={}",
+                                service_name,
+                                controller.target_fps(),
+                                decision.previous_fps,
+                                decision.current_fps,
+                                decision.reason.as_str(),
+                                host.pipeline_p95_us,
+                                host.missed_slots,
+                                host.iterations,
+                                viewer.max_queue_depth_frames,
+                                viewer.max_decode_time_us,
+                                viewer.max_render_submit_time_us,
+                                previous_bitrate,
+                                replacement_bitrate,
+                                recreate_started.elapsed().as_millis()
+                            );
+                        }
+                        Err(err) => {
+                            let failed_downshift = decision.current_fps < decision.previous_fps;
+                            controller.reject_change(
+                                decision.previous_fps,
+                                decision.current_fps,
+                                loop_started,
+                            );
+                            log::warn!(
+                                "diag movie cadence change rejected: service={}, target={}, previous={}, rejected={}, reason={}, err={:?}",
+                                service_name,
+                                controller.target_fps(),
+                                decision.previous_fps,
+                                decision.current_fps,
+                                decision.reason.as_str(),
+                                err
+                            );
+                            if failed_downshift {
+                                log::warn!(
+                                    "Movie cadence downshift requires a service restart after encoder recreation failure"
+                                );
+                                bail!("SWITCH");
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let reference_refresh_eligible = hq_reference_refresh_eligible(&encoder_cfg, codec_format);
         let policy_refresh_reason = reference_refresh_policy.evaluate(
             reference_refresh_eligible,
@@ -2061,10 +2646,19 @@ fn run(vs: VideoService) -> ResultType<()> {
         let secure_desktop_refresh_reason = secure_desktop_reference_refresh_pending.take();
         #[cfg(not(windows))]
         let secure_desktop_refresh_reason: Option<ReferenceRefreshReason> = None;
-        if let Some(reason) = secure_desktop_refresh_reason
+        let refresh_reason = secure_desktop_refresh_reason
             .or(delivery_refresh_reason)
-            .or(policy_refresh_reason)
-        {
+            .or(policy_refresh_reason);
+        if cadence_recreated {
+            if let Some(reason) = refresh_reason {
+                log::info!(
+                    "diag video reference refresh coalesced with Movie cadence change: service={}, display={}, reason={:?}",
+                    service_name,
+                    display_idx,
+                    reason
+                );
+            }
+        } else if let Some(reason) = refresh_reason {
             let refresh_started = Instant::now();
             match recreate_encoder_at_quality(&encoder_cfg, use_i444, quality) {
                 Ok(refreshed_encoder) => {
@@ -2299,6 +2893,13 @@ fn run(vs: VideoService) -> ResultType<()> {
                 bail!("Desktop changed");
             }
         }
+        let movie_schedule = movie_pacer.as_mut().map(MovieFramePacer::wait_next);
+        if let Some(schedule) = movie_schedule {
+            host_diag.record_pacing_missed_slots(schedule.missed_slots);
+            if let Some(window) = movie_host_window.as_mut() {
+                window.record_missed_slots(schedule.missed_slots);
+            }
+        }
         let now = time::Instant::now();
         if vs.source.is_monitor() && last_check_displays.elapsed().as_millis() > 1000 {
             last_check_displays = now;
@@ -2332,9 +2933,23 @@ fn run(vs: VideoService) -> ResultType<()> {
 
         frame_controller.reset();
 
-        let time = now - start;
+        let time = movie_schedule
+            .map(|schedule| schedule.scheduled_at.saturating_duration_since(start))
+            .unwrap_or_else(|| now.saturating_duration_since(start));
         let ms = (time.as_secs() * 1000 + time.subsec_millis() as u64) as i64;
-        let res = match c.frame(spf) {
+        let capture_call_started = Instant::now();
+        let capture_timeout = if movie_pacer.is_some() {
+            Duration::ZERO
+        } else {
+            spf
+        };
+        let captured_frame = c.frame(capture_timeout);
+        let capture_call_elapsed = capture_call_started.elapsed();
+        host_diag.record_capture_call(capture_call_elapsed);
+        if let Some(window) = movie_host_window.as_mut() {
+            window.record_capture(capture_call_elapsed);
+        }
+        let res = match captured_frame {
             Ok(frame) => {
                 repeat_encode_counter = 0;
                 if frame.valid() {
@@ -2343,7 +2958,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                         user_capture_helper_no_frame_since = None;
                         mag_no_frame_count = 0;
                     }
-                    host_diag.valid_capture += 1;
+                    host_diag.record_valid_capture(Instant::now());
                     let capture_frame = capture_frame_label(&frame);
                     let capture_frame_changed = {
                         let mut video_qos = VIDEO_QOS.lock().unwrap();
@@ -2403,6 +3018,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                         }
                     }
 
+                    let encode_pipeline_started = Instant::now();
                     let frame = frame.to(encoder.yuvfmt(), &mut yuv, &mut mid_data)?;
                     let send_conn_ids = handle_one_frame(
                         display_idx,
@@ -2420,6 +3036,11 @@ fn run(vs: VideoService) -> ResultType<()> {
                         capture_width,
                         capture_height,
                     )?;
+                    let encode_pipeline_elapsed = encode_pipeline_started.elapsed();
+                    host_diag.record_encode_pipeline(encode_pipeline_elapsed);
+                    if let Some(window) = movie_host_window.as_mut() {
+                        window.record_pipeline(encode_pipeline_elapsed);
+                    }
                     host_diag.record_send_result(send_conn_ids.len());
                     frame_controller.set_send(now, send_conn_ids);
                     send_counter += 1;
@@ -2538,6 +3159,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                     if repeat_encode_counter < repeat_encode_max {
                         repeat_encode_counter += 1;
                         host_diag.repeat_encode_calls += 1;
+                        let encode_pipeline_started = Instant::now();
                         let send_conn_ids = handle_one_frame(
                             display_idx,
                             &sp,
@@ -2554,6 +3176,11 @@ fn run(vs: VideoService) -> ResultType<()> {
                             capture_width,
                             capture_height,
                         )?;
+                        let encode_pipeline_elapsed = encode_pipeline_started.elapsed();
+                        host_diag.record_encode_pipeline(encode_pipeline_elapsed);
+                        if let Some(window) = movie_host_window.as_mut() {
+                            window.record_pipeline(encode_pipeline_elapsed);
+                        }
                         host_diag.record_send_result(send_conn_ids.len());
                         frame_controller.set_send(now, send_conn_ids);
                         send_counter += 1;
@@ -2649,24 +3276,29 @@ fn run(vs: VideoService) -> ResultType<()> {
             }
         }
 
-        let mut fetched_conn_ids = HashSet::new();
-        let timeout_millis = 3_000u64;
-        let wait_begin = Instant::now();
-        while wait_begin.elapsed().as_millis() < timeout_millis as _ {
-            if vs.source.is_monitor() {
-                check_privacy_mode_changed(&sp, display_idx, &c)?;
+        if movie_pacer.is_some() {
+            let mut fetched_conn_ids = HashSet::new();
+            frame_controller.drain_available(&mut fetched_conn_ids);
+        } else {
+            let mut fetched_conn_ids = HashSet::new();
+            let timeout_millis = 3_000u64;
+            let wait_begin = Instant::now();
+            while wait_begin.elapsed().as_millis() < timeout_millis as _ {
+                if vs.source.is_monitor() {
+                    check_privacy_mode_changed(&sp, display_idx, &c)?;
+                }
+                frame_controller.try_wait_next(&mut fetched_conn_ids, 300);
+                // break if all connections have received current frame
+                if frame_controller.delivery_ready(&fetched_conn_ids) {
+                    break;
+                }
             }
-            frame_controller.try_wait_next(&mut fetched_conn_ids, 300);
-            // break if all connections have received current frame
-            if frame_controller.delivery_ready(&fetched_conn_ids) {
-                break;
-            }
+            host_diag.record_wait(
+                frame_controller.send_conn_ids.len(),
+                fetched_conn_ids.len(),
+                wait_begin.elapsed(),
+            );
         }
-        host_diag.record_wait(
-            frame_controller.send_conn_ids.len(),
-            fetched_conn_ids.len(),
-            wait_begin.elapsed(),
-        );
         DISPLAY_CONN_IDS
             .lock()
             .unwrap()
@@ -2675,9 +3307,10 @@ fn run(vs: VideoService) -> ResultType<()> {
         let elapsed = now.elapsed();
         // may need to enable frame(timeout)
         log::trace!("{:?} {:?}", time::Instant::now(), elapsed);
-        if elapsed < spf {
+        if movie_pacer.is_none() && elapsed < spf {
             std::thread::sleep(spf - elapsed);
         }
+        host_diag.record_loop_total(loop_started.elapsed());
         #[cfg(windows)]
         let current_gdi = c.is_gdi();
         #[cfg(not(windows))]
@@ -2745,6 +3378,7 @@ fn setup_encoder(
     last_portable_service_running: bool,
     source: VideoSource,
     display_idx: usize,
+    encoder_fps: u32,
 ) -> ResultType<(
     Encoder,
     EncoderCfg,
@@ -2759,6 +3393,7 @@ fn setup_encoder(
         client_record || record_incoming,
         last_portable_service_running,
         source,
+        encoder_fps,
     );
     Encoder::set_fallback(&encoder_cfg);
     let codec_format = Encoder::negotiated_codec();
@@ -2820,6 +3455,38 @@ fn recreate_encoder_at_quality(
     Encoder::new(encoder_cfg, use_i444)
 }
 
+fn recreate_encoder_at_fps(
+    encoder_cfg: &EncoderCfg,
+    use_i444: bool,
+    quality: f32,
+    fps: u32,
+) -> ResultType<(Encoder, EncoderCfg)> {
+    let mut replacement_cfg = encoder_cfg.clone();
+    let fps = scrap::codec::normalized_encoder_fps(fps);
+    match &mut replacement_cfg {
+        EncoderCfg::VPX(config) => {
+            config.quality = quality;
+            config.fps = fps;
+        }
+        EncoderCfg::AOM(config) => {
+            config.quality = quality;
+            config.fps = fps;
+        }
+        #[cfg(feature = "hwcodec")]
+        EncoderCfg::HWRAM(config) => {
+            config.quality = quality;
+            config.fps = fps;
+        }
+        #[cfg(feature = "vram")]
+        EncoderCfg::VRAM(config) => {
+            config.quality = quality;
+            config.fps = fps;
+        }
+    }
+    let replacement = Encoder::new(replacement_cfg.clone(), use_i444)?;
+    Ok((replacement, replacement_cfg))
+}
+
 fn get_encoder_config(
     c: &CapturerInfo,
     _name: String,
@@ -2827,6 +3494,7 @@ fn get_encoder_config(
     record: bool,
     _portable_service: bool,
     _source: VideoSource,
+    encoder_fps: u32,
 ) -> EncoderCfg {
     #[cfg(all(windows, feature = "vram"))]
     if _portable_service || c.is_gdi() || c.is_cpu_only() || _source == VideoSource::Camera {
@@ -2854,6 +3522,7 @@ fn get_encoder_config(
                         width: c.width,
                         height: c.height,
                         quality,
+                        fps: encoder_fps,
                         feature,
                         keyframe_interval,
                     });
@@ -2871,6 +3540,7 @@ fn get_encoder_config(
                     width: c.width,
                     height: c.height,
                     quality,
+                    fps: encoder_fps,
                     keyframe_interval,
                     profile: if high_quality {
                         HwEncoderProfile::HighQuality
@@ -2889,6 +3559,7 @@ fn get_encoder_config(
                 width: c.width as _,
                 height: c.height as _,
                 quality,
+                fps: encoder_fps,
                 codec: VpxVideoCodecId::VP9,
                 keyframe_interval,
             })
@@ -2897,6 +3568,7 @@ fn get_encoder_config(
             width: c.width as _,
             height: c.height as _,
             quality,
+            fps: encoder_fps,
             codec: if format == CodecFormat::VP8 {
                 VpxVideoCodecId::VP8
             } else {
@@ -2914,6 +3586,7 @@ fn get_encoder_config(
                         width: c.width,
                         height: c.height,
                         quality,
+                        fps: encoder_fps,
                         keyframe_interval,
                         profile: Default::default(),
                     });
@@ -2924,6 +3597,7 @@ fn get_encoder_config(
                         width: c.width as _,
                         height: c.height as _,
                         quality,
+                        fps: encoder_fps,
                         codec: VpxVideoCodecId::VP9,
                         keyframe_interval,
                     });
@@ -2933,6 +3607,7 @@ fn get_encoder_config(
                 width: c.width as _,
                 height: c.height as _,
                 quality,
+                fps: encoder_fps,
                 keyframe_interval,
             })
         }
@@ -2940,6 +3615,7 @@ fn get_encoder_config(
             width: c.width as _,
             height: c.height as _,
             quality,
+            fps: encoder_fps,
             codec: VpxVideoCodecId::VP9,
             keyframe_interval,
         }),

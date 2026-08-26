@@ -36,6 +36,7 @@ use crate::{
     secure_tcp,
     ui_interface::{get_builtin_option, resolve_avatar_url, use_texture_render},
     ui_session_interface::{InvokeUiSession, Session},
+    video_profile::{VideoProfile, MOVIE_DEFAULT_TARGET_FPS},
     wrap_direct_public_key_symmetric_value_with_identity,
 };
 #[cfg(feature = "unix-file-copy-paste")]
@@ -106,6 +107,8 @@ pub mod screenshot;
 pub const MILLI1: Duration = Duration::from_millis(1);
 pub const SEC30: Duration = Duration::from_secs(30);
 pub const VIDEO_QUEUE_SIZE: usize = 120;
+pub(crate) const MOVIE_VIDEO_QUEUE_MAX_AGE_MS: u64 = 100;
+const MOVIE_VIDEO_REFRESH_COOLDOWN: Duration = Duration::from_millis(500);
 const VIDEO_FEEDBACK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 const MAX_DECODE_FAIL_COUNTER: usize = 3;
 const DEFAULT_CUSTOM_IMAGE_QUALITY: i32 = 50;
@@ -116,6 +119,39 @@ const MIN_CUSTOM_FPS: i32 = 5;
 const MAX_CUSTOM_FPS: i32 = 120;
 #[cfg(feature = "quic-transport")]
 const AUTO_QUIC_RACE_TIMEOUT: Duration = Duration::from_millis(1_500);
+
+fn movie_video_frame_obsolete(frame: &VideoFrame, newest_capture_time_ms: u64) -> bool {
+    frame.capture_time_ms > 0
+        && newest_capture_time_ms > frame.capture_time_ms
+        && newest_capture_time_ms.saturating_sub(frame.capture_time_ms)
+            > MOVIE_VIDEO_QUEUE_MAX_AGE_MS
+}
+
+pub(crate) fn movie_source_clock_regressed(
+    previous_received_frame_id: u64,
+    frame: &VideoFrame,
+    previous_capture_time_ms: u64,
+) -> bool {
+    frame.frame_id > previous_received_frame_id
+        && frame.capture_time_ms > 0
+        && previous_capture_time_ms > frame.capture_time_ms
+        && previous_capture_time_ms.saturating_sub(frame.capture_time_ms)
+            > MOVIE_VIDEO_QUEUE_MAX_AGE_MS
+}
+
+pub(crate) fn movie_video_refresh_due(
+    last_refresh: &Mutex<Option<std::time::Instant>>,
+    now: std::time::Instant,
+) -> bool {
+    let mut last_refresh = last_refresh.lock().unwrap();
+    if last_refresh
+        .is_some_and(|last| now.saturating_duration_since(last) < MOVIE_VIDEO_REFRESH_COOLDOWN)
+    {
+        return false;
+    }
+    *last_refresh = Some(now);
+    true
+}
 
 #[cfg(target_os = "linux")]
 pub const LOGIN_MSG_DESKTOP_NOT_INITED: &str = "Desktop env is not inited";
@@ -2648,6 +2684,8 @@ impl VideoHandler {
         if decoder_dimensions.is_some() {
             self.decoder_dimensions = decoder_dimensions;
         }
+        #[cfg(feature = "mediacodec")]
+        self.decoder.release_media_codec();
         self.decoder = Decoder::new(format, luid, self.decoder_dimensions, self._display);
         self.fail_counter = 0;
         self.decode_wait_counter = 0;
@@ -3326,6 +3364,25 @@ impl LoginConfigHandler {
                 capture_backend
             );
         }
+        let video_profile = VideoProfile::from_config(&self.get_option(keys::OPTION_VIDEO_PROFILE));
+        msg.video_profile = video_profile.wire_value().into();
+        if video_profile == VideoProfile::Movie {
+            let target_fps = self
+                .get_option(keys::OPTION_CUSTOM_FPS)
+                .parse::<i32>()
+                .ok()
+                .and_then(i32::checked_abs)
+                .unwrap_or(MOVIE_DEFAULT_TARGET_FPS as i32)
+                .clamp(MIN_CUSTOM_FPS, MAX_CUSTOM_FPS);
+            msg.custom_fps = target_fps;
+            *self.custom_fps.lock().unwrap() = Some(target_fps as usize);
+        }
+        log::info!(
+            "video profile initial option send: id={}, requested={}, target_fps={}",
+            self.id,
+            video_profile.config_value(),
+            msg.custom_fps.checked_abs().unwrap_or_default()
+        );
         let view_only = self.get_toggle_option("view-only");
         if view_only {
             msg.disable_keyboard = BoolOption::Yes.into();
@@ -3593,6 +3650,13 @@ impl LoginConfigHandler {
         let wire_custom_fps = if fps < 0 { -custom_fps } else { custom_fps };
         let mut config = self.load_config();
         let is_custom_profile = config.image_quality == "custom";
+        let is_movie_profile = VideoProfile::from_config(
+            config
+                .options
+                .get(keys::OPTION_VIDEO_PROFILE)
+                .map(String::as_str)
+                .unwrap_or_default(),
+        ) == VideoProfile::Movie;
         config
             .options
             .insert(keys::OPTION_CUSTOM_FPS.to_owned(), custom_fps.to_string());
@@ -3601,7 +3665,7 @@ impl LoginConfigHandler {
             if fps < 0 { "fixed" } else { "adaptive" }.to_owned(),
         );
         self.save_config(config);
-        if !is_custom_profile {
+        if !is_custom_profile && !is_movie_profile {
             return None;
         }
 
@@ -3614,7 +3678,11 @@ impl LoginConfigHandler {
         *self.custom_fps.lock().unwrap() = Some(custom_fps as _);
         self.last_auto_fps = None;
         Some(Self::message_with_option(OptionMessage {
-            custom_fps: wire_custom_fps,
+            custom_fps: if is_movie_profile {
+                custom_fps
+            } else {
+                wire_custom_fps
+            },
             ..Default::default()
         }))
     }
@@ -3652,6 +3720,48 @@ impl LoginConfigHandler {
             self.id,
             normalized,
             capture_backend
+        );
+        msg_out
+    }
+
+    pub fn set_video_profile(&mut self, value: String, save_config: bool) -> Message {
+        let profile = VideoProfile::from_config(&value);
+        let target_fps = self
+            .get_option(keys::OPTION_CUSTOM_FPS)
+            .parse::<i32>()
+            .ok()
+            .and_then(i32::checked_abs)
+            .unwrap_or(MOVIE_DEFAULT_TARGET_FPS as i32)
+            .clamp(MIN_CUSTOM_FPS, MAX_CUSTOM_FPS);
+        let mut misc = Misc::new();
+        misc.set_option(OptionMessage {
+            video_profile: profile.wire_value().into(),
+            custom_fps: if profile == VideoProfile::Movie {
+                target_fps
+            } else {
+                0
+            },
+            ..Default::default()
+        });
+        let mut msg_out = Message::new();
+        msg_out.set_misc(misc);
+        if save_config {
+            let mut config = self.load_config();
+            config.options.insert(
+                keys::OPTION_VIDEO_PROFILE.to_owned(),
+                profile.config_value().to_owned(),
+            );
+            self.save_config(config);
+        }
+        log::info!(
+            "video profile option send: id={}, requested={}, target_fps={}",
+            self.id,
+            profile.config_value(),
+            if profile == VideoProfile::Movie {
+                target_fps
+            } else {
+                0
+            }
         );
         msg_out
     }
@@ -4047,6 +4157,7 @@ pub(crate) struct VideoFeedbackTracker {
     decode_time_us: u32,
     render_submit_time_us: u32,
     dropped_frames: u64,
+    display_refresh_millihz: u32,
     last_sent: Option<std::time::Instant>,
     last_sent_decoded_frame_id: u64,
     last_sent_render_submitted_frame_id: u64,
@@ -4061,6 +4172,7 @@ pub(crate) struct VideoFeedbackSnapshot {
     pub(crate) decode_time_us: u32,
     pub(crate) render_submit_time_us: u32,
     pub(crate) dropped_frames: u64,
+    pub(crate) display_refresh_millihz: u32,
 }
 
 impl VideoFeedbackTracker {
@@ -4073,6 +4185,7 @@ impl VideoFeedbackTracker {
             decode_time_us: self.decode_time_us,
             render_submit_time_us: self.render_submit_time_us,
             dropped_frames: self.dropped_frames,
+            display_refresh_millihz: self.display_refresh_millihz,
         }
     }
 
@@ -4097,7 +4210,17 @@ impl VideoFeedbackTracker {
     }
 
     pub(crate) fn record_drop(&mut self) {
-        self.dropped_frames = self.dropped_frames.saturating_add(1);
+        self.record_drops(1);
+    }
+
+    pub(crate) fn record_drops(&mut self, count: usize) {
+        self.dropped_frames = self
+            .dropped_frames
+            .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+    }
+
+    pub(crate) fn record_display_refresh(&mut self, display_refresh_millihz: u32) {
+        self.display_refresh_millihz = display_refresh_millihz;
     }
 
     fn duration_us(duration: std::time::Duration) -> u32 {
@@ -4157,6 +4280,7 @@ impl VideoFeedbackTracker {
             decode_time_us: self.decode_time_us,
             render_submit_time_us: self.render_submit_time_us,
             dropped_frames: self.dropped_frames,
+            display_refresh_millihz: self.display_refresh_millihz,
             ..Default::default()
         })
     }
@@ -4198,6 +4322,9 @@ pub fn start_video_thread<F, T>(
     chroma: Arc<RwLock<Option<Chroma>>>,
     discard_queue: Arc<RwLock<bool>>,
     video_feedback: Arc<Mutex<VideoFeedbackTracker>>,
+    movie_mode: Arc<std::sync::atomic::AtomicBool>,
+    newest_capture_time_ms: Arc<std::sync::atomic::AtomicU64>,
+    movie_queue_refresh: Arc<Mutex<Option<std::time::Instant>>>,
     video_callback: F,
 ) where
     F: 'static + FnMut(usize, &mut scrap::ImageRgb, *mut c_void, bool) + Send,
@@ -4225,14 +4352,41 @@ pub fn start_video_thread<F, T>(
                                 *vf
                             }
                             MediaData::VideoQueue => {
-                                if let Some(vf) = video_queue.read().unwrap().pop() {
-                                    if discard_queue.read().unwrap().clone() {
+                                let mut stale_drops = 0usize;
+                                let selected = loop {
+                                    let Some(vf) = video_queue.read().unwrap().pop() else {
+                                        break None;
+                                    };
+                                    if movie_mode.load(std::sync::atomic::Ordering::Relaxed)
+                                        && movie_video_frame_obsolete(
+                                            &vf,
+                                            newest_capture_time_ms
+                                                .load(std::sync::atomic::Ordering::Relaxed),
+                                        )
+                                    {
+                                        stale_drops = stale_drops.saturating_add(1);
                                         continue;
                                     }
-                                    vf
-                                } else {
+                                    break Some(vf);
+                                };
+                                if stale_drops > 0 {
+                                    *discard_queue.write().unwrap() = true;
+                                    video_feedback.lock().unwrap().record_drops(stale_drops);
+                                    if movie_video_refresh_due(
+                                        &movie_queue_refresh,
+                                        std::time::Instant::now(),
+                                    ) {
+                                        session.refresh_video(display as _);
+                                    }
+                                    send_video_feedback(&session, &video_feedback, true);
+                                }
+                                if discard_queue.read().unwrap().clone() {
                                     continue;
                                 }
+                                let Some(vf) = selected else {
+                                    continue;
+                                };
+                                vf
                             }
                             _ => {
                                 // unreachable!();
@@ -4308,12 +4462,21 @@ pub fn start_video_thread<F, T>(
                                         handler.texture.texture,
                                         pixelbuffer,
                                     );
-                                    video_feedback.lock().unwrap().record_render_submitted(
-                                        stream_id,
-                                        decoded_frame_id,
-                                        render_submit_start.elapsed(),
-                                        video_queue.read().unwrap().len(),
-                                    );
+                                    {
+                                        let mut feedback = video_feedback.lock().unwrap();
+                                        feedback.record_render_submitted(
+                                            stream_id,
+                                            decoded_frame_id,
+                                            render_submit_start.elapsed(),
+                                            video_queue.read().unwrap().len(),
+                                        );
+                                        #[cfg(all(target_os = "android", feature = "mediacodec"))]
+                                        feedback.record_display_refresh(
+                                            scrap::mediacodec::output_surface_refresh_millihz(
+                                                display,
+                                            ),
+                                        );
+                                    }
                                     send_video_feedback(&session, &video_feedback, false);
 
                                     // chroma
@@ -6000,6 +6163,49 @@ mod video_feedback_tests {
     }
 
     #[test]
+    fn movie_queue_age_uses_source_timeline_without_clock_sync() {
+        let mut frame = frame(7, 1, 0);
+        frame.capture_time_ms = 1_000;
+        assert!(!movie_video_frame_obsolete(&frame, 1_100));
+        assert!(movie_video_frame_obsolete(&frame, 1_101));
+        frame.capture_time_ms = 0;
+        assert!(!movie_video_frame_obsolete(&frame, 9_000));
+    }
+
+    #[test]
+    fn movie_clock_reset_requires_forward_frame_progress() {
+        let mut frame = frame(7, 11, 0);
+        frame.capture_time_ms = 900;
+        assert!(movie_source_clock_regressed(10, &frame, 1_100));
+
+        frame.frame_id = 9;
+        assert!(!movie_source_clock_regressed(10, &frame, 1_100));
+    }
+
+    #[test]
+    fn feedback_counts_batched_movie_queue_drops() {
+        let mut tracker = VideoFeedbackTracker::default();
+        tracker.record_received(&frame(7, 1, 0));
+        tracker.record_drops(3);
+        assert_eq!(tracker.snapshot().dropped_frames, 3);
+    }
+
+    #[test]
+    fn movie_queue_refresh_requests_are_coalesced() {
+        let refresh = Mutex::new(None);
+        let start = std::time::Instant::now();
+        assert!(movie_video_refresh_due(&refresh, start));
+        assert!(!movie_video_refresh_due(
+            &refresh,
+            start + MOVIE_VIDEO_REFRESH_COOLDOWN - std::time::Duration::from_millis(1)
+        ));
+        assert!(movie_video_refresh_due(
+            &refresh,
+            start + MOVIE_VIDEO_REFRESH_COOLDOWN
+        ));
+    }
+
+    #[test]
     fn feedback_reports_receive_decode_and_render_submission_progress() {
         let start = std::time::Instant::now();
         let mut tracker = VideoFeedbackTracker::default();
@@ -6030,6 +6236,7 @@ mod video_feedback_tests {
                 decode_time_us: 120,
                 render_submit_time_us: 30,
                 dropped_frames: 0,
+                display_refresh_millihz: 0,
             }
         );
     }
@@ -7096,8 +7303,17 @@ mod security_tests {
     #[tokio::test]
     async fn test_secure_direct_connection_retries_after_removed_paired_viewer() {
         let _guard = lock_security_tests();
+        struct RestoreTransportMode(String);
+        impl Drop for RestoreTransportMode {
+            fn drop(&mut self) {
+                Config::set_option(keys::OPTION_REMOTE_TRANSPORT.to_owned(), self.0.clone());
+            }
+        }
+
         let saved_allow = Config::get_option(keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST);
         let saved_remember = Config::get_option(keys::OPTION_REMEMBER_PAIRED_VIEWERS);
+        let _restore_transport =
+            RestoreTransportMode(Config::get_option(keys::OPTION_REMOTE_TRANSPORT));
         let peer_id = format!("direct-peer-{}", Uuid::new_v4());
         let peer_config_id = format!("direct-config-{}", Uuid::new_v4());
         let (trusted_sign_pk, trusted_sign_sk) = sign::gen_keypair();
@@ -7111,9 +7327,19 @@ mod security_tests {
             keys::OPTION_REMEMBER_PAIRED_VIEWERS.to_owned(),
             "Y".to_owned(),
         );
+        Config::set_option(keys::OPTION_REMOTE_TRANSPORT.to_owned(), "tcp".to_owned());
         crate::common::pin_trusted_peer_signing_key(&peer_id, &peer_config_id, &trusted_sign_pk.0)
             .unwrap();
         crate::common::set_confirmed_direct_paired_viewer(&peer_config_id, true);
+        assert_eq!(
+            crate::common::trusted_peer_signing_key_status(
+                &peer_id,
+                &peer_config_id,
+                &trusted_sign_pk.0,
+            )
+            .unwrap(),
+            crate::common::TrustedPeerSigningKeyStatus::Trusted
+        );
 
         let interface = TestInterface::new(&peer_config_id, Some("local-secret"));
         let (addr, handle) = spawn_direct_handshake_peer_refuse_paired_then_accept_pairing(

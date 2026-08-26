@@ -33,6 +33,8 @@ const MAX_PENDING_INPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_INPUT_DEQUEUE_EVENTS: usize = 4;
 const MAX_OUTPUT_DEQUEUE_EVENTS: usize = 4;
 const MAX_IN_FLIGHT_FRAMES: usize = 128;
+const SURFACE_CONFIGURE_RETRY_DELAYS: [Duration; 2] =
+    [Duration::from_millis(20), Duration::from_millis(60)];
 // const VP8_MIME_TYPE: &str = "video/x-vnd.on2.vp8";
 // const VP9_MIME_TYPE: &str = "video/x-vnd.on2.vp9";
 
@@ -49,6 +51,7 @@ struct OutputSurface {
 
 lazy_static! {
     static ref OUTPUT_SURFACES: RwLock<HashMap<usize, OutputSurface>> = RwLock::new(HashMap::new());
+    static ref MOVIE_PRESENTATION_MODES: RwLock<HashMap<usize, bool>> = RwLock::new(HashMap::new());
 }
 
 static NEXT_SURFACE_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -73,6 +76,7 @@ pub fn set_output_surface(display: usize, window: NativeWindow, refresh_period_n
 }
 
 pub fn clear_output_surface(display: usize) {
+    MOVIE_PRESENTATION_MODES.write().unwrap().remove(&display);
     if let Some(surface) = OUTPUT_SURFACES.write().unwrap().remove(&display) {
         log::info!(
             "Android MediaCodec output surface cleared: display={}, generation={}",
@@ -80,6 +84,30 @@ pub fn clear_output_surface(display: usize) {
             surface.generation
         );
     }
+}
+
+pub fn set_movie_presentation_mode(display: usize, enabled: bool) {
+    MOVIE_PRESENTATION_MODES
+        .write()
+        .unwrap()
+        .insert(display, enabled);
+}
+
+fn movie_presentation_mode(display: usize) -> bool {
+    MOVIE_PRESENTATION_MODES
+        .read()
+        .unwrap()
+        .get(&display)
+        .copied()
+        .unwrap_or(false)
+}
+
+pub fn output_surface_refresh_millihz(display: usize) -> u32 {
+    let period_ns = output_surface_refresh_period(display);
+    if period_ns <= 0 {
+        return 0;
+    }
+    (1_000_000_000_000i64 / period_ns).clamp(0, i64::from(u32::MAX)) as u32
 }
 
 pub fn update_output_surface_refresh_period(display: usize, refresh_period_ns: i64) -> bool {
@@ -175,6 +203,17 @@ impl Deref for MediaCodecDecoder {
     }
 }
 
+impl Drop for MediaCodecDecoder {
+    fn drop(&mut self) {
+        if let Err(error) = self.decoder.stop() {
+            log::debug!(
+                "Android MediaCodec stop during decoder release returned: {:?}",
+                error
+            );
+        }
+    }
+}
+
 impl MediaCodecDecoder {
     pub fn new(
         format: CodecFormat,
@@ -225,6 +264,8 @@ impl MediaCodecDecoder {
                     if self.surface_output {
                         self.presentation_clock
                             .update_refresh_period(output_surface_refresh_period(self.display));
+                        self.presentation_clock
+                            .set_movie_mode(movie_presentation_mode(self.display));
                         let output_metadata = self.output_frame_metadata(presentation_time_us);
                         let (release_mode, presentation_reset, presentation_lead_us) =
                             if let Some(now_ns) = monotonic_now_ns() {
@@ -254,7 +295,7 @@ impl MediaCodecDecoder {
                         self.decoded_frames = self.decoded_frames.saturating_add(1);
                         if self.should_log_diag() {
                             log::info!(
-                                "diag android mediacodec frame: decoder={}, codec={}, visible={}x{}, input_queue_ms={}, output_dequeue_ms={}, total_ms={}, input_bytes={}, pending_inputs={}, render_path=surface-texture, release_mode={}, presentation_reset={}, presentation_lead_us={}, refresh_period_ns={}, surface_generation={}, output_format={:?}",
+                                "diag android mediacodec frame: decoder={}, codec={}, visible={}x{}, input_queue_ms={}, output_dequeue_ms={}, total_ms={}, input_bytes={}, pending_inputs={}, render_path=surface-texture, release_mode={}, presentation_reset={}, presentation_lead_us={}, movie_playout_delay_ms={}, refresh_period_ns={}, surface_generation={}, output_format={:?}",
                                 self.name,
                                 self.codec_label(),
                                 self.width,
@@ -267,6 +308,7 @@ impl MediaCodecDecoder {
                                 release_mode,
                                 presentation_reset,
                                 presentation_lead_us,
+                                self.presentation_clock.playout_delay_ms(),
                                 self.presentation_clock.refresh_period_ns(),
                                 self.surface_generation,
                                 res_format,
@@ -583,12 +625,28 @@ fn create_media_codec(
     let requested_surface =
         registered_surface.filter(|_| texture_render_enabled && surface_codec_supported(name));
     let surface_requested = requested_surface.is_some();
-    let (codec, output_surface, surface_output) = match configure_media_codec(
-        name,
-        width,
-        height,
-        requested_surface.as_ref(),
-    ) {
+    let mut configure_result =
+        configure_media_codec(name, width, height, requested_surface.as_ref());
+    if requested_surface.is_some() {
+        for (attempt, delay) in SURFACE_CONFIGURE_RETRY_DELAYS.iter().enumerate() {
+            if configure_result.is_ok() {
+                break;
+            }
+            log::warn!(
+                "Android MediaCodec surface configure retry: display={}, mime={}, size={}x{}, attempt={}, delay_ms={}",
+                display,
+                name,
+                width,
+                height,
+                attempt + 1,
+                delay.as_millis()
+            );
+            std::thread::sleep(*delay);
+            configure_result =
+                configure_media_codec(name, width, height, requested_surface.as_ref());
+        }
+    }
+    let (codec, output_surface, surface_output) = match configure_result {
         Ok(codec) => (codec, requested_surface, surface_requested),
         Err(error) if requested_surface.is_some() => {
             log::warn!(

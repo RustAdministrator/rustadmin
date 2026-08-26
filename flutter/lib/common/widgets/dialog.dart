@@ -1930,6 +1930,11 @@ customImageQualityDialog(SessionID sessionId, String id, FFI ffi) async {
   String initFpsMode = kCustomFpsModeAdaptive;
   bool qualitySet = false;
   bool fpsSet = false;
+  final videoProfile = await bind.sessionGetOption(
+      sessionId: sessionId, arg: kOptionVideoProfile);
+  var activeVideoProfile = videoProfile == kVideoProfileMovie
+      ? kVideoProfileMovie
+      : kVideoProfileStandard;
 
   bool? direct;
   try {
@@ -1944,11 +1949,18 @@ customImageQualityDialog(SessionID sessionId, String id, FFI ffi) async {
 
   int fpsForMode(double fps, String mode) {
     final value = fps.toInt();
+    if (activeVideoProfile == kVideoProfileMovie) return value;
     return mode == kCustomFpsModeFixed ? -value : value;
   }
 
-  setCustomValues({double? quality, double? fps, String? fpsMode}) async {
-    debugPrint("setCustomValues quality:$quality, fps:$fps, fpsMode:$fpsMode");
+  setCustomValues({
+    double? quality,
+    double? fps,
+    String? fpsMode,
+    String? videoProfile,
+  }) async {
+    debugPrint(
+        "setCustomValues quality:$quality, fps:$fps, fpsMode:$fpsMode, videoProfile:$videoProfile");
     if (quality != null) {
       qualitySet = true;
       await bind.sessionSetCustomImageQuality(
@@ -1957,6 +1969,19 @@ customImageQualityDialog(SessionID sessionId, String id, FFI ffi) async {
     if (fpsMode != null) {
       initFpsMode =
           fpsMode == kCustomFpsModeFixed ? fpsMode : kCustomFpsModeAdaptive;
+    }
+    if (videoProfile != null) {
+      activeVideoProfile = videoProfile == kVideoProfileMovie
+          ? kVideoProfileMovie
+          : kVideoProfileStandard;
+      await bind.sessionSetVideoProfile(
+          sessionId: sessionId, value: activeVideoProfile);
+      if (!hideFps) {
+        fpsSet = true;
+        await bind.sessionSetCustomFps(
+            sessionId: sessionId,
+            fps: fpsForMode(initFps, initFpsMode));
+      }
     }
     if (fps != null) {
       fpsSet = true;
@@ -1994,8 +2019,13 @@ customImageQualityDialog(SessionID sessionId, String id, FFI ffi) async {
   final fpsOption =
       await bind.sessionGetOption(sessionId: sessionId, arg: kOptionCustomFps);
   initFps = fpsOption == null
-      ? kDefaultFps
-      : double.tryParse(fpsOption) ?? kDefaultFps;
+      ? (activeVideoProfile == kVideoProfileMovie
+          ? kMovieDefaultTargetFps
+          : kDefaultFps)
+      : double.tryParse(fpsOption)?.abs() ??
+          (activeVideoProfile == kVideoProfileMovie
+              ? kMovieDefaultTargetFps
+              : kDefaultFps);
   if (initFps < kMinFps || initFps > kMaxFps) {
     initFps = kDefaultFps;
   }
@@ -2009,11 +2039,14 @@ customImageQualityDialog(SessionID sessionId, String id, FFI ffi) async {
       initQuality: initQuality,
       initFps: initFps,
       initFpsMode: initFpsMode,
+      initVideoProfile: activeVideoProfile,
       setQuality: (v) => setCustomValues(quality: v),
       setFps: (v) => setCustomValues(fps: v),
       setFpsMode: (v) => setCustomValues(fpsMode: v, fps: initFps),
+      setVideoProfile: (v) => setCustomValues(videoProfile: v),
       showFps: !hideFps,
-      showMoreQuality: !hideMoreQuality);
+      showMoreQuality: !hideMoreQuality,
+      showVideoProfile: true);
   msgBoxCommon(ffi.dialogManager, 'Custom Image Quality', content, [btnClose]);
 }
 

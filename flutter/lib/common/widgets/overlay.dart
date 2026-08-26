@@ -737,6 +737,12 @@ class QualityMonitor extends StatelessWidget {
                               _row("Video TX", qualityMonitorModel
                                   .data.quicVideoTransport),
                             if (qualityMonitorModel.extendedDetails &&
+                                qualityMonitorModel
+                                        .data.quicVideoQueueTargetMs !=
+                                    null)
+                              _row("QUIC queue target",
+                                  '${qualityMonitorModel.data.quicVideoQueueTargetMs}ms'),
+                            if (qualityMonitorModel.extendedDetails &&
                                 qualityMonitorModel.data.transportMtu != null)
                               _row("Path MTU",
                                   qualityMonitorModel.data.transportMtu),
@@ -864,6 +870,30 @@ class QualityMonitor extends StatelessWidget {
                                       '-'),
                               _row("FPS Mode",
                                   qualityMonitorModel.data.fpsMode ?? '-'),
+                              if (qualityMonitorModel
+                                      .data.requestedVideoProfile !=
+                                  null)
+                                _row(
+                                    "Video Profile",
+                                    '${qualityMonitorModel.data.requestedVideoProfile} / ${qualityMonitorModel.data.effectiveVideoProfile ?? '-'}'),
+                              if (qualityMonitorModel.data.movieTargetFps != null)
+                                _row("Target / Pacing FPS",
+                                    '${qualityMonitorModel.data.movieTargetFps} / ${qualityMonitorModel.data.moviePacingFps ?? '-'}'),
+                              if (qualityMonitorModel
+                                      .data.movieHostPipelineP95Us !=
+                                  null)
+                                _row("Host pipeline p95",
+                                    '${qualityMonitorModel.data.movieHostPipelineP95Us}us'),
+                              if (qualityMonitorModel
+                                      .data.moviePlayoutDelayMs !=
+                                  null)
+                                _row("Movie buffer",
+                                    '${qualityMonitorModel.data.moviePlayoutDelayMs}ms'),
+                              if (qualityMonitorModel
+                                      .data.movieFallbackReason !=
+                                  null)
+                                _row("Movie fallback", qualityMonitorModel
+                                    .data.movieFallbackReason),
                               _row("Auto FPS",
                                   qualityMonitorModel.data.autoFps ?? '-'),
                               _row("Delivery",
@@ -896,6 +926,9 @@ class QualityMonitor extends StatelessWidget {
                                       '-'),
                               _row("Decode FPS",
                                   qualityMonitorModel.data.decodeFps ?? '-'),
+                              if (qualityMonitorModel.data.displayRefresh != null)
+                                _row("Display Hz",
+                                    qualityMonitorModel.data.displayRefresh),
                               _row(
                                   "Queue",
                                   qualityMonitorModel

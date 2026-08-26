@@ -3409,6 +3409,8 @@ class _About extends StatefulWidget {
 }
 
 class _AboutState extends State<_About> {
+  bool _exportingDiagnostics = false;
+
   late final Future<Map<String, String>> _aboutFuture = () async {
     final license = await bind.mainGetLicense();
     final version = await bind.mainGetVersion();
@@ -3421,6 +3423,37 @@ class _AboutState extends State<_About> {
       'fingerprint': fingerprint,
     };
   }();
+
+  Future<void> _saveDiagnosticReport() async {
+    if (_exportingDiagnostics) return;
+    final now = DateTime.now();
+    String twoDigits(int value) => value.toString().padLeft(2, '0');
+    final timestamp = '${now.year}${twoDigits(now.month)}${twoDigits(now.day)}-'
+        '${twoDigits(now.hour)}${twoDigits(now.minute)}${twoDigits(now.second)}';
+    final outputFile = await FilePicker.saveFile(
+      dialogTitle: '${translate('Save as')}...',
+      fileName: 'RustAdmin-diagnostics-$timestamp.zip',
+      allowedExtensions: const ['zip'],
+      type: FileType.custom,
+    );
+    if (outputFile == null || !mounted) return;
+    setState(() => _exportingDiagnostics = true);
+    try {
+      final raw = await bind.mainExportDiagnostics(destination: outputFile);
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map || decoded['ok'] != true) {
+        throw StateError(decoded is Map
+            ? decoded['error']?.toString() ?? 'diagnostic export failed'
+            : 'invalid diagnostic export response');
+      }
+      showToast(translate('Success'));
+    } catch (error) {
+      debugPrint('Failed to save diagnostics: $error');
+      showToast(translate('Failed'));
+    } finally {
+      if (mounted) setState(() => _exportingDiagnostics = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -3473,6 +3506,19 @@ class _AboutState extends State<_About> {
                   SelectionArea(
                       child: Text('${translate('Fingerprint')}: $fingerprint')
                           .marginSymmetric(vertical: 4.0)),
+                if (!isWeb)
+                  OutlinedButton.icon(
+                    onPressed:
+                        _exportingDiagnostics ? null : _saveDiagnosticReport,
+                    icon: _exportingDiagnostics
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.bug_report_outlined),
+                    label: Text(translate('Save diagnostic report')),
+                  ).marginSymmetric(vertical: 4.0),
                 InkWell(
                     onTap: () {
                       launchUrlString(kRustAdminSourceUrl);

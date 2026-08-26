@@ -118,6 +118,9 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Off", "Off"),
         ("Trusted Peers Only", "Trusted Peers Only"),
         ("Standard", "Standard"),
+        ("Video profile", "Video profile"),
+        ("Movie mode", "Movie mode"),
+        ("Target FPS", "Target FPS"),
         ("Clipboard", "Clipboard"),
         ("Clipboard direction", "Clipboard direction"),
         ("Bidirectional", "Bidirectional"),
@@ -349,6 +352,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("High", "High"),
         ("Diagnostic logging", "Diagnostic logging"),
         ("Export diagnostic report", "Export diagnostic report"),
+        ("Save diagnostic report", "Save diagnostic report"),
         ("Create a private log ZIP and share it", "Create a private log ZIP and share it"),
         ("Delete diagnostic logs", "Delete diagnostic logs"),
     ].iter().cloned().collect();

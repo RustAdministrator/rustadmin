@@ -30,6 +30,7 @@ class _MobileCustomImageQualityControlsState
   String _fpsMode = kCustomFpsModeAdaptive;
   bool _showFps = true;
   bool _showMoreQuality = true;
+  bool _movieMode = false;
   bool _loading = true;
 
   SessionID get _sessionId => widget.ffi.sessionId;
@@ -71,7 +72,13 @@ class _MobileCustomImageQualityControlsState
         sessionId: _sessionId,
         arg: kOptionCustomFps,
       );
-      var loadedFps = double.tryParse(fpsOption ?? '')?.abs() ?? kDefaultFps;
+      final videoProfile = await bind.sessionGetOption(
+        sessionId: _sessionId,
+        arg: kOptionVideoProfile,
+      );
+      final movieMode = videoProfile == kVideoProfileMovie;
+      var loadedFps = double.tryParse(fpsOption ?? '')?.abs() ??
+          (movieMode ? kMovieDefaultTargetFps : kDefaultFps);
       if (loadedFps < kMinFps || loadedFps > kMaxFps) {
         loadedFps = kDefaultFps;
       }
@@ -91,6 +98,7 @@ class _MobileCustomImageQualityControlsState
         _quality = loadedQuality;
         _fps = loadedFps;
         _fpsMode = loadedFpsMode;
+        _movieMode = movieMode;
         _showFps = !hideFps;
         _showMoreQuality = !hideMoreQuality;
         _loading = false;
@@ -105,6 +113,7 @@ class _MobileCustomImageQualityControlsState
 
   int _fpsForMode(double fps) {
     final value = fps.round();
+    if (_movieMode) return value;
     return _fpsMode == kCustomFpsModeFixed ? -value : value;
   }
 
@@ -146,6 +155,25 @@ class _MobileCustomImageQualityControlsState
     }
   }
 
+  Future<void> _setVideoProfile(String value) async {
+    final normalized = value == kVideoProfileMovie
+        ? kVideoProfileMovie
+        : kVideoProfileStandard;
+    _movieMode = normalized == kVideoProfileMovie;
+    try {
+      await bind.sessionSetVideoProfile(
+        sessionId: _sessionId,
+        value: normalized,
+      );
+      await bind.sessionSetCustomFps(
+        sessionId: _sessionId,
+        fps: _fpsForMode(_fps),
+      );
+    } catch (error) {
+      debugPrint('Failed to set mobile video profile: $error');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_loading) {
@@ -166,11 +194,16 @@ class _MobileCustomImageQualityControlsState
         initQuality: _quality,
         initFps: _fps,
         initFpsMode: _fpsMode,
+        initVideoProfile: _movieMode
+            ? kVideoProfileMovie
+            : kVideoProfileStandard,
         setQuality: _setQuality,
         setFps: _setFps,
         setFpsMode: _setFpsMode,
+        setVideoProfile: _setVideoProfile,
         showFps: _showFps,
         showMoreQuality: _showMoreQuality,
+        showVideoProfile: true,
       ),
     );
   }

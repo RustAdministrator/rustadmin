@@ -817,6 +817,12 @@ impl InvokeUiSession for FlutterHandler {
                     "quic_disposable_drops",
                     &status.quic_disposable_drops.map_or(NULL, |it| it),
                 ),
+                (
+                    "quic_video_queue_target_ms",
+                    &status
+                        .quic_video_queue_target_ms
+                        .map_or(NULL, |it| it.to_string()),
+                ),
                 ("decoder", &status.decoder.map_or(NULL, |it| it)),
                 ("renderer", &status.renderer.map_or(NULL, |it| it)),
                 (
@@ -901,6 +907,15 @@ impl InvokeUiSession for FlutterHandler {
                     },
                 ),
                 (
+                    "display_refresh_millihz",
+                    &if status.display_refresh_millihz.is_empty() {
+                        NULL
+                    } else {
+                        serde_json::ser::to_string(&status.display_refresh_millihz)
+                            .unwrap_or(NULL.to_owned())
+                    },
+                ),
+                (
                     "video_delivery_phase",
                     &status.video_delivery_phase.map_or(NULL, |it| it),
                 ),
@@ -913,6 +928,38 @@ impl InvokeUiSession for FlutterHandler {
                 (
                     "video_stall_ms",
                     &status.video_stall_ms.map_or(NULL, |it| it.to_string()),
+                ),
+                (
+                    "requested_video_profile",
+                    &status.requested_video_profile.map_or(NULL, |it| it),
+                ),
+                (
+                    "effective_video_profile",
+                    &status.effective_video_profile.map_or(NULL, |it| it),
+                ),
+                (
+                    "movie_target_fps",
+                    &status.movie_target_fps.map_or(NULL, |it| it.to_string()),
+                ),
+                (
+                    "movie_pacing_fps",
+                    &status.movie_pacing_fps.map_or(NULL, |it| it.to_string()),
+                ),
+                (
+                    "movie_host_pipeline_p95_us",
+                    &status
+                        .movie_host_pipeline_p95_us
+                        .map_or(NULL, |it| it.to_string()),
+                ),
+                (
+                    "movie_fallback_reason",
+                    &status.movie_fallback_reason.map_or(NULL, |it| it),
+                ),
+                (
+                    "movie_playout_delay_ms",
+                    &status
+                        .movie_playout_delay_ms
+                        .map_or(NULL, |it| it.to_string()),
                 ),
             ],
             &[],
@@ -1420,6 +1467,8 @@ impl FlutterHandler {
         let mut is_sent = false;
         let is_multi_sessions = self.is_multi_ui_session();
         for h in self.session_handlers.read().unwrap().values() {
+            #[cfg(all(target_os = "android", feature = "mediacodec"))]
+            h.texture_notified.write().unwrap().remove(&display);
             // The soft renderer does not support multi-displays session for now.
             if h.displays.len() > 1 {
                 continue;

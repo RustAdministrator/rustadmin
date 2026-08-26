@@ -539,6 +539,11 @@ impl<T: InvokeUiSession> Session<T> {
         }
     }
 
+    pub fn set_video_profile(&self, value: String) {
+        let msg = self.lc.write().unwrap().set_video_profile(value, true);
+        self.send(Data::Message(msg));
+    }
+
     pub fn set_capture_backend(&self, value: String) {
         let msg = self.lc.write().unwrap().set_capture_backend(value, true);
         self.send(Data::Message(msg));
@@ -2118,6 +2123,18 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                     .then(|| t.video_delivery_phase.clone()),
                 video_recovery_count: has_video_delivery_status.then_some(t.video_recovery_count),
                 video_stall_ms: has_video_delivery_status.then_some(t.video_stall_ms),
+                requested_video_profile: (!t.requested_video_profile.is_empty())
+                    .then(|| t.requested_video_profile.clone()),
+                effective_video_profile: (!t.effective_video_profile.is_empty())
+                    .then(|| t.effective_video_profile.clone()),
+                movie_target_fps: (t.target_fps > 0).then_some(t.target_fps),
+                movie_pacing_fps: (t.pacing_fps > 0).then_some(t.pacing_fps),
+                movie_host_pipeline_p95_us: (t.host_pipeline_p95_us > 0)
+                    .then_some(t.host_pipeline_p95_us),
+                movie_fallback_reason: (!t.movie_fallback_reason.is_empty())
+                    .then(|| t.movie_fallback_reason.clone()),
+                movie_playout_delay_ms: (t.movie_playout_delay_ms > 0)
+                    .then_some(t.movie_playout_delay_ms),
                 ..Default::default()
             });
             handle_test_delay(t, peer).await;

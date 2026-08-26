@@ -433,6 +433,12 @@ class RustadminImpl {
         () => js.context.callMethod('setByName', ['custom-fps', fps]));
   }
 
+  Future<void> sessionSetVideoProfile(
+      {required UuidValue sessionId, required String value, dynamic hint}) {
+    return Future(
+        () => js.context.callMethod('setByName', ['video-profile', value]));
+  }
+
   Future<void> sessionSetCaptureBackend(
       {required UuidValue sessionId, required String value, dynamic hint}) {
     return Future(() => js.context.callMethod('setByName', [

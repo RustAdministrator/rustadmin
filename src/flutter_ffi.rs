@@ -770,6 +770,12 @@ pub fn session_set_custom_fps(session_id: SessionID, fps: i32) {
     }
 }
 
+pub fn session_set_video_profile(session_id: SessionID, value: String) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.set_video_profile(value);
+    }
+}
+
 pub fn session_set_capture_backend(session_id: SessionID, value: String) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         session.set_capture_backend(value);
@@ -2579,6 +2585,19 @@ pub fn main_get_software_update_url() {
 
 pub fn main_get_home_dir() -> String {
     fs::get_home_as_string()
+}
+
+pub fn main_export_diagnostics(destination: String) -> String {
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let result = crate::diagnostics::export(std::path::Path::new(&destination));
+        return match result {
+            Ok(report) => serde_json::json!({"ok": true, "report": report}).to_string(),
+            Err(error) => serde_json::json!({"ok": false, "error": error.to_string()}).to_string(),
+        };
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    serde_json::json!({"ok": false, "error": "desktop diagnostics are unavailable"}).to_string()
 }
 
 pub fn main_get_langs() -> String {

@@ -397,6 +397,8 @@ pub struct VpxEncoderConfig {
     pub height: c_uint,
     /// The bitrate ratio
     pub quality: f32,
+    /// Requested source cadence used by the shared encoder policy.
+    pub fps: u32,
     /// The codec
     pub codec: VpxVideoCodecId,
     /// keyframe interval
