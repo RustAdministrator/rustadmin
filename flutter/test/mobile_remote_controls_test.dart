@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
+import 'package:flutter_hbb/mobile/mobile_modifier_state.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -470,18 +471,86 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      final button = tester.widget<TextButton>(
+      final button = tester.widget<Material>(
         find.descendant(
           of: find.byKey(const Key('mobile-remote-quick-ctrl')),
-          matching: find.byType(TextButton),
+          matching: find.byType(Material),
         ),
       );
-      return button.style?.backgroundColor?.resolve({});
+      return button.color;
     }
 
     expect(await buttonColor(ThemeData.dark()), const Color(0xFF424242));
     await tester.pumpWidget(const SizedBox.shrink());
     expect(await buttonColor(ThemeData.light()), const Color(0xFFE0E0E0));
+  });
+
+  testWidgets('modifier tap and double tap expose one-shot and locked colors', (
+    tester,
+  ) async {
+    var ctrlMode = MobileModifierMode.off;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: StatefulBuilder(
+          builder: (context, setState) => Scaffold(
+            body: MobileRemoteKeyHelpTools(
+              ctrlActive: ctrlMode.active,
+              altActive: false,
+              shiftActive: false,
+              commandActive: false,
+              ctrlLocked: ctrlMode == MobileModifierMode.locked,
+              functionKeysActive: false,
+              moreKeysActive: false,
+              isMac: false,
+              showWindowsLinuxKeys: true,
+              quickKeyOrder: mobileRemoteDefaultQuickKeyOrder,
+              onCtrl: () => setState(() {
+                ctrlMode = ctrlMode == MobileModifierMode.off
+                    ? MobileModifierMode.oneShot
+                    : MobileModifierMode.off;
+              }),
+              onCtrlDoubleTap: () => setState(() {
+                ctrlMode = MobileModifierMode.locked;
+              }),
+              onAlt: () {},
+              onShift: () {},
+              onCommand: () {},
+              onFunctionKeys: () {},
+              onMoreKeys: () {},
+              onKeyPressed: (_) {},
+              onShortcutPressed: (_) {},
+            ),
+          ),
+        ),
+      ),
+    );
+
+    Finder ctrlMaterial() => find.descendant(
+          of: find.byKey(const Key('mobile-remote-quick-ctrl')),
+          matching: find.byType(Material),
+        );
+
+    await tester.tap(find.byKey(const Key('mobile-remote-quick-ctrl')));
+    await tester.pump(kDoubleTapTimeout + const Duration(milliseconds: 1));
+    expect(ctrlMode, MobileModifierMode.oneShot);
+    var material = tester.widget<Material>(ctrlMaterial());
+    expect(
+      material.color,
+      mobileRemoteToolbarActiveBackgroundColor(tester.element(ctrlMaterial())),
+    );
+
+    await tester.tap(find.byKey(const Key('mobile-remote-quick-ctrl')));
+    await tester.pump(kDoubleTapMinTime);
+    await tester.tap(find.byKey(const Key('mobile-remote-quick-ctrl')));
+    await tester.pump(kDoubleTapTimeout + const Duration(milliseconds: 1));
+    expect(ctrlMode, MobileModifierMode.locked);
+    material = tester.widget<Material>(ctrlMaterial());
+    expect(material.color, mobileRemoteAccentColor);
+
+    await tester.tap(find.byKey(const Key('mobile-remote-quick-ctrl')));
+    await tester.pump(kDoubleTapTimeout + const Duration(milliseconds: 1));
+    expect(ctrlMode, MobileModifierMode.off);
   });
 
   testWidgets('custom arrow buttons send the matching named control keys', (

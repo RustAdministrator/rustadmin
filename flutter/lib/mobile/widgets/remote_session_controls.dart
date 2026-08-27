@@ -921,6 +921,14 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
     required this.onMoreKeys,
     required this.onKeyPressed,
     required this.onShortcutPressed,
+    this.ctrlLocked = false,
+    this.altLocked = false,
+    this.shiftLocked = false,
+    this.commandLocked = false,
+    this.onCtrlDoubleTap,
+    this.onAltDoubleTap,
+    this.onShiftDoubleTap,
+    this.onCommandDoubleTap,
     this.labelBuilder,
   });
 
@@ -928,6 +936,10 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
   final bool altActive;
   final bool shiftActive;
   final bool commandActive;
+  final bool ctrlLocked;
+  final bool altLocked;
+  final bool shiftLocked;
+  final bool commandLocked;
   final bool functionKeysActive;
   final bool moreKeysActive;
   final bool isMac;
@@ -937,6 +949,10 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
   final VoidCallback onAlt;
   final VoidCallback onShift;
   final VoidCallback onCommand;
+  final VoidCallback? onCtrlDoubleTap;
+  final VoidCallback? onAltDoubleTap;
+  final VoidCallback? onShiftDoubleTap;
+  final VoidCallback? onCommandDoubleTap;
   final VoidCallback onFunctionKeys;
   final VoidCallback onMoreKeys;
   final ValueChanged<String> onKeyPressed;
@@ -950,35 +966,37 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
     String text,
     VoidCallback onPressed, {
     bool active = false,
+    bool locked = false,
+    VoidCallback? onDoublePressed,
     IconData? icon,
   }) {
+    assert(!locked || active);
+    final foregroundColor = locked
+        ? Colors.white
+        : mobileRemoteToolbarForegroundColor(context);
     return SizedBox.square(
       dimension: 36 * 1.1,
-      child: TextButton(
-        style: TextButton.styleFrom(
-          minimumSize: Size.zero,
-          padding: EdgeInsets.zero,
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
-          backgroundColor: active
-              ? mobileRemoteToolbarActiveBackgroundColor(context)
-              : mobileRemoteQuickKeyButtonBackgroundColor(context),
-        ),
-        onPressed: onPressed,
-        child: icon != null
-            ? Icon(
-                icon,
-                size: 18,
-                color: mobileRemoteToolbarForegroundColor(context),
-              )
-            : Text(
-                _label(text),
-                textAlign: TextAlign.center,
-                style: TextStyle(
-                  color: mobileRemoteToolbarForegroundColor(context),
-                  fontSize: 10,
+      child: Material(
+        color: locked
+            ? mobileRemoteAccentColor
+            : active
+                ? mobileRemoteToolbarActiveBackgroundColor(context)
+                : mobileRemoteQuickKeyButtonBackgroundColor(context),
+        borderRadius: BorderRadius.circular(4),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onPressed,
+          onDoubleTap: onDoublePressed,
+          child: icon != null
+              ? Icon(icon, size: 18, color: foregroundColor)
+              : Center(
+                  child: Text(
+                    _label(text),
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: foregroundColor, fontSize: 10),
+                  ),
                 ),
-              ),
+        ),
       ),
     );
   }
@@ -994,6 +1012,8 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
           mobileRemoteQuickKeyLabel(MobileRemoteQuickKey.ctrl, isMac: isMac),
           onCtrl,
           active: ctrlActive,
+          locked: ctrlLocked,
+          onDoublePressed: onCtrlDoubleTap,
         ),
       ),
       MobileRemoteQuickKey.alt: KeyedSubtree(
@@ -1003,6 +1023,8 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
           mobileRemoteQuickKeyLabel(MobileRemoteQuickKey.alt, isMac: isMac),
           onAlt,
           active: altActive,
+          locked: altLocked,
+          onDoublePressed: onAltDoubleTap,
         ),
       ),
       MobileRemoteQuickKey.shift: KeyedSubtree(
@@ -1012,6 +1034,8 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
           mobileRemoteQuickKeyLabel(MobileRemoteQuickKey.shift, isMac: isMac),
           onShift,
           active: shiftActive,
+          locked: shiftLocked,
+          onDoublePressed: onShiftDoubleTap,
         ),
       ),
       MobileRemoteQuickKey.command: KeyedSubtree(
@@ -1021,6 +1045,8 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
           mobileRemoteQuickKeyLabel(MobileRemoteQuickKey.command, isMac: isMac),
           onCommand,
           active: commandActive,
+          locked: commandLocked,
+          onDoublePressed: onCommandDoubleTap,
         ),
       ),
       MobileRemoteQuickKey.functionKeys: KeyedSubtree(

@@ -22,7 +22,9 @@ screen. “Mouse mode” moves a remote cursor relatively, like a trackpad.
 | Virtual joystick | Drag away from center | Move the remote cursor continuously in that direction | Not shown | Releasing the joystick stops movement. Relative mode sends motion deltas directly. |
 | Floating toolbar | Drag | Reposition the toolbar | Reposition the toolbar | This UI gesture is consumed locally and does not move the remote cursor. |
 | Custom-key strip | Horizontal drag | Scroll the custom-key row | Scroll the custom-key row | The drag is consumed locally and does not pan the remote screen or move the remote cursor. |
-| Custom key | Tap | Send that key or shortcut | Send that key or shortcut | Modifier buttons can remain active according to their current toggle state. |
+| Custom non-modifier key | Tap | Send that key or shortcut | Send that key or shortcut | All one-shot modifiers are disabled after the key is sent; locked modifiers remain active. |
+| Custom modifier key | Tap | Arm or disable the modifier | Arm or disable the modifier | An armed modifier uses the normal active color, combines with other modifiers, and is consumed by the next non-modifier key. Tapping the same modifier again disables it. |
+| Custom modifier key | Double tap | Lock the modifier | Lock the modifier | A locked modifier uses a blue background and remains active until it is tapped once. |
 
 ## Mobile keyboard input and custom arrow keys
 

@@ -18,6 +18,7 @@ import '../../models/state_model.dart';
 import 'relative_mouse_model.dart';
 import '../common.dart';
 import '../consts.dart';
+import '../mobile/mobile_modifier_state.dart';
 import '../mobile/mobile_viewport.dart';
 
 /// Mouse button enum.
@@ -336,6 +337,7 @@ class InputModel {
   var ctrl = false;
   var alt = false;
   var command = false;
+  final mobileModifierState = MobileModifierState();
 
   final ToReleaseRawKeys toReleaseRawKeys = ToReleaseRawKeys();
   final ToReleaseKeys toReleaseKeys = ToReleaseKeys();
@@ -419,6 +421,7 @@ class InputModel {
 
   InputModel(this.parent) {
     sessionId = parent.target!.sessionId;
+    mobileModifierState.addListener(_syncMobileModifierState);
     _relativeMouse = RelativeMouseModel(
       sessionId: sessionId,
       enabled: relativeMouseMode,
@@ -882,15 +885,86 @@ class InputModel {
   void inputKey(String name, {bool? down, bool? press}) {
     if (!keyboardPerm) return;
     if (isViewCamera) return;
+    final effectiveDown = down ?? false;
+    final effectivePress = press ?? true;
     bind.sessionInputKey(
         sessionId: sessionId,
         name: name,
-        down: down ?? false,
-        press: press ?? true,
+        down: effectiveDown,
+        press: effectivePress,
         alt: alt,
         ctrl: ctrl,
         shift: shift,
         command: command);
+    if ((effectiveDown || effectivePress) && !_isModifierKeyName(name)) {
+      mobileModifierState.consumeOneShot();
+    }
+  }
+
+  void inputKeyWithTemporaryMobileModifier(
+    String name,
+    MobileModifierKey modifier,
+  ) {
+    final modeBefore = mobileModifierState.modeFor(modifier);
+    final previousValue = _modifierValue(modifier);
+    _setModifierValue(modifier, true);
+    inputKey(name);
+    _setModifierValue(
+      modifier,
+      mobileModifierState.isActive(modifier) ||
+          (!modeBefore.active && previousValue),
+    );
+  }
+
+  void consumeMobileOneShotModifiers() {
+    mobileModifierState.consumeOneShot();
+  }
+
+  void _syncMobileModifierState() {
+    ctrl = mobileModifierState.isActive(MobileModifierKey.ctrl);
+    alt = mobileModifierState.isActive(MobileModifierKey.alt);
+    shift = mobileModifierState.isActive(MobileModifierKey.shift);
+    command = mobileModifierState.isActive(MobileModifierKey.command);
+  }
+
+  bool _modifierValue(MobileModifierKey modifier) => switch (modifier) {
+        MobileModifierKey.ctrl => ctrl,
+        MobileModifierKey.alt => alt,
+        MobileModifierKey.shift => shift,
+        MobileModifierKey.command => command,
+      };
+
+  void _setModifierValue(MobileModifierKey modifier, bool value) {
+    switch (modifier) {
+      case MobileModifierKey.ctrl:
+        ctrl = value;
+      case MobileModifierKey.alt:
+        alt = value;
+      case MobileModifierKey.shift:
+        shift = value;
+      case MobileModifierKey.command:
+        command = value;
+    }
+  }
+
+  static bool _isModifierKeyName(String name) {
+    return const <String>{
+      'VK_CONTROL',
+      'VK_SHIFT',
+      'VK_MENU',
+      'VK_LWIN',
+      'VK_RWIN',
+      'CONTROL_L',
+      'CONTROL_R',
+      'SHIFT_L',
+      'SHIFT_R',
+      'ALT_L',
+      'ALT_R',
+      'META_L',
+      'META_R',
+      'SUPER_L',
+      'SUPER_R',
+    }.contains(name.toUpperCase());
   }
 
   static Map<String, dynamic> getMouseEventMove() => {
@@ -960,6 +1034,7 @@ class InputModel {
 
   /// Reset key modifiers to false, including [shift], [ctrl], [alt] and [command].
   void resetModifiers() {
+    mobileModifierState.reset();
     shift = ctrl = alt = command = false;
   }
 

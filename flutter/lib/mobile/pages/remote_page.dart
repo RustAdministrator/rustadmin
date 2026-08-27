@@ -26,6 +26,7 @@ import '../../models/input_model.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../../utils/image.dart';
+import '../mobile_modifier_state.dart';
 import '../mobile_viewport.dart';
 import '../widgets/custom_image_quality_widget.dart';
 import '../widgets/dialog.dart';
@@ -371,7 +372,7 @@ class _RemotePageState extends State<RemotePage>
 
     // Input the new string.
     if (newStr.length > 1) {
-      bind.sessionInputString(sessionId: sessionId, value: newStr);
+      _inputMobileString(newStr);
     } else {
       inputChar(newStr);
     }
@@ -407,11 +408,11 @@ class _RemotePageState extends State<RemotePage>
                 content == '（）' ||
                 content == '【】')) {
           // can not only input content[0], because when input ], [ are also auo insert, which cause ] never be input
-          bind.sessionInputString(sessionId: sessionId, value: content);
+          _inputMobileString(content);
           openKeyboard();
           return;
         }
-        bind.sessionInputString(sessionId: sessionId, value: content);
+        _inputMobileString(content);
       } else {
         inputChar(content);
       }
@@ -434,6 +435,11 @@ class _RemotePageState extends State<RemotePage>
       char = 'VK_SPACE';
     }
     inputModel.inputKey(char);
+  }
+
+  void _inputMobileString(String value) {
+    bind.sessionInputString(sessionId: sessionId, value: value);
+    inputModel.consumeMobileOneShotModifiers();
   }
 
   void _requestMobileSoftKeyboard() {
@@ -1217,6 +1223,13 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
 
   @override
   Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: inputModel.mobileModifierState,
+      builder: (context, child) => _buildTools(context),
+    );
+  }
+
+  Widget _buildTools(BuildContext context) {
     final hasModifierOn = inputModel.ctrl ||
         inputModel.alt ||
         inputModel.shift ||
@@ -1232,6 +1245,7 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
     final isMac = pi.platform == kPeerPlatformMacOS;
     final isWin = pi.platform == kPeerPlatformWindows;
     final isLinux = pi.platform == kPeerPlatformLinux;
+    final modifiers = inputModel.mobileModifierState;
     _scheduleRectUpdate();
     return MobileRemoteKeyHelpTools(
       key: _key,
@@ -1239,16 +1253,27 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
       altActive: inputModel.alt,
       shiftActive: inputModel.shift,
       commandActive: inputModel.command,
+      ctrlLocked:
+          modifiers.modeFor(MobileModifierKey.ctrl) == MobileModifierMode.locked,
+      altLocked:
+          modifiers.modeFor(MobileModifierKey.alt) == MobileModifierMode.locked,
+      shiftLocked: modifiers.modeFor(MobileModifierKey.shift) ==
+          MobileModifierMode.locked,
+      commandLocked: modifiers.modeFor(MobileModifierKey.command) ==
+          MobileModifierMode.locked,
       functionKeysActive: _fn,
       moreKeysActive: _more,
       isMac: isMac,
       showWindowsLinuxKeys: isWin || isLinux,
       quickKeyOrder: widget.quickKeyOrder,
-      onCtrl: () => setState(() => inputModel.ctrl = !inputModel.ctrl),
-      onAlt: () => setState(() => inputModel.alt = !inputModel.alt),
-      onShift: () => setState(() => inputModel.shift = !inputModel.shift),
-      onCommand: () =>
-          setState(() => inputModel.command = !inputModel.command),
+      onCtrl: () => modifiers.tap(MobileModifierKey.ctrl),
+      onAlt: () => modifiers.tap(MobileModifierKey.alt),
+      onShift: () => modifiers.tap(MobileModifierKey.shift),
+      onCommand: () => modifiers.tap(MobileModifierKey.command),
+      onCtrlDoubleTap: () => modifiers.lock(MobileModifierKey.ctrl),
+      onAltDoubleTap: () => modifiers.lock(MobileModifierKey.alt),
+      onShiftDoubleTap: () => modifiers.lock(MobileModifierKey.shift),
+      onCommandDoubleTap: () => modifiers.lock(MobileModifierKey.command),
       onFunctionKeys: () {
         setState(() {
           _fn = !_fn;
@@ -1976,18 +2001,10 @@ TTextMenu? getResolutionMenu(FFI ffi, String id) {
 }
 
 void sendPrompt(bool isMac, String key) {
-  final old = isMac ? gFFI.inputModel.command : gFFI.inputModel.ctrl;
-  if (isMac) {
-    gFFI.inputModel.command = true;
-  } else {
-    gFFI.inputModel.ctrl = true;
-  }
-  gFFI.inputModel.inputKey(key);
-  if (isMac) {
-    gFFI.inputModel.command = old;
-  } else {
-    gFFI.inputModel.ctrl = old;
-  }
+  gFFI.inputModel.inputKeyWithTemporaryMobileModifier(
+    key,
+    isMac ? MobileModifierKey.command : MobileModifierKey.ctrl,
+  );
 }
 
 class FABLocation extends FloatingActionButtonLocation {

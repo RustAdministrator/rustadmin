@@ -120,7 +120,7 @@ void main() {
 
   test('reports the composed RustAdmin release version', () {
     expect(mobileRemoteLabVersion, '2.0.5.011');
-    expect(mobileRemoteLabRevisionLabel, '2.0.5.011 · Lab r21');
+    expect(mobileRemoteLabRevisionLabel, '2.0.5.011 · Lab r22');
   });
 
   test('calculates native-texture fit, zoom, and no-overscan bounds', () {
@@ -976,39 +976,38 @@ void main() {
     expect(alt.left - ctrl.right, closeTo(4, 0.01));
     expect(find.byIcon(Icons.push_pin), findsNothing);
 
-    final ctrlButton = tester.widget<TextButton>(
+    final ctrlButton = tester.widget<Material>(
       find.descendant(
         of: find.byKey(const Key('mobile-remote-quick-ctrl')),
-        matching: find.byType(TextButton),
+        matching: find.byType(Material),
       ),
     );
     final quickButtonContext = tester.element(
       find.byKey(const Key('mobile-remote-quick-ctrl')),
     );
     expect(
-      ctrlButton.style!.backgroundColor!.resolve(<WidgetState>{}),
+      ctrlButton.color,
       mobileRemoteQuickKeyButtonBackgroundColor(quickButtonContext),
     );
     expect(
-      (ctrlButton.style!.backgroundColor!.resolve(<WidgetState>{})!.a * 255)
-          .round(),
+      (ctrlButton.color!.a * 255).round(),
       0xFF,
     );
 
     await tester.tap(find.byKey(const Key('mobile-remote-quick-ctrl')));
-    await tester.pumpAndSettle();
-    final activeCtrlButton = tester.widget<TextButton>(
+    await tester.pump(kDoubleTapTimeout + const Duration(milliseconds: 1));
+    final activeCtrlButton = tester.widget<Material>(
       find.descendant(
         of: find.byKey(const Key('mobile-remote-quick-ctrl')),
-        matching: find.byType(TextButton),
+        matching: find.byType(Material),
       ),
     );
     expect(
-      activeCtrlButton.style!.backgroundColor!.resolve(<WidgetState>{}),
+      activeCtrlButton.color,
       mobileRemoteToolbarActiveBackgroundColor(quickButtonContext),
     );
     expect(
-      activeCtrlButton.style!.backgroundColor!.resolve(<WidgetState>{}),
+      activeCtrlButton.color,
       isNot(mobileRemoteAccentActiveColor),
     );
 

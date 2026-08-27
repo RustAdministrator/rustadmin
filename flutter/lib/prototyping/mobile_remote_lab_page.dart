@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
 import 'package:flutter_hbb/common/widgets/mobile_gesture_controller.dart';
+import 'package:flutter_hbb/mobile/mobile_modifier_state.dart';
 import 'package:flutter_hbb/mobile/mobile_viewport.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_hbb/prototyping/mobile_remote_lab_revision.dart';
@@ -817,10 +818,7 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
   var _cursorInertiaSettings = MobileCursorInertiaSettings.defaults;
   bool _showMonitorsInToolbar = false;
   bool _showQualityMonitor = false;
-  bool _keyboardCtrl = false;
-  bool _keyboardAlt = false;
-  bool _keyboardShift = false;
-  bool _keyboardCommand = false;
+  final _keyboardModifiers = MobileModifierState();
   bool _keyboardFunctionKeys = false;
   bool _keyboardMoreKeys = true;
   String _keyboardMode = kKeyMapMode;
@@ -845,6 +843,7 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
   @override
   void dispose() {
     _stopEdgeScroll();
+    _keyboardModifiers.dispose();
     super.dispose();
   }
 
@@ -860,10 +859,7 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       _connected = widget.scenario.connected;
       _showToolbar = widget.scenario != RemoteLabScenario.connecting;
       _showKeyboard = false;
-      _keyboardCtrl = false;
-      _keyboardAlt = false;
-      _keyboardShift = false;
-      _keyboardCommand = false;
+      _keyboardModifiers.reset();
       _keyboardFunctionKeys = false;
       _keyboardMoreKeys = true;
       _showGestureHelp = false;
@@ -2409,6 +2405,19 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       );
   }
 
+  void _tapKeyboardModifier(MobileModifierKey key) {
+    setState(() => _keyboardModifiers.tap(key));
+  }
+
+  void _lockKeyboardModifier(MobileModifierKey key) {
+    setState(() => _keyboardModifiers.lock(key));
+  }
+
+  void _showKeyboardPreviewAction(String action) {
+    setState(() => _keyboardModifiers.consumeOneShot());
+    _showPreviewAction(action);
+  }
+
   Future<void> _showResolutionMenu() async {
     var selected = '2560x1440';
     await showDialog<void>(
@@ -2481,35 +2490,37 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       children: [
         MobileRemoteKeyHelpTools(
           key: const Key('mobile-remote-key-help-tools'),
-          ctrlActive: _keyboardCtrl,
-          altActive: _keyboardAlt,
-          shiftActive: _keyboardShift,
-          commandActive: _keyboardCommand,
+          ctrlActive: _keyboardModifiers.isActive(MobileModifierKey.ctrl),
+          altActive: _keyboardModifiers.isActive(MobileModifierKey.alt),
+          shiftActive: _keyboardModifiers.isActive(MobileModifierKey.shift),
+          commandActive:
+              _keyboardModifiers.isActive(MobileModifierKey.command),
+          ctrlLocked: _keyboardModifiers.modeFor(MobileModifierKey.ctrl) ==
+              MobileModifierMode.locked,
+          altLocked: _keyboardModifiers.modeFor(MobileModifierKey.alt) ==
+              MobileModifierMode.locked,
+          shiftLocked: _keyboardModifiers.modeFor(MobileModifierKey.shift) ==
+              MobileModifierMode.locked,
+          commandLocked:
+              _keyboardModifiers.modeFor(MobileModifierKey.command) ==
+                  MobileModifierMode.locked,
           functionKeysActive: _keyboardFunctionKeys,
           moreKeysActive: _keyboardMoreKeys,
           isMac: false,
           showWindowsLinuxKeys: !widget.scenario.peerIsAndroid,
           quickKeyOrder: _quickKeyOrder,
-          onCtrl: () {
-            setState(() {
-              _keyboardCtrl = !_keyboardCtrl;
-            });
-          },
-          onAlt: () {
-            setState(() {
-              _keyboardAlt = !_keyboardAlt;
-            });
-          },
-          onShift: () {
-            setState(() {
-              _keyboardShift = !_keyboardShift;
-            });
-          },
-          onCommand: () {
-            setState(() {
-              _keyboardCommand = !_keyboardCommand;
-            });
-          },
+          onCtrl: () => _tapKeyboardModifier(MobileModifierKey.ctrl),
+          onAlt: () => _tapKeyboardModifier(MobileModifierKey.alt),
+          onShift: () => _tapKeyboardModifier(MobileModifierKey.shift),
+          onCommand: () => _tapKeyboardModifier(MobileModifierKey.command),
+          onCtrlDoubleTap: () =>
+              _lockKeyboardModifier(MobileModifierKey.ctrl),
+          onAltDoubleTap: () =>
+              _lockKeyboardModifier(MobileModifierKey.alt),
+          onShiftDoubleTap: () =>
+              _lockKeyboardModifier(MobileModifierKey.shift),
+          onCommandDoubleTap: () =>
+              _lockKeyboardModifier(MobileModifierKey.command),
           onFunctionKeys: () {
             setState(() {
               _keyboardFunctionKeys = !_keyboardFunctionKeys;
@@ -2526,8 +2537,8 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
               }
             });
           },
-          onKeyPressed: _showPreviewAction,
-          onShortcutPressed: _showPreviewAction,
+          onKeyPressed: _showKeyboardPreviewAction,
+          onShortcutPressed: _showKeyboardPreviewAction,
         ),
         _buildSimulatedSystemKeyboard(context),
       ],
