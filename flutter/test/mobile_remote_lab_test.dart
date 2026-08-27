@@ -120,7 +120,7 @@ void main() {
 
   test('reports the composed RustAdmin release version', () {
     expect(mobileRemoteLabVersion, '2.0.5.011');
-    expect(mobileRemoteLabRevisionLabel, '2.0.5.011 · Lab r22');
+    expect(mobileRemoteLabRevisionLabel, '2.0.5.011 · Lab r23');
   });
 
   test('calculates native-texture fit, zoom, and no-overscan bounds', () {
@@ -885,6 +885,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Session actions'), findsNothing);
     expect(find.text('OS Password'), findsOneWidget);
+    expect(find.text('Locate cursor'), findsOneWidget);
     expect(find.text('Reset canvas'), findsOneWidget);
     expect(find.text('Restart remote device'), findsOneWidget);
     expect(find.text('Start session recording'), findsOneWidget);
@@ -928,6 +929,7 @@ void main() {
     expect(find.text('OS Password'), findsNothing);
     expect(find.text('Send clipboard keystrokes'), findsNothing);
     expect(find.text('Block user input'), findsNothing);
+    expect(find.text('Locate cursor'), findsOneWidget);
     expect(find.text('Reset canvas'), findsOneWidget);
     expect(find.text('Copy Fingerprint'), findsOneWidget);
   });

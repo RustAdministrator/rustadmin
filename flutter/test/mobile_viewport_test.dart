@@ -118,6 +118,42 @@ void main() {
     expect(oppositeCorner.dy, closeTo(0, 0.000001));
   });
 
+  test('reveals a hidden remote cursor with the smallest canvas movement', () {
+    final offset = mobileRemoteCanvasOffsetForCursor(
+      cursorTexturePosition: const Offset(900, 700),
+      currentCanvasOffset: const Offset(-100, -100),
+      texture: const Size(1000, 800),
+      viewport: const Size(300, 200),
+      scale: 1,
+    );
+
+    expect(offset, const Offset(-624, -524));
+    expect(
+      mobileRemoteCanvasOffsetForCursor(
+        cursorTexturePosition: const Offset(200, 150),
+        currentCanvasOffset: const Offset(-100, -100),
+        texture: const Size(1000, 800),
+        viewport: const Size(300, 200),
+        scale: 1,
+      ),
+      const Offset(-100, -100),
+    );
+  });
+
+  test('explicit cursor location centers both viewport axes', () {
+    expect(
+      mobileRemoteCanvasOffsetForCursor(
+        cursorTexturePosition: const Offset(500, 400),
+        currentCanvasOffset: Offset.zero,
+        texture: const Size(1000, 800),
+        viewport: const Size(300, 200),
+        scale: 1,
+        center: true,
+      ),
+      const Offset(-350, -300),
+    );
+  });
+
   test('uses custom-key top as keyboard viewport bottom', () {
     expect(
       mobileRemoteUsableViewportHeight(
@@ -326,6 +362,32 @@ void main() {
         canScrollTowardEnd: true,
       ),
       1,
+    );
+  });
+
+  test('selection edge scrolling follows touch edges and remote bounds', () {
+    expect(
+      mobileRemoteSelectionEdgeScrollFactor(
+        touchPosition: const Offset(150, 590),
+        viewport: const Size(300, 600),
+        edgeThickness: 100,
+        directions: MobileRemoteScrollDirections.all,
+      ),
+      const Offset(0, 1),
+    );
+    expect(
+      mobileRemoteSelectionEdgeScrollFactor(
+        touchPosition: const Offset(5, 590),
+        viewport: const Size(300, 600),
+        edgeThickness: 100,
+        directions: const MobileRemoteScrollDirections(
+          left: false,
+          right: true,
+          up: true,
+          down: false,
+        ),
+      ),
+      Offset.zero,
     );
   });
 

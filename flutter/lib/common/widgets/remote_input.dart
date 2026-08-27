@@ -118,6 +118,8 @@ class _RawTouchGestureDetectorRegionState
   bool _leftLongPressRequested = false;
   bool _leftLongPressActive = false;
   Future<void>? _leftLongPressDownFuture;
+  bool _legacyHoldDragActive = false;
+  Future<void>? _legacyHoldDragDownFuture;
   bool _rightTwoFingerHoldRequested = false;
   bool _rightTwoFingerHoldActive = false;
   Future<void>? _rightTwoFingerDownFuture;
@@ -158,11 +160,18 @@ class _RawTouchGestureDetectorRegionState
   }
 
   void _releasePressedButtons() {
+    ffi.canvasModel.endMobileSelectionEdgeScroll();
     _leftLongPressRequested = false;
     if (_leftLongPressActive) {
       _leftLongPressActive = false;
       final down = _leftLongPressDownFuture ?? Future<void>.value();
       unawaited(down.then((_) => inputModel.tapUp(MouseButtons.left)));
+    }
+    if (_legacyHoldDragActive) {
+      _legacyHoldDragActive = false;
+      final down = _legacyHoldDragDownFuture ?? Future<void>.value();
+      _legacyHoldDragDownFuture = null;
+      unawaited(down.then((_) => inputModel.sendMouse('up', MouseButtons.left)));
     }
     _rightTwoFingerHoldRequested = false;
     if (_rightTwoFingerHoldActive) {
@@ -431,6 +440,7 @@ class _RawTouchGestureDetectorRegionState
 
   onOneFingerHoldEnd() async {
     _leftLongPressRequested = false;
+    ffi.canvasModel.endMobileSelectionEdgeScroll();
     if (!_leftLongPressActive || isNotTouchBasedDevice()) return;
     _leftLongPressActive = false;
     await _leftLongPressDownFuture;
@@ -459,11 +469,15 @@ class _RawTouchGestureDetectorRegionState
     if (!_leftLongPressRequested) return;
     _leftLongPressActive = true;
     _leftLongPressDownFuture = inputModel.tapDown(MouseButtons.left);
+    if (!handleTouch && !inputModel.relativeMouseMode.value) {
+      ffi.canvasModel.beginMobileSelectionEdgeScroll();
+    }
     await _leftLongPressDownFuture;
   }
 
   onOneFingerHoldMove(DragUpdateDetails d) async {
     if (!_leftLongPressActive || isNotTouchBasedDevice()) return;
+    await _leftLongPressDownFuture;
     final delta = d.localPosition - _cacheLongPressPosition;
     _cacheLongPressPosition = d.localPosition;
     if (handleTouch) {
@@ -475,6 +489,7 @@ class _RawTouchGestureDetectorRegionState
       await inputModel.sendMobileRelativeMouseMove(delta.dx, delta.dy);
     } else {
       await ffi.cursorModel.updatePan(delta, d.localPosition, false);
+      ffi.canvasModel.updateMobileSelectionEdgeScroll(d.localPosition);
     }
   }
 
@@ -533,7 +548,13 @@ class _RawTouchGestureDetectorRegionState
     }
     if (!handleTouch) {
       if (inputModel.mobileSpecialHoldDragActive) return;
-      await inputModel.sendMouse('down', MouseButtons.left);
+      _legacyHoldDragActive = true;
+      if (!inputModel.relativeMouseMode.value) {
+        ffi.canvasModel.beginMobileSelectionEdgeScroll();
+      }
+      _legacyHoldDragDownFuture =
+          inputModel.sendMouse('down', MouseButtons.left);
+      await _legacyHoldDragDownFuture;
     }
   }
 
@@ -543,17 +564,32 @@ class _RawTouchGestureDetectorRegionState
     }
     if (!handleTouch) {
       if (inputModel.mobileSpecialHoldDragActive) return;
+      await _legacyHoldDragDownFuture;
       await ffi.cursorModel.updatePan(d.delta, d.localPosition, handleTouch);
+      ffi.canvasModel.updateMobileSelectionEdgeScroll(d.localPosition);
     }
   }
 
   onHoldDragEnd(DragEndDetails d) async {
+    ffi.canvasModel.endMobileSelectionEdgeScroll();
     if (isNotTouchBasedDevice()) {
       return;
     }
-    if (!handleTouch) {
+    if (!handleTouch && _legacyHoldDragActive) {
+      _legacyHoldDragActive = false;
+      await _legacyHoldDragDownFuture;
+      _legacyHoldDragDownFuture = null;
       await inputModel.sendMouse('up', MouseButtons.left);
     }
+  }
+
+  onHoldDragCancel() async {
+    ffi.canvasModel.endMobileSelectionEdgeScroll();
+    if (!_legacyHoldDragActive) return;
+    _legacyHoldDragActive = false;
+    await _legacyHoldDragDownFuture;
+    _legacyHoldDragDownFuture = null;
+    await inputModel.sendMouse('up', MouseButtons.left);
   }
 
   onOneFingerPanStart(DragStartDetails d) async {
@@ -731,7 +767,6 @@ class _RawTouchGestureDetectorRegionState
     );
   }
 
-  get onHoldDragCancel => null;
   get onThreeFingerVerticalDragUpdate => ffi.ffiModel.isPeerAndroid
       ? null
       : (d) {

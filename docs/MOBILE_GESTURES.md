@@ -7,10 +7,10 @@ screen. “Mouse mode” moves a remote cursor relatively, like a trackpad.
 | Area | Gesture | Mouse mode | Touch mode | Notes |
 |---|---|---|---|---|
 | Remote screen | One-finger tap | Left click at the current remote cursor | Move to the tap position and left click | A tap on a floating control is consumed by that control. |
-| Remote screen | One-finger tap and hold | Left button down; release sends left button up | Move to the hold position and hold the left button; release sends left button up | Moving after the hold starts performs a left-button drag. |
+| Remote screen | One-finger tap and hold | Left button down; release sends left button up | Move to the hold position and hold the left button; release sends left button up | Moving after the hold starts performs a left-button drag. In mouse mode, holding the finger in a device-edge band continues scrolling and extending the selection until release or the remote edge. |
 | Remote screen | One-finger drag | Move the remote cursor | Move to the finger, hold the left button, and drag | Mouse-mode release velocity continues briefly when cursor inertia is enabled. |
 | Remote screen | Double tap | Double left click at the current remote cursor | Move to the tap position and double left click | Two clicks are sent as separate left-click sequences. |
-| Remote screen | Double tap, then drag | Hold the left button and drag the remote cursor | Not used; a normal one-finger drag already performs a direct left drag | This is the legacy mouse-mode drag gesture. |
+| Remote screen | Double tap, then drag | Hold the left button and drag the remote cursor | Not used; a normal one-finger drag already performs a direct left drag | This legacy mouse-mode drag has the same continuous selection edge scrolling as tap-and-hold drag. |
 | Remote screen | Two-finger tap | Right click at the current remote cursor | Move to the midpoint of both fingers and right click | Both fingers must stay within tap tolerance. |
 | Remote screen | Two-finger tap and hold | Hold the right button; releasing either finger sends right button up | Move to the midpoint of both fingers and hold the right button; releasing either finger sends right button up | Moving beyond tap tolerance before the hold starts changes the gesture into wheel, local pan, or zoom according to its direction. |
 | Remote screen | Two-finger vertical drag | Remote mouse wheel | Remote mouse wheel | Predominantly vertical parallel movement is committed to wheel scrolling until both fingers are released. It does not move the remote cursor or local canvas. |
@@ -52,6 +52,12 @@ configured time controls a linear slowdown after the finger is released. It is
 set with the `100-1000 ms` slider inside the `Screen scrolling` menu. A new
 touch, click, hold, or multi-finger gesture stops the active inertia
 immediately.
+
+After the first remote frame and cursor report arrive, the mobile viewport
+moves only as far as needed to reveal the cursor. If the cursor is on another
+remote monitor, the initial focus follows that monitor. `Locate cursor` in the
+More actions menu centers the viewport on the reported cursor without moving
+the remote pointer; `Reset canvas` resets only the local canvas transform.
 
 ## Saved mobile session controls
 

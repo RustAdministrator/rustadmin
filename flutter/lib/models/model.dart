@@ -2437,6 +2437,7 @@ class ImageModel with ChangeNotifier {
       _androidSurfaceTextureFrameSize = null;
       _interactionGeometryInitialized = false;
     } else {
+      parent.target?.canvasModel.tryApplyPendingMobileCursorFocus();
       notifyListeners();
     }
   }
@@ -2462,6 +2463,7 @@ class ImageModel with ChangeNotifier {
     _androidSurfaceTextureDisplay = display;
     _androidSurfaceTextureFrameSize = frameSize;
     await _ensureInteractionGeometry();
+    ffi.canvasModel.tryApplyPendingMobileCursorFocus();
     if (changed) {
       notifyListeners();
     }
@@ -2677,6 +2679,11 @@ enum EdgeScrollState {
   active,
 }
 
+enum MobileCursorFocusRequest {
+  initialReveal,
+  center,
+}
+
 class EdgeScrollFallbackState {
   final CanvasModel _owner;
   static const double _kEdgeAccelerationMaxSpeedPxPerSecond = 1800.0;
@@ -2706,7 +2713,7 @@ class EdgeScrollFallbackState {
       _nextEventIsFirst = false;
     } else {
       final thisTickElapsed = totalElapsed - _lastTotalElapsed;
-      if (_owner.scrollStyle == ScrollStyle.scrolledgeaccel) {
+      if (_owner._usesEdgeAcceleration) {
         final seconds =
             thisTickElapsed.inMicroseconds / Duration.microsecondsPerSecond;
         final delta = _edgeAccelerationFactor *
@@ -2786,10 +2793,14 @@ class CanvasModel with ChangeNotifier {
   bool _edgeScrollFallbackInitialized = false;
   // to avoid hammering a non-functional Bump Mouse
   bool _bumpMouseIsWorking = true;
+  bool _mobileSelectionEdgeScrollActive = false;
   ViewStyle _lastViewStyle = ViewStyle.defaultViewStyle();
   MobileRemoteViewScaleMode _mobileViewScaleMode =
       kDefaultMobileRemoteViewScaleMode;
   bool _mobileFitPending = true;
+  MobileCursorFocusRequest? _mobileCursorFocusRequest =
+      MobileCursorFocusRequest.initialReveal;
+  bool _mobileCursorFocusDisplaySwitchAttempted = false;
 
   Timer? _timerMobileFocusCanvasCursor;
   Timer? _timerMobileRestoreCanvasOffset;
@@ -3251,6 +3262,7 @@ class CanvasModel with ChangeNotifier {
 
   void disposeEdgeScrollFallback() {
     _edgeScrollState = EdgeScrollState.inactive;
+    _mobileSelectionEdgeScrollActive = false;
     if (_edgeScrollFallbackInitialized) {
       _edgeScrollFallbackState.dispose();
       _edgeScrollFallbackInitialized = false;
@@ -3272,7 +3284,32 @@ class CanvasModel with ChangeNotifier {
     }
   }
 
-  bool get _usesEdgeAcceleration => _scrollStyle == ScrollStyle.scrolledgeaccel;
+  bool get _usesEdgeAcceleration =>
+      _mobileSelectionEdgeScrollActive ||
+      _scrollStyle == ScrollStyle.scrolledgeaccel;
+
+  void beginMobileSelectionEdgeScroll() {
+    if (!_usesMobileRemoteViewport) return;
+    _mobileSelectionEdgeScrollActive = true;
+    _edgeScrollState = EdgeScrollState.active;
+  }
+
+  void updateMobileSelectionEdgeScroll(Offset touchPosition) {
+    if (!_mobileSelectionEdgeScrollActive) return;
+    edgeScrollMouse(touchPosition.dx, touchPosition.dy);
+  }
+
+  void endMobileSelectionEdgeScroll() {
+    if (!_mobileSelectionEdgeScrollActive) return;
+    _mobileSelectionEdgeScrollActive = false;
+    cancelEdgeScroll();
+    if (_scrollStyle == ScrollStyle.scrolledge ||
+        _scrollStyle == ScrollStyle.scrolledgeaccel) {
+      _edgeScrollState = EdgeScrollState.armed;
+    } else {
+      _edgeScrollState = EdgeScrollState.inactive;
+    }
+  }
 
   (Vector2, Vector2) getScrollInfo() {
     final scrollPixel = Vector2(
@@ -3358,7 +3395,15 @@ class CanvasModel with ChangeNotifier {
     final encroachment = fixedEdgeFactor * edgeThickness;
 
     if (_usesEdgeAcceleration) {
-      final edgeAccelerationFactor = _usesMobileRemoteViewport
+      final selectionFactor = mobileRemoteSelectionEdgeScrollFactor(
+        touchPosition: Offset(x, y),
+        viewport: size,
+        edgeThickness: _edgeScrollEdgeThickness.toDouble(),
+        directions: mobileDirections,
+      );
+      final edgeAccelerationFactor = _mobileSelectionEdgeScrollActive
+          ? Vector2(selectionFactor.dx, selectionFactor.dy)
+          : _usesMobileRemoteViewport
           ? Vector2(
               mobileRemoteEdgeAccelerationAxisFactor(
                 pointerPosition: x,
@@ -3625,6 +3670,9 @@ class CanvasModel with ChangeNotifier {
     _lastViewStyle = ViewStyle.defaultViewStyle();
     _mobileViewScaleMode = kDefaultMobileRemoteViewScaleMode;
     _mobileFitPending = true;
+    _mobileCursorFocusRequest = MobileCursorFocusRequest.initialReveal;
+    _mobileCursorFocusDisplaySwitchAttempted = false;
+    _mobileSelectionEdgeScrollActive = false;
     _timerMobileFocusCanvasCursor?.cancel();
     _timerMobileRestoreCanvasOffset?.cancel();
     _offsetBeforeMobileSoftKeyboard = null;
@@ -3655,6 +3703,76 @@ class CanvasModel with ChangeNotifier {
       _resetCanvasOffset(getDisplayWidth(), getDisplayHeight());
       notifyListeners();
     });
+  }
+
+  void requestMobileCursorFocus() {
+    _mobileCursorFocusRequest = MobileCursorFocusRequest.center;
+    _mobileCursorFocusDisplaySwitchAttempted = false;
+    tryApplyPendingMobileCursorFocus();
+  }
+
+  void tryApplyPendingMobileCursorFocus() {
+    final request = _mobileCursorFocusRequest;
+    final target = parent.target;
+    if (request == null ||
+        target == null ||
+        !_usesMobileRemoteViewport ||
+        !target.cursorModel.hasRemotePosition ||
+        !target.imageModel.hasRenderableFrame) {
+      return;
+    }
+    final remoteRect = target.ffiModel.rect;
+    if (remoteRect == null || remoteRect.isEmpty) return;
+    final remoteCursor = target.cursorModel.remotePosition;
+    if (!remoteRect.contains(remoteCursor)) {
+      if (!_mobileCursorFocusDisplaySwitchAttempted &&
+          target.ffiModel.pi.currentDisplay != kAllDisplayValue) {
+        final displays = target.ffiModel.pi.displays;
+        for (var index = 0; index < displays.length; index++) {
+          final display = displays[index];
+          final displayRect = Rect.fromLTWH(
+            display.x,
+            display.y,
+            display.width.toDouble(),
+            display.height.toDouble(),
+          );
+          if (displayRect.contains(remoteCursor) &&
+              index != target.ffiModel.pi.currentDisplay) {
+            _mobileCursorFocusDisplaySwitchAttempted = true;
+            openMonitorInTheSameTab(
+              index,
+              target,
+              target.ffiModel.pi,
+              updateCursorPos: false,
+            );
+            return;
+          }
+        }
+      }
+      return;
+    }
+
+    updateSize();
+    if (_mobileFitPending) {
+      _applyPendingMobileFit();
+    }
+    if (size.isEmpty || !_scale.isFinite || _scale <= 0) return;
+    final offset = mobileRemoteCanvasOffsetForCursor(
+      cursorTexturePosition: Offset(target.cursorModel.x, target.cursorModel.y),
+      currentCanvasOffset: Offset(_x, _y + getAdjustY()),
+      texture: _mobileTextureSize(),
+      viewport: size,
+      scale: _scale,
+      center: request == MobileCursorFocusRequest.center,
+    );
+    final adjust = getAdjustY();
+    _x = offset.dx;
+    _y = offset.dy - adjust;
+    _mobileFitPending = false;
+    _mobileCursorFocusRequest = null;
+    _mobileCursorFocusDisplaySwitchAttempted = false;
+    _updateImageOverflow();
+    notifyListeners();
   }
 
   void saveMobileOffsetBeforeSoftKeyboard() {
@@ -3885,6 +4003,7 @@ class CursorModel with ChangeNotifier {
   final _cacheKeys = <String>{};
   double _x = -10000;
   double _y = -10000;
+  bool _hasRemotePosition = false;
   // int.parse(evt['id']) may cause FormatException
   // So we use String here.
   String _id = "-1";
@@ -3974,6 +4093,8 @@ class CursorModel with ChangeNotifier {
   double get devicePixelRatio => parent.target!.canvasModel.devicePixelRatio;
 
   Offset get offset => Offset(_x, _y);
+  Offset get remotePosition => Offset(_x, _y);
+  bool get hasRemotePosition => _hasRemotePosition;
 
   Offset get mobileViewportPosition {
     final canvasModel = parent.target?.canvasModel;
@@ -4456,12 +4577,14 @@ class CursorModel with ChangeNotifier {
     }
     _x = double.parse(evt['x']);
     _y = double.parse(evt['y']);
+    _hasRemotePosition = true;
     try {
       RemoteCursorMovedState.find(id).value = true;
     } catch (e) {
       //
     }
     notifyListeners();
+    parent.target?.canvasModel.tryApplyPendingMobileCursorFocus();
   }
 
   updateDisplayOrigin(double x, double y, {updateCursorPos = true}) {
@@ -4489,6 +4612,7 @@ class CursorModel with ChangeNotifier {
   clear() {
     _x = -10000;
     _y = -10000;
+    _hasRemotePosition = false;
     _image = null;
     _firstUpdateMouseTime = null;
     gotMouseControl = true;
@@ -5878,7 +6002,8 @@ Future<void> initializeCursorAndCanvas(FFI ffi) async {
   }
   if (p == null || currentDisplay != ffi.ffiModel.pi.currentDisplay) {
     ffi.cursorModel.updateDisplayOrigin(
-        ffi.ffiModel.rect?.left ?? 0, ffi.ffiModel.rect?.top ?? 0);
+        ffi.ffiModel.rect?.left ?? 0, ffi.ffiModel.rect?.top ?? 0,
+        updateCursorPos: !isMobileClient);
     return;
   }
   double xCursor = p['xCursor'];

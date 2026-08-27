@@ -160,11 +160,14 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
           }
         }));
   }
-  // reset canvas
+  // mobile cursor and canvas actions
   if (isDefaultConn && isMobile) {
     v.add(TTextMenu(
+        child: Text(translate('Locate cursor')),
+        onPressed: () => ffi.canvasModel.requestMobileCursorFocus()));
+    v.add(TTextMenu(
         child: Text(translate('Reset canvas')),
-        onPressed: () => ffi.cursorModel.reset()));
+        onPressed: () => ffi.canvasModel.reset()));
   }
 
   // https://github.com/rustdesk/rustdesk/pull/9731

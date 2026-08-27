@@ -80,6 +80,73 @@ Offset mobileRemoteClampCanvasOffset({
   );
 }
 
+/// Returns a clamped canvas offset that makes [cursorTexturePosition] visible.
+///
+/// Initial connection setup uses the smallest required movement so it does not
+/// disturb an already useful view. An explicit locate action can request
+/// centering instead.
+Offset mobileRemoteCanvasOffsetForCursor({
+  required Offset cursorTexturePosition,
+  required Offset currentCanvasOffset,
+  required Size texture,
+  required Size viewport,
+  required double scale,
+  bool center = false,
+  double visibilityMargin = 24,
+}) {
+  if (!scale.isFinite ||
+      scale <= 0 ||
+      texture.width <= 0 ||
+      texture.height <= 0 ||
+      viewport.width <= 0 ||
+      viewport.height <= 0) {
+    return currentCanvasOffset;
+  }
+
+  var proposed = currentCanvasOffset;
+  if (center) {
+    proposed = viewport.center(Offset.zero) - cursorTexturePosition * scale;
+  } else {
+    final cursorViewportPosition = mobileRemoteViewportPositionFromTexture(
+      texturePosition: cursorTexturePosition,
+      canvasOffset: currentCanvasOffset,
+      scale: scale,
+    );
+    final horizontalMargin = math
+        .min(math.max(visibilityMargin, 0), viewport.width / 2)
+        .toDouble();
+    final verticalMargin = math
+        .min(math.max(visibilityMargin, 0), viewport.height / 2)
+        .toDouble();
+    final visibleRect = Rect.fromLTRB(
+      horizontalMargin,
+      verticalMargin,
+      viewport.width - horizontalMargin,
+      viewport.height - verticalMargin,
+    );
+    var dx = 0.0;
+    var dy = 0.0;
+    if (cursorViewportPosition.dx < visibleRect.left) {
+      dx = visibleRect.left - cursorViewportPosition.dx;
+    } else if (cursorViewportPosition.dx > visibleRect.right) {
+      dx = visibleRect.right - cursorViewportPosition.dx;
+    }
+    if (cursorViewportPosition.dy < visibleRect.top) {
+      dy = visibleRect.top - cursorViewportPosition.dy;
+    } else if (cursorViewportPosition.dy > visibleRect.bottom) {
+      dy = visibleRect.bottom - cursorViewportPosition.dy;
+    }
+    proposed += Offset(dx, dy);
+  }
+
+  return mobileRemoteClampCanvasOffset(
+    proposed: proposed,
+    texture: texture,
+    viewport: viewport,
+    scale: scale,
+  );
+}
+
 Offset mobileRemoteTexturePositionFromViewport({
   required Offset viewportPosition,
   required Offset canvasOffset,
@@ -311,6 +378,30 @@ double mobileRemoteEdgeAccelerationAxisFactor({
   }
   return 0;
 }
+
+/// Continuous edge-scroll acceleration for a held mobile selection gesture.
+/// This is intentionally independent of the configured general scroll mode.
+Offset mobileRemoteSelectionEdgeScrollFactor({
+  required Offset touchPosition,
+  required Size viewport,
+  required double edgeThickness,
+  required MobileRemoteScrollDirections directions,
+}) => Offset(
+  mobileRemoteEdgeAccelerationAxisFactor(
+    pointerPosition: touchPosition.dx,
+    viewportExtent: viewport.width,
+    edgeThickness: edgeThickness,
+    canScrollTowardStart: directions.left,
+    canScrollTowardEnd: directions.right,
+  ),
+  mobileRemoteEdgeAccelerationAxisFactor(
+    pointerPosition: touchPosition.dy,
+    viewportExtent: viewport.height,
+    edgeThickness: edgeThickness,
+    canScrollTowardStart: directions.up,
+    canScrollTowardEnd: directions.down,
+  ),
+);
 
 /// Returns the per-frame correction that brings an acceleration-mode cursor
 /// back to the neutral region exactly as the remaining inertia reaches zero.

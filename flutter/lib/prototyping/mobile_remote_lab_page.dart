@@ -2092,6 +2092,7 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       'Show sign-in',
     if (!widget.scenario.peerIsAndroid && !widget.scenario.viewOnly)
       'Send clipboard keystrokes',
+    'Locate cursor',
     'Reset canvas',
     'Note',
     if (!widget.scenario.peerIsAndroid && !widget.scenario.viewOnly)
