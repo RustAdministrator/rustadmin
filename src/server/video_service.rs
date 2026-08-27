@@ -60,10 +60,7 @@ use scrap::{
     Capturer, CodecFormat, Display, EncodeInput, Pixfmt, TraitCapturer, TraitPixelBuffer,
 };
 #[cfg(windows)]
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Once,
-};
+use std::sync::Once;
 use std::{
     collections::HashSet,
     io::ErrorKind::WouldBlock,
@@ -85,8 +82,16 @@ const HQ_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_secs(6);
 // service-wide coalescing window so one lost refresh cannot create a 2s stall.
 const DELIVERY_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_millis(250);
 const IN_PLACE_REFERENCE_REFRESH_TIMEOUT: Duration = Duration::from_secs(1);
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const USER_CAPTURE_HELPER_STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(any(windows, test))]
+const USER_CAPTURE_HELPER_FIRST_RETRY_COOLDOWN: Duration = Duration::from_secs(5);
+#[cfg(any(windows, test))]
+const USER_CAPTURE_HELPER_SECOND_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
+#[cfg(any(windows, test))]
+const USER_CAPTURE_HELPER_MAX_FAILURES: u32 = 3;
+#[cfg(any(windows, test))]
+const USER_CAPTURE_HELPER_STALE_ATTEMPT_GRACE: Duration = Duration::from_secs(2);
 #[cfg(windows)]
 const INSTALLED_SECURE_CAPTURE_HELPER_START_COOLDOWN: Duration = Duration::from_secs(5);
 #[cfg(windows)]
@@ -237,8 +242,163 @@ fn capture_frame_label(frame: &scrap::Frame<'_>) -> &'static str {
     }
 }
 
-#[cfg(windows)]
-static USER_CAPTURE_HELPER_DISABLED: AtomicBool = AtomicBool::new(false);
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UserCaptureHelperRetryPhase {
+    Ready,
+    Active { started_at: Instant },
+    Cooldown { retry_at: Instant },
+    RetryQueued,
+    Suppressed,
+    Manual,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UserCaptureHelperRetrySnapshot {
+    state: &'static str,
+    failures: u32,
+    retry_in_ms: u64,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct UserCaptureHelperAttempt {
+    number: u32,
+    retry: bool,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug)]
+struct UserCaptureHelperRetryPolicy {
+    phase: UserCaptureHelperRetryPhase,
+    failures: u32,
+}
+
+#[cfg(any(windows, test))]
+impl Default for UserCaptureHelperRetryPolicy {
+    fn default() -> Self {
+        Self {
+            phase: UserCaptureHelperRetryPhase::Ready,
+            failures: 0,
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+impl UserCaptureHelperRetryPolicy {
+    fn reset(&mut self) -> bool {
+        let changed = self.phase != UserCaptureHelperRetryPhase::Ready || self.failures != 0;
+        self.phase = UserCaptureHelperRetryPhase::Ready;
+        self.failures = 0;
+        changed
+    }
+
+    fn set_manual(&mut self) -> bool {
+        let changed = self.phase != UserCaptureHelperRetryPhase::Manual || self.failures != 0;
+        self.phase = UserCaptureHelperRetryPhase::Manual;
+        self.failures = 0;
+        changed
+    }
+
+    fn try_begin_attempt(&mut self, now: Instant) -> Option<UserCaptureHelperAttempt> {
+        self.expire_stale_attempt(now);
+        let retry = match self.phase {
+            UserCaptureHelperRetryPhase::Ready => false,
+            UserCaptureHelperRetryPhase::RetryQueued => true,
+            UserCaptureHelperRetryPhase::Cooldown { retry_at } if now >= retry_at => true,
+            _ => return None,
+        };
+        self.phase = UserCaptureHelperRetryPhase::Active { started_at: now };
+        Some(UserCaptureHelperAttempt {
+            number: self.failures.saturating_add(1),
+            retry,
+        })
+    }
+
+    fn record_failure(&mut self, now: Instant) -> UserCaptureHelperRetrySnapshot {
+        if !matches!(self.phase, UserCaptureHelperRetryPhase::Active { .. }) {
+            return self.snapshot(now);
+        }
+        self.failures = self.failures.saturating_add(1);
+        self.phase = if self.failures >= USER_CAPTURE_HELPER_MAX_FAILURES {
+            UserCaptureHelperRetryPhase::Suppressed
+        } else {
+            let cooldown = if self.failures == 1 {
+                USER_CAPTURE_HELPER_FIRST_RETRY_COOLDOWN
+            } else {
+                USER_CAPTURE_HELPER_SECOND_RETRY_COOLDOWN
+            };
+            UserCaptureHelperRetryPhase::Cooldown {
+                retry_at: now.checked_add(cooldown).unwrap_or(now),
+            }
+        };
+        self.snapshot(now)
+    }
+
+    fn record_success(&mut self) -> bool {
+        if matches!(self.phase, UserCaptureHelperRetryPhase::Active { .. }) {
+            self.reset()
+        } else {
+            false
+        }
+    }
+
+    fn queue_retry_if_due(&mut self, now: Instant) -> bool {
+        self.expire_stale_attempt(now);
+        if matches!(self.phase, UserCaptureHelperRetryPhase::Cooldown { retry_at } if now >= retry_at)
+        {
+            self.phase = UserCaptureHelperRetryPhase::RetryQueued;
+            return true;
+        }
+        false
+    }
+
+    fn snapshot(&self, now: Instant) -> UserCaptureHelperRetrySnapshot {
+        let (state, retry_in_ms) = match self.phase {
+            UserCaptureHelperRetryPhase::Ready => ("ready", 0),
+            UserCaptureHelperRetryPhase::Active { .. } => ("active", 0),
+            UserCaptureHelperRetryPhase::Cooldown { retry_at } => (
+                "cooldown",
+                retry_at
+                    .saturating_duration_since(now)
+                    .as_millis()
+                    .min(u64::MAX as u128) as u64,
+            ),
+            UserCaptureHelperRetryPhase::RetryQueued => ("retry-queued", 0),
+            UserCaptureHelperRetryPhase::Suppressed => ("suppressed", 0),
+            UserCaptureHelperRetryPhase::Manual => ("manual", 0),
+        };
+        UserCaptureHelperRetrySnapshot {
+            state,
+            failures: self.failures,
+            retry_in_ms,
+        }
+    }
+
+    fn expire_stale_attempt(&mut self, now: Instant) {
+        let stale_after = USER_CAPTURE_HELPER_STARTUP_TIMEOUT
+            .saturating_add(USER_CAPTURE_HELPER_STALE_ATTEMPT_GRACE);
+        if matches!(
+            self.phase,
+            UserCaptureHelperRetryPhase::Active { started_at }
+                if now.saturating_duration_since(started_at) >= stale_after
+        ) {
+            self.record_failure(now);
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
+fn capture_backend_allows_user_helper_retry(preference: CaptureBackend) -> bool {
+    matches!(
+        preference,
+        CaptureBackend::CaptureBackendAuto
+            | CaptureBackend::CaptureBackendNotSet
+            | CaptureBackend::CaptureBackendWgc
+            | CaptureBackend::CaptureBackendDxgi
+    )
+}
 
 type FrameFetchedNotifierSender = UnboundedSender<(i32, Option<Instant>)>;
 type FrameFetchedNotifierReceiver = Arc<TokioMutex<UnboundedReceiver<(i32, Option<Instant>)>>>;
@@ -279,6 +439,8 @@ lazy_static::lazy_static! {
 lazy_static::lazy_static! {
     static ref LAST_INSTALLED_SECURE_CAPTURE_HELPER_START: std::sync::Mutex<Option<Instant>> =
         Default::default();
+    static ref USER_CAPTURE_HELPER_RETRY_POLICY:
+        std::sync::Mutex<UserCaptureHelperRetryPolicy> = Default::default();
 }
 
 struct Screenshot {
@@ -332,7 +494,112 @@ pub fn set_capture_backend_preference(backend: CaptureBackend) {
         _ => CaptureBackend::CaptureBackendAuto,
     };
     *CAPTURE_BACKEND_PREFERENCE.lock().unwrap() = normalized;
+    #[cfg(windows)]
+    if capture_backend_allows_user_helper_retry(normalized) {
+        reset_user_capture_helper_retry("capture backend requested");
+    } else {
+        disable_user_capture_helper_retry("manual capture backend requested");
+    }
     log::info!("capture backend preference set to {:?}", normalized);
+}
+
+#[cfg(windows)]
+fn reset_user_capture_helper_retry(reason: &str) {
+    let mut policy = USER_CAPTURE_HELPER_RETRY_POLICY.lock().unwrap();
+    if policy.reset() {
+        log::info!(
+            "user capture helper retry reset: reason={}, state=ready, failures=0",
+            reason
+        );
+    }
+}
+
+#[cfg(windows)]
+fn disable_user_capture_helper_retry(reason: &str) {
+    let mut policy = USER_CAPTURE_HELPER_RETRY_POLICY.lock().unwrap();
+    if policy.set_manual() {
+        log::info!(
+            "user capture helper retry disabled: reason={}, state=manual, failures=0",
+            reason
+        );
+    }
+}
+
+#[cfg(windows)]
+fn begin_user_capture_helper_attempt(
+    backend: UserCaptureBackend,
+    display: usize,
+) -> Option<UserCaptureHelperAttempt> {
+    let now = Instant::now();
+    let mut policy = USER_CAPTURE_HELPER_RETRY_POLICY.lock().unwrap();
+    let attempt = policy.try_begin_attempt(now);
+    let snapshot = policy.snapshot(now);
+    if let Some(attempt) = attempt {
+        log::info!(
+            "user capture helper attempt started: backend={}, display={}, attempt={}, retry={}, state={}, failures={}",
+            backend.as_str(),
+            display,
+            attempt.number,
+            attempt.retry,
+            snapshot.state,
+            snapshot.failures
+        );
+    }
+    attempt
+}
+
+#[cfg(windows)]
+fn record_user_capture_helper_failure(reason: &str) {
+    let now = Instant::now();
+    let mut policy = USER_CAPTURE_HELPER_RETRY_POLICY.lock().unwrap();
+    let snapshot = policy.record_failure(now);
+    log::warn!(
+        "user capture helper attempt failed: reason={}, state={}, failures={}, retry_in_ms={}",
+        reason,
+        snapshot.state,
+        snapshot.failures,
+        snapshot.retry_in_ms
+    );
+}
+
+#[cfg(windows)]
+fn record_user_capture_helper_success(capture_backend: &str) {
+    let mut policy = USER_CAPTURE_HELPER_RETRY_POLICY.lock().unwrap();
+    let failures = policy.failures;
+    if policy.record_success() && failures > 0 {
+        log::info!(
+            "user capture helper recovered: capture_backend={}, previous_failures={}, state=ready",
+            capture_backend,
+            failures
+        );
+    }
+}
+
+#[cfg(windows)]
+fn queue_user_capture_helper_retry_if_due(reason: &str) -> bool {
+    let now = Instant::now();
+    let mut policy = USER_CAPTURE_HELPER_RETRY_POLICY.lock().unwrap();
+    if !policy.queue_retry_if_due(now) {
+        return false;
+    }
+    let snapshot = policy.snapshot(now);
+    log::info!(
+        "user capture helper retry queued: reason={}, state={}, failures={}, retry_in_ms={}",
+        reason,
+        snapshot.state,
+        snapshot.failures,
+        snapshot.retry_in_ms
+    );
+    true
+}
+
+#[cfg(windows)]
+fn user_capture_helper_retry_snapshot() -> UserCaptureHelperRetrySnapshot {
+    let now = Instant::now();
+    USER_CAPTURE_HELPER_RETRY_POLICY
+        .lock()
+        .unwrap()
+        .snapshot(now)
 }
 
 struct VideoFrameController {
@@ -940,24 +1207,29 @@ fn stale_secure_capture_helper_on_user_desktop(
 }
 
 #[cfg(windows)]
-fn should_use_user_capture_helper(portable_service_running: bool, privacy_mode_id: i32) -> bool {
+fn should_use_user_capture_helper(
+    portable_service_running: bool,
+    privacy_mode_id: i32,
+    backend: UserCaptureBackend,
+    display: usize,
+) -> bool {
     let privacy_mode_ok = privacy_mode_id == INVALID_PRIVACY_MODE_CONN_ID;
-    let helper_disabled = USER_CAPTURE_HELPER_DISABLED.load(Ordering::Relaxed);
     let is_root = crate::platform::is_root();
     let installed = is_installed();
     let desktop_state = WindowsCaptureDesktopState::current();
-    let use_helper = privacy_mode_ok
-        && !helper_disabled
+    let prerequisites_met = privacy_mode_ok
         && !portable_service_running
         && is_root
         && installed
         && !desktop_state.requires_secure_capture();
+    let attempt = prerequisites_met
+        .then(|| begin_user_capture_helper_attempt(backend, display))
+        .flatten();
+    let use_helper = attempt.is_some();
+    let retry = user_capture_helper_retry_snapshot();
     let mut blocked_by = Vec::new();
     if !privacy_mode_ok {
         blocked_by.push("privacy_mode");
-    }
-    if helper_disabled {
-        blocked_by.push("helper_disabled");
     }
     if portable_service_running {
         blocked_by.push("portable_service");
@@ -980,15 +1252,23 @@ fn should_use_user_capture_helper(portable_service_running: bool, privacy_mode_i
     if desktop_state.logon_ui {
         blocked_by.push("logon_ui");
     }
+    if prerequisites_met && attempt.is_none() {
+        blocked_by.push(retry.state);
+    }
     let blocked_by = if blocked_by.is_empty() {
         "none".to_owned()
     } else {
         blocked_by.join(",")
     };
     log::info!(
-        "user capture helper decision: use_helper={}, blocked_by={}, privacy_mode_id={}, portable_service_running={}, is_root={}, installed={}, prelogin={}, locked={}, desktop_changed={}, logon_ui={}",
+        "user capture helper decision: use_helper={}, backend={}, display={}, blocked_by={}, retry_state={}, retry_failures={}, retry_in_ms={}, privacy_mode_id={}, portable_service_running={}, is_root={}, installed={}, prelogin={}, locked={}, desktop_changed={}, logon_ui={}",
         use_helper,
+        backend.as_str(),
+        display,
         blocked_by,
+        retry.state,
+        retry.failures,
+        retry.retry_in_ms,
         privacy_mode_id,
         portable_service_running,
         is_root,
@@ -1015,7 +1295,12 @@ fn create_wgc_priority_capturer(
     width: usize,
     height: usize,
 ) -> ResultType<Box<dyn TraitCapturer>> {
-    if should_use_user_capture_helper(portable_service_running, privacy_mode_id) {
+    if should_use_user_capture_helper(
+        portable_service_running,
+        privacy_mode_id,
+        UserCaptureBackend::Wgc,
+        current,
+    ) {
         match crate::server::user_capture_helper::client::create_capturer(
             UserCaptureBackend::Wgc,
             current,
@@ -1027,6 +1312,7 @@ fn create_wgc_priority_capturer(
                 return Ok(capturer);
             }
             Err(err) => {
+                record_user_capture_helper_failure("WGC helper initialization failed");
                 log::warn!(
                     "Failed to create user WGC helper capturer, falling back to direct WGC: {}",
                     err
@@ -1089,7 +1375,12 @@ fn create_dxgi_priority_capturer(
 ) -> ResultType<Box<dyn TraitCapturer>> {
     let width = display.width();
     let height = display.height();
-    if should_use_user_capture_helper(portable_service_running, privacy_mode_id) {
+    if should_use_user_capture_helper(
+        portable_service_running,
+        privacy_mode_id,
+        UserCaptureBackend::Dxgi,
+        current,
+    ) {
         match crate::server::user_capture_helper::client::create_capturer(
             UserCaptureBackend::Dxgi,
             current,
@@ -1106,6 +1397,7 @@ fn create_dxgi_priority_capturer(
                 return Ok(capturer);
             }
             Err(err) => {
+                record_user_capture_helper_failure("DXGI helper initialization failed");
                 log::warn!(
                     "Failed to create user DXGI helper capturer, falling back to direct dxgi|gdi: {}",
                     err
@@ -1243,16 +1535,20 @@ fn ensure_installed_secure_capture_helper(
 #[cfg(test)]
 mod tests {
     use super::{
-        keep_privileged_stream_for_secure_transition, secure_capture_helper_ready,
-        should_force_privileged_secure_capturer, stale_secure_capture_helper_on_user_desktop,
-        stamp_video_frame, windows_capture_route, DurationSamples, HqReferenceRefreshPolicy,
-        MovieFramePacer, MovieHostCadenceWindow, ReferenceRefreshReason, VideoFrameController,
-        VideoSource, VideoStreamKey, WindowsCaptureRoute, DELIVERY_REFERENCE_REFRESH_COOLDOWN,
+        capture_backend_allows_user_helper_retry, keep_privileged_stream_for_secure_transition,
+        secure_capture_helper_ready, should_force_privileged_secure_capturer,
+        stale_secure_capture_helper_on_user_desktop, stamp_video_frame, windows_capture_route,
+        DurationSamples, HqReferenceRefreshPolicy, MovieFramePacer, MovieHostCadenceWindow,
+        ReferenceRefreshReason, UserCaptureHelperRetryPolicy, VideoFrameController, VideoSource,
+        VideoStreamKey, WindowsCaptureRoute, DELIVERY_REFERENCE_REFRESH_COOLDOWN,
         HOST_VIDEO_DIAG_SAMPLE_CAPACITY, HQ_REFERENCE_REFRESH_COOLDOWN,
+        USER_CAPTURE_HELPER_FIRST_RETRY_COOLDOWN, USER_CAPTURE_HELPER_SECOND_RETRY_COOLDOWN,
+        USER_CAPTURE_HELPER_STALE_ATTEMPT_GRACE, USER_CAPTURE_HELPER_STARTUP_TIMEOUT,
     };
     use hbb_common::message_proto::{option_message::CaptureBackend, VideoFrame};
     use std::{
         collections::HashSet,
+        sync::{Arc, Mutex},
         time::{Duration, Instant},
     };
 
@@ -1341,6 +1637,128 @@ mod tests {
             windows_capture_route(CaptureBackend::CaptureBackendAuto, false),
             WindowsCaptureRoute::Auto
         );
+    }
+
+    #[test]
+    fn user_capture_helper_retry_is_bounded_and_consumed_once() {
+        let start = Instant::now();
+        let mut policy = UserCaptureHelperRetryPolicy::default();
+
+        let initial = policy.try_begin_attempt(start).unwrap();
+        assert_eq!((initial.number, initial.retry), (1, false));
+        let first_failure = policy.record_failure(start);
+        assert_eq!(first_failure.state, "cooldown");
+        assert_eq!(
+            first_failure.retry_in_ms,
+            USER_CAPTURE_HELPER_FIRST_RETRY_COOLDOWN.as_millis() as u64
+        );
+        assert!(policy
+            .try_begin_attempt(start + USER_CAPTURE_HELPER_FIRST_RETRY_COOLDOWN / 2)
+            .is_none());
+
+        let first_retry_at = start + USER_CAPTURE_HELPER_FIRST_RETRY_COOLDOWN;
+        assert!(policy.queue_retry_if_due(first_retry_at));
+        assert!(!policy.queue_retry_if_due(first_retry_at));
+        let first_retry = policy.try_begin_attempt(first_retry_at).unwrap();
+        assert_eq!((first_retry.number, first_retry.retry), (2, true));
+        let second_failure = policy.record_failure(first_retry_at);
+        assert_eq!(second_failure.state, "cooldown");
+        assert_eq!(
+            second_failure.retry_in_ms,
+            USER_CAPTURE_HELPER_SECOND_RETRY_COOLDOWN.as_millis() as u64
+        );
+
+        let second_retry_at = first_retry_at + USER_CAPTURE_HELPER_SECOND_RETRY_COOLDOWN;
+        assert!(policy.queue_retry_if_due(second_retry_at));
+        let second_retry = policy.try_begin_attempt(second_retry_at).unwrap();
+        assert_eq!((second_retry.number, second_retry.retry), (3, true));
+        let final_failure = policy.record_failure(second_retry_at);
+        assert_eq!(final_failure.state, "suppressed");
+        assert!(!policy.queue_retry_if_due(second_retry_at + Duration::from_secs(300)));
+        assert!(policy
+            .try_begin_attempt(second_retry_at + Duration::from_secs(300))
+            .is_none());
+    }
+
+    #[test]
+    fn user_capture_helper_success_and_manual_override_reset_cleanly() {
+        let start = Instant::now();
+        let mut policy = UserCaptureHelperRetryPolicy::default();
+        assert!(policy.try_begin_attempt(start).is_some());
+        policy.record_failure(start);
+        let retry_at = start + USER_CAPTURE_HELPER_FIRST_RETRY_COOLDOWN;
+        assert!(policy.queue_retry_if_due(retry_at));
+        assert!(policy.try_begin_attempt(retry_at).is_some());
+        assert!(policy.record_success());
+        assert_eq!(policy.snapshot(retry_at).state, "ready");
+        assert_eq!(policy.snapshot(retry_at).failures, 0);
+
+        assert!(policy.set_manual());
+        assert!(policy.try_begin_attempt(retry_at).is_none());
+        assert_eq!(policy.record_failure(retry_at).state, "manual");
+        assert!(!policy.record_success());
+        assert!(policy.reset());
+        assert!(policy.try_begin_attempt(retry_at).is_some());
+    }
+
+    #[test]
+    fn abandoned_user_capture_helper_attempt_enters_cooldown() {
+        let start = Instant::now();
+        let mut policy = UserCaptureHelperRetryPolicy::default();
+        assert!(policy.try_begin_attempt(start).is_some());
+        let stale_at =
+            start + USER_CAPTURE_HELPER_STARTUP_TIMEOUT + USER_CAPTURE_HELPER_STALE_ATTEMPT_GRACE;
+
+        assert!(!policy.queue_retry_if_due(stale_at));
+        let snapshot = policy.snapshot(stale_at);
+        assert_eq!(snapshot.state, "cooldown");
+        assert_eq!(snapshot.failures, 1);
+        assert_eq!(
+            snapshot.retry_in_ms,
+            USER_CAPTURE_HELPER_FIRST_RETRY_COOLDOWN.as_millis() as u64
+        );
+    }
+
+    #[test]
+    fn concurrent_user_capture_helper_retry_is_queued_once() {
+        let start = Instant::now();
+        let mut policy = UserCaptureHelperRetryPolicy::default();
+        assert!(policy.try_begin_attempt(start).is_some());
+        policy.record_failure(start);
+        let retry_at = start + USER_CAPTURE_HELPER_FIRST_RETRY_COOLDOWN;
+        let policy = Arc::new(Mutex::new(policy));
+
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let policy = policy.clone();
+            workers.push(std::thread::spawn(move || {
+                policy.lock().unwrap().queue_retry_if_due(retry_at)
+            }));
+        }
+        let queued = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .filter(|queued| *queued)
+            .count();
+        assert_eq!(queued, 1);
+    }
+
+    #[test]
+    fn only_automatic_wgc_and_dxgi_preferences_retry_user_helper() {
+        for backend in [
+            CaptureBackend::CaptureBackendAuto,
+            CaptureBackend::CaptureBackendNotSet,
+            CaptureBackend::CaptureBackendWgc,
+            CaptureBackend::CaptureBackendDxgi,
+        ] {
+            assert!(capture_backend_allows_user_helper_retry(backend));
+        }
+        assert!(!capture_backend_allows_user_helper_retry(
+            CaptureBackend::CaptureBackendWinMag
+        ));
+        assert!(!capture_backend_allows_user_helper_retry(
+            CaptureBackend::CaptureBackendGdi
+        ));
     }
 
     #[test]
@@ -2948,6 +3366,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                         "interactive desktop restored; leaving SYSTEM helper capture, stop_requested={}",
                         stop_requested
                     );
+                    reset_user_capture_helper_retry("interactive desktop restored");
                     bail!("SWITCH");
                 }
                 if c.is_mag() {
@@ -2965,6 +3384,9 @@ fn run(vs: VideoService) -> ResultType<()> {
                         bail!("SWITCH");
                     }
                     if !desktop_state.requires_secure_capture() {
+                        reset_user_capture_helper_retry(
+                            "interactive desktop restored while using magnifier",
+                        );
                         log::info!(
                             "returned to user desktop while using magnifier; switch capture backend"
                         );
@@ -3010,6 +3432,22 @@ fn run(vs: VideoService) -> ResultType<()> {
                     "secure desktop exit stabilized; leaving SYSTEM helper capture after {}ms, stop_requested={}",
                     SECURE_DESKTOP_EXIT_DEBOUNCE.as_millis(),
                     stop_requested
+                );
+                reset_user_capture_helper_retry("secure desktop exit stabilized");
+                bail!("SWITCH");
+            }
+            let retry_preference = *CAPTURE_BACKEND_PREFERENCE.lock().unwrap();
+            if c.is_mag()
+                && c._capturer_privacy_mode_id == INVALID_PRIVACY_MODE_CONN_ID
+                && !portable_service_running
+                && crate::platform::is_root()
+                && is_installed()
+                && !desktop_state.requires_secure_capture()
+                && capture_backend_allows_user_helper_retry(retry_preference)
+                && queue_user_capture_helper_retry_if_due("interactive WinMag fallback")
+            {
+                log::info!(
+                    "interactive WinMag fallback reached user capture helper retry deadline; restarting video service"
                 );
                 bail!("SWITCH");
             }
@@ -3067,6 +3505,8 @@ fn run(vs: VideoService) -> ResultType<()> {
         } else {
             spf
         };
+        #[cfg(windows)]
+        let using_user_capture_helper = c.is_user_capture_helper();
         let captured_frame = c.frame(capture_timeout);
         let capture_call_elapsed = capture_call_started.elapsed();
         host_diag.record_capture_call(capture_call_elapsed);
@@ -3079,6 +3519,9 @@ fn run(vs: VideoService) -> ResultType<()> {
                 if frame.valid() {
                     #[cfg(windows)]
                     {
+                        if using_user_capture_helper {
+                            record_user_capture_helper_success(capture_backend);
+                        }
                         user_capture_helper_no_frame_since = None;
                         mag_no_frame_count = 0;
                     }
@@ -3237,9 +3680,9 @@ fn run(vs: VideoService) -> ResultType<()> {
                 if c.is_user_capture_helper() && first_frame {
                     let first_no_frame = *user_capture_helper_no_frame_since.get_or_insert(now);
                     if first_no_frame.elapsed() >= USER_CAPTURE_HELPER_STARTUP_TIMEOUT {
-                        USER_CAPTURE_HELPER_DISABLED.store(true, Ordering::Relaxed);
+                        record_user_capture_helper_failure("startup frame timeout");
                         log::warn!(
-                            "User capture helper did not produce startup frame after {:?}; switching to direct dxgi|gdi",
+                            "User capture helper did not produce startup frame after {:?}; switching to bounded fallback",
                             USER_CAPTURE_HELPER_STARTUP_TIMEOUT
                         );
                         bail!("SWITCH");
@@ -3320,9 +3763,9 @@ fn run(vs: VideoService) -> ResultType<()> {
 
                 #[cfg(windows)]
                 if c.is_user_capture_helper() {
-                    USER_CAPTURE_HELPER_DISABLED.store(true, Ordering::Relaxed);
+                    record_user_capture_helper_failure("capture error");
                     log::warn!(
-                        "User capture helper returned capture error; switching to direct dxgi|gdi: {:?}",
+                        "User capture helper returned capture error; switching to bounded fallback: {:?}",
                         err
                     );
                     bail!("SWITCH");
