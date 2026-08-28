@@ -334,7 +334,10 @@ pub fn new_cursor() -> ServiceTmpl<MouseCursorSub> {
 }
 
 pub fn new_pos() -> GenericService {
-    let svc = EmptyExtraFieldService::new(NAME_POS.to_owned(), false);
+    // A mobile controller starts with no usable cursor coordinate. Defer each
+    // new subscriber until run_pos can send the current host position, even
+    // when the physical cursor has not moved since the service started.
+    let svc = EmptyExtraFieldService::new(NAME_POS.to_owned(), true);
     GenericService::repeat::<StatePos, _, _>(&svc.clone(), 33, run_pos);
     svc.sp
 }

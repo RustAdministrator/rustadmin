@@ -25,6 +25,19 @@ void main() {
     expect(first + second, const Offset(50, -25));
   });
 
+  test('custom keys block taps in the remote input coordinate space', () {
+    const globalRect = Rect.fromLTWH(0, 700, 430, 50);
+    const inputRegionGlobalOrigin = Offset(0, 59);
+    final inputRect = mobileRemoteInputLocalRect(
+      globalRect: globalRect,
+      inputRegionGlobalOrigin: inputRegionGlobalOrigin,
+    );
+
+    expect(inputRect, const Rect.fromLTWH(0, 641, 430, 50));
+    expect(inputRect.contains(const Offset(215, 650)), isTrue);
+    expect(globalRect.contains(const Offset(215, 650)), isFalse);
+  });
+
   test('two-finger controller separates wheel, zoom, and viewport pan', () {
     final controller = MobileTwoFingerMotionController();
 

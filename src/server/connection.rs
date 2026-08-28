@@ -678,6 +678,11 @@ fn text_clipboard_allowed(clipboard_enabled: bool, keyboard_enabled: bool) -> bo
     clipboard_enabled && keyboard_enabled
 }
 
+#[inline]
+fn cursor_tracking_allowed(keyboard_enabled: bool, show_remote_cursor: bool) -> bool {
+    keyboard_enabled || show_remote_cursor
+}
+
 fn session_default_permission(auth_kind: SessionAuthKind, name: &str, current: bool) -> bool {
     if auth_kind.is_unattended_access() {
         current
@@ -2787,7 +2792,12 @@ impl Connection {
                 s.write().unwrap().subscribe(
                     NAME_CURSOR,
                     self.inner.clone(),
-                    enabled || self.show_remote_cursor,
+                    self.can_sub_cursor_tracking_services(),
+                );
+                s.write().unwrap().subscribe(
+                    NAME_POS,
+                    self.inner.clone(),
+                    self.can_sub_cursor_tracking_services(),
                 );
             }
             true
@@ -3797,10 +3807,8 @@ impl Connection {
                 let can_sub_file_clipboard = self.can_sub_file_clipboard_service();
                 #[cfg(not(feature = "unix-file-copy-paste"))]
                 let can_sub_file_clipboard = false;
-                if !self.peer_keyboard_enabled() && !self.show_remote_cursor {
+                if !self.can_sub_cursor_tracking_services() {
                     noperms.push(NAME_CURSOR);
-                }
-                if !self.show_remote_cursor {
                     noperms.push(NAME_POS);
                 }
                 if !self.follow_remote_window {
@@ -3900,6 +3908,11 @@ impl Connection {
 
     fn peer_keyboard_enabled(&self) -> bool {
         self.keyboard && !self.disable_keyboard
+    }
+
+    #[inline]
+    fn can_sub_cursor_tracking_services(&self) -> bool {
+        cursor_tracking_allowed(self.peer_keyboard_enabled(), self.show_remote_cursor)
     }
 
     fn clipboard_enabled(&self) -> bool {
@@ -6864,12 +6877,12 @@ impl Connection {
                     s.write().unwrap().subscribe(
                         NAME_CURSOR,
                         self.inner.clone(),
-                        self.peer_keyboard_enabled() || self.show_remote_cursor,
+                        self.can_sub_cursor_tracking_services(),
                     );
                     s.write().unwrap().subscribe(
                         NAME_POS,
                         self.inner.clone(),
-                        self.show_remote_cursor,
+                        self.can_sub_cursor_tracking_services(),
                     );
                 }
             }
@@ -6966,7 +6979,12 @@ impl Connection {
                     s.write().unwrap().subscribe(
                         NAME_CURSOR,
                         self.inner.clone(),
-                        self.peer_keyboard_enabled() || self.show_remote_cursor,
+                        self.can_sub_cursor_tracking_services(),
+                    );
+                    s.write().unwrap().subscribe(
+                        NAME_POS,
+                        self.inner.clone(),
+                        self.can_sub_cursor_tracking_services(),
                     );
                 }
             }
@@ -8742,6 +8760,14 @@ mod raii {
 mod test {
     #[allow(unused)]
     use super::*;
+
+    #[test]
+    fn cursor_tracking_follows_control_or_explicit_visibility() {
+        assert!(!cursor_tracking_allowed(false, false));
+        assert!(cursor_tracking_allowed(true, false));
+        assert!(cursor_tracking_allowed(false, true));
+        assert!(cursor_tracking_allowed(true, true));
+    }
 
     #[cfg(target_os = "macos")]
     #[test]

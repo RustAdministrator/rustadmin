@@ -4026,7 +4026,8 @@ class CursorModel with ChangeNotifier {
   // A better way is to not listen events from the KeyHelpTools.
   // But we're now using a Container(child: Stack(...)) to wrap the KeyHelpTools,
   // and the listener is on the Container.
-  Rect? _keyHelpToolsRect;
+  Rect? _keyHelpToolsInputRect;
+  Rect? _keyHelpToolsGlobalRect;
   // `lastIsBlocked` is only used in common/widgets/remote_input.dart -> _RawTouchGestureDetectorRegionState -> onDoubleTap()
   // Because onDoubleTap() doesn't have the `event` parameter, we can't get the touch event's position.
   bool _lastIsBlocked = false;
@@ -4035,7 +4036,7 @@ class CursorModel with ChangeNotifier {
   bool get lastKeyboardIsVisible => _lastKeyboardIsVisible;
 
   Rect? get keyHelpToolsRectToAdjustCanvas =>
-      _lastKeyboardIsVisible ? _keyHelpToolsRect : null;
+      _lastKeyboardIsVisible ? _keyHelpToolsGlobalRect : null;
   // The blocked rect is used to block the pointer/touch events in the remote page.
   final List<Rect> _blockedRects = [];
   // Used in shouldBlock().
@@ -4052,9 +4053,14 @@ class CursorModel with ChangeNotifier {
 
   set blockEvents(bool v) => _blockEvents = v;
 
-  keyHelpToolsVisibilityChanged(Rect? rect, bool keyboardIsVisible) {
-    _keyHelpToolsRect = rect;
-    if (rect == null) {
+  keyHelpToolsVisibilityChanged(
+    Rect? inputRect,
+    Rect? globalRect,
+    bool keyboardIsVisible,
+  ) {
+    _keyHelpToolsInputRect = inputRect;
+    _keyHelpToolsGlobalRect = globalRect;
+    if (inputRect == null) {
       _lastIsBlocked = false;
     } else {
       // Block the touch event is safe here.
@@ -4172,8 +4178,8 @@ class CursorModel with ChangeNotifier {
       }
     }
 
-    if (_keyHelpToolsRect != null &&
-        isPointInRect(offset, _keyHelpToolsRect!)) {
+    if (_keyHelpToolsInputRect != null &&
+        isPointInRect(offset, _keyHelpToolsInputRect!)) {
       return true;
     }
     return false;

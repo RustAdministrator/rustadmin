@@ -75,6 +75,13 @@ Offset mobileCursorInertiaFrameDelta({
   return velocityPixelsPerSecond * frameSeconds * decay;
 }
 
+Rect mobileRemoteInputLocalRect({
+  required Rect globalRect,
+  required Offset inputRegionGlobalOrigin,
+}) {
+  return globalRect.shift(-inputRegionGlobalOrigin);
+}
+
 class RawTouchGestureDetectorRegion extends StatefulWidget {
   final Widget child;
   final FFI ffi;
@@ -84,6 +91,7 @@ class RawTouchGestureDetectorRegion extends StatefulWidget {
   late final FfiModel ffiModel = ffi.ffiModel;
 
   RawTouchGestureDetectorRegion({
+    super.key,
     required this.child,
     required this.ffi,
     this.isCamera = false,

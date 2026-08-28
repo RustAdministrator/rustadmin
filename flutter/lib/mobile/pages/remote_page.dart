@@ -103,6 +103,7 @@ class _RemotePageState extends State<RemotePage>
   late final StreamSubscription<bool> keyboardSubscription;
   final FocusNode _mobileFocusNode = FocusNode();
   final FocusNode _physicalFocusNode = FocusNode();
+  final GlobalKey _mobileRemoteInputRegionKey = GlobalKey();
   var _showEdit = false; // use soft keyboard
   var _showCustomButtonEditor = false;
   var _toolbarTransparencySettings =
@@ -561,6 +562,7 @@ class _RemotePageState extends State<RemotePage>
                                     child: inputModel.isPhysicalMouse.value
                                         ? getBodyForMobile()
                                         : RawTouchGestureDetectorRegion(
+                                            key: _mobileRemoteInputRegionKey,
                                             child: getBodyForMobile(),
                                             ffi: gFFI,
                                             cursorInertiaDurationMs:
@@ -818,6 +820,7 @@ class _RemotePageState extends State<RemotePage>
                   keyboardIsVisible: keyboardIsVisible,
                   showGestureHelp: _showGestureHelp,
                   quickKeyOrder: _quickKeyOrder,
+                  remoteInputRegionKey: _mobileRemoteInputRegionKey,
                 ),
               ),
             );
@@ -1180,6 +1183,7 @@ class KeyHelpTools extends StatefulWidget {
   final bool keyboardIsVisible;
   final bool showGestureHelp;
   final List<MobileRemoteQuickKey> quickKeyOrder;
+  final GlobalKey remoteInputRegionKey;
 
   /// need to show by external request, etc [keyboardIsVisible] or [changeTouchMode]
   bool get requestShow => keyboardIsVisible || showGestureHelp;
@@ -1188,6 +1192,7 @@ class KeyHelpTools extends StatefulWidget {
     required this.keyboardIsVisible,
     required this.showGestureHelp,
     required this.quickKeyOrder,
+    required this.remoteInputRegionKey,
   });
 
   @override
@@ -1214,10 +1219,23 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
     }
     if (renderObject is RenderBox) {
       final size = renderObject.size;
-      Offset pos = renderObject.localToGlobal(Offset.zero);
+      final globalPosition = renderObject.localToGlobal(Offset.zero);
+      final globalRect = globalPosition & size;
+      final inputRenderObject = widget.remoteInputRegionKey.currentContext
+          ?.findRenderObject();
+      final inputRect = inputRenderObject is RenderBox &&
+              inputRenderObject.attached
+          ? mobileRemoteInputLocalRect(
+              globalRect: globalRect,
+              inputRegionGlobalOrigin:
+                  inputRenderObject.localToGlobal(Offset.zero),
+            )
+          : globalRect;
       gFFI.cursorModel.keyHelpToolsVisibilityChanged(
-          Rect.fromLTWH(pos.dx, pos.dy, size.width, size.height),
-          widget.keyboardIsVisible);
+        inputRect,
+        globalRect,
+        widget.keyboardIsVisible,
+      );
     }
   }
 
@@ -1237,7 +1255,7 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
 
     if (!hasModifierOn && !widget.requestShow) {
       gFFI.cursorModel
-          .keyHelpToolsVisibilityChanged(null, widget.keyboardIsVisible);
+          .keyHelpToolsVisibilityChanged(null, null, widget.keyboardIsVisible);
       return Offstage();
     }
 
