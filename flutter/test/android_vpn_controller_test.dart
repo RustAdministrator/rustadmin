@@ -5,6 +5,7 @@ class _FakeAndroidVpnPlatform implements AndroidVpnPlatformAdapter {
   final List<Object> probes;
   final List<bool> vpnStates;
   final List<bool> tunnelRequests = [];
+  final List<Map<dynamic, dynamic>> releases = [];
   Map<dynamic, dynamic>? attached;
   bool _vpnActive = false;
   int peerProbeCount = 0;
@@ -38,6 +39,9 @@ class _FakeAndroidVpnPlatform implements AndroidVpnPlatformAdapter {
         return true;
       case 'outgoing_session_attach':
         attached = Map<dynamic, dynamic>.from(arguments as Map);
+        return true;
+      case 'outgoing_session_release':
+        releases.add(Map<dynamic, dynamic>.from(arguments as Map));
         return true;
     }
     return null;
@@ -253,8 +257,69 @@ void main() {
       expect(result.proceed, isTrue);
       expect(didAttach, isTrue);
       expect(platform.attached?['session_id'], 'session-1');
+      expect(platform.attached?['generation'], 1);
       expect(platform.attached?['tunnel'], 'office');
       expect(platform.attached?['owns_tunnel'], isTrue);
     },
   );
+
+  test('native close events are accepted only for the active generation', () async {
+    final platform = _FakeAndroidVpnPlatform(['online']);
+    final coordinator = AndroidVpnSessionCoordinator.forTest(
+      platform: platform,
+      vpnActivationTimeout: const Duration(milliseconds: 100),
+      vpnRetryDelay: Duration.zero,
+      networkPollInterval: const Duration(milliseconds: 1),
+      peerReachabilityTimeout: const Duration(milliseconds: 100),
+      probeInterval: const Duration(milliseconds: 1),
+    );
+    final events = <AndroidOutgoingSessionClosedEvent>[];
+    final subscription = coordinator.sessionClosedEvents.listen(events.add);
+
+    expect(await coordinator.attach('10.0.0.2', 'session-1'), isTrue);
+    expect(
+      coordinator.handleNativeSessionClosed({
+        'session_id': 'session-1',
+        'generation': 0,
+        'reason': 'background-timeout',
+      }),
+      isFalse,
+    );
+    expect(
+      coordinator.handleNativeSessionClosed({
+        'session_id': 'session-1',
+        'generation': 1,
+        'reason': 'background-timeout',
+      }),
+      isTrue,
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(events, hasLength(1));
+    expect(events.single.reason, 'background-timeout');
+    await subscription.cancel();
+  });
+
+  test('stale release cannot clear a newer Android session generation', () async {
+    final platform = _FakeAndroidVpnPlatform(['online']);
+    final coordinator = AndroidVpnSessionCoordinator.forTest(
+      platform: platform,
+      vpnActivationTimeout: const Duration(milliseconds: 100),
+      vpnRetryDelay: Duration.zero,
+      networkPollInterval: const Duration(milliseconds: 1),
+      peerReachabilityTimeout: const Duration(milliseconds: 100),
+      probeInterval: const Duration(milliseconds: 1),
+    );
+
+    expect(await coordinator.attach('10.0.0.2', 'session-1'), isTrue);
+    await coordinator.release(generation: 0);
+    expect(platform.releases, isEmpty);
+    expect(coordinator.activeSessionGeneration, 1);
+
+    await coordinator.release(generation: 1);
+    expect(platform.releases, hasLength(1));
+    expect(platform.releases.single['session_id'], 'session-1');
+    expect(platform.releases.single['generation'], 1);
+    expect(coordinator.activeSessionGeneration, isNull);
+  });
 }

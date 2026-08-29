@@ -2011,14 +2011,23 @@ fn translate_keyboard_mode(evt: &KeyEvent) {
                         }
                     }
                 }
+                #[cfg(target_os = "windows")]
+                log::debug!(
+                    "Windows translate text injection: strategy=scan-first, chars={}",
+                    seq.chars().count()
+                );
                 for chr in seq.chars() {
                     // char in rust is 4 bytes.
                     // But for this case, char comes from keyboard. We only need 2 bytes.
                     #[cfg(target_os = "windows")]
                     if simulate_win_hot_key {
                         rdev::simulate_char(chr, true).ok();
+                    } else if u16::try_from(chr as u32).is_ok() {
+                        if rdev::simulate_char(chr, true).is_err() {
+                            en.key_sequence(&chr.to_string());
+                        }
                     } else {
-                        rdev::simulate_unicode(chr as _).ok();
+                        en.key_sequence(&chr.to_string());
                     }
                     #[cfg(target_os = "linux")]
                     en.key_click(Key::Layout(chr));

@@ -4185,6 +4185,12 @@ class CursorModel with ChangeNotifier {
     return false;
   }
 
+  bool shouldBlockGlobal(double x, double y) {
+    if (_blockEvents) return true;
+    final rect = _keyHelpToolsGlobalRect;
+    return rect != null && isPointInRect(Offset(x, y), rect);
+  }
+
   // For touch mode
   Future<bool> move(double x, double y) async {
     if (shouldBlock(x, y)) {
@@ -5454,6 +5460,7 @@ class FFI {
   final Map<int, TerminalModel> _terminalModels = {};
   int _sessionEventGeneration = 0;
   int _sessionStartGeneration = 0;
+  int? _androidSessionGeneration;
 
   // Getter for terminal models
   Map<int, TerminalModel> get terminalModels => _terminalModels;
@@ -5548,6 +5555,7 @@ class FFI {
     }
 
     if (isAndroid) {
+      _androidSessionGeneration = null;
       final attached = await AndroidVpnSessionCoordinator.instance.attach(
         id,
         sessionId.toString(),
@@ -5555,6 +5563,8 @@ class FFI {
       if (!attached) {
         throw StateError('Failed to protect the outgoing Android session');
       }
+      _androidSessionGeneration =
+          AndroidVpnSessionCoordinator.instance.activeSessionGeneration;
     }
 
     final isNewPeer = tabWindowId == null;
@@ -5802,6 +5812,37 @@ class FFI {
         sessionId: sessionId, code: code, trustThisDevice: trustThisDevice);
   }
 
+  /// Clear session-scoped state while keeping the mobile page reusable.
+  Future<void> resetMobileSessionForReconnect({
+    required bool closeSession,
+  }) async {
+    ++_sessionStartGeneration;
+    ++_sessionEventGeneration;
+    closed = true;
+    chatModel.close();
+    for (final model in _terminalModels.values) {
+      model.dispose();
+    }
+    _terminalModels.clear();
+    await imageModel.update(null);
+    cursorModel.clear();
+    ffiModel.clear();
+    canvasModel.clear();
+    inputModel.setRelativeMouseMode(false);
+    inputModel.resetModifiers();
+    if (closeSession) {
+      await bind.sessionClose(sessionId: sessionId);
+    }
+    if (isAndroid) {
+      await AndroidVpnSessionCoordinator.instance.release(
+        generation: _androidSessionGeneration,
+      );
+      _androidSessionGeneration = null;
+    }
+    id = '';
+    debugPrint('mobile session reset for fresh reconnect');
+  }
+
   /// Close the remote session.
   Future<void> close(
       {bool closeSession = true, bool saveCanvasConfig = true}) async {
@@ -5835,7 +5876,10 @@ class FFI {
       await bind.sessionClose(sessionId: sessionId);
     }
     if (isAndroid) {
-      await AndroidVpnSessionCoordinator.instance.release();
+      await AndroidVpnSessionCoordinator.instance.release(
+        generation: _androidSessionGeneration,
+      );
+      _androidSessionGeneration = null;
     }
     debugPrint('model $id closed');
     id = '';

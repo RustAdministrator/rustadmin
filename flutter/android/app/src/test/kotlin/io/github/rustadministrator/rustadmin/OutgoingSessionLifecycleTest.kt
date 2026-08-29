@@ -10,27 +10,27 @@ import org.junit.Test
 class OutgoingSessionLifecycleTest {
     @Test
     fun backgroundDeadlineExpiresAtConfiguredTimeout() {
-        val lifecycle = OutgoingSessionLifecycle(backgroundTimeoutMs = 600_000)
+        val lifecycle = OutgoingSessionLifecycle(backgroundTimeoutMs = 30_000)
         lifecycle.attach()
         assertTrue(lifecycle.enterBackground(nowMs = 1_000))
-        assertFalse(lifecycle.shouldExpire(nowMs = 600_999))
-        assertTrue(lifecycle.shouldExpire(nowMs = 601_000))
+        assertFalse(lifecycle.shouldExpire(nowMs = 30_999))
+        assertTrue(lifecycle.shouldExpire(nowMs = 31_000))
     }
 
     @Test
     fun foregroundReturnCancelsPendingDeadline() {
-        val lifecycle = OutgoingSessionLifecycle(backgroundTimeoutMs = 600_000)
+        val lifecycle = OutgoingSessionLifecycle(backgroundTimeoutMs = 30_000)
         lifecycle.attach()
         lifecycle.enterBackground(nowMs = 1_000)
 
         assertTrue(lifecycle.enterForeground())
-        assertFalse(lifecycle.shouldExpire(nowMs = 700_000))
+        assertFalse(lifecycle.shouldExpire(nowMs = 40_000))
         assertEquals(OutgoingSessionLifecycleState.ACTIVE, lifecycle.state)
     }
 
     @Test
     fun expiringSessionCannotBeResurrected() {
-        val lifecycle = OutgoingSessionLifecycle(backgroundTimeoutMs = 600_000)
+        val lifecycle = OutgoingSessionLifecycle(backgroundTimeoutMs = 30_000)
         lifecycle.attach()
         lifecycle.enterBackground(nowMs = 1_000)
 
@@ -73,5 +73,13 @@ class OutgoingSessionLifecycleTest {
             true
         })
         assertEquals(2, claims)
+    }
+
+    @Test
+    fun ownedTunnelTransfersOnlyToMatchingOwnedPendingAttach() {
+        assertTrue(shouldTransferOwnedTunnel(true, "office", true, "office"))
+        assertFalse(shouldTransferOwnedTunnel(true, "office", false, "office"))
+        assertFalse(shouldTransferOwnedTunnel(true, "office", true, "other"))
+        assertFalse(shouldTransferOwnedTunnel(false, "office", true, "office"))
     }
 }

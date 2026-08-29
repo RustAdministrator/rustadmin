@@ -373,6 +373,7 @@ class InputModel {
   // mouse
   final isPhysicalMouse = false.obs;
   int _lastButtons = 0;
+  final Set<int> _blockedRemotePointerIds = <int>{};
   Offset lastMousePos = Offset.zero;
   int _lastWheelTsUs = 0;
 
@@ -1065,6 +1066,7 @@ class InputModel {
 
     // Fix status
     if (!enter) {
+      _blockedRemotePointerIds.clear();
       resetModifiers();
     }
     _relativeMouse.onEnterOrLeaveImage(enter);
@@ -1201,6 +1203,7 @@ class InputModel {
     _stopFling = true;
     if (isViewOnly && !showMyCursor) return;
     if (e.kind != ui.PointerDeviceKind.mouse) return;
+    if (_isGlobalRemoteInputBlocked(e)) return;
 
     // May fix https://github.com/rustdesk/rustdesk/issues/13009
     if (isIOS && e.synthesized && e.position == Offset.zero && e.buttons == 0) {
@@ -1422,6 +1425,12 @@ class InputModel {
     if (isViewOnly && !showMyCursor) return;
     if (isViewCamera) return;
 
+    if (e.kind == ui.PointerDeviceKind.mouse &&
+        _isGlobalRemoteInputBlocked(e)) {
+      _blockedRemotePointerIds.add(e.pointer);
+      return;
+    }
+
     // Track mouse down events for duplicate detection on iOS.
     final nowMs = DateTime.now().millisecondsSinceEpoch;
     if (e.kind == ui.PointerDeviceKind.mouse) {
@@ -1454,6 +1463,7 @@ class InputModel {
     if (isDesktop) _queryOtherWindowCoords = false;
     if (isViewOnly && !showMyCursor) return;
     if (isViewCamera) return;
+    if (_blockedRemotePointerIds.remove(e.pointer)) return;
 
     if (_relativeMouse.enabled.value) {
       _relativeMouse.updatePointerRegionTopLeftGlobal(e);
@@ -1476,6 +1486,8 @@ class InputModel {
     if (isViewOnly && !showMyCursor) return;
     if (isViewCamera) return;
     if (e.kind != ui.PointerDeviceKind.mouse) return;
+    if (_blockedRemotePointerIds.contains(e.pointer)) return;
+    if (e.buttons == 0 && _isGlobalRemoteInputBlocked(e)) return;
 
     if (_relativeMouse.enabled.value) {
       _relativeMouse.updatePointerRegionTopLeftGlobal(e);
@@ -1523,6 +1535,7 @@ class InputModel {
   void onPointerSignalImage(PointerSignalEvent e) {
     if (isViewOnly) return;
     if (isViewCamera) return;
+    if (_isGlobalRemoteInputBlocked(e)) return;
     if (e is PointerScrollEvent) {
       final rawDx = e.scrollDelta.dx;
       final rawDy = e.scrollDelta.dy;
@@ -1567,6 +1580,18 @@ class InputModel {
           sessionId: sessionId,
           msg: '{"type": "wheel", "x": "$dx", "y": "$dy"}');
     }
+  }
+
+  void onPointCancelImage(PointerCancelEvent e) {
+    _blockedRemotePointerIds.remove(e.pointer);
+  }
+
+  bool _isGlobalRemoteInputBlocked(PointerEvent e) {
+    return parent.target?.cursorModel.shouldBlockGlobal(
+          e.position.dx,
+          e.position.dy,
+        ) ??
+        false;
   }
 
   void refreshMousePos() => handleMouse({

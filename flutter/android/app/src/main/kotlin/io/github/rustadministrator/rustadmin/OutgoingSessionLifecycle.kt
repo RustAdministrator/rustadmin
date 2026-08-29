@@ -64,3 +64,15 @@ internal fun resolveTunnelOwnership(
 ): Boolean {
     return requested && tunnelName.isNotBlank() && claimPending(tunnelName)
 }
+
+internal fun shouldTransferOwnedTunnel(
+    currentOwnsTunnel: Boolean,
+    currentTunnelName: String,
+    pendingOwnsTunnel: Boolean,
+    pendingTunnelName: String,
+): Boolean {
+    return currentOwnsTunnel &&
+        pendingOwnsTunnel &&
+        currentTunnelName.isNotBlank() &&
+        currentTunnelName == pendingTunnelName
+}

@@ -26,6 +26,7 @@ import '../../models/input_model.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../../utils/image.dart';
+import '../android_vpn_controller.dart';
 import '../mobile_modifier_state.dart';
 import '../mobile_viewport.dart';
 import '../widgets/custom_image_quality_widget.dart';
@@ -96,6 +97,12 @@ class _RemotePageState extends State<RemotePage>
   Orientation? _currentOrientation;
   final _uniqueKey = UniqueKey();
   Timer? _iosKeyboardWorkaroundTimer;
+  StreamSubscription<AndroidOutgoingSessionClosedEvent>?
+      _outgoingSessionClosedSubscription;
+  bool _backgroundReconnectPending = false;
+  bool _backgroundReconnectInProgress = false;
+  bool _manualDisconnect = false;
+  Future<void>? _backgroundCloseFuture;
 
   final _blockableOverlayState = BlockableOverlayState();
 
@@ -112,6 +119,7 @@ class _RemotePageState extends State<RemotePage>
       MobileRemoteToolbarPlacementSettings.defaults;
   var _cursorInertiaSettings = MobileCursorInertiaSettings.defaults;
   var _showMonitorsInToolbar = false;
+  var _physicalKeyInput = false;
   var _quickKeyOrder = List<MobileRemoteQuickKey>.of(
     mobileRemoteDefaultQuickKeyOrder,
   );
@@ -139,6 +147,11 @@ class _RemotePageState extends State<RemotePage>
         _showMonitorsInMobileToolbarFromUserDefaults();
     gFFI.canvasModel.initializeEdgeScrollFallback(this);
     gFFI.ffiModel.updateEventListener(sessionId, widget.id);
+    if (isAndroid) {
+      _outgoingSessionClosedSubscription = AndroidVpnSessionCoordinator
+          .instance.sessionClosedEvents
+          .listen(_handleOutgoingSessionClosed);
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
@@ -174,15 +187,7 @@ class _RemotePageState extends State<RemotePage>
 
   Future<void> _startConnection() async {
     try {
-      await gFFI.start(
-        widget.id,
-        password: widget.password,
-        isSharedPassword: widget.isSharedPassword,
-        forceRelay: widget.forceRelay,
-      );
-      if (!mounted || gFFI.closed) return;
-      await _refreshMobileInputSettings();
-      unawaited(gFFI.qualityMonitorModel.checkShowQualityMonitor(sessionId));
+      await _connectCurrentSession();
     } catch (e, stackTrace) {
       debugPrint('Failed to start mobile session: $e\n$stackTrace');
       if (!mounted) return;
@@ -190,6 +195,101 @@ class _RemotePageState extends State<RemotePage>
       showToast(translate('Failed to connect'));
       closeConnection();
     }
+  }
+
+  Future<void> _connectCurrentSession() async {
+    await gFFI.start(
+      widget.id,
+      password: widget.password,
+      isSharedPassword: widget.isSharedPassword,
+      forceRelay: widget.forceRelay,
+    );
+    if (!mounted || gFFI.closed) return;
+    await _refreshMobileInputSettings();
+    unawaited(gFFI.qualityMonitorModel.checkShowQualityMonitor(sessionId));
+  }
+
+  void _handleOutgoingSessionClosed(AndroidOutgoingSessionClosedEvent event) {
+    if (_manualDisconnect || !mounted) return;
+    if (event.reason == 'notification-disconnect') {
+      _manualDisconnect = true;
+      closeConnection();
+      return;
+    }
+    if (event.reason != 'background-timeout' &&
+        event.reason != 'background-native-disconnect' &&
+        event.reason != 'foreground-unhealthy' &&
+        event.reason != 'foreground-service-timeout') {
+      return;
+    }
+    _backgroundReconnectPending = true;
+    if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+      unawaited(_restartAfterBackground());
+    }
+  }
+
+  Future<void> _restartAfterBackground() async {
+    if (!mounted ||
+        _manualDisconnect ||
+        !_backgroundReconnectPending ||
+        _backgroundReconnectInProgress) {
+      return;
+    }
+    _backgroundReconnectInProgress = true;
+    _backgroundReconnectPending = false;
+    gFFI.dialogManager.dismissAll();
+    gFFI.dialogManager.showLoading(
+      translate('Reconnecting...'),
+      onCancel: _requestDisconnect,
+    );
+    try {
+      final backgroundClose = _backgroundCloseFuture;
+      if (backgroundClose != null) await backgroundClose;
+      await gFFI.resetMobileSessionForReconnect(closeSession: false);
+      if (isAndroid && widget.forceRelay != true) {
+        final coordinator = AndroidVpnSessionCoordinator.instance;
+        if (await coordinator.isEnabled(widget.id)) {
+          final prepared = await coordinator.prepare(widget.id);
+          if (!prepared.proceed) {
+            throw StateError(prepared.message);
+          }
+        }
+      }
+      await _connectCurrentSession();
+    } catch (error, stackTrace) {
+      debugPrint('Failed to reconnect mobile background session: '
+          '$error\n$stackTrace');
+      if (mounted) {
+        gFFI.dialogManager.dismissAll();
+        showToast(translate('Failed to reconnect'));
+        closeConnection();
+      }
+    } finally {
+      _backgroundReconnectInProgress = false;
+    }
+  }
+
+  Future<void> _closeIosSessionForBackground() async {
+    if (!isIOS ||
+        _manualDisconnect ||
+        _backgroundReconnectPending ||
+        gFFI.closed) {
+      return;
+    }
+    _backgroundReconnectPending = true;
+    final closeFuture = gFFI.resetMobileSessionForReconnect(closeSession: true);
+    _backgroundCloseFuture = closeFuture;
+    try {
+      await closeFuture;
+    } finally {
+      if (identical(_backgroundCloseFuture, closeFuture)) {
+        _backgroundCloseFuture = null;
+      }
+    }
+  }
+
+  void _requestDisconnect() {
+    clientClose(sessionId, gFFI);
   }
 
   Future<void> _refreshMobileInputSettings() async {
@@ -205,6 +305,10 @@ class _RemotePageState extends State<RemotePage>
           sessionId: sessionId,
           name: kOptionMobileCursorInertiaDurationMs,
         ),
+        bind.sessionGetPeerOption(
+          sessionId: sessionId,
+          name: kOptionMobilePhysicalKeyInput,
+        ),
       ]);
       final toolbarSettings =
           MobileRemoteToolbarTransparencySettings.fromStored(
@@ -217,12 +321,15 @@ class _RemotePageState extends State<RemotePage>
         stored[1].isEmpty ? inertiaDefaults.durationMs.toString() : stored[1],
         fallback: inertiaDefaults,
       );
+      final physicalKeyInput = stored[2] == 'Y';
       if (mounted &&
           (toolbarSettings != _toolbarTransparencySettings ||
-              inertiaSettings != _cursorInertiaSettings)) {
+              inertiaSettings != _cursorInertiaSettings ||
+              physicalKeyInput != _physicalKeyInput)) {
         setState(() {
           _toolbarTransparencySettings = toolbarSettings;
           _cursorInertiaSettings = inertiaSettings;
+          _physicalKeyInput = physicalKeyInput;
         });
       }
     } catch (error) {
@@ -232,7 +339,9 @@ class _RemotePageState extends State<RemotePage>
 
   @override
   Future<void> dispose() async {
+    _manualDisconnect = true;
     WidgetsBinding.instance.removeObserver(this);
+    await _outgoingSessionClosedSubscription?.cancel();
     gFFI.canvasModel.disposeEdgeScrollFallback();
     unawaited(bind.sessionClose(sessionId: gFFI.sessionId));
     // https://github.com/flutter/flutter/issues/64935
@@ -263,6 +372,11 @@ class _RemotePageState extends State<RemotePage>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       trySyncClipboard();
+      if (_backgroundReconnectPending) {
+        unawaited(_restartAfterBackground());
+      }
+    } else if (state == AppLifecycleState.paused && isIOS) {
+      unawaited(_closeIosSessionForBackground());
     }
   }
 
@@ -432,6 +546,13 @@ class _RemotePageState extends State<RemotePage>
   void inputChar(String char) {
     if (char == '\n') {
       char = 'VK_RETURN';
+    } else if (_physicalKeyInput &&
+        char.length == 1 &&
+        !inputModel.ctrl &&
+        !inputModel.alt &&
+        !inputModel.command) {
+      _inputMobileString(char);
+      return;
     } else if (char == ' ') {
       char = 'VK_SPACE';
     }
@@ -486,7 +607,7 @@ class _RemotePageState extends State<RemotePage>
 
     return WillPopScope(
       onWillPop: () async {
-        clientClose(sessionId, gFFI);
+        _requestDisconnect();
         return false;
       },
       child: Scaffold(
@@ -532,52 +653,73 @@ class _RemotePageState extends State<RemotePage>
           ),
         ),
         body: Obx(
-          () => getRawPointerAndKeyBody(
-            Overlay(
-              initialEntries: [
-                OverlayEntry(
-                  builder: (context) {
-                    return Container(
-                      color: kColorCanvas,
-                      child: isWebDesktop
-                          ? getBodyForDesktopWithListener()
-                          : SafeArea(
-                              child: OrientationBuilder(
-                                builder: (ctx, orientation) {
-                                  if (_currentOrientation != orientation) {
-                                    Timer(
-                                      const Duration(milliseconds: 200),
-                                      () {
-                                        gFFI.dialogManager
-                                            .resetMobileActionsOverlay(
-                                              ffi: gFFI,
-                                            );
-                                        _currentOrientation = orientation;
-                                        gFFI.canvasModel.updateViewStyle();
+          () => Stack(
+            children: [
+              Positioned.fill(
+                child: getRawPointerAndKeyBody(
+                  Overlay(
+                    initialEntries: [
+                      OverlayEntry(
+                        builder: (context) {
+                          return Container(
+                            color: kColorCanvas,
+                            child: isWebDesktop
+                                ? getBodyForDesktopWithListener()
+                                : SafeArea(
+                                    child: OrientationBuilder(
+                                      builder: (ctx, orientation) {
+                                        if (_currentOrientation != orientation) {
+                                          Timer(
+                                            const Duration(milliseconds: 200),
+                                            () {
+                                              gFFI.dialogManager
+                                                  .resetMobileActionsOverlay(
+                                                    ffi: gFFI,
+                                                  );
+                                              _currentOrientation = orientation;
+                                              gFFI.canvasModel.updateViewStyle();
+                                            },
+                                          );
+                                        }
+                                        final inputBody = Container(
+                                          color: MyTheme.canvasColor,
+                                          child: getBodyForMobile(),
+                                        );
+                                        return KeyedSubtree(
+                                          key: _mobileRemoteInputRegionKey,
+                                          child: inputModel.isPhysicalMouse.value
+                                              ? inputBody
+                                              : RawTouchGestureDetectorRegion(
+                                                  child: inputBody,
+                                                  ffi: gFFI,
+                                                  cursorInertiaDurationMs:
+                                                      _cursorInertiaSettings
+                                                          .durationMs,
+                                                ),
+                                        );
                                       },
-                                    );
-                                  }
-                                  return Container(
-                                    color: MyTheme.canvasColor,
-                                    child: inputModel.isPhysicalMouse.value
-                                        ? getBodyForMobile()
-                                        : RawTouchGestureDetectorRegion(
-                                            key: _mobileRemoteInputRegionKey,
-                                            child: getBodyForMobile(),
-                                            ffi: gFFI,
-                                            cursorInertiaDurationMs:
-                                                _cursorInertiaSettings
-                                                    .durationMs,
-                                          ),
-                                  );
-                                },
-                              ),
-                            ),
-                    );
-                  },
+                                    ),
+                                  ),
+                          );
+                        },
+                      ),
+                    ],
+                  ),
                 ),
-              ],
-            ),
+              ),
+              if (!isWebDesktop)
+                SafeArea(
+                  child: Align(
+                    alignment: Alignment.bottomCenter,
+                    child: KeyHelpTools(
+                      keyboardIsVisible: keyboardIsVisible,
+                      showGestureHelp: _showGestureHelp,
+                      quickKeyOrder: _quickKeyOrder,
+                      remoteInputRegionKey: _mobileRemoteInputRegionKey,
+                    ),
+                  ),
+                ),
+            ],
           ),
         ),
       ),
@@ -669,7 +811,7 @@ class _RemotePageState extends State<RemotePage>
                   ),
               ];
         return MobileRemoteToolbar(
-          onDisconnect: () => clientClose(sessionId, gFFI),
+          onDisconnect: _requestDisconnect,
           onOptions: () {
             setState(() => _showEdit = false);
             showOptions(
@@ -811,19 +953,6 @@ class _RemotePageState extends State<RemotePage>
                 ),
               );
             }
-            paints.add(
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: 0,
-                child: KeyHelpTools(
-                  keyboardIsVisible: keyboardIsVisible,
-                  showGestureHelp: _showGestureHelp,
-                  quickKeyOrder: _quickKeyOrder,
-                  remoteInputRegionKey: _mobileRemoteInputRegionKey,
-                ),
-              ),
-            );
             if (_showCustomButtonEditor) {
               paints.add(
                 Positioned.fill(child: _buildCustomButtonEditor(context)),
@@ -892,6 +1021,18 @@ class _RemotePageState extends State<RemotePage>
     final currentKeyboardMode =
         await bind.sessionGetKeyboardMode(sessionId: gFFI.sessionId) ??
         kKeyLegacyMode;
+    final physicalKeyInput =
+        await bind.sessionGetPeerOption(
+          sessionId: gFFI.sessionId,
+          name: kOptionMobilePhysicalKeyInput,
+        ) ==
+        'Y';
+    final physicalKeyInputSupported =
+        gFFI.ffiModel.pi.platform == kPeerPlatformWindows &&
+        bind.sessionIsKeyboardModeSupported(
+          sessionId: gFFI.sessionId,
+          mode: kKeyTranslateMode,
+        );
     const keyboardModeLabels = <String, String>{
       kKeyLegacyMode: 'Legacy mode',
       kKeyMapMode: 'Map mode',
@@ -954,6 +1095,27 @@ class _RemotePageState extends State<RemotePage>
                         modes: keyboardModes,
                         modeHeading: translate('Keyboard mode'),
                         toggles: [
+                          if (physicalKeyInputSupported)
+                            MobileRemoteToggleItem(
+                              id: 'physical-key-input',
+                              value: physicalKeyInput,
+                              child: Text(
+                                translate('Physical key input (VM compatibility)'),
+                              ),
+                              onChanged: gFFI.ffiModel.viewOnly
+                                  ? null
+                                  : (value) {
+                                      if (value == null) return;
+                                      setState(() => _physicalKeyInput = value);
+                                      unawaited(
+                                        bind.sessionPeerOption(
+                                          sessionId: gFFI.sessionId,
+                                          name: kOptionMobilePhysicalKeyInput,
+                                          value: value ? 'Y' : '',
+                                        ),
+                                      );
+                                    },
+                            ),
                           for (var i = 0; i < keyboardToggles.length; i++)
                             MobileRemoteToggleItem(
                               id: 'keyboard-$i',

@@ -145,12 +145,26 @@ class _RawTouchGestureDetectorRegionState
   Offset? _lastTapDownPositionForMouseMode;
   // Cache global position for onTap (which lacks position info).
   Offset? _lastTapDownGlobalPosition;
+  bool _tapStartedBlocked = false;
+  bool _doubleTapStartedBlocked = false;
+  bool _leftHoldStartedBlocked = false;
 
   FFI get ffi => widget.ffi;
   FfiModel get ffiModel => widget.ffiModel;
   InputModel get inputModel => widget.inputModel;
   bool get handleTouch => (isDesktop || isWebDesktop) || ffiModel.touchMode;
   SessionID get sessionId => ffi.sessionId;
+
+  bool _shouldBlockGesture(TapDownDetails details) {
+    return ffi.cursorModel.shouldBlock(
+          details.localPosition.dx,
+          details.localPosition.dy,
+        ) ||
+        ffi.cursorModel.shouldBlockGlobal(
+          details.globalPosition.dx,
+          details.globalPosition.dy,
+        );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -326,17 +340,19 @@ class _RawTouchGestureDetectorRegionState
   // Mobile, mouse mode.
   // Check if should block the mouse tap event (`_lastTapDownPositionForMouseMode`).
   bool shouldBlockMouseModeEvent() {
-    return _lastTapDownPositionForMouseMode != null &&
-        ffi.cursorModel.shouldBlock(
-          _lastTapDownPositionForMouseMode!.dx,
-          _lastTapDownPositionForMouseMode!.dy,
-        );
+    return _tapStartedBlocked ||
+        (_lastTapDownPositionForMouseMode != null &&
+            ffi.cursorModel.shouldBlock(
+              _lastTapDownPositionForMouseMode!.dx,
+              _lastTapDownPositionForMouseMode!.dy,
+            ));
   }
 
   onTapDown(TapDownDetails d) async {
     _stopCursorInertia();
     lastDeviceKind = d.kind;
     _lastTapDownGlobalPosition = d.globalPosition;
+    _tapStartedBlocked = _shouldBlockGesture(d);
     if (isNotTouchBasedDevice()) {
       return;
     }
@@ -355,6 +371,7 @@ class _RawTouchGestureDetectorRegionState
     if (isNotTouchBasedDevice()) {
       return;
     }
+    if (_tapStartedBlocked) return;
     // Filter duplicate touch tap events on iOS (Magic Mouse issue).
     if (inputModel.shouldIgnoreTouchTap(d.globalPosition)) {
       return;
@@ -373,9 +390,12 @@ class _RawTouchGestureDetectorRegionState
   }
 
   onTap() async {
+    final startedBlocked = _tapStartedBlocked;
+    _tapStartedBlocked = false;
     if (isNotTouchBasedDevice()) {
       return;
     }
+    if (startedBlocked) return;
     // Filter duplicate touch tap events on iOS (Magic Mouse issue).
     final lastPos = _lastTapDownGlobalPosition;
     if (lastPos != null && inputModel.shouldIgnoreTouchTap(lastPos)) {
@@ -392,9 +412,14 @@ class _RawTouchGestureDetectorRegionState
     }
   }
 
+  void onTapCancel() {
+    _tapStartedBlocked = false;
+  }
+
   onDoubleTapDown(TapDownDetails d) async {
     _stopCursorInertia();
     lastDeviceKind = d.kind;
+    _doubleTapStartedBlocked = _shouldBlockGesture(d);
     if (isNotTouchBasedDevice()) {
       return;
     }
@@ -407,9 +432,12 @@ class _RawTouchGestureDetectorRegionState
   }
 
   onDoubleTap() async {
+    final startedBlocked = _doubleTapStartedBlocked;
+    _doubleTapStartedBlocked = false;
     if (isNotTouchBasedDevice()) {
       return;
     }
+    if (startedBlocked) return;
     if (ffiModel.touchMode && ffi.cursorModel.lastIsBlocked) {
       return;
     }
@@ -430,9 +458,11 @@ class _RawTouchGestureDetectorRegionState
   onOneFingerHoldDown(TapDownDetails d) async {
     _stopCursorInertia();
     lastDeviceKind = d.kind;
+    _leftHoldStartedBlocked = _shouldBlockGesture(d);
     if (isNotTouchBasedDevice()) {
       return;
     }
+    if (_leftHoldStartedBlocked) return;
     if (handleTouch) {
       _lastPosOfDoubleTapDown = d.localPosition;
       _cacheLongPressPosition = d.localPosition;
@@ -447,6 +477,7 @@ class _RawTouchGestureDetectorRegionState
   }
 
   onOneFingerHoldEnd() async {
+    _leftHoldStartedBlocked = false;
     _leftLongPressRequested = false;
     ffi.canvasModel.endMobileSelectionEdgeScroll();
     if (!_leftLongPressActive || isNotTouchBasedDevice()) return;
@@ -458,6 +489,10 @@ class _RawTouchGestureDetectorRegionState
 
   onOneFingerHoldStart(TapDownDetails d) async {
     if (isNotTouchBasedDevice()) {
+      return;
+    }
+    if (_leftHoldStartedBlocked) {
+      _leftLongPressRequested = false;
       return;
     }
     _leftLongPressRequested = true;
@@ -798,7 +833,8 @@ class _RawTouchGestureDetectorRegionState
               instance
                 ..onTapDown = onTapDown
                 ..onTapUp = onTapUp
-                ..onTap = onTap;
+                ..onTap = onTap
+                ..onTapCancel = onTapCancel;
             },
           ),
       DoubleTapGestureRecognizer:
@@ -904,6 +940,7 @@ class RawPointerMouseRegion extends StatelessWidget {
         onPointerUp?.call(evt);
         inputModel.onPointUpImage(evt);
       },
+      onPointerCancel: inputModel.onPointCancelImage,
       onPointerMove: inputModel.onPointMoveImage,
       onPointerSignal: inputModel.onPointerSignalImage,
       onPointerPanZoomStart: inputModel.onPointerPanZoomStart,

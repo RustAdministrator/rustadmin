@@ -77,6 +77,18 @@ class AndroidVpnPrepareResult {
   const AndroidVpnPrepareResult.stop(String message) : this._(false, message);
 }
 
+class AndroidOutgoingSessionClosedEvent {
+  final String sessionId;
+  final String reason;
+  final int generation;
+
+  const AndroidOutgoingSessionClosedEvent({
+    required this.sessionId,
+    required this.reason,
+    required this.generation,
+  });
+}
+
 class _AndroidNetworkSnapshot {
   final bool vpnActive;
   final bool nonVpnWifiActive;
@@ -171,7 +183,17 @@ class AndroidVpnSessionCoordinator {
   final AndroidVpnPlatformAdapter _platform;
 
   final Map<String, _PendingVpnLease> _pendingLeases = {};
+  final StreamController<AndroidOutgoingSessionClosedEvent>
+      _sessionClosedController =
+      StreamController<AndroidOutgoingSessionClosedEvent>.broadcast();
   bool _preparing = false;
+  int _nextSessionGeneration = 0;
+  int? _activeSessionGeneration;
+  String _activeSessionId = '';
+
+  Stream<AndroidOutgoingSessionClosedEvent> get sessionClosedEvents =>
+      _sessionClosedController.stream;
+  int? get activeSessionGeneration => _activeSessionGeneration;
 
   Future<bool> isEnabled(String peerId) async {
     return await _platform.getPeerOption(peerId, kOptionAndroidVpnPreconnect) ==
@@ -318,9 +340,11 @@ class AndroidVpnSessionCoordinator {
   Future<bool> attach(String peerId, String sessionId) async {
     final lease = _pendingLeases.remove(peerId);
     lease?.expiry?.cancel();
+    final generation = ++_nextSessionGeneration;
     final attached =
         await _platform.invoke('outgoing_session_attach', {
           'session_id': sessionId,
+          'generation': generation,
           'tunnel': lease?.tunnelName ?? '',
           'owns_tunnel': lease?.ownsTunnel == true,
         }) ==
@@ -328,14 +352,59 @@ class AndroidVpnSessionCoordinator {
     if (!attached && lease?.ownsTunnel == true) {
       await _setWireGuardTunnel(lease!.tunnelName, false);
     }
+    if (attached) {
+      _activeSessionId = sessionId;
+      _activeSessionGeneration = generation;
+    }
     _log(
-      'Android outgoing session lease attached: peer=$peerId, session=$sessionId, ownsVpn=${lease?.ownsTunnel == true}, attached=$attached',
+      'Android outgoing session lease attached: peer=$peerId, session=$sessionId, generation=$generation, ownsVpn=${lease?.ownsTunnel == true}, attached=$attached',
     );
     return attached;
   }
 
-  Future<void> release() async {
-    await _platform.invoke('outgoing_session_release');
+  Future<void> release({required int? generation}) async {
+    if (generation == null || generation != _activeSessionGeneration) {
+      _log(
+        'Ignored stale Android outgoing session release: generation=$generation, activeGeneration=$_activeSessionGeneration',
+      );
+      return;
+    }
+    final sessionId = _activeSessionId;
+    await _platform.invoke('outgoing_session_release', {
+      'session_id': sessionId,
+      'generation': generation,
+    });
+    if (_activeSessionId == sessionId &&
+        _activeSessionGeneration == generation) {
+      _activeSessionId = '';
+      _activeSessionGeneration = null;
+    }
+  }
+
+  bool handleNativeSessionClosed(dynamic arguments) {
+    if (arguments is! Map) return false;
+    final sessionId = arguments['session_id']?.toString() ?? '';
+    final reason = arguments['reason']?.toString() ?? '';
+    final generation = switch (arguments['generation']) {
+      int value => value,
+      String value => int.tryParse(value) ?? -1,
+      _ => -1,
+    };
+    if (sessionId != _activeSessionId ||
+        generation != _activeSessionGeneration) {
+      _log(
+        'Ignored stale Android outgoing session close: session=$sessionId, generation=$generation, activeSession=$_activeSessionId, activeGeneration=$_activeSessionGeneration',
+      );
+      return false;
+    }
+    _sessionClosedController.add(
+      AndroidOutgoingSessionClosedEvent(
+        sessionId: sessionId,
+        reason: reason,
+        generation: generation,
+      ),
+    );
+    return true;
   }
 
   Future<AndroidPeerAvailability> _probe(String peerId) async {

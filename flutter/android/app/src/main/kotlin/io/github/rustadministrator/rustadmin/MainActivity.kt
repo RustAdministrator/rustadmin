@@ -549,19 +549,25 @@ class MainActivity : FlutterActivity() {
                 }
                 "outgoing_session_attach" -> {
                     val sessionId = call.argument<String>("session_id").orEmpty()
+                    val generation = call.argument<Int>("generation") ?: 0
                     val tunnelName = call.argument<String>("tunnel").orEmpty()
                     val ownsTunnel = call.argument<Boolean>("owns_tunnel") == true
                     result.success(
                         OutgoingSessionService.attach(
                             this,
                             sessionId,
+                            generation,
                             tunnelName,
                             ownsTunnel,
                         ),
                     )
                 }
                 "outgoing_session_release" -> {
-                    OutgoingSessionService.release(this)
+                    OutgoingSessionService.release(
+                        this,
+                        call.argument<String>("session_id").orEmpty(),
+                        call.argument<Int>("generation") ?: 0,
+                    )
                     result.success(true)
                 }
                 GET_VALUE -> {

@@ -35,6 +35,14 @@ peer supports it, but is not selected by default. The mode primarily affects a
 physical keyboard. Soft-keyboard text uses the text-input packet path, and
 custom buttons send named legacy control keys.
 
+For a Windows peer, `Physical key input (VM compatibility)` is an opt-in,
+per-peer soft-keyboard mode. Representable text is injected as physical
+scan-code key sequences so VM consoles and similar raw-input applications can
+receive it; characters that cannot be represented by the active Windows
+layout fall back to Unicode input. Leave this option disabled for the existing
+text-input behavior. Host and guest keyboard layouts should match when the
+option is enabled.
+
 | Custom button | Sent key name | Protocol control key |
 |---|---|---|
 | Left arrow | `VK_LEFT` | `LeftArrow` |
@@ -72,3 +80,17 @@ the remote pointer; `Reset canvas` resets only the local canvas transform.
   default under Display Settings. The preference is saved, and the enabled
   toolbar shows direct monitor buttons plus the combined display button when
   supported.
+
+## Mobile background sessions
+
+- Background handling applies to every outgoing mobile session, independently
+  of whether a VPN is active. Android retains the session for at most 30
+  seconds while the app is not visible. Returning before the deadline keeps a
+  session only while native receive activity remains healthy.
+- After the deadline, or when a resumed session is unhealthy, RustAdmin closes
+  the old transport and reconnects from a fresh session when the app returns to
+  the foreground. A VPN started and owned by RustAdmin is stopped and prepared
+  again as needed; pre-existing VPN state is never changed.
+- iOS cannot guarantee a 30-second background timer after suspension. It closes
+  the active transport when the app enters the background and performs the same
+  fresh reconnect on resume. Brief inactive transitions do not close it.

@@ -436,6 +436,70 @@ void main() {
     expect(find.byIcon(Icons.push_pin), findsNothing);
   });
 
+  testWidgets('quick-key overlay consumes touch and physical mouse sequences', (
+    tester,
+  ) async {
+    var remotePointerDowns = 0;
+    var ctrlTaps = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Stack(
+            children: [
+              Positioned.fill(
+                child: Listener(
+                  onPointerDown: (_) => remotePointerDowns += 1,
+                  child: const ColoredBox(color: Colors.black),
+                ),
+              ),
+              Align(
+                alignment: Alignment.bottomCenter,
+                child: MobileRemoteKeyHelpTools(
+                  ctrlActive: false,
+                  altActive: false,
+                  shiftActive: false,
+                  commandActive: false,
+                  functionKeysActive: false,
+                  moreKeysActive: false,
+                  isMac: false,
+                  showWindowsLinuxKeys: true,
+                  quickKeyOrder: mobileRemoteDefaultQuickKeyOrder,
+                  onCtrl: () => ctrlTaps += 1,
+                  onAlt: () {},
+                  onShift: () {},
+                  onCommand: () {},
+                  onFunctionKeys: () {},
+                  onMoreKeys: () {},
+                  onKeyPressed: (_) {},
+                  onShortcutPressed: (_) {},
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    await tester.tapAt(const Offset(100, 100));
+    expect(remotePointerDowns, 1);
+
+    final ctrl = find.byKey(const Key('mobile-remote-quick-ctrl'));
+    await tester.tap(ctrl);
+    await tester.pump(kDoubleTapTimeout + const Duration(milliseconds: 1));
+    expect(ctrlTaps, 1);
+    expect(remotePointerDowns, 1);
+
+    final mouse = await tester.startGesture(
+      tester.getCenter(ctrl),
+      kind: PointerDeviceKind.mouse,
+      buttons: kPrimaryMouseButton,
+    );
+    await mouse.up();
+    await tester.pump(kDoubleTapTimeout + const Duration(milliseconds: 1));
+    expect(ctrlTaps, 2);
+    expect(remotePointerDowns, 1);
+  });
+
   testWidgets('quick keys use theme-aware gray button surfaces', (
     tester,
   ) async {
@@ -945,6 +1009,7 @@ void main() {
   ) async {
     String? selectedMode;
     bool? reverseWheel;
+    bool? physicalKeyInput;
     await tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
@@ -974,6 +1039,14 @@ void main() {
                       child: const Text('Reverse mouse wheel'),
                       onChanged: (value) => reverseWheel = value,
                     ),
+                    MobileRemoteToggleItem(
+                      id: 'physical-key-input',
+                      value: false,
+                      child: const Text(
+                        'Physical key input (VM compatibility)',
+                      ),
+                      onChanged: (value) => physicalKeyInput = value,
+                    ),
                   ],
                 ),
               ),
@@ -999,6 +1072,10 @@ void main() {
     await tester.tap(find.text('Reverse mouse wheel'));
     await tester.pump();
     expect(reverseWheel, isTrue);
+
+    await tester.tap(find.text('Physical key input (VM compatibility)'));
+    await tester.pump();
+    expect(physicalKeyInput, isTrue);
   });
 
   testWidgets('shared edge-size control reports session slider changes', (

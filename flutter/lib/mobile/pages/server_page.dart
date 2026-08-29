@@ -13,6 +13,7 @@ import '../../common/widgets/dialog.dart';
 import '../../consts.dart';
 import '../../models/platform_model.dart';
 import '../../models/server_model.dart';
+import '../android_vpn_controller.dart';
 import 'home_page.dart';
 
 class ServerPage extends StatefulWidget implements PageShape {
@@ -926,13 +927,8 @@ void androidChannelInit() {
           }
         case "outgoing_session_closed":
           {
-            final reason = arguments is Map
-                ? arguments["reason"]?.toString() ?? ''
-                : '';
-            if (reason == 'background-timeout') {
-              showToast(translate('Session closed after 10 minutes in background'));
-            }
-            closeConnection();
+            AndroidVpnSessionCoordinator.instance
+                .handleNativeSessionClosed(arguments);
             break;
           }
       }

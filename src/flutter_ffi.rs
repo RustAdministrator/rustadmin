@@ -4146,7 +4146,12 @@ pub mod server_side {
             .ok()
             .and_then(|value| uuid::Uuid::parse_str(&String::from(value)).ok())
             .and_then(|session_id| super::sessions::get_session_by_session_id(&session_id))
-            .is_some_and(|session| session.is_connection_alive());
+            .is_some_and(|session| {
+                session.is_connection_healthy(
+                    std::time::Duration::from_secs(35),
+                    std::time::Duration::from_secs(15),
+                )
+            });
         jboolean::from(active)
     }
 
