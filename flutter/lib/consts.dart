@@ -191,6 +191,8 @@ const String kOptionCodecPreference = "codec-preference";
 const String kOptionQualityMonitorPosition = "quality-monitor-position";
 const String kOptionQualityMonitorFloatingPosition =
     "quality-monitor-floating-position";
+const String kOptionQualityMonitorFloatingSize =
+    "quality-monitor-floating-size";
 const String kOptionQualityMonitorDetails = "quality-monitor-details";
 const String kQualityMonitorPositionTopRight = "top-right";
 const String kQualityMonitorPositionTopLeft = "top-left";

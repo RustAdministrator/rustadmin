@@ -4734,7 +4734,9 @@ class QualityMonitorModel with ChangeNotifier {
   var _position = kQualityMonitorPositionTopRight;
   var _details = kQualityMonitorDetailsBasic;
   Offset? _floatingPosition;
+  Size? _floatingSize;
   Timer? _floatingPositionStoreTimer;
+  Timer? _floatingSizeStoreTimer;
   SessionID? _sessionId;
   final _data = QualityMonitorData();
 
@@ -4743,6 +4745,7 @@ class QualityMonitorModel with ChangeNotifier {
   String get details => _details;
   bool get extendedDetails => _details == kQualityMonitorDetailsExtended;
   Offset? get floatingPosition => _floatingPosition;
+  Size? get floatingSize => _floatingSize;
   QualityMonitorData get data => _data;
 
   Future<void> setDetails(String value) async {
@@ -4908,6 +4911,44 @@ class QualityMonitorModel with ChangeNotifier {
         value: _formatFloatingPosition(position));
   }
 
+  void updateFloatingSize(Size size, {bool persist = true}) {
+    final sessionId = parent.target?.sessionId;
+    if (sessionId == null ||
+        !size.width.isFinite ||
+        !size.height.isFinite ||
+        size.width <= 0 ||
+        size.height <= 0) {
+      return;
+    }
+    final rounded =
+        Size(size.width.roundToDouble(), size.height.roundToDouble());
+    if (_floatingSize != rounded) {
+      _floatingSize = rounded;
+      notifyListeners();
+    }
+    if (!persist) return;
+    _floatingSizeStoreTimer?.cancel();
+    _floatingSizeStoreTimer =
+        Timer(const Duration(milliseconds: 300), () {
+      bind.sessionPeerOption(
+          sessionId: sessionId,
+          name: kOptionQualityMonitorFloatingSize,
+          value: _formatFloatingSize(rounded));
+    });
+  }
+
+  Future<void> commitFloatingSize() async {
+    _floatingSizeStoreTimer?.cancel();
+    _floatingSizeStoreTimer = null;
+    final sessionId = parent.target?.sessionId;
+    final size = _floatingSize;
+    if (sessionId == null || size == null) return;
+    await bind.sessionPeerOption(
+        sessionId: sessionId,
+        name: kOptionQualityMonitorFloatingSize,
+        value: _formatFloatingSize(size));
+  }
+
   checkShowQualityMonitor(SessionID sessionId) async {
     final dataReset = _resetDataForSession(sessionId);
     final show = await bind.sessionGetToggleOption(
@@ -4926,6 +4967,9 @@ class QualityMonitorModel with ChangeNotifier {
                 sessionId: sessionId,
                 arg: kOptionQualityMonitorFloatingPosition) ??
             '');
+    final floatingSize = _parseFloatingSize(await bind.sessionGetOption(
+            sessionId: sessionId, arg: kOptionQualityMonitorFloatingSize) ??
+        '');
     final hostVersion = _hostVersion();
     final clientVersion = await _clientVersion();
     final showChanged = _show != show;
@@ -4933,6 +4977,7 @@ class QualityMonitorModel with ChangeNotifier {
         _position != position ||
         _details != details ||
         _floatingPosition != floatingPosition ||
+        _floatingSize != floatingSize ||
         _data.hostVersion != hostVersion ||
         _data.clientVersion != clientVersion ||
         dataReset) {
@@ -4943,6 +4988,7 @@ class QualityMonitorModel with ChangeNotifier {
       _position = position;
       _details = details;
       _floatingPosition = floatingPosition;
+      _floatingSize = floatingSize;
       _data.hostVersion = hostVersion;
       _data.clientVersion = clientVersion;
       notifyListeners();
@@ -4961,6 +5007,27 @@ class QualityMonitorModel with ChangeNotifier {
     final y = double.tryParse(parts[1]);
     if (x == null || y == null) return null;
     return Offset(x, y);
+  }
+
+  static String _formatFloatingSize(Size size) {
+    return '${size.width.round()},${size.height.round()}';
+  }
+
+  static Size? _parseFloatingSize(String value) {
+    if (value.isEmpty) return null;
+    final parts = value.split(',');
+    if (parts.length != 2) return null;
+    final width = double.tryParse(parts[0]);
+    final height = double.tryParse(parts[1]);
+    if (width == null ||
+        height == null ||
+        !width.isFinite ||
+        !height.isFinite ||
+        width <= 0 ||
+        height <= 0) {
+      return null;
+    }
+    return Size(width, height);
   }
 
   String? _displayMetricFromMap(String value) {
@@ -5294,6 +5361,7 @@ class QualityMonitorModel with ChangeNotifier {
   @override
   void dispose() {
     _floatingPositionStoreTimer?.cancel();
+    _floatingSizeStoreTimer?.cancel();
     showListenable.dispose();
     super.dispose();
   }
