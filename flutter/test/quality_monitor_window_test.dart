@@ -8,6 +8,7 @@ void main() {
     final source = QualityMonitorData()
       ..speed = '42KB/s'
       ..codecFormat = 'H265'
+      ..connectionType = 'QUIC/UDP'
       ..quicReassemblyDrops = '3'
       ..movieFallbackReason = 'x' * 2000;
 
@@ -18,6 +19,60 @@ void main() {
     expect(decoded.codecFormat, source.codecFormat);
     expect(decoded.quicReassemblyDrops, source.quicReassemblyDrops);
     expect(decoded.movieFallbackReason, hasLength(1024));
+  });
+
+  test('TCP transport clears and rejects stale QUIC metrics', () {
+    final model = QualityMonitorModel.detached();
+    addTearDown(model.dispose);
+
+    model.updateQualityStatus({
+      'connection_type': 'QUIC/UDP',
+      'transport_mtu': '1360',
+      'transport_rtt_ms': '8',
+      'quic_protocol': 'v4',
+      'quic_reassembly_drops': '7',
+    });
+    expect(model.data.isQuicTransport, isTrue);
+    expect(model.data.quicProtocol, 'v4');
+    expect(model.data.quicReassemblyDrops, '7');
+
+    model.updateConnectionInfo('TCP', true);
+    expect(model.data.connectionType, 'TCP');
+    expect(model.data.isQuicTransport, isFalse);
+    expect(model.data.transportMtu, isNull);
+    expect(model.data.transportRttMs, isNull);
+    expect(model.data.quicProtocol, isNull);
+    expect(model.data.quicReassemblyDrops, isNull);
+
+    model.updateQualityStatus({
+      'connection_type': 'TCP',
+      'transport_mtu': '1360',
+      'quic_protocol': 'v4',
+      'quic_reassembly_drops': '9',
+    });
+    expect(model.data.transportMtu, isNull);
+    expect(model.data.quicProtocol, isNull);
+    expect(model.data.quicReassemblyDrops, isNull);
+  });
+
+  test('detached TCP snapshots omit stale QUIC metrics', () {
+    final source = QualityMonitorData()
+      ..connectionType = 'TCP'
+      ..transportMtu = '1360'
+      ..quicProtocol = 'v4';
+
+    final encoded = qualityMonitorDataToWindowJson(source);
+    expect(encoded['connectionType'], 'TCP');
+    expect(encoded.containsKey('transportMtu'), isFalse);
+    expect(encoded.containsKey('quicProtocol'), isFalse);
+
+    final decoded = qualityMonitorDataFromWindowJson({
+      'connectionType': 'TCP',
+      'transportMtu': '1360',
+      'quicProtocol': 'v4',
+    });
+    expect(decoded.transportMtu, isNull);
+    expect(decoded.quicProtocol, isNull);
   });
 
   test('detached model applies only normalized display state', () {

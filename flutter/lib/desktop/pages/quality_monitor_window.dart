@@ -15,6 +15,7 @@ const _qualityMonitorSnapshotLimit = 64 * 1024;
 const _qualityMonitorValueLimit = 1024;
 
 Map<String, String> qualityMonitorDataToWindowJson(QualityMonitorData data) {
+  String? quicMetric(String? value) => data.isQuicTransport ? value : null;
   final values = <String, String?>{
     'speed': data.speed,
     'fps': data.fps,
@@ -23,27 +24,27 @@ Map<String, String> qualityMonitorDataToWindowJson(QualityMonitorData data) {
     'codecFormat': data.codecFormat,
     'chroma': data.chroma,
     'connectionType': data.connectionType,
-    'transportMtu': data.transportMtu,
-    'transportRttMs': data.transportRttMs,
-    'transportLostPackets': data.transportLostPackets,
-    'datagramPayload': data.datagramPayload,
-    'negotiatedDatagramPayload': data.negotiatedDatagramPayload,
-    'quicProtocol': data.quicProtocol,
-    'quicVideoTransport': data.quicVideoTransport,
-    'quicReassemblyDrops': data.quicReassemblyDrops,
-    'quicReassemblyReasons': data.quicReassemblyReasons,
-    'quicReassemblyFrame': data.quicReassemblyFrame,
-    'quicReassemblyTiming': data.quicReassemblyTiming,
-    'quicKeyframeRequests': data.quicKeyframeRequests,
-    'quicKeyframeBarrier': data.quicKeyframeBarrier,
-    'quicReceiverRecovery': data.quicReceiverRecovery,
-    'quicSenderRecovery': data.quicSenderRecovery,
-    'quicSenderAdmission': data.quicSenderAdmission,
-    'quicSenderFrame': data.quicSenderFrame,
-    'quicSenderPercentiles': data.quicSenderPercentiles,
-    'quicSenderSpace': data.quicSenderSpace,
-    'quicDisposableDrops': data.quicDisposableDrops,
-    'quicVideoQueueTargetMs': data.quicVideoQueueTargetMs,
+    'transportMtu': quicMetric(data.transportMtu),
+    'transportRttMs': quicMetric(data.transportRttMs),
+    'transportLostPackets': quicMetric(data.transportLostPackets),
+    'datagramPayload': quicMetric(data.datagramPayload),
+    'negotiatedDatagramPayload': quicMetric(data.negotiatedDatagramPayload),
+    'quicProtocol': quicMetric(data.quicProtocol),
+    'quicVideoTransport': quicMetric(data.quicVideoTransport),
+    'quicReassemblyDrops': quicMetric(data.quicReassemblyDrops),
+    'quicReassemblyReasons': quicMetric(data.quicReassemblyReasons),
+    'quicReassemblyFrame': quicMetric(data.quicReassemblyFrame),
+    'quicReassemblyTiming': quicMetric(data.quicReassemblyTiming),
+    'quicKeyframeRequests': quicMetric(data.quicKeyframeRequests),
+    'quicKeyframeBarrier': quicMetric(data.quicKeyframeBarrier),
+    'quicReceiverRecovery': quicMetric(data.quicReceiverRecovery),
+    'quicSenderRecovery': quicMetric(data.quicSenderRecovery),
+    'quicSenderAdmission': quicMetric(data.quicSenderAdmission),
+    'quicSenderFrame': quicMetric(data.quicSenderFrame),
+    'quicSenderPercentiles': quicMetric(data.quicSenderPercentiles),
+    'quicSenderSpace': quicMetric(data.quicSenderSpace),
+    'quicDisposableDrops': quicMetric(data.quicDisposableDrops),
+    'quicVideoQueueTargetMs': quicMetric(data.quicVideoQueueTargetMs),
     'hostVersion': data.hostVersion,
     'clientVersion': data.clientVersion,
     'decoder': data.decoder,
@@ -96,7 +97,7 @@ QualityMonitorData qualityMonitorDataFromWindowJson(
         : raw.substring(0, _qualityMonitorValueLimit);
   }
 
-  return QualityMonitorData()
+  final data = QualityMonitorData()
     ..speed = value('speed')
     ..fps = value('fps')
     ..delay = value('delay')
@@ -157,6 +158,10 @@ QualityMonitorData qualityMonitorDataFromWindowJson(
     ..movieHostPipelineP95Us = value('movieHostPipelineP95Us')
     ..movieFallbackReason = value('movieFallbackReason')
     ..moviePlayoutDelayMs = value('moviePlayoutDelayMs');
+  if (!data.isQuicTransport) {
+    data.clearQuicTransportMetrics();
+  }
+  return data;
 }
 
 class DesktopQualityMonitorWindowController {
