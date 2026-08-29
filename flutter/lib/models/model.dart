@@ -4732,9 +4732,13 @@ class QualityMonitorData {
 }
 
 class QualityMonitorModel with ChangeNotifier {
-  WeakReference<FFI> parent;
+  WeakReference<FFI>? parent;
 
   QualityMonitorModel(this.parent);
+  QualityMonitorModel.detached() : parent = null {
+    _show = true;
+    showListenable.value = true;
+  }
   var _show = false;
   final showListenable = ValueNotifier<bool>(false);
   var _position = kQualityMonitorPositionTopRight;
@@ -4744,7 +4748,7 @@ class QualityMonitorModel with ChangeNotifier {
   Timer? _floatingPositionStoreTimer;
   Timer? _floatingSizeStoreTimer;
   SessionID? _sessionId;
-  final _data = QualityMonitorData();
+  var _data = QualityMonitorData();
 
   bool get show => _show;
   String get position => _position;
@@ -4754,11 +4758,29 @@ class QualityMonitorModel with ChangeNotifier {
   Size? get floatingSize => _floatingSize;
   QualityMonitorData get data => _data;
 
+  void applyDetachedSnapshot({
+    required String details,
+    required QualityMonitorData data,
+  }) {
+    _show = true;
+    if (!showListenable.value) {
+      showListenable.value = true;
+    }
+    _position = kQualityMonitorPositionDetached;
+    _details = normalizeQualityMonitorDetails(details);
+    _data = data;
+    notifyListeners();
+  }
+
   Future<void> setDetails(String value) async {
     final details = normalizeQualityMonitorDetails(value);
     if (_details == details) return;
-    final sessionId = parent.target?.sessionId;
-    if (sessionId == null) return;
+    final sessionId = parent?.target?.sessionId;
+    if (sessionId == null) {
+      _details = details;
+      notifyListeners();
+      return;
+    }
     _details = details;
     notifyListeners();
     await bind.sessionPeerOption(
@@ -4789,7 +4811,7 @@ class QualityMonitorModel with ChangeNotifier {
   }
 
   String? _hostVersion() {
-    final value = parent.target?.ffiModel.pi.fullVersion;
+    final value = parent?.target?.ffiModel.pi.fullVersion;
     return value == null || value.isEmpty ? null : value;
   }
 
@@ -4886,7 +4908,7 @@ class QualityMonitorModel with ChangeNotifier {
   }
 
   void updateFloatingPosition(Offset position, {bool persist = true}) {
-    final sessionId = parent.target?.sessionId;
+    final sessionId = parent?.target?.sessionId;
     if (sessionId == null) return;
     final rounded =
         Offset(position.dx.roundToDouble(), position.dy.roundToDouble());
@@ -4908,7 +4930,7 @@ class QualityMonitorModel with ChangeNotifier {
   Future<void> commitFloatingPosition() async {
     _floatingPositionStoreTimer?.cancel();
     _floatingPositionStoreTimer = null;
-    final sessionId = parent.target?.sessionId;
+    final sessionId = parent?.target?.sessionId;
     final position = _floatingPosition;
     if (sessionId == null || position == null) return;
     await bind.sessionPeerOption(
@@ -4918,7 +4940,7 @@ class QualityMonitorModel with ChangeNotifier {
   }
 
   void updateFloatingSize(Size size, {bool persist = true}) {
-    final sessionId = parent.target?.sessionId;
+    final sessionId = parent?.target?.sessionId;
     if (sessionId == null ||
         !size.width.isFinite ||
         !size.height.isFinite ||
@@ -4946,7 +4968,7 @@ class QualityMonitorModel with ChangeNotifier {
   Future<void> commitFloatingSize() async {
     _floatingSizeStoreTimer?.cancel();
     _floatingSizeStoreTimer = null;
-    final sessionId = parent.target?.sessionId;
+    final sessionId = parent?.target?.sessionId;
     final size = _floatingSize;
     if (sessionId == null || size == null) return;
     await bind.sessionPeerOption(
@@ -5040,7 +5062,7 @@ class QualityMonitorModel with ChangeNotifier {
     if (value.isEmpty) return null;
     final values = jsonDecode(value) as Map<String, dynamic>;
     if (values.isEmpty) return null;
-    final pi = parent.target?.ffiModel.pi;
+    final pi = parent?.target?.ffiModel.pi;
     if (pi != null) {
       final currentDisplay = pi.currentDisplay;
       if (currentDisplay != kAllDisplayValue) {
@@ -5091,7 +5113,7 @@ class QualityMonitorModel with ChangeNotifier {
       }
       if (evt.containsKey('fps') && (evt['fps'] as String).isNotEmpty) {
         final fps = jsonDecode(evt['fps']) as Map<String, dynamic>;
-        final pi = parent.target?.ffiModel.pi;
+        final pi = parent?.target?.ffiModel.pi;
         if (pi != null) {
           final currentDisplay = pi.currentDisplay;
           if (currentDisplay != kAllDisplayValue) {

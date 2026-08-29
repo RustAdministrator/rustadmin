@@ -28,7 +28,13 @@ use std::{
 };
 
 #[cfg(windows)]
-use winapi::um::winuser::WHEEL_DELTA;
+use winapi::{
+    shared::minwindef::HKL,
+    um::winuser::{
+        GetForegroundWindow, GetKeyboardLayout, GetWindowThreadProcessId, MapVirtualKeyExW,
+        VkKeyScanExW, MAPVK_VK_TO_VSC_EX, WHEEL_DELTA,
+    },
+};
 
 const INVALID_CURSOR_POS: i32 = i32::MIN;
 const INVALID_DISPLAY_IDX: i32 = -1;
@@ -1934,6 +1940,90 @@ fn translate_process_code(code: u32, down: bool) {
     };
 }
 
+#[cfg(target_os = "windows")]
+struct WindowsScanTextMapper {
+    hkl: HKL,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsScanTextMapper {
+    fn new() -> Option<Self> {
+        let thread_id =
+            unsafe { GetWindowThreadProcessId(GetForegroundWindow(), std::ptr::null_mut()) };
+        let hkl = unsafe { GetKeyboardLayout(thread_id) };
+        if hkl.is_null() {
+            None
+        } else {
+            Some(Self { hkl })
+        }
+    }
+
+    fn inject_char(&self, chr: char) -> bool {
+        let Ok(unicode) = u16::try_from(chr as u32) else {
+            return false;
+        };
+        let packed = unsafe { VkKeyScanExW(unicode, self.hkl) };
+        if packed == -1 {
+            return false;
+        }
+        let packed = packed as u16;
+        let vk = packed & 0x00ff;
+        let modifiers = packed >> 8;
+        if modifiers & !0x0007 != 0 {
+            return false;
+        }
+        let scan = unsafe { MapVirtualKeyExW(vk as _, MAPVK_VK_TO_VSC_EX, self.hkl) };
+        if scan == 0 {
+            return false;
+        }
+
+        let modifier_scans = [
+            (0x0001, rdev::win_scancode_from_key(RdevKey::ShiftLeft)),
+            (0x0002, rdev::win_scancode_from_key(RdevKey::ControlLeft)),
+            (0x0004, rdev::win_scancode_from_key(RdevKey::Alt)),
+        ];
+        let mut pressed = Vec::with_capacity(modifier_scans.len());
+        for (flag, scan) in modifier_scans {
+            if modifiers & flag == 0 {
+                continue;
+            }
+            let Some(scan) = scan else {
+                release_scan_modifiers(&pressed);
+                return false;
+            };
+            if rdev::simulate_code(None, Some(scan), true).is_err() {
+                release_scan_modifiers(&pressed);
+                return false;
+            }
+            pressed.push(scan);
+        }
+
+        let down_ok = rdev::simulate_code(Some(vk), Some(scan), true).is_ok();
+        let up_ok = rdev::simulate_code(Some(vk), Some(scan), false).is_ok();
+        release_scan_modifiers(&pressed);
+        down_ok && up_ok
+    }
+
+    fn layout_id(&self) -> usize {
+        self.hkl as usize
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn release_scan_modifiers(scans: &[u32]) {
+    for scan in scans.iter().rev() {
+        let _ = rdev::simulate_code(None, Some(*scan), false);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn simulate_unicode_char(chr: char) -> bool {
+    let mut utf16 = [0u16; 2];
+    chr.encode_utf16(&mut utf16)
+        .iter()
+        .all(|unit| rdev::simulate_unicode(*unit).is_ok())
+}
+
 fn translate_keyboard_mode(evt: &KeyEvent) {
     match &evt.union {
         Some(key_event::Union::Seq(seq)) => {
@@ -1988,6 +2078,11 @@ fn translate_keyboard_mode(evt: &KeyEvent) {
             //
             // Try to release shift first.
             // remote: Shift + 1 => 1
+            #[cfg(target_os = "windows")]
+            {
+                log_windows_input_state_once("first-input-keyboard-text");
+                crate::platform::windows::try_change_desktop();
+            }
             let mut en = ENIGO.lock().unwrap();
 
             #[cfg(target_os = "macos")]
@@ -2012,16 +2107,49 @@ fn translate_keyboard_mode(evt: &KeyEvent) {
                     }
                 }
                 #[cfg(target_os = "windows")]
+                let scan_text_started = Instant::now();
+                #[cfg(target_os = "windows")]
+                let scan_text_mapper = if evt.scan_code_text && !simulate_win_hot_key {
+                    WindowsScanTextMapper::new()
+                } else {
+                    None
+                };
+                #[cfg(target_os = "windows")]
                 log::debug!(
-                    "Windows translate text injection: strategy=scan-first, chars={}",
-                    seq.chars().count()
+                    "Windows translate text injection: strategy={}, chars={}, host_hkl={}",
+                    if evt.scan_code_text {
+                        "vm-scan-code"
+                    } else {
+                        "scan-first"
+                    },
+                    seq.chars().count(),
+                    scan_text_mapper
+                        .as_ref()
+                        .map(|mapper| format!("0x{:x}", mapper.layout_id()))
+                        .unwrap_or_else(|| "unavailable".to_owned())
                 );
+                #[cfg(target_os = "windows")]
+                let mut layout_scan_count = 0usize;
+                #[cfg(target_os = "windows")]
+                let mut unicode_fallback_count = 0usize;
                 for chr in seq.chars() {
                     // char in rust is 4 bytes.
                     // But for this case, char comes from keyboard. We only need 2 bytes.
                     #[cfg(target_os = "windows")]
                     if simulate_win_hot_key {
                         rdev::simulate_char(chr, true).ok();
+                    } else if evt.scan_code_text {
+                        if scan_text_mapper
+                            .as_ref()
+                            .is_some_and(|mapper| mapper.inject_char(chr))
+                        {
+                            layout_scan_count += 1;
+                        } else {
+                            unicode_fallback_count += 1;
+                            if !simulate_unicode_char(chr) {
+                                en.key_sequence(&chr.to_string());
+                            }
+                        }
                     } else if u16::try_from(chr as u32).is_ok() {
                         if rdev::simulate_char(chr, true).is_err() {
                             en.key_sequence(&chr.to_string());
@@ -2031,6 +2159,15 @@ fn translate_keyboard_mode(evt: &KeyEvent) {
                     }
                     #[cfg(target_os = "linux")]
                     en.key_click(Key::Layout(chr));
+                }
+                #[cfg(target_os = "windows")]
+                if evt.scan_code_text {
+                    log::debug!(
+                        "Windows VM text injection result: layout_scan={}, unicode_fallback={}, elapsed_us={}",
+                        layout_scan_count,
+                        unicode_fallback_count,
+                        scan_text_started.elapsed().as_micros()
+                    );
                 }
             }
         }

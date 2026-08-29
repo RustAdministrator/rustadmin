@@ -10,6 +10,7 @@ import 'package:flutter_hbb/common/widgets/overlay.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
 import 'package:flutter_hbb/desktop/pages/install_page.dart';
 import 'package:flutter_hbb/desktop/pages/server_page.dart';
+import 'package:flutter_hbb/desktop/pages/quality_monitor_window.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_file_transfer_screen.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_view_camera_screen.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_port_forward_screen.dart';
@@ -99,6 +100,14 @@ Future<void> main(List<String> args) async {
           argument,
           kAppTypeDesktopTerminal,
         );
+        break;
+      case WindowType.QualityMonitor:
+        desktopType = DesktopType.qualityMonitor;
+        runMultiWindow(
+          argument,
+          kAppTypeDesktopQualityMonitor,
+        );
+        break;
       default:
         break;
     }
@@ -222,10 +231,14 @@ void runMultiWindow(
   Map<String, dynamic> argument,
   String appType,
 ) async {
-  await initEnv(appType);
+  final envAppType = appType == kAppTypeDesktopQualityMonitor
+      ? '$appType,$kWindowId'
+      : appType;
+  await initEnv(envAppType);
   final title = getWindowName();
   // set prevent close to true, we handle close event manually
-  WindowController.fromWindowId(kWindowId!).setPreventClose(true);
+  WindowController.fromWindowId(kWindowId!).setPreventClose(
+      appType != kAppTypeDesktopQualityMonitor);
   if (isMacOS) {
     disableWindowMovable(kWindowId);
   }
@@ -257,6 +270,9 @@ void runMultiWindow(
       widget = DesktopTerminalScreen(
         params: argument,
       );
+      break;
+    case kAppTypeDesktopQualityMonitor:
+      widget = DesktopQualityMonitorWindow(params: argument);
       break;
     default:
       // no such appType
@@ -306,6 +322,9 @@ void runMultiWindow(
       break;
     case kAppTypeDesktopTerminal:
       await restoreWindowPosition(WindowType.Terminal, windowId: kWindowId!);
+      break;
+    case kAppTypeDesktopQualityMonitor:
+      await WindowController.fromWindowId(kWindowId!).showTitleBar(true);
       break;
     default:
       // no such appType

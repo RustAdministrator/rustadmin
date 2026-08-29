@@ -20,6 +20,7 @@ import '../../utils/image.dart';
 import '../widgets/remote_toolbar.dart';
 import '../widgets/kb_layout_type_chooser.dart';
 import '../widgets/tabbar_widget.dart';
+import 'quality_monitor_window.dart';
 
 import 'package:flutter_hbb/native/custom_cursor.dart'
     if (dart.library.html) 'package:flutter_hbb/web/custom_cursor.dart';
@@ -73,6 +74,7 @@ class ViewCameraPage extends StatefulWidget {
 class _ViewCameraPageState extends State<ViewCameraPage>
     with AutomaticKeepAliveClientMixin, MultiWindowListener {
   Timer? _timer;
+  DesktopQualityMonitorWindowController? _qualityMonitorWindowController;
   String keyboardMode = "legacy";
   bool _isWindowBlur = false;
   final _cursorOverImage = false.obs;
@@ -134,6 +136,13 @@ class _ViewCameraPageState extends State<ViewCameraPage>
     _ffi.ffiModel.updateEventListener(sessionId, widget.id);
     if (!isWeb) bind.pluginSyncUi(syncTo: kAppTypeDesktopRemote);
     _ffi.qualityMonitorModel.checkShowQualityMonitor(sessionId);
+    _qualityMonitorWindowController = DesktopQualityMonitorWindowController(
+      model: _ffi.qualityMonitorModel,
+      peerId: widget.id,
+      sessionId: sessionId.toString(),
+      sourceWindowId:
+          stateGlobal.windowId < 0 ? kMainWindowId : stateGlobal.windowId,
+    )..start();
     _ffi.dialogManager.loadMobileActionsOverlayVisible();
     DesktopMultiWindow.addListener(this);
     // if (!_isCustomCursorInited) {
@@ -222,6 +231,8 @@ class _ViewCameraPageState extends State<ViewCameraPage>
 
   @override
   Future<void> dispose() async {
+    await _qualityMonitorWindowController?.dispose();
+    _qualityMonitorWindowController = null;
     final closeSession = closeSessionOnDispose.remove(widget.id) ?? true;
 
     // https://github.com/flutter/flutter/issues/64935

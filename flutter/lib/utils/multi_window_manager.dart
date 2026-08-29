@@ -22,6 +22,7 @@ enum WindowType {
   ViewCamera,
   PortForward,
   Terminal,
+  QualityMonitor,
   Unknown
 }
 
@@ -40,6 +41,8 @@ extension Index on int {
         return WindowType.PortForward;
       case 5:
         return WindowType.Terminal;
+      case 6:
+        return WindowType.QualityMonitor;
       default:
         return WindowType.Unknown;
     }
@@ -622,6 +625,8 @@ class RustDeskMultiWindowManager {
         return _portForwardWindows;
       case WindowType.Terminal:
         return _terminalWindows;
+      case WindowType.QualityMonitor:
+        break;
       case WindowType.Unknown:
         break;
     }
@@ -646,6 +651,8 @@ class RustDeskMultiWindowManager {
         break;
       case WindowType.Terminal:
         _terminalWindows.clear();
+      case WindowType.QualityMonitor:
+        break;
       case WindowType.Unknown:
         break;
     }

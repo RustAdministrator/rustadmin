@@ -1,6 +1,7 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/quality_monitor_settings.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
 import 'package:flutter_hbb/mobile/mobile_modifier_state.dart';
@@ -8,6 +9,14 @@ import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('VM physical input defaults on and preserves explicit opt out', () {
+    expect(mobileVmPhysicalInputEnabled(''), isTrue);
+    expect(mobileVmPhysicalInputEnabled('Y'), isTrue);
+    expect(mobileVmPhysicalInputEnabled('N'), isFalse);
+    expect(mobileVmPhysicalInputOption(true), 'Y');
+    expect(mobileVmPhysicalInputOption(false), 'N');
+  });
+
   Future<void> pumpToolbar(
     WidgetTester tester, {
     ThemeData? theme,
@@ -591,9 +600,9 @@ void main() {
     );
 
     Finder ctrlMaterial() => find.descendant(
-          of: find.byKey(const Key('mobile-remote-quick-ctrl')),
-          matching: find.byType(Material),
-        );
+      of: find.byKey(const Key('mobile-remote-quick-ctrl')),
+      matching: find.byType(Material),
+    );
 
     await tester.tap(find.byKey(const Key('mobile-remote-quick-ctrl')));
     await tester.pump(kDoubleTapTimeout + const Duration(milliseconds: 1));
@@ -767,6 +776,80 @@ void main() {
     expect(find.text('Extended'), findsOneWidget);
   });
 
+  testWidgets('overlay appearance submenu exposes independent sliders', (
+    tester,
+  ) async {
+    MobileRemoteToolbarTransparencySettings? toolbarCommitted;
+    QualityMonitorFadeSettings? monitorCommitted;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MobileRemoteOptionsContent(
+            radioSections: [
+              MobileRemoteRadioSection(
+                id: 'overlay-appearance',
+                value: '',
+                items: const [],
+                heading: const Text('Overlay appearance'),
+                content: MobileOverlayAppearanceControls(
+                  toolbarTitle: 'Toolbar',
+                  toolbarOpacityLabel: 'Opacity under cursor',
+                  qualityMonitorTitle: 'Quality monitor',
+                  inactiveOpacityLabel: 'Inactive opacity',
+                  fadeDelayLabel: 'Fade delay',
+                  fadeDurationLabel: 'Fade duration',
+                  toolbarSettings:
+                      MobileRemoteToolbarTransparencySettings.defaults,
+                  qualityMonitorSettings: QualityMonitorFadeSettings.defaults,
+                  onToolbarChanged: (_) {},
+                  onToolbarChangeEnd: (value) => toolbarCommitted = value,
+                  onQualityMonitorChanged: (_) {},
+                  onQualityMonitorChangeEnd: (value) =>
+                      monitorCommitted = value,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(
+      find.byKey(const Key('mobile-remote-options-open-overlay-appearance')),
+    );
+    await tester.pump();
+    expect(
+      find.byKey(const Key('mobile-toolbar-opacity-slider')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const Key('mobile-quality-monitor-opacity-slider')),
+      findsOneWidget,
+    );
+
+    await tester.drag(
+      find.byKey(const Key('mobile-toolbar-opacity-slider')),
+      const Offset(80, 0),
+    );
+    await tester.pump();
+    await tester.drag(
+      find.byKey(const Key('mobile-quality-monitor-opacity-slider')),
+      const Offset(-80, 0),
+    );
+    await tester.pump();
+
+    expect(toolbarCommitted, isNotNull);
+    expect(monitorCommitted, isNotNull);
+    expect(
+      toolbarCommitted!.overlapOpacityPercent,
+      isNot(kDefaultMobileRemoteToolbarOverlapOpacityPercent),
+    );
+    expect(
+      monitorCommitted!.opacityPercent,
+      lessThan(kMaxQualityMonitorInactiveOpacityPercent),
+    );
+  });
+
   testWidgets('options remain scrollable after rotating to landscape', (
     tester,
   ) async {
@@ -803,12 +886,9 @@ void main() {
                   scrollable: false,
                   contentBoxConstraints: BoxConstraints(
                     maxWidth: 500,
-                    maxHeight:
-                        MediaQuery.sizeOf(dialogContext).height * 0.9,
+                    maxHeight: MediaQuery.sizeOf(dialogContext).height * 0.9,
                   ),
-                  content: MobileRemoteOptionsContent(
-                    radioSections: sections,
-                  ),
+                  content: MobileRemoteOptionsContent(radioSections: sections),
                 ),
               ),
               child: const Text('Open options'),
@@ -907,9 +987,7 @@ void main() {
 
     expect(state.position.pixels, 0);
     expect(
-      find.byKey(
-        const Key('mobile-remote-options-submenu-custom-quality'),
-      ),
+      find.byKey(const Key('mobile-remote-options-submenu-custom-quality')),
       findsOneWidget,
     );
     expect(state.position.maxScrollExtent, greaterThan(0));
@@ -991,9 +1069,7 @@ void main() {
         )
         .dy;
     final androidY = tester
-        .getTopLeft(
-          find.byKey(const Key('mobile-remote-actions-open-android')),
-        )
+        .getTopLeft(find.byKey(const Key('mobile-remote-actions-open-android')))
         .dy;
     final resetY = tester.getTopLeft(find.text('Reset canvas')).dy;
     expect(keyboardY, lessThan(customizeY));

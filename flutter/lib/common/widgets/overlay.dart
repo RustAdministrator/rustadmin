@@ -11,11 +11,14 @@ import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 
+import '../../common/quality_monitor_settings.dart';
 import '../../consts.dart';
 import '../../desktop/widgets/tabbar_widget.dart';
 import '../../models/chat_model.dart';
 import '../../models/model.dart';
 import 'chat_page.dart';
+
+export '../../common/quality_monitor_settings.dart';
 
 class DraggableChatWindow extends StatelessWidget {
   const DraggableChatWindow(
@@ -540,6 +543,10 @@ class QualityMonitor extends StatefulWidget {
   final GestureDragUpdateCallback? onResizePanUpdate;
   final GestureDragEndCallback? onResizePanEnd;
   final GestureDragCancelCallback? onResizePanCancel;
+  final Future<void> Function(String details)? onDetailsChanged;
+  final bool opaque;
+  final bool fitContent;
+  final bool showHeader;
 
   const QualityMonitor(this.qualityMonitorModel,
       {Key? key,
@@ -550,7 +557,11 @@ class QualityMonitor extends StatefulWidget {
       this.onResizePanStart,
       this.onResizePanUpdate,
       this.onResizePanEnd,
-      this.onResizePanCancel})
+      this.onResizePanCancel,
+      this.onDetailsChanged,
+      this.opaque = false,
+      this.fitContent = false,
+      this.showHeader = true})
       : super(key: key);
 
   @override
@@ -731,21 +742,32 @@ class _QualityMonitorState extends State<QualityMonitor> {
                       ignoring: !qualityMonitorModel.extendedDetails,
                       child: Container(
                         key: const Key('quality-monitor-window'),
-                        constraints: qualityMonitorModel.extendedDetails
-                            ? BoxConstraints.tight(widget.extendedSize ??
-                                Size(isMobile ? 196 : 240, 420))
-                            : BoxConstraints(maxWidth: isMobile ? 176 : 200),
+                        constraints: widget.fitContent
+                            ? const BoxConstraints(
+                                minWidth: 280, maxWidth: 360)
+                            : qualityMonitorModel.extendedDetails
+                                ? BoxConstraints.tight(widget.extendedSize ??
+                                    Size(isMobile ? 196 : 240, 420))
+                                : BoxConstraints(
+                                    maxWidth: isMobile ? 176 : 200),
                         padding: qualityMonitorModel.extendedDetails
                             ? EdgeInsets.fromLTRB(isMobile ? 4 : 8,
-                                isMobile ? 20 : 24, isMobile ? 4 : 8, 0)
+                                widget.showHeader
+                                    ? (isMobile ? 20 : 24)
+                                    : (isMobile ? 4 : 8),
+                                isMobile ? 4 : 8,
+                                0)
                             : EdgeInsets.all(isMobile ? 4 : 8),
-                        color: MyTheme.canvasColor.withAlpha(150),
+                        color: widget.opaque
+                            ? MyTheme.canvasColor
+                            : MyTheme.canvasColor.withAlpha(150),
                         child: Builder(builder: (context) {
                           final rows = Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               SizedBox(
-                                  height: qualityMonitorModel.extendedDetails
+                                  height: qualityMonitorModel.extendedDetails ||
+                                          !widget.showHeader
                                       ? 0
                                       : (isMobile ? 20 : 24)),
                             _row(
@@ -992,7 +1014,10 @@ class _QualityMonitorState extends State<QualityMonitor> {
                             ],
                           ],
                           );
-                          if (!qualityMonitorModel.extendedDetails) return rows;
+                          if (!qualityMonitorModel.extendedDetails ||
+                              widget.fitContent) {
+                            return rows;
+                          }
                           return Listener(
                             behavior: HitTestBehavior.opaque,
                             child: Scrollbar(
@@ -1012,19 +1037,22 @@ class _QualityMonitorState extends State<QualityMonitor> {
                         }),
                       ),
                     ),
-                    Positioned(
-                      top: 0,
-                      left: 0,
-                      right: 0,
-                      child: QualityMonitorHeader(
-                        details: qualityMonitorModel.details,
-                        onPanUpdate: widget.onHeaderPanUpdate,
-                        onPanEnd: widget.onHeaderPanEnd,
-                        onPanCancel: widget.onHeaderPanCancel,
-                        onDetailsChanged: qualityMonitorModel.setDetails,
+                    if (widget.showHeader)
+                      Positioned(
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        child: QualityMonitorHeader(
+                          details: qualityMonitorModel.details,
+                          onPanUpdate: widget.onHeaderPanUpdate,
+                          onPanEnd: widget.onHeaderPanEnd,
+                          onPanCancel: widget.onHeaderPanCancel,
+                          onDetailsChanged: widget.onDetailsChanged ??
+                              qualityMonitorModel.setDetails,
+                        ),
                       ),
-                    ),
-                    if (qualityMonitorModel.extendedDetails)
+                    if (qualityMonitorModel.extendedDetails &&
+                        !widget.fitContent)
                       Positioned(
                         right: 0,
                         bottom: 0,
@@ -1303,63 +1331,6 @@ class QualityMonitorHoverFade extends StatefulWidget {
       _QualityMonitorHoverFadeState();
 }
 
-class QualityMonitorFadeSettings {
-  final double opacity;
-  final Duration delay;
-  final Duration duration;
-
-  const QualityMonitorFadeSettings({
-    required this.opacity,
-    required this.delay,
-    required this.duration,
-  });
-
-  factory QualityMonitorFadeSettings.fromUserDefaults() {
-    int option(String key,
-        {required int defaultValue, required int min, required int max}) {
-      return (int.tryParse(bind.mainGetUserDefaultOption(key: key)) ??
-              defaultValue)
-          .clamp(min, max);
-    }
-
-    return QualityMonitorFadeSettings(
-      opacity: option(
-            kOptionRemoteToolbarPinnedOpacityPercent,
-            defaultValue: kDefaultRemoteToolbarPinnedOpacityPercent,
-            min: kMinRemoteToolbarPinnedOpacityPercent,
-            max: kMaxRemoteToolbarPinnedOpacityPercent,
-          ) /
-          100.0,
-      delay: Duration(
-        milliseconds: option(
-          kOptionRemoteToolbarPinnedDimDelayMs,
-          defaultValue: kDefaultRemoteToolbarPinnedDimDelayMs,
-          min: kMinRemoteToolbarPinnedDimDelayMs,
-          max: kMaxRemoteToolbarPinnedDimDelayMs,
-        ),
-      ),
-      duration: Duration(
-        milliseconds: option(
-          kOptionRemoteToolbarPinnedDimDurationMs,
-          defaultValue: kDefaultRemoteToolbarPinnedDimDurationMs,
-          min: kMinRemoteToolbarPinnedDimDurationMs,
-          max: kMaxRemoteToolbarPinnedDimDurationMs,
-        ),
-      ),
-    );
-  }
-
-  @override
-  bool operator ==(Object other) =>
-      other is QualityMonitorFadeSettings &&
-      opacity == other.opacity &&
-      delay == other.delay &&
-      duration == other.duration;
-
-  @override
-  int get hashCode => Object.hash(opacity, delay, duration);
-}
-
 class _QualityMonitorHoverFadeState extends State<QualityMonitorHoverFade> {
   Timer? _dimTimer;
   Timer? _settingsTimer;
@@ -1373,13 +1344,11 @@ class _QualityMonitorHoverFadeState extends State<QualityMonitorHoverFade> {
   void initState() {
     super.initState();
     _settings = _readSettings();
-    if (isDesktop || isWebDesktop) {
-      _scheduleDim();
-      _settingsTimer = Timer.periodic(
-        QualityMonitorHoverFade.settingsRefreshInterval,
-        (_) => _refreshSettings(),
-      );
-    }
+    _scheduleDim();
+    _settingsTimer = Timer.periodic(
+      QualityMonitorHoverFade.settingsRefreshInterval,
+      (_) => _refreshSettings(),
+    );
   }
 
   QualityMonitorFadeSettings _readSettings() =>
@@ -1416,7 +1385,7 @@ class _QualityMonitorHoverFadeState extends State<QualityMonitorHoverFade> {
 
   void _scheduleDim() {
     _cancelDim();
-    if (_hovered || _interacting) return;
+    if (_settings.opacity >= 1.0 || _hovered || _interacting) return;
     _dimTimer = Timer(_settings.delay, () {
       _dimTimer = null;
       if (_hovered || _interacting) return;
@@ -1654,6 +1623,14 @@ class _PositionedQualityMonitorState extends State<PositionedQualityMonitor> {
             value: widget.qualityMonitorModel,
             child: Consumer<QualityMonitorModel>(
               builder: (context, qualityMonitorModel, child) {
+                if (qualityMonitorModel.position ==
+                    kQualityMonitorPositionDetached) {
+                  if (_lastBounds != null) {
+                    _lastBounds = null;
+                    widget.onBoundsChanged?.call(null);
+                  }
+                  return const SizedBox.shrink();
+                }
                 return LayoutBuilder(builder: (context, constraints) {
                   final extended = qualityMonitorModel.extendedDetails;
                   final monitorSize = _clampMonitorSize(

@@ -796,5 +796,22 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Save diagnostic report", "Сохранить диагностический отчёт"),
         ("Create a private log ZIP and share it", "Создать ZIP с диагностикой и отправить его"),
         ("Delete diagnostic logs", "Удалить диагностические логи"),
+        ("Overlay appearance", "Внешний вид оверлея"),
+        ("Toolbar", "Панель инструментов"),
+        ("Opacity under cursor", "Непрозрачность под курсором"),
+        ("Inactive opacity", "Непрозрачность в неактивном состоянии"),
+        ("Fade delay", "Задержка исчезновения"),
+        ("Fade duration", "Длительность исчезновения"),
+        ("Quality monitor appearance", "Внешний вид монитора качества"),
+        ("Toolbar inactive opacity", "Непрозрачность неактивной панели"),
+        ("Toolbar fade delay", "Задержка исчезновения панели"),
+        ("Toolbar fade duration", "Длительность исчезновения панели"),
+        ("Default Screen Scrolling", "Прокрутка экрана по умолчанию"),
+        ("Cursor inertia time", "Время инерции курсора"),
+
+        ("Settings layout", "Макет настроек"),
+        ("Modern", "Современный"),
+        ("Classic", "Классический"),
+        ("Diagnostics", "Диагностика"),
     ].iter().cloned().collect();
 }

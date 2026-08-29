@@ -60,6 +60,10 @@ use crate::{client::Data, client::Interface};
 const CHANGE_RESOLUTION_VALID_TIMEOUT_SECS: u64 = 15;
 const OPTION_MOBILE_PHYSICAL_KEY_INPUT: &str = "mobile-physical-key-input";
 
+fn mobile_physical_key_input_enabled(is_mobile: bool, stored_value: &str) -> bool {
+    is_mobile && !stored_value.eq_ignore_ascii_case("N")
+}
+
 fn mobile_soft_keyboard_mode(
     physical_key_input: bool,
     peer_platform: &str,
@@ -69,6 +73,27 @@ fn mobile_soft_keyboard_mode(
         KeyboardMode::Translate
     } else {
         KeyboardMode::Legacy
+    }
+}
+
+fn mobile_scan_code_text(
+    physical_key_input: bool,
+    peer_platform: &str,
+    translate_supported: bool,
+) -> bool {
+    physical_key_input && peer_platform == "Windows" && translate_supported
+}
+
+fn mobile_physical_keyboard_mode(
+    physical_key_input: bool,
+    peer_platform: &str,
+    map_supported: bool,
+    configured_mode: &str,
+) -> String {
+    if physical_key_input && peer_platform == "Windows" && map_supported {
+        KeyboardMode::Map.to_string()
+    } else {
+        configured_mode.to_owned()
     }
 }
 
@@ -987,17 +1012,40 @@ impl<T: InvokeUiSession> Session<T> {
     pub fn input_string(&self, value: &str) {
         let mut key_event = KeyEvent::new();
         key_event.set_seq(value.to_owned());
+        let physical_key_input = mobile_physical_key_input_enabled(
+            cfg!(any(target_os = "android", target_os = "ios")),
+            &self.get_option(OPTION_MOBILE_PHYSICAL_KEY_INPUT.to_owned()),
+        );
+        let peer_platform = self.peer_platform();
         let translate_supported =
             self.is_keyboard_mode_supported(KeyboardMode::Translate.to_string());
-        key_event.mode = mobile_soft_keyboard_mode(
-            self.get_option(OPTION_MOBILE_PHYSICAL_KEY_INPUT.to_owned()) == "Y",
-            &self.peer_platform(),
-            translate_supported,
-        )
-        .into();
+        key_event.mode =
+            mobile_soft_keyboard_mode(physical_key_input, &peer_platform, translate_supported)
+                .into();
+        key_event.scan_code_text =
+            mobile_scan_code_text(physical_key_input, &peer_platform, translate_supported);
+        log::debug!(
+            "mobile keyboard text policy: peer={}, mode={:?}, scan_code_text={}, chars={}",
+            peer_platform,
+            key_event.mode,
+            key_event.scan_code_text,
+            value.chars().count()
+        );
         let mut msg_out = Message::new();
         msg_out.set_key_event(key_event);
         self.send(Data::Message(msg_out));
+    }
+
+    pub fn mobile_physical_keyboard_mode(&self, configured_mode: &str) -> String {
+        if !cfg!(target_os = "android") {
+            return configured_mode.to_owned();
+        }
+        mobile_physical_keyboard_mode(
+            self.get_option(OPTION_MOBILE_PHYSICAL_KEY_INPUT.to_owned()) == "Y",
+            &self.peer_platform(),
+            self.is_keyboard_mode_supported(KeyboardMode::Map.to_string()),
+            configured_mode,
+        )
     }
 
     #[cfg(any(target_os = "ios"))]
@@ -2376,6 +2424,38 @@ mod mobile_soft_keyboard_tests {
         assert_eq!(
             mobile_soft_keyboard_mode(false, "Windows", true),
             KeyboardMode::Legacy
+        );
+    }
+
+    #[test]
+    fn scan_code_text_matches_the_opt_in_translate_policy() {
+        assert!(mobile_scan_code_text(true, "Windows", true));
+        assert!(!mobile_scan_code_text(false, "Windows", true));
+        assert!(!mobile_scan_code_text(true, "Linux", true));
+        assert!(!mobile_scan_code_text(true, "Windows", false));
+    }
+
+    #[test]
+    fn mobile_vm_physical_input_defaults_on_and_preserves_explicit_opt_out() {
+        assert!(mobile_physical_key_input_enabled(true, ""));
+        assert!(mobile_physical_key_input_enabled(true, "Y"));
+        assert!(!mobile_physical_key_input_enabled(true, "N"));
+        assert!(!mobile_physical_key_input_enabled(false, ""));
+    }
+
+    #[test]
+    fn physical_android_keys_use_map_without_changing_other_modes() {
+        assert_eq!(
+            mobile_physical_keyboard_mode(true, "Windows", true, "legacy"),
+            "map"
+        );
+        assert_eq!(
+            mobile_physical_keyboard_mode(false, "Windows", true, "legacy"),
+            "legacy"
+        );
+        assert_eq!(
+            mobile_physical_keyboard_mode(true, "Linux", true, "translate"),
+            "translate"
         );
     }
 }
