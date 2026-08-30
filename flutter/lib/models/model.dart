@@ -4185,6 +4185,12 @@ class CursorModel with ChangeNotifier {
     return false;
   }
 
+  bool shouldBlockGlobal(double x, double y) {
+    if (_blockEvents) return true;
+    final rect = _keyHelpToolsGlobalRect;
+    return rect != null && isPointInRect(Offset(x, y), rect);
+  }
+
   // For touch mode
   Future<bool> move(double x, double y) async {
     if (shouldBlock(x, y)) {
@@ -4714,6 +4720,55 @@ class QualityMonitorData {
   String? movieFallbackReason;
   String? moviePlayoutDelayMs;
 
+  bool get isQuicTransport =>
+      connectionType?.toUpperCase().contains('QUIC') == true;
+
+  bool clearQuicTransportMetrics() {
+    final hadMetrics = transportMtu != null ||
+        transportRttMs != null ||
+        transportLostPackets != null ||
+        datagramPayload != null ||
+        negotiatedDatagramPayload != null ||
+        quicProtocol != null ||
+        quicVideoTransport != null ||
+        quicReassemblyDrops != null ||
+        quicReassemblyReasons != null ||
+        quicReassemblyFrame != null ||
+        quicReassemblyTiming != null ||
+        quicKeyframeRequests != null ||
+        quicKeyframeBarrier != null ||
+        quicReceiverRecovery != null ||
+        quicSenderRecovery != null ||
+        quicSenderAdmission != null ||
+        quicSenderFrame != null ||
+        quicSenderPercentiles != null ||
+        quicSenderSpace != null ||
+        quicDisposableDrops != null ||
+        quicVideoQueueTargetMs != null;
+    transportMtu = null;
+    transportRttMs = null;
+    transportLostPackets = null;
+    datagramPayload = null;
+    negotiatedDatagramPayload = null;
+    quicProtocol = null;
+    quicVideoTransport = null;
+    quicReassemblyDrops = null;
+    quicReassemblyReasons = null;
+    quicReassemblyFrame = null;
+    quicReassemblyTiming = null;
+    quicKeyframeRequests = null;
+    quicKeyframeBarrier = null;
+    quicReceiverRecovery = null;
+    quicSenderRecovery = null;
+    quicSenderAdmission = null;
+    quicSenderFrame = null;
+    quicSenderPercentiles = null;
+    quicSenderSpace = null;
+    quicDisposableDrops = null;
+    quicVideoQueueTargetMs = null;
+    return hadMetrics;
+  }
+
   String? get codecLabel {
     final codec = codecFormat;
     if ((codec == 'H264' || codec == 'H265') &&
@@ -4726,30 +4781,55 @@ class QualityMonitorData {
 }
 
 class QualityMonitorModel with ChangeNotifier {
-  WeakReference<FFI> parent;
+  WeakReference<FFI>? parent;
 
   QualityMonitorModel(this.parent);
+  QualityMonitorModel.detached() : parent = null {
+    _show = true;
+    showListenable.value = true;
+  }
   var _show = false;
   final showListenable = ValueNotifier<bool>(false);
   var _position = kQualityMonitorPositionTopRight;
   var _details = kQualityMonitorDetailsBasic;
   Offset? _floatingPosition;
+  Size? _floatingSize;
   Timer? _floatingPositionStoreTimer;
+  Timer? _floatingSizeStoreTimer;
   SessionID? _sessionId;
-  final _data = QualityMonitorData();
+  var _data = QualityMonitorData();
 
   bool get show => _show;
   String get position => _position;
   String get details => _details;
   bool get extendedDetails => _details == kQualityMonitorDetailsExtended;
   Offset? get floatingPosition => _floatingPosition;
+  Size? get floatingSize => _floatingSize;
   QualityMonitorData get data => _data;
+
+  void applyDetachedSnapshot({
+    required String details,
+    required QualityMonitorData data,
+  }) {
+    _show = true;
+    if (!showListenable.value) {
+      showListenable.value = true;
+    }
+    _position = kQualityMonitorPositionDetached;
+    _details = normalizeQualityMonitorDetails(details);
+    _data = data;
+    notifyListeners();
+  }
 
   Future<void> setDetails(String value) async {
     final details = normalizeQualityMonitorDetails(value);
     if (_details == details) return;
-    final sessionId = parent.target?.sessionId;
-    if (sessionId == null) return;
+    final sessionId = parent?.target?.sessionId;
+    if (sessionId == null) {
+      _details = details;
+      notifyListeners();
+      return;
+    }
     _details = details;
     notifyListeners();
     await bind.sessionPeerOption(
@@ -4780,7 +4860,7 @@ class QualityMonitorModel with ChangeNotifier {
   }
 
   String? _hostVersion() {
-    final value = parent.target?.ffiModel.pi.fullVersion;
+    final value = parent?.target?.ffiModel.pi.fullVersion;
     return value == null || value.isEmpty ? null : value;
   }
 
@@ -4794,27 +4874,7 @@ class QualityMonitorModel with ChangeNotifier {
     _data.codecFormat = null;
     _data.chroma = null;
     _data.connectionType = null;
-    _data.transportMtu = null;
-    _data.transportRttMs = null;
-    _data.transportLostPackets = null;
-    _data.datagramPayload = null;
-    _data.negotiatedDatagramPayload = null;
-    _data.quicProtocol = null;
-    _data.quicVideoTransport = null;
-    _data.quicReassemblyDrops = null;
-    _data.quicReassemblyReasons = null;
-    _data.quicReassemblyFrame = null;
-    _data.quicReassemblyTiming = null;
-    _data.quicKeyframeRequests = null;
-    _data.quicKeyframeBarrier = null;
-    _data.quicReceiverRecovery = null;
-    _data.quicSenderRecovery = null;
-    _data.quicSenderAdmission = null;
-    _data.quicSenderFrame = null;
-    _data.quicSenderPercentiles = null;
-    _data.quicSenderSpace = null;
-    _data.quicDisposableDrops = null;
-    _data.quicVideoQueueTargetMs = null;
+    _data.clearQuicTransportMetrics();
     _data.hostVersion = null;
     _data.clientVersion = null;
     _data.decoder = null;
@@ -4854,7 +4914,10 @@ class QualityMonitorModel with ChangeNotifier {
     final value = streamType?.toString();
     final connectionType = value == null || value.isEmpty ? null : value;
     final directLabel = _directLabel(direct);
-    if (_data.connectionType == connectionType && _data.direct == directLabel) {
+    final transportReset = _data.clearQuicTransportMetrics();
+    if (_data.connectionType == connectionType &&
+        _data.direct == directLabel &&
+        !transportReset) {
       return;
     }
     _data.connectionType = connectionType;
@@ -4877,7 +4940,7 @@ class QualityMonitorModel with ChangeNotifier {
   }
 
   void updateFloatingPosition(Offset position, {bool persist = true}) {
-    final sessionId = parent.target?.sessionId;
+    final sessionId = parent?.target?.sessionId;
     if (sessionId == null) return;
     final rounded =
         Offset(position.dx.roundToDouble(), position.dy.roundToDouble());
@@ -4899,13 +4962,51 @@ class QualityMonitorModel with ChangeNotifier {
   Future<void> commitFloatingPosition() async {
     _floatingPositionStoreTimer?.cancel();
     _floatingPositionStoreTimer = null;
-    final sessionId = parent.target?.sessionId;
+    final sessionId = parent?.target?.sessionId;
     final position = _floatingPosition;
     if (sessionId == null || position == null) return;
     await bind.sessionPeerOption(
         sessionId: sessionId,
         name: kOptionQualityMonitorFloatingPosition,
         value: _formatFloatingPosition(position));
+  }
+
+  void updateFloatingSize(Size size, {bool persist = true}) {
+    final sessionId = parent?.target?.sessionId;
+    if (sessionId == null ||
+        !size.width.isFinite ||
+        !size.height.isFinite ||
+        size.width <= 0 ||
+        size.height <= 0) {
+      return;
+    }
+    final rounded =
+        Size(size.width.roundToDouble(), size.height.roundToDouble());
+    if (_floatingSize != rounded) {
+      _floatingSize = rounded;
+      notifyListeners();
+    }
+    if (!persist) return;
+    _floatingSizeStoreTimer?.cancel();
+    _floatingSizeStoreTimer =
+        Timer(const Duration(milliseconds: 300), () {
+      bind.sessionPeerOption(
+          sessionId: sessionId,
+          name: kOptionQualityMonitorFloatingSize,
+          value: _formatFloatingSize(rounded));
+    });
+  }
+
+  Future<void> commitFloatingSize() async {
+    _floatingSizeStoreTimer?.cancel();
+    _floatingSizeStoreTimer = null;
+    final sessionId = parent?.target?.sessionId;
+    final size = _floatingSize;
+    if (sessionId == null || size == null) return;
+    await bind.sessionPeerOption(
+        sessionId: sessionId,
+        name: kOptionQualityMonitorFloatingSize,
+        value: _formatFloatingSize(size));
   }
 
   checkShowQualityMonitor(SessionID sessionId) async {
@@ -4926,6 +5027,9 @@ class QualityMonitorModel with ChangeNotifier {
                 sessionId: sessionId,
                 arg: kOptionQualityMonitorFloatingPosition) ??
             '');
+    final floatingSize = _parseFloatingSize(await bind.sessionGetOption(
+            sessionId: sessionId, arg: kOptionQualityMonitorFloatingSize) ??
+        '');
     final hostVersion = _hostVersion();
     final clientVersion = await _clientVersion();
     final showChanged = _show != show;
@@ -4933,6 +5037,7 @@ class QualityMonitorModel with ChangeNotifier {
         _position != position ||
         _details != details ||
         _floatingPosition != floatingPosition ||
+        _floatingSize != floatingSize ||
         _data.hostVersion != hostVersion ||
         _data.clientVersion != clientVersion ||
         dataReset) {
@@ -4943,6 +5048,7 @@ class QualityMonitorModel with ChangeNotifier {
       _position = position;
       _details = details;
       _floatingPosition = floatingPosition;
+      _floatingSize = floatingSize;
       _data.hostVersion = hostVersion;
       _data.clientVersion = clientVersion;
       notifyListeners();
@@ -4963,11 +5069,32 @@ class QualityMonitorModel with ChangeNotifier {
     return Offset(x, y);
   }
 
+  static String _formatFloatingSize(Size size) {
+    return '${size.width.round()},${size.height.round()}';
+  }
+
+  static Size? _parseFloatingSize(String value) {
+    if (value.isEmpty) return null;
+    final parts = value.split(',');
+    if (parts.length != 2) return null;
+    final width = double.tryParse(parts[0]);
+    final height = double.tryParse(parts[1]);
+    if (width == null ||
+        height == null ||
+        !width.isFinite ||
+        !height.isFinite ||
+        width <= 0 ||
+        height <= 0) {
+      return null;
+    }
+    return Size(width, height);
+  }
+
   String? _displayMetricFromMap(String value) {
     if (value.isEmpty) return null;
     final values = jsonDecode(value) as Map<String, dynamic>;
     if (values.isEmpty) return null;
-    final pi = parent.target?.ffiModel.pi;
+    final pi = parent?.target?.ffiModel.pi;
     if (pi != null) {
       final currentDisplay = pi.currentDisplay;
       if (currentDisplay != kAllDisplayValue) {
@@ -5013,12 +5140,35 @@ class QualityMonitorModel with ChangeNotifier {
 
   updateQualityStatus(Map<String, dynamic> evt) {
     try {
+      String? eventString(String key) {
+        final value = evt[key];
+        return value is String && value.isNotEmpty ? value : null;
+      }
+
+      if (evt.containsKey('connection_type')) {
+        final connectionType = eventString('connection_type');
+        if (_data.connectionType != connectionType) {
+          _data.clearQuicTransportMetrics();
+        }
+        _data.connectionType = connectionType;
+      }
+      final isQuicTransport = _data.isQuicTransport;
+      if (!isQuicTransport) {
+        _data.clearQuicTransportMetrics();
+      }
+      void updateTransportMetric(
+          String key, void Function(String? value) update) {
+        if (evt.containsKey(key)) {
+          update(isQuicTransport ? eventString(key) : null);
+        }
+      }
+
       if (evt.containsKey('speed') && (evt['speed'] as String).isNotEmpty) {
         _data.speed = evt['speed'];
       }
       if (evt.containsKey('fps') && (evt['fps'] as String).isNotEmpty) {
         final fps = jsonDecode(evt['fps']) as Map<String, dynamic>;
-        final pi = parent.target?.ffiModel.pi;
+        final pi = parent?.target?.ffiModel.pi;
         if (pi != null) {
           final currentDisplay = pi.currentDisplay;
           if (currentDisplay != kAllDisplayValue) {
@@ -5051,94 +5201,48 @@ class QualityMonitorModel with ChangeNotifier {
       if (evt.containsKey('chroma') && (evt['chroma'] as String).isNotEmpty) {
         _data.chroma = evt['chroma'];
       }
-      if (evt.containsKey('connection_type') &&
-          (evt['connection_type'] as String).isNotEmpty) {
-        _data.connectionType = evt['connection_type'];
-      }
-      if (evt.containsKey('transport_mtu') &&
-          (evt['transport_mtu'] as String).isNotEmpty) {
-        _data.transportMtu = evt['transport_mtu'];
-      }
-      if (evt.containsKey('transport_rtt_ms') &&
-          (evt['transport_rtt_ms'] as String).isNotEmpty) {
-        _data.transportRttMs = evt['transport_rtt_ms'];
-      }
-      if (evt.containsKey('transport_lost_packets') &&
-          (evt['transport_lost_packets'] as String).isNotEmpty) {
-        _data.transportLostPackets = evt['transport_lost_packets'];
-      }
-      if (evt.containsKey('datagram_payload') &&
-          (evt['datagram_payload'] as String).isNotEmpty) {
-        _data.datagramPayload = evt['datagram_payload'];
-      }
-      if (evt.containsKey('negotiated_datagram_payload') &&
-          (evt['negotiated_datagram_payload'] as String).isNotEmpty) {
-        _data.negotiatedDatagramPayload = evt['negotiated_datagram_payload'];
-      }
-      if (evt.containsKey('quic_protocol') &&
-          (evt['quic_protocol'] as String).isNotEmpty) {
-        _data.quicProtocol = evt['quic_protocol'];
-      }
-      if (evt.containsKey('quic_video_transport') &&
-          (evt['quic_video_transport'] as String).isNotEmpty) {
-        _data.quicVideoTransport = evt['quic_video_transport'];
-      }
-      if (evt.containsKey('quic_reassembly_drops') &&
-          (evt['quic_reassembly_drops'] as String).isNotEmpty) {
-        _data.quicReassemblyDrops = evt['quic_reassembly_drops'];
-      }
-      if (evt.containsKey('quic_reassembly_reasons') &&
-          (evt['quic_reassembly_reasons'] as String).isNotEmpty) {
-        _data.quicReassemblyReasons = evt['quic_reassembly_reasons'];
-      }
-      if (evt.containsKey('quic_reassembly_frame') &&
-          (evt['quic_reassembly_frame'] as String).isNotEmpty) {
-        _data.quicReassemblyFrame = evt['quic_reassembly_frame'];
-      }
-      if (evt.containsKey('quic_reassembly_timing') &&
-          (evt['quic_reassembly_timing'] as String).isNotEmpty) {
-        _data.quicReassemblyTiming = evt['quic_reassembly_timing'];
-      }
-      if (evt.containsKey('quic_keyframe_requests') &&
-          (evt['quic_keyframe_requests'] as String).isNotEmpty) {
-        _data.quicKeyframeRequests = evt['quic_keyframe_requests'];
-      }
-      if (evt.containsKey('quic_keyframe_barrier') &&
-          (evt['quic_keyframe_barrier'] as String).isNotEmpty) {
-        _data.quicKeyframeBarrier = evt['quic_keyframe_barrier'];
-      }
-      if (evt.containsKey('quic_receiver_recovery') &&
-          (evt['quic_receiver_recovery'] as String).isNotEmpty) {
-        _data.quicReceiverRecovery = evt['quic_receiver_recovery'];
-      }
-      if (evt.containsKey('quic_sender_recovery') &&
-          (evt['quic_sender_recovery'] as String).isNotEmpty) {
-        _data.quicSenderRecovery = evt['quic_sender_recovery'];
-      }
-      if (evt.containsKey('quic_sender_admission') &&
-          (evt['quic_sender_admission'] as String).isNotEmpty) {
-        _data.quicSenderAdmission = evt['quic_sender_admission'];
-      }
-      if (evt.containsKey('quic_sender_frame') &&
-          (evt['quic_sender_frame'] as String).isNotEmpty) {
-        _data.quicSenderFrame = evt['quic_sender_frame'];
-      }
-      if (evt.containsKey('quic_sender_percentiles') &&
-          (evt['quic_sender_percentiles'] as String).isNotEmpty) {
-        _data.quicSenderPercentiles = evt['quic_sender_percentiles'];
-      }
-      if (evt.containsKey('quic_sender_space') &&
-          (evt['quic_sender_space'] as String).isNotEmpty) {
-        _data.quicSenderSpace = evt['quic_sender_space'];
-      }
-      if (evt.containsKey('quic_disposable_drops') &&
-          (evt['quic_disposable_drops'] as String).isNotEmpty) {
-        _data.quicDisposableDrops = evt['quic_disposable_drops'];
-      }
-      if (evt.containsKey('quic_video_queue_target_ms') &&
-          (evt['quic_video_queue_target_ms'] as String).isNotEmpty) {
-        _data.quicVideoQueueTargetMs = evt['quic_video_queue_target_ms'];
-      }
+      updateTransportMetric(
+          'transport_mtu', (value) => _data.transportMtu = value);
+      updateTransportMetric(
+          'transport_rtt_ms', (value) => _data.transportRttMs = value);
+      updateTransportMetric('transport_lost_packets',
+          (value) => _data.transportLostPackets = value);
+      updateTransportMetric(
+          'datagram_payload', (value) => _data.datagramPayload = value);
+      updateTransportMetric('negotiated_datagram_payload',
+          (value) => _data.negotiatedDatagramPayload = value);
+      updateTransportMetric(
+          'quic_protocol', (value) => _data.quicProtocol = value);
+      updateTransportMetric(
+          'quic_video_transport', (value) => _data.quicVideoTransport = value);
+      updateTransportMetric('quic_reassembly_drops',
+          (value) => _data.quicReassemblyDrops = value);
+      updateTransportMetric('quic_reassembly_reasons',
+          (value) => _data.quicReassemblyReasons = value);
+      updateTransportMetric('quic_reassembly_frame',
+          (value) => _data.quicReassemblyFrame = value);
+      updateTransportMetric('quic_reassembly_timing',
+          (value) => _data.quicReassemblyTiming = value);
+      updateTransportMetric('quic_keyframe_requests',
+          (value) => _data.quicKeyframeRequests = value);
+      updateTransportMetric('quic_keyframe_barrier',
+          (value) => _data.quicKeyframeBarrier = value);
+      updateTransportMetric('quic_receiver_recovery',
+          (value) => _data.quicReceiverRecovery = value);
+      updateTransportMetric('quic_sender_recovery',
+          (value) => _data.quicSenderRecovery = value);
+      updateTransportMetric('quic_sender_admission',
+          (value) => _data.quicSenderAdmission = value);
+      updateTransportMetric(
+          'quic_sender_frame', (value) => _data.quicSenderFrame = value);
+      updateTransportMetric('quic_sender_percentiles',
+          (value) => _data.quicSenderPercentiles = value);
+      updateTransportMetric(
+          'quic_sender_space', (value) => _data.quicSenderSpace = value);
+      updateTransportMetric('quic_disposable_drops',
+          (value) => _data.quicDisposableDrops = value);
+      updateTransportMetric('quic_video_queue_target_ms',
+          (value) => _data.quicVideoQueueTargetMs = value);
       final hostVersion = _hostVersion();
       if (hostVersion != null) {
         _data.hostVersion = hostVersion;
@@ -5294,6 +5398,7 @@ class QualityMonitorModel with ChangeNotifier {
   @override
   void dispose() {
     _floatingPositionStoreTimer?.cancel();
+    _floatingSizeStoreTimer?.cancel();
     showListenable.dispose();
     super.dispose();
   }
@@ -5386,6 +5491,7 @@ class FFI {
   final Map<int, TerminalModel> _terminalModels = {};
   int _sessionEventGeneration = 0;
   int _sessionStartGeneration = 0;
+  int? _androidSessionGeneration;
 
   // Getter for terminal models
   Map<int, TerminalModel> get terminalModels => _terminalModels;
@@ -5480,6 +5586,7 @@ class FFI {
     }
 
     if (isAndroid) {
+      _androidSessionGeneration = null;
       final attached = await AndroidVpnSessionCoordinator.instance.attach(
         id,
         sessionId.toString(),
@@ -5487,6 +5594,8 @@ class FFI {
       if (!attached) {
         throw StateError('Failed to protect the outgoing Android session');
       }
+      _androidSessionGeneration =
+          AndroidVpnSessionCoordinator.instance.activeSessionGeneration;
     }
 
     final isNewPeer = tabWindowId == null;
@@ -5734,6 +5843,37 @@ class FFI {
         sessionId: sessionId, code: code, trustThisDevice: trustThisDevice);
   }
 
+  /// Clear session-scoped state while keeping the mobile page reusable.
+  Future<void> resetMobileSessionForReconnect({
+    required bool closeSession,
+  }) async {
+    ++_sessionStartGeneration;
+    ++_sessionEventGeneration;
+    closed = true;
+    chatModel.close();
+    for (final model in _terminalModels.values) {
+      model.dispose();
+    }
+    _terminalModels.clear();
+    await imageModel.update(null);
+    cursorModel.clear();
+    ffiModel.clear();
+    canvasModel.clear();
+    inputModel.setRelativeMouseMode(false);
+    inputModel.resetModifiers();
+    if (closeSession) {
+      await bind.sessionClose(sessionId: sessionId);
+    }
+    if (isAndroid) {
+      await AndroidVpnSessionCoordinator.instance.release(
+        generation: _androidSessionGeneration,
+      );
+      _androidSessionGeneration = null;
+    }
+    id = '';
+    debugPrint('mobile session reset for fresh reconnect');
+  }
+
   /// Close the remote session.
   Future<void> close(
       {bool closeSession = true, bool saveCanvasConfig = true}) async {
@@ -5767,7 +5907,10 @@ class FFI {
       await bind.sessionClose(sessionId: sessionId);
     }
     if (isAndroid) {
-      await AndroidVpnSessionCoordinator.instance.release();
+      await AndroidVpnSessionCoordinator.instance.release(
+        generation: _androidSessionGeneration,
+      );
+      _androidSessionGeneration = null;
     }
     debugPrint('model $id closed');
     id = '';

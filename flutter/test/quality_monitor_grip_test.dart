@@ -5,22 +5,183 @@ import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/widgets/overlay.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/generated_bridge.dart';
+import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 
 class _TestRustadminImpl implements Rustadmin {
+  final options = <String, String>{};
+  final writes = <String, String>{};
+
   @override
   dynamic noSuchMethod(Invocation invocation) {
     if (invocation.memberName == #translate) {
       return invocation.namedArguments[#name] as String;
+    }
+    if (invocation.memberName == #mainGetUserDefaultOption ||
+        invocation.memberName == #mainGetLocalOption ||
+        invocation.memberName == #getLocalFlutterOption ||
+        invocation.memberName == #mainSupportedInputSource ||
+        invocation.memberName == #mainGetDisplays) {
+      return '';
+    }
+    if (invocation.memberName == #isDisableAb ||
+        invocation.memberName == #isDisableAccount ||
+        invocation.memberName == #isDisableGroupPanel ||
+        invocation.memberName == #mainCurrentIsWayland ||
+        invocation.memberName == #mainHasFileClipboard ||
+        invocation.memberName == #sessionGetToggleOptionSync) {
+      return false;
+    }
+    if (invocation.memberName == #versionToNumber ||
+        invocation.memberName == #peerGetSessionsCount) {
+      return 0;
+    }
+    if (invocation.memberName == #mainGetVersion) {
+      return Future<String>.value('2.0.5 rev test');
+    }
+    if (invocation.memberName == #sessionGetToggleOption) {
+      return Future<bool?>.value(true);
+    }
+    if (invocation.memberName == #sessionGetOption) {
+      final name = invocation.namedArguments[#arg] as String;
+      return Future<String?>.value(options[name] ?? '');
+    }
+    if (invocation.memberName == #sessionPeerOption) {
+      writes[invocation.namedArguments[#name] as String] =
+          invocation.namedArguments[#value] as String;
+      return Future<void>.value();
+    }
+    if (invocation.memberName == #mainSetOption ||
+        invocation.memberName == #mainSetLocalOption ||
+        invocation.memberName == #setLocalFlutterOption ||
+        invocation.memberName == #mainInitInputSource) {
+      return Future<void>.value();
     }
     return super.noSuchMethod(invocation);
   }
 }
 
 void main() {
+  late _TestRustadminImpl testImpl;
+
   setUpAll(() {
     isTest = true;
-    platformFFI.initForTest(_TestRustadminImpl());
+    testImpl = _TestRustadminImpl();
+    platformFFI.initForTest(testImpl);
+  });
+
+  setUp(() {
+    testImpl.options.clear();
+    testImpl.writes.clear();
+  });
+
+  Future<FFI> createMonitorFfi(
+      {String details = kQualityMonitorDetailsExtended,
+      String size = '',
+      String floatingPosition = ''}) async {
+    testImpl.options[kOptionQualityMonitorDetails] = details;
+    testImpl.options[kOptionQualityMonitorFloatingSize] = size;
+    testImpl.options[kOptionQualityMonitorFloatingPosition] = floatingPosition;
+    testImpl.options[kOptionQualityMonitorPosition] =
+        kQualityMonitorPositionTopRight;
+    final ffi = FFI(null)..id = 'quality-monitor-test-peer';
+    await ffi.qualityMonitorModel.checkShowQualityMonitor(ffi.sessionId);
+    return ffi;
+  }
+
+  Widget monitorApp(FFI ffi, {Size viewport = const Size(600, 500)}) =>
+      MaterialApp(
+          home: Scaffold(
+              body: Align(
+                  alignment: Alignment.topLeft,
+                  child: SizedBox(
+                      width: viewport.width,
+                      height: viewport.height,
+                      child: Stack(children: [
+                        PositionedQualityMonitor(
+                            qualityMonitorModel: ffi.qualityMonitorModel)
+                      ])))));
+
+  testWidgets('advanced quality monitor resizes, scrolls, and persists size',
+      (tester) async {
+    final ffi = await createMonitorFfi(size: '240,420');
+    await tester.pumpWidget(monitorApp(ffi));
+    await tester.pump();
+
+    final window = find.byKey(const Key('quality-monitor-window'));
+    final handle = find.byKey(const Key('quality-monitor-resize-handle'));
+    expect(tester.getSize(window), const Size(240, 420));
+    expect(handle, findsOneWidget);
+
+    await tester.drag(handle, const Offset(-50, -250));
+    await tester.pump();
+    expect(tester.getSize(window), const Size(190, 170));
+    expect(testImpl.writes[kOptionQualityMonitorFloatingSize], '190,170');
+
+    final scrollable = find.descendant(
+        of: window, matching: find.byType(Scrollable));
+    final scrollState = tester.state<ScrollableState>(scrollable);
+    expect(scrollState.position.pixels, 0);
+    await tester.drag(scrollable, const Offset(0, -160));
+    await tester.pump();
+    final scrolledOffset = scrollState.position.pixels;
+    expect(scrolledOffset, greaterThan(0));
+
+    ffi.qualityMonitorModel.updateConnectionInfo('QUIC/UDP', true);
+    await tester.pump();
+    expect(scrollState.position.pixels, scrolledOffset);
+  });
+
+  testWidgets('advanced quality monitor clamps persisted geometry to viewport',
+      (tester) async {
+    final ffi = await createMonitorFfi(
+        size: '900,900', floatingPosition: '500,500');
+    await tester.pumpWidget(
+        monitorApp(ffi, viewport: const Size(300, 220)));
+    await tester.pump();
+
+    final rect =
+        tester.getRect(find.byKey(const Key('quality-monitor-window')));
+    expect(rect.width, lessThanOrEqualTo(280));
+    expect(rect.height, lessThanOrEqualTo(200));
+    expect(rect.left, greaterThanOrEqualTo(0));
+    expect(rect.top, greaterThanOrEqualTo(0));
+    expect(rect.right, lessThanOrEqualTo(300));
+    expect(rect.bottom, lessThanOrEqualTo(220));
+  });
+
+  testWidgets('basic quality monitor remains fixed and non-resizable',
+      (tester) async {
+    final ffi = await createMonitorFfi(
+        details: kQualityMonitorDetailsBasic, size: '190,170');
+    await tester.pumpWidget(monitorApp(ffi));
+    await tester.pump();
+
+    expect(find.byKey(const Key('quality-monitor-resize-handle')), findsNothing);
+    expect(
+        find.descendant(
+            of: find.byKey(const Key('quality-monitor-window')),
+            matching: find.byType(Scrollable)),
+        findsNothing);
+  });
+
+  testWidgets('mobile advanced quality monitor keeps a usable resize target',
+      (tester) async {
+    final previousIsMobile = isMobile;
+    isMobile = true;
+    addTearDown(() => isMobile = previousIsMobile);
+    final ffi = await createMonitorFfi(size: '196,420');
+    await tester
+        .pumpWidget(monitorApp(ffi, viewport: const Size(320, 220)));
+    await tester.pump();
+
+    final window = find.byKey(const Key('quality-monitor-window'));
+    final handle = find.byKey(const Key('quality-monitor-resize-handle'));
+    expect(tester.getSize(window).height, lessThanOrEqualTo(200));
+    expect(tester.getSize(handle), const Size(28, 28));
+    expect(
+        find.descendant(of: window, matching: find.byType(Scrollable)),
+        findsOneWidget);
   });
 
   testWidgets('quality monitor header switches details from its context menu',
@@ -166,6 +327,40 @@ void main() {
     await tester.pump();
 
     expect(selected, kQualityMonitorDetailsExtended);
+    expect(backgroundDownCount, 0);
+  });
+
+  testWidgets('quality monitor resize handle blocks pointer passthrough',
+      (tester) async {
+    var backgroundDownCount = 0;
+    var resizeUpdateCount = 0;
+
+    await tester.pumpWidget(MaterialApp(
+      home: Stack(
+        children: [
+          Positioned.fill(
+            child: Listener(
+              behavior: HitTestBehavior.opaque,
+              onPointerDown: (_) => backgroundDownCount++,
+              child: const SizedBox.expand(),
+            ),
+          ),
+          Positioned(
+            left: 20,
+            top: 20,
+            child: QualityMonitorResizeHandle(
+              onPanUpdate: (_) => resizeUpdateCount++,
+            ),
+          ),
+        ],
+      ),
+    ));
+
+    final handle = find.byKey(const Key('quality-monitor-resize-handle'));
+    await tester.drag(handle, const Offset(20, 20));
+    await tester.pump();
+
+    expect(resizeUpdateCount, greaterThan(0));
     expect(backgroundDownCount, 0);
   });
 

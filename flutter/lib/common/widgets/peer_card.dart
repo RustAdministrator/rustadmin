@@ -1814,6 +1814,7 @@ Future<void> _showConnectionPropertiesDialog(String id) async {
                           kQualityMonitorPositionTopLeft,
                           kQualityMonitorPositionBottomRight,
                           kQualityMonitorPositionBottomLeft,
+                          if (isDesktop) kQualityMonitorPositionDetached,
                         ]
                             .map((value) => _stringMenuItem(
                                 value, qualityMonitorPositionLabel(value)))

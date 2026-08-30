@@ -68,6 +68,7 @@ const String kAppTypeDesktopFileTransfer = "file transfer";
 const String kAppTypeDesktopViewCamera = "view camera";
 const String kAppTypeDesktopPortForward = "port forward";
 const String kAppTypeDesktopTerminal = "terminal";
+const String kAppTypeDesktopQualityMonitor = "quality monitor";
 
 const String kWindowMainWindowOnTop = "main_window_on_top";
 const String kWindowRefreshCurrentUser = "refresh_current_user";
@@ -99,6 +100,7 @@ const String kWindowEventMoveTabToNewWindow = "move_tab_to_new_window";
 const String kWindowEventMoveTabToMainWindow = "move_tab_to_main_window";
 const String kWindowEventGetCachedSessionData = "get_cached_session_data";
 const String kWindowEventOpenMonitorSession = "open_monitor_session";
+const String kWindowEventQualityMonitorSnapshot = "quality_monitor_snapshot";
 
 const String kOptionViewStyle = "view_style";
 const String kOptionScrollStyle = "scroll_style";
@@ -191,13 +193,21 @@ const String kOptionCodecPreference = "codec-preference";
 const String kOptionQualityMonitorPosition = "quality-monitor-position";
 const String kOptionQualityMonitorFloatingPosition =
     "quality-monitor-floating-position";
+const String kOptionQualityMonitorFloatingSize =
+    "quality-monitor-floating-size";
 const String kOptionQualityMonitorDetails = "quality-monitor-details";
 const String kQualityMonitorPositionTopRight = "top-right";
 const String kQualityMonitorPositionTopLeft = "top-left";
 const String kQualityMonitorPositionBottomRight = "bottom-right";
 const String kQualityMonitorPositionBottomLeft = "bottom-left";
+const String kQualityMonitorPositionDetached = "detached-window";
 const String kQualityMonitorDetailsBasic = "basic";
 const String kQualityMonitorDetailsExtended = "extended";
+const String kOptionQualityMonitorInactiveOpacityPercent =
+    "quality-monitor-inactive-opacity-percent";
+const String kOptionQualityMonitorDimDelayMs = "quality-monitor-dim-delay-ms";
+const String kOptionQualityMonitorDimDurationMs =
+    "quality-monitor-dim-duration-ms";
 const String kOptionRemoteMenubarDragLeft = "remote-menubar-drag-left";
 const String kOptionRemoteMenubarDragRight = "remote-menubar-drag-right";
 const String kOptionRemoteToolbarRevealZonePx = "remote-toolbar-reveal-zone-px";
@@ -214,6 +224,8 @@ const String kOptionMobileRemoteToolbarPlacement =
     "mobile-remote-toolbar-placement";
 const String kOptionMobileCursorInertiaDurationMs =
     "mobile-cursor-inertia-duration-ms";
+const String kOptionMobilePhysicalKeyInput = "mobile-physical-key-input";
+const String kOptionMobileSettingsLayout = "mobile-settings-layout";
 const int kDefaultRemoteToolbarRevealZonePx = 36;
 const int kMinRemoteToolbarRevealZonePx = 8;
 const int kMaxRemoteToolbarRevealZonePx = 160;
@@ -230,6 +242,16 @@ const int kDefaultRemoteToolbarPinnedDimDurationMs = 3000;
 const int kMinRemoteToolbarPinnedDimDurationMs = 0;
 const int kMaxRemoteToolbarPinnedDimDurationMs = 10000;
 
+const int kDefaultQualityMonitorInactiveOpacityPercent = 100;
+const int kMinQualityMonitorInactiveOpacityPercent = 10;
+const int kMaxQualityMonitorInactiveOpacityPercent = 100;
+const int kDefaultQualityMonitorDimDelayMs = 1000;
+const int kMinQualityMonitorDimDelayMs = 0;
+const int kMaxQualityMonitorDimDelayMs = 5000;
+const int kDefaultQualityMonitorDimDurationMs = 3000;
+const int kMinQualityMonitorDimDurationMs = 0;
+const int kMaxQualityMonitorDimDurationMs = 10000;
+
 const int kDefaultMobileRemoteToolbarOverlapOpacityPercent = 20;
 const int kMinMobileRemoteToolbarOverlapOpacityPercent = 10;
 const int kMaxMobileRemoteToolbarOverlapOpacityPercent = 100;
@@ -243,6 +265,8 @@ String normalizeQualityMonitorPosition(String value) {
     case kQualityMonitorPositionBottomRight:
     case kQualityMonitorPositionBottomLeft:
       return value;
+    case kQualityMonitorPositionDetached:
+      return isDesktop ? value : kQualityMonitorPositionTopRight;
     case kQualityMonitorPositionTopRight:
     default:
       return kQualityMonitorPositionTopRight;
@@ -257,6 +281,8 @@ String qualityMonitorPositionLabel(String value) {
       return 'Bottom right';
     case kQualityMonitorPositionBottomLeft:
       return 'Bottom left';
+    case kQualityMonitorPositionDetached:
+      return 'Open in new window';
     case kQualityMonitorPositionTopRight:
     default:
       return 'Top right';

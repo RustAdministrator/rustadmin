@@ -24,6 +24,7 @@ import '../widgets/remote_toolbar.dart';
 import '../widgets/kb_layout_type_chooser.dart';
 import '../widgets/tabbar_widget.dart';
 import '../session_tab.dart';
+import 'quality_monitor_window.dart';
 
 import 'package:flutter_hbb/native/custom_cursor.dart'
     if (dart.library.html) 'package:flutter_hbb/web/custom_cursor.dart';
@@ -141,6 +142,7 @@ class _RemotePageState extends State<RemotePage>
   DateTime? _lifecycleSuspendedAt;
   bool _staleSessionRestartInProgress = false;
   bool _disposed = false;
+  DesktopQualityMonitorWindowController? _qualityMonitorWindowController;
   int _keyboardFocusGeneration = 0;
   String keyboardMode = "legacy";
   bool _isWindowBlur = false;
@@ -319,6 +321,12 @@ class _RemotePageState extends State<RemotePage>
     _ffi.ffiModel.updateEventListener(sessionId, widget.id);
     if (!isWeb) bind.pluginSyncUi(syncTo: kAppTypeDesktopRemote);
     _ffi.qualityMonitorModel.checkShowQualityMonitor(sessionId);
+    _qualityMonitorWindowController = DesktopQualityMonitorWindowController(
+      model: _ffi.qualityMonitorModel,
+      peerId: widget.id,
+      sessionId: sessionId.toString(),
+      sourceWindowId: widget.windowHost?.windowId ?? kMainWindowId,
+    )..start();
     _ffi.dialogManager.loadMobileActionsOverlayVisible();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // Session option should be set after models.dart/FFI.start
@@ -613,6 +621,8 @@ class _RemotePageState extends State<RemotePage>
   @override
   Future<void> dispose() async {
     _disposed = true;
+    await _qualityMonitorWindowController?.dispose();
+    _qualityMonitorWindowController = null;
     _keyboardFocusGeneration += 1;
     final closeSession =
         closeSessionOnDispose.remove(_sessionRegistrationKey) ?? true;

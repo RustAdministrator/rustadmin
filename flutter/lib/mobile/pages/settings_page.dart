@@ -12,6 +12,7 @@ import 'package:settings_ui/settings_ui.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../common.dart';
+import '../../common/quality_monitor_settings.dart';
 import '../../common/transport_mode.dart';
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/login.dart';
@@ -19,6 +20,7 @@ import '../../consts.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../widgets/dialog.dart';
+import '../widgets/mobile_settings_layout.dart';
 import '../widgets/remote_session_controls.dart';
 import 'home_page.dart';
 import 'scan_page.dart';
@@ -36,11 +38,10 @@ class SettingsPage extends StatefulWidget implements PageShape {
   @override
   State<SettingsPage> createState() => _SettingsState();
 }
-enum KeepScreenOn {
-  never,
-  duringControlled,
-  serviceOn,
-}
+
+enum KeepScreenOn { never, duringControlled, serviceOn }
+
+enum _MobileSettingsCategory { account, general, security, network, about }
 
 String _keepScreenOnToOption(KeepScreenOn value) {
   switch (value) {
@@ -108,49 +109,76 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   var _preventSleepWhileConnected = true;
   var _allowClipboardDebug = false;
   var _diagnosticLogging = true;
+  late MobileSettingsLayout _settingsLayout;
+  _MobileSettingsCategory? _selectedSettingsCategory;
 
   _SettingsState() {
+    _settingsLayout = normalizeMobileSettingsLayout(
+      bind.mainGetLocalOption(key: kOptionMobileSettingsLayout),
+      fallback: isAndroid
+          ? MobileSettingsLayout.modern
+          : MobileSettingsLayout.classic,
+    );
     _enableAbr = option2bool(
-        kOptionEnableAbr, bind.mainGetOptionSync(key: kOptionEnableAbr));
+      kOptionEnableAbr,
+      bind.mainGetOptionSync(key: kOptionEnableAbr),
+    );
     _lanDiscoveryMode = normalizeLanDiscoveryMode(
       bind.mainGetOptionSync(key: kOptionLanDiscoveryMode),
       legacyOptionValue: bind.mainGetOptionSync(key: kOptionEnableLanDiscovery),
     );
     _onlyWhiteList = whitelistNotEmpty();
     _enableDirectIPAccess = option2bool(
-        kOptionDirectServer, bind.mainGetOptionSync(key: kOptionDirectServer));
+      kOptionDirectServer,
+      bind.mainGetOptionSync(key: kOptionDirectServer),
+    );
     _directAccessPairingPassphraseSet = bind
         .mainGetOptionSync(key: kOptionDirectAccessPairingPassphrase)
         .isNotEmpty;
-    _rememberPairedViewers =
-        mainGetBoolOptionSync(kOptionRememberPairedViewers);
-    _peerPairingPassphraseSet =
-        bind.mainGetOptionSync(key: kOptionPeerPairingPassphrase).isNotEmpty;
-    _enableRecordSession = option2bool(kOptionEnableRecordSession,
-        bind.mainGetOptionSync(key: kOptionEnableRecordSession));
-    _enableHardwareCodec = option2bool(kOptionEnableHwcodec,
-        bind.mainGetOptionSync(key: kOptionEnableHwcodec));
+    _rememberPairedViewers = mainGetBoolOptionSync(
+      kOptionRememberPairedViewers,
+    );
+    _peerPairingPassphraseSet = bind
+        .mainGetOptionSync(key: kOptionPeerPairingPassphrase)
+        .isNotEmpty;
+    _enableRecordSession = option2bool(
+      kOptionEnableRecordSession,
+      bind.mainGetOptionSync(key: kOptionEnableRecordSession),
+    );
+    _enableHardwareCodec = option2bool(
+      kOptionEnableHwcodec,
+      bind.mainGetOptionSync(key: kOptionEnableHwcodec),
+    );
     _useTextureRender = bind.mainGetUseTextureRender();
     _allowWebSocket = mainGetBoolOptionSync(kOptionAllowWebSocket);
     _allowIdRelayServer = mainGetBoolOptionSync(kOptionAllowIdRelayServer);
-    _allowInsecureTlsFallback =
-        mainGetBoolOptionSync(kOptionAllowInsecureTLSFallback);
-    _allowUnverifiedPeerTrust =
-        mainGetBoolOptionSync(kOptionAllowUnverifiedPeerTrust);
+    _allowInsecureTlsFallback = mainGetBoolOptionSync(
+      kOptionAllowInsecureTLSFallback,
+    );
+    _allowUnverifiedPeerTrust = mainGetBoolOptionSync(
+      kOptionAllowUnverifiedPeerTrust,
+    );
     _transportMode = remoteTransportPreferenceFromOptions(
       remoteTransport: bind.mainGetOptionSync(key: kOptionRemoteTransport),
       disableUdp: bind.mainGetOptionSync(key: kOptionDisableUdp),
     );
-    _autoRecordIncomingSession = option2bool(kOptionAllowAutoRecordIncoming,
-        bind.mainGetOptionSync(key: kOptionAllowAutoRecordIncoming));
-    _autoRecordOutgoingSession = option2bool(kOptionAllowAutoRecordOutgoing,
-        bind.mainGetLocalOption(key: kOptionAllowAutoRecordOutgoing));
+    _autoRecordIncomingSession = option2bool(
+      kOptionAllowAutoRecordIncoming,
+      bind.mainGetOptionSync(key: kOptionAllowAutoRecordIncoming),
+    );
+    _autoRecordOutgoingSession = option2bool(
+      kOptionAllowAutoRecordOutgoing,
+      bind.mainGetLocalOption(key: kOptionAllowAutoRecordOutgoing),
+    );
     _localIP = bind.mainGetOptionSync(key: 'local-ip-addr');
     _directAccessPort = bind.mainGetOptionSync(key: kOptionDirectAccessPort);
-    _allowAutoDisconnect = option2bool(kOptionAllowAutoDisconnect,
-        bind.mainGetOptionSync(key: kOptionAllowAutoDisconnect));
-    _autoDisconnectTimeout =
-        bind.mainGetOptionSync(key: kOptionAutoDisconnectTimeout);
+    _allowAutoDisconnect = option2bool(
+      kOptionAllowAutoDisconnect,
+      bind.mainGetOptionSync(key: kOptionAllowAutoDisconnect),
+    );
+    _autoDisconnectTimeout = bind.mainGetOptionSync(
+      key: kOptionAutoDisconnectTimeout,
+    );
     _hideServer =
         bind.mainGetBuildinOption(key: kOptionHideServerSetting) == 'Y';
     _hideProxy = bind.mainGetBuildinOption(key: kOptionHideProxySetting) == 'Y';
@@ -158,21 +186,48 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
         bind.mainGetBuildinOption(key: kOptionHideNetworkSetting) == 'Y';
     _hideWebSocket =
         bind.mainGetBuildinOption(key: kOptionHideWebSocketSetting) == 'Y' ||
-            isWeb;
+        isWeb;
     _enableTrustedDevices = mainGetBoolOptionSync(kOptionEnableTrustedDevices);
     _enableUdpPunch = mainGetLocalBoolOptionSync(kOptionEnableUdpPunch);
     _enableIpv6Punch = mainGetLocalBoolOptionSync(kOptionEnableIpv6Punch);
-    _allowAskForNoteAtEndOfConnection =
-        mainGetLocalBoolOptionSync(kOptionAllowAskForNoteAtEndOfConnection);
-    _preventSleepWhileConnected =
-        mainGetLocalBoolOptionSync(kOptionKeepAwakeDuringOutgoingSessions);
-    _allowClipboardDebug =
-        mainGetLocalBoolOptionSync(kOptionAllowClipboardDebug);
-    _showTerminalExtraKeys =
-        mainGetLocalBoolOptionSync(kOptionEnableShowTerminalExtraKeys);
+    _allowAskForNoteAtEndOfConnection = mainGetLocalBoolOptionSync(
+      kOptionAllowAskForNoteAtEndOfConnection,
+    );
+    _preventSleepWhileConnected = mainGetLocalBoolOptionSync(
+      kOptionKeepAwakeDuringOutgoingSessions,
+    );
+    _allowClipboardDebug = mainGetLocalBoolOptionSync(
+      kOptionAllowClipboardDebug,
+    );
+    _showTerminalExtraKeys = mainGetLocalBoolOptionSync(
+      kOptionEnableShowTerminalExtraKeys,
+    );
     _diagnosticLogging = option2bool(
-        kOptionEnableAndroidDiagnosticLogging,
-        bind.mainGetLocalOption(key: kOptionEnableAndroidDiagnosticLogging));
+      kOptionEnableAndroidDiagnosticLogging,
+      bind.mainGetLocalOption(key: kOptionEnableAndroidDiagnosticLogging),
+    );
+  }
+
+  Future<void> _setSettingsLayout(MobileSettingsLayout layout) async {
+    await bind.mainSetLocalOption(
+      key: kOptionMobileSettingsLayout,
+      value: mobileSettingsLayoutOption(layout),
+    );
+    if (!mounted) return;
+    setState(() {
+      _settingsLayout = layout;
+      _selectedSettingsCategory = null;
+    });
+  }
+
+  Widget _settingsLayoutSelector() {
+    return MobileSettingsLayoutSelector(
+      layout: _settingsLayout,
+      title: translate('Settings layout'),
+      modernLabel: translate('Modern'),
+      classicLabel: translate('Classic'),
+      onChanged: (layout) => unawaited(_setSettingsLayout(layout)),
+    );
   }
 
   @override
@@ -194,8 +249,9 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
       }
 
       // start on boot depends on ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS and SYSTEM_ALERT_WINDOW
-      var enableStartOnBoot =
-          await gFFI.invokeMethod(AndroidChannel.kGetStartOnBootOpt);
+      var enableStartOnBoot = await gFFI.invokeMethod(
+        AndroidChannel.kGetStartOnBootOpt,
+      );
       if (enableStartOnBoot) {
         if (!await canStartOnBoot()) {
           enableStartOnBoot = false;
@@ -208,8 +264,9 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
         _enableStartOnBoot = enableStartOnBoot;
       }
 
-      var checkUpdateOnStartup =
-          mainGetLocalBoolOptionSync(kOptionEnableCheckUpdate);
+      var checkUpdateOnStartup = mainGetLocalBoolOptionSync(
+        kOptionEnableCheckUpdate,
+      );
       if (checkUpdateOnStartup != _checkUpdateOnStartup) {
         update = true;
         _checkUpdateOnStartup = checkUpdateOnStartup;
@@ -217,7 +274,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
 
       var floatingWindowDisabled =
           bind.mainGetLocalOption(key: kOptionDisableFloatingWindow) == "Y" ||
-              !await AndroidPermissionManager.check(kSystemAlertWindow);
+          !await AndroidPermissionManager.check(kSystemAlertWindow);
       if (floatingWindowDisabled != _floatingWindowDisabled) {
         update = true;
         _floatingWindowDisabled = floatingWindowDisabled;
@@ -226,7 +283,8 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
       final keepScreenOn = _floatingWindowDisabled
           ? KeepScreenOn.never
           : optionToKeepScreenOn(
-              bind.mainGetLocalOption(key: kOptionKeepScreenOn));
+              bind.mainGetLocalOption(key: kOptionKeepScreenOn),
+            );
       if (keepScreenOn != _keepScreenOn) {
         update = true;
         _keepScreenOn = keepScreenOn;
@@ -277,7 +335,8 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
 
   Future<bool> checkAndUpdateIgnoreBatteryStatus() async {
     final res = await AndroidPermissionManager.check(
-        kRequestIgnoreBatteryOptimizations);
+      kRequestIgnoreBatteryOptimizations,
+    );
     if (_ignoreBatteryOpt != res) {
       _ignoreBatteryOpt = res;
       return true;
@@ -290,7 +349,8 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
     if (!await canStartOnBoot() && _enableStartOnBoot) {
       _enableStartOnBoot = false;
       debugPrint(
-          "checkAndUpdateStartOnBoot and set _enableStartOnBoot -> false");
+        "checkAndUpdateStartOnBoot and set _enableStartOnBoot -> false",
+      );
       gFFI.invokeMethod(AndroidChannel.kSetStartOnBootOpt, false);
       return true;
     } else {
@@ -304,19 +364,15 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
     final outgoingOnly = bind.isOutgoingOnly();
     final incomingOnly = bind.isIncomingOnly();
     final customClientSection = CustomSettingsSection(
-        child: Column(
-      children: [
-        if (bind.isCustomClient())
-          Align(
-            alignment: Alignment.center,
-            child: loadPowered(context),
-          ),
-        Align(
-          alignment: Alignment.center,
-          child: loadLogo(),
-        )
-      ],
-    ));
+      key: const ValueKey('mobile-settings-section-branding'),
+      child: Column(
+        children: [
+          if (bind.isCustomClient())
+            Align(alignment: Alignment.center, child: loadPowered(context)),
+          Align(alignment: Alignment.center, child: loadLogo()),
+        ],
+      ),
+    );
     final List<AbstractSettingsTile> enhancementsTiles = [];
     final enable2fa = bind.mainHasValid2FaSync();
     final List<AbstractSettingsTile> tfaTiles = [
@@ -330,9 +386,12 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
 
           if (v == false) {
             CommonConfirmDialog(
-                gFFI.dialogManager, translate('cancel-2fa-confirm-tip'), () {
-              change2fa(callback: update);
-            });
+              gFFI.dialogManager,
+              translate('cancel-2fa-confirm-tip'),
+              () {
+                change2fa(callback: update);
+              },
+            );
           } else {
             change2fa(callback: update);
           }
@@ -349,9 +408,12 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
 
             if (v == false) {
               CommonConfirmDialog(
-                  gFFI.dialogManager, translate('cancel-bot-confirm-tip'), () {
-                changeBot(callback: update);
-              });
+                gFFI.dialogManager,
+                translate('cancel-bot-confirm-tip'),
+                () {
+                  changeBot(callback: update);
+                },
+              );
             } else {
               changeBot(callback: update);
             }
@@ -363,8 +425,10 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(translate('Enable trusted devices')),
-              Text('* ${translate('enable-trusted-devices-tip')}',
-                  style: Theme.of(context).textTheme.bodySmall),
+              Text(
+                '* ${translate('enable-trusted-devices-tip')}',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
             ],
           ),
           initialValue: _enableTrustedDevices,
@@ -395,6 +459,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
     ];
     final List<AbstractSettingsTile> shareScreenTiles = [
       _getPopupDialogRadioEntry(
+        key: const ValueKey('mobile-settings-tile-network-lan-discovery'),
         title: 'LAN discovery',
         list: [
           _RadioEntry('Off', kLanDiscoveryModeOff),
@@ -412,6 +477,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
               },
       ),
       _getPopupDialogRadioEntry(
+        key: const ValueKey('mobile-settings-tile-security-clipboard'),
         title: 'Clipboard direction',
         list: clipboardDirectionMenuKeys()
             .map((key) => _RadioEntry(clipboardDirectionPolicyLabel(key), key))
@@ -423,18 +489,25 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             ? null
             : (value) async {
                 await bind.mainSetOption(
-                    key: kOptionClipboardDirection, value: value);
+                  key: kOptionClipboardDirection,
+                  value: value,
+                );
               },
       ),
       SettingsTile.switchTile(
-        title: Row(children: [
-          Expanded(child: Text(translate('Use IP Whitelisting'))),
-          Offstage(
-                  offstage: !_onlyWhiteList,
-                  child: const Icon(Icons.warning_amber_rounded,
-                      color: Color.fromARGB(255, 255, 204, 0)))
-              .marginOnly(left: 5)
-        ]),
+        key: const ValueKey('mobile-settings-tile-security-whitelist'),
+        title: Row(
+          children: [
+            Expanded(child: Text(translate('Use IP Whitelisting'))),
+            Offstage(
+              offstage: !_onlyWhiteList,
+              child: const Icon(
+                Icons.warning_amber_rounded,
+                color: Color.fromARGB(255, 255, 204, 0),
+              ),
+            ).marginOnly(left: 5),
+          ],
+        ),
         initialValue: _onlyWhiteList,
         onToggle: (_) async {
           update() async {
@@ -450,6 +523,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
         },
       ),
       SettingsTile.switchTile(
+        key: const ValueKey('mobile-settings-tile-general-adaptive-bitrate'),
         title: Text(translate('Adaptive bitrate')),
         initialValue: _enableAbr,
         onToggle: isOptionFixed(kOptionEnableAbr)
@@ -463,14 +537,16 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
               },
       ),
       SettingsTile.switchTile(
+        key: const ValueKey('mobile-settings-tile-general-record-session'),
         title: Text(translate('Enable recording session')),
         initialValue: _enableRecordSession,
         onToggle: isOptionFixed(kOptionEnableRecordSession)
             ? null
             : (v) async {
                 await mainSetBoolOption(kOptionEnableRecordSession, v);
-                final newValue =
-                    await mainGetBoolOption(kOptionEnableRecordSession);
+                final newValue = await mainGetBoolOption(
+                  kOptionEnableRecordSession,
+                );
                 setState(() {
                   _enableRecordSession = newValue;
                 });
@@ -478,70 +554,80 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
       ),
       SettingsTile.switchTile(
         title: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Expanded(
-                  child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                    Text(translate("Direct IP Access")),
-                    Offstage(
-                        offstage: !_enableDirectIPAccess,
-                        child: Text(
-                          '${translate("Local Address")}: $_localIP${_directAccessPort.isEmpty ? "" : ":$_directAccessPort"}${_directAccessPairingPassphraseSet ? "\nLocal pairing passphrase: Required" : ""}',
-                          style: Theme.of(context).textTheme.bodySmall,
-                        )),
-                  ])),
-              Offstage(
-                  offstage: !_enableDirectIPAccess,
-                  child: Row(children: [
-                    IconButton(
-                        padding: EdgeInsets.zero,
-                        icon: Icon(
-                          Icons.lock_outline,
-                          size: 20,
-                        ),
-                        onPressed:
-                            isOptionFixed(kOptionDirectAccessPairingPassphrase)
-                                ? null
-                                : () async {
-                                    final passphrase =
-                                        await changeDirectAccessPairingPassphrase(
-                                            bind.mainGetOptionSync(
-                                                key:
-                                                    kOptionDirectAccessPairingPassphrase));
-                                    setState(() {
-                                      _directAccessPairingPassphraseSet =
-                                          passphrase.isNotEmpty;
-                                    });
-                                  }),
-                    IconButton(
-                        padding: EdgeInsets.zero,
-                        icon: Icon(
-                          Icons.edit,
-                          size: 20,
-                        ),
-                        onPressed: isOptionFixed(kOptionDirectAccessPort)
-                            ? null
-                            : () async {
-                                final port = await changeDirectAccessPort(
-                                    _localIP, _directAccessPort);
-                                setState(() {
-                                  _directAccessPort = port;
-                                });
-                              })
-                  ]))
-            ]),
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(translate("Direct IP Access")),
+                  Offstage(
+                    offstage: !_enableDirectIPAccess,
+                    child: Text(
+                      '${translate("Local Address")}: $_localIP${_directAccessPort.isEmpty ? "" : ":$_directAccessPort"}${_directAccessPairingPassphraseSet ? "\nLocal pairing passphrase: Required" : ""}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Offstage(
+              offstage: !_enableDirectIPAccess,
+              child: Row(
+                children: [
+                  IconButton(
+                    padding: EdgeInsets.zero,
+                    icon: Icon(Icons.lock_outline, size: 20),
+                    onPressed:
+                        isOptionFixed(kOptionDirectAccessPairingPassphrase)
+                        ? null
+                        : () async {
+                            final passphrase =
+                                await changeDirectAccessPairingPassphrase(
+                                  bind.mainGetOptionSync(
+                                    key: kOptionDirectAccessPairingPassphrase,
+                                  ),
+                                );
+                            setState(() {
+                              _directAccessPairingPassphraseSet =
+                                  passphrase.isNotEmpty;
+                            });
+                          },
+                  ),
+                  IconButton(
+                    padding: EdgeInsets.zero,
+                    icon: Icon(Icons.edit, size: 20),
+                    onPressed: isOptionFixed(kOptionDirectAccessPort)
+                        ? null
+                        : () async {
+                            final port = await changeDirectAccessPort(
+                              _localIP,
+                              _directAccessPort,
+                            );
+                            setState(() {
+                              _directAccessPort = port;
+                            });
+                          },
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
         initialValue: _enableDirectIPAccess,
         onToggle: isOptionFixed(kOptionDirectServer)
             ? null
             : (_) async {
                 _enableDirectIPAccess = !_enableDirectIPAccess;
-                String value =
-                    bool2option(kOptionDirectServer, _enableDirectIPAccess);
+                String value = bool2option(
+                  kOptionDirectServer,
+                  _enableDirectIPAccess,
+                );
                 await bind.mainSetOption(
-                    key: kOptionDirectServer, value: value);
+                  key: kOptionDirectServer,
+                  value: value,
+                );
                 setState(() {});
               },
       ),
@@ -560,13 +646,19 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
         ),
       if (_enableDirectIPAccess)
         SettingsTile(
-            title: Text(translate('Manage paired viewers')),
-            trailing: Icon(Icons.arrow_forward_ios),
-            onPressed: (context) {
-              Navigator.push(context, MaterialPageRoute(builder: (context) {
-                return const _ManagePairedViewers();
-              }));
-            }),
+          title: Text(translate('Manage paired viewers')),
+          trailing: Icon(Icons.arrow_forward_ios),
+          onPressed: (context) {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) {
+                  return const _ManagePairedViewers();
+                },
+              ),
+            );
+          },
+        ),
       SettingsTile(
         title: Text(translate("Rendezvous pairing passphrase")),
         value: Padding(
@@ -581,7 +673,8 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             ? null
             : (context) async {
                 final passphrase = await changePeerPairingPassphrase(
-                    bind.mainGetOptionSync(key: kOptionPeerPairingPassphrase));
+                  bind.mainGetOptionSync(key: kOptionPeerPairingPassphrase),
+                );
                 setState(() {
                   _peerPairingPassphraseSet = passphrase.isNotEmpty;
                 });
@@ -594,8 +687,9 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             ? null
             : (v) async {
                 await mainSetBoolOption(kOptionAllowUnverifiedPeerTrust, v);
-                final newValue =
-                    mainGetBoolOptionSync(kOptionAllowUnverifiedPeerTrust);
+                final newValue = mainGetBoolOptionSync(
+                  kOptionAllowUnverifiedPeerTrust,
+                );
                 setState(() {
                   _allowUnverifiedPeerTrust = newValue;
                 });
@@ -745,16 +839,18 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
           setState(() => _enableStartOnBoot = toValue);
 
           gFFI.invokeMethod(AndroidChannel.kSetStartOnBootOpt, toValue);
-        }));
+        },
+      ),
+    );
 
     if (!bind.isCustomClient()) {
       enhancementsTiles.add(
         SettingsTile.switchTile(
           initialValue: _checkUpdateOnStartup,
-          title:
-              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(translate('Check for software update on startup')),
-          ]),
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [Text(translate('Check for software update on startup'))],
+          ),
           onToggle: (bool toValue) async {
             await mainSetLocalBoolOption(kOptionEnableCheckUpdate, toValue);
             setState(() => _checkUpdateOnStartup = toValue);
@@ -766,13 +862,15 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
     enhancementsTiles.add(
       SettingsTile.switchTile(
         initialValue: _showTerminalExtraKeys,
-        title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(translate('Show terminal extra keys')),
-        ]),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [Text(translate('Show terminal extra keys'))],
+        ),
         onToggle: (bool v) async {
           await mainSetLocalBoolOption(kOptionEnableShowTerminalExtraKeys, v);
-          final newValue =
-              mainGetLocalBoolOptionSync(kOptionEnableShowTerminalExtraKeys);
+          final newValue = mainGetLocalBoolOptionSync(
+            kOptionEnableShowTerminalExtraKeys,
+          );
           setState(() {
             _showTerminalExtraKeys = newValue;
           });
@@ -790,63 +888,97 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
       }
       final disable = !toValue;
       bind.mainSetLocalOption(
-          key: kOptionDisableFloatingWindow,
-          value: disable ? 'Y' : defaultOptionNo);
+        key: kOptionDisableFloatingWindow,
+        value: disable ? 'Y' : defaultOptionNo,
+      );
       setState(() => _floatingWindowDisabled = disable);
       gFFI.serverModel.androidUpdatekeepScreenOn();
     }
 
-    enhancementsTiles.add(SettingsTile.switchTile(
+    enhancementsTiles.add(
+      SettingsTile.switchTile(
         initialValue: !_floatingWindowDisabled,
-        title: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(translate('Floating window')),
-          Text('* ${translate('floating_window_tip')}',
-              style: Theme.of(context).textTheme.bodySmall),
-        ]),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(translate('Floating window')),
+            Text(
+              '* ${translate('floating_window_tip')}',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ],
+        ),
         onToggle: bind.mainIsOptionFixed(key: kOptionDisableFloatingWindow)
             ? null
-            : onFloatingWindowChanged));
+            : onFloatingWindowChanged,
+      ),
+    );
 
-    enhancementsTiles.add(_getPopupDialogRadioEntry(
-      title: 'Keep screen on',
-      list: [
-        _RadioEntry('Never', _keepScreenOnToOption(KeepScreenOn.never)),
-        _RadioEntry('During controlled',
-            _keepScreenOnToOption(KeepScreenOn.duringControlled)),
-        _RadioEntry('During service is on',
-            _keepScreenOnToOption(KeepScreenOn.serviceOn)),
-      ],
-      getter: () => _keepScreenOnToOption(_floatingWindowDisabled
-          ? KeepScreenOn.never
-          : optionToKeepScreenOn(
-              bind.mainGetLocalOption(key: kOptionKeepScreenOn))),
-      asyncSetter: isOptionFixed(kOptionKeepScreenOn) || _floatingWindowDisabled
-          ? null
-          : (value) async {
-              await bind.mainSetLocalOption(
-                  key: kOptionKeepScreenOn, value: value);
-              setState(() => _keepScreenOn = optionToKeepScreenOn(value));
-              gFFI.serverModel.androidUpdatekeepScreenOn();
-            },
-    ));
+    enhancementsTiles.add(
+      _getPopupDialogRadioEntry(
+        title: 'Keep screen on',
+        list: [
+          _RadioEntry('Never', _keepScreenOnToOption(KeepScreenOn.never)),
+          _RadioEntry(
+            'During controlled',
+            _keepScreenOnToOption(KeepScreenOn.duringControlled),
+          ),
+          _RadioEntry(
+            'During service is on',
+            _keepScreenOnToOption(KeepScreenOn.serviceOn),
+          ),
+        ],
+        getter: () => _keepScreenOnToOption(
+          _floatingWindowDisabled
+              ? KeepScreenOn.never
+              : optionToKeepScreenOn(
+                  bind.mainGetLocalOption(key: kOptionKeepScreenOn),
+                ),
+        ),
+        asyncSetter:
+            isOptionFixed(kOptionKeepScreenOn) || _floatingWindowDisabled
+            ? null
+            : (value) async {
+                await bind.mainSetLocalOption(
+                  key: kOptionKeepScreenOn,
+                  value: value,
+                );
+                setState(() => _keepScreenOn = optionToKeepScreenOn(value));
+                gFFI.serverModel.androidUpdatekeepScreenOn();
+              },
+      ),
+    );
 
     final disabledSettings = bind.isDisableSettings();
     final hideSecuritySettings =
         bind.mainGetBuildinOption(key: kOptionHideSecuritySetting) == 'Y';
     final settings = SettingsList(
       sections: [
+        CustomSettingsSection(
+          key: const ValueKey('mobile-settings-section-layout'),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 12, 24, 8),
+            child: _settingsLayoutSelector(),
+          ),
+        ),
         customClientSection,
         if (!bind.isDisableAccount())
           SettingsSection(
+            key: const ValueKey('mobile-settings-section-account'),
             title: Text(translate('Account')),
             tiles: [
               SettingsTile(
-                title: Obx(() => Text(gFFI.userModel.userName.value.isEmpty
-                    ? translate('Login')
-                    : '${translate('Logout')} (${gFFI.userModel.accountLabelWithHandle})')),
+                title: Obx(
+                  () => Text(
+                    gFFI.userModel.userName.value.isEmpty
+                        ? translate('Login')
+                        : '${translate('Logout')} (${gFFI.userModel.accountLabelWithHandle})',
+                  ),
+                ),
                 leading: Obx(() {
                   final avatar = bind.mainResolveAvatarUrl(
-                      avatar: gFFI.userModel.avatar.value);
+                    avatar: gFFI.userModel.avatar.value,
+                  );
                   return buildAvatarWidget(
                         avatar: avatar,
                         size: 28,
@@ -866,6 +998,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             ],
           ),
         SettingsSection(
+          key: const ValueKey('mobile-settings-section-primary'),
           title: Text(translate("Settings")),
           tiles: [
             if (!disabledSettings && !_hideNetwork && !_hideServer)
@@ -1003,6 +1136,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                 },
               ),
             SettingsTile.switchTile(
+              key: const ValueKey('mobile-settings-tile-diagnostics-clipboard'),
               title: Text(translate('Clipboard debug diagnostics')),
               initialValue: _allowClipboardDebug,
               onToggle: isOptionFixed(kOptionAllowClipboardDebug)
@@ -1020,6 +1154,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                     },
             ),
             SettingsTile(
+              key: const ValueKey('mobile-settings-tile-general-language'),
               title: Text(translate('Language')),
               leading: Icon(Icons.translate),
               onPressed: (context) {
@@ -1027,6 +1162,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
               },
             ),
             SettingsTile(
+              key: const ValueKey('mobile-settings-tile-general-theme'),
               title: Text(
                 translate(
                   Theme.of(context).brightness == Brightness.light
@@ -1045,6 +1181,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             ),
             if (!bind.isDisableAccount())
               SettingsTile.switchTile(
+                key: const ValueKey('mobile-settings-tile-general-note'),
                 title: Text(translate('note-at-conn-end-tip')),
                 initialValue: _allowAskForNoteAtEndOfConnection,
                 onToggle: (v) async {
@@ -1066,6 +1203,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
               ),
             if (!incomingOnly)
               SettingsTile.switchTile(
+                key: const ValueKey('mobile-settings-tile-general-keep-awake'),
                 title: Text(
                   translate('keep-awake-during-outgoing-sessions-label'),
                 ),
@@ -1084,6 +1222,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
         ),
         if (!disabledSettings && !hideSecuritySettings)
           SettingsSection(
+            key: const ValueKey('mobile-settings-section-security'),
             title: Text(translate('Security')),
             tiles: [
               SettingsTile(
@@ -1101,6 +1240,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
           ),
         if (isAndroid)
           SettingsSection(
+            key: const ValueKey('mobile-settings-section-hardware'),
             title: Text(translate('Hardware Codec')),
             tiles: [
               SettingsTile.switchTile(
@@ -1136,6 +1276,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
           ),
         if (isAndroid)
           SettingsSection(
+            key: const ValueKey('mobile-settings-section-recording'),
             title: Text(translate("Recording")),
             tiles: [
               if (!outgoingOnly)
@@ -1202,12 +1343,17 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             !disabledSettings &&
             !outgoingOnly &&
             !hideSecuritySettings)
-          SettingsSection(title: Text('2FA'), tiles: tfaTiles),
+          SettingsSection(
+            key: const ValueKey('mobile-settings-section-2fa'),
+            title: Text('2FA'),
+            tiles: tfaTiles,
+          ),
         if (isAndroid &&
             !disabledSettings &&
             !outgoingOnly &&
             !hideSecuritySettings)
           SettingsSection(
+            key: const ValueKey('mobile-settings-section-share-screen'),
             title: Text(translate("Share screen")),
             tiles: shareScreenTiles,
           ),
@@ -1217,17 +1363,22 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             !outgoingOnly &&
             !hideSecuritySettings)
           SettingsSection(
+            key: const ValueKey('mobile-settings-section-enhancements'),
             title: Text(translate("Enhancements")),
             tiles: enhancementsTiles,
           ),
         SettingsSection(
+          key: const ValueKey('mobile-settings-section-about'),
           title: Text(translate("About")),
           tiles: [
             SettingsTile(
-                title: Text('${translate("Version")}: $version'),
-                leading: Icon(Icons.info)),
+              key: const ValueKey('mobile-settings-tile-about-version'),
+              title: Text('${translate("Version")}: $version'),
+              leading: Icon(Icons.info),
+            ),
             if (isAndroid)
               SettingsTile.switchTile(
+                key: const ValueKey('mobile-settings-tile-diagnostics-logging'),
                 title: Text(translate('Diagnostic logging')),
                 leading: const Icon(Icons.article_outlined),
                 initialValue: _diagnosticLogging,
@@ -1251,6 +1402,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
               ),
             if (isAndroid)
               SettingsTile(
+                key: const ValueKey('mobile-settings-tile-diagnostics-export'),
                 onPressed: (context) async {
                   try {
                     await platformFFI.exportAndroidDiagnostics();
@@ -1260,24 +1412,29 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                   }
                 },
                 title: Text(translate('Export diagnostic report')),
-                description:
-                    Text(translate('Create a private log ZIP and share it')),
+                description: Text(
+                  translate('Create a private log ZIP and share it'),
+                ),
                 leading: Icon(Icons.bug_report_outlined),
               ),
             if (isAndroid && !_diagnosticLogging)
               SettingsTile(
+                key: const ValueKey('mobile-settings-tile-diagnostics-delete'),
                 onPressed: (context) async {
-                  final confirmed = await showDialog<bool>(
+                  final confirmed =
+                      await showDialog<bool>(
                         context: context,
                         builder: (context) => AlertDialog(
                           title: Text(translate('Delete diagnostic logs')),
                           actions: [
                             TextButton(
                               onPressed: () => Navigator.pop(context, false),
-                              child: Text(translate('Cancel'))),
+                              child: Text(translate('Cancel')),
+                            ),
                             TextButton(
                               onPressed: () => Navigator.pop(context, true),
-                              child: Text(translate('Delete'))),
+                              child: Text(translate('Delete')),
+                            ),
                           ],
                         ),
                       ) ??
@@ -1290,6 +1447,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                 leading: const Icon(Icons.delete_outline),
               ),
             SettingsTile(
+              key: const ValueKey('mobile-settings-tile-about-source'),
               onPressed: (context) async {
                 await launchUrl(Uri.parse(kRustAdminSourceUrl));
               },
@@ -1304,6 +1462,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
               leading: Icon(Icons.code),
             ),
             SettingsTile(
+              key: const ValueKey('mobile-settings-tile-about-build-date'),
               title: Text(translate("Build Date")),
               value: Padding(
                 padding: EdgeInsets.symmetric(vertical: 8),
@@ -1313,6 +1472,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             ),
             if (isAndroid)
               SettingsTile(
+                key: const ValueKey('mobile-settings-tile-about-fingerprint'),
                 onPressed: (context) => onCopyFingerprint(_fingerprint),
                 title: Text(translate("Fingerprint")),
                 value: Padding(
@@ -1325,7 +1485,215 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
         ),
       ],
     );
-    return settings;
+    if (_settingsLayout == MobileSettingsLayout.classic) {
+      return settings;
+    }
+    return _buildModernSettings(
+      context,
+      settings.sections,
+      customClientSection,
+    );
+  }
+
+  Widget _buildModernSettings(
+    BuildContext context,
+    List<AbstractSettingsSection> sections,
+    CustomSettingsSection brandingSection,
+  ) {
+    SettingsSection? sectionById(String id) {
+      final key = ValueKey<String>('mobile-settings-section-$id');
+      for (final section in sections) {
+        if (section is SettingsSection && section.key == key) return section;
+      }
+      return null;
+    }
+
+    String tileId(AbstractSettingsTile tile) {
+      final key = tile.key;
+      return key is ValueKey<String> ? key.value : '';
+    }
+
+    MobileSettingsCategoryGroup? group(
+      String title,
+      Iterable<AbstractSettingsTile> tiles,
+    ) {
+      final children = _compactSettingsTiles(tiles);
+      return children.isEmpty
+          ? null
+          : MobileSettingsCategoryGroup(title: title, children: children);
+    }
+
+    final primaryTiles = sectionById('primary')?.tiles ?? const [];
+    final generalTiles = primaryTiles.where(
+      (tile) => tileId(tile).startsWith('mobile-settings-tile-general-'),
+    );
+    final primaryDiagnosticTiles = primaryTiles.where(
+      (tile) => tileId(tile).startsWith('mobile-settings-tile-diagnostics-'),
+    );
+    final networkTiles = primaryTiles.where((tile) {
+      final id = tileId(tile);
+      return !id.startsWith('mobile-settings-tile-general-') &&
+          !id.startsWith('mobile-settings-tile-diagnostics-');
+    });
+    final aboutTiles = sectionById('about')?.tiles ?? const [];
+    final diagnosticTiles = [
+      ...primaryDiagnosticTiles,
+      ...aboutTiles.where(
+        (tile) => tileId(tile).startsWith('mobile-settings-tile-diagnostics-'),
+      ),
+    ];
+    final aboutInfoTiles = aboutTiles.where(
+      (tile) => !tileId(tile).startsWith('mobile-settings-tile-diagnostics-'),
+    );
+    final shareTiles = sectionById('share-screen')?.tiles ?? const [];
+    final shareNetworkTiles = shareTiles.where(
+      (tile) => tileId(tile).startsWith('mobile-settings-tile-network-'),
+    );
+    final shareRecordingTiles = shareTiles.where(
+      (tile) => tileId(tile) == 'mobile-settings-tile-general-record-session',
+    );
+    final shareSecurityTiles = shareTiles.where((tile) {
+      final id = tileId(tile);
+      return !id.startsWith('mobile-settings-tile-network-') &&
+          !id.startsWith('mobile-settings-tile-general-');
+    });
+
+    List<MobileSettingsCategoryGroup> nonNullGroups(
+      Iterable<MobileSettingsCategoryGroup?> groups,
+    ) => [
+      for (final group in groups)
+        if (group != null) group,
+    ];
+
+    final categoryGroups =
+        <_MobileSettingsCategory, List<MobileSettingsCategoryGroup>>{
+          _MobileSettingsCategory.account: nonNullGroups([
+            group(
+              translate('Account'),
+              sectionById('account')?.tiles ?? const [],
+            ),
+          ]),
+          _MobileSettingsCategory.general: nonNullGroups([
+            group(translate('Settings'), generalTiles),
+            group(translate('Recording'), [
+              ...(sectionById('recording')?.tiles ?? const []),
+              ...shareRecordingTiles,
+            ]),
+            group(
+              translate('Enhancements'),
+              sectionById('enhancements')?.tiles ?? const [],
+            ),
+          ]),
+          _MobileSettingsCategory.security: nonNullGroups([
+            group(
+              translate('Security'),
+              sectionById('security')?.tiles ?? const [],
+            ),
+            group('2FA', sectionById('2fa')?.tiles ?? const []),
+            group(translate('Share screen'), shareSecurityTiles),
+          ]),
+          _MobileSettingsCategory.network: nonNullGroups([
+            group(translate('Network'), [
+              ...networkTiles,
+              ...shareNetworkTiles,
+            ]),
+          ]),
+          _MobileSettingsCategory.about: [
+            ...nonNullGroups([
+              group(translate('Diagnostics'), diagnosticTiles),
+              group(translate('About'), aboutInfoTiles),
+            ]),
+            MobileSettingsCategoryGroup(
+              title: '',
+              children: [brandingSection.child],
+            ),
+          ],
+        };
+
+    String categoryTitle(_MobileSettingsCategory category) =>
+        switch (category) {
+          _MobileSettingsCategory.account => translate('Account'),
+          _MobileSettingsCategory.general => translate('General'),
+          _MobileSettingsCategory.security => translate('Security'),
+          _MobileSettingsCategory.network => translate('Network'),
+          _MobileSettingsCategory.about => translate('About'),
+        };
+
+    final selected = _selectedSettingsCategory;
+    if (selected != null && (categoryGroups[selected]?.isNotEmpty ?? false)) {
+      return PopScope<void>(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, result) {
+          if (!didPop) {
+            setState(() => _selectedSettingsCategory = null);
+          }
+        },
+        child: MobileSettingsCategoryView(
+          id: selected.name,
+          title: categoryTitle(selected),
+          onBack: () => setState(() => _selectedSettingsCategory = null),
+          groups: categoryGroups[selected]!,
+        ),
+      );
+    }
+
+    void openCategory(_MobileSettingsCategory category) {
+      setState(() => _selectedSettingsCategory = category);
+    }
+
+    return MobileSettingsHome(
+      selector: _settingsLayoutSelector(),
+      items: [
+        if (categoryGroups[_MobileSettingsCategory.account]?.isNotEmpty ??
+            false)
+          MobileSettingsNavigationItem(
+            id: 'account',
+            title: translate('Account'),
+            icon: Icons.person_outline,
+            onPressed: () => openCategory(_MobileSettingsCategory.account),
+          ),
+        MobileSettingsNavigationItem(
+          id: 'general',
+          title: translate('General'),
+          icon: Icons.tune,
+          onPressed: () => openCategory(_MobileSettingsCategory.general),
+        ),
+        if (categoryGroups[_MobileSettingsCategory.security]?.isNotEmpty ??
+            false)
+          MobileSettingsNavigationItem(
+            id: 'security',
+            title: translate('Security'),
+            icon: Icons.shield_outlined,
+            onPressed: () => openCategory(_MobileSettingsCategory.security),
+          ),
+        if (categoryGroups[_MobileSettingsCategory.network]?.isNotEmpty ??
+            false)
+          MobileSettingsNavigationItem(
+            id: 'network',
+            title: translate('Network'),
+            icon: Icons.lan_outlined,
+            onPressed: () => openCategory(_MobileSettingsCategory.network),
+          ),
+        if (!bind.isIncomingOnly())
+          MobileSettingsNavigationItem(
+            id: 'display',
+            title: translate('Display Settings'),
+            icon: Icons.desktop_windows_outlined,
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => _DisplayPage()),
+              );
+            },
+          ),
+        MobileSettingsNavigationItem(
+          id: 'about',
+          title: translate('About'),
+          icon: Icons.info_outline,
+          onPressed: () => openCategory(_MobileSettingsCategory.about),
+        ),
+      ],
+    );
   }
 
   Future<bool> canStartOnBoot() async {
@@ -1341,6 +1709,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
 
   defaultDisplaySection() {
     return SettingsSection(
+      key: const ValueKey('mobile-settings-section-display'),
       title: Text(translate("Display Settings")),
       tiles: [
         SettingsTile(
@@ -1363,39 +1732,119 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   }
 }
 
+class _CompactSettingsTileAdapter extends StatelessWidget {
+  const _CompactSettingsTileAdapter({super.key, required this.tile});
+
+  final AbstractSettingsTile tile;
+
+  bool _isNavigationArrow(Widget? widget) {
+    return widget is Icon &&
+        (widget.icon == Icons.arrow_forward_ios ||
+            widget.icon == Icons.chevron_right ||
+            widget.icon == Icons.navigate_next);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final settingsTile = tile;
+    if (settingsTile is! SettingsTile) {
+      return SettingsList(
+        shrinkWrap: true,
+        physics: const NeverScrollableScrollPhysics(),
+        contentPadding: EdgeInsets.zero,
+        sections: [
+          SettingsSection(tiles: [tile]),
+        ],
+      );
+    }
+
+    final subtitle = settingsTile.description ?? settingsTile.value;
+    if (settingsTile.tileType == SettingsTileType.switchTile) {
+      final onToggle = settingsTile.enabled ? settingsTile.onToggle : null;
+      return SwitchListTile.adaptive(
+        contentPadding: EdgeInsets.zero,
+        visualDensity: VisualDensity.compact,
+        secondary: settingsTile.leading,
+        title: MobileSettingsRowTitle(child: settingsTile.title),
+        subtitle: subtitle == null
+            ? null
+            : MobileSettingsRowSubtitle(child: subtitle),
+        value: settingsTile.initialValue ?? false,
+        onChanged: onToggle == null ? null : (value) => onToggle(value),
+      );
+    }
+
+    final onPressed = settingsTile.enabled ? settingsTile.onPressed : null;
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      visualDensity: VisualDensity.compact,
+      enabled: settingsTile.enabled,
+      leading: settingsTile.leading,
+      title: MobileSettingsRowTitle(child: settingsTile.title),
+      subtitle: subtitle == null
+          ? null
+          : MobileSettingsRowSubtitle(child: subtitle),
+      trailing:
+          _isNavigationArrow(settingsTile.trailing) ||
+              (settingsTile.trailing == null && onPressed != null)
+          ? const MobileSettingsNavigationChevron()
+          : settingsTile.trailing,
+      onTap: onPressed == null ? null : () => onPressed(context),
+    );
+  }
+}
+
+List<Widget> _compactSettingsTiles(Iterable<AbstractSettingsTile> tiles) => [
+  for (final tile in tiles)
+    _CompactSettingsTileAdapter(key: tile.key, tile: tile),
+];
+
 void showLanguageSettings(OverlayDialogManager dialogManager) async {
   try {
     final langs = json.decode(await bind.mainGetLangs()) as List<dynamic>;
     var lang = bind.mainGetLocalOption(key: kCommConfKeyLang);
-    dialogManager.show((setState, close, context) {
-      setLang(v) async {
-        if (lang != v) {
-          setState(() {
-            lang = v;
-          });
-          await bind.mainSetLocalOption(key: kCommConfKeyLang, value: v);
-          HomePage.homeKey.currentState?.refreshPages();
-          Future.delayed(Duration(milliseconds: 200), close);
+    dialogManager.show(
+      (setState, close, context) {
+        setLang(v) async {
+          if (lang != v) {
+            setState(() {
+              lang = v;
+            });
+            await bind.mainSetLocalOption(key: kCommConfKeyLang, value: v);
+            HomePage.homeKey.currentState?.refreshPages();
+            Future.delayed(Duration(milliseconds: 200), close);
+          }
         }
-      }
 
-      final isOptFixed = isOptionFixed(kCommConfKeyLang);
-      return CustomAlertDialog(
-        content: Column(
-          children: [
-                getRadio(Text(translate('Default')), defaultOptionLang, lang,
-                    isOptFixed ? null : setLang),
-                Divider(color: MyTheme.border),
-              ] +
-              langs.map((e) {
-                final key = e[0] as String;
-                final name = e[1] as String;
-                return getRadio(Text(translate(name)), key, lang,
-                    isOptFixed ? null : setLang);
-              }).toList(),
-        ),
-      );
-    }, backDismiss: true, clickMaskDismiss: true);
+        final isOptFixed = isOptionFixed(kCommConfKeyLang);
+        return CustomAlertDialog(
+          content: Column(
+            children:
+                [
+                  getRadio(
+                    Text(translate('Default')),
+                    defaultOptionLang,
+                    lang,
+                    isOptFixed ? null : setLang,
+                  ),
+                  Divider(color: MyTheme.border),
+                ] +
+                langs.map((e) {
+                  final key = e[0] as String;
+                  final name = e[1] as String;
+                  return getRadio(
+                    Text(translate(name)),
+                    key,
+                    lang,
+                    isOptFixed ? null : setLang,
+                  );
+                }).toList(),
+          ),
+        );
+      },
+      backDismiss: true,
+      clickMaskDismiss: true,
+    );
   } catch (e) {
     //
   }
@@ -1404,64 +1853,89 @@ void showLanguageSettings(OverlayDialogManager dialogManager) async {
 void showThemeSettings(OverlayDialogManager dialogManager) async {
   var themeMode = MyTheme.getThemeModePreference();
 
-  dialogManager.show((setState, close, context) {
-    setTheme(v) {
-      if (themeMode != v) {
-        setState(() {
-          themeMode = v;
-        });
-        MyTheme.changeDarkMode(themeMode);
-        Future.delayed(Duration(milliseconds: 200), close);
+  dialogManager.show(
+    (setState, close, context) {
+      setTheme(v) {
+        if (themeMode != v) {
+          setState(() {
+            themeMode = v;
+          });
+          MyTheme.changeDarkMode(themeMode);
+          Future.delayed(Duration(milliseconds: 200), close);
+        }
       }
-    }
 
-    final isOptFixed = isOptionFixed(kCommConfKeyTheme);
-    return CustomAlertDialog(
-      content: Column(children: [
-        getRadio(Text(translate('Light')), ThemeMode.light, themeMode,
-            isOptFixed ? null : setTheme),
-        getRadio(Text(translate('Dark')), ThemeMode.dark, themeMode,
-            isOptFixed ? null : setTheme),
-        getRadio(Text(translate('Follow System')), ThemeMode.system, themeMode,
-            isOptFixed ? null : setTheme)
-      ]),
-    );
-  }, backDismiss: true, clickMaskDismiss: true);
+      final isOptFixed = isOptionFixed(kCommConfKeyTheme);
+      return CustomAlertDialog(
+        content: Column(
+          children: [
+            getRadio(
+              Text(translate('Light')),
+              ThemeMode.light,
+              themeMode,
+              isOptFixed ? null : setTheme,
+            ),
+            getRadio(
+              Text(translate('Dark')),
+              ThemeMode.dark,
+              themeMode,
+              isOptFixed ? null : setTheme,
+            ),
+            getRadio(
+              Text(translate('Follow System')),
+              ThemeMode.system,
+              themeMode,
+              isOptFixed ? null : setTheme,
+            ),
+          ],
+        ),
+      );
+    },
+    backDismiss: true,
+    clickMaskDismiss: true,
+  );
 }
 
 void showAbout(OverlayDialogManager dialogManager) {
-  dialogManager.show((setState, close, context) {
-    final appName = bind.mainGetAppNameSync();
-    return CustomAlertDialog(
-      title: Text('${translate('About')} $appName'),
-      content: SingleChildScrollView(
-        child: Column(
+  dialogManager.show(
+    (setState, close, context) {
+      final appName = bind.mainGetAppNameSync();
+      return CustomAlertDialog(
+        title: Text('${translate('About')} $appName'),
+        content: SingleChildScrollView(
+          child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               FutureBuilder<String>(
-                  future: bind.mainGetVersion(),
-                  initialData: version,
-                  builder: (context, snapshot) {
-                    final appVersion = (snapshot.data ?? version);
-                    return Text('Version: $appVersion');
-                  }),
+                future: bind.mainGetVersion(),
+                initialData: version,
+                builder: (context, snapshot) {
+                  final appVersion = (snapshot.data ?? version);
+                  return Text('Version: $appVersion');
+                },
+              ),
               InkWell(
-                  onTap: () async {
-                    await launchUrl(Uri.parse(kRustAdminSourceUrl));
-                  },
-                  child: Padding(
-                    padding: EdgeInsets.only(top: 12, bottom: 8),
-                    child: Text('Source code',
-                        style: TextStyle(
-                          decoration: TextDecoration.underline,
-                        )),
-                  )),
-            ]),
-      ),
-      actions: [],
-    );
-  }, clickMaskDismiss: true, backDismiss: true);
+                onTap: () async {
+                  await launchUrl(Uri.parse(kRustAdminSourceUrl));
+                },
+                child: Padding(
+                  padding: EdgeInsets.only(top: 12, bottom: 8),
+                  child: Text(
+                    'Source code',
+                    style: TextStyle(decoration: TextDecoration.underline),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [],
+      );
+    },
+    clickMaskDismiss: true,
+    backDismiss: true,
+  );
 }
 
 class ScanButton extends StatelessWidget {
@@ -1472,9 +1946,7 @@ class ScanButton extends StatelessWidget {
       onPressed: () {
         Navigator.push(
           context,
-          MaterialPageRoute(
-            builder: (BuildContext context) => ScanPage(),
-          ),
+          MaterialPageRoute(builder: (BuildContext context) => ScanPage()),
         );
       },
     );
@@ -1489,6 +1961,7 @@ class _DisplayPage extends StatefulWidget {
 }
 
 class __DisplayPageState extends State<_DisplayPage> {
+  // ignore: unused_element
   MobileRemoteToolbarTransparencySettings _toolbarTransparencySettings() {
     return MobileRemoteToolbarTransparencySettings.fromStored(
       overlapOpacityPercent: bind.mainGetUserDefaultOption(
@@ -1503,14 +1976,12 @@ class __DisplayPageState extends State<_DisplayPage> {
     );
   }
 
+  // ignore: unused_element
   SettingsTile _mobileScreenScrollingTile() {
     final entries = <_RadioEntry>[
       _RadioEntry('ScrollAuto', kRemoteScrollStyleAuto),
       _RadioEntry('ScrollEdge', kRemoteScrollStyleEdge),
-      _RadioEntry(
-        'ScrollEdgeAcceleration',
-        kRemoteScrollStyleEdgeAcceleration,
-      ),
+      _RadioEntry('ScrollEdgeAcceleration', kRemoteScrollStyleEdgeAcceleration),
     ];
     final scrollStyle = normalizeMobileRemoteScrollStyle(
       bind.mainGetUserDefaultOption(key: kOptionScrollStyle),
@@ -1528,9 +1999,7 @@ class __DisplayPageState extends State<_DisplayPage> {
             .obs;
     final scrollStyleFixed = isOptionFixed(kOptionScrollStyle);
     final inertiaFixed = isOptionFixed(kOptionMobileCursorInertiaDurationMs);
-    final edgeThicknessFixed = isOptionFixed(
-      kOptionEdgeScrollEdgeThickness,
-    );
+    final edgeThicknessFixed = isOptionFixed(kOptionEdgeScrollEdgeThickness);
 
     void showDialog() {
       gFFI.dialogManager.show(
@@ -1619,11 +2088,10 @@ class __DisplayPageState extends State<_DisplayPage> {
     );
   }
 
+  // ignore: unused_element
   SettingsTile _defaultTrackpadSpeedTile() {
     final initialSpeed =
-        (int.tryParse(
-                  bind.mainGetUserDefaultOption(key: kKeyTrackpadSpeed),
-                ) ??
+        (int.tryParse(bind.mainGetUserDefaultOption(key: kKeyTrackpadSpeed)) ??
                 kDefaultTrackpadSpeed)
             .clamp(kMinTrackpadSpeed, kMaxTrackpadSpeed)
             .toInt();
@@ -1642,9 +2110,7 @@ class __DisplayPageState extends State<_DisplayPage> {
               );
             },
           ),
-          actions: [
-            dialogButton('Close', onPressed: () => close()),
-          ],
+          actions: [dialogButton('Close', onPressed: () => close())],
         ),
         backDismiss: true,
         clickMaskDismiss: true,
@@ -1681,7 +2147,6 @@ class __DisplayPageState extends State<_DisplayPage> {
       _RadioEntry('H265', 'h265', enabled: h265),
       _RadioEntry('H265 HQ', 'h265-hq', enabled: h265),
     ];
-    RxBool showCustomImageQuality = false.obs;
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(
@@ -1691,107 +2156,7 @@ class __DisplayPageState extends State<_DisplayPage> {
         title: Text(translate('Display Settings')),
         centerTitle: true,
       ),
-      body: SettingsList(
-        sections: [
-          SettingsSection(
-            tiles: [
-              _getPopupDialogRadioEntry(
-                title: 'Default View Style',
-                list: [
-                  _RadioEntry('Scale original', kRemoteViewStyleOriginal),
-                  _RadioEntry('Scale adaptive', kRemoteViewStyleAdaptive),
-                ],
-                getter: () =>
-                    bind.mainGetUserDefaultOption(key: kOptionViewStyle),
-                asyncSetter: isOptionFixed(kOptionViewStyle)
-                    ? null
-                    : (value) async {
-                        await bind.mainSetUserDefaultOption(
-                          key: kOptionViewStyle,
-                          value: value,
-                        );
-                      },
-              ),
-              _mobileScreenScrollingTile(),
-              _defaultTrackpadSpeedTile(),
-              _getPopupDialogRadioEntry(
-                title: 'Toolbar Opacity Under Cursor',
-                list: [
-                  for (final percent
-                      in MobileRemoteToolbarTransparencySettings.opacityPresets)
-                    _RadioEntry(
-                      mobileRemoteToolbarOpacityLabel(percent),
-                      percent.toString(),
-                    ),
-                ],
-                getter: () => _toolbarTransparencySettings()
-                    .overlapOpacityPercent
-                    .toString(),
-                asyncSetter:
-                    isOptionFixed(
-                      kOptionMobileRemoteToolbarOverlapOpacityPercent,
-                    )
-                    ? null
-                    : (value) async {
-                        await bind.mainSetUserDefaultOption(
-                          key: kOptionMobileRemoteToolbarOverlapOpacityPercent,
-                          value: value,
-                        );
-                      },
-              ),
-              _getPopupDialogRadioEntry(
-                title: 'Default Image Quality',
-                list: [
-                  _RadioEntry('Good image quality', kRemoteImageQualityBest),
-                  _RadioEntry('Balanced', kRemoteImageQualityBalanced),
-                  _RadioEntry('Optimize reaction time', kRemoteImageQualityLow),
-                  _RadioEntry('Custom', kRemoteImageQualityCustom),
-                ],
-                getter: () {
-                  final v = bind.mainGetUserDefaultOption(
-                    key: kOptionImageQuality,
-                  );
-                  showCustomImageQuality.value = v == kRemoteImageQualityCustom;
-                  return v;
-                },
-                asyncSetter: isOptionFixed(kOptionImageQuality)
-                    ? null
-                    : (value) async {
-                        await bind.mainSetUserDefaultOption(
-                          key: kOptionImageQuality,
-                          value: value,
-                        );
-                        showCustomImageQuality.value =
-                            value == kRemoteImageQualityCustom;
-                      },
-                tail: customImageQualitySetting(),
-                showTail: showCustomImageQuality,
-                notCloseValue: kRemoteImageQualityCustom,
-              ),
-              _getPopupDialogRadioEntry(
-                title: 'Default Codec',
-                list: codecList,
-                getter: () =>
-                    bind.mainGetUserDefaultOption(key: kOptionCodecPreference),
-                asyncSetter: isOptionFixed(kOptionCodecPreference)
-                    ? null
-                    : (value) async {
-                        await bind.mainSetUserDefaultOption(
-                          key: kOptionCodecPreference,
-                          value: value,
-                        );
-                      },
-              ),
-            ],
-          ),
-          SettingsSection(
-            title: Text(translate('Other Default Options')),
-            tiles: otherDefaultSettings()
-                .map((e) => otherRow(e.$1, e.$2))
-                .toList(),
-          ),
-        ],
-      ),
+      body: _CompactDisplaySettings(codecList: codecList),
     );
   }
 
@@ -1805,9 +2170,427 @@ class __DisplayPageState extends State<_DisplayPage> {
           ? null
           : (b) async {
               await bind.mainSetUserDefaultOption(
-                  key: key, value: b ? 'Y' : defaultOptionNo);
+                key: key,
+                value: b ? 'Y' : defaultOptionNo,
+              );
               setState(() {});
             },
+    );
+  }
+}
+
+class _CompactDisplaySettings extends StatelessWidget {
+  const _CompactDisplaySettings({required this.codecList});
+
+  final List<_RadioEntry> codecList;
+
+  List<MobileRemoteToggleItem> _runtimeDisplayToggles() {
+    if (!isAndroid) return const [];
+
+    final toggles = <MobileRemoteToggleItem>[
+      MobileRemoteToggleItem(
+        id: 'display-enable-hardware-codec',
+        value: option2bool(
+          kOptionEnableHwcodec,
+          bind.mainGetOptionSync(key: kOptionEnableHwcodec),
+        ),
+        child: Text(translate('Enable hardware codec')),
+        dividerBefore: true,
+        onChanged: isOptionFixed(kOptionEnableHwcodec)
+            ? null
+            : (value) {
+                if (value == null) return;
+                unawaited(mainSetBoolOption(kOptionEnableHwcodec, value));
+              },
+      ),
+    ];
+    if (bind.mainHasGpuTextureRender()) {
+      toggles.add(
+        MobileRemoteToggleItem(
+          id: 'display-use-texture-rendering',
+          value: bind.mainGetUseTextureRender(),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(translate('Use texture rendering')),
+              Text(
+                translate('texture_render_tip'),
+                style: const TextStyle(fontSize: 12),
+              ),
+            ],
+          ),
+          onChanged: (value) {
+            if (value == null) return;
+            unawaited(
+              bind.mainSetLocalOption(
+                key: kOptionTextureRender,
+                value: value ? 'Y' : 'N',
+              ),
+            );
+          },
+        ),
+      );
+    }
+
+    final hideSecuritySettings =
+        bind.mainGetBuildinOption(key: kOptionHideSecuritySetting) == 'Y';
+    if (!bind.isDisableSettings() &&
+        !bind.isOutgoingOnly() &&
+        !hideSecuritySettings) {
+      toggles.add(
+        MobileRemoteToggleItem(
+          id: 'display-adaptive-bitrate',
+          value: option2bool(
+            kOptionEnableAbr,
+            bind.mainGetOptionSync(key: kOptionEnableAbr),
+          ),
+          child: Text(translate('Adaptive bitrate')),
+          onChanged: isOptionFixed(kOptionEnableAbr)
+              ? null
+              : (value) {
+                  if (value == null) return;
+                  unawaited(mainSetBoolOption(kOptionEnableAbr, value));
+                },
+        ),
+      );
+    }
+    return toggles;
+  }
+
+  MobileRemoteRadioItem _radioItem(
+    String value,
+    String label,
+    Future<void> Function(String)? onChanged, {
+    bool enabled = true,
+  }) {
+    return MobileRemoteRadioItem(
+      value: value,
+      child: Text(translate(label)),
+      onChanged: !enabled || onChanged == null
+          ? null
+          : (selected) {
+              if (selected != null) unawaited(onChanged(selected));
+            },
+    );
+  }
+
+  Future<void> _persistQualityMonitorFadeSettings(
+    QualityMonitorFadeSettings settings,
+  ) async {
+    await bind.mainSetUserDefaultOption(
+      key: kOptionQualityMonitorInactiveOpacityPercent,
+      value: settings.opacityPercent.toString(),
+    );
+    await bind.mainSetUserDefaultOption(
+      key: kOptionQualityMonitorDimDelayMs,
+      value: settings.delayMs.toString(),
+    );
+    await bind.mainSetUserDefaultOption(
+      key: kOptionQualityMonitorDimDurationMs,
+      value: settings.durationMs.toString(),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final viewStyle = bind.mainGetUserDefaultOption(key: kOptionViewStyle);
+    final scrollStyle = normalizeMobileRemoteScrollStyle(
+      bind.mainGetUserDefaultOption(key: kOptionScrollStyle),
+    );
+    final imageQuality = bind.mainGetUserDefaultOption(
+      key: kOptionImageQuality,
+    );
+    final codec = bind.mainGetUserDefaultOption(key: kOptionCodecPreference);
+    var edgeThickness =
+        (double.tryParse(
+                  bind.mainGetUserDefaultOption(
+                    key: kOptionEdgeScrollEdgeThickness,
+                  ),
+                ) ??
+                100.0)
+            .clamp(EdgeThicknessControl.kMin, EdgeThicknessControl.kMax)
+            .toDouble();
+    var cursorInertiaSettings = MobileCursorInertiaSettings.fromStored(
+      bind.mainGetUserDefaultOption(key: kOptionMobileCursorInertiaDurationMs),
+    );
+    final trackpadSpeed = SimpleWrapper(
+      (int.tryParse(bind.mainGetUserDefaultOption(key: kKeyTrackpadSpeed)) ??
+              kDefaultTrackpadSpeed)
+          .clamp(kMinTrackpadSpeed, kMaxTrackpadSpeed)
+          .toInt(),
+    );
+    var toolbarSettings = MobileRemoteToolbarTransparencySettings.fromStored(
+      overlapOpacityPercent: bind.mainGetUserDefaultOption(
+        key: kOptionMobileRemoteToolbarOverlapOpacityPercent,
+      ),
+    );
+    var qualityMonitorSettings = QualityMonitorFadeSettings.fromUserDefaults();
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: MobileRemoteOptionsContent(
+        showTitle: false,
+        toggles: _runtimeDisplayToggles(),
+        radioSections: [
+          MobileRemoteRadioSection(
+            id: 'default-view-style',
+            value: viewStyle,
+            heading: Text(translate('Default View Style')),
+            items: [
+              _radioItem(
+                kRemoteViewStyleOriginal,
+                'Scale original',
+                isOptionFixed(kOptionViewStyle)
+                    ? null
+                    : (value) => bind.mainSetUserDefaultOption(
+                        key: kOptionViewStyle,
+                        value: value,
+                      ),
+              ),
+              _radioItem(
+                kRemoteViewStyleAdaptive,
+                'Scale adaptive',
+                isOptionFixed(kOptionViewStyle)
+                    ? null
+                    : (value) => bind.mainSetUserDefaultOption(
+                        key: kOptionViewStyle,
+                        value: value,
+                      ),
+              ),
+            ],
+          ),
+          MobileRemoteRadioSection(
+            id: 'default-screen-scrolling',
+            value: scrollStyle,
+            heading: Text(translate('Default Screen Scrolling')),
+            items: [
+              for (final entry in const <(String, String)>[
+                (kRemoteScrollStyleAuto, 'ScrollAuto'),
+                (kRemoteScrollStyleEdge, 'ScrollEdge'),
+                (kRemoteScrollStyleEdgeAcceleration, 'ScrollEdgeAcceleration'),
+              ])
+                _radioItem(
+                  entry.$1,
+                  entry.$2,
+                  isOptionFixed(kOptionScrollStyle)
+                      ? null
+                      : (value) => bind.mainSetUserDefaultOption(
+                          key: kOptionScrollStyle,
+                          value: value,
+                        ),
+                ),
+            ],
+            selectionDetailsBuilder: (value) => Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (value == kRemoteScrollStyleEdge ||
+                    value == kRemoteScrollStyleEdgeAcceleration)
+                  EdgeThicknessControl(
+                    key: const Key('mobile-default-edge-thickness'),
+                    value: edgeThickness,
+                    onChanged: isOptionFixed(kOptionEdgeScrollEdgeThickness)
+                        ? null
+                        : (value) {
+                            edgeThickness = value;
+                            unawaited(
+                              bind.mainSetUserDefaultOption(
+                                key: kOptionEdgeScrollEdgeThickness,
+                                value: value.round().toString(),
+                              ),
+                            );
+                          },
+                  ),
+                const SizedBox(height: 8),
+                Text(translate('Cursor inertia time')),
+                MobileCursorInertiaControl(
+                  key: const Key('mobile-default-cursor-inertia'),
+                  durationMs: cursorInertiaSettings.durationMs,
+                  onChanged: isOptionFixed(kOptionMobileCursorInertiaDurationMs)
+                      ? null
+                      : (durationMs) {
+                          cursorInertiaSettings = cursorInertiaSettings
+                              .copyWith(durationMs: durationMs);
+                        },
+                  onChangeEnd:
+                      isOptionFixed(kOptionMobileCursorInertiaDurationMs)
+                      ? null
+                      : (durationMs) => unawaited(
+                          bind.mainSetUserDefaultOption(
+                            key: kOptionMobileCursorInertiaDurationMs,
+                            value: durationMs.toString(),
+                          ),
+                        ),
+                ),
+              ],
+            ),
+          ),
+          MobileRemoteRadioSection(
+            id: 'default-trackpad-speed',
+            value: '',
+            items: const [],
+            heading: Text(translate('Default trackpad speed')),
+            content: IgnorePointer(
+              ignoring: isOptionFixed(kKeyTrackpadSpeed),
+              child: Opacity(
+                opacity: isOptionFixed(kKeyTrackpadSpeed) ? 0.5 : 1,
+                child: TrackpadSpeedWidget(
+                  value: trackpadSpeed,
+                  onDebouncer: isOptionFixed(kKeyTrackpadSpeed)
+                      ? null
+                      : (value) => bind.mainSetUserDefaultOption(
+                          key: kKeyTrackpadSpeed,
+                          value: value.toString(),
+                        ),
+                ),
+              ),
+            ),
+          ),
+          MobileRemoteRadioSection(
+            id: 'overlay-appearance',
+            value: '',
+            items: const [],
+            heading: Text(translate('Overlay appearance')),
+            content: MobileOverlayAppearanceControls(
+              toolbarTitle: translate('Toolbar'),
+              toolbarOpacityLabel: translate('Opacity under cursor'),
+              qualityMonitorTitle: translate('Quality monitor'),
+              inactiveOpacityLabel: translate('Inactive opacity'),
+              fadeDelayLabel: translate('Fade delay'),
+              fadeDurationLabel: translate('Fade duration'),
+              toolbarSettings: toolbarSettings,
+              qualityMonitorSettings: qualityMonitorSettings,
+              toolbarEnabled: !isOptionFixed(
+                kOptionMobileRemoteToolbarOverlapOpacityPercent,
+              ),
+              qualityMonitorOpacityEnabled: !isOptionFixed(
+                kOptionQualityMonitorInactiveOpacityPercent,
+              ),
+              qualityMonitorDelayEnabled: !isOptionFixed(
+                kOptionQualityMonitorDimDelayMs,
+              ),
+              qualityMonitorDurationEnabled: !isOptionFixed(
+                kOptionQualityMonitorDimDurationMs,
+              ),
+              onToolbarChanged: (settings) => toolbarSettings = settings,
+              onToolbarChangeEnd: (settings) {
+                toolbarSettings = settings;
+                unawaited(
+                  bind.mainSetUserDefaultOption(
+                    key: kOptionMobileRemoteToolbarOverlapOpacityPercent,
+                    value: settings.overlapOpacityPercent.toString(),
+                  ),
+                );
+              },
+              onQualityMonitorChanged: (settings) =>
+                  qualityMonitorSettings = settings,
+              onQualityMonitorChangeEnd: (settings) {
+                qualityMonitorSettings = settings;
+                unawaited(_persistQualityMonitorFadeSettings(settings));
+              },
+            ),
+          ),
+          MobileRemoteRadioSection(
+            id: 'default-image-quality',
+            value: imageQuality,
+            heading: Text(translate('Default Image Quality')),
+            items: [
+              for (final entry in const <(String, String)>[
+                (kRemoteImageQualityBest, 'Good image quality'),
+                (kRemoteImageQualityBalanced, 'Balanced'),
+                (kRemoteImageQualityLow, 'Optimize reaction time'),
+                (kRemoteImageQualityCustom, 'Custom'),
+              ])
+                _radioItem(
+                  entry.$1,
+                  entry.$2,
+                  isOptionFixed(kOptionImageQuality)
+                      ? null
+                      : (value) => bind.mainSetUserDefaultOption(
+                          key: kOptionImageQuality,
+                          value: value,
+                        ),
+                ),
+            ],
+            selectionDetailsBuilder: (value) =>
+                value == kRemoteImageQualityCustom
+                ? customImageQualitySetting()
+                : const SizedBox.shrink(),
+          ),
+          MobileRemoteRadioSection(
+            id: 'default-codec',
+            value: codec,
+            heading: Text(translate('Default Codec')),
+            items: [
+              for (final entry in codecList)
+                _radioItem(
+                  entry.value,
+                  entry.label,
+                  isOptionFixed(kOptionCodecPreference)
+                      ? null
+                      : (value) => bind.mainSetUserDefaultOption(
+                          key: kOptionCodecPreference,
+                          value: value,
+                        ),
+                  enabled: entry.enabled,
+                ),
+            ],
+          ),
+          MobileRemoteRadioSection(
+            id: 'other-default-options',
+            value: '',
+            items: const [],
+            heading: Text(translate('Other Default Options')),
+            content: _CompactDefaultOptions(options: otherDefaultSettings()),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CompactDefaultOptions extends StatefulWidget {
+  const _CompactDefaultOptions({required this.options});
+
+  final List<(String, String)> options;
+
+  @override
+  State<_CompactDefaultOptions> createState() => _CompactDefaultOptionsState();
+}
+
+class _CompactDefaultOptionsState extends State<_CompactDefaultOptions> {
+  late final Map<String, bool> _values = _readValues();
+
+  Map<String, bool> _readValues() => {
+    for (final option in widget.options)
+      option.$2: bind.mainGetUserDefaultOption(key: option.$2) == 'Y',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final option in widget.options)
+          SwitchListTile.adaptive(
+            key: Key('mobile-default-option-${option.$2}'),
+            contentPadding: EdgeInsets.zero,
+            visualDensity: VisualDensity.compact,
+            value: _values[option.$2] ?? false,
+            title: Text(translate(option.$1)),
+            onChanged: isOptionFixed(option.$2)
+                ? null
+                : (value) {
+                    setState(() => _values[option.$2] = value);
+                    unawaited(
+                      bind.mainSetUserDefaultOption(
+                        key: option.$2,
+                        value: value ? 'Y' : defaultOptionNo,
+                      ),
+                    );
+                  },
+          ),
+      ],
     );
   }
 }
@@ -1925,6 +2708,7 @@ typedef _RadioEntryGetter = String Function();
 typedef _RadioEntrySetter = Future<void> Function(String);
 
 SettingsTile _getPopupDialogRadioEntry({
+  Key? key,
   required String title,
   required List<_RadioEntry> list,
   required _RadioEntryGetter getter,
@@ -2002,6 +2786,7 @@ SettingsTile _getPopupDialogRadioEntry({
   }
 
   return SettingsTile(
+    key: key,
     title: Text(translate(title)),
     onPressed: asyncSetter == null ? null : (context) => showDialog(),
     value: Padding(

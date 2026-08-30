@@ -1,6 +1,7 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
+import '../../common/quality_monitor_settings.dart';
 import '../../consts.dart';
 
 const mobileRemoteAccentColor = Color(0xFF0071FF);
@@ -242,6 +243,286 @@ class MobileCursorInertiaControl extends StatefulWidget {
   @override
   State<MobileCursorInertiaControl> createState() =>
       _MobileCursorInertiaControlState();
+}
+
+class MobileRemoteIntegerSlider extends StatefulWidget {
+  const MobileRemoteIntegerSlider({
+    super.key,
+    required this.label,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.step,
+    required this.unit,
+    this.onChanged,
+    this.onChangeEnd,
+  });
+
+  final String label;
+  final int value;
+  final int min;
+  final int max;
+  final int step;
+  final String unit;
+  final ValueChanged<int>? onChanged;
+  final ValueChanged<int>? onChangeEnd;
+
+  @override
+  State<MobileRemoteIntegerSlider> createState() =>
+      _MobileRemoteIntegerSliderState();
+}
+
+class _MobileRemoteIntegerSliderState extends State<MobileRemoteIntegerSlider> {
+  late int _value = _normalize(widget.value);
+
+  int _normalize(int value) {
+    final clamped = value.clamp(widget.min, widget.max).toInt();
+    final step = widget.step <= 0 ? 1 : widget.step;
+    final snapped =
+        widget.min + (((clamped - widget.min) / step).round() * step);
+    return snapped.clamp(widget.min, widget.max).toInt();
+  }
+
+  String _valueLabel(int value) => '$value${widget.unit}';
+
+  @override
+  void didUpdateWidget(covariant MobileRemoteIntegerSlider oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.value != widget.value ||
+        oldWidget.min != widget.min ||
+        oldWidget.max != widget.max ||
+        oldWidget.step != widget.step) {
+      _value = _normalize(widget.value);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final step = widget.step <= 0 ? 1 : widget.step;
+    final divisions = widget.max > widget.min
+        ? ((widget.max - widget.min) / step).round()
+        : null;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Expanded(child: Text(widget.label)),
+              const SizedBox(width: 8),
+              Text(
+                _valueLabel(_value),
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+            ],
+          ),
+          Slider(
+            value: _value.toDouble(),
+            min: widget.min.toDouble(),
+            max: widget.max.toDouble(),
+            divisions: divisions,
+            label: _valueLabel(_value),
+            semanticFormatterCallback: (value) =>
+                _valueLabel(_normalize(value.round())),
+            onChanged: widget.onChanged == null
+                ? null
+                : (value) {
+                    final normalized = _normalize(value.round());
+                    setState(() => _value = normalized);
+                    widget.onChanged?.call(normalized);
+                  },
+            onChangeEnd: widget.onChangeEnd == null
+                ? null
+                : (value) =>
+                      widget.onChangeEnd?.call(_normalize(value.round())),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class MobileOverlayAppearanceControls extends StatefulWidget {
+  const MobileOverlayAppearanceControls({
+    super.key,
+    required this.toolbarTitle,
+    required this.toolbarOpacityLabel,
+    required this.qualityMonitorTitle,
+    required this.inactiveOpacityLabel,
+    required this.fadeDelayLabel,
+    required this.fadeDurationLabel,
+    required this.toolbarSettings,
+    required this.qualityMonitorSettings,
+    required this.onToolbarChanged,
+    required this.onToolbarChangeEnd,
+    required this.onQualityMonitorChanged,
+    required this.onQualityMonitorChangeEnd,
+    this.toolbarEnabled = true,
+    this.qualityMonitorOpacityEnabled = true,
+    this.qualityMonitorDelayEnabled = true,
+    this.qualityMonitorDurationEnabled = true,
+  });
+
+  final String toolbarTitle;
+  final String toolbarOpacityLabel;
+  final String qualityMonitorTitle;
+  final String inactiveOpacityLabel;
+  final String fadeDelayLabel;
+  final String fadeDurationLabel;
+  final MobileRemoteToolbarTransparencySettings toolbarSettings;
+  final QualityMonitorFadeSettings qualityMonitorSettings;
+  final ValueChanged<MobileRemoteToolbarTransparencySettings> onToolbarChanged;
+  final ValueChanged<MobileRemoteToolbarTransparencySettings>
+  onToolbarChangeEnd;
+  final ValueChanged<QualityMonitorFadeSettings> onQualityMonitorChanged;
+  final ValueChanged<QualityMonitorFadeSettings> onQualityMonitorChangeEnd;
+  final bool toolbarEnabled;
+  final bool qualityMonitorOpacityEnabled;
+  final bool qualityMonitorDelayEnabled;
+  final bool qualityMonitorDurationEnabled;
+
+  @override
+  State<MobileOverlayAppearanceControls> createState() =>
+      _MobileOverlayAppearanceControlsState();
+}
+
+class _MobileOverlayAppearanceControlsState
+    extends State<MobileOverlayAppearanceControls> {
+  late var _toolbarSettings = widget.toolbarSettings;
+  late var _qualityMonitorSettings = widget.qualityMonitorSettings;
+
+  @override
+  void didUpdateWidget(covariant MobileOverlayAppearanceControls oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.toolbarSettings != widget.toolbarSettings) {
+      _toolbarSettings = widget.toolbarSettings;
+    }
+    if (oldWidget.qualityMonitorSettings != widget.qualityMonitorSettings) {
+      _qualityMonitorSettings = widget.qualityMonitorSettings;
+    }
+  }
+
+  void _updateToolbar(int opacityPercent, {required bool commit}) {
+    final settings = _toolbarSettings.copyWith(
+      overlapOpacityPercent: opacityPercent,
+    );
+    setState(() => _toolbarSettings = settings);
+    if (commit) {
+      widget.onToolbarChangeEnd(settings);
+    } else {
+      widget.onToolbarChanged(settings);
+    }
+  }
+
+  void _updateQualityMonitor(
+    QualityMonitorFadeSettings settings, {
+    required bool commit,
+  }) {
+    setState(() => _qualityMonitorSettings = settings);
+    if (commit) {
+      widget.onQualityMonitorChangeEnd(settings);
+    } else {
+      widget.onQualityMonitorChanged(settings);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          widget.toolbarTitle,
+          style: Theme.of(context).textTheme.titleSmall,
+        ),
+        MobileRemoteIntegerSlider(
+          key: const Key('mobile-toolbar-opacity-slider'),
+          label: widget.toolbarOpacityLabel,
+          value: _toolbarSettings.overlapOpacityPercent,
+          min: kMinMobileRemoteToolbarOverlapOpacityPercent,
+          max: kMaxMobileRemoteToolbarOverlapOpacityPercent,
+          step: 5,
+          unit: '%',
+          onChanged: widget.toolbarEnabled
+              ? (value) => _updateToolbar(value, commit: false)
+              : null,
+          onChangeEnd: widget.toolbarEnabled
+              ? (value) => _updateToolbar(value, commit: true)
+              : null,
+        ),
+        const Divider(),
+        Text(
+          widget.qualityMonitorTitle,
+          style: Theme.of(context).textTheme.titleSmall,
+        ),
+        MobileRemoteIntegerSlider(
+          key: const Key('mobile-quality-monitor-opacity-slider'),
+          label: widget.inactiveOpacityLabel,
+          value: _qualityMonitorSettings.opacityPercent,
+          min: kMinQualityMonitorInactiveOpacityPercent,
+          max: kMaxQualityMonitorInactiveOpacityPercent,
+          step: 5,
+          unit: '%',
+          onChanged: widget.qualityMonitorOpacityEnabled
+              ? (value) => _updateQualityMonitor(
+                  _qualityMonitorSettings.copyWith(opacityPercent: value),
+                  commit: false,
+                )
+              : null,
+          onChangeEnd: widget.qualityMonitorOpacityEnabled
+              ? (value) => _updateQualityMonitor(
+                  _qualityMonitorSettings.copyWith(opacityPercent: value),
+                  commit: true,
+                )
+              : null,
+        ),
+        MobileRemoteIntegerSlider(
+          key: const Key('mobile-quality-monitor-delay-slider'),
+          label: widget.fadeDelayLabel,
+          value: _qualityMonitorSettings.delayMs,
+          min: kMinQualityMonitorDimDelayMs,
+          max: kMaxQualityMonitorDimDelayMs,
+          step: 100,
+          unit: ' ms',
+          onChanged: widget.qualityMonitorDelayEnabled
+              ? (value) => _updateQualityMonitor(
+                  _qualityMonitorSettings.copyWith(delayMs: value),
+                  commit: false,
+                )
+              : null,
+          onChangeEnd: widget.qualityMonitorDelayEnabled
+              ? (value) => _updateQualityMonitor(
+                  _qualityMonitorSettings.copyWith(delayMs: value),
+                  commit: true,
+                )
+              : null,
+        ),
+        MobileRemoteIntegerSlider(
+          key: const Key('mobile-quality-monitor-duration-slider'),
+          label: widget.fadeDurationLabel,
+          value: _qualityMonitorSettings.durationMs,
+          min: kMinQualityMonitorDimDurationMs,
+          max: kMaxQualityMonitorDimDurationMs,
+          step: 100,
+          unit: ' ms',
+          onChanged: widget.qualityMonitorDurationEnabled
+              ? (value) => _updateQualityMonitor(
+                  _qualityMonitorSettings.copyWith(durationMs: value),
+                  commit: false,
+                )
+              : null,
+          onChangeEnd: widget.qualityMonitorDurationEnabled
+              ? (value) => _updateQualityMonitor(
+                  _qualityMonitorSettings.copyWith(durationMs: value),
+                  commit: true,
+                )
+              : null,
+        ),
+      ],
+    );
+  }
 }
 
 class _MobileCursorInertiaControlState
@@ -702,8 +983,9 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
         final availableExtent = _vertical
             ? constraints.maxHeight
             : constraints.maxWidth;
-        final maximumExtent =
-            _vertical ? _maximumVerticalButtonExtent : _maximumButtonExtent;
+        final maximumExtent = _vertical
+            ? _maximumVerticalButtonExtent
+            : _maximumButtonExtent;
         final extent = availableExtent.isFinite && availableExtent > 0
             ? (availableExtent / itemCount).clamp(0.0, maximumExtent)
             : maximumExtent;
@@ -980,8 +1262,8 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
         color: locked
             ? mobileRemoteAccentColor
             : active
-                ? mobileRemoteToolbarActiveBackgroundColor(context)
-                : mobileRemoteQuickKeyButtonBackgroundColor(context),
+            ? mobileRemoteToolbarActiveBackgroundColor(context)
+            : mobileRemoteQuickKeyButtonBackgroundColor(context),
         borderRadius: BorderRadius.circular(4),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
@@ -1316,8 +1598,9 @@ class MobileRemoteRadioSection {
     this.heading,
     this.submenuId,
     this.selectionDetailsBuilder,
+    this.content,
     this.dividerAfter = true,
-  });
+  }) : assert(items.length > 0 || content != null);
 
   final String id;
   final String value;
@@ -1325,6 +1608,7 @@ class MobileRemoteRadioSection {
   final Widget? heading;
   final String? submenuId;
   final Widget Function(String value)? selectionDetailsBuilder;
+  final Widget? content;
   final bool dividerAfter;
 
   String get resolvedSubmenuId => submenuId ?? id;
@@ -1345,6 +1629,11 @@ class MobileRemoteToggleItem {
   final ValueChanged<bool?>? onChanged;
   final bool dividerBefore;
 }
+
+bool mobileVmPhysicalInputEnabled(String storedValue) =>
+    storedValue.toUpperCase() != 'N';
+
+String mobileVmPhysicalInputOption(bool enabled) => enabled ? 'Y' : 'N';
 
 class MobileRemoteActionItem {
   const MobileRemoteActionItem({required this.child, required this.onPressed});
@@ -1407,10 +1696,7 @@ class _MobileRemoteActionsContentState
   MobileRemoteActionSection? get _section {
     final id = _sectionId;
     if (id == null) return null;
-    for (final section in [
-      ...widget.primarySections,
-      ...widget.sections,
-    ]) {
+    for (final section in [...widget.primarySections, ...widget.sections]) {
       if (section.id == id) return section;
     }
     return null;
@@ -1635,6 +1921,7 @@ class MobileRemoteOptionsContent extends StatefulWidget {
   const MobileRemoteOptionsContent({
     super.key,
     this.title = 'Display and session options',
+    this.showTitle = true,
     this.header = const [],
     this.radioSections = const [],
     this.toggles = const [],
@@ -1643,6 +1930,7 @@ class MobileRemoteOptionsContent extends StatefulWidget {
   });
 
   final String title;
+  final bool showTitle;
   final List<Widget> header;
   final List<MobileRemoteRadioSection> radioSections;
   final List<MobileRemoteToggleItem> toggles;
@@ -1710,6 +1998,21 @@ class _MobileRemoteOptionsContentState
     });
   }
 
+  Widget _navigationChevron() {
+    return const SizedBox(
+      width: 32,
+      height: 32,
+      child: Icon(Icons.chevron_right, size: 20),
+    );
+  }
+
+  Widget _rowTitle(BuildContext context, Widget child) {
+    return DefaultTextStyle.merge(
+      style: Theme.of(context).textTheme.bodyLarge,
+      child: child,
+    );
+  }
+
   Widget _backHeader(BuildContext context, String title, VoidCallback onBack) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
@@ -1745,28 +2048,30 @@ class _MobileRemoteOptionsContentState
       key: key,
       contentPadding: EdgeInsets.zero,
       visualDensity: VisualDensity.compact,
-      title: title,
-      trailing: const Icon(Icons.chevron_right),
+      title: _rowTitle(context, title),
+      trailing: _navigationChevron(),
       onTap: onTap,
     );
   }
 
   Widget _buildRoot(BuildContext context) {
     final children = <Widget>[
-      Align(
-        alignment: Alignment.centerLeft,
-        child: Text(
-          widget.title,
-          style: Theme.of(context).textTheme.titleMedium,
+      if (widget.showTitle) ...[
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Text(
+            widget.title,
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
         ),
-      ),
-      const SizedBox(height: 8),
+        const SizedBox(height: 8),
+      ],
       ...widget.header,
     ];
 
     final addedSubmenus = <String>{};
     for (final section in widget.radioSections) {
-      if (section.items.isEmpty) continue;
+      if (section.items.isEmpty && section.content == null) continue;
       final submenuId = section.resolvedSubmenuId;
       if (!addedSubmenus.add(submenuId)) continue;
       children.add(
@@ -1782,8 +2087,8 @@ class _MobileRemoteOptionsContentState
         ListTile(
           contentPadding: EdgeInsets.zero,
           visualDensity: VisualDensity.compact,
-          title: action.child,
-          trailing: const Icon(Icons.chevron_right),
+          title: _rowTitle(context, action.child),
+          trailing: _navigationChevron(),
           onTap: action.onPressed,
         ),
       );
@@ -1846,34 +2151,36 @@ class _MobileRemoteOptionsContentState
             ),
             const SizedBox(height: 4),
           ],
-          RadioGroup<String>(
-            groupValue:
-                _radioValues[sections[index].id] ?? sections[index].value,
-            onChanged: (value) {
-              if (value == null) return;
-              final section = sections[index];
-              final item = section.items.firstWhere(
-                (candidate) => candidate.value == value,
-              );
-              item.onChanged?.call(value);
-              if (item.commitSelection && item.onChanged != null) {
-                setState(() => _radioValues[section.id] = value);
-              }
-            },
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                for (final item in sections[index].items)
-                  RadioListTile<String>(
-                    contentPadding: EdgeInsets.zero,
-                    visualDensity: VisualDensity.compact,
-                    value: item.value,
-                    enabled: item.onChanged != null,
-                    title: item.child,
-                  ),
-              ],
+          if (sections[index].items.isNotEmpty)
+            RadioGroup<String>(
+              groupValue:
+                  _radioValues[sections[index].id] ?? sections[index].value,
+              onChanged: (value) {
+                if (value == null) return;
+                final section = sections[index];
+                final item = section.items.firstWhere(
+                  (candidate) => candidate.value == value,
+                );
+                item.onChanged?.call(value);
+                if (item.commitSelection && item.onChanged != null) {
+                  setState(() => _radioValues[section.id] = value);
+                }
+              },
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final item in sections[index].items)
+                    RadioListTile<String>(
+                      contentPadding: EdgeInsets.zero,
+                      visualDensity: VisualDensity.compact,
+                      value: item.value,
+                      enabled: item.onChanged != null,
+                      title: item.child,
+                    ),
+                ],
+              ),
             ),
-          ),
+          if (sections[index].content != null) sections[index].content!,
           if (sections[index].selectionDetailsBuilder != null)
             sections[index].selectionDetailsBuilder!(
               _radioValues[sections[index].id] ?? sections[index].value,

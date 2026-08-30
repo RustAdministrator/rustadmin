@@ -2091,6 +2091,7 @@ class _DisplayState extends State<_Display> {
       viewStyle(context),
       scrollStyle(context),
       toolbarAutoHide(context),
+      qualityMonitorAppearance(context),
       imageQuality(context),
       codec(context),
       if (isDesktop) trackpadSpeed(context),
@@ -2261,7 +2262,7 @@ class _DisplayState extends State<_Display> {
         ),
       ),
       _IntegerSettingSlider(
-        label: 'Toolbar and monitor opacity',
+        label: 'Toolbar inactive opacity',
         value: pinnedOpacityPercent,
         min: kMinRemoteToolbarPinnedOpacityPercent,
         max: kMaxRemoteToolbarPinnedOpacityPercent,
@@ -2275,7 +2276,7 @@ class _DisplayState extends State<_Display> {
         ),
       ),
       _IntegerSettingSlider(
-        label: 'Toolbar and monitor dim delay',
+        label: 'Toolbar fade delay',
         value: pinnedDimDelayMs,
         min: kMinRemoteToolbarPinnedDimDelayMs,
         max: kMaxRemoteToolbarPinnedDimDelayMs,
@@ -2289,7 +2290,7 @@ class _DisplayState extends State<_Display> {
         ),
       ),
       _IntegerSettingSlider(
-        label: 'Toolbar and monitor dim duration',
+        label: 'Toolbar fade duration',
         value: pinnedDimDurationMs,
         min: kMinRemoteToolbarPinnedDimDurationMs,
         max: kMaxRemoteToolbarPinnedDimDurationMs,
@@ -2300,6 +2301,72 @@ class _DisplayState extends State<_Display> {
           value,
           min: kMinRemoteToolbarPinnedDimDurationMs,
           max: kMaxRemoteToolbarPinnedDimDurationMs,
+        ),
+      ),
+    ]);
+  }
+
+  Widget qualityMonitorAppearance(BuildContext context) {
+    final opacityPercent = _toolbarOptionValue(
+      kOptionQualityMonitorInactiveOpacityPercent,
+      defaultValue: kDefaultQualityMonitorInactiveOpacityPercent,
+      min: kMinQualityMonitorInactiveOpacityPercent,
+      max: kMaxQualityMonitorInactiveOpacityPercent,
+    );
+    final dimDelayMs = _toolbarOptionValue(
+      kOptionQualityMonitorDimDelayMs,
+      defaultValue: kDefaultQualityMonitorDimDelayMs,
+      min: kMinQualityMonitorDimDelayMs,
+      max: kMaxQualityMonitorDimDelayMs,
+    );
+    final dimDurationMs = _toolbarOptionValue(
+      kOptionQualityMonitorDimDurationMs,
+      defaultValue: kDefaultQualityMonitorDimDurationMs,
+      min: kMinQualityMonitorDimDurationMs,
+      max: kMaxQualityMonitorDimDurationMs,
+    );
+
+    return _Card(title: 'Quality monitor appearance', children: [
+      _IntegerSettingSlider(
+        label: 'Inactive opacity',
+        value: opacityPercent,
+        min: kMinQualityMonitorInactiveOpacityPercent,
+        max: kMaxQualityMonitorInactiveOpacityPercent,
+        unit: '%',
+        enabled: !isOptionFixed(kOptionQualityMonitorInactiveOpacityPercent),
+        onChanged: (value) => _setToolbarOptionValue(
+          kOptionQualityMonitorInactiveOpacityPercent,
+          value,
+          min: kMinQualityMonitorInactiveOpacityPercent,
+          max: kMaxQualityMonitorInactiveOpacityPercent,
+        ),
+      ),
+      _IntegerSettingSlider(
+        label: 'Fade delay',
+        value: dimDelayMs,
+        min: kMinQualityMonitorDimDelayMs,
+        max: kMaxQualityMonitorDimDelayMs,
+        unit: 'ms',
+        enabled: !isOptionFixed(kOptionQualityMonitorDimDelayMs),
+        onChanged: (value) => _setToolbarOptionValue(
+          kOptionQualityMonitorDimDelayMs,
+          value,
+          min: kMinQualityMonitorDimDelayMs,
+          max: kMaxQualityMonitorDimDelayMs,
+        ),
+      ),
+      _IntegerSettingSlider(
+        label: 'Fade duration',
+        value: dimDurationMs,
+        min: kMinQualityMonitorDimDurationMs,
+        max: kMaxQualityMonitorDimDurationMs,
+        unit: 'ms',
+        enabled: !isOptionFixed(kOptionQualityMonitorDimDurationMs),
+        onChanged: (value) => _setToolbarOptionValue(
+          kOptionQualityMonitorDimDurationMs,
+          value,
+          min: kMinQualityMonitorDimDurationMs,
+          max: kMaxQualityMonitorDimDurationMs,
         ),
       ),
     ]);

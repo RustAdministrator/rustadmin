@@ -820,7 +820,17 @@ pub fn session_handle_flutter_key_event(
     down_or_up: bool,
 ) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
-        let keyboard_mode = session.get_keyboard_mode();
+        let configured_mode = session.get_keyboard_mode();
+        let keyboard_mode = session.mobile_physical_keyboard_mode(&configured_mode);
+        if keyboard_mode != configured_mode {
+            log::debug!(
+                "mobile physical keyboard policy: configured={}, effective={}, usb_hid={}, down={}",
+                configured_mode,
+                keyboard_mode,
+                usb_hid,
+                down_or_up
+            );
+        }
         session.handle_flutter_key_event(
             &keyboard_mode,
             &character,
@@ -840,7 +850,17 @@ pub fn session_handle_flutter_raw_key_event(
     down_or_up: bool,
 ) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
-        let keyboard_mode = session.get_keyboard_mode();
+        let configured_mode = session.get_keyboard_mode();
+        let keyboard_mode = session.mobile_physical_keyboard_mode(&configured_mode);
+        if keyboard_mode != configured_mode {
+            log::debug!(
+                "mobile physical raw keyboard policy: configured={}, effective={}, position_code={}, down={}",
+                configured_mode,
+                keyboard_mode,
+                position_code,
+                down_or_up
+            );
+        }
         session.handle_flutter_raw_key_event(
             &keyboard_mode,
             &name,
@@ -4146,7 +4166,12 @@ pub mod server_side {
             .ok()
             .and_then(|value| uuid::Uuid::parse_str(&String::from(value)).ok())
             .and_then(|session_id| super::sessions::get_session_by_session_id(&session_id))
-            .is_some_and(|session| session.is_connection_alive());
+            .is_some_and(|session| {
+                session.is_connection_healthy(
+                    std::time::Duration::from_secs(35),
+                    std::time::Duration::from_secs(15),
+                )
+            });
         jboolean::from(active)
     }
 

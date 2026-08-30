@@ -58,6 +58,44 @@ use crate::keyboard;
 use crate::{client::Data, client::Interface};
 
 const CHANGE_RESOLUTION_VALID_TIMEOUT_SECS: u64 = 15;
+const OPTION_MOBILE_PHYSICAL_KEY_INPUT: &str = "mobile-physical-key-input";
+
+fn mobile_physical_key_input_enabled(is_mobile: bool, stored_value: &str) -> bool {
+    is_mobile && !stored_value.eq_ignore_ascii_case("N")
+}
+
+fn mobile_soft_keyboard_mode(
+    physical_key_input: bool,
+    peer_platform: &str,
+    translate_supported: bool,
+) -> KeyboardMode {
+    if physical_key_input && peer_platform == "Windows" && translate_supported {
+        KeyboardMode::Translate
+    } else {
+        KeyboardMode::Legacy
+    }
+}
+
+fn mobile_scan_code_text(
+    physical_key_input: bool,
+    peer_platform: &str,
+    translate_supported: bool,
+) -> bool {
+    physical_key_input && peer_platform == "Windows" && translate_supported
+}
+
+fn mobile_physical_keyboard_mode(
+    physical_key_input: bool,
+    peer_platform: &str,
+    map_supported: bool,
+    configured_mode: &str,
+) -> String {
+    if physical_key_input && peer_platform == "Windows" && map_supported {
+        KeyboardMode::Map.to_string()
+    } else {
+        configured_mode.to_owned()
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct Session<T: InvokeUiSession> {
@@ -72,6 +110,7 @@ pub struct Session<T: InvokeUiSession> {
     pub server_clipboard_enabled: Arc<RwLock<bool>>,
     pub last_change_display: Arc<Mutex<ChangeDisplayRecord>>,
     pub connection_round_state: Arc<Mutex<ConnectionRoundState>>,
+    pub last_remote_activity: Arc<Mutex<Option<Instant>>>,
     pub printer_names: Arc<RwLock<HashMap<i32, String>>>,
     // Indicate whether the session is reconnected.
     // Used to auto start file transfer after reconnection.
@@ -108,17 +147,20 @@ enum ConnectionState {
 pub struct ConnectionRoundState {
     round: u32,
     state: ConnectionState,
+    changed_at: Instant,
 }
 
 impl ConnectionRoundState {
     pub fn new_round(&mut self) -> u32 {
         self.round += 1;
         self.state = ConnectionState::Connecting;
+        self.changed_at = Instant::now();
         self.round
     }
 
     pub fn set_connected(&mut self) {
         self.state = ConnectionState::Connected;
+        self.changed_at = Instant::now();
     }
 
     pub fn is_round_gt(&self, round: u32) -> bool {
@@ -134,6 +176,7 @@ impl ConnectionRoundState {
             false
         } else {
             self.state = ConnectionState::Disconnected;
+            self.changed_at = Instant::now();
             true
         }
     }
@@ -144,6 +187,7 @@ impl Default for ConnectionRoundState {
         Self {
             round: 0,
             state: ConnectionState::Connecting,
+            changed_at: Instant::now(),
         }
     }
 }
@@ -968,9 +1012,40 @@ impl<T: InvokeUiSession> Session<T> {
     pub fn input_string(&self, value: &str) {
         let mut key_event = KeyEvent::new();
         key_event.set_seq(value.to_owned());
+        let physical_key_input = mobile_physical_key_input_enabled(
+            cfg!(any(target_os = "android", target_os = "ios")),
+            &self.get_option(OPTION_MOBILE_PHYSICAL_KEY_INPUT.to_owned()),
+        );
+        let peer_platform = self.peer_platform();
+        let translate_supported =
+            self.is_keyboard_mode_supported(KeyboardMode::Translate.to_string());
+        key_event.mode =
+            mobile_soft_keyboard_mode(physical_key_input, &peer_platform, translate_supported)
+                .into();
+        key_event.scan_code_text =
+            mobile_scan_code_text(physical_key_input, &peer_platform, translate_supported);
+        log::debug!(
+            "mobile keyboard text policy: peer={}, mode={:?}, scan_code_text={}, chars={}",
+            peer_platform,
+            key_event.mode,
+            key_event.scan_code_text,
+            value.chars().count()
+        );
         let mut msg_out = Message::new();
         msg_out.set_key_event(key_event);
         self.send(Data::Message(msg_out));
+    }
+
+    pub fn mobile_physical_keyboard_mode(&self, configured_mode: &str) -> String {
+        if !cfg!(target_os = "android") {
+            return configured_mode.to_owned();
+        }
+        mobile_physical_keyboard_mode(
+            self.get_option(OPTION_MOBILE_PHYSICAL_KEY_INPUT.to_owned()) == "Y",
+            &self.peer_platform(),
+            self.is_keyboard_mode_supported(KeyboardMode::Map.to_string()),
+            configured_mode,
+        )
     }
 
     #[cfg(any(target_os = "ios"))]
@@ -1486,6 +1561,27 @@ impl<T: InvokeUiSession> Session<T> {
             self.connection_round_state.lock().unwrap().state,
             ConnectionState::Disconnected
         )
+    }
+
+    pub fn mark_remote_activity(&self) {
+        *self.last_remote_activity.lock().unwrap() = Some(Instant::now());
+    }
+
+    pub fn is_connection_healthy(
+        &self,
+        max_idle: TokioDuration,
+        max_connecting: TokioDuration,
+    ) -> bool {
+        let state = self.connection_round_state.lock().unwrap();
+        match state.state {
+            ConnectionState::Connecting => state.changed_at.elapsed() <= max_connecting,
+            ConnectionState::Connected => self
+                .last_remote_activity
+                .lock()
+                .unwrap()
+                .is_some_and(|last| last.elapsed() <= max_idle),
+            ConnectionState::Disconnected => false,
+        }
     }
 
     pub fn confirm_direct_trust_response(&self, approved: bool) {
@@ -2305,4 +2401,61 @@ async fn start_one_port_forward<T: InvokeUiSession>(
 async fn send_note(url: String, id: String, sid: u64, note: String) {
     let body = serde_json::json!({ "id": id, "session_id": sid, "note": note });
     allow_err!(crate::post_request(url, body.to_string(), "").await);
+}
+
+#[cfg(test)]
+mod mobile_soft_keyboard_tests {
+    use super::*;
+
+    #[test]
+    fn physical_input_uses_translate_only_for_supported_windows_peers() {
+        assert_eq!(
+            mobile_soft_keyboard_mode(true, "Windows", true),
+            KeyboardMode::Translate
+        );
+        assert_eq!(
+            mobile_soft_keyboard_mode(true, "Windows", false),
+            KeyboardMode::Legacy
+        );
+        assert_eq!(
+            mobile_soft_keyboard_mode(true, "Linux", true),
+            KeyboardMode::Legacy
+        );
+        assert_eq!(
+            mobile_soft_keyboard_mode(false, "Windows", true),
+            KeyboardMode::Legacy
+        );
+    }
+
+    #[test]
+    fn scan_code_text_matches_the_opt_in_translate_policy() {
+        assert!(mobile_scan_code_text(true, "Windows", true));
+        assert!(!mobile_scan_code_text(false, "Windows", true));
+        assert!(!mobile_scan_code_text(true, "Linux", true));
+        assert!(!mobile_scan_code_text(true, "Windows", false));
+    }
+
+    #[test]
+    fn mobile_vm_physical_input_defaults_on_and_preserves_explicit_opt_out() {
+        assert!(mobile_physical_key_input_enabled(true, ""));
+        assert!(mobile_physical_key_input_enabled(true, "Y"));
+        assert!(!mobile_physical_key_input_enabled(true, "N"));
+        assert!(!mobile_physical_key_input_enabled(false, ""));
+    }
+
+    #[test]
+    fn physical_android_keys_use_map_without_changing_other_modes() {
+        assert_eq!(
+            mobile_physical_keyboard_mode(true, "Windows", true, "legacy"),
+            "map"
+        );
+        assert_eq!(
+            mobile_physical_keyboard_mode(false, "Windows", true, "legacy"),
+            "legacy"
+        );
+        assert_eq!(
+            mobile_physical_keyboard_mode(true, "Linux", true, "translate"),
+            "translate"
+        );
+    }
 }

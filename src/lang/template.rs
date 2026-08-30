@@ -776,5 +776,23 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Display Name", ""),
         ("password-hidden-tip", ""),
         ("preset-password-in-use-tip", ""),
+        ("Overlay appearance", ""),
+        ("Toolbar", ""),
+        ("Opacity under cursor", ""),
+        ("Inactive opacity", ""),
+        ("Fade delay", ""),
+        ("Fade duration", ""),
+        ("Quality monitor appearance", ""),
+        ("Toolbar inactive opacity", ""),
+        ("Toolbar fade delay", ""),
+        ("Toolbar fade duration", ""),
+        ("Default Screen Scrolling", ""),
+        ("Cursor inertia time", ""),
+        ("Physical key input (VM compatibility)", ""),
+
+        ("Settings layout", ""),
+        ("Modern", ""),
+        ("Classic", ""),
+        ("Diagnostics", ""),
     ].iter().cloned().collect();
 }

@@ -375,6 +375,7 @@ impl<T: InvokeUiSession> Remote<T> {
                     .lock()
                     .unwrap()
                     .set_connected();
+                self.handler.mark_remote_activity();
                 self.handler
                     .set_connection_type(peer.is_secured(), direct, stream_type); // flutter -> connection_ready
                 self.handler.update_direct(Some(direct));
@@ -442,6 +443,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                     }
                                     Ok(ref bytes) => {
                                         last_recv_time = Instant::now();
+                                        self.handler.mark_remote_activity();
                                         if !received {
                                             received = true;
                                             self.handler.update_received(true);

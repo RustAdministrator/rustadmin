@@ -11,11 +11,14 @@ import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 
+import '../../common/quality_monitor_settings.dart';
 import '../../consts.dart';
 import '../../desktop/widgets/tabbar_widget.dart';
 import '../../models/chat_model.dart';
 import '../../models/model.dart';
 import 'chat_page.dart';
+
+export '../../common/quality_monitor_settings.dart';
 
 class DraggableChatWindow extends StatelessWidget {
   const DraggableChatWindow(
@@ -530,18 +533,49 @@ class IOSDraggableState extends State<IOSDraggable> {
   }
 }
 
-class QualityMonitor extends StatelessWidget {
+class QualityMonitor extends StatefulWidget {
   final QualityMonitorModel qualityMonitorModel;
+  final Size? extendedSize;
   final GestureDragUpdateCallback? onHeaderPanUpdate;
   final GestureDragEndCallback? onHeaderPanEnd;
   final GestureDragCancelCallback? onHeaderPanCancel;
+  final GestureDragStartCallback? onResizePanStart;
+  final GestureDragUpdateCallback? onResizePanUpdate;
+  final GestureDragEndCallback? onResizePanEnd;
+  final GestureDragCancelCallback? onResizePanCancel;
+  final Future<void> Function(String details)? onDetailsChanged;
+  final bool opaque;
+  final bool fitContent;
+  final bool showHeader;
 
   const QualityMonitor(this.qualityMonitorModel,
       {Key? key,
+      this.extendedSize,
       this.onHeaderPanUpdate,
       this.onHeaderPanEnd,
-      this.onHeaderPanCancel})
+      this.onHeaderPanCancel,
+      this.onResizePanStart,
+      this.onResizePanUpdate,
+      this.onResizePanEnd,
+      this.onResizePanCancel,
+      this.onDetailsChanged,
+      this.opaque = false,
+      this.fitContent = false,
+      this.showHeader = true})
       : super(key: key);
+
+  @override
+  State<QualityMonitor> createState() => _QualityMonitorState();
+}
+
+class _QualityMonitorState extends State<QualityMonitor> {
+  final _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
 
   Widget _compactTextScale(Widget child) => isMobile
       ? MediaQuery.withClampedTextScaling(maxScaleFactor: 1, child: child)
@@ -698,25 +732,44 @@ class QualityMonitor extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => ChangeNotifierProvider.value(
-      value: qualityMonitorModel,
+      value: widget.qualityMonitorModel,
       child: Consumer<QualityMonitorModel>(
           builder: (context, qualityMonitorModel, child) => qualityMonitorModel
                   .show
               ? Stack(
                   children: [
                     IgnorePointer(
+                      ignoring: !qualityMonitorModel.extendedDetails,
                       child: Container(
-                        constraints: BoxConstraints(
-                          maxWidth: isMobile
-                              ? (qualityMonitorModel.extendedDetails ? 196 : 176)
-                              : (qualityMonitorModel.extendedDetails ? 240 : 200),
-                        ),
-                        padding: EdgeInsets.all(isMobile ? 4 : 8),
-                        color: MyTheme.canvasColor.withAlpha(150),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            SizedBox(height: isMobile ? 20 : 24),
+                        key: const Key('quality-monitor-window'),
+                        constraints: widget.fitContent
+                            ? const BoxConstraints(
+                                minWidth: 280, maxWidth: 360)
+                            : qualityMonitorModel.extendedDetails
+                                ? BoxConstraints.tight(widget.extendedSize ??
+                                    Size(isMobile ? 196 : 240, 420))
+                                : BoxConstraints(
+                                    maxWidth: isMobile ? 176 : 200),
+                        padding: qualityMonitorModel.extendedDetails
+                            ? EdgeInsets.fromLTRB(isMobile ? 4 : 8,
+                                widget.showHeader
+                                    ? (isMobile ? 20 : 24)
+                                    : (isMobile ? 4 : 8),
+                                isMobile ? 4 : 8,
+                                0)
+                            : EdgeInsets.all(isMobile ? 4 : 8),
+                        color: widget.opaque
+                            ? MyTheme.canvasColor
+                            : MyTheme.canvasColor.withAlpha(150),
+                        child: Builder(builder: (context) {
+                          final rows = Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              SizedBox(
+                                  height: qualityMonitorModel.extendedDetails ||
+                                          !widget.showHeader
+                                      ? 0
+                                      : (isMobile ? 20 : 24)),
                             _row(
                                 "Speed", qualityMonitorModel.data.speed ?? '-'),
                             // let delay be 0 if fps is 0
@@ -960,21 +1013,56 @@ class QualityMonitor extends StatelessWidget {
                                       : '${qualityMonitorModel.data.videoRenderSubmitTimeUs}us'),
                             ],
                           ],
+                          );
+                          if (!qualityMonitorModel.extendedDetails ||
+                              widget.fitContent) {
+                            return rows;
+                          }
+                          return Listener(
+                            behavior: HitTestBehavior.opaque,
+                            child: Scrollbar(
+                              controller: _scrollController,
+                              thumbVisibility: isDesktop || isWebDesktop,
+                              child: SingleChildScrollView(
+                                key: const PageStorageKey<String>(
+                                    'quality-monitor-advanced-scroll'),
+                                controller: _scrollController,
+                                padding: EdgeInsets.only(
+                                    top: isMobile ? 2 : 4,
+                                    bottom: isMobile ? 28 : 26),
+                                child: rows,
+                              ),
+                            ),
+                          );
+                        }),
+                      ),
+                    ),
+                    if (widget.showHeader)
+                      Positioned(
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        child: QualityMonitorHeader(
+                          details: qualityMonitorModel.details,
+                          onPanUpdate: widget.onHeaderPanUpdate,
+                          onPanEnd: widget.onHeaderPanEnd,
+                          onPanCancel: widget.onHeaderPanCancel,
+                          onDetailsChanged: widget.onDetailsChanged ??
+                              qualityMonitorModel.setDetails,
                         ),
                       ),
-                    ),
-                    Positioned(
-                      top: 0,
-                      left: 0,
-                      right: 0,
-                      child: QualityMonitorHeader(
-                        details: qualityMonitorModel.details,
-                        onPanUpdate: onHeaderPanUpdate,
-                        onPanEnd: onHeaderPanEnd,
-                        onPanCancel: onHeaderPanCancel,
-                        onDetailsChanged: qualityMonitorModel.setDetails,
+                    if (qualityMonitorModel.extendedDetails &&
+                        !widget.fitContent)
+                      Positioned(
+                        right: 0,
+                        bottom: 0,
+                        child: QualityMonitorResizeHandle(
+                          onPanStart: widget.onResizePanStart,
+                          onPanUpdate: widget.onResizePanUpdate,
+                          onPanEnd: widget.onResizePanEnd,
+                          onPanCancel: widget.onResizePanCancel,
+                        ),
                       ),
-                    ),
                   ],
                 )
               : const SizedBox.shrink()));
@@ -1170,6 +1258,63 @@ class QualityMonitorDetailsToggle extends StatelessWidget {
   }
 }
 
+class QualityMonitorResizeHandle extends StatelessWidget {
+  final GestureDragStartCallback? onPanStart;
+  final GestureDragUpdateCallback? onPanUpdate;
+  final GestureDragEndCallback? onPanEnd;
+  final GestureDragCancelCallback? onPanCancel;
+
+  const QualityMonitorResizeHandle(
+      {Key? key,
+      this.onPanStart,
+      this.onPanUpdate,
+      this.onPanEnd,
+      this.onPanCancel})
+      : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    final foreground = mobileRemoteToolbarForegroundColor(context);
+    final extent = isMobile ? 28.0 : 26.0;
+    return Semantics(
+      label: 'Resize quality monitor',
+      child: MouseRegion(
+        cursor: onPanUpdate == null
+            ? MouseCursor.defer
+            : SystemMouseCursors.resizeUpLeftDownRight,
+        child: Listener(
+          behavior: HitTestBehavior.opaque,
+          child: GestureDetector(
+            key: const Key('quality-monitor-resize-handle'),
+            behavior: HitTestBehavior.opaque,
+            onPanStart: onPanStart,
+            onPanUpdate: onPanUpdate,
+            onPanEnd: onPanEnd,
+            onPanCancel: onPanCancel,
+            child: Container(
+              width: extent,
+              height: extent,
+              decoration: BoxDecoration(
+                color:
+                    mobileRemoteToolbarBackgroundColor(context).withAlpha(220),
+                border: Border(
+                  left: BorderSide(color: foreground.withAlpha(80)),
+                  top: BorderSide(color: foreground.withAlpha(80)),
+                ),
+                borderRadius:
+                    const BorderRadius.only(topLeft: Radius.circular(3)),
+              ),
+              alignment: Alignment.center,
+              child: Icon(Icons.open_in_full_rounded,
+                  size: isMobile ? 11 : 13, color: foreground),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class QualityMonitorHoverFade extends StatefulWidget {
   static const settingsRefreshInterval = Duration(milliseconds: 1000);
   static const restoreDuration = Duration(milliseconds: 180);
@@ -1186,63 +1331,6 @@ class QualityMonitorHoverFade extends StatefulWidget {
       _QualityMonitorHoverFadeState();
 }
 
-class QualityMonitorFadeSettings {
-  final double opacity;
-  final Duration delay;
-  final Duration duration;
-
-  const QualityMonitorFadeSettings({
-    required this.opacity,
-    required this.delay,
-    required this.duration,
-  });
-
-  factory QualityMonitorFadeSettings.fromUserDefaults() {
-    int option(String key,
-        {required int defaultValue, required int min, required int max}) {
-      return (int.tryParse(bind.mainGetUserDefaultOption(key: key)) ??
-              defaultValue)
-          .clamp(min, max);
-    }
-
-    return QualityMonitorFadeSettings(
-      opacity: option(
-            kOptionRemoteToolbarPinnedOpacityPercent,
-            defaultValue: kDefaultRemoteToolbarPinnedOpacityPercent,
-            min: kMinRemoteToolbarPinnedOpacityPercent,
-            max: kMaxRemoteToolbarPinnedOpacityPercent,
-          ) /
-          100.0,
-      delay: Duration(
-        milliseconds: option(
-          kOptionRemoteToolbarPinnedDimDelayMs,
-          defaultValue: kDefaultRemoteToolbarPinnedDimDelayMs,
-          min: kMinRemoteToolbarPinnedDimDelayMs,
-          max: kMaxRemoteToolbarPinnedDimDelayMs,
-        ),
-      ),
-      duration: Duration(
-        milliseconds: option(
-          kOptionRemoteToolbarPinnedDimDurationMs,
-          defaultValue: kDefaultRemoteToolbarPinnedDimDurationMs,
-          min: kMinRemoteToolbarPinnedDimDurationMs,
-          max: kMaxRemoteToolbarPinnedDimDurationMs,
-        ),
-      ),
-    );
-  }
-
-  @override
-  bool operator ==(Object other) =>
-      other is QualityMonitorFadeSettings &&
-      opacity == other.opacity &&
-      delay == other.delay &&
-      duration == other.duration;
-
-  @override
-  int get hashCode => Object.hash(opacity, delay, duration);
-}
-
 class _QualityMonitorHoverFadeState extends State<QualityMonitorHoverFade> {
   Timer? _dimTimer;
   Timer? _settingsTimer;
@@ -1250,18 +1338,17 @@ class _QualityMonitorHoverFadeState extends State<QualityMonitorHoverFade> {
   double _opacity = 1.0;
   Duration _duration = QualityMonitorHoverFade.restoreDuration;
   bool _hovered = false;
+  bool _interacting = false;
 
   @override
   void initState() {
     super.initState();
     _settings = _readSettings();
-    if (isDesktop || isWebDesktop) {
-      _scheduleDim();
-      _settingsTimer = Timer.periodic(
-        QualityMonitorHoverFade.settingsRefreshInterval,
-        (_) => _refreshSettings(),
-      );
-    }
+    _scheduleDim();
+    _settingsTimer = Timer.periodic(
+      QualityMonitorHoverFade.settingsRefreshInterval,
+      (_) => _refreshSettings(),
+    );
   }
 
   QualityMonitorFadeSettings _readSettings() =>
@@ -1298,9 +1385,10 @@ class _QualityMonitorHoverFadeState extends State<QualityMonitorHoverFade> {
 
   void _scheduleDim() {
     _cancelDim();
+    if (_settings.opacity >= 1.0 || _hovered || _interacting) return;
     _dimTimer = Timer(_settings.delay, () {
       _dimTimer = null;
-      if (_hovered) return;
+      if (_hovered || _interacting) return;
       _setOpacity(_settings.opacity, _settings.duration);
     });
   }
@@ -1313,6 +1401,23 @@ class _QualityMonitorHoverFadeState extends State<QualityMonitorHoverFade> {
 
   void _handleExit(PointerExitEvent event) {
     _hovered = false;
+    _scheduleDim();
+  }
+
+  void _handlePointerDown(PointerDownEvent event) {
+    _interacting = true;
+    _cancelDim();
+    _setOpacity(1.0, QualityMonitorHoverFade.restoreDuration);
+  }
+
+  void _handlePointerEnd(PointerEvent event) {
+    _interacting = false;
+    _scheduleDim();
+  }
+
+  void _handlePointerSignal(PointerSignalEvent event) {
+    _cancelDim();
+    _setOpacity(1.0, QualityMonitorHoverFade.restoreDuration);
     _scheduleDim();
   }
 
@@ -1329,11 +1434,18 @@ class _QualityMonitorHoverFadeState extends State<QualityMonitorHoverFade> {
         hitTestBehavior: HitTestBehavior.translucent,
         onEnter: _handleEnter,
         onExit: _handleExit,
-        child: AnimatedOpacity(
-          opacity: _opacity,
-          duration: _duration,
-          curve: Curves.easeOutCubic,
-          child: widget.child,
+        child: Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: _handlePointerDown,
+          onPointerUp: _handlePointerEnd,
+          onPointerCancel: _handlePointerEnd,
+          onPointerSignal: _handlePointerSignal,
+          child: AnimatedOpacity(
+            opacity: _opacity,
+            duration: _duration,
+            curve: Curves.easeOutCubic,
+            child: widget.child,
+          ),
         ),
       );
 }
@@ -1355,10 +1467,14 @@ class _PositionedQualityMonitorState extends State<PositionedQualityMonitor> {
   final _monitorKey = GlobalKey();
   Rect? _lastBounds;
   bool _boundsUpdateScheduled = false;
+  Offset? _resizeOrigin;
+  Size? _resizeSize;
 
   static const _inset = 10.0;
   static const _basicHeight = 180.0;
   static const _extendedHeight = 420.0;
+  static const _mobileMinExtendedSize = Size(160, 120);
+  static const _desktopMinExtendedSize = Size(180, 150);
 
   double _monitorWidth(bool extended) => isMobile
       ? (extended ? 196.0 : 176.0)
@@ -1375,35 +1491,98 @@ class _PositionedQualityMonitorState extends State<PositionedQualityMonitor> {
     return constraints.hasBoundedHeight ? constraints.maxHeight : fallback;
   }
 
+  Size _defaultMonitorSize(bool extended) => Size(
+      _monitorWidth(extended), extended ? _extendedHeight : _basicHeight);
+
+  Size _clampMonitorSize(
+      BoxConstraints constraints, Size requested, bool extended) {
+    if (!extended) return _defaultMonitorSize(false);
+    final minSize =
+        isMobile ? _mobileMinExtendedSize : _desktopMinExtendedSize;
+    final maxWidth = math.max(
+        1.0, _boundedWidth(constraints, extended) - _inset * 2);
+    final maxHeight = math.max(
+        1.0, _boundedHeight(constraints, extended) - _inset * 2);
+    final minWidth = math.min(minSize.width, maxWidth);
+    final minHeight = math.min(minSize.height, maxHeight);
+    return Size(
+        requested.width.clamp(minWidth, maxWidth).toDouble(),
+        requested.height.clamp(minHeight, maxHeight).toDouble());
+  }
+
+  Size _clampResizeAtOrigin(
+      BoxConstraints constraints, Offset origin, Size requested) {
+    final viewportWidth = _boundedWidth(constraints, true);
+    final viewportHeight = _boundedHeight(constraints, true);
+    final maxWidth = math.max(1.0, viewportWidth - origin.dx);
+    final maxHeight = math.max(1.0, viewportHeight - origin.dy);
+    final minSize =
+        isMobile ? _mobileMinExtendedSize : _desktopMinExtendedSize;
+    final minWidth = math.min(minSize.width, maxWidth);
+    final minHeight = math.min(minSize.height, maxHeight);
+    return Size(
+        requested.width.clamp(minWidth, maxWidth).toDouble(),
+        requested.height.clamp(minHeight, maxHeight).toDouble());
+  }
+
   Offset _fixedOrigin(
-      BoxConstraints constraints, String position, bool extended) {
-    final width = _boundedWidth(constraints, extended);
-    final height = _boundedHeight(constraints, extended);
-    final monitorWidth = _monitorWidth(extended);
-    final monitorHeight = extended ? _extendedHeight : _basicHeight;
+      BoxConstraints constraints, String position, Size monitorSize) {
+    final width = _boundedWidth(constraints, true);
+    final height = _boundedHeight(constraints, true);
     switch (position) {
       case kQualityMonitorPositionTopLeft:
         return const Offset(_inset, _inset);
       case kQualityMonitorPositionBottomRight:
-        return Offset(
-            width - monitorWidth - _inset, height - monitorHeight - _inset);
+        return Offset(width - monitorSize.width - _inset,
+            height - monitorSize.height - _inset);
       case kQualityMonitorPositionBottomLeft:
-        return Offset(_inset, height - monitorHeight - _inset);
+        return Offset(_inset, height - monitorSize.height - _inset);
       case kQualityMonitorPositionTopRight:
       default:
-        return Offset(width - monitorWidth - _inset, _inset);
+        return Offset(width - monitorSize.width - _inset, _inset);
     }
   }
 
   Offset _clampPosition(
-      BoxConstraints constraints, Offset position, bool extended) {
-    final width = _boundedWidth(constraints, extended);
-    final height = _boundedHeight(constraints, extended);
-    final monitorHeight = extended ? _extendedHeight : _basicHeight;
-    final maxX = math.max(0.0, width - _monitorWidth(extended));
-    final maxY = math.max(0.0, height - monitorHeight);
+      BoxConstraints constraints, Offset position, Size monitorSize) {
+    final width = _boundedWidth(constraints, true);
+    final height = _boundedHeight(constraints, true);
+    final maxX = math.max(0.0, width - monitorSize.width);
+    final maxY = math.max(0.0, height - monitorSize.height);
     return Offset(position.dx.clamp(0.0, maxX).toDouble(),
         position.dy.clamp(0.0, maxY).toDouble());
+  }
+
+  void _startResize(BoxConstraints constraints, Size monitorSize) {
+    final model = widget.qualityMonitorModel;
+    final origin = _clampPosition(
+        constraints,
+        model.floatingPosition ??
+            _fixedOrigin(constraints, model.position, monitorSize),
+        monitorSize);
+    _resizeOrigin = origin;
+    _resizeSize = monitorSize;
+    model.updateFloatingPosition(origin, persist: false);
+    model.updateFloatingSize(monitorSize, persist: false);
+  }
+
+  void _updateResize(BoxConstraints constraints, Offset delta) {
+    final origin = _resizeOrigin;
+    final currentSize = _resizeSize;
+    if (origin == null || currentSize == null) return;
+    final size = _clampResizeAtOrigin(
+        constraints,
+        origin,
+        Size(currentSize.width + delta.dx, currentSize.height + delta.dy));
+    _resizeSize = size;
+    widget.qualityMonitorModel.updateFloatingSize(size, persist: false);
+  }
+
+  void _finishResize() {
+    _resizeOrigin = null;
+    _resizeSize = null;
+    unawaited(widget.qualityMonitorModel.commitFloatingPosition());
+    unawaited(widget.qualityMonitorModel.commitFloatingSize());
   }
 
   void _scheduleBoundsUpdate() {
@@ -1444,27 +1623,49 @@ class _PositionedQualityMonitorState extends State<PositionedQualityMonitor> {
             value: widget.qualityMonitorModel,
             child: Consumer<QualityMonitorModel>(
               builder: (context, qualityMonitorModel, child) {
+                if (qualityMonitorModel.position ==
+                    kQualityMonitorPositionDetached) {
+                  if (_lastBounds != null) {
+                    _lastBounds = null;
+                    widget.onBoundsChanged?.call(null);
+                  }
+                  return const SizedBox.shrink();
+                }
                 return LayoutBuilder(builder: (context, constraints) {
                   final extended = qualityMonitorModel.extendedDetails;
+                  final monitorSize = _clampMonitorSize(
+                      constraints,
+                      extended
+                          ? (qualityMonitorModel.floatingSize ??
+                              _defaultMonitorSize(true))
+                          : _defaultMonitorSize(false),
+                      extended);
                   _scheduleBoundsUpdate();
                   final monitor = KeyedSubtree(
                     key: _monitorKey,
                     child: QualityMonitorHoverFade(
                       child: QualityMonitor(
                         qualityMonitorModel,
+                        extendedSize: extended ? monitorSize : null,
                         onHeaderPanUpdate: (details) {
                           final base = qualityMonitorModel.floatingPosition ??
                               _fixedOrigin(constraints,
-                                  qualityMonitorModel.position, extended);
+                                  qualityMonitorModel.position, monitorSize);
                           qualityMonitorModel.updateFloatingPosition(
                               _clampPosition(constraints,
-                                  base + details.delta, extended),
+                                  base + details.delta, monitorSize),
                               persist: false);
                         },
                         onHeaderPanEnd: (_) => unawaited(
                             qualityMonitorModel.commitFloatingPosition()),
                         onHeaderPanCancel: () => unawaited(
                             qualityMonitorModel.commitFloatingPosition()),
+                        onResizePanStart: (_) =>
+                            _startResize(constraints, monitorSize),
+                        onResizePanUpdate: (details) =>
+                            _updateResize(constraints, details.delta),
+                        onResizePanEnd: (_) => _finishResize(),
+                        onResizePanCancel: _finishResize,
                       ),
                     ),
                   );
@@ -1472,7 +1673,7 @@ class _PositionedQualityMonitorState extends State<PositionedQualityMonitor> {
                   Widget positionedMonitor;
                   if (floatingPosition != null) {
                     final position =
-                        _clampPosition(constraints, floatingPosition, extended);
+                        _clampPosition(constraints, floatingPosition, monitorSize);
                     positionedMonitor = Positioned(
                         top: position.dy, left: position.dx, child: monitor);
                   } else {

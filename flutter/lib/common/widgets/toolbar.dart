@@ -904,6 +904,9 @@ Future<List<TRadioMenu<String>>> toolbarQualityMonitorPosition(FFI ffi) async {
         qualityMonitorPositionLabel(kQualityMonitorPositionBottomRight)),
     item(kQualityMonitorPositionBottomLeft,
         qualityMonitorPositionLabel(kQualityMonitorPositionBottomLeft)),
+    if (isDesktop)
+      item(kQualityMonitorPositionDetached,
+          qualityMonitorPositionLabel(kQualityMonitorPositionDetached)),
   ];
 }
 
