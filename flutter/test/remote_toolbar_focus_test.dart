@@ -127,71 +127,6 @@ void main() {
     );
   });
 
-  test('toolbar menu activation recovers stale child open state', () {
-    expect(
-      shouldOpenToolbarMenuOnActivation(
-        targetMenuOpen: false,
-        menuGroupOpen: false,
-        targetMenuClosing: false,
-      ),
-      isTrue,
-    );
-    expect(
-      shouldOpenToolbarMenuOnActivation(
-        targetMenuOpen: true,
-        menuGroupOpen: false,
-        targetMenuClosing: false,
-      ),
-      isTrue,
-      reason: 'no visible group menu must make the first click open the target',
-    );
-    expect(
-      shouldOpenToolbarMenuOnActivation(
-        targetMenuOpen: false,
-        menuGroupOpen: true,
-        targetMenuClosing: false,
-      ),
-      isTrue,
-      reason: 'a sibling menu should switch to the target on the first click',
-    );
-    expect(
-      shouldOpenToolbarMenuOnActivation(
-        targetMenuOpen: true,
-        menuGroupOpen: true,
-        targetMenuClosing: false,
-      ),
-      isFalse,
-      reason: 'clicking the visibly open target should close it',
-    );
-    expect(
-      shouldOpenToolbarMenuOnActivation(
-        targetMenuOpen: true,
-        menuGroupOpen: true,
-        targetMenuClosing: true,
-      ),
-      isTrue,
-      reason: 'a closing target must reopen on the first activation',
-    );
-    expect(
-      isToolbarMenuClosing(
-        targetMenuOpen: true,
-        menuGroupOpen: false,
-        animationStatus: AnimationStatus.dismissed,
-      ),
-      isFalse,
-      reason: 'a stale private controller must not consume the first click',
-    );
-    expect(
-      isToolbarMenuClosing(
-        targetMenuOpen: true,
-        menuGroupOpen: true,
-        animationStatus: AnimationStatus.dismissed,
-      ),
-      isTrue,
-      reason: 'a group-owned overlay can still be awaiting close completion',
-    );
-  });
-
   testWidgets('an open toolbar menu blocks remote canvas focus stealing', (
     tester,
   ) async {
@@ -216,6 +151,7 @@ void main() {
       ..connType = ConnType.viewCamera;
     final menuFocusChanges = <bool>[];
     var closeCount = 0;
+    var showToolbar = true;
     late StateSetter rebuildRemotePage;
 
     await tester.pumpWidget(
@@ -242,23 +178,25 @@ void main() {
                       ChangeNotifierProvider.value(value: ffi.canvasModel),
                       ChangeNotifierProvider.value(value: ffi.recordingModel),
                     ],
-                    child: RemoteToolbar(
-                      id: peerId,
-                      ffi: ffi,
-                      state: state,
-                      onEnterOrLeaveImageSetter: (_, __) {},
-                      onEnterOrLeaveImageCleaner: (_) {},
-                      onImagePointerStateSetter: (_, __) {},
-                      onImagePointerStateCleaner: (_) {},
-                      onWindowPointerStateSetter: (_, __) {},
-                      onWindowPointerStateCleaner: (_) {},
-                      onMenuFocusChanged: (menuOpen) {
-                        menuFocusChanges.add(menuOpen);
-                        rawKeyFocusNode.canRequestFocus = !menuOpen;
-                      },
-                      onCloseConnection: () => closeCount++,
-                      setRemoteState: (_) {},
-                    ),
+                    child: showToolbar
+                        ? RemoteToolbar(
+                            id: peerId,
+                            ffi: ffi,
+                            state: state,
+                            onEnterOrLeaveImageSetter: (_, __) {},
+                            onEnterOrLeaveImageCleaner: (_) {},
+                            onImagePointerStateSetter: (_, __) {},
+                            onImagePointerStateCleaner: (_) {},
+                            onWindowPointerStateSetter: (_, __) {},
+                            onWindowPointerStateCleaner: (_) {},
+                            onMenuFocusChanged: (menuOpen) {
+                              menuFocusChanges.add(menuOpen);
+                              rawKeyFocusNode.canRequestFocus = !menuOpen;
+                            },
+                            onCloseConnection: () => closeCount++,
+                            setRemoteState: (_) {},
+                          )
+                        : const SizedBox.shrink(),
                   ),
                 ],
               );
@@ -430,5 +368,61 @@ void main() {
     expect(menuFocusChanges, [true, false, true, false, true, false]);
     expect(find.text('Scale original'), findsNothing);
     expect(closeCount, 1);
-  });
+
+    await tester.tap(
+      find.byTooltip('Display Settings'),
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Scale original'), findsOneWidget);
+
+    // Rapid sibling intent must keep only the latest target without briefly
+    // releasing the remote-input focus guard.
+    await tester.tap(find.byTooltip('Chat'), kind: PointerDeviceKind.mouse);
+    await tester.tap(
+      find.byTooltip('Display Settings'),
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Scale original'), findsOneWidget);
+    expect(find.text('Text chat'), findsNothing);
+    expect(menuFocusChanges.last, isTrue);
+
+    // A non-menu toolbar action, including the detachable quality monitor,
+    // must cancel all pending menu intent. Returning to the toolbar then opens
+    // a menu on the first click.
+    await tester.tap(find.text('QM'), kind: PointerDeviceKind.mouse);
+    await tester.pumpAndSettle();
+    expect(find.text('Scale original'), findsNothing);
+    expect(ffi.qualityMonitorModel.showListenable.value, isTrue);
+    expect(rawKeyFocusNode.canRequestFocus, isTrue);
+
+    rawKeyFocusNode.unfocus();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await tester.pump();
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+
+    await tester.tap(
+      find.byTooltip('Display Settings'),
+      kind: PointerDeviceKind.mouse,
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Scale original'), findsOneWidget);
+    expect(rawKeyFocusNode.canRequestFocus, isFalse);
+
+    // Disposing the toolbar during an asynchronous group close must cancel the
+    // coordinator generation and restore the remote-input focus gate.
+    final disposingGroupController = tester
+        .widget<RawMenuAnchorGroup>(find.byType(RawMenuAnchorGroup))
+        .controller;
+    disposingGroupController.close();
+    expect(disposingGroupController.isOpen, isTrue);
+    rebuildRemotePage(() => showToolbar = false);
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('Display Settings'), findsNothing);
+    expect(rawKeyFocusNode.canRequestFocus, isTrue);
+    expect(tester.takeException(), isNull);
+  }, variant: TargetPlatformVariant.desktop());
 }
