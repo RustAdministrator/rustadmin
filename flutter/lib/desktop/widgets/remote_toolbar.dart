@@ -110,6 +110,20 @@ bool shouldOpenToolbarMenuOnActivation({
   return !menuGroupOpen || !targetMenuOpen;
 }
 
+bool isToolbarMenuClosing({
+  required bool targetMenuOpen,
+  required bool menuGroupOpen,
+  required AnimationStatus animationStatus,
+}) {
+  // A dismissed private controller can remain stale after the group overlay is
+  // already gone. Only wait for onClose when the group still owns a visible or
+  // closing overlay; otherwise the next activation must reopen immediately.
+  return targetMenuOpen &&
+      menuGroupOpen &&
+      (animationStatus == AnimationStatus.reverse ||
+          animationStatus == AnimationStatus.dismissed);
+}
+
 int _parseToolbarIntOption(
   String? raw, {
   required int defaultValue,
@@ -3696,12 +3710,16 @@ class _IconSubmenuButtonState extends State<_IconSubmenuButton> {
     MenuController controller,
     _ToolbarMenuLifecycleScope? menuLifecycle,
   ) {
-    final targetMenuClosing = controller.isOpen &&
-        (_menuAnimationStatus == AnimationStatus.reverse ||
-            _menuAnimationStatus == AnimationStatus.dismissed);
+    final menuGroupOpen =
+        menuLifecycle?.isMenuGroupOpen() ?? controller.isOpen;
+    final targetMenuClosing = isToolbarMenuClosing(
+      targetMenuOpen: controller.isOpen,
+      menuGroupOpen: menuGroupOpen,
+      animationStatus: _menuAnimationStatus,
+    );
     final shouldOpen = shouldOpenToolbarMenuOnActivation(
       targetMenuOpen: controller.isOpen,
-      menuGroupOpen: menuLifecycle?.isMenuGroupOpen() ?? controller.isOpen,
+      menuGroupOpen: menuGroupOpen,
       targetMenuClosing: targetMenuClosing,
     );
     if (shouldOpen) {

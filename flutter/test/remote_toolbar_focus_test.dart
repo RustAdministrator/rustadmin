@@ -172,6 +172,24 @@ void main() {
       isTrue,
       reason: 'a closing target must reopen on the first activation',
     );
+    expect(
+      isToolbarMenuClosing(
+        targetMenuOpen: true,
+        menuGroupOpen: false,
+        animationStatus: AnimationStatus.dismissed,
+      ),
+      isFalse,
+      reason: 'a stale private controller must not consume the first click',
+    );
+    expect(
+      isToolbarMenuClosing(
+        targetMenuOpen: true,
+        menuGroupOpen: true,
+        animationStatus: AnimationStatus.dismissed,
+      ),
+      isTrue,
+      reason: 'a group-owned overlay can still be awaiting close completion',
+    );
   });
 
   testWidgets('an open toolbar menu blocks remote canvas focus stealing', (
