@@ -2719,11 +2719,9 @@ pub fn main_list_peer_security_entries() -> String {
 }
 
 pub fn main_remove_peer(id: String) {
-    if let Err(error) = crate::common::reset_peer_pairing_trust(&id) {
+    if let Err(error) = crate::common::remove_peer_security(&id) {
         log::error!("Refusing to remove host {id} without clearing its paired trust: {error}");
-        return;
     }
-    PeerConfig::remove(&id);
 }
 
 pub fn main_has_hwcodec() -> SyncReturn<bool> {

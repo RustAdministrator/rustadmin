@@ -2728,7 +2728,54 @@ impl PeerSecurityEntry {
     }
 }
 
-pub fn peer_security_entries() -> ResultType<Vec<PeerSecurityEntry>> {
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PeerSecurityMutationResult {
+    pub cleared_peer_config_ids: Vec<String>,
+    pub removed_quic_peer_ids: Vec<String>,
+    pub removed_peer_config: bool,
+}
+
+pub struct PeerSecurityRepository;
+
+fn peer_security_config_ids(peer_config_id: &str, aliases: &[String]) -> Vec<String> {
+    let mut ids = Vec::with_capacity(aliases.len().saturating_add(1));
+    ids.push(peer_config_id.to_owned());
+    ids.extend(aliases.iter().cloned());
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+impl PeerSecurityRepository {
+    pub fn list() -> ResultType<Vec<PeerSecurityEntry>> {
+        peer_security_entries_impl()
+    }
+
+    pub fn reset_pairing(peer_config_id: &str) -> ResultType<PeerSecurityMutationResult> {
+        let mut result = PeerSecurityMutationResult::default();
+        let mut removed_quic_peer_ids = Vec::new();
+        #[cfg(feature = "quic-transport")]
+        {
+            removed_quic_peer_ids = crate::quic_transport::forget_paired_peer(peer_config_id)?;
+        }
+        result.removed_quic_peer_ids = removed_quic_peer_ids;
+        for id in peer_security_config_ids(peer_config_id, &result.removed_quic_peer_ids) {
+            if clear_peer_pairing_state(&id) {
+                result.cleared_peer_config_ids.push(id);
+            }
+        }
+        Ok(result)
+    }
+
+    pub fn remove(peer_config_id: &str) -> ResultType<PeerSecurityMutationResult> {
+        let mut result = Self::reset_pairing(peer_config_id)?;
+        PeerConfig::remove(peer_config_id);
+        result.removed_peer_config = true;
+        Ok(result)
+    }
+}
+
+fn peer_security_entries_impl() -> ResultType<Vec<PeerSecurityEntry>> {
     let mut entries = BTreeMap::<String, PeerSecurityEntry>::new();
     for (id, modified_at, _) in PeerConfig::get_vec_id_modified_time_path(&None) {
         let modified_at_unix_ms = modified_at
@@ -2766,16 +2813,16 @@ pub fn peer_security_entries() -> ResultType<Vec<PeerSecurityEntry>> {
     Ok(entries)
 }
 
+pub fn peer_security_entries() -> ResultType<Vec<PeerSecurityEntry>> {
+    PeerSecurityRepository::list()
+}
+
 pub fn reset_peer_pairing_trust(peer_config_id: &str) -> ResultType<()> {
-    let mut peer_config_ids = vec![peer_config_id.to_owned()];
-    #[cfg(feature = "quic-transport")]
-    peer_config_ids.extend(crate::quic_transport::forget_paired_peer(peer_config_id)?);
-    peer_config_ids.sort();
-    peer_config_ids.dedup();
-    for id in peer_config_ids {
-        clear_peer_pairing_state(&id);
-    }
-    Ok(())
+    PeerSecurityRepository::reset_pairing(peer_config_id).map(|_| ())
+}
+
+pub fn remove_peer_security(peer_config_id: &str) -> ResultType<PeerSecurityMutationResult> {
+    PeerSecurityRepository::remove(peer_config_id)
 }
 
 fn paired_viewer_confirmed_option(scope: &str) -> Option<&'static str> {
@@ -5787,6 +5834,26 @@ mod tests {
         assert!(err.contains("peer identity changed"));
 
         hbb_common::config::PeerConfig::remove(&peer_id);
+    }
+
+    #[test]
+    fn test_peer_security_config_ids_include_primary_and_deduplicate_aliases() {
+        assert_eq!(
+            peer_security_config_ids(
+                "primary",
+                &[
+                    "alias-b".to_owned(),
+                    "primary".to_owned(),
+                    "alias-a".to_owned(),
+                    "alias-b".to_owned(),
+                ],
+            ),
+            vec![
+                "alias-a".to_owned(),
+                "alias-b".to_owned(),
+                "primary".to_owned(),
+            ]
+        );
     }
 
     #[test]
