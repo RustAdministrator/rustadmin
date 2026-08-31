@@ -35,7 +35,7 @@ use serde_json::json;
 ))]
 use std::ffi::c_void;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ops::{Deref, DerefMut},
     str::FromStr,
     sync::{
@@ -59,6 +59,38 @@ use crate::{client::Data, client::Interface};
 
 const CHANGE_RESOLUTION_VALID_TIMEOUT_SECS: u64 = 15;
 const OPTION_MOBILE_PHYSICAL_KEY_INPUT: &str = "mobile-physical-key-input";
+const OPTION_KEYBOARD_INPUT_MODE_V2: &str = "keyboard-input-mode-v2";
+const KEYBOARD_INPUT_MODE_AUTO: &str = "auto";
+const KEYBOARD_INPUT_MODE_TEXT: &str = "text";
+const KEYBOARD_INPUT_MODE_PHYSICAL: &str = "physical";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KeyboardInputPreference {
+    Auto,
+    Text,
+    Physical,
+}
+
+impl KeyboardInputPreference {
+    fn from_options(mode: &str, legacy_physical_key_input: &str) -> Self {
+        match mode.to_ascii_lowercase().as_str() {
+            KEYBOARD_INPUT_MODE_TEXT => Self::Text,
+            KEYBOARD_INPUT_MODE_PHYSICAL => Self::Physical,
+            KEYBOARD_INPUT_MODE_AUTO => Self::Auto,
+            _ if legacy_physical_key_input.eq_ignore_ascii_case("N") => Self::Text,
+            _ => Self::Auto,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct KeyboardInputSendState {
+    round: u32,
+    epoch: u64,
+    sequence: u64,
+    pressed_hid_usages: HashSet<u32>,
+    text_hid_usages: HashSet<u32>,
+}
 
 fn mobile_physical_key_input_enabled(is_mobile: bool, stored_value: &str) -> bool {
     is_mobile && !stored_value.eq_ignore_ascii_case("N")
@@ -97,6 +129,57 @@ fn mobile_physical_keyboard_mode(
     }
 }
 
+fn split_committed_text(value: &str, max_bytes: usize) -> Vec<&str> {
+    if value.is_empty() || max_bytes == 0 {
+        return Vec::new();
+    }
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < value.len() {
+        let mut end = value.len().min(start.saturating_add(max_bytes));
+        while end > start && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            return Vec::new();
+        }
+        chunks.push(&value[start..end]);
+        start = end;
+    }
+    chunks
+}
+
+fn keyboard_v2_modifier_bit(usage: u32) -> Option<u32> {
+    match usage {
+        0xe0 | 0xe4 => Some(hbb_common::keyboard::KEYBOARD_MODIFIER_CONTROL),
+        0xe1 | 0xe5 => Some(hbb_common::keyboard::KEYBOARD_MODIFIER_SHIFT),
+        0xe2 | 0xe6 => Some(hbb_common::keyboard::KEYBOARD_MODIFIER_ALT),
+        0xe3 | 0xe7 => Some(hbb_common::keyboard::KEYBOARD_MODIFIER_META),
+        _ => None,
+    }
+}
+
+fn keyboard_v2_modifier_mask(pressed: &HashSet<u32>) -> u32 {
+    pressed
+        .iter()
+        .filter_map(|usage| keyboard_v2_modifier_bit(*usage))
+        .fold(0, |mask, bit| mask | bit)
+}
+
+fn keyboard_v2_lock_mask(lock_modes: i32) -> u32 {
+    let mut mask = 0;
+    if lock_modes & (1 << 1) != 0 {
+        mask |= hbb_common::keyboard::KEYBOARD_LOCK_CAPS;
+    }
+    if lock_modes & (1 << 2) != 0 {
+        mask |= hbb_common::keyboard::KEYBOARD_LOCK_NUM;
+    }
+    if lock_modes & (1 << 3) != 0 {
+        mask |= hbb_common::keyboard::KEYBOARD_LOCK_SCROLL;
+    }
+    mask
+}
+
 #[derive(Clone, Default)]
 pub struct Session<T: InvokeUiSession> {
     pub password: String,
@@ -119,6 +202,7 @@ pub struct Session<T: InvokeUiSession> {
     pub audit_guid: Arc<Mutex<String>>,
     pub direct_trust_response: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
     pub direct_pairing_passphrase_response: Arc<Mutex<Option<oneshot::Sender<Option<String>>>>>,
+    pub(crate) keyboard_input_send_state: Arc<Mutex<KeyboardInputSendState>>,
 }
 
 #[derive(Clone)]
@@ -1009,7 +1093,258 @@ impl<T: InvokeUiSession> Session<T> {
         }
     }
 
-    pub fn input_string(&self, value: &str) {
+    fn keyboard_input_preference(&self) -> KeyboardInputPreference {
+        KeyboardInputPreference::from_options(
+            &self.get_option(OPTION_KEYBOARD_INPUT_MODE_V2.to_owned()),
+            &self.get_option(OPTION_MOBILE_PHYSICAL_KEY_INPUT.to_owned()),
+        )
+    }
+
+    fn keyboard_v2_capabilities(&self) -> Option<KeyboardCapabilities> {
+        let lc = self.lc.read().unwrap();
+        lc.peer_info
+            .as_ref()?
+            .features
+            .as_ref()?
+            .keyboard
+            .as_ref()
+            .filter(|capabilities| {
+                capabilities.protocol_version
+                    >= hbb_common::keyboard::KEYBOARD_INPUT_PROTOCOL_VERSION
+            })
+            .cloned()
+    }
+
+    fn next_keyboard_input(&self) -> KeyboardInput {
+        self.reset_keyboard_input_state_for_round();
+        let mut state = self.keyboard_input_send_state.lock().unwrap();
+        if state.epoch == 0 || state.sequence == u64::MAX {
+            let uuid = Uuid::new_v4().as_u128();
+            state.epoch = ((uuid >> 64) as u64) ^ uuid as u64;
+            if state.epoch == 0 {
+                state.epoch = 1;
+            }
+            state.sequence = 0;
+        }
+        state.sequence += 1;
+        KeyboardInput {
+            protocol_version: hbb_common::keyboard::KEYBOARD_INPUT_PROTOCOL_VERSION,
+            input_epoch: state.epoch,
+            sequence: state.sequence,
+            ..Default::default()
+        }
+    }
+
+    fn reset_keyboard_input_state_for_round(&self) {
+        let round = self.connection_round_state.lock().unwrap().round;
+        let mut state = self.keyboard_input_send_state.lock().unwrap();
+        if state.round != round {
+            *state = KeyboardInputSendState {
+                round,
+                ..Default::default()
+            };
+        }
+    }
+
+    fn send_keyboard_input(&self, input: KeyboardInput) {
+        let mut message = Message::new();
+        message.set_keyboard_input(input);
+        self.send(Data::Message(message));
+    }
+
+    fn try_send_physical_keyboard_v2(
+        &self,
+        character: &str,
+        usb_hid: i32,
+        lock_modes: i32,
+        down: bool,
+    ) -> bool {
+        self.reset_keyboard_input_state_for_round();
+        let Some(capabilities) = self
+            .keyboard_v2_capabilities()
+            .filter(|capabilities| capabilities.physical_key)
+        else {
+            return false;
+        };
+        let Ok(usage) = u32::try_from(usb_hid) else {
+            return false;
+        };
+        if !(hbb_common::keyboard::MIN_USB_HID_KEYBOARD_USAGE
+            ..=hbb_common::keyboard::MAX_USB_HID_KEYBOARD_USAGE)
+            .contains(&usage)
+        {
+            return false;
+        }
+
+        let preference = self.keyboard_input_preference();
+        let (repeat, modifier_mask, suppress_release, committed_text) = {
+            let mut state = self.keyboard_input_send_state.lock().unwrap();
+            let repeat = if down {
+                !state.pressed_hid_usages.insert(usage)
+            } else {
+                state.pressed_hid_usages.remove(&usage);
+                false
+            };
+            let modifier_mask = keyboard_v2_modifier_mask(&state.pressed_hid_usages);
+            let suppress_release = !down && state.text_hid_usages.remove(&usage);
+            let committed_text = if down
+                && preference == KeyboardInputPreference::Text
+                && keyboard_v2_modifier_bit(usage).is_none()
+                && modifier_mask
+                    & (hbb_common::keyboard::KEYBOARD_MODIFIER_CONTROL
+                        | hbb_common::keyboard::KEYBOARD_MODIFIER_ALT
+                        | hbb_common::keyboard::KEYBOARD_MODIFIER_META)
+                    == 0
+                && !character.is_empty()
+            {
+                state.text_hid_usages.insert(usage);
+                Some(character.to_owned())
+            } else {
+                None
+            };
+            (repeat, modifier_mask, suppress_release, committed_text)
+        };
+
+        if suppress_release {
+            return true;
+        }
+        if let Some(text) = committed_text {
+            self.send_committed_text_v2(&text, 0, 0, &capabilities);
+            return true;
+        }
+
+        let mut input = self.next_keyboard_input();
+        input.set_physical_key(PhysicalKey {
+            usb_hid_usage: usage,
+            down,
+            repeat,
+            modifier_mask,
+            lock_mask: keyboard_v2_lock_mask(lock_modes),
+            ..Default::default()
+        });
+        self.send_keyboard_input(input);
+        true
+    }
+
+    fn send_committed_text_v2(
+        &self,
+        value: &str,
+        delete_before_graphemes: u32,
+        delete_after_graphemes: u32,
+        capabilities: &KeyboardCapabilities,
+    ) {
+        self.send_committed_text_v2_with_source_layout(
+            value,
+            delete_before_graphemes,
+            delete_after_graphemes,
+            capabilities,
+            "",
+            "",
+            false,
+        );
+    }
+
+    fn send_committed_text_v2_with_source_layout(
+        &self,
+        value: &str,
+        mut delete_before_graphemes: u32,
+        mut delete_after_graphemes: u32,
+        capabilities: &KeyboardCapabilities,
+        source_language_tag: &str,
+        source_layout_type: &str,
+        prefer_physical: bool,
+    ) {
+        let delete_limit = hbb_common::keyboard::MAX_TEXT_DELETE_GRAPHEMES;
+        while delete_before_graphemes > delete_limit {
+            self.send_committed_text_chunk(
+                "",
+                delete_limit,
+                0,
+                source_language_tag,
+                source_layout_type,
+                prefer_physical,
+            );
+            delete_before_graphemes -= delete_limit;
+        }
+        while delete_after_graphemes > delete_limit {
+            self.send_committed_text_chunk(
+                "",
+                0,
+                delete_limit,
+                source_language_tag,
+                source_layout_type,
+                prefer_physical,
+            );
+            delete_after_graphemes -= delete_limit;
+        }
+
+        let advertised_max = usize::try_from(capabilities.max_committed_text_bytes)
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(hbb_common::keyboard::MAX_COMMITTED_TEXT_BYTES);
+        let max_bytes = advertised_max
+            .max(1)
+            .min(hbb_common::keyboard::MAX_COMMITTED_TEXT_BYTES);
+        let chunks = split_committed_text(value, max_bytes);
+        if chunks.is_empty() {
+            if value.is_empty() && (delete_before_graphemes != 0 || delete_after_graphemes != 0) {
+                self.send_committed_text_chunk(
+                    "",
+                    delete_before_graphemes,
+                    delete_after_graphemes,
+                    source_language_tag,
+                    source_layout_type,
+                    prefer_physical,
+                );
+            } else if !value.is_empty() {
+                log::warn!("Keyboard V2 text contains a scalar larger than the negotiated limit");
+            }
+            return;
+        }
+
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            self.send_committed_text_chunk(
+                chunk,
+                if index == 0 {
+                    delete_before_graphemes
+                } else {
+                    0
+                },
+                if index == 0 {
+                    delete_after_graphemes
+                } else {
+                    0
+                },
+                source_language_tag,
+                source_layout_type,
+                prefer_physical,
+            );
+        }
+    }
+
+    fn send_committed_text_chunk(
+        &self,
+        value: &str,
+        delete_before_graphemes: u32,
+        delete_after_graphemes: u32,
+        source_language_tag: &str,
+        source_layout_type: &str,
+        prefer_physical: bool,
+    ) {
+        let mut input = self.next_keyboard_input();
+        input.set_committed_text(CommittedText {
+            text: value.to_owned(),
+            delete_before_graphemes,
+            delete_after_graphemes,
+            source_language_tag: source_language_tag.to_owned(),
+            source_layout_type: source_layout_type.to_owned(),
+            prefer_physical,
+            ..Default::default()
+        });
+        self.send_keyboard_input(input);
+    }
+
+    fn send_legacy_text(&self, value: &str) {
         let mut key_event = KeyEvent::new();
         key_event.set_seq(value.to_owned());
         let physical_key_input = mobile_physical_key_input_enabled(
@@ -1034,6 +1369,78 @@ impl<T: InvokeUiSession> Session<T> {
         let mut msg_out = Message::new();
         msg_out.set_key_event(key_event);
         self.send(Data::Message(msg_out));
+    }
+
+    fn send_legacy_control_click(&self, control_key: ControlKey) {
+        let mut key_event = KeyEvent::new();
+        key_event.set_control_key(control_key);
+        key_event.press = true;
+        key_event.mode = KeyboardMode::Legacy.into();
+        self.send_key_event(&key_event);
+    }
+
+    pub fn input_text_edit(
+        &self,
+        value: &str,
+        delete_before_graphemes: u32,
+        delete_after_graphemes: u32,
+    ) {
+        let capabilities = self.keyboard_v2_capabilities();
+        if let Some(capabilities) = capabilities
+            .as_ref()
+            .filter(|capabilities| capabilities.committed_text)
+        {
+            self.send_committed_text_v2(
+                value,
+                delete_before_graphemes,
+                delete_after_graphemes,
+                capabilities,
+            );
+            return;
+        }
+
+        for _ in 0..delete_before_graphemes {
+            self.send_legacy_control_click(ControlKey::Backspace);
+        }
+        for _ in 0..delete_after_graphemes {
+            self.send_legacy_control_click(ControlKey::Delete);
+        }
+        if !value.is_empty() {
+            self.send_legacy_text(value);
+        }
+    }
+
+    pub fn input_text_edit_with_source_layout(
+        &self,
+        value: &str,
+        source_language_tag: &str,
+        source_layout_type: &str,
+    ) {
+        let capabilities = self.keyboard_v2_capabilities();
+        if let Some(capabilities) = capabilities.as_ref().filter(|capabilities| {
+            capabilities.committed_text
+                && capabilities.layout_aware_text
+                && hbb_common::keyboard::validate_source_layout_metadata(
+                    source_language_tag,
+                    source_layout_type,
+                )
+        }) {
+            self.send_committed_text_v2_with_source_layout(
+                value,
+                0,
+                0,
+                capabilities,
+                source_language_tag,
+                source_layout_type,
+                true,
+            );
+            return;
+        }
+        self.input_text_edit(value, 0, 0);
+    }
+
+    pub fn input_string(&self, value: &str) {
+        self.input_text_edit(value, 0, 0);
     }
 
     pub fn mobile_physical_keyboard_mode(&self, configured_mode: &str) -> String {
@@ -1132,6 +1539,8 @@ impl<T: InvokeUiSession> Session<T> {
     ) {
         if character == "flutter_key" {
             self._handle_key_flutter_simulation(keyboard_mode, usb_hid, down_or_up);
+        } else if self.try_send_physical_keyboard_v2(character, usb_hid, lock_modes, down_or_up) {
+            return;
         } else {
             self._handle_key_non_flutter_simulation(
                 keyboard_mode,
@@ -2456,6 +2865,43 @@ mod mobile_soft_keyboard_tests {
         assert_eq!(
             mobile_physical_keyboard_mode(true, "Linux", true, "translate"),
             "translate"
+        );
+    }
+
+    #[test]
+    fn keyboard_v2_mode_migrates_the_legacy_physical_toggle() {
+        assert_eq!(
+            KeyboardInputPreference::from_options("", ""),
+            KeyboardInputPreference::Auto
+        );
+        assert_eq!(
+            KeyboardInputPreference::from_options("", "N"),
+            KeyboardInputPreference::Text
+        );
+        assert_eq!(
+            KeyboardInputPreference::from_options("physical", "N"),
+            KeyboardInputPreference::Physical
+        );
+    }
+
+    #[test]
+    fn committed_text_chunks_preserve_utf8_boundaries() {
+        let text = "a\u{1f642}b";
+        assert_eq!(split_committed_text(text, 5), vec!["a\u{1f642}", "b"]);
+        assert!(split_committed_text("\u{1f642}", 3).is_empty());
+    }
+
+    #[test]
+    fn keyboard_v2_normalizes_hid_modifier_and_lock_state() {
+        let pressed = HashSet::from([0xe0, 0xe5, 0x04]);
+        assert_eq!(
+            keyboard_v2_modifier_mask(&pressed),
+            hbb_common::keyboard::KEYBOARD_MODIFIER_CONTROL
+                | hbb_common::keyboard::KEYBOARD_MODIFIER_SHIFT
+        );
+        assert_eq!(
+            keyboard_v2_lock_mask((1 << 1) | (1 << 3)),
+            hbb_common::keyboard::KEYBOARD_LOCK_CAPS | hbb_common::keyboard::KEYBOARD_LOCK_SCROLL
         );
     }
 }

@@ -1151,6 +1151,26 @@ impl InvokeUiSession for FlutterHandler {
         let mut features: HashMap<&str, bool> = Default::default();
         for ref f in pi.features.iter() {
             features.insert("privacy_mode", f.privacy_mode);
+            if let Some(keyboard) = f.keyboard.as_ref() {
+                features.insert(
+                    "keyboard_v2_committed_text",
+                    keyboard.protocol_version
+                        >= hbb_common::keyboard::KEYBOARD_INPUT_PROTOCOL_VERSION
+                        && keyboard.committed_text,
+                );
+                features.insert(
+                    "keyboard_v2_physical_key",
+                    keyboard.protocol_version
+                        >= hbb_common::keyboard::KEYBOARD_INPUT_PROTOCOL_VERSION
+                        && keyboard.physical_key,
+                );
+                features.insert(
+                    "keyboard_v2_layout_aware_text",
+                    keyboard.protocol_version
+                        >= hbb_common::keyboard::KEYBOARD_INPUT_PROTOCOL_VERSION
+                        && keyboard.layout_aware_text,
+                );
+            }
         }
         // compatible with 1.1.9
         if get_version_number(&pi.version) < get_version_number("1.2.0") {

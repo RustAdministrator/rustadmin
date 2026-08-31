@@ -1635,6 +1635,55 @@ bool mobileVmPhysicalInputEnabled(String storedValue) =>
 
 String mobileVmPhysicalInputOption(bool enabled) => enabled ? 'Y' : 'N';
 
+String mobileKeyboardInputV2Mode(String storedValue, String legacyPhysical) {
+  switch (storedValue.toLowerCase()) {
+    case kKeyboardInputModeText:
+    case kKeyboardInputModePhysical:
+    case kKeyboardInputModeAuto:
+      return storedValue.toLowerCase();
+    default:
+      return mobileVmPhysicalInputEnabled(legacyPhysical)
+          ? kKeyboardInputModeAuto
+          : kKeyboardInputModeText;
+  }
+}
+
+class MobileCommittedTextEdit {
+  const MobileCommittedTextEdit({
+    required this.text,
+    required this.deleteBeforeGraphemes,
+    this.deleteAfterGraphemes = 0,
+  });
+
+  final String text;
+  final int deleteBeforeGraphemes;
+  final int deleteAfterGraphemes;
+
+  bool get isEmpty =>
+      text.isEmpty && deleteBeforeGraphemes == 0 && deleteAfterGraphemes == 0;
+}
+
+MobileCommittedTextEdit mobileCommittedTextEdit(
+  String oldValue,
+  String newValue, {
+  bool replacedByClipboard = false,
+}) {
+  final oldGraphemes = (replacedByClipboard ? '' : oldValue).characters.toList(
+    growable: false,
+  );
+  final newGraphemes = newValue.characters.toList(growable: false);
+  var commonPrefix = 0;
+  while (commonPrefix < oldGraphemes.length &&
+      commonPrefix < newGraphemes.length &&
+      oldGraphemes[commonPrefix] == newGraphemes[commonPrefix]) {
+    commonPrefix += 1;
+  }
+  return MobileCommittedTextEdit(
+    text: newGraphemes.skip(commonPrefix).join(),
+    deleteBeforeGraphemes: oldGraphemes.length - commonPrefix,
+  );
+}
+
 class MobileRemoteActionItem {
   const MobileRemoteActionItem({required this.child, required this.onPressed});
 
@@ -1801,16 +1850,22 @@ class MobileRemoteKeyboardSettingsContent extends StatefulWidget {
     super.key,
     required this.mode,
     required this.modes,
+    this.inputMode,
+    this.inputModes = const [],
     this.toggles = const [],
     this.actions = const [],
     this.modeHeading = 'Keyboard mode',
+    this.inputModeHeading = 'Input mode',
   });
 
   final String mode;
   final List<MobileRemoteRadioItem> modes;
+  final String? inputMode;
+  final List<MobileRemoteRadioItem> inputModes;
   final List<MobileRemoteToggleItem> toggles;
   final List<MobileRemoteActionItem> actions;
   final String modeHeading;
+  final String inputModeHeading;
 
   @override
   State<MobileRemoteKeyboardSettingsContent> createState() =>
@@ -1820,6 +1875,7 @@ class MobileRemoteKeyboardSettingsContent extends StatefulWidget {
 class _MobileRemoteKeyboardSettingsContentState
     extends State<MobileRemoteKeyboardSettingsContent> {
   late String _mode;
+  String? _inputMode;
   late Map<String, bool> _toggleValues;
 
   @override
@@ -1833,13 +1889,16 @@ class _MobileRemoteKeyboardSettingsContentState
     covariant MobileRemoteKeyboardSettingsContent oldWidget,
   ) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.mode != widget.mode || oldWidget.toggles != widget.toggles) {
+    if (oldWidget.mode != widget.mode ||
+        oldWidget.inputMode != widget.inputMode ||
+        oldWidget.toggles != widget.toggles) {
       _resetValues();
     }
   }
 
   void _resetValues() {
     _mode = widget.mode;
+    _inputMode = widget.inputMode;
     _toggleValues = {
       for (final toggle in widget.toggles) toggle.id: toggle.value,
     };
@@ -1884,7 +1943,40 @@ class _MobileRemoteKeyboardSettingsContentState
             ),
           ),
         ],
-        if (widget.modes.isNotEmpty &&
+        if (widget.inputModes.isNotEmpty && _inputMode != null) ...[
+          if (widget.modes.isNotEmpty) const Divider(),
+          Text(
+            widget.inputModeHeading,
+            style: Theme.of(context).textTheme.labelLarge,
+          ),
+          RadioGroup<String>(
+            groupValue: _inputMode,
+            onChanged: (value) {
+              if (value == null) return;
+              final item = widget.inputModes.firstWhere(
+                (candidate) => candidate.value == value,
+              );
+              item.onChanged?.call(value);
+              if (item.commitSelection && item.onChanged != null) {
+                setState(() => _inputMode = value);
+              }
+            },
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                for (final item in widget.inputModes)
+                  RadioListTile<String>(
+                    contentPadding: EdgeInsets.zero,
+                    visualDensity: VisualDensity.compact,
+                    value: item.value,
+                    enabled: item.onChanged != null,
+                    title: item.child,
+                  ),
+              ],
+            ),
+          ),
+        ],
+        if ((widget.modes.isNotEmpty || widget.inputModes.isNotEmpty) &&
             (widget.toggles.isNotEmpty || widget.actions.isNotEmpty))
           const Divider(),
         for (final toggle in widget.toggles) ...[

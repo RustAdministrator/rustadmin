@@ -29,6 +29,7 @@ import '../../utils/image.dart';
 import '../android_vpn_controller.dart';
 import '../mobile_modifier_state.dart';
 import '../mobile_viewport.dart';
+import '../android_remote_keyboard.dart';
 import '../widgets/custom_image_quality_widget.dart';
 import '../widgets/dialog.dart';
 
@@ -103,6 +104,7 @@ class _RemotePageState extends State<RemotePage>
   bool _backgroundReconnectInProgress = false;
   bool _manualDisconnect = false;
   Future<void>? _backgroundCloseFuture;
+  bool _updatingSoftKeyboardText = false;
 
   final _blockableOverlayState = BlockableOverlayState();
 
@@ -119,12 +121,19 @@ class _RemotePageState extends State<RemotePage>
   var _cursorInertiaSettings = MobileCursorInertiaSettings.defaults;
   var _showMonitorsInToolbar = false;
   var _physicalKeyInput = true;
+  var _keyboardInputModeV2 = kKeyboardInputModeAuto;
   var _quickKeyOrder = List<MobileRemoteQuickKey>.of(
     mobileRemoteDefaultQuickKeyOrder,
   );
 
   InputModel get inputModel => gFFI.inputModel;
   SessionID get sessionId => gFFI.sessionId;
+
+  bool get _usesAndroidNativeKeyboardInput => useAndroidNativeRemoteKeyboard(
+    isAndroidClient: isAndroid,
+    physicalKeyCapability: gFFI.ffiModel.pi.features.keyboardV2PhysicalKey,
+    inputMode: _keyboardInputModeV2,
+  );
 
   final TextEditingController _textController = TextEditingController(
     text: initText,
@@ -139,6 +148,7 @@ class _RemotePageState extends State<RemotePage>
   @override
   void initState() {
     super.initState();
+    _textController.addListener(_handleSoftKeyboardEditingValue);
     _toolbarTransparencySettings =
         _toolbarTransparencySettingsFromUserDefaults();
     _toolbarPlacementSettings = _toolbarPlacementFromLocalOption();
@@ -311,6 +321,10 @@ class _RemotePageState extends State<RemotePage>
           sessionId: sessionId,
           name: kOptionMobilePhysicalKeyInput,
         ),
+        bind.sessionGetPeerOption(
+          sessionId: sessionId,
+          name: kOptionKeyboardInputModeV2,
+        ),
       ]);
       final toolbarSettings =
           MobileRemoteToolbarTransparencySettings.fromStored(
@@ -324,14 +338,20 @@ class _RemotePageState extends State<RemotePage>
         fallback: inertiaDefaults,
       );
       final physicalKeyInput = mobileVmPhysicalInputEnabled(stored[2]);
+      final keyboardInputModeV2 = mobileKeyboardInputV2Mode(
+        stored[3],
+        mobileVmPhysicalInputOption(physicalKeyInput),
+      );
       if (mounted &&
           (toolbarSettings != _toolbarTransparencySettings ||
               inertiaSettings != _cursorInertiaSettings ||
-              physicalKeyInput != _physicalKeyInput)) {
+              physicalKeyInput != _physicalKeyInput ||
+              keyboardInputModeV2 != _keyboardInputModeV2)) {
         setState(() {
           _toolbarTransparencySettings = toolbarSettings;
           _cursorInertiaSettings = inertiaSettings;
           _physicalKeyInput = physicalKeyInput;
+          _keyboardInputModeV2 = keyboardInputModeV2;
         });
       }
     } catch (error) {
@@ -342,6 +362,7 @@ class _RemotePageState extends State<RemotePage>
   @override
   Future<void> dispose() async {
     _manualDisconnect = true;
+    _textController.removeListener(_handleSoftKeyboardEditingValue);
     WidgetsBinding.instance.removeObserver(this);
     await _outgoingSessionClosedSubscription?.cancel();
     gFFI.canvasModel.disposeEdgeScrollFallback();
@@ -352,9 +373,11 @@ class _RemotePageState extends State<RemotePage>
     gFFI.inputModel.listenToMouse(false);
     gFFI.imageModel.disposeImage();
     gFFI.cursorModel.disposeImages();
+    await _setAndroidRemoteKeyboardInput(false);
     await gFFI.invokeMethod("enable_soft_keyboard", true);
     _mobileFocusNode.dispose();
     _physicalFocusNode.dispose();
+    _textController.dispose();
     await gFFI.close();
     _timer?.cancel();
     _iosKeyboardWorkaroundTimer?.cancel();
@@ -411,6 +434,7 @@ class _RemotePageState extends State<RemotePage>
 
     if (!visible) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
+      unawaited(_setAndroidRemoteKeyboardInput(false));
       // [pi.version.isNotEmpty] -> check ready or not, avoid login without soft-keyboard
       if (gFFI.chatModel.chatWindowOverlayEntry == null &&
           gFFI.ffiModel.pi.version.isNotEmpty) {
@@ -447,101 +471,85 @@ class _RemotePageState extends State<RemotePage>
     setState(() {});
   }
 
+  bool _softKeyboardSentinelWasReplaced(String oldValue, String newValue) {
+    final firstMarkerChanged =
+        oldValue.isNotEmpty &&
+        newValue.isNotEmpty &&
+        oldValue[0] == '1' &&
+        newValue[0] != '1';
+    final fullSentinelReplaced =
+        oldValue.startsWith(initText) &&
+        !newValue.startsWith(initText) &&
+        !(oldValue == initText && newValue.length == initText.length - 1);
+    return firstMarkerChanged || fullSentinelReplaced;
+  }
+
   void _handleIOSSoftKeyboardInput(String newValue) {
-    var oldValue = _value;
-    _value = newValue;
+    final oldValue = _value;
+    final replacedByClipboard = _softKeyboardSentinelWasReplaced(
+      oldValue,
+      newValue,
+    );
+    if (replacedByClipboard) {
+      _value = newValue;
+      _inputMobileTextEdit(
+        mobileCommittedTextEdit('', newValue, replacedByClipboard: true),
+      );
+      return;
+    }
     var i = newValue.length - 1;
     for (; i >= 0 && newValue[i] != '1'; --i) {}
     var j = oldValue.length - 1;
     for (; j >= 0 && oldValue[j] != '1'; --j) {}
     if (i < j) j = i;
-    var subNewValue = newValue.substring(j + 1);
-    var subOldValue = oldValue.substring(j + 1);
-
-    // get common prefix of subNewValue and subOldValue
-    var common = 0;
-    for (
-      ;
-      common < subOldValue.length &&
-          common < subNewValue.length &&
-          subNewValue[common] == subOldValue[common];
-      ++common
-    ) {}
-
-    // get newStr from subNewValue
-    var newStr = "";
-    if (subNewValue.length > common) {
-      newStr = subNewValue.substring(common);
-    }
-
-    // Set the value to the old value and early return if is still composing. (1 && 2)
-    // 1. The composing range is valid
-    // 2. The new string is shorter than the composing range.
-    if (_textController.value.isComposingRangeValid) {
-      final composingLength =
-          _textController.value.composing.end -
-          _textController.value.composing.start;
-      if (composingLength > newStr.length) {
-        _value = oldValue;
-        return;
-      }
-    }
-
-    // Delete the different part in the old value.
-    for (i = 0; i < subOldValue.length - common; ++i) {
-      inputModel.inputKey('VK_BACK');
-    }
-
-    // Input the new string.
-    if (newStr.length > 1) {
-      _inputMobileString(newStr);
-    } else {
-      inputChar(newStr);
-    }
+    final edit = mobileCommittedTextEdit(
+      oldValue.substring(j + 1),
+      newValue.substring(j + 1),
+      replacedByClipboard: replacedByClipboard,
+    );
+    _value = newValue;
+    _inputMobileTextEdit(edit);
   }
 
   void _handleNonIOSSoftKeyboardInput(String newValue) {
-    var oldValue = _value;
+    final oldValue = _value;
     _value = newValue;
-    if (oldValue.isNotEmpty &&
-        newValue.isNotEmpty &&
-        oldValue[0] == '1' &&
-        newValue[0] != '1') {
-      // clipboard
-      oldValue = '';
-    }
-    if (newValue.length == oldValue.length) {
-      // ?
-    } else if (newValue.length < oldValue.length) {
-      final char = 'VK_BACK';
-      inputModel.inputKey(char);
-    } else {
-      final content = newValue.substring(oldValue.length);
-      if (content.length > 1) {
-        if (oldValue != '' &&
-            content.length == 2 &&
-            (content == '""' ||
-                content == '()' ||
-                content == '[]' ||
-                content == '<>' ||
-                content == "{}" ||
-                content == '”“' ||
-                content == '《》' ||
-                content == '（）' ||
-                content == '【】')) {
-          // can not only input content[0], because when input ], [ are also auo insert, which cause ] never be input
-          _inputMobileString(content);
-          openKeyboard();
-          return;
-        }
-        _inputMobileString(content);
-      } else {
-        inputChar(content);
-      }
+    final replacedByClipboard = _softKeyboardSentinelWasReplaced(
+      oldValue,
+      newValue,
+    );
+    final edit = mobileCommittedTextEdit(
+      oldValue,
+      newValue,
+      replacedByClipboard: replacedByClipboard,
+    );
+    _inputMobileTextEdit(edit);
+    if (!replacedByClipboard &&
+        oldValue.isNotEmpty &&
+        edit.deleteBeforeGraphemes == 0 &&
+        const {
+          '""',
+          '()',
+          '[]',
+          '<>',
+          '{}',
+          '“”',
+          '《》',
+          '（）',
+          '【】',
+        }.contains(edit.text)) {
+      openKeyboard();
     }
   }
 
   // handle mobile virtual keyboard
+  void _handleSoftKeyboardEditingValue() {
+    if (_updatingSoftKeyboardText || !_showEdit) return;
+    final composing = _textController.value.composing;
+    if (composing.isValid && !composing.isCollapsed) return;
+    handleSoftKeyboardInput(_textController.text);
+  }
+
   void handleSoftKeyboardInput(String newValue) {
     if (isIOS) {
       _handleIOSSoftKeyboardInput(newValue);
@@ -568,12 +576,38 @@ class _RemotePageState extends State<RemotePage>
   }
 
   void _inputMobileString(String value) {
-    bind.sessionInputString(sessionId: sessionId, value: value);
+    _inputMobileTextEdit(
+      MobileCommittedTextEdit(text: value, deleteBeforeGraphemes: 0),
+    );
+  }
+
+  void _inputMobileTextEdit(MobileCommittedTextEdit edit) {
+    if (edit.isEmpty) return;
+    bind.sessionInputTextEdit(
+      sessionId: sessionId,
+      value: edit.text,
+      deleteBeforeGraphemes: edit.deleteBeforeGraphemes,
+      deleteAfterGraphemes: edit.deleteAfterGraphemes,
+    );
     inputModel.consumeMobileOneShotModifiers();
+  }
+
+  Future<void> _setAndroidRemoteKeyboardInput(bool enabled) async {
+    if (!isAndroid) return;
+    await gFFI.invokeMethod('set_remote_keyboard_input', {
+      'enabled': enabled && _usesAndroidNativeKeyboardInput,
+      'session_id': sessionId.toString(),
+      'mode': _keyboardInputModeV2,
+    });
   }
 
   void _requestMobileSoftKeyboard() {
     if (!mounted || !_showEdit) return;
+    if (_usesAndroidNativeKeyboardInput) {
+      _mobileFocusNode.unfocus();
+      unawaited(_setAndroidRemoteKeyboardInput(true));
+      return;
+    }
     _mobileFocusNode.requestFocus();
     if (!isIOS) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -584,9 +618,12 @@ class _RemotePageState extends State<RemotePage>
 
   void openKeyboard() {
     gFFI.invokeMethod("enable_soft_keyboard", true);
+    unawaited(_setAndroidRemoteKeyboardInput(false));
     // destroy first, so that our _value trick can work
     _value = initText;
+    _updatingSoftKeyboardText = true;
     _textController.text = _value;
+    _updatingSoftKeyboardText = false;
     setState(() => _showEdit = false);
     _timer?.cancel();
     _timer = Timer(kMobileDelaySoftKeyboard, () {
@@ -634,6 +671,7 @@ class _RemotePageState extends State<RemotePage>
                     if (keyboardIsVisible) {
                       _showEdit = false;
                       gFFI.invokeMethod("enable_soft_keyboard", false);
+                      unawaited(_setAndroidRemoteKeyboardInput(false));
                       _mobileFocusNode.unfocus();
                       _physicalFocusNode.requestFocus();
                     } else if (_showGestureHelp) {
@@ -912,7 +950,7 @@ class _RemotePageState extends State<RemotePage>
               SizedBox(
                 width: 0,
                 height: 0,
-                child: !_showEdit
+                child: !_showEdit || _usesAndroidNativeKeyboardInput
                     ? Container()
                     : TextFormField(
                         textInputAction: TextInputAction.newline,
@@ -936,7 +974,6 @@ class _RemotePageState extends State<RemotePage>
                         //      2. The button will trigger `onKeyEvent` if the text field is empty.
                         // ko/zh/ja input method: the button will trigger `onKeyEvent`
                         //                     and the event will not popup if `KeyEventResult.handled` is returned.
-                        onChanged: handleSoftKeyboardInput,
                       ).workaroundFreezeLinuxMint(),
               ),
             ];
@@ -1040,12 +1077,24 @@ class _RemotePageState extends State<RemotePage>
         name: kOptionMobilePhysicalKeyInput,
       ),
     );
+    final keyboardV2Supported =
+        gFFI.ffiModel.pi.features.keyboardV2CommittedText;
+    final keyboardInputMode = keyboardV2Supported
+        ? mobileKeyboardInputV2Mode(
+            await bind.sessionGetPeerOption(
+              sessionId: gFFI.sessionId,
+              name: kOptionKeyboardInputModeV2,
+            ),
+            mobileVmPhysicalInputOption(physicalKeyInput),
+          )
+        : null;
     final physicalKeyInputSupported =
-        gFFI.ffiModel.pi.platform == kPeerPlatformWindows &&
-        bind.sessionIsKeyboardModeSupported(
-          sessionId: gFFI.sessionId,
-          mode: kKeyTranslateMode,
-        );
+        gFFI.ffiModel.pi.features.keyboardV2PhysicalKey ||
+        (gFFI.ffiModel.pi.platform == kPeerPlatformWindows &&
+            bind.sessionIsKeyboardModeSupported(
+              sessionId: gFFI.sessionId,
+              mode: kKeyTranslateMode,
+            ));
     const keyboardModeLabels = <String, String>{
       kKeyLegacyMode: 'Legacy mode',
       kKeyMapMode: 'Map mode',
@@ -1077,6 +1126,52 @@ class _RemotePageState extends State<RemotePage>
                   },
           ),
     ];
+    final keyboardInputModes = keyboardV2Supported
+        ? <MobileRemoteRadioItem>[
+            for (final entry in const <String, String>{
+              kKeyboardInputModeAuto: 'Auto',
+              kKeyboardInputModeText: 'Text input',
+              kKeyboardInputModePhysical: 'Physical keys',
+            }.entries)
+              if (entry.key != kKeyboardInputModePhysical ||
+                  physicalKeyInputSupported)
+                MobileRemoteRadioItem(
+                  value: entry.key,
+                  child: Text(translate(entry.value)),
+                  onChanged: gFFI.ffiModel.viewOnly
+                      ? null
+                      : (value) async {
+                          if (value == null) return;
+                          final keyboardWasOpen = _showEdit;
+                          await _setAndroidRemoteKeyboardInput(false);
+                          await bind.sessionPeerOption(
+                            sessionId: gFFI.sessionId,
+                            name: kOptionKeyboardInputModeV2,
+                            value: value,
+                          );
+                          final physical = value != kKeyboardInputModeText;
+                          await bind.sessionPeerOption(
+                            sessionId: gFFI.sessionId,
+                            name: kOptionMobilePhysicalKeyInput,
+                            value: mobileVmPhysicalInputOption(physical),
+                          );
+                          if (mounted) {
+                            setState(() {
+                              _physicalKeyInput = physical;
+                              _keyboardInputModeV2 = value;
+                            });
+                            if (keyboardWasOpen) {
+                              WidgetsBinding.instance.addPostFrameCallback((_) {
+                                if (mounted && _showEdit) {
+                                  _requestMobileSoftKeyboard();
+                                }
+                              });
+                            }
+                          }
+                        },
+                ),
+          ]
+        : const <MobileRemoteRadioItem>[];
     if (!mounted) return;
     gFFI.dialogManager
         .show(
@@ -1107,8 +1202,11 @@ class _RemotePageState extends State<RemotePage>
                         mode: currentKeyboardMode,
                         modes: keyboardModes,
                         modeHeading: translate('Keyboard mode'),
+                        inputMode: keyboardInputMode,
+                        inputModes: keyboardInputModes,
+                        inputModeHeading: translate('Input mode'),
                         toggles: [
-                          if (physicalKeyInputSupported)
+                          if (!keyboardV2Supported && physicalKeyInputSupported)
                             MobileRemoteToggleItem(
                               id: 'physical-key-input',
                               value: physicalKeyInput,
