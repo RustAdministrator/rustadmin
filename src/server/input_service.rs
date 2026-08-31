@@ -28,11 +28,14 @@ use std::{
 };
 
 #[cfg(windows)]
+use std::{ffi::OsStr, os::windows::ffi::OsStrExt};
+#[cfg(windows)]
 use winapi::{
     shared::minwindef::HKL,
+    um::winnls::LocaleNameToLCID,
     um::winuser::{
-        GetForegroundWindow, GetKeyboardLayout, GetWindowThreadProcessId, MapVirtualKeyExW,
-        VkKeyScanExW, MAPVK_VK_TO_VSC_EX, WHEEL_DELTA,
+        GetForegroundWindow, GetKeyboardLayout, GetKeyboardLayoutList, GetWindowThreadProcessId,
+        MapVirtualKeyExW, VkKeyScanExW, MAPVK_VK_TO_VSC_EX, WHEEL_DELTA,
     },
 };
 
@@ -1958,6 +1961,33 @@ impl WindowsScanTextMapper {
         }
     }
 
+    fn for_source_layout(language_tag: &str) -> Option<Self> {
+        let language_id = windows_language_id(language_tag)?;
+        let count = unsafe { GetKeyboardLayoutList(0, std::ptr::null_mut()) };
+        if count <= 0 {
+            return None;
+        }
+        let mut layouts = vec![std::ptr::null_mut(); count as usize];
+        let copied = unsafe { GetKeyboardLayoutList(count, layouts.as_mut_ptr()) };
+        if copied <= 0 {
+            return None;
+        }
+        layouts.truncate(copied as usize);
+        let exact = layouts
+            .iter()
+            .copied()
+            .find(|layout| keyboard_layout_language_id(*layout) == language_id);
+        let primary = language_id & 0x03ff;
+        exact
+            .or_else(|| {
+                layouts
+                    .iter()
+                    .copied()
+                    .find(|layout| keyboard_layout_language_id(*layout) & 0x03ff == primary)
+            })
+            .map(|hkl| Self { hkl })
+    }
+
     fn inject_char(&self, chr: char) -> bool {
         let Ok(unicode) = u16::try_from(chr as u32) else {
             return false;
@@ -2006,6 +2036,42 @@ impl WindowsScanTextMapper {
 
     fn layout_id(&self) -> usize {
         self.hkl as usize
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_language_id(language_tag: &str) -> Option<u16> {
+    if language_tag.is_empty() {
+        return None;
+    }
+    let wide = OsStr::new(language_tag)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    const LOCALE_ALLOW_NEUTRAL_NAMES: u32 = 0x0800_0000;
+    let locale_id = unsafe { LocaleNameToLCID(wide.as_ptr(), LOCALE_ALLOW_NEUTRAL_NAMES) };
+    if locale_id == 0 {
+        None
+    } else {
+        Some((locale_id & 0xffff) as u16)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn keyboard_layout_language_id(layout: HKL) -> u16 {
+    (layout as usize & 0xffff) as u16
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod source_layout_tests {
+    use super::*;
+
+    #[test]
+    fn resolves_bcp47_language_tags_to_windows_language_ids() {
+        assert_eq!(windows_language_id("en-US"), Some(0x0409));
+        assert_eq!(windows_language_id("ru-RU"), Some(0x0419));
+        assert_eq!(windows_language_id("et-EE"), Some(0x0425));
+        assert_eq!(windows_language_id("invalid tag value"), None);
     }
 }
 
@@ -2109,15 +2175,41 @@ fn translate_keyboard_mode(evt: &KeyEvent) {
                 #[cfg(target_os = "windows")]
                 let scan_text_started = Instant::now();
                 #[cfg(target_os = "windows")]
-                let scan_text_mapper = if evt.scan_code_text && !simulate_win_hot_key {
-                    WindowsScanTextMapper::new()
+                let source_layout_text = evt.source_layout_text
+                    && hbb_common::keyboard::validate_source_layout_metadata(
+                        &evt.source_language_tag,
+                        &evt.source_layout_type,
+                    );
+                #[cfg(target_os = "windows")]
+                let logged_source_language_tag = if source_layout_text {
+                    evt.source_language_tag.as_str()
+                } else {
+                    ""
+                };
+                #[cfg(target_os = "windows")]
+                let logged_source_layout_type = if source_layout_text {
+                    evt.source_layout_type.as_str()
+                } else {
+                    ""
+                };
+                #[cfg(target_os = "windows")]
+                let physical_text = source_layout_text || evt.scan_code_text;
+                #[cfg(target_os = "windows")]
+                let scan_text_mapper = if physical_text && !simulate_win_hot_key {
+                    if source_layout_text {
+                        WindowsScanTextMapper::for_source_layout(&evt.source_language_tag)
+                    } else {
+                        WindowsScanTextMapper::new()
+                    }
                 } else {
                     None
                 };
                 #[cfg(target_os = "windows")]
                 log::debug!(
-                    "Windows translate text injection: strategy={}, chars={}, host_hkl={}",
-                    if evt.scan_code_text {
+                    "Windows translate text injection: strategy={}, chars={}, layout_hkl={}, source_layout={}/{}",
+                    if source_layout_text {
+                        "source-layout-scan"
+                    } else if evt.scan_code_text {
                         "vm-scan-code"
                     } else {
                         "scan-first"
@@ -2126,7 +2218,9 @@ fn translate_keyboard_mode(evt: &KeyEvent) {
                     scan_text_mapper
                         .as_ref()
                         .map(|mapper| format!("0x{:x}", mapper.layout_id()))
-                        .unwrap_or_else(|| "unavailable".to_owned())
+                        .unwrap_or_else(|| "unavailable".to_owned()),
+                    logged_source_language_tag,
+                    logged_source_layout_type,
                 );
                 #[cfg(target_os = "windows")]
                 let mut layout_scan_count = 0usize;
@@ -2138,7 +2232,7 @@ fn translate_keyboard_mode(evt: &KeyEvent) {
                     #[cfg(target_os = "windows")]
                     if simulate_win_hot_key {
                         rdev::simulate_char(chr, true).ok();
-                    } else if evt.scan_code_text {
+                    } else if physical_text {
                         if scan_text_mapper
                             .as_ref()
                             .is_some_and(|mapper| mapper.inject_char(chr))
@@ -2161,9 +2255,9 @@ fn translate_keyboard_mode(evt: &KeyEvent) {
                     en.key_click(Key::Layout(chr));
                 }
                 #[cfg(target_os = "windows")]
-                if evt.scan_code_text {
+                if physical_text {
                     log::debug!(
-                        "Windows VM text injection result: layout_scan={}, unicode_fallback={}, elapsed_us={}",
+                        "Windows physical text injection result: layout_scan={}, unicode_fallback={}, elapsed_us={}",
                         layout_scan_count,
                         unicode_fallback_count,
                         scan_text_started.elapsed().as_micros()

@@ -98,7 +98,9 @@ fn client_outbound_latest_key(message: &Message) -> Option<u64> {
 
 fn is_critical_client_input(message: &Message) -> bool {
     match message.union.as_ref() {
-        Some(message::Union::KeyEvent(_)) | Some(message::Union::PointerDeviceEvent(_)) => true,
+        Some(message::Union::KeyEvent(_))
+        | Some(message::Union::KeyboardInput(_))
+        | Some(message::Union::PointerDeviceEvent(_)) => true,
         Some(message::Union::MouseEvent(event)) => {
             let event_type = event.mask & MOUSE_TYPE_MASK;
             event_type != 0 && event_type != MOUSE_TYPE_MOVE_RELATIVE

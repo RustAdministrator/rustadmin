@@ -1836,6 +1836,12 @@ class FfiModel with ChangeNotifier {
       }
       Map<String, dynamic> features = json.decode(evt['features']);
       _pi.features.privacyMode = features['privacy_mode'] == true;
+      _pi.features.keyboardV2CommittedText =
+          features['keyboard_v2_committed_text'] == true;
+      _pi.features.keyboardV2PhysicalKey =
+          features['keyboard_v2_physical_key'] == true;
+      _pi.features.keyboardV2LayoutAwareText =
+          features['keyboard_v2_layout_aware_text'] == true;
       if (!isCache) {
         handleResolutions(peerId, evt["resolutions"]);
       }
@@ -6006,6 +6012,9 @@ class Resolution {
 
 class Features {
   bool privacyMode = false;
+  bool keyboardV2CommittedText = false;
+  bool keyboardV2PhysicalKey = false;
+  bool keyboardV2LayoutAwareText = false;
 }
 
 const kInvalidDisplayIndex = -1;

@@ -225,6 +225,10 @@ const String kOptionMobileRemoteToolbarPlacement =
 const String kOptionMobileCursorInertiaDurationMs =
     "mobile-cursor-inertia-duration-ms";
 const String kOptionMobilePhysicalKeyInput = "mobile-physical-key-input";
+const String kOptionKeyboardInputModeV2 = "keyboard-input-mode-v2";
+const String kKeyboardInputModeAuto = "auto";
+const String kKeyboardInputModeText = "text";
+const String kKeyboardInputModePhysical = "physical";
 const String kOptionMobileSettingsLayout = "mobile-settings-layout";
 const int kDefaultRemoteToolbarRevealZonePx = 36;
 const int kMinRemoteToolbarRevealZonePx = 8;

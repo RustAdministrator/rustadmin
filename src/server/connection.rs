@@ -547,6 +547,12 @@ struct InputMouse {
     show_cursor: bool,
 }
 
+#[derive(Default)]
+struct KeyboardInputReceiveState {
+    epoch: u64,
+    last_sequence: u64,
+}
+
 enum MessageInput {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     Mouse(InputMouse),
@@ -696,6 +702,105 @@ fn should_block_remote_control_for_permission_prompt(
     has_active_pending_prompt: bool,
 ) -> bool {
     auth_kind.is_low_permission_support() && has_active_pending_prompt
+}
+
+fn keyboard_input_policy_allows(
+    view_camera_session: bool,
+    blocked_by_permission_prompt: bool,
+    keyboard_enabled: bool,
+) -> bool {
+    !view_camera_session && !blocked_by_permission_prompt && keyboard_enabled
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum KeyboardInputSequenceDecision {
+    Accept,
+    ResetEpoch,
+    RejectDuplicateOrStale,
+}
+
+fn update_keyboard_input_sequence(
+    state: &mut KeyboardInputReceiveState,
+    epoch: u64,
+    sequence: u64,
+) -> KeyboardInputSequenceDecision {
+    if state.epoch != epoch {
+        state.epoch = epoch;
+        state.last_sequence = sequence;
+        return KeyboardInputSequenceDecision::ResetEpoch;
+    }
+    if sequence <= state.last_sequence {
+        return KeyboardInputSequenceDecision::RejectDuplicateOrStale;
+    }
+    state.last_sequence = sequence;
+    KeyboardInputSequenceDecision::Accept
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn platform_keycode_from_usb_hid(usage: u32) -> Option<u32> {
+    #[cfg(target_os = "windows")]
+    {
+        return rdev::usb_hid_code_to_win_scancode(usage as _).map(|code| code as u32);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        return rdev::usb_hid_code_to_linux_code(usage as _).map(|code| code as u32);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let code = if hbb_common::config::LocalConfig::get_kb_layout_type() == "ISO" {
+            rdev::usb_hid_code_to_macos_iso_code(usage as _)
+        } else {
+            rdev::usb_hid_code_to_macos_code(usage as _)
+        };
+        return code.map(|code| code as u32);
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn platform_keycode_from_rdev_key(key: rdev::Key) -> Option<u32> {
+    #[cfg(target_os = "windows")]
+    {
+        return rdev::win_scancode_from_key(key).map(|code| code as u32);
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        return rdev::code_from_key(key).map(|code| code as u32);
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn add_keyboard_v2_lock_modifiers(event: &mut KeyEvent, key: &PhysicalKey) {
+    let rdev_key = rdev::usb_hid_key_from_code(key.usb_hid_usage as _);
+    if key.lock_mask & hbb_common::keyboard::KEYBOARD_LOCK_CAPS != 0
+        && (crate::keyboard::is_letter_rdev_key(&rdev_key)
+            || crate::keyboard::is_letter_rdev_key_ex(&rdev_key))
+    {
+        event.modifiers.push(ControlKey::CapsLock.into());
+    }
+    if key.lock_mask & hbb_common::keyboard::KEYBOARD_LOCK_NUM != 0
+        && crate::keyboard::is_numpad_rdev_key(&rdev_key)
+    {
+        event.modifiers.push(ControlKey::NumLock.into());
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn physical_key_to_key_event(key: &PhysicalKey) -> Option<KeyEvent> {
+    let code = platform_keycode_from_usb_hid(key.usb_hid_usage)?;
+    let mut event = KeyEvent::new();
+    event.set_chr(code);
+    event.mode = KeyboardMode::Map.into();
+    event.down = key.down;
+    // Repeated physical key-downs must not become legacy `press`, which
+    // synthesizes an up event and breaks held keys before their real key-up.
+    event.press = false;
+    add_keyboard_v2_lock_modifiers(&mut event, key);
+    Some(event)
 }
 
 fn should_reject_additional_permission_request(
@@ -1439,6 +1544,7 @@ pub struct Connection {
     options_in_login: Option<OptionMessage>,
     #[cfg(not(any(target_os = "ios")))]
     pressed_modifiers: HashSet<rdev::Key>,
+    keyboard_input_receive_state: KeyboardInputReceiveState,
     #[cfg(target_os = "linux")]
     linux_headless_handle: LinuxHeadlessHandle,
     closed: bool,
@@ -1570,6 +1676,7 @@ fn stream_message_kind(msg: &Message) -> &'static str {
         Some(message::Union::CursorData(_)) => "CursorData",
         Some(message::Union::CursorPosition(_)) => "CursorPosition",
         Some(message::Union::KeyEvent(_)) => "KeyEvent",
+        Some(message::Union::KeyboardInput(_)) => "KeyboardInput",
         Some(message::Union::PointerDeviceEvent(_)) => "PointerDeviceEvent",
         Some(message::Union::MultiClipboards(_)) => "MultiClipboards",
         Some(message::Union::Clipboard(_)) => "Clipboard",
@@ -1707,6 +1814,7 @@ impl Connection {
             options_in_login: None,
             #[cfg(not(any(target_os = "ios")))]
             pressed_modifiers: Default::default(),
+            keyboard_input_receive_state: Default::default(),
             #[cfg(target_os = "linux")]
             linux_headless_handle,
             closed: false,
@@ -3650,6 +3758,23 @@ impl Connection {
             privacy_mode: privacy_mode::is_privacy_mode_supported(),
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             terminal,
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            keyboard: Some(KeyboardCapabilities {
+                protocol_version: hbb_common::keyboard::KEYBOARD_INPUT_PROTOCOL_VERSION,
+                committed_text: true,
+                physical_key: cfg!(any(
+                    target_os = "windows",
+                    target_os = "linux",
+                    target_os = "macos"
+                )),
+                modifier_sync: false,
+                clipboard_text_fallback: false,
+                secure_desktop_text: cfg!(target_os = "windows"),
+                max_committed_text_bytes: hbb_common::keyboard::MAX_COMMITTED_TEXT_BYTES as u32,
+                layout_aware_text: cfg!(target_os = "windows"),
+                ..Default::default()
+            })
+            .into(),
             ..Default::default()
         })
         .into();
@@ -4060,6 +4185,186 @@ impl Connection {
         self.tx_input
             .send(MessageInput::Pointer((msg, conn_id)))
             .ok();
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn keyboard_input_allowed(&mut self) -> bool {
+        let view_camera_session = self.is_authed_view_camera_conn();
+        let blocked_by_prompt = self.should_block_remote_control_for_permission_prompt();
+        let keyboard_enabled = self.peer_keyboard_enabled();
+        if !keyboard_input_policy_allows(view_camera_session, blocked_by_prompt, keyboard_enabled) {
+            self.release_pressed_modifiers_via_input();
+            if !view_camera_session {
+                self.update_auto_disconnect_timer();
+            }
+            return false;
+        }
+        MOUSE_MOVE_TIME.store(get_time(), Ordering::SeqCst);
+        true
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn accept_keyboard_input(&mut self, input: &KeyboardInput) -> bool {
+        if let Err(error) = hbb_common::keyboard::validate_keyboard_input(input) {
+            log::warn!(
+                "Rejected Keyboard V2 input: sequence={}, reason={}",
+                input.sequence,
+                error
+            );
+            return false;
+        }
+        if !matches!(
+            input.union.as_ref(),
+            Some(keyboard_input::Union::CommittedText(_))
+                | Some(keyboard_input::Union::PhysicalKey(_))
+        ) {
+            log::warn!(
+                "Rejected unsupported Keyboard V2 payload: sequence={}",
+                input.sequence
+            );
+            return false;
+        }
+
+        let previous_epoch = self.keyboard_input_receive_state.epoch;
+        let previous_sequence = self.keyboard_input_receive_state.last_sequence;
+        match update_keyboard_input_sequence(
+            &mut self.keyboard_input_receive_state,
+            input.input_epoch,
+            input.sequence,
+        ) {
+            KeyboardInputSequenceDecision::ResetEpoch => {
+                if previous_epoch != 0 {
+                    self.release_pressed_modifiers_via_input();
+                }
+                true
+            }
+            KeyboardInputSequenceDecision::RejectDuplicateOrStale => {
+                log::warn!(
+                    "Rejected duplicate or stale Keyboard V2 input: epoch={}, sequence={}, last={}",
+                    input.input_epoch,
+                    input.sequence,
+                    previous_sequence
+                );
+                false
+            }
+            KeyboardInputSequenceDecision::Accept => {
+                if input.sequence > previous_sequence.saturating_add(1) {
+                    log::debug!(
+                        "Keyboard V2 sequence gap: epoch={}, sequence={}, last={}",
+                        input.input_epoch,
+                        input.sequence,
+                        previous_sequence
+                    );
+                }
+                true
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn input_keyboard_v2(&mut self, input: KeyboardInput) {
+        match input.union {
+            Some(keyboard_input::Union::CommittedText(text)) => {
+                for _ in 0..text.delete_before_graphemes {
+                    let mut event = KeyEvent::new();
+                    event.set_control_key(ControlKey::Backspace);
+                    event.mode = KeyboardMode::Legacy.into();
+                    event.press = true;
+                    self.dispatch_key_event(event, false);
+                }
+                for _ in 0..text.delete_after_graphemes {
+                    let mut event = KeyEvent::new();
+                    event.set_control_key(ControlKey::Delete);
+                    event.mode = KeyboardMode::Legacy.into();
+                    event.press = true;
+                    self.dispatch_key_event(event, false);
+                }
+                if !text.text.is_empty() {
+                    let mut event = KeyEvent::new();
+                    event.set_seq(text.text);
+                    event.mode = KeyboardMode::Translate.into();
+                    event.scan_code_text = false;
+                    event.source_language_tag = text.source_language_tag;
+                    event.source_layout_type = text.source_layout_type;
+                    event.source_layout_text = text.prefer_physical;
+                    self.dispatch_key_event(event, false);
+                }
+            }
+            Some(keyboard_input::Union::PhysicalKey(key)) => {
+                let Some(event) = physical_key_to_key_event(&key) else {
+                    log::warn!(
+                        "Rejected unmappable Keyboard V2 HID usage: sequence={}, usage=0x{:x}",
+                        input.sequence,
+                        key.usb_hid_usage
+                    );
+                    return;
+                };
+                self.dispatch_key_event(event, true);
+            }
+            _ => {}
+        }
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn dispatch_key_event(&mut self, me: KeyEvent, stateful_physical_key: bool) {
+        if is_enter(&me) {
+            CLICK_TIME.store(get_time(), Ordering::SeqCst);
+        }
+
+        let key = match me.mode.enum_value() {
+            Ok(KeyboardMode::Map) => Some(crate::keyboard::keycode_to_rdev_key(me.chr())),
+            Ok(KeyboardMode::Translate) => {
+                if let Some(key_event::Union::Chr(code)) = me.union {
+                    Some(crate::keyboard::keycode_to_rdev_key(code & 0x0000FFFF))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+        .filter(crate::keyboard::is_modifier);
+
+        let is_press = if cfg!(target_os = "linux") {
+            (me.press || me.down) && !(crate::is_modifier(&me) || key.is_some())
+        } else {
+            me.press
+        };
+
+        if let Some(key) = key {
+            if stateful_physical_key && me.down {
+                self.pressed_modifiers.insert(key);
+            } else if !stateful_physical_key && is_press {
+                self.pressed_modifiers.insert(key);
+            } else {
+                self.pressed_modifiers.remove(&key);
+            }
+        }
+
+        if is_press {
+            match me.union {
+                Some(key_event::Union::Unicode(_)) | Some(key_event::Union::Seq(_)) => {
+                    self.input_key(me, false);
+                }
+                _ => self.input_key(me, true),
+            }
+        } else {
+            self.input_key(me, false);
+        }
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn release_pressed_modifiers_via_input(&mut self) {
+        let pressed = self.pressed_modifiers.drain().collect::<Vec<_>>();
+        for key in pressed {
+            if let Some(code) = platform_keycode_from_rdev_key(key) {
+                let mut event = KeyEvent::new();
+                event.set_chr(code);
+                event.mode = KeyboardMode::Map.into();
+                self.input_key(event, false);
+            } else {
+                rdev::simulate(&rdev::EventType::KeyRelease(key)).ok();
+            }
+        }
     }
 
     #[inline]
@@ -5260,66 +5565,27 @@ impl Connection {
                 }
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 Some(message::Union::KeyEvent(me)) => {
-                    if self.is_authed_view_camera_conn() {
+                    if !self.keyboard_input_allowed() {
                         return true;
                     }
-                    if self.should_block_remote_control_for_permission_prompt() {
-                        self.update_auto_disconnect_timer();
+                    self.dispatch_key_event(me, false);
+                    self.update_auto_disconnect_timer();
+                }
+                #[cfg(any(target_os = "android", target_os = "ios"))]
+                Some(message::Union::KeyboardInput(input)) => {
+                    log::warn!(
+                        "Rejected Keyboard V2 input on unsupported controlled platform: sequence={}",
+                        input.sequence
+                    );
+                    self.update_auto_disconnect_timer();
+                }
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                Some(message::Union::KeyboardInput(input)) => {
+                    if !self.keyboard_input_allowed() {
                         return true;
                     }
-                    if self.peer_keyboard_enabled() {
-                        if is_enter(&me) {
-                            CLICK_TIME.store(get_time(), Ordering::SeqCst);
-                        }
-                        // https://github.com/rustdesk/rustdesk/issues/8633
-                        MOUSE_MOVE_TIME.store(get_time(), Ordering::SeqCst);
-
-                        let key = match me.mode.enum_value() {
-                            Ok(KeyboardMode::Map) => {
-                                Some(crate::keyboard::keycode_to_rdev_key(me.chr()))
-                            }
-                            Ok(KeyboardMode::Translate) => {
-                                if let Some(key_event::Union::Chr(code)) = me.union {
-                                    Some(crate::keyboard::keycode_to_rdev_key(code & 0x0000FFFF))
-                                } else {
-                                    None
-                                }
-                            }
-                            _ => None,
-                        }
-                        .filter(crate::keyboard::is_modifier);
-
-                        // handle all down as press
-                        // fix unexpected repeating key on remote linux, seems also fix abnormal alt/shift, which
-                        // make sure all key are released
-                        // https://github.com/rustdesk/rustdesk/issues/6793
-                        let is_press = if cfg!(target_os = "linux") {
-                            (me.press || me.down) && !(crate::is_modifier(&me) || key.is_some())
-                        } else {
-                            me.press
-                        };
-
-                        if let Some(key) = key {
-                            if is_press {
-                                self.pressed_modifiers.insert(key);
-                            } else {
-                                self.pressed_modifiers.remove(&key);
-                            }
-                        }
-
-                        if is_press {
-                            match me.union {
-                                Some(key_event::Union::Unicode(_))
-                                | Some(key_event::Union::Seq(_)) => {
-                                    self.input_key(me, false);
-                                }
-                                _ => {
-                                    self.input_key(me, true);
-                                }
-                            }
-                        } else {
-                            self.input_key(me, false);
-                        }
+                    if self.accept_keyboard_input(&input) {
+                        self.input_keyboard_v2(input);
                     }
                     self.update_auto_disconnect_timer();
                 }
@@ -10150,6 +10416,55 @@ mod test {
             SessionAuthKind::OneTimePassword,
             false
         ));
+    }
+
+    #[test]
+    fn keyboard_v2_keeps_session_and_permission_gates() {
+        assert!(keyboard_input_policy_allows(false, false, true));
+        assert!(!keyboard_input_policy_allows(true, false, true));
+        assert!(!keyboard_input_policy_allows(false, true, true));
+        assert!(!keyboard_input_policy_allows(false, false, false));
+    }
+
+    #[test]
+    fn keyboard_v2_sequence_rejects_replays_but_allows_gaps_and_new_epochs() {
+        let mut state = KeyboardInputReceiveState::default();
+        assert_eq!(
+            update_keyboard_input_sequence(&mut state, 7, 10),
+            KeyboardInputSequenceDecision::ResetEpoch
+        );
+        assert_eq!(
+            update_keyboard_input_sequence(&mut state, 7, 12),
+            KeyboardInputSequenceDecision::Accept
+        );
+        assert_eq!(
+            update_keyboard_input_sequence(&mut state, 7, 12),
+            KeyboardInputSequenceDecision::RejectDuplicateOrStale
+        );
+        assert_eq!(
+            update_keyboard_input_sequence(&mut state, 8, 1),
+            KeyboardInputSequenceDecision::ResetEpoch
+        );
+    }
+
+    #[test]
+    fn keyboard_v2_maps_standard_hid_keys_and_lock_state() {
+        assert!(platform_keycode_from_usb_hid(0x04).is_some());
+        assert!(platform_keycode_from_rdev_key(rdev::usb_hid_key_from_code(0xe0)).is_some());
+        let event = physical_key_to_key_event(&PhysicalKey {
+            usb_hid_usage: 0x04,
+            down: true,
+            repeat: true,
+            lock_mask: hbb_common::keyboard::KEYBOARD_LOCK_CAPS,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(event.down);
+        assert!(!event.press);
+        assert!(event
+            .modifiers
+            .iter()
+            .any(|modifier| modifier.value() == ControlKey::CapsLock.value()));
     }
 
     #[test]

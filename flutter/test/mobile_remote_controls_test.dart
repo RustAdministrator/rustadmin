@@ -15,6 +15,33 @@ void main() {
     expect(mobileVmPhysicalInputEnabled('N'), isFalse);
     expect(mobileVmPhysicalInputOption(true), 'Y');
     expect(mobileVmPhysicalInputOption(false), 'N');
+    expect(mobileKeyboardInputV2Mode('', ''), kKeyboardInputModeAuto);
+    expect(mobileKeyboardInputV2Mode('', 'N'), kKeyboardInputModeText);
+    expect(
+      mobileKeyboardInputV2Mode(kKeyboardInputModePhysical, 'N'),
+      kKeyboardInputModePhysical,
+    );
+  });
+
+  test('committed text diff keeps grapheme edits atomic', () {
+    final append = mobileCommittedTextEdit('seed', 'seed\u{1f642}');
+    expect(append.text, '\u{1f642}');
+    expect(append.deleteBeforeGraphemes, 0);
+
+    final replace = mobileCommittedTextEdit(
+      'seedab',
+      'seed\u{43c}\u{438}\u{440}',
+    );
+    expect(replace.text, '\u{43c}\u{438}\u{440}');
+    expect(replace.deleteBeforeGraphemes, 2);
+
+    final paste = mobileCommittedTextEdit(
+      'hidden-seed',
+      'pasted',
+      replacedByClipboard: true,
+    );
+    expect(paste.text, 'pasted');
+    expect(paste.deleteBeforeGraphemes, 0);
   });
 
   Future<void> pumpToolbar(
@@ -1084,6 +1111,7 @@ void main() {
     tester,
   ) async {
     String? selectedMode;
+    String? selectedInputMode;
     bool? reverseWheel;
     bool? physicalKeyInput;
     await tester.pumpWidget(
@@ -1106,6 +1134,19 @@ void main() {
                       value: 'map',
                       child: const Text('Map mode'),
                       onChanged: (value) => selectedMode = value,
+                    ),
+                  ],
+                  inputMode: kKeyboardInputModeAuto,
+                  inputModes: [
+                    MobileRemoteRadioItem(
+                      value: kKeyboardInputModeAuto,
+                      child: const Text('Auto input'),
+                      onChanged: (value) => selectedInputMode = value,
+                    ),
+                    MobileRemoteRadioItem(
+                      value: kKeyboardInputModeText,
+                      child: const Text('Text input'),
+                      onChanged: (value) => selectedInputMode = value,
                     ),
                   ],
                   toggles: [
@@ -1144,6 +1185,10 @@ void main() {
     await tester.tap(find.text('Legacy mode'));
     await tester.pump();
     expect(selectedMode, 'legacy');
+
+    await tester.tap(find.text('Text input'));
+    await tester.pump();
+    expect(selectedInputMode, kKeyboardInputModeText);
 
     await tester.tap(find.text('Reverse mouse wheel'));
     await tester.pump();

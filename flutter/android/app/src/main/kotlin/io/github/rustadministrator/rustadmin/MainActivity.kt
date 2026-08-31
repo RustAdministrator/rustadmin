@@ -102,6 +102,11 @@ class MainActivity : FlutterActivity() {
     private var isAudioStart = false
     private var pendingWireGuardPermissionResult: MethodChannel.Result? = null
     private val audioRecordHandle = AudioRecordHandle(this, { false }, { isAudioStart })
+    private val remoteKeyboardController by lazy {
+        RemoteKeyboardController(this) { event ->
+            flutterMethodChannel?.invokeMethod("remote_keyboard_event", event)
+        }
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -165,6 +170,7 @@ class MainActivity : FlutterActivity() {
         displayManager.unregisterDisplayListener(displayListener)
         pendingWireGuardPermissionResult?.success(false)
         pendingWireGuardPermissionResult = null
+        remoteKeyboardController.destroy()
         releaseAllRemoteVideoTextures()
         mainService?.let {
             unbindService(serviceConnection)
@@ -463,6 +469,18 @@ class MainActivity : FlutterActivity() {
                     }
                     result.success(true)
 
+                }
+                "set_remote_keyboard_input" -> {
+                    val arguments = call.arguments as? Map<*, *>
+                    val enabled = arguments?.get("enabled") as? Boolean ?: false
+                    val sessionId = arguments?.get("session_id") as? String ?: ""
+                    val mode = arguments?.get("mode") as? String ?: "auto"
+                    if (enabled) {
+                        result.success(remoteKeyboardController.show(sessionId, mode))
+                    } else {
+                        remoteKeyboardController.hide(sessionId.takeIf { it.isNotEmpty() })
+                        result.success(true)
+                    }
                 }
                 "try_sync_clipboard" -> {
                     rdClipboardManager?.syncClipboard(true)

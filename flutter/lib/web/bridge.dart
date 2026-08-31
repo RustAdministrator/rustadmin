@@ -534,6 +534,42 @@ class RustadminImpl {
         () => js.context.callMethod('setByName', ['input_string', value]));
   }
 
+  Future<void> sessionInputTextEdit(
+      {required UuidValue sessionId,
+      required String value,
+      required int deleteBeforeGraphemes,
+      required int deleteAfterGraphemes,
+      dynamic hint}) async {
+    for (var i = 0; i < deleteBeforeGraphemes; i++) {
+      js.context.callMethod('setByName', [
+        'input_key',
+        jsonEncode({'name': 'VK_BACK', 'press': 'true'})
+      ]);
+    }
+    for (var i = 0; i < deleteAfterGraphemes; i++) {
+      js.context.callMethod('setByName', [
+        'input_key',
+        jsonEncode({'name': 'VK_DELETE', 'press': 'true'})
+      ]);
+    }
+    if (value.isNotEmpty) {
+      js.context.callMethod('setByName', ['input_string', value]);
+    }
+  }
+
+  Future<void> sessionInputTextEditWithSourceLayout(
+      {required UuidValue sessionId,
+      required String value,
+      required String sourceLanguageTag,
+      required String sourceLayoutType,
+      dynamic hint}) {
+    return sessionInputTextEdit(
+        sessionId: sessionId,
+        value: value,
+        deleteBeforeGraphemes: 0,
+        deleteAfterGraphemes: 0);
+  }
+
   Future<void> sessionSendChat(
       {required UuidValue sessionId, required String text, dynamic hint}) {
     return Future(

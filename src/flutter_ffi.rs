@@ -924,6 +924,32 @@ pub fn session_input_string(session_id: SessionID, value: String) {
     }
 }
 
+pub fn session_input_text_edit(
+    session_id: SessionID,
+    value: String,
+    delete_before_graphemes: u32,
+    delete_after_graphemes: u32,
+) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.input_text_edit(&value, delete_before_graphemes, delete_after_graphemes);
+    }
+}
+
+pub fn session_input_text_edit_with_source_layout(
+    session_id: SessionID,
+    value: String,
+    source_language_tag: String,
+    source_layout_type: String,
+) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.input_text_edit_with_source_layout(
+            &value,
+            &source_language_tag,
+            &source_layout_type,
+        );
+    }
+}
+
 // chat_client_mode
 pub fn session_send_chat(session_id: SessionID, text: String) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
