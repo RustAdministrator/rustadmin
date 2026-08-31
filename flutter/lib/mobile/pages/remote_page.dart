@@ -27,6 +27,7 @@ import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../../utils/image.dart';
 import '../android_vpn_controller.dart';
+import '../mobile_remote_settings_repository.dart';
 import '../mobile_modifier_state.dart';
 import '../mobile_viewport.dart';
 import '../android_remote_keyboard.dart';
@@ -34,27 +35,6 @@ import '../widgets/custom_image_quality_widget.dart';
 import '../widgets/dialog.dart';
 
 final initText = '1' * 1024;
-
-MobileRemoteToolbarTransparencySettings
-_toolbarTransparencySettingsFromUserDefaults() {
-  return MobileRemoteToolbarTransparencySettings.fromStored(
-    overlapOpacityPercent: bind.mainGetUserDefaultOption(
-      key: kOptionMobileRemoteToolbarOverlapOpacityPercent,
-    ),
-  );
-}
-
-MobileCursorInertiaSettings _cursorInertiaSettingsFromUserDefaults() {
-  return MobileCursorInertiaSettings.fromStored(
-    bind.mainGetUserDefaultOption(key: kOptionMobileCursorInertiaDurationMs),
-  );
-}
-
-MobileRemoteToolbarPlacementSettings _toolbarPlacementFromLocalOption() {
-  return MobileRemoteToolbarPlacementSettings.fromStored(
-    bind.mainGetLocalOption(key: kOptionMobileRemoteToolbarPlacement),
-  );
-}
 
 bool _showMonitorsInMobileToolbarFromUserDefaults() =>
     bind.mainGetUserDefaultOption(key: kKeyShowMonitorsToolbar) == 'Y';
@@ -125,6 +105,22 @@ class _RemotePageState extends State<RemotePage>
   var _quickKeyOrder = List<MobileRemoteQuickKey>.of(
     mobileRemoteDefaultQuickKeyOrder,
   );
+  late final _settingsRepository = MobileRemoteSettingsRepository(
+    readUserDefault: (key) => bind.mainGetUserDefaultOption(key: key),
+    readLocal: (key) => bind.mainGetLocalOption(key: key),
+    readPeer: (key) => bind.sessionGetPeerOption(
+      sessionId: sessionId,
+      name: key,
+    ),
+    writeLocal: (key, value) async {
+      await bind.mainSetLocalOption(key: key, value: value);
+    },
+    writePeer: (key, value) => bind.sessionPeerOption(
+      sessionId: sessionId,
+      name: key,
+      value: value,
+    ),
+  );
 
   InputModel get inputModel => gFFI.inputModel;
   SessionID get sessionId => gFFI.sessionId;
@@ -149,10 +145,10 @@ class _RemotePageState extends State<RemotePage>
   void initState() {
     super.initState();
     _textController.addListener(_handleSoftKeyboardEditingValue);
-    _toolbarTransparencySettings =
-        _toolbarTransparencySettingsFromUserDefaults();
-    _toolbarPlacementSettings = _toolbarPlacementFromLocalOption();
-    _cursorInertiaSettings = _cursorInertiaSettingsFromUserDefaults();
+    final defaults = _settingsRepository.readDefaults();
+    _toolbarTransparencySettings = defaults.toolbarTransparency;
+    _toolbarPlacementSettings = defaults.toolbarPlacement;
+    _cursorInertiaSettings = defaults.cursorInertia;
     _showMonitorsInToolbar = _showMonitorsInMobileToolbarFromUserDefaults();
     gFFI.canvasModel.initializeEdgeScrollFallback(this);
     gFFI.ffiModel.updateEventListener(sessionId, widget.id);
@@ -305,53 +301,18 @@ class _RemotePageState extends State<RemotePage>
   }
 
   Future<void> _refreshMobileInputSettings() async {
-    final toolbarDefaults = _toolbarTransparencySettingsFromUserDefaults();
-    final inertiaDefaults = _cursorInertiaSettingsFromUserDefaults();
     try {
-      final stored = await Future.wait([
-        bind.sessionGetPeerOption(
-          sessionId: sessionId,
-          name: kOptionMobileRemoteToolbarOverlapOpacityPercent,
-        ),
-        bind.sessionGetPeerOption(
-          sessionId: sessionId,
-          name: kOptionMobileCursorInertiaDurationMs,
-        ),
-        bind.sessionGetPeerOption(
-          sessionId: sessionId,
-          name: kOptionMobilePhysicalKeyInput,
-        ),
-        bind.sessionGetPeerOption(
-          sessionId: sessionId,
-          name: kOptionKeyboardInputModeV2,
-        ),
-      ]);
-      final toolbarSettings =
-          MobileRemoteToolbarTransparencySettings.fromStored(
-            overlapOpacityPercent: stored[0].isEmpty
-                ? toolbarDefaults.overlapOpacityPercent.toString()
-                : stored[0],
-            fallback: toolbarDefaults,
-          );
-      final inertiaSettings = MobileCursorInertiaSettings.fromStored(
-        stored[1].isEmpty ? inertiaDefaults.durationMs.toString() : stored[1],
-        fallback: inertiaDefaults,
-      );
-      final physicalKeyInput = mobileVmPhysicalInputEnabled(stored[2]);
-      final keyboardInputModeV2 = mobileKeyboardInputV2Mode(
-        stored[3],
-        mobileVmPhysicalInputOption(physicalKeyInput),
-      );
+      final settings = await _settingsRepository.readSession();
       if (mounted &&
-          (toolbarSettings != _toolbarTransparencySettings ||
-              inertiaSettings != _cursorInertiaSettings ||
-              physicalKeyInput != _physicalKeyInput ||
-              keyboardInputModeV2 != _keyboardInputModeV2)) {
+          (settings.toolbarTransparency != _toolbarTransparencySettings ||
+              settings.cursorInertia != _cursorInertiaSettings ||
+              settings.physicalKeyInput != _physicalKeyInput ||
+              settings.keyboardInputMode != _keyboardInputModeV2)) {
         setState(() {
-          _toolbarTransparencySettings = toolbarSettings;
-          _cursorInertiaSettings = inertiaSettings;
-          _physicalKeyInput = physicalKeyInput;
-          _keyboardInputModeV2 = keyboardInputModeV2;
+          _toolbarTransparencySettings = settings.toolbarTransparency;
+          _cursorInertiaSettings = settings.cursorInertia;
+          _physicalKeyInput = settings.physicalKeyInput;
+          _keyboardInputModeV2 = settings.keyboardInputMode;
         });
       }
     } catch (error) {
@@ -866,6 +827,7 @@ class _RemotePageState extends State<RemotePage>
               context,
               widget.id,
               gFFI.dialogManager,
+              settingsRepository: _settingsRepository,
               toolbarTransparencySettings: _toolbarTransparencySettings,
               onToolbarTransparencySettingsChanged: (settings) {
                 if (mounted) {
@@ -914,10 +876,7 @@ class _RemotePageState extends State<RemotePage>
               setState(() => _toolbarPlacementSettings = settings);
             }
             unawaited(
-              bind.mainSetLocalOption(
-                key: kOptionMobileRemoteToolbarPlacement,
-                value: settings.storedValue,
-              ),
+              _settingsRepository.storePlacement(settings),
             );
           },
         );
@@ -1144,16 +1103,14 @@ class _RemotePageState extends State<RemotePage>
                           if (value == null) return;
                           final keyboardWasOpen = _showEdit;
                           await _setAndroidRemoteKeyboardInput(false);
-                          await bind.sessionPeerOption(
-                            sessionId: gFFI.sessionId,
-                            name: kOptionKeyboardInputModeV2,
-                            value: value,
+                          await _settingsRepository.storePeerOption(
+                            kOptionKeyboardInputModeV2,
+                            value,
                           );
                           final physical = value != kKeyboardInputModeText;
-                          await bind.sessionPeerOption(
-                            sessionId: gFFI.sessionId,
-                            name: kOptionMobilePhysicalKeyInput,
-                            value: mobileVmPhysicalInputOption(physical),
+                          await _settingsRepository.storePeerOption(
+                            kOptionMobilePhysicalKeyInput,
+                            mobileVmPhysicalInputOption(physical),
                           );
                           if (mounted) {
                             setState(() {
@@ -1221,12 +1178,9 @@ class _RemotePageState extends State<RemotePage>
                                       if (value == null) return;
                                       setState(() => _physicalKeyInput = value);
                                       unawaited(
-                                        bind.sessionPeerOption(
-                                          sessionId: gFFI.sessionId,
-                                          name: kOptionMobilePhysicalKeyInput,
-                                          value: mobileVmPhysicalInputOption(
-                                            value,
-                                          ),
+                                        _settingsRepository.storePeerOption(
+                                          kOptionMobilePhysicalKeyInput,
+                                          mobileVmPhysicalInputOption(value),
                                         ),
                                       );
                                     },
@@ -1837,6 +1791,7 @@ void showOptions(
   BuildContext context,
   String id,
   OverlayDialogManager dialogManager, {
+  required MobileRemoteSettingsRepository settingsRepository,
   required MobileRemoteToolbarTransparencySettings toolbarTransparencySettings,
   required ValueChanged<MobileRemoteToolbarTransparencySettings>
   onToolbarTransparencySettingsChanged,
@@ -2124,10 +2079,9 @@ void showOptions(
                           },
                           onChangeEnd: (durationMs) {
                             unawaited(
-                              bind.sessionPeerOption(
-                                sessionId: gFFI.sessionId,
-                                name: kOptionMobileCursorInertiaDurationMs,
-                                value: durationMs.toString(),
+                              settingsRepository.storePeerOption(
+                                kOptionMobileCursorInertiaDurationMs,
+                                durationMs.toString(),
                               ),
                             );
                           },
@@ -2170,10 +2124,9 @@ void showOptions(
                       activeToolbarTransparencySettings = settings;
                       onToolbarTransparencySettingsChanged(settings);
                       unawaited(
-                        bind.sessionPeerOption(
-                          sessionId: gFFI.sessionId,
-                          name: kOptionMobileRemoteToolbarOverlapOpacityPercent,
-                          value: settings.overlapOpacityPercent.toString(),
+                        settingsRepository.storePeerOption(
+                          kOptionMobileRemoteToolbarOverlapOpacityPercent,
+                          settings.overlapOpacityPercent.toString(),
                         ),
                       );
                     },
