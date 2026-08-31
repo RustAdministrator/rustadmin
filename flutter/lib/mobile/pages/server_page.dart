@@ -989,15 +989,19 @@ void androidChannelInit() {
             }
             switch (event) {
               case AndroidRemotePhysicalKeyEvent():
-                gFFI.inputModel.inputAndroidRemotePhysicalKey(
-                  event.usbHidUsage,
-                  event.down,
+                unawaited(
+                  gFFI.inputModel.inputAndroidRemotePhysicalKey(
+                    event.usbHidUsage,
+                    event.down,
+                  ),
                 );
               case AndroidRemoteCommittedTextEvent():
-                gFFI.inputModel.inputAndroidRemoteCommittedText(
-                  event.text,
-                  sourceLanguageTag: event.sourceLanguageTag,
-                  sourceLayoutType: event.sourceLayoutType,
+                unawaited(
+                  gFFI.inputModel.inputAndroidRemoteCommittedText(
+                    event.text,
+                    sourceLanguageTag: event.sourceLanguageTag,
+                    sourceLayoutType: event.sourceLayoutType,
+                  ),
                 );
             }
             break;
