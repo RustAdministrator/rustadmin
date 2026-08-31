@@ -21,6 +21,7 @@ final List<StreamSubscription<KeyboardEvent>> keyListeners = [];
 typedef HandleEvent = Future<void> Function(Map<String, dynamic> evt);
 
 class PlatformFFI {
+  int _nextRenderTargetToken = 1;
   final _eventHandlers = <String, Map<String, HandleEvent>>{};
   final Rustadmin _ffiBind = RustadminImpl();
 
@@ -109,6 +110,19 @@ class PlatformFFI {
   void registerGpuTexture(SessionID sessionId, int display, int ptr) =>
       _ffiBind.sessionRegisterGpuTexture(
           sessionId: sessionId, display: display, ptr: ptr);
+  void registerPixelbufferRenderTarget(
+          SessionID sessionId, int display, int ptr, int token) =>
+      registerPixelbufferTexture(sessionId, display, ptr);
+  void unregisterPixelbufferRenderTarget(
+          SessionID sessionId, int display, int token) =>
+      registerPixelbufferTexture(sessionId, display, 0);
+  void registerGpuRenderTarget(
+          SessionID sessionId, int display, int ptr, int token) =>
+      registerGpuTexture(sessionId, display, ptr);
+  void unregisterGpuRenderTarget(
+          SessionID sessionId, int display, int token) =>
+      registerGpuTexture(sessionId, display, 0);
+  int nextRenderTargetToken() => _nextRenderTargetToken++;
 
   Future<void> init(String appType) async {
     Completer completer = Completer();
