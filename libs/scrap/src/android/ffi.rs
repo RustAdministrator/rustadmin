@@ -405,6 +405,19 @@ pub fn call_main_service_key_event(data: &[u8]) -> JniResult<()> {
     }
 }
 
+pub fn call_main_service_release_input() -> JniResult<()> {
+    if let (Some(jvm), Some(ctx)) = (
+        JVM.read().unwrap().as_ref(),
+        MAIN_SERVICE_CTX.read().unwrap().as_ref(),
+    ) {
+        let mut env = jvm.attach_current_thread_as_daemon()?;
+        env.call_method(ctx, "rustReleaseRemoteInputState", "()V", &[])?;
+        Ok(())
+    } else {
+        Err(JniError::ThrowFailed(-1))
+    }
+}
+
 fn _call_clipboard_manager<S, T>(name: S, sig: T, args: &[JValue]) -> JniResult<()>
 where
     S: Into<JNIString>,
