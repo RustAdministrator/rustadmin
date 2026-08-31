@@ -261,6 +261,7 @@ pub struct Remote<T: InvokeUiSession> {
     last_record_state: bool,
     sent_close_reason: bool,
     last_fps_control_summary_log: Option<Instant>,
+    connection_round: u32,
 }
 
 #[derive(Default)]
@@ -320,10 +321,12 @@ impl<T: InvokeUiSession> Remote<T> {
             last_record_state: false,
             sent_close_reason: false,
             last_fps_control_summary_log: None,
+            connection_round: 0,
         }
     }
 
     pub async fn io_loop(&mut self, key: &str, token: &str, round: u32) {
+        self.connection_round = round;
         #[cfg(target_os = "windows")]
         let _file_clip_context_holder = {
             // `is_port_forward()` will not reach here, but we still check it for clarity.
@@ -952,8 +955,16 @@ impl<T: InvokeUiSession> Remote<T> {
             .set_disconnected(round);
 
         #[cfg(not(target_os = "ios"))]
-        if self.handler.is_default() && _set_disconnected_ok {
-            Client::try_stop_clipboard();
+        if self.handler.is_default() {
+            #[cfg(feature = "flutter")]
+            {
+                Client::unregister_clipboard_channel(&self.handler.get_id(), self.connection_round);
+                Client::try_stop_clipboard();
+            }
+            #[cfg(not(feature = "flutter"))]
+            if _set_disconnected_ok {
+                Client::try_stop_clipboard();
+            }
         }
 
         #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
@@ -2378,6 +2389,12 @@ impl<T: InvokeUiSession> Remote<T> {
                         #[cfg(all(target_os = "windows", not(feature = "flutter")))]
                         self.check_clipboard_file_context();
                         if self.handler.is_default() {
+                            #[cfg(feature = "flutter")]
+                            #[cfg(not(target_os = "ios"))]
+                            Client::register_clipboard_channel(
+                                &self.handler.get_id(),
+                                self.connection_round,
+                            );
                             #[cfg(feature = "flutter")]
                             #[cfg(not(target_os = "ios"))]
                             let rx = Client::try_start_clipboard(None);
