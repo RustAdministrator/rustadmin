@@ -989,7 +989,7 @@ class _RemotePageState extends State<RemotePage>
   }
 
   List<TTextMenu> _getMobileActionMenus() {
-    if (gFFI.ffiModel.pi.platform != kPeerPlatformAndroid ||
+    if (!gFFI.ffiModel.pi.capabilities.mobileSystemActions ||
         !gFFI.ffiModel.keyboard) {
       return [];
     }
@@ -1037,7 +1037,7 @@ class _RemotePageState extends State<RemotePage>
       ),
     );
     final keyboardV2Supported =
-        gFFI.ffiModel.pi.features.keyboardV2CommittedText;
+        gFFI.ffiModel.pi.capabilities.keyboardV2CommittedText;
     final keyboardInputMode = keyboardV2Supported
         ? mobileKeyboardInputV2Mode(
             await bind.sessionGetPeerOption(
@@ -1048,12 +1048,12 @@ class _RemotePageState extends State<RemotePage>
           )
         : null;
     final physicalKeyInputSupported =
-        gFFI.ffiModel.pi.features.keyboardV2PhysicalKey ||
-        (gFFI.ffiModel.pi.platform == kPeerPlatformWindows &&
-            bind.sessionIsKeyboardModeSupported(
-              sessionId: gFFI.sessionId,
-              mode: kKeyTranslateMode,
-            ));
+        gFFI.ffiModel.pi.capabilities.physicalKeyInput(
+      translateModeSupported: bind.sessionIsKeyboardModeSupported(
+        sessionId: gFFI.sessionId,
+        mode: kKeyTranslateMode,
+      ),
+    );
     const keyboardModeLabels = <String, String>{
       kKeyLegacyMode: 'Legacy mode',
       kKeyMapMode: 'Map mode',
@@ -1242,7 +1242,7 @@ class _RemotePageState extends State<RemotePage>
   }
 
   Widget _buildCustomButtonEditor(BuildContext context) {
-    final isMac = gFFI.ffiModel.pi.platform == kPeerPlatformMacOS;
+    final isMac = gFFI.ffiModel.pi.capabilities.isMacOS;
     return Material(
       color: Theme.of(context).colorScheme.surface,
       child: SafeArea(
@@ -1493,9 +1493,9 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
     }
 
     final pi = gFFI.ffiModel.pi;
-    final isMac = pi.platform == kPeerPlatformMacOS;
-    final isWin = pi.platform == kPeerPlatformWindows;
-    final isLinux = pi.platform == kPeerPlatformLinux;
+    final isMac = pi.capabilities.isMacOS;
+    final isWin = pi.capabilities.isWindows;
+    final isLinux = pi.capabilities.isLinux;
     final modifiers = inputModel.mobileModifierState;
     _scheduleRectUpdate();
     return MobileRemoteKeyHelpTools(

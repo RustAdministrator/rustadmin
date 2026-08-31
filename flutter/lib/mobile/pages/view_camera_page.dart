@@ -426,7 +426,7 @@ class _ViewCameraPageState extends State<ViewCameraPage>
   }
 
   List<TTextMenu> _getMobileActionMenus() {
-    if (gFFI.ffiModel.pi.platform != kPeerPlatformAndroid ||
+    if (!gFFI.ffiModel.pi.capabilities.mobileSystemActions ||
         !gFFI.ffiModel.keyboard) {
       return [];
     }

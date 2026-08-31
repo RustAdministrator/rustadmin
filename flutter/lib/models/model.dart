@@ -18,6 +18,7 @@ import 'package:flutter_hbb/models/cm_file_model.dart';
 import 'package:flutter_hbb/models/file_model.dart';
 import 'package:flutter_hbb/models/group_model.dart';
 import 'package:flutter_hbb/models/peer_model.dart';
+import 'package:flutter_hbb/models/peer_capability_matrix.dart';
 import 'package:flutter_hbb/models/peer_tab_model.dart';
 import 'package:flutter_hbb/models/printer_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
@@ -194,10 +195,10 @@ class FfiModel with ChangeNotifier {
 
   bool get touchMode => _touchMode;
 
-  bool get isPeerAndroid => _pi.platform == kPeerPlatformAndroid;
+  bool get isPeerAndroid => _pi.capabilities.isAndroid;
   bool get isPeerMobile => isPeerAndroid;
 
-  bool get isPeerLinux => _pi.platform == kPeerPlatformLinux;
+  bool get isPeerLinux => _pi.capabilities.isLinux;
 
   bool get viewOnly => _viewOnly;
   bool get showMyCursor => _showMyCursor;
@@ -1872,14 +1873,8 @@ class FfiModel with ChangeNotifier {
           sessionId: sessionId, arg: kOptionToggleShowMyCursor));
     }
     if (connType == ConnType.defaultConn || connType == ConnType.viewCamera) {
-      final platformAdditions = evt['platform_additions'];
-      if (platformAdditions != null && platformAdditions != '') {
-        try {
-          _pi.platformAdditions = json.decode(platformAdditions);
-        } catch (e) {
-          debugPrint('Failed to decode platformAdditions $e');
-        }
-      }
+      _pi.platformAdditions =
+          decodePeerPlatformAdditions(evt['platform_additions']);
     }
 
     _pi.isSet.value = true;
@@ -5458,7 +5453,7 @@ class ElevationModel with ChangeNotifier {
   bool _canElevate = false;
   bool get showRequestMenu => _canElevate && !_running;
   onPeerInfo(PeerInfo pi) {
-    _canElevate = pi.platform == kPeerPlatformWindows && pi.sasEnabled == false;
+    _canElevate = pi.capabilities.elevationRequest;
     _running = false;
   }
 
@@ -6088,7 +6083,7 @@ class PeerInfo with ChangeNotifier {
   bool get isWayland => platformAdditions[kPlatformAdditionsIsWayland] == true;
   bool get isHeadless => platformAdditions[kPlatformAdditionsHeadless] == true;
   bool get isInstalled =>
-      platform != kPeerPlatformWindows ||
+      !capabilities.isWindows ||
       platformAdditions[kPlatformAdditionsIsInstalled] == true;
   List<int> get RustDeskVirtualDisplays => List<int>.from(
       platformAdditions[kPlatformAdditionsRustDeskVirtualDisplays] ?? []);
@@ -6108,7 +6103,17 @@ class PeerInfo with ChangeNotifier {
   String get fullVersion =>
       platformAdditions[kPlatformAdditionsFullVersion] as String? ?? version;
   bool get supportCaptureBackend =>
-      platformAdditions[kPlatformAdditionsSupportCaptureBackend] == true;
+      capabilities.captureBackendSelection;
+  PeerCapabilityMatrix get capabilities =>
+      PeerCapabilityMatrix.fromPeerInfo(
+        platform: platform,
+        sasEnabled: sasEnabled,
+        captureBackendSelection:
+            platformAdditions[kPlatformAdditionsSupportCaptureBackend] == true,
+        keyboardV2CommittedText: features.keyboardV2CommittedText,
+        keyboardV2PhysicalKey: features.keyboardV2PhysicalKey,
+        keyboardV2LayoutAwareText: features.keyboardV2LayoutAwareText,
+      );
 
   Display? tryGetDisplay({int? display}) {
     if (displays.isEmpty) {
