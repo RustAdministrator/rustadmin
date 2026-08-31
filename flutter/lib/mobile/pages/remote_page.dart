@@ -557,6 +557,7 @@ class _RemotePageState extends State<RemotePage>
         char.length == 1 &&
         !inputModel.ctrl &&
         !inputModel.alt &&
+        !inputModel.shift &&
         !inputModel.command) {
       _inputMobileString(char);
       return;

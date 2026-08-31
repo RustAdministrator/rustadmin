@@ -338,6 +338,10 @@ class InputModel {
   var alt = false;
   var command = false;
   final mobileModifierState = MobileModifierState();
+  bool _mobileShiftActive = false;
+  bool _mobileCtrlActive = false;
+  bool _mobileAltActive = false;
+  bool _mobileCommandActive = false;
 
   final ToReleaseRawKeys toReleaseRawKeys = ToReleaseRawKeys();
   final ToReleaseKeys toReleaseKeys = ToReleaseKeys();
@@ -908,6 +912,7 @@ class InputModel {
   ) {
     final modeBefore = mobileModifierState.modeFor(modifier);
     final previousValue = _modifierValue(modifier);
+    final releaseTemporaryModifier = !modeBefore.active && !previousValue;
     _setModifierValue(modifier, true);
     inputKey(name);
     _setModifierValue(
@@ -915,6 +920,15 @@ class InputModel {
       mobileModifierState.isActive(modifier) ||
           (!modeBefore.active && previousValue),
     );
+    if (releaseTemporaryModifier) {
+      _sendMobileModifierKeyUp(
+        modifier,
+        alt: alt,
+        ctrl: ctrl,
+        shift: shift,
+        command: command,
+      );
+    }
   }
 
   void consumeMobileOneShotModifiers() {
@@ -922,10 +936,75 @@ class InputModel {
   }
 
   void _syncMobileModifierState() {
-    ctrl = mobileModifierState.isActive(MobileModifierKey.ctrl);
-    alt = mobileModifierState.isActive(MobileModifierKey.alt);
-    shift = mobileModifierState.isActive(MobileModifierKey.shift);
-    command = mobileModifierState.isActive(MobileModifierKey.command);
+    final nextCtrl = mobileModifierState.isActive(MobileModifierKey.ctrl);
+    final nextAlt = mobileModifierState.isActive(MobileModifierKey.alt);
+    final nextShift = mobileModifierState.isActive(MobileModifierKey.shift);
+    final nextCommand = mobileModifierState.isActive(
+      MobileModifierKey.command,
+    );
+
+    void releaseIfDeactivated(MobileModifierKey key, bool was, bool next) {
+      if (!was || next) return;
+      _sendMobileModifierKeyUp(
+        key,
+        alt: nextAlt,
+        ctrl: nextCtrl,
+        shift: nextShift,
+        command: nextCommand,
+      );
+    }
+
+    releaseIfDeactivated(
+      MobileModifierKey.ctrl,
+      _mobileCtrlActive,
+      nextCtrl,
+    );
+    releaseIfDeactivated(MobileModifierKey.alt, _mobileAltActive, nextAlt);
+    releaseIfDeactivated(
+      MobileModifierKey.shift,
+      _mobileShiftActive,
+      nextShift,
+    );
+    releaseIfDeactivated(
+      MobileModifierKey.command,
+      _mobileCommandActive,
+      nextCommand,
+    );
+
+    _mobileCtrlActive = nextCtrl;
+    _mobileAltActive = nextAlt;
+    _mobileShiftActive = nextShift;
+    _mobileCommandActive = nextCommand;
+    ctrl = nextCtrl;
+    alt = nextAlt;
+    shift = nextShift;
+    command = nextCommand;
+  }
+
+  void _sendMobileModifierKeyUp(
+    MobileModifierKey modifier, {
+    required bool alt,
+    required bool ctrl,
+    required bool shift,
+    required bool command,
+  }) {
+    if (!keyboardPerm || isViewCamera) return;
+    final name = switch (modifier) {
+      MobileModifierKey.ctrl => 'VK_CONTROL',
+      MobileModifierKey.alt => 'VK_MENU',
+      MobileModifierKey.shift => 'VK_SHIFT',
+      MobileModifierKey.command => 'Meta',
+    };
+    bind.sessionInputKey(
+      sessionId: sessionId,
+      name: name,
+      down: false,
+      press: false,
+      alt: alt,
+      ctrl: ctrl,
+      shift: shift,
+      command: command,
+    );
   }
 
   bool _modifierValue(MobileModifierKey modifier) => switch (modifier) {
@@ -1149,14 +1228,14 @@ class InputModel {
     // This ensures the remote doesn't have stuck modifier keys after exiting.
     // Use press: false, down: false to send key-up events without modifiers attached.
     final modifiersToRelease = [
-      'Control_L',
-      'Control_R',
-      'Alt_L',
-      'Alt_R',
-      'Shift_L',
-      'Shift_R',
-      'Meta_L', // Command/Super left
-      'Meta_R', // Command/Super right
+      'VK_CONTROL',
+      'RControl',
+      'VK_MENU',
+      'RAlt',
+      'VK_SHIFT',
+      'RShift',
+      'Meta', // Command/Super left
+      'RWin', // Command/Super right
     ];
 
     for (final key in modifiersToRelease) {
