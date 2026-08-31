@@ -311,6 +311,8 @@ impl Client {
         ),
         (i32, String),
     )> {
+        crate::common::PeerSecurityRepository::recover_pending()
+            .context("failed to recover peer-security mutation")?;
         debug_assert!(peer == interface.get_id());
         interface.update_direct(None);
         interface.update_received(false);

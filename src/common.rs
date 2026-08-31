@@ -2632,16 +2632,6 @@ fn clear_peer_pairing_options(config: &mut PeerConfig) -> bool {
     changed
 }
 
-fn clear_peer_pairing_state(peer_config_id: &str) -> bool {
-    let mut config = PeerConfig::load(peer_config_id);
-    let changed = clear_peer_pairing_options(&mut config);
-    if changed {
-        config.store(peer_config_id);
-        log::info!("Cleared paired trust state for {peer_config_id}");
-    }
-    changed
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct PeerSecurityEntry {
     pub id: String,
@@ -2728,14 +2718,8 @@ impl PeerSecurityEntry {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct PeerSecurityMutationResult {
-    pub cleared_peer_config_ids: Vec<String>,
-    pub removed_quic_peer_ids: Vec<String>,
-    pub removed_peer_config: bool,
-}
-
-pub struct PeerSecurityRepository;
+mod peer_security_mutation;
+pub use peer_security_mutation::{PeerSecurityMutationResult, PeerSecurityRepository};
 
 fn peer_security_config_ids(peer_config_id: &str, aliases: &[String]) -> Vec<String> {
     let mut ids = Vec::with_capacity(aliases.len().saturating_add(1));
@@ -2744,35 +2728,6 @@ fn peer_security_config_ids(peer_config_id: &str, aliases: &[String]) -> Vec<Str
     ids.sort();
     ids.dedup();
     ids
-}
-
-impl PeerSecurityRepository {
-    pub fn list() -> ResultType<Vec<PeerSecurityEntry>> {
-        peer_security_entries_impl()
-    }
-
-    pub fn reset_pairing(peer_config_id: &str) -> ResultType<PeerSecurityMutationResult> {
-        let mut result = PeerSecurityMutationResult::default();
-        let mut removed_quic_peer_ids = Vec::new();
-        #[cfg(feature = "quic-transport")]
-        {
-            removed_quic_peer_ids = crate::quic_transport::forget_paired_peer(peer_config_id)?;
-        }
-        result.removed_quic_peer_ids = removed_quic_peer_ids;
-        for id in peer_security_config_ids(peer_config_id, &result.removed_quic_peer_ids) {
-            if clear_peer_pairing_state(&id) {
-                result.cleared_peer_config_ids.push(id);
-            }
-        }
-        Ok(result)
-    }
-
-    pub fn remove(peer_config_id: &str) -> ResultType<PeerSecurityMutationResult> {
-        let mut result = Self::reset_pairing(peer_config_id)?;
-        PeerConfig::remove(peer_config_id);
-        result.removed_peer_config = true;
-        Ok(result)
-    }
 }
 
 fn peer_security_entries_impl() -> ResultType<Vec<PeerSecurityEntry>> {

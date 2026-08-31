@@ -320,16 +320,20 @@ pub fn paired_peers() -> ResultType<Vec<TrustedPeerRecord>> {
     store.load_all().map_err(Into::into)
 }
 
-pub fn forget_paired_peer(peer_id: &str) -> ResultType<Vec<String>> {
+pub fn forget_paired_peer_ids(peer_ids: &[String]) -> ResultType<Vec<String>> {
     let config = NetworkTransportConfig::load()?;
     let mut store = FileTrustedPeerStore::new(&config.trusted_peer_store)?;
-    let removed_ids = match store.remove_peer_and_aliases(peer_id) {
-        Ok(removed_ids) => removed_ids,
-        Err(PairingError::InvalidPeerId) => return Ok(Vec::new()),
-        Err(error) => return Err(error.into()),
-    };
-    for removed_id in &removed_ids {
-        hbb_common::log::info!("Removed confirmed QUIC identity for peer {removed_id}");
+    let mut removed_ids = Vec::new();
+    for peer_id in peer_ids {
+        match store.remove(peer_id) {
+            Ok(true) => {
+                hbb_common::log::info!("Removed confirmed QUIC identity for peer {peer_id}");
+                removed_ids.push(peer_id.clone());
+            }
+            Ok(false) => {}
+            Err(PairingError::InvalidPeerId) => {}
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(removed_ids)
 }
