@@ -328,6 +328,7 @@ class InputModel {
   bool _mobileCtrlActive = false;
   bool _mobileAltActive = false;
   bool _mobileCommandActive = false;
+  Future<void> _androidRemoteKeyboardQueue = Future<void>.value();
 
   final ToReleaseRawKeys toReleaseRawKeys = ToReleaseRawKeys();
   final ToReleaseKeys toReleaseKeys = ToReleaseKeys();
@@ -796,24 +797,53 @@ class InputModel {
     );
   }
 
-  void inputAndroidRemotePhysicalKey(int usbHidUsage, bool down) {
-    if (isViewOnly || isViewCamera) return;
-    newKeyboardMode('', usbHidUsage, down, false);
+  Future<void> inputAndroidRemotePhysicalKey(int usbHidUsage, bool down) {
+    if (isViewOnly || isViewCamera) return Future<void>.value();
+    final inputSessionId = sessionId;
+    final lockModes = _buildLockModes(false);
+    return _enqueueAndroidRemoteKeyboard(() async {
+      await bind.sessionHandleFlutterKeyEvent(
+        sessionId: inputSessionId,
+        character: '',
+        usbHid: usbHidUsage,
+        lockModes: lockModes,
+        downOrUp: down,
+      );
+    });
   }
 
-  void inputAndroidRemoteCommittedText(
+  Future<void> inputAndroidRemoteCommittedText(
     String text, {
     required String sourceLanguageTag,
     required String sourceLayoutType,
   }) {
-    if (isViewOnly || isViewCamera || text.isEmpty) return;
-    bind.sessionInputTextEditWithSourceLayout(
-      sessionId: sessionId,
-      value: text,
-      sourceLanguageTag: sourceLanguageTag,
-      sourceLayoutType: sourceLayoutType,
-    );
-    consumeMobileOneShotModifiers();
+    if (isViewOnly || isViewCamera || text.isEmpty) {
+      return Future<void>.value();
+    }
+    final inputSessionId = sessionId;
+    return _enqueueAndroidRemoteKeyboard(() async {
+      await bind.sessionInputTextEditWithSourceLayout(
+        sessionId: inputSessionId,
+        value: text,
+        sourceLanguageTag: sourceLanguageTag,
+        sourceLayoutType: sourceLayoutType,
+      );
+      consumeMobileOneShotModifiers();
+    });
+  }
+
+  Future<void> _enqueueAndroidRemoteKeyboard(
+    Future<void> Function() operation,
+  ) {
+    _androidRemoteKeyboardQueue = _androidRemoteKeyboardQueue.then((_) async {
+      try {
+        await operation();
+      } catch (error, stackTrace) {
+        debugPrint('Android remote keyboard dispatch failed: $error');
+        debugPrintStack(stackTrace: stackTrace);
+      }
+    });
+    return _androidRemoteKeyboardQueue;
   }
 
   void mapKeyboardModeRaw(RawKeyEvent e, bool iosCapsLock) {

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/generated_bridge.dart';
 import 'package:flutter_hbb/mobile/mobile_modifier_state.dart';
@@ -26,8 +28,25 @@ class _InputKeyCall {
   final bool command;
 }
 
+class _FlutterKeyCall {
+  const _FlutterKeyCall({required this.usbHid, required this.down});
+
+  final int usbHid;
+  final bool down;
+
+  @override
+  bool operator ==(Object other) =>
+      other is _FlutterKeyCall && other.usbHid == usbHid && other.down == down;
+
+  @override
+  int get hashCode => Object.hash(usbHid, down);
+}
+
 class _TestRustadminImpl implements Rustadmin {
   final inputKeyCalls = <_InputKeyCall>[];
+  final flutterKeyCalls = <_FlutterKeyCall>[];
+  final pendingFlutterKeyCalls = <Completer<void>>[];
+  bool blockFlutterKeyCalls = false;
 
   @override
   dynamic noSuchMethod(Invocation invocation) {
@@ -63,6 +82,20 @@ class _TestRustadminImpl implements Rustadmin {
       );
       return Future<void>.value();
     }
+    if (invocation.memberName == #sessionHandleFlutterKeyEvent) {
+      flutterKeyCalls.add(
+        _FlutterKeyCall(
+          usbHid: invocation.namedArguments[#usbHid] as int,
+          down: invocation.namedArguments[#downOrUp] as bool,
+        ),
+      );
+      if (blockFlutterKeyCalls) {
+        final completer = Completer<void>();
+        pendingFlutterKeyCalls.add(completer);
+        return completer.future;
+      }
+      return Future<void>.value();
+    }
     if (invocation.memberName == #sessionSendMouse) {
       return Future<void>.value();
     }
@@ -84,6 +117,9 @@ void main() {
 
   setUp(() {
     testImpl.inputKeyCalls.clear();
+    testImpl.flutterKeyCalls.clear();
+    testImpl.pendingFlutterKeyCalls.clear();
+    testImpl.blockFlutterKeyCalls = false;
     inputModel = (FFI(null)..id = 'mobile-modifier-test-peer').inputModel;
   });
 
@@ -161,5 +197,39 @@ void main() {
     expect(testImpl.inputKeyCalls[0].ctrl, isTrue);
     expect(testImpl.inputKeyCalls[1].name, 'VK_CONTROL');
     expect(testImpl.inputKeyCalls[1].ctrl, isFalse);
+  });
+
+  test('Android physical key bridge preserves modifier ordering', () async {
+    testImpl.blockFlutterKeyCalls = true;
+
+    final shiftDown = inputModel.inputAndroidRemotePhysicalKey(0xe1, true);
+    final slashDown = inputModel.inputAndroidRemotePhysicalKey(0x38, true);
+    final slashUp = inputModel.inputAndroidRemotePhysicalKey(0x38, false);
+    final shiftUp = inputModel.inputAndroidRemotePhysicalKey(0xe1, false);
+    await Future<void>.delayed(Duration.zero);
+
+    expect(testImpl.flutterKeyCalls, [
+      const _FlutterKeyCall(usbHid: 0xe1, down: true),
+    ]);
+    testImpl.pendingFlutterKeyCalls.removeAt(0).complete();
+    await shiftDown;
+    await Future<void>.delayed(Duration.zero);
+    expect(testImpl.flutterKeyCalls, [
+      const _FlutterKeyCall(usbHid: 0xe1, down: true),
+      const _FlutterKeyCall(usbHid: 0x38, down: true),
+    ]);
+
+    while (testImpl.pendingFlutterKeyCalls.isNotEmpty) {
+      testImpl.pendingFlutterKeyCalls.removeAt(0).complete();
+      await Future<void>.delayed(Duration.zero);
+    }
+    await Future.wait([slashDown, slashUp, shiftUp]);
+
+    expect(testImpl.flutterKeyCalls, [
+      const _FlutterKeyCall(usbHid: 0xe1, down: true),
+      const _FlutterKeyCall(usbHid: 0x38, down: true),
+      const _FlutterKeyCall(usbHid: 0x38, down: false),
+      const _FlutterKeyCall(usbHid: 0xe1, down: false),
+    ]);
   });
 }

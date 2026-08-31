@@ -27,6 +27,125 @@ class AndroidKeyToUsbHidTest {
     }
 
     @Test
+    fun mapsGenericAndSideSpecificMetaStateModifiers() {
+        assertEquals(
+            listOf(0xe1),
+            AndroidMetaStateToUsbHid.modifiers(KeyEvent.META_SHIFT_ON),
+        )
+        assertEquals(
+            listOf(0xe5),
+            AndroidMetaStateToUsbHid.modifiers(
+                KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_RIGHT_ON,
+            ),
+        )
+        assertEquals(
+            listOf(0xe0, 0xe6, 0xe3),
+            AndroidMetaStateToUsbHid.modifiers(
+                KeyEvent.META_CTRL_ON or
+                    KeyEvent.META_ALT_ON or KeyEvent.META_ALT_RIGHT_ON or
+                    KeyEvent.META_META_ON,
+            ),
+        )
+    }
+
+    @Test
+    fun synthesizesShiftAroundSlashForQuestionMark() {
+        val router = AndroidPhysicalKeyRouter()
+
+        val events = buildList {
+            addAll(
+                router.route(
+                    KeyEvent.ACTION_DOWN,
+                    KeyEvent.KEYCODE_SLASH,
+                    KeyEvent.META_SHIFT_ON,
+                ).orEmpty(),
+            )
+            addAll(
+                router.route(
+                    KeyEvent.ACTION_UP,
+                    KeyEvent.KEYCODE_SLASH,
+                    KeyEvent.META_SHIFT_ON,
+                ).orEmpty(),
+            )
+        }
+
+        assertEquals(
+            listOf(
+                RemoteKeyboardEvent.PhysicalKey(0xe1, true, true),
+                RemoteKeyboardEvent.PhysicalKey(0x38, true),
+                RemoteKeyboardEvent.PhysicalKey(0x38, false),
+                RemoteKeyboardEvent.PhysicalKey(0xe1, false, true),
+            ),
+            events,
+        )
+    }
+
+    @Test
+    fun doesNotDuplicateExplicitShiftEvents() {
+        val router = AndroidPhysicalKeyRouter()
+
+        val events = buildList {
+            addAll(
+                router.route(
+                    KeyEvent.ACTION_DOWN,
+                    KeyEvent.KEYCODE_SHIFT_LEFT,
+                    KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON,
+                ).orEmpty(),
+            )
+            addAll(
+                router.route(
+                    KeyEvent.ACTION_DOWN,
+                    KeyEvent.KEYCODE_SLASH,
+                    KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON,
+                ).orEmpty(),
+            )
+            addAll(
+                router.route(
+                    KeyEvent.ACTION_UP,
+                    KeyEvent.KEYCODE_SLASH,
+                    KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON,
+                ).orEmpty(),
+            )
+            addAll(
+                router.route(
+                    KeyEvent.ACTION_UP,
+                    KeyEvent.KEYCODE_SHIFT_LEFT,
+                    0,
+                ).orEmpty(),
+            )
+        }
+
+        assertEquals(
+            listOf(
+                RemoteKeyboardEvent.PhysicalKey(0xe1, true),
+                RemoteKeyboardEvent.PhysicalKey(0x38, true),
+                RemoteKeyboardEvent.PhysicalKey(0x38, false),
+                RemoteKeyboardEvent.PhysicalKey(0xe1, false),
+            ),
+            events,
+        )
+    }
+
+    @Test
+    fun releasesPressedKeysAndSyntheticModifiersOnKeyboardClose() {
+        val router = AndroidPhysicalKeyRouter()
+        router.route(
+            KeyEvent.ACTION_DOWN,
+            KeyEvent.KEYCODE_SLASH,
+            KeyEvent.META_SHIFT_ON,
+        )
+
+        assertEquals(
+            listOf(
+                RemoteKeyboardEvent.PhysicalKey(0x38, false),
+                RemoteKeyboardEvent.PhysicalKey(0xe1, false, true),
+            ),
+            router.releaseAll(),
+        )
+        assertEquals(emptyList<RemoteKeyboardEvent.PhysicalKey>(), router.releaseAll())
+    }
+
+    @Test
     fun rejectsKeysWithoutAStablePhysicalPosition() {
         assertNull(AndroidKeyToUsbHid.map(KeyEvent.KEYCODE_UNKNOWN))
         assertNull(AndroidKeyToUsbHid.map(KeyEvent.KEYCODE_AT))

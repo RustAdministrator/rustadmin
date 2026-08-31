@@ -18,7 +18,11 @@ import ffi.FFI
 import java.util.Locale
 
 internal sealed interface RemoteKeyboardEvent {
-    data class PhysicalKey(val usbHidUsage: Int, val down: Boolean) : RemoteKeyboardEvent
+    data class PhysicalKey(
+        val usbHidUsage: Int,
+        val down: Boolean,
+        val synthesizedModifier: Boolean = false,
+    ) : RemoteKeyboardEvent
     data class CommittedText(val text: String) : RemoteKeyboardEvent
 }
 
@@ -107,10 +111,195 @@ internal object AndroidKeyToUsbHid {
     }
 }
 
+internal object AndroidMetaStateToUsbHid {
+    fun modifiers(metaState: Int): List<Int> = buildList {
+        addModifierPair(
+            metaState = metaState,
+            genericMask = KeyEvent.META_CTRL_ON,
+            leftMask = KeyEvent.META_CTRL_LEFT_ON,
+            rightMask = KeyEvent.META_CTRL_RIGHT_ON,
+            leftUsage = 0xe0,
+            rightUsage = 0xe4,
+        )
+        addModifierPair(
+            metaState = metaState,
+            genericMask = KeyEvent.META_SHIFT_ON,
+            leftMask = KeyEvent.META_SHIFT_LEFT_ON,
+            rightMask = KeyEvent.META_SHIFT_RIGHT_ON,
+            leftUsage = 0xe1,
+            rightUsage = 0xe5,
+        )
+        addModifierPair(
+            metaState = metaState,
+            genericMask = KeyEvent.META_ALT_ON,
+            leftMask = KeyEvent.META_ALT_LEFT_ON,
+            rightMask = KeyEvent.META_ALT_RIGHT_ON,
+            leftUsage = 0xe2,
+            rightUsage = 0xe6,
+        )
+        addModifierPair(
+            metaState = metaState,
+            genericMask = KeyEvent.META_META_ON,
+            leftMask = KeyEvent.META_META_LEFT_ON,
+            rightMask = KeyEvent.META_META_RIGHT_ON,
+            leftUsage = 0xe3,
+            rightUsage = 0xe7,
+        )
+    }
+
+    private fun MutableList<Int>.addModifierPair(
+        metaState: Int,
+        genericMask: Int,
+        leftMask: Int,
+        rightMask: Int,
+        leftUsage: Int,
+        rightUsage: Int,
+    ) {
+        val hasLeft = metaState and leftMask != 0
+        val hasRight = metaState and rightMask != 0
+        if (hasLeft) add(leftUsage)
+        if (hasRight) add(rightUsage)
+        if (!hasLeft && !hasRight && metaState and genericMask != 0) add(leftUsage)
+    }
+}
+
+internal class AndroidPhysicalKeyRouter {
+    private data class ActiveKey(
+        val usbHidUsage: Int,
+        val syntheticModifiers: List<Int>,
+    )
+
+    private val activeKeys = linkedMapOf<Int, ActiveKey>()
+    private val explicitModifiers = linkedSetOf<Int>()
+    private val syntheticModifierReferences = mutableMapOf<Int, Int>()
+
+    fun route(
+        action: Int,
+        keyCode: Int,
+        metaState: Int,
+        repeatCount: Int = 1,
+    ): List<RemoteKeyboardEvent.PhysicalKey>? {
+        val usage = AndroidKeyToUsbHid.map(keyCode) ?: return null
+        return when (action) {
+            KeyEvent.ACTION_DOWN -> routeDown(keyCode, usage, metaState)
+            KeyEvent.ACTION_UP -> routeUp(keyCode, usage)
+            KeyEvent.ACTION_MULTIPLE -> buildList {
+                repeat(repeatCount.coerceIn(1, MAX_SYNTHETIC_REPEAT_COUNT)) {
+                    addAll(routeDown(keyCode, usage, metaState))
+                    addAll(routeUp(keyCode, usage))
+                }
+            }
+            else -> null
+        }
+    }
+
+    fun releaseAll(): List<RemoteKeyboardEvent.PhysicalKey> = buildList {
+        activeKeys.entries.toList().asReversed().forEach { (keyCode, activeKey) ->
+            add(RemoteKeyboardEvent.PhysicalKey(activeKey.usbHidUsage, false))
+            activeKeys.remove(keyCode)
+            activeKey.syntheticModifiers.asReversed().forEach { modifier ->
+                releaseSyntheticModifier(modifier, this)
+            }
+        }
+        explicitModifiers.toList().asReversed().forEach { modifier ->
+            releaseExplicitModifier(modifier, this)
+        }
+        syntheticModifierReferences.keys.toList().asReversed().forEach { modifier ->
+            syntheticModifierReferences.remove(modifier)
+            add(RemoteKeyboardEvent.PhysicalKey(modifier, false, true))
+        }
+    }
+
+    private fun routeDown(
+        keyCode: Int,
+        usage: Int,
+        metaState: Int,
+    ): List<RemoteKeyboardEvent.PhysicalKey> = buildList {
+        if (isModifier(usage)) {
+            acquireExplicitModifier(usage, this)
+            return@buildList
+        }
+        if (!activeKeys.containsKey(keyCode)) {
+            val syntheticModifiers = AndroidMetaStateToUsbHid.modifiers(metaState)
+            syntheticModifiers.forEach { modifier ->
+                acquireSyntheticModifier(modifier, this)
+            }
+            activeKeys[keyCode] = ActiveKey(usage, syntheticModifiers)
+        }
+        add(RemoteKeyboardEvent.PhysicalKey(usage, true))
+    }
+
+    private fun routeUp(
+        keyCode: Int,
+        usage: Int,
+    ): List<RemoteKeyboardEvent.PhysicalKey> = buildList {
+        if (isModifier(usage)) {
+            releaseExplicitModifier(usage, this)
+            return@buildList
+        }
+        add(RemoteKeyboardEvent.PhysicalKey(usage, false))
+        activeKeys.remove(keyCode)?.syntheticModifiers?.asReversed()?.forEach { modifier ->
+            releaseSyntheticModifier(modifier, this)
+        }
+    }
+
+    private fun acquireExplicitModifier(
+        usage: Int,
+        output: MutableList<RemoteKeyboardEvent.PhysicalKey>,
+    ) {
+        if (usage in explicitModifiers) return
+        val wasActive = isModifierActive(usage)
+        explicitModifiers += usage
+        if (!wasActive) output += RemoteKeyboardEvent.PhysicalKey(usage, true)
+    }
+
+    private fun releaseExplicitModifier(
+        usage: Int,
+        output: MutableList<RemoteKeyboardEvent.PhysicalKey>,
+    ) {
+        if (!explicitModifiers.remove(usage)) return
+        if (!isModifierActive(usage)) output += RemoteKeyboardEvent.PhysicalKey(usage, false)
+    }
+
+    private fun acquireSyntheticModifier(
+        usage: Int,
+        output: MutableList<RemoteKeyboardEvent.PhysicalKey>,
+    ) {
+        val wasActive = isModifierActive(usage)
+        syntheticModifierReferences[usage] = (syntheticModifierReferences[usage] ?: 0) + 1
+        if (!wasActive) output += RemoteKeyboardEvent.PhysicalKey(usage, true, true)
+    }
+
+    private fun releaseSyntheticModifier(
+        usage: Int,
+        output: MutableList<RemoteKeyboardEvent.PhysicalKey>,
+    ) {
+        val references = syntheticModifierReferences[usage] ?: return
+        if (references <= 1) {
+            syntheticModifierReferences.remove(usage)
+        } else {
+            syntheticModifierReferences[usage] = references - 1
+        }
+        if (!isModifierActive(usage)) {
+            output += RemoteKeyboardEvent.PhysicalKey(usage, false, true)
+        }
+    }
+
+    private fun isModifierActive(usage: Int): Boolean =
+        usage in explicitModifiers || (syntheticModifierReferences[usage] ?: 0) > 0
+
+    private fun isModifier(usage: Int): Boolean = usage in 0xe0..0xe7
+
+    private companion object {
+        const val MAX_SYNTHETIC_REPEAT_COUNT = 64
+    }
+}
+
 internal class RemoteKeyboardInputView(
     context: Context,
     private val emit: (RemoteKeyboardEvent) -> Unit,
 ) : View(context) {
+    private val physicalKeyRouter = AndroidPhysicalKeyRouter()
     private val fallbackConnection = object : BaseInputConnection(this, false) {
         override fun sendKeyEvent(event: KeyEvent): Boolean = routeKeyEvent(event)
 
@@ -152,21 +341,15 @@ internal class RemoteKeyboardInputView(
     @Suppress("DEPRECATION")
     private fun routeKeyEvent(event: KeyEvent): Boolean {
         when (event.action) {
-            KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP -> {
-                val usage = AndroidKeyToUsbHid.map(event.keyCode)
-                if (usage != null) {
-                    emit(RemoteKeyboardEvent.PhysicalKey(usage, event.action == KeyEvent.ACTION_DOWN))
-                    return true
-                }
-            }
-
-            KeyEvent.ACTION_MULTIPLE -> {
-                val usage = AndroidKeyToUsbHid.map(event.keyCode)
-                if (usage != null) {
-                    repeat(event.repeatCount.coerceIn(1, MAX_SYNTHETIC_REPEAT_COUNT)) {
-                        emit(RemoteKeyboardEvent.PhysicalKey(usage, true))
-                        emit(RemoteKeyboardEvent.PhysicalKey(usage, false))
-                    }
+            KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP, KeyEvent.ACTION_MULTIPLE -> {
+                val routed = physicalKeyRouter.route(
+                    event.action,
+                    event.keyCode,
+                    event.metaState,
+                    event.repeatCount,
+                )
+                if (routed != null) {
+                    routed.forEach(emit)
                     return true
                 }
             }
@@ -180,6 +363,10 @@ internal class RemoteKeyboardInputView(
         return false
     }
 
+    fun releasePressedKeys() {
+        physicalKeyRouter.releaseAll().forEach(emit)
+    }
+
     private fun emitKeyClick(keyCode: Int) {
         val usage = AndroidKeyToUsbHid.map(keyCode) ?: return
         emit(RemoteKeyboardEvent.PhysicalKey(usage, true))
@@ -188,7 +375,6 @@ internal class RemoteKeyboardInputView(
 
     private companion object {
         const val MAX_SYNTHETIC_DELETE_COUNT = 64
-        const val MAX_SYNTHETIC_REPEAT_COUNT = 64
         const val MAX_FALLBACK_TEXT_CHARS = 2048
     }
 }
@@ -201,6 +387,7 @@ internal class RemoteKeyboardController(
     private var sessionId = ""
     private var mode = "auto"
     private var physicalEvents = 0L
+    private var syntheticModifierEvents = 0L
     private var textFallbacks = 0L
     private val sourceLayouts = linkedSetOf<String>()
 
@@ -209,6 +396,9 @@ internal class RemoteKeyboardController(
         if (this.sessionId == sessionId && view?.visibility == View.VISIBLE) {
             this.mode = mode
             return true
+        }
+        if (this.sessionId.isNotEmpty() && this.sessionId != sessionId) {
+            view?.releasePressedKeys()
         }
         this.sessionId = sessionId
         this.mode = mode
@@ -232,6 +422,7 @@ internal class RemoteKeyboardController(
     fun hide(requestedSessionId: String? = null) {
         if (requestedSessionId != null && requestedSessionId != sessionId) return
         val inputView = view ?: return
+        inputView.releasePressedKeys()
         val inputMethodManager =
             activity.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
         inputMethodManager.hideSoftInputFromWindow(inputView.windowToken, 0)
@@ -240,11 +431,12 @@ internal class RemoteKeyboardController(
         if (sessionId.isNotEmpty()) {
             FFI.logDiagnostic(
                 "info",
-                "Android remote keyboard disabled: mode=$mode, physical_events=$physicalEvents, text_fallbacks=$textFallbacks, source_layouts=${sourceLayouts.joinToString(";")}",
+                "Android remote keyboard disabled: mode=$mode, physical_events=$physicalEvents, synthetic_modifier_events=$syntheticModifierEvents, text_fallbacks=$textFallbacks, source_layouts=${sourceLayouts.joinToString(";")}",
             )
         }
         sessionId = ""
         physicalEvents = 0
+        syntheticModifierEvents = 0
         textFallbacks = 0
         sourceLayouts.clear()
     }
@@ -264,6 +456,7 @@ internal class RemoteKeyboardController(
                 when (event) {
                     is RemoteKeyboardEvent.PhysicalKey -> {
                         physicalEvents += 1
+                        if (event.synthesizedModifier) syntheticModifierEvents += 1
                         emitToFlutter(
                             mapOf(
                                 "session_id" to currentSessionId,
