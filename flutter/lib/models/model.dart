@@ -48,6 +48,7 @@ import '../utils/image.dart' as img;
 import '../common/widgets/dialog.dart';
 import 'input_model.dart';
 import 'platform_model.dart';
+import 'session_event.dart';
 import 'session_lifecycle.dart';
 import 'package:flutter_hbb/utils/scale.dart';
 
@@ -249,14 +250,14 @@ class FfiModel with ChangeNotifier {
     }
   }
 
-  updatePermission(Map<String, dynamic> evt, String id) {
+  updatePermissionValues(Map<String, bool> permissions, String id) {
     // Track previous keyboard permission to detect revocation.
     final hadKeyboardPerm = _permissions['keyboard'] != false;
     final updatedPermissions = <String>[];
 
-    evt.forEach((k, v) {
-      if (k == 'name' || k.isEmpty) return;
-      _permissions[k] = v == 'true';
+    permissions.forEach((k, v) {
+      if (k.isEmpty) return;
+      _permissions[k] = v;
       if (_kInitialSessionPermissionNames.contains(k)) {
         updatedPermissions.add(k);
       }
@@ -425,6 +426,27 @@ class FfiModel with ChangeNotifier {
   // todo: why called by two position
   StreamEventHandler startEventListener(SessionID sessionId, String peerId) {
     return (evt) async {
+      final typedEvent = decodeTypedSessionEvent(evt);
+      if (typedEvent is ConnectionReadySessionEvent) {
+        setConnectionType(
+          peerId,
+          typedEvent.secure,
+          typedEvent.direct,
+          typedEvent.streamType,
+        );
+        parent.target?.qualityMonitorModel.updateConnectionInfo(
+          typedEvent.streamType,
+          typedEvent.direct,
+        );
+        return;
+      } else if (typedEvent is PermissionSessionEvent) {
+        updatePermissionValues(typedEvent.permissions, peerId);
+        return;
+      } else if (typedEvent is InvalidSessionEvent) {
+        debugPrint(
+            'Rejected malformed session event ${typedEvent.name}: ${typedEvent.reason}');
+        return;
+      }
       var name = evt['name'];
       if (name == 'msgbox') {
         handleMsgBox(evt, sessionId, peerId);
@@ -438,11 +460,6 @@ class FfiModel with ChangeNotifier {
         handleSyncPeerInfo(evt, sessionId, peerId);
       } else if (name == 'sync_platform_additions') {
         handlePlatformAdditions(evt, sessionId, peerId);
-      } else if (name == 'connection_ready') {
-        setConnectionType(peerId, evt['secure'] == 'true',
-            evt['direct'] == 'true', evt['stream_type'] ?? '');
-        parent.target?.qualityMonitorModel
-            .updateConnectionInfo(evt['stream_type'], evt['direct']);
       } else if (name == 'switch_display') {
         // switch display is kept for backward compatibility
         handleSwitchDisplay(evt, sessionId, peerId);
@@ -456,8 +473,6 @@ class FfiModel with ChangeNotifier {
         await parent.target?.cursorModel.updateCursorPosition(evt, peerId);
       } else if (name == 'clipboard') {
         Clipboard.setData(ClipboardData(text: evt['content']));
-      } else if (name == 'permission') {
-        updatePermission(evt, peerId);
       } else if (name == 'chat_client_mode') {
         parent.target?.chatModel
             .receive(ChatModel.clientModeID, evt['text'] ?? '');
