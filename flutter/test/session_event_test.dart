@@ -443,6 +443,80 @@ void main() {
     }
   });
 
+  test('decodes bounded message, toast, and Windows-session events', () {
+    final trust =
+        decodeTypedSessionEvent({
+              'name': 'msgbox',
+              'type': 'confirm-peer-trust',
+              'title': 'Trust this device',
+              'text':
+                  '{"peer":"10.0.0.1","peer_id":"peer","fingerprint":"abc","trust_phrase":"one two","direct":true}',
+              'link': '',
+              'hasRetry': '',
+            })!
+            as MessageBoxSessionEvent;
+    expect(trust.securityDetails?.peerId, 'peer');
+    expect(trust.securityDetails?.direct, isTrue);
+    expect(trust.hasRetry, isFalse);
+
+    final malformedSecurity =
+        decodeTypedSessionEvent({
+              'name': 'msgbox',
+              'type': 'input-pairing-passphrase',
+              'title': 'Pairing',
+              'text': '{bad-json',
+              'link': '',
+            })!
+            as MessageBoxSessionEvent;
+    expect(malformedSecurity.securityDetails, isNull);
+
+    final plugin =
+        decodeMessageBoxSessionEvent({
+              'type': 'confirm-peer-trust',
+              'title': 'Spoof',
+              'text': trust.text,
+              'link': '',
+              'hasRetry': 'true',
+            }, origin: MessageBoxOrigin.plugin)
+            as MessageBoxSessionEvent;
+    expect(plugin.origin, MessageBoxOrigin.plugin);
+    expect(plugin.securityDetails, isNull);
+    expect(plugin.hasRetry, isFalse);
+
+    final toast =
+        decodeTypedSessionEvent({
+              'name': 'toast',
+              'type': 'info',
+              'text': 'ready',
+              'dur_msec': '2500',
+            })!
+            as ToastSessionEvent;
+    expect(toast.durationMs, 2500);
+
+    final sessions =
+        decodeTypedSessionEvent({
+              'name': 'set_multiple_windows_session',
+              'windows_sessions':
+                  '[{"sid":"1","name":"Console"},{"sid":"2","name":"User"}]',
+            })!
+            as MultipleWindowsSessionsEvent;
+    expect(sessions.sessions.map((value) => value.id), ['1', '2']);
+  });
+
+  test('rejects malformed message, toast, and Windows-session events', () {
+    for (final event in [
+      {'name': 'msgbox', 'type': 1, 'title': 'x', 'text': 'x'},
+      {'name': 'toast', 'dur_msec': '-1'},
+      {'name': 'set_multiple_windows_session', 'windows_sessions': '[]'},
+      {
+        'name': 'set_multiple_windows_session',
+        'windows_sessions': '[{"sid":1,"name":"User"}]',
+      },
+    ]) {
+      expect(decodeTypedSessionEvent(event), isA<InvalidSessionEvent>());
+    }
+  });
+
   test('decodes display and platform synchronization payloads', () {
     final sync =
         decodeTypedSessionEvent({

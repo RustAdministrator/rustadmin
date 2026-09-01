@@ -361,12 +361,18 @@ class FfiModel with ChangeNotifier {
   }
 
   handleCachedPeerData(CachedPeerData data, String peerId) async {
-    handleMsgBox({
-      'type': 'success',
-      'title': 'Successful',
-      'text': kMsgboxTextWaitingForImage,
-      'link': '',
-    }, sessionId, peerId);
+    handleMessageBoxEvent(
+      const MessageBoxSessionEvent(
+        type: 'success',
+        title: 'Successful',
+        text: kMsgboxTextWaitingForImage,
+        link: '',
+        hasRetry: false,
+        origin: MessageBoxOrigin.core,
+      ),
+      sessionId,
+      peerId,
+    );
     await updatePrivacyModeSignal(sessionId, peerId);
     setConnectionType(peerId, data.secure, data.direct, data.streamType);
     final peerInfoEvent = decodeTypedSessionEvent({
@@ -447,13 +453,7 @@ class FfiModel with ChangeNotifier {
         return;
       }
       var name = evt['name'];
-      if (name == 'msgbox') {
-        handleMsgBox(evt, sessionId, peerId);
-      } else if (name == 'toast') {
-        handleToast(evt, sessionId, peerId);
-      } else if (name == 'set_multiple_windows_session') {
-        handleMultipleWindowsSession(evt, sessionId, peerId);
-      } else if (name == 'add_connection') {
+      if (name == 'add_connection') {
         parent.target?.serverModel.addConnection(evt);
       } else if (name == 'on_client_remove') {
         parent.target?.serverModel.onClientRemove(evt);
@@ -466,8 +466,17 @@ class FfiModel with ChangeNotifier {
       } else if (name == 'plugin_manager') {
         pluginManager.handleEvent(evt);
       } else if (name == 'plugin_event') {
-        handlePluginEvent(evt,
-            (Map<String, dynamic> e) => handleMsgBox(e, sessionId, peerId));
+        handlePluginEvent(evt, (Map<String, dynamic> payload) {
+          final event = decodeMessageBoxSessionEvent(
+            payload,
+            origin: MessageBoxOrigin.plugin,
+          );
+          if (event is MessageBoxSessionEvent) {
+            handleMessageBoxEvent(event, sessionId, peerId);
+          } else if (event is InvalidSessionEvent) {
+            debugPrint('Rejected malformed plugin msgbox: ${event.reason}');
+          }
+        });
       } else if (name == 'plugin_reload') {
         handleReloading(evt);
       } else if (name == 'plugin_option') {
@@ -587,6 +596,12 @@ class FfiModel with ChangeNotifier {
       _handlePrinterRequestEvent(event, sessionId);
     } else if (event is ScreenshotSessionEvent) {
       _handleScreenshotEvent(event, sessionId);
+    } else if (event is MessageBoxSessionEvent) {
+      handleMessageBoxEvent(event, sessionId, peerId);
+    } else if (event is ToastSessionEvent) {
+      handleToastEvent(event);
+    } else if (event is MultipleWindowsSessionsEvent) {
+      handleMultipleWindowsSessionsEvent(event, sessionId, peerId);
     } else if (event is PeerInfoSessionEvent) {
       await handlePeerInfoEvent(event, peerId, false);
     } else if (event is SyncPeerInfoSessionEvent) {
@@ -1011,27 +1026,34 @@ class FfiModel with ChangeNotifier {
     dialogManager.dismissByTag(tag);
   }
 
-  handleMultipleWindowsSession(
-      Map<String, dynamic> evt, SessionID sessionId, String peerId) {
+  void handleMultipleWindowsSessionsEvent(
+      MultipleWindowsSessionsEvent event,
+      SessionID sessionId,
+      String peerId) {
     if (parent.target == null) return;
     final dialogManager = parent.target!.dialogManager;
-    final sessions = evt['windows_sessions'];
     final title = translate('Multiple Windows sessions found');
     final text = translate('Please select the session you want to connect to');
     final type = "";
 
-    showWindowsSessionsDialog(
-        type, title, text, dialogManager, sessionId, peerId, sessions);
+    showWindowsSessionsDialog(type, title, text, dialogManager, sessionId,
+        [for (final session in event.sessions) session.id],
+        [for (final session in event.sessions) session.name]);
   }
 
-  /// Handle the message box event based on [evt] and [id].
-  handleMsgBox(Map<String, dynamic> evt, SessionID sessionId, String peerId) {
+  void handleMessageBoxEvent(
+      MessageBoxSessionEvent event, SessionID sessionId, String peerId) {
     if (parent.target == null) return;
     final dialogManager = parent.target!.dialogManager;
-    final type = evt['type'];
-    final title = evt['title'];
-    final text = evt['text'];
-    final link = evt['link'];
+    final type = event.type;
+    final title = event.title;
+    final text = event.text;
+    final link = event.link;
+
+    if (event.origin == MessageBoxOrigin.plugin) {
+      msgBox(sessionId, type, title, text, link, dialogManager);
+      return;
+    }
 
     void rejectSecurityPrompt({required bool pairing}) {
       () async {
@@ -1057,26 +1079,27 @@ class FfiModel with ChangeNotifier {
     if (title == 'Connection Error' ||
         type == 'error' ||
         type == 'restarting' ||
-        (type is String && type.contains('error'))) {
+        type.contains('error')) {
       parent.target?.inputModel.setRelativeMouseMode(false);
     }
 
     if (type == 'input-pairing-passphrase' ||
         type == 'input-direct-pairing-passphrase') {
-      if (text is String) {
-        showPairingPassphraseDialog(sessionId, dialogManager, text);
+      final details = event.securityDetails;
+      if (details != null) {
+        showPairingPassphraseDialog(sessionId, dialogManager, details);
       } else {
         rejectSecurityPrompt(pairing: true);
       }
     } else if (type == 'confirm-peer-trust' || type == 'confirm-direct-trust') {
-      if (text is String) {
-        showPeerTrustDialog(sessionId, dialogManager, text);
+      final details = event.securityDetails;
+      if (details != null) {
+        showPeerTrustDialog(sessionId, dialogManager, details);
       } else {
         rejectSecurityPrompt(pairing: false);
       }
     } else if (type == 'error' &&
         title == 'Connection Error' &&
-        text is String &&
         isResettablePeerTrustError(text)) {
       showPeerIdentityChangedDialog(sessionId, dialogManager, text);
     } else if (type == 're-input-password') {
@@ -1112,11 +1135,11 @@ class FfiModel with ChangeNotifier {
     } else if (text == kMsgboxTextWaitingForImage) {
       showConnectedWaitingForImage(dialogManager, sessionId, type, title, text);
     } else if (title == 'Privacy mode') {
-      final hasRetry = evt['hasRetry'] == 'true';
+      final hasRetry = event.hasRetry;
       showPrivacyFailedDialog(
           sessionId, type, title, text, link, hasRetry, dialogManager);
     } else {
-      var hasRetry = evt['hasRetry'] == 'true';
+      var hasRetry = event.hasRetry;
       if (!hasRetry) {
         hasRetry = shouldAutoRetryOnOffline(type, title, text);
       }
@@ -1125,23 +1148,18 @@ class FfiModel with ChangeNotifier {
   }
 
   void showPeerTrustDialog(
-      SessionID sessionId, OverlayDialogManager dialogManager, String text) {
+      SessionID sessionId,
+      OverlayDialogManager dialogManager,
+      SecurityPromptDetails details) {
     final dialogTag = '$sessionId-confirm-peer-trust';
     if (dialogManager.hasDialog(dialogTag)) {
       return;
     }
-    Map<String, dynamic> details = const {};
-    try {
-      final decoded = jsonDecode(text);
-      if (decoded is Map<String, dynamic>) {
-        details = decoded;
-      }
-    } catch (_) {}
-    final peer = (details['peer'] ?? '').toString();
-    final peerId = (details['peer_id'] ?? '').toString();
-    final fingerprint = (details['fingerprint'] ?? '').toString();
-    final trustPhrase = (details['trust_phrase'] ?? '').toString();
-    final direct = details['direct'] == true;
+    final peer = details.peer;
+    final peerId = details.peerId;
+    final fingerprint = details.fingerprint;
+    final trustPhrase = details.trustPhrase;
+    final direct = details.direct;
     final controller = TextEditingController();
     String normalizePhrase(String value) =>
         value.trim().toLowerCase().split(RegExp(r'\s+')).join(' ');
@@ -1249,21 +1267,16 @@ class FfiModel with ChangeNotifier {
   }
 
   void showPairingPassphraseDialog(
-      SessionID sessionId, OverlayDialogManager dialogManager, String text) {
+      SessionID sessionId,
+      OverlayDialogManager dialogManager,
+      SecurityPromptDetails details) {
     final dialogTag = '$sessionId-input-pairing-passphrase';
     if (dialogManager.hasDialog(dialogTag)) {
       return;
     }
-    Map<String, dynamic> details = const {};
-    try {
-      final decoded = jsonDecode(text);
-      if (decoded is Map<String, dynamic>) {
-        details = decoded;
-      }
-    } catch (_) {}
-    final peer = (details['peer'] ?? '').toString();
-    final peerId = (details['peer_id'] ?? '').toString();
-    final direct = details['direct'] == true;
+    final peer = details.peer;
+    final peerId = details.peerId;
+    final direct = details.direct;
     final controller = TextEditingController();
     bool obscure = true;
     bool submitting = false;
@@ -1466,29 +1479,26 @@ class FfiModel with ChangeNotifier {
     return false;
   }
 
-  handleToast(Map<String, dynamic> evt, SessionID sessionId, String peerId) {
-    final type = evt['type'] ?? 'info';
-    final text = evt['text'] ?? '';
-    final durMsc = evt['dur_msec'] ?? 2000;
-    final duration = Duration(milliseconds: durMsc);
-    if ((text).isEmpty) {
+  void handleToastEvent(ToastSessionEvent event) {
+    final duration = Duration(milliseconds: event.durationMs);
+    if (event.text.isEmpty) {
       BotToast.showLoading(
         duration: duration,
         clickClose: true,
         allowClick: true,
       );
     } else {
-      if (type.contains('error')) {
+      if (event.type.contains('error')) {
         BotToast.showText(
           contentColor: Colors.red,
-          text: translate(text),
+          text: translate(event.text),
           duration: duration,
           clickClose: true,
           onlyOne: true,
         );
       } else {
         BotToast.showText(
-          text: translate(text),
+          text: translate(event.text),
           duration: duration,
           clickClose: true,
           onlyOne: true,

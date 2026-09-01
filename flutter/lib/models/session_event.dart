@@ -497,6 +497,70 @@ final class ScreenshotSessionEvent extends SessionEvent {
   final String message;
 }
 
+enum MessageBoxOrigin { core, plugin }
+
+final class SecurityPromptDetails {
+  const SecurityPromptDetails({
+    required this.peer,
+    required this.peerId,
+    required this.direct,
+    this.fingerprint = '',
+    this.trustPhrase = '',
+  });
+
+  final String peer;
+  final String peerId;
+  final bool direct;
+  final String fingerprint;
+  final String trustPhrase;
+}
+
+final class MessageBoxSessionEvent extends SessionEvent {
+  const MessageBoxSessionEvent({
+    required this.type,
+    required this.title,
+    required this.text,
+    required this.link,
+    required this.hasRetry,
+    required this.origin,
+    this.securityDetails,
+  });
+
+  final String type;
+  final String title;
+  final String text;
+  final String link;
+  final bool hasRetry;
+  final MessageBoxOrigin origin;
+  final SecurityPromptDetails? securityDetails;
+}
+
+final class ToastSessionEvent extends SessionEvent {
+  const ToastSessionEvent({
+    required this.type,
+    required this.text,
+    required this.durationMs,
+  });
+
+  final String type;
+  final String text;
+  final int durationMs;
+}
+
+final class WindowsSessionValue {
+  const WindowsSessionValue({required this.id, required this.name});
+
+  final String id;
+  final String name;
+}
+
+final class MultipleWindowsSessionsEvent extends SessionEvent {
+  MultipleWindowsSessionsEvent(List<WindowsSessionValue> sessions)
+    : sessions = List<WindowsSessionValue>.unmodifiable(sessions);
+
+  final List<WindowsSessionValue> sessions;
+}
+
 const _qualityDisplayMapKeys = <String>{
   'fps',
   'decode_fps',
@@ -665,6 +729,31 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
       return const SessionSignalEvent(SessionSignal.voiceCallIncoming);
     case 'exit_relative_mouse_mode':
       return const SessionSignalEvent(SessionSignal.exitRelativeMouseMode);
+    case 'msgbox':
+      return decodeMessageBoxSessionEvent(event);
+    case 'toast':
+      final type = event['type'] ?? 'info';
+      final text = event['text'] ?? '';
+      final durationMs = event.containsKey('dur_msec')
+          ? _decodeInt(event['dur_msec'])
+          : 2000;
+      return type is! String ||
+              type.length > 4096 ||
+              text is! String ||
+              text.length > 1024 * 1024 ||
+              durationMs == null ||
+              durationMs < 0 ||
+              durationMs > 10 * 60 * 1000
+          ? const InvalidSessionEvent('toast', 'invalid payload')
+          : ToastSessionEvent(type: type, text: text, durationMs: durationMs);
+    case 'set_multiple_windows_session':
+      final sessions = _decodeWindowsSessions(event['windows_sessions']);
+      return sessions == null || sessions.isEmpty
+          ? const InvalidSessionEvent(
+              'set_multiple_windows_session',
+              'invalid sessions',
+            )
+          : MultipleWindowsSessionsEvent(sessions);
     case 'cursor_data':
       final id = _decodeNonEmptyString(event['id']);
       final hotx = _decodeDouble(event['hotx']);
@@ -1200,6 +1289,48 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
   }
 }
 
+SessionEvent decodeMessageBoxSessionEvent(
+  Map<String, dynamic> event, {
+  MessageBoxOrigin origin = MessageBoxOrigin.core,
+}) {
+  final type = event['type'];
+  final title = event['title'];
+  final text = event['text'];
+  final link = event['link'] ?? '';
+  if (type is! String ||
+      type.length > 4096 ||
+      title is! String ||
+      title.length > 64 * 1024 ||
+      text is! String ||
+      text.length > 1024 * 1024 ||
+      link is! String ||
+      link.length > 64 * 1024) {
+    return const InvalidSessionEvent('msgbox', 'invalid payload');
+  }
+  SecurityPromptDetails? securityDetails;
+  if (origin == MessageBoxOrigin.core &&
+      (type == 'input-pairing-passphrase' ||
+          type == 'input-direct-pairing-passphrase' ||
+          type == 'confirm-peer-trust' ||
+          type == 'confirm-direct-trust')) {
+    securityDetails = _decodeSecurityPromptDetails(
+      text,
+      trust: type == 'confirm-peer-trust' || type == 'confirm-direct-trust',
+    );
+  }
+  return MessageBoxSessionEvent(
+    type: type,
+    title: title,
+    text: text,
+    link: link,
+    hasRetry:
+        origin == MessageBoxOrigin.core &&
+        event['hasRetry'].toString() == 'true',
+    origin: origin,
+    securityDetails: securityDetails,
+  );
+}
+
 int? _decodeInt(Object? value) {
   if (value is int) return value;
   if (value is num && value.isFinite && value == value.truncateToDouble()) {
@@ -1255,6 +1386,62 @@ SessionPeerFeaturesValue? _decodePeerFeatures(Object? raw) {
     keyboardV2PhysicalKey: values['keyboard_v2_physical_key'] == true,
     keyboardV2LayoutAwareText: values['keyboard_v2_layout_aware_text'] == true,
   );
+}
+
+SecurityPromptDetails? _decodeSecurityPromptDetails(
+  String raw, {
+  required bool trust,
+}) {
+  final values = _decodeJsonObject(raw);
+  if (values == null) return null;
+  final peer = values['peer'];
+  final peerId = values['peer_id'];
+  final direct = values['direct'];
+  final fingerprint = values['fingerprint'] ?? '';
+  final trustPhrase = values['trust_phrase'] ?? '';
+  if (peer is! String ||
+      peer.isEmpty ||
+      peer.length > 4096 ||
+      peerId is! String ||
+      peerId.isEmpty ||
+      peerId.length > 4096 ||
+      (direct != null && direct is! bool) ||
+      fingerprint is! String ||
+      fingerprint.length > 64 * 1024 ||
+      trustPhrase is! String ||
+      trustPhrase.length > 4096 ||
+      (trust && (fingerprint.isEmpty || trustPhrase.trim().isEmpty))) {
+    return null;
+  }
+  return SecurityPromptDetails(
+    peer: peer,
+    peerId: peerId,
+    direct: direct == true,
+    fingerprint: fingerprint,
+    trustPhrase: trustPhrase,
+  );
+}
+
+List<WindowsSessionValue>? _decodeWindowsSessions(Object? raw) {
+  final decoded = _decodeJsonInput(raw);
+  if (decoded is! List || decoded.isEmpty || decoded.length > 256) {
+    return null;
+  }
+  final sessions = <WindowsSessionValue>[];
+  for (final value in decoded) {
+    if (value is! Map) return null;
+    final id = value['sid'];
+    final name = value['name'];
+    if (id is! String ||
+        id.isEmpty ||
+        id.length > 4096 ||
+        name is! String ||
+        name.length > 4096) {
+      return null;
+    }
+    sessions.add(WindowsSessionValue(id: id, name: name));
+  }
+  return sessions;
 }
 
 List<SessionDisplayValue>? _decodeDisplays(Object? raw) {

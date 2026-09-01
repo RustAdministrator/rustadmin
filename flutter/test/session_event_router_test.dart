@@ -1,13 +1,18 @@
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
+import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
 import 'package:flutter_hbb/generated_bridge.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/session_event.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:get/get.dart';
 
 class _RouterRustadminImpl implements Rustadmin {
+  int pairingRejects = 0;
+  int trustRejects = 0;
+
   @override
   dynamic noSuchMethod(Invocation invocation) {
     if (invocation.memberName == #translate) {
@@ -31,6 +36,14 @@ class _RouterRustadminImpl implements Rustadmin {
     if (invocation.memberName == #sessionSendMouse) {
       return Future<void>.value();
     }
+    if (invocation.memberName == #sessionSubmitDirectPairingPassphrase) {
+      if (invocation.namedArguments[#approved] == false) pairingRejects++;
+      return Future<void>.value();
+    }
+    if (invocation.memberName == #sessionConfirmDirectTrust) {
+      if (invocation.namedArguments[#approved] == false) trustRejects++;
+      return Future<void>.value();
+    }
     return super.noSuchMethod(invocation);
   }
 }
@@ -39,20 +52,31 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   late FFI ffi;
+  late _RouterRustadminImpl rustadmin;
   const peerId = 'typed-event-router-peer';
 
   setUpAll(() {
     isTest = true;
-    platformFFI.initForTest(_RouterRustadminImpl());
+    rustadmin = _RouterRustadminImpl();
+    platformFFI.initForTest(rustadmin);
   });
 
   setUp(() {
+    rustadmin.pairingRejects = 0;
+    rustadmin.trustRejects = 0;
     initSharedStates(peerId);
     ffi = FFI(null)..id = peerId;
+    Get.put(
+      DesktopTabController(
+        tabType: DesktopTabType.remoteScreen,
+        onRemoved: (_, _) {},
+      ),
+    );
   });
 
   tearDown(() {
     ffi.inputModel.disposeRelativeMouseMode();
+    Get.delete<DesktopTabController>();
     removeSharedStates(peerId);
   });
 
@@ -209,5 +233,28 @@ void main() {
       'platform_additions': '["not-an-object"]',
     });
     expect(ffi.ffiModel.pi.platformAdditions['typed_test'], isTrue);
+  });
+
+  test('malformed security prompts are rejected instead of rendered', () async {
+    final listener = ffi.ffiModel.startEventListener(ffi.sessionId, peerId);
+
+    await listener({
+      'name': 'msgbox',
+      'type': 'input-pairing-passphrase',
+      'title': 'Pairing',
+      'text': '{bad-json',
+      'link': '',
+    });
+    await listener({
+      'name': 'msgbox',
+      'type': 'confirm-peer-trust',
+      'title': 'Trust',
+      'text': '{"peer":"host","peer_id":"id"}',
+      'link': '',
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    expect(rustadmin.pairingRejects, 1);
+    expect(rustadmin.trustRejects, 1);
   });
 }

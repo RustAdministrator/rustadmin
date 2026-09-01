@@ -2485,20 +2485,9 @@ void showWindowsSessionsDialog(
     String text,
     OverlayDialogManager dialogManager,
     SessionID sessionId,
-    String peerId,
-    String sessions) {
-  List<dynamic> sessionsList = [];
-  try {
-    sessionsList = json.decode(sessions);
-  } catch (e) {
-    print(e);
-  }
-  List<String> sids = [];
-  List<String> names = [];
-  for (var session in sessionsList) {
-    sids.add(session['sid']);
-    names.add(session['name']);
-  }
+    List<String> sids,
+    List<String> names) {
+  if (sids.isEmpty || sids.length != names.length) return;
   String selectedUserValue = sids.first;
   dialogManager.dismissAll();
   dialogManager.show((setState, close, context) {
