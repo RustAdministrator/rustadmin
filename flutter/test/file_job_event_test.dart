@@ -54,4 +54,26 @@ void main() {
     expect(job.state, JobState.error);
     expect(job.err, 'denied');
   });
+
+  test('typed directory values convert without reparsing JSON', () {
+    final directory = FileDirectory.fromSessionValue(
+      SessionFileDirectoryValue(
+        id: 4,
+        path: '/tmp',
+        entries: const [
+          SessionFileEntryValue(
+            entryType: 4,
+            modifiedTime: 10,
+            name: 'a.txt',
+            size: 12,
+          ),
+        ],
+      ),
+    );
+
+    expect(directory.id, 4);
+    expect(directory.path, '/tmp');
+    expect(directory.entries.single.name, 'a.txt');
+    expect(directory.entries.single.size, 12);
+  });
 }

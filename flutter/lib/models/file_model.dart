@@ -102,16 +102,16 @@ class FileModel {
     await remoteController.refresh();
   }
 
-  void receiveFileDir(Map<String, dynamic> evt) {
-    if (evt['is_local'] == "false") {
+  void receiveFileDirectoryEvent(FileDirectorySessionEvent event) {
+    if (!event.isLocal) {
       // init remote home, the remote connection will send one dir event when established. TODO opt
-      remoteController.initDirAndHome(evt);
+      remoteController.initDirAndHome(event.directory);
     }
-    fileFetcher.tryCompleteTask(evt['value'], evt['is_local']);
+    fileFetcher.completeDirectory(event.directory);
   }
 
-  void receiveEmptyDirs(Map<String, dynamic> evt) {
-    fileFetcher.tryCompleteEmptyDirsTask(evt['value'], evt['is_local']);
+  void receiveEmptyDirectoriesEvent(EmptyDirectoriesSessionEvent event) {
+    fileFetcher.completeEmptyDirectories(event);
   }
 
   // This method fixes a deadlock that occurred when the previous code directly
@@ -135,12 +135,13 @@ class FileModel {
     jobController.jobErrorEvent(event);
   }
 
-  Future<void> postOverrideFileConfirm(Map<String, dynamic> evt) async {
-    evtLoop.pushEvent(
-        _FileDialogEvent(WeakReference(this), FileDialogType.overwrite, evt));
+  Future<void> postOverrideFileConfirmEvent(
+      FileOverrideConfirmSessionEvent event) async {
+    evtLoop.pushEvent(_FileDialogEvent(
+        WeakReference(this), FileDialogType.overwrite, event));
   }
 
-  Future<void> overrideFileConfirm(Map<String, dynamic> evt,
+  Future<void> overrideFileConfirmEvent(FileOverrideConfirmSessionEvent event,
       {bool? overrideConfirm, bool skip = false}) async {
     // If `skip == true`, it means to skip this file without showing dialog.
     // Because `resp` may be null after the user operation or the last remembered operation,
@@ -148,9 +149,9 @@ class FileModel {
     final resp = overrideConfirm ??
         (!skip
             ? await showFileConfirmDialog(translate("Overwrite"),
-                "${evt['read_path']}", true, evt['is_identical'] == "true")
+                event.readPath, true, event.isIdentical)
             : null);
-    final id = int.tryParse(evt['id']) ?? 0;
+    final id = event.id;
     if (false == resp) {
       final jobIndex = jobController.getJob(id);
       if (jobIndex != -1) {
@@ -175,10 +176,10 @@ class FileModel {
       await bind.sessionSetConfirmOverrideFile(
           sessionId: sessionId,
           actId: id,
-          fileNum: int.parse(evt['file_num']),
+          fileNum: event.fileNum,
           needOverride: need_override,
           remember: fileConfirmCheckboxRemember,
-          isUpload: evt['is_upload'] == "true");
+          isUpload: event.isUpload);
     }
     // Update the loop config.
     if (fileConfirmCheckboxRemember) {
@@ -522,31 +523,27 @@ class FileController {
   }
 
   // TODO deprecated this
-  void initDirAndHome(Map<String, dynamic> evt) {
-    try {
-      final fd = FileDirectory.fromJson(jsonDecode(evt['value']));
-      fd.format(options.value.isWindows, sort: sortBy.value);
-      if (fd.id > 0) {
-        final jobIndex = jobController.getJob(fd.id);
-        if (jobIndex != -1) {
-          final job = jobController.jobTable[jobIndex];
-          var totalSize = 0;
-          var fileCount = fd.entries.length;
-          for (var element in fd.entries) {
-            totalSize += element.size;
-          }
-          job.totalSize = totalSize;
-          job.fileCount = fileCount;
-          debugPrint("update receive details: ${fd.path}");
-          jobController.jobTable.refresh();
+  void initDirAndHome(SessionFileDirectoryValue value) {
+    final fd = FileDirectory.fromSessionValue(value);
+    fd.format(options.value.isWindows, sort: sortBy.value);
+    if (fd.id > 0) {
+      final jobIndex = jobController.getJob(fd.id);
+      if (jobIndex != -1) {
+        final job = jobController.jobTable[jobIndex];
+        var totalSize = 0;
+        var fileCount = fd.entries.length;
+        for (var element in fd.entries) {
+          totalSize += element.size;
         }
-      } else if (options.value.home.isEmpty) {
-        options.value.home = fd.path;
-        debugPrint("init remote home: ${fd.path}");
-        directory.value = fd;
+        job.totalSize = totalSize;
+        job.fileCount = fileCount;
+        debugPrint("update receive details: ${fd.path}");
+        jobController.jobTable.refresh();
       }
-    } catch (e) {
-      debugPrint("initDirAndHome err=$e");
+    } else if (options.value.home.isEmpty) {
+      options.value.home = fd.path;
+      debugPrint("init remote home: ${fd.path}");
+      directory.value = fd;
     }
   }
 
@@ -1068,24 +1065,15 @@ class JobController {
     await bind.sessionCancelJob(sessionId: sessionId, actId: id);
   }
 
-  Future<void> loadLastJob(Map<String, dynamic> evt) async {
-    debugPrint("load last job: $evt");
-    Map<String, dynamic> jobDetail = json.decode(evt['value']);
-    String remote = jobDetail['remote'];
-    String to = jobDetail['to'];
-    bool showHidden = jobDetail['show_hidden'];
-    int fileNum = jobDetail['file_num'];
-    bool isRemote = jobDetail['is_remote'];
-    bool isAutoStart = jobDetail['auto_start'] == true;
-    int currJobId = -1;
-    if (isAutoStart) {
-      // Ensure jobDetail['id'] exists and is an int
-      if (jobDetail.containsKey('id') &&
-          jobDetail['id'] != null &&
-          jobDetail['id'] is int) {
-        currJobId = jobDetail['id'];
-      }
-    }
+  Future<void> loadLastJobEvent(FileResumeJobSessionEvent event) async {
+    debugPrint("load last job: id=${event.id}, auto=${event.autoStart}");
+    final remote = event.remotePath;
+    final to = event.localPath;
+    final showHidden = event.showHidden;
+    final fileNum = event.fileNum;
+    final isRemote = event.isRemote;
+    var isAutoStart = event.autoStart;
+    var currJobId = event.id ?? -1;
     if (currJobId < 0) {
       // If id is missing or invalid, disable auto-start and assign a new job id
       isAutoStart = false;
@@ -1264,45 +1252,30 @@ class FileFetcher {
     return c.future;
   }
 
-  tryCompleteEmptyDirsTask(String? msg, String? isLocalStr) {
-    if (msg == null || isLocalStr == null) return;
-    late final Map<String, Completer<List<FileDirectory>>> tasks;
-    try {
-      final map = jsonDecode(msg);
-      final String path = map["path"];
-      final List<dynamic> fdJsons = map["empty_dirs"];
-      final List<FileDirectory> fds =
-          fdJsons.map((fdJson) => FileDirectory.fromJson(fdJson)).toList();
-
-      tasks = remoteEmptyDirsTasks;
-      final completer = tasks.remove(path);
-
-      completer?.complete(fds);
-    } catch (e) {
-      debugPrint("tryCompleteJob err: $e");
-    }
+  void completeEmptyDirectories(EmptyDirectoriesSessionEvent event) {
+    final directories = [
+      for (final value in event.directories)
+        FileDirectory.fromSessionValue(value),
+    ];
+    final completer = remoteEmptyDirsTasks.remove(event.path);
+    completer?.complete(directories);
   }
 
-  tryCompleteTask(String? msg, String? isLocalStr) {
-    if (msg == null || isLocalStr == null) return;
+  void completeDirectory(SessionFileDirectoryValue value) {
     late final Map<Object, Completer<FileDirectory>> tasks;
-    try {
-      final fd = FileDirectory.fromJson(jsonDecode(msg));
-      if (fd.id > 0) {
-        // fd.id > 0 is result for read recursive
-        // to-do later,will be better if every fetch use ID,so that there will only one task map for read and recursive read
-        tasks = readRecursiveTasks;
-        final completer = tasks.remove(fd.id);
-        completer?.complete(fd);
-      } else if (fd.path.isNotEmpty) {
-        // result for normal read dir
-        // final jobs = isLocal?localJobs:remoteJobs; // maybe we will use read local dir async later
-        tasks = remoteTasks; // bypass now
-        final completer = tasks.remove(fd.path);
-        completer?.complete(fd);
-      }
-    } catch (e) {
-      debugPrint("tryCompleteJob err: $e");
+    final fd = FileDirectory.fromSessionValue(value);
+    if (fd.id > 0) {
+      // fd.id > 0 is result for read recursive
+      // to-do later,will be better if every fetch use ID,so that there will only one task map for read and recursive read
+      tasks = readRecursiveTasks;
+      final completer = tasks.remove(fd.id);
+      completer?.complete(fd);
+    } else if (fd.path.isNotEmpty) {
+      // result for normal read dir
+      // Local reads are synchronous; asynchronous tasks are remote-only for now.
+      tasks = remoteTasks; // bypass now
+      final completer = tasks.remove(fd.path);
+      completer?.complete(fd);
     }
   }
 
@@ -1379,6 +1352,14 @@ class FileDirectory {
 
   FileDirectory();
 
+  FileDirectory.fromSessionValue(SessionFileDirectoryValue value) {
+    id = value.id;
+    path = value.path;
+    entries = [
+      for (final entry in value.entries) Entry.fromSessionValue(entry),
+    ];
+  }
+
   FileDirectory.fromJson(Map<String, dynamic> json) {
     id = json['id'];
     path = json['path'];
@@ -1416,6 +1397,13 @@ class Entry {
   int size = 0;
 
   Entry();
+
+  Entry.fromSessionValue(SessionFileEntryValue value) {
+    entryType = value.entryType;
+    modifiedTime = value.modifiedTime;
+    name = value.name;
+    size = value.size;
+  }
 
   Entry.fromJson(Map<String, dynamic> json) {
     entryType = json['entry_type'];
@@ -1773,7 +1761,8 @@ List<Entry> _sortList(List<Entry> list, SortBy sortType, bool ascending) {
 /// The `_FileDialogType` and `_DialogEvent` are invisible for other models.
 enum FileDialogType { overwrite, unknown }
 
-class _FileDialogEvent extends BaseEvent<FileDialogType, Map<String, dynamic>> {
+class _FileDialogEvent
+    extends BaseEvent<FileDialogType, FileOverrideConfirmSessionEvent> {
   WeakReference<FileModel> fileModel;
   bool? _overrideConfirm;
   bool _skip = false;
@@ -1789,7 +1778,8 @@ class _FileDialogEvent extends BaseEvent<FileDialogType, Map<String, dynamic>> {
   }
 
   @override
-  EventCallback<Map<String, dynamic>>? findCallback(FileDialogType type) {
+  EventCallback<FileOverrideConfirmSessionEvent>? findCallback(
+      FileDialogType type) {
     final model = fileModel.target;
     if (model == null) {
       return null;
@@ -1797,7 +1787,7 @@ class _FileDialogEvent extends BaseEvent<FileDialogType, Map<String, dynamic>> {
     switch (type) {
       case FileDialogType.overwrite:
         return (data) async {
-          return await model.overrideFileConfirm(data,
+          return await model.overrideFileConfirmEvent(data,
               overrideConfirm: _overrideConfirm, skip: _skip);
         };
       default:
@@ -1808,18 +1798,18 @@ class _FileDialogEvent extends BaseEvent<FileDialogType, Map<String, dynamic>> {
 }
 
 class FileDialogEventLoop
-    extends BaseEventLoop<FileDialogType, Map<String, dynamic>> {
+    extends BaseEventLoop<FileDialogType, FileOverrideConfirmSessionEvent> {
   bool? _overrideConfirm;
   bool _skip = false;
 
   @override
   Future<void> onPreConsume(
-      BaseEvent<FileDialogType, Map<String, dynamic>> evt) async {
+      BaseEvent<FileDialogType, FileOverrideConfirmSessionEvent> evt) async {
     var event = evt as _FileDialogEvent;
     event.setOverrideConfirm(_overrideConfirm);
     event.setSkip(_skip);
     debugPrint(
-        "FileDialogEventLoop: consuming<jobId: ${evt.data['id']} overrideConfirm: $_overrideConfirm, skip: $_skip>");
+        "FileDialogEventLoop: consuming<jobId: ${evt.data.id} overrideConfirm: $_overrideConfirm, skip: $_skip>");
   }
 
   @override

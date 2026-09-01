@@ -453,14 +453,6 @@ class FfiModel with ChangeNotifier {
         handleToast(evt, sessionId, peerId);
       } else if (name == 'set_multiple_windows_session') {
         handleMultipleWindowsSession(evt, sessionId, peerId);
-      } else if (name == 'file_dir') {
-        parent.target?.fileModel.receiveFileDir(evt);
-      } else if (name == 'empty_dirs') {
-        parent.target?.fileModel.receiveEmptyDirs(evt);
-      } else if (name == 'override_file_confirm') {
-        parent.target?.fileModel.postOverrideFileConfirm(evt);
-      } else if (name == 'load_last_job') {
-        parent.target?.fileModel.jobController.loadLastJob(evt);
       } else if (name == 'add_connection') {
         parent.target?.serverModel.addConnection(evt);
       } else if (name == 'on_client_remove') {
@@ -605,6 +597,14 @@ class FfiModel with ChangeNotifier {
       parent.target?.fileModel.handleJobErrorEvent(event);
     } else if (event is FileFolderStatsSessionEvent) {
       parent.target?.fileModel.jobController.updateFolderStatsEvent(event);
+    } else if (event is FileDirectorySessionEvent) {
+      parent.target?.fileModel.receiveFileDirectoryEvent(event);
+    } else if (event is EmptyDirectoriesSessionEvent) {
+      parent.target?.fileModel.receiveEmptyDirectoriesEvent(event);
+    } else if (event is FileOverrideConfirmSessionEvent) {
+      await parent.target?.fileModel.postOverrideFileConfirmEvent(event);
+    } else if (event is FileResumeJobSessionEvent) {
+      await parent.target?.fileModel.jobController.loadLastJobEvent(event);
     } else if (event is PeerInfoSessionEvent) {
       await handlePeerInfoEvent(event, peerId, false);
     } else if (event is SyncPeerInfoSessionEvent) {

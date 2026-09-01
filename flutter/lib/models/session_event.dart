@@ -348,6 +348,90 @@ final class FileFolderStatsSessionEvent extends SessionEvent {
   final double totalSize;
 }
 
+final class SessionFileEntryValue {
+  const SessionFileEntryValue({
+    required this.entryType,
+    required this.modifiedTime,
+    required this.name,
+    required this.size,
+  });
+
+  final int entryType;
+  final int modifiedTime;
+  final String name;
+  final int size;
+}
+
+final class SessionFileDirectoryValue {
+  SessionFileDirectoryValue({
+    required this.id,
+    required this.path,
+    required List<SessionFileEntryValue> entries,
+  }) : entries = List<SessionFileEntryValue>.unmodifiable(entries);
+
+  final int id;
+  final String path;
+  final List<SessionFileEntryValue> entries;
+}
+
+final class FileDirectorySessionEvent extends SessionEvent {
+  const FileDirectorySessionEvent({
+    required this.isLocal,
+    required this.directory,
+  });
+
+  final bool isLocal;
+  final SessionFileDirectoryValue directory;
+}
+
+final class EmptyDirectoriesSessionEvent extends SessionEvent {
+  EmptyDirectoriesSessionEvent({
+    required this.isLocal,
+    required this.path,
+    required List<SessionFileDirectoryValue> directories,
+  }) : directories = List<SessionFileDirectoryValue>.unmodifiable(directories);
+
+  final bool isLocal;
+  final String path;
+  final List<SessionFileDirectoryValue> directories;
+}
+
+final class FileOverrideConfirmSessionEvent extends SessionEvent {
+  const FileOverrideConfirmSessionEvent({
+    required this.id,
+    required this.fileNum,
+    required this.readPath,
+    required this.isUpload,
+    required this.isIdentical,
+  });
+
+  final int id;
+  final int fileNum;
+  final String readPath;
+  final bool isUpload;
+  final bool isIdentical;
+}
+
+final class FileResumeJobSessionEvent extends SessionEvent {
+  const FileResumeJobSessionEvent({
+    required this.remotePath,
+    required this.localPath,
+    required this.showHidden,
+    required this.fileNum,
+    required this.isRemote,
+    required this.autoStart,
+    required this.id,
+  });
+
+  final String remotePath;
+  final String localPath;
+  final bool showHidden;
+  final int fileNum;
+  final bool isRemote;
+  final bool autoStart;
+  final int? id;
+}
+
 const _qualityDisplayMapKeys = <String>{
   'fps',
   'decode_fps',
@@ -742,6 +826,81 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
               entryCount: entryCount,
               totalSize: totalSize,
             );
+    case 'file_dir':
+      final isLocal = _decodeBool(event['is_local']);
+      final directory = _decodeFileDirectoryPayload(event['value']);
+      return isLocal == null || directory == null
+          ? const InvalidSessionEvent('file_dir', 'invalid directory')
+          : FileDirectorySessionEvent(isLocal: isLocal, directory: directory);
+    case 'empty_dirs':
+      final isLocal = _decodeBool(event['is_local']);
+      final payload = _decodeEmptyDirectoriesPayload(event['value']);
+      return isLocal == null || payload == null
+          ? const InvalidSessionEvent('empty_dirs', 'invalid directory list')
+          : EmptyDirectoriesSessionEvent(
+              isLocal: isLocal,
+              path: payload.path,
+              directories: payload.directories,
+            );
+    case 'override_file_confirm':
+      final id = _decodeInt(event['id']);
+      final fileNum = _decodeInt(event['file_num']);
+      final readPath = event['read_path'];
+      final isUpload = _decodeBool(event['is_upload']);
+      final isIdentical = _decodeBool(event['is_identical']);
+      return id == null ||
+              id < 0 ||
+              fileNum == null ||
+              fileNum < 0 ||
+              readPath is! String ||
+              readPath.length > 32 * 1024 ||
+              isUpload == null ||
+              isIdentical == null
+          ? const InvalidSessionEvent(
+              'override_file_confirm',
+              'invalid conflict',
+            )
+          : FileOverrideConfirmSessionEvent(
+              id: id,
+              fileNum: fileNum,
+              readPath: readPath,
+              isUpload: isUpload,
+              isIdentical: isIdentical,
+            );
+    case 'load_last_job':
+      final value = _decodeJsonInput(event['value']);
+      if (value is! Map) {
+        return const InvalidSessionEvent('load_last_job', 'invalid snapshot');
+      }
+      final remotePath = value['remote'];
+      final localPath = value['to'];
+      final showHidden = value['show_hidden'];
+      final fileNum = _decodeInt(value['file_num']);
+      final isRemote = value['is_remote'];
+      final autoStart = value['auto_start'] == true;
+      final decodedId = _decodeInt(value['id']);
+      final id = decodedId != null && decodedId >= 0 ? decodedId : null;
+      return remotePath is! String ||
+              remotePath.length > 32 * 1024 ||
+              localPath is! String ||
+              localPath.length > 32 * 1024 ||
+              showHidden is! bool ||
+              fileNum == null ||
+              fileNum < 0 ||
+              isRemote is! bool
+          ? const InvalidSessionEvent(
+              'load_last_job',
+              'invalid snapshot fields',
+            )
+          : FileResumeJobSessionEvent(
+              remotePath: remotePath,
+              localPath: localPath,
+              showHidden: showHidden,
+              fileNum: fileNum,
+              isRemote: isRemote,
+              autoStart: autoStart && id != null,
+              id: id,
+            );
     case 'peer_info':
       final username = _decodeBoundedString(event['username']);
       final hostname = _decodeBoundedString(event['hostname']);
@@ -1008,14 +1167,98 @@ List<SessionResolutionValue>? _decodeResolutions(Object? raw) {
   return resolutions;
 }
 
-Object? _decodeJsonInput(Object? raw) {
+Object? _decodeJsonInput(Object? raw, {int maxBytes = 1024 * 1024}) {
   if (raw is! String) return raw;
-  if (raw.length > 1024 * 1024) return null;
+  if (raw.length > maxBytes) return null;
   try {
     return jsonDecode(raw);
   } catch (_) {
     return null;
   }
+}
+
+final class _FilePayloadBudget {
+  int directories = 0;
+  int entries = 0;
+}
+
+SessionFileDirectoryValue? _decodeFileDirectoryPayload(Object? raw) {
+  final decoded = _decodeJsonInput(raw, maxBytes: 8 * 1024 * 1024);
+  return _decodeFileDirectory(decoded, _FilePayloadBudget());
+}
+
+({String path, List<SessionFileDirectoryValue> directories})?
+_decodeEmptyDirectoriesPayload(Object? raw) {
+  final decoded = _decodeJsonInput(raw, maxBytes: 8 * 1024 * 1024);
+  if (decoded is! Map) return null;
+  final path = decoded['path'];
+  final values = decoded['empty_dirs'];
+  if (path is! String ||
+      path.length > 32 * 1024 ||
+      values is! List ||
+      values.length > 8192) {
+    return null;
+  }
+  final budget = _FilePayloadBudget();
+  final directories = <SessionFileDirectoryValue>[];
+  for (final value in values) {
+    final directory = _decodeFileDirectory(value, budget);
+    if (directory == null) return null;
+    directories.add(directory);
+  }
+  return (path: path, directories: directories);
+}
+
+SessionFileDirectoryValue? _decodeFileDirectory(
+  Object? raw,
+  _FilePayloadBudget budget,
+) {
+  if (raw is! Map || ++budget.directories > 8192) return null;
+  final id = _decodeInt(raw['id']);
+  final path = raw['path'];
+  final values = raw['entries'];
+  if (id == null ||
+      id < 0 ||
+      id > 0x7fffffff ||
+      path is! String ||
+      path.length > 32 * 1024 ||
+      values is! List ||
+      values.length > 65536 ||
+      budget.entries + values.length > 65536) {
+    return null;
+  }
+  budget.entries += values.length;
+  final entries = <SessionFileEntryValue>[];
+  for (final value in values) {
+    final entry = _decodeFileEntry(value);
+    if (entry == null) return null;
+    entries.add(entry);
+  }
+  return SessionFileDirectoryValue(id: id, path: path, entries: entries);
+}
+
+SessionFileEntryValue? _decodeFileEntry(Object? raw) {
+  if (raw is! Map) return null;
+  final entryType = _decodeInt(raw['entry_type']);
+  final modifiedTime = _decodeInt(raw['modified_time']);
+  final name = raw['name'];
+  final size = _decodeInt(raw['size']);
+  if (entryType == null ||
+      entryType < 0 ||
+      entryType > 255 ||
+      modifiedTime == null ||
+      name is! String ||
+      name.length > 32 * 1024 ||
+      size == null ||
+      size < 0) {
+    return null;
+  }
+  return SessionFileEntryValue(
+    entryType: entryType,
+    modifiedTime: modifiedTime,
+    name: name,
+    size: size,
+  );
 }
 
 Map<String, Object?>? _decodeJsonObject(Object? raw) {

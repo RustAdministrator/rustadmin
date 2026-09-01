@@ -271,6 +271,85 @@ void main() {
     }
   });
 
+  test('decodes typed file directory and dialog payloads', () {
+    final directory =
+        decodeTypedSessionEvent({
+              'name': 'file_dir',
+              'is_local': 'false',
+              'value':
+                  '{"id":3,"path":"/tmp","entries":[{"entry_type":4,"modified_time":10,"name":"a.txt","size":12}]}',
+            })!
+            as FileDirectorySessionEvent;
+    expect(directory.isLocal, isFalse);
+    expect(directory.directory.id, 3);
+    expect(directory.directory.entries.single.name, 'a.txt');
+
+    final empty =
+        decodeTypedSessionEvent({
+              'name': 'empty_dirs',
+              'is_local': false,
+              'value':
+                  '{"path":"/tmp","empty_dirs":[{"id":0,"path":"/tmp/a","entries":[]}]}',
+            })!
+            as EmptyDirectoriesSessionEvent;
+    expect(empty.path, '/tmp');
+    expect(empty.directories.single.path, '/tmp/a');
+
+    final conflict =
+        decodeTypedSessionEvent({
+              'name': 'override_file_confirm',
+              'id': '3',
+              'file_num': '2',
+              'read_path': '/tmp/a.txt',
+              'is_upload': 'true',
+              'is_identical': false,
+            })!
+            as FileOverrideConfirmSessionEvent;
+    expect(conflict.isUpload, isTrue);
+    expect(conflict.isIdentical, isFalse);
+
+    final resume =
+        decodeTypedSessionEvent({
+              'name': 'load_last_job',
+              'value':
+                  '{"remote":"/remote","to":"/local","show_hidden":true,"file_num":4,"is_remote":true,"auto_start":true,"id":9}',
+            })!
+            as FileResumeJobSessionEvent;
+    expect(resume.id, 9);
+    expect(resume.autoStart, isTrue);
+  });
+
+  test('rejects malformed file directory and dialog payloads', () {
+    for (final event in [
+      {
+        'name': 'file_dir',
+        'is_local': 'false',
+        'value':
+            '{"id":0,"path":"/tmp","entries":[{"entry_type":4,"modified_time":0,"name":"a","size":-1}]}',
+      },
+      {
+        'name': 'empty_dirs',
+        'is_local': 'sometimes',
+        'value': '{"path":"/tmp","empty_dirs":[]}',
+      },
+      {
+        'name': 'override_file_confirm',
+        'id': '3',
+        'file_num': 'bad',
+        'read_path': '/tmp/a',
+        'is_upload': 'true',
+        'is_identical': 'false',
+      },
+      {
+        'name': 'load_last_job',
+        'value':
+            '{"remote":"/r","to":"/l","show_hidden":"yes","file_num":0,"is_remote":true}',
+      },
+    ]) {
+      expect(decodeTypedSessionEvent(event), isA<InvalidSessionEvent>());
+    }
+  });
+
   test('decodes display and platform synchronization payloads', () {
     final sync =
         decodeTypedSessionEvent({
