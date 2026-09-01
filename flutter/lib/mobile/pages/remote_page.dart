@@ -321,39 +321,73 @@ class _RemotePageState extends State<RemotePage>
   }
 
   @override
-  Future<void> dispose() async {
+  void dispose() {
     _manualDisconnect = true;
     _textController.removeListener(_handleSoftKeyboardEditingValue);
     WidgetsBinding.instance.removeObserver(this);
-    await _outgoingSessionClosedSubscription?.cancel();
+    final outgoingSubscriptionCancel =
+        _outgoingSessionClosedSubscription?.cancel();
     gFFI.canvasModel.disposeEdgeScrollFallback();
-    unawaited(bind.sessionClose(sessionId: gFFI.sessionId));
     // https://github.com/flutter/flutter/issues/64935
-    super.dispose();
     gFFI.dialogManager.hideMobileActionsOverlay(store: false);
     gFFI.inputModel.listenToMouse(false);
     gFFI.imageModel.disposeImage();
     gFFI.cursorModel.disposeImages();
-    await _setAndroidRemoteKeyboardInput(false);
-    await gFFI.invokeMethod("enable_soft_keyboard", true);
+    final remoteKeyboardCleanup = _setAndroidRemoteKeyboardInput(false);
+    final softKeyboardRestore = gFFI.invokeMethod("enable_soft_keyboard", true);
+    final sessionClose = gFFI.close();
     _mobileFocusNode.dispose();
     _physicalFocusNode.dispose();
     _textController.dispose();
-    await gFFI.close();
     _timer?.cancel();
     _iosKeyboardWorkaroundTimer?.cancel();
     gFFI.dialogManager.dismissAll();
-    await SystemChrome.setEnabledSystemUIMode(
-      SystemUiMode.manual,
-      overlays: SystemUiOverlay.values,
-    );
     WakelockManager.disable(_uniqueKey);
-    await keyboardSubscription.cancel();
+    final keyboardVisibilityCancel = keyboardSubscription.cancel();
     removeSharedStates(widget.id);
     // `on_voice_call_closed` should be called when the connection is ended.
     // The inner logic of `on_voice_call_closed` will check if the voice call is active.
     // Only one client is considered here for now.
     gFFI.chatModel.onVoiceCallClosed("End connetion");
+    super.dispose();
+    unawaited(
+      _finishDispose(
+        outgoingSubscriptionCancel: outgoingSubscriptionCancel,
+        remoteKeyboardCleanup: remoteKeyboardCleanup,
+        softKeyboardRestore: softKeyboardRestore,
+        sessionClose: sessionClose,
+        keyboardVisibilityCancel: keyboardVisibilityCancel,
+      ),
+    );
+  }
+
+  Future<void> _finishDispose({
+    required Future<void>? outgoingSubscriptionCancel,
+    required Future<void> remoteKeyboardCleanup,
+    required Future<bool> softKeyboardRestore,
+    required Future<void> sessionClose,
+    required Future<void> keyboardVisibilityCancel,
+  }) async {
+    try {
+      await Future.wait<void>([
+        if (outgoingSubscriptionCancel != null) outgoingSubscriptionCancel,
+        remoteKeyboardCleanup,
+        softKeyboardRestore.then<void>((_) {}),
+        sessionClose,
+        keyboardVisibilityCancel,
+      ]);
+    } catch (error, stackTrace) {
+      debugPrint('Failed to finish remote page disposal: $error\n$stackTrace');
+    } finally {
+      try {
+        await SystemChrome.setEnabledSystemUIMode(
+          SystemUiMode.manual,
+          overlays: SystemUiOverlay.values,
+        );
+      } catch (error, stackTrace) {
+        debugPrint('Failed to restore system UI: $error\n$stackTrace');
+      }
+    }
   }
 
   @override

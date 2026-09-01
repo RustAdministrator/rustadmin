@@ -50,7 +50,7 @@ import '../common/widgets/dialog.dart';
 import 'input_model.dart';
 import 'platform_model.dart';
 import 'session_event.dart';
-import 'session_lifecycle.dart';
+import 'session_handle.dart';
 import 'package:flutter_hbb/utils/scale.dart';
 
 import 'package:flutter_hbb/generated_bridge.dart'
@@ -5475,9 +5475,8 @@ class FFI {
   var id = '';
   var version = '';
   var connType = ConnType.defaultConn;
-  final _sessionLifecycle = SessionLifecycle();
-  Future<void>? _closeFuture;
-  bool get closed => _sessionLifecycle.isClosed;
+  late SessionHandle<EventToUI> _sessionHandle;
+  bool get closed => _sessionHandle.isClosed;
   int? hostWindowId;
   Future<void> Function(FFI ffi, String peerId)? onAuthenticated;
 
@@ -5508,13 +5507,12 @@ class FFI {
 
   // Terminal model registry for multiple terminals
   final Map<int, TerminalModel> _terminalModels = {};
-  int? _androidSessionGeneration;
-
   // Getter for terminal models
   Map<int, TerminalModel> get terminalModels => _terminalModels;
 
   FFI(SessionID? sId) {
     sessionId = sId ?? (isDesktop ? Uuid().v4obj() : _constSessionId);
+    _sessionHandle = _newSessionHandle();
     imageModel = ImageModel(WeakReference(this));
     ffiModel = FfiModel(WeakReference(this));
     cursorModel = CursorModel(WeakReference(this));
@@ -5543,6 +5541,16 @@ class FFI {
     lanPeersModel = Peers(
         name: PeersModelName.lan, loadEvent: LoadEvent.lan, getInitPeers: null);
   }
+
+  SessionHandle<EventToUI> _newSessionHandle() => SessionHandle<EventToUI>(
+    sessionId: sessionId,
+    closeNative: () => bind.sessionClose(sessionId: sessionId),
+    releasePlatformLease: isAndroid
+        ? (generation) => AndroidVpnSessionCoordinator.instance.release(
+            generation: generation,
+          )
+        : null,
+  );
 
   /// Mobile reuse FFI
   void mobileReset() {
@@ -5574,135 +5582,130 @@ class FFI {
     int? hostWindowId,
     String? transferSourceSessionId,
   }) async {
-    final activeClose = _closeFuture;
-    if (activeClose != null) {
-      await activeClose;
+    if (!_sessionHandle.isPristine) {
+      await _sessionHandle.waitForClose();
+      if (!_sessionHandle.canBeReplaced) {
+        throw StateError('Previous remote session is not fully closed');
+      }
+      _sessionHandle = _newSessionHandle();
     }
     this.hostWindowId = hostWindowId;
-    final sessionGeneration = _sessionLifecycle.beginStart();
     if (isMobile) mobileReset();
-    assert(
-        (!(isPortForward && isViewCamera)) &&
-            (!(isViewCamera && isPortForward)) &&
-            (!(isPortForward && isFileTransfer)) &&
-            (!(isTerminal && isFileTransfer)) &&
-            (!(isTerminal && isViewCamera)) &&
-            (!(isTerminal && isPortForward)),
-        'more than one connect type');
-    if (isFileTransfer) {
-      connType = ConnType.fileTransfer;
-    } else if (isViewCamera) {
-      connType = ConnType.viewCamera;
-    } else if (isPortForward) {
-      connType = ConnType.portForward;
-    } else if (isTerminal) {
-      connType = ConnType.terminal;
-    } else {
+    final sessionKind = SessionKind.fromLegacyFlags(
+      isFileTransfer: isFileTransfer,
+      isViewCamera: isViewCamera,
+      isPortForward: isPortForward,
+      isRdp: isRdp,
+      isTerminal: isTerminal,
+    );
+    connType = switch (sessionKind) {
+      SessionKind.remoteDesktop => ConnType.defaultConn,
+      SessionKind.fileTransfer => ConnType.fileTransfer,
+      SessionKind.viewCamera => ConnType.viewCamera,
+      SessionKind.portForward => ConnType.portForward,
+      SessionKind.rdp => ConnType.portForward,
+      SessionKind.terminal => ConnType.terminal,
+    };
+    if (sessionKind == SessionKind.remoteDesktop) {
       chatModel.resetClientMode();
-      connType = ConnType.defaultConn;
       canvasModel.id = id;
       imageModel.id = id;
       cursorModel.peerId = id;
     }
 
-    if (isAndroid) {
-      _androidSessionGeneration = null;
-      final attached = await AndroidVpnSessionCoordinator.instance.attach(
-        id,
-        sessionId.toString(),
-      );
-      if (!attached) {
-        _sessionLifecycle.failed(sessionGeneration);
-        throw StateError('Failed to protect the outgoing Android session');
-      }
-      _androidSessionGeneration =
-          AndroidVpnSessionCoordinator.instance.activeSessionGeneration;
-    }
-
     final isNewPeer = tabWindowId == null;
-    // If tabWindowId != null, this session is a "tab -> window" one.
-    // Else this session is a new one.
-    if (isNewPeer && !attachExisting) {
-      final addRes = isMobile
-          ? await bind.sessionAddAsync(
-              sessionId: sessionId,
-              id: id,
-              isFileTransfer: isFileTransfer,
-              isViewCamera: isViewCamera,
-              isPortForward: isPortForward,
-              isRdp: isRdp,
-              isTerminal: isTerminal,
-              switchUuid: switchUuid ?? '',
-              forceRelay: forceRelay ?? false,
-              password: password ?? '',
-              isSharedPassword: isSharedPassword ?? false,
-              connToken: connToken,
-            )
-          : bind.sessionAddSync(
-              sessionId: sessionId,
-              id: id,
-              isFileTransfer: isFileTransfer,
-              isViewCamera: isViewCamera,
-              isPortForward: isPortForward,
-              isRdp: isRdp,
-              isTerminal: isTerminal,
-              switchUuid: switchUuid ?? '',
-              forceRelay: forceRelay ?? false,
-              password: password ?? '',
-              isSharedPassword: isSharedPassword ?? false,
-              connToken: connToken,
+    final lease = await _sessionHandle.start(
+      acquirePlatformLease: isAndroid
+          ? () async {
+              final coordinator = AndroidVpnSessionCoordinator.instance;
+              final attached = await coordinator.attach(
+                id,
+                sessionId.toString(),
+              );
+              final generation = coordinator.activeSessionGeneration;
+              if (!attached || generation == null) {
+                throw StateError('Failed to protect the outgoing Android session');
+              }
+              return generation;
+            }
+          : null,
+      addNative: () async {
+        // If tabWindowId is set, this attaches another UI to an existing peer.
+        if (isNewPeer && !attachExisting) {
+          final addRes = isMobile
+              ? await bind.sessionAddAsync(
+                  sessionId: sessionId,
+                  id: id,
+                  isFileTransfer: isFileTransfer,
+                  isViewCamera: isViewCamera,
+                  isPortForward: isPortForward,
+                  isRdp: isRdp,
+                  isTerminal: isTerminal,
+                  switchUuid: switchUuid ?? '',
+                  forceRelay: forceRelay ?? false,
+                  password: password ?? '',
+                  isSharedPassword: isSharedPassword ?? false,
+                  connToken: connToken,
+                )
+              : bind.sessionAddSync(
+                  sessionId: sessionId,
+                  id: id,
+                  isFileTransfer: isFileTransfer,
+                  isViewCamera: isViewCamera,
+                  isPortForward: isPortForward,
+                  isRdp: isRdp,
+                  isTerminal: isTerminal,
+                  switchUuid: switchUuid ?? '',
+                  forceRelay: forceRelay ?? false,
+                  password: password ?? '',
+                  isSharedPassword: isSharedPassword ?? false,
+                  connToken: connToken,
+                );
+          if (addRes.isNotEmpty) {
+            throw StateError(addRes);
+          }
+        } else if (display != null) {
+          if (displays == null) {
+            throw StateError(
+              'Cannot attach display $display without a display set',
             );
-      if (addRes.isNotEmpty) {
-        _sessionLifecycle.failed(sessionGeneration);
-        throw StateError(addRes);
-      }
-      if (!_sessionLifecycle.accepts(sessionGeneration)) {
-        await bind.sessionClose(sessionId: sessionId);
-        return;
-      }
-    } else if (display != null) {
-      if (displays == null) {
-        debugPrint(
-            'Unreachable, failed to add existed session to $id, the displays is null while display is $display');
-        return;
-      }
-      final addRes = bind.sessionAddExistedSync(
-          id: id,
+          }
+          final addRes = bind.sessionAddExistedSync(
+            id: id,
+            sessionId: sessionId,
+            displays: Int32List.fromList(displays),
+            isViewCamera: isViewCamera,
+          );
+          if (addRes.isNotEmpty) {
+            throw StateError(addRes);
+          }
+          ffiModel.pi.currentDisplay = display;
+        }
+      },
+      prepareEvents: () async {
+        if (isDesktop &&
+            (connType == ConnType.defaultConn ||
+                connType == ConnType.viewCamera)) {
+          textureModel.updateCurrentDisplay(display ?? 0);
+        }
+        if (isDesktop) {
+          inputModel.updateTrackpadSpeed();
+        }
+      },
+      startEvents: () {
+        if (isNewPeer || display == null || displays == null) {
+          return bind.sessionStart(sessionId: sessionId, id: id);
+        }
+        return bind.sessionStartWithDisplays(
           sessionId: sessionId,
+          id: id,
           displays: Int32List.fromList(displays),
-          isViewCamera: isViewCamera);
-      if (addRes != '') {
-        debugPrint(
-            'Unreachable, failed to add existed session to $id, $addRes');
-        return;
-      }
-      ffiModel.pi.currentDisplay = display;
-    }
-    if (isDesktop && connType == ConnType.defaultConn) {
-      textureModel.updateCurrentDisplay(display ?? 0);
-    }
-    // FIXME: separate cameras displays or shift all indices.
-    if (isDesktop && connType == ConnType.viewCamera) {
-      // FIXME: currently the default 0 is not used.
-      textureModel.updateCurrentDisplay(display ?? 0);
-    }
-
-    if (isDesktop) {
-      inputModel.updateTrackpadSpeed();
-    }
-
-    // CAUTION: `sessionStart()` and `sessionStartWithDisplays()` are an async functions.
-    // Though the stream is returned immediately, the stream may not be ready.
-    // Any operations that depend on the stream should be carefully handled.
-    late final Stream<EventToUI> stream;
-    if (isNewPeer || display == null || displays == null) {
-      stream = bind.sessionStart(sessionId: sessionId, id: id);
-    } else {
-      // We have to put displays in `sessionStart()` to make sure the stream is ready
-      // and then the displays' capturing requests can be sent.
-      stream = bind.sessionStartWithDisplays(
-          sessionId: sessionId, id: id, displays: Int32List.fromList(displays));
-    }
+        );
+      },
+    );
+    if (lease == null) return;
+    final sessionGeneration = lease.generation;
+    final stream = lease.events;
 
     if (isWeb) {
       platformFFI.setRgbaCallback((int display, Uint8List data) {
@@ -5710,7 +5713,7 @@ class FFI {
         imageModel.onRgba(display, data);
       });
       this.id = id;
-      _sessionLifecycle.connected(sessionGeneration);
+      _sessionHandle.connected(sessionGeneration);
       return;
     }
 
@@ -5738,13 +5741,13 @@ class FFI {
     final hasGpuTextureRender = bind.mainHasGpuTextureRender();
     final SimpleWrapper<bool> isToNewWindowNotified = SimpleWrapper(false);
     // Preserved for the rgba data.
-    stream.listen((message) {
-      if (!_sessionLifecycle.accepts(sessionGeneration)) return;
+    final subscription = stream.listen((message) {
+      if (!_sessionHandle.accepts(sessionGeneration)) return;
       if (tabWindowId != null && !isToNewWindowNotified.value) {
         // Session is read to be moved to a new window.
         // Get the cached data and handle the cached data.
         Future.delayed(Duration.zero, () async {
-          if (!_sessionLifecycle.accepts(sessionGeneration)) return;
+          if (!_sessionHandle.accepts(sessionGeneration)) return;
           final args = jsonEncode({
             'id': id,
             if (transferSourceSessionId != null)
@@ -5767,7 +5770,7 @@ class FFI {
       () async {
         if (message is EventToUI_Event) {
           if (message.field0 == "close") {
-            _sessionLifecycle.closed(sessionGeneration);
+            await _sessionHandle.remoteClosed(sessionGeneration);
             debugPrint('Exit session event loop');
             return;
           }
@@ -5819,12 +5822,14 @@ class FFI {
         }
       }();
     });
+    await _sessionHandle.bindSubscription(sessionGeneration, subscription);
+    if (!_sessionHandle.accepts(sessionGeneration)) return;
     // every instance will bind a stream
     this.id = id;
-    _sessionLifecycle.connected(sessionGeneration);
+    _sessionHandle.connected(sessionGeneration);
     if (cachedPeerData != null) {
       Future.delayed(Duration.zero, () async {
-        if (!_sessionLifecycle.accepts(sessionGeneration)) return;
+        if (!_sessionHandle.accepts(sessionGeneration)) return;
         await handleCachedSessionData(
           cachedPeerData,
           runAuthenticatedSetup: attachExisting && tabWindowId == null,
@@ -5870,42 +5875,35 @@ class FFI {
   /// Clear session-scoped state while keeping the mobile page reusable.
   Future<void> resetMobileSessionForReconnect({
     required bool closeSession,
-  }) => _runCloseOperation(() async {
-        final closeGeneration = _sessionLifecycle.beginClose();
-        try {
-          chatModel.close();
-          for (final model in _terminalModels.values) {
-            model.dispose();
-          }
-          _terminalModels.clear();
-          await imageModel.update(null);
-          cursorModel.clear();
-          ffiModel.clear();
-          canvasModel.clear();
-          inputModel.setRelativeMouseMode(false);
-          inputModel.resetModifiers();
-          if (closeSession) {
-            await bind.sessionClose(sessionId: sessionId);
-          }
-          if (isAndroid) {
-            await AndroidVpnSessionCoordinator.instance.release(
-              generation: _androidSessionGeneration,
-            );
-            _androidSessionGeneration = null;
-          }
-          id = '';
-          debugPrint('mobile session reset for fresh reconnect');
-        } finally {
-          _sessionLifecycle.closed(closeGeneration);
-        }
-      });
+  }) => _sessionHandle.close(
+    nativeClosePolicy: closeSession
+        ? NativeSessionClosePolicy.requestClose
+        : NativeSessionClosePolicy.alreadyClosed,
+    cleanup: () async {
+      chatModel.close();
+      for (final model in _terminalModels.values) {
+        model.dispose();
+      }
+      _terminalModels.clear();
+      await imageModel.update(null);
+      cursorModel.clear();
+      ffiModel.clear();
+      canvasModel.clear();
+      inputModel.setRelativeMouseMode(false);
+      inputModel.resetModifiers();
+      id = '';
+      debugPrint('mobile session reset for fresh reconnect');
+    },
+  );
 
   /// Close the remote session.
   Future<void> close(
       {bool closeSession = true, bool saveCanvasConfig = true}) =>
-      _runCloseOperation(() async {
-        final closeGeneration = _sessionLifecycle.beginClose();
-        try {
+      _sessionHandle.close(
+        nativeClosePolicy: closeSession
+            ? NativeSessionClosePolicy.requestClose
+            : NativeSessionClosePolicy.alreadyClosed,
+        cleanup: () async {
           chatModel.close();
           // Close all terminal models
           for (final model in _terminalModels.values) {
@@ -5932,39 +5930,10 @@ class FFI {
           inputModel.resetModifiers();
           // Dispose relative mouse mode resources to ensure cursor is restored
           inputModel.disposeRelativeMouseMode();
-          if (closeSession) {
-            await bind.sessionClose(sessionId: sessionId);
-          }
-          if (isAndroid) {
-            await AndroidVpnSessionCoordinator.instance.release(
-              generation: _androidSessionGeneration,
-            );
-            _androidSessionGeneration = null;
-          }
           debugPrint('model $id closed');
           id = '';
-        } finally {
-          _sessionLifecycle.closed(closeGeneration);
-        }
-      });
-
-  Future<void> _runCloseOperation(Future<void> Function() operation) {
-    final active = _closeFuture;
-    if (active != null) return active;
-    if (_sessionLifecycle.phase == SessionPhase.closed &&
-        id.isEmpty &&
-        _androidSessionGeneration == null) {
-      return Future<void>.value();
-    }
-    late final Future<void> future;
-    future = operation().whenComplete(() {
-      if (identical(_closeFuture, future)) {
-        _closeFuture = null;
-      }
-    });
-    _closeFuture = future;
-    return future;
-  }
+        },
+      );
 
   void setMethodCallHandler(FMethod callback) {
     platformFFI.setMethodCallHandler(callback);
