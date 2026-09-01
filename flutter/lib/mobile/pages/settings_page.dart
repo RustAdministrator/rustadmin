@@ -13,6 +13,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../common.dart';
 import '../../common/quality_monitor_settings.dart';
+import '../../common/remote_display_settings.dart';
 import '../../common/transport_mode.dart';
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/login.dart';
@@ -2539,7 +2540,7 @@ class _CompactDisplaySettings extends StatelessWidget {
 class _CompactDefaultOptions extends StatefulWidget {
   const _CompactDefaultOptions({required this.options});
 
-  final List<(String, String)> options;
+  final List<UserDefaultToggleSetting> options;
 
   @override
   State<_CompactDefaultOptions> createState() => _CompactDefaultOptionsState();
@@ -2547,10 +2548,27 @@ class _CompactDefaultOptions extends StatefulWidget {
 
 class _CompactDefaultOptionsState extends State<_CompactDefaultOptions> {
   late final Map<String, bool> _values = _readValues();
+  late final StreamSubscription<String> _subscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _subscription = remoteDisplaySettings.watchKeys(widget.options).listen((key) {
+      if (!mounted) return;
+      final setting = widget.options.firstWhere((option) => option.key == key);
+      setState(() => _values[key] = remoteDisplaySettings.read(setting));
+    });
+  }
+
+  @override
+  void dispose() {
+    unawaited(_subscription.cancel());
+    super.dispose();
+  }
 
   Map<String, bool> _readValues() => {
     for (final option in widget.options)
-      option.$2: bind.mainGetUserDefaultOption(key: option.$2) == 'Y',
+      option.key: remoteDisplaySettings.read(option),
   };
 
   @override
@@ -2560,20 +2578,17 @@ class _CompactDefaultOptionsState extends State<_CompactDefaultOptions> {
       children: [
         for (final option in widget.options)
           SwitchListTile.adaptive(
-            key: Key('mobile-default-option-${option.$2}'),
+            key: Key('mobile-default-option-${option.key}'),
             contentPadding: EdgeInsets.zero,
             visualDensity: VisualDensity.compact,
-            value: _values[option.$2] ?? false,
-            title: Text(translate(option.$1)),
-            onChanged: isOptionFixed(option.$2)
+            value: _values[option.key] ?? false,
+            title: Text(translate(option.label)),
+            onChanged: isOptionFixed(option.key)
                 ? null
                 : (value) {
-                    setState(() => _values[option.$2] = value);
+                    setState(() => _values[option.key] = value);
                     unawaited(
-                      bind.mainSetUserDefaultOption(
-                        key: option.$2,
-                        value: value ? 'Y' : defaultOptionNo,
-                      ),
+                      remoteDisplaySettings.write(option, value),
                     );
                   },
           ),

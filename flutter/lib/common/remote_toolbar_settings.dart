@@ -38,6 +38,38 @@ class IntRangeCodec implements SettingCodec<int> {
   String encode(int value) => value.clamp(min, max).toInt().toString();
 }
 
+class DoubleRangeCodec implements SettingCodec<double> {
+  const DoubleRangeCodec({
+    required this.defaultValue,
+    required this.min,
+    required this.max,
+  });
+
+  final double defaultValue;
+  final double min;
+  final double max;
+
+  @override
+  double decode(String raw) =>
+      (double.tryParse(raw) ?? defaultValue).clamp(min, max).toDouble();
+
+  @override
+  String encode(double value) => value.clamp(min, max).toString();
+}
+
+class BoolOptionCodec implements SettingCodec<bool> {
+  const BoolOptionCodec({this.defaultValue = false, this.falseValue = ''});
+
+  final bool defaultValue;
+  final String falseValue;
+
+  @override
+  bool decode(String raw) => raw.isEmpty ? defaultValue : raw == 'Y';
+
+  @override
+  String encode(bool value) => value ? 'Y' : falseValue;
+}
+
 class AllowedStringCodec implements SettingCodec<String> {
   const AllowedStringCodec({
     required this.defaultValue,

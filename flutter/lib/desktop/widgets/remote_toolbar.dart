@@ -12,6 +12,7 @@ import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/common/widgets/dialog.dart';
 import 'package:flutter_hbb/common/widgets/toolbar.dart';
 import 'package:flutter_hbb/common/remote_toolbar_settings.dart';
+import 'package:flutter_hbb/common/remote_display_settings.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/desktop/session_tab.dart';
@@ -540,6 +541,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   Timer? _pinnedDimTimer;
   StreamSubscription<RemoteToolbarSettingsSnapshot>?
       _globalOptionSubscription;
+  StreamSubscription<bool>? _showMonitorsSubscription;
   Worker? _pinWorker;
   bool _isCursorOverToolbar = false;
   int _menuHoverDepth = 0;
@@ -612,6 +614,11 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     final subscription = _globalOptionSubscription;
     _globalOptionSubscription = null;
     if (subscription != null) unawaited(subscription.cancel());
+    final showMonitorsSubscription = _showMonitorsSubscription;
+    _showMonitorsSubscription = null;
+    if (showMonitorsSubscription != null) {
+      unawaited(showMonitorsSubscription.cancel());
+    }
   }
 
   bool get _menuIsOpen => _menuCoordinator.isInteractionActive;
@@ -631,6 +638,11 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       if (!_refreshingGlobalOptions) {
         unawaited(_handleGlobalOptionsMaybeChanged());
       }
+    });
+    _showMonitorsSubscription = remoteDisplaySettings
+        .watch(RemoteDisplaySettingsRegistry.showMonitorsToolbar)
+        .listen((_) {
+      if (mounted) setState(() {});
     });
   }
 
@@ -1482,7 +1494,9 @@ class _MonitorMenu extends StatelessWidget {
   }) : super(key: key);
 
   bool get showMonitorsToolbar =>
-      bind.mainGetUserDefaultOption(key: kKeyShowMonitorsToolbar) == 'Y';
+      remoteDisplaySettings.read(
+        RemoteDisplaySettingsRegistry.showMonitorsToolbar,
+      );
 
   bool get supportIndividualWindows =>
       !isWeb && ffi.ffiModel.pi.isSupportMultiDisplay;

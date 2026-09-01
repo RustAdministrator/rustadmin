@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
+import 'package:flutter_hbb/common/remote_display_settings.dart';
 import 'package:flutter_hbb/common/widgets/dialog.dart';
 import 'package:flutter_hbb/common/widgets/login.dart';
 import 'package:flutter_hbb/consts.dart';
@@ -792,7 +793,9 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
   if (pi.isSupportMultiDisplay &&
       PrivacyModeState.find(id).isEmpty &&
       pi.displaysCount.value > 1 &&
-      bind.mainGetUserDefaultOption(key: kKeyShowMonitorsToolbar) == 'Y') {
+      remoteDisplaySettings.read(
+        RemoteDisplaySettingsRegistry.showMonitorsToolbar,
+      )) {
     final value =
         bind.sessionGetDisplaysAsIndividualWindows(sessionId: ffi.sessionId) ==
             'Y';
@@ -1112,11 +1115,13 @@ List<TToggleMenu> toolbarKeyboardToggles(FFI ffi) {
 
   // reverse mouse wheel
   if (ffiModel.keyboard) {
-    var optionValue =
+    final optionValue =
         bind.sessionGetReverseMouseWheelSync(sessionId: sessionId) ?? '';
-    if (optionValue == '') {
-      optionValue = bind.mainGetUserDefaultOption(key: kKeyReverseMouseWheel);
-    }
+    final reverseMouseWheel = optionValue.isEmpty
+        ? remoteDisplaySettings.read(
+            RemoteDisplaySettingsRegistry.reverseMouseWheel,
+          )
+        : optionValue == 'Y';
     onChanged(bool? value) async {
       if (value == null) return;
       await bind.sessionSetReverseMouseWheel(
@@ -1125,7 +1130,7 @@ List<TToggleMenu> toolbarKeyboardToggles(FFI ffi) {
 
     final enabled = !ffi.ffiModel.viewOnly;
     v.add(TToggleMenu(
-        value: optionValue == 'Y',
+        value: reverseMouseWheel,
         onChanged: enabled ? onChanged : null,
         child: Text(translate('Reverse mouse wheel'))));
   }

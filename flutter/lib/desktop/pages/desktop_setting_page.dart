@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/transport_mode.dart';
+import 'package:flutter_hbb/common/quality_monitor_settings.dart';
+import 'package:flutter_hbb/common/remote_display_settings.dart';
 import 'package:flutter_hbb/common/remote_toolbar_settings.dart';
 import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
@@ -2085,20 +2087,29 @@ class _Display extends StatefulWidget {
 }
 
 class _DisplayState extends State<_Display> {
-  late final StreamSubscription<RemoteToolbarSettingsSnapshot>
-      _toolbarSettingsSubscription;
+  late final List<StreamSubscription<dynamic>> _settingsSubscriptions;
 
   @override
   void initState() {
     super.initState();
-    _toolbarSettingsSubscription = remoteToolbarSettings.watch().listen((_) {
+    void refresh(_) {
       if (mounted) setState(() {});
-    });
+    }
+
+    _settingsSubscriptions = [
+      remoteToolbarSettings.watch().listen(refresh),
+      qualityMonitorSettings.watch().listen(refresh),
+      remoteDisplaySettings
+          .watchKeys(RemoteDisplaySettingsRegistry.all)
+          .listen(refresh),
+    ];
   }
 
   @override
   void dispose() {
-    unawaited(_toolbarSettingsSubscription.cancel());
+    for (final subscription in _settingsSubscriptions) {
+      unawaited(subscription.cancel());
+    }
     super.dispose();
   }
 
@@ -2128,26 +2139,10 @@ class _DisplayState extends State<_Display> {
     await remoteUserDefaultSettings.write(setting, value);
   }
 
-  int _qualityMonitorOptionValue(
-    String key, {
-    required int defaultValue,
-    required int min,
-    required int max,
-  }) =>
-      (int.tryParse(bind.mainGetUserDefaultOption(key: key)) ?? defaultValue)
-          .clamp(min, max)
-          .toInt();
-
-  Future<void> _setQualityMonitorOptionValue(
-    String key,
-    int value, {
-    required int min,
-    required int max,
-  }) async {
-    await bind.mainSetUserDefaultOption(
-      key: key,
-      value: value.clamp(min, max).toString(),
-    );
+  Future<void> _setQualityMonitorSettings(
+    QualityMonitorFadeSettings settings,
+  ) async {
+    await qualityMonitorSettings.write(settings);
     if (mounted) {
       setState(() {});
     }
@@ -2156,11 +2151,16 @@ class _DisplayState extends State<_Display> {
   Widget viewStyle(BuildContext context) {
     final isOptFixed = isOptionFixed(kOptionViewStyle);
     Future<void> onChanged(String value) async {
-      await bind.mainSetUserDefaultOption(key: kOptionViewStyle, value: value);
+      await remoteDisplaySettings.write(
+        RemoteDisplaySettingsRegistry.viewStyle,
+        value,
+      );
       setState(() {});
     }
 
-    final groupValue = bind.mainGetUserDefaultOption(key: kOptionViewStyle);
+    final groupValue = remoteDisplaySettings.read(
+      RemoteDisplaySettingsRegistry.viewStyle,
+    );
     return _Card(title: 'Default View Style', children: [
       _Radio(context,
           value: kRemoteViewStyleOriginal,
@@ -2315,66 +2315,40 @@ class _DisplayState extends State<_Display> {
   }
 
   Widget qualityMonitorAppearance(BuildContext context) {
-    final opacityPercent = _qualityMonitorOptionValue(
-      kOptionQualityMonitorInactiveOpacityPercent,
-      defaultValue: kDefaultQualityMonitorInactiveOpacityPercent,
-      min: kMinQualityMonitorInactiveOpacityPercent,
-      max: kMaxQualityMonitorInactiveOpacityPercent,
-    );
-    final dimDelayMs = _qualityMonitorOptionValue(
-      kOptionQualityMonitorDimDelayMs,
-      defaultValue: kDefaultQualityMonitorDimDelayMs,
-      min: kMinQualityMonitorDimDelayMs,
-      max: kMaxQualityMonitorDimDelayMs,
-    );
-    final dimDurationMs = _qualityMonitorOptionValue(
-      kOptionQualityMonitorDimDurationMs,
-      defaultValue: kDefaultQualityMonitorDimDurationMs,
-      min: kMinQualityMonitorDimDurationMs,
-      max: kMaxQualityMonitorDimDurationMs,
-    );
+    final settings = qualityMonitorSettings.read();
 
     return _Card(title: 'Quality monitor appearance', children: [
       _IntegerSettingSlider(
         label: 'Inactive opacity',
-        value: opacityPercent,
+        value: settings.opacityPercent,
         min: kMinQualityMonitorInactiveOpacityPercent,
         max: kMaxQualityMonitorInactiveOpacityPercent,
         unit: '%',
         enabled: !isOptionFixed(kOptionQualityMonitorInactiveOpacityPercent),
-        onChanged: (value) => _setQualityMonitorOptionValue(
-          kOptionQualityMonitorInactiveOpacityPercent,
-          value,
-          min: kMinQualityMonitorInactiveOpacityPercent,
-          max: kMaxQualityMonitorInactiveOpacityPercent,
+        onChanged: (value) => _setQualityMonitorSettings(
+          settings.copyWith(opacityPercent: value),
         ),
       ),
       _IntegerSettingSlider(
         label: 'Fade delay',
-        value: dimDelayMs,
+        value: settings.delayMs,
         min: kMinQualityMonitorDimDelayMs,
         max: kMaxQualityMonitorDimDelayMs,
         unit: 'ms',
         enabled: !isOptionFixed(kOptionQualityMonitorDimDelayMs),
-        onChanged: (value) => _setQualityMonitorOptionValue(
-          kOptionQualityMonitorDimDelayMs,
-          value,
-          min: kMinQualityMonitorDimDelayMs,
-          max: kMaxQualityMonitorDimDelayMs,
+        onChanged: (value) => _setQualityMonitorSettings(
+          settings.copyWith(delayMs: value),
         ),
       ),
       _IntegerSettingSlider(
         label: 'Fade duration',
-        value: dimDurationMs,
+        value: settings.durationMs,
         min: kMinQualityMonitorDimDurationMs,
         max: kMaxQualityMonitorDimDurationMs,
         unit: 'ms',
         enabled: !isOptionFixed(kOptionQualityMonitorDimDurationMs),
-        onChanged: (value) => _setQualityMonitorOptionValue(
-          kOptionQualityMonitorDimDurationMs,
-          value,
-          min: kMinQualityMonitorDimDurationMs,
-          max: kMaxQualityMonitorDimDurationMs,
+        onChanged: (value) => _setQualityMonitorSettings(
+          settings.copyWith(durationMs: value),
         ),
       ),
     ]);
@@ -2382,13 +2356,17 @@ class _DisplayState extends State<_Display> {
 
   Widget imageQuality(BuildContext context) {
     Future<void> onChanged(String value) async {
-      await bind.mainSetUserDefaultOption(
-          key: kOptionImageQuality, value: value);
+      await remoteDisplaySettings.write(
+        RemoteDisplaySettingsRegistry.imageQuality,
+        value,
+      );
       setState(() {});
     }
 
     final isOptFixed = isOptionFixed(kOptionImageQuality);
-    final groupValue = bind.mainGetUserDefaultOption(key: kOptionImageQuality);
+    final groupValue = remoteDisplaySettings.read(
+      RemoteDisplaySettingsRegistry.imageQuality,
+    );
     return _Card(title: 'Default Image Quality', children: [
       _Radio(context,
           value: kRemoteImageQualityBest,
@@ -2441,13 +2419,16 @@ class _DisplayState extends State<_Display> {
 
   Widget codec(BuildContext context) {
     Future<void> onChanged(String value) async {
-      await bind.mainSetUserDefaultOption(
-          key: kOptionCodecPreference, value: value);
+      await remoteDisplaySettings.write(
+        RemoteDisplaySettingsRegistry.codecPreference,
+        value,
+      );
       setState(() {});
     }
 
-    final groupValue =
-        bind.mainGetUserDefaultOption(key: kOptionCodecPreference);
+    final groupValue = remoteDisplaySettings.read(
+      RemoteDisplaySettingsRegistry.codecPreference,
+    );
     var hwRadios = [];
     final isOptFixed = isOptionFixed(kOptionCodecPreference);
     try {
@@ -2559,15 +2540,11 @@ class _DisplayState extends State<_Display> {
     );
   }
 
-  Widget otherRow(String label, String key) {
-    final value = bind.mainGetUserDefaultOption(key: key) == 'Y';
-    final isOptFixed = isOptionFixed(key);
+  Widget otherRow(UserDefaultToggleSetting setting) {
+    final value = remoteDisplaySettings.read(setting);
+    final isOptFixed = isOptionFixed(setting.key);
     Future<void> onChanged(bool b) async {
-      await bind.mainSetUserDefaultOption(
-          key: key,
-          value: b
-              ? 'Y'
-              : (key == kOptionEnableFileCopyPaste ? 'N' : defaultOptionNo));
+      await remoteDisplaySettings.write(setting, b);
       setState(() {});
     }
 
@@ -2579,7 +2556,7 @@ class _DisplayState extends State<_Display> {
                     onChanged: isOptFixed ? null : (_) => onChanged(!value))
                 .marginOnly(right: 5),
             Expanded(
-              child: Text(translate(label)),
+              child: Text(translate(setting.label)),
             )
           ],
         ).marginOnly(left: _kCheckBoxLeftMargin),
@@ -2588,7 +2565,7 @@ class _DisplayState extends State<_Display> {
 
   Widget other(BuildContext context) {
     final children =
-        otherDefaultSettings().map((e) => otherRow(e.$1, e.$2)).toList();
+        otherDefaultSettings().map(otherRow).toList();
     return _Card(title: 'Other Default Options', children: children);
   }
 }
