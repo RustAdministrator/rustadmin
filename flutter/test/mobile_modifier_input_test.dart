@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/generated_bridge.dart';
@@ -223,6 +224,40 @@ void main() {
     expect(inputModel.ctrl, isTrue);
     expect(testImpl.inputKeyCalls, hasLength(1));
     expect(testImpl.inputKeyCalls.single.ctrl, isTrue);
+  });
+
+  test('physical modifier sides and AltGraph release independently', () {
+    inputModel.handleKeyDownEventModifiers(
+      KeyDownEvent(
+        physicalKey: PhysicalKeyboardKey.altLeft,
+        logicalKey: LogicalKeyboardKey.altLeft,
+        timeStamp: Duration.zero,
+      ),
+    );
+    inputModel.handleKeyDownEventModifiers(
+      KeyDownEvent(
+        physicalKey: PhysicalKeyboardKey.altRight,
+        logicalKey: LogicalKeyboardKey.altGraph,
+        timeStamp: Duration.zero,
+      ),
+    );
+    inputModel.handleKeyUpEventModifiers(
+      KeyUpEvent(
+        physicalKey: PhysicalKeyboardKey.altLeft,
+        logicalKey: LogicalKeyboardKey.altLeft,
+        timeStamp: Duration.zero,
+      ),
+    );
+
+    expect(inputModel.alt, isTrue);
+    inputModel.handleKeyUpEventModifiers(
+      KeyUpEvent(
+        physicalKey: PhysicalKeyboardKey.altRight,
+        logicalKey: LogicalKeyboardKey.altGraph,
+        timeStamp: Duration.zero,
+      ),
+    );
+    expect(inputModel.alt, isFalse);
   });
 
   test('turning off a modifier sends its key-up immediately', () {

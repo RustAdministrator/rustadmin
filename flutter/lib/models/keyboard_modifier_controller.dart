@@ -51,6 +51,22 @@ class KeyboardModifiers {
       );
 }
 
+enum PhysicalModifierKey {
+  altLeft(MobileModifierKey.alt),
+  altRight(MobileModifierKey.alt),
+  ctrlLeft(MobileModifierKey.ctrl),
+  ctrlRight(MobileModifierKey.ctrl),
+  shiftLeft(MobileModifierKey.shift),
+  shiftRight(MobileModifierKey.shift),
+  commandLeft(MobileModifierKey.command),
+  commandRight(MobileModifierKey.command),
+  superKey(MobileModifierKey.command);
+
+  const PhysicalModifierKey(this.modifier);
+
+  final MobileModifierKey modifier;
+}
+
 typedef MobileModifierRelease =
     void Function(MobileModifierKey key, KeyboardModifiers remaining);
 
@@ -103,7 +119,8 @@ class KeyboardInputController {
   final RemoteTextEditSink _sendTextEdit;
   final RemoteStringSink _sendString;
   late final MobileKeyboardModifierController _mobile;
-  KeyboardModifiers _physical = const KeyboardModifiers();
+  final _physicalKeys = <PhysicalModifierKey>{};
+  KeyboardModifiers _physicalOverrides = const KeyboardModifiers();
 
   KeyboardInputController({
     required RemoteKeySink sendKey,
@@ -114,18 +131,35 @@ class KeyboardInputController {
        _sendString = sendString {
     _mobile = MobileKeyboardModifierController(
       onRelease: (key, remaining) {
-        if (_physical.isActive(key)) return;
-        _sendModifierUp(key, _physical.merge(remaining));
+        final physical = physicalModifiers;
+        if (physical.isActive(key)) return;
+        _sendModifierUp(key, physical.merge(remaining));
       },
     );
   }
 
   MobileModifierState get mobileState => _mobile.state;
-  KeyboardModifiers get physicalModifiers => _physical;
-  KeyboardModifiers get effectiveModifiers => _physical.merge(_mobile.snapshot);
+  KeyboardModifiers get physicalModifiers {
+    var snapshot = _physicalOverrides;
+    for (final key in _physicalKeys) {
+      snapshot = snapshot.withValue(key.modifier, true);
+    }
+    return snapshot;
+  }
+
+  KeyboardModifiers get effectiveModifiers =>
+      physicalModifiers.merge(_mobile.snapshot);
 
   void setPhysical(MobileModifierKey key, bool value) {
-    _physical = _physical.withValue(key, value);
+    _physicalOverrides = _physicalOverrides.withValue(key, value);
+  }
+
+  void setPhysicalKey(PhysicalModifierKey key, bool value) {
+    if (value) {
+      _physicalKeys.add(key);
+    } else {
+      _physicalKeys.remove(key);
+    }
   }
 
   bool sendKey(String name, {bool? down, bool? press}) =>
@@ -166,7 +200,8 @@ class KeyboardInputController {
   void consumeOneShot() => _mobile.consumeOneShot();
 
   void reset() {
-    _physical = const KeyboardModifiers();
+    _physicalKeys.clear();
+    _physicalOverrides = const KeyboardModifiers();
     _mobile.reset();
   }
 

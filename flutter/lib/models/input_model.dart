@@ -170,148 +170,80 @@ class PointerEventToRust {
   }
 }
 
+PhysicalModifierKey? _physicalModifierKey(LogicalKeyboardKey key) {
+  if (key == LogicalKeyboardKey.altLeft) return PhysicalModifierKey.altLeft;
+  if (key == LogicalKeyboardKey.altRight ||
+      key == LogicalKeyboardKey.altGraph) {
+    return PhysicalModifierKey.altRight;
+  }
+  if (key == LogicalKeyboardKey.controlLeft) {
+    return PhysicalModifierKey.ctrlLeft;
+  }
+  if (key == LogicalKeyboardKey.controlRight) {
+    return PhysicalModifierKey.ctrlRight;
+  }
+  if (key == LogicalKeyboardKey.shiftLeft) {
+    return PhysicalModifierKey.shiftLeft;
+  }
+  if (key == LogicalKeyboardKey.shiftRight) {
+    return PhysicalModifierKey.shiftRight;
+  }
+  if (key == LogicalKeyboardKey.metaLeft) {
+    return PhysicalModifierKey.commandLeft;
+  }
+  if (key == LogicalKeyboardKey.metaRight) {
+    return PhysicalModifierKey.commandRight;
+  }
+  if (key == LogicalKeyboardKey.superKey) return PhysicalModifierKey.superKey;
+  return null;
+}
+
 class ToReleaseRawKeys {
-  RawKeyEvent? lastLShiftKeyEvent;
-  RawKeyEvent? lastRShiftKeyEvent;
-  RawKeyEvent? lastLCtrlKeyEvent;
-  RawKeyEvent? lastRCtrlKeyEvent;
-  RawKeyEvent? lastLAltKeyEvent;
-  RawKeyEvent? lastRAltKeyEvent;
-  RawKeyEvent? lastLCommandKeyEvent;
-  RawKeyEvent? lastRCommandKeyEvent;
-  RawKeyEvent? lastSuperKeyEvent;
+  final _pressed = <PhysicalKeyboardKey, RawKeyEvent>{};
 
-  reset() {
-    lastLShiftKeyEvent = null;
-    lastRShiftKeyEvent = null;
-    lastLCtrlKeyEvent = null;
-    lastRCtrlKeyEvent = null;
-    lastLAltKeyEvent = null;
-    lastRAltKeyEvent = null;
-    lastLCommandKeyEvent = null;
-    lastRCommandKeyEvent = null;
-    lastSuperKeyEvent = null;
+  void reset() => _pressed.clear();
+
+  void updateKeyDown(RawKeyDownEvent event) {
+    if (!event.repeat) _pressed[event.physicalKey] = event;
   }
 
-  updateKeyDown(LogicalKeyboardKey logicKey, RawKeyDownEvent e) {
-    if (e.isAltPressed) {
-      if (logicKey == LogicalKeyboardKey.altLeft) {
-        lastLAltKeyEvent = e;
-      } else if (logicKey == LogicalKeyboardKey.altRight) {
-        lastRAltKeyEvent = e;
-      }
-    } else if (e.isControlPressed) {
-      if (logicKey == LogicalKeyboardKey.controlLeft) {
-        lastLCtrlKeyEvent = e;
-      } else if (logicKey == LogicalKeyboardKey.controlRight) {
-        lastRCtrlKeyEvent = e;
-      }
-    } else if (e.isShiftPressed) {
-      if (logicKey == LogicalKeyboardKey.shiftLeft) {
-        lastLShiftKeyEvent = e;
-      } else if (logicKey == LogicalKeyboardKey.shiftRight) {
-        lastRShiftKeyEvent = e;
-      }
-    } else if (e.isMetaPressed) {
-      if (logicKey == LogicalKeyboardKey.metaLeft) {
-        lastLCommandKeyEvent = e;
-      } else if (logicKey == LogicalKeyboardKey.metaRight) {
-        lastRCommandKeyEvent = e;
-      } else if (logicKey == LogicalKeyboardKey.superKey) {
-        lastSuperKeyEvent = e;
-      }
-    }
+  void updateKeyUp(RawKeyUpEvent event) {
+    _pressed.remove(event.physicalKey);
   }
 
-  updateKeyUp(LogicalKeyboardKey logicKey, RawKeyUpEvent e) {
-    if (e.isAltPressed) {
-      if (logicKey == LogicalKeyboardKey.altLeft) {
-        lastLAltKeyEvent = null;
-      } else if (logicKey == LogicalKeyboardKey.altRight) {
-        lastRAltKeyEvent = null;
-      }
-    } else if (e.isControlPressed) {
-      if (logicKey == LogicalKeyboardKey.controlLeft) {
-        lastLCtrlKeyEvent = null;
-      } else if (logicKey == LogicalKeyboardKey.controlRight) {
-        lastRCtrlKeyEvent = null;
-      }
-    } else if (e.isShiftPressed) {
-      if (logicKey == LogicalKeyboardKey.shiftLeft) {
-        lastLShiftKeyEvent = null;
-      } else if (logicKey == LogicalKeyboardKey.shiftRight) {
-        lastRShiftKeyEvent = null;
-      }
-    } else if (e.isMetaPressed) {
-      if (logicKey == LogicalKeyboardKey.metaLeft) {
-        lastLCommandKeyEvent = null;
-      } else if (logicKey == LogicalKeyboardKey.metaRight) {
-        lastRCommandKeyEvent = null;
-      } else if (logicKey == LogicalKeyboardKey.superKey) {
-        lastSuperKeyEvent = null;
-      }
-    }
-  }
-
-  release(KeyEventResult Function(RawKeyEvent e) handleRawKeyEvent) {
-    for (final key in [
-      lastLShiftKeyEvent,
-      lastRShiftKeyEvent,
-      lastLCtrlKeyEvent,
-      lastRCtrlKeyEvent,
-      lastLAltKeyEvent,
-      lastRAltKeyEvent,
-      lastLCommandKeyEvent,
-      lastRCommandKeyEvent,
-      lastSuperKeyEvent,
-    ]) {
-      if (key != null) {
-        handleRawKeyEvent(
-          RawKeyUpEvent(data: key.data, character: key.character),
-        );
-      }
+  void release(KeyEventResult Function(RawKeyEvent event) handleKeyEvent) {
+    final pressed = _pressed.values.toList(growable: false).reversed;
+    _pressed.clear();
+    for (final event in pressed) {
+      handleKeyEvent(
+        RawKeyUpEvent(data: event.data, character: event.character),
+      );
     }
   }
 }
 
 class ToReleaseKeys {
-  KeyEvent? lastLShiftKeyEvent;
-  KeyEvent? lastRShiftKeyEvent;
-  KeyEvent? lastLCtrlKeyEvent;
-  KeyEvent? lastRCtrlKeyEvent;
-  KeyEvent? lastLAltKeyEvent;
-  KeyEvent? lastRAltKeyEvent;
-  KeyEvent? lastLCommandKeyEvent;
-  KeyEvent? lastRCommandKeyEvent;
-  KeyEvent? lastSuperKeyEvent;
+  final _pressed = <PhysicalKeyboardKey, KeyUpEvent>{};
 
-  reset() {
-    lastLShiftKeyEvent = null;
-    lastRShiftKeyEvent = null;
-    lastLCtrlKeyEvent = null;
-    lastRCtrlKeyEvent = null;
-    lastLAltKeyEvent = null;
-    lastRAltKeyEvent = null;
-    lastLCommandKeyEvent = null;
-    lastRCommandKeyEvent = null;
-    lastSuperKeyEvent = null;
+  void reset() => _pressed.clear();
+
+  void updateKeyDown(KeyDownEvent event) {
+    _pressed[event.physicalKey] = KeyUpEvent(
+      physicalKey: event.physicalKey,
+      logicalKey: event.logicalKey,
+      timeStamp: event.timeStamp,
+    );
   }
 
-  release(KeyEventResult Function(KeyEvent e) handleKeyEvent) {
-    for (final key in [
-      lastLShiftKeyEvent,
-      lastRShiftKeyEvent,
-      lastLCtrlKeyEvent,
-      lastRCtrlKeyEvent,
-      lastLAltKeyEvent,
-      lastRAltKeyEvent,
-      lastLCommandKeyEvent,
-      lastRCommandKeyEvent,
-      lastSuperKeyEvent,
-    ]) {
-      if (key != null) {
-        handleKeyEvent(key);
-      }
+  void updateKeyUp(KeyUpEvent event) {
+    _pressed.remove(event.physicalKey);
+  }
+
+  void release(KeyEventResult Function(KeyEvent event) handleKeyEvent) {
+    final pressed = _pressed.values.toList(growable: false).reversed;
+    _pressed.clear();
+    for (final event in pressed) {
+      handleKeyEvent(event);
     }
   }
 }
@@ -597,89 +529,16 @@ class InputModel {
     _trackpadSpeedInner = _trackpadSpeed / 100.0;
   }
 
-  void handleKeyDownEventModifiers(KeyEvent e) {
-    KeyUpEvent upEvent(e) => KeyUpEvent(
-      physicalKey: e.physicalKey,
-      logicalKey: e.logicalKey,
-      timeStamp: e.timeStamp,
-    );
-    if (e.logicalKey == LogicalKeyboardKey.altLeft) {
-      if (!alt) {
-        alt = true;
-      }
-      toReleaseKeys.lastLAltKeyEvent = upEvent(e);
-    } else if (e.logicalKey == LogicalKeyboardKey.altRight) {
-      if (!alt) {
-        alt = true;
-      }
-      toReleaseKeys.lastLAltKeyEvent = upEvent(e);
-    } else if (e.logicalKey == LogicalKeyboardKey.controlLeft) {
-      if (!ctrl) {
-        ctrl = true;
-      }
-      toReleaseKeys.lastLCtrlKeyEvent = upEvent(e);
-    } else if (e.logicalKey == LogicalKeyboardKey.controlRight) {
-      if (!ctrl) {
-        ctrl = true;
-      }
-      toReleaseKeys.lastRCtrlKeyEvent = upEvent(e);
-    } else if (e.logicalKey == LogicalKeyboardKey.shiftLeft) {
-      if (!shift) {
-        shift = true;
-      }
-      toReleaseKeys.lastLShiftKeyEvent = upEvent(e);
-    } else if (e.logicalKey == LogicalKeyboardKey.shiftRight) {
-      if (!shift) {
-        shift = true;
-      }
-      toReleaseKeys.lastRShiftKeyEvent = upEvent(e);
-    } else if (e.logicalKey == LogicalKeyboardKey.metaLeft) {
-      if (!command) {
-        command = true;
-      }
-      toReleaseKeys.lastLCommandKeyEvent = upEvent(e);
-    } else if (e.logicalKey == LogicalKeyboardKey.metaRight) {
-      if (!command) {
-        command = true;
-      }
-      toReleaseKeys.lastRCommandKeyEvent = upEvent(e);
-    } else if (e.logicalKey == LogicalKeyboardKey.superKey) {
-      if (!command) {
-        command = true;
-      }
-      toReleaseKeys.lastSuperKeyEvent = upEvent(e);
-    }
+  void handleKeyDownEventModifiers(KeyDownEvent event) {
+    final modifier = _physicalModifierKey(event.logicalKey);
+    if (modifier != null) _keyboardInput.setPhysicalKey(modifier, true);
+    toReleaseKeys.updateKeyDown(event);
   }
 
-  void handleKeyUpEventModifiers(KeyEvent e) {
-    if (e.logicalKey == LogicalKeyboardKey.altLeft) {
-      alt = false;
-      toReleaseKeys.lastLAltKeyEvent = null;
-    } else if (e.logicalKey == LogicalKeyboardKey.altRight) {
-      alt = false;
-      toReleaseKeys.lastRAltKeyEvent = null;
-    } else if (e.logicalKey == LogicalKeyboardKey.controlLeft) {
-      ctrl = false;
-      toReleaseKeys.lastLCtrlKeyEvent = null;
-    } else if (e.logicalKey == LogicalKeyboardKey.controlRight) {
-      ctrl = false;
-      toReleaseKeys.lastRCtrlKeyEvent = null;
-    } else if (e.logicalKey == LogicalKeyboardKey.shiftLeft) {
-      shift = false;
-      toReleaseKeys.lastLShiftKeyEvent = null;
-    } else if (e.logicalKey == LogicalKeyboardKey.shiftRight) {
-      shift = false;
-      toReleaseKeys.lastRShiftKeyEvent = null;
-    } else if (e.logicalKey == LogicalKeyboardKey.metaLeft) {
-      command = false;
-      toReleaseKeys.lastLCommandKeyEvent = null;
-    } else if (e.logicalKey == LogicalKeyboardKey.metaRight) {
-      command = false;
-      toReleaseKeys.lastRCommandKeyEvent = null;
-    } else if (e.logicalKey == LogicalKeyboardKey.superKey) {
-      command = false;
-      toReleaseKeys.lastSuperKeyEvent = null;
-    }
+  void handleKeyUpEventModifiers(KeyUpEvent event) {
+    final modifier = _physicalModifierKey(event.logicalKey);
+    if (modifier != null) _keyboardInput.setPhysicalKey(modifier, false);
+    toReleaseKeys.updateKeyUp(event);
   }
 
   KeyEventResult handleRawKeyEvent(RawKeyEvent e) {
@@ -705,35 +564,15 @@ class InputModel {
     final key = e.logicalKey;
     if (e is RawKeyDownEvent) {
       if (!e.repeat) {
-        if (e.isAltPressed && !alt) {
-          alt = true;
-        } else if (e.isControlPressed && !ctrl) {
-          ctrl = true;
-        } else if (e.isShiftPressed && !shift) {
-          shift = true;
-        } else if (e.isMetaPressed && !command) {
-          command = true;
-        }
+        final modifier = _physicalModifierKey(key);
+        if (modifier != null) _keyboardInput.setPhysicalKey(modifier, true);
       }
-      toReleaseRawKeys.updateKeyDown(key, e);
+      toReleaseRawKeys.updateKeyDown(e);
     }
     if (e is RawKeyUpEvent) {
-      if (key == LogicalKeyboardKey.altLeft ||
-          key == LogicalKeyboardKey.altRight) {
-        alt = false;
-      } else if (key == LogicalKeyboardKey.controlLeft ||
-          key == LogicalKeyboardKey.controlRight) {
-        ctrl = false;
-      } else if (key == LogicalKeyboardKey.shiftRight ||
-          key == LogicalKeyboardKey.shiftLeft) {
-        shift = false;
-      } else if (key == LogicalKeyboardKey.metaLeft ||
-          key == LogicalKeyboardKey.metaRight ||
-          key == LogicalKeyboardKey.superKey) {
-        command = false;
-      }
-
-      toReleaseRawKeys.updateKeyUp(key, e);
+      final modifier = _physicalModifierKey(key);
+      if (modifier != null) _keyboardInput.setPhysicalKey(modifier, false);
+      toReleaseRawKeys.updateKeyUp(e);
     }
 
     // * Currently mobile does not enable map mode
@@ -1088,6 +927,8 @@ class InputModel {
 
   /// Reset key modifiers to false, including [shift], [ctrl], [alt] and [command].
   void resetModifiers() {
+    toReleaseKeys.reset();
+    toReleaseRawKeys.reset();
     _keyboardInput.reset();
   }
 

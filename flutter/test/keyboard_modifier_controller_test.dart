@@ -1,4 +1,7 @@
+import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_hbb/mobile/mobile_modifier_state.dart';
+import 'package:flutter_hbb/models/input_model.dart';
 import 'package:flutter_hbb/models/keyboard_modifier_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -126,6 +129,51 @@ void main() {
 
     expect(harness.events, isEmpty);
     expect(harness.controller.effectiveModifiers.shift, isTrue);
+  });
+
+  test('left and right physical modifiers are tracked independently', () {
+    final harness = _KeyboardHarness();
+
+    harness.controller.setPhysicalKey(PhysicalModifierKey.altLeft, true);
+    harness.controller.setPhysicalKey(PhysicalModifierKey.altRight, true);
+    harness.controller.setPhysicalKey(PhysicalModifierKey.altLeft, false);
+
+    expect(harness.controller.physicalModifiers.alt, isTrue);
+    harness.controller.setPhysicalKey(PhysicalModifierKey.altRight, false);
+    expect(harness.controller.physicalModifiers.alt, isFalse);
+  });
+
+  test('pressed keys release once in reverse press order', () {
+    final tracker = ToReleaseKeys();
+    final released = <KeyEvent>[];
+    tracker.updateKeyDown(
+      KeyDownEvent(
+        physicalKey: PhysicalKeyboardKey.controlLeft,
+        logicalKey: LogicalKeyboardKey.controlLeft,
+        timeStamp: Duration.zero,
+      ),
+    );
+    tracker.updateKeyDown(
+      KeyDownEvent(
+        physicalKey: PhysicalKeyboardKey.keyA,
+        logicalKey: LogicalKeyboardKey.keyA,
+        timeStamp: Duration.zero,
+      ),
+    );
+
+    KeyEventResult release(KeyEvent event) {
+      released.add(event);
+      return KeyEventResult.handled;
+    }
+
+    tracker.release(release);
+    tracker.release(release);
+
+    expect(released.map((event) => event.logicalKey), [
+      LogicalKeyboardKey.keyA,
+      LogicalKeyboardKey.controlLeft,
+    ]);
+    expect(released, everyElement(isA<KeyUpEvent>()));
   });
 
   test('temporary modifier is released only when controller introduced it', () {
