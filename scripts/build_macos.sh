@@ -359,6 +359,17 @@ compose_cargo_features() {
   printf '%s\n' "$cargo_features"
 }
 
+validate_platform_profile() {
+  local cargo_features="$1"
+  local rust_host
+  rust_host="$(rustc -vV | sed -n 's/^host: //p')"
+  python3 "$repo_root/scripts/platform_profiles.py" check \
+    --profile macos-release \
+    --wrapper scripts/build_macos.sh \
+    --target "$rust_host" \
+    --features "$cargo_features"
+}
+
 warn_hwcodec_fallback() {
   hwcodec_fallback_warning="$1"
   if [[ "$allow_hwcodec_fallback" == "1" ]]; then
@@ -586,6 +597,7 @@ if [[ "$sign_only" -eq 0 ]]; then
     hwcodec=0
   fi
   features="$(compose_cargo_features)"
+  validate_platform_profile "$features"
 
   if [[ "$skip_cargo" -eq 0 ]]; then
     generate_version_file
@@ -594,6 +606,7 @@ if [[ "$sign_only" -eq 0 ]]; then
         warn_hwcodec_fallback "cargo build failed with hwcodec enabled."
         hwcodec=0
         features="$(compose_cargo_features)"
+        validate_platform_profile "$features"
         (cd "$repo_root" && MACOSX_DEPLOYMENT_TARGET=10.15 cargo build --features "$features" --release -vv)
       else
         exit 1

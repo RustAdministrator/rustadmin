@@ -11,6 +11,12 @@ case "${MODE}" in
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+python3 "${REPO_DIR}/scripts/platform_profiles.py" check \
+  --profile android-release-package \
+  --wrapper flutter/build_android.sh \
+  --target aarch64-linux-android \
+  --features flutter,hwcodec,mediacodec
 EXPECTED_FLUTTER_VERSION="$(tr -d '[:space:]' < "${SCRIPT_DIR}/FLUTTER_VERSION")"
 
 resolve_flutter_bin() {

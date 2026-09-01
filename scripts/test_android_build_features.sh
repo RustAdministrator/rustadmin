@@ -6,7 +6,7 @@ ANDROID_BUILD="${REPO_DIR}/flutter/android_common.sh"
 
 validate() {
   RUSTADMIN_ANDROID_VALIDATE_FEATURES_ONLY=1 \
-    bash "${ANDROID_BUILD}" aarch64-linux-android arm64-v8a "$1"
+    bash "${ANDROID_BUILD}" android-arm64 flutter/ndk_arm64.sh aarch64-linux-android arm64-v8a "$1"
 }
 
 validate "flutter"
