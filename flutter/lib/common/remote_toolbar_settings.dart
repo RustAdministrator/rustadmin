@@ -8,6 +8,17 @@ abstract interface class SettingCodec<T> {
   String encode(T value);
 }
 
+enum SettingScope { appLocal, userDefault, peer, liveSession }
+
+enum SettingApplyMode { live, nextSession, restartRequired }
+
+abstract interface class SettingDefinition<T> {
+  String get key;
+  SettingCodec<T> get codec;
+  SettingScope get scope;
+  SettingApplyMode get applyMode;
+}
+
 class IntRangeCodec implements SettingCodec<int> {
   const IntRangeCodec({
     required this.defaultValue,
@@ -43,11 +54,21 @@ class AllowedStringCodec implements SettingCodec<String> {
   String encode(String value) => decode(value);
 }
 
-class UserDefaultSetting<T> {
-  const UserDefaultSetting({required this.key, required this.codec});
+class UserDefaultSetting<T> implements SettingDefinition<T> {
+  const UserDefaultSetting({
+    required this.key,
+    required this.codec,
+    this.applyMode = SettingApplyMode.live,
+  });
 
+  @override
   final String key;
+  @override
   final SettingCodec<T> codec;
+  @override
+  final SettingApplyMode applyMode;
+  @override
+  SettingScope get scope => SettingScope.userDefault;
 }
 
 abstract final class RemoteToolbarSettingsRegistry {

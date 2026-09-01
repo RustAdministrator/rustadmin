@@ -1,9 +1,142 @@
 import '../consts.dart';
+import '../common/remote_toolbar_settings.dart';
 import 'widgets/remote_session_controls.dart';
 
 typedef OptionReader = String Function(String key);
 typedef PeerOptionReader = Future<String> Function(String key);
 typedef OptionWriter = Future<void> Function(String key, String value);
+
+class LocalSetting<T> implements SettingDefinition<T> {
+  const LocalSetting({
+    required this.key,
+    required this.codec,
+    this.applyMode = SettingApplyMode.live,
+  });
+
+  @override
+  final String key;
+  @override
+  final SettingCodec<T> codec;
+  @override
+  final SettingApplyMode applyMode;
+  @override
+  SettingScope get scope => SettingScope.appLocal;
+}
+
+class PeerSetting<T> implements SettingDefinition<T> {
+  const PeerSetting({
+    required this.key,
+    required this.codec,
+    this.inheritWhenEmpty = false,
+    this.applyMode = SettingApplyMode.live,
+  });
+
+  @override
+  final String key;
+  @override
+  final SettingCodec<T> codec;
+  final bool inheritWhenEmpty;
+  @override
+  final SettingApplyMode applyMode;
+  @override
+  SettingScope get scope => SettingScope.peer;
+}
+
+class _PlacementCodec
+    implements SettingCodec<MobileRemoteToolbarPlacementSettings> {
+  const _PlacementCodec();
+
+  @override
+  MobileRemoteToolbarPlacementSettings decode(String raw) =>
+      MobileRemoteToolbarPlacementSettings.fromStored(raw);
+
+  @override
+  String encode(MobileRemoteToolbarPlacementSettings value) =>
+      value.storedValue;
+}
+
+class _PhysicalInputCodec implements SettingCodec<bool> {
+  const _PhysicalInputCodec();
+
+  @override
+  bool decode(String raw) => mobileVmPhysicalInputEnabled(raw);
+
+  @override
+  String encode(bool value) => mobileVmPhysicalInputOption(value);
+}
+
+class _KeyboardInputModeCodec implements SettingCodec<String> {
+  const _KeyboardInputModeCodec();
+
+  @override
+  String decode(String raw) => switch (raw.toLowerCase()) {
+    kKeyboardInputModeAuto => kKeyboardInputModeAuto,
+    kKeyboardInputModeText => kKeyboardInputModeText,
+    kKeyboardInputModePhysical => kKeyboardInputModePhysical,
+    _ => '',
+  };
+
+  @override
+  String encode(String value) => decode(value);
+}
+
+abstract final class MobileRemoteSettingsRegistry {
+  static const _toolbarOverlapCodec = IntRangeCodec(
+    defaultValue: kDefaultMobileRemoteToolbarOverlapOpacityPercent,
+    min: kMinMobileRemoteToolbarOverlapOpacityPercent,
+    max: kMaxMobileRemoteToolbarOverlapOpacityPercent,
+  );
+  static const _cursorInertiaCodec = IntRangeCodec(
+    defaultValue: kDefaultMobileCursorInertiaDurationMs,
+    min: kMinMobileCursorInertiaDurationMs,
+    max: kMaxMobileCursorInertiaDurationMs,
+  );
+  static const toolbarOverlapDefault = UserDefaultSetting<int>(
+    key: kOptionMobileRemoteToolbarOverlapOpacityPercent,
+    codec: _toolbarOverlapCodec,
+  );
+  static const cursorInertiaDefault = UserDefaultSetting<int>(
+    key: kOptionMobileCursorInertiaDurationMs,
+    codec: _cursorInertiaCodec,
+  );
+  static const toolbarPlacement =
+      LocalSetting<MobileRemoteToolbarPlacementSettings>(
+        key: kOptionMobileRemoteToolbarPlacement,
+        codec: _PlacementCodec(),
+      );
+  static const toolbarOverlapPeer = PeerSetting<int>(
+    key: kOptionMobileRemoteToolbarOverlapOpacityPercent,
+    codec: _toolbarOverlapCodec,
+    inheritWhenEmpty: true,
+  );
+  static const cursorInertiaPeer = PeerSetting<int>(
+    key: kOptionMobileCursorInertiaDurationMs,
+    codec: _cursorInertiaCodec,
+    inheritWhenEmpty: true,
+  );
+  static const physicalKeyInput = PeerSetting<bool>(
+    key: kOptionMobilePhysicalKeyInput,
+    codec: _PhysicalInputCodec(),
+  );
+  static const keyboardInputMode = PeerSetting<String>(
+    key: kOptionKeyboardInputModeV2,
+    codec: _KeyboardInputModeCodec(),
+  );
+
+  static const all = <SettingDefinition<dynamic>>[
+    toolbarOverlapDefault,
+    cursorInertiaDefault,
+    toolbarPlacement,
+    toolbarOverlapPeer,
+    cursorInertiaPeer,
+    physicalKeyInput,
+    keyboardInputMode,
+  ];
+
+  static bool hasUniqueScopedKeys() =>
+      all.map((setting) => (setting.scope, setting.key)).toSet().length ==
+      all.length;
+}
 
 class MobileRemoteSettingsSnapshot {
   const MobileRemoteSettingsSnapshot({
@@ -36,19 +169,33 @@ class MobileRemoteSettingsRepository {
   final OptionWriter? writeLocal;
   final OptionWriter? writePeer;
 
+  T _readUserDefault<T>(UserDefaultSetting<T> setting) =>
+      setting.codec.decode(readUserDefault(setting.key));
+
+  T _readLocal<T>(LocalSetting<T> setting) =>
+      setting.codec.decode(readLocal(setting.key));
+
+  Future<T?> _readPeer<T>(PeerSetting<T> setting) async {
+    final raw = await readPeer(setting.key);
+    if (raw.isEmpty && setting.inheritWhenEmpty) return null;
+    return setting.codec.decode(raw);
+  }
+
   MobileRemoteSettingsSnapshot readDefaults() {
     const physicalKeyInput = true;
     return MobileRemoteSettingsSnapshot(
       toolbarTransparency: MobileRemoteToolbarTransparencySettings.fromStored(
-        overlapOpacityPercent: readUserDefault(
-          kOptionMobileRemoteToolbarOverlapOpacityPercent,
-        ),
+        overlapOpacityPercent: _readUserDefault(
+          MobileRemoteSettingsRegistry.toolbarOverlapDefault,
+        ).toString(),
       ),
-      toolbarPlacement: MobileRemoteToolbarPlacementSettings.fromStored(
-        readLocal(kOptionMobileRemoteToolbarPlacement),
+      toolbarPlacement: _readLocal(
+        MobileRemoteSettingsRegistry.toolbarPlacement,
       ),
       cursorInertia: MobileCursorInertiaSettings.fromStored(
-        readUserDefault(kOptionMobileCursorInertiaDurationMs),
+        _readUserDefault(
+          MobileRemoteSettingsRegistry.cursorInertiaDefault,
+        ).toString(),
       ),
       physicalKeyInput: physicalKeyInput,
       keyboardInputMode: mobileKeyboardInputV2Mode(
@@ -60,30 +207,32 @@ class MobileRemoteSettingsRepository {
 
   Future<MobileRemoteSettingsSnapshot> readSession() async {
     final defaults = readDefaults();
-    final stored = await Future.wait([
-      readPeer(kOptionMobileRemoteToolbarOverlapOpacityPercent),
-      readPeer(kOptionMobileCursorInertiaDurationMs),
-      readPeer(kOptionMobilePhysicalKeyInput),
-      readPeer(kOptionKeyboardInputModeV2),
-    ]);
-    final physicalKeyInput = mobileVmPhysicalInputEnabled(stored[2]);
+    final toolbarOverlap = await _readPeer(
+      MobileRemoteSettingsRegistry.toolbarOverlapPeer,
+    );
+    final cursorInertia = await _readPeer(
+      MobileRemoteSettingsRegistry.cursorInertiaPeer,
+    );
+    final physicalKeyInput =
+        await _readPeer(MobileRemoteSettingsRegistry.physicalKeyInput) ?? true;
+    final keyboardInputMode =
+        await _readPeer(MobileRemoteSettingsRegistry.keyboardInputMode) ?? '';
     return MobileRemoteSettingsSnapshot(
       toolbarTransparency: MobileRemoteToolbarTransparencySettings.fromStored(
-        overlapOpacityPercent: stored[0].isEmpty
-            ? defaults.toolbarTransparency.overlapOpacityPercent.toString()
-            : stored[0],
+        overlapOpacityPercent:
+            (toolbarOverlap ??
+                    defaults.toolbarTransparency.overlapOpacityPercent)
+                .toString(),
         fallback: defaults.toolbarTransparency,
       ),
       toolbarPlacement: defaults.toolbarPlacement,
       cursorInertia: MobileCursorInertiaSettings.fromStored(
-        stored[1].isEmpty
-            ? defaults.cursorInertia.durationMs.toString()
-            : stored[1],
+        (cursorInertia ?? defaults.cursorInertia.durationMs).toString(),
         fallback: defaults.cursorInertia,
       ),
       physicalKeyInput: physicalKeyInput,
       keyboardInputMode: mobileKeyboardInputV2Mode(
-        stored[3],
+        keyboardInputMode,
         mobileVmPhysicalInputOption(physicalKeyInput),
       ),
     );
@@ -94,12 +243,25 @@ class MobileRemoteSettingsRepository {
   ) async {
     final writer = writeLocal;
     if (writer != null) {
-      await writer(kOptionMobileRemoteToolbarPlacement, settings.storedValue);
+      final setting = MobileRemoteSettingsRegistry.toolbarPlacement;
+      await writer(setting.key, setting.codec.encode(settings));
     }
   }
 
-  Future<void> storePeerOption(String key, String value) async {
+  Future<void> _storePeer<T>(PeerSetting<T> setting, T value) async {
     final writer = writePeer;
-    if (writer != null) await writer(key, value);
+    if (writer != null) await writer(setting.key, setting.codec.encode(value));
   }
+
+  Future<void> storeToolbarOverlap(int value) =>
+      _storePeer(MobileRemoteSettingsRegistry.toolbarOverlapPeer, value);
+
+  Future<void> storeCursorInertia(int value) =>
+      _storePeer(MobileRemoteSettingsRegistry.cursorInertiaPeer, value);
+
+  Future<void> storePhysicalKeyInput(bool value) =>
+      _storePeer(MobileRemoteSettingsRegistry.physicalKeyInput, value);
+
+  Future<void> storeKeyboardInputMode(String value) =>
+      _storePeer(MobileRemoteSettingsRegistry.keyboardInputMode, value);
 }

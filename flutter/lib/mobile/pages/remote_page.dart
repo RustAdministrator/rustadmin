@@ -1102,14 +1102,12 @@ class _RemotePageState extends State<RemotePage>
                           if (value == null) return;
                           final keyboardWasOpen = _showEdit;
                           await _setAndroidRemoteKeyboardInput(false);
-                          await _settingsRepository.storePeerOption(
-                            kOptionKeyboardInputModeV2,
+                          await _settingsRepository.storeKeyboardInputMode(
                             value,
                           );
                           final physical = value != kKeyboardInputModeText;
-                          await _settingsRepository.storePeerOption(
-                            kOptionMobilePhysicalKeyInput,
-                            mobileVmPhysicalInputOption(physical),
+                          await _settingsRepository.storePhysicalKeyInput(
+                            physical,
                           );
                           if (mounted) {
                             setState(() {
@@ -1177,10 +1175,8 @@ class _RemotePageState extends State<RemotePage>
                                       if (value == null) return;
                                       setState(() => _physicalKeyInput = value);
                                       unawaited(
-                                        _settingsRepository.storePeerOption(
-                                          kOptionMobilePhysicalKeyInput,
-                                          mobileVmPhysicalInputOption(value),
-                                        ),
+                                        _settingsRepository
+                                            .storePhysicalKeyInput(value),
                                       );
                                     },
                             ),
@@ -1963,9 +1959,8 @@ void showOptions(
                           },
                           onChangeEnd: (durationMs) {
                             unawaited(
-                              settingsRepository.storePeerOption(
-                                kOptionMobileCursorInertiaDurationMs,
-                                durationMs.toString(),
+                              settingsRepository.storeCursorInertia(
+                                durationMs,
                               ),
                             );
                           },
@@ -2008,9 +2003,8 @@ void showOptions(
                       activeToolbarTransparencySettings = settings;
                       onToolbarTransparencySettingsChanged(settings);
                       unawaited(
-                        settingsRepository.storePeerOption(
-                          kOptionMobileRemoteToolbarOverlapOpacityPercent,
-                          settings.overlapOpacityPercent.toString(),
+                        settingsRepository.storeToolbarOverlap(
+                          settings.overlapOpacityPercent,
                         ),
                       );
                     },
