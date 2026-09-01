@@ -7,6 +7,7 @@ class _KeyboardHarness {
   final keyEffects = <(String, bool, bool, KeyboardModifiers)>[];
   bool acceptKeys = true;
   bool acceptText = true;
+  bool acceptString = true;
   bool throwOnKey = false;
   bool throwOnText = false;
 
@@ -28,6 +29,10 @@ class _KeyboardHarness {
           if (throwOnText) throw StateError('text sink failed');
           return acceptText;
         },
+    sendString: (text) {
+      events.add('string:$text');
+      return acceptString;
+    },
   );
 }
 
@@ -211,6 +216,19 @@ void main() {
       failed.controller.mobileState.modeFor(MobileModifierKey.alt),
       MobileModifierMode.oneShot,
     );
+  });
+
+  test('string input preserves legacy one-shot behavior', () {
+    final harness = _KeyboardHarness();
+    harness.controller.mobileState.tap(MobileModifierKey.ctrl);
+
+    expect(harness.controller.sendString('clipboard'), isTrue);
+    expect(harness.events, ['string:clipboard']);
+    expect(
+      harness.controller.mobileState.modeFor(MobileModifierKey.ctrl),
+      MobileModifierMode.oneShot,
+    );
+    expect(harness.controller.sendString(''), isFalse);
   });
 
   test('reset clears physical state before releasing virtual state', () {

@@ -463,6 +463,11 @@ class InputModel {
         );
         return true;
       },
+      sendString: (text) {
+        if (!keyboardPerm || isViewCamera) return false;
+        bind.sessionInputString(sessionId: sessionId, value: text);
+        return true;
+      },
     );
     _relativeMouse = RelativeMouseModel(
       sessionId: sessionId,
@@ -1013,6 +1018,8 @@ class InputModel {
       deleteAfterGraphemes: deleteAfterGraphemes,
     );
   }
+
+  bool inputString(String text) => _keyboardInput.sendString(text);
 
   static Map<String, dynamic> getMouseEventMove() => {
     'type': _kMouseEventMove,

@@ -155,8 +155,7 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
         onPressed: () async {
           ClipboardData? data = await Clipboard.getData(Clipboard.kTextPlain);
           if (data != null && data.text != null) {
-            bind.sessionInputString(
-                sessionId: sessionId, value: data.text ?? "");
+            ffi.inputModel.inputString(data.text ?? '');
           }
         }));
   }

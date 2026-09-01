@@ -96,17 +96,22 @@ typedef RemoteTextEditSink =
       required int deleteAfterGraphemes,
     });
 
+typedef RemoteStringSink = bool Function(String text);
+
 class KeyboardInputController {
   final RemoteKeySink _sendKey;
   final RemoteTextEditSink _sendTextEdit;
+  final RemoteStringSink _sendString;
   late final MobileKeyboardModifierController _mobile;
   KeyboardModifiers _physical = const KeyboardModifiers();
 
   KeyboardInputController({
     required RemoteKeySink sendKey,
     required RemoteTextEditSink sendTextEdit,
+    required RemoteStringSink sendString,
   }) : _sendKey = sendKey,
-       _sendTextEdit = sendTextEdit {
+       _sendTextEdit = sendTextEdit,
+       _sendString = sendString {
     _mobile = MobileKeyboardModifierController(
       onRelease: (key, remaining) {
         if (_physical.isActive(key)) return;
@@ -144,6 +149,8 @@ class KeyboardInputController {
     if (accepted) _mobile.consumeOneShot();
     return accepted;
   }
+
+  bool sendString(String text) => text.isNotEmpty && _sendString(text);
 
   bool sendWithTemporaryModifier(String name, MobileModifierKey modifier) {
     final modeBefore = mobileState.modeFor(modifier);

@@ -60,6 +60,7 @@ class _TestRustadminImpl implements Rustadmin {
   final flutterKeyCalls = <_FlutterKeyCall>[];
   final textEditCalls = <_TextEditCall>[];
   final sourceTextCalls = <String>[];
+  final inputStrings = <String>[];
   final pendingFlutterKeyCalls = <Completer<void>>[];
   bool blockFlutterKeyCalls = false;
 
@@ -112,6 +113,10 @@ class _TestRustadminImpl implements Rustadmin {
       sourceTextCalls.add(invocation.namedArguments[#value] as String);
       return Future<void>.value();
     }
+    if (invocation.memberName == #sessionInputString) {
+      inputStrings.add(invocation.namedArguments[#value] as String);
+      return Future<void>.value();
+    }
     if (invocation.memberName == #sessionHandleFlutterKeyEvent) {
       flutterKeyCalls.add(
         _FlutterKeyCall(
@@ -151,6 +156,7 @@ void main() {
     testImpl.flutterKeyCalls.clear();
     testImpl.textEditCalls.clear();
     testImpl.sourceTextCalls.clear();
+    testImpl.inputStrings.clear();
     testImpl.pendingFlutterKeyCalls.clear();
     testImpl.blockFlutterKeyCalls = false;
     ffi = FFI(null)..id = 'mobile-modifier-test-peer';
@@ -290,6 +296,17 @@ void main() {
     expect(inputModel.ctrl, isFalse);
     inputModel.inputKey('VK_A');
     expect(testImpl.inputKeyCalls, hasLength(1));
+    expect(inputModel.inputString('blocked'), isFalse);
+    expect(testImpl.inputStrings, isEmpty);
+  });
+
+  test('input string uses the model bridge without consuming one-shot', () {
+    inputModel.mobileModifierState.tap(MobileModifierKey.ctrl);
+
+    expect(inputModel.inputString('clipboard'), isTrue);
+
+    expect(testImpl.inputStrings, ['clipboard']);
+    expect(inputModel.ctrl, isTrue);
   });
 
   test('queued Android text rechecks permission before dispatch', () async {
