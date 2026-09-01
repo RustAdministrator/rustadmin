@@ -510,15 +510,6 @@ class FfiModel with ChangeNotifier {
       } else if (name == 'on_url_scheme_received') {
         // currently comes from "_url" ipc of mac and dbus of linux
         onUrlSchemeReceived(evt);
-      } else if (name == 'on_voice_call_waiting') {
-        // Waiting for the response from the peer.
-        parent.target?.chatModel.onVoiceCallWaiting();
-      } else if (name == 'on_voice_call_started') {
-        // Voice call is connected.
-        parent.target?.chatModel.onVoiceCallStarted();
-      } else if (name == 'on_voice_call_incoming') {
-        // Voice call is requested by the peer.
-        parent.target?.chatModel.onVoiceCallIncoming();
       } else if (name == 'update_voice_call_state') {
         parent.target?.serverModel.updateVoiceCallState(evt);
       } else if (name == 'plugin_manager') {
@@ -597,8 +588,17 @@ class FfiModel with ChangeNotifier {
           isMobile) {
         parent.target?.recordingModel.updateStatus(event.start);
       }
-    } else if (event is ExitRelativeMouseModeSessionEvent) {
-      parent.target?.inputModel.exitRelativeMouseModeWithKeyRelease();
+    } else if (event is SessionSignalEvent) {
+      switch (event.signal) {
+        case SessionSignal.voiceCallWaiting:
+          parent.target?.chatModel.onVoiceCallWaiting();
+        case SessionSignal.voiceCallStarted:
+          parent.target?.chatModel.onVoiceCallStarted();
+        case SessionSignal.voiceCallIncoming:
+          parent.target?.chatModel.onVoiceCallIncoming();
+        case SessionSignal.exitRelativeMouseMode:
+          parent.target?.inputModel.exitRelativeMouseModeWithKeyRelease();
+      }
     } else if (event is InvalidSessionEvent) {
       debugPrint(
         'Rejected malformed session event ${event.name}: ${event.reason}',

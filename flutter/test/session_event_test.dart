@@ -70,8 +70,28 @@ void main() {
     expect(fingerprint.fingerprint, 'abc');
     expect(record.start, isTrue);
     expect(
-      decodeTypedSessionEvent({'name': 'exit_relative_mouse_mode'}),
-      isA<ExitRelativeMouseModeSessionEvent>(),
+      (decodeTypedSessionEvent({'name': 'on_voice_call_waiting'})!
+              as SessionSignalEvent)
+          .signal,
+      SessionSignal.voiceCallWaiting,
+    );
+    expect(
+      (decodeTypedSessionEvent({'name': 'on_voice_call_started'})!
+              as SessionSignalEvent)
+          .signal,
+      SessionSignal.voiceCallStarted,
+    );
+    expect(
+      (decodeTypedSessionEvent({'name': 'on_voice_call_incoming'})!
+              as SessionSignalEvent)
+          .signal,
+      SessionSignal.voiceCallIncoming,
+    );
+    expect(
+      (decodeTypedSessionEvent({'name': 'exit_relative_mouse_mode'})!
+              as SessionSignalEvent)
+          .signal,
+      SessionSignal.exitRelativeMouseMode,
     );
   });
 

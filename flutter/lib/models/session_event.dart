@@ -57,8 +57,16 @@ final class RecordStatusSessionEvent extends SessionEvent {
   final bool start;
 }
 
-final class ExitRelativeMouseModeSessionEvent extends SessionEvent {
-  const ExitRelativeMouseModeSessionEvent();
+enum SessionSignal {
+  voiceCallWaiting,
+  voiceCallStarted,
+  voiceCallIncoming,
+  exitRelativeMouseMode,
+}
+
+final class SessionSignalEvent extends SessionEvent {
+  const SessionSignalEvent(this.signal);
+  final SessionSignal signal;
 }
 
 final class InvalidSessionEvent extends SessionEvent {
@@ -138,8 +146,14 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
       return start == null
           ? const InvalidSessionEvent('record_status', 'invalid start flag')
           : RecordStatusSessionEvent(start);
+    case 'on_voice_call_waiting':
+      return const SessionSignalEvent(SessionSignal.voiceCallWaiting);
+    case 'on_voice_call_started':
+      return const SessionSignalEvent(SessionSignal.voiceCallStarted);
+    case 'on_voice_call_incoming':
+      return const SessionSignalEvent(SessionSignal.voiceCallIncoming);
     case 'exit_relative_mouse_mode':
-      return const ExitRelativeMouseModeSessionEvent();
+      return const SessionSignalEvent(SessionSignal.exitRelativeMouseMode);
     default:
       return null;
   }
