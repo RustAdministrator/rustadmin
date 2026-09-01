@@ -432,6 +432,71 @@ final class FileResumeJobSessionEvent extends SessionEvent {
   final int? id;
 }
 
+enum SessionControlKind {
+  cancelMessageBox,
+  switchBack,
+  portableServiceRunning,
+  urlSchemeReceived,
+}
+
+final class SessionControlEvent extends SessionEvent {
+  const SessionControlEvent({
+    required this.kind,
+    this.value = '',
+    this.enabled = false,
+  });
+
+  final SessionControlKind kind;
+  final String value;
+  final bool enabled;
+}
+
+final class PeerHashSyncSessionEvent extends SessionEvent {
+  const PeerHashSyncSessionEvent({required this.id, required this.hash});
+
+  final String id;
+  final String hash;
+}
+
+enum PeerOptionSyncKind { viewOnly, keyboardMode, inputSource, other }
+
+final class PeerOptionSyncSessionEvent extends SessionEvent {
+  const PeerOptionSyncSessionEvent({required this.kind, this.viewOnly});
+
+  final PeerOptionSyncKind kind;
+  final bool? viewOnly;
+}
+
+final class WebSelectedFileSessionEvent extends SessionEvent {
+  const WebSelectedFileSessionEvent({
+    required this.handleIndex,
+    required this.file,
+  });
+
+  final int handleIndex;
+  final SessionFileEntryValue file;
+}
+
+final class WebEmptyDirectoriesSessionEvent extends SessionEvent {
+  WebEmptyDirectoriesSessionEvent(List<String> directories)
+    : directories = List<String>.unmodifiable(directories);
+
+  final List<String> directories;
+}
+
+final class PrinterRequestSessionEvent extends SessionEvent {
+  const PrinterRequestSessionEvent({required this.id, required this.path});
+
+  final int id;
+  final String path;
+}
+
+final class ScreenshotSessionEvent extends SessionEvent {
+  const ScreenshotSessionEvent(this.message);
+
+  final String message;
+}
+
 const _qualityDisplayMapKeys = <String>{
   'fps',
   'decode_fps',
@@ -901,6 +966,116 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
               autoStart: autoStart && id != null,
               id: id,
             );
+    case 'cancel_msgbox':
+      final tag = event['tag'];
+      return tag is! String || tag.length > 4096
+          ? const InvalidSessionEvent('cancel_msgbox', 'invalid tag')
+          : SessionControlEvent(
+              kind: SessionControlKind.cancelMessageBox,
+              value: tag,
+            );
+    case 'switch_back':
+      final peerId = _decodeBoundedString(event['peer_id']);
+      return peerId == null || peerId.isEmpty
+          ? const InvalidSessionEvent('switch_back', 'invalid peer id')
+          : SessionControlEvent(
+              kind: SessionControlKind.switchBack,
+              value: peerId,
+            );
+    case 'portable_service_running':
+      final running = _decodeBool(event['running']);
+      return running == null
+          ? const InvalidSessionEvent(
+              'portable_service_running',
+              'invalid state',
+            )
+          : SessionControlEvent(
+              kind: SessionControlKind.portableServiceRunning,
+              enabled: running,
+            );
+    case 'on_url_scheme_received':
+      final url = event['url'];
+      return url is! String || url.length > 64 * 1024
+          ? const InvalidSessionEvent('on_url_scheme_received', 'invalid URL')
+          : SessionControlEvent(
+              kind: SessionControlKind.urlSchemeReceived,
+              value: url,
+            );
+    case 'sync_peer_hash_password_to_personal_ab':
+      final id = _decodeBoundedString(event['id']);
+      final hash = event['hash'];
+      return id == null ||
+              id.isEmpty ||
+              hash is! String ||
+              hash.length > 64 * 1024
+          ? const InvalidSessionEvent(
+              'sync_peer_hash_password_to_personal_ab',
+              'invalid peer/hash',
+            )
+          : PeerHashSyncSessionEvent(id: id, hash: hash);
+    case 'sync_peer_option':
+      final key = event['k'];
+      if (key is! String || key.length > 4096) {
+        return const InvalidSessionEvent(
+          'sync_peer_option',
+          'invalid option key',
+        );
+      }
+      if (key == 'view-only') {
+        final value = _decodeBool(event['v']);
+        return value == null
+            ? const InvalidSessionEvent(
+                'sync_peer_option',
+                'invalid view-only value',
+              )
+            : PeerOptionSyncSessionEvent(
+                kind: PeerOptionSyncKind.viewOnly,
+                viewOnly: value,
+              );
+      }
+      return PeerOptionSyncSessionEvent(
+        kind: switch (key) {
+          'keyboard_mode' => PeerOptionSyncKind.keyboardMode,
+          'input_source' => PeerOptionSyncKind.inputSource,
+          _ => PeerOptionSyncKind.other,
+        },
+      );
+    case 'selected_files':
+      final handleIndex = _decodeInt(event['handleIndex']);
+      final file = _decodeFileEntry(_decodeJsonInput(event['file']));
+      return handleIndex == null || handleIndex < 0 || file == null
+          ? const InvalidSessionEvent('selected_files', 'invalid file')
+          : WebSelectedFileSessionEvent(handleIndex: handleIndex, file: file);
+    case 'send_emptry_dirs':
+      final values = _decodeJsonInput(event['dirs'], maxBytes: 8 * 1024 * 1024);
+      if (values is! List || values.length > 65536) {
+        return const InvalidSessionEvent(
+          'send_emptry_dirs',
+          'invalid directories',
+        );
+      }
+      final directories = <String>[];
+      for (final value in values) {
+        if (value is! String || value.length > 32 * 1024) {
+          return const InvalidSessionEvent(
+            'send_emptry_dirs',
+            'invalid directory path',
+          );
+        }
+        directories.add(value);
+      }
+      return WebEmptyDirectoriesSessionEvent(directories);
+    case 'printer_request':
+      final id = _decodeInt(event['id']);
+      final path = event['path'];
+      return id == null || id < 0 || path is! String || path.length > 32 * 1024
+          ? const InvalidSessionEvent('printer_request', 'invalid job')
+          : PrinterRequestSessionEvent(id: id, path: path);
+    case 'screenshot':
+      final message = event['msg'] ?? '';
+      return message is! String || message.length > 64 * 1024
+          ? const InvalidSessionEvent('screenshot', 'invalid message')
+          : ScreenshotSessionEvent(message);
     case 'peer_info':
       final username = _decodeBoundedString(event['username']);
       final hostname = _decodeBoundedString(event['hostname']);

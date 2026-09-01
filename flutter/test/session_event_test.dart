@@ -350,6 +350,99 @@ void main() {
     }
   });
 
+  test('decodes peripheral control and Web file events', () {
+    final cancel =
+        decodeTypedSessionEvent({'name': 'cancel_msgbox', 'tag': 'login'})!
+            as SessionControlEvent;
+    expect(cancel.kind, SessionControlKind.cancelMessageBox);
+    expect(cancel.value, 'login');
+
+    final service =
+        decodeTypedSessionEvent({
+              'name': 'portable_service_running',
+              'running': 'true',
+            })!
+            as SessionControlEvent;
+    expect(service.enabled, isTrue);
+
+    final url =
+        decodeTypedSessionEvent({
+              'name': 'on_url_scheme_received',
+              'url': 'rustdesk://connection/new/peer',
+            })!
+            as SessionControlEvent;
+    expect(url.kind, SessionControlKind.urlSchemeReceived);
+
+    final hash =
+        decodeTypedSessionEvent({
+              'name': 'sync_peer_hash_password_to_personal_ab',
+              'id': 'peer',
+              'hash': 'base64',
+            })!
+            as PeerHashSyncSessionEvent;
+    expect(hash.id, 'peer');
+
+    final option =
+        decodeTypedSessionEvent({
+              'name': 'sync_peer_option',
+              'k': 'view-only',
+              'v': true,
+            })!
+            as PeerOptionSyncSessionEvent;
+    expect(option.kind, PeerOptionSyncKind.viewOnly);
+    expect(option.viewOnly, isTrue);
+
+    final selected =
+        decodeTypedSessionEvent({
+              'name': 'selected_files',
+              'handleIndex': '2',
+              'file':
+                  '{"entry_type":4,"modified_time":10,"name":"a.txt","size":12}',
+            })!
+            as WebSelectedFileSessionEvent;
+    expect(selected.handleIndex, 2);
+    expect(selected.file.name, 'a.txt');
+
+    final directories =
+        decodeTypedSessionEvent({
+              'name': 'send_emptry_dirs',
+              'dirs': '["a","b"]',
+            })!
+            as WebEmptyDirectoriesSessionEvent;
+    expect(directories.directories, ['a', 'b']);
+
+    expect(
+      decodeTypedSessionEvent({
+        'name': 'printer_request',
+        'id': 3,
+        'path': '/tmp/print.pdf',
+      }),
+      isA<PrinterRequestSessionEvent>(),
+    );
+    expect(
+      decodeTypedSessionEvent({'name': 'screenshot'}),
+      isA<ScreenshotSessionEvent>(),
+    );
+  });
+
+  test('rejects malformed peripheral control and Web file events', () {
+    for (final event in [
+      {'name': 'cancel_msgbox', 'tag': 1},
+      {'name': 'portable_service_running', 'running': 'maybe'},
+      {'name': 'sync_peer_option', 'k': 'view-only', 'v': 'maybe'},
+      {
+        'name': 'selected_files',
+        'handleIndex': 'bad',
+        'file': '{"entry_type":4,"modified_time":10,"name":"a","size":1}',
+      },
+      {'name': 'send_emptry_dirs', 'dirs': '[1]'},
+      {'name': 'printer_request', 'id': 'bad', 'path': '/tmp/x'},
+      {'name': 'screenshot', 'msg': 1},
+    ]) {
+      expect(decodeTypedSessionEvent(event), isA<InvalidSessionEvent>());
+    }
+  });
+
   test('decodes display and platform synchronization payloads', () {
     final sync =
         decodeTypedSessionEvent({

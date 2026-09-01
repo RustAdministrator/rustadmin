@@ -267,46 +267,33 @@ class FileModel {
     }, useAnimation: false);
   }
 
-  void onSelectedFiles(dynamic obj) {
+  void onSelectedFileEvent(WebSelectedFileSessionEvent event) {
     localController.selectedItems.clear();
 
-    try {
-      int handleIndex = int.parse(obj['handleIndex']);
-      final file = jsonDecode(obj['file']);
-      var entry = Entry.fromJson(file);
-      entry.path = entry.name;
-      final otherSideData = remoteController.directoryData();
-      final toPath = otherSideData.directory.path;
-      final isWindows = otherSideData.options.isWindows;
-      final showHidden = otherSideData.options.showHidden;
-      final jobID = jobController.addTransferJob(entry, false);
-      webSendLocalFiles(
-        handleIndex: handleIndex,
-        actId: jobID,
-        path: entry.path,
-        to: PathUtil.join(toPath, entry.name, isWindows),
-        fileNum: 0,
-        includeHidden: showHidden,
-        isRemote: false,
-      );
-    } catch (e) {
-      debugPrint("Failed to decode onSelectedFiles: $e");
-    }
+    final entry = Entry.fromSessionValue(event.file)..path = event.file.name;
+    final otherSideData = remoteController.directoryData();
+    final toPath = otherSideData.directory.path;
+    final isWindows = otherSideData.options.isWindows;
+    final showHidden = otherSideData.options.showHidden;
+    final jobID = jobController.addTransferJob(entry, false);
+    webSendLocalFiles(
+      handleIndex: event.handleIndex,
+      actId: jobID,
+      path: entry.path,
+      to: PathUtil.join(toPath, entry.name, isWindows),
+      fileNum: 0,
+      includeHidden: showHidden,
+      isRemote: false,
+    );
   }
 
-  void sendEmptyDirs(dynamic obj) {
-    late final List<dynamic> emptyDirs;
-    try {
-      emptyDirs = jsonDecode(obj['dirs'] as String);
-    } catch (e) {
-      debugPrint("Failed to decode sendEmptyDirs: $e");
-    }
+  void sendEmptyDirectoriesEvent(WebEmptyDirectoriesSessionEvent event) {
     final otherSideData = remoteController.directoryData();
     final toPath = otherSideData.directory.path;
     final isPeerWindows = otherSideData.options.isWindows;
 
     final isLocalWindows = isWindows || isWebOnWindows;
-    for (var dir in emptyDirs) {
+    for (var dir in event.directories) {
       if (isLocalWindows != isPeerWindows) {
         dir = PathUtil.convert(dir, isLocalWindows, isPeerWindows);
       }

@@ -461,17 +461,6 @@ class FfiModel with ChangeNotifier {
         parent.target?.serverModel.updateClientPermission(evt);
       } else if (name == 'permission_request') {
         parent.target?.serverModel.handlePermissionRequest(evt);
-      } else if (name == 'cancel_msgbox') {
-        cancelMsgBox(evt, sessionId);
-      } else if (name == 'switch_back') {
-        final peer_id = evt['peer_id'].toString();
-        await bind.sessionSwitchSides(sessionId: sessionId);
-        closeConnection(id: peer_id);
-      } else if (name == 'portable_service_running') {
-        _handlePortableServiceRunning(peerId, evt);
-      } else if (name == 'on_url_scheme_received') {
-        // currently comes from "_url" ipc of mac and dbus of linux
-        onUrlSchemeReceived(evt);
       } else if (name == 'update_voice_call_state') {
         parent.target?.serverModel.updateVoiceCallState(evt);
       } else if (name == 'plugin_manager') {
@@ -483,33 +472,10 @@ class FfiModel with ChangeNotifier {
         handleReloading(evt);
       } else if (name == 'plugin_option') {
         handleOption(evt);
-      } else if (name == "sync_peer_hash_password_to_personal_ab") {
-        if (desktopType == DesktopType.main || isWeb || isMobile) {
-          final id = evt['id'];
-          final hash = evt['hash'];
-          if (id != null && hash != null) {
-            gFFI.abModel
-                .changePersonalHashPassword(id.toString(), hash.toString());
-          }
-        }
       } else if (name == "cm_file_transfer_log") {
         if (isDesktop) {
           gFFI.cmFileModel.onFileTransferLog(evt);
         }
-      } else if (name == 'sync_peer_option') {
-        _handleSyncPeerOption(evt, peerId);
-      } else if (name == "selected_files") {
-        if (isWeb) {
-          parent.target?.fileModel.onSelectedFiles(evt);
-        }
-      } else if (name == "send_emptry_dirs") {
-        if (isWeb) {
-          parent.target?.fileModel.sendEmptyDirs(evt);
-        }
-      } else if (name == "printer_request") {
-        _handlePrinterRequest(evt, sessionId, peerId);
-      } else if (name == 'screenshot') {
-        _handleScreenshot(evt, sessionId, peerId);
       } else {
         debugPrint('Event is not handled in the fixed branch: $name');
       }
@@ -605,6 +571,22 @@ class FfiModel with ChangeNotifier {
       await parent.target?.fileModel.postOverrideFileConfirmEvent(event);
     } else if (event is FileResumeJobSessionEvent) {
       await parent.target?.fileModel.jobController.loadLastJobEvent(event);
+    } else if (event is SessionControlEvent) {
+      await _handleSessionControlEvent(event, sessionId);
+    } else if (event is PeerHashSyncSessionEvent) {
+      if (desktopType == DesktopType.main || isWeb || isMobile) {
+        gFFI.abModel.changePersonalHashPassword(event.id, event.hash);
+      }
+    } else if (event is PeerOptionSyncSessionEvent) {
+      _handleSyncPeerOptionEvent(event, peerId);
+    } else if (event is WebSelectedFileSessionEvent) {
+      if (isWeb) parent.target?.fileModel.onSelectedFileEvent(event);
+    } else if (event is WebEmptyDirectoriesSessionEvent) {
+      if (isWeb) parent.target?.fileModel.sendEmptyDirectoriesEvent(event);
+    } else if (event is PrinterRequestSessionEvent) {
+      _handlePrinterRequestEvent(event, sessionId);
+    } else if (event is ScreenshotSessionEvent) {
+      _handleScreenshotEvent(event, sessionId);
     } else if (event is PeerInfoSessionEvent) {
       await handlePeerInfoEvent(event, peerId, false);
     } else if (event is SyncPeerInfoSessionEvent) {
@@ -622,11 +604,28 @@ class FfiModel with ChangeNotifier {
     }
   }
 
-  _handleScreenshot(
-      Map<String, dynamic> evt, SessionID sessionId, String peerId) {
+  Future<void> _handleSessionControlEvent(
+    SessionControlEvent event,
+    SessionID sessionId,
+  ) async {
+    switch (event.kind) {
+      case SessionControlKind.cancelMessageBox:
+        cancelMsgBoxValue(event.value, sessionId);
+      case SessionControlKind.switchBack:
+        await bind.sessionSwitchSides(sessionId: sessionId);
+        closeConnection(id: event.value);
+      case SessionControlKind.portableServiceRunning:
+        _handlePortableServiceRunning(event.enabled);
+      case SessionControlKind.urlSchemeReceived:
+        onUrlSchemeReceivedValue(event.value);
+    }
+  }
+
+  void _handleScreenshotEvent(
+      ScreenshotSessionEvent event, SessionID sessionId) {
     timerScreenshot?.cancel();
     timerScreenshot = null;
-    final msg = evt['msg'] ?? '';
+    final msg = event.message;
     final msgBoxType = 'custom-nook-nocancel-hasclose';
     final msgBoxTitle = 'Take screenshot';
     final dialogManager = parent.target!.dialogManager;
@@ -690,10 +689,10 @@ class FfiModel with ChangeNotifier {
     }
   }
 
-  _handlePrinterRequest(
-      Map<String, dynamic> evt, SessionID sessionId, String peerId) {
-    final id = evt['id'];
-    final path = evt['path'];
+  void _handlePrinterRequestEvent(
+      PrinterRequestSessionEvent event, SessionID sessionId) {
+    final id = event.id;
+    final path = event.path;
     final dialogManager = parent.target!.dialogManager;
     dialogManager.show((setState, close, context) {
       PrinterOptions printerOptions = PrinterOptions.load();
@@ -870,20 +869,23 @@ class FfiModel with ChangeNotifier {
         'success', 'Successful', kMsgboxTextWaitingForImage);
   }
 
-  _handleSyncPeerOption(Map<String, dynamic> evt, String peer) {
-    final k = evt['k'];
-    final v = evt['v'];
-    if (k == kOptionToggleViewOnly) {
-      setViewOnly(peer, v as bool);
-    } else if (k == 'keyboard_mode') {
-      parent.target?.inputModel.updateKeyboardMode();
-    } else if (k == 'input_source') {
-      stateGlobal.getInputSource(force: true);
+  void _handleSyncPeerOptionEvent(
+      PeerOptionSyncSessionEvent event, String peer) {
+    switch (event.kind) {
+      case PeerOptionSyncKind.viewOnly:
+        final viewOnly = event.viewOnly;
+        if (viewOnly != null) setViewOnly(peer, viewOnly);
+      case PeerOptionSyncKind.keyboardMode:
+        parent.target?.inputModel.updateKeyboardMode();
+      case PeerOptionSyncKind.inputSource:
+        stateGlobal.getInputSource(force: true);
+      case PeerOptionSyncKind.other:
+        break;
     }
   }
 
-  onUrlSchemeReceived(Map<String, dynamic> evt) {
-    final url = evt['url'].toString().trim();
+  void onUrlSchemeReceivedValue(String value) {
+    final url = value.trim();
     if (url.startsWith(bind.mainUriPrefixSync()) &&
         handleUriLink(uriString: url)) {
       return;
@@ -909,8 +911,7 @@ class FfiModel with ChangeNotifier {
     platformFFI.setEventCallback(startEventListener(sessionId, peerId));
   }
 
-  _handlePortableServiceRunning(String peerId, Map<String, dynamic> evt) {
-    final running = evt['running'] == 'true';
+  void _handlePortableServiceRunning(bool running) {
     parent.target?.elevationModel.onPortableServiceRunning(running);
   }
 
@@ -1003,10 +1004,10 @@ class FfiModel with ChangeNotifier {
     notifyListeners();
   }
 
-  cancelMsgBox(Map<String, dynamic> evt, SessionID sessionId) {
+  void cancelMsgBoxValue(String value, SessionID sessionId) {
     if (parent.target == null) return;
     final dialogManager = parent.target!.dialogManager;
-    final tag = '$sessionId-${evt['tag']}';
+    final tag = '$sessionId-$value';
     dialogManager.dismissByTag(tag);
   }
 
