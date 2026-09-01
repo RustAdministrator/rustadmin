@@ -26,7 +26,6 @@ import 'package:flutter_hbb/models/user_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/models/desktop_render_texture.dart';
 import 'package:flutter_hbb/models/terminal_model.dart';
-import 'package:flutter_hbb/plugin/event.dart';
 import 'package:flutter_hbb/plugin/manager.dart';
 import 'package:flutter_hbb/plugin/widgets/desc_ui.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
@@ -453,25 +452,7 @@ class FfiModel with ChangeNotifier {
         return;
       }
       var name = evt['name'];
-      if (name == 'plugin_manager') {
-        pluginManager.handleEvent(evt);
-      } else if (name == 'plugin_event') {
-        handlePluginEvent(evt, (Map<String, dynamic> payload) {
-          final event = decodeMessageBoxSessionEvent(
-            payload,
-            origin: MessageBoxOrigin.plugin,
-          );
-          if (event is MessageBoxSessionEvent) {
-            handleMessageBoxEvent(event, sessionId, peerId);
-          } else if (event is InvalidSessionEvent) {
-            debugPrint('Rejected malformed plugin msgbox: ${event.reason}');
-          }
-        });
-      } else if (name == 'plugin_reload') {
-        handleReloading(evt);
-      } else if (name == 'plugin_option') {
-        handleOption(evt);
-      } else if (name == "cm_file_transfer_log") {
+      if (name == "cm_file_transfer_log") {
         if (isDesktop) {
           gFFI.cmFileModel.onFileTransferLog(evt);
         }
@@ -608,6 +589,17 @@ class FfiModel with ChangeNotifier {
         case ClientPermissionKind.request:
           parent.target?.serverModel.handlePermissionRequestEvent(event);
       }
+    } else if (event is PluginCatalogSessionEvent) {
+      pluginManager.handleCatalogEvent(event);
+    } else if (event is PluginInstallStatusSessionEvent) {
+      pluginManager.handleInstallStatusEvent(event);
+    } else if (event is PluginContentSessionEvent) {
+      final message = event.message;
+      if (message != null) handleMessageBoxEvent(message, sessionId, peerId);
+    } else if (event is PluginReloadSessionEvent) {
+      handleReloadingEvent(event);
+    } else if (event is PluginOptionSessionEvent) {
+      handleOptionEvent(event);
     } else if (event is PeerInfoSessionEvent) {
       await handlePeerInfoEvent(event, peerId, false);
     } else if (event is SyncPeerInfoSessionEvent) {

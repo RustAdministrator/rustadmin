@@ -1,9 +1,9 @@
 // The plugin manager is a singleton class that manages the plugins.
 // 1. It merge metadata and the desc of plugins.
 
-import 'dart:convert';
 import 'dart:collection';
 import 'package:flutter/material.dart';
+import 'package:flutter_hbb/models/session_event.dart';
 
 const String kValueTrue = '1';
 const String kValueFalse = '0';
@@ -197,15 +197,19 @@ class PluginManager with ChangeNotifier {
     return null;
   }
 
-  void handleEvent(Map<String, dynamic> evt) {
-    if (evt['plugin_list'] != null) {
-      _handlePluginList(evt['plugin_list']);
-    } else if (evt['plugin_install'] != null && evt['id'] != null) {
-      _handlePluginInstall(evt['id'], evt['plugin_install']);
-    } else if (evt['plugin_uninstall'] != null && evt['id'] != null) {
-      _handlePluginUninstall(evt['id'], evt['plugin_uninstall']);
+  void handleCatalogEvent(PluginCatalogSessionEvent event) {
+    _plugins
+      ..clear()
+      ..addAll(event.plugins.map(_pluginFromSessionValue));
+    _sortPlugins();
+    notifyListeners();
+  }
+
+  void handleInstallStatusEvent(PluginInstallStatusSessionEvent event) {
+    if (event.install) {
+      _handlePluginInstall(event.id, event.message);
     } else {
-      debugPrint('Failed to handle manager event: $evt');
+      _handlePluginUninstall(event.id, event.message);
     }
   }
 
@@ -219,23 +223,6 @@ class PluginManager with ChangeNotifier {
         return 0;
       }
     });
-  }
-
-  void _handlePluginList(String pluginList) {
-    _plugins.clear();
-    try {
-      for (var p in json.decode(pluginList) as List<dynamic>) {
-        final plugin = _getPluginFromEvent(p);
-        if (plugin == null) {
-          continue;
-        }
-        _plugins.add(plugin);
-      }
-    } catch (e) {
-      debugPrint('Failed to decode $e,  plugin list \'$pluginList\'');
-    }
-    _sortPlugins();
-    notifyListeners();
   }
 
   void _handlePluginInstall(String id, String msg) {
@@ -262,56 +249,31 @@ class PluginManager with ChangeNotifier {
     }
   }
 
-  PluginInfo? _getPluginFromEvent(Map<String, dynamic> evt) {
-    final s = evt['source'];
-    assert(s != null, 'Source is null');
-    if (s == null) {
-      return null;
-    }
+  PluginInfo _pluginFromSessionValue(SessionPluginCatalogValue value) {
     final source = SourceInfo(
-      name: s['name'],
-      url: s['url'] ?? '',
-      description: s['description'] ?? '',
+      name: value.sourceName,
+      url: value.sourceUrl,
+      description: value.sourceDescription,
     );
-
-    final m = evt['meta'];
-    assert(m != null, 'Meta is null');
-    if (m == null) {
-      return null;
-    }
-
-    late DateTime lastReleased;
-    late DateTime published;
-    try {
-      lastReleased = DateTime.parse(
-          m['publish_info']?['last_released'] ?? '1970-01-01T00+00:00');
-    } catch (e) {
-      lastReleased = DateTime.utc(1970);
-    }
-    try {
-      published = DateTime.parse(
-          m['publish_info']?['published'] ?? '1970-01-01T00+00:00');
-    } catch (e) {
-      published = DateTime.utc(1970);
-    }
-
     final meta = Meta(
-      id: m['id'],
-      name: m['name'],
-      version: m['version'],
-      description: m['description'] ?? '',
-      author: m['author'],
-      home: m['home'] ?? '',
-      license: m['license'] ?? '',
-      source: m['source'] ?? '',
-      publishInfo:
-          PublishInfo(lastReleased: lastReleased, published: published),
+      id: value.id,
+      name: value.name,
+      version: value.version,
+      description: value.description,
+      author: value.author,
+      home: value.home,
+      license: value.license,
+      source: value.source,
+      publishInfo: PublishInfo(
+        lastReleased: value.lastReleased,
+        published: value.published,
+      ),
     );
     return PluginInfo(
       sourceInfo: source,
       meta: meta,
-      installedVersion: evt['installed_version'],
-      invalidReason: evt['invalid_reason'] ?? '',
+      installedVersion: value.installedVersion,
+      invalidReason: value.invalidReason,
     );
   }
 }

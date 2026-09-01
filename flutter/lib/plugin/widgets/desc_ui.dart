@@ -1,9 +1,8 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/models/model.dart';
+import 'package:flutter_hbb/models/session_event.dart';
 import 'package:provider/provider.dart';
 import 'package:get/get.dart';
 // to-do: do not depend on desktop
@@ -275,27 +274,31 @@ class PluginItem extends StatelessWidget {
   }
 }
 
-void handleReloading(Map<String, dynamic> evt) {
-  if (evt['id'] == null || evt['location'] == null) {
-    return;
-  }
-  try {
-    final uiList = <UiType>[];
-    for (var e in json.decode(evt['ui'] as String)) {
-      final ui = UiType.create(e);
-      if (ui != null) {
-        uiList.add(ui);
-      }
-    }
-    if (uiList.isNotEmpty) {
-      addLocationUi(evt['location']!, evt['id']!, uiList);
-    }
-  } catch (e) {
-    debugPrint('Failed handleReloading, json decode of ui, $e ');
+void handleReloadingEvent(PluginReloadSessionEvent event) {
+  final uiList = <UiType>[
+    for (final value in event.ui)
+      if (value.kind == SessionPluginUiKind.button)
+        UiButton(
+          key: value.key,
+          text: value.text,
+          icon: value.icon,
+          tooltip: value.tooltip,
+          action: value.action,
+        )
+      else
+        UiCheckbox(
+          key: value.key,
+          text: value.text,
+          tooltip: value.tooltip,
+          action: value.action,
+        ),
+  ];
+  if (uiList.isNotEmpty) {
+    addLocationUi(event.location, event.id, uiList);
   }
 }
 
-void handleOption(Map<String, dynamic> evt) {
+void handleOptionEvent(PluginOptionSessionEvent event) {
   updateOption(
-      evt['location'], evt['id'], evt['peer'] ?? '', evt['key'], evt['value']);
+      event.location, event.id, event.peer, event.key, event.value);
 }

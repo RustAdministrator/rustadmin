@@ -641,6 +641,115 @@ final class ClientPermissionSessionEvent extends SessionEvent {
   final bool enabled;
 }
 
+final class SessionPluginCatalogValue {
+  const SessionPluginCatalogValue({
+    required this.sourceName,
+    required this.sourceUrl,
+    required this.sourceDescription,
+    required this.id,
+    required this.name,
+    required this.version,
+    required this.description,
+    required this.author,
+    required this.home,
+    required this.license,
+    required this.source,
+    required this.lastReleased,
+    required this.published,
+    required this.installedVersion,
+    required this.invalidReason,
+  });
+
+  final String sourceName;
+  final String sourceUrl;
+  final String sourceDescription;
+  final String id;
+  final String name;
+  final String version;
+  final String description;
+  final String author;
+  final String home;
+  final String license;
+  final String source;
+  final DateTime lastReleased;
+  final DateTime published;
+  final String installedVersion;
+  final String invalidReason;
+}
+
+final class PluginCatalogSessionEvent extends SessionEvent {
+  PluginCatalogSessionEvent(List<SessionPluginCatalogValue> plugins)
+    : plugins = List<SessionPluginCatalogValue>.unmodifiable(plugins);
+
+  final List<SessionPluginCatalogValue> plugins;
+}
+
+final class PluginInstallStatusSessionEvent extends SessionEvent {
+  const PluginInstallStatusSessionEvent({
+    required this.id,
+    required this.message,
+    required this.install,
+  });
+
+  final String id;
+  final String message;
+  final bool install;
+}
+
+final class PluginContentSessionEvent extends SessionEvent {
+  const PluginContentSessionEvent(this.message);
+
+  final MessageBoxSessionEvent? message;
+}
+
+enum SessionPluginUiKind { button, checkbox }
+
+final class SessionPluginUiValue {
+  const SessionPluginUiValue({
+    required this.kind,
+    required this.key,
+    required this.text,
+    required this.tooltip,
+    required this.action,
+    this.icon = '',
+  });
+
+  final SessionPluginUiKind kind;
+  final String key;
+  final String text;
+  final String tooltip;
+  final String action;
+  final String icon;
+}
+
+final class PluginReloadSessionEvent extends SessionEvent {
+  PluginReloadSessionEvent({
+    required this.id,
+    required this.location,
+    required List<SessionPluginUiValue> ui,
+  }) : ui = List<SessionPluginUiValue>.unmodifiable(ui);
+
+  final String id;
+  final String location;
+  final List<SessionPluginUiValue> ui;
+}
+
+final class PluginOptionSessionEvent extends SessionEvent {
+  const PluginOptionSessionEvent({
+    required this.location,
+    required this.id,
+    required this.peer,
+    required this.key,
+    required this.value,
+  });
+
+  final String location;
+  final String id;
+  final String peer;
+  final String key;
+  final String value;
+}
+
 const _qualityDisplayMapKeys = <String>{
   'fps',
   'decode_fps',
@@ -879,6 +988,65 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
               requestId: requestId ?? '',
               name: permissionName,
               enabled: enabled,
+            );
+    case 'plugin_manager':
+      return _decodePluginManagerEvent(event);
+    case 'plugin_event':
+      final content = _decodeJsonObject(event['content']);
+      if (content == null) {
+        return const InvalidSessionEvent('plugin_event', 'invalid content');
+      }
+      if (content['t'] != 'MsgBox') {
+        return const PluginContentSessionEvent(null);
+      }
+      final payload = content['c'];
+      if (payload is! Map<String, Object?>) {
+        return const InvalidSessionEvent('plugin_event', 'invalid message box');
+      }
+      final message = decodeMessageBoxSessionEvent(
+        Map<String, dynamic>.from(payload),
+        origin: MessageBoxOrigin.plugin,
+      );
+      return message is MessageBoxSessionEvent
+          ? PluginContentSessionEvent(message)
+          : const InvalidSessionEvent(
+              'plugin_event',
+              'invalid message box payload',
+            );
+    case 'plugin_reload':
+      final id = _decodeBoundedString(event['id']);
+      final location = _decodeBoundedString(event['location']);
+      final ui = _decodePluginUi(event['ui']);
+      return id == null ||
+              id.isEmpty ||
+              location == null ||
+              location.isEmpty ||
+              ui == null
+          ? const InvalidSessionEvent('plugin_reload', 'invalid UI payload')
+          : PluginReloadSessionEvent(id: id, location: location, ui: ui);
+    case 'plugin_option':
+      final location = _decodeBoundedString(event['location']);
+      final id = _decodeBoundedString(event['id']);
+      final peer = event['peer'] ?? '';
+      final key = _decodeBoundedString(event['key']);
+      final value = event['value'];
+      return location == null ||
+              location.isEmpty ||
+              id == null ||
+              id.isEmpty ||
+              peer is! String ||
+              peer.length > 4096 ||
+              key == null ||
+              key.isEmpty ||
+              value is! String ||
+              value.length > 64 * 1024
+          ? const InvalidSessionEvent('plugin_option', 'invalid option payload')
+          : PluginOptionSessionEvent(
+              location: location,
+              id: id,
+              peer: peer,
+              key: key,
+              value: value,
             );
     case 'cursor_data':
       final id = _decodeNonEmptyString(event['id']);
@@ -1646,6 +1814,155 @@ SessionClientValue? _decodeClientValue(Object? raw) {
     inVoiceCall: inVoiceCall,
     incomingVoiceCall: incomingVoiceCall,
   );
+}
+
+SessionEvent _decodePluginManagerEvent(Map<String, dynamic> event) {
+  if (event.containsKey('plugin_list')) {
+    final plugins = _decodePluginCatalog(event['plugin_list']);
+    return plugins == null
+        ? const InvalidSessionEvent('plugin_manager', 'invalid catalog')
+        : PluginCatalogSessionEvent(plugins);
+  }
+  final install = event.containsKey('plugin_install');
+  final uninstall = event.containsKey('plugin_uninstall');
+  final id = _decodeBoundedString(event['id']);
+  final message = install
+      ? event['plugin_install']
+      : uninstall
+      ? event['plugin_uninstall']
+      : null;
+  return (!install && !uninstall) ||
+          id == null ||
+          id.isEmpty ||
+          message is! String ||
+          message.length > 64 * 1024
+      ? const InvalidSessionEvent('plugin_manager', 'invalid status')
+      : PluginInstallStatusSessionEvent(
+          id: id,
+          message: message,
+          install: install,
+        );
+}
+
+List<SessionPluginCatalogValue>? _decodePluginCatalog(Object? raw) {
+  final decoded = _decodeJsonInput(raw, maxBytes: 4 * 1024 * 1024);
+  if (decoded is! List || decoded.length > 1024) return null;
+  final plugins = <SessionPluginCatalogValue>[];
+  for (final value in decoded) {
+    if (value is! Map) return null;
+    final source = value['source'];
+    final meta = value['meta'];
+    if (source is! Map || meta is! Map) return null;
+    String? text(Map map, String key, {bool required = false}) {
+      final value = map[key] ?? '';
+      if (value is! String || value.length > 64 * 1024) return null;
+      return required && value.isEmpty ? null : value;
+    }
+
+    final sourceName = text(source, 'name', required: true);
+    final sourceUrl = text(source, 'url');
+    final sourceDescription = text(source, 'description');
+    final id = text(meta, 'id', required: true);
+    final name = text(meta, 'name', required: true);
+    final version = text(meta, 'version', required: true);
+    final description = text(meta, 'description');
+    final author = text(meta, 'author', required: true);
+    final home = text(meta, 'home');
+    final license = text(meta, 'license');
+    final sourceValue = text(meta, 'source');
+    final installedVersion = value['installed_version'];
+    final invalidReason = value['invalid_reason'] ?? '';
+    final publishInfo = meta['publish_info'];
+    if (sourceName == null ||
+        sourceUrl == null ||
+        sourceDescription == null ||
+        id == null ||
+        name == null ||
+        version == null ||
+        description == null ||
+        author == null ||
+        home == null ||
+        license == null ||
+        sourceValue == null ||
+        installedVersion is! String ||
+        installedVersion.length > 4096 ||
+        invalidReason is! String ||
+        invalidReason.length > 64 * 1024 ||
+        publishInfo is! Map) {
+      return null;
+    }
+    DateTime date(String key) {
+      final value = publishInfo[key];
+      return value is String
+          ? DateTime.tryParse(value) ?? DateTime.utc(1970)
+          : DateTime.utc(1970);
+    }
+
+    plugins.add(
+      SessionPluginCatalogValue(
+        sourceName: sourceName,
+        sourceUrl: sourceUrl,
+        sourceDescription: sourceDescription,
+        id: id,
+        name: name,
+        version: version,
+        description: description,
+        author: author,
+        home: home,
+        license: license,
+        source: sourceValue,
+        lastReleased: date('last_released'),
+        published: date('published'),
+        installedVersion: installedVersion,
+        invalidReason: invalidReason,
+      ),
+    );
+  }
+  return plugins;
+}
+
+List<SessionPluginUiValue>? _decodePluginUi(Object? raw) {
+  final decoded = _decodeJsonInput(raw);
+  if (decoded is! List || decoded.length > 1024) return null;
+  final ui = <SessionPluginUiValue>[];
+  for (final value in decoded) {
+    if (value is! Map) return null;
+    final type = value['t'];
+    if (type != 'Button' && type != 'Checkbox') continue;
+    final content = value['c'];
+    if (content is! Map) return null;
+    String? field(String key, {bool required = false}) {
+      final value = content[key] ?? '';
+      if (value is! String || value.length > 64 * 1024) return null;
+      return required && value.isEmpty ? null : value;
+    }
+
+    final key = field('key', required: true);
+    final text = field('text');
+    final tooltip = field('tooltip');
+    final action = field('action');
+    final icon = field('icon');
+    if (key == null ||
+        text == null ||
+        tooltip == null ||
+        action == null ||
+        icon == null) {
+      return null;
+    }
+    ui.add(
+      SessionPluginUiValue(
+        kind: type == 'Button'
+            ? SessionPluginUiKind.button
+            : SessionPluginUiKind.checkbox,
+        key: key,
+        text: text,
+        tooltip: tooltip,
+        action: action,
+        icon: icon,
+      ),
+    );
+  }
+  return ui;
 }
 
 List<SessionDisplayValue>? _decodeDisplays(Object? raw) {

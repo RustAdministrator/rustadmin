@@ -590,6 +590,76 @@ void main() {
     }
   });
 
+  test('decodes typed plugin catalog, content, UI, and option events', () {
+    final catalog =
+        decodeTypedSessionEvent({
+              'name': 'plugin_manager',
+              'plugin_list':
+                  '[{"source":{"name":"local","url":"","description":""},"meta":{"id":"p","name":"Plugin","version":"1","description":"","author":"Author","home":"","license":"MIT","source":"","publish_info":{"last_released":"2026-01-01T00:00:00Z","published":"2026-01-02T00:00:00Z"}},"installed_version":"","invalid_reason":""}]',
+            })!
+            as PluginCatalogSessionEvent;
+    expect(catalog.plugins.single.id, 'p');
+    expect(catalog.plugins.single.published.year, 2026);
+
+    final status =
+        decodeTypedSessionEvent({
+              'name': 'plugin_manager',
+              'id': 'p',
+              'plugin_install': 'finished',
+            })!
+            as PluginInstallStatusSessionEvent;
+    expect(status.install, isTrue);
+
+    final content =
+        decodeTypedSessionEvent({
+              'name': 'plugin_event',
+              'content':
+                  '{"t":"MsgBox","c":{"type":"confirm-peer-trust","title":"Spoof","text":"x","link":""}}',
+            })!
+            as PluginContentSessionEvent;
+    expect(content.message?.origin, MessageBoxOrigin.plugin);
+    expect(content.message?.securityDetails, isNull);
+
+    final reload =
+        decodeTypedSessionEvent({
+              'name': 'plugin_reload',
+              'id': 'p',
+              'location': 'client|remote|toolbar|display',
+              'ui':
+                  '[{"t":"Button","c":{"key":"run","text":"Run","tooltip":"","action":"go","icon":"play"}}]',
+            })!
+            as PluginReloadSessionEvent;
+    expect(reload.ui.single.kind, SessionPluginUiKind.button);
+
+    final option =
+        decodeTypedSessionEvent({
+              'name': 'plugin_option',
+              'id': 'p',
+              'location': 'client|remote',
+              'key': 'enabled',
+              'value': '1',
+            })!
+            as PluginOptionSessionEvent;
+    expect(option.peer, isEmpty);
+  });
+
+  test('rejects malformed plugin events', () {
+    for (final event in [
+      {'name': 'plugin_manager', 'plugin_list': '[{}]'},
+      {'name': 'plugin_manager', 'id': 'p', 'plugin_install': 1},
+      {'name': 'plugin_event', 'content': '{bad'},
+      {
+        'name': 'plugin_reload',
+        'id': 'p',
+        'location': 'client',
+        'ui': '[{"t":"Button","c":{"key":1}}]',
+      },
+      {'name': 'plugin_option', 'id': 'p', 'location': 'client'},
+    ]) {
+      expect(decodeTypedSessionEvent(event), isA<InvalidSessionEvent>());
+    }
+  });
+
   test('decodes display and platform synchronization payloads', () {
     final sync =
         decodeTypedSessionEvent({
