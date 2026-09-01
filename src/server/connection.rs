@@ -1754,7 +1754,9 @@ impl Connection {
                 video_source: VideoSource::Monitor,
             },
             require_2fa: crate::auth_2fa::get_2fa(None),
-            display_idx: *display_service::PRIMARY_DISPLAY_IDX,
+            // Login replaces this fallback with the primary index from the same
+            // refreshed display snapshot sent to the peer.
+            display_idx: 0,
             stream,
             server,
             hash,
@@ -3836,13 +3838,14 @@ impl Connection {
                 Err(err) => {
                     res.set_error(format!("{}", err));
                 }
-                Ok(displays) => {
+                Ok((displays, primary_display_idx)) => {
                     // For compatibility with old versions, we need to send the displays to the peer.
                     // But the displays may be updated later, before creating the video capturer.
                     #[cfg(target_os = "macos")]
                     {
                         self.retina.set_displays(&displays);
                     }
+                    self.display_idx = primary_display_idx;
                     pi.displays = displays;
                     pi.current_display = self.display_idx as _;
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -3952,14 +3955,12 @@ impl Connection {
                 if !self.audio_enabled() {
                     noperms.push(super::audio_service::NAME);
                 }
-                let primary_video_service_name = video_service::get_service_name(
-                    VideoSource::Monitor,
-                    *display_service::PRIMARY_DISPLAY_IDX,
-                );
+                let monitor_service_name =
+                    video_service::get_service_name(VideoSource::Monitor, self.display_idx);
                 log::info!(
                     "#{} diag monitor subscribe start: service={}, display_idx={}, keyboard={}, show_remote_cursor={}, follow_remote_window={}, clipboard={}, file_clipboard={}, audio={}, noperms={:?}",
                     self.inner.id(),
-                    primary_video_service_name,
+                    monitor_service_name,
                     self.display_idx,
                     self.peer_keyboard_enabled(),
                     self.show_remote_cursor,
@@ -3973,12 +3974,12 @@ impl Connection {
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 let _h = try_start_record_cursor_pos();
                 self.auto_disconnect_timer = Self::get_auto_disconenct_timer();
-                s.try_add_primay_video_service();
-                s.add_connection(self.inner.clone(), &noperms);
+                s.try_add_monitor_service(self.display_idx);
+                s.add_monitor_connection(self.inner.clone(), &noperms, self.display_idx);
                 log::info!(
                     "#{} diag monitor subscribe added: service={}, services_subed={}, auto_disconnect_timer={}",
                     self.inner.id(),
-                    primary_video_service_name,
+                    monitor_service_name,
                     self.services_subed,
                     self.auto_disconnect_timer.is_some()
                 );
@@ -6798,10 +6799,12 @@ impl Connection {
         let display_idx = s.display as usize;
         if self.display_idx != display_idx {
             if let Some(server) = self.server.upgrade() {
-                self.switch_display_to(display_idx, server.clone());
+                if !self.switch_display_to(display_idx, server.clone()) {
+                    return;
+                }
 
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                if s.width != 0 && s.height != 0 {
+                if !self.view_camera && s.width != 0 && s.height != 0 {
                     self.change_resolution(
                         None,
                         &Resolution {
@@ -6833,7 +6836,26 @@ impl Connection {
         }
     }
 
-    fn switch_display_to(&mut self, display_idx: usize, server: Arc<RwLock<Server>>) {
+    fn video_source_count(video_source: VideoSource) -> usize {
+        match video_source {
+            VideoSource::Monitor => display_service::get_sync_displays().len(),
+            VideoSource::Camera => camera::Cameras::get_sync_cameras().len(),
+        }
+    }
+
+    fn switch_display_to(&mut self, display_idx: usize, server: Arc<RwLock<Server>>) -> bool {
+        let video_source = self.video_source();
+        let source_count = Self::video_source_count(video_source);
+        if display_idx >= source_count {
+            log::warn!(
+                "#{} ignore switch to invalid {:?} index {}, available source count: {}",
+                self.inner.id(),
+                video_source,
+                display_idx,
+                source_count
+            );
+            return false;
+        }
         let new_service_name = video_service::get_service_name(self.video_source(), display_idx);
         let old_service_name =
             video_service::get_service_name(self.video_source(), self.display_idx);
@@ -6847,13 +6869,11 @@ impl Connection {
             new_service_name
         );
         let mut lock = server.write().unwrap();
-        if display_idx != *display_service::PRIMARY_DISPLAY_IDX {
-            if !lock.contains(&new_service_name) {
-                lock.add_service(Box::new(video_service::new(
-                    self.video_source(),
-                    display_idx,
-                )));
-            }
+        if !lock.contains(&new_service_name) {
+            lock.add_service(Box::new(video_service::new(
+                self.video_source(),
+                display_idx,
+            )));
         }
         // For versions greater than 1.2.4, a `CaptureDisplays` message will be sent immediately.
         // Unnecessary capturers will be removed then.
@@ -6862,6 +6882,7 @@ impl Connection {
         }
         lock.subscribe(&new_service_name, self.inner.clone(), true);
         self.display_idx = display_idx;
+        true
     }
 
     #[cfg(windows)]
@@ -6904,9 +6925,44 @@ impl Connection {
             sub,
             set
         );
-        if let Some(sever) = self.server.upgrade() {
-            let mut lock = sever.write().unwrap();
-            for display in add.iter() {
+        let source_count = Self::video_source_count(video_source);
+        let valid_add = add
+            .iter()
+            .copied()
+            .filter(|display| *display < source_count)
+            .collect::<Vec<_>>();
+        let valid_sub = sub
+            .iter()
+            .copied()
+            .filter(|display| *display < source_count)
+            .collect::<Vec<_>>();
+        let valid_set = set
+            .iter()
+            .copied()
+            .filter(|display| *display < source_count)
+            .collect::<Vec<_>>();
+        let invalid_count =
+            add.len() + sub.len() + set.len() - valid_add.len() - valid_sub.len() - valid_set.len();
+        if invalid_count != 0 {
+            log::warn!(
+                "#{} ignore {} invalid {:?} indices, available source count: {}",
+                self.inner.id(),
+                invalid_count,
+                video_source,
+                source_count
+            );
+        }
+        // An invalid non-empty request must not degrade into an empty set request,
+        // which would unsubscribe every current display.
+        if (!add.is_empty() && valid_add.is_empty())
+            || (add.is_empty() && !sub.is_empty() && valid_sub.is_empty())
+            || (add.is_empty() && sub.is_empty() && !set.is_empty() && valid_set.is_empty())
+        {
+            return;
+        }
+        if let Some(server) = self.server.upgrade() {
+            let mut lock = server.write().unwrap();
+            for display in valid_add.iter() {
                 let service_name = video_service::get_service_name(video_source, *display);
                 if !lock.contains(&service_name) {
                     log::info!(
@@ -6917,7 +6973,7 @@ impl Connection {
                     lock.add_service(Box::new(video_service::new(video_source, *display)));
                 }
             }
-            for display in set.iter() {
+            for display in valid_set.iter() {
                 let service_name = video_service::get_service_name(video_source, *display);
                 if !lock.contains(&service_name) {
                     log::info!(
@@ -6929,11 +6985,11 @@ impl Connection {
                 }
             }
             if !add.is_empty() {
-                lock.capture_displays(self.inner.clone(), video_source, add, true, false);
+                lock.capture_displays(self.inner.clone(), video_source, &valid_add, true, false);
             } else if !sub.is_empty() {
-                lock.capture_displays(self.inner.clone(), video_source, sub, false, true);
+                lock.capture_displays(self.inner.clone(), video_source, &valid_sub, false, true);
             } else {
-                lock.capture_displays(self.inner.clone(), video_source, set, true, true);
+                lock.capture_displays(self.inner.clone(), video_source, &valid_set, true, true);
             }
             self.multi_ui_session = lock.get_subbed_displays_count(self.inner.id()) > 1;
             if self.follow_remote_window {

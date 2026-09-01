@@ -55,6 +55,7 @@ class SessionHandle<T> {
 
   Future<SessionStartLease<T>?>? _startFuture;
   Future<void>? _closeFuture;
+  Future<void>? _remoteCloseFuture;
   Future<void> _eventTail = Future<void>.value();
   StreamSubscription<T>? _subscription;
   int? _platformLeaseGeneration;
@@ -75,7 +76,25 @@ class SessionHandle<T> {
   bool get canBeReplaced => isClosed && _cleanupFinished;
   bool accepts(int generation) => _lifecycle.accepts(generation);
 
-  Future<void> waitForClose() => _closeFuture ?? Future<void>.value();
+  Future<void> waitForClose() async {
+    final remoteClose = _remoteCloseFuture;
+    if (remoteClose != null) await remoteClose;
+    final close = _closeFuture;
+    if (close != null) await close;
+  }
+
+  Future<bool> prepareForReplacement({
+    Future<void> Function()? cleanupClosedSession,
+  }) async {
+    await waitForClose();
+    if (!canBeReplaced && isClosed && cleanupClosedSession != null) {
+      await close(
+        nativeClosePolicy: NativeSessionClosePolicy.alreadyClosed,
+        cleanup: cleanupClosedSession,
+      );
+    }
+    return canBeReplaced;
+  }
 
   Future<SessionStartLease<T>?> start({
     required Future<void> Function() addNative,
@@ -180,10 +199,21 @@ class SessionHandle<T> {
     await remoteClosed(generation);
   }
 
-  Future<void> remoteClosed(int generation) async {
-    if (!accepts(generation)) return;
+  Future<void> remoteClosed(int generation) {
+    final active = _remoteCloseFuture;
+    if (active != null) return active;
+    if (!accepts(generation)) return Future<void>.value();
     _nativeSessionActive = false;
     _lifecycle.closed(generation);
+    late final Future<void> future;
+    future = _finishRemoteClose().whenComplete(() {
+      if (identical(_remoteCloseFuture, future)) _remoteCloseFuture = null;
+    });
+    _remoteCloseFuture = future;
+    return future;
+  }
+
+  Future<void> _finishRemoteClose() async {
     try {
       await _cancelSubscription();
     } finally {
@@ -264,6 +294,10 @@ class SessionHandle<T> {
         }
       } catch (_) {
         // start() reports its own failure; close still has to finish cleanup.
+      }
+      final remoteClose = _remoteCloseFuture;
+      if (remoteClose != null) {
+        await remoteClose;
       }
       try {
         await _cancelSubscription();

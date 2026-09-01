@@ -2434,7 +2434,19 @@ class ImageModel with ChangeNotifier {
 
   addCallbackOnFirstImage(Function(String) cb) => callbacksOnFirstImage.add(cb);
 
-  clearImage() => _image = null;
+  void clearImage() => _publishImage(null);
+
+  void _publishImage(ui.Image? image) {
+    final previous = _image;
+    if (identical(previous, image)) return;
+    _image = image;
+    notifyListeners();
+    if (previous != null) {
+      SchedulerBinding.instance.addPostFrameCallback(
+        (_) => previous.dispose(),
+      );
+    }
+  }
 
   bool _webDecodingRgba = false;
   final List<Uint8List> _webRgbaList = List.empty(growable: true);
@@ -2490,14 +2502,13 @@ class ImageModel with ChangeNotifier {
       }
       await _ensureInteractionGeometry();
     }
-    _image?.dispose();
-    _image = image;
     if (image == null) {
+      _publishImage(null);
       await _androidRenderTarget.retire();
       _interactionGeometryInitialized = false;
     } else {
       parent.target?.canvasModel.tryApplyPendingMobileCursorFocus();
-      notifyListeners();
+      _publishImage(image);
     }
   }
 
@@ -2604,8 +2615,7 @@ class ImageModel with ChangeNotifier {
             );
 
   void disposeImage() {
-    _image?.dispose();
-    _image = null;
+    _publishImage(null);
     unawaited(_androidRenderTarget.retire());
     _interactionGeometryInitialized = false;
   }
@@ -5638,8 +5648,10 @@ class FFI {
     String? transferSourceSessionId,
   }) async {
     if (!_sessionHandle.isPristine) {
-      await _sessionHandle.waitForClose();
-      if (!_sessionHandle.canBeReplaced) {
+      final canReplace = await _sessionHandle.prepareForReplacement(
+        cleanupClosedSession: isMobile ? _cleanupMobileSessionState : null,
+      );
+      if (!canReplace) {
         throw StateError('Previous remote session is not fully closed');
       }
       _sessionHandle = _newSessionHandle();
@@ -5953,6 +5965,22 @@ class FFI {
         sessionId: sessionId, code: code, trustThisDevice: trustThisDevice);
   }
 
+  Future<void> _cleanupMobileSessionState() async {
+    chatModel.close();
+    for (final model in _terminalModels.values) {
+      model.dispose();
+    }
+    _terminalModels.clear();
+    await imageModel.update(null);
+    cursorModel.clear();
+    ffiModel.clear();
+    canvasModel.clear();
+    inputModel.setRelativeMouseMode(false);
+    inputModel.resetModifiers();
+    id = '';
+    debugPrint('mobile session reset for fresh reconnect');
+  }
+
   /// Clear session-scoped state while keeping the mobile page reusable.
   Future<void> resetMobileSessionForReconnect({
     required bool closeSession,
@@ -5960,21 +5988,7 @@ class FFI {
     nativeClosePolicy: closeSession
         ? NativeSessionClosePolicy.requestClose
         : NativeSessionClosePolicy.alreadyClosed,
-    cleanup: () async {
-      chatModel.close();
-      for (final model in _terminalModels.values) {
-        model.dispose();
-      }
-      _terminalModels.clear();
-      await imageModel.update(null);
-      cursorModel.clear();
-      ffiModel.clear();
-      canvasModel.clear();
-      inputModel.setRelativeMouseMode(false);
-      inputModel.resetModifiers();
-      id = '';
-      debugPrint('mobile session reset for fresh reconnect');
-    },
+    cleanup: _cleanupMobileSessionState,
   );
 
   /// Close the remote session.

@@ -156,6 +156,77 @@ void main() {
     await controller.close();
   });
 
+  test(
+    'remote close can finish cleanup before the next owner starts',
+    () async {
+      var nativeCloseCount = 0;
+      var cleanupCount = 0;
+      final controller = StreamController<int>();
+      final session = handle(closeNative: () async => nativeCloseCount++);
+      final lease = await session.start(
+        addNative: () async {},
+        startEvents: () => controller.stream,
+      );
+      await session.bindSubscription(
+        lease!.generation,
+        lease.events.listen((_) {}),
+      );
+      session.connected(lease.generation);
+
+      await session.remoteClosed(lease.generation);
+
+      expect(session.canBeReplaced, isFalse);
+      expect(
+        await session.prepareForReplacement(
+          cleanupClosedSession: () async => cleanupCount++,
+        ),
+        isTrue,
+      );
+      expect(nativeCloseCount, 0);
+      expect(cleanupCount, 1);
+      expect(session.canBeReplaced, isTrue);
+      await controller.close();
+    },
+  );
+
+  test('close racing remote close still runs cleanup once', () async {
+    final cancelGate = Completer<void>();
+    var cleanupCount = 0;
+    var subscriptionCancelCount = 0;
+    final controller = StreamController<int>(
+      onCancel: () {
+        subscriptionCancelCount++;
+        return cancelGate.future;
+      },
+    );
+    final session = handle(closeNative: () async {});
+    final lease = await session.start(
+      addNative: () async {},
+      startEvents: () => controller.stream,
+    );
+    await session.bindSubscription(
+      lease!.generation,
+      lease.events.listen((_) {}),
+    );
+
+    final remoteClose = session.remoteClosed(lease.generation);
+    await Future<void>.delayed(Duration.zero);
+    final close = session.close(
+      nativeClosePolicy: NativeSessionClosePolicy.alreadyClosed,
+      cleanup: () async => cleanupCount++,
+    );
+    await Future<void>.delayed(Duration.zero);
+    expect(cleanupCount, 0);
+
+    cancelGate.complete();
+    await Future.wait([remoteClose, close]);
+
+    expect(subscriptionCancelCount, 1);
+    expect(cleanupCount, 1);
+    expect(session.canBeReplaced, isTrue);
+    await controller.close();
+  });
+
   test('remote close releases the platform lease when cancel fails', () async {
     var releaseCount = 0;
     final controller = StreamController<int>(
