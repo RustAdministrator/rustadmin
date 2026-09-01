@@ -750,6 +750,69 @@ final class PluginOptionSessionEvent extends SessionEvent {
   final String value;
 }
 
+final class SessionCmTransferJobValue {
+  const SessionCmTransferJobValue({
+    required this.connectionId,
+    required this.id,
+    required this.path,
+    required this.isRemote,
+    required this.totalSize,
+    required this.finishedSize,
+    required this.transferred,
+    required this.done,
+    required this.cancel,
+    required this.error,
+  });
+
+  final int connectionId;
+  final int id;
+  final String path;
+  final bool isRemote;
+  final int totalSize;
+  final int finishedSize;
+  final int transferred;
+  final bool done;
+  final bool cancel;
+  final String error;
+}
+
+final class CmTransferLogSessionEvent extends SessionEvent {
+  CmTransferLogSessionEvent(List<SessionCmTransferJobValue> jobs)
+    : jobs = List<SessionCmTransferJobValue>.unmodifiable(jobs);
+
+  final List<SessionCmTransferJobValue> jobs;
+}
+
+enum CmFileActionKind { remove, createDirectory }
+
+final class CmFileActionSessionEvent extends SessionEvent {
+  const CmFileActionSessionEvent({
+    required this.kind,
+    required this.connectionId,
+    required this.id,
+    required this.path,
+    required this.directory,
+  });
+
+  final CmFileActionKind kind;
+  final int connectionId;
+  final int id;
+  final String path;
+  final bool directory;
+}
+
+final class CmFileRenameSessionEvent extends SessionEvent {
+  const CmFileRenameSessionEvent({
+    required this.connectionId,
+    required this.path,
+    required this.newName,
+  });
+
+  final int connectionId;
+  final String path;
+  final String newName;
+}
+
 const _qualityDisplayMapKeys = <String>{
   'fps',
   'decode_fps',
@@ -1048,6 +1111,8 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
               key: key,
               value: value,
             );
+    case 'cm_file_transfer_log':
+      return _decodeCmFileLogEvent(event);
     case 'cursor_data':
       final id = _decodeNonEmptyString(event['id']);
       final hotx = _decodeDouble(event['hotx']);
@@ -1963,6 +2028,143 @@ List<SessionPluginUiValue>? _decodePluginUi(Object? raw) {
     );
   }
   return ui;
+}
+
+SessionEvent _decodeCmFileLogEvent(Map<String, dynamic> event) {
+  if (event.containsKey('transfer')) {
+    final decoded = _decodeJsonInput(
+      event['transfer'],
+      maxBytes: 8 * 1024 * 1024,
+    );
+    final values = decoded is List ? decoded : [decoded];
+    if (values.length > 65536) {
+      return const InvalidSessionEvent(
+        'cm_file_transfer_log',
+        'transfer batch too large',
+      );
+    }
+    final jobs = <SessionCmTransferJobValue>[];
+    for (final value in values) {
+      final job = _decodeCmTransferJob(value);
+      if (job == null) {
+        return const InvalidSessionEvent(
+          'cm_file_transfer_log',
+          'invalid transfer job',
+        );
+      }
+      jobs.add(job);
+    }
+    return CmTransferLogSessionEvent(jobs);
+  }
+  if (event.containsKey('remove') || event.containsKey('create_dir')) {
+    final remove = event.containsKey('remove');
+    final decoded = _decodeJsonInput(
+      remove ? event['remove'] : event['create_dir'],
+    );
+    if (decoded is! Map) {
+      return const InvalidSessionEvent(
+        'cm_file_transfer_log',
+        'invalid file action',
+      );
+    }
+    final connectionId = _decodeInt(decoded['connId']);
+    final id = _decodeInt(decoded['id']);
+    final path = decoded['path'];
+    final directory = decoded['dir'];
+    return connectionId == null ||
+            connectionId < 0 ||
+            id == null ||
+            id < 0 ||
+            path is! String ||
+            path.length > 32 * 1024 ||
+            directory is! bool
+        ? const InvalidSessionEvent(
+            'cm_file_transfer_log',
+            'invalid file action fields',
+          )
+        : CmFileActionSessionEvent(
+            kind: remove
+                ? CmFileActionKind.remove
+                : CmFileActionKind.createDirectory,
+            connectionId: connectionId,
+            id: id,
+            path: path,
+            directory: directory,
+          );
+  }
+  if (event.containsKey('rename')) {
+    final decoded = _decodeJsonInput(event['rename']);
+    if (decoded is! Map) {
+      return const InvalidSessionEvent(
+        'cm_file_transfer_log',
+        'invalid rename',
+      );
+    }
+    final connectionId = _decodeInt(decoded['connId']);
+    final path = decoded['path'];
+    final newName = decoded['newName'];
+    return connectionId == null ||
+            connectionId < 0 ||
+            path is! String ||
+            path.length > 32 * 1024 ||
+            newName is! String ||
+            newName.length > 32 * 1024
+        ? const InvalidSessionEvent(
+            'cm_file_transfer_log',
+            'invalid rename fields',
+          )
+        : CmFileRenameSessionEvent(
+            connectionId: connectionId,
+            path: path,
+            newName: newName,
+          );
+  }
+  return const InvalidSessionEvent('cm_file_transfer_log', 'missing action');
+}
+
+SessionCmTransferJobValue? _decodeCmTransferJob(Object? raw) {
+  if (raw is! Map) return null;
+  final connectionId = _decodeInt(raw['connId']);
+  final id = _decodeInt(raw['id']);
+  final path = raw['dataSource'];
+  final isRemote = _decodeBool(raw['isRemote']);
+  final totalSize = _decodeInt(raw['totalSize']);
+  final finishedSize = _decodeInt(raw['finishedSize']);
+  final transferred = _decodeInt(raw['transferred']);
+  final done = _decodeBool(raw['done']);
+  final cancel = _decodeBool(raw['cancel']);
+  final error = raw['error'];
+  if (connectionId == null ||
+      connectionId < 0 ||
+      id == null ||
+      id < 0 ||
+      path is! String ||
+      path.length > 32 * 1024 ||
+      isRemote == null ||
+      totalSize == null ||
+      totalSize < 0 ||
+      finishedSize == null ||
+      finishedSize < 0 ||
+      transferred == null ||
+      transferred < 0 ||
+      done == null ||
+      cancel == null ||
+      error is! String ||
+      error.length > 64 * 1024) {
+    return null;
+  }
+  return SessionCmTransferJobValue(
+    connectionId: connectionId,
+    id: id,
+    path: path,
+    isRemote: isRemote,
+    totalSize: totalSize,
+    finishedSize: finishedSize,
+    transferred: transferred,
+    done: done,
+    cancel: cancel,
+    error: error,
+  );
 }
 
 List<SessionDisplayValue>? _decodeDisplays(Object? raw) {

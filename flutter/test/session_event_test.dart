@@ -660,6 +660,63 @@ void main() {
     }
   });
 
+  test('decodes typed connection-manager file logs', () {
+    final transfer =
+        decodeTypedSessionEvent({
+              'name': 'cm_file_transfer_log',
+              'transfer':
+                  '[{"connId":3,"id":"7","dataSource":"/tmp/a","isRemote":true,"totalSize":100,"finishedSize":50,"transferred":50,"done":false,"cancel":false,"error":""}]',
+            })!
+            as CmTransferLogSessionEvent;
+    expect(transfer.jobs.single.connectionId, 3);
+    expect(transfer.jobs.single.finishedSize, 50);
+
+    final remove =
+        decodeTypedSessionEvent({
+              'name': 'cm_file_transfer_log',
+              'remove': '{"connId":3,"id":8,"path":"/tmp/a","dir":false}',
+            })!
+            as CmFileActionSessionEvent;
+    expect(remove.kind, CmFileActionKind.remove);
+
+    final create =
+        decodeTypedSessionEvent({
+              'name': 'cm_file_transfer_log',
+              'create_dir': '{"connId":3,"id":9,"path":"/tmp/d","dir":true}',
+            })!
+            as CmFileActionSessionEvent;
+    expect(create.kind, CmFileActionKind.createDirectory);
+
+    final rename =
+        decodeTypedSessionEvent({
+              'name': 'cm_file_transfer_log',
+              'rename': '{"connId":3,"path":"/tmp/a","newName":"b"}',
+            })!
+            as CmFileRenameSessionEvent;
+    expect(rename.newName, 'b');
+  });
+
+  test('rejects malformed connection-manager file logs', () {
+    for (final event in [
+      {'name': 'cm_file_transfer_log'},
+      {
+        'name': 'cm_file_transfer_log',
+        'transfer':
+            '{"connId":3,"id":7,"dataSource":"a","isRemote":true,"totalSize":-1,"finishedSize":0,"transferred":0,"done":false,"cancel":false,"error":""}',
+      },
+      {
+        'name': 'cm_file_transfer_log',
+        'remove': '{"connId":3,"id":8,"path":"a","dir":"false"}',
+      },
+      {
+        'name': 'cm_file_transfer_log',
+        'rename': '{"connId":-1,"path":"a","newName":"b"}',
+      },
+    ]) {
+      expect(decodeTypedSessionEvent(event), isA<InvalidSessionEvent>());
+    }
+  });
+
   test('decodes display and platform synchronization payloads', () {
     final sync =
         decodeTypedSessionEvent({

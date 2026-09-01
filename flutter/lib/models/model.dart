@@ -451,14 +451,7 @@ class FfiModel with ChangeNotifier {
         await _routeTypedSessionEvent(typedEvent, sessionId, peerId);
         return;
       }
-      var name = evt['name'];
-      if (name == "cm_file_transfer_log") {
-        if (isDesktop) {
-          gFFI.cmFileModel.onFileTransferLog(evt);
-        }
-      } else {
-        debugPrint('Event is not handled in the fixed branch: $name');
-      }
+      debugPrint('Event is not handled in the fixed branch: ${evt['name']}');
     };
   }
 
@@ -600,6 +593,12 @@ class FfiModel with ChangeNotifier {
       handleReloadingEvent(event);
     } else if (event is PluginOptionSessionEvent) {
       handleOptionEvent(event);
+    } else if (event is CmTransferLogSessionEvent) {
+      if (isDesktop) gFFI.cmFileModel.handleTransferEvent(event);
+    } else if (event is CmFileActionSessionEvent) {
+      if (isDesktop) gFFI.cmFileModel.handleFileActionEvent(event);
+    } else if (event is CmFileRenameSessionEvent) {
+      if (isDesktop) gFFI.cmFileModel.handleRenameEvent(event);
     } else if (event is PeerInfoSessionEvent) {
       await handlePeerInfoEvent(event, peerId, false);
     } else if (event is SyncPeerInfoSessionEvent) {
