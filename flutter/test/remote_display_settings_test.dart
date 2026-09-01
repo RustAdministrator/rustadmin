@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter_hbb/common/quality_monitor_settings.dart';
 import 'package:flutter_hbb/common/remote_display_settings.dart';
 import 'package:flutter_hbb/common/remote_toolbar_settings.dart';
+import 'package:flutter_hbb/common/session_peer_settings.dart';
+import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/mobile/mobile_remote_settings_repository.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -13,6 +15,9 @@ void main() {
       ...QualityMonitorSettingsRegistry.all,
       ...RemoteDisplaySettingsRegistry.all,
       ...MobileRemoteSettingsRegistry.all,
+      ...SessionPeerSettingsRegistry.all,
+      ...RemoteAppLocalSettingsRegistry.all,
+      ...LiveSessionSettingsRegistry.all,
     ];
     final scopedKeys = definitions
         .map((setting) => (setting.scope, setting.key))
@@ -69,6 +74,34 @@ void main() {
         MobileRemoteSettingsRegistry.cursorInertiaPeer.applyMode,
         SettingApplyMode.live,
       );
+      expect(
+        SessionPeerSettingsRegistry.codecPreference.scope,
+        SettingScope.peer,
+      );
+      expect(
+        RemoteAppLocalSettingsRegistry.textureRender.scope,
+        SettingScope.appLocal,
+      );
+      expect(
+        RemoteAppLocalSettingsRegistry.virtualMouseScale.codec.decode('99'),
+        1.8,
+      );
+      expect(
+        RemoteAppLocalSettingsRegistry.virtualMouseScale.codec.decode('bad'),
+        1,
+      );
+      expect(
+        RemoteAppLocalSettingsRegistry.showVirtualMouse.codec.encode(false),
+        'N',
+      );
+      expect(
+        LiveSessionSettingsRegistry.showQualityMonitor.scope,
+        SettingScope.liveSession,
+      );
+      expect(
+        LiveSessionSettingsRegistry.showQualityMonitor.applyMode,
+        SettingApplyMode.live,
+      );
     },
   );
 
@@ -95,5 +128,50 @@ void main() {
     expect(storage[RemoteDisplaySettingsRegistry.showMonitorsToolbar.key], 'Y');
     await subscription.cancel();
     await defaults.dispose();
+  });
+
+  test('live repository emits only registered legacy commands', () async {
+    final commands = <String>[];
+    final repository = LiveSessionSettingsRepository(
+      readSync: (key) => key == 'show-quality-monitor',
+      read: (key) async => key == kOptionTerminalPersistent,
+      write: (command) async => commands.add(command),
+    );
+
+    expect(
+      repository.readSync(LiveSessionSettingsRegistry.showQualityMonitor),
+      isTrue,
+    );
+    expect(
+      await repository.read(LiveSessionSettingsRegistry.terminalPersistent),
+      isTrue,
+    );
+    await repository.toggle(LiveSessionSettingsRegistry.showRemoteCursor);
+    await repository.setBlockInput(true);
+    await repository.setBlockInput(false);
+    await repository.setClipboardDirection(kClipboardDirectionLocalToRemote);
+    await repository.setClipboardDirection('invalid');
+
+    expect(commands, [
+      'show-remote-cursor',
+      'block-input',
+      'unblock-input',
+      '$kSessionToggleClipboardDirectionPrefix'
+          '$kClipboardDirectionLocalToRemote',
+      '$kSessionToggleClipboardDirectionPrefix$kClipboardDirectionOff',
+    ]);
+
+    final unsettled = LiveSessionSettingsRepository(
+      readSync: (_) => false,
+      read: (_) async => null,
+      write: (_) async {},
+    );
+    expect(
+      await unsettled.toggleAndRead(
+        LiveSessionSettingsRegistry.showMyCursor,
+        fallback: true,
+      ),
+      isTrue,
+    );
   });
 }

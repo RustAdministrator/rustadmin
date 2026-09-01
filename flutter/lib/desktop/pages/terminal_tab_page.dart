@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/widgets/dialog.dart';
+import 'package:flutter_hbb/common/session_peer_settings.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
@@ -192,10 +193,9 @@ class _TerminalTabPageState extends State<TerminalTabPage> {
     final ffi = TerminalConnectionManager.getExistingConnection(peerId);
     if (ffi == null) return;
 
-    final isPersistent = bind.sessionGetToggleOptionSync(
-      sessionId: ffi.sessionId,
-      arg: kOptionTerminalPersistent,
-    );
+    final isPersistent = LiveSessionSettingsRepository.forSession(
+      ffi.sessionId,
+    ).readSync(LiveSessionSettingsRegistry.terminalPersistent);
 
     if (isPersistent) {
       if (persistAll) {
@@ -268,16 +268,14 @@ class _TerminalTabPageState extends State<TerminalTabPage> {
       text: translate('Keep terminal sessions on disconnect'),
       getter: () async {
         final ffi = Get.find<FFI>(tag: 'terminal_$peerId');
-        return bind.sessionGetToggleOptionSync(
-          sessionId: ffi.sessionId,
-          arg: kOptionTerminalPersistent,
+        return LiveSessionSettingsRepository.forSession(ffi.sessionId).readSync(
+          LiveSessionSettingsRegistry.terminalPersistent,
         );
       },
       setter: (bool v) async {
         final ffi = Get.find<FFI>(tag: 'terminal_$peerId');
-        await bind.sessionToggleOption(
-          sessionId: ffi.sessionId,
-          value: kOptionTerminalPersistent,
+        await LiveSessionSettingsRepository.forSession(ffi.sessionId).toggle(
+          LiveSessionSettingsRegistry.terminalPersistent,
         );
       },
       padding: padding,

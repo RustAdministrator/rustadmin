@@ -1,8 +1,8 @@
 import '../consts.dart';
+import 'package:uuid/uuid.dart';
 import '../common/remote_toolbar_settings.dart';
+import '../common/session_peer_settings.dart';
 import '../models/platform_model.dart';
-import '../generated_bridge.dart'
-    if (dart.library.html) '../web/bridge.dart';
 import 'widgets/remote_session_controls.dart';
 
 typedef OptionReader = String Function(String key);
@@ -109,14 +109,6 @@ abstract final class MobileRemoteSettingsRegistry {
         key: kOptionMobileRemoteToolbarPlacement,
         codec: _PlacementCodec(),
       );
-  static const touchMode = LocalSetting<bool>(
-    key: kOptionTouchMode,
-    codec: BoolOptionCodec(falseValue: 'N'),
-  );
-  static const textureRender = LocalSetting<bool>(
-    key: kOptionTextureRender,
-    codec: BoolOptionCodec(falseValue: 'N'),
-  );
   static const toolbarOverlapPeer = PeerSetting<int>(
     key: kOptionMobileRemoteToolbarOverlapOpacityPercent,
     codec: _toolbarOverlapCodec,
@@ -140,8 +132,6 @@ abstract final class MobileRemoteSettingsRegistry {
     toolbarOverlapDefault,
     cursorInertiaDefault,
     toolbarPlacement,
-    touchMode,
-    textureRender,
     toolbarOverlapPeer,
     cursorInertiaPeer,
     physicalKeyInput,
@@ -170,7 +160,7 @@ class MobileRemoteSettingsSnapshot {
 }
 
 class MobileRemoteSettingsRepository {
-  factory MobileRemoteSettingsRepository.forSession(SessionID sessionId) =>
+  factory MobileRemoteSettingsRepository.forSession(UuidValue sessionId) =>
       MobileRemoteSettingsRepository(
         readUserDefault: (key) => bind.mainGetUserDefaultOption(key: key),
         readLocal: (key) => bind.mainGetLocalOption(key: key),
@@ -294,16 +284,16 @@ class MobileRemoteSettingsRepository {
     }
   }
 
-  Future<void> _storeLocal<T>(LocalSetting<T> setting, T value) async {
+  Future<void> _storeAppLocal<T>(AppLocalSetting<T> setting, T value) async {
     final writer = _writeLocal;
     if (writer != null) await writer(setting.key, setting.codec.encode(value));
   }
 
   Future<void> storeTouchMode(bool value) =>
-      _storeLocal(MobileRemoteSettingsRegistry.touchMode, value);
+      _storeAppLocal(RemoteAppLocalSettingsRegistry.touchMode, value);
 
   Future<void> storeTextureRender(bool value) =>
-      _storeLocal(MobileRemoteSettingsRegistry.textureRender, value);
+      _storeAppLocal(RemoteAppLocalSettingsRegistry.textureRender, value);
 
   Future<void> _storePeer<T>(PeerSetting<T> setting, T value) async {
     final writer = _writePeer;
@@ -344,22 +334,4 @@ class MobileRemoteDefaultsRepository {
 
 final mobileRemoteDefaults = MobileRemoteDefaultsRepository(
   remoteUserDefaultSettings,
-);
-
-class MobileRemoteLocalSettingsRepository {
-  const MobileRemoteLocalSettingsRepository(this._readRaw, this._writeRaw);
-
-  final OptionReader _readRaw;
-  final OptionWriter _writeRaw;
-
-  T read<T>(LocalSetting<T> setting) =>
-      setting.codec.decode(_readRaw(setting.key));
-
-  Future<void> write<T>(LocalSetting<T> setting, T value) =>
-      _writeRaw(setting.key, setting.codec.encode(value));
-}
-
-final mobileRemoteLocalSettings = MobileRemoteLocalSettingsRepository(
-  (key) => bind.mainGetLocalOption(key: key),
-  (key, value) => bind.mainSetLocalOption(key: key, value: value),
 );

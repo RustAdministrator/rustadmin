@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/session_peer_settings.dart';
 import 'package:flutter_hbb/common/widgets/dialog.dart';
 import 'package:flutter_hbb/utils/event_loop.dart';
 import 'package:get/get.dart';
@@ -360,21 +361,24 @@ class FileController {
   }
 
   Future<void> onReady() async {
+    final settings = SessionPeerSettingsRepository.forSession(sessionId);
     if (isLocal) {
       options.value.home = await bind.mainGetHomeDir();
     }
-    options.value.showHidden = (await bind.sessionGetPeerOption(
-            sessionId: sessionId,
-            name: isLocal ? "local_show_hidden" : "remote_show_hidden"))
-        .isNotEmpty;
+    final showHiddenSetting = isLocal
+        ? SessionPeerSettingsRegistry.localShowHidden
+        : SessionPeerSettingsRegistry.remoteShowHidden;
+    options.value.showHidden = await settings.readPeer(showHiddenSetting);
     options.value.isWindows = isLocal
         ? isWindows
         : rootState.target?.ffiModel.pi.platform == kPeerPlatformWindows;
 
     await Future.delayed(Duration(milliseconds: 100));
 
-    final savedDir = (await bind.sessionGetPeerOption(
-        sessionId: sessionId, name: isLocal ? "local_dir" : "remote_dir"));
+    final directorySetting = isLocal
+        ? SessionPeerSettingsRegistry.localDirectory
+        : SessionPeerSettingsRegistry.remoteDirectory;
+    final savedDir = await settings.readPeer(directorySetting);
     Future<bool> tryOpenReadyDirs() async {
       final dirs = <String>{
         if (directory.value.path.isNotEmpty) directory.value.path,
@@ -401,15 +405,19 @@ class FileController {
   }
 
   Future<void> close() async {
-    // save config
-    Map<String, String> msgMap = {};
-    msgMap[isLocal ? "local_dir" : "remote_dir"] = directory.value.path;
-    msgMap[isLocal ? "local_show_hidden" : "remote_show_hidden"] =
-        options.value.showHidden ? "Y" : "";
-    for (final msg in msgMap.entries) {
-      await bind.sessionPeerOption(
-          sessionId: sessionId, name: msg.key, value: msg.value);
-    }
+    final settings = SessionPeerSettingsRepository.forSession(sessionId);
+    await settings.write(
+      isLocal
+          ? SessionPeerSettingsRegistry.localDirectory
+          : SessionPeerSettingsRegistry.remoteDirectory,
+      directory.value.path,
+    );
+    await settings.write(
+      isLocal
+          ? SessionPeerSettingsRegistry.localShowHidden
+          : SessionPeerSettingsRegistry.remoteShowHidden,
+      options.value.showHidden,
+    );
     directory.value.clear();
     options.value.clear();
   }

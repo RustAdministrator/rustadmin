@@ -15,6 +15,7 @@ import '../../common.dart';
 import '../../common/quality_monitor_settings.dart';
 import '../../common/remote_display_settings.dart';
 import '../../common/remote_toolbar_settings.dart';
+import '../../common/session_peer_settings.dart';
 import '../../common/transport_mode.dart';
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/login.dart';
@@ -1267,8 +1268,8 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                   description: Text(translate('texture_render_tip')),
                   initialValue: _useTextureRender,
                   onToggle: (v) async {
-                    await mobileRemoteLocalSettings.write(
-                      MobileRemoteSettingsRegistry.textureRender,
+                    await remoteAppLocalSettings.write(
+                      RemoteAppLocalSettingsRegistry.textureRender,
                       v,
                     );
                     final actual = bind.mainGetUseTextureRender();
@@ -2072,8 +2073,8 @@ class _CompactDisplaySettingsState extends State<_CompactDisplaySettings> {
           onChanged: (value) {
             if (value == null) return;
             unawaited(
-              mobileRemoteLocalSettings.write(
-                MobileRemoteSettingsRegistry.textureRender,
+              remoteAppLocalSettings.write(
+                RemoteAppLocalSettingsRegistry.textureRender,
                 value,
               ),
             );

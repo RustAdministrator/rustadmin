@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_hbb/common/widgets/peers_view.dart';
+import 'package:flutter_hbb/common/session_peer_settings.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/ab_model.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
@@ -1835,13 +1836,20 @@ class FfiModel with ChangeNotifier {
       // 1. User has set the touch mode explicitly.
       // 2. The advanced option (custom client) is set.
       //    Then we choose to use the local option.
-      final optLocal = bind.mainGetLocalOption(key: kOptionTouchMode);
-      if (optLocal != '') {
-        _touchMode = optLocal == 'Y';
+      final optLocal = remoteAppLocalSettings.read(
+        RemoteAppLocalSettingsRegistry.touchMode,
+      );
+      final optLocalRaw = remoteAppLocalSettings.readRaw(
+        RemoteAppLocalSettingsRegistry.touchMode,
+      );
+      if (optLocalRaw.isNotEmpty) {
+        _touchMode = optLocal;
       } else {
-        final optSession = await bind.sessionGetOption(
-            sessionId: sessionId, arg: kOptionTouchMode);
-        _touchMode = optSession != '';
+        final settings = SessionPeerSettingsRepository.forSession(sessionId);
+        _touchMode =
+            (await settings.readRaw(
+              SessionPeerSettingsRegistry.legacyTouchMode,
+            )).isNotEmpty;
       }
     }
     if (isMobile) {
@@ -1886,12 +1894,14 @@ class FfiModel with ChangeNotifier {
       parent.target?.elevationModel.onPeerInfo(_pi);
     }
     if (connType == ConnType.defaultConn) {
+      final liveSettings = LiveSessionSettingsRepository.forSession(sessionId);
       setViewOnly(
-          peerId,
-          bind.sessionGetToggleOptionSync(
-              sessionId: sessionId, arg: kOptionToggleViewOnly));
-      setShowMyCursor(bind.sessionGetToggleOptionSync(
-          sessionId: sessionId, arg: kOptionToggleShowMyCursor));
+        peerId,
+        liveSettings.readSync(LiveSessionSettingsRegistry.viewOnly),
+      );
+      setShowMyCursor(
+        liveSettings.readSync(LiveSessionSettingsRegistry.showMyCursor),
+      );
     }
     if (connType == ConnType.defaultConn || connType == ConnType.viewCamera) {
       _pi.platformAdditions =
@@ -2215,15 +2225,18 @@ class FfiModel with ChangeNotifier {
   ) async {
     notifyListeners();
     try {
-      final isOn = bind.sessionGetToggleOptionSync(
-          sessionId: sessionId, arg: 'privacy-mode');
+      final isOn = LiveSessionSettingsRepository.forSession(
+        sessionId,
+      ).readSync(LiveSessionSettingsRegistry.privacyMode);
       if (isOn) {
-        var privacyModeImpl = await bind.sessionGetOption(
-            sessionId: sessionId, arg: 'privacy-mode-impl-key');
+        final settings = SessionPeerSettingsRepository.forSession(sessionId);
+        var privacyModeImpl = await settings.read(
+          SessionPeerSettingsRegistry.privacyModeImplementation,
+        );
         // For compatibility, version < 1.2.4, the default value is 'privacy_mode_impl_mag'.
         final initDefaultPrivacyMode = 'privacy_mode_impl_mag';
         PrivacyModeState.find(peerId).value =
-            privacyModeImpl ?? initDefaultPrivacyMode;
+            privacyModeImpl.isEmpty ? initDefaultPrivacyMode : privacyModeImpl;
       } else {
         PrivacyModeState.find(peerId).value = '';
       }
@@ -2241,8 +2254,10 @@ class FfiModel with ChangeNotifier {
       if (value) {
         ShowRemoteCursorState.find(id).value = value;
       } else {
-        ShowRemoteCursorState.find(id).value = bind.sessionGetToggleOptionSync(
-            sessionId: sessionId, arg: 'show-remote-cursor');
+        ShowRemoteCursorState.find(id).value =
+            LiveSessionSettingsRepository.forSession(sessionId).readSync(
+          LiveSessionSettingsRegistry.showRemoteCursor,
+        );
       }
     } catch (e) {
       //
@@ -2288,7 +2303,12 @@ class VirtualMouseMode with ChangeNotifier {
     if (s <= 0) return;
     if (s == _virtualMouseScale) return;
     _virtualMouseScale = s;
-    bind.mainSetLocalOption(key: kOptionVirtualMouseScale, value: s.toString());
+    unawaited(
+      remoteAppLocalSettings.write(
+        RemoteAppLocalSettingsRegistry.virtualMouseScale,
+        s,
+      ),
+    );
     notifyListeners();
   }
 
@@ -2301,29 +2321,34 @@ class VirtualMouseMode with ChangeNotifier {
   }
 
   void loadOptions() {
-    _showVirtualMouse =
-        bind.mainGetLocalOption(key: kOptionShowVirtualMouse) == 'Y';
-    _virtualMouseScale = double.tryParse(
-            bind.mainGetLocalOption(key: kOptionVirtualMouseScale)) ??
-        1.0;
-    _showVirtualJoystick =
-        bind.mainGetLocalOption(key: kOptionShowVirtualJoystick) == 'Y';
+    _showVirtualMouse = remoteAppLocalSettings.read(
+      RemoteAppLocalSettingsRegistry.showVirtualMouse,
+    );
+    _virtualMouseScale = remoteAppLocalSettings.read(
+      RemoteAppLocalSettingsRegistry.virtualMouseScale,
+    );
+    _showVirtualJoystick = remoteAppLocalSettings.read(
+      RemoteAppLocalSettingsRegistry.showVirtualJoystick,
+    );
     notifyListeners();
   }
 
   Future<void> toggleVirtualMouse() async {
-    await bind.mainSetLocalOption(
-        key: kOptionShowVirtualMouse, value: showVirtualMouse ? 'N' : 'Y');
-    setShowVirtualMouse(
-        bind.mainGetLocalOption(key: kOptionShowVirtualMouse) == 'Y');
+    final value = !showVirtualMouse;
+    await remoteAppLocalSettings.write(
+      RemoteAppLocalSettingsRegistry.showVirtualMouse,
+      value,
+    );
+    setShowVirtualMouse(value);
   }
 
   Future<void> toggleVirtualJoystick() async {
-    await bind.mainSetLocalOption(
-        key: kOptionShowVirtualJoystick,
-        value: showVirtualJoystick ? 'N' : 'Y');
-    setShowVirtualJoystick(
-        bind.mainGetLocalOption(key: kOptionShowVirtualJoystick) == 'Y');
+    final value = !showVirtualJoystick;
+    await remoteAppLocalSettings.write(
+      RemoteAppLocalSettingsRegistry.showVirtualJoystick,
+      value,
+    );
+    setShowVirtualJoystick(value);
   }
 }
 
@@ -4870,10 +4895,10 @@ class QualityMonitorModel with ChangeNotifier {
     }
     _details = details;
     notifyListeners();
-    await bind.sessionPeerOption(
-        sessionId: sessionId,
-        name: kOptionQualityMonitorDetails,
-        value: details);
+    await SessionPeerSettingsRepository.forSession(sessionId).write(
+      SessionPeerSettingsRegistry.qualityMonitorDetails,
+      details,
+    );
   }
 
   String? _directLabel(dynamic direct) {
@@ -4970,10 +4995,10 @@ class QualityMonitorModel with ChangeNotifier {
       return;
     }
     _floatingPosition = null;
-    await bind.sessionPeerOption(
-        sessionId: sessionId,
-        name: kOptionQualityMonitorFloatingPosition,
-        value: '');
+    await SessionPeerSettingsRepository.forSession(sessionId).write(
+      SessionPeerSettingsRegistry.qualityMonitorFloatingPosition,
+      '',
+    );
     notifyListeners();
   }
 
@@ -4988,12 +5013,15 @@ class QualityMonitorModel with ChangeNotifier {
     }
     if (!persist) return;
     _floatingPositionStoreTimer?.cancel();
+    final settings = SessionPeerSettingsRepository.forSession(sessionId);
     _floatingPositionStoreTimer =
         Timer(const Duration(milliseconds: 300), () {
-      bind.sessionPeerOption(
-          sessionId: sessionId,
-          name: kOptionQualityMonitorFloatingPosition,
-          value: _formatFloatingPosition(rounded));
+      unawaited(
+        settings.write(
+          SessionPeerSettingsRegistry.qualityMonitorFloatingPosition,
+          _formatFloatingPosition(rounded),
+        ),
+      );
     });
   }
 
@@ -5003,10 +5031,10 @@ class QualityMonitorModel with ChangeNotifier {
     final sessionId = parent?.target?.sessionId;
     final position = _floatingPosition;
     if (sessionId == null || position == null) return;
-    await bind.sessionPeerOption(
-        sessionId: sessionId,
-        name: kOptionQualityMonitorFloatingPosition,
-        value: _formatFloatingPosition(position));
+    await SessionPeerSettingsRepository.forSession(sessionId).write(
+      SessionPeerSettingsRegistry.qualityMonitorFloatingPosition,
+      _formatFloatingPosition(position),
+    );
   }
 
   void updateFloatingSize(Size size, {bool persist = true}) {
@@ -5026,12 +5054,15 @@ class QualityMonitorModel with ChangeNotifier {
     }
     if (!persist) return;
     _floatingSizeStoreTimer?.cancel();
+    final settings = SessionPeerSettingsRepository.forSession(sessionId);
     _floatingSizeStoreTimer =
         Timer(const Duration(milliseconds: 300), () {
-      bind.sessionPeerOption(
-          sessionId: sessionId,
-          name: kOptionQualityMonitorFloatingSize,
-          value: _formatFloatingSize(rounded));
+      unawaited(
+        settings.write(
+          SessionPeerSettingsRegistry.qualityMonitorFloatingSize,
+          _formatFloatingSize(rounded),
+        ),
+      );
     });
   }
 
@@ -5041,33 +5072,32 @@ class QualityMonitorModel with ChangeNotifier {
     final sessionId = parent?.target?.sessionId;
     final size = _floatingSize;
     if (sessionId == null || size == null) return;
-    await bind.sessionPeerOption(
-        sessionId: sessionId,
-        name: kOptionQualityMonitorFloatingSize,
-        value: _formatFloatingSize(size));
+    await SessionPeerSettingsRepository.forSession(sessionId).write(
+      SessionPeerSettingsRegistry.qualityMonitorFloatingSize,
+      _formatFloatingSize(size),
+    );
   }
 
   checkShowQualityMonitor(SessionID sessionId) async {
     final dataReset = _resetDataForSession(sessionId);
-    final show = await bind.sessionGetToggleOption(
-            sessionId: sessionId, arg: 'show-quality-monitor') ==
-        true;
-    final position = normalizeQualityMonitorPosition(
-        await bind.sessionGetOption(
-                sessionId: sessionId, arg: kOptionQualityMonitorPosition) ??
-            '');
-    final details = normalizeQualityMonitorDetails(
-        await bind.sessionGetOption(
-                sessionId: sessionId, arg: kOptionQualityMonitorDetails) ??
-            '');
+    final settings = SessionPeerSettingsRepository.forSession(sessionId);
+    final show = await LiveSessionSettingsRepository.forSession(
+      sessionId,
+    ).read(LiveSessionSettingsRegistry.showQualityMonitor);
+    final position =
+        await settings.read(SessionPeerSettingsRegistry.qualityMonitorPosition);
+    final details =
+        await settings.read(SessionPeerSettingsRegistry.qualityMonitorDetails);
     final floatingPosition = _parseFloatingPosition(
-        await bind.sessionGetOption(
-                sessionId: sessionId,
-                arg: kOptionQualityMonitorFloatingPosition) ??
-            '');
-    final floatingSize = _parseFloatingSize(await bind.sessionGetOption(
-            sessionId: sessionId, arg: kOptionQualityMonitorFloatingSize) ??
-        '');
+      await settings.read(
+        SessionPeerSettingsRegistry.qualityMonitorFloatingPosition,
+      ),
+    );
+    final floatingSize = _parseFloatingSize(
+      await settings.read(
+        SessionPeerSettingsRegistry.qualityMonitorFloatingSize,
+      ),
+    );
     final hostVersion = _hostVersion();
     final clientVersion = await _clientVersion();
     final showChanged = _show != show;

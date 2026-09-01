@@ -13,6 +13,7 @@ import 'package:flutter_hbb/common/widgets/dialog.dart';
 import 'package:flutter_hbb/common/widgets/toolbar.dart';
 import 'package:flutter_hbb/common/remote_toolbar_settings.dart';
 import 'package:flutter_hbb/common/remote_display_settings.dart';
+import 'package:flutter_hbb/common/session_peer_settings.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/desktop/session_tab.dart';
@@ -50,11 +51,8 @@ class ToolbarImagePointerState {
 typedef ToolbarImagePointerHandler = void Function(ToolbarImagePointerState);
 typedef ToolbarWindowPointerHandler = void Function(Offset? position);
 
-const String _kOptionRemoteMenubarOrientation = 'remote-menubar-orientation';
 const String _kRemoteMenubarOrientationHorizontal = 'horizontal';
 const String _kRemoteMenubarOrientationVertical = 'vertical';
-const String _kOptionRemoteMenubarDragX = 'remote-menubar-drag-x';
-const String _kOptionRemoteMenubarDragY = 'remote-menubar-drag-y';
 const double _kRemoteMenubarTopEdgeY = 0.0;
 
 enum _ToolbarMenuId {
@@ -187,18 +185,17 @@ class ToolbarState {
     _isInitializing = true;
 
     try {
+      final settings = SessionPeerSettingsRepository.forSession(sessionId);
+      final liveSettings = LiveSessionSettingsRepository.forSession(sessionId);
       // Load both states in parallel for better performance
       final results = await Future.wait<Object?>([
-        bind.sessionGetToggleOption(
-            sessionId: sessionId, arg: kOptionCollapseToolbar),
-        bind.sessionGetToggleOption(
-            sessionId: sessionId, arg: kOptionHideToolbar),
-        bind.sessionGetOption(
-            sessionId: sessionId, arg: _kOptionRemoteMenubarOrientation),
+        liveSettings.read(LiveSessionSettingsRegistry.collapseToolbar),
+        liveSettings.read(LiveSessionSettingsRegistry.hideToolbar),
+        settings.read(SessionPeerSettingsRegistry.toolbarOrientation),
       ]);
 
-      collapse.value = (results[0] as bool?) ?? false;
-      hide.value = (results[1] as bool?) ?? false;
+      collapse.value = results[0] as bool;
+      hide.value = results[1] as bool;
       vertical.value = results[2] == _kRemoteMenubarOrientationVertical;
     } finally {
       _isInitializing = false;
@@ -207,24 +204,32 @@ class ToolbarState {
   }
 
   switchCollapse(SessionID sessionId) async {
-    bind.sessionToggleOption(
-        sessionId: sessionId, value: kOptionCollapseToolbar);
-    collapse.value = !collapse.value;
+    final fallback = !collapse.value;
+    collapse.value = await LiveSessionSettingsRepository.forSession(
+      sessionId,
+    ).toggleAndRead(
+      LiveSessionSettingsRegistry.collapseToolbar,
+      fallback: fallback,
+    );
   }
 
   // Switch hide state for entire toolbar visibility
   switchHide(SessionID sessionId) async {
-    bind.sessionToggleOption(sessionId: sessionId, value: kOptionHideToolbar);
-    hide.value = !hide.value;
+    final fallback = !hide.value;
+    hide.value = await LiveSessionSettingsRepository.forSession(
+      sessionId,
+    ).toggleAndRead(
+      LiveSessionSettingsRegistry.hideToolbar,
+      fallback: fallback,
+    );
   }
 
   switchOrientation(SessionID sessionId) async {
     final next = !vertical.value;
     vertical.value = next;
-    await bind.sessionPeerOption(
-      sessionId: sessionId,
-      name: _kOptionRemoteMenubarOrientation,
-      value: next
+    await SessionPeerSettingsRepository.forSession(sessionId).write(
+      SessionPeerSettingsRegistry.toolbarOrientation,
+      next
           ? _kRemoteMenubarOrientationVertical
           : _kRemoteMenubarOrientationHorizontal,
     );
@@ -654,23 +659,12 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   }
 
   void _initDragBounds() {
-    final confLeft = double.tryParse(
-        bind.mainGetLocalOption(key: kOptionRemoteMenubarDragLeft));
-    if (confLeft == null) {
-      bind.mainSetLocalOption(
-          key: kOptionRemoteMenubarDragLeft, value: _dragLeft.toString());
-    } else {
-      _dragLeft = confLeft;
-    }
-
-    final confRight = double.tryParse(
-        bind.mainGetLocalOption(key: kOptionRemoteMenubarDragRight));
-    if (confRight == null) {
-      bind.mainSetLocalOption(
-          key: kOptionRemoteMenubarDragRight, value: _dragRight.toString());
-    } else {
-      _dragRight = confRight;
-    }
+    _dragLeft = remoteAppLocalSettings.read(
+      RemoteAppLocalSettingsRegistry.toolbarDragLeft,
+    );
+    _dragRight = remoteAppLocalSettings.read(
+      RemoteAppLocalSettingsRegistry.toolbarDragRight,
+    );
   }
 
   void _startToolbarDrag(DragStartDetails details) {
@@ -706,15 +700,20 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   }
 
   void _endToolbarDrag() {
-    bind.sessionPeerOption(
-      sessionId: widget.ffi.sessionId,
-      name: _kOptionRemoteMenubarDragX,
-      value: _fractionX.value.toString(),
+    final settings = SessionPeerSettingsRepository.forSession(
+      widget.ffi.sessionId,
     );
-    bind.sessionPeerOption(
-      sessionId: widget.ffi.sessionId,
-      name: _kOptionRemoteMenubarDragY,
-      value: _fractionY.value.toString(),
+    unawaited(
+      settings.write(
+        SessionPeerSettingsRegistry.toolbarDragX,
+        _fractionX.value,
+      ),
+    );
+    unawaited(
+      settings.write(
+        SessionPeerSettingsRegistry.toolbarDragY,
+        _fractionY.value,
+      ),
     );
     _dragging.value = false;
     if (pin) {
@@ -732,10 +731,11 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   void _bindToolbarYToTopEdge() {
     if (_fractionY.value == _kRemoteMenubarTopEdgeY) return;
     _fractionY.value = _kRemoteMenubarTopEdgeY;
-    bind.sessionPeerOption(
-      sessionId: widget.ffi.sessionId,
-      name: _kOptionRemoteMenubarDragY,
-      value: _fractionY.value.toString(),
+    unawaited(
+      SessionPeerSettingsRepository.forSession(widget.ffi.sessionId).write(
+        SessionPeerSettingsRegistry.toolbarDragY,
+        _fractionY.value,
+      ),
     );
   }
 
@@ -1061,18 +1061,15 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     _pinWorker = ever<bool>(widget.state._pin, _handlePinChanged);
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final settings = SessionPeerSettingsRepository.forSession(
+        widget.ffi.sessionId,
+      );
       final position = await Future.wait([
-        bind.sessionGetOption(
-            sessionId: widget.ffi.sessionId, arg: _kOptionRemoteMenubarDragX),
-        bind.sessionGetOption(
-            sessionId: widget.ffi.sessionId, arg: _kOptionRemoteMenubarDragY),
+        settings.read(SessionPeerSettingsRegistry.toolbarDragX),
+        settings.read(SessionPeerSettingsRegistry.toolbarDragY),
       ]);
-      _fractionX.value = (double.tryParse(position[0] ?? '') ?? 0.5)
-          .clamp(_dragLeft, _dragRight)
-          .toDouble();
-      _fractionY.value = (double.tryParse(position[1] ?? '') ?? 0.0)
-          .clamp(0.0, 1.0)
-          .toDouble();
+      _fractionX.value = position[0].clamp(_dragLeft, _dragRight).toDouble();
+      _fractionY.value = position[1].clamp(0.0, 1.0).toDouble();
       // Initialize toolbar states (collapse, hide) from session options
       await widget.state.init(widget.ffi.sessionId);
       if (!pin) {
@@ -1388,9 +1385,8 @@ class _QualityMonitorMenu extends StatelessWidget {
   const _QualityMonitorMenu({Key? key, required this.ffi}) : super(key: key);
 
   Future<void> _toggle() async {
-    await bind.sessionToggleOption(
-      sessionId: ffi.sessionId,
-      value: 'show-quality-monitor',
+    await LiveSessionSettingsRepository.forSession(ffi.sessionId).toggle(
+      LiveSessionSettingsRegistry.showQualityMonitor,
     );
     await ffi.qualityMonitorModel.checkShowQualityMonitor(ffi.sessionId);
   }
@@ -3157,20 +3153,23 @@ class _KeyboardMenu extends StatelessWidget {
 
   viewMode() {
     final ffiModel = ffi.ffiModel;
+    final liveSettings = LiveSessionSettingsRepository.forSession(ffi.sessionId);
     final enabled = versionCmp(pi.version, '1.2.0') >= 0 && ffiModel.keyboard;
     return CkbMenuButton(
         value: ffiModel.viewOnly,
         onChanged: enabled
             ? (value) async {
                 if (value == null) return;
-                await bind.sessionToggleOption(
-                    sessionId: ffi.sessionId, value: kOptionToggleViewOnly);
-                final viewOnly = await bind.sessionGetToggleOption(
-                    sessionId: ffi.sessionId, arg: kOptionToggleViewOnly);
-                ffiModel.setViewOnly(id, viewOnly ?? value);
-                final showMyCursor = await bind.sessionGetToggleOption(
-                    sessionId: ffi.sessionId, arg: kOptionToggleShowMyCursor);
-                ffiModel.setShowMyCursor(showMyCursor ?? value);
+                final viewOnly = await liveSettings.toggleAndRead(
+                  LiveSessionSettingsRegistry.viewOnly,
+                  fallback: value,
+                );
+                ffiModel.setViewOnly(id, viewOnly);
+                final showMyCursor = await liveSettings.read(
+                  LiveSessionSettingsRegistry.showMyCursor,
+                  fallback: value,
+                );
+                ffiModel.setShowMyCursor(showMyCursor);
               }
             : null,
         ffi: ffi,
@@ -3179,25 +3178,24 @@ class _KeyboardMenu extends StatelessWidget {
 
   showMyCursor() {
     final ffiModel = ffi.ffiModel;
+    final liveSettings = LiveSessionSettingsRepository.forSession(ffi.sessionId);
     return CkbMenuButton(
             value: ffiModel.showMyCursor,
             onChanged: (value) async {
               if (value == null) return;
-              await bind.sessionToggleOption(
-                  sessionId: ffi.sessionId, value: kOptionToggleShowMyCursor);
-              final showMyCursor = await bind.sessionGetToggleOption(
-                      sessionId: ffi.sessionId,
-                      arg: kOptionToggleShowMyCursor) ??
-                  value;
+              final showMyCursor = await liveSettings.toggleAndRead(
+                LiveSessionSettingsRegistry.showMyCursor,
+                fallback: value,
+              );
               ffiModel.setShowMyCursor(showMyCursor);
 
               // Also set view only if showMyCursor is enabled and viewOnly is not enabled.
               if (showMyCursor && !ffiModel.viewOnly) {
-                await bind.sessionToggleOption(
-                    sessionId: ffi.sessionId, value: kOptionToggleViewOnly);
-                final viewOnly = await bind.sessionGetToggleOption(
-                    sessionId: ffi.sessionId, arg: kOptionToggleViewOnly);
-                ffiModel.setViewOnly(id, viewOnly ?? value);
+                final viewOnly = await liveSettings.toggleAndRead(
+                  LiveSessionSettingsRegistry.viewOnly,
+                  fallback: true,
+                );
+                ffiModel.setViewOnly(id, viewOnly);
               }
             },
             ffi: ffi,
@@ -3910,23 +3908,12 @@ class _DraggableShowHideState extends State<_DraggableShowHide> {
   @override
   initState() {
     super.initState();
-
-    final confLeft = double.tryParse(
-        bind.mainGetLocalOption(key: kOptionRemoteMenubarDragLeft));
-    if (confLeft == null) {
-      bind.mainSetLocalOption(
-          key: kOptionRemoteMenubarDragLeft, value: left.toString());
-    } else {
-      left = confLeft;
-    }
-    final confRight = double.tryParse(
-        bind.mainGetLocalOption(key: kOptionRemoteMenubarDragRight));
-    if (confRight == null) {
-      bind.mainSetLocalOption(
-          key: kOptionRemoteMenubarDragRight, value: right.toString());
-    } else {
-      right = confRight;
-    }
+    left = remoteAppLocalSettings.read(
+      RemoteAppLocalSettingsRegistry.toolbarDragLeft,
+    );
+    right = remoteAppLocalSettings.read(
+      RemoteAppLocalSettingsRegistry.toolbarDragRight,
+    );
   }
 
   Widget _buildDraggable(BuildContext context) {
@@ -3964,15 +3951,20 @@ class _DraggableShowHideState extends State<_DraggableShowHide> {
           widget.fractionY.value =
               widget.fractionY.value.clamp(0.0, 1.0).toDouble();
         }
-        bind.sessionPeerOption(
-          sessionId: widget.sessionId,
-          name: _kOptionRemoteMenubarDragX,
-          value: widget.fractionX.value.toString(),
+        final settings = SessionPeerSettingsRepository.forSession(
+          widget.sessionId,
         );
-        bind.sessionPeerOption(
-          sessionId: widget.sessionId,
-          name: _kOptionRemoteMenubarDragY,
-          value: widget.fractionY.value.toString(),
+        unawaited(
+          settings.write(
+            SessionPeerSettingsRegistry.toolbarDragX,
+            widget.fractionX.value,
+          ),
+        );
+        unawaited(
+          settings.write(
+            SessionPeerSettingsRegistry.toolbarDragY,
+            widget.fractionY.value,
+          ),
         );
         widget.dragging.value = false;
       },

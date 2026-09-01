@@ -20,6 +20,7 @@ import 'package:provider/provider.dart';
 
 import '../../common.dart';
 import '../../common/remote_display_settings.dart';
+import '../../common/session_peer_settings.dart';
 import '../../common/widgets/overlay.dart';
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/remote_input.dart';
@@ -750,10 +751,9 @@ class _RemotePageState extends State<RemotePage>
   }
 
   Future<void> _toggleQualityMonitor() async {
-    await bind.sessionToggleOption(
-      sessionId: sessionId,
-      value: 'show-quality-monitor',
-    );
+    await LiveSessionSettingsRepository.forSession(
+      sessionId,
+    ).toggle(LiveSessionSettingsRegistry.showQualityMonitor);
     await gFFI.qualityMonitorModel.checkShowQualityMonitor(sessionId);
   }
 
@@ -970,10 +970,9 @@ class _RemotePageState extends State<RemotePage>
     final ffiModel = Provider.of<FfiModel>(context);
     var paints = <Widget>[const ImagePaint()];
     if (showCursorPaint) {
-      final cursor = bind.sessionGetToggleOptionSync(
-        sessionId: sessionId,
-        arg: 'show-remote-cursor',
-      );
+      final cursor = LiveSessionSettingsRepository.forSession(
+        sessionId,
+      ).readSync(LiveSessionSettingsRegistry.showRemoteCursor);
       if (ffiModel.keyboard || cursor) {
         paints.add(mobileRemoteCursorOverlay(widget.id));
       }
