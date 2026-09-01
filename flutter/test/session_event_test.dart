@@ -799,4 +799,14 @@ void main() {
       expect(decodeTypedSessionEvent({'name': 'legacy_unknown'}), isNull);
     },
   );
+
+  test('every registered event name has a decoder branch', () {
+    for (final name in typedSessionEventNames) {
+      expect(
+        decodeTypedSessionEvent({'name': name}),
+        isNotNull,
+        reason: 'missing decoder branch for $name',
+      );
+    }
+  });
 }

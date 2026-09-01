@@ -903,9 +903,70 @@ final class InvalidSessionEvent extends SessionEvent {
   final String reason;
 }
 
+const typedSessionEventNames = <String>{
+  'connection_ready',
+  'permission',
+  'clipboard',
+  'chat_client_mode',
+  'chat_server_mode',
+  'show_elevation',
+  'on_voice_call_closed',
+  'fingerprint',
+  'record_status',
+  'on_voice_call_waiting',
+  'on_voice_call_started',
+  'on_voice_call_incoming',
+  'exit_relative_mouse_mode',
+  'msgbox',
+  'toast',
+  'set_multiple_windows_session',
+  'add_connection',
+  'update_voice_call_state',
+  'on_client_remove',
+  'permission_update',
+  'permission_request',
+  'plugin_manager',
+  'plugin_event',
+  'plugin_reload',
+  'plugin_option',
+  'cm_file_transfer_log',
+  'cursor_data',
+  'cursor_id',
+  'cursor_position',
+  'update_block_input_state',
+  'update_privacy_mode',
+  'use_texture_render',
+  'follow_current_display',
+  'terminal_response',
+  'job_progress',
+  'job_done',
+  'job_error',
+  'update_folder_files',
+  'file_dir',
+  'empty_dirs',
+  'override_file_confirm',
+  'load_last_job',
+  'cancel_msgbox',
+  'switch_back',
+  'portable_service_running',
+  'on_url_scheme_received',
+  'sync_peer_hash_password_to_personal_ab',
+  'sync_peer_option',
+  'selected_files',
+  'send_emptry_dirs',
+  'printer_request',
+  'screenshot',
+  'peer_info',
+  'sync_peer_info',
+  'switch_display',
+  'sync_platform_additions',
+  'update_quality_status',
+};
+
 SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
   final name = event['name'];
   if (name is! String) return const InvalidSessionEvent('', 'missing name');
+  if (!typedSessionEventNames.contains(name)) return null;
   switch (name) {
     case 'connection_ready':
       final secure = _decodeBool(event['secure']);
@@ -1644,7 +1705,7 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
         displayMaps: displayMaps,
       );
     default:
-      return null;
+      return InvalidSessionEvent(name, 'missing typed decoder');
   }
 }
 

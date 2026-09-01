@@ -58,7 +58,6 @@ import 'package:flutter_hbb/generated_bridge.dart'
 import 'package:flutter_hbb/native/custom_cursor.dart'
     if (dart.library.html) 'package:flutter_hbb/web/custom_cursor.dart';
 
-typedef HandleMsgBox = Function(Map<String, dynamic> evt, String id);
 typedef ReconnectHandle = Function(OverlayDialogManager, SessionID, bool);
 final _constSessionId = Uuid().v4obj();
 
@@ -384,12 +383,21 @@ class FfiModel with ChangeNotifier {
     }
     await handlePeerInfoEvent(peerInfoEvent, peerId, true);
     for (final element in data.cursorDataList) {
-      updateLastCursorId(element);
-      await handleCursorData(element);
+      final event = decodeTypedSessionEvent({...element, 'name': 'cursor_data'});
+      if (event is CursorShapeSessionEvent) {
+        updateLastCursorIdValue(event.id);
+        await handleCursorShapeEvent(event);
+      }
     }
     if (data.lastCursorId.isNotEmpty) {
-      updateLastCursorId(data.lastCursorId);
-      handleCursorId(data.lastCursorId);
+      final event = decodeTypedSessionEvent({
+        ...data.lastCursorId,
+        'name': 'cursor_id',
+      });
+      if (event is CursorIdSessionEvent) {
+        updateLastCursorIdValue(event.id);
+        handleCursorIdEvent(event);
+      }
     }
   }
 
@@ -2053,39 +2061,14 @@ class FfiModel with ChangeNotifier {
     return display;
   }
 
-  updateLastCursorId(Map<String, dynamic> evt) {
-    // int.parse(evt['id']) may cause FormatException
-    // Unhandled Exception: FormatException: Positive input exceeds the limit of integer 18446744071749110741
-    final id = evt['id']?.toString();
-    if (id == null || id.isEmpty) {
-      return;
-    }
-    updateLastCursorIdValue(id);
-  }
-
   void updateLastCursorIdValue(String id) {
     parent.target?.cursorModel.id = id;
-  }
-
-  handleCursorId(Map<String, dynamic> evt) {
-    final event = decodeTypedSessionEvent({...evt, 'name': 'cursor_id'});
-    if (event is CursorIdSessionEvent) handleCursorIdEvent(event);
   }
 
   void handleCursorIdEvent(CursorIdSessionEvent event) {
     final payload = event.toLegacyPayload();
     cachedPeerData.lastCursorId = payload;
     parent.target?.cursorModel.updateCursorIdValue(event.id);
-  }
-
-  Future<void> handleCursorData(
-    Map<String, dynamic> evt, {
-    String? peerId,
-  }) async {
-    final event = decodeTypedSessionEvent({...evt, 'name': 'cursor_data'});
-    if (event is CursorShapeSessionEvent) {
-      await handleCursorShapeEvent(event, peerId: peerId);
-    }
   }
 
   Future<void> handleCursorShapeEvent(
@@ -4539,11 +4522,6 @@ class CursorModel with ChangeNotifier {
     _images.clear();
   }
 
-  Future<void> updateCursorData(Map<String, dynamic> evt) async {
-    final event = decodeTypedSessionEvent({...evt, 'name': 'cursor_data'});
-    if (event is CursorShapeSessionEvent) await updateCursorShape(event);
-  }
-
   Future<void> updateCursorShape(CursorShapeSessionEvent event) async {
     final id = event.id;
     final hotx = event.hotx;
@@ -4630,28 +4608,11 @@ class CursorModel with ChangeNotifier {
     }
   }
 
-  void updateCursorId(Map<String, dynamic> evt) {
-    final id = evt['id']?.toString();
-    if (id == null || id.isEmpty) return;
-    updateCursorIdValue(id);
-  }
-
   void updateCursorIdValue(String id) {
     _id = id;
     if (!_updateCurData()) {
       debugPrint(
           'WARNING: updateCursorId $_id, cache is ${_cache == null ? "null" : "not null"}. without notifyListeners()');
-    }
-  }
-
-  /// Update the cursor position.
-  Future<void> updateCursorPosition(
-    Map<String, dynamic> evt,
-    String id,
-  ) async {
-    final event = decodeTypedSessionEvent({...evt, 'name': 'cursor_position'});
-    if (event is CursorPositionSessionEvent) {
-      await updateCursorPositionValue(event.x, event.y, id);
     }
   }
 
