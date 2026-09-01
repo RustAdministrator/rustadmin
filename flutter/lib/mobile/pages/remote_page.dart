@@ -1797,25 +1797,11 @@ void showOptions(
   ];
   var activeShowMonitorsInToolbar = showMonitorsInToolbar;
   var activeToolbarTransparencySettings = toolbarTransparencySettings;
-  var activeQualityMonitorFadeSettings =
-      QualityMonitorFadeSettings.fromUserDefaults();
+  var activeQualityMonitorFadeSettings = qualityMonitorSettings.read();
 
   Future<void> persistQualityMonitorFadeSettings(
     QualityMonitorFadeSettings settings,
-  ) async {
-    await bind.mainSetUserDefaultOption(
-      key: kOptionQualityMonitorInactiveOpacityPercent,
-      value: settings.opacityPercent.toString(),
-    );
-    await bind.mainSetUserDefaultOption(
-      key: kOptionQualityMonitorDimDelayMs,
-      value: settings.delayMs.toString(),
-    );
-    await bind.mainSetUserDefaultOption(
-      key: kOptionQualityMonitorDimDurationMs,
-      value: settings.durationMs.toString(),
-    );
-  }
+  ) => qualityMonitorSettings.write(settings);
 
   var activeCursorInertiaSettings = cursorInertiaSettings;
   List<TRadioMenu<String>> imageQualityRadios = await toolbarImageQuality(

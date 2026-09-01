@@ -1,6 +1,36 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_hbb/consts.dart';
-import 'package:flutter_hbb/models/platform_model.dart';
+
+import 'remote_toolbar_settings.dart';
+
+abstract final class QualityMonitorSettingsRegistry {
+  static const opacity = UserDefaultSetting<int>(
+    key: kOptionQualityMonitorInactiveOpacityPercent,
+    codec: IntRangeCodec(
+      defaultValue: kDefaultQualityMonitorInactiveOpacityPercent,
+      min: kMinQualityMonitorInactiveOpacityPercent,
+      max: kMaxQualityMonitorInactiveOpacityPercent,
+    ),
+  );
+  static const delay = UserDefaultSetting<int>(
+    key: kOptionQualityMonitorDimDelayMs,
+    codec: IntRangeCodec(
+      defaultValue: kDefaultQualityMonitorDimDelayMs,
+      min: kMinQualityMonitorDimDelayMs,
+      max: kMaxQualityMonitorDimDelayMs,
+    ),
+  );
+  static const duration = UserDefaultSetting<int>(
+    key: kOptionQualityMonitorDimDurationMs,
+    codec: IntRangeCodec(
+      defaultValue: kDefaultQualityMonitorDimDurationMs,
+      min: kMinQualityMonitorDimDurationMs,
+      max: kMaxQualityMonitorDimDurationMs,
+    ),
+  );
+
+  static const all = <UserDefaultSetting<dynamic>>[opacity, delay, duration];
+}
 
 @immutable
 class QualityMonitorFadeSettings {
@@ -32,7 +62,8 @@ class QualityMonitorFadeSettings {
     QualityMonitorFadeSettings fallback = defaults,
   }) {
     return QualityMonitorFadeSettings(
-      opacity: _normalized(
+      opacity:
+          _normalized(
             opacityPercent,
             fallback.opacityPercent,
             kMinQualityMonitorInactiveOpacityPercent,
@@ -59,17 +90,7 @@ class QualityMonitorFadeSettings {
   }
 
   factory QualityMonitorFadeSettings.fromUserDefaults() {
-    return QualityMonitorFadeSettings.fromStored(
-      opacityPercent: bind.mainGetUserDefaultOption(
-        key: kOptionQualityMonitorInactiveOpacityPercent,
-      ),
-      delayMs: bind.mainGetUserDefaultOption(
-        key: kOptionQualityMonitorDimDelayMs,
-      ),
-      durationMs: bind.mainGetUserDefaultOption(
-        key: kOptionQualityMonitorDimDurationMs,
-      ),
-    );
+    return qualityMonitorSettings.read();
   }
 
   QualityMonitorFadeSettings copyWith({
@@ -78,11 +99,11 @@ class QualityMonitorFadeSettings {
     int? durationMs,
   }) {
     return QualityMonitorFadeSettings(
-      opacity: (opacityPercent ?? this.opacityPercent)
-              .clamp(
-                kMinQualityMonitorInactiveOpacityPercent,
-                kMaxQualityMonitorInactiveOpacityPercent,
-              ) /
+      opacity:
+          (opacityPercent ?? this.opacityPercent).clamp(
+            kMinQualityMonitorInactiveOpacityPercent,
+            kMaxQualityMonitorInactiveOpacityPercent,
+          ) /
           100.0,
       delay: Duration(
         milliseconds: (delayMs ?? this.delayMs)
@@ -90,10 +111,12 @@ class QualityMonitorFadeSettings {
             .toInt(),
       ),
       duration: Duration(
-        milliseconds: (durationMs ?? this.durationMs).clamp(
-          kMinQualityMonitorDimDurationMs,
-          kMaxQualityMonitorDimDurationMs,
-        ).toInt(),
+        milliseconds: (durationMs ?? this.durationMs)
+            .clamp(
+              kMinQualityMonitorDimDurationMs,
+              kMaxQualityMonitorDimDurationMs,
+            )
+            .toInt(),
       ),
     );
   }
@@ -113,3 +136,44 @@ class QualityMonitorFadeSettings {
   @override
   int get hashCode => Object.hash(opacity, delay, duration);
 }
+
+class QualityMonitorSettingsRepository {
+  const QualityMonitorSettingsRepository(this._userDefaults);
+
+  final UserDefaultSettingsRepository _userDefaults;
+  static final _keys = QualityMonitorSettingsRegistry.all
+      .map((setting) => setting.key)
+      .toSet();
+
+  QualityMonitorFadeSettings read() => QualityMonitorFadeSettings(
+    opacity: _userDefaults.read(QualityMonitorSettingsRegistry.opacity) / 100,
+    delay: Duration(
+      milliseconds: _userDefaults.read(QualityMonitorSettingsRegistry.delay),
+    ),
+    duration: Duration(
+      milliseconds: _userDefaults.read(QualityMonitorSettingsRegistry.duration),
+    ),
+  );
+
+  Stream<QualityMonitorFadeSettings> watch() =>
+      _userDefaults.changes.where(_keys.contains).map((_) => read()).distinct();
+
+  Future<void> write(QualityMonitorFadeSettings settings) async {
+    await _userDefaults.write(
+      QualityMonitorSettingsRegistry.opacity,
+      settings.opacityPercent,
+    );
+    await _userDefaults.write(
+      QualityMonitorSettingsRegistry.delay,
+      settings.delayMs,
+    );
+    await _userDefaults.write(
+      QualityMonitorSettingsRegistry.duration,
+      settings.durationMs,
+    );
+  }
+}
+
+final qualityMonitorSettings = QualityMonitorSettingsRepository(
+  remoteUserDefaultSettings,
+);

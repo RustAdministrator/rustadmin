@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -469,6 +471,8 @@ void main() {
   testWidgets('quality monitor fades without blocking remote hover',
       (tester) async {
     var backgroundHoverCount = 0;
+    final settingsChanges = StreamController<QualityMonitorFadeSettings>();
+    addTearDown(settingsChanges.close);
     var settings = const QualityMonitorFadeSettings(
       opacity: 0.5,
       delay: Duration(milliseconds: 1000),
@@ -489,6 +493,7 @@ void main() {
             top: 20,
             child: QualityMonitorHoverFade(
               settingsProvider: () => settings,
+              settingsStream: settingsChanges.stream,
               child: const SizedBox(width: 100, height: 100),
             ),
           ),
@@ -510,7 +515,8 @@ void main() {
       delay: Duration(milliseconds: 250),
       duration: Duration(milliseconds: 750),
     );
-    await tester.pump(QualityMonitorHoverFade.settingsRefreshInterval);
+    settingsChanges.add(settings);
+    await tester.pump();
     expect(opacityWidget().opacity, settings.opacity);
     expect(opacityWidget().duration, QualityMonitorHoverFade.restoreDuration);
 

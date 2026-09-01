@@ -2276,20 +2276,7 @@ class _CompactDisplaySettings extends StatelessWidget {
 
   Future<void> _persistQualityMonitorFadeSettings(
     QualityMonitorFadeSettings settings,
-  ) async {
-    await bind.mainSetUserDefaultOption(
-      key: kOptionQualityMonitorInactiveOpacityPercent,
-      value: settings.opacityPercent.toString(),
-    );
-    await bind.mainSetUserDefaultOption(
-      key: kOptionQualityMonitorDimDelayMs,
-      value: settings.delayMs.toString(),
-    );
-    await bind.mainSetUserDefaultOption(
-      key: kOptionQualityMonitorDimDurationMs,
-      value: settings.durationMs.toString(),
-    );
-  }
+  ) => qualityMonitorSettings.write(settings);
 
   @override
   Widget build(BuildContext context) {
@@ -2324,7 +2311,7 @@ class _CompactDisplaySettings extends StatelessWidget {
         key: kOptionMobileRemoteToolbarOverlapOpacityPercent,
       ),
     );
-    var qualityMonitorSettings = QualityMonitorFadeSettings.fromUserDefaults();
+    var activeQualityMonitorSettings = qualityMonitorSettings.read();
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -2459,7 +2446,7 @@ class _CompactDisplaySettings extends StatelessWidget {
               fadeDelayLabel: translate('Fade delay'),
               fadeDurationLabel: translate('Fade duration'),
               toolbarSettings: toolbarSettings,
-              qualityMonitorSettings: qualityMonitorSettings,
+              qualityMonitorSettings: activeQualityMonitorSettings,
               toolbarEnabled: !isOptionFixed(
                 kOptionMobileRemoteToolbarOverlapOpacityPercent,
               ),
@@ -2483,9 +2470,9 @@ class _CompactDisplaySettings extends StatelessWidget {
                 );
               },
               onQualityMonitorChanged: (settings) =>
-                  qualityMonitorSettings = settings,
+                  activeQualityMonitorSettings = settings,
               onQualityMonitorChangeEnd: (settings) {
-                qualityMonitorSettings = settings;
+                activeQualityMonitorSettings = settings;
                 unawaited(_persistQualityMonitorFadeSettings(settings));
               },
             ),
