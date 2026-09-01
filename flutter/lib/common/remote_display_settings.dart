@@ -10,10 +10,11 @@ class _DefaultViewStyleCodec implements SettingCodec<String> {
   String decode(String raw) => switch (raw) {
     kRemoteViewStyleOriginal => kRemoteViewStyleOriginal,
     kRemoteViewStyleAdaptive => kRemoteViewStyleAdaptive,
-    _ => defaultTargetPlatform == TargetPlatform.android ||
-            defaultTargetPlatform == TargetPlatform.iOS
-        ? kRemoteViewStyleAdaptive
-        : kRemoteViewStyleOriginal,
+    _ =>
+      defaultTargetPlatform == TargetPlatform.android ||
+              defaultTargetPlatform == TargetPlatform.iOS
+          ? kRemoteViewStyleAdaptive
+          : kRemoteViewStyleOriginal,
   };
 
   @override
@@ -25,6 +26,7 @@ class UserDefaultToggleSetting extends UserDefaultSetting<bool> {
     required this.label,
     required super.key,
     required super.codec,
+    super.applyMode = SettingApplyMode.nextSession,
   });
 
   final String label;
@@ -34,6 +36,7 @@ abstract final class RemoteDisplaySettingsRegistry {
   static const viewStyle = UserDefaultSetting<String>(
     key: kOptionViewStyle,
     codec: _DefaultViewStyleCodec(),
+    applyMode: SettingApplyMode.nextSession,
   );
   static const imageQuality = UserDefaultSetting<String>(
     key: kOptionImageQuality,
@@ -46,6 +49,7 @@ abstract final class RemoteDisplaySettingsRegistry {
         kRemoteImageQualityCustom,
       },
     ),
+    applyMode: SettingApplyMode.nextSession,
   );
   static const codecPreference = UserDefaultSetting<String>(
     key: kOptionCodecPreference,
@@ -63,14 +67,17 @@ abstract final class RemoteDisplaySettingsRegistry {
         'h265-hq',
       },
     ),
+    applyMode: SettingApplyMode.nextSession,
   );
   static const customImageQuality = UserDefaultSetting<double>(
     key: 'custom_image_quality',
     codec: DoubleRangeCodec(defaultValue: kDefaultQuality, min: 10, max: 4095),
+    applyMode: SettingApplyMode.nextSession,
   );
   static const customFps = UserDefaultSetting<double>(
     key: kOptionCustomFps,
     codec: DoubleRangeCodec(defaultValue: kDefaultFps, min: 5, max: 120),
+    applyMode: SettingApplyMode.nextSession,
   );
   static const customFpsMode = UserDefaultSetting<String>(
     key: kOptionCustomFpsMode,
@@ -78,6 +85,7 @@ abstract final class RemoteDisplaySettingsRegistry {
       defaultValue: kCustomFpsModeAdaptive,
       allowedValues: {kCustomFpsModeAdaptive, kCustomFpsModeFixed},
     ),
+    applyMode: SettingApplyMode.nextSession,
   );
 
   static const viewOnly = UserDefaultToggleSetting(
@@ -89,6 +97,7 @@ abstract final class RemoteDisplaySettingsRegistry {
     label: 'show_monitors_tip',
     key: kKeyShowMonitorsToolbar,
     codec: BoolOptionCodec(),
+    applyMode: SettingApplyMode.live,
   );
   static const collapseToolbar = UserDefaultToggleSetting(
     label: 'Collapse toolbar',
@@ -154,6 +163,7 @@ abstract final class RemoteDisplaySettingsRegistry {
     label: 'Reverse mouse wheel',
     key: kKeyReverseMouseWheel,
     codec: BoolOptionCodec(),
+    applyMode: SettingApplyMode.live,
   );
   static const swapMouseButtons = UserDefaultToggleSetting(
     label: 'swap-left-right-mouse',

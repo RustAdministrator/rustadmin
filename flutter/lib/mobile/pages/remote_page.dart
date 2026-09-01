@@ -19,6 +19,7 @@ import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 
 import '../../common.dart';
+import '../../common/remote_display_settings.dart';
 import '../../common/widgets/overlay.dart';
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/remote_input.dart';
@@ -39,7 +40,9 @@ import '../widgets/dialog.dart';
 final initText = '1' * 1024;
 
 bool _showMonitorsInMobileToolbarFromUserDefaults() =>
-    bind.mainGetUserDefaultOption(key: kKeyShowMonitorsToolbar) == 'Y';
+    remoteDisplaySettings.read(
+      RemoteDisplaySettingsRegistry.showMonitorsToolbar,
+    );
 
 // Workaround for Android (default input method, Microsoft SwiftKey keyboard) when using physical keyboard.
 // When connecting a physical keyboard, `KeyEvent.physicalKey.usbHidUsage` are wrong is using Microsoft SwiftKey keyboard.
@@ -82,6 +85,7 @@ class _RemotePageState extends State<RemotePage>
   Timer? _iosKeyboardWorkaroundTimer;
   StreamSubscription<AndroidOutgoingSessionClosedEvent>?
   _outgoingSessionClosedSubscription;
+  StreamSubscription<bool>? _showMonitorsSubscription;
   late final MobileSessionReconnectController _reconnectController;
   bool _updatingSoftKeyboardText = false;
 
@@ -104,22 +108,8 @@ class _RemotePageState extends State<RemotePage>
   var _quickKeyOrder = List<MobileRemoteQuickKey>.of(
     mobileRemoteDefaultQuickKeyOrder,
   );
-  late final _settingsRepository = MobileRemoteSettingsRepository(
-    readUserDefault: (key) => bind.mainGetUserDefaultOption(key: key),
-    readLocal: (key) => bind.mainGetLocalOption(key: key),
-    readPeer: (key) => bind.sessionGetPeerOption(
-      sessionId: sessionId,
-      name: key,
-    ),
-    writeLocal: (key, value) async {
-      await bind.mainSetLocalOption(key: key, value: value);
-    },
-    writePeer: (key, value) => bind.sessionPeerOption(
-      sessionId: sessionId,
-      name: key,
-      value: value,
-    ),
-  );
+  late final _settingsRepository =
+      MobileRemoteSettingsRepository.forSession(sessionId);
 
   InputModel get inputModel => gFFI.inputModel;
   SessionID get sessionId => gFFI.sessionId;
@@ -174,6 +164,11 @@ class _RemotePageState extends State<RemotePage>
     _toolbarPlacementSettings = defaults.toolbarPlacement;
     _cursorInertiaSettings = defaults.cursorInertia;
     _showMonitorsInToolbar = _showMonitorsInMobileToolbarFromUserDefaults();
+    _showMonitorsSubscription = remoteDisplaySettings
+        .watch(RemoteDisplaySettingsRegistry.showMonitorsToolbar)
+        .listen((value) {
+      if (mounted) setState(() => _showMonitorsInToolbar = value);
+    });
     gFFI.canvasModel.initializeEdgeScrollFallback(this);
     gFFI.ffiModel.updateEventListener(sessionId, widget.id);
     if (isAndroid) {
@@ -291,6 +286,8 @@ class _RemotePageState extends State<RemotePage>
     WidgetsBinding.instance.removeObserver(this);
     final outgoingSubscriptionCancel =
         _outgoingSessionClosedSubscription?.cancel();
+    final showMonitorsCancel = _showMonitorsSubscription?.cancel();
+    if (showMonitorsCancel != null) unawaited(showMonitorsCancel);
     gFFI.canvasModel.disposeEdgeScrollFallback();
     // https://github.com/flutter/flutter/issues/64935
     gFFI.dialogManager.hideMobileActionsOverlay(store: false);
@@ -1029,22 +1026,12 @@ class _RemotePageState extends State<RemotePage>
     final currentKeyboardMode =
         await bind.sessionGetKeyboardMode(sessionId: gFFI.sessionId) ??
         kKeyLegacyMode;
-    final physicalKeyInput = mobileVmPhysicalInputEnabled(
-      await bind.sessionGetPeerOption(
-        sessionId: gFFI.sessionId,
-        name: kOptionMobilePhysicalKeyInput,
-      ),
-    );
+    final mobileSettings = await _settingsRepository.readSession();
+    final physicalKeyInput = mobileSettings.physicalKeyInput;
     final keyboardV2Supported =
         gFFI.ffiModel.pi.capabilities.keyboardV2CommittedText;
     final keyboardInputMode = keyboardV2Supported
-        ? mobileKeyboardInputV2Mode(
-            await bind.sessionGetPeerOption(
-              sessionId: gFFI.sessionId,
-              name: kOptionKeyboardInputModeV2,
-            ),
-            mobileVmPhysicalInputOption(physicalKeyInput),
-          )
+        ? mobileSettings.keyboardInputMode
         : null;
     final physicalKeyInputSupported =
         gFFI.ffiModel.pi.capabilities.physicalKeyInput(
@@ -1391,8 +1378,9 @@ class _RemotePageState extends State<RemotePage>
           touchMode: gFFI.ffiModel.touchMode,
           onTouchModeChange: (t) {
             gFFI.ffiModel.toggleTouchMode();
-            final v = gFFI.ffiModel.touchMode ? 'Y' : 'N';
-            unawaited(bind.mainSetLocalOption(key: kOptionTouchMode, value: v));
+            unawaited(
+              _settingsRepository.storeTouchMode(gFFI.ffiModel.touchMode),
+            );
           },
           virtualMouseMode: gFFI.ffiModel.virtualMouseMode,
           inputModel: gFFI.inputModel,
@@ -1829,10 +1817,7 @@ void showOptions(
         value: gFFI.imageModel.useTextureRender,
         onChanged: (value) async {
           if (value == null) return;
-          await bind.mainSetLocalOption(
-            key: kOptionTextureRender,
-            value: value ? 'Y' : 'N',
-          );
+          await settingsRepository.storeTextureRender(value);
         },
         child: Text(translate('Use texture rendering')),
       ),
@@ -1899,9 +1884,9 @@ void showOptions(
                     onChanged: (value) async {
                       if (value == null) return;
                       setState(() => activeShowMonitorsInToolbar = value);
-                      await bind.mainSetUserDefaultOption(
-                        key: kKeyShowMonitorsToolbar,
-                        value: value ? 'Y' : 'N',
+                      await remoteDisplaySettings.write(
+                        RemoteDisplaySettingsRegistry.showMonitorsToolbar,
+                        value,
                       );
                       onShowMonitorsInToolbarChanged(value);
                     },

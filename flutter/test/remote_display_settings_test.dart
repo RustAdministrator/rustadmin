@@ -49,6 +49,26 @@ void main() {
         RemoteDisplaySettingsRegistry.showRemoteCursor.codec.encode(false),
         '',
       );
+      expect(
+        RemoteDisplaySettingsRegistry.viewStyle.applyMode,
+        SettingApplyMode.nextSession,
+      );
+      expect(
+        RemoteDisplaySettingsRegistry.showMonitorsToolbar.applyMode,
+        SettingApplyMode.live,
+      );
+      expect(
+        QualityMonitorSettingsRegistry.opacity.applyMode,
+        SettingApplyMode.live,
+      );
+      expect(
+        MobileRemoteSettingsRegistry.cursorInertiaDefault.applyMode,
+        SettingApplyMode.nextSession,
+      );
+      expect(
+        MobileRemoteSettingsRegistry.cursorInertiaPeer.applyMode,
+        SettingApplyMode.live,
+      );
     },
   );
 

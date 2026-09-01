@@ -83,10 +83,14 @@ void main() {
     );
 
     await repository.storePlacement(placement);
+    await repository.storeTouchMode(false);
+    await repository.storeTextureRender(true);
     await repository.storeCursorInertia(600);
 
     expect(writes, [
       (kOptionMobileRemoteToolbarPlacement, placement.storedValue),
+      (kOptionTouchMode, 'N'),
+      (kOptionTextureRender, 'Y'),
       (kOptionMobileCursorInertiaDurationMs, '600'),
     ]);
   });

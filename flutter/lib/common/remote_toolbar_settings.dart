@@ -295,6 +295,8 @@ class RemoteToolbarSettingsRepository {
   Stream<RemoteToolbarSettingsSnapshot> watch() =>
       userDefaults.changes.where(_keys.contains).map((_) => read()).distinct();
 
+  T readSetting<T>(UserDefaultSetting<T> setting) => userDefaults.read(setting);
+
   Future<void> write<T>(UserDefaultSetting<T> setting, T value) =>
       userDefaults.write(setting, value);
 }
