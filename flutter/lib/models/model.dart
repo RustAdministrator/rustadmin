@@ -5229,10 +5229,12 @@ class QualityMonitorModel with ChangeNotifier {
 
       if (evt.containsKey('connection_type')) {
         final connectionType = eventString('connection_type');
-        if (_data.connectionType != connectionType) {
-          _data.clearQuicTransportMetrics();
+        if (connectionType != null) {
+          if (_data.connectionType != connectionType) {
+            _data.clearQuicTransportMetrics();
+          }
+          _data.connectionType = connectionType;
         }
-        _data.connectionType = connectionType;
       }
       final isQuicTransport = _data.isQuicTransport;
       if (!isQuicTransport) {
@@ -5240,8 +5242,9 @@ class QualityMonitorModel with ChangeNotifier {
       }
       void updateTransportMetric(
           String key, void Function(String? value) update) {
-        if (evt.containsKey(key)) {
-          update(isQuicTransport ? eventString(key) : null);
+        final value = eventString(key);
+        if (isQuicTransport && value != null) {
+          update(value);
         }
       }
 

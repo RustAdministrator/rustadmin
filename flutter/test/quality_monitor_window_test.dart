@@ -79,12 +79,23 @@ void main() {
     );
     model.updateConnectionInfo('QUIC/UDP', true);
     model.updateConnectionInfo('QUIC/UDP', true);
+    model.updateQualityStatusEvent(
+      qualityEvent({
+        'connection_type': '',
+        'transport_mtu': '',
+        'transport_rtt_ms': '',
+        'quic_protocol': '',
+        'quic_reassembly_drops': '',
+        'delay': '12',
+      }),
+    );
 
     expect(model.data.connectionType, 'QUIC/UDP');
     expect(model.data.transportMtu, '1360');
     expect(model.data.transportRttMs, '8');
     expect(model.data.quicProtocol, 'v4');
     expect(model.data.quicReassemblyDrops, '7');
+    expect(model.data.delay, '12');
     expect(model.data.direct, 'yes');
   });
 
