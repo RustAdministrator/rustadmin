@@ -8,6 +8,9 @@ import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
+import 'package:flutter_hbb/generated_bridge.dart'
+    if (dart.library.html) 'package:flutter_hbb/web/bridge.dart'
+    show PeerSecurityEntry;
 import 'package:flutter_hbb/models/peer_model.dart';
 import 'package:flutter_hbb/models/peer_tab_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
@@ -3208,6 +3211,24 @@ class KnownHost {
     );
   }
 
+  factory KnownHost.fromFfi(PeerSecurityEntry entry) => KnownHost(
+        id: entry.id,
+        alias: entry.alias,
+        username: entry.username,
+        hostname: entry.hostname,
+        platform: entry.platform,
+        lastUpdatedUnixMs: entry.lastUpdatedUnixMs,
+        hasPeerConfig: entry.hasPeerConfig,
+        hasPassword: entry.hasPassword,
+        hasPinnedKey: entry.hasPinnedKey,
+        pinnedKeyFingerprint: entry.pinnedKeyFingerprint,
+        hasDirectPairingMemory: entry.hasDirectPairingMemory,
+        hasRendezvousPairingMemory: entry.hasRendezvousPairingMemory,
+        hasQuicIdentity: entry.hasQuicIdentity,
+        quicIdentityFingerprint: entry.quicIdentityFingerprint,
+        quicConfirmedAtUnixMs: entry.quicConfirmedAtUnixMs,
+      );
+
   String get displayName {
     if (alias.isNotEmpty) return alias;
     if (hostname.isNotEmpty) return hostname;
@@ -3279,14 +3300,22 @@ class KnownHost {
   static Future<List<KnownHost>> get() async {
     final List<KnownHost> hosts = List.empty(growable: true);
     try {
-      final hostsJson = await bind.mainListPeerSecurityEntries();
-      if (hostsJson.isEmpty) return hosts;
-      final hostsList = json.decode(hostsJson);
-      if (hostsList is! List) return hosts;
-      for (final host in hostsList) {
-        if (host is! Map<String, dynamic>) continue;
-        final entry = KnownHost.fromJson(host);
-        if (entry.id.isNotEmpty) hosts.add(entry);
+      if (isWeb) {
+        final hostsJson = await bind.mainListPeerSecurityEntries();
+        if (hostsJson.isNotEmpty) {
+          final hostsList = json.decode(hostsJson);
+          if (hostsList is List) {
+            for (final host in hostsList) {
+              if (host is! Map<String, dynamic>) continue;
+              final entry = KnownHost.fromJson(host);
+              if (entry.id.isNotEmpty) hosts.add(entry);
+            }
+          }
+        }
+      } else {
+        for (final entry in await bind.mainListPeerSecurityEntriesV2()) {
+          if (entry.id.isNotEmpty) hosts.add(KnownHost.fromFfi(entry));
+        }
       }
     } catch (e) {
       print(e.toString());

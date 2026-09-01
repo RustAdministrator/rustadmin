@@ -4,7 +4,7 @@ use crate::keyboard::input_source::{change_input_source, get_cur_session_input_s
 use crate::platform::linux::is_x11;
 use crate::{
     client::{self, file_trait::FileManager},
-    common::{make_fd_to_json, make_vec_fd_to_json},
+    common::{make_fd_to_json, make_vec_fd_to_json, PeerSecurityEntry},
     flutter::{
         self, session_add, session_add_existed, session_start_, sessions, try_sync_peer_option,
     },
@@ -2710,16 +2710,40 @@ pub fn main_reset_peer_trust(id: String) -> SyncReturn<bool> {
     SyncReturn(reset)
 }
 
-pub fn main_list_peer_security_entries() -> String {
-    match crate::common::peer_security_entries() {
-        Ok(entries) => serde_json::to_string(&entries).unwrap_or_else(|error| {
-            log::error!("Failed to encode peer security entries: {error}");
-            "[]".to_owned()
-        }),
+fn resolve_peer_security_entries(
+    result: ResultType<Vec<PeerSecurityEntry>>,
+) -> Vec<PeerSecurityEntry> {
+    match result {
+        Ok(entries) => entries,
         Err(error) => {
             log::error!("Failed to list peer security entries: {error}");
-            "[]".to_owned()
+            Vec::new()
         }
+    }
+}
+
+pub fn main_list_peer_security_entries() -> String {
+    serde_json::to_string(&resolve_peer_security_entries(
+        crate::common::peer_security_entries(),
+    ))
+    .unwrap_or_else(|error| {
+        log::error!("Failed to encode peer security entries: {error}");
+        "[]".to_owned()
+    })
+}
+
+pub fn main_list_peer_security_entries_v2() -> Vec<PeerSecurityEntry> {
+    resolve_peer_security_entries(crate::common::peer_security_entries())
+}
+
+#[cfg(test)]
+mod peer_security_bridge_tests {
+    use super::*;
+
+    #[test]
+    fn peer_security_list_failure_is_empty() {
+        let entries = resolve_peer_security_entries(Err(anyhow::anyhow!("test failure")));
+        assert!(entries.is_empty());
     }
 }
 
