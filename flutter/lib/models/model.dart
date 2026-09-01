@@ -369,7 +369,15 @@ class FfiModel with ChangeNotifier {
     }, sessionId, peerId);
     await updatePrivacyModeSignal(sessionId, peerId);
     setConnectionType(peerId, data.secure, data.direct, data.streamType);
-    await handlePeerInfo(data.peerInfo, peerId, true);
+    final peerInfoEvent = decodeTypedSessionEvent({
+      ...data.peerInfo,
+      'name': 'peer_info',
+    });
+    if (peerInfoEvent is! PeerInfoSessionEvent) {
+      debugPrint('Rejected invalid cached peer_info snapshot');
+      return;
+    }
+    await handlePeerInfoEvent(peerInfoEvent, peerId, true);
     for (final element in data.cursorDataList) {
       updateLastCursorId(element);
       await handleCursorData(element);
@@ -445,8 +453,6 @@ class FfiModel with ChangeNotifier {
         handleToast(evt, sessionId, peerId);
       } else if (name == 'set_multiple_windows_session') {
         handleMultipleWindowsSession(evt, sessionId, peerId);
-      } else if (name == 'peer_info') {
-        handlePeerInfo(evt, peerId, false);
       } else if (name == 'terminal_response') {
         parent.target?.routeTerminalResponse(evt);
       } else if (name == 'file_dir') {
@@ -599,6 +605,8 @@ class FfiModel with ChangeNotifier {
         sessionId,
         peerId,
       );
+    } else if (event is PeerInfoSessionEvent) {
+      await handlePeerInfoEvent(event, peerId, false);
     } else if (event is SyncPeerInfoSessionEvent) {
       await handleSyncPeerInfoEvent(event, sessionId, peerId);
     } else if (event is SwitchDisplaySessionEvent) {
@@ -1753,23 +1761,20 @@ class FfiModel with ChangeNotifier {
     }
   }
 
-  /// Handle the peer info event based on [evt].
-  handlePeerInfo(Map<String, dynamic> evt, String peerId, bool isCache) async {
+  Future<void> handlePeerInfoEvent(
+      PeerInfoSessionEvent event, String peerId, bool isCache) async {
     parent.target?.chatModel.voiceCallStatus.value = VoiceCallStatus.notStarted;
 
     _queryAuditGuid(peerId);
 
-    // Map clone is required here, otherwise "evt" may be changed by other threads through the reference.
-    // Because this function is asynchronous, there's an "await" in this function.
-    cachedPeerData.peerInfo = {...evt};
-    // Do not cache resolutions, because a new display connection have different resolutions.
-    cachedPeerData.peerInfo.remove('resolutions');
+    cachedPeerData.peerInfo = Map<String, dynamic>.from(
+        event.toLegacyPayload(includeResolutions: false));
 
     // Recent peer is updated by handle_peer_info(ui_session_interface.rs) --> handle_peer_info(client.rs) --> save_config(client.rs)
     bind.mainLoadRecentPeers();
 
     parent.target?.dialogManager.dismissAll();
-    _pi.version = evt['version'];
+    _pi.version = event.version;
     // Note: Relative mouse mode is NOT auto-enabled on connect.
     // Users must manually enable it via toolbar or keyboard shortcut (Ctrl+Alt+Shift+M).
     //
@@ -1783,11 +1788,11 @@ class FfiModel with ChangeNotifier {
     }
     _pi.isSupportMultiUiSession =
         bind.isSupportMultiUiSession(version: _pi.version);
-    _pi.username = evt['username'];
-    _pi.hostname = evt['hostname'];
-    _pi.platform = evt['platform'];
-    _pi.sasEnabled = evt['sas_enabled'] == 'true';
-    final currentDisplay = int.parse(evt['current_display']);
+    _pi.username = event.username;
+    _pi.hostname = event.hostname;
+    _pi.platform = event.platform;
+    _pi.sasEnabled = event.sasEnabled;
+    final currentDisplay = event.currentDisplay;
     if (_pi.primaryDisplay == kInvalidDisplayIndex) {
       _pi.primaryDisplay = currentDisplay;
     }
@@ -1836,16 +1841,15 @@ class FfiModel with ChangeNotifier {
       }
     } else if (connType == ConnType.defaultConn ||
         connType == ConnType.viewCamera) {
-      List<Display> newDisplays = [];
-      List<dynamic> displays = json.decode(evt['displays']);
-      for (int i = 0; i < displays.length; ++i) {
-        newDisplays.add(evtToDisplay(displays[i]));
-      }
+      final displays = event.displays;
+      final newDisplays = [
+        for (final display in displays) _displayFromSessionValue(display),
+      ];
       _pi.displays.value = newDisplays;
       _pi.displaysCount.value = _pi.displays.length;
       if (_pi.currentDisplay < _pi.displays.length) {
         // now replaced to _updateCurDisplay
-        updateCurDisplay(sessionId);
+        await updateCurDisplay(sessionId);
       }
       if (displays.isNotEmpty) {
         _reconnects = 1;
@@ -1853,16 +1857,15 @@ class FfiModel with ChangeNotifier {
         waitForFirstImage.value = true;
         isRefreshing = false;
       }
-      Map<String, dynamic> features = json.decode(evt['features']);
-      _pi.features.privacyMode = features['privacy_mode'] == true;
+      _pi.features.privacyMode = event.features.privacyMode;
       _pi.features.keyboardV2CommittedText =
-          features['keyboard_v2_committed_text'] == true;
+          event.features.keyboardV2CommittedText;
       _pi.features.keyboardV2PhysicalKey =
-          features['keyboard_v2_physical_key'] == true;
+          event.features.keyboardV2PhysicalKey;
       _pi.features.keyboardV2LayoutAwareText =
-          features['keyboard_v2_layout_aware_text'] == true;
+          event.features.keyboardV2LayoutAwareText;
       if (!isCache) {
-        handleResolutions(peerId, evt["resolutions"]);
+        _applyResolutionValues(event.resolutions);
       }
       parent.target?.elevationModel.onPeerInfo(_pi);
     }
@@ -1876,7 +1879,7 @@ class FfiModel with ChangeNotifier {
     }
     if (connType == ConnType.defaultConn || connType == ConnType.viewCamera) {
       _pi.platformAdditions =
-          decodePeerPlatformAdditions(evt['platform_additions']);
+          Map<String, dynamic>.from(event.platformAdditions);
     }
 
     _pi.isSet.value = true;
@@ -2010,39 +2013,6 @@ class FfiModel with ChangeNotifier {
     }
   }
 
-  handleResolutions(String id, dynamic resolutions) {
-    try {
-      final resolutionsObj = json.decode(resolutions as String);
-      late List<dynamic> dynamicArray;
-      if (resolutionsObj is Map) {
-        // The web version
-        dynamicArray = (resolutionsObj as Map<String, dynamic>)['resolutions']
-            as List<dynamic>;
-      } else {
-        // The rust version
-        dynamicArray = resolutionsObj as List<dynamic>;
-      }
-      List<Resolution> arr = List.empty(growable: true);
-      for (int i = 0; i < dynamicArray.length; i++) {
-        var width = dynamicArray[i]["width"];
-        var height = dynamicArray[i]["height"];
-        if (width is int && width > 0 && height is int && height > 0) {
-          arr.add(Resolution(width, height));
-        }
-      }
-      arr.sort((a, b) {
-        if (b.width != a.width) {
-          return b.width - a.width;
-        } else {
-          return b.height - a.height;
-        }
-      });
-      _pi.resolutions = arr;
-    } catch (e) {
-      debugPrint("Failed to parse resolutions:$e");
-    }
-  }
-
   void _applyResolutionValues(List<SessionResolutionValue> values) {
     final resolutions = [
       for (final value in values) Resolution(value.width, value.height),
@@ -2073,29 +2043,6 @@ class FfiModel with ChangeNotifier {
       }
     }
     return display;
-  }
-
-  Display evtToDisplay(Map<String, dynamic> evt) {
-    var d = Display();
-    d.x = evt['x']?.toDouble() ?? d.x;
-    d.y = evt['y']?.toDouble() ?? d.y;
-    d.width = evt['width'] ?? d.width;
-    d.height = evt['height'] ?? d.height;
-    d.cursorEmbedded = evt['cursor_embedded'] == 1;
-    d.originalWidth = evt['original_width'] ?? kInvalidResolutionValue;
-    d.originalHeight = evt['original_height'] ?? kInvalidResolutionValue;
-    d._scale = 1.0;
-    final scaledWidth = evt['scaled_width'];
-    if (scaledWidth != null) {
-      final sw = int.tryParse(scaledWidth.toString());
-      if (sw != null && sw > 0 && d.width > 0) {
-        d._scale = max(d.width.toDouble() / sw, 1.0);
-      } else {
-        debugPrint(
-            "Invalid scaled_width ($scaledWidth) or width (${d.width}), using default scale 1.0");
-      }
-    }
-    return d;
   }
 
   updateLastCursorId(Map<String, dynamic> evt) {

@@ -122,6 +122,40 @@ void main() {
     expect(voice.reason, 'null');
   });
 
+  test('decodes and round-trips a bounded peer info snapshot', () {
+    final event =
+        decodeTypedSessionEvent({
+              'name': 'peer_info',
+              'username': 'user',
+              'hostname': 'host',
+              'platform': 'Windows',
+              'sas_enabled': 'true',
+              'displays':
+                  '[{"x":0,"y":0,"width":1920,"height":1080,"cursor_embedded":0}]',
+              'version': '2.0.5',
+              'features':
+                  '{"privacy_mode":true,"keyboard_v2_physical_key":true}',
+              'current_display': '0',
+              'resolutions': '[{"width":1920,"height":1080}]',
+              'platform_additions': '{"full_version":"2.0.5 rev 112"}',
+            })!
+            as PeerInfoSessionEvent;
+
+    expect(event.sasEnabled, isTrue);
+    expect(event.displays.single.width, 1920);
+    expect(event.features.privacyMode, isTrue);
+    expect(event.features.keyboardV2PhysicalKey, isTrue);
+    expect(event.resolutions.single.height, 1080);
+    expect(event.platformAdditions['full_version'], '2.0.5 rev 112');
+
+    final cachedPayload = event.toLegacyPayload(includeResolutions: false);
+    final cached = decodeTypedSessionEvent(
+      Map<String, dynamic>.from(cachedPayload),
+    );
+    expect(cached, isA<PeerInfoSessionEvent>());
+    expect((cached! as PeerInfoSessionEvent).resolutions, isEmpty);
+  });
+
   test('decodes display and platform synchronization payloads', () {
     final sync =
         decodeTypedSessionEvent({
@@ -197,7 +231,11 @@ void main() {
         decodeTypedSessionEvent({'name': 'permission'}),
         isA<InvalidSessionEvent>(),
       );
-      expect(decodeTypedSessionEvent({'name': 'peer_info'}), isNull);
+      expect(
+        decodeTypedSessionEvent({'name': 'peer_info'}),
+        isA<InvalidSessionEvent>(),
+      );
+      expect(decodeTypedSessionEvent({'name': 'legacy_unknown'}), isNull);
     },
   );
 }

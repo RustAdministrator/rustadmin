@@ -201,6 +201,75 @@ final class SyncPlatformAdditionsSessionEvent extends SessionEvent {
   final Map<String, Object?> updates;
 }
 
+final class SessionPeerFeaturesValue {
+  const SessionPeerFeaturesValue({
+    required this.privacyMode,
+    required this.keyboardV2CommittedText,
+    required this.keyboardV2PhysicalKey,
+    required this.keyboardV2LayoutAwareText,
+  });
+
+  final bool privacyMode;
+  final bool keyboardV2CommittedText;
+  final bool keyboardV2PhysicalKey;
+  final bool keyboardV2LayoutAwareText;
+
+  Map<String, bool> toLegacyMap() => {
+    'privacy_mode': privacyMode,
+    'keyboard_v2_committed_text': keyboardV2CommittedText,
+    'keyboard_v2_physical_key': keyboardV2PhysicalKey,
+    'keyboard_v2_layout_aware_text': keyboardV2LayoutAwareText,
+  };
+}
+
+final class PeerInfoSessionEvent extends SessionEvent {
+  PeerInfoSessionEvent({
+    required this.username,
+    required this.hostname,
+    required this.platform,
+    required this.sasEnabled,
+    required this.version,
+    required this.currentDisplay,
+    required List<SessionDisplayValue> displays,
+    required this.features,
+    required List<SessionResolutionValue> resolutions,
+    required Map<String, Object?> platformAdditions,
+  }) : displays = List<SessionDisplayValue>.unmodifiable(displays),
+       resolutions = List<SessionResolutionValue>.unmodifiable(resolutions),
+       platformAdditions = Map<String, Object?>.unmodifiable(platformAdditions);
+
+  final String username;
+  final String hostname;
+  final String platform;
+  final bool sasEnabled;
+  final String version;
+  final int currentDisplay;
+  final List<SessionDisplayValue> displays;
+  final SessionPeerFeaturesValue features;
+  final List<SessionResolutionValue> resolutions;
+  final Map<String, Object?> platformAdditions;
+
+  Map<String, Object> toLegacyPayload({bool includeResolutions = true}) => {
+    'name': 'peer_info',
+    'username': username,
+    'hostname': hostname,
+    'platform': platform,
+    'sas_enabled': sasEnabled.toString(),
+    'displays': jsonEncode([
+      for (final display in displays) display.toLegacyMap(),
+    ]),
+    'version': version,
+    'features': jsonEncode(features.toLegacyMap()),
+    'current_display': currentDisplay.toString(),
+    if (includeResolutions)
+      'resolutions': jsonEncode([
+        for (final resolution in resolutions)
+          {'width': resolution.width, 'height': resolution.height},
+      ]),
+    'platform_additions': jsonEncode(platformAdditions),
+  };
+}
+
 const _qualityDisplayMapKeys = <String>{
   'fps',
   'decode_fps',
@@ -438,6 +507,50 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
               'invalid display index',
             )
           : FollowCurrentDisplaySessionEvent(displayIndex);
+    case 'peer_info':
+      final username = _decodeBoundedString(event['username']);
+      final hostname = _decodeBoundedString(event['hostname']);
+      final platform = _decodeBoundedString(event['platform']);
+      final version = _decodeBoundedString(event['version']);
+      final sasEnabled = event.containsKey('sas_enabled')
+          ? _decodeBool(event['sas_enabled'])
+          : false;
+      final currentDisplay = _decodeInt(event['current_display']);
+      final displays = _decodeDisplays(event['displays']);
+      final features = _decodePeerFeatures(event['features']);
+      final resolutions = event.containsKey('resolutions')
+          ? _decodeResolutions(event['resolutions'])
+          : const <SessionResolutionValue>[];
+      final additionsRaw = event['platform_additions'];
+      final platformAdditions = additionsRaw == null || additionsRaw == ''
+          ? const <String, Object?>{}
+          : _decodeJsonObject(additionsRaw);
+      if (username == null ||
+          hostname == null ||
+          platform == null ||
+          version == null ||
+          sasEnabled == null ||
+          currentDisplay == null ||
+          currentDisplay < -1 ||
+          currentDisplay >= 64 ||
+          displays == null ||
+          features == null ||
+          resolutions == null ||
+          platformAdditions == null) {
+        return const InvalidSessionEvent('peer_info', 'invalid snapshot');
+      }
+      return PeerInfoSessionEvent(
+        username: username,
+        hostname: hostname,
+        platform: platform,
+        sasEnabled: sasEnabled,
+        version: version,
+        currentDisplay: currentDisplay,
+        displays: displays,
+        features: features,
+        resolutions: resolutions,
+        platformAdditions: platformAdditions,
+      );
     case 'sync_peer_info':
       if (!event.containsKey('displays')) {
         return SyncPeerInfoSessionEvent(null);
@@ -549,6 +662,30 @@ String? _decodeNonEmptyString(Object? value) {
   if (value == null) return null;
   final decoded = value.toString();
   return decoded.isEmpty ? null : decoded;
+}
+
+String? _decodeBoundedString(Object? value) =>
+    value is String && value.length <= 4096 ? value : null;
+
+SessionPeerFeaturesValue? _decodePeerFeatures(Object? raw) {
+  final values = _decodeJsonObject(raw);
+  if (values == null) return null;
+  const keys = <String>{
+    'privacy_mode',
+    'keyboard_v2_committed_text',
+    'keyboard_v2_physical_key',
+    'keyboard_v2_layout_aware_text',
+  };
+  for (final key in keys) {
+    final value = values[key];
+    if (value != null && value is! bool) return null;
+  }
+  return SessionPeerFeaturesValue(
+    privacyMode: values['privacy_mode'] == true,
+    keyboardV2CommittedText: values['keyboard_v2_committed_text'] == true,
+    keyboardV2PhysicalKey: values['keyboard_v2_physical_key'] == true,
+    keyboardV2LayoutAwareText: values['keyboard_v2_layout_aware_text'] == true,
+  );
 }
 
 List<SessionDisplayValue>? _decodeDisplays(Object? raw) {
