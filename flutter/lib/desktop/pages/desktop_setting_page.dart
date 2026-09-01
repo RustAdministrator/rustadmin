@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/transport_mode.dart';
+import 'package:flutter_hbb/common/remote_toolbar_settings.dart';
 import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
@@ -2084,6 +2085,23 @@ class _Display extends StatefulWidget {
 }
 
 class _DisplayState extends State<_Display> {
+  late final StreamSubscription<RemoteToolbarSettingsSnapshot>
+      _toolbarSettingsSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _toolbarSettingsSubscription = remoteToolbarSettings.watch().listen((_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    unawaited(_toolbarSettingsSubscription.cancel());
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
     final scrollController = ScrollController();
@@ -2100,25 +2118,36 @@ class _DisplayState extends State<_Display> {
     ]).marginOnly(bottom: _kListViewBottomMargin);
   }
 
-  int _toolbarOptionValue(
+  int _toolbarOptionValue(UserDefaultSetting<int> setting) =>
+      remoteUserDefaultSettings.read(setting);
+
+  Future<void> _setToolbarOptionValue(
+    UserDefaultSetting<int> setting,
+    int value,
+  ) async {
+    await remoteUserDefaultSettings.write(setting, value);
+  }
+
+  int _qualityMonitorOptionValue(
     String key, {
     required int defaultValue,
     required int min,
     required int max,
-  }) {
-    return (int.tryParse(bind.mainGetUserDefaultOption(key: key)) ??
-            defaultValue)
-        .clamp(min, max);
-  }
+  }) =>
+      (int.tryParse(bind.mainGetUserDefaultOption(key: key)) ?? defaultValue)
+          .clamp(min, max)
+          .toInt();
 
-  Future<void> _setToolbarOptionValue(
+  Future<void> _setQualityMonitorOptionValue(
     String key,
     int value, {
     required int min,
     required int max,
   }) async {
-    final next = value.clamp(min, max);
-    await bind.mainSetUserDefaultOption(key: key, value: next.toString());
+    await bind.mainSetUserDefaultOption(
+      key: key,
+      value: value.clamp(min, max).toString(),
+    );
     if (mounted) {
       setState(() {});
     }
@@ -2149,19 +2178,23 @@ class _DisplayState extends State<_Display> {
   Widget scrollStyle(BuildContext context) {
     final isOptFixed = isOptionFixed(kOptionScrollStyle);
     Future<void> onChanged(String value) async {
-      await bind.mainSetUserDefaultOption(
-          key: kOptionScrollStyle, value: value);
-      setState(() {});
+      await remoteUserDefaultSettings.write(
+        RemoteToolbarSettingsRegistry.scrollStyle,
+        value,
+      );
     }
 
-    final groupValue = bind.mainGetUserDefaultOption(key: kOptionScrollStyle);
+    final groupValue = remoteUserDefaultSettings.read(
+      RemoteToolbarSettingsRegistry.scrollStyle,
+    );
     final usesEdgeThickness = groupValue == kRemoteScrollStyleEdge ||
         groupValue == kRemoteScrollStyleEdgeAcceleration;
 
     onEdgeScrollEdgeThicknessChanged(double value) async {
-      await bind.mainSetUserDefaultOption(
-          key: kOptionEdgeScrollEdgeThickness, value: value.round().toString());
-      setState(() {});
+      await remoteUserDefaultSettings.write(
+        RemoteToolbarSettingsRegistry.edgeThickness,
+        value.round(),
+      );
     }
 
     return _Card(title: 'Default Scroll Style', children: [
@@ -2189,9 +2222,9 @@ class _DisplayState extends State<_Display> {
         Offstage(
             offstage: !usesEdgeThickness,
             child: EdgeThicknessControl(
-              value: double.tryParse(bind.mainGetUserDefaultOption(
-                      key: kOptionEdgeScrollEdgeThickness)) ??
-                  100.0,
+              value: remoteUserDefaultSettings
+                  .read(RemoteToolbarSettingsRegistry.edgeThickness)
+                  .toDouble(),
               onChanged: isOptionFixed(kOptionEdgeScrollEdgeThickness)
                   ? null
                   : onEdgeScrollEdgeThicknessChanged,
@@ -2202,34 +2235,19 @@ class _DisplayState extends State<_Display> {
 
   Widget toolbarAutoHide(BuildContext context) {
     final revealZonePx = _toolbarOptionValue(
-      kOptionRemoteToolbarRevealZonePx,
-      defaultValue: kDefaultRemoteToolbarRevealZonePx,
-      min: kMinRemoteToolbarRevealZonePx,
-      max: kMaxRemoteToolbarRevealZonePx,
+      RemoteToolbarSettingsRegistry.revealZone,
     );
     final hideDelayMs = _toolbarOptionValue(
-      kOptionRemoteToolbarHideDelayMs,
-      defaultValue: kDefaultRemoteToolbarHideDelayMs,
-      min: kMinRemoteToolbarHideDelayMs,
-      max: kMaxRemoteToolbarHideDelayMs,
+      RemoteToolbarSettingsRegistry.hideDelay,
     );
     final pinnedOpacityPercent = _toolbarOptionValue(
-      kOptionRemoteToolbarPinnedOpacityPercent,
-      defaultValue: kDefaultRemoteToolbarPinnedOpacityPercent,
-      min: kMinRemoteToolbarPinnedOpacityPercent,
-      max: kMaxRemoteToolbarPinnedOpacityPercent,
+      RemoteToolbarSettingsRegistry.pinnedOpacity,
     );
     final pinnedDimDelayMs = _toolbarOptionValue(
-      kOptionRemoteToolbarPinnedDimDelayMs,
-      defaultValue: kDefaultRemoteToolbarPinnedDimDelayMs,
-      min: kMinRemoteToolbarPinnedDimDelayMs,
-      max: kMaxRemoteToolbarPinnedDimDelayMs,
+      RemoteToolbarSettingsRegistry.pinnedDimDelay,
     );
     final pinnedDimDurationMs = _toolbarOptionValue(
-      kOptionRemoteToolbarPinnedDimDurationMs,
-      defaultValue: kDefaultRemoteToolbarPinnedDimDurationMs,
-      min: kMinRemoteToolbarPinnedDimDurationMs,
-      max: kMaxRemoteToolbarPinnedDimDurationMs,
+      RemoteToolbarSettingsRegistry.pinnedDimDuration,
     );
 
     return _Card(title: 'Toolbar auto-hide', children: [
@@ -2241,10 +2259,8 @@ class _DisplayState extends State<_Display> {
         unit: 'px',
         enabled: !isOptionFixed(kOptionRemoteToolbarRevealZonePx),
         onChanged: (value) => _setToolbarOptionValue(
-          kOptionRemoteToolbarRevealZonePx,
+          RemoteToolbarSettingsRegistry.revealZone,
           value,
-          min: kMinRemoteToolbarRevealZonePx,
-          max: kMaxRemoteToolbarRevealZonePx,
         ),
       ),
       _IntegerSettingSlider(
@@ -2255,10 +2271,8 @@ class _DisplayState extends State<_Display> {
         unit: 'ms',
         enabled: !isOptionFixed(kOptionRemoteToolbarHideDelayMs),
         onChanged: (value) => _setToolbarOptionValue(
-          kOptionRemoteToolbarHideDelayMs,
+          RemoteToolbarSettingsRegistry.hideDelay,
           value,
-          min: kMinRemoteToolbarHideDelayMs,
-          max: kMaxRemoteToolbarHideDelayMs,
         ),
       ),
       _IntegerSettingSlider(
@@ -2269,10 +2283,8 @@ class _DisplayState extends State<_Display> {
         unit: '%',
         enabled: !isOptionFixed(kOptionRemoteToolbarPinnedOpacityPercent),
         onChanged: (value) => _setToolbarOptionValue(
-          kOptionRemoteToolbarPinnedOpacityPercent,
+          RemoteToolbarSettingsRegistry.pinnedOpacity,
           value,
-          min: kMinRemoteToolbarPinnedOpacityPercent,
-          max: kMaxRemoteToolbarPinnedOpacityPercent,
         ),
       ),
       _IntegerSettingSlider(
@@ -2283,10 +2295,8 @@ class _DisplayState extends State<_Display> {
         unit: 'ms',
         enabled: !isOptionFixed(kOptionRemoteToolbarPinnedDimDelayMs),
         onChanged: (value) => _setToolbarOptionValue(
-          kOptionRemoteToolbarPinnedDimDelayMs,
+          RemoteToolbarSettingsRegistry.pinnedDimDelay,
           value,
-          min: kMinRemoteToolbarPinnedDimDelayMs,
-          max: kMaxRemoteToolbarPinnedDimDelayMs,
         ),
       ),
       _IntegerSettingSlider(
@@ -2297,29 +2307,27 @@ class _DisplayState extends State<_Display> {
         unit: 'ms',
         enabled: !isOptionFixed(kOptionRemoteToolbarPinnedDimDurationMs),
         onChanged: (value) => _setToolbarOptionValue(
-          kOptionRemoteToolbarPinnedDimDurationMs,
+          RemoteToolbarSettingsRegistry.pinnedDimDuration,
           value,
-          min: kMinRemoteToolbarPinnedDimDurationMs,
-          max: kMaxRemoteToolbarPinnedDimDurationMs,
         ),
       ),
     ]);
   }
 
   Widget qualityMonitorAppearance(BuildContext context) {
-    final opacityPercent = _toolbarOptionValue(
+    final opacityPercent = _qualityMonitorOptionValue(
       kOptionQualityMonitorInactiveOpacityPercent,
       defaultValue: kDefaultQualityMonitorInactiveOpacityPercent,
       min: kMinQualityMonitorInactiveOpacityPercent,
       max: kMaxQualityMonitorInactiveOpacityPercent,
     );
-    final dimDelayMs = _toolbarOptionValue(
+    final dimDelayMs = _qualityMonitorOptionValue(
       kOptionQualityMonitorDimDelayMs,
       defaultValue: kDefaultQualityMonitorDimDelayMs,
       min: kMinQualityMonitorDimDelayMs,
       max: kMaxQualityMonitorDimDelayMs,
     );
-    final dimDurationMs = _toolbarOptionValue(
+    final dimDurationMs = _qualityMonitorOptionValue(
       kOptionQualityMonitorDimDurationMs,
       defaultValue: kDefaultQualityMonitorDimDurationMs,
       min: kMinQualityMonitorDimDurationMs,
@@ -2334,7 +2342,7 @@ class _DisplayState extends State<_Display> {
         max: kMaxQualityMonitorInactiveOpacityPercent,
         unit: '%',
         enabled: !isOptionFixed(kOptionQualityMonitorInactiveOpacityPercent),
-        onChanged: (value) => _setToolbarOptionValue(
+        onChanged: (value) => _setQualityMonitorOptionValue(
           kOptionQualityMonitorInactiveOpacityPercent,
           value,
           min: kMinQualityMonitorInactiveOpacityPercent,
@@ -2348,7 +2356,7 @@ class _DisplayState extends State<_Display> {
         max: kMaxQualityMonitorDimDelayMs,
         unit: 'ms',
         enabled: !isOptionFixed(kOptionQualityMonitorDimDelayMs),
-        onChanged: (value) => _setToolbarOptionValue(
+        onChanged: (value) => _setQualityMonitorOptionValue(
           kOptionQualityMonitorDimDelayMs,
           value,
           min: kMinQualityMonitorDimDelayMs,
@@ -2362,7 +2370,7 @@ class _DisplayState extends State<_Display> {
         max: kMaxQualityMonitorDimDurationMs,
         unit: 'ms',
         enabled: !isOptionFixed(kOptionQualityMonitorDimDurationMs),
-        onChanged: (value) => _setToolbarOptionValue(
+        onChanged: (value) => _setQualityMonitorOptionValue(
           kOptionQualityMonitorDimDurationMs,
           value,
           min: kMinQualityMonitorDimDurationMs,
@@ -2410,15 +2418,17 @@ class _DisplayState extends State<_Display> {
   }
 
   Widget trackpadSpeed(BuildContext context) {
-    final initSpeed =
-        (int.tryParse(bind.mainGetUserDefaultOption(key: kKeyTrackpadSpeed)) ??
-            kDefaultTrackpadSpeed);
+    final initSpeed = remoteUserDefaultSettings.read(
+      RemoteToolbarSettingsRegistry.trackpadSpeed,
+    );
     final curSpeed = SimpleWrapper(initSpeed);
     void onDebouncer(int v) {
-      bind.mainSetUserDefaultOption(
-          key: kKeyTrackpadSpeed, value: v.toString());
-      // It's better to notify all sessions that the default speed is changed.
-      // But it may also be ok to take effect in the next connection.
+      unawaited(
+        remoteUserDefaultSettings.write(
+          RemoteToolbarSettingsRegistry.trackpadSpeed,
+          v,
+        ),
+      );
     }
 
     return _Card(title: 'Default trackpad speed', children: [

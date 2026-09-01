@@ -11,6 +11,7 @@ import 'package:flutter/widgets.dart' as flutter_widgets
 import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/common/widgets/dialog.dart';
 import 'package:flutter_hbb/common/widgets/toolbar.dart';
+import 'package:flutter_hbb/common/remote_toolbar_settings.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/desktop/session_tab.dart';
@@ -94,15 +95,6 @@ class _ToolbarMenuLifecycleScope extends InheritedWidget {
   }
 }
 
-int _parseToolbarIntOption(
-  String? raw, {
-  required int defaultValue,
-  required int min,
-  required int max,
-}) {
-  return (int.tryParse(raw ?? '') ?? defaultValue).clamp(min, max);
-}
-
 class _ToolbarOpacityState {
   const _ToolbarOpacityState({
     required this.opacity,
@@ -144,22 +136,9 @@ class _ToolbarOpacityLayer extends StatelessWidget {
   }
 }
 
-int _getToolbarIntDefault(
-  String key, {
-  required int defaultValue,
-  required int min,
-  required int max,
-}) {
-  return _parseToolbarIntOption(
-    bind.mainGetUserDefaultOption(key: key),
-    defaultValue: defaultValue,
-    min: min,
-    max: max,
-  );
-}
-
 class ToolbarState {
   late RxBool _pin;
+  late RemoteToolbarSettingsSnapshot _userDefaults;
 
   RxBool collapse = false.obs;
   RxBool hide = false.obs;
@@ -170,6 +149,7 @@ class ToolbarState {
   bool _isInitializing = false;
 
   ToolbarState() {
+    _userDefaults = remoteToolbarSettings.read();
     _pin = RxBool(false);
     final s = bind.getLocalFlutterOption(k: kOptionRemoteMenubarState);
     if (s.isEmpty) {
@@ -187,37 +167,17 @@ class ToolbarState {
   }
 
   bool get pin => _pin.value;
-  int get revealZonePx => _getToolbarIntDefault(
-        kOptionRemoteToolbarRevealZonePx,
-        defaultValue: kDefaultRemoteToolbarRevealZonePx,
-        min: kMinRemoteToolbarRevealZonePx,
-        max: kMaxRemoteToolbarRevealZonePx,
-      );
-  int get hideDelayMs => _getToolbarIntDefault(
-        kOptionRemoteToolbarHideDelayMs,
-        defaultValue: kDefaultRemoteToolbarHideDelayMs,
-        min: kMinRemoteToolbarHideDelayMs,
-        max: kMaxRemoteToolbarHideDelayMs,
-      );
-  int get pinnedDimOpacityPercent => _getToolbarIntDefault(
-        kOptionRemoteToolbarPinnedOpacityPercent,
-        defaultValue: kDefaultRemoteToolbarPinnedOpacityPercent,
-        min: kMinRemoteToolbarPinnedOpacityPercent,
-        max: kMaxRemoteToolbarPinnedOpacityPercent,
-      );
-  double get pinnedDimOpacity => pinnedDimOpacityPercent.toDouble() / 100.0;
-  int get pinnedDimDelayMs => _getToolbarIntDefault(
-        kOptionRemoteToolbarPinnedDimDelayMs,
-        defaultValue: kDefaultRemoteToolbarPinnedDimDelayMs,
-        min: kMinRemoteToolbarPinnedDimDelayMs,
-        max: kMaxRemoteToolbarPinnedDimDelayMs,
-      );
-  int get pinnedDimDurationMs => _getToolbarIntDefault(
-        kOptionRemoteToolbarPinnedDimDurationMs,
-        defaultValue: kDefaultRemoteToolbarPinnedDimDurationMs,
-        min: kMinRemoteToolbarPinnedDimDurationMs,
-        max: kMaxRemoteToolbarPinnedDimDurationMs,
-      );
+  int get revealZonePx => _userDefaults.revealZonePx;
+  int get hideDelayMs => _userDefaults.hideDelayMs;
+  int get pinnedDimOpacityPercent => _userDefaults.pinnedOpacityPercent;
+  double get pinnedDimOpacity => _userDefaults.pinnedOpacity;
+  int get pinnedDimDelayMs => _userDefaults.pinnedDimDelayMs;
+  int get pinnedDimDurationMs => _userDefaults.pinnedDimDurationMs;
+  RemoteToolbarSettingsSnapshot get userDefaults => _userDefaults;
+
+  void applyUserDefaults(RemoteToolbarSettingsSnapshot snapshot) {
+    _userDefaults = snapshot;
+  }
 
   /// Initialize all toolbar states from session options.
   /// This should be called once when the toolbar is first created.
@@ -578,7 +538,8 @@ class RemoteToolbar extends StatefulWidget {
 class _RemoteToolbarState extends State<RemoteToolbar> {
   Timer? _autoHideTimer;
   Timer? _pinnedDimTimer;
-  Timer? _globalOptionTimer;
+  StreamSubscription<RemoteToolbarSettingsSnapshot>?
+      _globalOptionSubscription;
   Worker? _pinWorker;
   bool _isCursorOverToolbar = false;
   int _menuHoverDepth = 0;
@@ -599,14 +560,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   double _toolbarDragStartFractionY = 0.0;
   double _dragLeft = 0.0;
   double _dragRight = 1.0;
-  int? _lastRevealZonePx;
-  int? _lastHideDelayMs;
-  int? _lastPinnedDimOpacityPercent;
-  int? _lastPinnedDimDelayMs;
-  int? _lastPinnedDimDurationMs;
-  String? _lastDefaultScrollStyle;
-  int? _lastDefaultEdgeScrollEdgeThickness;
-  int? _lastDefaultTrackpadSpeed;
+  RemoteToolbarSettingsSnapshot? _pendingGlobalOptions;
   bool _refreshingGlobalOptions = false;
   bool _menuFocusGuardActive = false;
   ToolbarMenuPhase _lastMenuPhase = ToolbarMenuPhase.closed;
@@ -655,8 +609,9 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   }
 
   void _cancelGlobalOptionRefresh() {
-    _globalOptionTimer?.cancel();
-    _globalOptionTimer = null;
+    final subscription = _globalOptionSubscription;
+    _globalOptionSubscription = null;
+    if (subscription != null) unawaited(subscription.cancel());
   }
 
   bool get _menuIsOpen => _menuCoordinator.isInteractionActive;
@@ -670,74 +625,13 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       !_menuInteractionActive &&
       _dragging.isFalse;
 
-  int _getDefaultEdgeScrollEdgeThickness() {
-    return _parseToolbarIntOption(
-      bind.mainGetUserDefaultOption(key: kOptionEdgeScrollEdgeThickness),
-      defaultValue: 100,
-      min: EdgeThicknessControl.kMin.round(),
-      max: EdgeThicknessControl.kMax.round(),
-    );
-  }
-
-  int _getDefaultTrackpadSpeed() {
-    return _parseToolbarIntOption(
-      bind.mainGetUserDefaultOption(key: kKeyTrackpadSpeed),
-      defaultValue: kDefaultTrackpadSpeed,
-      min: kMinTrackpadSpeed,
-      max: kMaxTrackpadSpeed,
-    );
-  }
-
-  String _getDefaultScrollStyle() {
-    final value = bind.mainGetUserDefaultOption(key: kOptionScrollStyle);
-    switch (value) {
-      case kRemoteScrollStyleBar:
-      case kRemoteScrollStyleEdge:
-      case kRemoteScrollStyleEdgeAcceleration:
-        return value;
-      default:
-        return kRemoteScrollStyleAuto;
-    }
-  }
-
-  bool _refreshGlobalOptionSnapshot() {
-    final revealZonePx = widget.state.revealZonePx;
-    final hideDelayMs = widget.state.hideDelayMs;
-    final pinnedDimOpacityPercent = widget.state.pinnedDimOpacityPercent;
-    final pinnedDimDelayMs = widget.state.pinnedDimDelayMs;
-    final pinnedDimDurationMs = widget.state.pinnedDimDurationMs;
-    final defaultScrollStyle = _getDefaultScrollStyle();
-    final defaultEdgeScrollEdgeThickness = _getDefaultEdgeScrollEdgeThickness();
-    final defaultTrackpadSpeed = _getDefaultTrackpadSpeed();
-
-    final changed = _lastRevealZonePx != null &&
-        (_lastRevealZonePx != revealZonePx ||
-            _lastHideDelayMs != hideDelayMs ||
-            _lastPinnedDimOpacityPercent != pinnedDimOpacityPercent ||
-            _lastPinnedDimDelayMs != pinnedDimDelayMs ||
-            _lastPinnedDimDurationMs != pinnedDimDurationMs ||
-            _lastDefaultScrollStyle != defaultScrollStyle ||
-            _lastDefaultEdgeScrollEdgeThickness !=
-                defaultEdgeScrollEdgeThickness ||
-            _lastDefaultTrackpadSpeed != defaultTrackpadSpeed);
-
-    _lastRevealZonePx = revealZonePx;
-    _lastHideDelayMs = hideDelayMs;
-    _lastPinnedDimOpacityPercent = pinnedDimOpacityPercent;
-    _lastPinnedDimDelayMs = pinnedDimDelayMs;
-    _lastPinnedDimDurationMs = pinnedDimDurationMs;
-    _lastDefaultScrollStyle = defaultScrollStyle;
-    _lastDefaultEdgeScrollEdgeThickness = defaultEdgeScrollEdgeThickness;
-    _lastDefaultTrackpadSpeed = defaultTrackpadSpeed;
-    return changed;
-  }
-
   void _startGlobalOptionRefresh() {
-    _refreshGlobalOptionSnapshot();
-    _globalOptionTimer = Timer.periodic(
-      const Duration(milliseconds: 1000),
-      (_) => _handleGlobalOptionsMaybeChanged(),
-    );
+    _globalOptionSubscription = remoteToolbarSettings.watch().listen((snapshot) {
+      _pendingGlobalOptions = snapshot;
+      if (!_refreshingGlobalOptions) {
+        unawaited(_handleGlobalOptionsMaybeChanged());
+      }
+    });
   }
 
   bool _shouldOpenVerticalMenusLeft() =>
@@ -988,66 +882,62 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     if (_refreshingGlobalOptions || !mounted) return;
     _refreshingGlobalOptions = true;
     try {
-      final previousScrollStyle = _lastDefaultScrollStyle;
-      final previousEdgeScrollEdgeThickness =
-          _lastDefaultEdgeScrollEdgeThickness;
-      final previousTrackpadSpeed = _lastDefaultTrackpadSpeed;
-      if (!_refreshGlobalOptionSnapshot()) {
-        return;
-      }
+      while (mounted && _pendingGlobalOptions != null) {
+        final next = _pendingGlobalOptions!;
+        _pendingGlobalOptions = null;
+        final previous = widget.state.userDefaults;
+        if (next == previous) continue;
+        widget.state.applyUserDefaults(next);
 
-      if (pin) {
-        if (_shouldDimPinnedToolbar) {
-          _cancelPinnedDim();
-          if (_toolbarOpacityState.value.opacity < 1.0) {
-            _setToolbarOpacity(
-              widget.state.pinnedDimOpacity,
-              const Duration(milliseconds: 180),
-            );
+        if (pin) {
+          if (_shouldDimPinnedToolbar) {
+            _cancelPinnedDim();
+            if (_toolbarOpacityState.value.opacity < 1.0) {
+              _setToolbarOpacity(
+                widget.state.pinnedDimOpacity,
+                const Duration(milliseconds: 180),
+              );
+            } else {
+              _schedulePinnedDim();
+            }
           } else {
-            _schedulePinnedDim();
+            _showPinnedToolbarOpaque();
           }
         } else {
-          _showPinnedToolbarOpaque();
+          _cancelAutoHide();
+          _handleWindowPointerState(_lastWindowPointer);
         }
-      } else {
-        _cancelAutoHide();
-        _handleWindowPointerState(_lastWindowPointer);
-      }
 
-      if (previousScrollStyle != null &&
-          widget.ffi.canvasModel.scrollStyle.stringValue ==
-              previousScrollStyle &&
-          _lastDefaultScrollStyle != previousScrollStyle) {
-        await bind.sessionSetScrollStyle(
-          sessionId: widget.ffi.sessionId,
-          value: _lastDefaultScrollStyle!,
-        );
-        await widget.ffi.canvasModel.updateScrollStyle();
-      }
+        if (widget.ffi.canvasModel.scrollStyle.stringValue ==
+                previous.scrollStyle &&
+            next.scrollStyle != previous.scrollStyle) {
+          await bind.sessionSetScrollStyle(
+            sessionId: widget.ffi.sessionId,
+            value: next.scrollStyle,
+          );
+          await widget.ffi.canvasModel.updateScrollStyle();
+        }
 
-      if (previousEdgeScrollEdgeThickness != null &&
-          widget.ffi.canvasModel.edgeScrollEdgeThickness ==
-              previousEdgeScrollEdgeThickness &&
-          _lastDefaultEdgeScrollEdgeThickness !=
-              previousEdgeScrollEdgeThickness) {
-        await bind.sessionSetEdgeScrollEdgeThickness(
-          sessionId: widget.ffi.sessionId,
-          value: _lastDefaultEdgeScrollEdgeThickness!,
-        );
-        widget.ffi.canvasModel.updateEdgeScrollEdgeThickness(
-          _lastDefaultEdgeScrollEdgeThickness!,
-        );
-      }
+        if (widget.ffi.canvasModel.edgeScrollEdgeThickness ==
+                previous.edgeThickness &&
+            next.edgeThickness != previous.edgeThickness) {
+          await bind.sessionSetEdgeScrollEdgeThickness(
+            sessionId: widget.ffi.sessionId,
+            value: next.edgeThickness,
+          );
+          widget.ffi.canvasModel.updateEdgeScrollEdgeThickness(
+            next.edgeThickness,
+          );
+        }
 
-      if (previousTrackpadSpeed != null &&
-          widget.ffi.inputModel.trackpadSpeed == previousTrackpadSpeed &&
-          _lastDefaultTrackpadSpeed != previousTrackpadSpeed) {
-        await bind.sessionSetTrackpadSpeed(
-          sessionId: widget.ffi.sessionId,
-          value: _lastDefaultTrackpadSpeed!,
-        );
-        await widget.ffi.inputModel.updateTrackpadSpeed();
+        if (widget.ffi.inputModel.trackpadSpeed == previous.trackpadSpeed &&
+            next.trackpadSpeed != previous.trackpadSpeed) {
+          await bind.sessionSetTrackpadSpeed(
+            sessionId: widget.ffi.sessionId,
+            value: next.trackpadSpeed,
+          );
+          await widget.ffi.inputModel.updateTrackpadSpeed();
+        }
       }
     } finally {
       _refreshingGlobalOptions = false;

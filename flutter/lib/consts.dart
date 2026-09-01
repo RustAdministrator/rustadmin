@@ -101,10 +101,15 @@ const String kWindowEventMoveTabToMainWindow = "move_tab_to_main_window";
 const String kWindowEventGetCachedSessionData = "get_cached_session_data";
 const String kWindowEventOpenMonitorSession = "open_monitor_session";
 const String kWindowEventQualityMonitorSnapshot = "quality_monitor_snapshot";
+const String kWindowEventUserDefaultOptionChanged =
+    "user_default_option_changed";
 
 const String kOptionViewStyle = "view_style";
 const String kOptionScrollStyle = "scroll_style";
 const String kOptionEdgeScrollEdgeThickness = "edge-scroll-edge-thickness";
+const int kDefaultEdgeScrollEdgeThickness = 100;
+const int kMinEdgeScrollEdgeThickness = 20;
+const int kMaxEdgeScrollEdgeThickness = 300;
 const String kOptionImageQuality = "image_quality";
 const String kOptionCustomImageQuality = "custom_image_quality";
 const String kOptionCustomFps = "custom-fps";
