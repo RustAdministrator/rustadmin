@@ -38,4 +38,26 @@ void main() {
     expect(errors, hasLength(1));
     expect(calls, ['after-failure']);
   });
+
+  test(
+    'cancellation skips pending commands but accepts new commands',
+    () async {
+      final firstGate = Completer<void>();
+      final calls = <String>[];
+      final queue = KeyboardCommandQueue();
+
+      final first = queue.enqueue(() async {
+        calls.add('first');
+        await firstGate.future;
+      });
+      final stale = queue.enqueue(() async => calls.add('stale'));
+      await Future<void>.delayed(Duration.zero);
+      queue.cancelPending();
+      final fresh = queue.enqueue(() async => calls.add('fresh'));
+      firstGate.complete();
+      await Future.wait([first, stale, fresh]);
+
+      expect(calls, ['first', 'fresh']);
+    },
+  );
 }

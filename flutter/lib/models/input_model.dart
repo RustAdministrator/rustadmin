@@ -852,6 +852,7 @@ class InputModel {
     final inputSessionId = sessionId;
     final lockModes = _buildLockModes(false);
     return _androidRemoteKeyboardQueue.enqueue(() async {
+      if (!keyboardPerm || isViewOnly || isViewCamera) return;
       await bind.sessionHandleFlutterKeyEvent(
         sessionId: inputSessionId,
         character: '',
@@ -872,6 +873,7 @@ class InputModel {
     }
     final inputSessionId = sessionId;
     return _androidRemoteKeyboardQueue.enqueue(() async {
+      if (!keyboardPerm || isViewOnly || isViewCamera) return;
       await bind.sessionInputTextEditWithSourceLayout(
         sessionId: inputSessionId,
         value: text,
@@ -1080,6 +1082,13 @@ class InputModel {
   /// Reset key modifiers to false, including [shift], [ctrl], [alt] and [command].
   void resetModifiers() {
     _keyboardInput.reset();
+  }
+
+  void permissionRevoked() {
+    _androidRemoteKeyboardQueue.cancelPending();
+    toReleaseKeys.release(handleKeyEvent);
+    toReleaseRawKeys.release(handleRawKeyEvent);
+    resetModifiers();
   }
 
   /// Modify the given modifier map [evt] based on current modifier key status.

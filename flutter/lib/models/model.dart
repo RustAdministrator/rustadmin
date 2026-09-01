@@ -254,7 +254,12 @@ class FfiModel with ChangeNotifier {
   updatePermissionValues(Map<String, bool> permissions, String id) {
     // Track previous keyboard permission to detect revocation.
     final hadKeyboardPerm = _permissions['keyboard'] != false;
+    final revokesKeyboard = hadKeyboardPerm && permissions['keyboard'] == false;
     final updatedPermissions = <String>[];
+
+    if (revokesKeyboard) {
+      parent.target?.inputModel.permissionRevoked();
+    }
 
     permissions.forEach((k, v) {
       if (k.isEmpty) return;

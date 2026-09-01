@@ -6,9 +6,12 @@ class KeyboardCommandQueue {
 
   final KeyboardCommandErrorHandler? onError;
   Future<void> _tail = Future<void>.value();
+  var _generation = 0;
 
   Future<void> enqueue(Future<void> Function() command) {
+    final generation = _generation;
     _tail = _tail.then((_) async {
+      if (generation != _generation) return;
       try {
         await command();
       } catch (error, stackTrace) {
@@ -16,5 +19,9 @@ class KeyboardCommandQueue {
       }
     });
     return _tail;
+  }
+
+  void cancelPending() {
+    _generation++;
   }
 }

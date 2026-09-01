@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/generated_bridge.dart';
 import 'package:flutter_hbb/mobile/mobile_modifier_state.dart';
 import 'package:flutter_hbb/models/input_model.dart';
@@ -58,6 +59,7 @@ class _TestRustadminImpl implements Rustadmin {
   final inputKeyCalls = <_InputKeyCall>[];
   final flutterKeyCalls = <_FlutterKeyCall>[];
   final textEditCalls = <_TextEditCall>[];
+  final sourceTextCalls = <String>[];
   final pendingFlutterKeyCalls = <Completer<void>>[];
   bool blockFlutterKeyCalls = false;
 
@@ -106,6 +108,10 @@ class _TestRustadminImpl implements Rustadmin {
       );
       return Future<void>.value();
     }
+    if (invocation.memberName == #sessionInputTextEditWithSourceLayout) {
+      sourceTextCalls.add(invocation.namedArguments[#value] as String);
+      return Future<void>.value();
+    }
     if (invocation.memberName == #sessionHandleFlutterKeyEvent) {
       flutterKeyCalls.add(
         _FlutterKeyCall(
@@ -131,6 +137,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   late _TestRustadminImpl testImpl;
+  late FFI ffi;
   late InputModel inputModel;
 
   setUpAll(() {
@@ -143,13 +150,17 @@ void main() {
     testImpl.inputKeyCalls.clear();
     testImpl.flutterKeyCalls.clear();
     testImpl.textEditCalls.clear();
+    testImpl.sourceTextCalls.clear();
     testImpl.pendingFlutterKeyCalls.clear();
     testImpl.blockFlutterKeyCalls = false;
-    inputModel = (FFI(null)..id = 'mobile-modifier-test-peer').inputModel;
+    ffi = FFI(null)..id = 'mobile-modifier-test-peer';
+    KeyboardEnabledState.init(ffi.id);
+    inputModel = ffi.inputModel;
   });
 
   tearDown(() {
     inputModel.disposeRelativeMouseMode();
+    KeyboardEnabledState.delete(ffi.id);
   });
 
   test('one-shot Ctrl is explicitly released after Ctrl+A', () {
@@ -265,6 +276,38 @@ void main() {
     expect(testImpl.inputKeyCalls.single.name, 'VK_CONTROL');
     expect(testImpl.inputKeyCalls.single.down, isFalse);
     expect(inputModel.ctrl, isFalse);
+  });
+
+  test('permission revocation releases virtual state before denying input', () {
+    inputModel.mobileModifierState.lock(MobileModifierKey.ctrl);
+    testImpl.inputKeyCalls.clear();
+
+    ffi.ffiModel.updatePermissionValues({'keyboard': false}, ffi.id);
+
+    expect(testImpl.inputKeyCalls, hasLength(1));
+    expect(testImpl.inputKeyCalls.single.name, 'VK_CONTROL');
+    expect(testImpl.inputKeyCalls.single.down, isFalse);
+    expect(inputModel.ctrl, isFalse);
+    inputModel.inputKey('VK_A');
+    expect(testImpl.inputKeyCalls, hasLength(1));
+  });
+
+  test('queued Android text rechecks permission before dispatch', () async {
+    testImpl.blockFlutterKeyCalls = true;
+    final physicalDown = inputModel.inputAndroidRemotePhysicalKey(0xe1, true);
+    final committedText = inputModel.inputAndroidRemoteCommittedText(
+      'blocked',
+      sourceLanguageTag: 'en',
+      sourceLayoutType: 'qwerty',
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    ffi.ffiModel.updatePermissionValues({'keyboard': false}, ffi.id);
+    ffi.ffiModel.updatePermissionValues({'keyboard': true}, ffi.id);
+    testImpl.pendingFlutterKeyCalls.removeAt(0).complete();
+    await Future.wait([physicalDown, committedText]);
+
+    expect(testImpl.sourceTextCalls, isEmpty);
   });
 
   test('Android physical key bridge preserves modifier ordering', () async {
