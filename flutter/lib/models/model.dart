@@ -4987,7 +4987,12 @@ class QualityMonitorModel with ChangeNotifier {
     final value = streamType?.toString();
     final connectionType = value == null || value.isEmpty ? null : value;
     final directLabel = _directLabel(direct);
-    final transportReset = _data.clearQuicTransportMetrics();
+    final connectionChanged = _data.connectionType != connectionType;
+    final isQuicTransport =
+        connectionType?.toUpperCase().contains('QUIC') == true;
+    final transportReset = connectionChanged || !isQuicTransport
+        ? _data.clearQuicTransportMetrics()
+        : false;
     if (_data.connectionType == connectionType &&
         _data.direct == directLabel &&
         !transportReset) {

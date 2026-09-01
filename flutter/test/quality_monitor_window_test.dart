@@ -64,6 +64,30 @@ void main() {
     expect(model.data.quicReassemblyDrops, isNull);
   });
 
+  test('repeated QUIC connection info preserves live transport metrics', () {
+    final model = QualityMonitorModel.detached();
+    addTearDown(model.dispose);
+
+    model.updateQualityStatusEvent(
+      qualityEvent({
+        'connection_type': 'QUIC/UDP',
+        'transport_mtu': '1360',
+        'transport_rtt_ms': '8',
+        'quic_protocol': 'v4',
+        'quic_reassembly_drops': '7',
+      }),
+    );
+    model.updateConnectionInfo('QUIC/UDP', true);
+    model.updateConnectionInfo('QUIC/UDP', true);
+
+    expect(model.data.connectionType, 'QUIC/UDP');
+    expect(model.data.transportMtu, '1360');
+    expect(model.data.transportRttMs, '8');
+    expect(model.data.quicProtocol, 'v4');
+    expect(model.data.quicReassemblyDrops, '7');
+    expect(model.data.direct, 'yes');
+  });
+
   test('detached TCP snapshots omit stale QUIC metrics', () {
     final source = QualityMonitorData()
       ..connectionType = 'TCP'
