@@ -1,3 +1,6 @@
+use super::input_authorization::{
+    RemoteInputAuthorizationGate, RemoteInputDecision, RemoteInputKind,
+};
 #[cfg(target_os = "windows")]
 use super::login_failure_check::try_acquire_os_credential_login_gate;
 use super::login_failure_check::{
@@ -58,6 +61,8 @@ use hbb_common::{
     },
     tokio_util::codec::{BytesCodec, Framed},
 };
+#[cfg(target_os = "android")]
+use scrap::android::call_main_service_release_input;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use scrap::android::{call_main_service_key_event, call_main_service_pointer_input};
 use scrap::camera;
@@ -702,14 +707,6 @@ fn should_block_remote_control_for_permission_prompt(
     has_active_pending_prompt: bool,
 ) -> bool {
     auth_kind.is_low_permission_support() && has_active_pending_prompt
-}
-
-fn keyboard_input_policy_allows(
-    view_camera_session: bool,
-    blocked_by_permission_prompt: bool,
-    keyboard_enabled: bool,
-) -> bool {
-    !view_camera_session && !blocked_by_permission_prompt && keyboard_enabled
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1544,6 +1541,7 @@ pub struct Connection {
     options_in_login: Option<OptionMessage>,
     #[cfg(not(any(target_os = "ios")))]
     pressed_modifiers: HashSet<rdev::Key>,
+    remote_input_authorization: RemoteInputAuthorizationGate,
     keyboard_input_receive_state: KeyboardInputReceiveState,
     #[cfg(target_os = "linux")]
     linux_headless_handle: LinuxHeadlessHandle,
@@ -1814,6 +1812,7 @@ impl Connection {
             options_in_login: None,
             #[cfg(not(any(target_os = "ios")))]
             pressed_modifiers: Default::default(),
+            remote_input_authorization: Default::default(),
             keyboard_input_receive_state: Default::default(),
             #[cfg(target_os = "linux")]
             linux_headless_handle,
@@ -2884,6 +2883,9 @@ impl Connection {
     async fn apply_switch_permission(&mut self, name: &str, enabled: bool) {
         let applied = if name == "keyboard" {
             self.keyboard = enabled;
+            if !enabled {
+                self.revoke_remote_input_authorization();
+            }
             self.send_permission(Permission::Keyboard, enabled).await;
             if let Some(s) = self.server.upgrade() {
                 s.write().unwrap().subscribe(
@@ -3127,6 +3129,7 @@ impl Connection {
                 requested_at: Instant::now(),
             },
         );
+        self.revoke_remote_input_authorization();
         log::info!(
             "Forwarding permission request {} ({}) from {} session to local user",
             request_id,
@@ -4187,18 +4190,71 @@ impl Connection {
             .ok();
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    fn authorize_remote_input(&mut self, kind: RemoteInputKind) -> RemoteInputDecision {
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        let show_cursor = self.show_my_cursor;
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        let show_cursor = false;
+        let outcome = self.remote_input_authorization.evaluate(
+            kind,
+            self.is_authed_view_camera_conn(),
+            self.should_block_remote_control_for_permission_prompt(),
+            self.peer_keyboard_enabled(),
+            show_cursor,
+        );
+        if outcome.reset_required {
+            self.reset_platform_remote_input_state();
+        }
+        outcome.decision
+    }
+
+    fn revoke_remote_input_authorization(&mut self) {
+        if self.remote_input_authorization.revoke() {
+            self.reset_platform_remote_input_state();
+        }
+    }
+
+    fn reset_platform_remote_input_state(&mut self) {
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        self.release_pressed_modifiers_via_input();
+        #[cfg(target_os = "android")]
+        self.release_android_remote_input_state();
+    }
+
+    #[cfg(target_os = "android")]
+    fn release_android_remote_input_state(&mut self) {
+        for key in self.pressed_modifiers.drain() {
+            let Some(control_key) = map_key_to_control_key(&key) else {
+                continue;
+            };
+            let mut event = KeyEvent::new();
+            event.set_control_key(control_key);
+            event.mode = KeyboardMode::Legacy.into();
+            event.down = false;
+            match event.write_to_bytes() {
+                Ok(data) => {
+                    if let Err(error) = call_main_service_key_event(&data) {
+                        log::debug!("Failed to release Android remote modifier: {error}");
+                    }
+                }
+                Err(error) => {
+                    log::debug!("Failed to encode Android remote modifier release: {error}");
+                }
+            }
+        }
+        if let Err(error) = call_main_service_release_input() {
+            log::debug!("Failed to reset Android remote input state: {error}");
+        }
+    }
+
     fn keyboard_input_allowed(&mut self) -> bool {
-        let view_camera_session = self.is_authed_view_camera_conn();
-        let blocked_by_prompt = self.should_block_remote_control_for_permission_prompt();
-        let keyboard_enabled = self.peer_keyboard_enabled();
-        if !keyboard_input_policy_allows(view_camera_session, blocked_by_prompt, keyboard_enabled) {
-            self.release_pressed_modifiers_via_input();
-            if !view_camera_session {
+        if self.authorize_remote_input(RemoteInputKind::Keyboard) != RemoteInputDecision::Control {
+            if !self.is_authed_view_camera_conn() {
                 self.update_auto_disconnect_timer();
             }
             return false;
         }
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         MOUSE_MOVE_TIME.store(get_time(), Ordering::SeqCst);
         true
     }
@@ -5415,56 +5471,63 @@ impl Connection {
             match msg.union {
                 #[allow(unused_mut)]
                 Some(message::Union::MouseEvent(mut me)) => {
-                    if self.is_authed_view_camera_conn() {
-                        return true;
-                    }
-                    // Low-permission sessions allow support input, but local permission prompts
-                    // must be answered only from the controlled machine.
-                    if self.should_block_remote_control_for_permission_prompt() {
-                        self.update_auto_disconnect_timer();
+                    let decision = self.authorize_remote_input(RemoteInputKind::Mouse);
+                    if decision == RemoteInputDecision::Deny {
+                        if !self.is_authed_view_camera_conn() {
+                            self.update_auto_disconnect_timer();
+                        }
                         return true;
                     }
                     #[cfg(any(target_os = "android", target_os = "ios"))]
-                    if let Err(e) = call_main_service_pointer_input("mouse", me.mask, me.x, me.y) {
-                        log::debug!("call_main_service_pointer_input fail:{}", e);
+                    if decision == RemoteInputDecision::Control {
+                        if let Err(e) =
+                            call_main_service_pointer_input("mouse", me.mask, me.x, me.y)
+                        {
+                            log::debug!("call_main_service_pointer_input fail:{}", e);
+                        }
                     }
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                    if self.peer_keyboard_enabled() {
-                        if is_left_up(&me) {
-                            CLICK_TIME.store(get_time(), Ordering::SeqCst);
-                        } else {
-                            MOUSE_MOVE_TIME.store(get_time(), Ordering::SeqCst);
+                    match decision {
+                        RemoteInputDecision::Control => {
+                            if is_left_up(&me) {
+                                CLICK_TIME.store(get_time(), Ordering::SeqCst);
+                            } else {
+                                MOUSE_MOVE_TIME.store(get_time(), Ordering::SeqCst);
+                            }
+                            #[cfg(target_os = "macos")]
+                            self.retina.on_mouse_event(&mut me, self.display_idx);
+                            self.input_mouse(
+                                me,
+                                self.inner.id(),
+                                self.lr.my_name.clone(),
+                                self.peer_argb,
+                                true,
+                                self.show_my_cursor,
+                            );
                         }
-                        #[cfg(target_os = "macos")]
-                        self.retina.on_mouse_event(&mut me, self.display_idx);
-                        self.input_mouse(
-                            me,
-                            self.inner.id(),
-                            self.lr.my_name.clone(),
-                            self.peer_argb,
-                            true,
-                            self.show_my_cursor,
-                        );
-                    } else if self.show_my_cursor {
-                        #[cfg(target_os = "macos")]
-                        self.retina.on_mouse_event(&mut me, self.display_idx);
-                        self.input_mouse(
-                            me,
-                            self.inner.id(),
-                            self.lr.my_name.clone(),
-                            self.peer_argb,
-                            false,
-                            true,
-                        );
+                        RemoteInputDecision::CursorOnly => {
+                            #[cfg(target_os = "macos")]
+                            self.retina.on_mouse_event(&mut me, self.display_idx);
+                            self.input_mouse(
+                                me,
+                                self.inner.id(),
+                                self.lr.my_name.clone(),
+                                self.peer_argb,
+                                false,
+                                true,
+                            );
+                        }
+                        RemoteInputDecision::Deny => {}
                     }
                     self.update_auto_disconnect_timer();
                 }
                 Some(message::Union::PointerDeviceEvent(pde)) => {
-                    if self.is_authed_view_camera_conn() {
-                        return true;
-                    }
-                    if self.should_block_remote_control_for_permission_prompt() {
-                        self.update_auto_disconnect_timer();
+                    if self.authorize_remote_input(RemoteInputKind::Pointer)
+                        != RemoteInputDecision::Control
+                    {
+                        if !self.is_authed_view_camera_conn() {
+                            self.update_auto_disconnect_timer();
+                        }
                         return true;
                     }
                     #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -5506,11 +5569,7 @@ impl Connection {
                 Some(message::Union::KeyEvent(..)) => {}
                 #[cfg(any(target_os = "android"))]
                 Some(message::Union::KeyEvent(mut me)) => {
-                    if self.is_authed_view_camera_conn() {
-                        return true;
-                    }
-                    if self.should_block_remote_control_for_permission_prompt() {
-                        self.update_auto_disconnect_timer();
+                    if !self.keyboard_input_allowed() {
                         return true;
                     }
                     let key = match me.mode.enum_value() {
@@ -5573,6 +5632,9 @@ impl Connection {
                 }
                 #[cfg(any(target_os = "android", target_os = "ios"))]
                 Some(message::Union::KeyboardInput(input)) => {
+                    if !self.keyboard_input_allowed() {
+                        return true;
+                    }
                     log::warn!(
                         "Rejected Keyboard V2 input on unsupported controlled platform: sequence={}",
                         input.sequence
@@ -7230,6 +7292,9 @@ impl Connection {
         if let Ok(q) = o.disable_keyboard.enum_value() {
             if q != BoolOption::NotSet {
                 self.disable_keyboard = q == BoolOption::Yes;
+                if self.disable_keyboard {
+                    self.revoke_remote_input_authorization();
+                }
                 if let Some(s) = self.server.upgrade() {
                     s.write().unwrap().subscribe(
                         super::clipboard_service::NAME,
@@ -8586,6 +8651,7 @@ impl Default for PortableState {
 
 impl Drop for Connection {
     fn drop(&mut self) {
+        self.revoke_remote_input_authorization();
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         self.release_pressed_modifiers();
 
@@ -10420,10 +10486,21 @@ mod test {
 
     #[test]
     fn keyboard_v2_keeps_session_and_permission_gates() {
-        assert!(keyboard_input_policy_allows(false, false, true));
-        assert!(!keyboard_input_policy_allows(true, false, true));
-        assert!(!keyboard_input_policy_allows(false, true, true));
-        assert!(!keyboard_input_policy_allows(false, false, false));
+        let decision = |view_camera, permission_prompt, keyboard_enabled| {
+            RemoteInputAuthorizationGate::default()
+                .evaluate(
+                    RemoteInputKind::Keyboard,
+                    view_camera,
+                    permission_prompt,
+                    keyboard_enabled,
+                    false,
+                )
+                .decision
+        };
+        assert_eq!(decision(false, false, true), RemoteInputDecision::Control);
+        assert_eq!(decision(true, false, true), RemoteInputDecision::Deny);
+        assert_eq!(decision(false, true, true), RemoteInputDecision::Deny);
+        assert_eq!(decision(false, false, false), RemoteInputDecision::Deny);
     }
 
     #[test]

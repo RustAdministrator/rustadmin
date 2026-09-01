@@ -18,6 +18,7 @@ import 'package:flutter_hbb/models/cm_file_model.dart';
 import 'package:flutter_hbb/models/file_model.dart';
 import 'package:flutter_hbb/models/group_model.dart';
 import 'package:flutter_hbb/models/peer_model.dart';
+import 'package:flutter_hbb/models/peer_capability_matrix.dart';
 import 'package:flutter_hbb/models/peer_tab_model.dart';
 import 'package:flutter_hbb/models/printer_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
@@ -48,6 +49,8 @@ import '../utils/image.dart' as img;
 import '../common/widgets/dialog.dart';
 import 'input_model.dart';
 import 'platform_model.dart';
+import 'session_event.dart';
+import 'session_lifecycle.dart';
 import 'package:flutter_hbb/utils/scale.dart';
 
 import 'package:flutter_hbb/generated_bridge.dart'
@@ -192,10 +195,10 @@ class FfiModel with ChangeNotifier {
 
   bool get touchMode => _touchMode;
 
-  bool get isPeerAndroid => _pi.platform == kPeerPlatformAndroid;
+  bool get isPeerAndroid => _pi.capabilities.isAndroid;
   bool get isPeerMobile => isPeerAndroid;
 
-  bool get isPeerLinux => _pi.platform == kPeerPlatformLinux;
+  bool get isPeerLinux => _pi.capabilities.isLinux;
 
   bool get viewOnly => _viewOnly;
   bool get showMyCursor => _showMyCursor;
@@ -248,14 +251,14 @@ class FfiModel with ChangeNotifier {
     }
   }
 
-  updatePermission(Map<String, dynamic> evt, String id) {
+  updatePermissionValues(Map<String, bool> permissions, String id) {
     // Track previous keyboard permission to detect revocation.
     final hadKeyboardPerm = _permissions['keyboard'] != false;
     final updatedPermissions = <String>[];
 
-    evt.forEach((k, v) {
-      if (k == 'name' || k.isEmpty) return;
-      _permissions[k] = v == 'true';
+    permissions.forEach((k, v) {
+      if (k.isEmpty) return;
+      _permissions[k] = v;
       if (_kInitialSessionPermissionNames.contains(k)) {
         updatedPermissions.add(k);
       }
@@ -424,6 +427,27 @@ class FfiModel with ChangeNotifier {
   // todo: why called by two position
   StreamEventHandler startEventListener(SessionID sessionId, String peerId) {
     return (evt) async {
+      final typedEvent = decodeTypedSessionEvent(evt);
+      if (typedEvent is ConnectionReadySessionEvent) {
+        setConnectionType(
+          peerId,
+          typedEvent.secure,
+          typedEvent.direct,
+          typedEvent.streamType,
+        );
+        parent.target?.qualityMonitorModel.updateConnectionInfo(
+          typedEvent.streamType,
+          typedEvent.direct,
+        );
+        return;
+      } else if (typedEvent is PermissionSessionEvent) {
+        updatePermissionValues(typedEvent.permissions, peerId);
+        return;
+      } else if (typedEvent is InvalidSessionEvent) {
+        debugPrint(
+            'Rejected malformed session event ${typedEvent.name}: ${typedEvent.reason}');
+        return;
+      }
       var name = evt['name'];
       if (name == 'msgbox') {
         handleMsgBox(evt, sessionId, peerId);
@@ -437,11 +461,6 @@ class FfiModel with ChangeNotifier {
         handleSyncPeerInfo(evt, sessionId, peerId);
       } else if (name == 'sync_platform_additions') {
         handlePlatformAdditions(evt, sessionId, peerId);
-      } else if (name == 'connection_ready') {
-        setConnectionType(peerId, evt['secure'] == 'true',
-            evt['direct'] == 'true', evt['stream_type'] ?? '');
-        parent.target?.qualityMonitorModel
-            .updateConnectionInfo(evt['stream_type'], evt['direct']);
       } else if (name == 'switch_display') {
         // switch display is kept for backward compatibility
         handleSwitchDisplay(evt, sessionId, peerId);
@@ -455,8 +474,6 @@ class FfiModel with ChangeNotifier {
         await parent.target?.cursorModel.updateCursorPosition(evt, peerId);
       } else if (name == 'clipboard') {
         Clipboard.setData(ClipboardData(text: evt['content']));
-      } else if (name == 'permission') {
-        updatePermission(evt, peerId);
       } else if (name == 'chat_client_mode') {
         parent.target?.chatModel
             .receive(ChatModel.clientModeID, evt['text'] ?? '');
@@ -1856,14 +1873,8 @@ class FfiModel with ChangeNotifier {
           sessionId: sessionId, arg: kOptionToggleShowMyCursor));
     }
     if (connType == ConnType.defaultConn || connType == ConnType.viewCamera) {
-      final platformAdditions = evt['platform_additions'];
-      if (platformAdditions != null && platformAdditions != '') {
-        try {
-          _pi.platformAdditions = json.decode(platformAdditions);
-        } catch (e) {
-          debugPrint('Failed to decode platformAdditions $e');
-        }
-      }
+      _pi.platformAdditions =
+          decodePeerPlatformAdditions(evt['platform_additions']);
     }
 
     _pi.isSet.value = true;
@@ -5442,7 +5453,7 @@ class ElevationModel with ChangeNotifier {
   bool _canElevate = false;
   bool get showRequestMenu => _canElevate && !_running;
   onPeerInfo(PeerInfo pi) {
-    _canElevate = pi.platform == kPeerPlatformWindows && pi.sasEnabled == false;
+    _canElevate = pi.capabilities.elevationRequest;
     _running = false;
   }
 
@@ -5464,7 +5475,9 @@ class FFI {
   var id = '';
   var version = '';
   var connType = ConnType.defaultConn;
-  var closed = false;
+  final _sessionLifecycle = SessionLifecycle();
+  Future<void>? _closeFuture;
+  bool get closed => _sessionLifecycle.isClosed;
   int? hostWindowId;
   Future<void> Function(FFI ffi, String peerId)? onAuthenticated;
 
@@ -5495,8 +5508,6 @@ class FFI {
 
   // Terminal model registry for multiple terminals
   final Map<int, TerminalModel> _terminalModels = {};
-  int _sessionEventGeneration = 0;
-  int _sessionStartGeneration = 0;
   int? _androidSessionGeneration;
 
   // Getter for terminal models
@@ -5563,9 +5574,12 @@ class FFI {
     int? hostWindowId,
     String? transferSourceSessionId,
   }) async {
+    final activeClose = _closeFuture;
+    if (activeClose != null) {
+      await activeClose;
+    }
     this.hostWindowId = hostWindowId;
-    final sessionStartGeneration = ++_sessionStartGeneration;
-    closed = false;
+    final sessionGeneration = _sessionLifecycle.beginStart();
     if (isMobile) mobileReset();
     assert(
         (!(isPortForward && isViewCamera)) &&
@@ -5598,6 +5612,7 @@ class FFI {
         sessionId.toString(),
       );
       if (!attached) {
+        _sessionLifecycle.failed(sessionGeneration);
         throw StateError('Failed to protect the outgoing Android session');
       }
       _androidSessionGeneration =
@@ -5638,9 +5653,10 @@ class FFI {
               connToken: connToken,
             );
       if (addRes.isNotEmpty) {
+        _sessionLifecycle.failed(sessionGeneration);
         throw StateError(addRes);
       }
-      if (closed || sessionStartGeneration != _sessionStartGeneration) {
+      if (!_sessionLifecycle.accepts(sessionGeneration)) {
         await bind.sessionClose(sessionId: sessionId);
         return;
       }
@@ -5694,6 +5710,7 @@ class FFI {
         imageModel.onRgba(display, data);
       });
       this.id = id;
+      _sessionLifecycle.connected(sessionGeneration);
       return;
     }
 
@@ -5720,15 +5737,14 @@ class FFI {
     imageModel.updateUserTextureRender();
     final hasGpuTextureRender = bind.mainHasGpuTextureRender();
     final SimpleWrapper<bool> isToNewWindowNotified = SimpleWrapper(false);
-    final sessionEventGeneration = ++_sessionEventGeneration;
     // Preserved for the rgba data.
     stream.listen((message) {
-      if (closed || sessionEventGeneration != _sessionEventGeneration) return;
+      if (!_sessionLifecycle.accepts(sessionGeneration)) return;
       if (tabWindowId != null && !isToNewWindowNotified.value) {
         // Session is read to be moved to a new window.
         // Get the cached data and handle the cached data.
         Future.delayed(Duration.zero, () async {
-          if (sessionEventGeneration != _sessionEventGeneration) return;
+          if (!_sessionLifecycle.accepts(sessionGeneration)) return;
           final args = jsonEncode({
             'id': id,
             if (transferSourceSessionId != null)
@@ -5751,7 +5767,7 @@ class FFI {
       () async {
         if (message is EventToUI_Event) {
           if (message.field0 == "close") {
-            closed = true;
+            _sessionLifecycle.closed(sessionGeneration);
             debugPrint('Exit session event loop');
             return;
           }
@@ -5805,8 +5821,10 @@ class FFI {
     });
     // every instance will bind a stream
     this.id = id;
+    _sessionLifecycle.connected(sessionGeneration);
     if (cachedPeerData != null) {
       Future.delayed(Duration.zero, () async {
+        if (!_sessionLifecycle.accepts(sessionGeneration)) return;
         await handleCachedSessionData(
           cachedPeerData,
           runAuthenticatedSetup: attachExisting && tabWindowId == null,
@@ -5852,74 +5870,100 @@ class FFI {
   /// Clear session-scoped state while keeping the mobile page reusable.
   Future<void> resetMobileSessionForReconnect({
     required bool closeSession,
-  }) async {
-    ++_sessionStartGeneration;
-    ++_sessionEventGeneration;
-    closed = true;
-    chatModel.close();
-    for (final model in _terminalModels.values) {
-      model.dispose();
-    }
-    _terminalModels.clear();
-    await imageModel.update(null);
-    cursorModel.clear();
-    ffiModel.clear();
-    canvasModel.clear();
-    inputModel.setRelativeMouseMode(false);
-    inputModel.resetModifiers();
-    if (closeSession) {
-      await bind.sessionClose(sessionId: sessionId);
-    }
-    if (isAndroid) {
-      await AndroidVpnSessionCoordinator.instance.release(
-        generation: _androidSessionGeneration,
-      );
-      _androidSessionGeneration = null;
-    }
-    id = '';
-    debugPrint('mobile session reset for fresh reconnect');
-  }
+  }) => _runCloseOperation(() async {
+        final closeGeneration = _sessionLifecycle.beginClose();
+        try {
+          chatModel.close();
+          for (final model in _terminalModels.values) {
+            model.dispose();
+          }
+          _terminalModels.clear();
+          await imageModel.update(null);
+          cursorModel.clear();
+          ffiModel.clear();
+          canvasModel.clear();
+          inputModel.setRelativeMouseMode(false);
+          inputModel.resetModifiers();
+          if (closeSession) {
+            await bind.sessionClose(sessionId: sessionId);
+          }
+          if (isAndroid) {
+            await AndroidVpnSessionCoordinator.instance.release(
+              generation: _androidSessionGeneration,
+            );
+            _androidSessionGeneration = null;
+          }
+          id = '';
+          debugPrint('mobile session reset for fresh reconnect');
+        } finally {
+          _sessionLifecycle.closed(closeGeneration);
+        }
+      });
 
   /// Close the remote session.
   Future<void> close(
-      {bool closeSession = true, bool saveCanvasConfig = true}) async {
-    ++_sessionStartGeneration;
-    closed = true;
-    chatModel.close();
-    // Close all terminal models
-    for (final model in _terminalModels.values) {
-      model.dispose();
+      {bool closeSession = true, bool saveCanvasConfig = true}) =>
+      _runCloseOperation(() async {
+        final closeGeneration = _sessionLifecycle.beginClose();
+        try {
+          chatModel.close();
+          // Close all terminal models
+          for (final model in _terminalModels.values) {
+            model.dispose();
+          }
+          _terminalModels.clear();
+          if (saveCanvasConfig &&
+              imageModel.hasRenderableFrame &&
+              !isWebDesktop) {
+            await setCanvasConfig(
+                sessionId,
+                cursorModel.x,
+                cursorModel.y,
+                canvasModel.x,
+                canvasModel.y,
+                canvasModel.scale,
+                ffiModel.pi.currentDisplay);
+          }
+          imageModel.callbacksOnFirstImage.clear();
+          await imageModel.update(null);
+          cursorModel.clear();
+          ffiModel.clear();
+          canvasModel.clear();
+          inputModel.resetModifiers();
+          // Dispose relative mouse mode resources to ensure cursor is restored
+          inputModel.disposeRelativeMouseMode();
+          if (closeSession) {
+            await bind.sessionClose(sessionId: sessionId);
+          }
+          if (isAndroid) {
+            await AndroidVpnSessionCoordinator.instance.release(
+              generation: _androidSessionGeneration,
+            );
+            _androidSessionGeneration = null;
+          }
+          debugPrint('model $id closed');
+          id = '';
+        } finally {
+          _sessionLifecycle.closed(closeGeneration);
+        }
+      });
+
+  Future<void> _runCloseOperation(Future<void> Function() operation) {
+    final active = _closeFuture;
+    if (active != null) return active;
+    if (_sessionLifecycle.phase == SessionPhase.closed &&
+        id.isEmpty &&
+        _androidSessionGeneration == null) {
+      return Future<void>.value();
     }
-    _terminalModels.clear();
-    if (saveCanvasConfig && imageModel.hasRenderableFrame && !isWebDesktop) {
-      await setCanvasConfig(
-          sessionId,
-          cursorModel.x,
-          cursorModel.y,
-          canvasModel.x,
-          canvasModel.y,
-          canvasModel.scale,
-          ffiModel.pi.currentDisplay);
-    }
-    imageModel.callbacksOnFirstImage.clear();
-    await imageModel.update(null);
-    cursorModel.clear();
-    ffiModel.clear();
-    canvasModel.clear();
-    inputModel.resetModifiers();
-    // Dispose relative mouse mode resources to ensure cursor is restored
-    inputModel.disposeRelativeMouseMode();
-    if (closeSession) {
-      await bind.sessionClose(sessionId: sessionId);
-    }
-    if (isAndroid) {
-      await AndroidVpnSessionCoordinator.instance.release(
-        generation: _androidSessionGeneration,
-      );
-      _androidSessionGeneration = null;
-    }
-    debugPrint('model $id closed');
-    id = '';
+    late final Future<void> future;
+    future = operation().whenComplete(() {
+      if (identical(_closeFuture, future)) {
+        _closeFuture = null;
+      }
+    });
+    _closeFuture = future;
+    return future;
   }
 
   void setMethodCallHandler(FMethod callback) {
@@ -6039,7 +6083,7 @@ class PeerInfo with ChangeNotifier {
   bool get isWayland => platformAdditions[kPlatformAdditionsIsWayland] == true;
   bool get isHeadless => platformAdditions[kPlatformAdditionsHeadless] == true;
   bool get isInstalled =>
-      platform != kPeerPlatformWindows ||
+      !capabilities.isWindows ||
       platformAdditions[kPlatformAdditionsIsInstalled] == true;
   List<int> get RustDeskVirtualDisplays => List<int>.from(
       platformAdditions[kPlatformAdditionsRustDeskVirtualDisplays] ?? []);
@@ -6059,7 +6103,17 @@ class PeerInfo with ChangeNotifier {
   String get fullVersion =>
       platformAdditions[kPlatformAdditionsFullVersion] as String? ?? version;
   bool get supportCaptureBackend =>
-      platformAdditions[kPlatformAdditionsSupportCaptureBackend] == true;
+      capabilities.captureBackendSelection;
+  PeerCapabilityMatrix get capabilities =>
+      PeerCapabilityMatrix.fromPeerInfo(
+        platform: platform,
+        sasEnabled: sasEnabled,
+        captureBackendSelection:
+            platformAdditions[kPlatformAdditionsSupportCaptureBackend] == true,
+        keyboardV2CommittedText: features.keyboardV2CommittedText,
+        keyboardV2PhysicalKey: features.keyboardV2PhysicalKey,
+        keyboardV2LayoutAwareText: features.keyboardV2LayoutAwareText,
+      );
 
   Display? tryGetDisplay({int? display}) {
     if (displays.isEmpty) {

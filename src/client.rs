@@ -39,8 +39,13 @@ use crate::{
     video_profile::{VideoProfile, MOVIE_DEFAULT_TARGET_FPS},
     wrap_direct_public_key_symmetric_value_with_identity,
 };
+
+#[cfg(all(feature = "flutter", not(target_os = "ios")))]
+mod clipboard_lifecycle;
 #[cfg(feature = "unix-file-copy-paste")]
 use crate::{clipboard::check_clipboard_files, clipboard_file::unix_file_clip};
+#[cfg(all(feature = "flutter", not(target_os = "ios")))]
+use clipboard_lifecycle::ClipboardChannelRegistry;
 pub use file_trait::FileManager;
 #[cfg(not(feature = "flutter"))]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -254,6 +259,8 @@ struct ClipboardState {
     is_text_required: bool,
     #[cfg(all(feature = "flutter", feature = "unix-file-copy-paste"))]
     is_file_required: bool,
+    #[cfg(feature = "flutter")]
+    active_channels: ClipboardChannelRegistry,
     running: bool,
 }
 
@@ -304,6 +311,8 @@ impl Client {
         ),
         (i32, String),
     )> {
+        crate::common::PeerSecurityRepository::recover_pending()
+            .context("failed to recover peer-security mutation")?;
         debug_assert!(peer == interface.get_id());
         interface.update_direct(None);
         interface.update_received(false);
@@ -1869,22 +1878,36 @@ impl Client {
         CLIPBOARD_STATE.lock().unwrap().is_file_required = b;
     }
 
+    #[cfg(all(feature = "flutter", not(target_os = "ios")))]
+    pub fn register_clipboard_channel(peer_id: &str, round: u32) {
+        CLIPBOARD_STATE
+            .lock()
+            .unwrap()
+            .active_channels
+            .register(peer_id, round);
+    }
+
+    #[cfg(all(feature = "flutter", not(target_os = "ios")))]
+    pub fn unregister_clipboard_channel(peer_id: &str, round: u32) {
+        CLIPBOARD_STATE
+            .lock()
+            .unwrap()
+            .active_channels
+            .unregister(peer_id, round);
+    }
+
     #[cfg(not(target_os = "ios"))]
     fn try_stop_clipboard() {
-        // There's a bug here.
-        // If session is closed by the peer, `has_sessions_running()` will always return true.
-        // It's better to check if the active session number.
-        // But it's not a problem, because the clipboard thread does not consume CPU.
-        //
-        // If we want to fix it, we can add a flag to indicate if session is active.
-        // But I think it's not necessary to introduce complexity at this point.
-        #[cfg(feature = "flutter")]
-        if crate::flutter::sessions::has_sessions_running(ConnType::DEFAULT_CONN) {
-            return;
+        {
+            let mut state = CLIPBOARD_STATE.lock().unwrap();
+            #[cfg(feature = "flutter")]
+            if state.active_channels.has_active() {
+                return;
+            }
+            #[cfg(not(target_os = "android"))]
+            clipboard_listener::unsubscribe(Self::CLIENT_CLIPBOARD_NAME);
+            state.running = false;
         }
-        #[cfg(not(target_os = "android"))]
-        clipboard_listener::unsubscribe(Self::CLIENT_CLIPBOARD_NAME);
-        CLIPBOARD_STATE.lock().unwrap().running = false;
         #[cfg(all(feature = "unix-file-copy-paste", target_os = "linux"))]
         clipboard::platform::unix::fuse::uninit_fuse_context(true);
     }
@@ -1994,6 +2017,8 @@ impl ClipboardState {
             is_text_required: true,
             #[cfg(all(feature = "flutter", feature = "unix-file-copy-paste"))]
             is_file_required: true,
+            #[cfg(feature = "flutter")]
+            active_channels: ClipboardChannelRegistry::default(),
             running: false,
         }
     }

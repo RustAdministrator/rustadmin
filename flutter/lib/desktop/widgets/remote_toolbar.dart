@@ -3096,8 +3096,7 @@ class _KeyboardMenu extends StatelessWidget {
               inputSource(),
               Divider(),
               viewMode(),
-              if ([kPeerPlatformWindows, kPeerPlatformMacOS, kPeerPlatformLinux]
-                  .contains(pi.platform))
+              if (pi.capabilities.desktopCursorControls)
                 showMyCursor(),
               Divider(),
               ...toolbarToggles(),
@@ -3303,7 +3302,7 @@ class _KeyboardMenu extends StatelessWidget {
   }
 
   mobileActions() {
-    if (pi.platform != kPeerPlatformAndroid) return [];
+    if (!pi.capabilities.mobileSystemActions) return [];
     final enabled = versionCmp(pi.version, '1.2.7') >= 0;
     if (!enabled) return [];
     return [

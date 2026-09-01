@@ -94,6 +94,12 @@ class MainService : Service() {
     }
 
     @Keep
+    @RequiresApi(Build.VERSION_CODES.N)
+    fun rustReleaseRemoteInputState() {
+        InputService.ctx?.releaseRemoteInputState()
+    }
+
+    @Keep
     fun rustGetByName(name: String): String {
         return when (name) {
             "screen_size" -> {

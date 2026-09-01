@@ -58,6 +58,7 @@ lazy_static::lazy_static! {
 }
 
 static FRB_TRACE_NEXT_ID: AtomicU64 = AtomicU64::new(1);
+static RENDER_TARGET_NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 struct FrbTraceGuard {
     id: u64,
@@ -595,6 +596,10 @@ pub fn session_set_flutter_option(session_id: SessionID, k: String, v: String) {
 pub fn get_next_texture_key() -> SyncReturn<i32> {
     let k = TEXTURE_RENDER_KEY.fetch_add(1, Ordering::SeqCst) + 1;
     SyncReturn(k)
+}
+
+pub fn get_next_render_target_token() -> SyncReturn<u64> {
+    SyncReturn(RENDER_TARGET_NEXT_TOKEN.fetch_add(1, Ordering::Relaxed))
 }
 
 pub fn get_local_flutter_option(k: String) -> SyncReturn<String> {
@@ -2719,11 +2724,9 @@ pub fn main_list_peer_security_entries() -> String {
 }
 
 pub fn main_remove_peer(id: String) {
-    if let Err(error) = crate::common::reset_peer_pairing_trust(&id) {
+    if let Err(error) = crate::common::remove_peer_security(&id) {
         log::error!("Refusing to remove host {id} without clearing its paired trust: {error}");
-        return;
     }
-    PeerConfig::remove(&id);
 }
 
 pub fn main_has_hwcodec() -> SyncReturn<bool> {
@@ -3230,6 +3233,27 @@ pub fn session_register_pixelbuffer_texture(
     ))
 }
 
+pub fn session_register_pixelbuffer_render_target(
+    session_id: SessionID,
+    display: usize,
+    ptr: usize,
+    token: u64,
+) -> SyncReturn<()> {
+    SyncReturn(super::flutter::session_register_pixelbuffer_render_target(
+        session_id, display, ptr, token,
+    ))
+}
+
+pub fn session_unregister_pixelbuffer_render_target(
+    session_id: SessionID,
+    display: usize,
+    token: u64,
+) -> SyncReturn<()> {
+    SyncReturn(
+        super::flutter::session_unregister_pixelbuffer_render_target(session_id, display, token),
+    )
+}
+
 pub fn session_register_gpu_texture(
     session_id: SessionID,
     display: usize,
@@ -3237,6 +3261,27 @@ pub fn session_register_gpu_texture(
 ) -> SyncReturn<()> {
     SyncReturn(super::flutter::session_register_gpu_texture(
         session_id, display, ptr,
+    ))
+}
+
+pub fn session_register_gpu_render_target(
+    session_id: SessionID,
+    display: usize,
+    ptr: usize,
+    token: u64,
+) -> SyncReturn<()> {
+    SyncReturn(super::flutter::session_register_gpu_render_target(
+        session_id, display, ptr, token,
+    ))
+}
+
+pub fn session_unregister_gpu_render_target(
+    session_id: SessionID,
+    display: usize,
+    token: u64,
+) -> SyncReturn<()> {
+    SyncReturn(super::flutter::session_unregister_gpu_render_target(
+        session_id, display, token,
     ))
 }
 

@@ -72,6 +72,7 @@ class InputService : AccessibilityService() {
     private var leftIsDown = false
     private var touchPath = Path()
     private var stroke: GestureDescription.StrokeDescription? = null
+    private var gestureActive = false
     private var lastTouchGestureStartTime = 0L
     private var mouseX = 0
     private var mouseY = 0
@@ -236,6 +237,23 @@ class InputService : AccessibilityService() {
     }
 
     @RequiresApi(Build.VERSION_CODES.N)
+    fun releaseRemoteInputState() {
+        isWaitingLongPress = false
+        leftIsDown = false
+        recentActionTask?.cancel()
+        recentActionTask = null
+        wheelActionsQueue.clear()
+        timer.purge()
+        if (gestureActive && stroke != null) {
+            endGesture(mouseX, mouseY)
+        } else {
+            touchPath.reset()
+            stroke = null
+            gestureActive = false
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.N)
     private fun consumeWheelActions() {
         if (isWheelActionsPolling) {
             return
@@ -287,6 +305,7 @@ class InputService : AccessibilityService() {
         lastTouchGestureStartTime = System.currentTimeMillis()
         lastX = x
         lastY = y
+        gestureActive = true
     }
 
     @RequiresApi(Build.VERSION_CODES.N)
@@ -380,6 +399,7 @@ class InputService : AccessibilityService() {
         } else {
             endGestureBelowO(x, y)
         }
+        gestureActive = false
     }
 
     @RequiresApi(Build.VERSION_CODES.N)

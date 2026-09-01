@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common/widgets/gestures.dart';
@@ -114,6 +116,52 @@ void main() {
     expect(accumulator.add(-17), -2);
     accumulator.reset();
     expect(accumulator.add(7), 0);
+  });
+
+  test('button sequence cancels a request before down is emitted', () async {
+    final controller = MobileButtonSequenceController();
+    final calls = <String>[];
+    final token = controller.beginRequest();
+
+    controller.cancelRequest(token);
+    await controller.activate(token, () async => calls.add('down'));
+    await controller.release(() async => calls.add('up'));
+
+    expect(calls, isEmpty);
+    expect(controller.hasIntent, isFalse);
+  });
+
+  test('button release waits for an in-flight down and balances it', () async {
+    final controller = MobileButtonSequenceController();
+    final downGate = Completer<void>();
+    final calls = <String>[];
+    final token = controller.beginRequest();
+    final down = controller.activate(token, () async {
+      calls.add('down-start');
+      await downGate.future;
+      calls.add('down-end');
+    });
+    await Future<void>.delayed(Duration.zero);
+
+    final up = controller.release(() async => calls.add('up'));
+    expect(calls, ['down-start']);
+    downGate.complete();
+    await Future.wait([down, up]);
+
+    expect(calls, ['down-start', 'down-end', 'up']);
+    expect(controller.hasIntent, isFalse);
+  });
+
+  test('button sequence emits at most one up per press', () async {
+    final controller = MobileButtonSequenceController();
+    final calls = <String>[];
+    final token = controller.beginRequest();
+    await controller.activate(token, () async => calls.add('down'));
+
+    await controller.release(() async => calls.add('up'));
+    await controller.release(() async => calls.add('duplicate-up'));
+
+    expect(calls, ['down', 'up']);
   });
 
   Future<void> pumpTarget(

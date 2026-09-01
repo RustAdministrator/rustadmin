@@ -172,6 +172,17 @@ void main() {
     expect(testImpl.inputKeyCalls.single.ctrl, isTrue);
   });
 
+  test('virtual release preserves the same physical modifier', () {
+    inputModel.ctrl = true;
+    inputModel.mobileModifierState.tap(MobileModifierKey.ctrl);
+
+    inputModel.inputKey('VK_A');
+
+    expect(inputModel.ctrl, isTrue);
+    expect(testImpl.inputKeyCalls, hasLength(1));
+    expect(testImpl.inputKeyCalls.single.ctrl, isTrue);
+  });
+
   test('turning off a modifier sends its key-up immediately', () {
     inputModel.mobileModifierState.lock(MobileModifierKey.ctrl);
     testImpl.inputKeyCalls.clear();
@@ -197,6 +208,19 @@ void main() {
     expect(testImpl.inputKeyCalls[0].ctrl, isTrue);
     expect(testImpl.inputKeyCalls[1].name, 'VK_CONTROL');
     expect(testImpl.inputKeyCalls[1].ctrl, isFalse);
+  });
+
+  test('temporary shortcut does not overwrite a physical modifier', () {
+    inputModel.ctrl = true;
+
+    inputModel.inputKeyWithTemporaryMobileModifier(
+      'VK_C',
+      MobileModifierKey.ctrl,
+    );
+
+    expect(inputModel.ctrl, isTrue);
+    expect(testImpl.inputKeyCalls, hasLength(1));
+    expect(testImpl.inputKeyCalls.single.ctrl, isTrue);
   });
 
   test('Android physical key bridge preserves modifier ordering', () async {

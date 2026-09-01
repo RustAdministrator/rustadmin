@@ -28,6 +28,9 @@ use std::{
     },
 };
 
+mod render_target;
+use render_target::RenderTargetOwner;
+
 /// tag "main" for [Desktop Main Page] and [Mobile (Client and Server)] (the mobile don't need multiple windows, only one global event stream is needed)
 /// tag "cm" only for [Desktop CM Page]
 pub(crate) const APP_TYPE_MAIN: &str = "main";
@@ -265,15 +268,30 @@ pub type FlutterGpuTextureRendererPluginCApiSetTexture =
 #[cfg(feature = "vram")]
 pub type FlutterGpuTextureRendererPluginCApiGetAdapterLuid = unsafe extern "C" fn() -> i64;
 
-pub(super) type TextureRgbaPtr = usize;
-
 struct DisplaySessionInfo {
-    // TextureRgba pointer in flutter native.
-    texture_rgba_ptr: TextureRgbaPtr,
+    pixelbuffer_target: RenderTargetOwner,
     size: (usize, usize),
     #[cfg(feature = "vram")]
-    gpu_output_ptr: usize,
+    gpu_target: RenderTargetOwner,
     notify_render_type: Option<RenderType>,
+}
+
+impl DisplaySessionInfo {
+    fn with_size(width: usize, height: usize) -> Self {
+        Self {
+            pixelbuffer_target: RenderTargetOwner::default(),
+            size: (width, height),
+            #[cfg(feature = "vram")]
+            gpu_target: RenderTargetOwner::default(),
+            notify_render_type: None,
+        }
+    }
+}
+
+impl Default for DisplaySessionInfo {
+    fn default() -> Self {
+        Self::with_size(0, 0)
+    }
 }
 
 // Video Texture Renderer in Flutter
@@ -349,58 +367,51 @@ impl VideoRenderer {
             info.size = (width, height);
             info.notify_render_type = None;
         } else {
-            sessions_lock.insert(
-                display,
-                DisplaySessionInfo {
-                    texture_rgba_ptr: usize::default(),
-                    size: (width, height),
-                    #[cfg(feature = "vram")]
-                    gpu_output_ptr: usize::default(),
-                    notify_render_type: None,
-                },
-            );
+            sessions_lock.insert(display, DisplaySessionInfo::with_size(width, height));
         }
     }
 
     fn register_pixelbuffer_texture(&self, display: usize, ptr: usize) {
         let mut sessions_lock = self.map_display_sessions.write().unwrap();
-        if ptr == 0 {
-            if let Some(info) = sessions_lock.get_mut(&display) {
-                if info.texture_rgba_ptr != usize::default() {
-                    info.texture_rgba_ptr = usize::default();
-                }
-                #[cfg(feature = "vram")]
-                if info.gpu_output_ptr != usize::default() {
-                    return;
-                }
+        let info = sessions_lock.entry(display).or_default();
+        if let Some(previous) = info.pixelbuffer_target.pointer() {
+            if ptr != 0 && previous != ptr {
+                log::warn!(
+                    "replace legacy pixelbuffer render target {} with {}",
+                    previous,
+                    ptr
+                );
             }
-            sessions_lock.remove(&display);
+        }
+        info.pixelbuffer_target.register_legacy(ptr);
+        info.notify_render_type = None;
+    }
+
+    fn register_owned_pixelbuffer_texture(&self, display: usize, ptr: usize, token: u64) {
+        let mut sessions_lock = self.map_display_sessions.write().unwrap();
+        let info = sessions_lock.entry(display).or_default();
+        if info.pixelbuffer_target.register(ptr, token) {
+            info.notify_render_type = None;
         } else {
-            if let Some(info) = sessions_lock.get_mut(&display) {
-                if info.texture_rgba_ptr != usize::default()
-                    && info.texture_rgba_ptr != ptr as TextureRgbaPtr
-                {
-                    log::warn!(
-                        "texture_rgba_ptr is not null and not equal to ptr, replace {} to {}",
-                        info.texture_rgba_ptr,
-                        ptr
-                    );
-                }
-                info.texture_rgba_ptr = ptr as _;
+            log::debug!(
+                "ignore stale pixelbuffer render target: display={}, token={}",
+                display,
+                token
+            );
+        }
+    }
+
+    fn unregister_owned_pixelbuffer_texture(&self, display: usize, token: u64) {
+        let mut sessions_lock = self.map_display_sessions.write().unwrap();
+        if let Some(info) = sessions_lock.get_mut(&display) {
+            if info.pixelbuffer_target.unregister(token) {
                 info.notify_render_type = None;
             } else {
-                if ptr != 0 {
-                    sessions_lock.insert(
-                        display,
-                        DisplaySessionInfo {
-                            texture_rgba_ptr: ptr as _,
-                            size: (0, 0),
-                            #[cfg(feature = "vram")]
-                            gpu_output_ptr: usize::default(),
-                            notify_render_type: None,
-                        },
-                    );
-                }
+                log::debug!(
+                    "ignore stale pixelbuffer unregister: display={}, token={}",
+                    display,
+                    token
+                );
             }
         }
     }
@@ -408,57 +419,113 @@ impl VideoRenderer {
     #[cfg(feature = "vram")]
     pub fn register_gpu_output(&self, display: usize, ptr: usize) {
         let mut sessions_lock = self.map_display_sessions.write().unwrap();
-        if ptr == 0 {
-            if let Some(info) = sessions_lock.get_mut(&display) {
-                if info.gpu_output_ptr != usize::default() {
-                    info.gpu_output_ptr = usize::default();
-                }
-                if info.texture_rgba_ptr != usize::default() {
-                    return;
-                }
-            }
-            sessions_lock.remove(&display);
+        let info = sessions_lock.entry(display).or_default();
+        info.gpu_target.register_legacy(ptr);
+        info.notify_render_type = None;
+    }
+
+    #[cfg(feature = "vram")]
+    pub fn register_owned_gpu_output(&self, display: usize, ptr: usize, token: u64) {
+        let mut sessions_lock = self.map_display_sessions.write().unwrap();
+        let info = sessions_lock.entry(display).or_default();
+        if info.gpu_target.register(ptr, token) {
+            info.notify_render_type = None;
         } else {
-            if let Some(info) = sessions_lock.get_mut(&display) {
-                if info.gpu_output_ptr != usize::default() && info.gpu_output_ptr != ptr {
-                    log::error!(
-                        "gpu_output_ptr is not null and not equal to ptr, relace {} to {}",
-                        info.gpu_output_ptr,
-                        ptr
-                    );
-                }
-                info.gpu_output_ptr = ptr as _;
+            log::debug!(
+                "ignore stale GPU render target: display={}, token={}",
+                display,
+                token
+            );
+        }
+    }
+
+    #[cfg(feature = "vram")]
+    pub fn unregister_owned_gpu_output(&self, display: usize, token: u64) {
+        let mut sessions_lock = self.map_display_sessions.write().unwrap();
+        if let Some(info) = sessions_lock.get_mut(&display) {
+            if info.gpu_target.unregister(token) {
                 info.notify_render_type = None;
             } else {
-                if ptr != usize::default() {
-                    sessions_lock.insert(
-                        display,
-                        DisplaySessionInfo {
-                            texture_rgba_ptr: usize::default(),
-                            size: (0, 0),
-                            gpu_output_ptr: ptr,
-                            notify_render_type: None,
-                        },
-                    );
-                }
+                log::debug!(
+                    "ignore stale GPU unregister: display={}, token={}",
+                    display,
+                    token
+                );
             }
         }
+    }
+
+    fn pixelbuffer_display(
+        &self,
+        sessions: &HashMap<usize, DisplaySessionInfo>,
+        requested_display: usize,
+    ) -> Option<usize> {
+        if self.is_support_multi_ui_session {
+            return sessions
+                .get(&requested_display)
+                .and_then(|info| info.pixelbuffer_target.pointer())
+                .map(|_| requested_display);
+        }
+        if sessions
+            .get(&requested_display)
+            .and_then(|info| info.pixelbuffer_target.pointer())
+            .is_some()
+        {
+            return Some(requested_display);
+        }
+        sessions
+            .iter()
+            .filter_map(|(display, info)| {
+                info.pixelbuffer_target
+                    .pointer()
+                    .map(|_| (info.pixelbuffer_target.token().unwrap_or(0), *display))
+            })
+            .max()
+            .map(|(_, display)| display)
+    }
+
+    #[cfg(feature = "vram")]
+    fn gpu_display(
+        &self,
+        sessions: &HashMap<usize, DisplaySessionInfo>,
+        requested_display: usize,
+    ) -> Option<usize> {
+        if self.is_support_multi_ui_session {
+            return sessions
+                .get(&requested_display)
+                .and_then(|info| info.gpu_target.pointer())
+                .map(|_| requested_display);
+        }
+        if sessions
+            .get(&requested_display)
+            .and_then(|info| info.gpu_target.pointer())
+            .is_some()
+        {
+            return Some(requested_display);
+        }
+        sessions
+            .iter()
+            .filter_map(|(display, info)| {
+                info.gpu_target
+                    .pointer()
+                    .map(|_| (info.gpu_target.token().unwrap_or(0), *display))
+            })
+            .max()
+            .map(|(_, display)| display)
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     pub fn on_rgba(&self, display: usize, rgba: &scrap::ImageRgb) -> bool {
         let mut write_lock = self.map_display_sessions.write().unwrap();
-        let opt_info = if !self.is_support_multi_ui_session {
-            write_lock.values_mut().next()
-        } else {
-            write_lock.get_mut(&display)
-        };
-        let Some(info) = opt_info else {
+        let Some(target_display) = self.pixelbuffer_display(&write_lock, display) else {
             return false;
         };
-        if info.texture_rgba_ptr == usize::default() {
+        let Some(info) = write_lock.get_mut(&target_display) else {
             return false;
-        }
+        };
+        let Some(texture_rgba_ptr) = info.pixelbuffer_target.pointer() else {
+            return false;
+        };
 
         if info.size.0 != rgba.w || info.size.1 != rgba.h {
             log::error!(
@@ -477,7 +544,7 @@ impl VideoRenderer {
         if let Some(func) = &self.on_rgba_func {
             unsafe {
                 func(
-                    info.texture_rgba_ptr as _,
+                    texture_rgba_ptr as _,
                     rgba.raw.as_ptr() as _,
                     rgba.raw.len() as _,
                     rgba.w as _,
@@ -497,19 +564,17 @@ impl VideoRenderer {
     #[cfg(feature = "vram")]
     pub fn on_texture(&self, display: usize, texture: *mut c_void) -> bool {
         let mut write_lock = self.map_display_sessions.write().unwrap();
-        let opt_info = if !self.is_support_multi_ui_session {
-            write_lock.values_mut().next()
-        } else {
-            write_lock.get_mut(&display)
-        };
-        let Some(info) = opt_info else {
+        let Some(target_display) = self.gpu_display(&write_lock, display) else {
             return false;
         };
-        if info.gpu_output_ptr == usize::default() {
+        let Some(info) = write_lock.get_mut(&target_display) else {
             return false;
-        }
+        };
+        let Some(gpu_output_ptr) = info.gpu_target.pointer() else {
+            return false;
+        };
         if let Some(func) = &self.on_texture_func {
-            unsafe { func(info.gpu_output_ptr as _, texture) };
+            unsafe { func(gpu_output_ptr as _, texture) };
         }
         if info.notify_render_type != Some(RenderType::Texture) {
             info.notify_render_type = Some(RenderType::Texture);
@@ -2077,6 +2142,44 @@ pub fn session_register_pixelbuffer_texture(session_id: SessionID, display: usiz
     }
 }
 
+fn with_session_renderer(session_id: &SessionID, callback: impl FnOnce(&VideoRenderer)) {
+    for session in sessions::get_sessions() {
+        if let Some(handler) = session
+            .ui_handler
+            .session_handlers
+            .read()
+            .unwrap()
+            .get(session_id)
+        {
+            callback(&handler.renderer);
+            break;
+        }
+    }
+}
+
+#[inline]
+pub fn session_register_pixelbuffer_render_target(
+    session_id: SessionID,
+    display: usize,
+    ptr: usize,
+    token: u64,
+) {
+    with_session_renderer(&session_id, |renderer| {
+        renderer.register_owned_pixelbuffer_texture(display, ptr, token)
+    });
+}
+
+#[inline]
+pub fn session_unregister_pixelbuffer_render_target(
+    session_id: SessionID,
+    display: usize,
+    token: u64,
+) {
+    with_session_renderer(&session_id, |renderer| {
+        renderer.unregister_owned_pixelbuffer_texture(display, token)
+    });
+}
+
 #[inline]
 pub fn session_register_gpu_texture(_session_id: SessionID, _display: usize, _output_ptr: usize) {
     #[cfg(feature = "vram")]
@@ -2092,6 +2195,27 @@ pub fn session_register_gpu_texture(_session_id: SessionID, _display: usize, _ou
             break;
         }
     }
+}
+
+#[inline]
+pub fn session_register_gpu_render_target(
+    _session_id: SessionID,
+    _display: usize,
+    _output_ptr: usize,
+    _token: u64,
+) {
+    #[cfg(feature = "vram")]
+    with_session_renderer(&_session_id, |renderer| {
+        renderer.register_owned_gpu_output(_display, _output_ptr, _token)
+    });
+}
+
+#[inline]
+pub fn session_unregister_gpu_render_target(_session_id: SessionID, _display: usize, _token: u64) {
+    #[cfg(feature = "vram")]
+    with_session_renderer(&_session_id, |renderer| {
+        renderer.unregister_owned_gpu_output(_display, _token)
+    });
 }
 
 #[inline]

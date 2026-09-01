@@ -164,3 +164,55 @@ class MobileWheelAccumulator {
 
   void reset() => _remainder = 0;
 }
+
+/// Serializes one remote button lifetime. Cancellation invalidates a pending
+/// request, while a release queued during an in-flight down waits and emits one
+/// matching up.
+class MobileButtonSequenceController {
+  var _generation = 0;
+  int? _request;
+  var _pressed = false;
+  Future<void> _tail = Future<void>.value();
+
+  bool get hasIntent => _request != null || _pressed;
+  bool get isPressed => _pressed;
+  Future<void> get settled => _tail;
+
+  int beginRequest() {
+    final token = ++_generation;
+    _request = token;
+    return token;
+  }
+
+  bool isRequested(int token) => _request == token;
+
+  void cancelRequest(int token) {
+    if (_request == token) {
+      _request = null;
+      _generation += 1;
+    }
+  }
+
+  Future<void> activate(int token, Future<void> Function() sendDown) =>
+      _enqueue(() async {
+        if (_request != token || _pressed) return;
+        await sendDown();
+        _pressed = true;
+      });
+
+  Future<void> release(Future<void> Function() sendUp) {
+    _request = null;
+    _generation += 1;
+    return _enqueue(() async {
+      if (!_pressed) return;
+      await sendUp();
+      _pressed = false;
+    });
+  }
+
+  Future<void> _enqueue(Future<void> Function() command) {
+    final result = _tail.then((_) => command());
+    _tail = result.then<void>((_) {}, onError: (Object _, StackTrace __) {});
+    return result;
+  }
+}
