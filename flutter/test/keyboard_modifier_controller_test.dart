@@ -1,26 +1,50 @@
-import 'package:flutter/services.dart';
-import 'package:flutter/widgets.dart';
+import 'dart:async';
+
 import 'package:flutter_hbb/mobile/mobile_modifier_state.dart';
-import 'package:flutter_hbb/models/input_model.dart';
 import 'package:flutter_hbb/models/keyboard_modifier_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class _KeyboardHarness {
   final events = <String>[];
+  final errors = <Object>[];
   final keyEffects = <(String, bool, bool, KeyboardModifiers)>[];
-  bool acceptKeys = true;
-  bool acceptText = true;
-  bool acceptString = true;
+  bool allowDispatch = true;
   bool throwOnKey = false;
   bool throwOnText = false;
+  bool failKeyEffect = false;
+  Completer<void>? physicalGate;
+  int activeEffects = 0;
+  int maxActiveEffects = 0;
+
+  Future<void> runEffect(
+    String event, {
+    void Function()? record,
+    Completer<void>? gate,
+    bool fail = false,
+  }) async {
+    activeEffects++;
+    if (activeEffects > maxActiveEffects) maxActiveEffects = activeEffects;
+    try {
+      events.add(event);
+      record?.call();
+      if (gate != null) await gate.future;
+      if (fail) throw StateError('async sink failed');
+    } finally {
+      activeEffects--;
+    }
+  }
 
   late final controller = KeyboardInputController(
+    canDispatch: () => allowDispatch,
     sendKey:
         ({required name, required down, required press, required modifiers}) {
-          events.add('key:$name');
-          keyEffects.add((name, down, press, modifiers));
           if (throwOnKey) throw StateError('sink failed');
-          return acceptKeys;
+          final fail = failKeyEffect;
+          return () => runEffect(
+            'key:$name',
+            record: () => keyEffects.add((name, down, press, modifiers)),
+            fail: fail,
+          );
         },
     sendTextEdit:
         ({
@@ -28,14 +52,39 @@ class _KeyboardHarness {
           required deleteBeforeGraphemes,
           required deleteAfterGraphemes,
         }) {
-          events.add('text:$text:$deleteBeforeGraphemes:$deleteAfterGraphemes');
           if (throwOnText) throw StateError('text sink failed');
-          return acceptText;
+          return () async {
+            events.add(
+              'text:$text:$deleteBeforeGraphemes:$deleteAfterGraphemes',
+            );
+          };
         },
-    sendString: (text) {
-      events.add('string:$text');
-      return acceptString;
-    },
+    sendString: (text) =>
+        () async => events.add('string:$text'),
+    sendPhysicalKey:
+        ({
+          required character,
+          required usbHid,
+          required lockModes,
+          required down,
+        }) =>
+            () => runEffect('physical:$usbHid:$down', gate: physicalGate),
+    sendRawKey:
+        ({
+          required name,
+          required platformCode,
+          required positionCode,
+          required lockModes,
+          required down,
+        }) =>
+            () => runEffect('raw:$platformCode:$positionCode:$down'),
+    sendSourceText:
+        ({
+          required text,
+          required sourceLanguageTag,
+          required sourceLayoutType,
+        }) => () async {},
+    onError: (error, _) => errors.add(error),
   );
 }
 
@@ -84,11 +133,12 @@ void main() {
     expect(effective.alt, isFalse);
   });
 
-  test('one-shot key emits command then an explicit release', () {
+  test('one-shot key emits command then an explicit release', () async {
     final harness = _KeyboardHarness();
     harness.controller.mobileState.tap(MobileModifierKey.ctrl);
 
     expect(harness.controller.sendKey('VK_A'), isTrue);
+    await harness.controller.idle;
 
     expect(harness.events, ['key:VK_A', 'key:VK_CONTROL']);
     expect(harness.keyEffects[0].$4.ctrl, isTrue);
@@ -102,7 +152,7 @@ void main() {
   });
 
   test('rejected or failed sink preserves one-shot state', () {
-    final rejected = _KeyboardHarness()..acceptKeys = false;
+    final rejected = _KeyboardHarness()..allowDispatch = false;
     rejected.controller.mobileState.tap(MobileModifierKey.shift);
 
     expect(rejected.controller.sendKey('VK_A'), isFalse);
@@ -143,62 +193,90 @@ void main() {
     expect(harness.controller.physicalModifiers.alt, isFalse);
   });
 
-  test('pressed keys release once in reverse press order', () {
-    final tracker = ToReleaseKeys();
-    final released = <KeyEvent>[];
-    tracker.updateKeyDown(
-      KeyDownEvent(
-        physicalKey: PhysicalKeyboardKey.controlLeft,
-        logicalKey: LogicalKeyboardKey.controlLeft,
-        timeStamp: Duration.zero,
-      ),
+  test('pressed keys recover once in reverse dispatch order', () async {
+    final harness = _KeyboardHarness();
+    harness.controller.sendKey('VK_CONTROL', down: true, press: false);
+    harness.controller.sendKey('VK_A', down: true, press: false);
+    await harness.controller.idle;
+    harness.events.clear();
+    harness.keyEffects.clear();
+
+    harness.controller.retirePendingAndRecover(
+      harness.controller.clearPhysicalModifiers,
     );
-    tracker.updateKeyDown(
-      KeyDownEvent(
-        physicalKey: PhysicalKeyboardKey.keyA,
-        logicalKey: LogicalKeyboardKey.keyA,
-        timeStamp: Duration.zero,
-      ),
+    await harness.controller.idle;
+
+    expect(harness.events, ['key:VK_A', 'key:VK_CONTROL']);
+    expect(
+      harness.keyEffects.every((effect) => !effect.$2 && !effect.$3),
+      isTrue,
     );
-
-    KeyEventResult release(KeyEvent event) {
-      released.add(event);
-      return KeyEventResult.handled;
-    }
-
-    tracker.release(release);
-    tracker.release(release);
-
-    expect(released.map((event) => event.logicalKey), [
-      LogicalKeyboardKey.keyA,
-      LogicalKeyboardKey.controlLeft,
-    ]);
-    expect(released, everyElement(isA<KeyUpEvent>()));
   });
 
-  test('temporary modifier is released only when controller introduced it', () {
+  test('pressed-key recovery survives a cleanup callback failure', () async {
     final harness = _KeyboardHarness();
+    harness.controller.sendKey('VK_A', down: true, press: false);
+    await harness.controller.idle;
+    harness.events.clear();
 
     expect(
+      () => harness.controller.retirePendingAndRecover(
+        () => throw StateError('cleanup failed'),
+      ),
+      throwsStateError,
+    );
+    await harness.controller.idle;
+
+    expect(harness.events, ['key:VK_A']);
+    expect(harness.keyEffects.last.$2, isFalse);
+  });
+
+  test('raw-key recovery uses the same pressed ledger', () async {
+    final harness = _KeyboardHarness();
+    await harness.controller.sendRawKey(
+      name: 'a',
+      platformCode: 65,
+      positionCode: 30,
+      lockModes: 0,
+      down: true,
+    );
+    await harness.controller.idle;
+    harness.events.clear();
+
+    harness.controller.retirePendingAndRecover(
+      harness.controller.clearPhysicalModifiers,
+    );
+    await harness.controller.idle;
+
+    expect(harness.events, ['raw:65:30:false']);
+  });
+
+  test(
+    'temporary modifier is released only when controller introduced it',
+    () async {
+      final harness = _KeyboardHarness();
+
+      expect(
+        harness.controller.sendWithTemporaryModifier(
+          'VK_C',
+          MobileModifierKey.ctrl,
+        ),
+        isTrue,
+      );
+      await harness.controller.idle;
+      expect(harness.events, ['key:VK_C', 'key:VK_CONTROL']);
+      expect(harness.keyEffects[0].$4.ctrl, isTrue);
+      expect(harness.keyEffects[1].$4.ctrl, isFalse);
+      harness.events.clear();
+      harness.keyEffects.clear();
+      harness.controller.mobileState.lock(MobileModifierKey.ctrl);
       harness.controller.sendWithTemporaryModifier(
         'VK_C',
         MobileModifierKey.ctrl,
-      ),
-      isTrue,
-    );
-    expect(harness.events, ['key:VK_C', 'key:VK_CONTROL']);
-    expect(harness.keyEffects[0].$4.ctrl, isTrue);
-    expect(harness.keyEffects[1].$4.ctrl, isFalse);
-
-    harness.events.clear();
-    harness.keyEffects.clear();
-    harness.controller.mobileState.lock(MobileModifierKey.ctrl);
-    harness.controller.sendWithTemporaryModifier(
-      'VK_C',
-      MobileModifierKey.ctrl,
-    );
-    expect(harness.events, ['key:VK_C']);
-  });
+      );
+      expect(harness.events, ['key:VK_C']);
+    },
+  );
 
   test('modifier command does not consume an unrelated one-shot', () {
     final harness = _KeyboardHarness();
@@ -213,7 +291,46 @@ void main() {
     expect(harness.events, ['key:VK_SHIFT']);
   });
 
-  test('accepted text edit consumes one-shot after the text effect', () {
+  test(
+    'async effect failure is reported and does not poison ordering',
+    () async {
+      final harness = _KeyboardHarness()..failKeyEffect = true;
+      harness.controller.sendKey('VK_A');
+      harness.failKeyEffect = false;
+      harness.controller.sendKey('VK_B');
+
+      await harness.controller.idle;
+
+      expect(harness.events, ['key:VK_A', 'key:VK_B']);
+      expect(harness.errors, hasLength(1));
+    },
+  );
+
+  test('one logical batch never overlaps its FFI effects', () async {
+    final harness = _KeyboardHarness()..physicalGate = Completer<void>();
+    harness.controller.mobileState.tap(MobileModifierKey.shift);
+
+    final dispatch = harness.controller.sendPhysicalKey(
+      character: 'a',
+      usbHid: 0x04,
+      lockModes: 0,
+      down: true,
+      consumeOneShot: true,
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(harness.events, ['physical:4:true']);
+    expect(harness.maxActiveEffects, 1);
+    harness.physicalGate!.complete();
+    harness.physicalGate = null;
+    await dispatch;
+    await harness.controller.idle;
+
+    expect(harness.events, ['physical:4:true', 'key:VK_SHIFT']);
+    expect(harness.maxActiveEffects, 1);
+  });
+
+  test('accepted text edit consumes one-shot after the text effect', () async {
     final harness = _KeyboardHarness();
     harness.controller.mobileState.tap(MobileModifierKey.alt);
 
@@ -225,6 +342,7 @@ void main() {
       ),
       isTrue,
     );
+    await harness.controller.idle;
 
     expect(harness.events, ['text:x:1:0', 'key:VK_MENU']);
     expect(
@@ -234,7 +352,7 @@ void main() {
   });
 
   test('rejected or failed text edit preserves one-shot state', () {
-    final rejected = _KeyboardHarness()..acceptText = false;
+    final rejected = _KeyboardHarness()..allowDispatch = false;
     rejected.controller.mobileState.tap(MobileModifierKey.alt);
 
     expect(

@@ -170,10 +170,11 @@ void main() {
     KeyboardEnabledState.delete(ffi.id);
   });
 
-  test('one-shot Ctrl is explicitly released after Ctrl+A', () {
+  test('one-shot Ctrl is explicitly released after Ctrl+A', () async {
     inputModel.mobileModifierState.tap(MobileModifierKey.ctrl);
 
     inputModel.inputKey('VK_A');
+    await inputModel.keyboardDispatchIdle;
 
     expect(inputModel.ctrl, isFalse);
     expect(
@@ -190,11 +191,12 @@ void main() {
     expect(testImpl.inputKeyCalls[1].ctrl, isFalse);
   });
 
-  test('one-shot release preserves a locked modifier', () {
+  test('one-shot release preserves a locked modifier', () async {
     inputModel.mobileModifierState.tap(MobileModifierKey.ctrl);
     inputModel.mobileModifierState.lock(MobileModifierKey.shift);
 
     inputModel.inputKey('VK_A');
+    await inputModel.keyboardDispatchIdle;
 
     expect(inputModel.ctrl, isFalse);
     expect(inputModel.shift, isTrue);
@@ -273,11 +275,12 @@ void main() {
     expect(testImpl.inputKeyCalls.single.press, isFalse);
   });
 
-  test('temporary shortcut modifiers are explicitly released', () {
+  test('temporary shortcut modifiers are explicitly released', () async {
     inputModel.inputKeyWithTemporaryMobileModifier(
       'VK_C',
       MobileModifierKey.ctrl,
     );
+    await inputModel.keyboardDispatchIdle;
 
     expect(inputModel.ctrl, isFalse);
     expect(testImpl.inputKeyCalls, hasLength(2));
@@ -300,7 +303,7 @@ void main() {
     expect(testImpl.inputKeyCalls.single.ctrl, isTrue);
   });
 
-  test('mobile text edit keeps FFI arguments and releases one-shot', () {
+  test('mobile text edit keeps FFI arguments and releases one-shot', () async {
     inputModel.mobileModifierState.tap(MobileModifierKey.ctrl);
 
     inputModel.inputMobileTextEdit(
@@ -308,6 +311,7 @@ void main() {
       deleteBeforeGraphemes: 2,
       deleteAfterGraphemes: 1,
     );
+    await inputModel.keyboardDispatchIdle;
 
     expect(testImpl.textEditCalls, hasLength(1));
     expect(testImpl.textEditCalls.single.text, 'text');
@@ -344,9 +348,25 @@ void main() {
     expect(inputModel.ctrl, isTrue);
   });
 
+  test('Android source text reserves one-shot modifier immediately', () async {
+    inputModel.mobileModifierState.tap(MobileModifierKey.shift);
+
+    final dispatch = inputModel.inputAndroidRemoteCommittedText(
+      'a',
+      sourceLanguageTag: 'en',
+      sourceLayoutType: 'qwerty',
+    );
+
+    expect(inputModel.shift, isFalse);
+    await dispatch;
+    await inputModel.keyboardDispatchIdle;
+    expect(testImpl.sourceTextCalls, ['a']);
+  });
+
   test('queued Android text rechecks permission before dispatch', () async {
     testImpl.blockFlutterKeyCalls = true;
     final physicalDown = inputModel.inputAndroidRemotePhysicalKey(0xe1, true);
+    final physicalUp = inputModel.inputAndroidRemotePhysicalKey(0xe1, false);
     final committedText = inputModel.inputAndroidRemoteCommittedText(
       'blocked',
       sourceLanguageTag: 'en',
@@ -357,9 +377,36 @@ void main() {
     ffi.ffiModel.updatePermissionValues({'keyboard': false}, ffi.id);
     ffi.ffiModel.updatePermissionValues({'keyboard': true}, ffi.id);
     testImpl.pendingFlutterKeyCalls.removeAt(0).complete();
-    await Future.wait([physicalDown, committedText]);
+    await physicalDown;
+    await Future<void>.delayed(Duration.zero);
+
+    expect(testImpl.flutterKeyCalls, [
+      const _FlutterKeyCall(usbHid: 0xe1, down: true),
+      const _FlutterKeyCall(usbHid: 0xe1, down: false),
+    ]);
+    testImpl.pendingFlutterKeyCalls.removeAt(0).complete();
+    await Future.wait([
+      physicalUp,
+      committedText,
+      inputModel.keyboardDispatchIdle,
+    ]);
 
     expect(testImpl.sourceTextCalls, isEmpty);
+  });
+
+  test('virtual input waits behind Android physical input', () async {
+    testImpl.blockFlutterKeyCalls = true;
+    final physicalDown = inputModel.inputAndroidRemotePhysicalKey(0xe1, true);
+    inputModel.inputKey('VK_A');
+    await Future<void>.delayed(Duration.zero);
+
+    expect(testImpl.inputKeyCalls, isEmpty);
+    testImpl.pendingFlutterKeyCalls.removeAt(0).complete();
+    await physicalDown;
+    await inputModel.keyboardDispatchIdle;
+
+    expect(testImpl.inputKeyCalls, hasLength(1));
+    expect(testImpl.inputKeyCalls.single.name, 'VK_A');
   });
 
   test('Android physical key bridge preserves modifier ordering', () async {
@@ -387,6 +434,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
     }
     await Future.wait([slashDown, slashUp, shiftUp]);
+    await inputModel.keyboardDispatchIdle;
 
     expect(testImpl.flutterKeyCalls, [
       const _FlutterKeyCall(usbHid: 0xe1, down: true),

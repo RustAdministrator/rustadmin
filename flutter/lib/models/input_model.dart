@@ -16,7 +16,6 @@ import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../../models/state_model.dart';
 import 'relative_mouse_model.dart';
-import 'keyboard_command_queue.dart';
 import 'keyboard_modifier_controller.dart';
 import '../common.dart';
 import '../consts.dart';
@@ -198,71 +197,12 @@ PhysicalModifierKey? _physicalModifierKey(LogicalKeyboardKey key) {
   return null;
 }
 
-class ToReleaseRawKeys {
-  final _pressed = <PhysicalKeyboardKey, RawKeyEvent>{};
-
-  void reset() => _pressed.clear();
-
-  void updateKeyDown(RawKeyDownEvent event) {
-    if (!event.repeat) _pressed[event.physicalKey] = event;
-  }
-
-  void updateKeyUp(RawKeyUpEvent event) {
-    _pressed.remove(event.physicalKey);
-  }
-
-  void release(KeyEventResult Function(RawKeyEvent event) handleKeyEvent) {
-    final pressed = _pressed.values.toList(growable: false).reversed;
-    _pressed.clear();
-    for (final event in pressed) {
-      handleKeyEvent(
-        RawKeyUpEvent(data: event.data, character: event.character),
-      );
-    }
-  }
-}
-
-class ToReleaseKeys {
-  final _pressed = <PhysicalKeyboardKey, KeyUpEvent>{};
-
-  void reset() => _pressed.clear();
-
-  void updateKeyDown(KeyDownEvent event) {
-    _pressed[event.physicalKey] = KeyUpEvent(
-      physicalKey: event.physicalKey,
-      logicalKey: event.logicalKey,
-      timeStamp: event.timeStamp,
-    );
-  }
-
-  void updateKeyUp(KeyUpEvent event) {
-    _pressed.remove(event.physicalKey);
-  }
-
-  void release(KeyEventResult Function(KeyEvent event) handleKeyEvent) {
-    final pressed = _pressed.values.toList(growable: false).reversed;
-    _pressed.clear();
-    for (final event in pressed) {
-      handleKeyEvent(event);
-    }
-  }
-}
-
 class InputModel {
   final WeakReference<FFI> parent;
   String keyboardMode = '';
 
   // keyboard
   late final KeyboardInputController _keyboardInput;
-  final _androidRemoteKeyboardQueue = KeyboardCommandQueue(
-    onError: (error, stackTrace) {
-      debugPrint('Android remote keyboard dispatch failed: $error');
-      debugPrintStack(stackTrace: stackTrace);
-    },
-  );
-
-  final ToReleaseRawKeys toReleaseRawKeys = ToReleaseRawKeys();
-  final ToReleaseKeys toReleaseKeys = ToReleaseKeys();
 
   // trackpad
   var _trackpadLastDelta = Offset.zero;
@@ -325,6 +265,7 @@ class InputModel {
   late final SessionID sessionId;
 
   MobileModifierState get mobileModifierState => _keyboardInput.mobileState;
+  Future<void> get keyboardDispatchIdle => _keyboardInput.idle;
   bool get shift => _effectiveModifiers.shift;
   bool get ctrl => _effectiveModifiers.ctrl;
   bool get alt => _effectiveModifiers.alt;
@@ -362,43 +303,83 @@ class InputModel {
   InputModel(this.parent) {
     sessionId = parent.target!.sessionId;
     _keyboardInput = KeyboardInputController(
-      sendKey: ({
-        required name,
-        required down,
-        required press,
-        required modifiers,
-      }) {
-        if (!keyboardPerm || isViewCamera) return false;
-        bind.sessionInputKey(
-          sessionId: sessionId,
-          name: name,
-          down: down,
-          press: press,
-          alt: modifiers.alt,
-          ctrl: modifiers.ctrl,
-          shift: modifiers.shift,
-          command: modifiers.command,
-        );
-        return true;
-      },
-      sendTextEdit: ({
-        required text,
-        required deleteBeforeGraphemes,
-        required deleteAfterGraphemes,
-      }) {
-        if (!keyboardPerm || isViewCamera) return false;
-        bind.sessionInputTextEdit(
-          sessionId: sessionId,
-          value: text,
-          deleteBeforeGraphemes: deleteBeforeGraphemes,
-          deleteAfterGraphemes: deleteAfterGraphemes,
-        );
-        return true;
-      },
-      sendString: (text) {
-        if (!keyboardPerm || isViewCamera) return false;
-        bind.sessionInputString(sessionId: sessionId, value: text);
-        return true;
+      canDispatch: () => keyboardPerm && !isViewOnly && !isViewCamera,
+      sendKey:
+          ({
+            required name,
+            required down,
+            required press,
+            required modifiers,
+          }) =>
+              () => bind.sessionInputKey(
+                sessionId: sessionId,
+                name: name,
+                down: down,
+                press: press,
+                alt: modifiers.alt,
+                ctrl: modifiers.ctrl,
+                shift: modifiers.shift,
+                command: modifiers.command,
+              ),
+      sendTextEdit:
+          ({
+            required text,
+            required deleteBeforeGraphemes,
+            required deleteAfterGraphemes,
+          }) =>
+              () => bind.sessionInputTextEdit(
+                sessionId: sessionId,
+                value: text,
+                deleteBeforeGraphemes: deleteBeforeGraphemes,
+                deleteAfterGraphemes: deleteAfterGraphemes,
+              ),
+      sendString: (text) =>
+          () => bind.sessionInputString(sessionId: sessionId, value: text),
+      sendPhysicalKey:
+          ({
+            required character,
+            required usbHid,
+            required lockModes,
+            required down,
+          }) =>
+              () => bind.sessionHandleFlutterKeyEvent(
+                sessionId: sessionId,
+                character: character,
+                usbHid: usbHid,
+                lockModes: lockModes,
+                downOrUp: down,
+              ),
+      sendRawKey:
+          ({
+            required name,
+            required platformCode,
+            required positionCode,
+            required lockModes,
+            required down,
+          }) =>
+              () => bind.sessionHandleFlutterRawKeyEvent(
+                sessionId: sessionId,
+                name: name,
+                platformCode: platformCode,
+                positionCode: positionCode,
+                lockModes: lockModes,
+                downOrUp: down,
+              ),
+      sendSourceText:
+          ({
+            required text,
+            required sourceLanguageTag,
+            required sourceLayoutType,
+          }) =>
+              () => bind.sessionInputTextEditWithSourceLayout(
+                sessionId: sessionId,
+                value: text,
+                sourceLanguageTag: sourceLanguageTag,
+                sourceLayoutType: sourceLayoutType,
+              ),
+      onError: (error, stackTrace) {
+        debugPrint('Remote keyboard dispatch failed: $error');
+        debugPrintStack(stackTrace: stackTrace);
       },
     );
     _relativeMouse = RelativeMouseModel(
@@ -532,13 +513,11 @@ class InputModel {
   void handleKeyDownEventModifiers(KeyDownEvent event) {
     final modifier = _physicalModifierKey(event.logicalKey);
     if (modifier != null) _keyboardInput.setPhysicalKey(modifier, true);
-    toReleaseKeys.updateKeyDown(event);
   }
 
   void handleKeyUpEventModifiers(KeyUpEvent event) {
     final modifier = _physicalModifierKey(event.logicalKey);
     if (modifier != null) _keyboardInput.setPhysicalKey(modifier, false);
-    toReleaseKeys.updateKeyUp(event);
   }
 
   KeyEventResult handleRawKeyEvent(RawKeyEvent e) {
@@ -567,12 +546,10 @@ class InputModel {
         final modifier = _physicalModifierKey(key);
         if (modifier != null) _keyboardInput.setPhysicalKey(modifier, true);
       }
-      toReleaseRawKeys.updateKeyDown(e);
     }
     if (e is RawKeyUpEvent) {
       final modifier = _physicalModifierKey(key);
       if (modifier != null) _keyboardInput.setPhysicalKey(modifier, false);
-      toReleaseRawKeys.updateKeyUp(e);
     }
 
     // * Currently mobile does not enable map mode
@@ -666,6 +643,8 @@ class InputModel {
         // Show repeat event be converted to "release+press" events?
         e is KeyDownEvent || e is KeyRepeatEvent,
         iosCapsLock,
+        consumeOneShot:
+            e is KeyDownEvent && _physicalModifierKey(e.logicalKey) == null,
       );
     } else {
       legacyKeyboardMode(e);
@@ -679,32 +658,30 @@ class InputModel {
     String character,
     int usbHid,
     bool down,
-    bool iosCapsLock,
-  ) {
+    bool iosCapsLock, {
+    bool consumeOneShot = false,
+  }) {
     final lockModes = _buildLockModes(iosCapsLock);
-    bind.sessionHandleFlutterKeyEvent(
-      sessionId: sessionId,
-      character: character,
-      usbHid: usbHid,
-      lockModes: lockModes,
-      downOrUp: down,
+    unawaited(
+      _keyboardInput.sendPhysicalKey(
+        character: character,
+        usbHid: usbHid,
+        lockModes: lockModes,
+        down: down,
+        consumeOneShot: consumeOneShot,
+      ),
     );
   }
 
   Future<void> inputAndroidRemotePhysicalKey(int usbHidUsage, bool down) {
-    if (isViewOnly || isViewCamera) return Future<void>.value();
-    final inputSessionId = sessionId;
     final lockModes = _buildLockModes(false);
-    return _androidRemoteKeyboardQueue.enqueue(() async {
-      if (!keyboardPerm || isViewOnly || isViewCamera) return;
-      await bind.sessionHandleFlutterKeyEvent(
-        sessionId: inputSessionId,
-        character: '',
-        usbHid: usbHidUsage,
-        lockModes: lockModes,
-        downOrUp: down,
-      );
-    });
+    return _keyboardInput.sendPhysicalKey(
+      character: '',
+      usbHid: usbHidUsage,
+      lockModes: lockModes,
+      down: down,
+      consumeOneShot: down && (usbHidUsage < 0xe0 || usbHidUsage > 0xe7),
+    );
   }
 
   Future<void> inputAndroidRemoteCommittedText(
@@ -712,20 +689,11 @@ class InputModel {
     required String sourceLanguageTag,
     required String sourceLayoutType,
   }) {
-    if (isViewOnly || isViewCamera || text.isEmpty) {
-      return Future<void>.value();
-    }
-    final inputSessionId = sessionId;
-    return _androidRemoteKeyboardQueue.enqueue(() async {
-      if (!keyboardPerm || isViewOnly || isViewCamera) return;
-      await bind.sessionInputTextEditWithSourceLayout(
-        sessionId: inputSessionId,
-        value: text,
-        sourceLanguageTag: sourceLanguageTag,
-        sourceLayoutType: sourceLayoutType,
-      );
-      consumeMobileOneShotModifiers();
-    });
+    return _keyboardInput.sendSourceText(
+      text: text,
+      sourceLanguageTag: sourceLanguageTag,
+      sourceLayoutType: sourceLayoutType,
+    );
   }
 
   void mapKeyboardModeRaw(RawKeyEvent e, bool iosCapsLock) {
@@ -765,6 +733,10 @@ class InputModel {
       positionCode,
       down,
       iosCapsLock,
+      consumeOneShot:
+          e is RawKeyDownEvent &&
+          !e.repeat &&
+          _physicalModifierKey(e.logicalKey) == null,
     );
   }
 
@@ -774,16 +746,19 @@ class InputModel {
     int platformCode,
     int positionCode,
     bool down,
-    bool iosCapsLock,
-  ) {
+    bool iosCapsLock, {
+    bool consumeOneShot = false,
+  }) {
     final lockModes = _buildLockModes(iosCapsLock);
-    bind.sessionHandleFlutterRawKeyEvent(
-      sessionId: sessionId,
-      name: name,
-      platformCode: platformCode,
-      positionCode: positionCode,
-      lockModes: lockModes,
-      downOrUp: down,
+    unawaited(
+      _keyboardInput.sendRawKey(
+        name: name,
+        platformCode: platformCode,
+        positionCode: positionCode,
+        lockModes: lockModes,
+        down: down,
+        consumeOneShot: consumeOneShot,
+      ),
     );
   }
 
@@ -927,16 +902,13 @@ class InputModel {
 
   /// Reset key modifiers to false, including [shift], [ctrl], [alt] and [command].
   void resetModifiers() {
-    toReleaseKeys.reset();
-    toReleaseRawKeys.reset();
     _keyboardInput.reset();
   }
 
   void permissionRevoked() {
-    _androidRemoteKeyboardQueue.cancelPending();
-    toReleaseKeys.release(handleKeyEvent);
-    toReleaseRawKeys.release(handleRawKeyEvent);
-    resetModifiers();
+    _keyboardInput.retirePendingAndRecover(() {
+      _keyboardInput.reset(cancelPending: false, clearTrackedKeys: false);
+    });
   }
 
   /// Modify the given modifier map [evt] based on current modifier key status.
@@ -959,8 +931,13 @@ class InputModel {
   }
 
   void enterOrLeave(bool enter) {
-    toReleaseKeys.release(handleKeyEvent);
-    toReleaseRawKeys.release(handleRawKeyEvent);
+    _keyboardInput.retirePendingAndRecover(() {
+      if (enter) {
+        _keyboardInput.clearPhysicalModifiers();
+      } else {
+        _keyboardInput.reset(cancelPending: false, clearTrackedKeys: false);
+      }
+    });
     _pointerMovedAfterEnter = false;
     _pointerInsideImage = enter;
     _lastWheelTsUs = 0;
@@ -968,7 +945,6 @@ class InputModel {
     // Fix status
     if (!enter) {
       _blockedRemotePointerIds.clear();
-      resetModifiers();
     }
     _relativeMouse.onEnterOrLeaveImage(enter);
     _flingTimer?.cancel();
@@ -1058,21 +1034,12 @@ class InputModel {
       'RWin', // Command/Super right
     ];
 
-    for (final key in modifiersToRelease) {
-      bind.sessionInputKey(
-        sessionId: sessionId,
-        name: key,
-        down: false,
-        press: false,
-        alt: false,
-        ctrl: false,
-        shift: false,
-        command: false,
-      );
-    }
-
-    // Reset local modifier state
-    resetModifiers();
+    _keyboardInput.retirePendingAndRecover(() {
+      for (final key in modifiersToRelease) {
+        _keyboardInput.sendKeyUpWithoutModifiers(key);
+      }
+      _keyboardInput.reset(cancelPending: false, clearTrackedKeys: false);
+    });
 
     // Now exit relative mouse mode
     _relativeMouse.setRelativeMouseMode(false);
