@@ -457,24 +457,10 @@ class FfiModel with ChangeNotifier {
         parent.target?.fileModel.receiveFileDir(evt);
       } else if (name == 'empty_dirs') {
         parent.target?.fileModel.receiveEmptyDirs(evt);
-      } else if (name == 'job_progress') {
-        parent.target?.fileModel.jobController.tryUpdateJobProgress(evt);
-      } else if (name == 'job_done') {
-        bool? refresh =
-            await parent.target?.fileModel.jobController.jobDone(evt);
-        if (refresh == true) {
-          // many job done for delete directory
-          // todo: refresh may not work when confirm delete local directory
-          parent.target?.fileModel.refreshAll();
-        }
-      } else if (name == 'job_error') {
-        parent.target?.fileModel.handleJobError(evt);
       } else if (name == 'override_file_confirm') {
         parent.target?.fileModel.postOverrideFileConfirm(evt);
       } else if (name == 'load_last_job') {
         parent.target?.fileModel.jobController.loadLastJob(evt);
-      } else if (name == 'update_folder_files') {
-        parent.target?.fileModel.jobController.updateFolderFiles(evt);
       } else if (name == 'add_connection') {
         parent.target?.serverModel.addConnection(evt);
       } else if (name == 'on_client_remove') {
@@ -605,6 +591,20 @@ class FfiModel with ChangeNotifier {
       );
     } else if (event is TerminalResponseSessionEvent) {
       parent.target?.routeTerminalResponseEvent(event);
+    } else if (event is FileJobProgressSessionEvent) {
+      parent.target?.fileModel.jobController.updateJobProgressEvent(event);
+    } else if (event is FileJobDoneSessionEvent) {
+      final refresh =
+          await parent.target?.fileModel.jobController.jobDoneEvent(event);
+      if (refresh == true) {
+        // many job done for delete directory
+        // todo: refresh may not work when confirm delete local directory
+        parent.target?.fileModel.refreshAll();
+      }
+    } else if (event is FileJobErrorSessionEvent) {
+      parent.target?.fileModel.handleJobErrorEvent(event);
+    } else if (event is FileFolderStatsSessionEvent) {
+      parent.target?.fileModel.jobController.updateFolderStatsEvent(event);
     } else if (event is PeerInfoSessionEvent) {
       await handlePeerInfoEvent(event, peerId, false);
     } else if (event is SyncPeerInfoSessionEvent) {

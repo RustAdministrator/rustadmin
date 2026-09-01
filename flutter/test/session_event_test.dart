@@ -210,6 +210,67 @@ void main() {
     }
   });
 
+  test('decodes typed file job status events', () {
+    final progress =
+        decodeTypedSessionEvent({
+              'name': 'job_progress',
+              'id': '9',
+              'file_num': '2',
+              'speed': '1024.5',
+              'finished_size': '4096',
+            })!
+            as FileJobProgressSessionEvent;
+    expect(progress.id, 9);
+    expect(progress.fileNum, 2);
+    expect(progress.speed, 1024.5);
+    expect(progress.finishedSize, 4096);
+
+    final done =
+        decodeTypedSessionEvent({'name': 'job_done', 'id': 9})!
+            as FileJobDoneSessionEvent;
+    expect(done.fileNum, 0);
+    expect(done.speed, 0);
+
+    final error =
+        decodeTypedSessionEvent({
+              'name': 'job_error',
+              'id': '9',
+              'file_num': '2',
+              'err': 'denied',
+            })!
+            as FileJobErrorSessionEvent;
+    expect(error.error, 'denied');
+
+    final stats =
+        decodeTypedSessionEvent({
+              'name': 'update_folder_files',
+              'info': '{"id":9,"num_entries":12,"total_size":1264822.0}',
+            })!
+            as FileFolderStatsSessionEvent;
+    expect(stats.entryCount, 12);
+    expect(stats.totalSize, 1264822);
+  });
+
+  test('rejects malformed file job status events', () {
+    for (final event in [
+      {
+        'name': 'job_progress',
+        'id': '9',
+        'file_num': '2',
+        'speed': 'NaN',
+        'finished_size': '4096',
+      },
+      {'name': 'job_done', 'id': '-1'},
+      {'name': 'job_error', 'id': '1', 'err': 7},
+      {
+        'name': 'update_folder_files',
+        'info': '{"id":1,"num_entries":-1,"total_size":1}',
+      },
+    ]) {
+      expect(decodeTypedSessionEvent(event), isA<InvalidSessionEvent>());
+    }
+  });
+
   test('decodes display and platform synchronization payloads', () {
     final sync =
         decodeTypedSessionEvent({

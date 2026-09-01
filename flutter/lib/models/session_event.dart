@@ -295,6 +295,59 @@ final class TerminalResponseSessionEvent extends SessionEvent {
   final int exitCode;
 }
 
+final class FileJobProgressSessionEvent extends SessionEvent {
+  const FileJobProgressSessionEvent({
+    required this.id,
+    required this.fileNum,
+    required this.speed,
+    required this.finishedSize,
+  });
+
+  final int id;
+  final int fileNum;
+  final double speed;
+  final int finishedSize;
+}
+
+sealed class FileJobResultSessionEvent extends SessionEvent {
+  const FileJobResultSessionEvent({required this.id, required this.fileNum});
+
+  final int id;
+  final int fileNum;
+}
+
+final class FileJobDoneSessionEvent extends FileJobResultSessionEvent {
+  const FileJobDoneSessionEvent({
+    required super.id,
+    required super.fileNum,
+    required this.speed,
+  });
+
+  final double speed;
+}
+
+final class FileJobErrorSessionEvent extends FileJobResultSessionEvent {
+  const FileJobErrorSessionEvent({
+    required super.id,
+    required super.fileNum,
+    required this.error,
+  });
+
+  final String error;
+}
+
+final class FileFolderStatsSessionEvent extends SessionEvent {
+  const FileFolderStatsSessionEvent({
+    required this.id,
+    required this.entryCount,
+    required this.totalSize,
+  });
+
+  final int id;
+  final int entryCount;
+  final double totalSize;
+}
+
 const _qualityDisplayMapKeys = <String>{
   'fps',
   'decode_fps',
@@ -619,6 +672,76 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
             'unknown response type',
           );
       }
+    case 'job_progress':
+      final id = _decodeInt(event['id']);
+      final fileNum = _decodeInt(event['file_num']);
+      final speed = _decodeDouble(event['speed']);
+      final finishedSize = _decodeInt(event['finished_size']);
+      return id == null ||
+              id < 0 ||
+              fileNum == null ||
+              fileNum < 0 ||
+              speed == null ||
+              speed < 0 ||
+              finishedSize == null ||
+              finishedSize < 0
+          ? const InvalidSessionEvent('job_progress', 'invalid progress')
+          : FileJobProgressSessionEvent(
+              id: id,
+              fileNum: fileNum,
+              speed: speed,
+              finishedSize: finishedSize,
+            );
+    case 'job_done':
+      final id = _decodeInt(event['id']);
+      final fileNum = event.containsKey('file_num')
+          ? _decodeInt(event['file_num'])
+          : 0;
+      final speed = event.containsKey('speed')
+          ? _decodeDouble(event['speed'])
+          : 0.0;
+      return id == null ||
+              id < 0 ||
+              fileNum == null ||
+              fileNum < 0 ||
+              speed == null ||
+              speed < 0
+          ? const InvalidSessionEvent('job_done', 'invalid result')
+          : FileJobDoneSessionEvent(id: id, fileNum: fileNum, speed: speed);
+    case 'job_error':
+      final id = _decodeInt(event['id']);
+      final fileNum = event.containsKey('file_num')
+          ? _decodeInt(event['file_num'])
+          : 0;
+      final error = event['err'];
+      return id == null ||
+              id < 0 ||
+              fileNum == null ||
+              fileNum < 0 ||
+              error is! String ||
+              error.length > 64 * 1024
+          ? const InvalidSessionEvent('job_error', 'invalid result')
+          : FileJobErrorSessionEvent(id: id, fileNum: fileNum, error: error);
+    case 'update_folder_files':
+      final info = _decodeJsonObject(event['info']);
+      final id = _decodeInt(info?['id']);
+      final entryCount = _decodeInt(info?['num_entries']);
+      final totalSize = _decodeDouble(info?['total_size']);
+      return id == null ||
+              id < 0 ||
+              entryCount == null ||
+              entryCount < 0 ||
+              totalSize == null ||
+              totalSize < 0
+          ? const InvalidSessionEvent(
+              'update_folder_files',
+              'invalid folder stats',
+            )
+          : FileFolderStatsSessionEvent(
+              id: id,
+              entryCount: entryCount,
+              totalSize: totalSize,
+            );
     case 'peer_info':
       final username = _decodeBoundedString(event['username']);
       final hostname = _decodeBoundedString(event['hostname']);

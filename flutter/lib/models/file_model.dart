@@ -13,6 +13,7 @@ import 'package:flutter_hbb/web/dummy.dart'
 import '../consts.dart';
 import 'model.dart';
 import 'platform_model.dart';
+import 'session_event.dart';
 
 enum SortBy {
   name,
@@ -114,31 +115,24 @@ class FileModel {
   }
 
   // This method fixes a deadlock that occurred when the previous code directly
-  // called jobController.jobError(evt) in the job_error event handler.
+  // called jobController.jobErrorEvent() in the job_error event handler.
   //
-  // The problem with directly calling jobController.jobError():
+  // The problem with directly calling jobController.jobErrorEvent():
   //   1. fetchDirectoryRecursiveToRemove(jobID) registers readRecursiveTasks[jobID]
   //      and waits for completion
   //   2. If the remote has no permission (or some other errors), it returns a FileTransferError
-  //   3. The error triggers job_error event, which called jobController.jobError()
-  //   4. jobController.jobError() calls getJob(jobID) to find the job in jobTable
+  //   3. The error triggers job_error event, which called jobController.jobErrorEvent()
+  //   4. jobController.jobErrorEvent() calls getJob(jobID) to find the job in jobTable
   //   5. But addDeleteDirJob() is called AFTER fetchDirectoryRecursiveToRemove(),
   //      so the job doesn't exist yet in jobTable
-  //   6. Result: jobController.jobError() does nothing useful, and
+  //   6. Result: jobController.jobErrorEvent() does nothing useful, and
   //      readRecursiveTasks[jobID] never completes, causing a 2s timeout
   //
-  // Solution: Before calling jobController.jobError(), we first check if there's
+  // Solution: Before calling jobController.jobErrorEvent(), we first check if there's
   // a pending readRecursiveTasks with this ID and complete it with the error.
-  void handleJobError(Map<String, dynamic> evt) {
-    final id = int.tryParse(evt['id']?.toString() ?? '');
-    if (id != null) {
-      final err = evt['err']?.toString() ?? 'Unknown error';
-      fileFetcher.tryCompleteRecursiveTaskWithError(id, err);
-    }
-    // Always call jobController.jobError(evt) to ensure all error events are processed,
-    // even if the event does not have a valid job ID. This allows for generic error handling
-    // or logging of unexpected errors.
-    jobController.jobError(evt);
+  void handleJobErrorEvent(FileJobErrorSessionEvent event) {
+    fileFetcher.tryCompleteRecursiveTaskWithError(event.id, event.error);
+    jobController.jobErrorEvent(event);
   }
 
   Future<void> postOverrideFileConfirm(Map<String, dynamic> evt) async {
@@ -711,8 +705,7 @@ class FileController {
             sendRemoveFile(entries[i].path, i, deleteJobId);
             final res = await jobController.jobResultListener.start();
             // handle remove res;
-            if (item.isDirectory &&
-                res['file_num'] == (entries.length - 1).toString()) {
+            if (item.isDirectory && res.fileNum == entries.length - 1) {
               await sendRemoveEmptyDir(item.path, i, deleteJobId);
             }
           } else {
@@ -724,8 +717,7 @@ class FileController {
               for (var j = i + 1; j < entries.length; j++) {
                 sendRemoveFile(entries[j].path, j, deleteJobId);
                 final res = await jobController.jobResultListener.start();
-                if (item.isDirectory &&
-                    res['file_num'] == (entries.length - 1).toString()) {
+                if (item.isDirectory && res.fileNum == entries.length - 1) {
                   await sendRemoveEmptyDir(item.path, i, deleteJobId);
                 }
               }
@@ -916,7 +908,7 @@ const _kOneWayFileTransferError = 'one-way-file-transfer-tip';
 class JobController {
   static final JobID jobID = JobID();
   final jobTable = List<JobProgress>.empty(growable: true).obs;
-  final jobResultListener = JobResultListener<Map<String, dynamic>>();
+  final jobResultListener = JobResultListener<FileJobResultSessionEvent>();
   final GetSessionID getSessionID;
   final GetDialogManager getDialogManager;
   SessionID get sessionId => getSessionID();
@@ -970,59 +962,38 @@ class JobController {
     return jobID;
   }
 
-  void tryUpdateJobProgress(Map<String, dynamic> evt) {
-    try {
-      int id = int.parse(evt['id']);
-      // id = index + 1
-      final jobIndex = getJob(id);
-      if (jobIndex >= 0 && jobTable.length > jobIndex) {
-        final job = jobTable[jobIndex];
-        job.fileNum = int.parse(evt['file_num']);
-        job.speed = double.parse(evt['speed']);
-        job.finishedSize = int.parse(evt['finished_size']);
-        job.recvJobRes = true;
-        jobTable.refresh();
-      }
-    } catch (e) {
-      debugPrint("Failed to tryUpdateJobProgress, evt: ${evt.toString()}");
+  void updateJobProgressEvent(FileJobProgressSessionEvent event) {
+    final jobIndex = getJob(event.id);
+    if (jobIndex >= 0 && jobTable.length > jobIndex) {
+      final job = jobTable[jobIndex];
+      job.fileNum = event.fileNum;
+      job.speed = event.speed;
+      job.finishedSize = event.finishedSize;
+      job.recvJobRes = true;
+      jobTable.refresh();
     }
   }
 
-  Future<bool> jobDone(Map<String, dynamic> evt) async {
+  Future<bool> jobDoneEvent(FileJobDoneSessionEvent event) async {
     if (jobResultListener.isListening) {
-      jobResultListener.complete(evt);
+      jobResultListener.complete(event);
       // return;
     }
-    int id = -1;
-    int? fileNum = 0;
-    double? speed = 0;
-    try {
-      id = int.parse(evt['id']);
-    } catch (_) {}
-    final jobIndex = getJob(id);
+    final jobIndex = getJob(event.id);
     if (jobIndex == -1) return true;
     final job = jobTable[jobIndex];
     job.recvJobRes = true;
     if (job.type == JobType.deleteFile) {
       job.state = JobState.done;
     } else if (job.type == JobType.deleteDir) {
-      try {
-        fileNum = int.tryParse(evt['file_num']);
-      } catch (_) {}
-      if (fileNum != null) {
-        if (fileNum < job.fileNum) return true; // file_num can be 0 at last
-        job.fileNum = fileNum;
-        if (fileNum >= job.fileCount - 1) {
-          job.state = JobState.done;
-        }
+      if (event.fileNum < job.fileNum) return true; // file_num can be 0 at last
+      job.fileNum = event.fileNum;
+      if (event.fileNum >= job.fileCount - 1) {
+        job.state = JobState.done;
       }
     } else {
-      try {
-        fileNum = int.tryParse(evt['file_num']);
-        speed = double.tryParse(evt['speed']);
-      } catch (_) {}
-      if (fileNum != null) job.fileNum = fileNum;
-      if (speed != null) job.speed = speed;
+      job.fileNum = event.fileNum;
+      job.speed = event.speed;
       job.state = JobState.done;
     }
     jobTable.refresh();
@@ -1033,30 +1004,28 @@ class JobController {
     }
   }
 
-  void jobError(Map<String, dynamic> evt) {
-    final err = evt['err'].toString();
-    int jobIndex = getJob(int.parse(evt['id']));
+  void jobErrorEvent(FileJobErrorSessionEvent event) {
+    final err = event.error;
+    int jobIndex = getJob(event.id);
     if (jobIndex != -1) {
       final job = jobTable[jobIndex];
       job.state = JobState.error;
       job.err = err;
       job.recvJobRes = true;
       if (job.type == JobType.transfer) {
-        int? fileNum = int.tryParse(evt['file_num']);
-        if (fileNum != null) job.fileNum = fileNum;
+        job.fileNum = event.fileNum;
         if (err == "skipped") {
           job.state = JobState.done;
           job.finishedSize = job.totalSize;
         }
       } else if (job.type == JobType.deleteDir) {
         if (jobResultListener.isListening) {
-          jobResultListener.complete(evt);
+          jobResultListener.complete(event);
         }
-        int? fileNum = int.tryParse(evt['file_num']);
-        if (fileNum != null) job.fileNum = fileNum;
+        job.fileNum = event.fileNum;
       } else if (job.type == JobType.deleteFile) {
         if (jobResultListener.isListening) {
-          jobResultListener.complete(evt);
+          jobResultListener.complete(event);
         }
       }
       jobTable.refresh();
@@ -1070,7 +1039,7 @@ class JobController {
         }
       }
     }
-    debugPrint("jobError $evt");
+    debugPrint("jobError id=${event.id}, error=$err");
   }
 
   void updateJobStatus(int id,
@@ -1175,20 +1144,16 @@ class JobController {
     }
   }
 
-  void updateFolderFiles(Map<String, dynamic> evt) {
-    // ret: "{\"id\":1,\"num_entries\":12,\"total_size\":1264822.0}"
-    Map<String, dynamic> info = json.decode(evt['info']);
-    int id = info['id'];
-    int num_entries = info['num_entries'];
-    double total_size = info['total_size'];
-    final jobIndex = getJob(id);
+  void updateFolderStatsEvent(FileFolderStatsSessionEvent event) {
+    final jobIndex = getJob(event.id);
     if (jobIndex != -1) {
       final job = jobTable[jobIndex];
-      job.fileCount = num_entries;
-      job.totalSize = total_size.toInt();
+      job.fileCount = event.entryCount;
+      job.totalSize = event.totalSize.toInt();
       jobTable.refresh();
     }
-    debugPrint("update folder files: $info");
+    debugPrint(
+        "update folder files: id=${event.id}, entries=${event.entryCount}, size=${event.totalSize}");
   }
 
   void clear() {
@@ -1342,7 +1307,7 @@ class FileFetcher {
   }
 
   // Complete a pending recursive read task with an error.
-  // See FileModel.handleJobError() for why this is necessary.
+  // See FileModel.handleJobErrorEvent() for why this is necessary.
   void tryCompleteRecursiveTaskWithError(int id, String error) {
     final completer = readRecursiveTasks.remove(id);
     if (completer != null && !completer.isCompleted) {
