@@ -461,6 +461,35 @@ void main() {
     expect(ordinaryLongPresses, 0);
   });
 
+  testWidgets('pointer loss ends a two-finger hold exactly once', (
+    tester,
+  ) async {
+    var holdStarts = 0;
+    var holdEnds = 0;
+    var taps = 0;
+    await pumpTarget(
+      tester,
+      onOrdinaryTap: () {},
+      onTwoFingerTap: (_) => taps += 1,
+      onTwoFingerHoldStart: (_) => holdStarts += 1,
+      onTwoFingerHoldEnd: () => holdEnds += 1,
+    );
+
+    final first = await tester.startGesture(const Offset(380, 300), pointer: 1);
+    final second = await tester.startGesture(
+      const Offset(420, 300),
+      pointer: 2,
+    );
+    await tester.pump(kLongPressTimeout + const Duration(milliseconds: 1));
+    await first.cancel();
+    await second.cancel();
+    await tester.pump();
+
+    expect(holdStarts, 1);
+    expect(holdEnds, 1);
+    expect(taps, 0);
+  });
+
   testWidgets('one-finger hold remains a long press', (tester) async {
     var ordinaryLongPresses = 0;
     var twoFingerHolds = 0;
@@ -586,5 +615,36 @@ void main() {
 
     expect(oneFingerStarts, 1);
     expect(oneFingerEnds, 1);
+  });
+
+  testWidgets('pointer loss cancels one-finger pan ownership once', (
+    tester,
+  ) async {
+    var starts = 0;
+    var ends = 0;
+    var cancels = 0;
+    await pumpTarget(
+      tester,
+      onOrdinaryTap: () {},
+      onTwoFingerTap: (_) {},
+      onTwoFingerHoldStart: (_) {},
+      onTwoFingerHoldEnd: () {},
+      onOneFingerPanStart: (_) => starts += 1,
+      onOneFingerPanEnd: (_) => ends += 1,
+      onOneFingerPanCancel: () => cancels += 1,
+    );
+
+    final finger = await tester.startGesture(
+      const Offset(400, 300),
+      pointer: 1,
+    );
+    await finger.moveBy(const Offset(30, 0));
+    await finger.moveBy(const Offset(10, 0));
+    await tester.pump();
+    await finger.cancel();
+    await tester.pump();
+
+    expect(starts, 1);
+    expect(ends + cancels, 1);
   });
 }
