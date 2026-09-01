@@ -435,7 +435,7 @@ class FfiModel with ChangeNotifier {
     return (evt) async {
       final typedEvent = decodeTypedSessionEvent(evt);
       if (typedEvent != null) {
-        _routeTypedSessionEvent(typedEvent, peerId);
+        await _routeTypedSessionEvent(typedEvent, peerId);
         return;
       }
       var name = evt['name'];
@@ -454,14 +454,6 @@ class FfiModel with ChangeNotifier {
       } else if (name == 'switch_display') {
         // switch display is kept for backward compatibility
         handleSwitchDisplay(evt, sessionId, peerId);
-      } else if (name == 'cursor_data') {
-        updateLastCursorId(evt);
-        await handleCursorData(evt, peerId: peerId);
-      } else if (name == 'cursor_id') {
-        updateLastCursorId(evt);
-        handleCursorId(evt);
-      } else if (name == 'cursor_position') {
-        await parent.target?.cursorModel.updateCursorPosition(evt, peerId);
       } else if (name == 'terminal_response') {
         parent.target?.routeTerminalResponse(evt);
       } else if (name == 'file_dir') {
@@ -559,10 +551,10 @@ class FfiModel with ChangeNotifier {
     };
   }
 
-  void _routeTypedSessionEvent(
+  Future<void> _routeTypedSessionEvent(
     SessionEvent event,
     String peerId,
-  ) {
+  ) async {
     if (event is ConnectionReadySessionEvent) {
       setConnectionType(peerId, event.secure, event.direct, event.streamType);
       parent.target?.qualityMonitorModel.updateConnectionInfo(
@@ -600,6 +592,17 @@ class FfiModel with ChangeNotifier {
         case SessionSignal.exitRelativeMouseMode:
           parent.target?.inputModel.exitRelativeMouseModeWithKeyRelease();
       }
+    } else if (event is CursorShapeSessionEvent) {
+      updateLastCursorIdValue(event.id);
+      await handleCursorShapeEvent(event, peerId: peerId);
+    } else if (event is CursorIdSessionEvent) {
+      handleCursorIdEvent(event);
+    } else if (event is CursorPositionSessionEvent) {
+      await parent.target?.cursorModel.updateCursorPositionValue(
+        event.x,
+        event.y,
+        peerId,
+      );
     } else if (event is InvalidSessionEvent) {
       debugPrint(
         'Rejected malformed session event ${event.name}: ${event.reason}',
@@ -2074,17 +2077,40 @@ class FfiModel with ChangeNotifier {
     if (id == null || id.isEmpty) {
       return;
     }
+    updateLastCursorIdValue(id);
+  }
+
+  void updateLastCursorIdValue(String id) {
     parent.target?.cursorModel.id = id;
   }
 
   handleCursorId(Map<String, dynamic> evt) {
-    cachedPeerData.lastCursorId = evt;
-    parent.target?.cursorModel.updateCursorId(evt);
+    final event = decodeTypedSessionEvent({...evt, 'name': 'cursor_id'});
+    if (event is CursorIdSessionEvent) handleCursorIdEvent(event);
   }
 
-  handleCursorData(Map<String, dynamic> evt, {String? peerId}) async {
-    cachedPeerData.cursorDataList.add(evt);
-    await parent.target?.cursorModel.updateCursorData(evt);
+  void handleCursorIdEvent(CursorIdSessionEvent event) {
+    final payload = event.toLegacyPayload();
+    cachedPeerData.lastCursorId = payload;
+    parent.target?.cursorModel.updateCursorIdValue(event.id);
+  }
+
+  Future<void> handleCursorData(
+    Map<String, dynamic> evt, {
+    String? peerId,
+  }) async {
+    final event = decodeTypedSessionEvent({...evt, 'name': 'cursor_data'});
+    if (event is CursorShapeSessionEvent) {
+      await handleCursorShapeEvent(event, peerId: peerId);
+    }
+  }
+
+  Future<void> handleCursorShapeEvent(
+    CursorShapeSessionEvent event, {
+    String? peerId,
+  }) async {
+    cachedPeerData.cursorDataList.add(event.toLegacyPayload());
+    await parent.target?.cursorModel.updateCursorShape(event);
     if (peerId != null) {
       _tryNotifyAuthenticatedHandoff(peerId);
     }
@@ -4531,17 +4557,18 @@ class CursorModel with ChangeNotifier {
     _images.clear();
   }
 
-  updateCursorData(Map<String, dynamic> evt) async {
-    final id = evt['id']?.toString();
-    if (id == null || id.isEmpty) {
-      return;
-    }
-    final hotx = double.parse(evt['hotx']);
-    final hoty = double.parse(evt['hoty']);
-    final width = int.parse(evt['width']);
-    final height = int.parse(evt['height']);
-    List<dynamic> colors = json.decode(evt['colors']);
-    final rgba = Uint8List.fromList(colors.map((s) => s as int).toList());
+  Future<void> updateCursorData(Map<String, dynamic> evt) async {
+    final event = decodeTypedSessionEvent({...evt, 'name': 'cursor_data'});
+    if (event is CursorShapeSessionEvent) await updateCursorShape(event);
+  }
+
+  Future<void> updateCursorShape(CursorShapeSessionEvent event) async {
+    final id = event.id;
+    final hotx = event.hotx;
+    final hoty = event.hoty;
+    final width = event.width;
+    final height = event.height;
+    final rgba = Uint8List.fromList(event.colors);
     final image = await img.decodeImageFromPixels(
         rgba, width, height, ui.PixelFormat.rgba8888);
     if (image == null) {
@@ -4621,11 +4648,13 @@ class CursorModel with ChangeNotifier {
     }
   }
 
-  updateCursorId(Map<String, dynamic> evt) {
+  void updateCursorId(Map<String, dynamic> evt) {
     final id = evt['id']?.toString();
-    if (id == null || id.isEmpty) {
-      return;
-    }
+    if (id == null || id.isEmpty) return;
+    updateCursorIdValue(id);
+  }
+
+  void updateCursorIdValue(String id) {
     _id = id;
     if (!_updateCurData()) {
       debugPrint(
@@ -4634,13 +4663,27 @@ class CursorModel with ChangeNotifier {
   }
 
   /// Update the cursor position.
-  updateCursorPosition(Map<String, dynamic> evt, String id) async {
+  Future<void> updateCursorPosition(
+    Map<String, dynamic> evt,
+    String id,
+  ) async {
+    final event = decodeTypedSessionEvent({...evt, 'name': 'cursor_position'});
+    if (event is CursorPositionSessionEvent) {
+      await updateCursorPositionValue(event.x, event.y, id);
+    }
+  }
+
+  Future<void> updateCursorPositionValue(
+    double x,
+    double y,
+    String id,
+  ) async {
     if (!isConnIn2Secs()) {
       gotMouseControl = false;
       _lastPeerMouse = DateTime.now();
     }
-    _x = double.parse(evt['x']);
-    _y = double.parse(evt['y']);
+    _x = x;
+    _y = y;
     _hasRemotePosition = true;
     try {
       RemoteCursorMovedState.find(id).value = true;

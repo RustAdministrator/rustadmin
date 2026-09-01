@@ -4,6 +4,7 @@ import 'package:flutter_hbb/generated_bridge.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
+import 'package:flutter_hbb/models/session_event.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class _RouterRustadminImpl implements Rustadmin {
@@ -84,4 +85,58 @@ void main() {
       expect(FingerprintState.find(peerId).value, 'trusted');
     },
   );
+
+  test('cursor events validate payloads before model routing', () async {
+    final listener = ffi.ffiModel.startEventListener(ffi.sessionId, peerId);
+
+    await listener({'name': 'cursor_id', 'id': 17});
+    await listener({'name': 'cursor_position', 'x': '12.5', 'y': -4});
+
+    expect(ffi.ffiModel.cachedPeerData.lastCursorId, {'id': '17'});
+    expect(ffi.cursorModel.x, 12.5);
+    expect(ffi.cursorModel.y, -4);
+
+    await listener({'name': 'cursor_position', 'x': 'nan', 'y': '1'});
+    expect(ffi.cursorModel.x, 12.5);
+    expect(ffi.cursorModel.y, -4);
+  });
+
+  test('cursor shape decoder enforces dimensions and byte payload', () {
+    final valid = decodeTypedSessionEvent({
+      'name': 'cursor_data',
+      'id': 'cursor-1',
+      'hotx': '0',
+      'hoty': 1,
+      'width': '1',
+      'height': 1,
+      'colors': '[0, 127, 255, 255]',
+    });
+
+    expect(valid, isA<CursorShapeSessionEvent>());
+    expect((valid as CursorShapeSessionEvent).colors, [0, 127, 255, 255]);
+    expect(
+      decodeTypedSessionEvent({
+        'name': 'cursor_data',
+        'id': 'cursor-1',
+        'hotx': 0,
+        'hoty': 0,
+        'width': 1,
+        'height': 1,
+        'colors': '[0, 1, 2]',
+      }),
+      isA<InvalidSessionEvent>(),
+    );
+    expect(
+      decodeTypedSessionEvent({
+        'name': 'cursor_data',
+        'id': 'cursor-1',
+        'hotx': 0,
+        'hoty': 0,
+        'width': 4096,
+        'height': 4096,
+        'colors': '[]',
+      }),
+      isA<InvalidSessionEvent>(),
+    );
+  });
 }

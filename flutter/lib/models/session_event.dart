@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 sealed class SessionEvent {
   const SessionEvent();
 }
@@ -67,6 +69,46 @@ enum SessionSignal {
 final class SessionSignalEvent extends SessionEvent {
   const SessionSignalEvent(this.signal);
   final SessionSignal signal;
+}
+
+final class CursorShapeSessionEvent extends SessionEvent {
+  CursorShapeSessionEvent({
+    required this.id,
+    required this.hotx,
+    required this.hoty,
+    required this.width,
+    required this.height,
+    required List<int> colors,
+  }) : colors = List.unmodifiable(colors);
+
+  final String id;
+  final double hotx;
+  final double hoty;
+  final int width;
+  final int height;
+  final List<int> colors;
+
+  Map<String, dynamic> toLegacyPayload() => {
+    'id': id,
+    'hotx': hotx.toString(),
+    'hoty': hoty.toString(),
+    'width': width.toString(),
+    'height': height.toString(),
+    'colors': jsonEncode(colors),
+  };
+}
+
+final class CursorIdSessionEvent extends SessionEvent {
+  const CursorIdSessionEvent(this.id);
+  final String id;
+
+  Map<String, dynamic> toLegacyPayload() => {'id': id};
+}
+
+final class CursorPositionSessionEvent extends SessionEvent {
+  const CursorPositionSessionEvent({required this.x, required this.y});
+  final double x;
+  final double y;
 }
 
 final class InvalidSessionEvent extends SessionEvent {
@@ -154,6 +196,49 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
       return const SessionSignalEvent(SessionSignal.voiceCallIncoming);
     case 'exit_relative_mouse_mode':
       return const SessionSignalEvent(SessionSignal.exitRelativeMouseMode);
+    case 'cursor_data':
+      final id = _decodeNonEmptyString(event['id']);
+      final hotx = _decodeDouble(event['hotx']);
+      final hoty = _decodeDouble(event['hoty']);
+      final width = _decodeInt(event['width']);
+      final height = _decodeInt(event['height']);
+      if (id == null ||
+          hotx == null ||
+          hoty == null ||
+          width == null ||
+          height == null ||
+          width <= 0 ||
+          height <= 0 ||
+          width > 4096 ||
+          height > 4096) {
+        return const InvalidSessionEvent('cursor_data', 'invalid metadata');
+      }
+      final expectedBytes = width * height * 4;
+      if (expectedBytes > 16 * 1024 * 1024) {
+        return const InvalidSessionEvent('cursor_data', 'payload too large');
+      }
+      final colors = _decodeByteList(event['colors'], expectedBytes);
+      return colors == null
+          ? const InvalidSessionEvent('cursor_data', 'invalid colors')
+          : CursorShapeSessionEvent(
+              id: id,
+              hotx: hotx,
+              hoty: hoty,
+              width: width,
+              height: height,
+              colors: colors,
+            );
+    case 'cursor_id':
+      final id = _decodeNonEmptyString(event['id']);
+      return id == null
+          ? const InvalidSessionEvent('cursor_id', 'invalid id')
+          : CursorIdSessionEvent(id);
+    case 'cursor_position':
+      final x = _decodeDouble(event['x']);
+      final y = _decodeDouble(event['y']);
+      return x == null || y == null
+          ? const InvalidSessionEvent('cursor_position', 'invalid position')
+          : CursorPositionSessionEvent(x: x, y: y);
     default:
       return null;
   }
@@ -172,4 +257,36 @@ bool? _decodeBool(Object? value) {
     if (value.toLowerCase() == 'false') return false;
   }
   return null;
+}
+
+double? _decodeDouble(Object? value) {
+  final decoded = switch (value) {
+    num number => number.toDouble(),
+    String text => double.tryParse(text),
+    _ => null,
+  };
+  return decoded?.isFinite == true ? decoded : null;
+}
+
+String? _decodeNonEmptyString(Object? value) {
+  if (value == null) return null;
+  final decoded = value.toString();
+  return decoded.isEmpty ? null : decoded;
+}
+
+List<int>? _decodeByteList(Object? value, int expectedLength) {
+  if (value is! String) return null;
+  Object? decoded;
+  try {
+    decoded = jsonDecode(value);
+  } catch (_) {
+    return null;
+  }
+  if (decoded is! List || decoded.length != expectedLength) return null;
+  final bytes = <int>[];
+  for (final item in decoded) {
+    if (item is! int || item < 0 || item > 255) return null;
+    bytes.add(item);
+  }
+  return bytes;
 }
