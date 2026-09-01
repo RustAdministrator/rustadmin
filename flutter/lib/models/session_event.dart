@@ -130,6 +130,89 @@ final class FollowCurrentDisplaySessionEvent extends SessionEvent {
   final int? displayIndex;
 }
 
+const _qualityDisplayMapKeys = <String>{
+  'fps',
+  'decode_fps',
+  'video_queue',
+  'frame_resolution',
+  'video_progress',
+  'video_dropped',
+  'video_decode_time_us',
+  'video_render_submit_time_us',
+  'video_feedback_queue',
+  'display_refresh_millihz',
+};
+
+const _qualityScalarKeys = <String>{
+  'connection_type',
+  'speed',
+  'delay',
+  'target_bitrate',
+  'codec_format',
+  'chroma',
+  'transport_mtu',
+  'transport_rtt_ms',
+  'transport_lost_packets',
+  'datagram_payload',
+  'negotiated_datagram_payload',
+  'quic_protocol',
+  'quic_video_transport',
+  'quic_reassembly_drops',
+  'quic_reassembly_reasons',
+  'quic_reassembly_frame',
+  'quic_reassembly_timing',
+  'quic_keyframe_requests',
+  'quic_keyframe_barrier',
+  'quic_receiver_recovery',
+  'quic_sender_recovery',
+  'quic_sender_admission',
+  'quic_sender_frame',
+  'quic_sender_percentiles',
+  'quic_sender_space',
+  'quic_disposable_drops',
+  'quic_video_queue_target_ms',
+  'decoder',
+  'renderer',
+  'capture_backend',
+  'capture_frame',
+  'encoder_backend',
+  'encoder_input',
+  'video_threads',
+  'texture_render',
+  'direct',
+  'fps_mode',
+  'auto_fps',
+  'video_delivery_phase',
+  'video_recovery_count',
+  'video_stall_ms',
+  'requested_video_profile',
+  'effective_video_profile',
+  'movie_target_fps',
+  'movie_pacing_fps',
+  'movie_host_pipeline_p95_us',
+  'movie_fallback_reason',
+  'movie_playout_delay_ms',
+};
+
+final class QualityStatusSessionEvent extends SessionEvent {
+  QualityStatusSessionEvent({
+    required Map<String, String> values,
+    required Map<String, Map<String, String>> displayMaps,
+  }) : values = Map<String, String>.unmodifiable(values),
+       displayMaps = Map<String, Map<String, String>>.unmodifiable({
+         for (final entry in displayMaps.entries)
+           entry.key: Map<String, String>.unmodifiable(entry.value),
+       });
+
+  final Map<String, String> values;
+  final Map<String, Map<String, String>> displayMaps;
+
+  bool contains(String key) =>
+      values.containsKey(key) || displayMaps.containsKey(key);
+
+  Map<String, String>? displayMap(String key) => displayMaps[key];
+}
+
 final class InvalidSessionEvent extends SessionEvent {
   const InvalidSessionEvent(this.name, this.reason);
 
@@ -284,6 +367,36 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
               'invalid display index',
             )
           : FollowCurrentDisplaySessionEvent(displayIndex);
+    case 'update_quality_status':
+      final values = <String, String>{};
+      final displayMaps = <String, Map<String, String>>{};
+      for (final key in _qualityScalarKeys) {
+        if (!event.containsKey(key)) continue;
+        final value = event[key];
+        if (value is! String || value.length > 1024 * 1024) {
+          return InvalidSessionEvent('update_quality_status', 'invalid $key');
+        }
+        values[key] = value;
+      }
+      for (final key in _qualityDisplayMapKeys) {
+        if (!event.containsKey(key)) continue;
+        final value = event[key];
+        if (value is! String || value.length > 1024 * 1024) {
+          return InvalidSessionEvent('update_quality_status', 'invalid $key');
+        }
+        final decoded = _decodeStringMap(value);
+        if (decoded == null) {
+          return InvalidSessionEvent(
+            'update_quality_status',
+            'invalid $key map',
+          );
+        }
+        displayMaps[key] = decoded;
+      }
+      return QualityStatusSessionEvent(
+        values: values,
+        displayMaps: displayMaps,
+      );
     default:
       return null;
   }
@@ -334,4 +447,27 @@ List<int>? _decodeByteList(Object? value, int expectedLength) {
     bytes.add(item);
   }
   return bytes;
+}
+
+Map<String, String>? _decodeStringMap(String value) {
+  if (value.isEmpty) return const {};
+  Object? decoded;
+  try {
+    decoded = jsonDecode(value);
+  } catch (_) {
+    return null;
+  }
+  if (decoded is! Map || decoded.length > 256) return null;
+  final values = <String, String>{};
+  for (final entry in decoded.entries) {
+    final key = entry.key;
+    final item = entry.value;
+    if (key is! String) return null;
+    if (item == null) continue;
+    if (item is! String && item is! num && item is! bool) return null;
+    final text = item.toString();
+    if (text.length > 4096) return null;
+    values[key] = text;
+  }
+  return values;
 }

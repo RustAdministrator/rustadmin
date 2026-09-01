@@ -486,8 +486,6 @@ class FfiModel with ChangeNotifier {
         parent.target?.serverModel.updateClientPermission(evt);
       } else if (name == 'permission_request') {
         parent.target?.serverModel.handlePermissionRequest(evt);
-      } else if (name == 'update_quality_status') {
-        parent.target?.qualityMonitorModel.updateQualityStatus(evt);
       } else if (name == 'cancel_msgbox') {
         cancelMsgBox(evt, sessionId);
       } else if (name == 'switch_back') {
@@ -608,6 +606,8 @@ class FfiModel with ChangeNotifier {
         sessionId,
         peerId,
       );
+    } else if (event is QualityStatusSessionEvent) {
+      parent.target?.qualityMonitorModel.updateQualityStatusEvent(event);
     } else if (event is InvalidSessionEvent) {
       debugPrint(
         'Rejected malformed session event ${event.name}: ${event.reason}',
@@ -5194,10 +5194,8 @@ class QualityMonitorModel with ChangeNotifier {
     return Size(width, height);
   }
 
-  String? _displayMetricFromMap(String value) {
-    if (value.isEmpty) return null;
-    final values = jsonDecode(value) as Map<String, dynamic>;
-    if (values.isEmpty) return null;
+  String? _displayMetricFromValues(Map<String, String>? values) {
+    if (values == null || values.isEmpty) return null;
     final pi = parent?.target?.ffiModel.pi;
     if (pi != null) {
       final currentDisplay = pi.currentDisplay;
@@ -5242,8 +5240,9 @@ class QualityMonitorModel with ChangeNotifier {
     return formatted.isEmpty ? null : formatted.join(' ');
   }
 
-  updateQualityStatus(Map<String, dynamic> evt) {
+  void updateQualityStatusEvent(QualityStatusSessionEvent event) {
     try {
+      final evt = event.values;
       String? eventString(String key) {
         final value = evt[key];
         return value is String && value.isNotEmpty ? value : null;
@@ -5270,8 +5269,8 @@ class QualityMonitorModel with ChangeNotifier {
       if (evt.containsKey('speed') && (evt['speed'] as String).isNotEmpty) {
         _data.speed = evt['speed'];
       }
-      if (evt.containsKey('fps') && (evt['fps'] as String).isNotEmpty) {
-        final fps = jsonDecode(evt['fps']) as Map<String, dynamic>;
+      final fps = event.displayMap('fps');
+      if (fps != null && fps.isNotEmpty) {
         final pi = parent?.target?.ffiModel.pi;
         if (pi != null) {
           final currentDisplay = pi.currentDisplay;
@@ -5379,15 +5378,20 @@ class QualityMonitorModel with ChangeNotifier {
           (evt['encoder_input'] as String).isNotEmpty) {
         _data.encoderInput = evt['encoder_input'];
       }
-      if (evt.containsKey('decode_fps')) {
-        _data.decodeFps = _displayMetricFromMap(evt['decode_fps'] as String);
+      if (event.contains('decode_fps')) {
+        _data.decodeFps = _displayMetricFromValues(
+          event.displayMap('decode_fps'),
+        );
       }
-      if (evt.containsKey('video_queue')) {
-        _data.videoQueue = _displayMetricFromMap(evt['video_queue'] as String);
+      if (event.contains('video_queue')) {
+        _data.videoQueue = _displayMetricFromValues(
+          event.displayMap('video_queue'),
+        );
       }
-      if (evt.containsKey('frame_resolution')) {
-        _data.frameResolution =
-            _displayMetricFromMap(evt['frame_resolution'] as String);
+      if (event.contains('frame_resolution')) {
+        _data.frameResolution = _displayMetricFromValues(
+          event.displayMap('frame_resolution'),
+        );
       }
       if (evt.containsKey('video_threads') &&
           (evt['video_threads'] as String).isNotEmpty) {
@@ -5409,35 +5413,35 @@ class QualityMonitorModel with ChangeNotifier {
           (evt['auto_fps'] as String).isNotEmpty) {
         _data.autoFps = evt['auto_fps'];
       }
-      if (evt.containsKey('video_progress') &&
-          (evt['video_progress'] as String).isNotEmpty) {
-        _data.videoProgress =
-            _displayMetricFromMap(evt['video_progress'] as String);
+      if (event.contains('video_progress')) {
+        _data.videoProgress = _displayMetricFromValues(
+          event.displayMap('video_progress'),
+        );
       }
-      if (evt.containsKey('video_dropped') &&
-          (evt['video_dropped'] as String).isNotEmpty) {
-        _data.videoDropped =
-            _displayMetricFromMap(evt['video_dropped'] as String);
+      if (event.contains('video_dropped')) {
+        _data.videoDropped = _displayMetricFromValues(
+          event.displayMap('video_dropped'),
+        );
       }
-      if (evt.containsKey('video_decode_time_us') &&
-          (evt['video_decode_time_us'] as String).isNotEmpty) {
-        _data.videoDecodeTimeUs =
-            _displayMetricFromMap(evt['video_decode_time_us'] as String);
+      if (event.contains('video_decode_time_us')) {
+        _data.videoDecodeTimeUs = _displayMetricFromValues(
+          event.displayMap('video_decode_time_us'),
+        );
       }
-      if (evt.containsKey('video_render_submit_time_us') &&
-          (evt['video_render_submit_time_us'] as String).isNotEmpty) {
-        _data.videoRenderSubmitTimeUs = _displayMetricFromMap(
-            evt['video_render_submit_time_us'] as String);
+      if (event.contains('video_render_submit_time_us')) {
+        _data.videoRenderSubmitTimeUs = _displayMetricFromValues(
+          event.displayMap('video_render_submit_time_us'),
+        );
       }
-      if (evt.containsKey('video_feedback_queue') &&
-          (evt['video_feedback_queue'] as String).isNotEmpty) {
-        _data.videoFeedbackQueue =
-            _displayMetricFromMap(evt['video_feedback_queue'] as String);
+      if (event.contains('video_feedback_queue')) {
+        _data.videoFeedbackQueue = _displayMetricFromValues(
+          event.displayMap('video_feedback_queue'),
+        );
       }
-      if (evt.containsKey('display_refresh_millihz') &&
-          (evt['display_refresh_millihz'] as String).isNotEmpty) {
-        final millihz = _displayMetricFromMap(
-            evt['display_refresh_millihz'] as String);
+      if (event.contains('display_refresh_millihz')) {
+        final millihz = _displayMetricFromValues(
+          event.displayMap('display_refresh_millihz'),
+        );
         _data.displayRefresh = _formatDisplayRefresh(millihz);
       }
       if (evt.containsKey('video_delivery_phase') &&

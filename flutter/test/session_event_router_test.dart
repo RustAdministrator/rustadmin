@@ -170,4 +170,28 @@ void main() {
     expect(follow, isA<FollowCurrentDisplaySessionEvent>());
     expect((follow as FollowCurrentDisplaySessionEvent).displayIndex, 2);
   });
+
+  test('quality metrics validate scalar and display-map payloads', () async {
+    final listener = ffi.ffiModel.startEventListener(ffi.sessionId, peerId);
+
+    await listener({
+      'name': 'update_quality_status',
+      'connection_type': 'QUIC/UDP',
+      'speed': '42KB/s',
+      'decode_fps': '{"0": 60}',
+    });
+    expect(ffi.qualityMonitorModel.data.connectionType, 'QUIC/UDP');
+    expect(ffi.qualityMonitorModel.data.speed, '42KB/s');
+
+    await listener({'name': 'update_quality_status', 'speed': 42});
+    expect(ffi.qualityMonitorModel.data.speed, '42KB/s');
+
+    expect(
+      decodeTypedSessionEvent({
+        'name': 'update_quality_status',
+        'decode_fps': 'not-json',
+      }),
+      isA<InvalidSessionEvent>(),
+    );
+  });
 }
