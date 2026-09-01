@@ -56,24 +56,6 @@ class RawKeyFocusScope extends StatelessWidget {
     );
   }
 }
-Offset mobileCursorInertiaFrameDelta({
-  required Offset velocityPixelsPerSecond,
-  required Duration elapsedBeforeFrame,
-  required Duration frameDuration,
-  required Duration totalDuration,
-}) {
-  final totalMicroseconds = totalDuration.inMicroseconds;
-  if (totalMicroseconds <= 0 || frameDuration <= Duration.zero) {
-    return Offset.zero;
-  }
-  final midpointMicroseconds =
-      elapsedBeforeFrame.inMicroseconds + frameDuration.inMicroseconds / 2;
-  if (midpointMicroseconds >= totalMicroseconds) return Offset.zero;
-  final decay = 1 - midpointMicroseconds / totalMicroseconds;
-  final frameSeconds =
-      frameDuration.inMicroseconds / Duration.microsecondsPerSecond;
-  return velocityPixelsPerSecond * frameSeconds * decay;
-}
 
 Rect mobileRemoteInputLocalRect({
   required Rect globalRect,
@@ -126,14 +108,8 @@ class _RawTouchGestureDetectorRegionState
   final _leftLongPressButton = MobileButtonSequenceController();
   final _legacyHoldDragButton = MobileButtonSequenceController();
   final _rightTwoFingerButton = MobileButtonSequenceController();
-  Timer? _cursorInertiaTimer;
-  Stopwatch? _cursorInertiaStopwatch;
-  Duration _previousInertiaElapsed = Duration.zero;
-  Offset _cursorInertiaVelocity = Offset.zero;
-  Offset _cursorInertiaLocalPosition = Offset.zero;
+  late final MobileCursorInertiaController _cursorInertia;
   Offset _lastOneFingerPanPosition = Offset.zero;
-  bool _cursorInertiaTickPending = false;
-  int _cursorInertiaGeneration = 0;
 
   // For mouse mode, we need to block the events when the cursor is in a blocked area.
   // So we need to cache the last tap down position.
@@ -162,6 +138,19 @@ class _RawTouchGestureDetectorRegionState
   }
 
   @override
+  void initState() {
+    super.initState();
+    _cursorInertia = MobileCursorInertiaController(
+      onFrame: _applyCursorInertiaFrame,
+      onStopped: ffi.canvasModel.cancelEdgeScroll,
+      onError: (error, stackTrace) {
+        debugPrint('Mobile cursor inertia failed: $error');
+        debugPrintStack(stackTrace: stackTrace);
+      },
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
     return RawGestureDetector(
       child: widget.child,
@@ -171,7 +160,7 @@ class _RawTouchGestureDetectorRegionState
 
   @override
   void dispose() {
-    _stopCursorInertia();
+    _cursorInertia.dispose();
     _releasePressedButtons();
     super.dispose();
   }
@@ -196,13 +185,7 @@ class _RawTouchGestureDetectorRegionState
   }
 
   void _stopCursorInertia({bool cancelEdgeScroll = true}) {
-    _cursorInertiaGeneration += 1;
-    _cursorInertiaTimer?.cancel();
-    _cursorInertiaTimer = null;
-    _cursorInertiaStopwatch?.stop();
-    _cursorInertiaStopwatch = null;
-    _previousInertiaElapsed = Duration.zero;
-    if (cancelEdgeScroll) ffi.canvasModel.cancelEdgeScroll();
+    _cursorInertia.stop(notify: cancelEdgeScroll);
   }
 
   bool _startCursorInertia(DragEndDetails details) {
@@ -213,25 +196,16 @@ class _RawTouchGestureDetectorRegionState
           kMaxMobileCursorInertiaDurationMs,
         )
         .toInt();
-    var velocity = details.velocity.pixelsPerSecond;
-    if (durationMs <= 0 || velocity.distance < 50) {
+    final started = _cursorInertia.start(
+      duration: Duration(milliseconds: durationMs),
+      velocity: details.velocity.pixelsPerSecond,
+      localPosition: _lastOneFingerPanPosition,
+    );
+    if (!started) {
       ffi.canvasModel.cancelEdgeScroll();
       return false;
     }
-    const maximumVelocity = 3000.0;
-    if (velocity.distance > maximumVelocity) {
-      velocity = velocity / velocity.distance * maximumVelocity;
-    }
-    _cursorInertiaVelocity = velocity;
-    _cursorInertiaLocalPosition = _lastOneFingerPanPosition;
-    _previousInertiaElapsed = Duration.zero;
-    _cursorInertiaStopwatch = Stopwatch()..start();
-    final generation = _cursorInertiaGeneration;
     if (inputModel.useEdgeScroll) ffi.canvasModel.rearmEdgeScroll();
-    _cursorInertiaTimer = Timer.periodic(
-      const Duration(milliseconds: 16),
-      (_) => _runCursorInertiaTick(generation, durationMs),
-    );
     return true;
   }
 
@@ -255,74 +229,41 @@ class _RawTouchGestureDetectorRegionState
     await ffi.cursorModel.updatePan(delta, targetPosition, false);
   }
 
-  Future<void> _runCursorInertiaTick(int generation, int durationMs) async {
-    if (generation != _cursorInertiaGeneration || _cursorInertiaTickPending) {
-      return;
+  Future<Offset> _applyCursorInertiaFrame(
+    MobileCursorInertiaFrame frame,
+  ) async {
+    if (inputModel.relativeMouseMode.value) {
+      await inputModel.sendMobileRelativeMouseMove(
+        frame.delta.dx,
+        frame.delta.dy,
+      );
+      return Offset.zero;
     }
-    final stopwatch = _cursorInertiaStopwatch;
-    if (stopwatch == null) return;
-    final totalDuration = Duration(milliseconds: durationMs);
-    final elapsed = stopwatch.elapsed;
-    final remaining = totalDuration - _previousInertiaElapsed;
-    if (remaining <= Duration.zero) {
-      _stopCursorInertia();
-      return;
-    }
-    final frameDuration = elapsed >= totalDuration
-        ? remaining
-        : elapsed - _previousInertiaElapsed;
-    final delta = mobileCursorInertiaFrameDelta(
-      velocityPixelsPerSecond: _cursorInertiaVelocity,
-      elapsedBeforeFrame: _previousInertiaElapsed,
-      frameDuration: frameDuration,
-      totalDuration: totalDuration,
-    );
-    _previousInertiaElapsed = elapsed;
-    if (delta == Offset.zero) {
-      _stopCursorInertia();
-      return;
-    }
-    _cursorInertiaTickPending = true;
-    try {
-      _cursorInertiaLocalPosition += delta;
-      if (inputModel.relativeMouseMode.value) {
-        await inputModel.sendMobileRelativeMouseMove(delta.dx, delta.dy);
-      } else {
+    await ffi.cursorModel.updatePan(frame.delta, frame.localPosition, false);
+    var adjustment = Offset.zero;
+    if (_returnsAccelerationCursorToNeutral) {
+      final currentPosition = ffi.cursorModel.mobileViewportPosition;
+      adjustment = mobileRemoteAccelerationReturnDelta(
+        pointerPosition: currentPosition,
+        viewport: ffi.canvasModel.size,
+        edgeThickness: ffi.canvasModel.edgeScrollEdgeThickness.toDouble(),
+        directions: ffi.canvasModel.mobileViewportScrollDirections,
+        frameDuration: frame.frameDuration,
+        remainingDuration: frame.remainingDuration,
+      );
+      if (adjustment != Offset.zero) {
         await ffi.cursorModel.updatePan(
-          delta,
-          _cursorInertiaLocalPosition,
+          adjustment,
+          currentPosition + adjustment,
           false,
         );
-        if (_returnsAccelerationCursorToNeutral) {
-          final currentPosition = ffi.cursorModel.mobileViewportPosition;
-          final returnDelta = mobileRemoteAccelerationReturnDelta(
-            pointerPosition: currentPosition,
-            viewport: ffi.canvasModel.size,
-            edgeThickness: ffi.canvasModel.edgeScrollEdgeThickness.toDouble(),
-            directions: ffi.canvasModel.mobileViewportScrollDirections,
-            frameDuration: frameDuration,
-            remainingDuration: remaining,
-          );
-          if (returnDelta != Offset.zero) {
-            _cursorInertiaLocalPosition += returnDelta;
-            await ffi.cursorModel.updatePan(
-              returnDelta,
-              currentPosition + returnDelta,
-              false,
-            );
-          }
-        }
-        if (inputModel.useEdgeScroll) {
-          final edgePosition = ffi.cursorModel.mobileViewportPosition;
-          ffi.canvasModel.edgeScrollMouse(edgePosition.dx, edgePosition.dy);
-        }
       }
-    } finally {
-      _cursorInertiaTickPending = false;
     }
-    if (generation == _cursorInertiaGeneration && elapsed >= totalDuration) {
-      _stopCursorInertia();
+    if (inputModel.useEdgeScroll) {
+      final edgePosition = ffi.cursorModel.mobileViewportPosition;
+      ffi.canvasModel.edgeScrollMouse(edgePosition.dx, edgePosition.dy);
     }
+    return adjustment;
   }
 
   bool isNotTouchBasedDevice() {

@@ -428,3 +428,22 @@ Offset mobileRemoteAccelerationReturnDelta({
           .toDouble();
   return (target - pointerPosition) * fraction;
 }
+
+Offset mobileCursorInertiaFrameDelta({
+  required Offset velocityPixelsPerSecond,
+  required Duration elapsedBeforeFrame,
+  required Duration frameDuration,
+  required Duration totalDuration,
+}) {
+  final totalMicroseconds = totalDuration.inMicroseconds;
+  if (totalMicroseconds <= 0 || frameDuration <= Duration.zero) {
+    return Offset.zero;
+  }
+  final midpointMicroseconds =
+      elapsedBeforeFrame.inMicroseconds + frameDuration.inMicroseconds / 2;
+  if (midpointMicroseconds >= totalMicroseconds) return Offset.zero;
+  final decay = 1 - midpointMicroseconds / totalMicroseconds;
+  final frameSeconds =
+      frameDuration.inMicroseconds / Duration.microsecondsPerSecond;
+  return velocityPixelsPerSecond * frameSeconds * decay;
+}
