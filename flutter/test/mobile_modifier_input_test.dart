@@ -42,9 +42,22 @@ class _FlutterKeyCall {
   int get hashCode => Object.hash(usbHid, down);
 }
 
+class _TextEditCall {
+  const _TextEditCall({
+    required this.text,
+    required this.deleteBefore,
+    required this.deleteAfter,
+  });
+
+  final String text;
+  final int deleteBefore;
+  final int deleteAfter;
+}
+
 class _TestRustadminImpl implements Rustadmin {
   final inputKeyCalls = <_InputKeyCall>[];
   final flutterKeyCalls = <_FlutterKeyCall>[];
+  final textEditCalls = <_TextEditCall>[];
   final pendingFlutterKeyCalls = <Completer<void>>[];
   bool blockFlutterKeyCalls = false;
 
@@ -78,6 +91,17 @@ class _TestRustadminImpl implements Rustadmin {
           ctrl: invocation.namedArguments[#ctrl] as bool,
           shift: invocation.namedArguments[#shift] as bool,
           command: invocation.namedArguments[#command] as bool,
+        ),
+      );
+      return Future<void>.value();
+    }
+    if (invocation.memberName == #sessionInputTextEdit) {
+      textEditCalls.add(
+        _TextEditCall(
+          text: invocation.namedArguments[#value] as String,
+          deleteBefore:
+              invocation.namedArguments[#deleteBeforeGraphemes] as int,
+          deleteAfter: invocation.namedArguments[#deleteAfterGraphemes] as int,
         ),
       );
       return Future<void>.value();
@@ -118,6 +142,7 @@ void main() {
   setUp(() {
     testImpl.inputKeyCalls.clear();
     testImpl.flutterKeyCalls.clear();
+    testImpl.textEditCalls.clear();
     testImpl.pendingFlutterKeyCalls.clear();
     testImpl.blockFlutterKeyCalls = false;
     inputModel = (FFI(null)..id = 'mobile-modifier-test-peer').inputModel;
@@ -221,6 +246,25 @@ void main() {
     expect(inputModel.ctrl, isTrue);
     expect(testImpl.inputKeyCalls, hasLength(1));
     expect(testImpl.inputKeyCalls.single.ctrl, isTrue);
+  });
+
+  test('mobile text edit keeps FFI arguments and releases one-shot', () {
+    inputModel.mobileModifierState.tap(MobileModifierKey.ctrl);
+
+    inputModel.inputMobileTextEdit(
+      text: 'text',
+      deleteBeforeGraphemes: 2,
+      deleteAfterGraphemes: 1,
+    );
+
+    expect(testImpl.textEditCalls, hasLength(1));
+    expect(testImpl.textEditCalls.single.text, 'text');
+    expect(testImpl.textEditCalls.single.deleteBefore, 2);
+    expect(testImpl.textEditCalls.single.deleteAfter, 1);
+    expect(testImpl.inputKeyCalls, hasLength(1));
+    expect(testImpl.inputKeyCalls.single.name, 'VK_CONTROL');
+    expect(testImpl.inputKeyCalls.single.down, isFalse);
+    expect(inputModel.ctrl, isFalse);
   });
 
   test('Android physical key bridge preserves modifier ordering', () async {

@@ -544,13 +544,11 @@ class _RemotePageState extends State<RemotePage>
 
   void _inputMobileTextEdit(MobileCommittedTextEdit edit) {
     if (edit.isEmpty) return;
-    bind.sessionInputTextEdit(
-      sessionId: sessionId,
-      value: edit.text,
+    inputModel.inputMobileTextEdit(
+      text: edit.text,
       deleteBeforeGraphemes: edit.deleteBeforeGraphemes,
       deleteAfterGraphemes: edit.deleteAfterGraphemes,
     );
-    inputModel.consumeMobileOneShotModifiers();
   }
 
   Future<void> _setAndroidRemoteKeyboardInput(bool enabled) async {

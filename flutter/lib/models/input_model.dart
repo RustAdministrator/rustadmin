@@ -321,11 +321,7 @@ class InputModel {
   String keyboardMode = '';
 
   // keyboard
-  var _physicalShift = false;
-  var _physicalCtrl = false;
-  var _physicalAlt = false;
-  var _physicalCommand = false;
-  late final MobileKeyboardModifierController _mobileModifiers;
+  late final KeyboardInputController _keyboardInput;
   final _androidRemoteKeyboardQueue = KeyboardCommandQueue(
     onError: (error, stackTrace) {
       debugPrint('Android remote keyboard dispatch failed: $error');
@@ -396,24 +392,22 @@ class InputModel {
 
   late final SessionID sessionId;
 
-  MobileModifierState get mobileModifierState => _mobileModifiers.state;
+  MobileModifierState get mobileModifierState => _keyboardInput.mobileState;
   bool get shift => _effectiveModifiers.shift;
   bool get ctrl => _effectiveModifiers.ctrl;
   bool get alt => _effectiveModifiers.alt;
   bool get command => _effectiveModifiers.command;
-  set shift(bool value) => _physicalShift = value;
-  set ctrl(bool value) => _physicalCtrl = value;
-  set alt(bool value) => _physicalAlt = value;
-  set command(bool value) => _physicalCommand = value;
+  set shift(bool value) =>
+      _keyboardInput.setPhysical(MobileModifierKey.shift, value);
+  set ctrl(bool value) =>
+      _keyboardInput.setPhysical(MobileModifierKey.ctrl, value);
+  set alt(bool value) =>
+      _keyboardInput.setPhysical(MobileModifierKey.alt, value);
+  set command(bool value) =>
+      _keyboardInput.setPhysical(MobileModifierKey.command, value);
 
-  KeyboardModifiers get _physicalModifiers => KeyboardModifiers(
-        alt: _physicalAlt,
-        ctrl: _physicalCtrl,
-        shift: _physicalShift,
-        command: _physicalCommand,
-      );
   KeyboardModifiers get _effectiveModifiers =>
-      _physicalModifiers.merge(_mobileModifiers.snapshot);
+      _keyboardInput.effectiveModifiers;
 
   bool get keyboardPerm => parent.target!.ffiModel.keyboard;
   String get id => parent.target?.id ?? '';
@@ -435,13 +429,39 @@ class InputModel {
 
   InputModel(this.parent) {
     sessionId = parent.target!.sessionId;
-    _mobileModifiers = MobileKeyboardModifierController(
-      onRelease: (key, remaining) {
-        if (_physicalModifiers.isActive(key)) return;
-        _sendMobileModifierKeyUp(
-          key,
-          modifiers: _physicalModifiers.merge(remaining),
+    _keyboardInput = KeyboardInputController(
+      sendKey: ({
+        required name,
+        required down,
+        required press,
+        required modifiers,
+      }) {
+        if (!keyboardPerm || isViewCamera) return false;
+        bind.sessionInputKey(
+          sessionId: sessionId,
+          name: name,
+          down: down,
+          press: press,
+          alt: modifiers.alt,
+          ctrl: modifiers.ctrl,
+          shift: modifiers.shift,
+          command: modifiers.command,
         );
+        return true;
+      },
+      sendTextEdit: ({
+        required text,
+        required deleteBeforeGraphemes,
+        required deleteAfterGraphemes,
+      }) {
+        if (!keyboardPerm || isViewCamera) return false;
+        bind.sessionInputTextEdit(
+          sessionId: sessionId,
+          value: text,
+          deleteBeforeGraphemes: deleteBeforeGraphemes,
+          deleteAfterGraphemes: deleteAfterGraphemes,
+        );
+        return true;
       },
     );
     _relativeMouse = RelativeMouseModel(
@@ -966,110 +986,30 @@ class InputModel {
   /// [down] indicates the key's state(down or up).
   /// [press] indicates a click event(down and up).
   void inputKey(String name, {bool? down, bool? press}) {
-    _inputKeyWithModifiers(
-      name,
-      _effectiveModifiers,
-      down: down,
-      press: press,
-    );
-  }
-
-  void _inputKeyWithModifiers(
-    String name,
-    KeyboardModifiers modifiers, {
-    bool? down,
-    bool? press,
-  }) {
-    if (!keyboardPerm) return;
-    if (isViewCamera) return;
-    final effectiveDown = down ?? false;
-    final effectivePress = press ?? true;
-    bind.sessionInputKey(
-      sessionId: sessionId,
-      name: name,
-      down: effectiveDown,
-      press: effectivePress,
-      alt: modifiers.alt,
-      ctrl: modifiers.ctrl,
-      shift: modifiers.shift,
-      command: modifiers.command,
-    );
-    if ((effectiveDown || effectivePress) && !_isModifierKeyName(name)) {
-      _mobileModifiers.consumeOneShot();
-    }
+    _keyboardInput.sendKey(name, down: down, press: press);
   }
 
   void inputKeyWithTemporaryMobileModifier(
     String name,
     MobileModifierKey modifier,
   ) {
-    final modeBefore = mobileModifierState.modeFor(modifier);
-    final before = _effectiveModifiers;
-    final releaseTemporaryModifier = !modeBefore.active && !before.isActive(modifier);
-    _inputKeyWithModifiers(
-      name,
-      before.withModifier(modifier),
-    );
-    if (releaseTemporaryModifier) {
-      _sendMobileModifierKeyUp(
-        modifier,
-        modifiers: _effectiveModifiers,
-      );
-    }
+    _keyboardInput.sendWithTemporaryModifier(name, modifier);
   }
 
   void consumeMobileOneShotModifiers() {
-    _mobileModifiers.consumeOneShot();
+    _keyboardInput.consumeOneShot();
   }
 
-  void _sendMobileModifierKeyUp(
-    MobileModifierKey modifier, {
-    required KeyboardModifiers modifiers,
+  void inputMobileTextEdit({
+    required String text,
+    required int deleteBeforeGraphemes,
+    required int deleteAfterGraphemes,
   }) {
-    if (!keyboardPerm || isViewCamera) return;
-    final name = switch (modifier) {
-      MobileModifierKey.ctrl => 'VK_CONTROL',
-      MobileModifierKey.alt => 'VK_MENU',
-      MobileModifierKey.shift => 'VK_SHIFT',
-      MobileModifierKey.command => 'Meta',
-    };
-    bind.sessionInputKey(
-      sessionId: sessionId,
-      name: name,
-      down: false,
-      press: false,
-      alt: modifiers.alt,
-      ctrl: modifiers.ctrl,
-      shift: modifiers.shift,
-      command: modifiers.command,
+    _keyboardInput.sendTextEdit(
+      text: text,
+      deleteBeforeGraphemes: deleteBeforeGraphemes,
+      deleteAfterGraphemes: deleteAfterGraphemes,
     );
-  }
-
-  bool _modifierValue(MobileModifierKey modifier) => switch (modifier) {
-    MobileModifierKey.ctrl => ctrl,
-    MobileModifierKey.alt => alt,
-    MobileModifierKey.shift => shift,
-    MobileModifierKey.command => command,
-  };
-
-  static bool _isModifierKeyName(String name) {
-    return const <String>{
-      'VK_CONTROL',
-      'VK_SHIFT',
-      'VK_MENU',
-      'VK_LWIN',
-      'VK_RWIN',
-      'CONTROL_L',
-      'CONTROL_R',
-      'SHIFT_L',
-      'SHIFT_R',
-      'ALT_L',
-      'ALT_R',
-      'META_L',
-      'META_R',
-      'SUPER_L',
-      'SUPER_R',
-    }.contains(name.toUpperCase());
   }
 
   static Map<String, dynamic> getMouseEventMove() => {
@@ -1139,11 +1079,7 @@ class InputModel {
 
   /// Reset key modifiers to false, including [shift], [ctrl], [alt] and [command].
   void resetModifiers() {
-    _physicalShift = false;
-    _physicalCtrl = false;
-    _physicalAlt = false;
-    _physicalCommand = false;
-    _mobileModifiers.reset();
+    _keyboardInput.reset();
   }
 
   /// Modify the given modifier map [evt] based on current modifier key status.
