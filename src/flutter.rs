@@ -1794,9 +1794,13 @@ fn refresh_clipboard_channels() -> bool {
 
 #[cfg(not(target_os = "ios"))]
 pub fn update_text_clipboard_required() {
-    let is_required = refresh_clipboard_channels();
     #[cfg(target_os = "android")]
-    let _ = scrap::android::ffi::call_clipboard_manager_enable_client_clipboard(is_required);
+    {
+        let is_required = refresh_clipboard_channels();
+        let _ = scrap::android::ffi::call_clipboard_manager_enable_client_clipboard(is_required);
+    }
+    #[cfg(not(target_os = "android"))]
+    refresh_clipboard_channels();
 }
 
 #[cfg(feature = "unix-file-copy-paste")]
