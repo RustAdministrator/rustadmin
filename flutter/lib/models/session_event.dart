@@ -561,6 +561,86 @@ final class MultipleWindowsSessionsEvent extends SessionEvent {
   final List<WindowsSessionValue> sessions;
 }
 
+final class SessionClientValue {
+  const SessionClientValue({
+    required this.id,
+    required this.authorized,
+    required this.isFileTransfer,
+    required this.isViewCamera,
+    required this.isTerminal,
+    required this.portForward,
+    required this.name,
+    required this.avatar,
+    required this.peerId,
+    required this.keyboard,
+    required this.clipboard,
+    required this.audio,
+    required this.file,
+    required this.restart,
+    required this.recording,
+    required this.blockInput,
+    required this.disconnected,
+    required this.fromSwitch,
+    required this.inVoiceCall,
+    required this.incomingVoiceCall,
+  });
+
+  final int id;
+  final bool authorized;
+  final bool isFileTransfer;
+  final bool isViewCamera;
+  final bool isTerminal;
+  final String portForward;
+  final String name;
+  final String avatar;
+  final String peerId;
+  final bool keyboard;
+  final bool clipboard;
+  final bool audio;
+  final bool file;
+  final bool restart;
+  final bool recording;
+  final bool blockInput;
+  final bool disconnected;
+  final bool fromSwitch;
+  final bool inVoiceCall;
+  final bool incomingVoiceCall;
+}
+
+enum ClientSnapshotKind { addConnection, voiceState }
+
+final class ClientSnapshotSessionEvent extends SessionEvent {
+  const ClientSnapshotSessionEvent({required this.kind, required this.client});
+
+  final ClientSnapshotKind kind;
+  final SessionClientValue client;
+}
+
+final class ClientRemovedSessionEvent extends SessionEvent {
+  const ClientRemovedSessionEvent({required this.id, required this.close});
+
+  final int id;
+  final bool close;
+}
+
+enum ClientPermissionKind { update, request }
+
+final class ClientPermissionSessionEvent extends SessionEvent {
+  const ClientPermissionSessionEvent({
+    required this.kind,
+    required this.clientId,
+    required this.name,
+    required this.enabled,
+    this.requestId = '',
+  });
+
+  final ClientPermissionKind kind;
+  final int clientId;
+  final String requestId;
+  final String name;
+  final bool enabled;
+}
+
 const _qualityDisplayMapKeys = <String>{
   'fps',
   'decode_fps',
@@ -754,6 +834,52 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
               'invalid sessions',
             )
           : MultipleWindowsSessionsEvent(sessions);
+    case 'add_connection':
+    case 'update_voice_call_state':
+      final client = _decodeClientValue(event['client']);
+      return client == null
+          ? InvalidSessionEvent(name, 'invalid client snapshot')
+          : ClientSnapshotSessionEvent(
+              kind: name == 'add_connection'
+                  ? ClientSnapshotKind.addConnection
+                  : ClientSnapshotKind.voiceState,
+              client: client,
+            );
+    case 'on_client_remove':
+      final id = _decodeInt(event['id']);
+      final close = _decodeBool(event['close']);
+      return id == null || id < 0 || close == null
+          ? const InvalidSessionEvent(
+              'on_client_remove',
+              'invalid client state',
+            )
+          : ClientRemovedSessionEvent(id: id, close: close);
+    case 'permission_update':
+    case 'permission_request':
+      final id = _decodeInt(event['id']);
+      final permissionName = event['permission_name'];
+      final enabled = _decodeBool(event['enabled']);
+      final requestId = name == 'permission_request'
+          ? _decodeNonEmptyString(event['request_id'])
+          : '';
+      return id == null ||
+              id < 0 ||
+              permissionName is! String ||
+              permissionName.isEmpty ||
+              permissionName.length > 4096 ||
+              enabled == null ||
+              (name == 'permission_request' &&
+                  (requestId == null || requestId.length > 64))
+          ? InvalidSessionEvent(name, 'invalid permission')
+          : ClientPermissionSessionEvent(
+              kind: name == 'permission_update'
+                  ? ClientPermissionKind.update
+                  : ClientPermissionKind.request,
+              clientId: id,
+              requestId: requestId ?? '',
+              name: permissionName,
+              enabled: enabled,
+            );
     case 'cursor_data':
       final id = _decodeNonEmptyString(event['id']);
       final hotx = _decodeDouble(event['hotx']);
@@ -1442,6 +1568,84 @@ List<WindowsSessionValue>? _decodeWindowsSessions(Object? raw) {
     sessions.add(WindowsSessionValue(id: id, name: name));
   }
   return sessions;
+}
+
+SessionClientValue? _decodeClientValue(Object? raw) {
+  final decoded = _decodeJsonInput(raw);
+  if (decoded is! Map) return null;
+  final id = _decodeInt(decoded['id']);
+  if (id == null || id < 0 || id > 0x7fffffff) return null;
+
+  bool? requiredBool(String key) => _decodeBool(decoded[key]);
+  bool? optionalBool(String key, bool fallback) =>
+      decoded.containsKey(key) ? _decodeBool(decoded[key]) : fallback;
+  String? requiredString(String key) {
+    final value = decoded[key];
+    return value is String && value.length <= 64 * 1024 ? value : null;
+  }
+
+  final authorized = requiredBool('authorized');
+  final isFileTransfer = requiredBool('is_file_transfer');
+  final isViewCamera = requiredBool('is_view_camera');
+  final isTerminal = optionalBool('is_terminal', false);
+  final portForward = requiredString('port_forward');
+  final clientName = requiredString('name');
+  final avatar = decoded.containsKey('avatar') ? requiredString('avatar') : '';
+  final peerId = requiredString('peer_id');
+  final keyboard = requiredBool('keyboard');
+  final clipboard = requiredBool('clipboard');
+  final audio = requiredBool('audio');
+  final file = requiredBool('file');
+  final restart = requiredBool('restart');
+  final recording = requiredBool('recording');
+  final blockInput = requiredBool('block_input');
+  final disconnected = requiredBool('disconnected');
+  final fromSwitch = requiredBool('from_switch');
+  final inVoiceCall = optionalBool('in_voice_call', false);
+  final incomingVoiceCall = optionalBool('incoming_voice_call', false);
+  if (authorized == null ||
+      isFileTransfer == null ||
+      isViewCamera == null ||
+      isTerminal == null ||
+      portForward == null ||
+      clientName == null ||
+      avatar == null ||
+      peerId == null ||
+      keyboard == null ||
+      clipboard == null ||
+      audio == null ||
+      file == null ||
+      restart == null ||
+      recording == null ||
+      blockInput == null ||
+      disconnected == null ||
+      fromSwitch == null ||
+      inVoiceCall == null ||
+      incomingVoiceCall == null) {
+    return null;
+  }
+  return SessionClientValue(
+    id: id,
+    authorized: authorized,
+    isFileTransfer: isFileTransfer,
+    isViewCamera: isViewCamera,
+    isTerminal: isTerminal,
+    portForward: portForward,
+    name: clientName,
+    avatar: avatar,
+    peerId: peerId,
+    keyboard: keyboard,
+    clipboard: clipboard,
+    audio: audio,
+    file: file,
+    restart: restart,
+    recording: recording,
+    blockInput: blockInput,
+    disconnected: disconnected,
+    fromSwitch: fromSwitch,
+    inVoiceCall: inVoiceCall,
+    incomingVoiceCall: incomingVoiceCall,
+  );
 }
 
 List<SessionDisplayValue>? _decodeDisplays(Object? raw) {

@@ -517,6 +517,79 @@ void main() {
     }
   });
 
+  test('decodes connection-manager client and permission events', () {
+    final client = <String, Object>{
+      'id': 3,
+      'authorized': true,
+      'is_file_transfer': false,
+      'is_view_camera': false,
+      'is_terminal': false,
+      'port_forward': '',
+      'name': 'User',
+      'avatar': '',
+      'peer_id': 'peer',
+      'keyboard': true,
+      'clipboard': true,
+      'audio': false,
+      'file': true,
+      'restart': false,
+      'recording': false,
+      'block_input': false,
+      'disconnected': false,
+      'from_switch': false,
+      'in_voice_call': false,
+      'incoming_voice_call': true,
+    };
+    final added =
+        decodeTypedSessionEvent({'name': 'add_connection', 'client': client})!
+            as ClientSnapshotSessionEvent;
+    expect(added.kind, ClientSnapshotKind.addConnection);
+    expect(added.client.id, 3);
+    expect(added.client.incomingVoiceCall, isTrue);
+
+    final removed =
+        decodeTypedSessionEvent({
+              'name': 'on_client_remove',
+              'id': '3',
+              'close': 'true',
+            })!
+            as ClientRemovedSessionEvent;
+    expect(removed.close, isTrue);
+
+    final request =
+        decodeTypedSessionEvent({
+              'name': 'permission_request',
+              'id': '3',
+              'request_id': '18446744073709551615',
+              'permission_name': 'clipboard',
+              'enabled': 'true',
+            })!
+            as ClientPermissionSessionEvent;
+    expect(request.requestId, '18446744073709551615');
+  });
+
+  test('rejects malformed connection-manager events', () {
+    for (final event in [
+      {'name': 'add_connection', 'client': '{}'},
+      {'name': 'on_client_remove', 'id': '3', 'close': 'maybe'},
+      {
+        'name': 'permission_request',
+        'id': '3',
+        'request_id': '',
+        'permission_name': 'clipboard',
+        'enabled': 'true',
+      },
+      {
+        'name': 'permission_update',
+        'id': '-1',
+        'permission_name': 'clipboard',
+        'enabled': true,
+      },
+    ]) {
+      expect(decodeTypedSessionEvent(event), isA<InvalidSessionEvent>());
+    }
+  });
+
   test('decodes display and platform synchronization payloads', () {
     final sync =
         decodeTypedSessionEvent({

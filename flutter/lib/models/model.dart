@@ -453,17 +453,7 @@ class FfiModel with ChangeNotifier {
         return;
       }
       var name = evt['name'];
-      if (name == 'add_connection') {
-        parent.target?.serverModel.addConnection(evt);
-      } else if (name == 'on_client_remove') {
-        parent.target?.serverModel.onClientRemove(evt);
-      } else if (name == 'permission_update') {
-        parent.target?.serverModel.updateClientPermission(evt);
-      } else if (name == 'permission_request') {
-        parent.target?.serverModel.handlePermissionRequest(evt);
-      } else if (name == 'update_voice_call_state') {
-        parent.target?.serverModel.updateVoiceCallState(evt);
-      } else if (name == 'plugin_manager') {
+      if (name == 'plugin_manager') {
         pluginManager.handleEvent(evt);
       } else if (name == 'plugin_event') {
         handlePluginEvent(evt, (Map<String, dynamic> payload) {
@@ -602,6 +592,22 @@ class FfiModel with ChangeNotifier {
       handleToastEvent(event);
     } else if (event is MultipleWindowsSessionsEvent) {
       handleMultipleWindowsSessionsEvent(event, sessionId, peerId);
+    } else if (event is ClientSnapshotSessionEvent) {
+      switch (event.kind) {
+        case ClientSnapshotKind.addConnection:
+          parent.target?.serverModel.addConnectionEvent(event.client);
+        case ClientSnapshotKind.voiceState:
+          parent.target?.serverModel.updateVoiceCallStateEvent(event.client);
+      }
+    } else if (event is ClientRemovedSessionEvent) {
+      parent.target?.serverModel.onClientRemoveEvent(event);
+    } else if (event is ClientPermissionSessionEvent) {
+      switch (event.kind) {
+        case ClientPermissionKind.update:
+          parent.target?.serverModel.updateClientPermissionEvent(event);
+        case ClientPermissionKind.request:
+          parent.target?.serverModel.handlePermissionRequestEvent(event);
+      }
     } else if (event is PeerInfoSessionEvent) {
       await handlePeerInfoEvent(event, peerId, false);
     } else if (event is SyncPeerInfoSessionEvent) {

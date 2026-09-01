@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -13,6 +11,7 @@ import 'package:flutter_hbb/generated_bridge.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
+import 'package:flutter_hbb/models/session_event.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:get/get.dart';
 import 'package:image/image.dart' as img2;
@@ -33,6 +32,29 @@ final testClients = [
       false)
     ..disconnected = true,
 ];
+
+SessionClientValue _sessionClient(Client client) => SessionClientValue(
+      id: client.id,
+      authorized: client.authorized,
+      isFileTransfer: client.isFileTransfer,
+      isViewCamera: client.isViewCamera,
+      isTerminal: client.isTerminal,
+      portForward: client.portForward,
+      name: client.name,
+      avatar: client.avatar,
+      peerId: client.peerId,
+      keyboard: client.keyboard,
+      clipboard: client.clipboard,
+      audio: client.audio,
+      file: client.file,
+      restart: client.restart,
+      recording: client.recording,
+      blockInput: client.blockInput,
+      disconnected: client.disconnected,
+      fromSwitch: client.fromSwitch,
+      inVoiceCall: client.inVoiceCall,
+      incomingVoiceCall: client.incomingVoiceCall,
+    );
 
 bool _testShouldBlockRustAdminGuiForActiveSessions = false;
 String _testRemoteModifyControlPermission = '';
@@ -523,11 +545,14 @@ void main() {
     expect(find.byTooltip('Enable clipboard: OFF'), findsOneWidget);
     expect(find.byTooltip('Enable clipboard: ON'), findsNothing);
 
-    gFFI.serverModel.updateClientPermission({
-      'id': '10',
-      'permission_name': 'clipboard',
-      'enabled': 'true',
-    });
+    gFFI.serverModel.updateClientPermissionEvent(
+      const ClientPermissionSessionEvent(
+        kind: ClientPermissionKind.update,
+        clientId: 10,
+        name: 'clipboard',
+        enabled: true,
+      ),
+    );
     await tester.pump();
 
     expect(find.byTooltip('Enable clipboard: OFF'), findsNothing);
@@ -570,7 +595,7 @@ void main() {
       ..recording = true
       ..blockInput = true;
 
-    gFFI.serverModel.addConnection({'client': jsonEncode(authorized.toJson())});
+    gFFI.serverModel.addConnectionEvent(_sessionClient(authorized));
 
     expect(existing.authorized, isTrue);
     expect(existing.clipboard, isTrue);
@@ -587,12 +612,15 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 600));
 
-    gFFI.serverModel.handlePermissionRequest({
-      'id': '0',
-      'request_id': '42',
-      'permission_name': 'clipboard',
-      'enabled': 'true',
-    });
+    gFFI.serverModel.handlePermissionRequestEvent(
+      const ClientPermissionSessionEvent(
+        kind: ClientPermissionKind.request,
+        clientId: 0,
+        requestId: '42',
+        name: 'clipboard',
+        enabled: true,
+      ),
+    );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 1));
 
