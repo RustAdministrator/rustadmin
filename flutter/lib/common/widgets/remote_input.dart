@@ -178,14 +178,14 @@ class _RawTouchGestureDetectorRegionState
 
   Future<void> _sendMobileButtonDown(MobileButtonIntent intent) => switch (intent) {
     MobileButtonIntent.leftLongPress => inputModel.tapDown(MouseButtons.left),
-    MobileButtonIntent.legacyHoldDrag =>
+    MobileButtonIntent.legacyHoldDrag || MobileButtonIntent.touchModePanDrag =>
       inputModel.sendMouse('down', MouseButtons.left),
     MobileButtonIntent.rightTwoFinger => inputModel.tapDown(MouseButtons.right),
   };
 
   Future<void> _sendMobileButtonUp(MobileButtonIntent intent) => switch (intent) {
     MobileButtonIntent.leftLongPress => inputModel.tapUp(MouseButtons.left),
-    MobileButtonIntent.legacyHoldDrag =>
+    MobileButtonIntent.legacyHoldDrag || MobileButtonIntent.touchModePanDrag =>
       inputModel.sendMouse('up', MouseButtons.left),
     MobileButtonIntent.rightTwoFinger => inputModel.tapUp(MouseButtons.right),
   };
@@ -606,7 +606,11 @@ class _RawTouchGestureDetectorRegionState
       }
       // In relative mouse mode, skip mouse down - only send movement via sendMobileRelativeMouseMove
       if (!inputModel.relativeMouseMode.value) {
-        await inputModel.sendMouse('down', MouseButtons.left);
+        final request = _interaction.begin(MobileButtonIntent.touchModePanDrag);
+        await _interaction.activate(
+          MobileButtonIntent.touchModePanDrag,
+          request,
+        );
       }
       await ffi.cursorModel.move(d.localPosition.dx, d.localPosition.dy);
     }
@@ -655,10 +659,7 @@ class _RawTouchGestureDetectorRegionState
       ffi.cursorModel.clearRemoteWindowCoords();
     }
     if (handleTouch) {
-      // In relative mouse mode, skip mouse up - matches the skipped mouse down in onOneFingerPanStart
-      if (!inputModel.relativeMouseMode.value) {
-        await inputModel.sendMouse('up', MouseButtons.left);
-      }
+      await _interaction.release(MobileButtonIntent.touchModePanDrag);
     } else {
       if (!_startCursorInertia(d)) {
         await _returnAccelerationCursorToNeutral();
@@ -671,13 +672,11 @@ class _RawTouchGestureDetectorRegionState
   // stuck in the "started" state and cause issues such as the Magic Mouse
   // double-click problem on iPad with magic mouse.
   onOneFingerPanCancel() async {
-    final releaseLeftDrag = handleTouch &&
-        _touchModePanStarted &&
-        !inputModel.relativeMouseMode.value;
+    final releaseLeftDrag = handleTouch && _touchModePanStarted;
     _touchModePanStarted = false;
     ffi.canvasModel.cancelEdgeScroll();
     if (releaseLeftDrag) {
-      await inputModel.sendMouse('up', MouseButtons.left);
+      await _interaction.release(MobileButtonIntent.touchModePanDrag);
     }
   }
 

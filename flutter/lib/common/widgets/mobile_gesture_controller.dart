@@ -342,7 +342,12 @@ class MobileButtonSequenceController {
   }
 }
 
-enum MobileButtonIntent { leftLongPress, legacyHoldDrag, rightTwoFinger }
+enum MobileButtonIntent {
+  leftLongPress,
+  legacyHoldDrag,
+  touchModePanDrag,
+  rightTwoFinger,
+}
 
 typedef MobileButtonEffect = Future<void> Function(MobileButtonIntent intent);
 
