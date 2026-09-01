@@ -10,6 +10,7 @@ import 'package:xterm/xterm.dart';
 
 import 'model.dart';
 import 'platform_model.dart';
+import 'session_event.dart';
 
 class TerminalModel with ChangeNotifier {
   final String id; // peer id
@@ -188,86 +189,30 @@ class TerminalModel with ChangeNotifier {
     }
   }
 
-  static int getTerminalIdFromEvt(Map<String, dynamic> evt) {
-    if (evt.containsKey('terminal_id')) {
-      final v = evt['terminal_id'];
-      if (v is int) {
-        // Desktop and mobile send terminal_id as an int
-        return v;
-      } else if (v is String) {
-        // Web sends terminal_id as a string
-        final parsed = int.tryParse(v);
-        if (parsed != null) {
-          return parsed;
-        } else {
-          debugPrint(
-              '[TerminalModel] Failed to parse terminal_id as integer: $v. Expected a numeric string.');
-          return 0;
-        }
-      } else {
-        // Unexpected type, log and handle gracefully
-        debugPrint(
-            '[TerminalModel] Unexpected terminal_id type: ${v.runtimeType}, value: $v. Expected int or String.');
-        return 0;
-      }
-    } else {
-      debugPrint('[TerminalModel] Event does not contain terminal_id');
-      return 0;
-    }
-  }
-
-  static bool getSuccessFromEvt(Map<String, dynamic> evt) {
-    if (evt.containsKey('success')) {
-      final v = evt['success'];
-      if (v is bool) {
-        // Desktop and mobile
-        return v;
-      } else if (v is String) {
-        // Web
-        return v.toLowerCase() == 'true';
-      } else {
-        // Unexpected type, log and handle gracefully
-        debugPrint(
-            '[TerminalModel] Unexpected success type: ${v.runtimeType}, value: $v. Expected bool or String.');
-        return false;
-      }
-    } else {
-      debugPrint('[TerminalModel] Event does not contain success');
-      return false;
-    }
-  }
-
-  void handleTerminalResponse(Map<String, dynamic> evt) {
-    final String? type = evt['type'];
-    final int evtTerminalId = getTerminalIdFromEvt(evt);
-
+  void handleTerminalResponseEvent(TerminalResponseSessionEvent event) {
     // Only handle events for this terminal
-    if (evtTerminalId != terminalId) {
+    if (event.terminalId != terminalId) {
       debugPrint(
-          '[TerminalModel] Ignoring event for terminal $evtTerminalId (not mine)');
+          '[TerminalModel] Ignoring event for terminal ${event.terminalId} (not mine)');
       return;
     }
 
-    switch (type) {
-      case 'opened':
-        _handleTerminalOpened(evt);
-        break;
-      case 'data':
-        _handleTerminalData(evt);
-        break;
-      case 'closed':
-        _handleTerminalClosed(evt);
-        break;
-      case 'error':
-        _handleTerminalError(evt);
-        break;
+    switch (event.kind) {
+      case TerminalResponseKind.opened:
+        _handleTerminalOpened(event);
+      case TerminalResponseKind.data:
+        _handleTerminalData(event);
+      case TerminalResponseKind.closed:
+        _handleTerminalClosed(event);
+      case TerminalResponseKind.error:
+        _handleTerminalError(event);
     }
   }
 
-  void _handleTerminalOpened(Map<String, dynamic> evt) {
-    final bool success = getSuccessFromEvt(evt);
-    final String message = evt['message']?.toString() ?? '';
-    final String? serviceId = evt['service_id']?.toString();
+  void _handleTerminalOpened(TerminalResponseSessionEvent event) {
+    final success = event.success;
+    final message = event.message;
+    final serviceId = event.serviceId;
 
     debugPrint(
         '[TerminalModel] Terminal opened response: success=$success, message=$message, service_id=$serviceId');
@@ -296,8 +241,7 @@ class TerminalModel with ChangeNotifier {
         notifyListeners();
       });
 
-      final persistentSessions =
-          evt['persistent_sessions'] as List<dynamic>? ?? [];
+      final persistentSessions = event.persistentSessionIds;
       if (kWindowId != null && persistentSessions.isNotEmpty) {
         DesktopMultiWindow.invokeMethod(
             kWindowId!,
@@ -328,34 +272,8 @@ class TerminalModel with ChangeNotifier {
     }
   }
 
-  void _handleTerminalData(Map<String, dynamic> evt) {
-    final data = evt['data'];
-
-    if (data != null) {
-      try {
-        String text = '';
-        if (data is String) {
-          // Try to decode as base64 first
-          try {
-            final bytes = base64Decode(data);
-            text = utf8.decode(bytes, allowMalformed: true);
-          } catch (e) {
-            // If base64 decode fails, treat as plain text
-            text = data;
-          }
-        } else if (data is List) {
-          // Handle if data comes as byte array
-          text = utf8.decode(List<int>.from(data), allowMalformed: true);
-        } else {
-          debugPrint('[TerminalModel] Unknown data type: ${data.runtimeType}');
-          return;
-        }
-
-        _writeToTerminal(text);
-      } catch (e) {
-        debugPrint('[TerminalModel] Failed to process terminal data: $e');
-      }
-    }
+  void _handleTerminalData(TerminalResponseSessionEvent event) {
+    _writeToTerminal(utf8.decode(event.data, allowMalformed: true));
   }
 
   /// Write text to terminal, buffering if the view is not yet ready.
@@ -407,16 +325,15 @@ class TerminalModel with ChangeNotifier {
     _flushOutputBuffer();
   }
 
-  void _handleTerminalClosed(Map<String, dynamic> evt) {
-    final int exitCode = evt['exit_code'] ?? 0;
-    _writeToTerminal('\r\nTerminal closed with exit code: $exitCode\r\n');
+  void _handleTerminalClosed(TerminalResponseSessionEvent event) {
+    _writeToTerminal(
+        '\r\nTerminal closed with exit code: ${event.exitCode}\r\n');
     _terminalOpened = false;
     notifyListeners();
   }
 
-  void _handleTerminalError(Map<String, dynamic> evt) {
-    final String message = evt['message'] ?? 'Unknown error';
-    _writeToTerminal('\r\nTerminal error: $message\r\n');
+  void _handleTerminalError(TerminalResponseSessionEvent event) {
+    _writeToTerminal('\r\nTerminal error: ${event.message}\r\n');
   }
 
   @override

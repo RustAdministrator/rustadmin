@@ -156,6 +156,60 @@ void main() {
     expect((cached! as PeerInfoSessionEvent).resolutions, isEmpty);
   });
 
+  test('decodes terminal responses into bounded typed payloads', () {
+    final opened =
+        decodeTypedSessionEvent({
+              'name': 'terminal_response',
+              'type': 'opened',
+              'terminal_id': '7',
+              'success': 'true',
+              'message': 'ready',
+              'service_id': 'service',
+              'persistent_sessions': [1, '2'],
+            })!
+            as TerminalResponseSessionEvent;
+    expect(opened.kind, TerminalResponseKind.opened);
+    expect(opened.terminalId, 7);
+    expect(opened.success, isTrue);
+    expect(opened.persistentSessionIds, [1, 2]);
+
+    final data =
+        decodeTypedSessionEvent({
+              'name': 'terminal_response',
+              'type': 'data',
+              'terminal_id': 7,
+              'data': 'aGk=',
+            })!
+            as TerminalResponseSessionEvent;
+    expect(data.kind, TerminalResponseKind.data);
+    expect(data.data, [104, 105]);
+
+    final closed =
+        decodeTypedSessionEvent({
+              'name': 'terminal_response',
+              'type': 'closed',
+              'terminal_id': 7,
+              'exit_code': '-1',
+            })!
+            as TerminalResponseSessionEvent;
+    expect(closed.exitCode, -1);
+  });
+
+  test('rejects malformed terminal responses', () {
+    for (final event in [
+      {'name': 'terminal_response', 'type': 'data', 'data': 'aGk='},
+      {
+        'name': 'terminal_response',
+        'type': 'data',
+        'terminal_id': 1,
+        'data': [0, 256],
+      },
+      {'name': 'terminal_response', 'type': 'unknown', 'terminal_id': 1},
+    ]) {
+      expect(decodeTypedSessionEvent(event), isA<InvalidSessionEvent>());
+    }
+  });
+
   test('decodes display and platform synchronization payloads', () {
     final sync =
         decodeTypedSessionEvent({

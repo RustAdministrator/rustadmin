@@ -270,6 +270,31 @@ final class PeerInfoSessionEvent extends SessionEvent {
   };
 }
 
+enum TerminalResponseKind { opened, data, closed, error }
+
+final class TerminalResponseSessionEvent extends SessionEvent {
+  TerminalResponseSessionEvent({
+    required this.kind,
+    required this.terminalId,
+    this.success = false,
+    this.message = '',
+    this.serviceId,
+    List<int> persistentSessionIds = const [],
+    List<int> data = const [],
+    this.exitCode = 0,
+  }) : persistentSessionIds = List<int>.unmodifiable(persistentSessionIds),
+       data = List<int>.unmodifiable(data);
+
+  final TerminalResponseKind kind;
+  final int terminalId;
+  final bool success;
+  final String message;
+  final String? serviceId;
+  final List<int> persistentSessionIds;
+  final List<int> data;
+  final int exitCode;
+}
+
 const _qualityDisplayMapKeys = <String>{
   'fps',
   'decode_fps',
@@ -507,6 +532,93 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
               'invalid display index',
             )
           : FollowCurrentDisplaySessionEvent(displayIndex);
+    case 'terminal_response':
+      final terminalId = _decodeInt(event['terminal_id']);
+      final type = event['type'];
+      if (terminalId == null ||
+          terminalId < 0 ||
+          terminalId > 0x7fffffff ||
+          type is! String) {
+        return const InvalidSessionEvent(
+          'terminal_response',
+          'invalid terminal metadata',
+        );
+      }
+      switch (type) {
+        case 'opened':
+          final success = event.containsKey('success')
+              ? _decodeBool(event['success'])
+              : false;
+          final message = event['message'] ?? '';
+          final serviceId = event['service_id'];
+          final persistentIds = _decodeIntList(
+            event['persistent_sessions'],
+            maxLength: 256,
+            missingIsEmpty: true,
+          );
+          if (success == null ||
+              message is! String ||
+              message.length > 64 * 1024 ||
+              (serviceId != null &&
+                  (serviceId is! String || serviceId.length > 4096)) ||
+              persistentIds == null) {
+            return const InvalidSessionEvent(
+              'terminal_response',
+              'invalid opened response',
+            );
+          }
+          return TerminalResponseSessionEvent(
+            kind: TerminalResponseKind.opened,
+            terminalId: terminalId,
+            success: success,
+            message: message,
+            serviceId: serviceId as String?,
+            persistentSessionIds: persistentIds,
+          );
+        case 'data':
+          final data = _decodeTerminalData(event['data']);
+          return data == null
+              ? const InvalidSessionEvent(
+                  'terminal_response',
+                  'invalid terminal data',
+                )
+              : TerminalResponseSessionEvent(
+                  kind: TerminalResponseKind.data,
+                  terminalId: terminalId,
+                  data: data,
+                );
+        case 'closed':
+          final exitCode = event.containsKey('exit_code')
+              ? _decodeInt(event['exit_code'])
+              : 0;
+          return exitCode == null
+              ? const InvalidSessionEvent(
+                  'terminal_response',
+                  'invalid exit code',
+                )
+              : TerminalResponseSessionEvent(
+                  kind: TerminalResponseKind.closed,
+                  terminalId: terminalId,
+                  exitCode: exitCode,
+                );
+        case 'error':
+          final message = event['message'] ?? 'Unknown error';
+          return message is! String || message.length > 64 * 1024
+              ? const InvalidSessionEvent(
+                  'terminal_response',
+                  'invalid error message',
+                )
+              : TerminalResponseSessionEvent(
+                  kind: TerminalResponseKind.error,
+                  terminalId: terminalId,
+                  message: message,
+                );
+        default:
+          return const InvalidSessionEvent(
+            'terminal_response',
+            'unknown response type',
+          );
+      }
     case 'peer_info':
       final username = _decodeBoundedString(event['username']);
       final hostname = _decodeBoundedString(event['hostname']);
@@ -827,6 +939,43 @@ Object? _freezeJsonValue(Object? value, _JsonBudget budget, int depth) {
     return Map<String, Object?>.unmodifiable(items);
   }
   return _invalidJson;
+}
+
+List<int>? _decodeIntList(
+  Object? value, {
+  required int maxLength,
+  bool missingIsEmpty = false,
+}) {
+  if (value == null && missingIsEmpty) return const [];
+  if (value is! List || value.length > maxLength) return null;
+  final result = <int>[];
+  for (final item in value) {
+    final decoded = _decodeInt(item);
+    if (decoded == null || decoded < 0 || decoded > 0x7fffffff) return null;
+    result.add(decoded);
+  }
+  return result;
+}
+
+List<int>? _decodeTerminalData(Object? value) {
+  const maxBytes = 1024 * 1024;
+  if (value is String) {
+    if (value.length > 2 * maxBytes) return null;
+    try {
+      final decoded = base64Decode(value);
+      return decoded.length <= maxBytes ? decoded : null;
+    } catch (_) {
+      final decoded = utf8.encode(value);
+      return decoded.length <= maxBytes ? decoded : null;
+    }
+  }
+  if (value is! List || value.length > maxBytes) return null;
+  final bytes = <int>[];
+  for (final item in value) {
+    if (item is! int || item < 0 || item > 255) return null;
+    bytes.add(item);
+  }
+  return bytes;
 }
 
 List<int>? _decodeByteList(Object? value, int expectedLength) {

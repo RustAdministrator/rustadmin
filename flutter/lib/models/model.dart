@@ -453,8 +453,6 @@ class FfiModel with ChangeNotifier {
         handleToast(evt, sessionId, peerId);
       } else if (name == 'set_multiple_windows_session') {
         handleMultipleWindowsSession(evt, sessionId, peerId);
-      } else if (name == 'terminal_response') {
-        parent.target?.routeTerminalResponse(evt);
       } else if (name == 'file_dir') {
         parent.target?.fileModel.receiveFileDir(evt);
       } else if (name == 'empty_dirs') {
@@ -605,6 +603,8 @@ class FfiModel with ChangeNotifier {
         sessionId,
         peerId,
       );
+    } else if (event is TerminalResponseSessionEvent) {
+      parent.target?.routeTerminalResponseEvent(event);
     } else if (event is PeerInfoSessionEvent) {
       await handlePeerInfoEvent(event, peerId, false);
     } else if (event is SyncPeerInfoSessionEvent) {
@@ -6036,13 +6036,11 @@ class FFI {
     _terminalModels.remove(terminalId);
   }
 
-  void routeTerminalResponse(Map<String, dynamic> evt) {
-    final int terminalId = TerminalModel.getTerminalIdFromEvt(evt);
-
+  void routeTerminalResponseEvent(TerminalResponseSessionEvent event) {
     // Route to specific terminal model if it exists
-    final model = _terminalModels[terminalId];
+    final model = _terminalModels[event.terminalId];
     if (model != null) {
-      model.handleTerminalResponse(evt);
+      model.handleTerminalResponseEvent(event);
     }
   }
 }
