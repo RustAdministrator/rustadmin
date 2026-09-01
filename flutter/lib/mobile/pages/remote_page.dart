@@ -23,6 +23,7 @@ import '../../common/widgets/overlay.dart';
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/remote_input.dart';
 import '../../models/input_model.dart';
+import '../../models/android_render_target_controller.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../../utils/image.dart';
@@ -1549,124 +1550,19 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
   }
 }
 
-class ImagePaint extends StatefulWidget {
+class ImagePaint extends StatelessWidget {
   const ImagePaint({Key? key}) : super(key: key);
 
-  @override
-  State<ImagePaint> createState() => _ImagePaintState();
-}
-
-class _ImagePaintState extends State<ImagePaint> {
-  int? _textureId;
-  int? _textureDisplay;
-  int? _textureWidth;
-  int? _textureHeight;
-  int? _queuedDisplay;
-  int? _queuedWidth;
-  int? _queuedHeight;
-  bool _targetUpdateScheduled = false;
-  int _targetGeneration = 0;
-
-  void _queueTextureTarget(int? display, int? width, int? height) {
-    if (_queuedDisplay == display &&
-        _queuedWidth == width &&
-        _queuedHeight == height) {
-      return;
-    }
-    _queuedDisplay = display;
-    _queuedWidth = width;
-    _queuedHeight = height;
-    if (_targetUpdateScheduled) return;
-    _targetUpdateScheduled = true;
+  void _requestTarget(
+    ImageModel model,
+    AndroidTextureTarget? target,
+    int intentEpoch,
+  ) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _targetUpdateScheduled = false;
-      if (!mounted) return;
-      final nextDisplay = _queuedDisplay;
-      final nextWidth = _queuedWidth;
-      final nextHeight = _queuedHeight;
-      _targetGeneration++;
-      final generation = _targetGeneration;
-      if (nextDisplay == null || nextWidth == null || nextHeight == null) {
-        unawaited(_releaseTexture());
-      } else if (_textureId == null ||
-          _textureDisplay != nextDisplay ||
-          _textureWidth != nextWidth ||
-          _textureHeight != nextHeight) {
-        unawaited(
-          _createTexture(generation, nextDisplay, nextWidth, nextHeight),
-        );
-      }
-    });
-  }
-
-  Future<void> _createTexture(
-    int generation,
-    int display,
-    int width,
-    int height,
-  ) async {
-    final textureId = await platformFFI.createAndroidRemoteVideoTexture(
-      display: display,
-      width: width,
-      height: height,
-    );
-    if (textureId == null) return;
-    if (!mounted || generation != _targetGeneration) {
-      await platformFFI.releaseAndroidRemoteVideoTexture(
-        display: display,
-        textureId: textureId,
-      );
-      return;
-    }
-    final oldTextureId = _textureId;
-    final oldDisplay = _textureDisplay;
-    setState(() {
-      _textureId = textureId;
-      _textureDisplay = display;
-      _textureWidth = width;
-      _textureHeight = height;
-    });
-    if (oldTextureId != null && oldDisplay != null) {
-      await platformFFI.releaseAndroidRemoteVideoTexture(
-        display: oldDisplay,
-        textureId: oldTextureId,
-      );
-    }
-    await bind.sessionRefresh(sessionId: gFFI.sessionId, display: display);
-  }
-
-  Future<void> _releaseTexture() async {
-    final textureId = _textureId;
-    final display = _textureDisplay;
-    if (textureId == null || display == null) return;
-    if (mounted) {
-      setState(() {
-        _textureId = null;
-        _textureDisplay = null;
-        _textureWidth = null;
-        _textureHeight = null;
-      });
-    }
-    await platformFFI.releaseAndroidRemoteVideoTexture(
-      display: display,
-      textureId: textureId,
-    );
-  }
-
-  @override
-  void dispose() {
-    _targetGeneration++;
-    final textureId = _textureId;
-    final display = _textureDisplay;
-    if (textureId != null && display != null) {
       unawaited(
-        platformFFI.releaseAndroidRemoteVideoTexture(
-          display: display,
-          textureId: textureId,
-        ),
+        model.requireAndroidTextureTarget(target, intentEpoch: intentEpoch),
       );
-    }
-    super.dispose();
+    });
   }
 
   @override
@@ -1695,21 +1591,25 @@ class _ImagePaintState extends State<ImagePaint> {
     );
     final display = ffiModel.pi.currentDisplay;
     final displayInfo = ffiModel.pi.tryGetDisplayIfNotAllDisplay();
+    final intentEpoch = m.androidRenderTargetEpoch;
     if (!isAndroid ||
         !m.useTextureRender ||
         displayInfo == null ||
         displayInfo.width <= 0 ||
         displayInfo.height <= 0) {
-      _queueTextureTarget(null, null, null);
+      if (m.androidRenderTarget.phase != AndroidRenderTargetPhase.none) {
+        _requestTarget(m, null, intentEpoch);
+      }
       return softwarePaint;
     }
-    _queueTextureTarget(display, displayInfo.width, displayInfo.height);
-    final textureId = _textureId;
-    if (textureId == null ||
-        !m.androidSurfaceTextureActive ||
-        _textureDisplay != display ||
-        _textureWidth != displayInfo.width ||
-        _textureHeight != displayInfo.height) {
+    final target = AndroidTextureTarget(
+      display: display,
+      width: displayInfo.width,
+      height: displayInfo.height,
+    );
+    _requestTarget(m, target, intentEpoch);
+    final snapshot = m.androidRenderTarget;
+    if (!snapshot.canRenderTexture || snapshot.target != target) {
       return softwarePaint;
     }
     return Stack(
@@ -1721,7 +1621,7 @@ class _ImagePaintState extends State<ImagePaint> {
           width: displayInfo.width * s,
           height: displayInfo.height * s,
           child: Texture(
-            textureId: textureId,
+            textureId: snapshot.textureId!,
             filterQuality: mobileRemoteTextureFilterQuality(logicalScale: s),
           ),
         ),

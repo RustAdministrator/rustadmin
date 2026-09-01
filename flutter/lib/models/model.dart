@@ -47,6 +47,7 @@ import '../mobile/mobile_viewport.dart';
 import '../mobile/android_vpn_controller.dart';
 import '../utils/image.dart' as img;
 import '../common/widgets/dialog.dart';
+import 'android_render_target_controller.dart';
 import 'input_model.dart';
 import 'platform_model.dart';
 import 'session_event.dart';
@@ -2364,9 +2365,7 @@ class ImageModel with ChangeNotifier {
   late final SessionID sessionId;
 
   bool _useTextureRender = false;
-  bool _androidSurfaceTextureActive = false;
-  int? _androidSurfaceTextureDisplay;
-  Size? _androidSurfaceTextureFrameSize;
+  late final AndroidRenderTargetController _androidRenderTarget;
   bool _interactionGeometryInitialized = false;
 
   WeakReference<FFI> parent;
@@ -2375,18 +2374,45 @@ class ImageModel with ChangeNotifier {
 
   ImageModel(this.parent) {
     sessionId = parent.target!.sessionId;
+    _androidRenderTarget = AndroidRenderTargetController(
+      create: (target) => platformFFI.createAndroidRemoteVideoTexture(
+        display: target.display,
+        width: target.width,
+        height: target.height,
+      ),
+      release: (target, textureId) =>
+          platformFFI.releaseAndroidRemoteVideoTexture(
+        display: target.display,
+        textureId: textureId,
+      ),
+      refresh: (display) =>
+          bind.sessionRefresh(sessionId: sessionId, display: display),
+      onChanged: notifyListeners,
+      onError: (error, stackTrace) {
+        debugPrint('Android render target failed: $error\n$stackTrace');
+      },
+    );
   }
 
   get useTextureRender => _useTextureRender;
-  get androidSurfaceTextureActive => _androidSurfaceTextureActive;
+  AndroidRenderTargetSnapshot get androidRenderTarget =>
+      _androidRenderTarget.snapshot;
+  int get androidRenderTargetEpoch => _androidRenderTarget.intentEpoch;
+  get androidSurfaceTextureActive =>
+      _androidRenderTarget.snapshot.canRenderTexture;
   Size? get renderFrameSize => remoteRenderableFrameSize(
         softwareFrameSize: _image == null
             ? null
             : Size(_image!.width.toDouble(), _image!.height.toDouble()),
-        androidTextureActive: _androidSurfaceTextureActive &&
-            _androidSurfaceTextureDisplay ==
+        androidTextureActive: _androidRenderTarget.snapshot.canRenderTexture &&
+            _androidRenderTarget.snapshot.target?.display ==
                 parent.target?.ffiModel.pi.currentDisplay,
-        androidTextureFrameSize: _androidSurfaceTextureFrameSize,
+        androidTextureFrameSize: _androidRenderTarget.snapshot.target == null
+            ? null
+            : Size(
+                _androidRenderTarget.snapshot.target!.width.toDouble(),
+                _androidRenderTarget.snapshot.target!.height.toDouble(),
+              ),
       );
   bool get hasRenderableFrame => renderFrameSize != null;
 
@@ -2451,9 +2477,7 @@ class ImageModel with ChangeNotifier {
     _image?.dispose();
     _image = image;
     if (image == null) {
-      _androidSurfaceTextureActive = false;
-      _androidSurfaceTextureDisplay = null;
-      _androidSurfaceTextureFrameSize = null;
+      await _androidRenderTarget.retire();
       _interactionGeometryInitialized = false;
     } else {
       parent.target?.canvasModel.tryApplyPendingMobileCursorFocus();
@@ -2474,18 +2498,23 @@ class ImageModel with ChangeNotifier {
     if (rect == null || rect.width <= 0 || rect.height <= 0) {
       return;
     }
-    final frameSize = Size(rect.width, rect.height);
-    final changed = !_androidSurfaceTextureActive ||
-        _androidSurfaceTextureDisplay != display ||
-        _androidSurfaceTextureFrameSize != frameSize;
-    _androidSurfaceTextureActive = true;
-    _androidSurfaceTextureDisplay = display;
-    _androidSurfaceTextureFrameSize = frameSize;
-    await _ensureInteractionGeometry();
-    ffi.canvasModel.tryApplyPendingMobileCursorFocus();
-    if (changed) {
-      notifyListeners();
+    final target = _androidRenderTarget.snapshot.target;
+    if (_androidRenderTarget.snapshot.phase != AndroidRenderTargetPhase.ready ||
+        target == null ||
+        target.display != display ||
+        target.width != rect.width.toInt() ||
+        target.height != rect.height.toInt()) {
+      return;
     }
+    await _ensureInteractionGeometry();
+    final changed = _androidRenderTarget.producerFrame(
+      display: display,
+      width: rect.width.toInt(),
+      height: rect.height.toInt(),
+      active: true,
+    );
+    if (!changed) return;
+    ffi.canvasModel.tryApplyPendingMobileCursorFocus();
   }
 
   Future<void> _ensureInteractionGeometry() async {
@@ -2521,9 +2550,7 @@ class ImageModel with ChangeNotifier {
     _useTextureRender =
         (isDesktop || isAndroid) && bind.mainGetUseTextureRender();
     if (!_useTextureRender) {
-      _androidSurfaceTextureActive = false;
-      _androidSurfaceTextureDisplay = null;
-      _androidSurfaceTextureFrameSize = null;
+      unawaited(_androidRenderTarget.retire());
     }
     if (preValue != _useTextureRender) {
       notifyListeners();
@@ -2533,31 +2560,37 @@ class ImageModel with ChangeNotifier {
   setUseTextureRender(bool value) {
     _useTextureRender = value;
     if (!value) {
-      _androidSurfaceTextureActive = false;
-      _androidSurfaceTextureDisplay = null;
-      _androidSurfaceTextureFrameSize = null;
+      unawaited(_androidRenderTarget.retire());
     }
     notifyListeners();
   }
 
   setAndroidSurfaceTextureActive(bool value) {
-    final changed = _androidSurfaceTextureActive != value ||
-        (!value && (_androidSurfaceTextureDisplay != null ||
-            _androidSurfaceTextureFrameSize != null));
-    _androidSurfaceTextureActive = value;
     if (!value) {
-      _androidSurfaceTextureDisplay = null;
-      _androidSurfaceTextureFrameSize = null;
+      _androidRenderTarget.producerFrame(
+        display: -1,
+        width: 0,
+        height: 0,
+        active: false,
+      );
     }
-    if (changed) notifyListeners();
   }
+
+  Future<void> requireAndroidTextureTarget(
+    AndroidTextureTarget? target, {
+    int? intentEpoch,
+  }) =>
+      target == null
+          ? _androidRenderTarget.retire(intentEpoch: intentEpoch)
+          : _androidRenderTarget.requireTarget(
+              target,
+              intentEpoch: intentEpoch,
+            );
 
   void disposeImage() {
     _image?.dispose();
     _image = null;
-    _androidSurfaceTextureActive = false;
-    _androidSurfaceTextureDisplay = null;
-    _androidSurfaceTextureFrameSize = null;
+    unawaited(_androidRenderTarget.retire());
     _interactionGeometryInitialized = false;
   }
 }
