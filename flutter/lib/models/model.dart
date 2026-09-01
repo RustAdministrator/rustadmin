@@ -433,24 +433,8 @@ class FfiModel with ChangeNotifier {
   StreamEventHandler startEventListener(SessionID sessionId, String peerId) {
     return (evt) async {
       final typedEvent = decodeTypedSessionEvent(evt);
-      if (typedEvent is ConnectionReadySessionEvent) {
-        setConnectionType(
-          peerId,
-          typedEvent.secure,
-          typedEvent.direct,
-          typedEvent.streamType,
-        );
-        parent.target?.qualityMonitorModel.updateConnectionInfo(
-          typedEvent.streamType,
-          typedEvent.direct,
-        );
-        return;
-      } else if (typedEvent is PermissionSessionEvent) {
-        updatePermissionValues(typedEvent.permissions, peerId);
-        return;
-      } else if (typedEvent is InvalidSessionEvent) {
-        debugPrint(
-            'Rejected malformed session event ${typedEvent.name}: ${typedEvent.reason}');
+      if (typedEvent != null) {
+        _routeTypedSessionEvent(typedEvent, peerId);
         return;
       }
       var name = evt['name'];
@@ -477,14 +461,6 @@ class FfiModel with ChangeNotifier {
         handleCursorId(evt);
       } else if (name == 'cursor_position') {
         await parent.target?.cursorModel.updateCursorPosition(evt, peerId);
-      } else if (name == 'clipboard') {
-        Clipboard.setData(ClipboardData(text: evt['content']));
-      } else if (name == 'chat_client_mode') {
-        parent.target?.chatModel
-            .receive(ChatModel.clientModeID, evt['text'] ?? '');
-      } else if (name == 'chat_server_mode') {
-        parent.target?.chatModel
-            .receive(int.parse(evt['id'] as String), evt['text'] ?? '');
       } else if (name == 'terminal_response') {
         parent.target?.routeTerminalResponse(evt);
       } else if (name == 'file_dir') {
@@ -523,9 +499,6 @@ class FfiModel with ChangeNotifier {
         updateBlockInputState(evt, peerId);
       } else if (name == 'update_privacy_mode') {
         updatePrivacyMode(evt, sessionId, peerId);
-      } else if (name == 'show_elevation') {
-        final show = evt['show'].toString() == 'true';
-        parent.target?.serverModel.setShowElevation(show);
       } else if (name == 'cancel_msgbox') {
         cancelMsgBox(evt, sessionId);
       } else if (name == 'switch_back') {
@@ -543,17 +516,11 @@ class FfiModel with ChangeNotifier {
       } else if (name == 'on_voice_call_started') {
         // Voice call is connected.
         parent.target?.chatModel.onVoiceCallStarted();
-      } else if (name == 'on_voice_call_closed') {
-        // Voice call is closed with reason.
-        final reason = evt['reason'].toString();
-        parent.target?.chatModel.onVoiceCallClosed(reason);
       } else if (name == 'on_voice_call_incoming') {
         // Voice call is requested by the peer.
         parent.target?.chatModel.onVoiceCallIncoming();
       } else if (name == 'update_voice_call_state') {
         parent.target?.serverModel.updateVoiceCallState(evt);
-      } else if (name == 'fingerprint') {
-        FingerprintState.find(peerId).value = evt['fingerprint'] ?? '';
       } else if (name == 'plugin_manager') {
         pluginManager.handleEvent(evt);
       } else if (name == 'plugin_event') {
@@ -590,23 +557,53 @@ class FfiModel with ChangeNotifier {
         if (isWeb) {
           parent.target?.fileModel.sendEmptyDirs(evt);
         }
-      } else if (name == "record_status") {
-        if (desktopType == DesktopType.remote ||
-            desktopType == DesktopType.viewCamera ||
-            isMobile) {
-          parent.target?.recordingModel.updateStatus(evt['start'] == 'true');
-        }
       } else if (name == "printer_request") {
         _handlePrinterRequest(evt, sessionId, peerId);
       } else if (name == 'screenshot') {
         _handleScreenshot(evt, sessionId, peerId);
-      } else if (name == 'exit_relative_mouse_mode') {
-        // Handle exit shortcut from rdev grab loop (Ctrl+Alt on Win/Linux, Cmd+G on macOS)
-        parent.target?.inputModel.exitRelativeMouseModeWithKeyRelease();
       } else {
         debugPrint('Event is not handled in the fixed branch: $name');
       }
     };
+  }
+
+  void _routeTypedSessionEvent(
+    SessionEvent event,
+    String peerId,
+  ) {
+    if (event is ConnectionReadySessionEvent) {
+      setConnectionType(peerId, event.secure, event.direct, event.streamType);
+      parent.target?.qualityMonitorModel.updateConnectionInfo(
+        event.streamType,
+        event.direct,
+      );
+    } else if (event is PermissionSessionEvent) {
+      updatePermissionValues(event.permissions, peerId);
+    } else if (event is ClipboardSessionEvent) {
+      Clipboard.setData(ClipboardData(text: event.content));
+    } else if (event is ClientChatSessionEvent) {
+      parent.target?.chatModel.receive(ChatModel.clientModeID, event.text);
+    } else if (event is ServerChatSessionEvent) {
+      parent.target?.chatModel.receive(event.id, event.text);
+    } else if (event is ShowElevationSessionEvent) {
+      parent.target?.serverModel.setShowElevation(event.show);
+    } else if (event is VoiceCallClosedSessionEvent) {
+      parent.target?.chatModel.onVoiceCallClosed(event.reason);
+    } else if (event is FingerprintSessionEvent) {
+      FingerprintState.find(peerId).value = event.fingerprint;
+    } else if (event is RecordStatusSessionEvent) {
+      if (desktopType == DesktopType.remote ||
+          desktopType == DesktopType.viewCamera ||
+          isMobile) {
+        parent.target?.recordingModel.updateStatus(event.start);
+      }
+    } else if (event is ExitRelativeMouseModeSessionEvent) {
+      parent.target?.inputModel.exitRelativeMouseModeWithKeyRelease();
+    } else if (event is InvalidSessionEvent) {
+      debugPrint(
+        'Rejected malformed session event ${event.name}: ${event.reason}',
+      );
+    }
   }
 
   _handleScreenshot(

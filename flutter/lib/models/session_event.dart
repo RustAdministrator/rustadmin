@@ -21,6 +21,46 @@ final class PermissionSessionEvent extends SessionEvent {
   final Map<String, bool> permissions;
 }
 
+final class ClipboardSessionEvent extends SessionEvent {
+  const ClipboardSessionEvent(this.content);
+  final String content;
+}
+
+final class ClientChatSessionEvent extends SessionEvent {
+  const ClientChatSessionEvent(this.text);
+  final String text;
+}
+
+final class ServerChatSessionEvent extends SessionEvent {
+  const ServerChatSessionEvent({required this.id, required this.text});
+  final int id;
+  final String text;
+}
+
+final class ShowElevationSessionEvent extends SessionEvent {
+  const ShowElevationSessionEvent(this.show);
+  final bool show;
+}
+
+final class VoiceCallClosedSessionEvent extends SessionEvent {
+  const VoiceCallClosedSessionEvent(this.reason);
+  final String reason;
+}
+
+final class FingerprintSessionEvent extends SessionEvent {
+  const FingerprintSessionEvent(this.fingerprint);
+  final String fingerprint;
+}
+
+final class RecordStatusSessionEvent extends SessionEvent {
+  const RecordStatusSessionEvent(this.start);
+  final bool start;
+}
+
+final class ExitRelativeMouseModeSessionEvent extends SessionEvent {
+  const ExitRelativeMouseModeSessionEvent();
+}
+
 final class InvalidSessionEvent extends SessionEvent {
   const InvalidSessionEvent(this.name, this.reason);
 
@@ -67,9 +107,48 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
         return const InvalidSessionEvent('permission', 'empty snapshot');
       }
       return PermissionSessionEvent(permissions);
+    case 'clipboard':
+      final content = event['content'];
+      return content is String
+          ? ClipboardSessionEvent(content)
+          : const InvalidSessionEvent('clipboard', 'invalid content');
+    case 'chat_client_mode':
+      final text = event['text'];
+      return text == null || text is String
+          ? ClientChatSessionEvent(text as String? ?? '')
+          : const InvalidSessionEvent('chat_client_mode', 'invalid text');
+    case 'chat_server_mode':
+      final id = _decodeInt(event['id']);
+      final text = event['text'];
+      if (id == null || (text != null && text is! String)) {
+        return const InvalidSessionEvent('chat_server_mode', 'invalid id/text');
+      }
+      return ServerChatSessionEvent(id: id, text: text as String? ?? '');
+    case 'show_elevation':
+      return ShowElevationSessionEvent(event['show'].toString() == 'true');
+    case 'on_voice_call_closed':
+      return VoiceCallClosedSessionEvent(event['reason'].toString());
+    case 'fingerprint':
+      final fingerprint = event['fingerprint'];
+      return fingerprint == null || fingerprint is String
+          ? FingerprintSessionEvent(fingerprint as String? ?? '')
+          : const InvalidSessionEvent('fingerprint', 'invalid value');
+    case 'record_status':
+      final start = _decodeBool(event['start']);
+      return start == null
+          ? const InvalidSessionEvent('record_status', 'invalid start flag')
+          : RecordStatusSessionEvent(start);
+    case 'exit_relative_mouse_mode':
+      return const ExitRelativeMouseModeSessionEvent();
     default:
       return null;
   }
+}
+
+int? _decodeInt(Object? value) {
+  if (value is int) return value;
+  if (value is String) return int.tryParse(value);
+  return null;
 }
 
 bool? _decodeBool(Object? value) {

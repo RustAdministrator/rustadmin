@@ -31,6 +31,77 @@ void main() {
     });
   });
 
+  test('decodes compact text, status, and control events', () {
+    final clipboard =
+        decodeTypedSessionEvent({'name': 'clipboard', 'content': 'text'})!
+            as ClipboardSessionEvent;
+    final clientChat =
+        decodeTypedSessionEvent({'name': 'chat_client_mode', 'text': 'client'})!
+            as ClientChatSessionEvent;
+    final serverChat =
+        decodeTypedSessionEvent({
+              'name': 'chat_server_mode',
+              'id': '7',
+              'text': 'server',
+            })!
+            as ServerChatSessionEvent;
+    final elevation =
+        decodeTypedSessionEvent({'name': 'show_elevation', 'show': true})!
+            as ShowElevationSessionEvent;
+    final voice =
+        decodeTypedSessionEvent({
+              'name': 'on_voice_call_closed',
+              'reason': 'done',
+            })!
+            as VoiceCallClosedSessionEvent;
+    final fingerprint =
+        decodeTypedSessionEvent({'name': 'fingerprint', 'fingerprint': 'abc'})!
+            as FingerprintSessionEvent;
+    final record =
+        decodeTypedSessionEvent({'name': 'record_status', 'start': 'true'})!
+            as RecordStatusSessionEvent;
+
+    expect(clipboard.content, 'text');
+    expect(clientChat.text, 'client');
+    expect(serverChat.id, 7);
+    expect(serverChat.text, 'server');
+    expect(elevation.show, isTrue);
+    expect(voice.reason, 'done');
+    expect(fingerprint.fingerprint, 'abc');
+    expect(record.start, isTrue);
+    expect(
+      decodeTypedSessionEvent({'name': 'exit_relative_mouse_mode'}),
+      isA<ExitRelativeMouseModeSessionEvent>(),
+    );
+  });
+
+  test('rejects malformed compact typed events', () {
+    for (final event in [
+      {'name': 'clipboard'},
+      {'name': 'chat_client_mode', 'text': 1},
+      {'name': 'chat_server_mode', 'id': 'bad', 'text': 'x'},
+      {'name': 'fingerprint', 'fingerprint': 1},
+      {'name': 'record_status', 'start': 'sometimes'},
+    ]) {
+      expect(decodeTypedSessionEvent(event), isA<InvalidSessionEvent>());
+    }
+  });
+
+  test('preserves tolerant legacy elevation and voice coercion', () {
+    final elevation =
+        decodeTypedSessionEvent({
+              'name': 'show_elevation',
+              'show': 'sometimes',
+            })!
+            as ShowElevationSessionEvent;
+    final voice =
+        decodeTypedSessionEvent({'name': 'on_voice_call_closed'})!
+            as VoiceCallClosedSessionEvent;
+
+    expect(elevation.show, isFalse);
+    expect(voice.reason, 'null');
+  });
+
   test(
     'rejects malformed known events but leaves unknown events to legacy',
     () {
