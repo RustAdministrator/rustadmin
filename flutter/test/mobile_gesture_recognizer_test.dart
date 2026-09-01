@@ -312,6 +312,25 @@ void main() {
     }
   });
 
+  test('tap and fallback-up keep button ownership explicit', () async {
+    final calls = <String>[];
+    final coordinator = MobileInteractionCoordinator(
+      sendDown: (intent) async => calls.add('down:${intent.name}'),
+      sendUp: (intent) async => calls.add('up:${intent.name}'),
+    );
+
+    await coordinator.tap(MobileButtonIntent.ordinaryTap);
+    await coordinator.releaseOrSendUp(MobileButtonIntent.ordinaryTap);
+    final pending = coordinator.begin(MobileButtonIntent.leftLongPress);
+    await coordinator.releaseOrSendUp(MobileButtonIntent.leftLongPress);
+
+    expect(calls, ['down:ordinaryTap', 'up:ordinaryTap', 'up:ordinaryTap']);
+    expect(
+      coordinator.isRequested(MobileButtonIntent.leftLongPress, pending),
+      isFalse,
+    );
+  });
+
   Future<void> pumpTarget(
     WidgetTester tester, {
     required GestureTapDownCallback onTwoFingerTap,

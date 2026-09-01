@@ -177,14 +177,16 @@ class _RawTouchGestureDetectorRegionState
   }
 
   Future<void> _sendMobileButtonDown(MobileButtonIntent intent) => switch (intent) {
-    MobileButtonIntent.leftLongPress => inputModel.tapDown(MouseButtons.left),
+    MobileButtonIntent.ordinaryTap || MobileButtonIntent.leftLongPress =>
+      inputModel.tapDown(MouseButtons.left),
     MobileButtonIntent.legacyHoldDrag || MobileButtonIntent.touchModePanDrag =>
       inputModel.sendMouse('down', MouseButtons.left),
     MobileButtonIntent.rightTwoFinger => inputModel.tapDown(MouseButtons.right),
   };
 
   Future<void> _sendMobileButtonUp(MobileButtonIntent intent) => switch (intent) {
-    MobileButtonIntent.leftLongPress => inputModel.tapUp(MouseButtons.left),
+    MobileButtonIntent.ordinaryTap || MobileButtonIntent.leftLongPress =>
+      inputModel.tapUp(MouseButtons.left),
     MobileButtonIntent.legacyHoldDrag || MobileButtonIntent.touchModePanDrag =>
       inputModel.sendMouse('up', MouseButtons.left),
     MobileButtonIntent.rightTwoFinger => inputModel.tapUp(MouseButtons.right),
@@ -329,9 +331,12 @@ class _RawTouchGestureDetectorRegionState
       if (isMoved) {
         // If pan already handled 'down', don't send it again.
         if (lastTapDownDetails != null && !_touchModePanStarted) {
-          await inputModel.tapDown(MouseButtons.left);
+          await _interaction.tap(MobileButtonIntent.ordinaryTap);
+        } else if (_touchModePanStarted) {
+          await _interaction.release(MobileButtonIntent.touchModePanDrag);
+        } else {
+          await _interaction.releaseOrSendUp(MobileButtonIntent.ordinaryTap);
         }
-        await inputModel.tapUp(MouseButtons.left);
       }
     }
   }
@@ -355,7 +360,7 @@ class _RawTouchGestureDetectorRegionState
         return;
       }
       // Mobile, "Mouse mode"
-      await inputModel.tap(MouseButtons.left);
+      await _interaction.tap(MobileButtonIntent.ordinaryTap);
     }
   }
 
@@ -398,8 +403,8 @@ class _RawTouchGestureDetectorRegionState
         return;
       }
     }
-    await inputModel.tap(MouseButtons.left);
-    await inputModel.tap(MouseButtons.left);
+    await _interaction.tap(MobileButtonIntent.ordinaryTap);
+    await _interaction.tap(MobileButtonIntent.ordinaryTap);
   }
 
   onOneFingerHoldDown(TapDownDetails d) async {
@@ -504,7 +509,7 @@ class _RawTouchGestureDetectorRegionState
 
   onTwoFingerTap(TapDownDetails d) async {
     if (!await _prepareTwoFingerButton(d)) return;
-    await inputModel.tap(MouseButtons.right);
+    await _interaction.tap(MobileButtonIntent.rightTwoFinger);
   }
 
   onTwoFingerHoldStart(TapDownDetails d) async {

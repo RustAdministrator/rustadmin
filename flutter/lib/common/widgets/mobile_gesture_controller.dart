@@ -343,6 +343,7 @@ class MobileButtonSequenceController {
 }
 
 enum MobileButtonIntent {
+  ordinaryTap,
   leftLongPress,
   legacyHoldDrag,
   touchModePanDrag,
@@ -377,6 +378,21 @@ class MobileInteractionCoordinator {
 
   Future<void> release(MobileButtonIntent intent) =>
       _button(intent).release(() => sendUp(intent));
+
+  Future<void> tap(MobileButtonIntent intent) async {
+    final token = begin(intent);
+    try {
+      await activate(intent, token);
+    } finally {
+      await release(intent);
+    }
+  }
+
+  Future<void> releaseOrSendUp(MobileButtonIntent intent) async {
+    final hadIntent = hasIntent(intent);
+    await release(intent);
+    if (!hadIntent) await sendUp(intent);
+  }
 
   bool hasIntent(MobileButtonIntent intent) => _button(intent).hasIntent;
 
