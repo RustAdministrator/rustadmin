@@ -139,4 +139,35 @@ void main() {
       isA<InvalidSessionEvent>(),
     );
   });
+
+  test('privacy and render signals reject dynamic payload types', () async {
+    final listener = ffi.ffiModel.startEventListener(ffi.sessionId, peerId);
+
+    await listener({'name': 'update_block_input_state', 'input_state': 'on'});
+    await listener({'name': 'update_privacy_mode'});
+
+    expect(BlockInputState.find(peerId).value, isTrue);
+    expect(PrivacyModeState.find(peerId).value, isEmpty);
+
+    await listener({'name': 'update_block_input_state', 'input_state': 1});
+    expect(BlockInputState.find(peerId).value, isTrue);
+
+    final texture = decodeTypedSessionEvent({
+      'name': 'use_texture_render',
+      'v': 'Y',
+    });
+    expect(texture, isA<TextureRenderSessionEvent>());
+    expect((texture as TextureRenderSessionEvent).enabled, isTrue);
+    expect(
+      decodeTypedSessionEvent({'name': 'use_texture_render', 'v': true}),
+      isA<InvalidSessionEvent>(),
+    );
+
+    final follow = decodeTypedSessionEvent({
+      'name': 'follow_current_display',
+      'display_idx': '2',
+    });
+    expect(follow, isA<FollowCurrentDisplaySessionEvent>());
+    expect((follow as FollowCurrentDisplaySessionEvent).displayIndex, 2);
+  });
 }

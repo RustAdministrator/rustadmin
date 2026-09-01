@@ -367,7 +367,7 @@ class FfiModel with ChangeNotifier {
       'text': kMsgboxTextWaitingForImage,
       'link': '',
     }, sessionId, peerId);
-    updatePrivacyMode(data.updatePrivacyMode, sessionId, peerId);
+    await updatePrivacyModeSignal(sessionId, peerId);
     setConnectionType(peerId, data.secure, data.direct, data.streamType);
     await handlePeerInfo(data.peerInfo, peerId, true);
     for (final element in data.cursorDataList) {
@@ -435,7 +435,7 @@ class FfiModel with ChangeNotifier {
     return (evt) async {
       final typedEvent = decodeTypedSessionEvent(evt);
       if (typedEvent != null) {
-        await _routeTypedSessionEvent(typedEvent, peerId);
+        await _routeTypedSessionEvent(typedEvent, sessionId, peerId);
         return;
       }
       var name = evt['name'];
@@ -488,10 +488,6 @@ class FfiModel with ChangeNotifier {
         parent.target?.serverModel.handlePermissionRequest(evt);
       } else if (name == 'update_quality_status') {
         parent.target?.qualityMonitorModel.updateQualityStatus(evt);
-      } else if (name == 'update_block_input_state') {
-        updateBlockInputState(evt, peerId);
-      } else if (name == 'update_privacy_mode') {
-        updatePrivacyMode(evt, sessionId, peerId);
       } else if (name == 'cancel_msgbox') {
         cancelMsgBox(evt, sessionId);
       } else if (name == 'switch_back') {
@@ -529,10 +525,6 @@ class FfiModel with ChangeNotifier {
         }
       } else if (name == 'sync_peer_option') {
         _handleSyncPeerOption(evt, peerId);
-      } else if (name == 'follow_current_display') {
-        handleFollowCurrentDisplay(evt, sessionId, peerId);
-      } else if (name == 'use_texture_render') {
-        _handleUseTextureRender(evt, sessionId, peerId);
       } else if (name == "selected_files") {
         if (isWeb) {
           parent.target?.fileModel.onSelectedFiles(evt);
@@ -553,6 +545,7 @@ class FfiModel with ChangeNotifier {
 
   Future<void> _routeTypedSessionEvent(
     SessionEvent event,
+    SessionID sessionId,
     String peerId,
   ) async {
     if (event is ConnectionReadySessionEvent) {
@@ -601,6 +594,18 @@ class FfiModel with ChangeNotifier {
       await parent.target?.cursorModel.updateCursorPositionValue(
         event.x,
         event.y,
+        peerId,
+      );
+    } else if (event is BlockInputSessionEvent) {
+      updateBlockInputStateValue(event.enabled, peerId);
+    } else if (event is PrivacyModeChangedSessionEvent) {
+      await updatePrivacyModeSignal(sessionId, peerId);
+    } else if (event is TextureRenderSessionEvent) {
+      handleUseTextureRenderValue(event.enabled, sessionId);
+    } else if (event is FollowCurrentDisplaySessionEvent) {
+      await handleFollowCurrentDisplayValue(
+        event.displayIndex,
+        sessionId,
         peerId,
       );
     } else if (event is InvalidSessionEvent) {
@@ -850,9 +855,8 @@ class FfiModel with ChangeNotifier {
     });
   }
 
-  _handleUseTextureRender(
-      Map<String, dynamic> evt, SessionID sessionId, String peerId) {
-    parent.target?.imageModel.setUseTextureRender(evt['v'] == 'Y');
+  void handleUseTextureRenderValue(bool enabled, SessionID sessionId) {
+    parent.target?.imageModel.setUseTextureRender(enabled);
     waitForFirstImage.value = true;
     isRefreshing = true;
     showConnectedWaitingForImage(parent.target!.dialogManager, sessionId,
@@ -2202,13 +2206,16 @@ class FfiModel with ChangeNotifier {
         json.encode(_pi.platformAdditions);
   }
 
-  handleFollowCurrentDisplay(
-      Map<String, dynamic> evt, SessionID sessionId, String peerId) async {
-    if (evt['display_idx'] != null) {
+  Future<void> handleFollowCurrentDisplayValue(
+    int? displayIndex,
+    SessionID sessionId,
+    String peerId,
+  ) async {
+    if (displayIndex != null) {
       if (pi.currentDisplay == kAllDisplayValue) {
         return;
       }
-      _pi.currentDisplay = int.parse(evt['display_idx']);
+      _pi.currentDisplay = displayIndex;
       try {
         CurrentDisplayState.find(peerId).value = _pi.currentDisplay;
       } catch (e) {
@@ -2236,18 +2243,20 @@ class FfiModel with ChangeNotifier {
     }
   }
 
-  updateBlockInputState(Map<String, dynamic> evt, String peerId) {
-    _inputBlocked = evt['input_state'] == 'on';
+  void updateBlockInputStateValue(bool enabled, String peerId) {
+    _inputBlocked = enabled;
     notifyListeners();
     try {
-      BlockInputState.find(peerId).value = evt['input_state'] == 'on';
+      BlockInputState.find(peerId).value = enabled;
     } catch (e) {
       //
     }
   }
 
-  updatePrivacyMode(
-      Map<String, dynamic> evt, SessionID sessionId, String peerId) async {
+  Future<void> updatePrivacyModeSignal(
+    SessionID sessionId,
+    String peerId,
+  ) async {
     notifyListeners();
     try {
       final isOn = bind.sessionGetToggleOptionSync(

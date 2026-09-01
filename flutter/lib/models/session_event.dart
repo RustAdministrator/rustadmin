@@ -111,6 +111,25 @@ final class CursorPositionSessionEvent extends SessionEvent {
   final double y;
 }
 
+final class BlockInputSessionEvent extends SessionEvent {
+  const BlockInputSessionEvent(this.enabled);
+  final bool enabled;
+}
+
+final class PrivacyModeChangedSessionEvent extends SessionEvent {
+  const PrivacyModeChangedSessionEvent();
+}
+
+final class TextureRenderSessionEvent extends SessionEvent {
+  const TextureRenderSessionEvent(this.enabled);
+  final bool enabled;
+}
+
+final class FollowCurrentDisplaySessionEvent extends SessionEvent {
+  const FollowCurrentDisplaySessionEvent(this.displayIndex);
+  final int? displayIndex;
+}
+
 final class InvalidSessionEvent extends SessionEvent {
   const InvalidSessionEvent(this.name, this.reason);
 
@@ -239,6 +258,32 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
       return x == null || y == null
           ? const InvalidSessionEvent('cursor_position', 'invalid position')
           : CursorPositionSessionEvent(x: x, y: y);
+    case 'update_block_input_state':
+      final state = event['input_state'];
+      return state is! String
+          ? const InvalidSessionEvent(
+              'update_block_input_state',
+              'invalid state',
+            )
+          : BlockInputSessionEvent(state == 'on');
+    case 'update_privacy_mode':
+      return const PrivacyModeChangedSessionEvent();
+    case 'use_texture_render':
+      final value = event['v'];
+      return value is! String
+          ? const InvalidSessionEvent('use_texture_render', 'invalid value')
+          : TextureRenderSessionEvent(value == 'Y');
+    case 'follow_current_display':
+      if (!event.containsKey('display_idx')) {
+        return const FollowCurrentDisplaySessionEvent(null);
+      }
+      final displayIndex = _decodeInt(event['display_idx']);
+      return displayIndex == null
+          ? const InvalidSessionEvent(
+              'follow_current_display',
+              'invalid display index',
+            )
+          : FollowCurrentDisplaySessionEvent(displayIndex);
     default:
       return null;
   }
