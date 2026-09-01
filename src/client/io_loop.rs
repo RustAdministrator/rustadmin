@@ -959,6 +959,9 @@ impl<T: InvokeUiSession> Remote<T> {
             #[cfg(feature = "flutter")]
             {
                 Client::unregister_clipboard_channel(&self.handler.get_id(), self.connection_round);
+                crate::flutter::update_text_clipboard_required();
+                #[cfg(feature = "unix-file-copy-paste")]
+                crate::flutter::update_file_clipboard_required();
                 Client::try_stop_clipboard();
             }
             #[cfg(not(feature = "flutter"))]
@@ -2391,10 +2394,25 @@ impl<T: InvokeUiSession> Remote<T> {
                         if self.handler.is_default() {
                             #[cfg(feature = "flutter")]
                             #[cfg(not(target_os = "ios"))]
-                            Client::register_clipboard_channel(
-                                &self.handler.get_id(),
-                                self.connection_round,
-                            );
+                            {
+                                let text = self.handler.is_text_clipboard_required();
+                                #[cfg(any(
+                                    target_os = "windows",
+                                    feature = "unix-file-copy-paste"
+                                ))]
+                                let file = self.handler.is_file_clipboard_required();
+                                #[cfg(not(any(
+                                    target_os = "windows",
+                                    feature = "unix-file-copy-paste"
+                                )))]
+                                let file = false;
+                                Client::register_clipboard_channel(
+                                    &self.handler.get_id(),
+                                    self.connection_round,
+                                    text,
+                                    file,
+                                );
+                            }
                             #[cfg(feature = "flutter")]
                             #[cfg(not(target_os = "ios"))]
                             let rx = Client::try_start_clipboard(None);

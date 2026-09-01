@@ -1972,6 +1972,10 @@ impl<T: InvokeUiSession> Session<T> {
         )
     }
 
+    pub(crate) fn connection_round(&self) -> u32 {
+        self.connection_round_state.lock().unwrap().round
+    }
+
     pub fn mark_remote_activity(&self) {
         *self.last_remote_activity.lock().unwrap() = Some(Instant::now());
     }

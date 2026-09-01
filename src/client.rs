@@ -14,6 +14,8 @@ use magnum_opus::{Channels::*, Decoder as AudioDecoder};
 #[cfg(not(any(target_os = "linux", target_os = "ios")))]
 use ringbuf::{ring_buffer::RbBase, Rb};
 use serde::{Deserialize, Serialize};
+#[cfg(all(feature = "flutter", not(target_os = "ios")))]
+use std::collections::HashSet;
 use std::{
     collections::HashMap,
     ffi::c_void,
@@ -40,12 +42,14 @@ use crate::{
     wrap_direct_public_key_symmetric_value_with_identity,
 };
 
-#[cfg(all(feature = "flutter", not(target_os = "ios")))]
+#[cfg(not(target_os = "ios"))]
 mod clipboard_lifecycle;
 #[cfg(feature = "unix-file-copy-paste")]
 use crate::{clipboard::check_clipboard_files, clipboard_file::unix_file_clip};
 #[cfg(all(feature = "flutter", not(target_os = "ios")))]
-use clipboard_lifecycle::ClipboardChannelRegistry;
+use clipboard_lifecycle::{ClipboardChannelPolicy, ClipboardSnapshotOrigin};
+#[cfg(not(target_os = "ios"))]
+use clipboard_lifecycle::{ClipboardCoordinator, ClipboardPayloadKind};
 pub use file_trait::FileManager;
 #[cfg(not(feature = "flutter"))]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -253,17 +257,6 @@ fn authenticated_peer_allows_quic_pin(
         || paired_viewer_was_confirmed
 }
 
-#[cfg(not(target_os = "ios"))]
-struct ClipboardState {
-    #[cfg(feature = "flutter")]
-    is_text_required: bool,
-    #[cfg(all(feature = "flutter", feature = "unix-file-copy-paste"))]
-    is_file_required: bool,
-    #[cfg(feature = "flutter")]
-    active_channels: ClipboardChannelRegistry,
-    running: bool,
-}
-
 #[cfg(not(any(target_os = "linux", target_os = "ios")))]
 lazy_static::lazy_static! {
     static ref AUDIO_HOST: Host = cpal::default_host();
@@ -276,7 +269,7 @@ lazy_static::lazy_static! {
 
 #[cfg(not(target_os = "ios"))]
 lazy_static::lazy_static! {
-    static ref CLIPBOARD_STATE: Arc<Mutex<ClipboardState>> = Arc::new(Mutex::new(ClipboardState::new()));
+    static ref CLIPBOARD_STATE: Arc<Mutex<ClipboardCoordinator>> = Arc::new(Mutex::new(ClipboardCoordinator::default()));
 }
 
 const PUBLIC_SERVER: &str = "public";
@@ -1865,26 +1858,22 @@ impl Client {
         Ok(conn)
     }
 
-    #[inline]
-    #[cfg(feature = "flutter")]
-    #[cfg(not(target_os = "ios"))]
-    pub fn set_is_text_clipboard_required(b: bool) {
-        CLIPBOARD_STATE.lock().unwrap().is_text_required = b;
-    }
-
-    #[inline]
-    #[cfg(all(feature = "flutter", feature = "unix-file-copy-paste"))]
-    pub fn set_is_file_clipboard_required(b: bool) {
-        CLIPBOARD_STATE.lock().unwrap().is_file_required = b;
+    #[cfg(all(feature = "flutter", not(target_os = "ios")))]
+    pub fn register_clipboard_channel(peer_id: &str, round: u32, text: bool, file: bool) {
+        CLIPBOARD_STATE.lock().unwrap().channels.register(
+            peer_id,
+            round,
+            ClipboardChannelPolicy { text, file },
+        );
     }
 
     #[cfg(all(feature = "flutter", not(target_os = "ios")))]
-    pub fn register_clipboard_channel(peer_id: &str, round: u32) {
-        CLIPBOARD_STATE
-            .lock()
-            .unwrap()
-            .active_channels
-            .register(peer_id, round);
+    pub fn update_clipboard_channel(peer_id: &str, round: u32, text: bool, file: bool) {
+        CLIPBOARD_STATE.lock().unwrap().channels.update(
+            peer_id,
+            round,
+            ClipboardChannelPolicy { text, file },
+        );
     }
 
     #[cfg(all(feature = "flutter", not(target_os = "ios")))]
@@ -1892,8 +1881,35 @@ impl Client {
         CLIPBOARD_STATE
             .lock()
             .unwrap()
-            .active_channels
+            .channels
             .unregister(peer_id, round);
+    }
+
+    #[cfg(all(feature = "flutter", not(target_os = "ios")))]
+    pub fn clipboard_local_recipients(is_file: bool) -> HashSet<(String, u32)> {
+        let kind = if is_file {
+            ClipboardPayloadKind::File
+        } else {
+            ClipboardPayloadKind::Text
+        };
+        CLIPBOARD_STATE
+            .lock()
+            .unwrap()
+            .channels
+            .recipients(kind, ClipboardSnapshotOrigin::Local)
+            .into_iter()
+            .map(|id| id.into_tuple())
+            .collect()
+    }
+
+    #[cfg(all(feature = "flutter", not(target_os = "ios")))]
+    pub fn clipboard_required(is_file: bool) -> bool {
+        let kind = if is_file {
+            ClipboardPayloadKind::File
+        } else {
+            ClipboardPayloadKind::Text
+        };
+        CLIPBOARD_STATE.lock().unwrap().channels.requires(kind)
     }
 
     #[cfg(not(target_os = "ios"))]
@@ -1901,12 +1917,12 @@ impl Client {
         {
             let mut state = CLIPBOARD_STATE.lock().unwrap();
             #[cfg(feature = "flutter")]
-            if state.active_channels.has_active() {
+            if state.channels.has_active() {
                 return;
             }
+            state.stop_watcher();
             #[cfg(not(target_os = "android"))]
             clipboard_listener::unsubscribe(Self::CLIENT_CLIPBOARD_NAME);
-            state.running = false;
         }
         #[cfg(all(feature = "unix-file-copy-paste", target_os = "linux"))]
         clipboard::platform::unix::fuse::uninit_fuse_context(true);
@@ -1922,7 +1938,7 @@ impl Client {
         _client_clip_ctx: Option<ClientClipboardContext>,
     ) -> Option<UnboundedReceiver<()>> {
         let mut clipboard_lock = CLIPBOARD_STATE.lock().unwrap();
-        if clipboard_lock.running {
+        if clipboard_lock.watcher_running() {
             return None;
         }
 
@@ -1934,7 +1950,7 @@ impl Client {
             return None;
         }
 
-        clipboard_lock.running = true;
+        let generation = clipboard_lock.begin_watcher()?;
         let (tx_started, rx_started) = unbounded_channel();
 
         log::info!("Start client clipboard loop");
@@ -1947,7 +1963,11 @@ impl Client {
 
             tx_started.send(()).ok();
             loop {
-                if !CLIPBOARD_STATE.lock().unwrap().running {
+                if !CLIPBOARD_STATE
+                    .lock()
+                    .unwrap()
+                    .is_current_watcher(generation)
+                {
                     break;
                 }
                 match rx_cb_result.recv_timeout(Duration::from_millis(CLIPBOARD_INTERVAL)) {
@@ -1970,7 +1990,7 @@ impl Client {
                 }
             }
             log::info!("Stop client clipboard loop");
-            CLIPBOARD_STATE.lock().unwrap().running = false;
+            CLIPBOARD_STATE.lock().unwrap().finish_watcher(generation);
         });
 
         Some(rx_started)
@@ -1979,18 +1999,27 @@ impl Client {
     #[cfg(target_os = "android")]
     fn try_start_clipboard(_p: Option<()>) -> Option<UnboundedReceiver<()>> {
         let mut clipboard_lock = CLIPBOARD_STATE.lock().unwrap();
-        if clipboard_lock.running {
+        if clipboard_lock.watcher_running() {
             return None;
         }
-        clipboard_lock.running = true;
+        let generation = clipboard_lock.begin_watcher()?;
 
         log::info!("Start client clipboard loop");
         std::thread::spawn(move || {
             loop {
-                if !CLIPBOARD_STATE.lock().unwrap().running {
+                if !CLIPBOARD_STATE
+                    .lock()
+                    .unwrap()
+                    .is_current_watcher(generation)
+                {
                     break;
                 }
-                if !CLIPBOARD_STATE.lock().unwrap().is_text_required {
+                if !CLIPBOARD_STATE
+                    .lock()
+                    .unwrap()
+                    .channels
+                    .requires(ClipboardPayloadKind::Text)
+                {
                     std::thread::sleep(Duration::from_millis(CLIPBOARD_INTERVAL));
                     continue;
                 }
@@ -2002,25 +2031,10 @@ impl Client {
                 std::thread::sleep(Duration::from_millis(CLIPBOARD_INTERVAL));
             }
             log::info!("Stop client clipboard loop");
-            CLIPBOARD_STATE.lock().unwrap().running = false;
+            CLIPBOARD_STATE.lock().unwrap().finish_watcher(generation);
         });
 
         None
-    }
-}
-
-#[cfg(not(target_os = "ios"))]
-impl ClipboardState {
-    fn new() -> Self {
-        Self {
-            #[cfg(feature = "flutter")]
-            is_text_required: true,
-            #[cfg(all(feature = "flutter", feature = "unix-file-copy-paste"))]
-            is_file_required: true,
-            #[cfg(feature = "flutter")]
-            active_channels: ClipboardChannelRegistry::default(),
-            running: false,
-        }
     }
 }
 
@@ -2036,7 +2050,11 @@ impl ClientClipboardHandler {
     fn is_text_required(&self) -> bool {
         #[cfg(feature = "flutter")]
         {
-            CLIPBOARD_STATE.lock().unwrap().is_text_required
+            CLIPBOARD_STATE
+                .lock()
+                .unwrap()
+                .channels
+                .requires(ClipboardPayloadKind::Text)
         }
         #[cfg(not(feature = "flutter"))]
         {
@@ -2051,7 +2069,11 @@ impl ClientClipboardHandler {
     fn is_file_required(&self) -> bool {
         #[cfg(feature = "flutter")]
         {
-            CLIPBOARD_STATE.lock().unwrap().is_file_required
+            CLIPBOARD_STATE
+                .lock()
+                .unwrap()
+                .channels
+                .requires(ClipboardPayloadKind::File)
         }
         #[cfg(not(feature = "flutter"))]
         {
@@ -2063,7 +2085,7 @@ impl ClientClipboardHandler {
     }
 
     fn check_clipboard(&mut self) {
-        if CLIPBOARD_STATE.lock().unwrap().running {
+        if CLIPBOARD_STATE.lock().unwrap().watcher_running() {
             #[cfg(feature = "unix-file-copy-paste")]
             if self.is_file_required() {
                 if let Some(urls) =
