@@ -288,6 +288,30 @@ void main() {
     expect(calls, ['down', 'up']);
   });
 
+  test('interaction coordinator balances every remote button intent', () async {
+    final calls = <String>[];
+    final coordinator = MobileInteractionCoordinator(
+      sendDown: (intent) async => calls.add('down:${intent.name}'),
+      sendUp: (intent) async => calls.add('up:${intent.name}'),
+    );
+
+    for (final intent in MobileButtonIntent.values) {
+      final token = coordinator.begin(intent);
+      await coordinator.activate(intent, token);
+    }
+    await coordinator.releaseAll();
+    await coordinator.releaseAll();
+
+    for (final intent in MobileButtonIntent.values) {
+      expect(
+        calls.where((call) => call == 'down:${intent.name}'),
+        hasLength(1),
+      );
+      expect(calls.where((call) => call == 'up:${intent.name}'), hasLength(1));
+      expect(coordinator.hasIntent(intent), isFalse);
+    }
+  });
+
   Future<void> pumpTarget(
     WidgetTester tester, {
     required GestureTapDownCallback onTwoFingerTap,

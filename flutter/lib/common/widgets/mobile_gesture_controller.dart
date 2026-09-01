@@ -341,3 +341,44 @@ class MobileButtonSequenceController {
     return result;
   }
 }
+
+enum MobileButtonIntent { leftLongPress, legacyHoldDrag, rightTwoFinger }
+
+typedef MobileButtonEffect = Future<void> Function(MobileButtonIntent intent);
+
+class MobileInteractionCoordinator {
+  MobileInteractionCoordinator({required this.sendDown, required this.sendUp});
+
+  final MobileButtonEffect sendDown;
+  final MobileButtonEffect sendUp;
+  final _buttons = <MobileButtonIntent, MobileButtonSequenceController>{
+    for (final intent in MobileButtonIntent.values)
+      intent: MobileButtonSequenceController(),
+  };
+
+  MobileButtonSequenceController _button(MobileButtonIntent intent) =>
+      _buttons[intent]!;
+
+  int begin(MobileButtonIntent intent) => _button(intent).beginRequest();
+
+  bool isRequested(MobileButtonIntent intent, int token) =>
+      _button(intent).isRequested(token);
+
+  void cancel(MobileButtonIntent intent, int token) =>
+      _button(intent).cancelRequest(token);
+
+  Future<void> activate(MobileButtonIntent intent, int token) =>
+      _button(intent).activate(token, () => sendDown(intent));
+
+  Future<void> release(MobileButtonIntent intent) =>
+      _button(intent).release(() => sendUp(intent));
+
+  bool hasIntent(MobileButtonIntent intent) => _button(intent).hasIntent;
+
+  bool isPressed(MobileButtonIntent intent) => _button(intent).isPressed;
+
+  Future<void> settled(MobileButtonIntent intent) => _button(intent).settled;
+
+  Future<void> releaseAll() =>
+      Future.wait(MobileButtonIntent.values.map(release));
+}
