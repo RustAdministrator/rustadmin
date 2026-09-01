@@ -5744,8 +5744,20 @@ class FFI {
 
     if (isWeb) {
       platformFFI.setRgbaCallback((int display, Uint8List data) {
-        onEvent2UIRgba();
-        imageModel.onRgba(display, data);
+        final frame = Uint8List.fromList(data);
+        unawaited(
+          _sessionHandle.dispatchEvent(
+            sessionGeneration,
+            () async {
+              await onEvent2UIRgba();
+              await imageModel.onRgba(display, frame);
+            },
+            onError: (error, stackTrace) {
+              debugPrint('Web RGBA dispatch failed: $error');
+              debugPrintStack(stackTrace: stackTrace);
+            },
+          ),
+        );
       });
       this.id = id;
       _sessionHandle.connected(sessionGeneration);
@@ -5768,94 +5780,104 @@ class FFI {
       await bind.sessionRequestNewDisplayInitMsgs(
           sessionId: sessionId, display: ffiModel.pi.currentDisplay);
       if (runAuthenticatedSetup && connType == ConnType.defaultConn) {
-        unawaited(ffiModel.tryUseAllMyDisplaysForTheRemoteSession(id));
+        await ffiModel.tryUseAllMyDisplaysForTheRemoteSession(id);
       }
     }
 
     imageModel.updateUserTextureRender();
     final hasGpuTextureRender = bind.mainHasGpuTextureRender();
     final SimpleWrapper<bool> isToNewWindowNotified = SimpleWrapper(false);
-    // Preserved for the rgba data.
-    final subscription = stream.listen((message) {
-      if (!_sessionHandle.accepts(sessionGeneration)) return;
-      if (tabWindowId != null && !isToNewWindowNotified.value) {
-        // Session is read to be moved to a new window.
-        // Get the cached data and handle the cached data.
-        Future.delayed(Duration.zero, () async {
-          if (!_sessionHandle.accepts(sessionGeneration)) return;
-          final args = jsonEncode({
-            'id': id,
-            if (transferSourceSessionId != null)
-              'session_id': transferSourceSessionId
-            else if (display == null)
-              'session_id': sessionId.toString(),
-            'close': display == null,
-          });
-          final cachedData = await DesktopMultiWindow.invokeMethod(
-              tabWindowId, kWindowEventGetCachedSessionData, args);
-          if (cachedData == null) {
-            // unreachable
-            debugPrint('Unreachable, the cached data is empty.');
-            return;
-          }
-          await handleCachedSessionData(cachedData);
-        });
-        isToNewWindowNotified.value = true;
-      }
-      () async {
-        if (message is EventToUI_Event) {
-          if (message.field0 == "close") {
-            await _sessionHandle.remoteClosed(sessionGeneration);
-            debugPrint('Exit session event loop');
-            return;
-          }
+    var streamCloseQueued = false;
+    void reportEventError(Object error, StackTrace stackTrace) {
+      debugPrint('Session event dispatch failed: $error');
+      debugPrintStack(stackTrace: stackTrace);
+    }
 
-          Map<String, dynamic>? event;
-          try {
-            event = json.decode(message.field0);
-          } catch (e) {
-            debugPrint('json.decode fail1(): $e, ${message.field0}');
-          }
-          if (event != null) {
-            await cb(event);
-          }
-        } else if (message is EventToUI_Rgba) {
-          final display = message.field0;
-          if (isAndroid) {
-            imageModel.setAndroidSurfaceTextureActive(false);
-          }
-          // Fetch the image buffer from rust codes.
-          final sz = platformFFI.getRgbaSize(sessionId, display);
-          if (sz == 0) {
-            platformFFI.nextRgba(sessionId, display);
-            return;
-          }
-          final rgba = platformFFI.getRgba(sessionId, display, sz);
-          if (rgba != null) {
-            onEvent2UIRgba();
-            await imageModel.onRgba(display, rgba);
-          } else {
-            platformFFI.nextRgba(sessionId, display);
-          }
-        } else if (message is EventToUI_Texture) {
-          final display = message.field0;
-          final gpuTexture = message.field1;
-          debugPrint(
-              "EventToUI_Texture display:$display, gpuTexture:$gpuTexture");
-          if (gpuTexture && !hasGpuTextureRender) {
-            debugPrint('the gpuTexture is not supported.');
-            return;
-          }
-          if (isAndroid) {
-            await imageModel.onAndroidSurfaceTextureFrame(
-              display,
-              gpuTexture,
-            );
-          }
-          textureModel.setTextureType(display: display, gpuTexture: gpuTexture);
-          onEvent2UIRgba();
+    Future<void> dispatchSessionEvent(Future<void> Function() dispatch) =>
+        _sessionHandle.dispatchEvent(
+          sessionGeneration,
+          dispatch,
+          onError: reportEventError,
+        );
+
+    Future<void> transferSessionToTab() async {
+      final args = jsonEncode({
+        'id': id,
+        if (transferSourceSessionId != null)
+          'session_id': transferSourceSessionId
+        else if (display == null)
+          'session_id': sessionId.toString(),
+        'close': display == null,
+      });
+      final cachedData = await DesktopMultiWindow.invokeMethod(
+        tabWindowId!,
+        kWindowEventGetCachedSessionData,
+        args,
+      );
+      if (cachedData == null) {
+        debugPrint('Unreachable, the cached data is empty.');
+        return;
+      }
+      await handleCachedSessionData(cachedData);
+    }
+
+    Future<void> handleSessionMessage(EventToUI message) async {
+      if (message is EventToUI_Event) {
+        Map<String, dynamic>? event;
+        try {
+          event = json.decode(message.field0);
+        } catch (e) {
+          debugPrint('json.decode fail1(): $e, ${message.field0}');
         }
-      }();
+        if (event != null) await cb(event);
+      } else if (message is EventToUI_Rgba) {
+        final display = message.field0;
+        if (isAndroid) imageModel.setAndroidSurfaceTextureActive(false);
+        final sz = platformFFI.getRgbaSize(sessionId, display);
+        if (sz == 0) {
+          platformFFI.nextRgba(sessionId, display);
+          return;
+        }
+        final rgba = platformFFI.getRgba(sessionId, display, sz);
+        if (rgba != null) {
+          await onEvent2UIRgba();
+          await imageModel.onRgba(display, rgba);
+        } else {
+          platformFFI.nextRgba(sessionId, display);
+        }
+      } else if (message is EventToUI_Texture) {
+        final display = message.field0;
+        final gpuTexture = message.field1;
+        debugPrint(
+          'EventToUI_Texture display:$display, gpuTexture:$gpuTexture',
+        );
+        if (gpuTexture && !hasGpuTextureRender) {
+          debugPrint('the gpuTexture is not supported.');
+          return;
+        }
+        if (isAndroid) {
+          await imageModel.onAndroidSurfaceTextureFrame(display, gpuTexture);
+        }
+        textureModel.setTextureType(display: display, gpuTexture: gpuTexture);
+        await onEvent2UIRgba();
+      }
+    }
+
+    final subscription = stream.listen((message) {
+      if (streamCloseQueued || !_sessionHandle.accepts(sessionGeneration)) {
+        return;
+      }
+      if (message is EventToUI_Event && message.field0 == 'close') {
+        streamCloseQueued = true;
+        unawaited(_sessionHandle.remoteClosedAfterEvents(sessionGeneration));
+        debugPrint('Exit session event loop');
+        return;
+      }
+      if (tabWindowId != null && !isToNewWindowNotified.value) {
+        isToNewWindowNotified.value = true;
+        unawaited(dispatchSessionEvent(transferSessionToTab));
+      }
+      unawaited(dispatchSessionEvent(() => handleSessionMessage(message)));
     });
     await _sessionHandle.bindSubscription(sessionGeneration, subscription);
     if (!_sessionHandle.accepts(sessionGeneration)) return;
@@ -5863,17 +5885,21 @@ class FFI {
     this.id = id;
     _sessionHandle.connected(sessionGeneration);
     if (cachedPeerData != null) {
-      Future.delayed(Duration.zero, () async {
+      Future.delayed(Duration.zero, () {
         if (!_sessionHandle.accepts(sessionGeneration)) return;
-        await handleCachedSessionData(
-          cachedPeerData,
-          runAuthenticatedSetup: attachExisting && tabWindowId == null,
+        unawaited(
+          dispatchSessionEvent(
+            () => handleCachedSessionData(
+              cachedPeerData,
+              runAuthenticatedSetup: attachExisting && tabWindowId == null,
+            ),
+          ),
         );
       });
     }
   }
 
-  void onEvent2UIRgba() async {
+  Future<void> onEvent2UIRgba() async {
     if (ffiModel.waitForImageDialogShow.isTrue) {
       ffiModel.waitForImageDialogShow.value = false;
       ffiModel.waitForImageTimer?.cancel();

@@ -320,4 +320,108 @@ void main() {
     expect(session.phase, SessionPhase.closed);
     expect(session.canBeReplaced, isTrue);
   });
+
+  test(
+    'close waits for the active event and skips queued stale events',
+    () async {
+      final gate = Completer<void>();
+      final trace = <String>[];
+      final session = handle(closeNative: () async {});
+      final lease = await session.start(
+        addNative: () async {},
+        startEvents: () => const Stream<int>.empty(),
+      );
+      final generation = lease!.generation;
+
+      final first = session.dispatchEvent(generation, () async {
+        trace.add('first-start');
+        await gate.future;
+        trace.add('first-end');
+      });
+      await Future<void>.delayed(Duration.zero);
+      final stale = session.dispatchEvent(
+        generation,
+        () async => trace.add('stale'),
+      );
+      final close = session.close(
+        nativeClosePolicy: NativeSessionClosePolicy.requestClose,
+        cleanup: () async => trace.add('cleanup'),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(trace, ['first-start']);
+      gate.complete();
+      await Future.wait([first, stale, close]);
+      expect(trace, ['first-start', 'first-end', 'cleanup']);
+    },
+  );
+
+  test('remote close preserves events queued before its barrier', () async {
+    final trace = <String>[];
+    final session = handle(closeNative: () async {});
+    final lease = await session.start(
+      addNative: () async {},
+      startEvents: () => const Stream<int>.empty(),
+    );
+    final generation = lease!.generation;
+
+    final event = session.dispatchEvent(
+      generation,
+      () async => trace.add('event'),
+    );
+    final close = session.remoteClosedAfterEvents(generation);
+    await Future.wait([event, close]);
+
+    expect(trace, ['event']);
+    expect(session.phase, SessionPhase.closed);
+  });
+
+  test('close awaited inside an event does not self-deadlock', () async {
+    final trace = <String>[];
+    final session = handle(closeNative: () async {});
+    final lease = await session.start(
+      addNative: () async {},
+      startEvents: () => const Stream<int>.empty(),
+    );
+
+    await session
+        .dispatchEvent(lease!.generation, () async {
+          trace.add('event-start');
+          await session.close(
+            nativeClosePolicy: NativeSessionClosePolicy.requestClose,
+            cleanup: () async => trace.add('cleanup'),
+          );
+          trace.add('event-end');
+        })
+        .timeout(const Duration(seconds: 1));
+    await session.waitForClose().timeout(const Duration(seconds: 1));
+
+    expect(trace, ['event-start', 'event-end', 'cleanup']);
+    expect(session.phase, SessionPhase.closed);
+  });
+
+  test('event failure is reported and does not poison later events', () async {
+    final errors = <Object>[];
+    final trace = <String>[];
+    final session = handle(closeNative: () async {});
+    final lease = await session.start(
+      addNative: () async {},
+      startEvents: () => const Stream<int>.empty(),
+    );
+    final generation = lease!.generation;
+
+    await session.dispatchEvent(
+      generation,
+      () async => throw StateError('event failed'),
+      onError: (error, _) => errors.add(error),
+    );
+    await session.dispatchEvent(generation, () async => trace.add('next'));
+
+    expect(errors, hasLength(1));
+    expect(trace, ['next']);
+    await session.close(
+      nativeClosePolicy: NativeSessionClosePolicy.requestClose,
+      cleanup: () async {},
+    );
+  });
 }

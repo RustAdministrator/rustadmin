@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter_hbb/models/session_lifecycle.dart';
 import 'package:uuid/uuid.dart';
 
+final _sessionEventZoneKey = Object();
+
 enum SessionKind {
   remoteDesktop,
   fileTransfer,
@@ -53,6 +55,7 @@ class SessionHandle<T> {
 
   Future<SessionStartLease<T>?>? _startFuture;
   Future<void>? _closeFuture;
+  Future<void> _eventTail = Future<void>.value();
   StreamSubscription<T>? _subscription;
   int? _platformLeaseGeneration;
   bool _startRequested = false;
@@ -155,6 +158,28 @@ class SessionHandle<T> {
 
   void connected(int generation) => _lifecycle.connected(generation);
 
+  Future<void> dispatchEvent(
+    int generation,
+    Future<void> Function() dispatch, {
+    void Function(Object error, StackTrace stackTrace)? onError,
+  }) {
+    _eventTail = _eventTail.then((_) async {
+      if (!accepts(generation)) return;
+      try {
+        await runZoned(dispatch, zoneValues: {_sessionEventZoneKey: this});
+      } catch (error, stackTrace) {
+        onError?.call(error, stackTrace);
+      }
+    });
+    return _eventTail;
+  }
+
+  Future<void> remoteClosedAfterEvents(int generation) async {
+    if (!accepts(generation)) return;
+    await dispatchEvent(generation, () async {});
+    await remoteClosed(generation);
+  }
+
   Future<void> remoteClosed(int generation) async {
     if (!accepts(generation)) return;
     _nativeSessionActive = false;
@@ -162,7 +187,11 @@ class SessionHandle<T> {
     try {
       await _cancelSubscription();
     } finally {
-      await _releasePlatformLeaseOnce();
+      try {
+        await _eventTail;
+      } finally {
+        await _releasePlatformLeaseOnce();
+      }
     }
   }
 
@@ -170,8 +199,14 @@ class SessionHandle<T> {
     required NativeSessionClosePolicy nativeClosePolicy,
     required Future<void> Function() cleanup,
   }) {
+    final insideEventDispatch = identical(
+      Zone.current[_sessionEventZoneKey],
+      this,
+    );
     final active = _closeFuture;
-    if (active != null) return active;
+    if (active != null) {
+      return insideEventDispatch ? Future<void>.value() : active;
+    }
     if (isClosed &&
         !_nativeSessionActive &&
         _subscription == null &&
@@ -180,6 +215,27 @@ class SessionHandle<T> {
       return Future<void>.value();
     }
     final closeGeneration = _lifecycle.beginClose();
+    if (insideEventDispatch) {
+      final completion = Completer<void>();
+      final future = completion.future;
+      _closeFuture = future;
+      unawaited(future.catchError((_) {}));
+      scheduleMicrotask(() async {
+        try {
+          await _close(
+            closeGeneration: closeGeneration,
+            nativeClosePolicy: nativeClosePolicy,
+            cleanup: cleanup,
+          );
+          completion.complete();
+        } catch (error, stackTrace) {
+          completion.completeError(error, stackTrace);
+        } finally {
+          if (identical(_closeFuture, future)) _closeFuture = null;
+        }
+      });
+      return Future<void>.value();
+    }
     late final Future<void> future;
     future =
         _close(
@@ -213,9 +269,13 @@ class SessionHandle<T> {
         await _cancelSubscription();
       } finally {
         try {
-          await cleanup();
+          await _eventTail;
         } finally {
-          _cleanupFinished = true;
+          try {
+            await cleanup();
+          } finally {
+            _cleanupFinished = true;
+          }
         }
       }
     } finally {
