@@ -28,6 +28,7 @@ import '../../models/platform_model.dart';
 import '../../utils/image.dart';
 import '../android_vpn_controller.dart';
 import '../mobile_remote_settings_repository.dart';
+import '../mobile_session_reconnect_controller.dart';
 import '../mobile_modifier_state.dart';
 import '../mobile_viewport.dart';
 import '../android_remote_keyboard.dart';
@@ -80,10 +81,7 @@ class _RemotePageState extends State<RemotePage>
   Timer? _iosKeyboardWorkaroundTimer;
   StreamSubscription<AndroidOutgoingSessionClosedEvent>?
   _outgoingSessionClosedSubscription;
-  bool _backgroundReconnectPending = false;
-  bool _backgroundReconnectInProgress = false;
-  bool _manualDisconnect = false;
-  Future<void>? _backgroundCloseFuture;
+  late final MobileSessionReconnectController _reconnectController;
   bool _updatingSoftKeyboardText = false;
 
   final _blockableOverlayState = BlockableOverlayState();
@@ -144,6 +142,31 @@ class _RemotePageState extends State<RemotePage>
   @override
   void initState() {
     super.initState();
+    _reconnectController = MobileSessionReconnectController(
+      resetSession: ({required closeSession}) =>
+          gFFI.resetMobileSessionForReconnect(closeSession: closeSession),
+      prepareReconnect: _prepareBackgroundReconnect,
+      connect: _connectCurrentSession,
+      onReconnectStarted: () {
+        if (!mounted) return;
+        gFFI.dialogManager.dismissAll();
+        gFFI.dialogManager.showLoading(
+          translate('Reconnecting...'),
+          onCancel: _requestDisconnect,
+        );
+      },
+      onReconnectFailed: (error, stackTrace) {
+        debugPrint(
+          'Failed to reconnect mobile background session: '
+          '$error\n$stackTrace',
+        );
+        if (!mounted) return;
+        gFFI.dialogManager.dismissAll();
+        showToast(translate('Failed to reconnect'));
+        closeConnection();
+      },
+      onNotificationDisconnect: closeConnection,
+    );
     _textController.addListener(_handleSoftKeyboardEditingValue);
     final defaults = _settingsRepository.readDefaults();
     _toolbarTransparencySettings = defaults.toolbarTransparency;
@@ -216,82 +239,22 @@ class _RemotePageState extends State<RemotePage>
   }
 
   void _handleOutgoingSessionClosed(AndroidOutgoingSessionClosedEvent event) {
-    if (_manualDisconnect || !mounted) return;
-    if (event.reason == 'notification-disconnect') {
-      _manualDisconnect = true;
-      closeConnection();
-      return;
-    }
-    if (event.reason != 'background-timeout' &&
-        event.reason != 'background-native-disconnect' &&
-        event.reason != 'foreground-unhealthy' &&
-        event.reason != 'foreground-service-timeout') {
-      return;
-    }
-    _backgroundReconnectPending = true;
-    if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
-      unawaited(_restartAfterBackground());
-    }
-  }
-
-  Future<void> _restartAfterBackground() async {
-    if (!mounted ||
-        _manualDisconnect ||
-        !_backgroundReconnectPending ||
-        _backgroundReconnectInProgress) {
-      return;
-    }
-    _backgroundReconnectInProgress = true;
-    _backgroundReconnectPending = false;
-    gFFI.dialogManager.dismissAll();
-    gFFI.dialogManager.showLoading(
-      translate('Reconnecting...'),
-      onCancel: _requestDisconnect,
+    if (!mounted) return;
+    _reconnectController.handleSessionClosed(
+      event.reason,
+      isForeground:
+          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed,
     );
-    try {
-      final backgroundClose = _backgroundCloseFuture;
-      if (backgroundClose != null) await backgroundClose;
-      await gFFI.resetMobileSessionForReconnect(closeSession: false);
-      if (isAndroid && widget.forceRelay != true) {
-        final coordinator = AndroidVpnSessionCoordinator.instance;
-        if (await coordinator.isEnabled(widget.id)) {
-          final prepared = await coordinator.prepare(widget.id);
-          if (!prepared.proceed) {
-            throw StateError(prepared.message);
-          }
-        }
-      }
-      await _connectCurrentSession();
-    } catch (error, stackTrace) {
-      debugPrint(
-        'Failed to reconnect mobile background session: '
-        '$error\n$stackTrace',
-      );
-      if (mounted) {
-        gFFI.dialogManager.dismissAll();
-        showToast(translate('Failed to reconnect'));
-        closeConnection();
-      }
-    } finally {
-      _backgroundReconnectInProgress = false;
-    }
   }
 
-  Future<void> _closeIosSessionForBackground() async {
-    if (!isIOS ||
-        _manualDisconnect ||
-        _backgroundReconnectPending ||
-        gFFI.closed) {
-      return;
-    }
-    _backgroundReconnectPending = true;
-    final closeFuture = gFFI.resetMobileSessionForReconnect(closeSession: true);
-    _backgroundCloseFuture = closeFuture;
-    try {
-      await closeFuture;
-    } finally {
-      if (identical(_backgroundCloseFuture, closeFuture)) {
-        _backgroundCloseFuture = null;
+  Future<void> _prepareBackgroundReconnect() async {
+    if (isAndroid && widget.forceRelay != true) {
+      final coordinator = AndroidVpnSessionCoordinator.instance;
+      if (await coordinator.isEnabled(widget.id)) {
+        final prepared = await coordinator.prepare(widget.id);
+        if (!prepared.proceed) {
+          throw StateError(prepared.message);
+        }
       }
     }
   }
@@ -322,7 +285,7 @@ class _RemotePageState extends State<RemotePage>
 
   @override
   void dispose() {
-    _manualDisconnect = true;
+    _reconnectController.dispose();
     _textController.removeListener(_handleSoftKeyboardEditingValue);
     WidgetsBinding.instance.removeObserver(this);
     final outgoingSubscriptionCancel =
@@ -394,11 +357,14 @@ class _RemotePageState extends State<RemotePage>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       trySyncClipboard();
-      if (_backgroundReconnectPending) {
-        unawaited(_restartAfterBackground());
-      }
-    } else if (state == AppLifecycleState.paused && isIOS) {
-      unawaited(_closeIosSessionForBackground());
+      unawaited(_reconnectController.enterForeground());
+    } else if (state == AppLifecycleState.paused) {
+      unawaited(
+        _reconnectController.enterBackground(
+          closeSession: isIOS,
+          sessionClosed: gFFI.closed,
+        ),
+      );
     }
   }
 
