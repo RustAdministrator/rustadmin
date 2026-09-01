@@ -122,6 +122,66 @@ void main() {
     expect(voice.reason, 'null');
   });
 
+  test('decodes display and platform synchronization payloads', () {
+    final sync =
+        decodeTypedSessionEvent({
+              'name': 'sync_peer_info',
+              'displays':
+                  '[{"x":0,"y":0,"width":1920,"height":1080,"cursor_embedded":1,"scaled_width":1280}]',
+            })!
+            as SyncPeerInfoSessionEvent;
+    final display = sync.displays!.single;
+    expect(display.width, 1920);
+    expect(display.cursorEmbedded, isTrue);
+    expect(display.scaledWidth, 1280);
+
+    final switched =
+        decodeTypedSessionEvent({
+              'name': 'switch_display',
+              'display': '1',
+              'x': '1920',
+              'y': 0,
+              'width': '2560',
+              'height': 1440,
+              'cursor_embedded': '1',
+              'original_width': '2560',
+              'original_height': 1440,
+              'resolutions': '{"resolutions":[{"width":2560,"height":1440}]}',
+            })!
+            as SwitchDisplaySessionEvent;
+    expect(switched.displayIndex, 1);
+    expect(switched.display.x, 1920);
+    expect(switched.display.cursorEmbedded, isTrue);
+    expect(switched.resolutions.single.width, 2560);
+
+    final additions =
+        decodeTypedSessionEvent({
+              'name': 'sync_platform_additions',
+              'platform_additions': '{"is_wayland":true,"virtual":[1,2]}',
+            })!
+            as SyncPlatformAdditionsSessionEvent;
+    expect(additions.updates['is_wayland'], isTrue);
+    expect(additions.updates['virtual'], [1, 2]);
+    expect(() => additions.updates['later'] = true, throwsUnsupportedError);
+  });
+
+  test('rejects malformed display and platform synchronization payloads', () {
+    for (final event in [
+      {'name': 'sync_peer_info', 'displays': '[{"width":"bad"}]'},
+      {'name': 'switch_display', 'display': 'bad', 'resolutions': '[]'},
+      {
+        'name': 'switch_display',
+        'display': '64',
+        'width': '999999999',
+        'resolutions': '[]',
+      },
+      {'name': 'sync_platform_additions', 'platform_additions': '[1,2]'},
+      {'name': 'sync_platform_additions', 'platform_additions': '{"bad":null'},
+    ]) {
+      expect(decodeTypedSessionEvent(event), isA<InvalidSessionEvent>());
+    }
+  });
+
   test(
     'rejects malformed known events but leaves unknown events to legacy',
     () {

@@ -194,4 +194,20 @@ void main() {
       isA<InvalidSessionEvent>(),
     );
   });
+
+  test('platform additions are validated before merging', () async {
+    final listener = ffi.ffiModel.startEventListener(ffi.sessionId, peerId);
+
+    await listener({
+      'name': 'sync_platform_additions',
+      'platform_additions': '{"typed_test":true}',
+    });
+    expect(ffi.ffiModel.pi.platformAdditions['typed_test'], isTrue);
+
+    await listener({
+      'name': 'sync_platform_additions',
+      'platform_additions': '["not-an-object"]',
+    });
+    expect(ffi.ffiModel.pi.platformAdditions['typed_test'], isTrue);
+  });
 }

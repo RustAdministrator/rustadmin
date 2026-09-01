@@ -130,6 +130,77 @@ final class FollowCurrentDisplaySessionEvent extends SessionEvent {
   final int? displayIndex;
 }
 
+final class SessionDisplayValue {
+  const SessionDisplayValue({
+    this.x,
+    this.y,
+    this.width,
+    this.height,
+    required this.cursorEmbedded,
+    this.originalWidth,
+    this.originalHeight,
+    this.scaledWidth,
+  });
+
+  final double? x;
+  final double? y;
+  final int? width;
+  final int? height;
+  final bool cursorEmbedded;
+  final int? originalWidth;
+  final int? originalHeight;
+  final int? scaledWidth;
+
+  Map<String, Object> toLegacyMap() => {
+    if (x != null) 'x': x!,
+    if (y != null) 'y': y!,
+    if (width != null) 'width': width!,
+    if (height != null) 'height': height!,
+    'cursor_embedded': cursorEmbedded ? 1 : 0,
+    if (originalWidth != null) 'original_width': originalWidth!,
+    if (originalHeight != null) 'original_height': originalHeight!,
+    if (scaledWidth != null) 'scaled_width': scaledWidth!,
+  };
+}
+
+final class SessionResolutionValue {
+  const SessionResolutionValue(this.width, this.height);
+
+  final int width;
+  final int height;
+}
+
+final class SyncPeerInfoSessionEvent extends SessionEvent {
+  SyncPeerInfoSessionEvent(List<SessionDisplayValue>? displays)
+    : displays = displays == null
+          ? null
+          : List<SessionDisplayValue>.unmodifiable(displays);
+
+  final List<SessionDisplayValue>? displays;
+}
+
+final class SwitchDisplaySessionEvent extends SessionEvent {
+  SwitchDisplaySessionEvent({
+    required this.displayIndex,
+    required this.display,
+    required List<SessionResolutionValue> resolutions,
+  }) : resolutions = List<SessionResolutionValue>.unmodifiable(resolutions);
+
+  final int displayIndex;
+  final SessionDisplayValue display;
+  final List<SessionResolutionValue> resolutions;
+}
+
+final class SyncPlatformAdditionsSessionEvent extends SessionEvent {
+  SyncPlatformAdditionsSessionEvent({
+    required this.clearVirtualDisplays,
+    required Map<String, Object?> updates,
+  }) : updates = Map<String, Object?>.unmodifiable(updates);
+
+  final bool clearVirtualDisplays;
+  final Map<String, Object?> updates;
+}
+
 const _qualityDisplayMapKeys = <String>{
   'fps',
   'decode_fps',
@@ -367,6 +438,51 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
               'invalid display index',
             )
           : FollowCurrentDisplaySessionEvent(displayIndex);
+    case 'sync_peer_info':
+      if (!event.containsKey('displays')) {
+        return SyncPeerInfoSessionEvent(null);
+      }
+      final displays = _decodeDisplays(event['displays']);
+      return displays == null
+          ? const InvalidSessionEvent('sync_peer_info', 'invalid displays')
+          : SyncPeerInfoSessionEvent(displays);
+    case 'switch_display':
+      final displayIndex = _decodeInt(event['display']);
+      final display = _decodeDisplay(event);
+      final resolutions = _decodeResolutions(event['resolutions']);
+      if (displayIndex == null ||
+          displayIndex < 0 ||
+          displayIndex >= 64 ||
+          display == null ||
+          resolutions == null) {
+        return const InvalidSessionEvent(
+          'switch_display',
+          'invalid display payload',
+        );
+      }
+      return SwitchDisplaySessionEvent(
+        displayIndex: displayIndex,
+        display: display,
+        resolutions: resolutions,
+      );
+    case 'sync_platform_additions':
+      final raw = event['platform_additions'];
+      if (raw == '') {
+        return SyncPlatformAdditionsSessionEvent(
+          clearVirtualDisplays: true,
+          updates: const {},
+        );
+      }
+      final additions = _decodeJsonObject(raw);
+      return additions == null
+          ? const InvalidSessionEvent(
+              'sync_platform_additions',
+              'invalid platform additions',
+            )
+          : SyncPlatformAdditionsSessionEvent(
+              clearVirtualDisplays: false,
+              updates: additions,
+            );
     case 'update_quality_status':
       final values = <String, String>{};
       final displayMaps = <String, Map<String, String>>{};
@@ -404,6 +520,9 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
 
 int? _decodeInt(Object? value) {
   if (value is int) return value;
+  if (value is num && value.isFinite && value == value.truncateToDouble()) {
+    return value.toInt();
+  }
   if (value is String) return int.tryParse(value);
   return null;
 }
@@ -430,6 +549,147 @@ String? _decodeNonEmptyString(Object? value) {
   if (value == null) return null;
   final decoded = value.toString();
   return decoded.isEmpty ? null : decoded;
+}
+
+List<SessionDisplayValue>? _decodeDisplays(Object? raw) {
+  final decoded = _decodeJsonInput(raw);
+  if (decoded is! List || decoded.length > 64) return null;
+  final displays = <SessionDisplayValue>[];
+  for (final item in decoded) {
+    final display = _decodeDisplay(item);
+    if (display == null) return null;
+    displays.add(display);
+  }
+  return displays;
+}
+
+SessionDisplayValue? _decodeDisplay(Object? raw) {
+  if (raw is! Map) return null;
+  final x = raw.containsKey('x') ? _decodeDouble(raw['x']) : null;
+  final y = raw.containsKey('y') ? _decodeDouble(raw['y']) : null;
+  final width = raw.containsKey('width') ? _decodeInt(raw['width']) : null;
+  final height = raw.containsKey('height') ? _decodeInt(raw['height']) : null;
+  final originalWidth = raw.containsKey('original_width')
+      ? _decodeInt(raw['original_width'])
+      : null;
+  final originalHeight = raw.containsKey('original_height')
+      ? _decodeInt(raw['original_height'])
+      : null;
+  final scaledWidth = raw.containsKey('scaled_width')
+      ? _decodeInt(raw['scaled_width'])
+      : null;
+  if ((raw.containsKey('x') && x == null) ||
+      (raw.containsKey('y') && y == null) ||
+      (raw.containsKey('width') && width == null) ||
+      (raw.containsKey('height') && height == null) ||
+      (raw.containsKey('original_width') && originalWidth == null) ||
+      (raw.containsKey('original_height') && originalHeight == null) ||
+      (raw.containsKey('scaled_width') && scaledWidth == null)) {
+    return null;
+  }
+  if ((x != null && x.abs() > 1000000000) ||
+      (y != null && y.abs() > 1000000000) ||
+      !_validDimension(width) ||
+      !_validDimension(height) ||
+      !_validOriginalDimension(originalWidth) ||
+      !_validOriginalDimension(originalHeight) ||
+      (scaledWidth != null && (scaledWidth < 0 || scaledWidth > 262144))) {
+    return null;
+  }
+  final cursor = raw['cursor_embedded'];
+  final cursorEmbedded = switch (cursor) {
+    true => true,
+    false || null => false,
+    _ => _decodeInt(cursor) == 1,
+  };
+  return SessionDisplayValue(
+    x: x,
+    y: y,
+    width: width,
+    height: height,
+    cursorEmbedded: cursorEmbedded,
+    originalWidth: originalWidth,
+    originalHeight: originalHeight,
+    scaledWidth: scaledWidth,
+  );
+}
+
+bool _validDimension(int? value) =>
+    value == null || (value >= 0 && value <= 262144);
+
+bool _validOriginalDimension(int? value) =>
+    value == null || (value >= -1 && value <= 262144);
+
+List<SessionResolutionValue>? _decodeResolutions(Object? raw) {
+  var decoded = _decodeJsonInput(raw);
+  if (decoded is Map) decoded = decoded['resolutions'];
+  if (decoded is! List || decoded.length > 256) return null;
+  final resolutions = <SessionResolutionValue>[];
+  for (final item in decoded) {
+    if (item is! Map) continue;
+    final width = _decodeInt(item['width']);
+    final height = _decodeInt(item['height']);
+    if (width != null && width > 0 && height != null && height > 0) {
+      resolutions.add(SessionResolutionValue(width, height));
+    }
+  }
+  return resolutions;
+}
+
+Object? _decodeJsonInput(Object? raw) {
+  if (raw is! String) return raw;
+  if (raw.length > 1024 * 1024) return null;
+  try {
+    return jsonDecode(raw);
+  } catch (_) {
+    return null;
+  }
+}
+
+Map<String, Object?>? _decodeJsonObject(Object? raw) {
+  final decoded = _decodeJsonInput(raw);
+  if (decoded is! Map) return null;
+  final budget = _JsonBudget();
+  final frozen = _freezeJsonValue(decoded, budget, 0);
+  return identical(frozen, _invalidJson) || frozen is! Map<String, Object?>
+      ? null
+      : frozen;
+}
+
+const _invalidJson = Object();
+
+final class _JsonBudget {
+  int nodes = 0;
+}
+
+Object? _freezeJsonValue(Object? value, _JsonBudget budget, int depth) {
+  if (depth > 8 || ++budget.nodes > 4096) return _invalidJson;
+  if (value == null || value is bool || value is int) return value;
+  if (value is double) return value.isFinite ? value : _invalidJson;
+  if (value is String) {
+    return value.length <= 64 * 1024 ? value : _invalidJson;
+  }
+  if (value is List) {
+    final items = <Object?>[];
+    for (final item in value) {
+      final frozen = _freezeJsonValue(item, budget, depth + 1);
+      if (identical(frozen, _invalidJson)) return _invalidJson;
+      items.add(frozen);
+    }
+    return List<Object?>.unmodifiable(items);
+  }
+  if (value is Map) {
+    final items = <String, Object?>{};
+    for (final entry in value.entries) {
+      final key = entry.key;
+      if (key is! String || key.length > 4096) return _invalidJson;
+      final frozen = _freezeJsonValue(entry.value, budget, depth + 1);
+      if (identical(frozen, _invalidJson)) return _invalidJson;
+      items[key] = frozen;
+    }
+    return Map<String, Object?>.unmodifiable(items);
+  }
+  return _invalidJson;
 }
 
 List<int>? _decodeByteList(Object? value, int expectedLength) {

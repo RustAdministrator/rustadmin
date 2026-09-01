@@ -447,13 +447,6 @@ class FfiModel with ChangeNotifier {
         handleMultipleWindowsSession(evt, sessionId, peerId);
       } else if (name == 'peer_info') {
         handlePeerInfo(evt, peerId, false);
-      } else if (name == 'sync_peer_info') {
-        handleSyncPeerInfo(evt, sessionId, peerId);
-      } else if (name == 'sync_platform_additions') {
-        handlePlatformAdditions(evt, sessionId, peerId);
-      } else if (name == 'switch_display') {
-        // switch display is kept for backward compatibility
-        handleSwitchDisplay(evt, sessionId, peerId);
       } else if (name == 'terminal_response') {
         parent.target?.routeTerminalResponse(evt);
       } else if (name == 'file_dir') {
@@ -606,6 +599,12 @@ class FfiModel with ChangeNotifier {
         sessionId,
         peerId,
       );
+    } else if (event is SyncPeerInfoSessionEvent) {
+      await handleSyncPeerInfoEvent(event, sessionId, peerId);
+    } else if (event is SwitchDisplaySessionEvent) {
+      handleSwitchDisplayEvent(event, sessionId, peerId);
+    } else if (event is SyncPlatformAdditionsSessionEvent) {
+      handlePlatformAdditionsEvent(event);
     } else if (event is QualityStatusSessionEvent) {
       parent.target?.qualityMonitorModel.updateQualityStatusEvent(event);
     } else if (event is InvalidSessionEvent) {
@@ -951,9 +950,13 @@ class FfiModel with ChangeNotifier {
     }
   }
 
-  handleSwitchDisplay(
-      Map<String, dynamic> evt, SessionID sessionId, String peerId) {
-    final display = int.parse(evt['display']);
+  void handleSwitchDisplayEvent(
+      SwitchDisplaySessionEvent event, SessionID sessionId, String peerId) {
+    final display = event.displayIndex;
+    if (display >= _pi.displays.length) {
+      debugPrint('Ignoring switch_display for unknown display $display');
+      return;
+    }
 
     if (_pi.currentDisplay != kAllDisplayValue) {
       if (bind.peerGetSessionsCount(
@@ -970,18 +973,7 @@ class FfiModel with ChangeNotifier {
       // It is only used to update the display info.
     }
 
-    var newDisplay = Display();
-    newDisplay.x = double.tryParse(evt['x']) ?? newDisplay.x;
-    newDisplay.y = double.tryParse(evt['y']) ?? newDisplay.y;
-    newDisplay.width = int.tryParse(evt['width']) ?? newDisplay.width;
-    newDisplay.height = int.tryParse(evt['height']) ?? newDisplay.height;
-    newDisplay.cursorEmbedded = int.tryParse(evt['cursor_embedded']) == 1;
-    newDisplay.originalWidth = int.tryParse(
-            evt['original_width'] ?? kInvalidResolutionValue.toString()) ??
-        kInvalidResolutionValue;
-    newDisplay.originalHeight = int.tryParse(
-            evt['original_height'] ?? kInvalidResolutionValue.toString()) ??
-        kInvalidResolutionValue;
+    final newDisplay = _displayFromSessionValue(event.display);
     newDisplay._scale = _pi.scaleOfDisplay(display);
     _pi.displays[display] = newDisplay;
 
@@ -998,7 +990,7 @@ class FfiModel with ChangeNotifier {
     }
 
     if (!_pi.isSupportMultiUiSession || _pi.currentDisplay == display) {
-      handleResolutions(peerId, evt['resolutions']);
+      _applyResolutionValues(event.resolutions);
     }
     notifyListeners();
   }
@@ -2051,6 +2043,38 @@ class FfiModel with ChangeNotifier {
     }
   }
 
+  void _applyResolutionValues(List<SessionResolutionValue> values) {
+    final resolutions = [
+      for (final value in values) Resolution(value.width, value.height),
+    ]..sort((a, b) {
+        final widthOrder = b.width.compareTo(a.width);
+        return widthOrder != 0 ? widthOrder : b.height.compareTo(a.height);
+      });
+    _pi.resolutions = resolutions;
+  }
+
+  Display _displayFromSessionValue(SessionDisplayValue value) {
+    final display = Display();
+    display.x = value.x ?? display.x;
+    display.y = value.y ?? display.y;
+    display.width = value.width ?? display.width;
+    display.height = value.height ?? display.height;
+    display.cursorEmbedded = value.cursorEmbedded;
+    display.originalWidth = value.originalWidth ?? kInvalidResolutionValue;
+    display.originalHeight = value.originalHeight ?? kInvalidResolutionValue;
+    display._scale = 1.0;
+    final scaledWidth = value.scaledWidth;
+    if (scaledWidth != null) {
+      if (scaledWidth > 0 && display.width > 0) {
+        display._scale = max(display.width.toDouble() / scaledWidth, 1.0);
+      } else {
+        debugPrint(
+            'Invalid scaled_width ($scaledWidth) or width (${display.width}), using default scale 1.0');
+      }
+    }
+    return display;
+  }
+
   Display evtToDisplay(Map<String, dynamic> evt) {
     var d = Display();
     d.x = evt['x']?.toDouble() ?? d.x;
@@ -2120,26 +2144,29 @@ class FfiModel with ChangeNotifier {
     }
   }
 
-  /// Handle the peer info synchronization event based on [evt].
-  handleSyncPeerInfo(
-      Map<String, dynamic> evt, SessionID sessionId, String peerId) async {
-    if (evt['displays'] != null) {
-      cachedPeerData.peerInfo['displays'] = evt['displays'];
-      List<dynamic> displays = json.decode(evt['displays']);
-      List<Display> newDisplays = [];
-      for (int i = 0; i < displays.length; ++i) {
-        newDisplays.add(evtToDisplay(displays[i]));
-      }
+  Future<void> handleSyncPeerInfoEvent(
+      SyncPeerInfoSessionEvent event,
+      SessionID sessionId,
+      String peerId) async {
+    final displayValues = event.displays;
+    if (displayValues != null) {
+      cachedPeerData.peerInfo['displays'] = jsonEncode([
+        for (final display in displayValues) display.toLegacyMap(),
+      ]);
+      final newDisplays = [
+        for (final display in displayValues)
+          _displayFromSessionValue(display),
+      ];
       _pi.displays.value = newDisplays;
       _pi.displaysCount.value = _pi.displays.length;
 
       if (_pi.currentDisplay == kAllDisplayValue) {
-        updateCurDisplay(sessionId);
+        await updateCurDisplay(sessionId);
         // to-do: What if the displays are changed?
       } else {
         if (_pi.currentDisplay >= 0 &&
             _pi.currentDisplay < _pi.displays.length) {
-          updateCurDisplay(sessionId);
+          await updateCurDisplay(sessionId);
         } else {
           if (_pi.displays.isNotEmpty) {
             // Notify to switch display
@@ -2173,32 +2200,23 @@ class FfiModel with ChangeNotifier {
     notifyListeners();
   }
 
-  handlePlatformAdditions(
-      Map<String, dynamic> evt, SessionID sessionId, String peerId) async {
-    final updateData = evt['platform_additions'] as String?;
-    if (updateData == null) {
-      return;
-    }
-
-    if (updateData.isEmpty) {
+  void handlePlatformAdditionsEvent(
+      SyncPlatformAdditionsSessionEvent event) {
+    if (event.clearVirtualDisplays) {
       _pi.platformAdditions.remove(kPlatformAdditionsRustDeskVirtualDisplays);
       _pi.platformAdditions.remove(kPlatformAdditionsAmyuniVirtualDisplays);
     } else {
-      try {
-        final updateJson = json.decode(updateData) as Map<String, dynamic>;
-        for (final key in updateJson.keys) {
-          _pi.platformAdditions[key] = updateJson[key];
-        }
-        if (!updateJson
-            .containsKey(kPlatformAdditionsRustDeskVirtualDisplays)) {
-          _pi.platformAdditions
-              .remove(kPlatformAdditionsRustDeskVirtualDisplays);
-        }
-        if (!updateJson.containsKey(kPlatformAdditionsAmyuniVirtualDisplays)) {
-          _pi.platformAdditions.remove(kPlatformAdditionsAmyuniVirtualDisplays);
-        }
-      } catch (e) {
-        debugPrint('Failed to decode platformAdditions $e');
+      for (final entry in event.updates.entries) {
+        _pi.platformAdditions[entry.key] = entry.value;
+      }
+      if (!event.updates
+          .containsKey(kPlatformAdditionsRustDeskVirtualDisplays)) {
+        _pi.platformAdditions
+            .remove(kPlatformAdditionsRustDeskVirtualDisplays);
+      }
+      if (!event.updates
+          .containsKey(kPlatformAdditionsAmyuniVirtualDisplays)) {
+        _pi.platformAdditions.remove(kPlatformAdditionsAmyuniVirtualDisplays);
       }
     }
 
