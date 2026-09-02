@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter_hbb/common/widgets/peers_view.dart';
+import 'package:flutter_hbb/common/session_peer_settings.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/ab_model.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
@@ -26,7 +27,6 @@ import 'package:flutter_hbb/models/user_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/models/desktop_render_texture.dart';
 import 'package:flutter_hbb/models/terminal_model.dart';
-import 'package:flutter_hbb/plugin/event.dart';
 import 'package:flutter_hbb/plugin/manager.dart';
 import 'package:flutter_hbb/plugin/widgets/desc_ui.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
@@ -47,10 +47,11 @@ import '../mobile/mobile_viewport.dart';
 import '../mobile/android_vpn_controller.dart';
 import '../utils/image.dart' as img;
 import '../common/widgets/dialog.dart';
+import 'android_render_target_controller.dart';
 import 'input_model.dart';
 import 'platform_model.dart';
 import 'session_event.dart';
-import 'session_lifecycle.dart';
+import 'session_handle.dart';
 import 'package:flutter_hbb/utils/scale.dart';
 
 import 'package:flutter_hbb/generated_bridge.dart'
@@ -58,7 +59,6 @@ import 'package:flutter_hbb/generated_bridge.dart'
 import 'package:flutter_hbb/native/custom_cursor.dart'
     if (dart.library.html) 'package:flutter_hbb/web/custom_cursor.dart';
 
-typedef HandleMsgBox = Function(Map<String, dynamic> evt, String id);
 typedef ReconnectHandle = Function(OverlayDialogManager, SessionID, bool);
 final _constSessionId = Uuid().v4obj();
 
@@ -254,7 +254,12 @@ class FfiModel with ChangeNotifier {
   updatePermissionValues(Map<String, bool> permissions, String id) {
     // Track previous keyboard permission to detect revocation.
     final hadKeyboardPerm = _permissions['keyboard'] != false;
+    final revokesKeyboard = hadKeyboardPerm && permissions['keyboard'] == false;
     final updatedPermissions = <String>[];
+
+    if (revokesKeyboard) {
+      parent.target?.inputModel.permissionRevoked();
+    }
 
     permissions.forEach((k, v) {
       if (k.isEmpty) return;
@@ -355,22 +360,45 @@ class FfiModel with ChangeNotifier {
   }
 
   handleCachedPeerData(CachedPeerData data, String peerId) async {
-    handleMsgBox({
-      'type': 'success',
-      'title': 'Successful',
-      'text': kMsgboxTextWaitingForImage,
-      'link': '',
-    }, sessionId, peerId);
-    updatePrivacyMode(data.updatePrivacyMode, sessionId, peerId);
+    handleMessageBoxEvent(
+      const MessageBoxSessionEvent(
+        type: 'success',
+        title: 'Successful',
+        text: kMsgboxTextWaitingForImage,
+        link: '',
+        hasRetry: false,
+        origin: MessageBoxOrigin.core,
+      ),
+      sessionId,
+      peerId,
+    );
+    await updatePrivacyModeSignal(sessionId, peerId);
     setConnectionType(peerId, data.secure, data.direct, data.streamType);
-    await handlePeerInfo(data.peerInfo, peerId, true);
+    final peerInfoEvent = decodeTypedSessionEvent({
+      ...data.peerInfo,
+      'name': 'peer_info',
+    });
+    if (peerInfoEvent is! PeerInfoSessionEvent) {
+      debugPrint('Rejected invalid cached peer_info snapshot');
+      return;
+    }
+    await handlePeerInfoEvent(peerInfoEvent, peerId, true);
     for (final element in data.cursorDataList) {
-      updateLastCursorId(element);
-      await handleCursorData(element);
+      final event = decodeTypedSessionEvent({...element, 'name': 'cursor_data'});
+      if (event is CursorShapeSessionEvent) {
+        updateLastCursorIdValue(event.id);
+        await handleCursorShapeEvent(event);
+      }
     }
     if (data.lastCursorId.isNotEmpty) {
-      updateLastCursorId(data.lastCursorId);
-      handleCursorId(data.lastCursorId);
+      final event = decodeTypedSessionEvent({
+        ...data.lastCursorId,
+        'name': 'cursor_id',
+      });
+      if (event is CursorIdSessionEvent) {
+        updateLastCursorIdValue(event.id);
+        handleCursorIdEvent(event);
+      }
     }
   }
 
@@ -428,187 +456,197 @@ class FfiModel with ChangeNotifier {
   StreamEventHandler startEventListener(SessionID sessionId, String peerId) {
     return (evt) async {
       final typedEvent = decodeTypedSessionEvent(evt);
-      if (typedEvent is ConnectionReadySessionEvent) {
-        setConnectionType(
-          peerId,
-          typedEvent.secure,
-          typedEvent.direct,
-          typedEvent.streamType,
-        );
-        parent.target?.qualityMonitorModel.updateConnectionInfo(
-          typedEvent.streamType,
-          typedEvent.direct,
-        );
-        return;
-      } else if (typedEvent is PermissionSessionEvent) {
-        updatePermissionValues(typedEvent.permissions, peerId);
-        return;
-      } else if (typedEvent is InvalidSessionEvent) {
-        debugPrint(
-            'Rejected malformed session event ${typedEvent.name}: ${typedEvent.reason}');
+      if (typedEvent != null) {
+        await _routeTypedSessionEvent(typedEvent, sessionId, peerId);
         return;
       }
-      var name = evt['name'];
-      if (name == 'msgbox') {
-        handleMsgBox(evt, sessionId, peerId);
-      } else if (name == 'toast') {
-        handleToast(evt, sessionId, peerId);
-      } else if (name == 'set_multiple_windows_session') {
-        handleMultipleWindowsSession(evt, sessionId, peerId);
-      } else if (name == 'peer_info') {
-        handlePeerInfo(evt, peerId, false);
-      } else if (name == 'sync_peer_info') {
-        handleSyncPeerInfo(evt, sessionId, peerId);
-      } else if (name == 'sync_platform_additions') {
-        handlePlatformAdditions(evt, sessionId, peerId);
-      } else if (name == 'switch_display') {
-        // switch display is kept for backward compatibility
-        handleSwitchDisplay(evt, sessionId, peerId);
-      } else if (name == 'cursor_data') {
-        updateLastCursorId(evt);
-        await handleCursorData(evt, peerId: peerId);
-      } else if (name == 'cursor_id') {
-        updateLastCursorId(evt);
-        handleCursorId(evt);
-      } else if (name == 'cursor_position') {
-        await parent.target?.cursorModel.updateCursorPosition(evt, peerId);
-      } else if (name == 'clipboard') {
-        Clipboard.setData(ClipboardData(text: evt['content']));
-      } else if (name == 'chat_client_mode') {
-        parent.target?.chatModel
-            .receive(ChatModel.clientModeID, evt['text'] ?? '');
-      } else if (name == 'chat_server_mode') {
-        parent.target?.chatModel
-            .receive(int.parse(evt['id'] as String), evt['text'] ?? '');
-      } else if (name == 'terminal_response') {
-        parent.target?.routeTerminalResponse(evt);
-      } else if (name == 'file_dir') {
-        parent.target?.fileModel.receiveFileDir(evt);
-      } else if (name == 'empty_dirs') {
-        parent.target?.fileModel.receiveEmptyDirs(evt);
-      } else if (name == 'job_progress') {
-        parent.target?.fileModel.jobController.tryUpdateJobProgress(evt);
-      } else if (name == 'job_done') {
-        bool? refresh =
-            await parent.target?.fileModel.jobController.jobDone(evt);
-        if (refresh == true) {
-          // many job done for delete directory
-          // todo: refresh may not work when confirm delete local directory
-          parent.target?.fileModel.refreshAll();
-        }
-      } else if (name == 'job_error') {
-        parent.target?.fileModel.handleJobError(evt);
-      } else if (name == 'override_file_confirm') {
-        parent.target?.fileModel.postOverrideFileConfirm(evt);
-      } else if (name == 'load_last_job') {
-        parent.target?.fileModel.jobController.loadLastJob(evt);
-      } else if (name == 'update_folder_files') {
-        parent.target?.fileModel.jobController.updateFolderFiles(evt);
-      } else if (name == 'add_connection') {
-        parent.target?.serverModel.addConnection(evt);
-      } else if (name == 'on_client_remove') {
-        parent.target?.serverModel.onClientRemove(evt);
-      } else if (name == 'permission_update') {
-        parent.target?.serverModel.updateClientPermission(evt);
-      } else if (name == 'permission_request') {
-        parent.target?.serverModel.handlePermissionRequest(evt);
-      } else if (name == 'update_quality_status') {
-        parent.target?.qualityMonitorModel.updateQualityStatus(evt);
-      } else if (name == 'update_block_input_state') {
-        updateBlockInputState(evt, peerId);
-      } else if (name == 'update_privacy_mode') {
-        updatePrivacyMode(evt, sessionId, peerId);
-      } else if (name == 'show_elevation') {
-        final show = evt['show'].toString() == 'true';
-        parent.target?.serverModel.setShowElevation(show);
-      } else if (name == 'cancel_msgbox') {
-        cancelMsgBox(evt, sessionId);
-      } else if (name == 'switch_back') {
-        final peer_id = evt['peer_id'].toString();
-        await bind.sessionSwitchSides(sessionId: sessionId);
-        closeConnection(id: peer_id);
-      } else if (name == 'portable_service_running') {
-        _handlePortableServiceRunning(peerId, evt);
-      } else if (name == 'on_url_scheme_received') {
-        // currently comes from "_url" ipc of mac and dbus of linux
-        onUrlSchemeReceived(evt);
-      } else if (name == 'on_voice_call_waiting') {
-        // Waiting for the response from the peer.
-        parent.target?.chatModel.onVoiceCallWaiting();
-      } else if (name == 'on_voice_call_started') {
-        // Voice call is connected.
-        parent.target?.chatModel.onVoiceCallStarted();
-      } else if (name == 'on_voice_call_closed') {
-        // Voice call is closed with reason.
-        final reason = evt['reason'].toString();
-        parent.target?.chatModel.onVoiceCallClosed(reason);
-      } else if (name == 'on_voice_call_incoming') {
-        // Voice call is requested by the peer.
-        parent.target?.chatModel.onVoiceCallIncoming();
-      } else if (name == 'update_voice_call_state') {
-        parent.target?.serverModel.updateVoiceCallState(evt);
-      } else if (name == 'fingerprint') {
-        FingerprintState.find(peerId).value = evt['fingerprint'] ?? '';
-      } else if (name == 'plugin_manager') {
-        pluginManager.handleEvent(evt);
-      } else if (name == 'plugin_event') {
-        handlePluginEvent(evt,
-            (Map<String, dynamic> e) => handleMsgBox(e, sessionId, peerId));
-      } else if (name == 'plugin_reload') {
-        handleReloading(evt);
-      } else if (name == 'plugin_option') {
-        handleOption(evt);
-      } else if (name == "sync_peer_hash_password_to_personal_ab") {
-        if (desktopType == DesktopType.main || isWeb || isMobile) {
-          final id = evt['id'];
-          final hash = evt['hash'];
-          if (id != null && hash != null) {
-            gFFI.abModel
-                .changePersonalHashPassword(id.toString(), hash.toString());
-          }
-        }
-      } else if (name == "cm_file_transfer_log") {
-        if (isDesktop) {
-          gFFI.cmFileModel.onFileTransferLog(evt);
-        }
-      } else if (name == 'sync_peer_option') {
-        _handleSyncPeerOption(evt, peerId);
-      } else if (name == 'follow_current_display') {
-        handleFollowCurrentDisplay(evt, sessionId, peerId);
-      } else if (name == 'use_texture_render') {
-        _handleUseTextureRender(evt, sessionId, peerId);
-      } else if (name == "selected_files") {
-        if (isWeb) {
-          parent.target?.fileModel.onSelectedFiles(evt);
-        }
-      } else if (name == "send_emptry_dirs") {
-        if (isWeb) {
-          parent.target?.fileModel.sendEmptyDirs(evt);
-        }
-      } else if (name == "record_status") {
-        if (desktopType == DesktopType.remote ||
-            desktopType == DesktopType.viewCamera ||
-            isMobile) {
-          parent.target?.recordingModel.updateStatus(evt['start'] == 'true');
-        }
-      } else if (name == "printer_request") {
-        _handlePrinterRequest(evt, sessionId, peerId);
-      } else if (name == 'screenshot') {
-        _handleScreenshot(evt, sessionId, peerId);
-      } else if (name == 'exit_relative_mouse_mode') {
-        // Handle exit shortcut from rdev grab loop (Ctrl+Alt on Win/Linux, Cmd+G on macOS)
-        parent.target?.inputModel.exitRelativeMouseModeWithKeyRelease();
-      } else {
-        debugPrint('Event is not handled in the fixed branch: $name');
-      }
+      debugPrint('Event is not handled in the fixed branch: ${evt['name']}');
     };
   }
 
-  _handleScreenshot(
-      Map<String, dynamic> evt, SessionID sessionId, String peerId) {
+  Future<void> _routeTypedSessionEvent(
+    SessionEvent event,
+    SessionID sessionId,
+    String peerId,
+  ) async {
+    if (event is ConnectionReadySessionEvent) {
+      setConnectionType(peerId, event.secure, event.direct, event.streamType);
+      parent.target?.qualityMonitorModel.updateConnectionInfo(
+        event.streamType,
+        event.direct,
+      );
+    } else if (event is PermissionSessionEvent) {
+      updatePermissionValues(event.permissions, peerId);
+    } else if (event is ClipboardSessionEvent) {
+      Clipboard.setData(ClipboardData(text: event.content));
+    } else if (event is ClientChatSessionEvent) {
+      parent.target?.chatModel.receive(ChatModel.clientModeID, event.text);
+    } else if (event is ServerChatSessionEvent) {
+      parent.target?.chatModel.receive(event.id, event.text);
+    } else if (event is ShowElevationSessionEvent) {
+      parent.target?.serverModel.setShowElevation(event.show);
+    } else if (event is VoiceCallClosedSessionEvent) {
+      parent.target?.chatModel.onVoiceCallClosed(event.reason);
+    } else if (event is FingerprintSessionEvent) {
+      FingerprintState.find(peerId).value = event.fingerprint;
+    } else if (event is RecordStatusSessionEvent) {
+      if (desktopType == DesktopType.remote ||
+          desktopType == DesktopType.viewCamera ||
+          isMobile) {
+        parent.target?.recordingModel.updateStatus(event.start);
+      }
+    } else if (event is SessionSignalEvent) {
+      switch (event.signal) {
+        case SessionSignal.voiceCallWaiting:
+          parent.target?.chatModel.onVoiceCallWaiting();
+        case SessionSignal.voiceCallStarted:
+          parent.target?.chatModel.onVoiceCallStarted();
+        case SessionSignal.voiceCallIncoming:
+          parent.target?.chatModel.onVoiceCallIncoming();
+        case SessionSignal.exitRelativeMouseMode:
+          parent.target?.inputModel.exitRelativeMouseModeWithKeyRelease();
+      }
+    } else if (event is CursorShapeSessionEvent) {
+      updateLastCursorIdValue(event.id);
+      await handleCursorShapeEvent(event, peerId: peerId);
+    } else if (event is CursorIdSessionEvent) {
+      handleCursorIdEvent(event);
+    } else if (event is CursorPositionSessionEvent) {
+      await parent.target?.cursorModel.updateCursorPositionValue(
+        event.x,
+        event.y,
+        peerId,
+      );
+    } else if (event is BlockInputSessionEvent) {
+      updateBlockInputStateValue(event.enabled, peerId);
+    } else if (event is PrivacyModeChangedSessionEvent) {
+      await updatePrivacyModeSignal(sessionId, peerId);
+    } else if (event is TextureRenderSessionEvent) {
+      handleUseTextureRenderValue(event.enabled, sessionId);
+    } else if (event is FollowCurrentDisplaySessionEvent) {
+      await handleFollowCurrentDisplayValue(
+        event.displayIndex,
+        sessionId,
+        peerId,
+      );
+    } else if (event is TerminalResponseSessionEvent) {
+      parent.target?.routeTerminalResponseEvent(event);
+    } else if (event is FileJobProgressSessionEvent) {
+      parent.target?.fileModel.jobController.updateJobProgressEvent(event);
+    } else if (event is FileJobDoneSessionEvent) {
+      final refresh =
+          await parent.target?.fileModel.jobController.jobDoneEvent(event);
+      if (refresh == true) {
+        // many job done for delete directory
+        // todo: refresh may not work when confirm delete local directory
+        parent.target?.fileModel.refreshAll();
+      }
+    } else if (event is FileJobErrorSessionEvent) {
+      parent.target?.fileModel.handleJobErrorEvent(event);
+    } else if (event is FileFolderStatsSessionEvent) {
+      parent.target?.fileModel.jobController.updateFolderStatsEvent(event);
+    } else if (event is FileDirectorySessionEvent) {
+      parent.target?.fileModel.receiveFileDirectoryEvent(event);
+    } else if (event is EmptyDirectoriesSessionEvent) {
+      parent.target?.fileModel.receiveEmptyDirectoriesEvent(event);
+    } else if (event is FileOverrideConfirmSessionEvent) {
+      await parent.target?.fileModel.postOverrideFileConfirmEvent(event);
+    } else if (event is FileResumeJobSessionEvent) {
+      await parent.target?.fileModel.jobController.loadLastJobEvent(event);
+    } else if (event is SessionControlEvent) {
+      await _handleSessionControlEvent(event, sessionId);
+    } else if (event is PeerHashSyncSessionEvent) {
+      if (desktopType == DesktopType.main || isWeb || isMobile) {
+        gFFI.abModel.changePersonalHashPassword(event.id, event.hash);
+      }
+    } else if (event is PeerOptionSyncSessionEvent) {
+      _handleSyncPeerOptionEvent(event, peerId);
+    } else if (event is WebSelectedFileSessionEvent) {
+      if (isWeb) parent.target?.fileModel.onSelectedFileEvent(event);
+    } else if (event is WebEmptyDirectoriesSessionEvent) {
+      if (isWeb) parent.target?.fileModel.sendEmptyDirectoriesEvent(event);
+    } else if (event is PrinterRequestSessionEvent) {
+      _handlePrinterRequestEvent(event, sessionId);
+    } else if (event is ScreenshotSessionEvent) {
+      _handleScreenshotEvent(event, sessionId);
+    } else if (event is MessageBoxSessionEvent) {
+      handleMessageBoxEvent(event, sessionId, peerId);
+    } else if (event is ToastSessionEvent) {
+      handleToastEvent(event);
+    } else if (event is MultipleWindowsSessionsEvent) {
+      handleMultipleWindowsSessionsEvent(event, sessionId, peerId);
+    } else if (event is ClientSnapshotSessionEvent) {
+      switch (event.kind) {
+        case ClientSnapshotKind.addConnection:
+          parent.target?.serverModel.addConnectionEvent(event.client);
+        case ClientSnapshotKind.voiceState:
+          parent.target?.serverModel.updateVoiceCallStateEvent(event.client);
+      }
+    } else if (event is ClientRemovedSessionEvent) {
+      parent.target?.serverModel.onClientRemoveEvent(event);
+    } else if (event is ClientPermissionSessionEvent) {
+      switch (event.kind) {
+        case ClientPermissionKind.update:
+          parent.target?.serverModel.updateClientPermissionEvent(event);
+        case ClientPermissionKind.request:
+          parent.target?.serverModel.handlePermissionRequestEvent(event);
+      }
+    } else if (event is PluginCatalogSessionEvent) {
+      pluginManager.handleCatalogEvent(event);
+    } else if (event is PluginInstallStatusSessionEvent) {
+      pluginManager.handleInstallStatusEvent(event);
+    } else if (event is PluginContentSessionEvent) {
+      final message = event.message;
+      if (message != null) handleMessageBoxEvent(message, sessionId, peerId);
+    } else if (event is PluginReloadSessionEvent) {
+      handleReloadingEvent(event);
+    } else if (event is PluginOptionSessionEvent) {
+      handleOptionEvent(event);
+    } else if (event is CmTransferLogSessionEvent) {
+      if (isDesktop) gFFI.cmFileModel.handleTransferEvent(event);
+    } else if (event is CmFileActionSessionEvent) {
+      if (isDesktop) gFFI.cmFileModel.handleFileActionEvent(event);
+    } else if (event is CmFileRenameSessionEvent) {
+      if (isDesktop) gFFI.cmFileModel.handleRenameEvent(event);
+    } else if (event is PeerInfoSessionEvent) {
+      await handlePeerInfoEvent(event, peerId, false);
+    } else if (event is SyncPeerInfoSessionEvent) {
+      await handleSyncPeerInfoEvent(event, sessionId, peerId);
+    } else if (event is SwitchDisplaySessionEvent) {
+      handleSwitchDisplayEvent(event, sessionId, peerId);
+    } else if (event is SyncPlatformAdditionsSessionEvent) {
+      handlePlatformAdditionsEvent(event);
+    } else if (event is QualityStatusSessionEvent) {
+      parent.target?.qualityMonitorModel.updateQualityStatusEvent(event);
+    } else if (event is InvalidSessionEvent) {
+      debugPrint(
+        'Rejected malformed session event ${event.name}: ${event.reason}',
+      );
+    }
+  }
+
+  Future<void> _handleSessionControlEvent(
+    SessionControlEvent event,
+    SessionID sessionId,
+  ) async {
+    switch (event.kind) {
+      case SessionControlKind.cancelMessageBox:
+        cancelMsgBoxValue(event.value, sessionId);
+      case SessionControlKind.switchBack:
+        await bind.sessionSwitchSides(sessionId: sessionId);
+        closeConnection(id: event.value);
+      case SessionControlKind.portableServiceRunning:
+        _handlePortableServiceRunning(event.enabled);
+      case SessionControlKind.urlSchemeReceived:
+        onUrlSchemeReceivedValue(event.value);
+    }
+  }
+
+  void _handleScreenshotEvent(
+      ScreenshotSessionEvent event, SessionID sessionId) {
     timerScreenshot?.cancel();
     timerScreenshot = null;
-    final msg = evt['msg'] ?? '';
+    final msg = event.message;
     final msgBoxType = 'custom-nook-nocancel-hasclose';
     final msgBoxTitle = 'Take screenshot';
     final dialogManager = parent.target!.dialogManager;
@@ -672,10 +710,10 @@ class FfiModel with ChangeNotifier {
     }
   }
 
-  _handlePrinterRequest(
-      Map<String, dynamic> evt, SessionID sessionId, String peerId) {
-    final id = evt['id'];
-    final path = evt['path'];
+  void _handlePrinterRequestEvent(
+      PrinterRequestSessionEvent event, SessionID sessionId) {
+    final id = event.id;
+    final path = event.path;
     final dialogManager = parent.target!.dialogManager;
     dialogManager.show((setState, close, context) {
       PrinterOptions printerOptions = PrinterOptions.load();
@@ -844,29 +882,31 @@ class FfiModel with ChangeNotifier {
     });
   }
 
-  _handleUseTextureRender(
-      Map<String, dynamic> evt, SessionID sessionId, String peerId) {
-    parent.target?.imageModel.setUseTextureRender(evt['v'] == 'Y');
+  void handleUseTextureRenderValue(bool enabled, SessionID sessionId) {
+    parent.target?.imageModel.setUseTextureRender(enabled);
     waitForFirstImage.value = true;
     isRefreshing = true;
     showConnectedWaitingForImage(parent.target!.dialogManager, sessionId,
         'success', 'Successful', kMsgboxTextWaitingForImage);
   }
 
-  _handleSyncPeerOption(Map<String, dynamic> evt, String peer) {
-    final k = evt['k'];
-    final v = evt['v'];
-    if (k == kOptionToggleViewOnly) {
-      setViewOnly(peer, v as bool);
-    } else if (k == 'keyboard_mode') {
-      parent.target?.inputModel.updateKeyboardMode();
-    } else if (k == 'input_source') {
-      stateGlobal.getInputSource(force: true);
+  void _handleSyncPeerOptionEvent(
+      PeerOptionSyncSessionEvent event, String peer) {
+    switch (event.kind) {
+      case PeerOptionSyncKind.viewOnly:
+        final viewOnly = event.viewOnly;
+        if (viewOnly != null) setViewOnly(peer, viewOnly);
+      case PeerOptionSyncKind.keyboardMode:
+        parent.target?.inputModel.updateKeyboardMode();
+      case PeerOptionSyncKind.inputSource:
+        stateGlobal.getInputSource(force: true);
+      case PeerOptionSyncKind.other:
+        break;
     }
   }
 
-  onUrlSchemeReceived(Map<String, dynamic> evt) {
-    final url = evt['url'].toString().trim();
+  void onUrlSchemeReceivedValue(String value) {
+    final url = value.trim();
     if (url.startsWith(bind.mainUriPrefixSync()) &&
         handleUriLink(uriString: url)) {
       return;
@@ -892,8 +932,7 @@ class FfiModel with ChangeNotifier {
     platformFFI.setEventCallback(startEventListener(sessionId, peerId));
   }
 
-  _handlePortableServiceRunning(String peerId, Map<String, dynamic> evt) {
-    final running = evt['running'] == 'true';
+  void _handlePortableServiceRunning(bool running) {
     parent.target?.elevationModel.onPortableServiceRunning(running);
   }
 
@@ -941,9 +980,13 @@ class FfiModel with ChangeNotifier {
     }
   }
 
-  handleSwitchDisplay(
-      Map<String, dynamic> evt, SessionID sessionId, String peerId) {
-    final display = int.parse(evt['display']);
+  void handleSwitchDisplayEvent(
+      SwitchDisplaySessionEvent event, SessionID sessionId, String peerId) {
+    final display = event.displayIndex;
+    if (display >= _pi.displays.length) {
+      debugPrint('Ignoring switch_display for unknown display $display');
+      return;
+    }
 
     if (_pi.currentDisplay != kAllDisplayValue) {
       if (bind.peerGetSessionsCount(
@@ -960,18 +1003,7 @@ class FfiModel with ChangeNotifier {
       // It is only used to update the display info.
     }
 
-    var newDisplay = Display();
-    newDisplay.x = double.tryParse(evt['x']) ?? newDisplay.x;
-    newDisplay.y = double.tryParse(evt['y']) ?? newDisplay.y;
-    newDisplay.width = int.tryParse(evt['width']) ?? newDisplay.width;
-    newDisplay.height = int.tryParse(evt['height']) ?? newDisplay.height;
-    newDisplay.cursorEmbedded = int.tryParse(evt['cursor_embedded']) == 1;
-    newDisplay.originalWidth = int.tryParse(
-            evt['original_width'] ?? kInvalidResolutionValue.toString()) ??
-        kInvalidResolutionValue;
-    newDisplay.originalHeight = int.tryParse(
-            evt['original_height'] ?? kInvalidResolutionValue.toString()) ??
-        kInvalidResolutionValue;
+    final newDisplay = _displayFromSessionValue(event.display);
     newDisplay._scale = _pi.scaleOfDisplay(display);
     _pi.displays[display] = newDisplay;
 
@@ -988,39 +1020,46 @@ class FfiModel with ChangeNotifier {
     }
 
     if (!_pi.isSupportMultiUiSession || _pi.currentDisplay == display) {
-      handleResolutions(peerId, evt['resolutions']);
+      _applyResolutionValues(event.resolutions);
     }
     notifyListeners();
   }
 
-  cancelMsgBox(Map<String, dynamic> evt, SessionID sessionId) {
+  void cancelMsgBoxValue(String value, SessionID sessionId) {
     if (parent.target == null) return;
     final dialogManager = parent.target!.dialogManager;
-    final tag = '$sessionId-${evt['tag']}';
+    final tag = '$sessionId-$value';
     dialogManager.dismissByTag(tag);
   }
 
-  handleMultipleWindowsSession(
-      Map<String, dynamic> evt, SessionID sessionId, String peerId) {
+  void handleMultipleWindowsSessionsEvent(
+      MultipleWindowsSessionsEvent event,
+      SessionID sessionId,
+      String peerId) {
     if (parent.target == null) return;
     final dialogManager = parent.target!.dialogManager;
-    final sessions = evt['windows_sessions'];
     final title = translate('Multiple Windows sessions found');
     final text = translate('Please select the session you want to connect to');
     final type = "";
 
-    showWindowsSessionsDialog(
-        type, title, text, dialogManager, sessionId, peerId, sessions);
+    showWindowsSessionsDialog(type, title, text, dialogManager, sessionId,
+        [for (final session in event.sessions) session.id],
+        [for (final session in event.sessions) session.name]);
   }
 
-  /// Handle the message box event based on [evt] and [id].
-  handleMsgBox(Map<String, dynamic> evt, SessionID sessionId, String peerId) {
+  void handleMessageBoxEvent(
+      MessageBoxSessionEvent event, SessionID sessionId, String peerId) {
     if (parent.target == null) return;
     final dialogManager = parent.target!.dialogManager;
-    final type = evt['type'];
-    final title = evt['title'];
-    final text = evt['text'];
-    final link = evt['link'];
+    final type = event.type;
+    final title = event.title;
+    final text = event.text;
+    final link = event.link;
+
+    if (event.origin == MessageBoxOrigin.plugin) {
+      msgBox(sessionId, type, title, text, link, dialogManager);
+      return;
+    }
 
     void rejectSecurityPrompt({required bool pairing}) {
       () async {
@@ -1046,26 +1085,27 @@ class FfiModel with ChangeNotifier {
     if (title == 'Connection Error' ||
         type == 'error' ||
         type == 'restarting' ||
-        (type is String && type.contains('error'))) {
+        type.contains('error')) {
       parent.target?.inputModel.setRelativeMouseMode(false);
     }
 
     if (type == 'input-pairing-passphrase' ||
         type == 'input-direct-pairing-passphrase') {
-      if (text is String) {
-        showPairingPassphraseDialog(sessionId, dialogManager, text);
+      final details = event.securityDetails;
+      if (details != null) {
+        showPairingPassphraseDialog(sessionId, dialogManager, details);
       } else {
         rejectSecurityPrompt(pairing: true);
       }
     } else if (type == 'confirm-peer-trust' || type == 'confirm-direct-trust') {
-      if (text is String) {
-        showPeerTrustDialog(sessionId, dialogManager, text);
+      final details = event.securityDetails;
+      if (details != null) {
+        showPeerTrustDialog(sessionId, dialogManager, details);
       } else {
         rejectSecurityPrompt(pairing: false);
       }
     } else if (type == 'error' &&
         title == 'Connection Error' &&
-        text is String &&
         isResettablePeerTrustError(text)) {
       showPeerIdentityChangedDialog(sessionId, dialogManager, text);
     } else if (type == 're-input-password') {
@@ -1101,11 +1141,11 @@ class FfiModel with ChangeNotifier {
     } else if (text == kMsgboxTextWaitingForImage) {
       showConnectedWaitingForImage(dialogManager, sessionId, type, title, text);
     } else if (title == 'Privacy mode') {
-      final hasRetry = evt['hasRetry'] == 'true';
+      final hasRetry = event.hasRetry;
       showPrivacyFailedDialog(
           sessionId, type, title, text, link, hasRetry, dialogManager);
     } else {
-      var hasRetry = evt['hasRetry'] == 'true';
+      var hasRetry = event.hasRetry;
       if (!hasRetry) {
         hasRetry = shouldAutoRetryOnOffline(type, title, text);
       }
@@ -1114,23 +1154,18 @@ class FfiModel with ChangeNotifier {
   }
 
   void showPeerTrustDialog(
-      SessionID sessionId, OverlayDialogManager dialogManager, String text) {
+      SessionID sessionId,
+      OverlayDialogManager dialogManager,
+      SecurityPromptDetails details) {
     final dialogTag = '$sessionId-confirm-peer-trust';
     if (dialogManager.hasDialog(dialogTag)) {
       return;
     }
-    Map<String, dynamic> details = const {};
-    try {
-      final decoded = jsonDecode(text);
-      if (decoded is Map<String, dynamic>) {
-        details = decoded;
-      }
-    } catch (_) {}
-    final peer = (details['peer'] ?? '').toString();
-    final peerId = (details['peer_id'] ?? '').toString();
-    final fingerprint = (details['fingerprint'] ?? '').toString();
-    final trustPhrase = (details['trust_phrase'] ?? '').toString();
-    final direct = details['direct'] == true;
+    final peer = details.peer;
+    final peerId = details.peerId;
+    final fingerprint = details.fingerprint;
+    final trustPhrase = details.trustPhrase;
+    final direct = details.direct;
     final controller = TextEditingController();
     String normalizePhrase(String value) =>
         value.trim().toLowerCase().split(RegExp(r'\s+')).join(' ');
@@ -1238,21 +1273,16 @@ class FfiModel with ChangeNotifier {
   }
 
   void showPairingPassphraseDialog(
-      SessionID sessionId, OverlayDialogManager dialogManager, String text) {
+      SessionID sessionId,
+      OverlayDialogManager dialogManager,
+      SecurityPromptDetails details) {
     final dialogTag = '$sessionId-input-pairing-passphrase';
     if (dialogManager.hasDialog(dialogTag)) {
       return;
     }
-    Map<String, dynamic> details = const {};
-    try {
-      final decoded = jsonDecode(text);
-      if (decoded is Map<String, dynamic>) {
-        details = decoded;
-      }
-    } catch (_) {}
-    final peer = (details['peer'] ?? '').toString();
-    final peerId = (details['peer_id'] ?? '').toString();
-    final direct = details['direct'] == true;
+    final peer = details.peer;
+    final peerId = details.peerId;
+    final direct = details.direct;
     final controller = TextEditingController();
     bool obscure = true;
     bool submitting = false;
@@ -1455,29 +1485,26 @@ class FfiModel with ChangeNotifier {
     return false;
   }
 
-  handleToast(Map<String, dynamic> evt, SessionID sessionId, String peerId) {
-    final type = evt['type'] ?? 'info';
-    final text = evt['text'] ?? '';
-    final durMsc = evt['dur_msec'] ?? 2000;
-    final duration = Duration(milliseconds: durMsc);
-    if ((text).isEmpty) {
+  void handleToastEvent(ToastSessionEvent event) {
+    final duration = Duration(milliseconds: event.durationMs);
+    if (event.text.isEmpty) {
       BotToast.showLoading(
         duration: duration,
         clickClose: true,
         allowClick: true,
       );
     } else {
-      if (type.contains('error')) {
+      if (event.type.contains('error')) {
         BotToast.showText(
           contentColor: Colors.red,
-          text: translate(text),
+          text: translate(event.text),
           duration: duration,
           clickClose: true,
           onlyOne: true,
         );
       } else {
         BotToast.showText(
-          text: translate(text),
+          text: translate(event.text),
           duration: duration,
           clickClose: true,
           onlyOne: true,
@@ -1751,23 +1778,20 @@ class FfiModel with ChangeNotifier {
     }
   }
 
-  /// Handle the peer info event based on [evt].
-  handlePeerInfo(Map<String, dynamic> evt, String peerId, bool isCache) async {
+  Future<void> handlePeerInfoEvent(
+      PeerInfoSessionEvent event, String peerId, bool isCache) async {
     parent.target?.chatModel.voiceCallStatus.value = VoiceCallStatus.notStarted;
 
     _queryAuditGuid(peerId);
 
-    // Map clone is required here, otherwise "evt" may be changed by other threads through the reference.
-    // Because this function is asynchronous, there's an "await" in this function.
-    cachedPeerData.peerInfo = {...evt};
-    // Do not cache resolutions, because a new display connection have different resolutions.
-    cachedPeerData.peerInfo.remove('resolutions');
+    cachedPeerData.peerInfo = Map<String, dynamic>.from(
+        event.toLegacyPayload(includeResolutions: false));
 
     // Recent peer is updated by handle_peer_info(ui_session_interface.rs) --> handle_peer_info(client.rs) --> save_config(client.rs)
     bind.mainLoadRecentPeers();
 
     parent.target?.dialogManager.dismissAll();
-    _pi.version = evt['version'];
+    _pi.version = event.version;
     // Note: Relative mouse mode is NOT auto-enabled on connect.
     // Users must manually enable it via toolbar or keyboard shortcut (Ctrl+Alt+Shift+M).
     //
@@ -1781,11 +1805,11 @@ class FfiModel with ChangeNotifier {
     }
     _pi.isSupportMultiUiSession =
         bind.isSupportMultiUiSession(version: _pi.version);
-    _pi.username = evt['username'];
-    _pi.hostname = evt['hostname'];
-    _pi.platform = evt['platform'];
-    _pi.sasEnabled = evt['sas_enabled'] == 'true';
-    final currentDisplay = int.parse(evt['current_display']);
+    _pi.username = event.username;
+    _pi.hostname = event.hostname;
+    _pi.platform = event.platform;
+    _pi.sasEnabled = event.sasEnabled;
+    final currentDisplay = event.currentDisplay;
     if (_pi.primaryDisplay == kInvalidDisplayIndex) {
       _pi.primaryDisplay = currentDisplay;
     }
@@ -1812,13 +1836,20 @@ class FfiModel with ChangeNotifier {
       // 1. User has set the touch mode explicitly.
       // 2. The advanced option (custom client) is set.
       //    Then we choose to use the local option.
-      final optLocal = bind.mainGetLocalOption(key: kOptionTouchMode);
-      if (optLocal != '') {
-        _touchMode = optLocal == 'Y';
+      final optLocal = remoteAppLocalSettings.read(
+        RemoteAppLocalSettingsRegistry.touchMode,
+      );
+      final optLocalRaw = remoteAppLocalSettings.readRaw(
+        RemoteAppLocalSettingsRegistry.touchMode,
+      );
+      if (optLocalRaw.isNotEmpty) {
+        _touchMode = optLocal;
       } else {
-        final optSession = await bind.sessionGetOption(
-            sessionId: sessionId, arg: kOptionTouchMode);
-        _touchMode = optSession != '';
+        final settings = SessionPeerSettingsRepository.forSession(sessionId);
+        _touchMode =
+            (await settings.readRaw(
+              SessionPeerSettingsRegistry.legacyTouchMode,
+            )).isNotEmpty;
       }
     }
     if (isMobile) {
@@ -1834,16 +1865,15 @@ class FfiModel with ChangeNotifier {
       }
     } else if (connType == ConnType.defaultConn ||
         connType == ConnType.viewCamera) {
-      List<Display> newDisplays = [];
-      List<dynamic> displays = json.decode(evt['displays']);
-      for (int i = 0; i < displays.length; ++i) {
-        newDisplays.add(evtToDisplay(displays[i]));
-      }
+      final displays = event.displays;
+      final newDisplays = [
+        for (final display in displays) _displayFromSessionValue(display),
+      ];
       _pi.displays.value = newDisplays;
       _pi.displaysCount.value = _pi.displays.length;
       if (_pi.currentDisplay < _pi.displays.length) {
         // now replaced to _updateCurDisplay
-        updateCurDisplay(sessionId);
+        await updateCurDisplay(sessionId);
       }
       if (displays.isNotEmpty) {
         _reconnects = 1;
@@ -1851,30 +1881,31 @@ class FfiModel with ChangeNotifier {
         waitForFirstImage.value = true;
         isRefreshing = false;
       }
-      Map<String, dynamic> features = json.decode(evt['features']);
-      _pi.features.privacyMode = features['privacy_mode'] == true;
+      _pi.features.privacyMode = event.features.privacyMode;
       _pi.features.keyboardV2CommittedText =
-          features['keyboard_v2_committed_text'] == true;
+          event.features.keyboardV2CommittedText;
       _pi.features.keyboardV2PhysicalKey =
-          features['keyboard_v2_physical_key'] == true;
+          event.features.keyboardV2PhysicalKey;
       _pi.features.keyboardV2LayoutAwareText =
-          features['keyboard_v2_layout_aware_text'] == true;
+          event.features.keyboardV2LayoutAwareText;
       if (!isCache) {
-        handleResolutions(peerId, evt["resolutions"]);
+        _applyResolutionValues(event.resolutions);
       }
       parent.target?.elevationModel.onPeerInfo(_pi);
     }
     if (connType == ConnType.defaultConn) {
+      final liveSettings = LiveSessionSettingsRepository.forSession(sessionId);
       setViewOnly(
-          peerId,
-          bind.sessionGetToggleOptionSync(
-              sessionId: sessionId, arg: kOptionToggleViewOnly));
-      setShowMyCursor(bind.sessionGetToggleOptionSync(
-          sessionId: sessionId, arg: kOptionToggleShowMyCursor));
+        peerId,
+        liveSettings.readSync(LiveSessionSettingsRegistry.viewOnly),
+      );
+      setShowMyCursor(
+        liveSettings.readSync(LiveSessionSettingsRegistry.showMyCursor),
+      );
     }
     if (connType == ConnType.defaultConn || connType == ConnType.viewCamera) {
       _pi.platformAdditions =
-          decodePeerPlatformAdditions(evt['platform_additions']);
+          Map<String, dynamic>.from(event.platformAdditions);
     }
 
     _pi.isSet.value = true;
@@ -2008,105 +2039,82 @@ class FfiModel with ChangeNotifier {
     }
   }
 
-  handleResolutions(String id, dynamic resolutions) {
-    try {
-      final resolutionsObj = json.decode(resolutions as String);
-      late List<dynamic> dynamicArray;
-      if (resolutionsObj is Map) {
-        // The web version
-        dynamicArray = (resolutionsObj as Map<String, dynamic>)['resolutions']
-            as List<dynamic>;
-      } else {
-        // The rust version
-        dynamicArray = resolutionsObj as List<dynamic>;
-      }
-      List<Resolution> arr = List.empty(growable: true);
-      for (int i = 0; i < dynamicArray.length; i++) {
-        var width = dynamicArray[i]["width"];
-        var height = dynamicArray[i]["height"];
-        if (width is int && width > 0 && height is int && height > 0) {
-          arr.add(Resolution(width, height));
-        }
-      }
-      arr.sort((a, b) {
-        if (b.width != a.width) {
-          return b.width - a.width;
-        } else {
-          return b.height - a.height;
-        }
+  void _applyResolutionValues(List<SessionResolutionValue> values) {
+    final resolutions = [
+      for (final value in values) Resolution(value.width, value.height),
+    ]..sort((a, b) {
+        final widthOrder = b.width.compareTo(a.width);
+        return widthOrder != 0 ? widthOrder : b.height.compareTo(a.height);
       });
-      _pi.resolutions = arr;
-    } catch (e) {
-      debugPrint("Failed to parse resolutions:$e");
-    }
+    _pi.resolutions = resolutions;
   }
 
-  Display evtToDisplay(Map<String, dynamic> evt) {
-    var d = Display();
-    d.x = evt['x']?.toDouble() ?? d.x;
-    d.y = evt['y']?.toDouble() ?? d.y;
-    d.width = evt['width'] ?? d.width;
-    d.height = evt['height'] ?? d.height;
-    d.cursorEmbedded = evt['cursor_embedded'] == 1;
-    d.originalWidth = evt['original_width'] ?? kInvalidResolutionValue;
-    d.originalHeight = evt['original_height'] ?? kInvalidResolutionValue;
-    d._scale = 1.0;
-    final scaledWidth = evt['scaled_width'];
+  Display _displayFromSessionValue(SessionDisplayValue value) {
+    final display = Display();
+    display.x = value.x ?? display.x;
+    display.y = value.y ?? display.y;
+    display.width = value.width ?? display.width;
+    display.height = value.height ?? display.height;
+    display.cursorEmbedded = value.cursorEmbedded;
+    display.originalWidth = value.originalWidth ?? kInvalidResolutionValue;
+    display.originalHeight = value.originalHeight ?? kInvalidResolutionValue;
+    display._scale = 1.0;
+    final scaledWidth = value.scaledWidth;
     if (scaledWidth != null) {
-      final sw = int.tryParse(scaledWidth.toString());
-      if (sw != null && sw > 0 && d.width > 0) {
-        d._scale = max(d.width.toDouble() / sw, 1.0);
+      if (scaledWidth > 0 && display.width > 0) {
+        display._scale = max(display.width.toDouble() / scaledWidth, 1.0);
       } else {
         debugPrint(
-            "Invalid scaled_width ($scaledWidth) or width (${d.width}), using default scale 1.0");
+            'Invalid scaled_width ($scaledWidth) or width (${display.width}), using default scale 1.0');
       }
     }
-    return d;
+    return display;
   }
 
-  updateLastCursorId(Map<String, dynamic> evt) {
-    // int.parse(evt['id']) may cause FormatException
-    // Unhandled Exception: FormatException: Positive input exceeds the limit of integer 18446744071749110741
-    final id = evt['id']?.toString();
-    if (id == null || id.isEmpty) {
-      return;
-    }
+  void updateLastCursorIdValue(String id) {
     parent.target?.cursorModel.id = id;
   }
 
-  handleCursorId(Map<String, dynamic> evt) {
-    cachedPeerData.lastCursorId = evt;
-    parent.target?.cursorModel.updateCursorId(evt);
+  void handleCursorIdEvent(CursorIdSessionEvent event) {
+    final payload = event.toLegacyPayload();
+    cachedPeerData.lastCursorId = payload;
+    parent.target?.cursorModel.updateCursorIdValue(event.id);
   }
 
-  handleCursorData(Map<String, dynamic> evt, {String? peerId}) async {
-    cachedPeerData.cursorDataList.add(evt);
-    await parent.target?.cursorModel.updateCursorData(evt);
+  Future<void> handleCursorShapeEvent(
+    CursorShapeSessionEvent event, {
+    String? peerId,
+  }) async {
+    cachedPeerData.cursorDataList.add(event.toLegacyPayload());
+    await parent.target?.cursorModel.updateCursorShape(event);
     if (peerId != null) {
       _tryNotifyAuthenticatedHandoff(peerId);
     }
   }
 
-  /// Handle the peer info synchronization event based on [evt].
-  handleSyncPeerInfo(
-      Map<String, dynamic> evt, SessionID sessionId, String peerId) async {
-    if (evt['displays'] != null) {
-      cachedPeerData.peerInfo['displays'] = evt['displays'];
-      List<dynamic> displays = json.decode(evt['displays']);
-      List<Display> newDisplays = [];
-      for (int i = 0; i < displays.length; ++i) {
-        newDisplays.add(evtToDisplay(displays[i]));
-      }
+  Future<void> handleSyncPeerInfoEvent(
+      SyncPeerInfoSessionEvent event,
+      SessionID sessionId,
+      String peerId) async {
+    final displayValues = event.displays;
+    if (displayValues != null) {
+      cachedPeerData.peerInfo['displays'] = jsonEncode([
+        for (final display in displayValues) display.toLegacyMap(),
+      ]);
+      final newDisplays = [
+        for (final display in displayValues)
+          _displayFromSessionValue(display),
+      ];
       _pi.displays.value = newDisplays;
       _pi.displaysCount.value = _pi.displays.length;
 
       if (_pi.currentDisplay == kAllDisplayValue) {
-        updateCurDisplay(sessionId);
+        await updateCurDisplay(sessionId);
         // to-do: What if the displays are changed?
       } else {
         if (_pi.currentDisplay >= 0 &&
             _pi.currentDisplay < _pi.displays.length) {
-          updateCurDisplay(sessionId);
+          await updateCurDisplay(sessionId);
         } else {
           if (_pi.displays.isNotEmpty) {
             // Notify to switch display
@@ -2140,32 +2148,23 @@ class FfiModel with ChangeNotifier {
     notifyListeners();
   }
 
-  handlePlatformAdditions(
-      Map<String, dynamic> evt, SessionID sessionId, String peerId) async {
-    final updateData = evt['platform_additions'] as String?;
-    if (updateData == null) {
-      return;
-    }
-
-    if (updateData.isEmpty) {
+  void handlePlatformAdditionsEvent(
+      SyncPlatformAdditionsSessionEvent event) {
+    if (event.clearVirtualDisplays) {
       _pi.platformAdditions.remove(kPlatformAdditionsRustDeskVirtualDisplays);
       _pi.platformAdditions.remove(kPlatformAdditionsAmyuniVirtualDisplays);
     } else {
-      try {
-        final updateJson = json.decode(updateData) as Map<String, dynamic>;
-        for (final key in updateJson.keys) {
-          _pi.platformAdditions[key] = updateJson[key];
-        }
-        if (!updateJson
-            .containsKey(kPlatformAdditionsRustDeskVirtualDisplays)) {
-          _pi.platformAdditions
-              .remove(kPlatformAdditionsRustDeskVirtualDisplays);
-        }
-        if (!updateJson.containsKey(kPlatformAdditionsAmyuniVirtualDisplays)) {
-          _pi.platformAdditions.remove(kPlatformAdditionsAmyuniVirtualDisplays);
-        }
-      } catch (e) {
-        debugPrint('Failed to decode platformAdditions $e');
+      for (final entry in event.updates.entries) {
+        _pi.platformAdditions[entry.key] = entry.value;
+      }
+      if (!event.updates
+          .containsKey(kPlatformAdditionsRustDeskVirtualDisplays)) {
+        _pi.platformAdditions
+            .remove(kPlatformAdditionsRustDeskVirtualDisplays);
+      }
+      if (!event.updates
+          .containsKey(kPlatformAdditionsAmyuniVirtualDisplays)) {
+        _pi.platformAdditions.remove(kPlatformAdditionsAmyuniVirtualDisplays);
       }
     }
 
@@ -2173,13 +2172,16 @@ class FfiModel with ChangeNotifier {
         json.encode(_pi.platformAdditions);
   }
 
-  handleFollowCurrentDisplay(
-      Map<String, dynamic> evt, SessionID sessionId, String peerId) async {
-    if (evt['display_idx'] != null) {
+  Future<void> handleFollowCurrentDisplayValue(
+    int? displayIndex,
+    SessionID sessionId,
+    String peerId,
+  ) async {
+    if (displayIndex != null) {
       if (pi.currentDisplay == kAllDisplayValue) {
         return;
       }
-      _pi.currentDisplay = int.parse(evt['display_idx']);
+      _pi.currentDisplay = displayIndex;
       try {
         CurrentDisplayState.find(peerId).value = _pi.currentDisplay;
       } catch (e) {
@@ -2207,29 +2209,34 @@ class FfiModel with ChangeNotifier {
     }
   }
 
-  updateBlockInputState(Map<String, dynamic> evt, String peerId) {
-    _inputBlocked = evt['input_state'] == 'on';
+  void updateBlockInputStateValue(bool enabled, String peerId) {
+    _inputBlocked = enabled;
     notifyListeners();
     try {
-      BlockInputState.find(peerId).value = evt['input_state'] == 'on';
+      BlockInputState.find(peerId).value = enabled;
     } catch (e) {
       //
     }
   }
 
-  updatePrivacyMode(
-      Map<String, dynamic> evt, SessionID sessionId, String peerId) async {
+  Future<void> updatePrivacyModeSignal(
+    SessionID sessionId,
+    String peerId,
+  ) async {
     notifyListeners();
     try {
-      final isOn = bind.sessionGetToggleOptionSync(
-          sessionId: sessionId, arg: 'privacy-mode');
+      final isOn = LiveSessionSettingsRepository.forSession(
+        sessionId,
+      ).readSync(LiveSessionSettingsRegistry.privacyMode);
       if (isOn) {
-        var privacyModeImpl = await bind.sessionGetOption(
-            sessionId: sessionId, arg: 'privacy-mode-impl-key');
+        final settings = SessionPeerSettingsRepository.forSession(sessionId);
+        var privacyModeImpl = await settings.read(
+          SessionPeerSettingsRegistry.privacyModeImplementation,
+        );
         // For compatibility, version < 1.2.4, the default value is 'privacy_mode_impl_mag'.
         final initDefaultPrivacyMode = 'privacy_mode_impl_mag';
         PrivacyModeState.find(peerId).value =
-            privacyModeImpl ?? initDefaultPrivacyMode;
+            privacyModeImpl.isEmpty ? initDefaultPrivacyMode : privacyModeImpl;
       } else {
         PrivacyModeState.find(peerId).value = '';
       }
@@ -2247,8 +2254,10 @@ class FfiModel with ChangeNotifier {
       if (value) {
         ShowRemoteCursorState.find(id).value = value;
       } else {
-        ShowRemoteCursorState.find(id).value = bind.sessionGetToggleOptionSync(
-            sessionId: sessionId, arg: 'show-remote-cursor');
+        ShowRemoteCursorState.find(id).value =
+            LiveSessionSettingsRepository.forSession(sessionId).readSync(
+          LiveSessionSettingsRegistry.showRemoteCursor,
+        );
       }
     } catch (e) {
       //
@@ -2294,7 +2303,12 @@ class VirtualMouseMode with ChangeNotifier {
     if (s <= 0) return;
     if (s == _virtualMouseScale) return;
     _virtualMouseScale = s;
-    bind.mainSetLocalOption(key: kOptionVirtualMouseScale, value: s.toString());
+    unawaited(
+      remoteAppLocalSettings.write(
+        RemoteAppLocalSettingsRegistry.virtualMouseScale,
+        s,
+      ),
+    );
     notifyListeners();
   }
 
@@ -2307,29 +2321,34 @@ class VirtualMouseMode with ChangeNotifier {
   }
 
   void loadOptions() {
-    _showVirtualMouse =
-        bind.mainGetLocalOption(key: kOptionShowVirtualMouse) == 'Y';
-    _virtualMouseScale = double.tryParse(
-            bind.mainGetLocalOption(key: kOptionVirtualMouseScale)) ??
-        1.0;
-    _showVirtualJoystick =
-        bind.mainGetLocalOption(key: kOptionShowVirtualJoystick) == 'Y';
+    _showVirtualMouse = remoteAppLocalSettings.read(
+      RemoteAppLocalSettingsRegistry.showVirtualMouse,
+    );
+    _virtualMouseScale = remoteAppLocalSettings.read(
+      RemoteAppLocalSettingsRegistry.virtualMouseScale,
+    );
+    _showVirtualJoystick = remoteAppLocalSettings.read(
+      RemoteAppLocalSettingsRegistry.showVirtualJoystick,
+    );
     notifyListeners();
   }
 
   Future<void> toggleVirtualMouse() async {
-    await bind.mainSetLocalOption(
-        key: kOptionShowVirtualMouse, value: showVirtualMouse ? 'N' : 'Y');
-    setShowVirtualMouse(
-        bind.mainGetLocalOption(key: kOptionShowVirtualMouse) == 'Y');
+    final value = !showVirtualMouse;
+    await remoteAppLocalSettings.write(
+      RemoteAppLocalSettingsRegistry.showVirtualMouse,
+      value,
+    );
+    setShowVirtualMouse(value);
   }
 
   Future<void> toggleVirtualJoystick() async {
-    await bind.mainSetLocalOption(
-        key: kOptionShowVirtualJoystick,
-        value: showVirtualJoystick ? 'N' : 'Y');
-    setShowVirtualJoystick(
-        bind.mainGetLocalOption(key: kOptionShowVirtualJoystick) == 'Y');
+    final value = !showVirtualJoystick;
+    await remoteAppLocalSettings.write(
+      RemoteAppLocalSettingsRegistry.showVirtualJoystick,
+      value,
+    );
+    setShowVirtualJoystick(value);
   }
 }
 
@@ -2362,9 +2381,7 @@ class ImageModel with ChangeNotifier {
   late final SessionID sessionId;
 
   bool _useTextureRender = false;
-  bool _androidSurfaceTextureActive = false;
-  int? _androidSurfaceTextureDisplay;
-  Size? _androidSurfaceTextureFrameSize;
+  late final AndroidRenderTargetController _androidRenderTarget;
   bool _interactionGeometryInitialized = false;
 
   WeakReference<FFI> parent;
@@ -2373,24 +2390,63 @@ class ImageModel with ChangeNotifier {
 
   ImageModel(this.parent) {
     sessionId = parent.target!.sessionId;
+    _androidRenderTarget = AndroidRenderTargetController(
+      create: (target) => platformFFI.createAndroidRemoteVideoTexture(
+        display: target.display,
+        width: target.width,
+        height: target.height,
+      ),
+      release: (target, textureId) =>
+          platformFFI.releaseAndroidRemoteVideoTexture(
+        display: target.display,
+        textureId: textureId,
+      ),
+      refresh: (display) =>
+          bind.sessionRefresh(sessionId: sessionId, display: display),
+      onChanged: notifyListeners,
+      onError: (error, stackTrace) {
+        debugPrint('Android render target failed: $error\n$stackTrace');
+      },
+    );
   }
 
   get useTextureRender => _useTextureRender;
-  get androidSurfaceTextureActive => _androidSurfaceTextureActive;
+  AndroidRenderTargetSnapshot get androidRenderTarget =>
+      _androidRenderTarget.snapshot;
+  int get androidRenderTargetEpoch => _androidRenderTarget.intentEpoch;
+  get androidSurfaceTextureActive =>
+      _androidRenderTarget.snapshot.canRenderTexture;
   Size? get renderFrameSize => remoteRenderableFrameSize(
         softwareFrameSize: _image == null
             ? null
             : Size(_image!.width.toDouble(), _image!.height.toDouble()),
-        androidTextureActive: _androidSurfaceTextureActive &&
-            _androidSurfaceTextureDisplay ==
+        androidTextureActive: _androidRenderTarget.snapshot.canRenderTexture &&
+            _androidRenderTarget.snapshot.target?.display ==
                 parent.target?.ffiModel.pi.currentDisplay,
-        androidTextureFrameSize: _androidSurfaceTextureFrameSize,
+        androidTextureFrameSize: _androidRenderTarget.snapshot.target == null
+            ? null
+            : Size(
+                _androidRenderTarget.snapshot.target!.width.toDouble(),
+                _androidRenderTarget.snapshot.target!.height.toDouble(),
+              ),
       );
   bool get hasRenderableFrame => renderFrameSize != null;
 
   addCallbackOnFirstImage(Function(String) cb) => callbacksOnFirstImage.add(cb);
 
-  clearImage() => _image = null;
+  void clearImage() => _publishImage(null);
+
+  void _publishImage(ui.Image? image) {
+    final previous = _image;
+    if (identical(previous, image)) return;
+    _image = image;
+    notifyListeners();
+    if (previous != null) {
+      SchedulerBinding.instance.addPostFrameCallback(
+        (_) => previous.dispose(),
+      );
+    }
+  }
 
   bool _webDecodingRgba = false;
   final List<Uint8List> _webRgbaList = List.empty(growable: true);
@@ -2446,16 +2502,13 @@ class ImageModel with ChangeNotifier {
       }
       await _ensureInteractionGeometry();
     }
-    _image?.dispose();
-    _image = image;
     if (image == null) {
-      _androidSurfaceTextureActive = false;
-      _androidSurfaceTextureDisplay = null;
-      _androidSurfaceTextureFrameSize = null;
+      _publishImage(null);
+      await _androidRenderTarget.retire();
       _interactionGeometryInitialized = false;
     } else {
       parent.target?.canvasModel.tryApplyPendingMobileCursorFocus();
-      notifyListeners();
+      _publishImage(image);
     }
   }
 
@@ -2472,18 +2525,23 @@ class ImageModel with ChangeNotifier {
     if (rect == null || rect.width <= 0 || rect.height <= 0) {
       return;
     }
-    final frameSize = Size(rect.width, rect.height);
-    final changed = !_androidSurfaceTextureActive ||
-        _androidSurfaceTextureDisplay != display ||
-        _androidSurfaceTextureFrameSize != frameSize;
-    _androidSurfaceTextureActive = true;
-    _androidSurfaceTextureDisplay = display;
-    _androidSurfaceTextureFrameSize = frameSize;
-    await _ensureInteractionGeometry();
-    ffi.canvasModel.tryApplyPendingMobileCursorFocus();
-    if (changed) {
-      notifyListeners();
+    final target = _androidRenderTarget.snapshot.target;
+    if (_androidRenderTarget.snapshot.phase != AndroidRenderTargetPhase.ready ||
+        target == null ||
+        target.display != display ||
+        target.width != rect.width.toInt() ||
+        target.height != rect.height.toInt()) {
+      return;
     }
+    await _ensureInteractionGeometry();
+    final changed = _androidRenderTarget.producerFrame(
+      display: display,
+      width: rect.width.toInt(),
+      height: rect.height.toInt(),
+      active: true,
+    );
+    if (!changed) return;
+    ffi.canvasModel.tryApplyPendingMobileCursorFocus();
   }
 
   Future<void> _ensureInteractionGeometry() async {
@@ -2519,9 +2577,7 @@ class ImageModel with ChangeNotifier {
     _useTextureRender =
         (isDesktop || isAndroid) && bind.mainGetUseTextureRender();
     if (!_useTextureRender) {
-      _androidSurfaceTextureActive = false;
-      _androidSurfaceTextureDisplay = null;
-      _androidSurfaceTextureFrameSize = null;
+      unawaited(_androidRenderTarget.retire());
     }
     if (preValue != _useTextureRender) {
       notifyListeners();
@@ -2531,31 +2587,36 @@ class ImageModel with ChangeNotifier {
   setUseTextureRender(bool value) {
     _useTextureRender = value;
     if (!value) {
-      _androidSurfaceTextureActive = false;
-      _androidSurfaceTextureDisplay = null;
-      _androidSurfaceTextureFrameSize = null;
+      unawaited(_androidRenderTarget.retire());
     }
     notifyListeners();
   }
 
   setAndroidSurfaceTextureActive(bool value) {
-    final changed = _androidSurfaceTextureActive != value ||
-        (!value && (_androidSurfaceTextureDisplay != null ||
-            _androidSurfaceTextureFrameSize != null));
-    _androidSurfaceTextureActive = value;
     if (!value) {
-      _androidSurfaceTextureDisplay = null;
-      _androidSurfaceTextureFrameSize = null;
+      _androidRenderTarget.producerFrame(
+        display: -1,
+        width: 0,
+        height: 0,
+        active: false,
+      );
     }
-    if (changed) notifyListeners();
   }
 
+  Future<void> requireAndroidTextureTarget(
+    AndroidTextureTarget? target, {
+    int? intentEpoch,
+  }) =>
+      target == null
+          ? _androidRenderTarget.retire(intentEpoch: intentEpoch)
+          : _androidRenderTarget.requireTarget(
+              target,
+              intentEpoch: intentEpoch,
+            );
+
   void disposeImage() {
-    _image?.dispose();
-    _image = null;
-    _androidSurfaceTextureActive = false;
-    _androidSurfaceTextureDisplay = null;
-    _androidSurfaceTextureFrameSize = null;
+    _publishImage(null);
+    unawaited(_androidRenderTarget.retire());
     _interactionGeometryInitialized = false;
   }
 }
@@ -4496,17 +4557,13 @@ class CursorModel with ChangeNotifier {
     _images.clear();
   }
 
-  updateCursorData(Map<String, dynamic> evt) async {
-    final id = evt['id']?.toString();
-    if (id == null || id.isEmpty) {
-      return;
-    }
-    final hotx = double.parse(evt['hotx']);
-    final hoty = double.parse(evt['hoty']);
-    final width = int.parse(evt['width']);
-    final height = int.parse(evt['height']);
-    List<dynamic> colors = json.decode(evt['colors']);
-    final rgba = Uint8List.fromList(colors.map((s) => s as int).toList());
+  Future<void> updateCursorShape(CursorShapeSessionEvent event) async {
+    final id = event.id;
+    final hotx = event.hotx;
+    final hoty = event.hoty;
+    final width = event.width;
+    final height = event.height;
+    final rgba = Uint8List.fromList(event.colors);
     final image = await img.decodeImageFromPixels(
         rgba, width, height, ui.PixelFormat.rgba8888);
     if (image == null) {
@@ -4586,11 +4643,7 @@ class CursorModel with ChangeNotifier {
     }
   }
 
-  updateCursorId(Map<String, dynamic> evt) {
-    final id = evt['id']?.toString();
-    if (id == null || id.isEmpty) {
-      return;
-    }
+  void updateCursorIdValue(String id) {
     _id = id;
     if (!_updateCurData()) {
       debugPrint(
@@ -4598,14 +4651,17 @@ class CursorModel with ChangeNotifier {
     }
   }
 
-  /// Update the cursor position.
-  updateCursorPosition(Map<String, dynamic> evt, String id) async {
+  Future<void> updateCursorPositionValue(
+    double x,
+    double y,
+    String id,
+  ) async {
     if (!isConnIn2Secs()) {
       gotMouseControl = false;
       _lastPeerMouse = DateTime.now();
     }
-    _x = double.parse(evt['x']);
-    _y = double.parse(evt['y']);
+    _x = x;
+    _y = y;
     _hasRemotePosition = true;
     try {
       RemoteCursorMovedState.find(id).value = true;
@@ -4849,10 +4905,10 @@ class QualityMonitorModel with ChangeNotifier {
     }
     _details = details;
     notifyListeners();
-    await bind.sessionPeerOption(
-        sessionId: sessionId,
-        name: kOptionQualityMonitorDetails,
-        value: details);
+    await SessionPeerSettingsRepository.forSession(sessionId).write(
+      SessionPeerSettingsRegistry.qualityMonitorDetails,
+      details,
+    );
   }
 
   String? _directLabel(dynamic direct) {
@@ -4931,7 +4987,12 @@ class QualityMonitorModel with ChangeNotifier {
     final value = streamType?.toString();
     final connectionType = value == null || value.isEmpty ? null : value;
     final directLabel = _directLabel(direct);
-    final transportReset = _data.clearQuicTransportMetrics();
+    final connectionChanged = _data.connectionType != connectionType;
+    final isQuicTransport =
+        connectionType?.toUpperCase().contains('QUIC') == true;
+    final transportReset = connectionChanged || !isQuicTransport
+        ? _data.clearQuicTransportMetrics()
+        : false;
     if (_data.connectionType == connectionType &&
         _data.direct == directLabel &&
         !transportReset) {
@@ -4949,10 +5010,10 @@ class QualityMonitorModel with ChangeNotifier {
       return;
     }
     _floatingPosition = null;
-    await bind.sessionPeerOption(
-        sessionId: sessionId,
-        name: kOptionQualityMonitorFloatingPosition,
-        value: '');
+    await SessionPeerSettingsRepository.forSession(sessionId).write(
+      SessionPeerSettingsRegistry.qualityMonitorFloatingPosition,
+      '',
+    );
     notifyListeners();
   }
 
@@ -4967,12 +5028,15 @@ class QualityMonitorModel with ChangeNotifier {
     }
     if (!persist) return;
     _floatingPositionStoreTimer?.cancel();
+    final settings = SessionPeerSettingsRepository.forSession(sessionId);
     _floatingPositionStoreTimer =
         Timer(const Duration(milliseconds: 300), () {
-      bind.sessionPeerOption(
-          sessionId: sessionId,
-          name: kOptionQualityMonitorFloatingPosition,
-          value: _formatFloatingPosition(rounded));
+      unawaited(
+        settings.write(
+          SessionPeerSettingsRegistry.qualityMonitorFloatingPosition,
+          _formatFloatingPosition(rounded),
+        ),
+      );
     });
   }
 
@@ -4982,10 +5046,10 @@ class QualityMonitorModel with ChangeNotifier {
     final sessionId = parent?.target?.sessionId;
     final position = _floatingPosition;
     if (sessionId == null || position == null) return;
-    await bind.sessionPeerOption(
-        sessionId: sessionId,
-        name: kOptionQualityMonitorFloatingPosition,
-        value: _formatFloatingPosition(position));
+    await SessionPeerSettingsRepository.forSession(sessionId).write(
+      SessionPeerSettingsRegistry.qualityMonitorFloatingPosition,
+      _formatFloatingPosition(position),
+    );
   }
 
   void updateFloatingSize(Size size, {bool persist = true}) {
@@ -5005,12 +5069,15 @@ class QualityMonitorModel with ChangeNotifier {
     }
     if (!persist) return;
     _floatingSizeStoreTimer?.cancel();
+    final settings = SessionPeerSettingsRepository.forSession(sessionId);
     _floatingSizeStoreTimer =
         Timer(const Duration(milliseconds: 300), () {
-      bind.sessionPeerOption(
-          sessionId: sessionId,
-          name: kOptionQualityMonitorFloatingSize,
-          value: _formatFloatingSize(rounded));
+      unawaited(
+        settings.write(
+          SessionPeerSettingsRegistry.qualityMonitorFloatingSize,
+          _formatFloatingSize(rounded),
+        ),
+      );
     });
   }
 
@@ -5020,33 +5087,32 @@ class QualityMonitorModel with ChangeNotifier {
     final sessionId = parent?.target?.sessionId;
     final size = _floatingSize;
     if (sessionId == null || size == null) return;
-    await bind.sessionPeerOption(
-        sessionId: sessionId,
-        name: kOptionQualityMonitorFloatingSize,
-        value: _formatFloatingSize(size));
+    await SessionPeerSettingsRepository.forSession(sessionId).write(
+      SessionPeerSettingsRegistry.qualityMonitorFloatingSize,
+      _formatFloatingSize(size),
+    );
   }
 
   checkShowQualityMonitor(SessionID sessionId) async {
     final dataReset = _resetDataForSession(sessionId);
-    final show = await bind.sessionGetToggleOption(
-            sessionId: sessionId, arg: 'show-quality-monitor') ==
-        true;
-    final position = normalizeQualityMonitorPosition(
-        await bind.sessionGetOption(
-                sessionId: sessionId, arg: kOptionQualityMonitorPosition) ??
-            '');
-    final details = normalizeQualityMonitorDetails(
-        await bind.sessionGetOption(
-                sessionId: sessionId, arg: kOptionQualityMonitorDetails) ??
-            '');
+    final settings = SessionPeerSettingsRepository.forSession(sessionId);
+    final show = await LiveSessionSettingsRepository.forSession(
+      sessionId,
+    ).read(LiveSessionSettingsRegistry.showQualityMonitor);
+    final position =
+        await settings.read(SessionPeerSettingsRegistry.qualityMonitorPosition);
+    final details =
+        await settings.read(SessionPeerSettingsRegistry.qualityMonitorDetails);
     final floatingPosition = _parseFloatingPosition(
-        await bind.sessionGetOption(
-                sessionId: sessionId,
-                arg: kOptionQualityMonitorFloatingPosition) ??
-            '');
-    final floatingSize = _parseFloatingSize(await bind.sessionGetOption(
-            sessionId: sessionId, arg: kOptionQualityMonitorFloatingSize) ??
-        '');
+      await settings.read(
+        SessionPeerSettingsRegistry.qualityMonitorFloatingPosition,
+      ),
+    );
+    final floatingSize = _parseFloatingSize(
+      await settings.read(
+        SessionPeerSettingsRegistry.qualityMonitorFloatingSize,
+      ),
+    );
     final hostVersion = _hostVersion();
     final clientVersion = await _clientVersion();
     final showChanged = _show != show;
@@ -5107,10 +5173,8 @@ class QualityMonitorModel with ChangeNotifier {
     return Size(width, height);
   }
 
-  String? _displayMetricFromMap(String value) {
-    if (value.isEmpty) return null;
-    final values = jsonDecode(value) as Map<String, dynamic>;
-    if (values.isEmpty) return null;
+  String? _displayMetricFromValues(Map<String, String>? values) {
+    if (values == null || values.isEmpty) return null;
     final pi = parent?.target?.ffiModel.pi;
     if (pi != null) {
       final currentDisplay = pi.currentDisplay;
@@ -5155,8 +5219,9 @@ class QualityMonitorModel with ChangeNotifier {
     return formatted.isEmpty ? null : formatted.join(' ');
   }
 
-  updateQualityStatus(Map<String, dynamic> evt) {
+  void updateQualityStatusEvent(QualityStatusSessionEvent event) {
     try {
+      final evt = event.values;
       String? eventString(String key) {
         final value = evt[key];
         return value is String && value.isNotEmpty ? value : null;
@@ -5164,10 +5229,12 @@ class QualityMonitorModel with ChangeNotifier {
 
       if (evt.containsKey('connection_type')) {
         final connectionType = eventString('connection_type');
-        if (_data.connectionType != connectionType) {
-          _data.clearQuicTransportMetrics();
+        if (connectionType != null) {
+          if (_data.connectionType != connectionType) {
+            _data.clearQuicTransportMetrics();
+          }
+          _data.connectionType = connectionType;
         }
-        _data.connectionType = connectionType;
       }
       final isQuicTransport = _data.isQuicTransport;
       if (!isQuicTransport) {
@@ -5175,16 +5242,17 @@ class QualityMonitorModel with ChangeNotifier {
       }
       void updateTransportMetric(
           String key, void Function(String? value) update) {
-        if (evt.containsKey(key)) {
-          update(isQuicTransport ? eventString(key) : null);
+        final value = eventString(key);
+        if (isQuicTransport && value != null) {
+          update(value);
         }
       }
 
       if (evt.containsKey('speed') && (evt['speed'] as String).isNotEmpty) {
         _data.speed = evt['speed'];
       }
-      if (evt.containsKey('fps') && (evt['fps'] as String).isNotEmpty) {
-        final fps = jsonDecode(evt['fps']) as Map<String, dynamic>;
+      final fps = event.displayMap('fps');
+      if (fps != null && fps.isNotEmpty) {
         final pi = parent?.target?.ffiModel.pi;
         if (pi != null) {
           final currentDisplay = pi.currentDisplay;
@@ -5292,15 +5360,20 @@ class QualityMonitorModel with ChangeNotifier {
           (evt['encoder_input'] as String).isNotEmpty) {
         _data.encoderInput = evt['encoder_input'];
       }
-      if (evt.containsKey('decode_fps')) {
-        _data.decodeFps = _displayMetricFromMap(evt['decode_fps'] as String);
+      if (event.contains('decode_fps')) {
+        _data.decodeFps = _displayMetricFromValues(
+          event.displayMap('decode_fps'),
+        );
       }
-      if (evt.containsKey('video_queue')) {
-        _data.videoQueue = _displayMetricFromMap(evt['video_queue'] as String);
+      if (event.contains('video_queue')) {
+        _data.videoQueue = _displayMetricFromValues(
+          event.displayMap('video_queue'),
+        );
       }
-      if (evt.containsKey('frame_resolution')) {
-        _data.frameResolution =
-            _displayMetricFromMap(evt['frame_resolution'] as String);
+      if (event.contains('frame_resolution')) {
+        _data.frameResolution = _displayMetricFromValues(
+          event.displayMap('frame_resolution'),
+        );
       }
       if (evt.containsKey('video_threads') &&
           (evt['video_threads'] as String).isNotEmpty) {
@@ -5322,35 +5395,35 @@ class QualityMonitorModel with ChangeNotifier {
           (evt['auto_fps'] as String).isNotEmpty) {
         _data.autoFps = evt['auto_fps'];
       }
-      if (evt.containsKey('video_progress') &&
-          (evt['video_progress'] as String).isNotEmpty) {
-        _data.videoProgress =
-            _displayMetricFromMap(evt['video_progress'] as String);
+      if (event.contains('video_progress')) {
+        _data.videoProgress = _displayMetricFromValues(
+          event.displayMap('video_progress'),
+        );
       }
-      if (evt.containsKey('video_dropped') &&
-          (evt['video_dropped'] as String).isNotEmpty) {
-        _data.videoDropped =
-            _displayMetricFromMap(evt['video_dropped'] as String);
+      if (event.contains('video_dropped')) {
+        _data.videoDropped = _displayMetricFromValues(
+          event.displayMap('video_dropped'),
+        );
       }
-      if (evt.containsKey('video_decode_time_us') &&
-          (evt['video_decode_time_us'] as String).isNotEmpty) {
-        _data.videoDecodeTimeUs =
-            _displayMetricFromMap(evt['video_decode_time_us'] as String);
+      if (event.contains('video_decode_time_us')) {
+        _data.videoDecodeTimeUs = _displayMetricFromValues(
+          event.displayMap('video_decode_time_us'),
+        );
       }
-      if (evt.containsKey('video_render_submit_time_us') &&
-          (evt['video_render_submit_time_us'] as String).isNotEmpty) {
-        _data.videoRenderSubmitTimeUs = _displayMetricFromMap(
-            evt['video_render_submit_time_us'] as String);
+      if (event.contains('video_render_submit_time_us')) {
+        _data.videoRenderSubmitTimeUs = _displayMetricFromValues(
+          event.displayMap('video_render_submit_time_us'),
+        );
       }
-      if (evt.containsKey('video_feedback_queue') &&
-          (evt['video_feedback_queue'] as String).isNotEmpty) {
-        _data.videoFeedbackQueue =
-            _displayMetricFromMap(evt['video_feedback_queue'] as String);
+      if (event.contains('video_feedback_queue')) {
+        _data.videoFeedbackQueue = _displayMetricFromValues(
+          event.displayMap('video_feedback_queue'),
+        );
       }
-      if (evt.containsKey('display_refresh_millihz') &&
-          (evt['display_refresh_millihz'] as String).isNotEmpty) {
-        final millihz = _displayMetricFromMap(
-            evt['display_refresh_millihz'] as String);
+      if (event.contains('display_refresh_millihz')) {
+        final millihz = _displayMetricFromValues(
+          event.displayMap('display_refresh_millihz'),
+        );
         _data.displayRefresh = _formatDisplayRefresh(millihz);
       }
       if (evt.containsKey('video_delivery_phase') &&
@@ -5475,9 +5548,8 @@ class FFI {
   var id = '';
   var version = '';
   var connType = ConnType.defaultConn;
-  final _sessionLifecycle = SessionLifecycle();
-  Future<void>? _closeFuture;
-  bool get closed => _sessionLifecycle.isClosed;
+  late SessionHandle<EventToUI> _sessionHandle;
+  bool get closed => _sessionHandle.isClosed;
   int? hostWindowId;
   Future<void> Function(FFI ffi, String peerId)? onAuthenticated;
 
@@ -5508,13 +5580,12 @@ class FFI {
 
   // Terminal model registry for multiple terminals
   final Map<int, TerminalModel> _terminalModels = {};
-  int? _androidSessionGeneration;
-
   // Getter for terminal models
   Map<int, TerminalModel> get terminalModels => _terminalModels;
 
   FFI(SessionID? sId) {
     sessionId = sId ?? (isDesktop ? Uuid().v4obj() : _constSessionId);
+    _sessionHandle = _newSessionHandle();
     imageModel = ImageModel(WeakReference(this));
     ffiModel = FfiModel(WeakReference(this));
     cursorModel = CursorModel(WeakReference(this));
@@ -5543,6 +5614,16 @@ class FFI {
     lanPeersModel = Peers(
         name: PeersModelName.lan, loadEvent: LoadEvent.lan, getInitPeers: null);
   }
+
+  SessionHandle<EventToUI> _newSessionHandle() => SessionHandle<EventToUI>(
+    sessionId: sessionId,
+    closeNative: () => bind.sessionClose(sessionId: sessionId),
+    releasePlatformLease: isAndroid
+        ? (generation) => AndroidVpnSessionCoordinator.instance.release(
+            generation: generation,
+          )
+        : null,
+  );
 
   /// Mobile reuse FFI
   void mobileReset() {
@@ -5574,143 +5655,152 @@ class FFI {
     int? hostWindowId,
     String? transferSourceSessionId,
   }) async {
-    final activeClose = _closeFuture;
-    if (activeClose != null) {
-      await activeClose;
+    if (!_sessionHandle.isPristine) {
+      final canReplace = await _sessionHandle.prepareForReplacement(
+        cleanupClosedSession: isMobile ? _cleanupMobileSessionState : null,
+      );
+      if (!canReplace) {
+        throw StateError('Previous remote session is not fully closed');
+      }
+      _sessionHandle = _newSessionHandle();
     }
     this.hostWindowId = hostWindowId;
-    final sessionGeneration = _sessionLifecycle.beginStart();
     if (isMobile) mobileReset();
-    assert(
-        (!(isPortForward && isViewCamera)) &&
-            (!(isViewCamera && isPortForward)) &&
-            (!(isPortForward && isFileTransfer)) &&
-            (!(isTerminal && isFileTransfer)) &&
-            (!(isTerminal && isViewCamera)) &&
-            (!(isTerminal && isPortForward)),
-        'more than one connect type');
-    if (isFileTransfer) {
-      connType = ConnType.fileTransfer;
-    } else if (isViewCamera) {
-      connType = ConnType.viewCamera;
-    } else if (isPortForward) {
-      connType = ConnType.portForward;
-    } else if (isTerminal) {
-      connType = ConnType.terminal;
-    } else {
+    final sessionKind = SessionKind.fromLegacyFlags(
+      isFileTransfer: isFileTransfer,
+      isViewCamera: isViewCamera,
+      isPortForward: isPortForward,
+      isRdp: isRdp,
+      isTerminal: isTerminal,
+    );
+    connType = switch (sessionKind) {
+      SessionKind.remoteDesktop => ConnType.defaultConn,
+      SessionKind.fileTransfer => ConnType.fileTransfer,
+      SessionKind.viewCamera => ConnType.viewCamera,
+      SessionKind.portForward => ConnType.portForward,
+      SessionKind.rdp => ConnType.portForward,
+      SessionKind.terminal => ConnType.terminal,
+    };
+    if (sessionKind == SessionKind.remoteDesktop) {
       chatModel.resetClientMode();
-      connType = ConnType.defaultConn;
       canvasModel.id = id;
       imageModel.id = id;
       cursorModel.peerId = id;
     }
 
-    if (isAndroid) {
-      _androidSessionGeneration = null;
-      final attached = await AndroidVpnSessionCoordinator.instance.attach(
-        id,
-        sessionId.toString(),
-      );
-      if (!attached) {
-        _sessionLifecycle.failed(sessionGeneration);
-        throw StateError('Failed to protect the outgoing Android session');
-      }
-      _androidSessionGeneration =
-          AndroidVpnSessionCoordinator.instance.activeSessionGeneration;
-    }
-
     final isNewPeer = tabWindowId == null;
-    // If tabWindowId != null, this session is a "tab -> window" one.
-    // Else this session is a new one.
-    if (isNewPeer && !attachExisting) {
-      final addRes = isMobile
-          ? await bind.sessionAddAsync(
-              sessionId: sessionId,
-              id: id,
-              isFileTransfer: isFileTransfer,
-              isViewCamera: isViewCamera,
-              isPortForward: isPortForward,
-              isRdp: isRdp,
-              isTerminal: isTerminal,
-              switchUuid: switchUuid ?? '',
-              forceRelay: forceRelay ?? false,
-              password: password ?? '',
-              isSharedPassword: isSharedPassword ?? false,
-              connToken: connToken,
-            )
-          : bind.sessionAddSync(
-              sessionId: sessionId,
-              id: id,
-              isFileTransfer: isFileTransfer,
-              isViewCamera: isViewCamera,
-              isPortForward: isPortForward,
-              isRdp: isRdp,
-              isTerminal: isTerminal,
-              switchUuid: switchUuid ?? '',
-              forceRelay: forceRelay ?? false,
-              password: password ?? '',
-              isSharedPassword: isSharedPassword ?? false,
-              connToken: connToken,
+    final lease = await _sessionHandle.start(
+      acquirePlatformLease: isAndroid
+          ? () async {
+              final coordinator = AndroidVpnSessionCoordinator.instance;
+              final attached = await coordinator.attach(
+                id,
+                sessionId.toString(),
+              );
+              final generation = coordinator.activeSessionGeneration;
+              if (!attached || generation == null) {
+                throw StateError('Failed to protect the outgoing Android session');
+              }
+              return generation;
+            }
+          : null,
+      addNative: () async {
+        // If tabWindowId is set, this attaches another UI to an existing peer.
+        if (isNewPeer && !attachExisting) {
+          final addRes = isMobile
+              ? await bind.sessionAddAsync(
+                  sessionId: sessionId,
+                  id: id,
+                  isFileTransfer: isFileTransfer,
+                  isViewCamera: isViewCamera,
+                  isPortForward: isPortForward,
+                  isRdp: isRdp,
+                  isTerminal: isTerminal,
+                  switchUuid: switchUuid ?? '',
+                  forceRelay: forceRelay ?? false,
+                  password: password ?? '',
+                  isSharedPassword: isSharedPassword ?? false,
+                  connToken: connToken,
+                )
+              : bind.sessionAddSync(
+                  sessionId: sessionId,
+                  id: id,
+                  isFileTransfer: isFileTransfer,
+                  isViewCamera: isViewCamera,
+                  isPortForward: isPortForward,
+                  isRdp: isRdp,
+                  isTerminal: isTerminal,
+                  switchUuid: switchUuid ?? '',
+                  forceRelay: forceRelay ?? false,
+                  password: password ?? '',
+                  isSharedPassword: isSharedPassword ?? false,
+                  connToken: connToken,
+                );
+          if (addRes.isNotEmpty) {
+            throw StateError(addRes);
+          }
+        } else if (display != null) {
+          if (displays == null) {
+            throw StateError(
+              'Cannot attach display $display without a display set',
             );
-      if (addRes.isNotEmpty) {
-        _sessionLifecycle.failed(sessionGeneration);
-        throw StateError(addRes);
-      }
-      if (!_sessionLifecycle.accepts(sessionGeneration)) {
-        await bind.sessionClose(sessionId: sessionId);
-        return;
-      }
-    } else if (display != null) {
-      if (displays == null) {
-        debugPrint(
-            'Unreachable, failed to add existed session to $id, the displays is null while display is $display');
-        return;
-      }
-      final addRes = bind.sessionAddExistedSync(
-          id: id,
+          }
+          final addRes = bind.sessionAddExistedSync(
+            id: id,
+            sessionId: sessionId,
+            displays: Int32List.fromList(displays),
+            isViewCamera: isViewCamera,
+          );
+          if (addRes.isNotEmpty) {
+            throw StateError(addRes);
+          }
+          ffiModel.pi.currentDisplay = display;
+        }
+      },
+      prepareEvents: () async {
+        if (isDesktop &&
+            (connType == ConnType.defaultConn ||
+                connType == ConnType.viewCamera)) {
+          textureModel.updateCurrentDisplay(display ?? 0);
+        }
+        if (isDesktop) {
+          inputModel.updateTrackpadSpeed();
+        }
+      },
+      startEvents: () {
+        if (isNewPeer || display == null || displays == null) {
+          return bind.sessionStart(sessionId: sessionId, id: id);
+        }
+        return bind.sessionStartWithDisplays(
           sessionId: sessionId,
+          id: id,
           displays: Int32List.fromList(displays),
-          isViewCamera: isViewCamera);
-      if (addRes != '') {
-        debugPrint(
-            'Unreachable, failed to add existed session to $id, $addRes');
-        return;
-      }
-      ffiModel.pi.currentDisplay = display;
-    }
-    if (isDesktop && connType == ConnType.defaultConn) {
-      textureModel.updateCurrentDisplay(display ?? 0);
-    }
-    // FIXME: separate cameras displays or shift all indices.
-    if (isDesktop && connType == ConnType.viewCamera) {
-      // FIXME: currently the default 0 is not used.
-      textureModel.updateCurrentDisplay(display ?? 0);
-    }
-
-    if (isDesktop) {
-      inputModel.updateTrackpadSpeed();
-    }
-
-    // CAUTION: `sessionStart()` and `sessionStartWithDisplays()` are an async functions.
-    // Though the stream is returned immediately, the stream may not be ready.
-    // Any operations that depend on the stream should be carefully handled.
-    late final Stream<EventToUI> stream;
-    if (isNewPeer || display == null || displays == null) {
-      stream = bind.sessionStart(sessionId: sessionId, id: id);
-    } else {
-      // We have to put displays in `sessionStart()` to make sure the stream is ready
-      // and then the displays' capturing requests can be sent.
-      stream = bind.sessionStartWithDisplays(
-          sessionId: sessionId, id: id, displays: Int32List.fromList(displays));
-    }
+        );
+      },
+    );
+    if (lease == null) return;
+    final sessionGeneration = lease.generation;
+    final stream = lease.events;
 
     if (isWeb) {
       platformFFI.setRgbaCallback((int display, Uint8List data) {
-        onEvent2UIRgba();
-        imageModel.onRgba(display, data);
+        final frame = Uint8List.fromList(data);
+        unawaited(
+          _sessionHandle.dispatchEvent(
+            sessionGeneration,
+            () async {
+              await onEvent2UIRgba();
+              await imageModel.onRgba(display, frame);
+            },
+            onError: (error, stackTrace) {
+              debugPrint('Web RGBA dispatch failed: $error');
+              debugPrintStack(stackTrace: stackTrace);
+            },
+          ),
+        );
       });
       this.id = id;
-      _sessionLifecycle.connected(sessionGeneration);
+      _sessionHandle.connected(sessionGeneration);
       return;
     }
 
@@ -5730,110 +5820,126 @@ class FFI {
       await bind.sessionRequestNewDisplayInitMsgs(
           sessionId: sessionId, display: ffiModel.pi.currentDisplay);
       if (runAuthenticatedSetup && connType == ConnType.defaultConn) {
-        unawaited(ffiModel.tryUseAllMyDisplaysForTheRemoteSession(id));
+        await ffiModel.tryUseAllMyDisplaysForTheRemoteSession(id);
       }
     }
 
     imageModel.updateUserTextureRender();
     final hasGpuTextureRender = bind.mainHasGpuTextureRender();
     final SimpleWrapper<bool> isToNewWindowNotified = SimpleWrapper(false);
-    // Preserved for the rgba data.
-    stream.listen((message) {
-      if (!_sessionLifecycle.accepts(sessionGeneration)) return;
-      if (tabWindowId != null && !isToNewWindowNotified.value) {
-        // Session is read to be moved to a new window.
-        // Get the cached data and handle the cached data.
-        Future.delayed(Duration.zero, () async {
-          if (!_sessionLifecycle.accepts(sessionGeneration)) return;
-          final args = jsonEncode({
-            'id': id,
-            if (transferSourceSessionId != null)
-              'session_id': transferSourceSessionId
-            else if (display == null)
-              'session_id': sessionId.toString(),
-            'close': display == null,
-          });
-          final cachedData = await DesktopMultiWindow.invokeMethod(
-              tabWindowId, kWindowEventGetCachedSessionData, args);
-          if (cachedData == null) {
-            // unreachable
-            debugPrint('Unreachable, the cached data is empty.');
-            return;
-          }
-          await handleCachedSessionData(cachedData);
-        });
-        isToNewWindowNotified.value = true;
-      }
-      () async {
-        if (message is EventToUI_Event) {
-          if (message.field0 == "close") {
-            _sessionLifecycle.closed(sessionGeneration);
-            debugPrint('Exit session event loop');
-            return;
-          }
+    var streamCloseQueued = false;
+    void reportEventError(Object error, StackTrace stackTrace) {
+      debugPrint('Session event dispatch failed: $error');
+      debugPrintStack(stackTrace: stackTrace);
+    }
 
-          Map<String, dynamic>? event;
-          try {
-            event = json.decode(message.field0);
-          } catch (e) {
-            debugPrint('json.decode fail1(): $e, ${message.field0}');
-          }
-          if (event != null) {
-            await cb(event);
-          }
-        } else if (message is EventToUI_Rgba) {
-          final display = message.field0;
-          if (isAndroid) {
-            imageModel.setAndroidSurfaceTextureActive(false);
-          }
-          // Fetch the image buffer from rust codes.
-          final sz = platformFFI.getRgbaSize(sessionId, display);
-          if (sz == 0) {
-            platformFFI.nextRgba(sessionId, display);
-            return;
-          }
-          final rgba = platformFFI.getRgba(sessionId, display, sz);
-          if (rgba != null) {
-            onEvent2UIRgba();
-            await imageModel.onRgba(display, rgba);
-          } else {
-            platformFFI.nextRgba(sessionId, display);
-          }
-        } else if (message is EventToUI_Texture) {
-          final display = message.field0;
-          final gpuTexture = message.field1;
-          debugPrint(
-              "EventToUI_Texture display:$display, gpuTexture:$gpuTexture");
-          if (gpuTexture && !hasGpuTextureRender) {
-            debugPrint('the gpuTexture is not supported.');
-            return;
-          }
-          if (isAndroid) {
-            await imageModel.onAndroidSurfaceTextureFrame(
-              display,
-              gpuTexture,
-            );
-          }
-          textureModel.setTextureType(display: display, gpuTexture: gpuTexture);
-          onEvent2UIRgba();
+    Future<void> dispatchSessionEvent(Future<void> Function() dispatch) =>
+        _sessionHandle.dispatchEvent(
+          sessionGeneration,
+          dispatch,
+          onError: reportEventError,
+        );
+
+    Future<void> transferSessionToTab() async {
+      final args = jsonEncode({
+        'id': id,
+        if (transferSourceSessionId != null)
+          'session_id': transferSourceSessionId
+        else if (display == null)
+          'session_id': sessionId.toString(),
+        'close': display == null,
+      });
+      final cachedData = await DesktopMultiWindow.invokeMethod(
+        tabWindowId!,
+        kWindowEventGetCachedSessionData,
+        args,
+      );
+      if (cachedData == null) {
+        debugPrint('Unreachable, the cached data is empty.');
+        return;
+      }
+      await handleCachedSessionData(cachedData);
+    }
+
+    Future<void> handleSessionMessage(EventToUI message) async {
+      if (message is EventToUI_Event) {
+        Map<String, dynamic>? event;
+        try {
+          event = json.decode(message.field0);
+        } catch (e) {
+          debugPrint('json.decode fail1(): $e, ${message.field0}');
         }
-      }();
+        if (event != null) await cb(event);
+      } else if (message is EventToUI_Rgba) {
+        final display = message.field0;
+        if (isAndroid) imageModel.setAndroidSurfaceTextureActive(false);
+        final sz = platformFFI.getRgbaSize(sessionId, display);
+        if (sz == 0) {
+          platformFFI.nextRgba(sessionId, display);
+          return;
+        }
+        final rgba = platformFFI.getRgba(sessionId, display, sz);
+        if (rgba != null) {
+          await onEvent2UIRgba();
+          await imageModel.onRgba(display, rgba);
+        } else {
+          platformFFI.nextRgba(sessionId, display);
+        }
+      } else if (message is EventToUI_Texture) {
+        final display = message.field0;
+        final gpuTexture = message.field1;
+        debugPrint(
+          'EventToUI_Texture display:$display, gpuTexture:$gpuTexture',
+        );
+        if (gpuTexture && !hasGpuTextureRender) {
+          debugPrint('the gpuTexture is not supported.');
+          return;
+        }
+        if (isAndroid) {
+          await imageModel.onAndroidSurfaceTextureFrame(display, gpuTexture);
+        }
+        textureModel.setTextureType(display: display, gpuTexture: gpuTexture);
+        await onEvent2UIRgba();
+      }
+    }
+
+    final subscription = stream.listen((message) {
+      if (streamCloseQueued || !_sessionHandle.accepts(sessionGeneration)) {
+        return;
+      }
+      if (message is EventToUI_Event && message.field0 == 'close') {
+        streamCloseQueued = true;
+        unawaited(_sessionHandle.remoteClosedAfterEvents(sessionGeneration));
+        debugPrint('Exit session event loop');
+        return;
+      }
+      if (tabWindowId != null && !isToNewWindowNotified.value) {
+        isToNewWindowNotified.value = true;
+        unawaited(dispatchSessionEvent(transferSessionToTab));
+      }
+      unawaited(dispatchSessionEvent(() => handleSessionMessage(message)));
     });
+    await _sessionHandle.bindSubscription(sessionGeneration, subscription);
+    if (!_sessionHandle.accepts(sessionGeneration)) return;
     // every instance will bind a stream
     this.id = id;
-    _sessionLifecycle.connected(sessionGeneration);
+    _sessionHandle.connected(sessionGeneration);
     if (cachedPeerData != null) {
-      Future.delayed(Duration.zero, () async {
-        if (!_sessionLifecycle.accepts(sessionGeneration)) return;
-        await handleCachedSessionData(
-          cachedPeerData,
-          runAuthenticatedSetup: attachExisting && tabWindowId == null,
+      Future.delayed(Duration.zero, () {
+        if (!_sessionHandle.accepts(sessionGeneration)) return;
+        unawaited(
+          dispatchSessionEvent(
+            () => handleCachedSessionData(
+              cachedPeerData,
+              runAuthenticatedSetup: attachExisting && tabWindowId == null,
+            ),
+          ),
         );
       });
     }
   }
 
-  void onEvent2UIRgba() async {
+  Future<void> onEvent2UIRgba() async {
     if (ffiModel.waitForImageDialogShow.isTrue) {
       ffiModel.waitForImageDialogShow.value = false;
       ffiModel.waitForImageTimer?.cancel();
@@ -5867,45 +5973,40 @@ class FFI {
         sessionId: sessionId, code: code, trustThisDevice: trustThisDevice);
   }
 
+  Future<void> _cleanupMobileSessionState() async {
+    chatModel.close();
+    for (final model in _terminalModels.values) {
+      model.dispose();
+    }
+    _terminalModels.clear();
+    await imageModel.update(null);
+    cursorModel.clear();
+    ffiModel.clear();
+    canvasModel.clear();
+    inputModel.setRelativeMouseMode(false);
+    inputModel.resetModifiers();
+    id = '';
+    debugPrint('mobile session reset for fresh reconnect');
+  }
+
   /// Clear session-scoped state while keeping the mobile page reusable.
   Future<void> resetMobileSessionForReconnect({
     required bool closeSession,
-  }) => _runCloseOperation(() async {
-        final closeGeneration = _sessionLifecycle.beginClose();
-        try {
-          chatModel.close();
-          for (final model in _terminalModels.values) {
-            model.dispose();
-          }
-          _terminalModels.clear();
-          await imageModel.update(null);
-          cursorModel.clear();
-          ffiModel.clear();
-          canvasModel.clear();
-          inputModel.setRelativeMouseMode(false);
-          inputModel.resetModifiers();
-          if (closeSession) {
-            await bind.sessionClose(sessionId: sessionId);
-          }
-          if (isAndroid) {
-            await AndroidVpnSessionCoordinator.instance.release(
-              generation: _androidSessionGeneration,
-            );
-            _androidSessionGeneration = null;
-          }
-          id = '';
-          debugPrint('mobile session reset for fresh reconnect');
-        } finally {
-          _sessionLifecycle.closed(closeGeneration);
-        }
-      });
+  }) => _sessionHandle.close(
+    nativeClosePolicy: closeSession
+        ? NativeSessionClosePolicy.requestClose
+        : NativeSessionClosePolicy.alreadyClosed,
+    cleanup: _cleanupMobileSessionState,
+  );
 
   /// Close the remote session.
   Future<void> close(
       {bool closeSession = true, bool saveCanvasConfig = true}) =>
-      _runCloseOperation(() async {
-        final closeGeneration = _sessionLifecycle.beginClose();
-        try {
+      _sessionHandle.close(
+        nativeClosePolicy: closeSession
+            ? NativeSessionClosePolicy.requestClose
+            : NativeSessionClosePolicy.alreadyClosed,
+        cleanup: () async {
           chatModel.close();
           // Close all terminal models
           for (final model in _terminalModels.values) {
@@ -5932,39 +6033,10 @@ class FFI {
           inputModel.resetModifiers();
           // Dispose relative mouse mode resources to ensure cursor is restored
           inputModel.disposeRelativeMouseMode();
-          if (closeSession) {
-            await bind.sessionClose(sessionId: sessionId);
-          }
-          if (isAndroid) {
-            await AndroidVpnSessionCoordinator.instance.release(
-              generation: _androidSessionGeneration,
-            );
-            _androidSessionGeneration = null;
-          }
           debugPrint('model $id closed');
           id = '';
-        } finally {
-          _sessionLifecycle.closed(closeGeneration);
-        }
-      });
-
-  Future<void> _runCloseOperation(Future<void> Function() operation) {
-    final active = _closeFuture;
-    if (active != null) return active;
-    if (_sessionLifecycle.phase == SessionPhase.closed &&
-        id.isEmpty &&
-        _androidSessionGeneration == null) {
-      return Future<void>.value();
-    }
-    late final Future<void> future;
-    future = operation().whenComplete(() {
-      if (identical(_closeFuture, future)) {
-        _closeFuture = null;
-      }
-    });
-    _closeFuture = future;
-    return future;
-  }
+        },
+      );
 
   void setMethodCallHandler(FMethod callback) {
     platformFFI.setMethodCallHandler(callback);
@@ -5985,13 +6057,11 @@ class FFI {
     _terminalModels.remove(terminalId);
   }
 
-  void routeTerminalResponse(Map<String, dynamic> evt) {
-    final int terminalId = TerminalModel.getTerminalIdFromEvt(evt);
-
+  void routeTerminalResponseEvent(TerminalResponseSessionEvent event) {
     // Route to specific terminal model if it exists
-    final model = _terminalModels[terminalId];
+    final model = _terminalModels[event.terminalId];
     if (model != null) {
-      model.handleTerminalResponse(evt);
+      model.handleTerminalResponseEvent(event);
     }
   }
 }

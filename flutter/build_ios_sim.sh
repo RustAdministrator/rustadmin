@@ -13,10 +13,12 @@ prepare_ios_flutter_build "${RUSTADMIN_IOS_SIMULATOR_PUB_CACHE:-${HOME}/.pub-cac
 SIMULATOR_ARCH="${RUSTADMIN_IOS_SIMULATOR_ARCH:-arm64}"
 case "${SIMULATOR_ARCH}" in
   arm64)
-    bash "${SCRIPT_DIR}/ios_sim_arm64.sh"
+    SIMULATOR_RUST_TARGET="aarch64-apple-ios-sim"
+    SIMULATOR_RUST_SCRIPT="${SCRIPT_DIR}/ios_sim_arm64.sh"
     ;;
   x86_64)
-    bash "${SCRIPT_DIR}/ios_x64.sh"
+    SIMULATOR_RUST_TARGET="x86_64-apple-ios"
+    SIMULATOR_RUST_SCRIPT="${SCRIPT_DIR}/ios_x64.sh"
     ;;
   *)
     echo "error: unsupported RUSTADMIN_IOS_SIMULATOR_ARCH=${SIMULATOR_ARCH}" >&2
@@ -24,6 +26,15 @@ case "${SIMULATOR_ARCH}" in
     exit 1
     ;;
 esac
+
+: "${RUSTDESK_IOS_CARGO_FEATURES:=flutter,hwcodec}"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+python3 "${REPO_DIR}/scripts/platform_profiles.py" check \
+  --profile ios-simulator-package \
+  --wrapper flutter/build_ios_sim.sh \
+  --target "${SIMULATOR_RUST_TARGET}" \
+  --features "${RUSTDESK_IOS_CARGO_FEATURES}"
+bash "${SIMULATOR_RUST_SCRIPT}"
 
 cd "${SCRIPT_DIR}"
 flutter build ios --simulator --debug --config-only

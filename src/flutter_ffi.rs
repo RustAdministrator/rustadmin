@@ -4,7 +4,7 @@ use crate::keyboard::input_source::{change_input_source, get_cur_session_input_s
 use crate::platform::linux::is_x11;
 use crate::{
     client::{self, file_trait::FileManager},
-    common::{make_fd_to_json, make_vec_fd_to_json},
+    common::{make_fd_to_json, make_vec_fd_to_json, PeerSecurityEntry},
     flutter::{
         self, session_add, session_add_existed, session_start_, sessions, try_sync_peer_option,
     },
@@ -2442,10 +2442,10 @@ pub fn main_remove_discovered(id: String) {
     remove_discovered(id);
 }
 
-fn main_broadcast_message(data: &HashMap<&str, &str>) {
+fn main_broadcast_message(data: &HashMap<&str, &str>, include_main: bool) {
     let event = serde_json::ser::to_string(&data).unwrap_or("".to_owned());
     for app in flutter::get_global_event_channels() {
-        if app == flutter::APP_TYPE_MAIN || app == flutter::APP_TYPE_CM {
+        if app == flutter::APP_TYPE_CM || (!include_main && app == flutter::APP_TYPE_MAIN) {
             continue;
         }
         let _res = flutter::push_global_event(&app, event.clone());
@@ -2453,13 +2453,16 @@ fn main_broadcast_message(data: &HashMap<&str, &str>) {
 }
 
 pub fn main_change_theme(dark: String) {
-    main_broadcast_message(&HashMap::from([("name", "theme"), ("dark", &dark)]));
+    main_broadcast_message(&HashMap::from([("name", "theme"), ("dark", &dark)]), false);
     #[cfg(not(any(target_os = "ios")))]
     send_to_cm(&crate::ipc::Data::Theme(dark));
 }
 
 pub fn main_change_language(lang: String) {
-    main_broadcast_message(&HashMap::from([("name", "language"), ("lang", &lang)]));
+    main_broadcast_message(
+        &HashMap::from([("name", "language"), ("lang", &lang)]),
+        false,
+    );
     #[cfg(not(any(target_os = "ios")))]
     send_to_cm(&crate::ipc::Data::Language(lang));
 }
@@ -2469,7 +2472,14 @@ pub fn main_video_save_directory(root: bool) -> SyncReturn<String> {
 }
 
 pub fn main_set_user_default_option(key: String, value: String) {
-    set_user_default_option(key, value);
+    set_user_default_option(key.clone(), value);
+    main_broadcast_message(
+        &HashMap::from([
+            ("name", "user_default_option_changed"),
+            ("key", key.as_str()),
+        ]),
+        true,
+    );
 }
 
 pub fn main_get_user_default_option(key: String) -> SyncReturn<String> {
@@ -2710,16 +2720,40 @@ pub fn main_reset_peer_trust(id: String) -> SyncReturn<bool> {
     SyncReturn(reset)
 }
 
-pub fn main_list_peer_security_entries() -> String {
-    match crate::common::peer_security_entries() {
-        Ok(entries) => serde_json::to_string(&entries).unwrap_or_else(|error| {
-            log::error!("Failed to encode peer security entries: {error}");
-            "[]".to_owned()
-        }),
+fn resolve_peer_security_entries(
+    result: ResultType<Vec<PeerSecurityEntry>>,
+) -> Vec<PeerSecurityEntry> {
+    match result {
+        Ok(entries) => entries,
         Err(error) => {
             log::error!("Failed to list peer security entries: {error}");
-            "[]".to_owned()
+            Vec::new()
         }
+    }
+}
+
+pub fn main_list_peer_security_entries() -> String {
+    serde_json::to_string(&resolve_peer_security_entries(
+        crate::common::peer_security_entries(),
+    ))
+    .unwrap_or_else(|error| {
+        log::error!("Failed to encode peer security entries: {error}");
+        "[]".to_owned()
+    })
+}
+
+pub fn main_list_peer_security_entries_v2() -> Vec<PeerSecurityEntry> {
+    resolve_peer_security_entries(crate::common::peer_security_entries())
+}
+
+#[cfg(test)]
+mod peer_security_bridge_tests {
+    use super::*;
+
+    #[test]
+    fn peer_security_list_failure_is_empty() {
+        let entries = resolve_peer_security_entries(Err(anyhow::anyhow!("test failure")));
+        assert!(entries.is_empty());
     }
 }
 

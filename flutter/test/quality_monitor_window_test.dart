@@ -1,7 +1,12 @@
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/pages/quality_monitor_window.dart';
 import 'package:flutter_hbb/models/model.dart';
+import 'package:flutter_hbb/models/session_event.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+QualityStatusSessionEvent qualityEvent(Map<String, dynamic> values) =>
+    decodeTypedSessionEvent({'name': 'update_quality_status', ...values})
+        as QualityStatusSessionEvent;
 
 void main() {
   test('detached quality monitor snapshot round-trips bounded data', () {
@@ -25,13 +30,15 @@ void main() {
     final model = QualityMonitorModel.detached();
     addTearDown(model.dispose);
 
-    model.updateQualityStatus({
-      'connection_type': 'QUIC/UDP',
-      'transport_mtu': '1360',
-      'transport_rtt_ms': '8',
-      'quic_protocol': 'v4',
-      'quic_reassembly_drops': '7',
-    });
+    model.updateQualityStatusEvent(
+      qualityEvent({
+        'connection_type': 'QUIC/UDP',
+        'transport_mtu': '1360',
+        'transport_rtt_ms': '8',
+        'quic_protocol': 'v4',
+        'quic_reassembly_drops': '7',
+      }),
+    );
     expect(model.data.isQuicTransport, isTrue);
     expect(model.data.quicProtocol, 'v4');
     expect(model.data.quicReassemblyDrops, '7');
@@ -44,15 +51,52 @@ void main() {
     expect(model.data.quicProtocol, isNull);
     expect(model.data.quicReassemblyDrops, isNull);
 
-    model.updateQualityStatus({
-      'connection_type': 'TCP',
-      'transport_mtu': '1360',
-      'quic_protocol': 'v4',
-      'quic_reassembly_drops': '9',
-    });
+    model.updateQualityStatusEvent(
+      qualityEvent({
+        'connection_type': 'TCP',
+        'transport_mtu': '1360',
+        'quic_protocol': 'v4',
+        'quic_reassembly_drops': '9',
+      }),
+    );
     expect(model.data.transportMtu, isNull);
     expect(model.data.quicProtocol, isNull);
     expect(model.data.quicReassemblyDrops, isNull);
+  });
+
+  test('repeated QUIC connection info preserves live transport metrics', () {
+    final model = QualityMonitorModel.detached();
+    addTearDown(model.dispose);
+
+    model.updateQualityStatusEvent(
+      qualityEvent({
+        'connection_type': 'QUIC/UDP',
+        'transport_mtu': '1360',
+        'transport_rtt_ms': '8',
+        'quic_protocol': 'v4',
+        'quic_reassembly_drops': '7',
+      }),
+    );
+    model.updateConnectionInfo('QUIC/UDP', true);
+    model.updateConnectionInfo('QUIC/UDP', true);
+    model.updateQualityStatusEvent(
+      qualityEvent({
+        'connection_type': '',
+        'transport_mtu': '',
+        'transport_rtt_ms': '',
+        'quic_protocol': '',
+        'quic_reassembly_drops': '',
+        'delay': '12',
+      }),
+    );
+
+    expect(model.data.connectionType, 'QUIC/UDP');
+    expect(model.data.transportMtu, '1360');
+    expect(model.data.transportRttMs, '8');
+    expect(model.data.quicProtocol, 'v4');
+    expect(model.data.quicReassemblyDrops, '7');
+    expect(model.data.delay, '12');
+    expect(model.data.direct, 'yes');
   });
 
   test('detached TCP snapshots omit stale QUIC metrics', () {

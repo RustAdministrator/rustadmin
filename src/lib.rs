@@ -1,3 +1,24 @@
+#[cfg(all(
+    target_os = "android",
+    feature = "hwcodec",
+    not(feature = "mediacodec")
+))]
+compile_error!("Android hwcodec builds must enable the mediacodec Cargo feature.");
+#[cfg(all(
+    target_os = "android",
+    feature = "mediacodec",
+    not(feature = "hwcodec")
+))]
+compile_error!("Android mediacodec builds must enable the hwcodec Cargo feature.");
+#[cfg(all(not(target_os = "android"), feature = "mediacodec"))]
+compile_error!("The mediacodec Cargo feature is supported only on Android.");
+#[cfg(all(not(target_os = "windows"), feature = "vram"))]
+compile_error!("The vram Cargo feature is supported only on Windows.");
+#[cfg(all(not(target_os = "linux"), feature = "linux-pkg-config"))]
+compile_error!("The linux-pkg-config Cargo feature is supported only on Linux.");
+#[cfg(all(not(target_os = "macos"), feature = "screencapturekit"))]
+compile_error!("The screencapturekit Cargo feature is supported only on macOS.");
+
 mod keyboard;
 /// cbindgen:ignore
 pub mod platform;

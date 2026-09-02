@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 4 ]]; then
-  echo "usage: $0 <rust-target> <lipo-arch> <platform-id> <platform-name>" >&2
+if [[ $# -ne 6 ]]; then
+  echo "usage: $0 <profile> <wrapper> <rust-target> <lipo-arch> <platform-id> <platform-name>" >&2
   exit 2
 fi
 
-RUST_TARGET="$1"
-LIPO_ARCH="$2"
-EXPECTED_PLATFORM="$3"
-PLATFORM_NAME="$4"
+PROFILE_ID="$1"
+WRAPPER_PATH="$2"
+RUST_TARGET="$3"
+LIPO_ARCH="$4"
+EXPECTED_PLATFORM="$5"
+PLATFORM_NAME="$6"
 SDK_NAME="iphoneos"
 if [[ "${EXPECTED_PLATFORM}" == "7" ]]; then
   SDK_NAME="iphonesimulator"
@@ -20,6 +22,14 @@ export IPHONEOS_DEPLOYMENT_TARGET
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+: "${RUSTDESK_IOS_CARGO_FEATURES:=flutter,hwcodec}"
+
+python3 "${REPO_DIR}/scripts/platform_profiles.py" check \
+  --profile "${PROFILE_ID}" \
+  --wrapper "${WRAPPER_PATH}" \
+  --target "${RUST_TARGET}" \
+  --abi "${LIPO_ARCH}" \
+  --features "${RUSTDESK_IOS_CARGO_FEATURES}"
 
 declare -a CODEC_ROOTS=()
 declare -a CODEC_ROOT_LABELS=()
@@ -185,8 +195,6 @@ if [[ ${#CODEC_ROOTS[@]} -eq 0 ]]; then
   echo "       Set RUSTDESK_IOS_CODEC_ROOT, CMAKE_PREFIX_PATH, or create a local iOS codec prefix." >&2
   exit 1
 fi
-
-: "${RUSTDESK_IOS_CARGO_FEATURES:=flutter,hwcodec}"
 
 find_component_root "libyuv" "include/libyuv/convert.h" "lib/libyuv.a"
 SELECTED_CODEC_ROOT="${FOUND_COMPONENT_ROOT}"

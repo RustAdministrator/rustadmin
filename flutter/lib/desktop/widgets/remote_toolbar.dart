@@ -11,6 +11,9 @@ import 'package:flutter/widgets.dart' as flutter_widgets
 import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/common/widgets/dialog.dart';
 import 'package:flutter_hbb/common/widgets/toolbar.dart';
+import 'package:flutter_hbb/common/remote_toolbar_settings.dart';
+import 'package:flutter_hbb/common/remote_display_settings.dart';
+import 'package:flutter_hbb/common/session_peer_settings.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/desktop/session_tab.dart';
@@ -48,11 +51,8 @@ class ToolbarImagePointerState {
 typedef ToolbarImagePointerHandler = void Function(ToolbarImagePointerState);
 typedef ToolbarWindowPointerHandler = void Function(Offset? position);
 
-const String _kOptionRemoteMenubarOrientation = 'remote-menubar-orientation';
 const String _kRemoteMenubarOrientationHorizontal = 'horizontal';
 const String _kRemoteMenubarOrientationVertical = 'vertical';
-const String _kOptionRemoteMenubarDragX = 'remote-menubar-drag-x';
-const String _kOptionRemoteMenubarDragY = 'remote-menubar-drag-y';
 const double _kRemoteMenubarTopEdgeY = 0.0;
 
 enum _ToolbarMenuId {
@@ -92,15 +92,6 @@ class _ToolbarMenuLifecycleScope extends InheritedWidget {
         verticalToolbar != oldWidget.verticalToolbar ||
         openMenusLeft != oldWidget.openMenusLeft;
   }
-}
-
-int _parseToolbarIntOption(
-  String? raw, {
-  required int defaultValue,
-  required int min,
-  required int max,
-}) {
-  return (int.tryParse(raw ?? '') ?? defaultValue).clamp(min, max);
 }
 
 class _ToolbarOpacityState {
@@ -144,22 +135,9 @@ class _ToolbarOpacityLayer extends StatelessWidget {
   }
 }
 
-int _getToolbarIntDefault(
-  String key, {
-  required int defaultValue,
-  required int min,
-  required int max,
-}) {
-  return _parseToolbarIntOption(
-    bind.mainGetUserDefaultOption(key: key),
-    defaultValue: defaultValue,
-    min: min,
-    max: max,
-  );
-}
-
 class ToolbarState {
   late RxBool _pin;
+  late RemoteToolbarSettingsSnapshot _userDefaults;
 
   RxBool collapse = false.obs;
   RxBool hide = false.obs;
@@ -170,6 +148,7 @@ class ToolbarState {
   bool _isInitializing = false;
 
   ToolbarState() {
+    _userDefaults = remoteToolbarSettings.read();
     _pin = RxBool(false);
     final s = bind.getLocalFlutterOption(k: kOptionRemoteMenubarState);
     if (s.isEmpty) {
@@ -187,37 +166,17 @@ class ToolbarState {
   }
 
   bool get pin => _pin.value;
-  int get revealZonePx => _getToolbarIntDefault(
-        kOptionRemoteToolbarRevealZonePx,
-        defaultValue: kDefaultRemoteToolbarRevealZonePx,
-        min: kMinRemoteToolbarRevealZonePx,
-        max: kMaxRemoteToolbarRevealZonePx,
-      );
-  int get hideDelayMs => _getToolbarIntDefault(
-        kOptionRemoteToolbarHideDelayMs,
-        defaultValue: kDefaultRemoteToolbarHideDelayMs,
-        min: kMinRemoteToolbarHideDelayMs,
-        max: kMaxRemoteToolbarHideDelayMs,
-      );
-  int get pinnedDimOpacityPercent => _getToolbarIntDefault(
-        kOptionRemoteToolbarPinnedOpacityPercent,
-        defaultValue: kDefaultRemoteToolbarPinnedOpacityPercent,
-        min: kMinRemoteToolbarPinnedOpacityPercent,
-        max: kMaxRemoteToolbarPinnedOpacityPercent,
-      );
-  double get pinnedDimOpacity => pinnedDimOpacityPercent.toDouble() / 100.0;
-  int get pinnedDimDelayMs => _getToolbarIntDefault(
-        kOptionRemoteToolbarPinnedDimDelayMs,
-        defaultValue: kDefaultRemoteToolbarPinnedDimDelayMs,
-        min: kMinRemoteToolbarPinnedDimDelayMs,
-        max: kMaxRemoteToolbarPinnedDimDelayMs,
-      );
-  int get pinnedDimDurationMs => _getToolbarIntDefault(
-        kOptionRemoteToolbarPinnedDimDurationMs,
-        defaultValue: kDefaultRemoteToolbarPinnedDimDurationMs,
-        min: kMinRemoteToolbarPinnedDimDurationMs,
-        max: kMaxRemoteToolbarPinnedDimDurationMs,
-      );
+  int get revealZonePx => _userDefaults.revealZonePx;
+  int get hideDelayMs => _userDefaults.hideDelayMs;
+  int get pinnedDimOpacityPercent => _userDefaults.pinnedOpacityPercent;
+  double get pinnedDimOpacity => _userDefaults.pinnedOpacity;
+  int get pinnedDimDelayMs => _userDefaults.pinnedDimDelayMs;
+  int get pinnedDimDurationMs => _userDefaults.pinnedDimDurationMs;
+  RemoteToolbarSettingsSnapshot get userDefaults => _userDefaults;
+
+  void applyUserDefaults(RemoteToolbarSettingsSnapshot snapshot) {
+    _userDefaults = snapshot;
+  }
 
   /// Initialize all toolbar states from session options.
   /// This should be called once when the toolbar is first created.
@@ -226,18 +185,17 @@ class ToolbarState {
     _isInitializing = true;
 
     try {
+      final settings = SessionPeerSettingsRepository.forSession(sessionId);
+      final liveSettings = LiveSessionSettingsRepository.forSession(sessionId);
       // Load both states in parallel for better performance
       final results = await Future.wait<Object?>([
-        bind.sessionGetToggleOption(
-            sessionId: sessionId, arg: kOptionCollapseToolbar),
-        bind.sessionGetToggleOption(
-            sessionId: sessionId, arg: kOptionHideToolbar),
-        bind.sessionGetOption(
-            sessionId: sessionId, arg: _kOptionRemoteMenubarOrientation),
+        liveSettings.read(LiveSessionSettingsRegistry.collapseToolbar),
+        liveSettings.read(LiveSessionSettingsRegistry.hideToolbar),
+        settings.read(SessionPeerSettingsRegistry.toolbarOrientation),
       ]);
 
-      collapse.value = (results[0] as bool?) ?? false;
-      hide.value = (results[1] as bool?) ?? false;
+      collapse.value = results[0] as bool;
+      hide.value = results[1] as bool;
       vertical.value = results[2] == _kRemoteMenubarOrientationVertical;
     } finally {
       _isInitializing = false;
@@ -246,24 +204,32 @@ class ToolbarState {
   }
 
   switchCollapse(SessionID sessionId) async {
-    bind.sessionToggleOption(
-        sessionId: sessionId, value: kOptionCollapseToolbar);
-    collapse.value = !collapse.value;
+    final fallback = !collapse.value;
+    collapse.value = await LiveSessionSettingsRepository.forSession(
+      sessionId,
+    ).toggleAndRead(
+      LiveSessionSettingsRegistry.collapseToolbar,
+      fallback: fallback,
+    );
   }
 
   // Switch hide state for entire toolbar visibility
   switchHide(SessionID sessionId) async {
-    bind.sessionToggleOption(sessionId: sessionId, value: kOptionHideToolbar);
-    hide.value = !hide.value;
+    final fallback = !hide.value;
+    hide.value = await LiveSessionSettingsRepository.forSession(
+      sessionId,
+    ).toggleAndRead(
+      LiveSessionSettingsRegistry.hideToolbar,
+      fallback: fallback,
+    );
   }
 
   switchOrientation(SessionID sessionId) async {
     final next = !vertical.value;
     vertical.value = next;
-    await bind.sessionPeerOption(
-      sessionId: sessionId,
-      name: _kOptionRemoteMenubarOrientation,
-      value: next
+    await SessionPeerSettingsRepository.forSession(sessionId).write(
+      SessionPeerSettingsRegistry.toolbarOrientation,
+      next
           ? _kRemoteMenubarOrientationVertical
           : _kRemoteMenubarOrientationHorizontal,
     );
@@ -578,7 +544,9 @@ class RemoteToolbar extends StatefulWidget {
 class _RemoteToolbarState extends State<RemoteToolbar> {
   Timer? _autoHideTimer;
   Timer? _pinnedDimTimer;
-  Timer? _globalOptionTimer;
+  StreamSubscription<RemoteToolbarSettingsSnapshot>?
+      _globalOptionSubscription;
+  StreamSubscription<bool>? _showMonitorsSubscription;
   Worker? _pinWorker;
   bool _isCursorOverToolbar = false;
   int _menuHoverDepth = 0;
@@ -599,14 +567,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   double _toolbarDragStartFractionY = 0.0;
   double _dragLeft = 0.0;
   double _dragRight = 1.0;
-  int? _lastRevealZonePx;
-  int? _lastHideDelayMs;
-  int? _lastPinnedDimOpacityPercent;
-  int? _lastPinnedDimDelayMs;
-  int? _lastPinnedDimDurationMs;
-  String? _lastDefaultScrollStyle;
-  int? _lastDefaultEdgeScrollEdgeThickness;
-  int? _lastDefaultTrackpadSpeed;
+  RemoteToolbarSettingsSnapshot? _pendingGlobalOptions;
   bool _refreshingGlobalOptions = false;
   bool _menuFocusGuardActive = false;
   ToolbarMenuPhase _lastMenuPhase = ToolbarMenuPhase.closed;
@@ -655,8 +616,14 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   }
 
   void _cancelGlobalOptionRefresh() {
-    _globalOptionTimer?.cancel();
-    _globalOptionTimer = null;
+    final subscription = _globalOptionSubscription;
+    _globalOptionSubscription = null;
+    if (subscription != null) unawaited(subscription.cancel());
+    final showMonitorsSubscription = _showMonitorsSubscription;
+    _showMonitorsSubscription = null;
+    if (showMonitorsSubscription != null) {
+      unawaited(showMonitorsSubscription.cancel());
+    }
   }
 
   bool get _menuIsOpen => _menuCoordinator.isInteractionActive;
@@ -670,74 +637,18 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       !_menuInteractionActive &&
       _dragging.isFalse;
 
-  int _getDefaultEdgeScrollEdgeThickness() {
-    return _parseToolbarIntOption(
-      bind.mainGetUserDefaultOption(key: kOptionEdgeScrollEdgeThickness),
-      defaultValue: 100,
-      min: EdgeThicknessControl.kMin.round(),
-      max: EdgeThicknessControl.kMax.round(),
-    );
-  }
-
-  int _getDefaultTrackpadSpeed() {
-    return _parseToolbarIntOption(
-      bind.mainGetUserDefaultOption(key: kKeyTrackpadSpeed),
-      defaultValue: kDefaultTrackpadSpeed,
-      min: kMinTrackpadSpeed,
-      max: kMaxTrackpadSpeed,
-    );
-  }
-
-  String _getDefaultScrollStyle() {
-    final value = bind.mainGetUserDefaultOption(key: kOptionScrollStyle);
-    switch (value) {
-      case kRemoteScrollStyleBar:
-      case kRemoteScrollStyleEdge:
-      case kRemoteScrollStyleEdgeAcceleration:
-        return value;
-      default:
-        return kRemoteScrollStyleAuto;
-    }
-  }
-
-  bool _refreshGlobalOptionSnapshot() {
-    final revealZonePx = widget.state.revealZonePx;
-    final hideDelayMs = widget.state.hideDelayMs;
-    final pinnedDimOpacityPercent = widget.state.pinnedDimOpacityPercent;
-    final pinnedDimDelayMs = widget.state.pinnedDimDelayMs;
-    final pinnedDimDurationMs = widget.state.pinnedDimDurationMs;
-    final defaultScrollStyle = _getDefaultScrollStyle();
-    final defaultEdgeScrollEdgeThickness = _getDefaultEdgeScrollEdgeThickness();
-    final defaultTrackpadSpeed = _getDefaultTrackpadSpeed();
-
-    final changed = _lastRevealZonePx != null &&
-        (_lastRevealZonePx != revealZonePx ||
-            _lastHideDelayMs != hideDelayMs ||
-            _lastPinnedDimOpacityPercent != pinnedDimOpacityPercent ||
-            _lastPinnedDimDelayMs != pinnedDimDelayMs ||
-            _lastPinnedDimDurationMs != pinnedDimDurationMs ||
-            _lastDefaultScrollStyle != defaultScrollStyle ||
-            _lastDefaultEdgeScrollEdgeThickness !=
-                defaultEdgeScrollEdgeThickness ||
-            _lastDefaultTrackpadSpeed != defaultTrackpadSpeed);
-
-    _lastRevealZonePx = revealZonePx;
-    _lastHideDelayMs = hideDelayMs;
-    _lastPinnedDimOpacityPercent = pinnedDimOpacityPercent;
-    _lastPinnedDimDelayMs = pinnedDimDelayMs;
-    _lastPinnedDimDurationMs = pinnedDimDurationMs;
-    _lastDefaultScrollStyle = defaultScrollStyle;
-    _lastDefaultEdgeScrollEdgeThickness = defaultEdgeScrollEdgeThickness;
-    _lastDefaultTrackpadSpeed = defaultTrackpadSpeed;
-    return changed;
-  }
-
   void _startGlobalOptionRefresh() {
-    _refreshGlobalOptionSnapshot();
-    _globalOptionTimer = Timer.periodic(
-      const Duration(milliseconds: 1000),
-      (_) => _handleGlobalOptionsMaybeChanged(),
-    );
+    _globalOptionSubscription = remoteToolbarSettings.watch().listen((snapshot) {
+      _pendingGlobalOptions = snapshot;
+      if (!_refreshingGlobalOptions) {
+        unawaited(_handleGlobalOptionsMaybeChanged());
+      }
+    });
+    _showMonitorsSubscription = remoteDisplaySettings
+        .watch(RemoteDisplaySettingsRegistry.showMonitorsToolbar)
+        .listen((_) {
+      if (mounted) setState(() {});
+    });
   }
 
   bool _shouldOpenVerticalMenusLeft() =>
@@ -748,23 +659,12 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   }
 
   void _initDragBounds() {
-    final confLeft = double.tryParse(
-        bind.mainGetLocalOption(key: kOptionRemoteMenubarDragLeft));
-    if (confLeft == null) {
-      bind.mainSetLocalOption(
-          key: kOptionRemoteMenubarDragLeft, value: _dragLeft.toString());
-    } else {
-      _dragLeft = confLeft;
-    }
-
-    final confRight = double.tryParse(
-        bind.mainGetLocalOption(key: kOptionRemoteMenubarDragRight));
-    if (confRight == null) {
-      bind.mainSetLocalOption(
-          key: kOptionRemoteMenubarDragRight, value: _dragRight.toString());
-    } else {
-      _dragRight = confRight;
-    }
+    _dragLeft = remoteAppLocalSettings.read(
+      RemoteAppLocalSettingsRegistry.toolbarDragLeft,
+    );
+    _dragRight = remoteAppLocalSettings.read(
+      RemoteAppLocalSettingsRegistry.toolbarDragRight,
+    );
   }
 
   void _startToolbarDrag(DragStartDetails details) {
@@ -800,15 +700,20 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   }
 
   void _endToolbarDrag() {
-    bind.sessionPeerOption(
-      sessionId: widget.ffi.sessionId,
-      name: _kOptionRemoteMenubarDragX,
-      value: _fractionX.value.toString(),
+    final settings = SessionPeerSettingsRepository.forSession(
+      widget.ffi.sessionId,
     );
-    bind.sessionPeerOption(
-      sessionId: widget.ffi.sessionId,
-      name: _kOptionRemoteMenubarDragY,
-      value: _fractionY.value.toString(),
+    unawaited(
+      settings.write(
+        SessionPeerSettingsRegistry.toolbarDragX,
+        _fractionX.value,
+      ),
+    );
+    unawaited(
+      settings.write(
+        SessionPeerSettingsRegistry.toolbarDragY,
+        _fractionY.value,
+      ),
     );
     _dragging.value = false;
     if (pin) {
@@ -826,10 +731,11 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   void _bindToolbarYToTopEdge() {
     if (_fractionY.value == _kRemoteMenubarTopEdgeY) return;
     _fractionY.value = _kRemoteMenubarTopEdgeY;
-    bind.sessionPeerOption(
-      sessionId: widget.ffi.sessionId,
-      name: _kOptionRemoteMenubarDragY,
-      value: _fractionY.value.toString(),
+    unawaited(
+      SessionPeerSettingsRepository.forSession(widget.ffi.sessionId).write(
+        SessionPeerSettingsRegistry.toolbarDragY,
+        _fractionY.value,
+      ),
     );
   }
 
@@ -988,66 +894,62 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     if (_refreshingGlobalOptions || !mounted) return;
     _refreshingGlobalOptions = true;
     try {
-      final previousScrollStyle = _lastDefaultScrollStyle;
-      final previousEdgeScrollEdgeThickness =
-          _lastDefaultEdgeScrollEdgeThickness;
-      final previousTrackpadSpeed = _lastDefaultTrackpadSpeed;
-      if (!_refreshGlobalOptionSnapshot()) {
-        return;
-      }
+      while (mounted && _pendingGlobalOptions != null) {
+        final next = _pendingGlobalOptions!;
+        _pendingGlobalOptions = null;
+        final previous = widget.state.userDefaults;
+        if (next == previous) continue;
+        widget.state.applyUserDefaults(next);
 
-      if (pin) {
-        if (_shouldDimPinnedToolbar) {
-          _cancelPinnedDim();
-          if (_toolbarOpacityState.value.opacity < 1.0) {
-            _setToolbarOpacity(
-              widget.state.pinnedDimOpacity,
-              const Duration(milliseconds: 180),
-            );
+        if (pin) {
+          if (_shouldDimPinnedToolbar) {
+            _cancelPinnedDim();
+            if (_toolbarOpacityState.value.opacity < 1.0) {
+              _setToolbarOpacity(
+                widget.state.pinnedDimOpacity,
+                const Duration(milliseconds: 180),
+              );
+            } else {
+              _schedulePinnedDim();
+            }
           } else {
-            _schedulePinnedDim();
+            _showPinnedToolbarOpaque();
           }
         } else {
-          _showPinnedToolbarOpaque();
+          _cancelAutoHide();
+          _handleWindowPointerState(_lastWindowPointer);
         }
-      } else {
-        _cancelAutoHide();
-        _handleWindowPointerState(_lastWindowPointer);
-      }
 
-      if (previousScrollStyle != null &&
-          widget.ffi.canvasModel.scrollStyle.stringValue ==
-              previousScrollStyle &&
-          _lastDefaultScrollStyle != previousScrollStyle) {
-        await bind.sessionSetScrollStyle(
-          sessionId: widget.ffi.sessionId,
-          value: _lastDefaultScrollStyle!,
-        );
-        await widget.ffi.canvasModel.updateScrollStyle();
-      }
+        if (widget.ffi.canvasModel.scrollStyle.stringValue ==
+                previous.scrollStyle &&
+            next.scrollStyle != previous.scrollStyle) {
+          await bind.sessionSetScrollStyle(
+            sessionId: widget.ffi.sessionId,
+            value: next.scrollStyle,
+          );
+          await widget.ffi.canvasModel.updateScrollStyle();
+        }
 
-      if (previousEdgeScrollEdgeThickness != null &&
-          widget.ffi.canvasModel.edgeScrollEdgeThickness ==
-              previousEdgeScrollEdgeThickness &&
-          _lastDefaultEdgeScrollEdgeThickness !=
-              previousEdgeScrollEdgeThickness) {
-        await bind.sessionSetEdgeScrollEdgeThickness(
-          sessionId: widget.ffi.sessionId,
-          value: _lastDefaultEdgeScrollEdgeThickness!,
-        );
-        widget.ffi.canvasModel.updateEdgeScrollEdgeThickness(
-          _lastDefaultEdgeScrollEdgeThickness!,
-        );
-      }
+        if (widget.ffi.canvasModel.edgeScrollEdgeThickness ==
+                previous.edgeThickness &&
+            next.edgeThickness != previous.edgeThickness) {
+          await bind.sessionSetEdgeScrollEdgeThickness(
+            sessionId: widget.ffi.sessionId,
+            value: next.edgeThickness,
+          );
+          widget.ffi.canvasModel.updateEdgeScrollEdgeThickness(
+            next.edgeThickness,
+          );
+        }
 
-      if (previousTrackpadSpeed != null &&
-          widget.ffi.inputModel.trackpadSpeed == previousTrackpadSpeed &&
-          _lastDefaultTrackpadSpeed != previousTrackpadSpeed) {
-        await bind.sessionSetTrackpadSpeed(
-          sessionId: widget.ffi.sessionId,
-          value: _lastDefaultTrackpadSpeed!,
-        );
-        await widget.ffi.inputModel.updateTrackpadSpeed();
+        if (widget.ffi.inputModel.trackpadSpeed == previous.trackpadSpeed &&
+            next.trackpadSpeed != previous.trackpadSpeed) {
+          await bind.sessionSetTrackpadSpeed(
+            sessionId: widget.ffi.sessionId,
+            value: next.trackpadSpeed,
+          );
+          await widget.ffi.inputModel.updateTrackpadSpeed();
+        }
       }
     } finally {
       _refreshingGlobalOptions = false;
@@ -1159,18 +1061,15 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     _pinWorker = ever<bool>(widget.state._pin, _handlePinChanged);
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
+      final settings = SessionPeerSettingsRepository.forSession(
+        widget.ffi.sessionId,
+      );
       final position = await Future.wait([
-        bind.sessionGetOption(
-            sessionId: widget.ffi.sessionId, arg: _kOptionRemoteMenubarDragX),
-        bind.sessionGetOption(
-            sessionId: widget.ffi.sessionId, arg: _kOptionRemoteMenubarDragY),
+        settings.read(SessionPeerSettingsRegistry.toolbarDragX),
+        settings.read(SessionPeerSettingsRegistry.toolbarDragY),
       ]);
-      _fractionX.value = (double.tryParse(position[0] ?? '') ?? 0.5)
-          .clamp(_dragLeft, _dragRight)
-          .toDouble();
-      _fractionY.value = (double.tryParse(position[1] ?? '') ?? 0.0)
-          .clamp(0.0, 1.0)
-          .toDouble();
+      _fractionX.value = position[0].clamp(_dragLeft, _dragRight).toDouble();
+      _fractionY.value = position[1].clamp(0.0, 1.0).toDouble();
       // Initialize toolbar states (collapse, hide) from session options
       await widget.state.init(widget.ffi.sessionId);
       if (!pin) {
@@ -1486,9 +1385,8 @@ class _QualityMonitorMenu extends StatelessWidget {
   const _QualityMonitorMenu({Key? key, required this.ffi}) : super(key: key);
 
   Future<void> _toggle() async {
-    await bind.sessionToggleOption(
-      sessionId: ffi.sessionId,
-      value: 'show-quality-monitor',
+    await LiveSessionSettingsRepository.forSession(ffi.sessionId).toggle(
+      LiveSessionSettingsRegistry.showQualityMonitor,
     );
     await ffi.qualityMonitorModel.checkShowQualityMonitor(ffi.sessionId);
   }
@@ -1592,7 +1490,9 @@ class _MonitorMenu extends StatelessWidget {
   }) : super(key: key);
 
   bool get showMonitorsToolbar =>
-      bind.mainGetUserDefaultOption(key: kKeyShowMonitorsToolbar) == 'Y';
+      remoteDisplaySettings.read(
+        RemoteDisplaySettingsRegistry.showMonitorsToolbar,
+      );
 
   bool get supportIndividualWindows =>
       !isWeb && ffi.ffiModel.pi.isSupportMultiDisplay;
@@ -3253,20 +3153,23 @@ class _KeyboardMenu extends StatelessWidget {
 
   viewMode() {
     final ffiModel = ffi.ffiModel;
+    final liveSettings = LiveSessionSettingsRepository.forSession(ffi.sessionId);
     final enabled = versionCmp(pi.version, '1.2.0') >= 0 && ffiModel.keyboard;
     return CkbMenuButton(
         value: ffiModel.viewOnly,
         onChanged: enabled
             ? (value) async {
                 if (value == null) return;
-                await bind.sessionToggleOption(
-                    sessionId: ffi.sessionId, value: kOptionToggleViewOnly);
-                final viewOnly = await bind.sessionGetToggleOption(
-                    sessionId: ffi.sessionId, arg: kOptionToggleViewOnly);
-                ffiModel.setViewOnly(id, viewOnly ?? value);
-                final showMyCursor = await bind.sessionGetToggleOption(
-                    sessionId: ffi.sessionId, arg: kOptionToggleShowMyCursor);
-                ffiModel.setShowMyCursor(showMyCursor ?? value);
+                final viewOnly = await liveSettings.toggleAndRead(
+                  LiveSessionSettingsRegistry.viewOnly,
+                  fallback: value,
+                );
+                ffiModel.setViewOnly(id, viewOnly);
+                final showMyCursor = await liveSettings.read(
+                  LiveSessionSettingsRegistry.showMyCursor,
+                  fallback: value,
+                );
+                ffiModel.setShowMyCursor(showMyCursor);
               }
             : null,
         ffi: ffi,
@@ -3275,25 +3178,24 @@ class _KeyboardMenu extends StatelessWidget {
 
   showMyCursor() {
     final ffiModel = ffi.ffiModel;
+    final liveSettings = LiveSessionSettingsRepository.forSession(ffi.sessionId);
     return CkbMenuButton(
             value: ffiModel.showMyCursor,
             onChanged: (value) async {
               if (value == null) return;
-              await bind.sessionToggleOption(
-                  sessionId: ffi.sessionId, value: kOptionToggleShowMyCursor);
-              final showMyCursor = await bind.sessionGetToggleOption(
-                      sessionId: ffi.sessionId,
-                      arg: kOptionToggleShowMyCursor) ??
-                  value;
+              final showMyCursor = await liveSettings.toggleAndRead(
+                LiveSessionSettingsRegistry.showMyCursor,
+                fallback: value,
+              );
               ffiModel.setShowMyCursor(showMyCursor);
 
               // Also set view only if showMyCursor is enabled and viewOnly is not enabled.
               if (showMyCursor && !ffiModel.viewOnly) {
-                await bind.sessionToggleOption(
-                    sessionId: ffi.sessionId, value: kOptionToggleViewOnly);
-                final viewOnly = await bind.sessionGetToggleOption(
-                    sessionId: ffi.sessionId, arg: kOptionToggleViewOnly);
-                ffiModel.setViewOnly(id, viewOnly ?? value);
+                final viewOnly = await liveSettings.toggleAndRead(
+                  LiveSessionSettingsRegistry.viewOnly,
+                  fallback: true,
+                );
+                ffiModel.setViewOnly(id, viewOnly);
               }
             },
             ffi: ffi,
@@ -4006,23 +3908,12 @@ class _DraggableShowHideState extends State<_DraggableShowHide> {
   @override
   initState() {
     super.initState();
-
-    final confLeft = double.tryParse(
-        bind.mainGetLocalOption(key: kOptionRemoteMenubarDragLeft));
-    if (confLeft == null) {
-      bind.mainSetLocalOption(
-          key: kOptionRemoteMenubarDragLeft, value: left.toString());
-    } else {
-      left = confLeft;
-    }
-    final confRight = double.tryParse(
-        bind.mainGetLocalOption(key: kOptionRemoteMenubarDragRight));
-    if (confRight == null) {
-      bind.mainSetLocalOption(
-          key: kOptionRemoteMenubarDragRight, value: right.toString());
-    } else {
-      right = confRight;
-    }
+    left = remoteAppLocalSettings.read(
+      RemoteAppLocalSettingsRegistry.toolbarDragLeft,
+    );
+    right = remoteAppLocalSettings.read(
+      RemoteAppLocalSettingsRegistry.toolbarDragRight,
+    );
   }
 
   Widget _buildDraggable(BuildContext context) {
@@ -4060,15 +3951,20 @@ class _DraggableShowHideState extends State<_DraggableShowHide> {
           widget.fractionY.value =
               widget.fractionY.value.clamp(0.0, 1.0).toDouble();
         }
-        bind.sessionPeerOption(
-          sessionId: widget.sessionId,
-          name: _kOptionRemoteMenubarDragX,
-          value: widget.fractionX.value.toString(),
+        final settings = SessionPeerSettingsRepository.forSession(
+          widget.sessionId,
         );
-        bind.sessionPeerOption(
-          sessionId: widget.sessionId,
-          name: _kOptionRemoteMenubarDragY,
-          value: widget.fractionY.value.toString(),
+        unawaited(
+          settings.write(
+            SessionPeerSettingsRegistry.toolbarDragX,
+            widget.fractionX.value,
+          ),
+        );
+        unawaited(
+          settings.write(
+            SessionPeerSettingsRegistry.toolbarDragY,
+            widget.fractionY.value,
+          ),
         );
         widget.dragging.value = false;
       },

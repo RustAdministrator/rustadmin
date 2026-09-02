@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_hbb/consts.dart';
 
 class EdgeThicknessControl extends StatefulWidget {
   const EdgeThicknessControl({
@@ -8,8 +9,8 @@ class EdgeThicknessControl extends StatefulWidget {
     this.colorScheme,
   });
 
-  static const double kMin = 20;
-  static const double kMax = 300;
+  static const double kMin = kMinEdgeScrollEdgeThickness * 1.0;
+  static const double kMax = kMaxEdgeScrollEdgeThickness * 1.0;
 
   final double value;
   final ValueChanged<double>? onChanged;

@@ -1,17 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "usage: $0 <rust-target> <android-abi> <cargo-features>" >&2
+if [[ $# -ne 5 ]]; then
+  echo "usage: $0 <profile> <wrapper> <rust-target> <android-abi> <cargo-features>" >&2
   exit 2
 fi
 
-RUST_TARGET="$1"
-ANDROID_ABI="$2"
-CARGO_FEATURES="$3"
+PROFILE_ID="$1"
+WRAPPER_PATH="$2"
+RUST_TARGET="$3"
+ANDROID_ABI="$4"
+CARGO_FEATURES="$5"
 ANDROID_API_LEVEL=24
 EXPECTED_NDK_VERSION=28.2.13676358
 REQUIRE_FFMPEG=0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+python3 "${REPO_DIR}/scripts/platform_profiles.py" check \
+  --profile "${PROFILE_ID}" \
+  --wrapper "${WRAPPER_PATH}" \
+  --target "${RUST_TARGET}" \
+  --abi "${ANDROID_ABI}" \
+  --features "${CARGO_FEATURES}"
 
 case ",${CARGO_FEATURES}," in
   *,hwcodec,*) REQUIRE_FFMPEG=1 ;;
@@ -33,8 +44,6 @@ if [[ "${RUSTADMIN_ANDROID_VALIDATE_FEATURES_ONLY:-0}" == "1" ]]; then
   exit 0
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 JNI_LIBS_DIR="${SCRIPT_DIR}/android/app/src/main/jniLibs"
 
 if [[ -z "${ANDROID_NDK_HOME:-}" || ! -d "${ANDROID_NDK_HOME}" ]]; then

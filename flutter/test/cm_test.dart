@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -13,6 +11,7 @@ import 'package:flutter_hbb/generated_bridge.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
+import 'package:flutter_hbb/models/session_event.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:get/get.dart';
 import 'package:image/image.dart' as img2;
@@ -34,9 +33,33 @@ final testClients = [
     ..disconnected = true,
 ];
 
+SessionClientValue _sessionClient(Client client) => SessionClientValue(
+      id: client.id,
+      authorized: client.authorized,
+      isFileTransfer: client.isFileTransfer,
+      isViewCamera: client.isViewCamera,
+      isTerminal: client.isTerminal,
+      portForward: client.portForward,
+      name: client.name,
+      avatar: client.avatar,
+      peerId: client.peerId,
+      keyboard: client.keyboard,
+      clipboard: client.clipboard,
+      audio: client.audio,
+      file: client.file,
+      restart: client.restart,
+      recording: client.recording,
+      blockInput: client.blockInput,
+      disconnected: client.disconnected,
+      fromSwitch: client.fromSwitch,
+      inVoiceCall: client.inVoiceCall,
+      incomingVoiceCall: client.incomingVoiceCall,
+    );
+
 bool _testShouldBlockRustAdminGuiForActiveSessions = false;
 String _testRemoteModifyControlPermission = '';
 String _testKnownHostsJson = '';
+List<PeerSecurityEntry> _testKnownHostsV2 = const [];
 
 class _TestRustadminImpl implements Rustadmin {
   String _mainGetCommon(String key) {
@@ -84,6 +107,8 @@ class _TestRustadminImpl implements Rustadmin {
         return Future<String>.value('');
       case #mainListPeerSecurityEntries:
         return Future<String>.value(_testKnownHostsJson);
+      case #mainListPeerSecurityEntriesV2:
+        return Future<List<PeerSecurityEntry>>.value(_testKnownHostsV2);
       case #mainGetPeerSync:
         return '{"info":{}}';
       case #isIncomingOnly:
@@ -165,6 +190,7 @@ Future<void> _initConnectionManagerTest() async {
   _testShouldBlockRustAdminGuiForActiveSessions = false;
   _testRemoteModifyControlPermission = '';
   _testKnownHostsJson = '';
+  _testKnownHostsV2 = const [];
   platformFFI.initForTest(_TestRustadminImpl());
   await initGlobalFFI();
 }
@@ -262,53 +288,59 @@ void main() {
   test('stored peer security includes config and QUIC-only records', () async {
     isTest = true;
     platformFFI.initForTest(_TestRustadminImpl());
-    _testKnownHostsJson = jsonEncode([
-      {
-        'id': 'peer-b',
-        'hostname': 'beta',
-        'platform': 'Linux',
-        'last_updated_unix_ms': 100,
-        'has_peer_config': true,
-        'has_password': false,
-        'has_pinned_key': false,
-        'pinned_key_fingerprint': '',
-        'has_direct_pairing_memory': false,
-        'has_rendezvous_pairing_memory': true,
-        'has_quic_identity': false,
-        'quic_identity_fingerprint': '',
-        'quic_confirmed_at_unix_ms': 0,
-      },
-      {
-        'id': 'peer-a',
-        'alias': 'Alias A',
-        'username': 'alice',
-        'hostname': 'alpha',
-        'platform': 'Windows',
-        'last_updated_unix_ms': 200,
-        'has_peer_config': true,
-        'has_password': true,
-        'has_pinned_key': true,
-        'pinned_key_fingerprint': 'signing fingerprint',
-        'has_direct_pairing_memory': true,
-        'has_rendezvous_pairing_memory': false,
-        'has_quic_identity': true,
-        'quic_identity_fingerprint': 'quic fingerprint',
-        'quic_confirmed_at_unix_ms': 200,
-      },
-      {
-        'id': '192.0.2.10',
-        'last_updated_unix_ms': 50,
-        'has_peer_config': false,
-        'has_password': false,
-        'has_pinned_key': false,
-        'pinned_key_fingerprint': '',
-        'has_direct_pairing_memory': false,
-        'has_rendezvous_pairing_memory': false,
-        'has_quic_identity': true,
-        'quic_identity_fingerprint': 'orphan fingerprint',
-        'quic_confirmed_at_unix_ms': 50,
-      },
-    ]);
+    _testKnownHostsV2 = const [
+      PeerSecurityEntry(
+        id: 'peer-b',
+        alias: '',
+        username: '',
+        hostname: 'beta',
+        platform: 'Linux',
+        lastUpdatedUnixMs: 100,
+        hasPeerConfig: true,
+        hasPassword: false,
+        hasPinnedKey: false,
+        pinnedKeyFingerprint: '',
+        hasDirectPairingMemory: false,
+        hasRendezvousPairingMemory: true,
+        hasQuicIdentity: false,
+        quicIdentityFingerprint: '',
+        quicConfirmedAtUnixMs: 0,
+      ),
+      PeerSecurityEntry(
+        id: 'peer-a',
+        alias: 'Alias A',
+        username: 'alice',
+        hostname: 'alpha',
+        platform: 'Windows',
+        lastUpdatedUnixMs: 200,
+        hasPeerConfig: true,
+        hasPassword: true,
+        hasPinnedKey: true,
+        pinnedKeyFingerprint: 'signing fingerprint',
+        hasDirectPairingMemory: true,
+        hasRendezvousPairingMemory: false,
+        hasQuicIdentity: true,
+        quicIdentityFingerprint: 'quic fingerprint',
+        quicConfirmedAtUnixMs: 200,
+      ),
+      PeerSecurityEntry(
+        id: '192.0.2.10',
+        alias: '',
+        username: '',
+        hostname: '',
+        platform: '',
+        lastUpdatedUnixMs: 50,
+        hasPeerConfig: false,
+        hasPassword: false,
+        hasPinnedKey: false,
+        pinnedKeyFingerprint: '',
+        hasDirectPairingMemory: false,
+        hasRendezvousPairingMemory: false,
+        hasQuicIdentity: true,
+        quicIdentityFingerprint: 'orphan fingerprint',
+        quicConfirmedAtUnixMs: 50,
+      ),
+    ];
 
     final hosts = await KnownHost.get();
 
@@ -329,6 +361,53 @@ void main() {
     expect(hosts.last.hasPeerConfig, isFalse);
     expect(hosts.last.hasQuicIdentity, isTrue);
     expect(hosts.last.deviceSummary, contains('QUIC-only record'));
+  });
+
+  test('typed and web fallback peer security records stay equivalent', () {
+    const timestamp = 1710000000000;
+    const ffiEntry = PeerSecurityEntry(
+      id: 'peer-parity',
+      alias: 'Alias',
+      username: 'user',
+      hostname: 'host',
+      platform: 'Windows',
+      lastUpdatedUnixMs: timestamp,
+      hasPeerConfig: true,
+      hasPassword: true,
+      hasPinnedKey: true,
+      pinnedKeyFingerprint: 'signing',
+      hasDirectPairingMemory: true,
+      hasRendezvousPairingMemory: false,
+      hasQuicIdentity: true,
+      quicIdentityFingerprint: 'quic',
+      quicConfirmedAtUnixMs: timestamp,
+    );
+    final fromFfi = KnownHost.fromFfi(ffiEntry);
+    final fromJson = KnownHost.fromJson({
+      'id': ffiEntry.id,
+      'alias': ffiEntry.alias,
+      'username': ffiEntry.username,
+      'hostname': ffiEntry.hostname,
+      'platform': ffiEntry.platform,
+      'last_updated_unix_ms': timestamp.toString(),
+      'has_peer_config': ffiEntry.hasPeerConfig,
+      'has_password': ffiEntry.hasPassword,
+      'has_pinned_key': ffiEntry.hasPinnedKey,
+      'pinned_key_fingerprint': ffiEntry.pinnedKeyFingerprint,
+      'has_direct_pairing_memory': ffiEntry.hasDirectPairingMemory,
+      'has_rendezvous_pairing_memory': ffiEntry.hasRendezvousPairingMemory,
+      'has_quic_identity': ffiEntry.hasQuicIdentity,
+      'quic_identity_fingerprint': ffiEntry.quicIdentityFingerprint,
+      'quic_confirmed_at_unix_ms': timestamp.toString(),
+    });
+
+    expect(fromJson.id, fromFfi.id);
+    expect(fromJson.displayName, fromFfi.displayName);
+    expect(fromJson.userAndHost, fromFfi.userAndHost);
+    expect(fromJson.lastUpdatedUnixMs, timestamp);
+    expect(fromJson.quicConfirmedAtUnixMs, timestamp);
+    expect(fromJson.storedSecurity, fromFfi.storedSecurity);
+    expect(fromJson.identitySummary, fromFfi.identitySummary);
   });
 
   testWidgets('stored peer security table renders orphan QUIC records',
@@ -466,11 +545,14 @@ void main() {
     expect(find.byTooltip('Enable clipboard: OFF'), findsOneWidget);
     expect(find.byTooltip('Enable clipboard: ON'), findsNothing);
 
-    gFFI.serverModel.updateClientPermission({
-      'id': '10',
-      'permission_name': 'clipboard',
-      'enabled': 'true',
-    });
+    gFFI.serverModel.updateClientPermissionEvent(
+      const ClientPermissionSessionEvent(
+        kind: ClientPermissionKind.update,
+        clientId: 10,
+        name: 'clipboard',
+        enabled: true,
+      ),
+    );
     await tester.pump();
 
     expect(find.byTooltip('Enable clipboard: OFF'), findsNothing);
@@ -513,7 +595,7 @@ void main() {
       ..recording = true
       ..blockInput = true;
 
-    gFFI.serverModel.addConnection({'client': jsonEncode(authorized.toJson())});
+    gFFI.serverModel.addConnectionEvent(_sessionClient(authorized));
 
     expect(existing.authorized, isTrue);
     expect(existing.clipboard, isTrue);
@@ -530,12 +612,15 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 600));
 
-    gFFI.serverModel.handlePermissionRequest({
-      'id': '0',
-      'request_id': '42',
-      'permission_name': 'clipboard',
-      'enabled': 'true',
-    });
+    gFFI.serverModel.handlePermissionRequestEvent(
+      const ClientPermissionSessionEvent(
+        kind: ClientPermissionKind.request,
+        clientId: 0,
+        requestId: '42',
+        name: 'clipboard',
+        enabled: true,
+      ),
+    );
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 1));
 

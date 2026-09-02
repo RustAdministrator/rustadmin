@@ -505,6 +505,18 @@ finally {
 Invoke-BridgeGeneration
 
 $Features = if ($NoHwCodec) { "flutter" } else { "flutter,hwcodec" }
+$RustHostLine = rustc -vV | Select-String '^host:' | Select-Object -First 1
+if ($null -eq $RustHostLine) {
+    throw "Unable to determine the Rust host target."
+}
+$RustHost = $RustHostLine.Line -replace '^host:\s*', ''
+Invoke-NativeCommand {
+    python (Join-Path $RepoRoot "scripts\platform_profiles.py") check `
+        --profile windows-x86_64-release `
+        --wrapper scripts/build_windows.ps1 `
+        --target $RustHost `
+        --features $Features
+} "platform profile validation"
 
 Push-Location $RepoRoot
 try {

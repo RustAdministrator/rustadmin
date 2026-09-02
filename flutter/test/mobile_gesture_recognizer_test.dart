@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common/widgets/gestures.dart';
 import 'package:flutter_hbb/common/widgets/mobile_gesture_controller.dart';
 import 'package:flutter_hbb/common/widgets/remote_input.dart';
+import 'package:flutter_hbb/mobile/mobile_viewport.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:fake_async/fake_async.dart';
 
 void main() {
   test('cursor inertia integrates a linearly decaying motion vector', () {
@@ -25,6 +27,128 @@ void main() {
     expect(first, const Offset(37.5, -18.75));
     expect(second, const Offset(12.5, -6.25));
     expect(first + second, const Offset(50, -25));
+  });
+
+  test('cursor inertia controller owns ticks and natural stop', () {
+    fakeAsync((async) {
+      final frames = <MobileCursorInertiaFrame>[];
+      var stopped = 0;
+      var elapsed = Duration.zero;
+      final controller = MobileCursorInertiaController(
+        onFrame: (frame) async {
+          frames.add(frame);
+          return frames.length == 1 ? const Offset(1, 0) : Offset.zero;
+        },
+        onStopped: () => stopped++,
+        elapsedNow: () => elapsed,
+      );
+
+      expect(
+        controller.start(
+          duration: const Duration(milliseconds: 32),
+          velocity: const Offset(1000, 0),
+          localPosition: const Offset(10, 20),
+        ),
+        isTrue,
+      );
+      elapsed = const Duration(milliseconds: 16);
+      async.elapse(const Duration(milliseconds: 16));
+      async.flushMicrotasks();
+      elapsed = const Duration(milliseconds: 32);
+      async.elapse(const Duration(milliseconds: 16));
+      async.flushMicrotasks();
+
+      expect(frames, hasLength(2));
+      expect(frames.first.localPosition, const Offset(22, 20));
+      expect(frames.last.localPosition, const Offset(27, 20));
+      expect(controller.active, isFalse);
+      expect(stopped, 1);
+    });
+  });
+
+  test('cursor inertia stop invalidates future timer ticks', () {
+    fakeAsync((async) {
+      final frames = <MobileCursorInertiaFrame>[];
+      var elapsed = Duration.zero;
+      final controller = MobileCursorInertiaController(
+        onFrame: (frame) async {
+          frames.add(frame);
+          return Offset.zero;
+        },
+        onStopped: () {},
+        elapsedNow: () => elapsed,
+      );
+      expect(
+        controller.start(
+          duration: const Duration(milliseconds: 200),
+          velocity: const Offset(500, 0),
+          localPosition: Offset.zero,
+        ),
+        isTrue,
+      );
+      elapsed = const Duration(milliseconds: 16);
+      async.elapse(const Duration(milliseconds: 16));
+      async.flushMicrotasks();
+      controller.stop();
+      final count = frames.length;
+      async.elapse(const Duration(seconds: 1));
+      async.flushMicrotasks();
+
+      expect(frames, hasLength(count));
+      expect(controller.active, isFalse);
+    });
+  });
+
+  test('old async frame cannot unlock a restarted inertia generation', () {
+    fakeAsync((async) {
+      final firstFrame = Completer<Offset>();
+      final secondFrame = Completer<Offset>();
+      var elapsed = Duration.zero;
+      var calls = 0;
+      final controller = MobileCursorInertiaController(
+        onFrame: (_) {
+          calls++;
+          if (calls == 1) return firstFrame.future;
+          if (calls == 2) return secondFrame.future;
+          return Future<Offset>.value(Offset.zero);
+        },
+        onStopped: () {},
+        elapsedNow: () => elapsed,
+      );
+
+      controller.start(
+        duration: const Duration(milliseconds: 100),
+        velocity: const Offset(500, 0),
+        localPosition: Offset.zero,
+      );
+      elapsed = const Duration(milliseconds: 16);
+      async.elapse(const Duration(milliseconds: 16));
+      async.flushMicrotasks();
+      expect(calls, 1);
+
+      controller.stop(notify: false);
+      elapsed = Duration.zero;
+      controller.start(
+        duration: const Duration(milliseconds: 100),
+        velocity: const Offset(500, 0),
+        localPosition: Offset.zero,
+      );
+      elapsed = const Duration(milliseconds: 16);
+      async.elapse(const Duration(milliseconds: 16));
+      async.flushMicrotasks();
+      expect(calls, 2);
+
+      firstFrame.complete(Offset.zero);
+      async.flushMicrotasks();
+      elapsed = const Duration(milliseconds: 32);
+      async.elapse(const Duration(milliseconds: 16));
+      async.flushMicrotasks();
+      expect(calls, 2);
+
+      secondFrame.complete(Offset.zero);
+      async.flushMicrotasks();
+      controller.stop(notify: false);
+    });
   });
 
   test('custom keys block taps in the remote input coordinate space', () {
@@ -164,6 +288,49 @@ void main() {
     expect(calls, ['down', 'up']);
   });
 
+  test('interaction coordinator balances every remote button intent', () async {
+    final calls = <String>[];
+    final coordinator = MobileInteractionCoordinator(
+      sendDown: (intent) async => calls.add('down:${intent.name}'),
+      sendUp: (intent) async => calls.add('up:${intent.name}'),
+    );
+
+    for (final intent in MobileButtonIntent.values) {
+      final token = coordinator.begin(intent);
+      await coordinator.activate(intent, token);
+    }
+    await coordinator.releaseAll();
+    await coordinator.releaseAll();
+
+    for (final intent in MobileButtonIntent.values) {
+      expect(
+        calls.where((call) => call == 'down:${intent.name}'),
+        hasLength(1),
+      );
+      expect(calls.where((call) => call == 'up:${intent.name}'), hasLength(1));
+      expect(coordinator.hasIntent(intent), isFalse);
+    }
+  });
+
+  test('tap and fallback-up keep button ownership explicit', () async {
+    final calls = <String>[];
+    final coordinator = MobileInteractionCoordinator(
+      sendDown: (intent) async => calls.add('down:${intent.name}'),
+      sendUp: (intent) async => calls.add('up:${intent.name}'),
+    );
+
+    await coordinator.tap(MobileButtonIntent.ordinaryTap);
+    await coordinator.releaseOrSendUp(MobileButtonIntent.ordinaryTap);
+    final pending = coordinator.begin(MobileButtonIntent.leftLongPress);
+    await coordinator.releaseOrSendUp(MobileButtonIntent.leftLongPress);
+
+    expect(calls, ['down:ordinaryTap', 'up:ordinaryTap', 'up:ordinaryTap']);
+    expect(
+      coordinator.isRequested(MobileButtonIntent.leftLongPress, pending),
+      isFalse,
+    );
+  });
+
   Future<void> pumpTarget(
     WidgetTester tester, {
     required GestureTapDownCallback onTwoFingerTap,
@@ -294,6 +461,35 @@ void main() {
     expect(ordinaryLongPresses, 0);
   });
 
+  testWidgets('pointer loss ends a two-finger hold exactly once', (
+    tester,
+  ) async {
+    var holdStarts = 0;
+    var holdEnds = 0;
+    var taps = 0;
+    await pumpTarget(
+      tester,
+      onOrdinaryTap: () {},
+      onTwoFingerTap: (_) => taps += 1,
+      onTwoFingerHoldStart: (_) => holdStarts += 1,
+      onTwoFingerHoldEnd: () => holdEnds += 1,
+    );
+
+    final first = await tester.startGesture(const Offset(380, 300), pointer: 1);
+    final second = await tester.startGesture(
+      const Offset(420, 300),
+      pointer: 2,
+    );
+    await tester.pump(kLongPressTimeout + const Duration(milliseconds: 1));
+    await first.cancel();
+    await second.cancel();
+    await tester.pump();
+
+    expect(holdStarts, 1);
+    expect(holdEnds, 1);
+    expect(taps, 0);
+  });
+
   testWidgets('one-finger hold remains a long press', (tester) async {
     var ordinaryLongPresses = 0;
     var twoFingerHolds = 0;
@@ -419,5 +615,36 @@ void main() {
 
     expect(oneFingerStarts, 1);
     expect(oneFingerEnds, 1);
+  });
+
+  testWidgets('pointer loss cancels one-finger pan ownership once', (
+    tester,
+  ) async {
+    var starts = 0;
+    var ends = 0;
+    var cancels = 0;
+    await pumpTarget(
+      tester,
+      onOrdinaryTap: () {},
+      onTwoFingerTap: (_) {},
+      onTwoFingerHoldStart: (_) {},
+      onTwoFingerHoldEnd: () {},
+      onOneFingerPanStart: (_) => starts += 1,
+      onOneFingerPanEnd: (_) => ends += 1,
+      onOneFingerPanCancel: () => cancels += 1,
+    );
+
+    final finger = await tester.startGesture(
+      const Offset(400, 300),
+      pointer: 1,
+    );
+    await finger.moveBy(const Offset(30, 0));
+    await finger.moveBy(const Offset(10, 0));
+    await tester.pump();
+    await finger.cancel();
+    await tester.pump();
+
+    expect(starts, 1);
+    expect(ends + cancels, 1);
   });
 }

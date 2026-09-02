@@ -59,6 +59,10 @@ jobs:
       with:
         submodules: recursive
 
+    - name: Validate shipping platform profiles
+      shell: bash
+      run: bash scripts/test_platform_profiles.sh
+
     - name: Checkout hbb_common
       shell: bash
       env:

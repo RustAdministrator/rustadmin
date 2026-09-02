@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
+import 'package:flutter_hbb/common/session_peer_settings.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/model.dart';
@@ -68,25 +69,20 @@ class _MobileCustomImageQualityControlsState
         loadedQuality = kDefaultQuality;
       }
 
-      final fpsOption = await bind.sessionGetOption(
-        sessionId: _sessionId,
-        arg: kOptionCustomFps,
-      );
-      final videoProfile = await bind.sessionGetOption(
-        sessionId: _sessionId,
-        arg: kOptionVideoProfile,
-      );
+      final settings = SessionPeerSettingsRepository.forSession(_sessionId);
+      final fpsOption =
+          await settings.readRaw(SessionPeerSettingsRegistry.customFps);
+      final videoProfile =
+          await settings.read(SessionPeerSettingsRegistry.videoProfile);
       final movieMode = videoProfile == kVideoProfileMovie;
-      var loadedFps = double.tryParse(fpsOption ?? '')?.abs() ??
+      var loadedFps = double.tryParse(fpsOption)?.abs() ??
           (movieMode ? kMovieDefaultTargetFps : kDefaultFps);
       if (loadedFps < kMinFps || loadedFps > kMaxFps) {
         loadedFps = kDefaultFps;
       }
 
-      final fpsModeOption = await bind.sessionGetOption(
-        sessionId: _sessionId,
-        arg: kOptionCustomFpsMode,
-      );
+      final fpsModeOption =
+          await settings.read(SessionPeerSettingsRegistry.customFpsMode);
       final loadedFpsMode = fpsModeOption == kCustomFpsModeFixed
           ? kCustomFpsModeFixed
           : kCustomFpsModeAdaptive;

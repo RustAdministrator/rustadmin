@@ -5,9 +5,13 @@ import 'package:bot_toast/bot_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
+import 'package:flutter_hbb/common/session_peer_settings.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
+import 'package:flutter_hbb/generated_bridge.dart'
+    if (dart.library.html) 'package:flutter_hbb/web/bridge.dart'
+    show PeerSecurityEntry;
 import 'package:flutter_hbb/models/peer_model.dart';
 import 'package:flutter_hbb/models/peer_tab_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
@@ -999,10 +1003,15 @@ _connectDialog(
       final password = passwordController?.text.trim() ?? '';
       if (passwordController != null && password.isEmpty) return;
       if (rememberAccount) {
-        bind.sessionPeerOption(
-            sessionId: sessionId, name: 'os-username', value: osUsername);
-        bind.sessionPeerOption(
-            sessionId: sessionId, name: 'os-password', value: osPassword);
+        final settings = SessionPeerSettingsRepository.forSession(sessionId);
+        unawaited(settings.write(
+          SessionPeerSettingsRegistry.osUsername,
+          osUsername,
+        ));
+        unawaited(settings.write(
+          SessionPeerSettingsRegistry.osPassword,
+          osPassword,
+        ));
       }
       gFFI.login(
         osUsername,
@@ -1453,12 +1462,10 @@ showSetOSPassword(
   Function()? closeCallback,
 ) async {
   final controller = TextEditingController();
-  final initialOsPassword = osPassword ??
-      await bind.sessionGetOption(sessionId: sessionId, arg: 'os-password') ??
-      '';
-  var autoLogin =
-      await bind.sessionGetOption(sessionId: sessionId, arg: 'auto-login') !=
-          '';
+  final settings = SessionPeerSettingsRepository.forSession(sessionId);
+  final String initialOsPassword = osPassword ??
+      (await settings.read(SessionPeerSettingsRegistry.osPassword));
+  var autoLogin = await settings.read(SessionPeerSettingsRegistry.autoLogin);
   controller.text = initialOsPassword;
   dialogManager.show((setState, close, context) {
     closeWithCallback([dynamic]) {
@@ -1468,12 +1475,10 @@ showSetOSPassword(
 
     submit() {
       var text = controller.text.trim();
-      bind.sessionPeerOption(
-          sessionId: sessionId, name: 'os-password', value: text);
-      bind.sessionPeerOption(
-          sessionId: sessionId,
-          name: 'auto-login',
-          value: autoLogin ? 'Y' : '');
+      unawaited(settings.write(SessionPeerSettingsRegistry.osPassword, text));
+      unawaited(
+        settings.write(SessionPeerSettingsRegistry.autoLogin, autoLogin),
+      );
       if (text != '' && login) {
         bind.sessionInputOsPassword(sessionId: sessionId, value: text);
       }
@@ -1532,22 +1537,21 @@ showSetOSAccount(
 ) async {
   final usernameController = TextEditingController();
   final passwdController = TextEditingController();
-  var username =
-      await bind.sessionGetOption(sessionId: sessionId, arg: 'os-username') ??
-          '';
-  var password =
-      await bind.sessionGetOption(sessionId: sessionId, arg: 'os-password') ??
-          '';
+  final settings = SessionPeerSettingsRepository.forSession(sessionId);
+  var username = await settings.read(SessionPeerSettingsRegistry.osUsername);
+  var password = await settings.read(SessionPeerSettingsRegistry.osPassword);
   usernameController.text = username;
   passwdController.text = password;
   dialogManager.show((setState, close, context) {
     submit() {
       final username = usernameController.text.trim();
-      final password = usernameController.text.trim();
-      bind.sessionPeerOption(
-          sessionId: sessionId, name: 'os-username', value: username);
-      bind.sessionPeerOption(
-          sessionId: sessionId, name: 'os-password', value: password);
+      final password = passwdController.text.trim();
+      unawaited(
+        settings.write(SessionPeerSettingsRegistry.osUsername, username),
+      );
+      unawaited(
+        settings.write(SessionPeerSettingsRegistry.osPassword, password),
+      );
       close();
     }
 
@@ -1930,8 +1934,9 @@ customImageQualityDialog(SessionID sessionId, String id, FFI ffi) async {
   String initFpsMode = kCustomFpsModeAdaptive;
   bool qualitySet = false;
   bool fpsSet = false;
-  final videoProfile = await bind.sessionGetOption(
-      sessionId: sessionId, arg: kOptionVideoProfile);
+  final settings = SessionPeerSettingsRepository.forSession(sessionId);
+  final videoProfile =
+      await settings.read(SessionPeerSettingsRegistry.videoProfile);
   var activeVideoProfile = videoProfile == kVideoProfileMovie
       ? kVideoProfileMovie
       : kVideoProfileStandard;
@@ -2016,21 +2021,17 @@ customImageQualityDialog(SessionID sessionId, String id, FFI ffi) async {
     initQuality = kDefaultQuality;
   }
   // fps
-  final fpsOption =
-      await bind.sessionGetOption(sessionId: sessionId, arg: kOptionCustomFps);
-  initFps = fpsOption == null
+  final fpsRaw = await settings.readRaw(SessionPeerSettingsRegistry.customFps);
+  initFps = fpsRaw.isEmpty
       ? (activeVideoProfile == kVideoProfileMovie
           ? kMovieDefaultTargetFps
           : kDefaultFps)
-      : double.tryParse(fpsOption)?.abs() ??
-          (activeVideoProfile == kVideoProfileMovie
-              ? kMovieDefaultTargetFps
-              : kDefaultFps);
+      : SessionPeerSettingsRegistry.customFps.codec.decode(fpsRaw);
   if (initFps < kMinFps || initFps > kMaxFps) {
     initFps = kDefaultFps;
   }
-  final fpsModeOption = await bind.sessionGetOption(
-      sessionId: sessionId, arg: kOptionCustomFpsMode);
+  final fpsModeOption =
+      await settings.read(SessionPeerSettingsRegistry.customFpsMode);
   initFpsMode = fpsModeOption == kCustomFpsModeFixed
       ? kCustomFpsModeFixed
       : kCustomFpsModeAdaptive;
@@ -2482,20 +2483,9 @@ void showWindowsSessionsDialog(
     String text,
     OverlayDialogManager dialogManager,
     SessionID sessionId,
-    String peerId,
-    String sessions) {
-  List<dynamic> sessionsList = [];
-  try {
-    sessionsList = json.decode(sessions);
-  } catch (e) {
-    print(e);
-  }
-  List<String> sids = [];
-  List<String> names = [];
-  for (var session in sessionsList) {
-    sids.add(session['sid']);
-    names.add(session['name']);
-  }
+    List<String> sids,
+    List<String> names) {
+  if (sids.isEmpty || sids.length != names.length) return;
   String selectedUserValue = sids.first;
   dialogManager.dismissAll();
   dialogManager.show((setState, close, context) {
@@ -3208,6 +3198,24 @@ class KnownHost {
     );
   }
 
+  factory KnownHost.fromFfi(PeerSecurityEntry entry) => KnownHost(
+        id: entry.id,
+        alias: entry.alias,
+        username: entry.username,
+        hostname: entry.hostname,
+        platform: entry.platform,
+        lastUpdatedUnixMs: entry.lastUpdatedUnixMs,
+        hasPeerConfig: entry.hasPeerConfig,
+        hasPassword: entry.hasPassword,
+        hasPinnedKey: entry.hasPinnedKey,
+        pinnedKeyFingerprint: entry.pinnedKeyFingerprint,
+        hasDirectPairingMemory: entry.hasDirectPairingMemory,
+        hasRendezvousPairingMemory: entry.hasRendezvousPairingMemory,
+        hasQuicIdentity: entry.hasQuicIdentity,
+        quicIdentityFingerprint: entry.quicIdentityFingerprint,
+        quicConfirmedAtUnixMs: entry.quicConfirmedAtUnixMs,
+      );
+
   String get displayName {
     if (alias.isNotEmpty) return alias;
     if (hostname.isNotEmpty) return hostname;
@@ -3279,14 +3287,22 @@ class KnownHost {
   static Future<List<KnownHost>> get() async {
     final List<KnownHost> hosts = List.empty(growable: true);
     try {
-      final hostsJson = await bind.mainListPeerSecurityEntries();
-      if (hostsJson.isEmpty) return hosts;
-      final hostsList = json.decode(hostsJson);
-      if (hostsList is! List) return hosts;
-      for (final host in hostsList) {
-        if (host is! Map<String, dynamic>) continue;
-        final entry = KnownHost.fromJson(host);
-        if (entry.id.isNotEmpty) hosts.add(entry);
+      if (isWeb) {
+        final hostsJson = await bind.mainListPeerSecurityEntries();
+        if (hostsJson.isNotEmpty) {
+          final hostsList = json.decode(hostsJson);
+          if (hostsList is List) {
+            for (final host in hostsList) {
+              if (host is! Map<String, dynamic>) continue;
+              final entry = KnownHost.fromJson(host);
+              if (entry.id.isNotEmpty) hosts.add(entry);
+            }
+          }
+        }
+      } else {
+        for (final entry in await bind.mainListPeerSecurityEntriesV2()) {
+          if (entry.id.isNotEmpty) hosts.add(KnownHost.fromFfi(entry));
+        }
       }
     } catch (e) {
       print(e.toString());

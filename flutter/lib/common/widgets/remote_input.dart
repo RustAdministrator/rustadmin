@@ -56,24 +56,6 @@ class RawKeyFocusScope extends StatelessWidget {
     );
   }
 }
-Offset mobileCursorInertiaFrameDelta({
-  required Offset velocityPixelsPerSecond,
-  required Duration elapsedBeforeFrame,
-  required Duration frameDuration,
-  required Duration totalDuration,
-}) {
-  final totalMicroseconds = totalDuration.inMicroseconds;
-  if (totalMicroseconds <= 0 || frameDuration <= Duration.zero) {
-    return Offset.zero;
-  }
-  final midpointMicroseconds =
-      elapsedBeforeFrame.inMicroseconds + frameDuration.inMicroseconds / 2;
-  if (midpointMicroseconds >= totalMicroseconds) return Offset.zero;
-  final decay = 1 - midpointMicroseconds / totalMicroseconds;
-  final frameSeconds =
-      frameDuration.inMicroseconds / Duration.microsecondsPerSecond;
-  return velocityPixelsPerSecond * frameSeconds * decay;
-}
 
 Rect mobileRemoteInputLocalRect({
   required Rect globalRect,
@@ -123,17 +105,10 @@ class _RawTouchGestureDetectorRegionState
   // `onDoubleTap()` does not provide the position of the tap event.
   Offset _lastPosOfDoubleTapDown = Offset.zero;
   bool _touchModePanStarted = false;
-  final _leftLongPressButton = MobileButtonSequenceController();
-  final _legacyHoldDragButton = MobileButtonSequenceController();
-  final _rightTwoFingerButton = MobileButtonSequenceController();
-  Timer? _cursorInertiaTimer;
-  Stopwatch? _cursorInertiaStopwatch;
-  Duration _previousInertiaElapsed = Duration.zero;
-  Offset _cursorInertiaVelocity = Offset.zero;
-  Offset _cursorInertiaLocalPosition = Offset.zero;
+  late final MobileInteractionCoordinator _interaction;
+  late final MobileCursorInertiaController _cursorInertia;
+  late bool _hadKeyboardPermission;
   Offset _lastOneFingerPanPosition = Offset.zero;
-  bool _cursorInertiaTickPending = false;
-  int _cursorInertiaGeneration = 0;
 
   // For mouse mode, we need to block the events when the cursor is in a blocked area.
   // So we need to cache the last tap down position.
@@ -162,6 +137,25 @@ class _RawTouchGestureDetectorRegionState
   }
 
   @override
+  void initState() {
+    super.initState();
+    _interaction = MobileInteractionCoordinator(
+      sendDown: _sendMobileButtonDown,
+      sendUp: _sendMobileButtonUp,
+    );
+    _cursorInertia = MobileCursorInertiaController(
+      onFrame: _applyCursorInertiaFrame,
+      onStopped: ffi.canvasModel.cancelEdgeScroll,
+      onError: (error, stackTrace) {
+        debugPrint('Mobile cursor inertia failed: $error');
+        debugPrintStack(stackTrace: stackTrace);
+      },
+    );
+    _hadKeyboardPermission = ffiModel.keyboard;
+    ffiModel.addListener(_handlePermissionChange);
+  }
+
+  @override
   Widget build(BuildContext context) {
     return RawGestureDetector(
       child: widget.child,
@@ -171,38 +165,43 @@ class _RawTouchGestureDetectorRegionState
 
   @override
   void dispose() {
-    _stopCursorInertia();
+    ffiModel.removeListener(_handlePermissionChange);
+    _cursorInertia.dispose();
     _releasePressedButtons();
     super.dispose();
   }
 
   void _releasePressedButtons() {
     ffi.canvasModel.endMobileSelectionEdgeScroll();
-    unawaited(
-      _leftLongPressButton.release(
-        () => inputModel.tapUp(MouseButtons.left),
-      ),
-    );
-    unawaited(
-      _legacyHoldDragButton.release(
-        () => inputModel.sendMouse('up', MouseButtons.left),
-      ),
-    );
-    unawaited(
-      _rightTwoFingerButton.release(
-        () => inputModel.tapUp(MouseButtons.right),
-      ),
-    );
+    unawaited(_interaction.releaseAll());
+  }
+
+  Future<void> _sendMobileButtonDown(MobileButtonIntent intent) => switch (intent) {
+    MobileButtonIntent.ordinaryTap || MobileButtonIntent.leftLongPress =>
+      inputModel.tapDown(MouseButtons.left),
+    MobileButtonIntent.legacyHoldDrag || MobileButtonIntent.touchModePanDrag =>
+      inputModel.sendMouse('down', MouseButtons.left),
+    MobileButtonIntent.rightTwoFinger => inputModel.tapDown(MouseButtons.right),
+  };
+
+  Future<void> _sendMobileButtonUp(MobileButtonIntent intent) => switch (intent) {
+    MobileButtonIntent.ordinaryTap || MobileButtonIntent.leftLongPress =>
+      inputModel.tapUp(MouseButtons.left),
+    MobileButtonIntent.legacyHoldDrag || MobileButtonIntent.touchModePanDrag =>
+      inputModel.sendMouse('up', MouseButtons.left),
+    MobileButtonIntent.rightTwoFinger => inputModel.tapUp(MouseButtons.right),
+  };
+
+  void _handlePermissionChange() {
+    final hasKeyboardPermission = ffiModel.keyboard;
+    if (_hadKeyboardPermission && !hasKeyboardPermission) {
+      _releasePressedButtons();
+    }
+    _hadKeyboardPermission = hasKeyboardPermission;
   }
 
   void _stopCursorInertia({bool cancelEdgeScroll = true}) {
-    _cursorInertiaGeneration += 1;
-    _cursorInertiaTimer?.cancel();
-    _cursorInertiaTimer = null;
-    _cursorInertiaStopwatch?.stop();
-    _cursorInertiaStopwatch = null;
-    _previousInertiaElapsed = Duration.zero;
-    if (cancelEdgeScroll) ffi.canvasModel.cancelEdgeScroll();
+    _cursorInertia.stop(notify: cancelEdgeScroll);
   }
 
   bool _startCursorInertia(DragEndDetails details) {
@@ -213,25 +212,16 @@ class _RawTouchGestureDetectorRegionState
           kMaxMobileCursorInertiaDurationMs,
         )
         .toInt();
-    var velocity = details.velocity.pixelsPerSecond;
-    if (durationMs <= 0 || velocity.distance < 50) {
+    final started = _cursorInertia.start(
+      duration: Duration(milliseconds: durationMs),
+      velocity: details.velocity.pixelsPerSecond,
+      localPosition: _lastOneFingerPanPosition,
+    );
+    if (!started) {
       ffi.canvasModel.cancelEdgeScroll();
       return false;
     }
-    const maximumVelocity = 3000.0;
-    if (velocity.distance > maximumVelocity) {
-      velocity = velocity / velocity.distance * maximumVelocity;
-    }
-    _cursorInertiaVelocity = velocity;
-    _cursorInertiaLocalPosition = _lastOneFingerPanPosition;
-    _previousInertiaElapsed = Duration.zero;
-    _cursorInertiaStopwatch = Stopwatch()..start();
-    final generation = _cursorInertiaGeneration;
     if (inputModel.useEdgeScroll) ffi.canvasModel.rearmEdgeScroll();
-    _cursorInertiaTimer = Timer.periodic(
-      const Duration(milliseconds: 16),
-      (_) => _runCursorInertiaTick(generation, durationMs),
-    );
     return true;
   }
 
@@ -255,74 +245,41 @@ class _RawTouchGestureDetectorRegionState
     await ffi.cursorModel.updatePan(delta, targetPosition, false);
   }
 
-  Future<void> _runCursorInertiaTick(int generation, int durationMs) async {
-    if (generation != _cursorInertiaGeneration || _cursorInertiaTickPending) {
-      return;
+  Future<Offset> _applyCursorInertiaFrame(
+    MobileCursorInertiaFrame frame,
+  ) async {
+    if (inputModel.relativeMouseMode.value) {
+      await inputModel.sendMobileRelativeMouseMove(
+        frame.delta.dx,
+        frame.delta.dy,
+      );
+      return Offset.zero;
     }
-    final stopwatch = _cursorInertiaStopwatch;
-    if (stopwatch == null) return;
-    final totalDuration = Duration(milliseconds: durationMs);
-    final elapsed = stopwatch.elapsed;
-    final remaining = totalDuration - _previousInertiaElapsed;
-    if (remaining <= Duration.zero) {
-      _stopCursorInertia();
-      return;
-    }
-    final frameDuration = elapsed >= totalDuration
-        ? remaining
-        : elapsed - _previousInertiaElapsed;
-    final delta = mobileCursorInertiaFrameDelta(
-      velocityPixelsPerSecond: _cursorInertiaVelocity,
-      elapsedBeforeFrame: _previousInertiaElapsed,
-      frameDuration: frameDuration,
-      totalDuration: totalDuration,
-    );
-    _previousInertiaElapsed = elapsed;
-    if (delta == Offset.zero) {
-      _stopCursorInertia();
-      return;
-    }
-    _cursorInertiaTickPending = true;
-    try {
-      _cursorInertiaLocalPosition += delta;
-      if (inputModel.relativeMouseMode.value) {
-        await inputModel.sendMobileRelativeMouseMove(delta.dx, delta.dy);
-      } else {
+    await ffi.cursorModel.updatePan(frame.delta, frame.localPosition, false);
+    var adjustment = Offset.zero;
+    if (_returnsAccelerationCursorToNeutral) {
+      final currentPosition = ffi.cursorModel.mobileViewportPosition;
+      adjustment = mobileRemoteAccelerationReturnDelta(
+        pointerPosition: currentPosition,
+        viewport: ffi.canvasModel.size,
+        edgeThickness: ffi.canvasModel.edgeScrollEdgeThickness.toDouble(),
+        directions: ffi.canvasModel.mobileViewportScrollDirections,
+        frameDuration: frame.frameDuration,
+        remainingDuration: frame.remainingDuration,
+      );
+      if (adjustment != Offset.zero) {
         await ffi.cursorModel.updatePan(
-          delta,
-          _cursorInertiaLocalPosition,
+          adjustment,
+          currentPosition + adjustment,
           false,
         );
-        if (_returnsAccelerationCursorToNeutral) {
-          final currentPosition = ffi.cursorModel.mobileViewportPosition;
-          final returnDelta = mobileRemoteAccelerationReturnDelta(
-            pointerPosition: currentPosition,
-            viewport: ffi.canvasModel.size,
-            edgeThickness: ffi.canvasModel.edgeScrollEdgeThickness.toDouble(),
-            directions: ffi.canvasModel.mobileViewportScrollDirections,
-            frameDuration: frameDuration,
-            remainingDuration: remaining,
-          );
-          if (returnDelta != Offset.zero) {
-            _cursorInertiaLocalPosition += returnDelta;
-            await ffi.cursorModel.updatePan(
-              returnDelta,
-              currentPosition + returnDelta,
-              false,
-            );
-          }
-        }
-        if (inputModel.useEdgeScroll) {
-          final edgePosition = ffi.cursorModel.mobileViewportPosition;
-          ffi.canvasModel.edgeScrollMouse(edgePosition.dx, edgePosition.dy);
-        }
       }
-    } finally {
-      _cursorInertiaTickPending = false;
     }
-    if (generation == _cursorInertiaGeneration && elapsed >= totalDuration) {
-      _stopCursorInertia();
+    if (inputModel.useEdgeScroll) {
+      final edgePosition = ffi.cursorModel.mobileViewportPosition;
+      ffi.canvasModel.edgeScrollMouse(edgePosition.dx, edgePosition.dy);
     }
+    return adjustment;
   }
 
   bool isNotTouchBasedDevice() {
@@ -374,9 +331,12 @@ class _RawTouchGestureDetectorRegionState
       if (isMoved) {
         // If pan already handled 'down', don't send it again.
         if (lastTapDownDetails != null && !_touchModePanStarted) {
-          await inputModel.tapDown(MouseButtons.left);
+          await _interaction.tap(MobileButtonIntent.ordinaryTap);
+        } else if (_touchModePanStarted) {
+          await _interaction.release(MobileButtonIntent.touchModePanDrag);
+        } else {
+          await _interaction.releaseOrSendUp(MobileButtonIntent.ordinaryTap);
         }
-        await inputModel.tapUp(MouseButtons.left);
       }
     }
   }
@@ -400,7 +360,7 @@ class _RawTouchGestureDetectorRegionState
         return;
       }
       // Mobile, "Mouse mode"
-      await inputModel.tap(MouseButtons.left);
+      await _interaction.tap(MobileButtonIntent.ordinaryTap);
     }
   }
 
@@ -443,8 +403,8 @@ class _RawTouchGestureDetectorRegionState
         return;
       }
     }
-    await inputModel.tap(MouseButtons.left);
-    await inputModel.tap(MouseButtons.left);
+    await _interaction.tap(MobileButtonIntent.ordinaryTap);
+    await _interaction.tap(MobileButtonIntent.ordinaryTap);
   }
 
   onOneFingerHoldDown(TapDownDetails d) async {
@@ -471,9 +431,7 @@ class _RawTouchGestureDetectorRegionState
   onOneFingerHoldEnd() async {
     _leftHoldStartedBlocked = false;
     ffi.canvasModel.endMobileSelectionEdgeScroll();
-    await _leftLongPressButton.release(
-      () => inputModel.tapUp(MouseButtons.left),
-    );
+    await _interaction.release(MobileButtonIntent.leftLongPress);
   }
 
   onOneFingerHoldStart(TapDownDetails d) async {
@@ -483,34 +441,36 @@ class _RawTouchGestureDetectorRegionState
     if (_leftHoldStartedBlocked) {
       return;
     }
-    final request = _leftLongPressButton.beginRequest();
+    final request = _interaction.begin(MobileButtonIntent.leftLongPress);
     if (handleTouch) {
       final isMoved = await ffi.cursorModel.move(
         _cacheLongPressPosition.dx,
         _cacheLongPressPosition.dy,
       );
       if (!isMoved) {
-        _leftLongPressButton.cancelRequest(request);
+        _interaction.cancel(MobileButtonIntent.leftLongPress, request);
         return;
       }
     } else if (shouldBlockMouseModeEvent()) {
-      _leftLongPressButton.cancelRequest(request);
+      _interaction.cancel(MobileButtonIntent.leftLongPress, request);
       return;
     }
-    if (!_leftLongPressButton.isRequested(request)) return;
+    if (!_interaction.isRequested(MobileButtonIntent.leftLongPress, request)) {
+      return;
+    }
     if (!handleTouch && !inputModel.relativeMouseMode.value) {
       ffi.canvasModel.beginMobileSelectionEdgeScroll();
     }
-    await _leftLongPressButton.activate(
-      request,
-      () => inputModel.tapDown(MouseButtons.left),
-    );
+    await _interaction.activate(MobileButtonIntent.leftLongPress, request);
   }
 
   onOneFingerHoldMove(DragUpdateDetails d) async {
-    if (!_leftLongPressButton.hasIntent || isNotTouchBasedDevice()) return;
-    await _leftLongPressButton.settled;
-    if (!_leftLongPressButton.isPressed) return;
+    if (!_interaction.hasIntent(MobileButtonIntent.leftLongPress) ||
+        isNotTouchBasedDevice()) {
+      return;
+    }
+    await _interaction.settled(MobileButtonIntent.leftLongPress);
+    if (!_interaction.isPressed(MobileButtonIntent.leftLongPress)) return;
     final delta = d.localPosition - _cacheLongPressPosition;
     _cacheLongPressPosition = d.localPosition;
     if (handleTouch) {
@@ -549,26 +509,23 @@ class _RawTouchGestureDetectorRegionState
 
   onTwoFingerTap(TapDownDetails d) async {
     if (!await _prepareTwoFingerButton(d)) return;
-    await inputModel.tap(MouseButtons.right);
+    await _interaction.tap(MobileButtonIntent.rightTwoFinger);
   }
 
   onTwoFingerHoldStart(TapDownDetails d) async {
-    final request = _rightTwoFingerButton.beginRequest();
+    final request = _interaction.begin(MobileButtonIntent.rightTwoFinger);
     if (!await _prepareTwoFingerButton(d)) {
-      _rightTwoFingerButton.cancelRequest(request);
+      _interaction.cancel(MobileButtonIntent.rightTwoFinger, request);
       return;
     }
-    if (!_rightTwoFingerButton.isRequested(request)) return;
-    await _rightTwoFingerButton.activate(
-      request,
-      () => inputModel.tapDown(MouseButtons.right),
-    );
+    if (!_interaction.isRequested(MobileButtonIntent.rightTwoFinger, request)) {
+      return;
+    }
+    await _interaction.activate(MobileButtonIntent.rightTwoFinger, request);
   }
 
   onTwoFingerHoldEnd() async {
-    await _rightTwoFingerButton.release(
-      () => inputModel.tapUp(MouseButtons.right),
-    );
+    await _interaction.release(MobileButtonIntent.rightTwoFinger);
   }
 
   onHoldDragStart(DragStartDetails d) async {
@@ -579,14 +536,11 @@ class _RawTouchGestureDetectorRegionState
     }
     if (!handleTouch) {
       if (inputModel.mobileSpecialHoldDragActive) return;
-      final request = _legacyHoldDragButton.beginRequest();
+      final request = _interaction.begin(MobileButtonIntent.legacyHoldDrag);
       if (!inputModel.relativeMouseMode.value) {
         ffi.canvasModel.beginMobileSelectionEdgeScroll();
       }
-      await _legacyHoldDragButton.activate(
-        request,
-        () => inputModel.sendMouse('down', MouseButtons.left),
-      );
+      await _interaction.activate(MobileButtonIntent.legacyHoldDrag, request);
     }
   }
 
@@ -596,9 +550,9 @@ class _RawTouchGestureDetectorRegionState
     }
     if (!handleTouch) {
       if (inputModel.mobileSpecialHoldDragActive) return;
-      if (!_legacyHoldDragButton.hasIntent) return;
-      await _legacyHoldDragButton.settled;
-      if (!_legacyHoldDragButton.isPressed) return;
+      if (!_interaction.hasIntent(MobileButtonIntent.legacyHoldDrag)) return;
+      await _interaction.settled(MobileButtonIntent.legacyHoldDrag);
+      if (!_interaction.isPressed(MobileButtonIntent.legacyHoldDrag)) return;
       await ffi.cursorModel.updatePan(d.delta, d.localPosition, handleTouch);
       ffi.canvasModel.updateMobileSelectionEdgeScroll(d.localPosition);
     }
@@ -610,17 +564,13 @@ class _RawTouchGestureDetectorRegionState
       return;
     }
     if (!handleTouch) {
-      await _legacyHoldDragButton.release(
-        () => inputModel.sendMouse('up', MouseButtons.left),
-      );
+      await _interaction.release(MobileButtonIntent.legacyHoldDrag);
     }
   }
 
   onHoldDragCancel() async {
     ffi.canvasModel.endMobileSelectionEdgeScroll();
-    await _legacyHoldDragButton.release(
-      () => inputModel.sendMouse('up', MouseButtons.left),
-    );
+    await _interaction.release(MobileButtonIntent.legacyHoldDrag);
   }
 
   onOneFingerPanStart(DragStartDetails d) async {
@@ -661,7 +611,11 @@ class _RawTouchGestureDetectorRegionState
       }
       // In relative mouse mode, skip mouse down - only send movement via sendMobileRelativeMouseMove
       if (!inputModel.relativeMouseMode.value) {
-        await inputModel.sendMouse('down', MouseButtons.left);
+        final request = _interaction.begin(MobileButtonIntent.touchModePanDrag);
+        await _interaction.activate(
+          MobileButtonIntent.touchModePanDrag,
+          request,
+        );
       }
       await ffi.cursorModel.move(d.localPosition.dx, d.localPosition.dy);
     }
@@ -710,10 +664,7 @@ class _RawTouchGestureDetectorRegionState
       ffi.cursorModel.clearRemoteWindowCoords();
     }
     if (handleTouch) {
-      // In relative mouse mode, skip mouse up - matches the skipped mouse down in onOneFingerPanStart
-      if (!inputModel.relativeMouseMode.value) {
-        await inputModel.sendMouse('up', MouseButtons.left);
-      }
+      await _interaction.release(MobileButtonIntent.touchModePanDrag);
     } else {
       if (!_startCursorInertia(d)) {
         await _returnAccelerationCursorToNeutral();
@@ -726,13 +677,11 @@ class _RawTouchGestureDetectorRegionState
   // stuck in the "started" state and cause issues such as the Magic Mouse
   // double-click problem on iPad with magic mouse.
   onOneFingerPanCancel() async {
-    final releaseLeftDrag = handleTouch &&
-        _touchModePanStarted &&
-        !inputModel.relativeMouseMode.value;
+    final releaseLeftDrag = handleTouch && _touchModePanStarted;
     _touchModePanStarted = false;
     ffi.canvasModel.cancelEdgeScroll();
     if (releaseLeftDrag) {
-      await inputModel.sendMouse('up', MouseButtons.left);
+      await _interaction.release(MobileButtonIntent.touchModePanDrag);
     }
   }
 

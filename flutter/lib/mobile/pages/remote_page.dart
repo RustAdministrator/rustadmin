@@ -19,15 +19,19 @@ import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 
 import '../../common.dart';
+import '../../common/remote_display_settings.dart';
+import '../../common/session_peer_settings.dart';
 import '../../common/widgets/overlay.dart';
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/remote_input.dart';
 import '../../models/input_model.dart';
+import '../../models/android_render_target_controller.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../../utils/image.dart';
 import '../android_vpn_controller.dart';
 import '../mobile_remote_settings_repository.dart';
+import '../mobile_session_reconnect_controller.dart';
 import '../mobile_modifier_state.dart';
 import '../mobile_viewport.dart';
 import '../android_remote_keyboard.dart';
@@ -37,7 +41,9 @@ import '../widgets/dialog.dart';
 final initText = '1' * 1024;
 
 bool _showMonitorsInMobileToolbarFromUserDefaults() =>
-    bind.mainGetUserDefaultOption(key: kKeyShowMonitorsToolbar) == 'Y';
+    remoteDisplaySettings.read(
+      RemoteDisplaySettingsRegistry.showMonitorsToolbar,
+    );
 
 // Workaround for Android (default input method, Microsoft SwiftKey keyboard) when using physical keyboard.
 // When connecting a physical keyboard, `KeyEvent.physicalKey.usbHidUsage` are wrong is using Microsoft SwiftKey keyboard.
@@ -80,10 +86,8 @@ class _RemotePageState extends State<RemotePage>
   Timer? _iosKeyboardWorkaroundTimer;
   StreamSubscription<AndroidOutgoingSessionClosedEvent>?
   _outgoingSessionClosedSubscription;
-  bool _backgroundReconnectPending = false;
-  bool _backgroundReconnectInProgress = false;
-  bool _manualDisconnect = false;
-  Future<void>? _backgroundCloseFuture;
+  StreamSubscription<bool>? _showMonitorsSubscription;
+  late final MobileSessionReconnectController _reconnectController;
   bool _updatingSoftKeyboardText = false;
 
   final _blockableOverlayState = BlockableOverlayState();
@@ -105,22 +109,8 @@ class _RemotePageState extends State<RemotePage>
   var _quickKeyOrder = List<MobileRemoteQuickKey>.of(
     mobileRemoteDefaultQuickKeyOrder,
   );
-  late final _settingsRepository = MobileRemoteSettingsRepository(
-    readUserDefault: (key) => bind.mainGetUserDefaultOption(key: key),
-    readLocal: (key) => bind.mainGetLocalOption(key: key),
-    readPeer: (key) => bind.sessionGetPeerOption(
-      sessionId: sessionId,
-      name: key,
-    ),
-    writeLocal: (key, value) async {
-      await bind.mainSetLocalOption(key: key, value: value);
-    },
-    writePeer: (key, value) => bind.sessionPeerOption(
-      sessionId: sessionId,
-      name: key,
-      value: value,
-    ),
-  );
+  late final _settingsRepository =
+      MobileRemoteSettingsRepository.forSession(sessionId);
 
   InputModel get inputModel => gFFI.inputModel;
   SessionID get sessionId => gFFI.sessionId;
@@ -144,12 +134,42 @@ class _RemotePageState extends State<RemotePage>
   @override
   void initState() {
     super.initState();
+    _reconnectController = MobileSessionReconnectController(
+      resetSession: ({required closeSession}) =>
+          gFFI.resetMobileSessionForReconnect(closeSession: closeSession),
+      prepareReconnect: _prepareBackgroundReconnect,
+      connect: _connectCurrentSession,
+      onReconnectStarted: () {
+        if (!mounted) return;
+        gFFI.dialogManager.dismissAll();
+        gFFI.dialogManager.showLoading(
+          translate('Reconnecting...'),
+          onCancel: _requestDisconnect,
+        );
+      },
+      onReconnectFailed: (error, stackTrace) {
+        debugPrint(
+          'Failed to reconnect mobile background session: '
+          '$error\n$stackTrace',
+        );
+        if (!mounted) return;
+        gFFI.dialogManager.dismissAll();
+        showToast(translate('Failed to reconnect'));
+        closeConnection();
+      },
+      onNotificationDisconnect: closeConnection,
+    );
     _textController.addListener(_handleSoftKeyboardEditingValue);
     final defaults = _settingsRepository.readDefaults();
     _toolbarTransparencySettings = defaults.toolbarTransparency;
     _toolbarPlacementSettings = defaults.toolbarPlacement;
     _cursorInertiaSettings = defaults.cursorInertia;
     _showMonitorsInToolbar = _showMonitorsInMobileToolbarFromUserDefaults();
+    _showMonitorsSubscription = remoteDisplaySettings
+        .watch(RemoteDisplaySettingsRegistry.showMonitorsToolbar)
+        .listen((value) {
+      if (mounted) setState(() => _showMonitorsInToolbar = value);
+    });
     gFFI.canvasModel.initializeEdgeScrollFallback(this);
     gFFI.ffiModel.updateEventListener(sessionId, widget.id);
     if (isAndroid) {
@@ -216,82 +236,22 @@ class _RemotePageState extends State<RemotePage>
   }
 
   void _handleOutgoingSessionClosed(AndroidOutgoingSessionClosedEvent event) {
-    if (_manualDisconnect || !mounted) return;
-    if (event.reason == 'notification-disconnect') {
-      _manualDisconnect = true;
-      closeConnection();
-      return;
-    }
-    if (event.reason != 'background-timeout' &&
-        event.reason != 'background-native-disconnect' &&
-        event.reason != 'foreground-unhealthy' &&
-        event.reason != 'foreground-service-timeout') {
-      return;
-    }
-    _backgroundReconnectPending = true;
-    if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
-      unawaited(_restartAfterBackground());
-    }
-  }
-
-  Future<void> _restartAfterBackground() async {
-    if (!mounted ||
-        _manualDisconnect ||
-        !_backgroundReconnectPending ||
-        _backgroundReconnectInProgress) {
-      return;
-    }
-    _backgroundReconnectInProgress = true;
-    _backgroundReconnectPending = false;
-    gFFI.dialogManager.dismissAll();
-    gFFI.dialogManager.showLoading(
-      translate('Reconnecting...'),
-      onCancel: _requestDisconnect,
+    if (!mounted) return;
+    _reconnectController.handleSessionClosed(
+      event.reason,
+      isForeground:
+          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed,
     );
-    try {
-      final backgroundClose = _backgroundCloseFuture;
-      if (backgroundClose != null) await backgroundClose;
-      await gFFI.resetMobileSessionForReconnect(closeSession: false);
-      if (isAndroid && widget.forceRelay != true) {
-        final coordinator = AndroidVpnSessionCoordinator.instance;
-        if (await coordinator.isEnabled(widget.id)) {
-          final prepared = await coordinator.prepare(widget.id);
-          if (!prepared.proceed) {
-            throw StateError(prepared.message);
-          }
-        }
-      }
-      await _connectCurrentSession();
-    } catch (error, stackTrace) {
-      debugPrint(
-        'Failed to reconnect mobile background session: '
-        '$error\n$stackTrace',
-      );
-      if (mounted) {
-        gFFI.dialogManager.dismissAll();
-        showToast(translate('Failed to reconnect'));
-        closeConnection();
-      }
-    } finally {
-      _backgroundReconnectInProgress = false;
-    }
   }
 
-  Future<void> _closeIosSessionForBackground() async {
-    if (!isIOS ||
-        _manualDisconnect ||
-        _backgroundReconnectPending ||
-        gFFI.closed) {
-      return;
-    }
-    _backgroundReconnectPending = true;
-    final closeFuture = gFFI.resetMobileSessionForReconnect(closeSession: true);
-    _backgroundCloseFuture = closeFuture;
-    try {
-      await closeFuture;
-    } finally {
-      if (identical(_backgroundCloseFuture, closeFuture)) {
-        _backgroundCloseFuture = null;
+  Future<void> _prepareBackgroundReconnect() async {
+    if (isAndroid && widget.forceRelay != true) {
+      final coordinator = AndroidVpnSessionCoordinator.instance;
+      if (await coordinator.isEnabled(widget.id)) {
+        final prepared = await coordinator.prepare(widget.id);
+        if (!prepared.proceed) {
+          throw StateError(prepared.message);
+        }
       }
     }
   }
@@ -321,50 +281,89 @@ class _RemotePageState extends State<RemotePage>
   }
 
   @override
-  Future<void> dispose() async {
-    _manualDisconnect = true;
+  void dispose() {
+    _reconnectController.dispose();
     _textController.removeListener(_handleSoftKeyboardEditingValue);
     WidgetsBinding.instance.removeObserver(this);
-    await _outgoingSessionClosedSubscription?.cancel();
+    final outgoingSubscriptionCancel =
+        _outgoingSessionClosedSubscription?.cancel();
+    final showMonitorsCancel = _showMonitorsSubscription?.cancel();
+    if (showMonitorsCancel != null) unawaited(showMonitorsCancel);
     gFFI.canvasModel.disposeEdgeScrollFallback();
-    unawaited(bind.sessionClose(sessionId: gFFI.sessionId));
     // https://github.com/flutter/flutter/issues/64935
-    super.dispose();
     gFFI.dialogManager.hideMobileActionsOverlay(store: false);
     gFFI.inputModel.listenToMouse(false);
     gFFI.imageModel.disposeImage();
     gFFI.cursorModel.disposeImages();
-    await _setAndroidRemoteKeyboardInput(false);
-    await gFFI.invokeMethod("enable_soft_keyboard", true);
+    final remoteKeyboardCleanup = _setAndroidRemoteKeyboardInput(false);
+    final softKeyboardRestore = gFFI.invokeMethod("enable_soft_keyboard", true);
+    final sessionClose = gFFI.close();
     _mobileFocusNode.dispose();
     _physicalFocusNode.dispose();
     _textController.dispose();
-    await gFFI.close();
     _timer?.cancel();
     _iosKeyboardWorkaroundTimer?.cancel();
     gFFI.dialogManager.dismissAll();
-    await SystemChrome.setEnabledSystemUIMode(
-      SystemUiMode.manual,
-      overlays: SystemUiOverlay.values,
-    );
     WakelockManager.disable(_uniqueKey);
-    await keyboardSubscription.cancel();
+    final keyboardVisibilityCancel = keyboardSubscription.cancel();
     removeSharedStates(widget.id);
     // `on_voice_call_closed` should be called when the connection is ended.
     // The inner logic of `on_voice_call_closed` will check if the voice call is active.
     // Only one client is considered here for now.
     gFFI.chatModel.onVoiceCallClosed("End connetion");
+    super.dispose();
+    unawaited(
+      _finishDispose(
+        outgoingSubscriptionCancel: outgoingSubscriptionCancel,
+        remoteKeyboardCleanup: remoteKeyboardCleanup,
+        softKeyboardRestore: softKeyboardRestore,
+        sessionClose: sessionClose,
+        keyboardVisibilityCancel: keyboardVisibilityCancel,
+      ),
+    );
+  }
+
+  Future<void> _finishDispose({
+    required Future<void>? outgoingSubscriptionCancel,
+    required Future<void> remoteKeyboardCleanup,
+    required Future<bool> softKeyboardRestore,
+    required Future<void> sessionClose,
+    required Future<void> keyboardVisibilityCancel,
+  }) async {
+    try {
+      await Future.wait<void>([
+        if (outgoingSubscriptionCancel != null) outgoingSubscriptionCancel,
+        remoteKeyboardCleanup,
+        softKeyboardRestore.then<void>((_) {}),
+        sessionClose,
+        keyboardVisibilityCancel,
+      ]);
+    } catch (error, stackTrace) {
+      debugPrint('Failed to finish remote page disposal: $error\n$stackTrace');
+    } finally {
+      try {
+        await SystemChrome.setEnabledSystemUIMode(
+          SystemUiMode.manual,
+          overlays: SystemUiOverlay.values,
+        );
+      } catch (error, stackTrace) {
+        debugPrint('Failed to restore system UI: $error\n$stackTrace');
+      }
+    }
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       trySyncClipboard();
-      if (_backgroundReconnectPending) {
-        unawaited(_restartAfterBackground());
-      }
-    } else if (state == AppLifecycleState.paused && isIOS) {
-      unawaited(_closeIosSessionForBackground());
+      unawaited(_reconnectController.enterForeground());
+    } else if (state == AppLifecycleState.paused) {
+      unawaited(
+        _reconnectController.enterBackground(
+          closeSession: isIOS,
+          sessionClosed: gFFI.closed,
+        ),
+      );
     }
   }
 
@@ -544,13 +543,11 @@ class _RemotePageState extends State<RemotePage>
 
   void _inputMobileTextEdit(MobileCommittedTextEdit edit) {
     if (edit.isEmpty) return;
-    bind.sessionInputTextEdit(
-      sessionId: sessionId,
-      value: edit.text,
+    inputModel.inputMobileTextEdit(
+      text: edit.text,
       deleteBeforeGraphemes: edit.deleteBeforeGraphemes,
       deleteAfterGraphemes: edit.deleteAfterGraphemes,
     );
-    inputModel.consumeMobileOneShotModifiers();
   }
 
   Future<void> _setAndroidRemoteKeyboardInput(bool enabled) async {
@@ -754,10 +751,9 @@ class _RemotePageState extends State<RemotePage>
   }
 
   Future<void> _toggleQualityMonitor() async {
-    await bind.sessionToggleOption(
-      sessionId: sessionId,
-      value: 'show-quality-monitor',
-    );
+    await LiveSessionSettingsRepository.forSession(
+      sessionId,
+    ).toggle(LiveSessionSettingsRegistry.showQualityMonitor);
     await gFFI.qualityMonitorModel.checkShowQualityMonitor(sessionId);
   }
 
@@ -974,10 +970,9 @@ class _RemotePageState extends State<RemotePage>
     final ffiModel = Provider.of<FfiModel>(context);
     var paints = <Widget>[const ImagePaint()];
     if (showCursorPaint) {
-      final cursor = bind.sessionGetToggleOptionSync(
-        sessionId: sessionId,
-        arg: 'show-remote-cursor',
-      );
+      final cursor = LiveSessionSettingsRepository.forSession(
+        sessionId,
+      ).readSync(LiveSessionSettingsRegistry.showRemoteCursor);
       if (ffiModel.keyboard || cursor) {
         paints.add(mobileRemoteCursorOverlay(widget.id));
       }
@@ -1030,22 +1025,12 @@ class _RemotePageState extends State<RemotePage>
     final currentKeyboardMode =
         await bind.sessionGetKeyboardMode(sessionId: gFFI.sessionId) ??
         kKeyLegacyMode;
-    final physicalKeyInput = mobileVmPhysicalInputEnabled(
-      await bind.sessionGetPeerOption(
-        sessionId: gFFI.sessionId,
-        name: kOptionMobilePhysicalKeyInput,
-      ),
-    );
+    final mobileSettings = await _settingsRepository.readSession();
+    final physicalKeyInput = mobileSettings.physicalKeyInput;
     final keyboardV2Supported =
         gFFI.ffiModel.pi.capabilities.keyboardV2CommittedText;
     final keyboardInputMode = keyboardV2Supported
-        ? mobileKeyboardInputV2Mode(
-            await bind.sessionGetPeerOption(
-              sessionId: gFFI.sessionId,
-              name: kOptionKeyboardInputModeV2,
-            ),
-            mobileVmPhysicalInputOption(physicalKeyInput),
-          )
+        ? mobileSettings.keyboardInputMode
         : null;
     final physicalKeyInputSupported =
         gFFI.ffiModel.pi.capabilities.physicalKeyInput(
@@ -1103,14 +1088,12 @@ class _RemotePageState extends State<RemotePage>
                           if (value == null) return;
                           final keyboardWasOpen = _showEdit;
                           await _setAndroidRemoteKeyboardInput(false);
-                          await _settingsRepository.storePeerOption(
-                            kOptionKeyboardInputModeV2,
+                          await _settingsRepository.storeKeyboardInputMode(
                             value,
                           );
                           final physical = value != kKeyboardInputModeText;
-                          await _settingsRepository.storePeerOption(
-                            kOptionMobilePhysicalKeyInput,
-                            mobileVmPhysicalInputOption(physical),
+                          await _settingsRepository.storePhysicalKeyInput(
+                            physical,
                           );
                           if (mounted) {
                             setState(() {
@@ -1178,10 +1161,8 @@ class _RemotePageState extends State<RemotePage>
                                       if (value == null) return;
                                       setState(() => _physicalKeyInput = value);
                                       unawaited(
-                                        _settingsRepository.storePeerOption(
-                                          kOptionMobilePhysicalKeyInput,
-                                          mobileVmPhysicalInputOption(value),
-                                        ),
+                                        _settingsRepository
+                                            .storePhysicalKeyInput(value),
                                       );
                                     },
                             ),
@@ -1396,8 +1377,9 @@ class _RemotePageState extends State<RemotePage>
           touchMode: gFFI.ffiModel.touchMode,
           onTouchModeChange: (t) {
             gFFI.ffiModel.toggleTouchMode();
-            final v = gFFI.ffiModel.touchMode ? 'Y' : 'N';
-            unawaited(bind.mainSetLocalOption(key: kOptionTouchMode, value: v));
+            unawaited(
+              _settingsRepository.storeTouchMode(gFFI.ffiModel.touchMode),
+            );
           },
           virtualMouseMode: gFFI.ffiModel.virtualMouseMode,
           inputModel: gFFI.inputModel,
@@ -1551,124 +1533,19 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
   }
 }
 
-class ImagePaint extends StatefulWidget {
+class ImagePaint extends StatelessWidget {
   const ImagePaint({Key? key}) : super(key: key);
 
-  @override
-  State<ImagePaint> createState() => _ImagePaintState();
-}
-
-class _ImagePaintState extends State<ImagePaint> {
-  int? _textureId;
-  int? _textureDisplay;
-  int? _textureWidth;
-  int? _textureHeight;
-  int? _queuedDisplay;
-  int? _queuedWidth;
-  int? _queuedHeight;
-  bool _targetUpdateScheduled = false;
-  int _targetGeneration = 0;
-
-  void _queueTextureTarget(int? display, int? width, int? height) {
-    if (_queuedDisplay == display &&
-        _queuedWidth == width &&
-        _queuedHeight == height) {
-      return;
-    }
-    _queuedDisplay = display;
-    _queuedWidth = width;
-    _queuedHeight = height;
-    if (_targetUpdateScheduled) return;
-    _targetUpdateScheduled = true;
+  void _requestTarget(
+    ImageModel model,
+    AndroidTextureTarget? target,
+    int intentEpoch,
+  ) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _targetUpdateScheduled = false;
-      if (!mounted) return;
-      final nextDisplay = _queuedDisplay;
-      final nextWidth = _queuedWidth;
-      final nextHeight = _queuedHeight;
-      _targetGeneration++;
-      final generation = _targetGeneration;
-      if (nextDisplay == null || nextWidth == null || nextHeight == null) {
-        unawaited(_releaseTexture());
-      } else if (_textureId == null ||
-          _textureDisplay != nextDisplay ||
-          _textureWidth != nextWidth ||
-          _textureHeight != nextHeight) {
-        unawaited(
-          _createTexture(generation, nextDisplay, nextWidth, nextHeight),
-        );
-      }
-    });
-  }
-
-  Future<void> _createTexture(
-    int generation,
-    int display,
-    int width,
-    int height,
-  ) async {
-    final textureId = await platformFFI.createAndroidRemoteVideoTexture(
-      display: display,
-      width: width,
-      height: height,
-    );
-    if (textureId == null) return;
-    if (!mounted || generation != _targetGeneration) {
-      await platformFFI.releaseAndroidRemoteVideoTexture(
-        display: display,
-        textureId: textureId,
-      );
-      return;
-    }
-    final oldTextureId = _textureId;
-    final oldDisplay = _textureDisplay;
-    setState(() {
-      _textureId = textureId;
-      _textureDisplay = display;
-      _textureWidth = width;
-      _textureHeight = height;
-    });
-    if (oldTextureId != null && oldDisplay != null) {
-      await platformFFI.releaseAndroidRemoteVideoTexture(
-        display: oldDisplay,
-        textureId: oldTextureId,
-      );
-    }
-    await bind.sessionRefresh(sessionId: gFFI.sessionId, display: display);
-  }
-
-  Future<void> _releaseTexture() async {
-    final textureId = _textureId;
-    final display = _textureDisplay;
-    if (textureId == null || display == null) return;
-    if (mounted) {
-      setState(() {
-        _textureId = null;
-        _textureDisplay = null;
-        _textureWidth = null;
-        _textureHeight = null;
-      });
-    }
-    await platformFFI.releaseAndroidRemoteVideoTexture(
-      display: display,
-      textureId: textureId,
-    );
-  }
-
-  @override
-  void dispose() {
-    _targetGeneration++;
-    final textureId = _textureId;
-    final display = _textureDisplay;
-    if (textureId != null && display != null) {
       unawaited(
-        platformFFI.releaseAndroidRemoteVideoTexture(
-          display: display,
-          textureId: textureId,
-        ),
+        model.requireAndroidTextureTarget(target, intentEpoch: intentEpoch),
       );
-    }
-    super.dispose();
+    });
   }
 
   @override
@@ -1697,21 +1574,25 @@ class _ImagePaintState extends State<ImagePaint> {
     );
     final display = ffiModel.pi.currentDisplay;
     final displayInfo = ffiModel.pi.tryGetDisplayIfNotAllDisplay();
+    final intentEpoch = m.androidRenderTargetEpoch;
     if (!isAndroid ||
         !m.useTextureRender ||
         displayInfo == null ||
         displayInfo.width <= 0 ||
         displayInfo.height <= 0) {
-      _queueTextureTarget(null, null, null);
+      if (m.androidRenderTarget.phase != AndroidRenderTargetPhase.none) {
+        _requestTarget(m, null, intentEpoch);
+      }
       return softwarePaint;
     }
-    _queueTextureTarget(display, displayInfo.width, displayInfo.height);
-    final textureId = _textureId;
-    if (textureId == null ||
-        !m.androidSurfaceTextureActive ||
-        _textureDisplay != display ||
-        _textureWidth != displayInfo.width ||
-        _textureHeight != displayInfo.height) {
+    final target = AndroidTextureTarget(
+      display: display,
+      width: displayInfo.width,
+      height: displayInfo.height,
+    );
+    _requestTarget(m, target, intentEpoch);
+    final snapshot = m.androidRenderTarget;
+    if (!snapshot.canRenderTexture || snapshot.target != target) {
       return softwarePaint;
     }
     return Stack(
@@ -1723,7 +1604,7 @@ class _ImagePaintState extends State<ImagePaint> {
           width: displayInfo.width * s,
           height: displayInfo.height * s,
           child: Texture(
-            textureId: textureId,
+            textureId: snapshot.textureId!,
             filterQuality: mobileRemoteTextureFilterQuality(logicalScale: s),
           ),
         ),
@@ -1899,25 +1780,11 @@ void showOptions(
   ];
   var activeShowMonitorsInToolbar = showMonitorsInToolbar;
   var activeToolbarTransparencySettings = toolbarTransparencySettings;
-  var activeQualityMonitorFadeSettings =
-      QualityMonitorFadeSettings.fromUserDefaults();
+  var activeQualityMonitorFadeSettings = qualityMonitorSettings.read();
 
   Future<void> persistQualityMonitorFadeSettings(
     QualityMonitorFadeSettings settings,
-  ) async {
-    await bind.mainSetUserDefaultOption(
-      key: kOptionQualityMonitorInactiveOpacityPercent,
-      value: settings.opacityPercent.toString(),
-    );
-    await bind.mainSetUserDefaultOption(
-      key: kOptionQualityMonitorDimDelayMs,
-      value: settings.delayMs.toString(),
-    );
-    await bind.mainSetUserDefaultOption(
-      key: kOptionQualityMonitorDimDurationMs,
-      value: settings.durationMs.toString(),
-    );
-  }
+  ) => qualityMonitorSettings.write(settings);
 
   var activeCursorInertiaSettings = cursorInertiaSettings;
   List<TRadioMenu<String>> imageQualityRadios = await toolbarImageQuality(
@@ -1949,10 +1816,7 @@ void showOptions(
         value: gFFI.imageModel.useTextureRender,
         onChanged: (value) async {
           if (value == null) return;
-          await bind.mainSetLocalOption(
-            key: kOptionTextureRender,
-            value: value ? 'Y' : 'N',
-          );
+          await settingsRepository.storeTextureRender(value);
         },
         child: Text(translate('Use texture rendering')),
       ),
@@ -2019,9 +1883,9 @@ void showOptions(
                     onChanged: (value) async {
                       if (value == null) return;
                       setState(() => activeShowMonitorsInToolbar = value);
-                      await bind.mainSetUserDefaultOption(
-                        key: kKeyShowMonitorsToolbar,
-                        value: value ? 'Y' : 'N',
+                      await remoteDisplaySettings.write(
+                        RemoteDisplaySettingsRegistry.showMonitorsToolbar,
+                        value,
                       );
                       onShowMonitorsInToolbarChanged(value);
                     },
@@ -2079,9 +1943,8 @@ void showOptions(
                           },
                           onChangeEnd: (durationMs) {
                             unawaited(
-                              settingsRepository.storePeerOption(
-                                kOptionMobileCursorInertiaDurationMs,
-                                durationMs.toString(),
+                              settingsRepository.storeCursorInertia(
+                                durationMs,
                               ),
                             );
                           },
@@ -2124,9 +1987,8 @@ void showOptions(
                       activeToolbarTransparencySettings = settings;
                       onToolbarTransparencySettingsChanged(settings);
                       unawaited(
-                        settingsRepository.storePeerOption(
-                          kOptionMobileRemoteToolbarOverlapOpacityPercent,
-                          settings.overlapOpacityPercent.toString(),
+                        settingsRepository.storeToolbarOverlap(
+                          settings.overlapOpacityPercent,
                         ),
                       );
                     },

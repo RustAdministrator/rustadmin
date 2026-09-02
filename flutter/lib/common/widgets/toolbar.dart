@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
+import 'package:flutter_hbb/common/remote_display_settings.dart';
+import 'package:flutter_hbb/common/session_peer_settings.dart';
 import 'package:flutter_hbb/common/widgets/dialog.dart';
 import 'package:flutter_hbb/common/widgets/login.dart';
 import 'package:flutter_hbb/consts.dart';
@@ -78,9 +80,9 @@ handleOsPasswordAction(
     isEditOsPassword = false;
     return;
   }
-  final password =
-      await bind.sessionGetOption(sessionId: sessionId, arg: 'os-password') ??
-          '';
+  final password = await SessionPeerSettingsRepository.forSession(
+    sessionId,
+  ).read(SessionPeerSettingsRegistry.osPassword);
   if (password.isEmpty) {
     showSetOSPassword(sessionId, true, dialogManager, password,
         () => isEditOsPassword = false);
@@ -94,6 +96,7 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
   final pi = ffiModel.pi;
   final perms = ffiModel.permissions;
   final sessionId = ffi.sessionId;
+  final liveSettings = LiveSessionSettingsRepository.forSession(sessionId);
   final isDefaultConn = ffi.connType == ConnType.defaultConn;
 
   List<TTextMenu> v = [];
@@ -155,8 +158,7 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
         onPressed: () async {
           ClipboardData? data = await Clipboard.getData(Clipboard.kTextPlain);
           if (data != null && data.text != null) {
-            bind.sessionInputString(
-                sessionId: sessionId, value: data.text ?? "");
+            ffi.inputModel.inputString(data.text ?? '');
           }
         }));
   }
@@ -322,11 +324,9 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
     v.add(TTextMenu(
         child: Obx(() => Text(translate(
             '${BlockInputState.find(id).value ? 'Unb' : 'B'}lock user input'))),
-        onPressed: () {
+        onPressed: () async {
           RxBool blockInput = BlockInputState.find(id);
-          bind.sessionToggleOption(
-              sessionId: sessionId,
-              value: '${blockInput.value ? 'un' : ''}block-input');
+          await liveSettings.setBlockInput(!blockInput.value);
           blockInput.value = !blockInput.value;
         }));
   }
@@ -453,8 +453,9 @@ Future<List<TRadioMenu<String>>> toolbarImageQuality(
   onChanged(String? value) async {
     if (value == null) return;
     if (value != kRemoteImageQualityCustom) {
-      final videoProfile = await bind.sessionGetOption(
-          sessionId: ffi.sessionId, arg: kOptionVideoProfile);
+      final videoProfile = await SessionPeerSettingsRepository.forSession(
+        ffi.sessionId,
+      ).read(SessionPeerSettingsRegistry.videoProfile);
       if (videoProfile == kVideoProfileMovie) {
         await bind.sessionSetVideoProfile(
             sessionId: ffi.sessionId, value: kVideoProfileStandard);
@@ -498,9 +499,9 @@ Future<List<TRadioMenu<String>>> toolbarCodec(
   final sessionId = ffi.sessionId;
   final alternativeCodecs =
       await bind.sessionAlternativeCodecs(sessionId: sessionId);
-  final groupValue = await bind.sessionGetOption(
-          sessionId: sessionId, arg: kOptionCodecPreference) ??
-      '';
+  final settings = SessionPeerSettingsRepository.forSession(sessionId);
+  final groupValue =
+      await settings.read(SessionPeerSettingsRegistry.codecPreference);
   bool vp8 = false;
   bool av1 = false;
   bool av1Hw = false;
@@ -523,8 +524,7 @@ Future<List<TRadioMenu<String>>> toolbarCodec(
 
   onChanged(String? value) async {
     if (value == null) return;
-    await bind.sessionPeerOption(
-        sessionId: sessionId, name: kOptionCodecPreference, value: value);
+    await settings.write(SessionPeerSettingsRegistry.codecPreference, value);
     bind.sessionChangePreferCodec(sessionId: sessionId);
   }
 
@@ -571,19 +571,13 @@ Future<List<TRadioMenu<String>>> toolbarCaptureBackend(FFI ffi) async {
     return [];
   }
   final sessionId = ffi.sessionId;
-  var groupValue = await bind.sessionGetOption(
-          sessionId: sessionId, arg: kOptionCaptureBackend) ??
-      '';
-  if (groupValue.isEmpty) {
-    groupValue = 'auto';
-  }
+  final settings = SessionPeerSettingsRepository.forSession(sessionId);
+  final groupValue =
+      await settings.read(SessionPeerSettingsRegistry.captureBackend);
 
   onChanged(String? value) async {
     if (value == null) return;
-    await bind.sessionPeerOption(
-        sessionId: sessionId,
-        name: kOptionCaptureBackend,
-        value: value == 'auto' ? '' : value);
+    await settings.write(SessionPeerSettingsRegistry.captureBackend, value);
     await bind.sessionSetCaptureBackend(sessionId: sessionId, value: value);
   }
 
@@ -615,6 +609,7 @@ Future<List<TToggleMenu>> toolbarCursor(
   final ffiModel = ffi.ffiModel;
   final pi = ffiModel.pi;
   final sessionId = ffi.sessionId;
+  final liveSettings = LiveSessionSettingsRepository.forSession(sessionId);
 
   // show remote cursor
   if (pi.platform != kPeerPlatformAndroid &&
@@ -623,7 +618,7 @@ Future<List<TToggleMenu>> toolbarCursor(
     final state = ShowRemoteCursorState.find(id);
     final lockState = ShowRemoteCursorLockState.find(id);
     final enabled = !ffiModel.viewOnly;
-    final option = 'show-remote-cursor';
+    const option = LiveSessionSettingsRegistry.showRemoteCursor;
     if (pi.currentDisplay == kAllDisplayValue ||
         bind.sessionIsMultiUiSession(sessionId: sessionId)) {
       lockState.value = false;
@@ -634,10 +629,10 @@ Future<List<TToggleMenu>> toolbarCursor(
         onChanged: enabled && !lockState.value
             ? (value) async {
                 if (value == null) return;
-                await bind.sessionToggleOption(
-                    sessionId: sessionId, value: option);
-                state.value = bind.sessionGetToggleOptionSync(
-                    sessionId: sessionId, arg: option);
+                state.value = await liveSettings.toggleAndRead(
+                  option,
+                  fallback: value,
+                );
               }
             : null));
   }
@@ -649,35 +644,30 @@ Future<List<TToggleMenu>> toolbarCursor(
       pi.displays.length > 1 &&
       pi.currentDisplay != kAllDisplayValue &&
       !bind.sessionIsMultiUiSession(sessionId: sessionId)) {
-    final option = 'follow-remote-cursor';
-    final value =
-        bind.sessionGetToggleOptionSync(sessionId: sessionId, arg: option);
-    final showCursorOption = 'show-remote-cursor';
+    const option = LiveSessionSettingsRegistry.followRemoteCursor;
+    final value = liveSettings.readSync(option);
+    const showCursorOption = LiveSessionSettingsRegistry.showRemoteCursor;
     final showCursorState = ShowRemoteCursorState.find(id);
     final showCursorLockState = ShowRemoteCursorLockState.find(id);
-    final showCursorEnabled = bind.sessionGetToggleOptionSync(
-        sessionId: sessionId, arg: showCursorOption);
+    final showCursorEnabled = liveSettings.readSync(showCursorOption);
     showCursorLockState.value = value;
     if (value && !showCursorEnabled) {
-      await bind.sessionToggleOption(
-          sessionId: sessionId, value: showCursorOption);
-      showCursorState.value = bind.sessionGetToggleOptionSync(
-          sessionId: sessionId, arg: showCursorOption);
+      showCursorState.value =
+          await liveSettings.toggleAndRead(showCursorOption);
     }
     v.add(TToggleMenu(
         child: Text(translate('Follow remote cursor')),
         value: value,
         onChanged: (value) async {
           if (value == null) return;
-          await bind.sessionToggleOption(sessionId: sessionId, value: option);
-          final followRemoteCursor = bind.sessionGetToggleOptionSync(
-              sessionId: sessionId, arg: option);
+          final followRemoteCursor = await liveSettings.toggleAndRead(
+            option,
+            fallback: value,
+          );
           showCursorLockState.value = followRemoteCursor;
           if (!showCursorEnabled) {
-            await bind.sessionToggleOption(
-                sessionId: sessionId, value: showCursorOption);
-            showCursorState.value = bind.sessionGetToggleOptionSync(
-                sessionId: sessionId, arg: showCursorOption);
+            showCursorState.value =
+                await liveSettings.toggleAndRead(showCursorOption);
           }
         }));
   }
@@ -689,17 +679,14 @@ Future<List<TToggleMenu>> toolbarCursor(
       pi.displays.length > 1 &&
       pi.currentDisplay != kAllDisplayValue &&
       !bind.sessionIsMultiUiSession(sessionId: sessionId)) {
-    final option = 'follow-remote-window';
-    final value =
-        bind.sessionGetToggleOptionSync(sessionId: sessionId, arg: option);
+    const option = LiveSessionSettingsRegistry.followRemoteWindow;
+    final value = liveSettings.readSync(option);
     v.add(TToggleMenu(
         child: Text(translate('Follow remote window focus')),
         value: value,
         onChanged: (value) async {
           if (value == null) return;
-          await bind.sessionToggleOption(sessionId: sessionId, value: option);
-          value = bind.sessionGetToggleOptionSync(
-              sessionId: sessionId, arg: option);
+          await liveSettings.toggle(option);
         }));
   }
   // zoom cursor
@@ -707,16 +694,17 @@ Future<List<TToggleMenu>> toolbarCursor(
   if (!isMobile &&
       pi.platform != kPeerPlatformAndroid &&
       viewStyle != kRemoteViewStyleOriginal) {
-    final option = 'zoom-cursor';
-    final peerState = PeerBoolOption.find(id, option);
+    const option = LiveSessionSettingsRegistry.zoomCursor;
+    final peerState = PeerBoolOption.find(id, option.key);
     v.add(TToggleMenu(
       child: Text(translate('Zoom cursor')),
       value: peerState.value,
       onChanged: (value) async {
         if (value == null) return;
-        await bind.sessionToggleOption(sessionId: sessionId, value: option);
-        peerState.value =
-            bind.sessionGetToggleOptionSync(sessionId: sessionId, arg: option);
+        peerState.value = await liveSettings.toggleAndRead(
+          option,
+          fallback: value,
+        );
       },
     ));
   }
@@ -730,18 +718,18 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
   final pi = ffiModel.pi;
   final perms = ffiModel.permissions;
   final sessionId = ffi.sessionId;
+  final liveSettings = LiveSessionSettingsRepository.forSession(sessionId);
   final isDefaultConn = ffi.connType == ConnType.defaultConn;
 
   // mute
   if (isDefaultConn && perms['audio'] != false) {
-    final option = 'disable-audio';
-    final value =
-        bind.sessionGetToggleOptionSync(sessionId: sessionId, arg: option);
+    const option = LiveSessionSettingsRegistry.disableAudio;
+    final value = liveSettings.readSync(option);
     v.add(TToggleMenu(
         value: value,
-        onChanged: (value) {
+        onChanged: (value) async {
           if (value == null) return;
-          bind.sessionToggleOption(sessionId: sessionId, value: option);
+          await liveSettings.toggle(option);
         },
         child: Text(translate('Mute'))));
   }
@@ -759,15 +747,14 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
       perms['file'] != false &&
       (isSupportIfPeer_1_2_3 || isSupportIfPeer_1_2_4)) {
     final enabled = !ffiModel.viewOnly;
-    final value = bind.sessionGetToggleOptionSync(
-        sessionId: sessionId, arg: kOptionEnableFileCopyPaste);
+    const option = LiveSessionSettingsRegistry.enableFileCopyPaste;
+    final value = liveSettings.readSync(option);
     v.add(TToggleMenu(
         value: value,
         onChanged: enabled
-            ? (value) {
+            ? (value) async {
                 if (value == null) return;
-                bind.sessionToggleOption(
-                    sessionId: sessionId, value: kOptionEnableFileCopyPaste);
+                await liveSettings.toggle(option);
               }
             : null,
         child: Text(translate('Enable file copy and paste'))));
@@ -776,15 +763,14 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
   // lock after session end
   if (isDefaultConn && ffiModel.keyboard && !ffiModel.isPeerAndroid) {
     final enabled = !ffiModel.viewOnly;
-    final option = 'lock-after-session-end';
-    final value =
-        bind.sessionGetToggleOptionSync(sessionId: sessionId, arg: option);
+    const option = LiveSessionSettingsRegistry.lockAfterSessionEnd;
+    final value = liveSettings.readSync(option);
     v.add(TToggleMenu(
         value: value,
         onChanged: enabled
-            ? (value) {
+            ? (value) async {
                 if (value == null) return;
-                bind.sessionToggleOption(sessionId: sessionId, value: option);
+                await liveSettings.toggle(option);
               }
             : null,
         child: Text(translate('Lock after session end'))));
@@ -793,7 +779,9 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
   if (pi.isSupportMultiDisplay &&
       PrivacyModeState.find(id).isEmpty &&
       pi.displaysCount.value > 1 &&
-      bind.mainGetUserDefaultOption(key: kKeyShowMonitorsToolbar) == 'Y') {
+      remoteDisplaySettings.read(
+        RemoteDisplaySettingsRegistry.showMonitorsToolbar,
+      )) {
     final value =
         bind.sessionGetDisplaysAsIndividualWindows(sessionId: ffi.sessionId) ==
             'Y';
@@ -826,14 +814,13 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
   final codec_format = ffi.qualityMonitorModel.data.codecFormat;
   if (versionCmp(pi.version, "1.2.4") >= 0 &&
       (codec_format == "AV1" || codec_format == "VP9")) {
-    final option = 'i444';
-    final value =
-        bind.sessionGetToggleOptionSync(sessionId: sessionId, arg: option);
+    const option = LiveSessionSettingsRegistry.trueColor444;
+    final value = liveSettings.readSync(option);
     v.add(TToggleMenu(
         value: value,
         onChanged: (value) async {
           if (value == null) return;
-          await bind.sessionToggleOption(sessionId: sessionId, value: option);
+          await liveSettings.toggle(option);
           bind.sessionChangePreferCodec(sessionId: sessionId);
         },
         child: Text(translate('True color (4:4:4)'))));
@@ -845,8 +832,7 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
         value: ffiModel.viewOnly,
         onChanged: (value) async {
           if (value == null) return;
-          await bind.sessionToggleOption(
-              sessionId: ffi.sessionId, value: kOptionToggleViewOnly);
+          await liveSettings.toggle(LiveSessionSettingsRegistry.viewOnly);
           ffiModel.setViewOnly(id, value);
         },
         child: Text(translate('View Mode'))));
@@ -857,29 +843,33 @@ Future<List<TToggleMenu>> toolbarDisplayToggle(
 Future<List<TRadioMenu<String>>> toolbarQualityMonitorPosition(FFI ffi) async {
   const disabled = 'disabled';
   final sessionId = ffi.sessionId;
-  final showQualityMonitor = bind.sessionGetToggleOptionSync(
-      sessionId: sessionId, arg: 'show-quality-monitor');
-  final position = normalizeQualityMonitorPosition(await bind.sessionGetOption(
-          sessionId: sessionId, arg: kOptionQualityMonitorPosition) ??
-      '');
+  final settings = SessionPeerSettingsRepository.forSession(sessionId);
+  final liveSettings = LiveSessionSettingsRepository.forSession(sessionId);
+  final showQualityMonitor = liveSettings.readSync(
+    LiveSessionSettingsRegistry.showQualityMonitor,
+  );
+  final position =
+      await settings.read(SessionPeerSettingsRegistry.qualityMonitorPosition);
   final groupValue = showQualityMonitor ? position : disabled;
 
   Future<void> onChanged(String? value) async {
     if (value == null || value == groupValue) return;
     if (value == disabled) {
       if (showQualityMonitor) {
-        await bind.sessionToggleOption(
-            sessionId: sessionId, value: 'show-quality-monitor');
+        await liveSettings.toggle(
+          LiveSessionSettingsRegistry.showQualityMonitor,
+        );
       }
     } else {
-      await bind.sessionPeerOption(
-          sessionId: sessionId,
-          name: kOptionQualityMonitorPosition,
-          value: normalizeQualityMonitorPosition(value));
+      await settings.write(
+        SessionPeerSettingsRegistry.qualityMonitorPosition,
+        value,
+      );
       await ffi.qualityMonitorModel.clearFloatingPosition(sessionId);
       if (!showQualityMonitor) {
-        await bind.sessionToggleOption(
-            sessionId: sessionId, value: 'show-quality-monitor');
+        await liveSettings.toggle(
+          LiveSessionSettingsRegistry.showQualityMonitor,
+        );
       }
     }
     ffi.qualityMonitorModel.checkShowQualityMonitor(sessionId);
@@ -912,16 +902,13 @@ Future<List<TRadioMenu<String>>> toolbarQualityMonitorPosition(FFI ffi) async {
 
 Future<List<TRadioMenu<String>>> toolbarQualityMonitorDetails(FFI ffi) async {
   final sessionId = ffi.sessionId;
-  final details = normalizeQualityMonitorDetails(await bind.sessionGetOption(
-          sessionId: sessionId, arg: kOptionQualityMonitorDetails) ??
-      '');
+  final settings = SessionPeerSettingsRepository.forSession(sessionId);
+  final details =
+      await settings.read(SessionPeerSettingsRegistry.qualityMonitorDetails);
 
   Future<void> onChanged(String? value) async {
     if (value == null || value == details) return;
-    await bind.sessionPeerOption(
-        sessionId: sessionId,
-        name: kOptionQualityMonitorDetails,
-        value: normalizeQualityMonitorDetails(value));
+    await settings.write(SessionPeerSettingsRegistry.qualityMonitorDetails, value);
     ffi.qualityMonitorModel.checkShowQualityMonitor(sessionId);
   }
 
@@ -946,23 +933,23 @@ Future<List<TRadioMenu<String>>> toolbarClipboardDirection(FFI ffi) async {
   final ffiModel = ffi.ffiModel;
   final perms = ffiModel.permissions;
   final sessionId = ffi.sessionId;
+  final liveSettings = LiveSessionSettingsRepository.forSession(sessionId);
   final isDefaultConn = ffi.connType == ConnType.defaultConn;
   if (!isDefaultConn || !ffiModel.keyboard || perms['clipboard'] == false) {
     return [];
   }
 
   final disabled = ffiModel.viewOnly ||
-      bind.sessionGetToggleOptionSync(
-          sessionId: sessionId, arg: 'disable-clipboard');
-  final sessionPolicy = await bind.sessionGetOption(
-        sessionId: sessionId,
-        arg: kOptionClipboardDirection,
-      ) ??
-      '';
+      liveSettings.readSync(LiveSessionSettingsRegistry.disableClipboard);
+  final sessionPolicy = await SessionPeerSettingsRepository.forSession(
+    sessionId,
+  ).read(SessionPeerSettingsRegistry.clipboardDirection);
   final currentPolicy = disabled
       ? kClipboardDirectionOff
       : normalizeClipboardDirectionPolicy(sessionPolicy.isEmpty
-          ? bind.mainGetLocalOption(key: kOptionClipboardDirection)
+          ? remoteAppLocalSettings.read(
+              RemoteAppLocalSettingsRegistry.clipboardDirection,
+            )
           : sessionPolicy);
   final enabled = !ffiModel.viewOnly;
   return clipboardDirectionMenuKeys()
@@ -970,12 +957,9 @@ Future<List<TRadioMenu<String>>> toolbarClipboardDirection(FFI ffi) async {
             value: key,
             groupValue: currentPolicy,
             onChanged: enabled
-                ? (value) {
+                ? (value) async {
                     if (value == null) return;
-                    bind.sessionToggleOption(
-                      sessionId: sessionId,
-                      value: sessionClipboardDirectionToggleValue(value),
-                    );
+                    await liveSettings.setClipboardDirection(value);
                   }
                 : null,
             child: Text(translate(clipboardDirectionPolicyLabel(key))),
@@ -990,8 +974,9 @@ List<TToggleMenu> toolbarPrivacyMode(
   final ffiModel = ffi.ffiModel;
   final pi = ffiModel.pi;
   final sessionId = ffi.sessionId;
+  final liveSettings = LiveSessionSettingsRepository.forSession(sessionId);
 
-  getDefaultMenu(Future<void> Function(SessionID sid, String opt) toggleFunc) {
+  getDefaultMenu(Future<void> Function() toggleFunc) {
     final enabled = !ffi.ffiModel.viewOnly;
     return TToggleMenu(
         value: privacyModeState.isNotEmpty,
@@ -1009,8 +994,7 @@ List<TToggleMenu> toolbarPrivacyMode(
                       ffi.dialogManager);
                   return;
                 }
-                final option = 'privacy-mode';
-                toggleFunc(sessionId, option);
+                unawaited(toggleFunc());
               }
             : null,
         child: Text(translate('Privacy mode')));
@@ -1021,8 +1005,8 @@ List<TToggleMenu> toolbarPrivacyMode(
           as List<dynamic>?;
   if (privacyModeImpls == null) {
     return [
-      getDefaultMenu((sid, opt) async {
-        bind.sessionToggleOption(sessionId: sid, value: opt);
+      getDefaultMenu(() async {
+        await liveSettings.toggle(LiveSessionSettingsRegistry.privacyMode);
         togglePrivacyModeTime = DateTime.now();
       })
     ];
@@ -1034,9 +1018,11 @@ List<TToggleMenu> toolbarPrivacyMode(
   if (privacyModeImpls.length == 1) {
     final implKey = (privacyModeImpls[0] as List<dynamic>)[0] as String;
     return [
-      getDefaultMenu((sid, opt) async {
+      getDefaultMenu(() async {
         bind.sessionTogglePrivacyMode(
-            sessionId: sid, implKey: implKey, on: privacyModeState.isEmpty);
+            sessionId: sessionId,
+            implKey: implKey,
+            on: privacyModeState.isEmpty);
         togglePrivacyModeTime = DateTime.now();
       })
     ];
@@ -1061,6 +1047,7 @@ List<TToggleMenu> toolbarKeyboardToggles(FFI ffi) {
   final ffiModel = ffi.ffiModel;
   final pi = ffiModel.pi;
   final sessionId = ffi.sessionId;
+  final liveSettings = LiveSessionSettingsRepository.forSession(sessionId);
   final isDefaultConn = ffi.connType == ConnType.defaultConn;
   List<TToggleMenu> v = [];
 
@@ -1068,12 +1055,11 @@ List<TToggleMenu> toolbarKeyboardToggles(FFI ffi) {
   if (ffiModel.keyboard &&
       ((isMacOS && pi.platform != kPeerPlatformMacOS) ||
           (!isMacOS && pi.platform == kPeerPlatformMacOS))) {
-    final option = 'allow_swap_key';
-    final value =
-        bind.sessionGetToggleOptionSync(sessionId: sessionId, arg: option);
-    onChanged(bool? value) {
+    const option = LiveSessionSettingsRegistry.swapControlCommand;
+    final value = liveSettings.readSync(option);
+    onChanged(bool? value) async {
       if (value == null) return;
-      bind.sessionToggleOption(sessionId: sessionId, value: option);
+      await liveSettings.toggle(option);
     }
 
     final enabled = !ffi.ffiModel.viewOnly;
@@ -1113,11 +1099,13 @@ List<TToggleMenu> toolbarKeyboardToggles(FFI ffi) {
 
   // reverse mouse wheel
   if (ffiModel.keyboard) {
-    var optionValue =
+    final optionValue =
         bind.sessionGetReverseMouseWheelSync(sessionId: sessionId) ?? '';
-    if (optionValue == '') {
-      optionValue = bind.mainGetUserDefaultOption(key: kKeyReverseMouseWheel);
-    }
+    final reverseMouseWheel = optionValue.isEmpty
+        ? remoteDisplaySettings.read(
+            RemoteDisplaySettingsRegistry.reverseMouseWheel,
+          )
+        : optionValue == 'Y';
     onChanged(bool? value) async {
       if (value == null) return;
       await bind.sessionSetReverseMouseWheel(
@@ -1126,19 +1114,18 @@ List<TToggleMenu> toolbarKeyboardToggles(FFI ffi) {
 
     final enabled = !ffi.ffiModel.viewOnly;
     v.add(TToggleMenu(
-        value: optionValue == 'Y',
+        value: reverseMouseWheel,
         onChanged: enabled ? onChanged : null,
         child: Text(translate('Reverse mouse wheel'))));
   }
 
   // swap left right mouse
   if (ffiModel.keyboard) {
-    final option = 'swap-left-right-mouse';
-    final value =
-        bind.sessionGetToggleOptionSync(sessionId: sessionId, arg: option);
-    onChanged(bool? value) {
+    const option = LiveSessionSettingsRegistry.swapMouseButtons;
+    final value = liveSettings.readSync(option);
+    onChanged(bool? value) async {
       if (value == null) return;
-      bind.sessionToggleOption(sessionId: sessionId, value: option);
+      await liveSettings.toggle(option);
     }
 
     final enabled = !ffi.ffiModel.viewOnly;

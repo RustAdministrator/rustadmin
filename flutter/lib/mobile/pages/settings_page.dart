@@ -13,6 +13,9 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../../common.dart';
 import '../../common/quality_monitor_settings.dart';
+import '../../common/remote_display_settings.dart';
+import '../../common/remote_toolbar_settings.dart';
+import '../../common/session_peer_settings.dart';
 import '../../common/transport_mode.dart';
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/login.dart';
@@ -20,6 +23,7 @@ import '../../consts.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../widgets/dialog.dart';
+import '../mobile_remote_settings_repository.dart';
 import '../widgets/mobile_settings_layout.dart';
 import '../widgets/remote_session_controls.dart';
 import 'home_page.dart';
@@ -1264,9 +1268,9 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                   description: Text(translate('texture_render_tip')),
                   initialValue: _useTextureRender,
                   onToggle: (v) async {
-                    await bind.mainSetLocalOption(
-                      key: kOptionTextureRender,
-                      value: v ? 'Y' : 'N',
+                    await remoteAppLocalSettings.write(
+                      RemoteAppLocalSettingsRegistry.textureRender,
+                      v,
                     );
                     final actual = bind.mainGetUseTextureRender();
                     setState(() => _useTextureRender = actual);
@@ -1961,175 +1965,6 @@ class _DisplayPage extends StatefulWidget {
 }
 
 class __DisplayPageState extends State<_DisplayPage> {
-  // ignore: unused_element
-  MobileRemoteToolbarTransparencySettings _toolbarTransparencySettings() {
-    return MobileRemoteToolbarTransparencySettings.fromStored(
-      overlapOpacityPercent: bind.mainGetUserDefaultOption(
-        key: kOptionMobileRemoteToolbarOverlapOpacityPercent,
-      ),
-    );
-  }
-
-  MobileCursorInertiaSettings _cursorInertiaSettings() {
-    return MobileCursorInertiaSettings.fromStored(
-      bind.mainGetUserDefaultOption(key: kOptionMobileCursorInertiaDurationMs),
-    );
-  }
-
-  // ignore: unused_element
-  SettingsTile _mobileScreenScrollingTile() {
-    final entries = <_RadioEntry>[
-      _RadioEntry('ScrollAuto', kRemoteScrollStyleAuto),
-      _RadioEntry('ScrollEdge', kRemoteScrollStyleEdge),
-      _RadioEntry('ScrollEdgeAcceleration', kRemoteScrollStyleEdgeAcceleration),
-    ];
-    final scrollStyle = normalizeMobileRemoteScrollStyle(
-      bind.mainGetUserDefaultOption(key: kOptionScrollStyle),
-    ).obs;
-    final inertiaDurationMs = _cursorInertiaSettings().durationMs.obs;
-    final edgeThickness =
-        (double.tryParse(
-                  bind.mainGetUserDefaultOption(
-                    key: kOptionEdgeScrollEdgeThickness,
-                  ),
-                ) ??
-                100.0)
-            .clamp(EdgeThicknessControl.kMin, EdgeThicknessControl.kMax)
-            .toDouble()
-            .obs;
-    final scrollStyleFixed = isOptionFixed(kOptionScrollStyle);
-    final inertiaFixed = isOptionFixed(kOptionMobileCursorInertiaDurationMs);
-    final edgeThicknessFixed = isOptionFixed(kOptionEdgeScrollEdgeThickness);
-
-    void showDialog() {
-      gFFI.dialogManager.show(
-        (setState, close, context) => CustomAlertDialog(
-          title: Text(translate('Default Screen Scrolling')),
-          content: Obx(
-            () => Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                for (final entry in entries)
-                  getRadio(
-                    Text(translate(entry.label)),
-                    entry.value,
-                    scrollStyle.value,
-                    scrollStyleFixed
-                        ? null
-                        : (String? value) async {
-                            if (value == null) return;
-                            await bind.mainSetUserDefaultOption(
-                              key: kOptionScrollStyle,
-                              value: value,
-                            );
-                            scrollStyle.value = value;
-                          },
-                  ),
-                if (scrollStyle.value == kRemoteScrollStyleEdge ||
-                    scrollStyle.value == kRemoteScrollStyleEdgeAcceleration)
-                  EdgeThicknessControl(
-                    key: const Key('mobile-default-edge-thickness'),
-                    value: edgeThickness.value,
-                    onChanged: edgeThicknessFixed
-                        ? null
-                        : (value) {
-                            edgeThickness.value = value;
-                            unawaited(
-                              bind.mainSetUserDefaultOption(
-                                key: kOptionEdgeScrollEdgeThickness,
-                                value: value.round().toString(),
-                              ),
-                            );
-                          },
-                  ),
-                const Divider(),
-                Text(translate('Cursor inertia time')),
-                MobileCursorInertiaControl(
-                  key: const Key('mobile-default-cursor-inertia'),
-                  durationMs: inertiaDurationMs.value,
-                  onChanged: inertiaFixed ? null : (_) {},
-                  onChangeEnd: inertiaFixed
-                      ? null
-                      : (durationMs) async {
-                          inertiaDurationMs.value = durationMs;
-                          await bind.mainSetUserDefaultOption(
-                            key: kOptionMobileCursorInertiaDurationMs,
-                            value: durationMs.toString(),
-                          );
-                        },
-                ),
-              ],
-            ),
-          ),
-        ),
-        backDismiss: true,
-        clickMaskDismiss: true,
-      );
-    }
-
-    return SettingsTile(
-      title: Text(translate('Default Screen Scrolling')),
-      onPressed: scrollStyleFixed && inertiaFixed && edgeThicknessFixed
-          ? null
-          : (context) => showDialog(),
-      value: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        child: Obx(() {
-          final styleLabel = entries
-              .firstWhere((entry) => entry.value == scrollStyle.value)
-              .label;
-          return Text(
-            '${translate(styleLabel)} · '
-            '${mobileCursorInertiaDurationLabel(inertiaDurationMs.value)}',
-          );
-        }),
-      ),
-    );
-  }
-
-  // ignore: unused_element
-  SettingsTile _defaultTrackpadSpeedTile() {
-    final initialSpeed =
-        (int.tryParse(bind.mainGetUserDefaultOption(key: kKeyTrackpadSpeed)) ??
-                kDefaultTrackpadSpeed)
-            .clamp(kMinTrackpadSpeed, kMaxTrackpadSpeed)
-            .toInt();
-    final speed = SimpleWrapper(initialSpeed);
-
-    Future<void> showDialog() async {
-      await gFFI.dialogManager.show(
-        (setState, close, context) => CustomAlertDialog(
-          title: Text(translate('Default trackpad speed')),
-          content: TrackpadSpeedWidget(
-            value: speed,
-            onDebouncer: (value) {
-              bind.mainSetUserDefaultOption(
-                key: kKeyTrackpadSpeed,
-                value: value.toString(),
-              );
-            },
-          ),
-          actions: [dialogButton('Close', onPressed: () => close())],
-        ),
-        backDismiss: true,
-        clickMaskDismiss: true,
-      );
-      if (mounted) setState(() {});
-    }
-
-    return SettingsTile(
-      title: Text(translate('Default trackpad speed')),
-      value: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        child: Text('$initialSpeed%'),
-      ),
-      onPressed: isOptionFixed(kKeyTrackpadSpeed)
-          ? null
-          : (context) => showDialog(),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final Map codecsJson = jsonDecode(bind.mainSupportedHwdecodings());
@@ -2160,29 +1995,45 @@ class __DisplayPageState extends State<_DisplayPage> {
     );
   }
 
-  SettingsTile otherRow(String label, String key) {
-    final value = bind.mainGetUserDefaultOption(key: key) == 'Y';
-    final isOptFixed = isOptionFixed(key);
-    return SettingsTile.switchTile(
-      initialValue: value,
-      title: Text(translate(label)),
-      onToggle: isOptFixed
-          ? null
-          : (b) async {
-              await bind.mainSetUserDefaultOption(
-                key: key,
-                value: b ? 'Y' : defaultOptionNo,
-              );
-              setState(() {});
-            },
-    );
-  }
 }
 
-class _CompactDisplaySettings extends StatelessWidget {
+class _CompactDisplaySettings extends StatefulWidget {
   const _CompactDisplaySettings({required this.codecList});
 
   final List<_RadioEntry> codecList;
+
+  @override
+  State<_CompactDisplaySettings> createState() =>
+      _CompactDisplaySettingsState();
+}
+
+class _CompactDisplaySettingsState extends State<_CompactDisplaySettings> {
+  late final List<StreamSubscription<dynamic>> _subscriptions;
+
+  @override
+  void initState() {
+    super.initState();
+    void refresh(_) {
+      if (mounted) setState(() {});
+    }
+
+    _subscriptions = [
+      remoteDisplaySettings
+          .watchKeys(RemoteDisplaySettingsRegistry.all)
+          .listen(refresh),
+      remoteToolbarSettings.watch().listen(refresh),
+      qualityMonitorSettings.watch().listen(refresh),
+      mobileRemoteDefaults.watch().listen(refresh),
+    ];
+  }
+
+  @override
+  void dispose() {
+    for (final subscription in _subscriptions) {
+      unawaited(subscription.cancel());
+    }
+    super.dispose();
+  }
 
   List<MobileRemoteToggleItem> _runtimeDisplayToggles() {
     if (!isAndroid) return const [];
@@ -2222,9 +2073,9 @@ class _CompactDisplaySettings extends StatelessWidget {
           onChanged: (value) {
             if (value == null) return;
             unawaited(
-              bind.mainSetLocalOption(
-                key: kOptionTextureRender,
-                value: value ? 'Y' : 'N',
+              remoteAppLocalSettings.write(
+                RemoteAppLocalSettingsRegistry.textureRender,
+                value,
               ),
             );
           },
@@ -2276,55 +2127,41 @@ class _CompactDisplaySettings extends StatelessWidget {
 
   Future<void> _persistQualityMonitorFadeSettings(
     QualityMonitorFadeSettings settings,
-  ) async {
-    await bind.mainSetUserDefaultOption(
-      key: kOptionQualityMonitorInactiveOpacityPercent,
-      value: settings.opacityPercent.toString(),
-    );
-    await bind.mainSetUserDefaultOption(
-      key: kOptionQualityMonitorDimDelayMs,
-      value: settings.delayMs.toString(),
-    );
-    await bind.mainSetUserDefaultOption(
-      key: kOptionQualityMonitorDimDurationMs,
-      value: settings.durationMs.toString(),
-    );
-  }
+  ) => qualityMonitorSettings.write(settings);
 
   @override
   Widget build(BuildContext context) {
-    final viewStyle = bind.mainGetUserDefaultOption(key: kOptionViewStyle);
-    final scrollStyle = normalizeMobileRemoteScrollStyle(
-      bind.mainGetUserDefaultOption(key: kOptionScrollStyle),
+    final viewStyle = remoteDisplaySettings.read(
+      RemoteDisplaySettingsRegistry.viewStyle,
     );
-    final imageQuality = bind.mainGetUserDefaultOption(
-      key: kOptionImageQuality,
+    final scrollStyle = remoteToolbarSettings.readSetting(
+      RemoteToolbarSettingsRegistry.scrollStyle,
     );
-    final codec = bind.mainGetUserDefaultOption(key: kOptionCodecPreference);
-    var edgeThickness =
-        (double.tryParse(
-                  bind.mainGetUserDefaultOption(
-                    key: kOptionEdgeScrollEdgeThickness,
-                  ),
-                ) ??
-                100.0)
-            .clamp(EdgeThicknessControl.kMin, EdgeThicknessControl.kMax)
-            .toDouble();
-    var cursorInertiaSettings = MobileCursorInertiaSettings.fromStored(
-      bind.mainGetUserDefaultOption(key: kOptionMobileCursorInertiaDurationMs),
+    final imageQuality = remoteDisplaySettings.read(
+      RemoteDisplaySettingsRegistry.imageQuality,
     );
-    final trackpadSpeed = SimpleWrapper(
-      (int.tryParse(bind.mainGetUserDefaultOption(key: kKeyTrackpadSpeed)) ??
-              kDefaultTrackpadSpeed)
-          .clamp(kMinTrackpadSpeed, kMaxTrackpadSpeed)
-          .toInt(),
+    final codec = remoteDisplaySettings.read(
+      RemoteDisplaySettingsRegistry.codecPreference,
     );
-    var toolbarSettings = MobileRemoteToolbarTransparencySettings.fromStored(
-      overlapOpacityPercent: bind.mainGetUserDefaultOption(
-        key: kOptionMobileRemoteToolbarOverlapOpacityPercent,
+    var edgeThickness = remoteToolbarSettings
+        .readSetting(RemoteToolbarSettingsRegistry.edgeThickness)
+        .toDouble();
+    var cursorInertiaSettings = MobileCursorInertiaSettings(
+      durationMs: mobileRemoteDefaults.read(
+        MobileRemoteSettingsRegistry.cursorInertiaDefault,
       ),
     );
-    var qualityMonitorSettings = QualityMonitorFadeSettings.fromUserDefaults();
+    final trackpadSpeed = SimpleWrapper(
+      remoteToolbarSettings.readSetting(
+        RemoteToolbarSettingsRegistry.trackpadSpeed,
+      ),
+    );
+    var toolbarSettings = MobileRemoteToolbarTransparencySettings(
+      overlapOpacityPercent: mobileRemoteDefaults.read(
+        MobileRemoteSettingsRegistry.toolbarOverlapDefault,
+      ),
+    );
+    var activeQualityMonitorSettings = qualityMonitorSettings.read();
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -2342,9 +2179,9 @@ class _CompactDisplaySettings extends StatelessWidget {
                 'Scale original',
                 isOptionFixed(kOptionViewStyle)
                     ? null
-                    : (value) => bind.mainSetUserDefaultOption(
-                        key: kOptionViewStyle,
-                        value: value,
+                    : (value) => remoteDisplaySettings.write(
+                        RemoteDisplaySettingsRegistry.viewStyle,
+                        value,
                       ),
               ),
               _radioItem(
@@ -2352,9 +2189,9 @@ class _CompactDisplaySettings extends StatelessWidget {
                 'Scale adaptive',
                 isOptionFixed(kOptionViewStyle)
                     ? null
-                    : (value) => bind.mainSetUserDefaultOption(
-                        key: kOptionViewStyle,
-                        value: value,
+                    : (value) => remoteDisplaySettings.write(
+                        RemoteDisplaySettingsRegistry.viewStyle,
+                        value,
                       ),
               ),
             ],
@@ -2374,9 +2211,9 @@ class _CompactDisplaySettings extends StatelessWidget {
                   entry.$2,
                   isOptionFixed(kOptionScrollStyle)
                       ? null
-                      : (value) => bind.mainSetUserDefaultOption(
-                          key: kOptionScrollStyle,
-                          value: value,
+                      : (value) => remoteToolbarSettings.write(
+                          RemoteToolbarSettingsRegistry.scrollStyle,
+                          value,
                         ),
                 ),
             ],
@@ -2394,9 +2231,9 @@ class _CompactDisplaySettings extends StatelessWidget {
                         : (value) {
                             edgeThickness = value;
                             unawaited(
-                              bind.mainSetUserDefaultOption(
-                                key: kOptionEdgeScrollEdgeThickness,
-                                value: value.round().toString(),
+                              remoteToolbarSettings.write(
+                                RemoteToolbarSettingsRegistry.edgeThickness,
+                                value.round(),
                               ),
                             );
                           },
@@ -2416,9 +2253,9 @@ class _CompactDisplaySettings extends StatelessWidget {
                       isOptionFixed(kOptionMobileCursorInertiaDurationMs)
                       ? null
                       : (durationMs) => unawaited(
-                          bind.mainSetUserDefaultOption(
-                            key: kOptionMobileCursorInertiaDurationMs,
-                            value: durationMs.toString(),
+                          mobileRemoteDefaults.write(
+                            MobileRemoteSettingsRegistry.cursorInertiaDefault,
+                            durationMs,
                           ),
                         ),
                 ),
@@ -2438,9 +2275,9 @@ class _CompactDisplaySettings extends StatelessWidget {
                   value: trackpadSpeed,
                   onDebouncer: isOptionFixed(kKeyTrackpadSpeed)
                       ? null
-                      : (value) => bind.mainSetUserDefaultOption(
-                          key: kKeyTrackpadSpeed,
-                          value: value.toString(),
+                      : (value) => remoteToolbarSettings.write(
+                          RemoteToolbarSettingsRegistry.trackpadSpeed,
+                          value,
                         ),
                 ),
               ),
@@ -2459,7 +2296,7 @@ class _CompactDisplaySettings extends StatelessWidget {
               fadeDelayLabel: translate('Fade delay'),
               fadeDurationLabel: translate('Fade duration'),
               toolbarSettings: toolbarSettings,
-              qualityMonitorSettings: qualityMonitorSettings,
+              qualityMonitorSettings: activeQualityMonitorSettings,
               toolbarEnabled: !isOptionFixed(
                 kOptionMobileRemoteToolbarOverlapOpacityPercent,
               ),
@@ -2476,16 +2313,16 @@ class _CompactDisplaySettings extends StatelessWidget {
               onToolbarChangeEnd: (settings) {
                 toolbarSettings = settings;
                 unawaited(
-                  bind.mainSetUserDefaultOption(
-                    key: kOptionMobileRemoteToolbarOverlapOpacityPercent,
-                    value: settings.overlapOpacityPercent.toString(),
+                  mobileRemoteDefaults.write(
+                    MobileRemoteSettingsRegistry.toolbarOverlapDefault,
+                    settings.overlapOpacityPercent,
                   ),
                 );
               },
               onQualityMonitorChanged: (settings) =>
-                  qualityMonitorSettings = settings,
+                  activeQualityMonitorSettings = settings,
               onQualityMonitorChangeEnd: (settings) {
-                qualityMonitorSettings = settings;
+                activeQualityMonitorSettings = settings;
                 unawaited(_persistQualityMonitorFadeSettings(settings));
               },
             ),
@@ -2506,9 +2343,9 @@ class _CompactDisplaySettings extends StatelessWidget {
                   entry.$2,
                   isOptionFixed(kOptionImageQuality)
                       ? null
-                      : (value) => bind.mainSetUserDefaultOption(
-                          key: kOptionImageQuality,
-                          value: value,
+                      : (value) => remoteDisplaySettings.write(
+                          RemoteDisplaySettingsRegistry.imageQuality,
+                          value,
                         ),
                 ),
             ],
@@ -2522,15 +2359,15 @@ class _CompactDisplaySettings extends StatelessWidget {
             value: codec,
             heading: Text(translate('Default Codec')),
             items: [
-              for (final entry in codecList)
+              for (final entry in widget.codecList)
                 _radioItem(
                   entry.value,
                   entry.label,
                   isOptionFixed(kOptionCodecPreference)
                       ? null
-                      : (value) => bind.mainSetUserDefaultOption(
-                          key: kOptionCodecPreference,
-                          value: value,
+                      : (value) => remoteDisplaySettings.write(
+                          RemoteDisplaySettingsRegistry.codecPreference,
+                          value,
                         ),
                   enabled: entry.enabled,
                 ),
@@ -2552,7 +2389,7 @@ class _CompactDisplaySettings extends StatelessWidget {
 class _CompactDefaultOptions extends StatefulWidget {
   const _CompactDefaultOptions({required this.options});
 
-  final List<(String, String)> options;
+  final List<UserDefaultToggleSetting> options;
 
   @override
   State<_CompactDefaultOptions> createState() => _CompactDefaultOptionsState();
@@ -2560,10 +2397,27 @@ class _CompactDefaultOptions extends StatefulWidget {
 
 class _CompactDefaultOptionsState extends State<_CompactDefaultOptions> {
   late final Map<String, bool> _values = _readValues();
+  late final StreamSubscription<String> _subscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _subscription = remoteDisplaySettings.watchKeys(widget.options).listen((key) {
+      if (!mounted) return;
+      final setting = widget.options.firstWhere((option) => option.key == key);
+      setState(() => _values[key] = remoteDisplaySettings.read(setting));
+    });
+  }
+
+  @override
+  void dispose() {
+    unawaited(_subscription.cancel());
+    super.dispose();
+  }
 
   Map<String, bool> _readValues() => {
     for (final option in widget.options)
-      option.$2: bind.mainGetUserDefaultOption(key: option.$2) == 'Y',
+      option.key: remoteDisplaySettings.read(option),
   };
 
   @override
@@ -2573,20 +2427,17 @@ class _CompactDefaultOptionsState extends State<_CompactDefaultOptions> {
       children: [
         for (final option in widget.options)
           SwitchListTile.adaptive(
-            key: Key('mobile-default-option-${option.$2}'),
+            key: Key('mobile-default-option-${option.key}'),
             contentPadding: EdgeInsets.zero,
             visualDensity: VisualDensity.compact,
-            value: _values[option.$2] ?? false,
-            title: Text(translate(option.$1)),
-            onChanged: isOptionFixed(option.$2)
+            value: _values[option.key] ?? false,
+            title: Text(translate(option.label)),
+            onChanged: isOptionFixed(option.key)
                 ? null
                 : (value) {
-                    setState(() => _values[option.$2] = value);
+                    setState(() => _values[option.key] = value);
                     unawaited(
-                      bind.mainSetUserDefaultOption(
-                        key: option.$2,
-                        value: value ? 'Y' : defaultOptionNo,
-                      ),
+                      remoteDisplaySettings.write(option, value),
                     );
                   },
           ),

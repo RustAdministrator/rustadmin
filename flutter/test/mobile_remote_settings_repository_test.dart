@@ -1,9 +1,26 @@
 import 'package:flutter_hbb/consts.dart';
+import 'package:flutter_hbb/common/remote_toolbar_settings.dart';
 import 'package:flutter_hbb/mobile/mobile_remote_settings_repository.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('registry keys are unique within each legal scope', () {
+    expect(MobileRemoteSettingsRegistry.hasUniqueScopedKeys(), isTrue);
+    expect(
+      MobileRemoteSettingsRegistry.toolbarPlacement.scope,
+      SettingScope.appLocal,
+    );
+    expect(
+      MobileRemoteSettingsRegistry.toolbarOverlapDefault.scope,
+      SettingScope.userDefault,
+    );
+    expect(
+      MobileRemoteSettingsRegistry.toolbarOverlapPeer.scope,
+      SettingScope.peer,
+    );
+  });
+
   test('session values override defaults while empty values inherit', () async {
     final userDefaults = <String, String>{
       kOptionMobileRemoteToolbarOverlapOpacityPercent: '40',
@@ -66,13 +83,14 @@ void main() {
     );
 
     await repository.storePlacement(placement);
-    await repository.storePeerOption(
-      kOptionMobileCursorInertiaDurationMs,
-      '600',
-    );
+    await repository.storeTouchMode(false);
+    await repository.storeTextureRender(true);
+    await repository.storeCursorInertia(600);
 
     expect(writes, [
       (kOptionMobileRemoteToolbarPlacement, placement.storedValue),
+      (kOptionTouchMode, 'N'),
+      (kOptionTextureRender, 'Y'),
       (kOptionMobileCursorInertiaDurationMs, '600'),
     ]);
   });

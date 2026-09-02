@@ -457,6 +457,12 @@ features="flutter linux-pkg-config"
 if [[ "$hwcodec" -eq 1 ]]; then
   features="$features hwcodec"
 fi
+rust_host="$(rustc -vV | sed -n 's/^host: //p')"
+python3 "$repo_root/scripts/platform_profiles.py" check \
+  --profile linux-x86_64-release \
+  --wrapper scripts/build_linux.sh \
+  --target "$rust_host" \
+  --features "$features"
 
 if [[ "$skip_cargo" -eq 0 ]]; then
   generate_version_file

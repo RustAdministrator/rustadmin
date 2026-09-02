@@ -13,6 +13,7 @@ import '../../consts.dart';
 import '../../common/widgets/overlay.dart';
 import '../../common/widgets/remote_input.dart';
 import '../../common.dart';
+import '../../common/session_peer_settings.dart';
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/toolbar.dart';
 import '../../models/model.dart';
@@ -330,10 +331,13 @@ class _RemotePageState extends State<RemotePage>
     _ffi.dialogManager.loadMobileActionsOverlayVisible();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       // Session option should be set after models.dart/FFI.start
-      _showRemoteCursor.value = bind.sessionGetToggleOptionSync(
-          sessionId: sessionId, arg: 'show-remote-cursor');
-      _zoomCursor.value = bind.sessionGetToggleOptionSync(
-          sessionId: sessionId, arg: kOptionZoomCursor);
+      final liveSettings = LiveSessionSettingsRepository.forSession(sessionId);
+      _showRemoteCursor.value = liveSettings.readSync(
+        LiveSessionSettingsRegistry.showRemoteCursor,
+      );
+      _zoomCursor.value = liveSettings.readSync(
+        LiveSessionSettingsRegistry.zoomCursor,
+      );
     });
     DesktopMultiWindow.addListener(this);
     if (widget.windowHost?.isMainWindow == true) {

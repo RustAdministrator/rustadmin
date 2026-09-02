@@ -28,6 +28,42 @@ sealed class EventToUI {
   ) = EventToUI_Texture;
 }
 
+class PeerSecurityEntry {
+  final String id;
+  final String alias;
+  final String username;
+  final String hostname;
+  final String platform;
+  final int lastUpdatedUnixMs;
+  final bool hasPeerConfig;
+  final bool hasPassword;
+  final bool hasPinnedKey;
+  final String pinnedKeyFingerprint;
+  final bool hasDirectPairingMemory;
+  final bool hasRendezvousPairingMemory;
+  final bool hasQuicIdentity;
+  final String quicIdentityFingerprint;
+  final int quicConfirmedAtUnixMs;
+
+  const PeerSecurityEntry({
+    required this.id,
+    required this.alias,
+    required this.username,
+    required this.hostname,
+    required this.platform,
+    required this.lastUpdatedUnixMs,
+    required this.hasPeerConfig,
+    required this.hasPassword,
+    required this.hasPinnedKey,
+    required this.pinnedKeyFingerprint,
+    required this.hasDirectPairingMemory,
+    required this.hasRendezvousPairingMemory,
+    required this.hasQuicIdentity,
+    required this.quicIdentityFingerprint,
+    required this.quicConfirmedAtUnixMs,
+  });
+}
+
 class EventToUI_Event implements EventToUI {
   const EventToUI_Event(final String field0) : this.field = field0;
   final String field;
@@ -1302,6 +1338,10 @@ class RustadminImpl {
 
   Future<String> mainListPeerSecurityEntries({dynamic hint}) {
     return Future.value('[]');
+  }
+
+  Future<List<PeerSecurityEntry>> mainListPeerSecurityEntriesV2({dynamic hint}) {
+    return Future.value(const []);
   }
 
   Future<void> mainRemovePeer({required String id, dynamic hint}) {

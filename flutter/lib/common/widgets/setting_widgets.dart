@@ -3,8 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/consts.dart';
-import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:get/get.dart';
+
+import '../remote_display_settings.dart';
 
 Widget customImageQualityWidget({
   required double initQuality,
@@ -499,20 +500,15 @@ class _CustomImageQualityWidgetState extends State<CustomImageQualityWidget> {
 }
 
 customImageQualitySetting() {
-  final qualityKey = 'custom_image_quality';
-  final fpsKey = kOptionCustomFps;
-  final fpsModeKey = kOptionCustomFpsMode;
-
-  final initQuality =
-      (double.tryParse(bind.mainGetUserDefaultOption(key: qualityKey)) ??
-      kDefaultQuality);
-  final isQuanlityFixed = isOptionFixed(qualityKey);
-  final initFps =
-      (double.tryParse(bind.mainGetUserDefaultOption(key: fpsKey)) ??
-      kDefaultFps);
-  final isFpsFixed = isOptionFixed(fpsKey);
-  final initFpsMode = bind.mainGetUserDefaultOption(key: fpsModeKey);
-  final isFpsModeFixed = isOptionFixed(fpsModeKey);
+  final qualitySetting = RemoteDisplaySettingsRegistry.customImageQuality;
+  final fpsSetting = RemoteDisplaySettingsRegistry.customFps;
+  final fpsModeSetting = RemoteDisplaySettingsRegistry.customFpsMode;
+  final initQuality = remoteDisplaySettings.read(qualitySetting);
+  final isQuanlityFixed = isOptionFixed(qualitySetting.key);
+  final initFps = remoteDisplaySettings.read(fpsSetting);
+  final isFpsFixed = isOptionFixed(fpsSetting.key);
+  final initFpsMode = remoteDisplaySettings.read(fpsModeSetting);
+  final isFpsModeFixed = isOptionFixed(fpsModeSetting.key);
 
   return customImageQualityWidget(
     initQuality: initQuality,
@@ -521,17 +517,17 @@ customImageQualitySetting() {
     setQuality: isQuanlityFixed
         ? null
         : (v) {
-            bind.mainSetUserDefaultOption(key: qualityKey, value: v.toString());
+            remoteDisplaySettings.write(qualitySetting, v);
           },
     setFps: isFpsFixed
         ? null
         : (v) {
-            bind.mainSetUserDefaultOption(key: fpsKey, value: v.toString());
+            remoteDisplaySettings.write(fpsSetting, v);
           },
     setFpsMode: isFpsModeFixed
         ? null
         : (v) {
-            bind.mainSetUserDefaultOption(key: fpsModeKey, value: v);
+            remoteDisplaySettings.write(fpsModeSetting, v);
           },
     showFps: true,
     showMoreQuality: true,
@@ -578,40 +574,11 @@ List<Widget> ServerConfigImportExportWidgets(
   ];
 }
 
-List<(String, String)> otherDefaultSettings() {
-  List<(String, String)> v = [
-    ('View Mode', kOptionViewOnly),
-    ('show_monitors_tip', kKeyShowMonitorsToolbar),
-    if ((isDesktop || isWebDesktop))
-      ('Collapse toolbar', kOptionCollapseToolbar),
-    ('Show remote cursor', kOptionShowRemoteCursor),
-    ('Follow remote cursor', kOptionFollowRemoteCursor),
-    ('Follow remote window focus', kOptionFollowRemoteWindow),
-    if ((isDesktop || isWebDesktop)) ('Zoom cursor', kOptionZoomCursor),
-    ('Show quality monitor', kOptionShowQualityMonitor),
-    ('Mute', kOptionDisableAudio),
-    if (isDesktop) ('Enable file copy and paste', kOptionEnableFileCopyPaste),
-    ('Disable clipboard', kOptionDisableClipboard),
-    ('Lock after session end', kOptionLockAfterSessionEnd),
-    ('Privacy mode', kOptionPrivacyMode),
-    ('True color (4:4:4)', kOptionI444),
-    ('Reverse mouse wheel', kKeyReverseMouseWheel),
-    ('swap-left-right-mouse', kOptionSwapLeftRightMouse),
-    if (isDesktop)
-      (
-        'Show displays as individual windows',
-        kKeyShowDisplaysAsIndividualWindows,
-      ),
-    if (isDesktop)
-      (
-        'Use all my displays for the remote session',
-        kKeyUseAllMyDisplaysForTheRemoteSession,
-      ),
-    ('Keep terminal sessions on disconnect', kOptionTerminalPersistent),
-  ];
-
-  return v;
-}
+List<UserDefaultToggleSetting> otherDefaultSettings() =>
+    RemoteDisplaySettingsRegistry.visibleToggles(
+      desktop: isDesktop,
+      webDesktop: isWebDesktop,
+    );
 
 class TrackpadSpeedWidget extends StatefulWidget {
   final SimpleWrapper<int> value;

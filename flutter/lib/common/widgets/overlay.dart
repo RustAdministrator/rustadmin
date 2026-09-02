@@ -1316,14 +1316,17 @@ class QualityMonitorResizeHandle extends StatelessWidget {
 }
 
 class QualityMonitorHoverFade extends StatefulWidget {
-  static const settingsRefreshInterval = Duration(milliseconds: 1000);
   static const restoreDuration = Duration(milliseconds: 180);
 
   final Widget child;
   final QualityMonitorFadeSettings Function()? settingsProvider;
+  final Stream<QualityMonitorFadeSettings>? settingsStream;
 
   const QualityMonitorHoverFade(
-      {Key? key, required this.child, this.settingsProvider})
+      {Key? key,
+      required this.child,
+      this.settingsProvider,
+      this.settingsStream})
       : super(key: key);
 
   @override
@@ -1333,7 +1336,7 @@ class QualityMonitorHoverFade extends StatefulWidget {
 
 class _QualityMonitorHoverFadeState extends State<QualityMonitorHoverFade> {
   Timer? _dimTimer;
-  Timer? _settingsTimer;
+  StreamSubscription<QualityMonitorFadeSettings>? _settingsSubscription;
   late QualityMonitorFadeSettings _settings;
   double _opacity = 1.0;
   Duration _duration = QualityMonitorHoverFade.restoreDuration;
@@ -1345,19 +1348,19 @@ class _QualityMonitorHoverFadeState extends State<QualityMonitorHoverFade> {
     super.initState();
     _settings = _readSettings();
     _scheduleDim();
-    _settingsTimer = Timer.periodic(
-      QualityMonitorHoverFade.settingsRefreshInterval,
-      (_) => _refreshSettings(),
-    );
+    final stream = widget.settingsStream ??
+        (widget.settingsProvider == null ? qualityMonitorSettings.watch() : null);
+    if (stream != null) {
+      _settingsSubscription = stream.listen(_refreshSettings);
+    }
   }
 
   QualityMonitorFadeSettings _readSettings() =>
       widget.settingsProvider?.call() ??
       QualityMonitorFadeSettings.fromUserDefaults();
 
-  void _refreshSettings() {
+  void _refreshSettings(QualityMonitorFadeSettings next) {
     if (!mounted) return;
-    final next = _readSettings();
     if (next == _settings) return;
     _settings = next;
     _cancelDim();
@@ -1424,7 +1427,7 @@ class _QualityMonitorHoverFadeState extends State<QualityMonitorHoverFade> {
   @override
   void dispose() {
     _cancelDim();
-    _settingsTimer?.cancel();
+    _settingsSubscription?.cancel();
     super.dispose();
   }
 

@@ -16,7 +16,6 @@ import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../../models/state_model.dart';
 import 'relative_mouse_model.dart';
-import 'keyboard_command_queue.dart';
 import 'keyboard_modifier_controller.dart';
 import '../common.dart';
 import '../consts.dart';
@@ -170,150 +169,32 @@ class PointerEventToRust {
   }
 }
 
-class ToReleaseRawKeys {
-  RawKeyEvent? lastLShiftKeyEvent;
-  RawKeyEvent? lastRShiftKeyEvent;
-  RawKeyEvent? lastLCtrlKeyEvent;
-  RawKeyEvent? lastRCtrlKeyEvent;
-  RawKeyEvent? lastLAltKeyEvent;
-  RawKeyEvent? lastRAltKeyEvent;
-  RawKeyEvent? lastLCommandKeyEvent;
-  RawKeyEvent? lastRCommandKeyEvent;
-  RawKeyEvent? lastSuperKeyEvent;
-
-  reset() {
-    lastLShiftKeyEvent = null;
-    lastRShiftKeyEvent = null;
-    lastLCtrlKeyEvent = null;
-    lastRCtrlKeyEvent = null;
-    lastLAltKeyEvent = null;
-    lastRAltKeyEvent = null;
-    lastLCommandKeyEvent = null;
-    lastRCommandKeyEvent = null;
-    lastSuperKeyEvent = null;
+PhysicalModifierKey? _physicalModifierKey(LogicalKeyboardKey key) {
+  if (key == LogicalKeyboardKey.altLeft) return PhysicalModifierKey.altLeft;
+  if (key == LogicalKeyboardKey.altRight ||
+      key == LogicalKeyboardKey.altGraph) {
+    return PhysicalModifierKey.altRight;
   }
-
-  updateKeyDown(LogicalKeyboardKey logicKey, RawKeyDownEvent e) {
-    if (e.isAltPressed) {
-      if (logicKey == LogicalKeyboardKey.altLeft) {
-        lastLAltKeyEvent = e;
-      } else if (logicKey == LogicalKeyboardKey.altRight) {
-        lastRAltKeyEvent = e;
-      }
-    } else if (e.isControlPressed) {
-      if (logicKey == LogicalKeyboardKey.controlLeft) {
-        lastLCtrlKeyEvent = e;
-      } else if (logicKey == LogicalKeyboardKey.controlRight) {
-        lastRCtrlKeyEvent = e;
-      }
-    } else if (e.isShiftPressed) {
-      if (logicKey == LogicalKeyboardKey.shiftLeft) {
-        lastLShiftKeyEvent = e;
-      } else if (logicKey == LogicalKeyboardKey.shiftRight) {
-        lastRShiftKeyEvent = e;
-      }
-    } else if (e.isMetaPressed) {
-      if (logicKey == LogicalKeyboardKey.metaLeft) {
-        lastLCommandKeyEvent = e;
-      } else if (logicKey == LogicalKeyboardKey.metaRight) {
-        lastRCommandKeyEvent = e;
-      } else if (logicKey == LogicalKeyboardKey.superKey) {
-        lastSuperKeyEvent = e;
-      }
-    }
+  if (key == LogicalKeyboardKey.controlLeft) {
+    return PhysicalModifierKey.ctrlLeft;
   }
-
-  updateKeyUp(LogicalKeyboardKey logicKey, RawKeyUpEvent e) {
-    if (e.isAltPressed) {
-      if (logicKey == LogicalKeyboardKey.altLeft) {
-        lastLAltKeyEvent = null;
-      } else if (logicKey == LogicalKeyboardKey.altRight) {
-        lastRAltKeyEvent = null;
-      }
-    } else if (e.isControlPressed) {
-      if (logicKey == LogicalKeyboardKey.controlLeft) {
-        lastLCtrlKeyEvent = null;
-      } else if (logicKey == LogicalKeyboardKey.controlRight) {
-        lastRCtrlKeyEvent = null;
-      }
-    } else if (e.isShiftPressed) {
-      if (logicKey == LogicalKeyboardKey.shiftLeft) {
-        lastLShiftKeyEvent = null;
-      } else if (logicKey == LogicalKeyboardKey.shiftRight) {
-        lastRShiftKeyEvent = null;
-      }
-    } else if (e.isMetaPressed) {
-      if (logicKey == LogicalKeyboardKey.metaLeft) {
-        lastLCommandKeyEvent = null;
-      } else if (logicKey == LogicalKeyboardKey.metaRight) {
-        lastRCommandKeyEvent = null;
-      } else if (logicKey == LogicalKeyboardKey.superKey) {
-        lastSuperKeyEvent = null;
-      }
-    }
+  if (key == LogicalKeyboardKey.controlRight) {
+    return PhysicalModifierKey.ctrlRight;
   }
-
-  release(KeyEventResult Function(RawKeyEvent e) handleRawKeyEvent) {
-    for (final key in [
-      lastLShiftKeyEvent,
-      lastRShiftKeyEvent,
-      lastLCtrlKeyEvent,
-      lastRCtrlKeyEvent,
-      lastLAltKeyEvent,
-      lastRAltKeyEvent,
-      lastLCommandKeyEvent,
-      lastRCommandKeyEvent,
-      lastSuperKeyEvent,
-    ]) {
-      if (key != null) {
-        handleRawKeyEvent(
-          RawKeyUpEvent(data: key.data, character: key.character),
-        );
-      }
-    }
+  if (key == LogicalKeyboardKey.shiftLeft) {
+    return PhysicalModifierKey.shiftLeft;
   }
-}
-
-class ToReleaseKeys {
-  KeyEvent? lastLShiftKeyEvent;
-  KeyEvent? lastRShiftKeyEvent;
-  KeyEvent? lastLCtrlKeyEvent;
-  KeyEvent? lastRCtrlKeyEvent;
-  KeyEvent? lastLAltKeyEvent;
-  KeyEvent? lastRAltKeyEvent;
-  KeyEvent? lastLCommandKeyEvent;
-  KeyEvent? lastRCommandKeyEvent;
-  KeyEvent? lastSuperKeyEvent;
-
-  reset() {
-    lastLShiftKeyEvent = null;
-    lastRShiftKeyEvent = null;
-    lastLCtrlKeyEvent = null;
-    lastRCtrlKeyEvent = null;
-    lastLAltKeyEvent = null;
-    lastRAltKeyEvent = null;
-    lastLCommandKeyEvent = null;
-    lastRCommandKeyEvent = null;
-    lastSuperKeyEvent = null;
+  if (key == LogicalKeyboardKey.shiftRight) {
+    return PhysicalModifierKey.shiftRight;
   }
-
-  release(KeyEventResult Function(KeyEvent e) handleKeyEvent) {
-    for (final key in [
-      lastLShiftKeyEvent,
-      lastRShiftKeyEvent,
-      lastLCtrlKeyEvent,
-      lastRCtrlKeyEvent,
-      lastLAltKeyEvent,
-      lastRAltKeyEvent,
-      lastLCommandKeyEvent,
-      lastRCommandKeyEvent,
-      lastSuperKeyEvent,
-    ]) {
-      if (key != null) {
-        handleKeyEvent(key);
-      }
-    }
+  if (key == LogicalKeyboardKey.metaLeft) {
+    return PhysicalModifierKey.commandLeft;
   }
+  if (key == LogicalKeyboardKey.metaRight) {
+    return PhysicalModifierKey.commandRight;
+  }
+  if (key == LogicalKeyboardKey.superKey) return PhysicalModifierKey.superKey;
+  return null;
 }
 
 class InputModel {
@@ -321,20 +202,7 @@ class InputModel {
   String keyboardMode = '';
 
   // keyboard
-  var _physicalShift = false;
-  var _physicalCtrl = false;
-  var _physicalAlt = false;
-  var _physicalCommand = false;
-  late final MobileKeyboardModifierController _mobileModifiers;
-  final _androidRemoteKeyboardQueue = KeyboardCommandQueue(
-    onError: (error, stackTrace) {
-      debugPrint('Android remote keyboard dispatch failed: $error');
-      debugPrintStack(stackTrace: stackTrace);
-    },
-  );
-
-  final ToReleaseRawKeys toReleaseRawKeys = ToReleaseRawKeys();
-  final ToReleaseKeys toReleaseKeys = ToReleaseKeys();
+  late final KeyboardInputController _keyboardInput;
 
   // trackpad
   var _trackpadLastDelta = Offset.zero;
@@ -396,24 +264,23 @@ class InputModel {
 
   late final SessionID sessionId;
 
-  MobileModifierState get mobileModifierState => _mobileModifiers.state;
+  MobileModifierState get mobileModifierState => _keyboardInput.mobileState;
+  Future<void> get keyboardDispatchIdle => _keyboardInput.idle;
   bool get shift => _effectiveModifiers.shift;
   bool get ctrl => _effectiveModifiers.ctrl;
   bool get alt => _effectiveModifiers.alt;
   bool get command => _effectiveModifiers.command;
-  set shift(bool value) => _physicalShift = value;
-  set ctrl(bool value) => _physicalCtrl = value;
-  set alt(bool value) => _physicalAlt = value;
-  set command(bool value) => _physicalCommand = value;
+  set shift(bool value) =>
+      _keyboardInput.setPhysical(MobileModifierKey.shift, value);
+  set ctrl(bool value) =>
+      _keyboardInput.setPhysical(MobileModifierKey.ctrl, value);
+  set alt(bool value) =>
+      _keyboardInput.setPhysical(MobileModifierKey.alt, value);
+  set command(bool value) =>
+      _keyboardInput.setPhysical(MobileModifierKey.command, value);
 
-  KeyboardModifiers get _physicalModifiers => KeyboardModifiers(
-        alt: _physicalAlt,
-        ctrl: _physicalCtrl,
-        shift: _physicalShift,
-        command: _physicalCommand,
-      );
   KeyboardModifiers get _effectiveModifiers =>
-      _physicalModifiers.merge(_mobileModifiers.snapshot);
+      _keyboardInput.effectiveModifiers;
 
   bool get keyboardPerm => parent.target!.ffiModel.keyboard;
   String get id => parent.target?.id ?? '';
@@ -435,13 +302,84 @@ class InputModel {
 
   InputModel(this.parent) {
     sessionId = parent.target!.sessionId;
-    _mobileModifiers = MobileKeyboardModifierController(
-      onRelease: (key, remaining) {
-        if (_physicalModifiers.isActive(key)) return;
-        _sendMobileModifierKeyUp(
-          key,
-          modifiers: _physicalModifiers.merge(remaining),
-        );
+    _keyboardInput = KeyboardInputController(
+      canDispatch: () => keyboardPerm && !isViewOnly && !isViewCamera,
+      sendKey:
+          ({
+            required name,
+            required down,
+            required press,
+            required modifiers,
+          }) =>
+              () => bind.sessionInputKey(
+                sessionId: sessionId,
+                name: name,
+                down: down,
+                press: press,
+                alt: modifiers.alt,
+                ctrl: modifiers.ctrl,
+                shift: modifiers.shift,
+                command: modifiers.command,
+              ),
+      sendTextEdit:
+          ({
+            required text,
+            required deleteBeforeGraphemes,
+            required deleteAfterGraphemes,
+          }) =>
+              () => bind.sessionInputTextEdit(
+                sessionId: sessionId,
+                value: text,
+                deleteBeforeGraphemes: deleteBeforeGraphemes,
+                deleteAfterGraphemes: deleteAfterGraphemes,
+              ),
+      sendString: (text) =>
+          () => bind.sessionInputString(sessionId: sessionId, value: text),
+      sendPhysicalKey:
+          ({
+            required character,
+            required usbHid,
+            required lockModes,
+            required down,
+          }) =>
+              () => bind.sessionHandleFlutterKeyEvent(
+                sessionId: sessionId,
+                character: character,
+                usbHid: usbHid,
+                lockModes: lockModes,
+                downOrUp: down,
+              ),
+      sendRawKey:
+          ({
+            required name,
+            required platformCode,
+            required positionCode,
+            required lockModes,
+            required down,
+          }) =>
+              () => bind.sessionHandleFlutterRawKeyEvent(
+                sessionId: sessionId,
+                name: name,
+                platformCode: platformCode,
+                positionCode: positionCode,
+                lockModes: lockModes,
+                downOrUp: down,
+              ),
+      sendSourceText:
+          ({
+            required text,
+            required sourceLanguageTag,
+            required sourceLayoutType,
+          }) =>
+              () => bind.sessionInputTextEditWithSourceLayout(
+                sessionId: sessionId,
+                value: text,
+                sourceLanguageTag: sourceLanguageTag,
+                sourceLayoutType: sourceLayoutType,
+              ),
+      onError: (error, stackTrace) {
+        debugPrint('Remote keyboard dispatch failed: $error');
+        debugPrintStack(stackTrace: stackTrace);
       },
     );
     _relativeMouse = RelativeMouseModel(
@@ -572,89 +510,14 @@ class InputModel {
     _trackpadSpeedInner = _trackpadSpeed / 100.0;
   }
 
-  void handleKeyDownEventModifiers(KeyEvent e) {
-    KeyUpEvent upEvent(e) => KeyUpEvent(
-      physicalKey: e.physicalKey,
-      logicalKey: e.logicalKey,
-      timeStamp: e.timeStamp,
-    );
-    if (e.logicalKey == LogicalKeyboardKey.altLeft) {
-      if (!alt) {
-        alt = true;
-      }
-      toReleaseKeys.lastLAltKeyEvent = upEvent(e);
-    } else if (e.logicalKey == LogicalKeyboardKey.altRight) {
-      if (!alt) {
-        alt = true;
-      }
-      toReleaseKeys.lastLAltKeyEvent = upEvent(e);
-    } else if (e.logicalKey == LogicalKeyboardKey.controlLeft) {
-      if (!ctrl) {
-        ctrl = true;
-      }
-      toReleaseKeys.lastLCtrlKeyEvent = upEvent(e);
-    } else if (e.logicalKey == LogicalKeyboardKey.controlRight) {
-      if (!ctrl) {
-        ctrl = true;
-      }
-      toReleaseKeys.lastRCtrlKeyEvent = upEvent(e);
-    } else if (e.logicalKey == LogicalKeyboardKey.shiftLeft) {
-      if (!shift) {
-        shift = true;
-      }
-      toReleaseKeys.lastLShiftKeyEvent = upEvent(e);
-    } else if (e.logicalKey == LogicalKeyboardKey.shiftRight) {
-      if (!shift) {
-        shift = true;
-      }
-      toReleaseKeys.lastRShiftKeyEvent = upEvent(e);
-    } else if (e.logicalKey == LogicalKeyboardKey.metaLeft) {
-      if (!command) {
-        command = true;
-      }
-      toReleaseKeys.lastLCommandKeyEvent = upEvent(e);
-    } else if (e.logicalKey == LogicalKeyboardKey.metaRight) {
-      if (!command) {
-        command = true;
-      }
-      toReleaseKeys.lastRCommandKeyEvent = upEvent(e);
-    } else if (e.logicalKey == LogicalKeyboardKey.superKey) {
-      if (!command) {
-        command = true;
-      }
-      toReleaseKeys.lastSuperKeyEvent = upEvent(e);
-    }
+  void handleKeyDownEventModifiers(KeyDownEvent event) {
+    final modifier = _physicalModifierKey(event.logicalKey);
+    if (modifier != null) _keyboardInput.setPhysicalKey(modifier, true);
   }
 
-  void handleKeyUpEventModifiers(KeyEvent e) {
-    if (e.logicalKey == LogicalKeyboardKey.altLeft) {
-      alt = false;
-      toReleaseKeys.lastLAltKeyEvent = null;
-    } else if (e.logicalKey == LogicalKeyboardKey.altRight) {
-      alt = false;
-      toReleaseKeys.lastRAltKeyEvent = null;
-    } else if (e.logicalKey == LogicalKeyboardKey.controlLeft) {
-      ctrl = false;
-      toReleaseKeys.lastLCtrlKeyEvent = null;
-    } else if (e.logicalKey == LogicalKeyboardKey.controlRight) {
-      ctrl = false;
-      toReleaseKeys.lastRCtrlKeyEvent = null;
-    } else if (e.logicalKey == LogicalKeyboardKey.shiftLeft) {
-      shift = false;
-      toReleaseKeys.lastLShiftKeyEvent = null;
-    } else if (e.logicalKey == LogicalKeyboardKey.shiftRight) {
-      shift = false;
-      toReleaseKeys.lastRShiftKeyEvent = null;
-    } else if (e.logicalKey == LogicalKeyboardKey.metaLeft) {
-      command = false;
-      toReleaseKeys.lastLCommandKeyEvent = null;
-    } else if (e.logicalKey == LogicalKeyboardKey.metaRight) {
-      command = false;
-      toReleaseKeys.lastRCommandKeyEvent = null;
-    } else if (e.logicalKey == LogicalKeyboardKey.superKey) {
-      command = false;
-      toReleaseKeys.lastSuperKeyEvent = null;
-    }
+  void handleKeyUpEventModifiers(KeyUpEvent event) {
+    final modifier = _physicalModifierKey(event.logicalKey);
+    if (modifier != null) _keyboardInput.setPhysicalKey(modifier, false);
   }
 
   KeyEventResult handleRawKeyEvent(RawKeyEvent e) {
@@ -680,35 +543,13 @@ class InputModel {
     final key = e.logicalKey;
     if (e is RawKeyDownEvent) {
       if (!e.repeat) {
-        if (e.isAltPressed && !alt) {
-          alt = true;
-        } else if (e.isControlPressed && !ctrl) {
-          ctrl = true;
-        } else if (e.isShiftPressed && !shift) {
-          shift = true;
-        } else if (e.isMetaPressed && !command) {
-          command = true;
-        }
+        final modifier = _physicalModifierKey(key);
+        if (modifier != null) _keyboardInput.setPhysicalKey(modifier, true);
       }
-      toReleaseRawKeys.updateKeyDown(key, e);
     }
     if (e is RawKeyUpEvent) {
-      if (key == LogicalKeyboardKey.altLeft ||
-          key == LogicalKeyboardKey.altRight) {
-        alt = false;
-      } else if (key == LogicalKeyboardKey.controlLeft ||
-          key == LogicalKeyboardKey.controlRight) {
-        ctrl = false;
-      } else if (key == LogicalKeyboardKey.shiftRight ||
-          key == LogicalKeyboardKey.shiftLeft) {
-        shift = false;
-      } else if (key == LogicalKeyboardKey.metaLeft ||
-          key == LogicalKeyboardKey.metaRight ||
-          key == LogicalKeyboardKey.superKey) {
-        command = false;
-      }
-
-      toReleaseRawKeys.updateKeyUp(key, e);
+      final modifier = _physicalModifierKey(key);
+      if (modifier != null) _keyboardInput.setPhysicalKey(modifier, false);
     }
 
     // * Currently mobile does not enable map mode
@@ -802,6 +643,8 @@ class InputModel {
         // Show repeat event be converted to "release+press" events?
         e is KeyDownEvent || e is KeyRepeatEvent,
         iosCapsLock,
+        consumeOneShot:
+            e is KeyDownEvent && _physicalModifierKey(e.logicalKey) == null,
       );
     } else {
       legacyKeyboardMode(e);
@@ -815,31 +658,30 @@ class InputModel {
     String character,
     int usbHid,
     bool down,
-    bool iosCapsLock,
-  ) {
+    bool iosCapsLock, {
+    bool consumeOneShot = false,
+  }) {
     final lockModes = _buildLockModes(iosCapsLock);
-    bind.sessionHandleFlutterKeyEvent(
-      sessionId: sessionId,
-      character: character,
-      usbHid: usbHid,
-      lockModes: lockModes,
-      downOrUp: down,
+    unawaited(
+      _keyboardInput.sendPhysicalKey(
+        character: character,
+        usbHid: usbHid,
+        lockModes: lockModes,
+        down: down,
+        consumeOneShot: consumeOneShot,
+      ),
     );
   }
 
   Future<void> inputAndroidRemotePhysicalKey(int usbHidUsage, bool down) {
-    if (isViewOnly || isViewCamera) return Future<void>.value();
-    final inputSessionId = sessionId;
     final lockModes = _buildLockModes(false);
-    return _androidRemoteKeyboardQueue.enqueue(() async {
-      await bind.sessionHandleFlutterKeyEvent(
-        sessionId: inputSessionId,
-        character: '',
-        usbHid: usbHidUsage,
-        lockModes: lockModes,
-        downOrUp: down,
-      );
-    });
+    return _keyboardInput.sendPhysicalKey(
+      character: '',
+      usbHid: usbHidUsage,
+      lockModes: lockModes,
+      down: down,
+      consumeOneShot: down && (usbHidUsage < 0xe0 || usbHidUsage > 0xe7),
+    );
   }
 
   Future<void> inputAndroidRemoteCommittedText(
@@ -847,19 +689,11 @@ class InputModel {
     required String sourceLanguageTag,
     required String sourceLayoutType,
   }) {
-    if (isViewOnly || isViewCamera || text.isEmpty) {
-      return Future<void>.value();
-    }
-    final inputSessionId = sessionId;
-    return _androidRemoteKeyboardQueue.enqueue(() async {
-      await bind.sessionInputTextEditWithSourceLayout(
-        sessionId: inputSessionId,
-        value: text,
-        sourceLanguageTag: sourceLanguageTag,
-        sourceLayoutType: sourceLayoutType,
-      );
-      consumeMobileOneShotModifiers();
-    });
+    return _keyboardInput.sendSourceText(
+      text: text,
+      sourceLanguageTag: sourceLanguageTag,
+      sourceLayoutType: sourceLayoutType,
+    );
   }
 
   void mapKeyboardModeRaw(RawKeyEvent e, bool iosCapsLock) {
@@ -899,6 +733,10 @@ class InputModel {
       positionCode,
       down,
       iosCapsLock,
+      consumeOneShot:
+          e is RawKeyDownEvent &&
+          !e.repeat &&
+          _physicalModifierKey(e.logicalKey) == null,
     );
   }
 
@@ -908,16 +746,19 @@ class InputModel {
     int platformCode,
     int positionCode,
     bool down,
-    bool iosCapsLock,
-  ) {
+    bool iosCapsLock, {
+    bool consumeOneShot = false,
+  }) {
     final lockModes = _buildLockModes(iosCapsLock);
-    bind.sessionHandleFlutterRawKeyEvent(
-      sessionId: sessionId,
-      name: name,
-      platformCode: platformCode,
-      positionCode: positionCode,
-      lockModes: lockModes,
-      downOrUp: down,
+    unawaited(
+      _keyboardInput.sendRawKey(
+        name: name,
+        platformCode: platformCode,
+        positionCode: positionCode,
+        lockModes: lockModes,
+        down: down,
+        consumeOneShot: consumeOneShot,
+      ),
     );
   }
 
@@ -966,111 +807,33 @@ class InputModel {
   /// [down] indicates the key's state(down or up).
   /// [press] indicates a click event(down and up).
   void inputKey(String name, {bool? down, bool? press}) {
-    _inputKeyWithModifiers(
-      name,
-      _effectiveModifiers,
-      down: down,
-      press: press,
-    );
-  }
-
-  void _inputKeyWithModifiers(
-    String name,
-    KeyboardModifiers modifiers, {
-    bool? down,
-    bool? press,
-  }) {
-    if (!keyboardPerm) return;
-    if (isViewCamera) return;
-    final effectiveDown = down ?? false;
-    final effectivePress = press ?? true;
-    bind.sessionInputKey(
-      sessionId: sessionId,
-      name: name,
-      down: effectiveDown,
-      press: effectivePress,
-      alt: modifiers.alt,
-      ctrl: modifiers.ctrl,
-      shift: modifiers.shift,
-      command: modifiers.command,
-    );
-    if ((effectiveDown || effectivePress) && !_isModifierKeyName(name)) {
-      _mobileModifiers.consumeOneShot();
-    }
+    _keyboardInput.sendKey(name, down: down, press: press);
   }
 
   void inputKeyWithTemporaryMobileModifier(
     String name,
     MobileModifierKey modifier,
   ) {
-    final modeBefore = mobileModifierState.modeFor(modifier);
-    final before = _effectiveModifiers;
-    final releaseTemporaryModifier = !modeBefore.active && !before.isActive(modifier);
-    _inputKeyWithModifiers(
-      name,
-      before.withModifier(modifier),
-    );
-    if (releaseTemporaryModifier) {
-      _sendMobileModifierKeyUp(
-        modifier,
-        modifiers: _effectiveModifiers,
-      );
-    }
+    _keyboardInput.sendWithTemporaryModifier(name, modifier);
   }
 
   void consumeMobileOneShotModifiers() {
-    _mobileModifiers.consumeOneShot();
+    _keyboardInput.consumeOneShot();
   }
 
-  void _sendMobileModifierKeyUp(
-    MobileModifierKey modifier, {
-    required KeyboardModifiers modifiers,
+  void inputMobileTextEdit({
+    required String text,
+    required int deleteBeforeGraphemes,
+    required int deleteAfterGraphemes,
   }) {
-    if (!keyboardPerm || isViewCamera) return;
-    final name = switch (modifier) {
-      MobileModifierKey.ctrl => 'VK_CONTROL',
-      MobileModifierKey.alt => 'VK_MENU',
-      MobileModifierKey.shift => 'VK_SHIFT',
-      MobileModifierKey.command => 'Meta',
-    };
-    bind.sessionInputKey(
-      sessionId: sessionId,
-      name: name,
-      down: false,
-      press: false,
-      alt: modifiers.alt,
-      ctrl: modifiers.ctrl,
-      shift: modifiers.shift,
-      command: modifiers.command,
+    _keyboardInput.sendTextEdit(
+      text: text,
+      deleteBeforeGraphemes: deleteBeforeGraphemes,
+      deleteAfterGraphemes: deleteAfterGraphemes,
     );
   }
 
-  bool _modifierValue(MobileModifierKey modifier) => switch (modifier) {
-    MobileModifierKey.ctrl => ctrl,
-    MobileModifierKey.alt => alt,
-    MobileModifierKey.shift => shift,
-    MobileModifierKey.command => command,
-  };
-
-  static bool _isModifierKeyName(String name) {
-    return const <String>{
-      'VK_CONTROL',
-      'VK_SHIFT',
-      'VK_MENU',
-      'VK_LWIN',
-      'VK_RWIN',
-      'CONTROL_L',
-      'CONTROL_R',
-      'SHIFT_L',
-      'SHIFT_R',
-      'ALT_L',
-      'ALT_R',
-      'META_L',
-      'META_R',
-      'SUPER_L',
-      'SUPER_R',
-    }.contains(name.toUpperCase());
-  }
+  bool inputString(String text) => _keyboardInput.sendString(text);
 
   static Map<String, dynamic> getMouseEventMove() => {
     'type': _kMouseEventMove,
@@ -1139,11 +902,13 @@ class InputModel {
 
   /// Reset key modifiers to false, including [shift], [ctrl], [alt] and [command].
   void resetModifiers() {
-    _physicalShift = false;
-    _physicalCtrl = false;
-    _physicalAlt = false;
-    _physicalCommand = false;
-    _mobileModifiers.reset();
+    _keyboardInput.reset();
+  }
+
+  void permissionRevoked() {
+    _keyboardInput.retirePendingAndRecover(() {
+      _keyboardInput.reset(cancelPending: false, clearTrackedKeys: false);
+    });
   }
 
   /// Modify the given modifier map [evt] based on current modifier key status.
@@ -1166,8 +931,13 @@ class InputModel {
   }
 
   void enterOrLeave(bool enter) {
-    toReleaseKeys.release(handleKeyEvent);
-    toReleaseRawKeys.release(handleRawKeyEvent);
+    _keyboardInput.retirePendingAndRecover(() {
+      if (enter) {
+        _keyboardInput.clearPhysicalModifiers();
+      } else {
+        _keyboardInput.reset(cancelPending: false, clearTrackedKeys: false);
+      }
+    });
     _pointerMovedAfterEnter = false;
     _pointerInsideImage = enter;
     _lastWheelTsUs = 0;
@@ -1175,7 +945,6 @@ class InputModel {
     // Fix status
     if (!enter) {
       _blockedRemotePointerIds.clear();
-      resetModifiers();
     }
     _relativeMouse.onEnterOrLeaveImage(enter);
     _flingTimer?.cancel();
@@ -1265,21 +1034,12 @@ class InputModel {
       'RWin', // Command/Super right
     ];
 
-    for (final key in modifiersToRelease) {
-      bind.sessionInputKey(
-        sessionId: sessionId,
-        name: key,
-        down: false,
-        press: false,
-        alt: false,
-        ctrl: false,
-        shift: false,
-        command: false,
-      );
-    }
-
-    // Reset local modifier state
-    resetModifiers();
+    _keyboardInput.retirePendingAndRecover(() {
+      for (final key in modifiersToRelease) {
+        _keyboardInput.sendKeyUpWithoutModifiers(key);
+      }
+      _keyboardInput.reset(cancelPending: false, clearTrackedKeys: false);
+    });
 
     // Now exit relative mouse mode
     _relativeMouse.setRelativeMouseMode(false);

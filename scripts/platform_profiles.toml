@@ -1,0 +1,261 @@
+schema_version = 1
+cargo_default_features = ["use_dasp", "quic-transport"]
+
+shipping_wrappers = [
+  "flutter/build_android.sh",
+  "flutter/ndk_arm64.sh",
+  "flutter/ndk_arm.sh",
+  "flutter/ndk_x64.sh",
+  "flutter/ndk_x86.sh",
+  "flutter/build_ios.sh",
+  "flutter/build_ios_sim.sh",
+  "flutter/ios_arm64.sh",
+  "flutter/ios_sim_arm64.sh",
+  "flutter/ios_x64.sh",
+  "scripts/build_macos.sh",
+  "scripts/build_windows.ps1",
+  "scripts/build_linux.sh",
+]
+
+[[profiles]]
+id = "android-release-package"
+platform = "android"
+rust_targets = ["aarch64-linux-android", "armv7-linux-androideabi", "x86_64-linux-android"]
+artifact = "package"
+roles = ["controller", "controlled-host"]
+default_features = true
+required_features = ["flutter"]
+optional_features = ["hwcodec", "mediacodec"]
+forbidden_features = ["vram", "linux-pkg-config", "screencapturekit", "unix-file-copy-paste"]
+native_components = ["libyuv", "libvpx", "aom", "opus", "ndk-compat"]
+conditional_native_components = ["hwcodec:ffmpeg"]
+native_marker = "android-multi-abi"
+minimum_os = "api-24"
+packaging = "gradle-apk-aab"
+wrappers = ["flutter/build_android.sh"]
+gates = ["config", "compile", "unit", "artifact", "device"]
+
+[profiles.feature_requires]
+hwcodec = ["mediacodec"]
+mediacodec = ["hwcodec"]
+
+[[profiles]]
+id = "android-arm64"
+platform = "android"
+rust_targets = ["aarch64-linux-android"]
+abi = "arm64-v8a"
+artifact = "cdylib"
+roles = ["controller", "controlled-host"]
+default_features = true
+required_features = ["flutter"]
+optional_features = ["hwcodec", "mediacodec"]
+forbidden_features = ["vram", "linux-pkg-config", "screencapturekit", "unix-file-copy-paste"]
+native_components = ["libyuv", "libvpx", "aom", "opus", "ndk-compat"]
+conditional_native_components = ["hwcodec:ffmpeg"]
+native_marker = "android-elf-arm64"
+minimum_os = "api-24"
+packaging = "gradle-apk"
+wrappers = ["flutter/ndk_arm64.sh"]
+gates = ["config", "compile", "unit", "artifact", "device"]
+
+[profiles.feature_requires]
+hwcodec = ["mediacodec"]
+mediacodec = ["hwcodec"]
+
+[[profiles]]
+id = "android-armv7"
+platform = "android"
+rust_targets = ["armv7-linux-androideabi"]
+abi = "armeabi-v7a"
+artifact = "cdylib"
+roles = ["controller", "controlled-host"]
+default_features = true
+required_features = ["flutter"]
+optional_features = ["hwcodec", "mediacodec"]
+forbidden_features = ["vram", "linux-pkg-config", "screencapturekit", "unix-file-copy-paste"]
+native_components = ["libyuv", "libvpx", "aom", "opus", "ndk-compat"]
+conditional_native_components = ["hwcodec:ffmpeg"]
+native_marker = "android-elf-armv7"
+minimum_os = "api-24"
+packaging = "gradle-apk"
+wrappers = ["flutter/ndk_arm.sh"]
+gates = ["config", "compile", "unit", "artifact", "device"]
+
+[profiles.feature_requires]
+hwcodec = ["mediacodec"]
+mediacodec = ["hwcodec"]
+
+[[profiles]]
+id = "android-x86_64"
+platform = "android"
+rust_targets = ["x86_64-linux-android"]
+abi = "x86_64"
+artifact = "cdylib"
+roles = ["controller", "controlled-host"]
+default_features = true
+required_features = ["flutter"]
+optional_features = ["hwcodec", "mediacodec"]
+forbidden_features = ["vram", "linux-pkg-config", "screencapturekit", "unix-file-copy-paste"]
+native_components = ["libyuv", "libvpx", "aom", "opus", "ndk-compat"]
+conditional_native_components = ["hwcodec:ffmpeg"]
+native_marker = "android-elf-x86_64"
+minimum_os = "api-24"
+packaging = "gradle-apk"
+wrappers = ["flutter/ndk_x64.sh"]
+gates = ["config", "compile", "unit", "artifact", "device"]
+
+[profiles.feature_requires]
+hwcodec = ["mediacodec"]
+mediacodec = ["hwcodec"]
+
+[[profiles]]
+id = "android-x86"
+platform = "android"
+rust_targets = ["i686-linux-android"]
+abi = "x86"
+artifact = "cdylib"
+roles = ["controller", "controlled-host"]
+default_features = true
+required_features = ["flutter"]
+optional_features = ["hwcodec", "mediacodec"]
+forbidden_features = ["vram", "linux-pkg-config", "screencapturekit", "unix-file-copy-paste"]
+native_components = ["libyuv", "libvpx", "aom", "opus", "ndk-compat"]
+conditional_native_components = ["hwcodec:ffmpeg"]
+native_marker = "android-elf-x86"
+minimum_os = "api-24"
+packaging = "gradle-apk"
+wrappers = ["flutter/ndk_x86.sh"]
+gates = ["config", "compile", "unit", "artifact", "device"]
+
+[profiles.feature_requires]
+hwcodec = ["mediacodec"]
+mediacodec = ["hwcodec"]
+
+[[profiles]]
+id = "ios-device-arm64"
+platform = "ios"
+rust_targets = ["aarch64-apple-ios"]
+abi = "arm64"
+artifact = "staticlib"
+roles = ["controller"]
+default_features = true
+required_features = ["flutter"]
+optional_features = ["hwcodec"]
+forbidden_features = ["mediacodec", "vram", "linux-pkg-config", "screencapturekit", "unix-file-copy-paste"]
+native_components = ["libyuv", "libvpx", "aom", "opus", "libsodium"]
+conditional_native_components = ["hwcodec:ffmpeg"]
+native_marker = "LC_BUILD_VERSION-platform-2"
+minimum_os = "15.0"
+packaging = "xcode-ios"
+wrappers = ["flutter/build_ios.sh", "flutter/ios_arm64.sh"]
+gates = ["config", "compile", "unit", "artifact", "device"]
+
+[[profiles]]
+id = "ios-simulator-arm64"
+platform = "ios"
+rust_targets = ["aarch64-apple-ios-sim"]
+abi = "arm64"
+artifact = "staticlib"
+roles = ["controller"]
+default_features = true
+required_features = ["flutter"]
+optional_features = ["hwcodec"]
+forbidden_features = ["mediacodec", "vram", "linux-pkg-config", "screencapturekit", "unix-file-copy-paste"]
+native_components = ["libyuv", "libvpx", "aom", "opus", "libsodium"]
+conditional_native_components = ["hwcodec:ffmpeg"]
+native_marker = "LC_BUILD_VERSION-platform-7-arm64"
+minimum_os = "15.0"
+packaging = "xcode-ios-simulator"
+wrappers = ["flutter/ios_sim_arm64.sh"]
+gates = ["config", "compile", "unit", "artifact", "device"]
+
+[[profiles]]
+id = "ios-simulator-x86_64"
+platform = "ios"
+rust_targets = ["x86_64-apple-ios"]
+abi = "x86_64"
+artifact = "staticlib"
+roles = ["controller"]
+default_features = true
+required_features = ["flutter"]
+optional_features = ["hwcodec"]
+forbidden_features = ["mediacodec", "vram", "linux-pkg-config", "screencapturekit", "unix-file-copy-paste"]
+native_components = ["libyuv", "libvpx", "aom", "opus", "libsodium"]
+conditional_native_components = ["hwcodec:ffmpeg"]
+native_marker = "LC_BUILD_VERSION-platform-7-x86_64"
+minimum_os = "15.0"
+packaging = "xcode-ios-simulator"
+wrappers = ["flutter/ios_x64.sh"]
+gates = ["config", "compile", "unit", "artifact", "device"]
+
+[[profiles]]
+id = "ios-simulator-package"
+platform = "ios"
+rust_targets = ["aarch64-apple-ios-sim", "x86_64-apple-ios"]
+artifact = "package"
+roles = ["controller"]
+default_features = true
+required_features = ["flutter"]
+optional_features = ["hwcodec"]
+forbidden_features = ["mediacodec", "vram", "linux-pkg-config", "screencapturekit", "unix-file-copy-paste"]
+native_components = ["libyuv", "libvpx", "aom", "opus", "libsodium"]
+conditional_native_components = ["hwcodec:ffmpeg"]
+native_marker = "LC_BUILD_VERSION-platform-7"
+minimum_os = "15.0"
+packaging = "xcode-ios-simulator"
+wrappers = ["flutter/build_ios_sim.sh"]
+gates = ["config", "compile", "unit", "artifact", "device"]
+
+[[profiles]]
+id = "macos-release"
+platform = "macos"
+rust_targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+artifact = "cdylib"
+roles = ["controller", "controlled-host"]
+default_features = true
+required_features = ["flutter"]
+optional_features = ["hwcodec", "screencapturekit"]
+forbidden_features = ["mediacodec", "vram", "linux-pkg-config", "unix-file-copy-paste"]
+native_components = ["libyuv", "libvpx", "aom", "opus"]
+conditional_native_components = ["hwcodec:ffmpeg"]
+native_marker = "LC_BUILD_VERSION-platform-1"
+minimum_os = "10.15"
+packaging = "flutter-macos"
+wrappers = ["scripts/build_macos.sh"]
+gates = ["config", "compile", "unit", "artifact", "device"]
+
+[[profiles]]
+id = "windows-x86_64-release"
+platform = "windows"
+rust_targets = ["x86_64-pc-windows-msvc"]
+artifact = "cdylib"
+roles = ["controller", "controlled-host", "service"]
+default_features = true
+required_features = ["flutter"]
+optional_features = ["hwcodec", "vram"]
+forbidden_features = ["mediacodec", "linux-pkg-config", "screencapturekit", "unix-file-copy-paste"]
+native_components = ["libyuv", "libvpx", "aom", "opus"]
+conditional_native_components = ["hwcodec:ffmpeg"]
+native_marker = "PE-x86_64"
+minimum_os = "windows-10"
+packaging = "flutter-windows-zip"
+wrappers = ["scripts/build_windows.ps1"]
+gates = ["config", "compile", "unit", "artifact", "device"]
+
+[[profiles]]
+id = "linux-x86_64-release"
+platform = "linux"
+rust_targets = ["x86_64-unknown-linux-gnu"]
+artifact = "cdylib"
+roles = ["controller", "controlled-host", "service"]
+default_features = true
+required_features = ["flutter", "linux-pkg-config"]
+optional_features = ["hwcodec", "unix-file-copy-paste"]
+forbidden_features = ["mediacodec", "vram", "screencapturekit"]
+native_components = ["libyuv", "libvpx", "aom", "opus", "gstreamer", "pam"]
+conditional_native_components = ["hwcodec:ffmpeg"]
+native_marker = "ELF-x86_64"
+minimum_os = "glibc-2.31"
+packaging = "flutter-linux-zip-deb"
+wrappers = ["scripts/build_linux.sh"]
+gates = ["config", "compile", "unit", "artifact", "device"]

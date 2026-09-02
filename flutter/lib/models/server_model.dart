@@ -18,6 +18,7 @@ import '../desktop/pages/server_page.dart' as desktop;
 import '../desktop/widgets/tabbar_widget.dart';
 import '../mobile/pages/server_page.dart';
 import 'model.dart';
+import 'session_event.dart';
 
 const kLoginDialogTag = "LOGIN";
 
@@ -590,9 +591,9 @@ class ServerModel with ChangeNotifier {
     }
   }
 
-  void addConnection(Map<String, dynamic> evt) {
+  void addConnectionEvent(SessionClientValue value) {
     try {
-      final client = Client.fromJson(jsonDecode(evt["client"]));
+      final client = Client.fromSessionValue(value);
       var activeClient = client;
       if (client.authorized) {
         parent.target?.dialogManager.dismissByTag(getLoginDialogTag(client.id));
@@ -629,19 +630,14 @@ class ServerModel with ChangeNotifier {
     }
   }
 
-  void updateClientPermission(Map<String, dynamic> evt) {
+  void updateClientPermissionEvent(ClientPermissionSessionEvent event) {
     try {
-      final id = int.tryParse(evt['id']?.toString() ?? '');
-      final name = evt['permission_name']?.toString() ?? '';
-      final enabled = evt['enabled']?.toString() == 'true';
-      if (id == null || name.isEmpty) {
-        return;
-      }
-      final index = _clients.indexWhere((client) => client.id == id);
+      final index =
+          _clients.indexWhere((client) => client.id == event.clientId);
       if (index < 0) {
         return;
       }
-      if (_clients[index].setPermission(name, enabled)) {
+      if (_clients[index].setPermission(event.name, event.enabled)) {
         notifyListeners();
       }
     } catch (e) {
@@ -757,21 +753,18 @@ class ServerModel with ChangeNotifier {
     }
   }
 
-  void handlePermissionRequest(Map<String, dynamic> evt) {
-    final id = int.tryParse(evt['id']?.toString() ?? '');
-    final requestId = evt['request_id']?.toString() ?? '';
-    final name = evt['permission_name']?.toString() ?? '';
-    final enabled = evt['enabled']?.toString() == 'true';
-    if (id == null || requestId.isEmpty || name.isEmpty || !enabled) {
+  void handlePermissionRequestEvent(ClientPermissionSessionEvent event) {
+    if (!event.enabled) {
       return;
     }
-    final client = _clients.firstWhereOrNull((c) => c.id == id);
+    final client =
+        _clients.firstWhereOrNull((c) => c.id == event.clientId);
     if (client == null) {
       return;
     }
 
     if (_permissionRequests
-        .any((r) => r.client.id == client.id && r.requestId == requestId)) {
+        .any((r) => r.client.id == client.id && r.requestId == event.requestId)) {
       return;
     }
 
@@ -780,12 +773,12 @@ class ServerModel with ChangeNotifier {
     }
     _permissionRequests.add(PermissionRequestPrompt(
       client: client,
-      requestId: requestId,
-      name: name,
-      enabled: enabled,
+      requestId: event.requestId,
+      name: event.name,
+      enabled: event.enabled,
       title:
-          '${translate('Allow')} ${translate(_permissionRequestTitle(name))}?',
-      risk: translate(_permissionRequestRisk(name)),
+          '${translate('Allow')} ${translate(_permissionRequestTitle(event.name))}?',
+      risk: translate(_permissionRequestRisk(event.name)),
     ));
     notifyListeners();
   }
@@ -913,10 +906,10 @@ class ServerModel with ChangeNotifier {
     }
   }
 
-  void onClientRemove(Map<String, dynamic> evt) {
+  void onClientRemoveEvent(ClientRemovedSessionEvent event) {
     try {
-      final id = int.parse(evt['id'] as String);
-      final close = (evt['close'] as String) == 'true';
+      final id = event.id;
+      final close = event.close;
       if (_clients.any((c) => c.id == id)) {
         final index = _clients.indexWhere((client) => client.id == id);
         if (index >= 0) {
@@ -960,9 +953,9 @@ class ServerModel with ChangeNotifier {
     }
   }
 
-  void updateVoiceCallState(Map<String, dynamic> evt) {
+  void updateVoiceCallStateEvent(SessionClientValue value) {
     try {
-      final client = Client.fromJson(jsonDecode(evt["client"]));
+      final client = Client.fromSessionValue(value);
       final index = _clients.indexWhere((element) => element.id == client.id);
       if (index != -1) {
         _clients[index].inVoiceCall = client.inVoiceCall;
@@ -1180,6 +1173,29 @@ class Client {
 
   Client(this.id, this.authorized, this.isFileTransfer, this.isViewCamera,
       this.name, this.peerId, this.keyboard, this.clipboard, this.audio);
+
+  Client.fromSessionValue(SessionClientValue value) {
+    id = value.id;
+    authorized = value.authorized;
+    isFileTransfer = value.isFileTransfer;
+    isViewCamera = value.isViewCamera;
+    isTerminal = value.isTerminal;
+    portForward = value.portForward;
+    name = value.name;
+    avatar = value.avatar;
+    peerId = value.peerId;
+    keyboard = value.keyboard;
+    clipboard = value.clipboard;
+    audio = value.audio;
+    file = value.file;
+    restart = value.restart;
+    recording = value.recording;
+    blockInput = value.blockInput;
+    disconnected = value.disconnected;
+    fromSwitch = value.fromSwitch;
+    inVoiceCall = value.inVoiceCall;
+    incomingVoiceCall = value.incomingVoiceCall;
+  }
 
   void updateFrom(Client other) {
     authorized = other.authorized;
