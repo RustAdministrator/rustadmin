@@ -6,7 +6,8 @@ use crate::{
     client::{self, file_trait::FileManager},
     common::{make_fd_to_json, make_vec_fd_to_json, PeerSecurityEntry},
     flutter::{
-        self, session_add, session_add_existed, session_start_, sessions, try_sync_peer_option,
+        self, session_add, session_add_existed, session_start_, session_start_with_displays_,
+        sessions, try_sync_peer_option,
     },
     input::*,
     ui_interface::{self, *},
@@ -380,15 +381,7 @@ pub fn session_start_with_displays(
     id: String,
     displays: Vec<i32>,
 ) -> ResultType<()> {
-    session_start_(&session_id, &id, events2ui)?;
-
-    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
-        session.capture_displays(displays.clone(), vec![], vec![]);
-        for display in displays {
-            session.refresh_video(display as _);
-        }
-    }
-    Ok(())
+    session_start_with_displays_(&session_id, &id, events2ui, &displays)
 }
 
 pub fn session_get_remember(session_id: SessionID) -> Option<bool> {

@@ -15,10 +15,12 @@ use hbb_common::{
 };
 use serde::Serialize;
 use serde_json::json;
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
+use std::collections::HashSet;
 #[cfg(target_os = "windows")]
 use std::io::{Error as IoError, ErrorKind as IoErrorKind};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     ffi::CString,
     os::raw::{c_char, c_int, c_void},
     str::FromStr,
@@ -203,12 +205,190 @@ pub unsafe extern "C" fn get_rustdesk_app_name(buffer: *mut u16, length: i32) ->
 #[derive(Default)]
 struct SessionHandler {
     event_stream: Option<StreamSink<EventToUI>>,
-    // displays of current session.
-    // We need this variable to check if the display is in use before pushing rgba to flutter.
-    displays: Vec<usize>,
+    display_intent: ViewDisplayIntent,
     renderer: VideoRenderer,
     #[cfg(all(target_os = "android", feature = "mediacodec"))]
     texture_notified: RwLock<HashSet<usize>>,
+}
+
+#[derive(Default)]
+struct ViewDisplayIntent {
+    displays: Vec<usize>,
+    initialized: bool,
+}
+
+impl ViewDisplayIntent {
+    fn set_wire_displays(&mut self, displays: &[i32]) {
+        self.displays.clear();
+        self.displays.reserve(displays.len());
+        for display in displays
+            .iter()
+            .filter_map(|display| usize::try_from(*display).ok())
+        {
+            if !self.displays.contains(&display) {
+                self.displays.push(display);
+            }
+        }
+        self.initialized = true;
+    }
+
+    fn seed_initial_display(&mut self, display: usize) {
+        if !self.initialized {
+            self.displays.push(display);
+            self.initialized = true;
+        }
+    }
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct DisplayDemandDelta {
+    previous: Vec<usize>,
+    current: Vec<usize>,
+    retained: Vec<usize>,
+    added: Vec<usize>,
+    removed: Vec<usize>,
+}
+
+impl DisplayDemandDelta {
+    fn between(mut previous: Vec<usize>, mut current: Vec<usize>) -> Self {
+        previous.sort_unstable();
+        previous.dedup();
+        current.sort_unstable();
+        current.dedup();
+
+        let retained = current
+            .iter()
+            .copied()
+            .filter(|display| previous.binary_search(display).is_ok())
+            .collect();
+        let added = current
+            .iter()
+            .copied()
+            .filter(|display| previous.binary_search(display).is_err())
+            .collect();
+        let removed = previous
+            .iter()
+            .copied()
+            .filter(|display| current.binary_search(display).is_err())
+            .collect();
+
+        Self {
+            previous,
+            current,
+            retained,
+            added,
+            removed,
+        }
+    }
+}
+
+fn aggregate_display_intents<'a>(intents: impl Iterator<Item = &'a [usize]>) -> Vec<usize> {
+    let mut displays = Vec::new();
+    for intent in intents {
+        displays.extend_from_slice(intent);
+    }
+    displays.sort_unstable();
+    displays.dedup();
+    displays
+}
+
+fn aggregate_active_display_intents(handlers: &HashMap<SessionID, SessionHandler>) -> Vec<usize> {
+    aggregate_display_intents(
+        handlers
+            .values()
+            .filter(|handler| handler.event_stream.is_some())
+            .map(|handler| handler.display_intent.displays.as_slice()),
+    )
+}
+
+fn wire_display_indices(displays: &[usize]) -> Vec<i32> {
+    displays
+        .iter()
+        .filter_map(|display| i32::try_from(*display).ok())
+        .collect()
+}
+
+fn apply_display_demand_delta(session: &FlutterSession, delta: &DisplayDemandDelta) {
+    let added = wire_display_indices(&delta.added);
+    if !added.is_empty() {
+        session.capture_displays(added, vec![], vec![]);
+    }
+
+    let removed = wire_display_indices(&delta.removed);
+    if !removed.is_empty() {
+        session.capture_displays(vec![], removed, vec![]);
+    }
+}
+
+#[cfg(test)]
+mod display_intent_tests {
+    use super::{aggregate_display_intents, DisplayDemandDelta, ViewDisplayIntent};
+
+    #[test]
+    fn aggregate_display_intents_is_deterministic_and_unique() {
+        let first = [2, 0, 2];
+        let second = [1, 2];
+        let aggregate =
+            aggregate_display_intents([first.as_slice(), second.as_slice()].into_iter());
+
+        assert_eq!(aggregate, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn expanding_display_demand_retains_existing_display() {
+        let delta = DisplayDemandDelta::between(vec![0], vec![1, 0]);
+
+        assert_eq!(delta.previous, vec![0]);
+        assert_eq!(delta.current, vec![0, 1]);
+        assert_eq!(delta.retained, vec![0]);
+        assert_eq!(delta.added, vec![1]);
+        assert!(delta.removed.is_empty());
+    }
+
+    #[test]
+    fn releasing_one_view_removes_only_unshared_display() {
+        let previous = aggregate_display_intents([[0, 1].as_slice(), [1].as_slice()].into_iter());
+        let current = aggregate_display_intents([[1].as_slice()].into_iter());
+        let delta = DisplayDemandDelta::between(previous, current);
+
+        assert_eq!(delta.retained, vec![1]);
+        assert!(delta.added.is_empty());
+        assert_eq!(delta.removed, vec![0]);
+    }
+
+    #[test]
+    fn attaching_or_releasing_shared_display_needs_no_host_change() {
+        let one_view = aggregate_display_intents([[1].as_slice()].into_iter());
+        let two_views = aggregate_display_intents([[1].as_slice(), [1].as_slice()].into_iter());
+
+        let attach = DisplayDemandDelta::between(one_view.clone(), two_views.clone());
+        assert_eq!(attach.retained, vec![1]);
+        assert!(attach.added.is_empty());
+        assert!(attach.removed.is_empty());
+
+        let release = DisplayDemandDelta::between(two_views, one_view);
+        assert_eq!(release.retained, vec![1]);
+        assert!(release.added.is_empty());
+        assert!(release.removed.is_empty());
+    }
+
+    #[test]
+    fn wire_display_intent_ignores_invalid_and_duplicate_indices() {
+        let mut intent = ViewDisplayIntent::default();
+        intent.set_wire_displays(&[2, -1, 2, 0]);
+
+        assert_eq!(intent.displays, vec![2, 0]);
+        assert!(intent.initialized);
+    }
+
+    #[test]
+    fn renderer_size_only_seeds_initial_intent_once() {
+        let mut intent = ViewDisplayIntent::default();
+        intent.seed_initial_display(1);
+        intent.seed_initial_display(0);
+
+        assert_eq!(intent.displays, vec![1]);
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -1559,12 +1739,12 @@ impl FlutterHandler {
             #[cfg(all(target_os = "android", feature = "mediacodec"))]
             h.texture_notified.write().unwrap().remove(&display);
             // The soft renderer does not support multi-displays session for now.
-            if h.displays.len() > 1 {
+            if h.display_intent.displays.len() > 1 {
                 continue;
             }
             // If there're multiple ui sessions, we only notify the ui session that has the display.
             if is_multi_sessions {
-                if !h.displays.contains(&display) {
+                if !h.display_intent.displays.contains(&display) {
                     continue;
                 }
             }
@@ -1596,7 +1776,7 @@ impl FlutterHandler {
         rgba: &mut scrap::ImageRgb,
     ) {
         for (_, session) in self.session_handlers.read().unwrap().iter() {
-            if use_texture_render || session.displays.len() > 1 {
+            if use_texture_render || session.display_intent.displays.len() > 1 {
                 if session.renderer.on_rgba(display, rgba) {
                     if let Some(stream) = &session.event_stream {
                         stream.add(EventToUI::Texture(display, false));
@@ -1722,51 +1902,85 @@ pub fn session_add(
 ///
 /// * `id` - The identifier of the remote session with prefix. Regex: [\w]*[\_]*[\d]+
 /// * `events2ui` - The events channel to ui.
-pub fn session_start_(
+fn session_start_with_display_intent(
     session_id: &SessionID,
     id: &str,
     event_stream: StreamSink<EventToUI>,
-) -> ResultType<()> {
+    displays: Option<&[i32]>,
+) -> ResultType<(FlutterSession, DisplayDemandDelta)> {
     // is_connected is used to indicate whether to start a peer connection. For two cases:
     // 1. "Move tab to new window"
     // 2. multi ui session within the same peer connection.
     let mut is_connected = false;
-    let mut is_found = false;
+    let mut started = None;
     for s in sessions::get_sessions() {
-        if let Some(h) = s.session_handlers.write().unwrap().get_mut(session_id) {
+        let mut handlers = s.session_handlers.write().unwrap();
+        let previous = aggregate_active_display_intents(&handlers);
+        if let Some(h) = handlers.get_mut(session_id) {
             is_connected = h.event_stream.is_some();
             try_send_close_event(&h.event_stream);
+            if let Some(displays) = displays {
+                h.display_intent.set_wire_displays(displays);
+            }
             h.event_stream = Some(event_stream);
-            is_found = true;
+            let current = aggregate_active_display_intents(&handlers);
+            let is_first_ui_session = handlers.len() == 1;
+            drop(handlers);
+            started = Some((
+                s,
+                is_first_ui_session,
+                DisplayDemandDelta::between(previous, current),
+            ));
             break;
         }
     }
-    if !is_found {
+    let Some((session, is_first_ui_session, display_delta)) = started else {
         bail!(
             "No session with peer id {}, session id: {}",
             id,
             session_id.to_string()
         );
-    }
+    };
 
-    if let Some(session) = sessions::get_session_by_session_id(session_id) {
-        let is_first_ui_session = session.session_handlers.read().unwrap().len() == 1;
-        if !is_connected && is_first_ui_session {
-            log::info!(
-                "Session {} start, use texture render: {}",
-                id,
-                session.use_texture_render.load(Ordering::Relaxed)
-            );
-            let session = (*session).clone();
-            std::thread::spawn(move || {
-                let round = session.connection_round_state.lock().unwrap().new_round();
-                io_loop(session, round);
-            });
-        }
-        Ok(())
-    } else {
-        bail!("No session with peer id {}", id)
+    if !is_connected && is_first_ui_session {
+        log::info!(
+            "Session {} start, use texture render: {}",
+            id,
+            session.use_texture_render.load(Ordering::Relaxed)
+        );
+        let session_for_io = (*session).clone();
+        std::thread::spawn(move || {
+            let round = session_for_io
+                .connection_round_state
+                .lock()
+                .unwrap()
+                .new_round();
+            io_loop(session_for_io, round);
+        });
     }
+    Ok((session, display_delta))
+}
+
+pub fn session_start_(
+    session_id: &SessionID,
+    id: &str,
+    event_stream: StreamSink<EventToUI>,
+) -> ResultType<()> {
+    session_start_with_display_intent(session_id, id, event_stream, None).map(|_| ())
+}
+
+pub fn session_start_with_displays_(
+    session_id: &SessionID,
+    id: &str,
+    event_stream: StreamSink<EventToUI>,
+    displays: &[i32],
+) -> ResultType<()> {
+    let (session, display_delta) =
+        session_start_with_display_intent(session_id, id, event_stream, Some(displays))?;
+    // A newly added subscription is synchronized by the host video service. Retained
+    // subscriptions must not be refreshed merely because another UI view attached.
+    apply_display_demand_delta(&session, &display_delta);
+    Ok(())
 }
 
 #[inline]
@@ -2132,11 +2346,9 @@ pub fn session_set_size(session_id: SessionID, display: usize, width: usize, hei
             .unwrap()
             .get_mut(&session_id)
         {
-            // If the session is the first connection, displays is not set yet.
-            // `displays`` is set while switching displays or adding a new session.
-            if !h.displays.contains(&display) {
-                h.displays.push(display);
-            }
+            // The first UI session has no explicit display intent until its initial
+            // renderer is sized. Seed it once; later target setup must not expand intent.
+            h.display_intent.seed_initial_display(display);
             h.renderer.set_size(display, width, height);
             break;
         }
@@ -2550,25 +2762,36 @@ pub mod sessions {
     #[inline]
     pub fn remove_session_by_session_id(id: &SessionID) -> Option<FlutterSession> {
         let mut remove_peer_key = None;
-        for (peer_key, s) in SESSIONS.write().unwrap().iter_mut() {
-            let mut write_lock = s.ui_handler.session_handlers.write().unwrap();
-            let remove_ret = write_lock.remove(id);
-            match remove_ret {
-                Some(_) => {
-                    if write_lock.is_empty() {
+        let mut display_reconcile = None;
+        let removed_session = {
+            let mut sessions = SESSIONS.write().unwrap();
+            for (peer_key, s) in sessions.iter_mut() {
+                let mut handlers = s.ui_handler.session_handlers.write().unwrap();
+                let previous = aggregate_active_display_intents(&handlers);
+                if handlers.remove(id).is_some() {
+                    if handlers.is_empty() {
                         remove_peer_key = Some(peer_key.clone());
                     } else {
-                        check_remove_unused_displays(None, id, s, &write_lock);
+                        let current = aggregate_active_display_intents(&handlers);
+                        display_reconcile =
+                            Some((s.clone(), DisplayDemandDelta::between(previous, current)));
                     }
                     break;
                 }
-                None => {}
             }
+            remove_peer_key
+                .as_ref()
+                .and_then(|peer_key| sessions.remove(peer_key))
+        };
+
+        if let Some((session, display_delta)) = display_reconcile {
+            apply_display_demand_delta(&session, &display_delta);
         }
-        let s = SESSIONS.write().unwrap().remove(&remove_peer_key?);
+
+        let session = removed_session?;
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         update_session_count_to_server();
-        s
+        Some(session)
     }
 
     /// Check if removing a session by session_id would result in removing the entire peer.
@@ -2591,90 +2814,65 @@ pub mod sessions {
         false
     }
 
-    fn check_remove_unused_displays(
-        current: Option<usize>,
-        session_id: &SessionID,
-        session: &FlutterSession,
-        handlers: &HashMap<SessionID, SessionHandler>,
-    ) {
-        // Set capture displays if some are not used any more.
-        let mut remains_displays = HashSet::new();
-        if let Some(current) = current {
-            remains_displays.insert(current);
-        }
-        for (k, h) in handlers.iter() {
-            if k == session_id {
-                continue;
-            }
-            remains_displays.extend(
-                h.renderer
-                    .map_display_sessions
-                    .read()
-                    .unwrap()
-                    .keys()
-                    .cloned(),
-            );
-        }
-        if !remains_displays.is_empty() {
-            session.capture_displays(
-                vec![],
-                vec![],
-                remains_displays.iter().map(|d| *d as i32).collect(),
-            );
-        }
-    }
-
     pub fn session_switch_display(is_desktop: bool, session_id: SessionID, value: Vec<i32>) {
         for s in SESSIONS.read().unwrap().values() {
-            let mut write_lock = s.ui_handler.session_handlers.write().unwrap();
-            if let Some(h) = write_lock.get_mut(&session_id) {
-                h.displays = value.iter().map(|x| *x as usize).collect::<_>();
-                #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                let displays_refresh = value.clone();
-                if value.len() == 1 {
-                    // Switch display.
-                    // This operation will also cause the peer to send a switch display message.
-                    // The switch display message will contain `SupportedResolutions`, which is useful when changing resolutions.
-                    s.switch_display(value[0]);
-                    // Reset the valid flag of the display.
-                    s.next_rgba(value[0] as usize);
+            let update = {
+                let mut handlers = s.ui_handler.session_handlers.write().unwrap();
+                let previous = aggregate_active_display_intents(&handlers);
+                let Some(handler) = handlers.get_mut(&session_id) else {
+                    continue;
+                };
+                let is_active = handler.event_stream.is_some();
+                handler.display_intent.set_wire_displays(&value);
+                let current = aggregate_active_display_intents(&handlers);
+                let active_ui_sessions = handlers
+                    .values()
+                    .filter(|handler| handler.event_stream.is_some())
+                    .count();
+                (
+                    DisplayDemandDelta::between(previous, current),
+                    active_ui_sessions,
+                    is_active,
+                )
+            };
 
-                    if !is_desktop {
-                        s.capture_displays(vec![], vec![], value);
-                    } else {
-                        // Check if other displays are needed.
-                        if value.len() == 1 {
-                            check_remove_unused_displays(
-                                Some(value[0] as _),
-                                &session_id,
-                                &s,
-                                &write_lock,
-                            );
-                        }
-                    }
-                } else {
-                    // Try capture all displays.
-                    s.capture_displays(vec![], vec![], value);
-                }
-                // When switching display, we also need to send "Refresh display" message.
-                // On the controlled side:
-                // 1. If this display is not currently captured -> Refresh -> Message "Refresh display" is not required.
-                // One more key frame (first frame) will be sent because the refresh message.
-                // 2. If this display is currently captured -> Not refresh -> Message "Refresh display" is required.
-                // Without the message, the control side cannot see the latest display image.
-                #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                {
-                    let is_support_multi_ui_session = crate::common::is_support_multi_ui_session(
-                        &s.ui_handler.peer_info.read().unwrap().version,
-                    );
-                    if is_support_multi_ui_session {
-                        for display in displays_refresh.iter() {
-                            s.refresh_video(*display);
-                        }
-                    }
-                }
+            let (display_delta, active_ui_sessions, is_active) = update;
+            if !is_active {
                 break;
             }
+            let legacy_single_display = display_delta.current.len() == 1 && active_ui_sessions == 1;
+
+            if legacy_single_display {
+                let display = display_delta.current[0];
+                let Ok(display_wire) = i32::try_from(display) else {
+                    break;
+                };
+                // Preserve the established one-view replacement behavior. Multi-view
+                // updates below are declarative and must not reset another view's decoder.
+                s.switch_display(display_wire);
+                s.next_rgba(display);
+                if is_desktop {
+                    s.capture_displays(
+                        vec![],
+                        vec![],
+                        wire_display_indices(&display_delta.current),
+                    );
+                } else {
+                    s.capture_displays(vec![], vec![], vec![display_wire]);
+                }
+
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                if crate::common::is_support_multi_ui_session(
+                    &s.ui_handler.peer_info.read().unwrap().version,
+                ) {
+                    s.refresh_video(display_wire);
+                }
+            } else if is_desktop {
+                apply_display_demand_delta(s, &display_delta);
+            } else {
+                s.capture_displays(vec![], vec![], wire_display_indices(&display_delta.current));
+            }
+            break;
         }
     }
 
@@ -2709,7 +2907,7 @@ pub mod sessions {
     ) -> bool {
         if let Some(s) = SESSIONS.read().unwrap().get(&(peer_id, conn_type)) {
             let mut h = SessionHandler::default();
-            h.displays = displays.iter().map(|x| *x as usize).collect::<_>();
+            h.display_intent.set_wire_displays(&displays);
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             let is_support_multi_ui_session = crate::common::is_support_multi_ui_session(
                 &s.ui_handler.peer_info.read().unwrap().version,
