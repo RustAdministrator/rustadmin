@@ -43,6 +43,8 @@ void main() {
       'kind': 'physical',
       'usb_hid_usage': 0x14,
       'down': true,
+      'repeat': true,
+      'modifier_usages': [0xe0, 0xe6],
     });
 
     expect(event, isA<AndroidRemotePhysicalKeyEvent>());
@@ -50,6 +52,8 @@ void main() {
     expect(physical.sessionId, 'session-1');
     expect(physical.usbHidUsage, 0x14);
     expect(physical.down, isTrue);
+    expect(physical.repeat, isTrue);
+    expect(physical.modifierUsages, [0xe0, 0xe6]);
   });
 
   test('parses committed text fallback without exposing it to logs', () {
@@ -68,6 +72,25 @@ void main() {
     expect(committed.sourceLayoutType, 'qwerty');
   });
 
+  test('bounds committed text by UTF-8 bytes rather than Dart length', () {
+    expect(
+      AndroidRemoteKeyboardEvent.tryParse({
+        'session_id': 'session-1',
+        'kind': 'text',
+        'text': List.filled(512, '😀').join(),
+      }),
+      isA<AndroidRemoteCommittedTextEvent>(),
+    );
+    expect(
+      AndroidRemoteKeyboardEvent.tryParse({
+        'session_id': 'session-1',
+        'kind': 'text',
+        'text': List.filled(683, '€').join(),
+      }),
+      isNull,
+    );
+  });
+
   test('rejects malformed, oversized, and non-keyboard payloads', () {
     expect(AndroidRemoteKeyboardEvent.tryParse(null), isNull);
     expect(
@@ -76,6 +99,26 @@ void main() {
         'kind': 'physical',
         'usb_hid_usage': 0x04,
         'down': true,
+      }),
+      isNull,
+    );
+    expect(
+      AndroidRemoteKeyboardEvent.tryParse({
+        'session_id': 'session-1',
+        'kind': 'physical',
+        'usb_hid_usage': 0x04,
+        'down': true,
+        'modifier_usages': [0xdf],
+      }),
+      isNull,
+    );
+    expect(
+      AndroidRemoteKeyboardEvent.tryParse({
+        'session_id': 'session-1',
+        'kind': 'physical',
+        'usb_hid_usage': 0x04,
+        'down': true,
+        'modifier_usages': List<int>.filled(9, 0xe0),
       }),
       isNull,
     );

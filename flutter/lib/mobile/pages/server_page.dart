@@ -993,6 +993,8 @@ void androidChannelInit() {
                   gFFI.inputModel.inputAndroidRemotePhysicalKey(
                     event.usbHidUsage,
                     event.down,
+                    repeat: event.repeat,
+                    modifierUsages: event.modifierUsages,
                   ),
                 );
               case AndroidRemoteCommittedTextEvent():

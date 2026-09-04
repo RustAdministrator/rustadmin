@@ -11,6 +11,7 @@ import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/input_model.dart';
+import 'package:flutter_hbb/models/keyboard_intent.dart';
 import 'package:flutter_hbb/mobile/mobile_viewport.dart';
 
 import './gestures.dart';
@@ -42,7 +43,18 @@ class RawKeyFocusScope extends StatelessWidget {
         // Preserve focus guards managed by the remote page across rebuilds.
         canRequestFocus: focusNode?.canRequestFocus,
         focusNode: focusNode,
-        onFocusChange: onFocusChange,
+        onFocusChange: (focused) {
+          if (!focused) {
+            unawaited(
+              inputModel.resetKeyboard(
+                KeyboardResetReason.focusLoss,
+                invalidatePending: true,
+                allowBlockedReleases: true,
+              ),
+            );
+          }
+          onFocusChange?.call(focused);
+        },
         onKey: useRawKeyEvents
             ? (FocusNode data, RawKeyEvent event) =>
                   inputModel.handleRawKeyEvent(event)

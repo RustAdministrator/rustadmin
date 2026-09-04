@@ -18,6 +18,7 @@ import '../../common/widgets/dialog.dart';
 import '../../common/widgets/toolbar.dart';
 import '../../models/model.dart';
 import '../../models/input_model.dart';
+import '../../models/keyboard_intent.dart';
 import '../../models/platform_model.dart';
 import '../../common/shared_state.dart';
 import '../../utils/image.dart';
@@ -442,7 +443,11 @@ class _RemotePageState extends State<RemotePage>
       _timer?.cancel();
       _timer = null;
       _ffi.inputModel.setRelativeMouseMode(false);
-      _ffi.inputModel.resetModifiers();
+      await _ffi.inputModel.resetKeyboard(
+        KeyboardResetReason.reconnect,
+        invalidatePending: true,
+        allowBlockedReleases: true,
+      );
       _ffi.inputModel.disposeRelativeMouseMode();
       _ffi.dialogManager.dismissAll();
       _ffi.ffiModel.clear();
@@ -506,12 +511,8 @@ class _RemotePageState extends State<RemotePage>
     }
     stateGlobal.isFocused.value = false;
 
-    // When window loses focus, temporarily release relative mouse mode constraints
-    // to allow user to interact with other applications normally.
-    // The cursor will be re-hidden and re-centered when window regains focus.
-    if (_ffi.inputModel.relativeMouseMode.value) {
-      _ffi.inputModel.onWindowBlur();
-    }
+    // Release remote keyboard state even when relative mouse mode is disabled.
+    _ffi.inputModel.onWindowBlur();
   }
 
   @override

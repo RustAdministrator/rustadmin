@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import '../consts.dart';
 
 bool useAndroidNativeRemoteKeyboard({
@@ -25,13 +27,32 @@ sealed class AndroidRemoteKeyboardEvent {
       case 'physical':
         final usage = arguments['usb_hid_usage'];
         final down = arguments['down'];
-        if (usage is! int || usage < 0x04 || usage > 0xe7 || down is! bool) {
+        final repeat = arguments['repeat'] ?? false;
+        final modifiers = arguments['modifier_usages'] ?? const <int>[];
+        if (usage is! int ||
+            usage < 0x04 ||
+            usage > 0xe7 ||
+            down is! bool ||
+            repeat is! bool ||
+            modifiers is! List ||
+            modifiers.length > 8 ||
+            modifiers.any(
+              (value) => value is! int || value < 0xe0 || value > 0xe7,
+            )) {
           return null;
         }
-        return AndroidRemotePhysicalKeyEvent(sessionId, usage, down);
+        return AndroidRemotePhysicalKeyEvent(
+          sessionId,
+          usage,
+          down,
+          repeat: repeat,
+          modifierUsages: modifiers.cast<int>(),
+        );
       case 'text':
         final text = arguments['text'];
-        if (text is! String || text.isEmpty || text.length > 2048) {
+        if (text is! String ||
+            text.isEmpty ||
+            utf8.encode(text).length > 2048) {
           return null;
         }
         return AndroidRemoteCommittedTextEvent(
@@ -57,11 +78,15 @@ final class AndroidRemotePhysicalKeyEvent extends AndroidRemoteKeyboardEvent {
   const AndroidRemotePhysicalKeyEvent(
     super.sessionId,
     this.usbHidUsage,
-    this.down,
-  );
+    this.down, {
+    this.repeat = false,
+    this.modifierUsages = const <int>[],
+  });
 
   final int usbHidUsage;
   final bool down;
+  final bool repeat;
+  final List<int> modifierUsages;
 }
 
 final class AndroidRemoteCommittedTextEvent extends AndroidRemoteKeyboardEvent {

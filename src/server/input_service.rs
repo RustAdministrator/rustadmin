@@ -874,7 +874,7 @@ fn release_record_key(record_key: KeysDown) {
         KeysDown::EnigoKey(key) => {
             if let Some(key) = record_key_to_key(key) {
                 ENIGO.lock().unwrap().key_up(key);
-                log::debug!("Fixed {:?} timeout", key);
+                log::debug!("Released stale keyboard state after timeout");
             }
         }
     };
@@ -916,7 +916,7 @@ fn fix_modifier(
             return;
         }
         en.key_up(key1);
-        log::debug!("Fixed {:?}", key1);
+        log::debug!("Released mismatched keyboard modifier state");
     }
 }
 
@@ -1476,7 +1476,7 @@ fn simulate_(event_type: &EventType) {
     match rdev::simulate(&event_type) {
         Ok(()) => (),
         Err(_simulate_error) => {
-            log::error!("Could not send {:?}", &event_type);
+            log::error!("Could not inject keyboard input event");
         }
     }
 }
@@ -2181,18 +2181,6 @@ fn translate_keyboard_mode(evt: &KeyEvent) {
                         &evt.source_layout_type,
                     );
                 #[cfg(target_os = "windows")]
-                let logged_source_language_tag = if source_layout_text {
-                    evt.source_language_tag.as_str()
-                } else {
-                    ""
-                };
-                #[cfg(target_os = "windows")]
-                let logged_source_layout_type = if source_layout_text {
-                    evt.source_layout_type.as_str()
-                } else {
-                    ""
-                };
-                #[cfg(target_os = "windows")]
                 let physical_text = source_layout_text || evt.scan_code_text;
                 #[cfg(target_os = "windows")]
                 let scan_text_mapper = if physical_text && !simulate_win_hot_key {
@@ -2206,7 +2194,7 @@ fn translate_keyboard_mode(evt: &KeyEvent) {
                 };
                 #[cfg(target_os = "windows")]
                 log::debug!(
-                    "Windows translate text injection: strategy={}, chars={}, layout_hkl={}, source_layout={}/{}",
+                    "Windows translate text injection: strategy={}, chars={}",
                     if source_layout_text {
                         "source-layout-scan"
                     } else if evt.scan_code_text {
@@ -2215,12 +2203,6 @@ fn translate_keyboard_mode(evt: &KeyEvent) {
                         "scan-first"
                     },
                     seq.chars().count(),
-                    scan_text_mapper
-                        .as_ref()
-                        .map(|mapper| format!("0x{:x}", mapper.layout_id()))
-                        .unwrap_or_else(|| "unavailable".to_owned()),
-                    logged_source_language_tag,
-                    logged_source_layout_type,
                 );
                 #[cfg(target_os = "windows")]
                 let mut layout_scan_count = 0usize;

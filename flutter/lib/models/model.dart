@@ -49,6 +49,7 @@ import '../utils/image.dart' as img;
 import '../common/widgets/dialog.dart';
 import 'android_render_target_controller.dart';
 import 'input_model.dart';
+import 'keyboard_intent.dart';
 import 'platform_model.dart';
 import 'session_event.dart';
 import 'session_handle.dart';
@@ -5979,12 +5980,16 @@ class FFI {
       model.dispose();
     }
     _terminalModels.clear();
+    inputModel.setRelativeMouseMode(false);
+    await inputModel.resetKeyboard(
+      KeyboardResetReason.reconnect,
+      invalidatePending: true,
+      allowBlockedReleases: true,
+    );
     await imageModel.update(null);
     cursorModel.clear();
     ffiModel.clear();
     canvasModel.clear();
-    inputModel.setRelativeMouseMode(false);
-    inputModel.resetModifiers();
     id = '';
     debugPrint('mobile session reset for fresh reconnect');
   }
@@ -6026,11 +6031,15 @@ class FFI {
                 ffiModel.pi.currentDisplay);
           }
           imageModel.callbacksOnFirstImage.clear();
+          await inputModel.resetKeyboard(
+            KeyboardResetReason.sessionClose,
+            invalidatePending: true,
+            allowBlockedReleases: true,
+          );
           await imageModel.update(null);
           cursorModel.clear();
           ffiModel.clear();
           canvasModel.clear();
-          inputModel.resetModifiers();
           // Dispose relative mouse mode resources to ensure cursor is restored
           inputModel.disposeRelativeMouseMode();
           debugPrint('model $id closed');

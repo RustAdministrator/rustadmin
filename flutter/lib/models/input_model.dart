@@ -16,6 +16,10 @@ import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../../models/state_model.dart';
 import 'relative_mouse_model.dart';
+import 'keyboard_dispatcher.dart';
+import 'keyboard_event_normalizer.dart';
+import 'keyboard_input_controller.dart';
+import 'keyboard_intent.dart';
 import 'keyboard_modifier_controller.dart';
 import '../common.dart';
 import '../consts.dart';
@@ -169,40 +173,17 @@ class PointerEventToRust {
   }
 }
 
-PhysicalModifierKey? _physicalModifierKey(LogicalKeyboardKey key) {
-  if (key == LogicalKeyboardKey.altLeft) return PhysicalModifierKey.altLeft;
-  if (key == LogicalKeyboardKey.altRight ||
-      key == LogicalKeyboardKey.altGraph) {
-    return PhysicalModifierKey.altRight;
-  }
-  if (key == LogicalKeyboardKey.controlLeft) {
-    return PhysicalModifierKey.ctrlLeft;
-  }
-  if (key == LogicalKeyboardKey.controlRight) {
-    return PhysicalModifierKey.ctrlRight;
-  }
-  if (key == LogicalKeyboardKey.shiftLeft) {
-    return PhysicalModifierKey.shiftLeft;
-  }
-  if (key == LogicalKeyboardKey.shiftRight) {
-    return PhysicalModifierKey.shiftRight;
-  }
-  if (key == LogicalKeyboardKey.metaLeft) {
-    return PhysicalModifierKey.commandLeft;
-  }
-  if (key == LogicalKeyboardKey.metaRight) {
-    return PhysicalModifierKey.commandRight;
-  }
-  if (key == LogicalKeyboardKey.superKey) return PhysicalModifierKey.superKey;
-  return null;
-}
-
 class InputModel {
   final WeakReference<FFI> parent;
   String keyboardMode = '';
 
   // keyboard
   late final KeyboardInputController _keyboardInput;
+  final _flutterKeyboardNormalizer = FlutterKeyboardEventNormalizer();
+  final _androidKeyboardNormalizer = AndroidHardwareKeyboardNormalizer();
+  final _toolbarKeyboardNormalizer = MobileToolbarKeyboardNormalizer();
+  ControllerKeyboardInputMode _keyboardInputMode =
+      ControllerKeyboardInputMode.auto;
 
   // trackpad
   var _trackpadLastDelta = Offset.zero;
@@ -304,81 +285,67 @@ class InputModel {
     sessionId = parent.target!.sessionId;
     _keyboardInput = KeyboardInputController(
       canDispatch: () => keyboardPerm && !isViewOnly && !isViewCamera,
-      sendKey:
-          ({
-            required name,
-            required down,
-            required press,
-            required modifiers,
-          }) =>
-              () => bind.sessionInputKey(
-                sessionId: sessionId,
-                name: name,
-                down: down,
-                press: press,
-                alt: modifiers.alt,
-                ctrl: modifiers.ctrl,
-                shift: modifiers.shift,
-                command: modifiers.command,
-              ),
-      sendTextEdit:
+      sendHid: ({required key, required action, required lockMask}) {
+        if (key.usagePage != HidKey.keyboardUsagePage) {
+          return Future<void>.value();
+        }
+        return Future<void>.sync(
+          () => bind.sessionHandleFlutterKeyEvent(
+            sessionId: sessionId,
+            character: '',
+            usbHid: key.usage,
+            lockModes: lockMask,
+            downOrUp: action != KeyboardIntentAction.up,
+          ),
+        );
+      },
+      sendLegacy: ({required name, required down, required modifiers}) {
+        return Future<void>.sync(
+          () => bind.sessionInputKey(
+            sessionId: sessionId,
+            name: name,
+            down: down,
+            press: false,
+            alt: modifiers.alt,
+            ctrl: modifiers.ctrl,
+            shift: modifiers.shift,
+            command: modifiers.command,
+          ),
+        );
+      },
+      sendText:
           ({
             required text,
             required deleteBeforeGraphemes,
             required deleteAfterGraphemes,
-          }) =>
+            required sourceLanguageTag,
+            required sourceLayoutType,
+          }) {
+            if ((sourceLanguageTag.isNotEmpty || sourceLayoutType.isNotEmpty) &&
+                deleteBeforeGraphemes == 0 &&
+                deleteAfterGraphemes == 0) {
+              return Future<void>.sync(
+                () => bind.sessionInputTextEditWithSourceLayout(
+                  sessionId: sessionId,
+                  value: text,
+                  sourceLanguageTag: sourceLanguageTag,
+                  sourceLayoutType: sourceLayoutType,
+                ),
+              );
+            }
+            return Future<void>.sync(
               () => bind.sessionInputTextEdit(
                 sessionId: sessionId,
                 value: text,
                 deleteBeforeGraphemes: deleteBeforeGraphemes,
                 deleteAfterGraphemes: deleteAfterGraphemes,
               ),
-      sendString: (text) =>
-          () => bind.sessionInputString(sessionId: sessionId, value: text),
-      sendPhysicalKey:
-          ({
-            required character,
-            required usbHid,
-            required lockModes,
-            required down,
-          }) =>
-              () => bind.sessionHandleFlutterKeyEvent(
-                sessionId: sessionId,
-                character: character,
-                usbHid: usbHid,
-                lockModes: lockModes,
-                downOrUp: down,
-              ),
-      sendRawKey:
-          ({
-            required name,
-            required platformCode,
-            required positionCode,
-            required lockModes,
-            required down,
-          }) =>
-              () => bind.sessionHandleFlutterRawKeyEvent(
-                sessionId: sessionId,
-                name: name,
-                platformCode: platformCode,
-                positionCode: positionCode,
-                lockModes: lockModes,
-                downOrUp: down,
-              ),
-      sendSourceText:
-          ({
-            required text,
-            required sourceLanguageTag,
-            required sourceLayoutType,
-          }) =>
-              () => bind.sessionInputTextEditWithSourceLayout(
-                sessionId: sessionId,
-                value: text,
-                sourceLanguageTag: sourceLanguageTag,
-                sourceLayoutType: sourceLayoutType,
-              ),
+            );
+          },
       onError: (error, stackTrace) {
-        debugPrint('Remote keyboard dispatch failed: $error');
+        debugPrint(
+          'Remote keyboard dispatch failed (${error.runtimeType})',
+        );
         debugPrintStack(stackTrace: stackTrace);
       },
     );
@@ -477,14 +444,69 @@ class InputModel {
     return lockModes;
   }
 
+  ControllerKeyboardMode get _controllerKeyboardMode => switch (keyboardMode) {
+    kKeyMapMode => ControllerKeyboardMode.map,
+    kKeyTranslateMode => ControllerKeyboardMode.translate,
+    _ => ControllerKeyboardMode.legacy,
+  };
+
+  KeyboardClientKind get _keyboardClientKind {
+    if (isWebDesktop) return KeyboardClientKind.webDesktop;
+    if (isDesktop) return KeyboardClientKind.desktop;
+    if (isAndroid) return KeyboardClientKind.android;
+    if (isIOS) return KeyboardClientKind.ios;
+    return KeyboardClientKind.otherMobile;
+  }
+
+  KeyboardRoutingContext get _keyboardRoutingContext => KeyboardRoutingContext(
+    keyboardMode: _controllerKeyboardMode,
+    inputMode: _keyboardInputMode,
+    clientKind: _keyboardClientKind,
+    peerIsAndroid: peerPlatform == kPeerPlatformAndroid,
+    ignoreMeta: isWindows || isLinux,
+  );
+
+  Future<void> setKeyboardInputMode(String mode) async {
+    final next = switch (mode) {
+      kKeyboardInputModeText => ControllerKeyboardInputMode.text,
+      kKeyboardInputModePhysical => ControllerKeyboardInputMode.physical,
+      _ => ControllerKeyboardInputMode.auto,
+    };
+    if (next == _keyboardInputMode) return;
+    await resetKeyboard(
+      KeyboardResetReason.inputModeChange,
+      invalidatePending: true,
+      allowBlockedReleases: true,
+    );
+    _keyboardInputMode = next;
+  }
+
+  Future<void> resetKeyboard(
+    KeyboardResetReason reason, {
+    bool invalidatePending = false,
+    bool allowBlockedReleases = false,
+  }) => _keyboardInput.reset(
+    reason,
+    invalidatePending: invalidatePending,
+    allowBlockedReleases: allowBlockedReleases,
+  );
+
   // This function must be called after the peer info is received.
   // Because `sessionGetKeyboardMode` relies on the peer version.
-  updateKeyboardMode() async {
+  Future<void> updateKeyboardMode() async {
     // * Currently mobile does not enable map mode
     if (isDesktop || isWebDesktop) {
-      keyboardMode =
+      final next =
           await bind.sessionGetKeyboardMode(sessionId: sessionId) ??
           kKeyLegacyMode;
+      if (next != keyboardMode) {
+        await resetKeyboard(
+          KeyboardResetReason.inputModeChange,
+          invalidatePending: true,
+          allowBlockedReleases: true,
+        );
+        keyboardMode = next;
+      }
     }
   }
 
@@ -510,16 +532,6 @@ class InputModel {
     _trackpadSpeedInner = _trackpadSpeed / 100.0;
   }
 
-  void handleKeyDownEventModifiers(KeyDownEvent event) {
-    final modifier = _physicalModifierKey(event.logicalKey);
-    if (modifier != null) _keyboardInput.setPhysicalKey(modifier, true);
-  }
-
-  void handleKeyUpEventModifiers(KeyUpEvent event) {
-    final modifier = _physicalModifierKey(event.logicalKey);
-    if (modifier != null) _keyboardInput.setPhysicalKey(modifier, false);
-  }
-
   KeyEventResult handleRawKeyEvent(RawKeyEvent e) {
     if (isViewOnly) return KeyEventResult.handled;
     if (isViewCamera) return KeyEventResult.handled;
@@ -535,28 +547,15 @@ class InputModel {
       return KeyEventResult.handled;
     }
 
-    bool iosCapsLock = false;
-    if (isIOS && e is RawKeyDownEvent) {
-      iosCapsLock = _getIosCapsFromRawCharacter(e);
-    }
-
-    final key = e.logicalKey;
-    if (e is RawKeyDownEvent) {
-      if (!e.repeat) {
-        final modifier = _physicalModifierKey(key);
-        if (modifier != null) _keyboardInput.setPhysicalKey(modifier, true);
-      }
-    }
-    if (e is RawKeyUpEvent) {
-      final modifier = _physicalModifierKey(key);
-      if (modifier != null) _keyboardInput.setPhysicalKey(modifier, false);
-    }
-
-    // * Currently mobile does not enable map mode
-    if ((isDesktop || isWebDesktop) && keyboardMode == kKeyMapMode) {
-      mapKeyboardModeRaw(e, iosCapsLock);
-    } else {
-      legacyKeyboardModeRaw(e);
+    final iosCapsLock = isIOS && e is RawKeyDownEvent
+        ? _getIosCapsFromRawCharacter(e)
+        : false;
+    final intent = _flutterKeyboardNormalizer.fromRawKeyEvent(
+      e,
+      lockMask: _buildLockModes(iosCapsLock),
+    );
+    if (intent != null) {
+      _keyboardInput.handle(intent, _keyboardRoutingContext);
     }
 
     return KeyEventResult.handled;
@@ -572,14 +571,6 @@ class InputModel {
         return KeyEventResult.ignored;
       }
     }
-    if (isWindows || isLinux) {
-      // Ignore meta keys. Because flutter window will loose focus if meta key is pressed.
-      if (e.physicalKey == PhysicalKeyboardKey.metaLeft ||
-          e.physicalKey == PhysicalKeyboardKey.metaRight) {
-        return KeyEventResult.handled;
-      }
-    }
-
     if (_relativeMouse.handleKeyEvent(
       e,
       ctrlPressed: ctrl,
@@ -590,98 +581,37 @@ class InputModel {
       return KeyEventResult.handled;
     }
 
-    bool iosCapsLock = false;
-    if (isIOS && (e is KeyDownEvent || e is KeyRepeatEvent)) {
-      iosCapsLock = _getIosCapsFromCharacter(e);
-    }
-
-    if (e is KeyUpEvent) {
-      handleKeyUpEventModifiers(e);
-    } else if (e is KeyDownEvent) {
-      handleKeyDownEventModifiers(e);
-    }
-
-    bool isMobileAndMapMode = false;
-    if (isMobile) {
-      // Do not use map mode if mobile -> Android. Android does not support map mode for now.
-      // Because simulating the physical key events(uhid) which requires root permission is not supported.
-      if (peerPlatform != kPeerPlatformAndroid) {
-        if (isIOS) {
-          isMobileAndMapMode = true;
-        } else {
-          // The physicalKey.usbHidUsage may be not correct for soft keyboard on Android.
-          // iOS does not have this issue.
-          // 1. Open the soft keyboard on Android
-          // 2. Switch to input method like zh/ko/ja
-          // 3. Click Backspace and Enter on the soft keyboard or physical keyboard
-          // 4. The physicalKey.usbHidUsage is not correct.
-          // PhysicalKeyboardKey#8ac83(usbHidUsage: "0x1100000042", debugName: "Key with ID 0x1100000042")
-          // LogicalKeyboardKey#2604c(keyId: "0x10000000d", keyLabel: "Enter", debugName: "Enter")
-          //
-          // The correct PhysicalKeyboardKey should be
-          // PhysicalKeyboardKey#e14a9(usbHidUsage: "0x00070028", debugName: "Enter")
-          // https://github.com/flutter/flutter/issues/157771
-          // We cannot use the debugName to determine the key is correct or not, because it's null in release mode.
-          // The normal `usbHidUsage` for keyboard shoud be between [0x00000010, 0x000c029f]
-          // https://github.com/flutter/flutter/blob/c051b69e2a2224300e20d93dbd15f4b91e8844d1/packages/flutter/lib/src/services/keyboard_key.g.dart#L5332 - 5600
-          final isNormalHsbHidUsage = (e.physicalKey.usbHidUsage >> 20) == 0;
-          isMobileAndMapMode =
-              isNormalHsbHidUsage &&
-              // No need to check `!['Backspace', 'Enter'].contains(e.logicalKey.keyLabel)`
-              // But we still add it for more reliability.
-              !['Backspace', 'Enter'].contains(e.logicalKey.keyLabel);
-        }
-      }
-    }
-    final isDesktopAndMapMode =
-        isDesktop || (isWebDesktop && keyboardMode == kKeyMapMode);
-    if (isMobileAndMapMode || isDesktopAndMapMode) {
-      // FIXME: e.character is wrong for dead keys, eg: ^ in de
-      newKeyboardMode(
-        e.character ?? '',
-        e.physicalKey.usbHidUsage & 0xFFFF,
-        // Show repeat event be converted to "release+press" events?
-        e is KeyDownEvent || e is KeyRepeatEvent,
-        iosCapsLock,
-        consumeOneShot:
-            e is KeyDownEvent && _physicalModifierKey(e.logicalKey) == null,
-      );
-    } else {
-      legacyKeyboardMode(e);
+    final iosCapsLock = isIOS && (e is KeyDownEvent || e is KeyRepeatEvent)
+        ? _getIosCapsFromCharacter(e)
+        : false;
+    final intent = _flutterKeyboardNormalizer.fromKeyEvent(
+      e,
+      lockMask: _buildLockModes(iosCapsLock),
+    );
+    if (intent != null) {
+      _keyboardInput.handle(intent, _keyboardRoutingContext);
     }
 
     return KeyEventResult.handled;
   }
 
-  /// Send Key Event
-  void newKeyboardMode(
-    String character,
-    int usbHid,
-    bool down,
-    bool iosCapsLock, {
-    bool consumeOneShot = false,
+  Future<void> inputAndroidRemotePhysicalKey(
+    int usbHidUsage,
+    bool down, {
+    bool repeat = false,
+    Iterable<int> modifierUsages = const <int>[],
   }) {
-    final lockModes = _buildLockModes(iosCapsLock);
-    unawaited(
-      _keyboardInput.sendPhysicalKey(
-        character: character,
-        usbHid: usbHid,
-        lockModes: lockModes,
-        down: down,
-        consumeOneShot: consumeOneShot,
-      ),
-    );
-  }
-
-  Future<void> inputAndroidRemotePhysicalKey(int usbHidUsage, bool down) {
-    final lockModes = _buildLockModes(false);
-    return _keyboardInput.sendPhysicalKey(
-      character: '',
-      usbHid: usbHidUsage,
-      lockModes: lockModes,
+    final intent = _androidKeyboardNormalizer.physical(
+      usbHidUsage: usbHidUsage,
       down: down,
-      consumeOneShot: down && (usbHidUsage < 0xe0 || usbHidUsage > 0xe7),
+      repeat: repeat,
+      modifierUsages: modifierUsages,
+      lockMask: _buildLockModes(false),
     );
+    if (intent != null) {
+      return _keyboardInput.handleAndWait(intent, _keyboardRoutingContext);
+    }
+    return Future<void>.value();
   }
 
   Future<void> inputAndroidRemoteCommittedText(
@@ -689,133 +619,75 @@ class InputModel {
     required String sourceLanguageTag,
     required String sourceLayoutType,
   }) {
-    return _keyboardInput.sendSourceText(
-      text: text,
+    final intent = _androidKeyboardNormalizer.text(
+      text,
       sourceLanguageTag: sourceLanguageTag,
       sourceLayoutType: sourceLayoutType,
     );
-  }
-
-  void mapKeyboardModeRaw(RawKeyEvent e, bool iosCapsLock) {
-    int positionCode = -1;
-    int platformCode = -1;
-    bool down;
-
-    if (e.data is RawKeyEventDataMacOs) {
-      RawKeyEventDataMacOs newData = e.data as RawKeyEventDataMacOs;
-      positionCode = newData.keyCode;
-      platformCode = newData.keyCode;
-    } else if (e.data is RawKeyEventDataWindows) {
-      RawKeyEventDataWindows newData = e.data as RawKeyEventDataWindows;
-      positionCode = newData.scanCode;
-      platformCode = newData.keyCode;
-    } else if (e.data is RawKeyEventDataLinux) {
-      RawKeyEventDataLinux newData = e.data as RawKeyEventDataLinux;
-      // scanCode and keyCode of RawKeyEventDataLinux are incorrect.
-      // 1. scanCode means keycode
-      // 2. keyCode means keysym
-      positionCode = newData.scanCode;
-      platformCode = newData.keyCode;
-    } else if (e.data is RawKeyEventDataAndroid) {
-      RawKeyEventDataAndroid newData = e.data as RawKeyEventDataAndroid;
-      positionCode = newData.scanCode + 8;
-      platformCode = newData.keyCode;
-    } else {}
-
-    if (e is RawKeyDownEvent) {
-      down = true;
-    } else {
-      down = false;
+    if (intent != null) {
+      return _keyboardInput.handleAndWait(intent, _keyboardRoutingContext);
     }
-    inputRawKey(
-      e.character ?? '',
-      platformCode,
-      positionCode,
-      down,
-      iosCapsLock,
-      consumeOneShot:
-          e is RawKeyDownEvent &&
-          !e.repeat &&
-          _physicalModifierKey(e.logicalKey) == null,
-    );
-  }
-
-  /// Send raw Key Event
-  void inputRawKey(
-    String name,
-    int platformCode,
-    int positionCode,
-    bool down,
-    bool iosCapsLock, {
-    bool consumeOneShot = false,
-  }) {
-    final lockModes = _buildLockModes(iosCapsLock);
-    unawaited(
-      _keyboardInput.sendRawKey(
-        name: name,
-        platformCode: platformCode,
-        positionCode: positionCode,
-        lockModes: lockModes,
-        down: down,
-        consumeOneShot: consumeOneShot,
-      ),
-    );
-  }
-
-  void legacyKeyboardModeRaw(RawKeyEvent e) {
-    if (e is RawKeyDownEvent) {
-      if (e.repeat) {
-        sendRawKey(e, press: true);
-      } else {
-        sendRawKey(e, down: true);
-      }
-    }
-    if (e is RawKeyUpEvent) {
-      sendRawKey(e);
-    }
-  }
-
-  void sendRawKey(RawKeyEvent e, {bool? down, bool? press}) {
-    // for maximum compatibility
-    final label =
-        physicalKeyMap[e.physicalKey.usbHidUsage] ??
-        logicalKeyMap[e.logicalKey.keyId] ??
-        e.logicalKey.keyLabel;
-    inputKey(label, down: down, press: press ?? false);
-  }
-
-  void legacyKeyboardMode(KeyEvent e) {
-    if (e is KeyDownEvent) {
-      sendKey(e, down: true);
-    } else if (e is KeyRepeatEvent) {
-      sendKey(e, press: true);
-    } else if (e is KeyUpEvent) {
-      sendKey(e);
-    }
-  }
-
-  void sendKey(KeyEvent e, {bool? down, bool? press}) {
-    // for maximum compatibility
-    final label =
-        physicalKeyMap[e.physicalKey.usbHidUsage] ??
-        logicalKeyMap[e.logicalKey.keyId] ??
-        e.logicalKey.keyLabel;
-    inputKey(label, down: down, press: press ?? false);
+    return Future<void>.value();
   }
 
   /// Send key stroke event.
   /// [down] indicates the key's state(down or up).
   /// [press] indicates a click event(down and up).
   void inputKey(String name, {bool? down, bool? press}) {
-    _keyboardInput.sendKey(name, down: down, press: press);
+    final Iterable<KeyboardIntent> intents;
+    if (press ?? down == null) {
+      intents = _toolbarKeyboardNormalizer.click(name);
+    } else {
+      final intent = _toolbarKeyboardNormalizer.event(
+        name,
+        action: down == true
+            ? KeyboardIntentAction.down
+            : KeyboardIntentAction.up,
+      );
+      intents = intent == null ? const [] : [intent];
+    }
+    for (final intent in intents) {
+      _keyboardInput.handle(intent, _keyboardRoutingContext);
+    }
   }
 
   void inputKeyWithTemporaryMobileModifier(
     String name,
     MobileModifierKey modifier,
   ) {
-    _keyboardInput.sendWithTemporaryModifier(name, modifier);
+    if (!_effectiveModifiers.isActive(modifier)) {
+      tapMobileModifier(modifier);
+    }
+    inputKey(name);
   }
+
+  void tapMobileModifier(MobileModifierKey modifier) {
+    _keyboardInput.handle(
+      _toolbarKeyboardNormalizer.modifier(
+        _canonicalModifier(modifier),
+        action: SyntheticModifierAction.toggle,
+      ),
+      _keyboardRoutingContext,
+    );
+  }
+
+  void lockMobileModifier(MobileModifierKey modifier) {
+    _keyboardInput.handle(
+      _toolbarKeyboardNormalizer.modifier(
+        _canonicalModifier(modifier),
+        action: SyntheticModifierAction.lock,
+      ),
+      _keyboardRoutingContext,
+    );
+  }
+
+  static CanonicalModifier _canonicalModifier(MobileModifierKey modifier) =>
+      switch (modifier) {
+        MobileModifierKey.ctrl => CanonicalModifier.control,
+        MobileModifierKey.shift => CanonicalModifier.shift,
+        MobileModifierKey.alt => CanonicalModifier.alt,
+        MobileModifierKey.command => CanonicalModifier.meta,
+      };
 
   void consumeMobileOneShotModifiers() {
     _keyboardInput.consumeOneShot();
@@ -826,14 +698,35 @@ class InputModel {
     required int deleteBeforeGraphemes,
     required int deleteAfterGraphemes,
   }) {
-    _keyboardInput.sendTextEdit(
-      text: text,
+    inputCommittedText(
+      text,
       deleteBeforeGraphemes: deleteBeforeGraphemes,
       deleteAfterGraphemes: deleteAfterGraphemes,
     );
   }
 
-  bool inputString(String text) => _keyboardInput.sendString(text);
+  bool inputCommittedText(
+    String text, {
+    int deleteBeforeGraphemes = 0,
+    int deleteAfterGraphemes = 0,
+  }) => _keyboardInput.handle(
+    CommittedTextIntent(
+      text: text,
+      source: KeyboardInputSource.futureIme,
+      deleteBeforeGraphemes: deleteBeforeGraphemes,
+      deleteAfterGraphemes: deleteAfterGraphemes,
+    ),
+    _keyboardRoutingContext,
+  );
+
+  bool inputString(String text) => _keyboardInput.handle(
+    CommittedTextIntent(
+      text: text,
+      source: KeyboardInputSource.mobileToolbar,
+      consumeOneShot: false,
+    ),
+    _keyboardRoutingContext,
+  );
 
   static Map<String, dynamic> getMouseEventMove() => {
     'type': _kMouseEventMove,
@@ -902,13 +795,23 @@ class InputModel {
 
   /// Reset key modifiers to false, including [shift], [ctrl], [alt] and [command].
   void resetModifiers() {
-    _keyboardInput.reset();
+    unawaited(
+      resetKeyboard(
+        KeyboardResetReason.manual,
+        invalidatePending: true,
+        allowBlockedReleases: true,
+      ),
+    );
   }
 
   void permissionRevoked() {
-    _keyboardInput.retirePendingAndRecover(() {
-      _keyboardInput.reset(cancelPending: false, clearTrackedKeys: false);
-    });
+    unawaited(
+      resetKeyboard(
+        KeyboardResetReason.permissionRevoked,
+        invalidatePending: true,
+        allowBlockedReleases: true,
+      ),
+    );
   }
 
   /// Modify the given modifier map [evt] based on current modifier key status.
@@ -931,13 +834,15 @@ class InputModel {
   }
 
   void enterOrLeave(bool enter) {
-    _keyboardInput.retirePendingAndRecover(() {
-      if (enter) {
-        _keyboardInput.clearPhysicalModifiers();
-      } else {
-        _keyboardInput.reset(cancelPending: false, clearTrackedKeys: false);
-      }
-    });
+    if (!enter) {
+      unawaited(
+        resetKeyboard(
+          KeyboardResetReason.focusLoss,
+          invalidatePending: true,
+          allowBlockedReleases: true,
+        ),
+      );
+    }
     _pointerMovedAfterEnter = false;
     _pointerInsideImage = enter;
     _lastWheelTsUs = 0;
@@ -1019,29 +924,13 @@ class InputModel {
   /// blocked some key events, leaving the remote in a state where modifiers are stuck.
   void exitRelativeMouseModeWithKeyRelease() {
     if (!_relativeMouse.enabled.value) return;
-
-    // First, send release events for all modifier keys to the remote.
-    // This ensures the remote doesn't have stuck modifier keys after exiting.
-    // Use press: false, down: false to send key-up events without modifiers attached.
-    final modifiersToRelease = [
-      'VK_CONTROL',
-      'RControl',
-      'VK_MENU',
-      'RAlt',
-      'VK_SHIFT',
-      'RShift',
-      'Meta', // Command/Super left
-      'RWin', // Command/Super right
-    ];
-
-    _keyboardInput.retirePendingAndRecover(() {
-      for (final key in modifiersToRelease) {
-        _keyboardInput.sendKeyUpWithoutModifiers(key);
-      }
-      _keyboardInput.reset(cancelPending: false, clearTrackedKeys: false);
-    });
-
-    // Now exit relative mouse mode
+    unawaited(
+      resetKeyboard(
+        KeyboardResetReason.relativeMouseExit,
+        invalidatePending: true,
+        allowBlockedReleases: true,
+      ),
+    );
     _relativeMouse.setRelativeMouseMode(false);
   }
 
@@ -1058,6 +947,13 @@ class InputModel {
   }
 
   void onWindowBlur() {
+    unawaited(
+      resetKeyboard(
+        KeyboardResetReason.focusLoss,
+        invalidatePending: true,
+        allowBlockedReleases: true,
+      ),
+    );
     _relativeMouse.onWindowBlur();
   }
 
@@ -1957,15 +1853,25 @@ class InputModel {
   // Simulate a key press event.
   // `usbHidUsage` is the USB HID usage code of the key.
   Future<void> tapHidKey(int usbHidUsage) async {
-    newKeyboardMode(kKeyFlutterKey, usbHidUsage, true, false);
+    final down = _toolbarKeyboardNormalizer.hidEvent(
+      usbHidUsage,
+      action: KeyboardIntentAction.down,
+    );
+    final up = _toolbarKeyboardNormalizer.hidEvent(
+      usbHidUsage,
+      action: KeyboardIntentAction.up,
+    );
+    if (down == null || up == null) return;
+    _keyboardInput.handle(down, _keyboardRoutingContext);
     await Future.delayed(Duration(milliseconds: 100));
-    newKeyboardMode(kKeyFlutterKey, usbHidUsage, false, false);
+    _keyboardInput.handle(up, _keyboardRoutingContext);
+    await keyboardDispatchIdle;
   }
 
   Future<void> onMobileVolumeUp() async =>
-      await tapHidKey(PhysicalKeyboardKey.audioVolumeUp.usbHidUsage & 0xFFFF);
+      await tapHidKey(PhysicalKeyboardKey.audioVolumeUp.usbHidUsage);
   Future<void> onMobileVolumeDown() async =>
-      await tapHidKey(PhysicalKeyboardKey.audioVolumeDown.usbHidUsage & 0xFFFF);
+      await tapHidKey(PhysicalKeyboardKey.audioVolumeDown.usbHidUsage);
   Future<void> onMobilePower() async =>
-      await tapHidKey(PhysicalKeyboardKey.power.usbHidUsage & 0xFFFF);
+      await tapHidKey(PhysicalKeyboardKey.power.usbHidUsage);
 }

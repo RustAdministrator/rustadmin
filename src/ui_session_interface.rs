@@ -96,6 +96,15 @@ fn mobile_physical_key_input_enabled(is_mobile: bool, stored_value: &str) -> boo
     is_mobile && !stored_value.eq_ignore_ascii_case("N")
 }
 
+fn legacy_soft_keyboard_physical_input(
+    preference: KeyboardInputPreference,
+    is_mobile: bool,
+    stored_value: &str,
+) -> bool {
+    preference != KeyboardInputPreference::Text
+        && mobile_physical_key_input_enabled(is_mobile, stored_value)
+}
+
 fn mobile_soft_keyboard_mode(
     physical_key_input: bool,
     peer_platform: &str,
@@ -1347,7 +1356,8 @@ impl<T: InvokeUiSession> Session<T> {
     fn send_legacy_text(&self, value: &str) {
         let mut key_event = KeyEvent::new();
         key_event.set_seq(value.to_owned());
-        let physical_key_input = mobile_physical_key_input_enabled(
+        let physical_key_input = legacy_soft_keyboard_physical_input(
+            self.keyboard_input_preference(),
             cfg!(any(target_os = "android", target_os = "ios")),
             &self.get_option(OPTION_MOBILE_PHYSICAL_KEY_INPUT.to_owned()),
         );
@@ -2854,6 +2864,35 @@ mod mobile_soft_keyboard_tests {
         assert!(mobile_physical_key_input_enabled(true, "Y"));
         assert!(!mobile_physical_key_input_enabled(true, "N"));
         assert!(!mobile_physical_key_input_enabled(false, ""));
+    }
+
+    #[test]
+    fn legacy_compatibility_toggle_remains_effective_in_auto() {
+        assert!(legacy_soft_keyboard_physical_input(
+            KeyboardInputPreference::Auto,
+            true,
+            "Y"
+        ));
+        assert!(!legacy_soft_keyboard_physical_input(
+            KeyboardInputPreference::Auto,
+            true,
+            "N"
+        ));
+        assert!(!legacy_soft_keyboard_physical_input(
+            KeyboardInputPreference::Text,
+            true,
+            "Y"
+        ));
+        assert!(legacy_soft_keyboard_physical_input(
+            KeyboardInputPreference::Physical,
+            true,
+            "Y"
+        ));
+        assert!(!legacy_soft_keyboard_physical_input(
+            KeyboardInputPreference::Physical,
+            true,
+            "N"
+        ));
     }
 
     #[test]
