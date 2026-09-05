@@ -1,11 +1,13 @@
 import 'dart:async';
 
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/generated_bridge.dart';
 import 'package:flutter_hbb/mobile/mobile_modifier_state.dart';
+import 'package:flutter_hbb/mobile/widgets/remote_text_input.dart';
 import 'package:flutter_hbb/models/input_model.dart';
 import 'package:flutter_hbb/models/keyboard_intent.dart';
 import 'package:flutter_hbb/models/model.dart';
@@ -529,6 +531,43 @@ void main() {
       const _FlutterKeyCall(usbHid: 0xe0, down: false),
     );
   });
+
+  for (final mode in [
+    kKeyboardInputModeAuto,
+    kKeyboardInputModeText,
+    kKeyboardInputModePhysical,
+  ]) {
+    testWidgets('software keyboard submit reaches the key bridge in $mode mode',
+        (tester) async {
+      await inputModel.setKeyboardInputMode(mode);
+      final controller = TextEditingController(text: '1111');
+      final focus = FocusNode();
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: MobileRemoteTextInput(
+            controller: controller,
+            focusNode: focus,
+            onEnter: () => inputModel.inputKey('VK_ENTER'),
+          ),
+        ),
+      ));
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pump();
+      await inputModel.keyboardDispatchIdle;
+
+      expect(testImpl.orderedKeyboardCalls, [
+        'legacy:VK_ENTER:down',
+        'legacy:VK_ENTER:up',
+      ]);
+      expect(testImpl.plainTextEdits, 0);
+      expect(testImpl.sourceLayoutTextEdits, 0);
+      expect(focus.hasFocus, isTrue);
+      await tester.pumpWidget(const SizedBox.shrink());
+      controller.dispose();
+      focus.dispose();
+    });
+  }
 
   test('permission revocation releases state before input is denied', () async {
     inputModel.lockMobileModifier(MobileModifierKey.ctrl);

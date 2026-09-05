@@ -12,6 +12,7 @@ import 'package:flutter_hbb/mobile/widgets/floating_mouse.dart';
 import 'package:flutter_hbb/mobile/widgets/floating_mouse_widgets.dart';
 import 'package:flutter_hbb/mobile/widgets/gesture_help.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
+import 'package:flutter_hbb/mobile/widgets/remote_text_input.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_keyboard_visibility/flutter_keyboard_visibility.dart';
 import 'package:flutter_svg/svg.dart';
@@ -534,27 +535,9 @@ class _RemotePageState extends State<RemotePage>
     }
   }
 
-  void inputChar(String char) {
-    if (char == '\n') {
-      char = 'VK_RETURN';
-    } else if (_physicalKeyInput &&
-        char.length == 1 &&
-        !inputModel.ctrl &&
-        !inputModel.alt &&
-        !inputModel.shift &&
-        !inputModel.command) {
-      _inputMobileString(char);
-      return;
-    } else if (char == ' ') {
-      char = 'VK_SPACE';
-    }
-    inputModel.inputKey(char);
-  }
-
-  void _inputMobileString(String value) {
-    _inputMobileTextEdit(
-      MobileCommittedTextEdit(text: value, deleteBeforeGraphemes: 0),
-    );
+  void _handleSoftKeyboardEnter() {
+    if (_updatingSoftKeyboardText || !_showEdit) return;
+    inputModel.inputKey('VK_ENTER');
   }
 
   void _inputMobileTextEdit(MobileCommittedTextEdit edit) {
@@ -923,28 +906,10 @@ class _RemotePageState extends State<RemotePage>
                 height: 0,
                 child: !_showEdit || _usesAndroidNativeKeyboardInput
                     ? Container()
-                    : TextFormField(
-                        textInputAction: TextInputAction.newline,
-                        autocorrect: false,
-                        // Flutter 3.16.9 Android.
-                        // `enableSuggestions` causes secure keyboard to be shown.
-                        // https://github.com/flutter/flutter/issues/139143
-                        // https://github.com/flutter/flutter/issues/146540
-                        // enableSuggestions: false,
-                        autofocus: true,
+                    : MobileRemoteTextInput(
                         focusNode: _mobileFocusNode,
-                        maxLines: null,
                         controller: _textController,
-                        // trick way to make backspace work always
-                        keyboardType: TextInputType.multiline,
-                        // `onChanged` may be called depending on the input method if this widget is wrapped in
-                        // `Focus(onKeyEvent: ..., child: ...)`
-                        // For `Backspace` button in the soft keyboard:
-                        // en/fr input method:
-                        //      1. The button will not trigger `onKeyEvent` if the text field is not empty.
-                        //      2. The button will trigger `onKeyEvent` if the text field is empty.
-                        // ko/zh/ja input method: the button will trigger `onKeyEvent`
-                        //                     and the event will not popup if `KeyEventResult.handled` is returned.
+                        onEnter: _handleSoftKeyboardEnter,
                       ).workaroundFreezeLinuxMint(),
               ),
             ];
