@@ -4193,6 +4193,78 @@ pub enum MediaData {
 
 pub type MediaSender = mpsc::Sender<MediaData>;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DisplayActivation {
+    pub(crate) display: usize,
+    pub(crate) generation: u64,
+    pub(crate) view_count: usize,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DisplayMediaIntent {
+    pub(crate) logical_session_generation: u64,
+    pub(crate) aggregate_generation: u64,
+    pub(crate) displays: Vec<DisplayActivation>,
+}
+
+impl DisplayMediaIntent {
+    pub(crate) fn activation(&self, display: usize) -> Option<DisplayActivation> {
+        self.displays
+            .binary_search_by_key(&display, |entry| entry.display)
+            .ok()
+            .map(|index| self.displays[index])
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RenderFrameContext {
+    pub(crate) connection_generation: u32,
+    pub(crate) display_activation_generation: u64,
+    pub(crate) stream_id: u64,
+    pub(crate) frame_id: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RenderFrameOutcome {
+    pub(crate) eligible_bindings: u16,
+    pub(crate) submitted_bindings: u16,
+    pub(crate) rejected_bindings: u16,
+}
+
+impl RenderFrameOutcome {
+    pub(crate) fn submitted() -> Self {
+        Self {
+            eligible_bindings: 1,
+            submitted_bindings: 1,
+            rejected_bindings: 0,
+        }
+    }
+
+    pub(crate) fn rejected() -> Self {
+        Self {
+            eligible_bindings: 1,
+            submitted_bindings: 0,
+            rejected_bindings: 1,
+        }
+    }
+
+    pub(crate) fn merge(&mut self, other: Self) {
+        self.eligible_bindings = self
+            .eligible_bindings
+            .saturating_add(other.eligible_bindings);
+        self.submitted_bindings = self
+            .submitted_bindings
+            .saturating_add(other.submitted_bindings);
+        self.rejected_bindings = self
+            .rejected_bindings
+            .saturating_add(other.rejected_bindings);
+    }
+
+    pub(crate) fn any_submitted(self) -> bool {
+        self.submitted_bindings > 0
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct VideoFeedbackTracker {
     stream_id: u64,
@@ -4450,7 +4522,9 @@ pub fn start_video_thread<F, T>(
     movie_queue_refresh: Arc<Mutex<Option<std::time::Instant>>>,
     video_callback: F,
 ) where
-    F: 'static + FnMut(usize, &mut scrap::ImageRgb, *mut c_void, bool) + Send,
+    F: 'static
+        + FnMut(usize, u64, u64, &mut scrap::ImageRgb, *mut c_void, bool) -> RenderFrameOutcome
+        + Send,
     T: InvokeUiSession,
 {
     let mut video_callback = video_callback;
@@ -4581,13 +4655,15 @@ pub fn start_video_thread<F, T>(
                                         }
                                     }
                                     let render_submit_start = std::time::Instant::now();
-                                    video_callback(
+                                    let render_outcome = video_callback(
                                         display,
+                                        stream_id,
+                                        decoded_frame_id,
                                         &mut handler.rgb,
                                         handler.texture.texture,
                                         pixelbuffer,
                                     );
-                                    {
+                                    if render_outcome.any_submitted() {
                                         let mut feedback = video_feedback.lock().unwrap();
                                         feedback.record_render_submitted(
                                             stream_id,
@@ -5508,6 +5584,7 @@ pub enum Data {
     NewVoiceCall,
     CloseVoiceCall,
     ResetDecoder(Option<usize>),
+    DisplayIntent(DisplayMediaIntent),
     RenameFile((i32, String, String, bool)),
     TakeScreenshot((i32, String)),
 }

@@ -4,8 +4,9 @@ use crate::clipboard::{update_clipboard_with_direction, ClipboardSide};
 use crate::{audio_service, clipboard::CLIPBOARD_INTERVAL, ConnInner, CLIENT_SERVER};
 use crate::{
     client::{
-        self, new_voice_call_request, Client, Data, Interface, MediaData, MediaSender,
-        QualityStatus, MILLI1, SEC30,
+        self, new_voice_call_request, Client, Data, DisplayActivation, DisplayMediaIntent,
+        Interface, MediaData, MediaSender, QualityStatus, RenderFrameContext, RenderFrameOutcome,
+        MILLI1, SEC30,
     },
     common::get_default_sound_input,
     input::{MOUSE_TYPE_MASK, MOUSE_TYPE_MOVE_RELATIVE},
@@ -48,7 +49,7 @@ use hbb_common::{
 use hbb_common::{tokio::sync::Mutex as TokioMutex, ResultType};
 use scrap::CodecFormat;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     ffi::c_void,
     num::NonZeroI64,
     path::PathBuf,
@@ -130,7 +131,7 @@ enum StartupKeyframeAction {
     Refresh { attempt: usize, dropped_deltas: u64 },
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct StartupKeyframeRecovery {
     last_refresh: Option<Instant>,
     refresh_count: usize,
@@ -163,11 +164,17 @@ impl StartupKeyframeRecovery {
 #[derive(Debug, PartialEq, Eq)]
 enum NoVideoStartupAction {
     None,
-    Refresh { attempt: usize, elapsed_ms: u128 },
-    Stalled { elapsed_ms: u128 },
+    Refresh {
+        attempt: usize,
+        elapsed_ms: u128,
+    },
+    Stalled {
+        elapsed_ms: u128,
+        refresh_attempts: usize,
+    },
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct NoVideoStartupWatchdog {
     since: Option<Instant>,
     last_refresh: Option<Instant>,
@@ -227,10 +234,186 @@ impl NoVideoStartupWatchdog {
             self.last_stalled_log = Some(now);
             return NoVideoStartupAction::Stalled {
                 elapsed_ms: elapsed.as_millis(),
+                refresh_attempts: self.refresh_count,
             };
         }
 
         NoVideoStartupAction::None
+    }
+}
+
+#[derive(Debug)]
+struct DisplayStartupState {
+    activation_generation: u64,
+    stream_id: u64,
+    render_stream_id: Arc<AtomicU64>,
+    first_frame_received: bool,
+    keyframe_recovery: StartupKeyframeRecovery,
+    watchdog: NoVideoStartupWatchdog,
+}
+
+impl DisplayStartupState {
+    fn new(activation_generation: u64) -> Self {
+        Self {
+            activation_generation,
+            stream_id: 0,
+            render_stream_id: Arc::new(AtomicU64::new(0)),
+            first_frame_received: false,
+            keyframe_recovery: StartupKeyframeRecovery::default(),
+            watchdog: NoVideoStartupWatchdog::default(),
+        }
+    }
+
+    fn begin_stream(&mut self, stream_id: u64) -> Result<bool, u64> {
+        if self.stream_id == stream_id {
+            return Ok(false);
+        }
+        if self.stream_id != 0 && (stream_id == 0 || stream_id < self.stream_id) {
+            return Err(self.stream_id);
+        }
+        self.stream_id = stream_id;
+        self.render_stream_id.store(stream_id, Ordering::Release);
+        self.first_frame_received = false;
+        self.keyframe_recovery.reset();
+        self.watchdog.reset();
+        Ok(true)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DisplayStartupFrameAction {
+    RejectUndesired,
+    RejectStaleStream {
+        expected_stream_id: u64,
+    },
+    WaitForKeyframe,
+    Refresh {
+        attempt: usize,
+        dropped_deltas: u64,
+    },
+    Accept {
+        first_for_display: bool,
+        stream_changed: bool,
+        activation_generation: u64,
+    },
+}
+
+#[derive(Default)]
+struct DisplayStartupController {
+    logical_session_generation: u64,
+    aggregate_generation: u64,
+    displays: BTreeMap<usize, DisplayStartupState>,
+}
+
+impl DisplayStartupController {
+    fn reconcile(&mut self, intent: &DisplayMediaIntent) -> Vec<usize> {
+        let mut retired = self
+            .displays
+            .iter()
+            .filter_map(|(display, state)| {
+                (!intent
+                    .activation(*display)
+                    .is_some_and(|activation| activation.generation == state.activation_generation))
+                .then_some(*display)
+            })
+            .collect::<Vec<_>>();
+        for display in &retired {
+            if let Some(state) = self.displays.remove(display) {
+                state.render_stream_id.store(0, Ordering::Release);
+            }
+        }
+        for activation in &intent.displays {
+            self.displays
+                .entry(activation.display)
+                .or_insert_with(|| DisplayStartupState::new(activation.generation));
+        }
+        retired.sort_unstable();
+        self.logical_session_generation = intent.logical_session_generation;
+        self.aggregate_generation = intent.aggregate_generation;
+        retired
+    }
+
+    fn ensure_legacy_display(&mut self, display: usize) -> DisplayActivation {
+        let state = self
+            .displays
+            .entry(display)
+            .or_insert_with(|| DisplayStartupState::new(1));
+        DisplayActivation {
+            display,
+            generation: state.activation_generation,
+            view_count: 1,
+        }
+    }
+
+    fn activation(&self, display: usize) -> Option<DisplayActivation> {
+        self.displays.get(&display).map(|state| DisplayActivation {
+            display,
+            generation: state.activation_generation,
+            view_count: 1,
+        })
+    }
+
+    fn observe_frame(
+        &mut self,
+        display: usize,
+        stream_id: u64,
+        frame_id: u64,
+        payload_stats: Option<(usize, usize, bool)>,
+        now: Instant,
+    ) -> DisplayStartupFrameAction {
+        let Some(state) = self.displays.get_mut(&display) else {
+            return DisplayStartupFrameAction::RejectUndesired;
+        };
+        let stream_changed = match state.begin_stream(stream_id) {
+            Ok(changed) => changed,
+            Err(expected_stream_id) => {
+                return DisplayStartupFrameAction::RejectStaleStream { expected_stream_id };
+            }
+        };
+        if !state.first_frame_received && should_wait_for_startup_keyframe(frame_id, payload_stats)
+        {
+            return match state.keyframe_recovery.observe_delta(now) {
+                StartupKeyframeAction::Wait => DisplayStartupFrameAction::WaitForKeyframe,
+                StartupKeyframeAction::Refresh {
+                    attempt,
+                    dropped_deltas,
+                } => DisplayStartupFrameAction::Refresh {
+                    attempt,
+                    dropped_deltas,
+                },
+            };
+        }
+        let first_for_display = !state.first_frame_received;
+        if first_for_display {
+            state.first_frame_received = true;
+            state.keyframe_recovery.reset();
+            state.watchdog.reset();
+        }
+        DisplayStartupFrameAction::Accept {
+            first_for_display,
+            stream_changed,
+            activation_generation: state.activation_generation,
+        }
+    }
+
+    fn tick(
+        &mut self,
+        expects_video: bool,
+        is_connected: bool,
+        now: Instant,
+    ) -> Vec<(usize, NoVideoStartupAction)> {
+        self.displays
+            .iter_mut()
+            .filter_map(|(display, state)| {
+                let action = state.watchdog.tick(
+                    expects_video,
+                    is_connected,
+                    state.first_frame_received,
+                    now,
+                );
+                (action != NoVideoStartupAction::None).then_some((*display, action))
+            })
+            .collect()
     }
 }
 
@@ -248,8 +431,8 @@ pub struct Remote<T: InvokeUiSession> {
     timer: crate::RustDeskInterval,
     last_update_jobs_status: (Instant, HashMap<i32, u64>),
     is_connected: bool,
-    first_frame: bool,
-    startup_keyframe_recovery: StartupKeyframeRecovery,
+    connection_video_ready: bool,
+    display_startup: DisplayStartupController,
     #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
     client_conn_id: i32, // used for file clipboard
     data_count: Arc<AtomicUsize>,
@@ -306,8 +489,8 @@ impl<T: InvokeUiSession> Remote<T> {
             timer: crate::rustdesk_interval(time::interval(SEC30)),
             last_update_jobs_status: (Instant::now(), Default::default()),
             is_connected: false,
-            first_frame: false,
-            startup_keyframe_recovery: StartupKeyframeRecovery::default(),
+            connection_video_ready: false,
+            display_startup: DisplayStartupController::default(),
             #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
             client_conn_id: 0,
             data_count: Arc::new(AtomicUsize::new(0)),
@@ -325,8 +508,101 @@ impl<T: InvokeUiSession> Remote<T> {
         }
     }
 
+    fn reconcile_display_intent(&mut self, intent: &DisplayMediaIntent) {
+        let previous_generation = self.display_startup.aggregate_generation;
+        let retired = self.display_startup.reconcile(intent);
+        for display in &retired {
+            self.video_threads.remove(display);
+        }
+        if previous_generation != intent.aggregate_generation || !retired.is_empty() {
+            log::info!(
+                "diag viewer display intent reconciled: logical_generation={}, connection_generation={}, aggregate_generation={}, previous_aggregate_generation={}, active={:?}, retired={retired:?}",
+                intent.logical_session_generation,
+                self.connection_round,
+                intent.aggregate_generation,
+                previous_generation,
+                intent
+                    .displays
+                    .iter()
+                    .map(|entry| (entry.display, entry.generation, entry.view_count))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    fn startup_refresh_message(&self, display: usize) -> Message {
+        if crate::common::is_support_multi_ui_session_num(self.handler.lc.read().unwrap().version) {
+            client::LoginConfigHandler::refresh_display(display)
+        } else {
+            client::LoginConfigHandler::refresh()
+        }
+    }
+
+    async fn sync_display_intent_to_peer(&mut self, peer: &mut Stream) {
+        let Some(intent) = self.handler.ui_handler.display_media_intent() else {
+            if let Some(display) = self
+                .handler
+                .lc
+                .read()
+                .unwrap()
+                .peer_info
+                .as_ref()
+                .and_then(|peer_info| usize::try_from(peer_info.current_display).ok())
+            {
+                self.display_startup.ensure_legacy_display(display);
+            }
+            return;
+        };
+        self.reconcile_display_intent(&intent);
+        if intent.displays.is_empty()
+            || !crate::common::is_support_multi_ui_session_num(
+                self.handler.lc.read().unwrap().version,
+            )
+        {
+            return;
+        }
+        let set = intent
+            .displays
+            .iter()
+            .filter_map(|entry| i32::try_from(entry.display).ok())
+            .collect::<Vec<_>>();
+        let mut misc = Misc::new();
+        misc.set_capture_displays(CaptureDisplays {
+            set,
+            ..Default::default()
+        });
+        let mut message = Message::new();
+        message.set_misc(misc);
+        if let Err(error) = peer.send(&message).await {
+            log::warn!(
+                "diag viewer display intent reconnect sync failed: logical_generation={}, connection_generation={}, aggregate_generation={}, err={error}",
+                intent.logical_session_generation,
+                self.connection_round,
+                intent.aggregate_generation
+            );
+        } else {
+            log::info!(
+                "diag viewer display intent reconnect sync: logical_generation={}, connection_generation={}, aggregate_generation={}, displays={:?}",
+                intent.logical_session_generation,
+                self.connection_round,
+                intent.aggregate_generation,
+                intent
+                    .displays
+                    .iter()
+                    .map(|entry| entry.display)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
     pub async fn io_loop(&mut self, key: &str, token: &str, round: u32) {
         self.connection_round = round;
+        self.handler
+            .ui_handler
+            .begin_connection_runtime(self.connection_round);
+        if let Some(intent) = self.handler.ui_handler.display_media_intent() {
+            self.reconcile_display_intent(&intent);
+        }
         #[cfg(target_os = "windows")]
         let _file_clip_context_holder = {
             // `is_port_forward()` will not reach here, but we still check it for clarity.
@@ -425,7 +701,6 @@ impl<T: InvokeUiSession> Remote<T> {
                 let mut status_timer =
                     crate::rustdesk_interval(time::interval(Duration::new(1, 0)));
                 let mut fps_instant = Instant::now();
-                let mut no_video_watchdog = NoVideoStartupWatchdog::default();
 
                 let _keep_it = client::hc_connection(feedback, rendezvous_server, token).await;
 
@@ -439,7 +714,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                             "diag client stream read error: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, err={}",
                                             self.handler.get_id(),
                                             self.is_connected,
-                                            self.first_frame,
+                                            self.connection_video_ready,
                                             self.video_format,
                                             err
                                         );
@@ -459,7 +734,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                                 "diag client peer handler requested exit: id={}, is_connected={}, video_packet_seen={}, video_format={:?}",
                                                 self.handler.get_id(),
                                                 self.is_connected,
-                                                self.first_frame,
+                                                self.connection_video_ready,
                                                 self.video_format
                                             );
                                             break
@@ -471,7 +746,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                     "diag client stream ended by peer: id={}, is_connected={}, video_packet_seen={}, video_format={:?}",
                                     self.handler.get_id(),
                                     self.is_connected,
-                                    self.first_frame,
+                                    self.connection_video_ready,
                                     self.video_format
                                 );
                                 if self.handler.is_restarting_remote_device() {
@@ -501,7 +776,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                     "diag client receive timeout: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, elapsed_ms={}",
                                     self.handler.get_id(),
                                     self.is_connected,
-                                    self.first_frame,
+                                    self.connection_video_ready,
                                     self.video_format,
                                     last_recv_time.elapsed().as_millis()
                                 );
@@ -519,46 +794,69 @@ impl<T: InvokeUiSession> Remote<T> {
                             }
                         }
                         _ = status_timer.tick() => {
-                            match no_video_watchdog.tick(
+                            if let Some(intent) = self.handler.ui_handler.display_media_intent() {
+                                if intent.aggregate_generation != self.display_startup.aggregate_generation {
+                                    self.reconcile_display_intent(&intent);
+                                }
+                            }
+                            self.handler.ui_handler.tick_render_liveness();
+                            let startup_actions = self.display_startup.tick(
                                 expects_video,
                                 self.is_connected,
-                                self.first_frame,
                                 Instant::now(),
-                            ) {
-                                NoVideoStartupAction::Refresh { attempt, elapsed_ms } => {
-                                    log::warn!(
-                                        "diag client no video startup retry: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, elapsed_ms={}, refresh_attempt={}/{}",
-                                        self.handler.get_id(),
-                                        self.is_connected,
-                                        self.first_frame,
-                                        self.video_format,
-                                        elapsed_ms,
-                                        attempt,
-                                        NO_VIDEO_START_MAX_REFRESHES
-                                    );
-                                    let msg = client::LoginConfigHandler::refresh();
-                                    if let Err(err) = peer.send(&msg).await {
+                            );
+                            for (display, action) in startup_actions {
+                                let (activation_generation, stream_id) = self
+                                    .display_startup
+                                    .displays
+                                    .get(&display)
+                                    .map(|state| (state.activation_generation, state.stream_id))
+                                    .unwrap_or_default();
+                                match action {
+                                    NoVideoStartupAction::Refresh { attempt, elapsed_ms } => {
                                         log::warn!(
-                                            "diag client no video refresh send failed: id={}, attempt={}, err={}",
+                                            "diag client display startup retry: id={}, connection_generation={}, aggregate_generation={}, display={}, activation_generation={}, stream_id={}, elapsed_ms={}, refresh_attempt={}/{}",
                                             self.handler.get_id(),
+                                            self.connection_round,
+                                            self.display_startup.aggregate_generation,
+                                            display,
+                                            activation_generation,
+                                            stream_id,
+                                            elapsed_ms,
                                             attempt,
-                                            err
+                                            NO_VIDEO_START_MAX_REFRESHES
+                                        );
+                                        let msg = self.startup_refresh_message(display);
+                                        if let Err(err) = peer.send(&msg).await {
+                                            log::warn!(
+                                                "diag client display startup refresh failed: id={}, display={}, activation_generation={}, attempt={}, err={}",
+                                                self.handler.get_id(),
+                                                display,
+                                                activation_generation,
+                                                attempt,
+                                                err
+                                            );
+                                        }
+                                    }
+                                    NoVideoStartupAction::Stalled {
+                                        elapsed_ms,
+                                        refresh_attempts,
+                                    } => {
+                                        log::warn!(
+                                            "diag client display startup stalled: id={}, connection_generation={}, aggregate_generation={}, display={}, activation_generation={}, stream_id={}, elapsed_ms={}, refresh_attempts={}/{}",
+                                            self.handler.get_id(),
+                                            self.connection_round,
+                                            self.display_startup.aggregate_generation,
+                                            display,
+                                            activation_generation,
+                                            stream_id,
+                                            elapsed_ms,
+                                            refresh_attempts,
+                                            NO_VIDEO_START_MAX_REFRESHES
                                         );
                                     }
+                                    NoVideoStartupAction::None => {}
                                 }
-                                NoVideoStartupAction::Stalled { elapsed_ms } => {
-                                    log::warn!(
-                                        "diag client no video startup still waiting: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, elapsed_ms={}, refresh_attempts={}/{}",
-                                        self.handler.get_id(),
-                                        self.is_connected,
-                                        self.first_frame,
-                                        self.video_format,
-                                        elapsed_ms,
-                                        NO_VIDEO_START_MAX_REFRESHES.min(no_video_watchdog.refresh_count),
-                                        NO_VIDEO_START_MAX_REFRESHES
-                                    );
-                                }
-                                NoVideoStartupAction::None => {}
                             }
 
                             let elapsed = fps_instant.elapsed().as_millis();
@@ -1178,7 +1476,7 @@ impl<T: InvokeUiSession> Remote<T> {
                     "diag client io_loop received Data::Close: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, video_threads={}, sent_close_reason={}",
                     self.handler.get_id(),
                     self.is_connected,
-                    self.first_frame,
+                    self.connection_video_ready,
                     self.video_format,
                     self.video_threads.len(),
                     self.sent_close_reason
@@ -1687,6 +1985,9 @@ impl<T: InvokeUiSession> Remote<T> {
                     }
                 }
             },
+            Data::DisplayIntent(intent) => {
+                self.reconcile_display_intent(&intent);
+            }
             Data::TakeScreenshot((display, sid)) => {
                 let mut msg = Message::new();
                 msg.set_screenshot_request(ScreenshotRequest {
@@ -2174,19 +2475,73 @@ impl<T: InvokeUiSession> Remote<T> {
         if let Ok(msg_in) = Message::parse_from_bytes(&data) {
             match msg_in.union {
                 Some(message::Union::VideoFrame(vf)) => {
-                    if !self.first_frame {
-                        let payload_stats = scrap::codec::video_frame_payload_stats(&vf);
-                        let (payload_bytes, frame_count, has_keyframe) =
-                            payload_stats.unwrap_or((0, 0, false));
-                        if should_wait_for_startup_keyframe(vf.frame_id, payload_stats) {
-                            if let StartupKeyframeAction::Refresh {
+                    let Ok(display) = usize::try_from(vf.display) else {
+                        log::warn!("ignored video frame with negative display {}", vf.display);
+                        return true;
+                    };
+                    if let Some(intent) = self.handler.ui_handler.display_media_intent() {
+                        if intent.aggregate_generation != self.display_startup.aggregate_generation
+                        {
+                            self.reconcile_display_intent(&intent);
+                        }
+                        if intent.activation(display).is_none() {
+                            log::debug!(
+                                "diag viewer ignored undesired legacy media: connection_generation={}, aggregate_generation={}, display={}, stream_id={}, frame_id={}",
+                                self.connection_round,
+                                intent.aggregate_generation,
+                                display,
+                                vf.stream_id,
+                                vf.frame_id
+                            );
+                            return true;
+                        }
+                    } else {
+                        self.display_startup.ensure_legacy_display(display);
+                    }
+
+                    let payload_stats = scrap::codec::video_frame_payload_stats(&vf);
+                    let (payload_bytes, frame_count, has_keyframe) =
+                        payload_stats.unwrap_or((0, 0, false));
+                    let startup_action = self.display_startup.observe_frame(
+                        display,
+                        vf.stream_id,
+                        vf.frame_id,
+                        payload_stats,
+                        Instant::now(),
+                    );
+                    let (first_for_display, stream_changed, activation_generation) =
+                        match startup_action {
+                            DisplayStartupFrameAction::RejectUndesired => return true,
+                            DisplayStartupFrameAction::RejectStaleStream { expected_stream_id } => {
+                                log::debug!(
+                                    "diag viewer ignored stale media stream: connection_generation={}, aggregate_generation={}, display={}, activation_generation={}, expected_stream_id={}, stale_stream_id={}, frame_id={}",
+                                    self.connection_round,
+                                    self.display_startup.aggregate_generation,
+                                    display,
+                                    self.display_startup
+                                        .activation(display)
+                                        .map(|activation| activation.generation)
+                                        .unwrap_or_default(),
+                                    expected_stream_id,
+                                    vf.stream_id,
+                                    vf.frame_id
+                                );
+                                return true;
+                            }
+                            DisplayStartupFrameAction::WaitForKeyframe => return true,
+                            DisplayStartupFrameAction::Refresh {
                                 attempt,
                                 dropped_deltas,
-                            } = self.startup_keyframe_recovery.observe_delta(Instant::now())
-                            {
+                            } => {
                                 log::warn!(
-                                    "diag video startup keyframe recovery: display={}, stream_id={}, frame_id={}, format={:?}, payload_bytes={}, dropped_deltas={}, refresh_attempt={}",
-                                    vf.display,
+                                    "diag video startup keyframe recovery: connection_generation={}, aggregate_generation={}, display={}, activation_generation={}, stream_id={}, frame_id={}, format={:?}, payload_bytes={}, dropped_deltas={}, refresh_attempt={}",
+                                    self.connection_round,
+                                    self.display_startup.aggregate_generation,
+                                    display,
+                                    self.display_startup
+                                        .activation(display)
+                                        .map(|activation| activation.generation)
+                                        .unwrap_or_default(),
                                     vf.stream_id,
                                     vf.frame_id,
                                     CodecFormat::from(&vf),
@@ -2194,32 +2549,43 @@ impl<T: InvokeUiSession> Remote<T> {
                                     dropped_deltas,
                                     attempt
                                 );
-                                let refresh = client::LoginConfigHandler::refresh();
+                                let refresh = self.startup_refresh_message(display);
                                 if let Err(error) = peer.send(&refresh).await {
                                     log::warn!(
                                         "diag video startup keyframe request failed: display={}, stream_id={}, attempt={}, err={}",
-                                        vf.display,
+                                        display,
                                         vf.stream_id,
                                         attempt,
                                         error
                                     );
                                 }
+                                return true;
                             }
-                            return true;
-                        }
+                            DisplayStartupFrameAction::Accept {
+                                first_for_display,
+                                stream_changed,
+                                activation_generation,
+                            } => (first_for_display, stream_changed, activation_generation),
+                        };
+                    if first_for_display {
                         log::info!(
-                            "diag first video frame received from stream: display={}, stream_id={}, frame_id={}, capture_ms={}, format={:?}, payload_bytes={}, frame_count={}, keyframe={}",
-                            vf.display,
+                            "diag first video frame received for display activation: connection_generation={}, aggregate_generation={}, display={}, activation_generation={}, stream_id={}, frame_id={}, stream_changed={}, capture_ms={}, format={:?}, payload_bytes={}, frame_count={}, keyframe={}",
+                            self.connection_round,
+                            self.display_startup.aggregate_generation,
+                            display,
+                            activation_generation,
                             vf.stream_id,
                             vf.frame_id,
+                            stream_changed,
                             vf.capture_time_ms,
                             CodecFormat::from(&vf),
                             payload_bytes,
                             frame_count,
                             has_keyframe
                         );
-                        self.first_frame = true;
-                        self.startup_keyframe_recovery.reset();
+                    }
+                    if !self.connection_video_ready {
+                        self.connection_video_ready = true;
                         self.handler.close_success();
                         self.handler.adapt_size();
                         self.send_toggle_virtual_display_msg(peer).await;
@@ -2227,9 +2593,27 @@ impl<T: InvokeUiSession> Remote<T> {
                     }
                     self.video_format = CodecFormat::from(&vf);
 
-                    let display = vf.display as usize;
+                    if self.video_threads.get(&display).is_some_and(|thread| {
+                        thread.activation_generation != activation_generation
+                            || thread.stream_id != vf.stream_id
+                    }) {
+                        self.video_threads.remove(&display);
+                    }
                     if !self.video_threads.contains_key(&display) {
-                        self.new_video_thread(display);
+                        let Some(render_stream_id) = self
+                            .display_startup
+                            .displays
+                            .get(&display)
+                            .map(|state| state.render_stream_id.clone())
+                        else {
+                            return true;
+                        };
+                        self.new_video_thread(
+                            display,
+                            activation_generation,
+                            vf.stream_id,
+                            render_stream_id,
+                        );
                     }
                     let Some(thread) = self.video_threads.get_mut(&display) else {
                         return true;
@@ -2389,6 +2773,7 @@ impl<T: InvokeUiSession> Remote<T> {
                             }
                         }
                         self.handler.handle_peer_info(pi);
+                        self.sync_display_intent_to_peer(peer).await;
                         #[cfg(all(target_os = "windows", not(feature = "flutter")))]
                         self.check_clipboard_file_context();
                         if self.handler.is_default() {
@@ -2948,7 +3333,7 @@ impl<T: InvokeUiSession> Remote<T> {
                             "diag client received remote close reason: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, reason={}",
                             self.handler.get_id(),
                             self.is_connected,
-                            self.first_frame,
+                            self.connection_video_ready,
                             self.video_format,
                             c
                         );
@@ -3499,7 +3884,13 @@ impl<T: InvokeUiSession> Remote<T> {
         }
     }
 
-    fn new_video_thread(&mut self, display: usize) {
+    fn new_video_thread(
+        &mut self,
+        display: usize,
+        activation_generation: u64,
+        stream_id: u64,
+        render_stream_id: Arc<AtomicU64>,
+    ) {
         let video_queue = Arc::new(RwLock::new(ArrayQueue::new(client::VIDEO_QUEUE_SIZE)));
         let (video_sender, video_receiver) = std::sync::mpsc::channel::<MediaData>();
         let decode_fps = Arc::new(RwLock::new(None));
@@ -3515,6 +3906,8 @@ impl<T: InvokeUiSession> Remote<T> {
             client::VideoFeedbackTracker::default(),
         ));
         let video_thread = VideoThread {
+            activation_generation,
+            stream_id,
             video_queue: video_queue.clone(),
             video_sender,
             decode_fps: decode_fps.clone(),
@@ -3530,6 +3923,7 @@ impl<T: InvokeUiSession> Remote<T> {
             movie_queue_refresh: movie_queue_refresh.clone(),
         };
         let handler = self.handler.ui_handler.clone();
+        let connection_generation = self.connection_round;
         crate::client::start_video_thread(
             self.handler.clone(),
             display,
@@ -3546,18 +3940,39 @@ impl<T: InvokeUiSession> Remote<T> {
             newest_capture_time_ms,
             movie_queue_refresh,
             move |display: usize,
+                  stream_id: u64,
+                  frame_id: u64,
                   data: &mut scrap::ImageRgb,
                   _texture: *mut c_void,
-                  pixelbuffer: bool| {
+                  pixelbuffer: bool|
+                  -> RenderFrameOutcome {
                 *frame_count.write().unwrap() += 1;
+                if render_stream_id.load(Ordering::Acquire) != stream_id {
+                    return RenderFrameOutcome::default();
+                }
+                let context = RenderFrameContext {
+                    connection_generation,
+                    display_activation_generation: activation_generation,
+                    stream_id,
+                    frame_id,
+                };
                 if pixelbuffer {
-                    handler.on_rgba(display, data);
+                    handler.on_rgba(context, display, data)
                 } else {
                     #[cfg(any(
                         all(feature = "vram", feature = "flutter"),
                         all(target_os = "android", feature = "mediacodec")
                     ))]
-                    handler.on_texture(display, _texture);
+                    {
+                        return handler.on_texture(context, display, _texture);
+                    }
+                    #[cfg(not(any(
+                        all(feature = "vram", feature = "flutter"),
+                        all(target_os = "android", feature = "mediacodec")
+                    )))]
+                    {
+                        RenderFrameOutcome::default()
+                    }
                 }
             },
         );
@@ -3636,6 +4051,8 @@ struct FpsControl {
 }
 
 struct VideoThread {
+    activation_generation: u64,
+    stream_id: u64,
     video_queue: Arc<RwLock<ArrayQueue<VideoFrame>>>,
     video_sender: MediaSender,
     decode_fps: Arc<RwLock<Option<usize>>>,
@@ -3662,10 +4079,12 @@ impl Drop for VideoThread {
 mod tests {
     use super::{
         is_critical_client_input, is_would_block_error, session_permission_response_msgbox_type,
-        should_wait_for_startup_keyframe, NoVideoStartupAction, NoVideoStartupWatchdog,
-        StartupKeyframeAction, StartupKeyframeRecovery, NO_VIDEO_START_MAX_REFRESHES,
-        NO_VIDEO_START_REFRESH_INTERVAL, NO_VIDEO_START_TIMEOUT, STARTUP_KEYFRAME_REFRESH_INTERVAL,
+        should_wait_for_startup_keyframe, DisplayStartupController, DisplayStartupFrameAction,
+        NoVideoStartupAction, NoVideoStartupWatchdog, StartupKeyframeAction,
+        StartupKeyframeRecovery, NO_VIDEO_START_MAX_REFRESHES, NO_VIDEO_START_REFRESH_INTERVAL,
+        NO_VIDEO_START_TIMEOUT, STARTUP_KEYFRAME_REFRESH_INTERVAL,
     };
+    use crate::client::{DisplayActivation, DisplayMediaIntent};
     use crate::input::{MOUSE_TYPE_DOWN, MOUSE_TYPE_MOVE_RELATIVE};
     use hbb_common::message_proto::{message, KeyEvent, Message, MouseEvent, PointerDeviceEvent};
     use hbb_common::tokio::time::{Duration, Instant};
@@ -3859,6 +4278,132 @@ mod tests {
         assert_eq!(
             watchdog.tick(true, true, false, start + NO_VIDEO_START_TIMEOUT),
             NoVideoStartupAction::None
+        );
+    }
+
+    fn media_intent(generation: u64, displays: &[(usize, u64)]) -> DisplayMediaIntent {
+        DisplayMediaIntent {
+            logical_session_generation: 1,
+            aggregate_generation: generation,
+            displays: displays
+                .iter()
+                .map(|(display, activation_generation)| DisplayActivation {
+                    display: *display,
+                    generation: *activation_generation,
+                    view_count: 1,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn first_frame_on_a_does_not_stop_b_startup_watchdog() {
+        let start = Instant::now();
+        let mut startup = DisplayStartupController::default();
+        startup.reconcile(&media_intent(1, &[(0, 1), (1, 1)]));
+
+        assert!(matches!(
+            startup.observe_frame(0, 7, 1, Some((100, 1, true)), start),
+            DisplayStartupFrameAction::Accept {
+                first_for_display: true,
+                ..
+            }
+        ));
+        assert!(startup.tick(true, true, start).is_empty());
+        let actions = startup.tick(true, true, start + NO_VIDEO_START_TIMEOUT);
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].0, 1);
+        assert!(matches!(
+            actions[0].1,
+            NoVideoStartupAction::Refresh { attempt: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn a_keyframe_does_not_clear_b_startup_recovery() {
+        let start = Instant::now();
+        let mut startup = DisplayStartupController::default();
+        startup.reconcile(&media_intent(1, &[(0, 1), (1, 1)]));
+
+        assert!(matches!(
+            startup.observe_frame(1, 8, 2, Some((100, 1, false)), start),
+            DisplayStartupFrameAction::Refresh { attempt: 1, .. }
+        ));
+        assert!(matches!(
+            startup.observe_frame(0, 7, 1, Some((100, 1, true)), start),
+            DisplayStartupFrameAction::Accept { .. }
+        ));
+        assert_eq!(
+            startup.observe_frame(
+                1,
+                8,
+                3,
+                Some((100, 1, false)),
+                start + STARTUP_KEYFRAME_REFRESH_INTERVAL / 2,
+            ),
+            DisplayStartupFrameAction::WaitForKeyframe
+        );
+    }
+
+    #[test]
+    fn retained_activation_keeps_its_startup_progress_across_newer_intent() {
+        let start = Instant::now();
+        let mut startup = DisplayStartupController::default();
+        startup.reconcile(&media_intent(41, &[(0, 3), (1, 5)]));
+        startup.observe_frame(1, 8, 1, Some((100, 1, true)), start);
+
+        let retired = startup.reconcile(&media_intent(42, &[(0, 3), (1, 5), (2, 1)]));
+
+        assert!(retired.is_empty());
+        assert!(startup.displays.get(&1).unwrap().first_frame_received);
+        assert!(!startup.displays.get(&2).unwrap().first_frame_received);
+    }
+
+    #[test]
+    fn readded_display_gets_fresh_startup_state_and_rejects_old_activation() {
+        let start = Instant::now();
+        let mut startup = DisplayStartupController::default();
+        startup.reconcile(&media_intent(1, &[(1, 4)]));
+        startup.observe_frame(1, 8, 1, Some((100, 1, true)), start);
+        assert_eq!(startup.reconcile(&media_intent(2, &[])), vec![1]);
+        startup.reconcile(&media_intent(3, &[(1, 5)]));
+
+        let state = startup.displays.get(&1).unwrap();
+        assert_eq!(state.activation_generation, 5);
+        assert!(!state.first_frame_received);
+        assert_eq!(state.stream_id, 0);
+    }
+
+    #[test]
+    fn delayed_older_stream_cannot_replace_the_current_display_stream() {
+        let start = Instant::now();
+        let mut startup = DisplayStartupController::default();
+        startup.reconcile(&media_intent(1, &[(1, 4)]));
+        assert!(matches!(
+            startup.observe_frame(1, 9, 1, Some((100, 1, true)), start),
+            DisplayStartupFrameAction::Accept { .. }
+        ));
+
+        assert_eq!(
+            startup.observe_frame(
+                1,
+                8,
+                20,
+                Some((100, 1, true)),
+                start + Duration::from_millis(1),
+            ),
+            DisplayStartupFrameAction::RejectStaleStream {
+                expected_stream_id: 9,
+            }
+        );
+        let state = startup.displays.get(&1).unwrap();
+        assert_eq!(state.stream_id, 9);
+        assert_eq!(
+            state
+                .render_stream_id
+                .load(std::sync::atomic::Ordering::Acquire),
+            9
         );
     }
 }

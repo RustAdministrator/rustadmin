@@ -49,8 +49,9 @@ use uuid::Uuid;
 use crate::client::io_loop::Remote;
 use crate::client::{
     check_if_retry, handle_hash, handle_login_error, handle_login_from_ui, handle_test_delay,
-    input_os_password, send_mouse, send_pointer_device_event, show_sign_in, FileManager, Key,
-    LoginConfigHandler, QualityStatus, KEY_MAP,
+    input_os_password, send_mouse, send_pointer_device_event, show_sign_in, DisplayMediaIntent,
+    FileManager, Key, LoginConfigHandler, QualityStatus, RenderFrameContext, RenderFrameOutcome,
+    KEY_MAP,
 };
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::common::GrabState;
@@ -2342,7 +2343,17 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn update_block_input_state(&self, on: bool);
     fn job_progress(&self, id: i32, file_num: i32, speed: f64, finished_size: f64);
     fn adapt_size(&self);
-    fn on_rgba(&self, display: usize, rgba: &mut scrap::ImageRgb);
+    fn on_rgba(
+        &self,
+        context: RenderFrameContext,
+        display: usize,
+        rgba: &mut scrap::ImageRgb,
+    ) -> RenderFrameOutcome;
+    fn display_media_intent(&self) -> Option<DisplayMediaIntent> {
+        None
+    }
+    fn begin_connection_runtime(&self, _connection_generation: u32) {}
+    fn tick_render_liveness(&self) {}
     fn msgbox(&self, msgtype: &str, title: &str, text: &str, link: &str, retry: bool);
     #[cfg(any(target_os = "android", target_os = "ios"))]
     fn clipboard(&self, content: String);
@@ -2359,7 +2370,12 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
         all(feature = "vram", feature = "flutter"),
         all(target_os = "android", feature = "mediacodec")
     ))]
-    fn on_texture(&self, display: usize, texture: *mut c_void);
+    fn on_texture(
+        &self,
+        context: RenderFrameContext,
+        display: usize,
+        texture: *mut c_void,
+    ) -> RenderFrameOutcome;
     fn set_multiple_windows_session(&self, sessions: Vec<WindowsSession>);
     fn set_current_display(&self, disp_idx: i32);
     #[cfg(feature = "flutter")]
