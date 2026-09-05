@@ -49,7 +49,7 @@ class AndroidKeyToUsbHidTest {
     }
 
     @Test
-    fun synthesizesShiftAroundSlashForQuestionMark() {
+    fun reportsShiftWithSlashForQuestionMarkWithoutOwningState() {
         val router = AndroidPhysicalKeyRouter()
 
         val events = buildList {
@@ -71,10 +71,16 @@ class AndroidKeyToUsbHidTest {
 
         assertEquals(
             listOf(
-                RemoteKeyboardEvent.PhysicalKey(0xe1, true, true),
-                RemoteKeyboardEvent.PhysicalKey(0x38, true),
-                RemoteKeyboardEvent.PhysicalKey(0x38, false),
-                RemoteKeyboardEvent.PhysicalKey(0xe1, false, true),
+                RemoteKeyboardEvent.PhysicalKey(
+                    0x38,
+                    true,
+                    modifierUsages = listOf(0xe1),
+                ),
+                RemoteKeyboardEvent.PhysicalKey(
+                    0x38,
+                    false,
+                    modifierUsages = listOf(0xe1),
+                ),
             ),
             events,
         )
@@ -118,8 +124,16 @@ class AndroidKeyToUsbHidTest {
         assertEquals(
             listOf(
                 RemoteKeyboardEvent.PhysicalKey(0xe1, true),
-                RemoteKeyboardEvent.PhysicalKey(0x38, true),
-                RemoteKeyboardEvent.PhysicalKey(0x38, false),
+                RemoteKeyboardEvent.PhysicalKey(
+                    0x38,
+                    true,
+                    modifierUsages = listOf(0xe1),
+                ),
+                RemoteKeyboardEvent.PhysicalKey(
+                    0x38,
+                    false,
+                    modifierUsages = listOf(0xe1),
+                ),
                 RemoteKeyboardEvent.PhysicalKey(0xe1, false),
             ),
             events,
@@ -127,22 +141,18 @@ class AndroidKeyToUsbHidTest {
     }
 
     @Test
-    fun releasesPressedKeysAndSyntheticModifiersOnKeyboardClose() {
+    fun preservesRepeatAsRepeatedDownWithoutSyntheticUp() {
         val router = AndroidPhysicalKeyRouter()
-        router.route(
-            KeyEvent.ACTION_DOWN,
-            KeyEvent.KEYCODE_SLASH,
-            KeyEvent.META_SHIFT_ON,
-        )
 
         assertEquals(
-            listOf(
-                RemoteKeyboardEvent.PhysicalKey(0x38, false),
-                RemoteKeyboardEvent.PhysicalKey(0xe1, false, true),
+            listOf(RemoteKeyboardEvent.PhysicalKey(0x04, true, repeat = true)),
+            router.route(
+                KeyEvent.ACTION_DOWN,
+                KeyEvent.KEYCODE_A,
+                0,
+                repeatCount = 2,
             ),
-            router.releaseAll(),
         )
-        assertEquals(emptyList<RemoteKeyboardEvent.PhysicalKey>(), router.releaseAll())
     }
 
     @Test
@@ -153,7 +163,7 @@ class AndroidKeyToUsbHidTest {
     }
 
     @Test
-    fun normalizesImeLayoutMetadataBeforeItLeavesAndroid() {
+    fun normalizesInputLayoutMetadataBeforeItLeavesAndroid() {
         assertEquals(
             "ru-RU",
             AndroidInputLayoutMetadata.canonicalizeLanguageTag("ru_RU"),
@@ -172,4 +182,22 @@ class AndroidKeyToUsbHidTest {
             AndroidInputLayoutMetadata.sanitizeLayoutType("qwerty bad!"),
         )
     }
+
+    @Test
+    fun committedTextLimitUsesUtf8BytesWithoutSplittingCodePoints() {
+        val exact = "😀".repeat(512)
+        assertEquals(exact, AndroidCommittedTextBounds.truncateUtf8(exact))
+
+        val oversized = "€".repeat(683)
+        val bounded = AndroidCommittedTextBounds.truncateUtf8(oversized)
+        assertEquals(2046, bounded.toByteArray(Charsets.UTF_8).size)
+        assertEquals(682, bounded.length)
+
+        val splitCandidate = "a".repeat(2047) + "😀"
+        assertEquals(
+            "a".repeat(2047),
+            AndroidCommittedTextBounds.truncateUtf8(splitCandidate),
+        )
+    }
+
 }

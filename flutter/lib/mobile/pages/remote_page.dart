@@ -25,6 +25,7 @@ import '../../common/widgets/overlay.dart';
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/remote_input.dart';
 import '../../models/input_model.dart';
+import '../../models/keyboard_intent.dart';
 import '../../models/android_render_target_controller.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
@@ -263,6 +264,7 @@ class _RemotePageState extends State<RemotePage>
   Future<void> _refreshMobileInputSettings() async {
     try {
       final settings = await _settingsRepository.readSession();
+      await gFFI.inputModel.setKeyboardInputMode(settings.keyboardInputMode);
       if (mounted &&
           (settings.toolbarTransparency != _toolbarTransparencySettings ||
               settings.cursorInertia != _cursorInertiaSettings ||
@@ -359,6 +361,13 @@ class _RemotePageState extends State<RemotePage>
       unawaited(_reconnectController.enterForeground());
     } else if (state == AppLifecycleState.paused) {
       unawaited(
+        gFFI.inputModel.resetKeyboard(
+          KeyboardResetReason.applicationBackground,
+          invalidatePending: true,
+          allowBlockedReleases: true,
+        ),
+      );
+      unawaited(
         _reconnectController.enterBackground(
           closeSession: isIOS,
           sessionClosed: gFFI.closed,
@@ -393,6 +402,13 @@ class _RemotePageState extends State<RemotePage>
     }
 
     if (!visible) {
+      unawaited(
+        gFFI.inputModel.resetKeyboard(
+          KeyboardResetReason.keyboardHide,
+          invalidatePending: true,
+          allowBlockedReleases: true,
+        ),
+      );
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
       unawaited(_setAndroidRemoteKeyboardInput(false));
       // [pi.version.isNotEmpty] -> check ready or not, avoid login without soft-keyboard
@@ -1062,6 +1078,11 @@ class _RemotePageState extends State<RemotePage>
                 ? null
                 : (value) async {
                     if (value == null) return;
+                    await gFFI.inputModel.resetKeyboard(
+                      KeyboardResetReason.inputModeChange,
+                      invalidatePending: true,
+                      allowBlockedReleases: true,
+                    );
                     await bind.sessionSetKeyboardMode(
                       sessionId: gFFI.sessionId,
                       value: value,
@@ -1088,6 +1109,7 @@ class _RemotePageState extends State<RemotePage>
                           if (value == null) return;
                           final keyboardWasOpen = _showEdit;
                           await _setAndroidRemoteKeyboardInput(false);
+                          await gFFI.inputModel.setKeyboardInputMode(value);
                           await _settingsRepository.storeKeyboardInputMode(
                             value,
                           );
@@ -1502,14 +1524,18 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
       isMac: isMac,
       showWindowsLinuxKeys: isWin || isLinux,
       quickKeyOrder: widget.quickKeyOrder,
-      onCtrl: () => modifiers.tap(MobileModifierKey.ctrl),
-      onAlt: () => modifiers.tap(MobileModifierKey.alt),
-      onShift: () => modifiers.tap(MobileModifierKey.shift),
-      onCommand: () => modifiers.tap(MobileModifierKey.command),
-      onCtrlDoubleTap: () => modifiers.lock(MobileModifierKey.ctrl),
-      onAltDoubleTap: () => modifiers.lock(MobileModifierKey.alt),
-      onShiftDoubleTap: () => modifiers.lock(MobileModifierKey.shift),
-      onCommandDoubleTap: () => modifiers.lock(MobileModifierKey.command),
+      onCtrl: () => inputModel.tapMobileModifier(MobileModifierKey.ctrl),
+      onAlt: () => inputModel.tapMobileModifier(MobileModifierKey.alt),
+      onShift: () => inputModel.tapMobileModifier(MobileModifierKey.shift),
+      onCommand: () => inputModel.tapMobileModifier(MobileModifierKey.command),
+      onCtrlDoubleTap: () =>
+          inputModel.lockMobileModifier(MobileModifierKey.ctrl),
+      onAltDoubleTap: () =>
+          inputModel.lockMobileModifier(MobileModifierKey.alt),
+      onShiftDoubleTap: () =>
+          inputModel.lockMobileModifier(MobileModifierKey.shift),
+      onCommandDoubleTap: () =>
+          inputModel.lockMobileModifier(MobileModifierKey.command),
       onFunctionKeys: () {
         setState(() {
           _fn = !_fn;

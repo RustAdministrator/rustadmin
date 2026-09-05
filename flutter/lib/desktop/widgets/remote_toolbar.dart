@@ -29,6 +29,7 @@ import 'package:window_size/window_size.dart' as window_size;
 
 import '../../common.dart';
 import '../../models/model.dart';
+import '../../models/keyboard_intent.dart';
 import '../../models/platform_model.dart';
 import '../../common/shared_state.dart';
 import './popup_menu.dart';
@@ -3037,6 +3038,11 @@ class _KeyboardMenu extends StatelessWidget {
       final enabled = !ffi.ffiModel.viewOnly;
       onChanged(String? value) async {
         if (value == null) return;
+        await ffi.inputModel.resetKeyboard(
+          KeyboardResetReason.inputModeChange,
+          invalidatePending: true,
+          allowBlockedReleases: true,
+        );
         await bind.sessionSetKeyboardMode(
             sessionId: ffi.sessionId, value: value);
         await ffi.inputModel.updateKeyboardMode();
@@ -3139,6 +3145,11 @@ class _KeyboardMenu extends StatelessWidget {
         onChanged: enabled
             ? (v) async {
                 if (v != null) {
+                  await ffi.inputModel.resetKeyboard(
+                    KeyboardResetReason.inputModeChange,
+                    invalidatePending: true,
+                    allowBlockedReleases: true,
+                  );
                   await stateGlobal.setInputSource(ffi.sessionId, v);
                   await ffi.ffiModel.checkDesktopKeyboardMode();
                   await ffi.inputModel.updateKeyboardMode();

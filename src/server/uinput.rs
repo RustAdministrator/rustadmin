@@ -426,7 +426,7 @@ pub mod service {
                         if keyboard.emit(&[shift_down]).is_ok() {
                             shift_pressed = true;
                         } else {
-                            log::warn!("input_text_wayland: failed to press Shift for '{}'", c);
+                            log::warn!("input_text_wayland: failed to press Shift for character");
                         }
                     }
                     let key_down = InputEvent::new(EventType::KEY, evdev_key.code(), 1);
@@ -476,7 +476,10 @@ pub mod service {
                         let shift_down =
                             InputEvent::new(EventType::KEY, evdev::Key::KEY_LEFTSHIFT.code(), 1);
                         if let Err(e) = keyboard.emit(&[shift_down]) {
-                            log::warn!("input_char_wayland_key_event: failed to press Shift for '{}': {:?}", chr, e);
+                            log::warn!(
+                                "input_char_wayland_key_event: failed to press Shift: {:?}",
+                                e
+                            );
                         }
                     }
                     let key_down = InputEvent::new(EventType::KEY, evdev_key.code(), 1);
@@ -489,7 +492,10 @@ pub mod service {
                         let shift_up =
                             InputEvent::new(EventType::KEY, evdev::Key::KEY_LEFTSHIFT.code(), 0);
                         if let Err(e) = keyboard.emit(&[shift_up]) {
-                            log::warn!("input_char_wayland_key_event: failed to release Shift for '{}': {:?}", chr, e);
+                            log::warn!(
+                                "input_char_wayland_key_event: failed to release Shift: {:?}",
+                                e
+                            );
                         }
                     }
                 }
@@ -556,13 +562,11 @@ pub mod service {
 
     pub fn map_key(key: &enigo::Key) -> ResultType<(evdev::Key, bool)> {
         if let Some(k) = KEY_MAP.get(&key) {
-            log::trace!("mapkey matched in KEY_MAP, evdev={:?}", &k);
             return Ok((k.clone(), false));
         } else {
             match key {
                 enigo::Key::Layout(c) => {
                     if let Some((k, is_shift)) = KEY_MAP_LAYOUT.get(&c) {
-                        log::trace!("mapkey Layout matched, evdev={:?}", k);
                         return Ok((k.clone(), is_shift.clone()));
                     }
                 }
@@ -575,7 +579,7 @@ pub mod service {
                 _ => {}
             }
         }
-        bail!("Failed to map key {:?}", &key);
+        bail!("Failed to map keyboard input");
     }
 
     async fn ipc_send_data(stream: &mut Connection, data: &Data) {
@@ -589,10 +593,10 @@ pub mod service {
     ) {
         let data_desc = match data {
             DataKeyboard::Sequence(seq) => format!("Sequence(len={})", seq.len()),
-            DataKeyboard::KeyDown(Key::Layout(_))
-            | DataKeyboard::KeyUp(Key::Layout(_))
-            | DataKeyboard::KeyClick(Key::Layout(_)) => "Layout(<redacted>)".to_string(),
-            _ => format!("{:?}", data),
+            DataKeyboard::KeyDown(_) => "KeyDown(<redacted>)".to_string(),
+            DataKeyboard::KeyUp(_) => "KeyUp(<redacted>)".to_string(),
+            DataKeyboard::KeyClick(_) => "KeyClick(<redacted>)".to_string(),
+            DataKeyboard::GetKeyState(_) => "GetKeyState(<redacted>)".to_string(),
         };
         log::trace!("handle_keyboard received: {}", data_desc);
         match data {
@@ -606,10 +610,7 @@ pub mod service {
             }
             DataKeyboard::KeyDown(enigo::Key::Raw(code)) => {
                 if *code < 8 {
-                    log::error!(
-                        "Invalid Raw keycode {} (must be >= 8 due to XKB offset), skipping",
-                        code
-                    );
+                    log::error!("Invalid raw keycode below XKB minimum, skipping");
                 } else {
                     let down_event = InputEvent::new(EventType::KEY, *code - 8, 1);
                     allow_err!(keyboard.emit(&[down_event]));
@@ -617,10 +618,7 @@ pub mod service {
             }
             DataKeyboard::KeyUp(enigo::Key::Raw(code)) => {
                 if *code < 8 {
-                    log::error!(
-                        "Invalid Raw keycode {} (must be >= 8 due to XKB offset), skipping",
-                        code
-                    );
+                    log::error!("Invalid raw keycode below XKB minimum, skipping");
                 } else {
                     let up_event = InputEvent::new(EventType::KEY, *code - 8, 0);
                     allow_err!(keyboard.emit(&[up_event]));
