@@ -345,16 +345,12 @@ class SessionHandle<T> {
         await remoteClose;
       }
       try {
-        await _cancelSubscription();
+        await _eventTail;
       } finally {
         try {
-          await _eventTail;
+          await cleanup();
         } finally {
-          try {
-            await cleanup();
-          } finally {
-            _cleanupFinished = true;
-          }
+          _cleanupFinished = true;
         }
       }
     } finally {
@@ -366,9 +362,16 @@ class SessionHandle<T> {
         }
       } finally {
         try {
-          await _releasePlatformLeaseOnce();
+          // Cancellation of FRB's async* stream may need a native event to
+          // wake its ReceivePort. Close native first; beginClose already
+          // rejects stale callbacks, and replacement still waits for cancel.
+          await _cancelSubscription();
         } finally {
-          _lifecycle.closed(closeGeneration);
+          try {
+            await _releasePlatformLeaseOnce();
+          } finally {
+            _lifecycle.closed(closeGeneration);
+          }
         }
       }
     }

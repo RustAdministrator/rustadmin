@@ -1979,6 +1979,57 @@ pub fn session_start_with_displays_(
 fn try_send_close_event(event_stream: &Option<StreamSink<EventToUI>>) {
     if let Some(stream) = &event_stream {
         stream.add(EventToUI::Event("close".to_owned()));
+        // The application marker is not the FRB stream terminator. Without
+        // this, Dart's async* subscription can wait forever on a quiet port.
+        stream.close();
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod event_stream_close_tests {
+    use super::*;
+    use flutter_rust_bridge::{
+        ffi::io::ffi::{DartCObject, DartCObjectType},
+        rust2dart::Rust2Dart,
+        store_dart_post_cobject,
+    };
+    use std::cell::RefCell;
+
+    const TEST_PORT: i64 = -137;
+    thread_local! {
+        static ACTIONS: RefCell<Vec<i32>> = RefCell::new(Vec::new());
+    }
+
+    unsafe extern "C" fn record_post(port: i64, message: *mut DartCObject) -> bool {
+        if port != TEST_PORT || message.is_null() {
+            return false;
+        }
+        // Read only the bridge envelope tag; no application payload is logged.
+        let message = &*message;
+        if message.ty != DartCObjectType::DartArray {
+            return false;
+        }
+        let array = message.value.as_array;
+        if array.length == 0 || array.values.is_null() || (*array.values).is_null() {
+            return false;
+        }
+        let action = &**array.values;
+        if action.ty != DartCObjectType::DartInt32 {
+            return false;
+        }
+        ACTIONS.with(|actions| actions.borrow_mut().push(action.value.as_int32));
+        true
+    }
+
+    #[test]
+    fn application_close_is_followed_by_bridge_stream_termination() {
+        unsafe { store_dart_post_cobject(record_post) };
+        ACTIONS.with(|actions| actions.borrow_mut().clear());
+        let stream = StreamSink::new(Rust2Dart::new(TEST_PORT));
+        try_send_close_event(&Some(stream));
+        ACTIONS.with(|actions| assert_eq!(*actions.borrow(), [0, 2]));
+        try_send_close_event(&None);
+        ACTIONS.with(|actions| assert_eq!(*actions.borrow(), [0, 2]));
     }
 }
 
