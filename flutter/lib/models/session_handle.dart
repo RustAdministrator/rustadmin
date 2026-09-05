@@ -56,6 +56,7 @@ class SessionHandle<T> {
   Future<SessionStartLease<T>?>? _startFuture;
   Future<void>? _closeFuture;
   Future<void>? _remoteCloseFuture;
+  Future<void>? _eventCloseFuture;
   Future<void> _eventTail = Future<void>.value();
   StreamSubscription<T>? _subscription;
   int? _platformLeaseGeneration;
@@ -77,6 +78,8 @@ class SessionHandle<T> {
   bool accepts(int generation) => _lifecycle.accepts(generation);
 
   Future<void> waitForClose() async {
+    final eventClose = _eventCloseFuture;
+    if (eventClose != null) await eventClose;
     final remoteClose = _remoteCloseFuture;
     if (remoteClose != null) await remoteClose;
     final close = _closeFuture;
@@ -177,6 +180,40 @@ class SessionHandle<T> {
 
   void connected(int generation) => _lifecycle.connected(generation);
 
+  Future<void> bindEventStream(
+    SessionStartLease<T> lease, {
+    required bool Function(T event) isCloseEvent,
+    required Future<void> Function(T event) onEvent,
+    required void Function(Object error, StackTrace stackTrace) onError,
+  }) async {
+    var ended = false;
+    void finish() {
+      if (ended) return;
+      ended = true;
+      unawaited(remoteClosedAfterEvents(lease.generation).catchError(onError));
+    }
+
+    final subscription = lease.events.listen(
+      (event) {
+        if (ended || !accepts(lease.generation)) return;
+        if (isCloseEvent(event)) {
+          finish();
+        } else {
+          unawaited(
+            dispatchEvent(
+              lease.generation,
+              () => onEvent(event),
+              onError: onError,
+            ),
+          );
+        }
+      },
+      onDone: finish,
+      onError: onError,
+    );
+    await bindSubscription(lease.generation, subscription);
+  }
+
   Future<void> dispatchEvent(
     int generation,
     Future<void> Function() dispatch, {
@@ -193,10 +230,18 @@ class SessionHandle<T> {
     return _eventTail;
   }
 
-  Future<void> remoteClosedAfterEvents(int generation) async {
-    if (!accepts(generation)) return;
-    await dispatchEvent(generation, () async {});
-    await remoteClosed(generation);
+  Future<void> remoteClosedAfterEvents(int generation) {
+    final active = _eventCloseFuture;
+    if (active != null) return active;
+    if (!accepts(generation)) return Future<void>.value();
+    late final Future<void> future;
+    future = dispatchEvent(generation, () async {})
+        .then((_) => remoteClosed(generation))
+        .whenComplete(() {
+          if (identical(_eventCloseFuture, future)) _eventCloseFuture = null;
+        });
+    _eventCloseFuture = future;
+    return future;
   }
 
   Future<void> remoteClosed(int generation) {

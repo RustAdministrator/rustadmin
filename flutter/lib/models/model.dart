@@ -4076,6 +4076,7 @@ class PredefinedCursor {
 
 class CursorModel with ChangeNotifier {
   ui.Image? _image;
+  int _imageEpoch = 0;
   final _images = <String, Tuple3<ui.Image, double, double>>{};
   CursorData? _cache;
   final _cacheMap = <String, CursorData>{};
@@ -4554,11 +4555,22 @@ class CursorModel with ChangeNotifier {
   }
 
   disposeImages() {
-    _images.forEach((_, v) => v.item1.dispose());
+    _imageEpoch++;
+    final images = _images.values.map((v) => v.item1).toList();
     _images.clear();
+    _image = null;
+    _cache = null;
+    _cacheMap.clear();
+    notifyListeners();
+    SchedulerBinding.instance.addPostFrameCallback((_) {
+      for (final image in images) {
+        image.dispose();
+      }
+    });
   }
 
   Future<void> updateCursorShape(CursorShapeSessionEvent event) async {
+    final imageEpoch = _imageEpoch;
     final id = event.id;
     final hotx = event.hotx;
     final hoty = event.hoty;
@@ -4570,37 +4582,39 @@ class CursorModel with ChangeNotifier {
     if (image == null) {
       return;
     }
-    if (await _updateCache(rgba, image, id, hotx, hoty, width, height)) {
-      _images[id]?.item1.dispose();
-      _images[id] = Tuple3(image, hotx, hoty);
+    if (imageEpoch != _imageEpoch) {
+      image.dispose();
+      return;
     }
+    _updateCache(rgba, id, hotx, hoty, width, height);
+    final previous = _images[id]?.item1;
+    _images[id] = Tuple3(image, hotx, hoty);
 
     // Update last cursor data.
     // Do not use the previous `image` and `id`, because `_id` may be changed.
     _updateCurData();
+    if (previous != null) {
+      SchedulerBinding.instance.addPostFrameCallback((_) => previous.dispose());
+    }
   }
 
-  Future<bool> _updateCache(
+  void _updateCache(
     Uint8List rgba,
-    ui.Image image,
     String id,
     double hotx,
     double hoty,
     int w,
     int h,
-  ) async {
-    Uint8List? data;
+  ) {
+    final Uint8List data;
     img2.Image imgOrigin = img2.Image.fromBytes(
         width: w, height: h, bytes: rgba.buffer, order: img2.ChannelOrder.rgba);
     if (isWindows) {
       data = imgOrigin.getBytes(order: img2.ChannelOrder.bgra);
     } else {
-      ByteData? imgBytes =
-          await image.toByteData(format: ui.ImageByteFormat.png);
-      if (imgBytes == null) {
-        return false;
-      }
-      data = imgBytes.buffer.asUint8List();
+      // Encode from the existing pixels; session teardown must not wait for
+      // a raster-thread readback while the mobile application is backgrounded.
+      data = Uint8List.fromList(img2.encodePng(imgOrigin));
     }
     final cache = CursorData(
       peerId: peerId,
@@ -4614,7 +4628,6 @@ class CursorModel with ChangeNotifier {
       height: h,
     );
     _cacheMap[id] = cache;
-    return true;
   }
 
   bool _updateCurData() {
@@ -5690,7 +5703,8 @@ class FFI {
     }
 
     final isNewPeer = tabWindowId == null;
-    final lease = await _sessionHandle.start(
+    final sessionHandle = _sessionHandle;
+    final lease = await sessionHandle.start(
       acquirePlatformLease: isAndroid
           ? () async {
               final coordinator = AndroidVpnSessionCoordinator.instance;
@@ -5781,13 +5795,12 @@ class FFI {
     );
     if (lease == null) return;
     final sessionGeneration = lease.generation;
-    final stream = lease.events;
 
     if (isWeb) {
       platformFFI.setRgbaCallback((int display, Uint8List data) {
         final frame = Uint8List.fromList(data);
         unawaited(
-          _sessionHandle.dispatchEvent(
+          sessionHandle.dispatchEvent(
             sessionGeneration,
             () async {
               await onEvent2UIRgba();
@@ -5801,7 +5814,7 @@ class FFI {
         );
       });
       this.id = id;
-      _sessionHandle.connected(sessionGeneration);
+      sessionHandle.connected(sessionGeneration);
       return;
     }
 
@@ -5828,14 +5841,13 @@ class FFI {
     imageModel.updateUserTextureRender();
     final hasGpuTextureRender = bind.mainHasGpuTextureRender();
     final SimpleWrapper<bool> isToNewWindowNotified = SimpleWrapper(false);
-    var streamCloseQueued = false;
     void reportEventError(Object error, StackTrace stackTrace) {
       debugPrint('Session event dispatch failed: $error');
       debugPrintStack(stackTrace: stackTrace);
     }
 
     Future<void> dispatchSessionEvent(Future<void> Function() dispatch) =>
-        _sessionHandle.dispatchEvent(
+        sessionHandle.dispatchEvent(
           sessionGeneration,
           dispatch,
           onError: reportEventError,
@@ -5904,30 +5916,28 @@ class FFI {
       }
     }
 
-    final subscription = stream.listen((message) {
-      if (streamCloseQueued || !_sessionHandle.accepts(sessionGeneration)) {
-        return;
-      }
-      if (message is EventToUI_Event && message.field0 == 'close') {
-        streamCloseQueued = true;
-        unawaited(_sessionHandle.remoteClosedAfterEvents(sessionGeneration));
-        debugPrint('Exit session event loop');
-        return;
-      }
-      if (tabWindowId != null && !isToNewWindowNotified.value) {
-        isToNewWindowNotified.value = true;
-        unawaited(dispatchSessionEvent(transferSessionToTab));
-      }
-      unawaited(dispatchSessionEvent(() => handleSessionMessage(message)));
-    });
-    await _sessionHandle.bindSubscription(sessionGeneration, subscription);
-    if (!_sessionHandle.accepts(sessionGeneration)) return;
+    await sessionHandle.bindEventStream(
+      lease,
+      isCloseEvent: (message) =>
+          message is EventToUI_Event && message.field0 == 'close',
+      onEvent: (message) async {
+        if (tabWindowId != null && !isToNewWindowNotified.value) {
+          isToNewWindowNotified.value = true;
+          await transferSessionToTab();
+        }
+        if (sessionHandle.accepts(sessionGeneration)) {
+          await handleSessionMessage(message);
+        }
+      },
+      onError: reportEventError,
+    );
+    if (!sessionHandle.accepts(sessionGeneration)) return;
     // every instance will bind a stream
     this.id = id;
-    _sessionHandle.connected(sessionGeneration);
+    sessionHandle.connected(sessionGeneration);
     if (cachedPeerData != null) {
       Future.delayed(Duration.zero, () {
-        if (!_sessionHandle.accepts(sessionGeneration)) return;
+        if (!sessionHandle.accepts(sessionGeneration)) return;
         unawaited(
           dispatchSessionEvent(
             () => handleCachedSessionData(

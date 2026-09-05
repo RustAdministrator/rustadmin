@@ -837,14 +837,6 @@ impl FlutterHandler {
         }
     }
 
-    pub(crate) fn close_event_stream(&self, session_id: SessionID) {
-        // to-do: Make sure the following logic is correct.
-        // No need to remove the display handler, because it will be removed when the connection is closed.
-        if let Some(session) = self.session_handlers.write().unwrap().get_mut(&session_id) {
-            try_send_close_event(&session.event_stream);
-        }
-    }
-
     fn make_displays_msg(displays: &Vec<DisplayInfo>) -> String {
         let mut msg_vec = Vec::new();
         for ref d in displays.iter() {
@@ -2761,14 +2753,23 @@ pub mod sessions {
 
     #[inline]
     pub fn remove_session_by_session_id(id: &SessionID) -> Option<FlutterSession> {
+        remove_session_with_notifier(id, |handler| try_send_close_event(&handler.event_stream))
+    }
+
+    fn remove_session_with_notifier(
+        id: &SessionID,
+        notify: impl FnOnce(&SessionHandler),
+    ) -> Option<FlutterSession> {
         let mut remove_peer_key = None;
         let mut display_reconcile = None;
+        let mut removed_handler = None;
         let removed_session = {
             let mut sessions = SESSIONS.write().unwrap();
             for (peer_key, s) in sessions.iter_mut() {
                 let mut handlers = s.ui_handler.session_handlers.write().unwrap();
                 let previous = aggregate_active_display_intents(&handlers);
-                if handlers.remove(id).is_some() {
+                if let Some(handler) = handlers.remove(id) {
+                    removed_handler = Some(handler);
                     if handlers.is_empty() {
                         remove_peer_key = Some(peer_key.clone());
                     } else {
@@ -2783,6 +2784,12 @@ pub mod sessions {
                 .as_ref()
                 .and_then(|peer_key| sessions.remove(peer_key))
         };
+
+        // Notify through the detached handler while its sink is still alive.
+        // This is required even when other views keep the peer session alive.
+        if let Some(handler) = removed_handler {
+            notify(&handler);
+        }
 
         if let Some((session, display_delta)) = display_reconcile {
             apply_display_demand_delta(&session, &display_delta);
@@ -2812,6 +2819,57 @@ pub mod sessions {
         }
         // Session not found
         false
+    }
+
+    #[cfg(test)]
+    mod close_tests {
+        use super::*;
+
+        #[test]
+        fn removed_views_are_notified_once_including_the_last_view() {
+            let first = SessionID::new_v4();
+            let second = SessionID::new_v4();
+            let peer_key = (format!("close-test-{first}"), ConnType::DEFAULT_CONN);
+            let session: FlutterSession = Arc::new(Session::default());
+            {
+                let mut handlers = session.ui_handler.session_handlers.write().unwrap();
+                for (id, display) in [(first, 0), (second, 1)] {
+                    let mut handler = SessionHandler::default();
+                    handler.display_intent.set_wire_displays(&[display]);
+                    handlers.insert(id, handler);
+                }
+            }
+            SESSIONS
+                .write()
+                .unwrap()
+                .insert(peer_key.clone(), session.clone());
+            let mut notifications = Vec::new();
+
+            assert!(remove_session_with_notifier(&first, |handler| {
+                assert!(!session
+                    .ui_handler
+                    .session_handlers
+                    .read()
+                    .unwrap()
+                    .contains_key(&first));
+                notifications.push(handler.display_intent.displays.clone());
+            })
+            .is_none());
+            assert!(get_session_by_session_id(&second).is_some());
+            assert!(remove_session_with_notifier(&first, |_| {
+                panic!("duplicate removal notified a closed view");
+            })
+            .is_none());
+
+            let last = remove_session_with_notifier(&second, |handler| {
+                assert!(!SESSIONS.read().unwrap().contains_key(&peer_key));
+                notifications.push(handler.display_intent.displays.clone());
+            })
+            .unwrap();
+            assert!(Arc::ptr_eq(&last, &session));
+            assert_eq!(notifications, vec![vec![0], vec![1]]);
+            assert!(get_session_by_session_id(&second).is_none());
+        }
     }
 
     pub fn session_switch_display(is_desktop: bool, session_id: SessionID, value: Vec<i32>) {
