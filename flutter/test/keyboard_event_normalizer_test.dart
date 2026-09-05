@@ -135,6 +135,94 @@ void main() {
     expect((unicode.single as CommittedTextIntent).text, 'ф');
   });
 
+  test(
+    'direct mobile shortcut edits use HID without a legacy text fallback',
+    () {
+      const toolbar = MobileToolbarKeyboardNormalizer();
+      for (final (text, usage) in [
+        ('a', 0x04),
+        ('C', 0x06),
+        ('z', 0x1d),
+        ('1', 0x1e),
+        ('0', 0x27),
+        (' ', 0x2c),
+        ('-', 0x2d),
+        ('=', 0x2e),
+        ('[', 0x2f),
+        (']', 0x30),
+        ('\\', 0x31),
+        (';', 0x33),
+        ("'", 0x34),
+        ('`', 0x35),
+        (',', 0x36),
+        ('.', 0x37),
+        ('/', 0x38),
+      ]) {
+        final keys = toolbar.modifiedTextEdit(
+          CommittedTextIntent(
+            text: text,
+            source: KeyboardInputSource.futureIme,
+          ),
+        );
+        expect(keys, hasLength(2), reason: text);
+        expect(keys.map((key) => key.action), [
+          KeyboardIntentAction.down,
+          KeyboardIntentAction.up,
+        ]);
+        for (final key in keys) {
+          expect(
+            key.key,
+            HidKey(HidKey.keyboardUsagePage, usage),
+            reason: text,
+          );
+          expect(key.synthetic, isTrue);
+          expect(key.legacyFallbackName, isNull);
+          expect(key.textCandidate, isNull);
+        }
+      }
+    },
+  );
+
+  test('mobile modified deletion maps only single Backspace and Delete', () {
+    const toolbar = MobileToolbarKeyboardNormalizer();
+    for (final (before, after, usage) in [(1, 0, 0x2a), (0, 1, 0x4c)]) {
+      final keys = toolbar.modifiedTextEdit(
+        CommittedTextIntent(
+          text: '',
+          source: KeyboardInputSource.futureIme,
+          deleteBeforeGraphemes: before,
+          deleteAfterGraphemes: after,
+        ),
+      );
+      expect(keys, hasLength(2));
+      expect(keys.first.key, HidKey(HidKey.keyboardUsagePage, usage));
+    }
+    for (final edit in const [
+      CommittedTextIntent(text: 'ab', source: KeyboardInputSource.futureIme),
+      CommittedTextIntent(text: '日', source: KeyboardInputSource.futureIme),
+      CommittedTextIntent(text: 'é', source: KeyboardInputSource.futureIme),
+      CommittedTextIntent(text: '\n', source: KeyboardInputSource.futureIme),
+      CommittedTextIntent(
+        text: 'c',
+        source: KeyboardInputSource.futureIme,
+        deleteBeforeGraphemes: 1,
+      ),
+      CommittedTextIntent(
+        text: '',
+        source: KeyboardInputSource.futureIme,
+        deleteBeforeGraphemes: 2,
+      ),
+      CommittedTextIntent(
+        text: '',
+        source: KeyboardInputSource.futureIme,
+        deleteBeforeGraphemes: 1,
+        deleteAfterGraphemes: 1,
+      ),
+    ]) {
+      expect(toolbar.modifiedTextEdit(edit), isEmpty);
+    }
+  });
+
   test('mobile synthetic Control remains synthetic canonical state', () {
     final toolbar = MobileToolbarKeyboardNormalizer();
     final intent = toolbar.modifier(

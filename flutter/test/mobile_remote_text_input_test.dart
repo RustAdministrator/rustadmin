@@ -27,7 +27,7 @@ class _KeyboardHarness {
   }
 
   final KeyboardRoutingContext context;
-  final text = TextEditingController(text: '1111');
+  final text = MobileRemoteTextEditingController(text: '1111');
   final focus = FocusNode();
   final events = <Object>[];
   String _previous = '1111';
@@ -58,6 +58,8 @@ class _KeyboardHarness {
   );
 
   void _editingChanged() {
+    final returnBaseline = text.returnEchoBaseline;
+    if (returnBaseline != null) _previous = returnBaseline;
     final composing = text.value.composing;
     if (composing.isValid && !composing.isCollapsed) return;
     final edit = mobileCommittedTextEdit(_previous, text.text);
@@ -69,6 +71,7 @@ class _KeyboardHarness {
         source: KeyboardInputSource.futureIme,
         deleteBeforeGraphemes: edit.deleteBeforeGraphemes,
         deleteAfterGraphemes: edit.deleteAfterGraphemes,
+        allowMobileShortcut: !text.isLiteralEdit,
       ),
       context,
     );
@@ -79,6 +82,21 @@ class _KeyboardHarness {
       'VK_ENTER',
     )) {
       keyboard.handle(intent, context);
+    }
+  }
+
+  Future<void> nativeReturn(WidgetTester tester) async {
+    if (context.clientKind == KeyboardClientKind.ios) {
+      final before = text.value;
+      await tester.testTextInput.receiveAction(TextInputAction.newline);
+      // Match FlutterTextInputPlugin: action first, then its inserted newline.
+      tester.testTextInput.updateEditingValue(
+        before
+            .replaced(before.selection, '\n')
+            .copyWith(composing: TextRange.empty),
+      );
+    } else {
+      await tester.testTextInput.receiveAction(TextInputAction.done);
     }
   }
 
@@ -129,20 +147,25 @@ void main() {
           debugDefaultTargetPlatformOverride = platform;
           final harness = _KeyboardHarness(platform, mode);
           await harness.mount(tester);
-          final field = tester.widget<TextFormField>(
-            find.byType(TextFormField),
+          final field = tester.widget<EditableText>(
+            find.byWidgetPredicate((widget) => widget is EditableText),
           );
           expect(field.controller, same(harness.text));
           expect(
             tester.testTextInput.setClientArgs!['inputAction'],
-            'TextInputAction.done',
+            platform == TargetPlatform.iOS
+                ? 'TextInputAction.newline'
+                : 'TextInputAction.done',
           );
 
-          await tester.testTextInput.receiveAction(TextInputAction.done);
+          await harness.nativeReturn(tester);
           await tester.pump();
           await harness.keyboard.idle;
           expect(harness.events, _enter);
-          expect(harness.text.text, '1111');
+          expect(
+            harness.text.text,
+            platform == TargetPlatform.iOS ? '1111\n' : '1111',
+          );
           expect(harness.focus.hasFocus, isTrue);
           expect(tester.testTextInput.isVisible, isTrue);
 
@@ -152,7 +175,7 @@ void main() {
           await harness.keyboard.idle;
           expect(harness.events, _enter);
 
-          await tester.testTextInput.receiveAction(TextInputAction.done);
+          await harness.nativeReturn(tester);
           await tester.pump();
           await harness.keyboard.idle;
           expect(harness.events, [..._enter, ..._enter]);
@@ -205,7 +228,7 @@ void main() {
         await tester.pump();
         expect(harness.events, isEmpty);
 
-        await tester.testTextInput.receiveAction(TextInputAction.done);
+        await harness.nativeReturn(tester);
         await tester.pump();
         await harness.keyboard.idle;
         expect(harness.events, [('text', '日本語', 0, 0), ..._enter]);
@@ -254,19 +277,20 @@ void main() {
         ControllerKeyboardInputMode.auto,
       );
       await harness.mount(tester);
-      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await harness.nativeReturn(tester);
       await tester.pump();
+      final baseline = harness.text.text;
       tester.testTextInput.updateEditingValue(
-        const TextEditingValue(
-          text: '1111a',
-          selection: TextSelection.collapsed(offset: 5),
+        TextEditingValue(
+          text: '${baseline}a',
+          selection: TextSelection.collapsed(offset: baseline.length + 1),
         ),
       );
       await tester.pump();
       tester.testTextInput.updateEditingValue(
-        const TextEditingValue(
-          text: '1111',
-          selection: TextSelection.collapsed(offset: 4),
+        TextEditingValue(
+          text: baseline,
+          selection: TextSelection.collapsed(offset: baseline.length),
         ),
       );
       await tester.pump();
@@ -293,7 +317,7 @@ void main() {
           SyntheticModifierAction.toggle,
         );
         harness.modifier(CanonicalModifier.shift, SyntheticModifierAction.lock);
-        await tester.testTextInput.receiveAction(TextInputAction.done);
+        await harness.nativeReturn(tester);
         await tester.pump();
         await harness.keyboard.idle;
         expect(harness.events, [
@@ -320,10 +344,136 @@ void main() {
       ControllerKeyboardInputMode.auto,
     )..allowed = false;
     await harness.mount(tester);
-    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await harness.nativeReturn(tester);
     await tester.pump();
     await harness.keyboard.idle;
     expect(harness.events, isEmpty);
     await harness.unmount(tester);
+  });
+
+  testWidgets('iOS Return echo survives rebuild and duplicate native updates', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final harness = _KeyboardHarness(
+      TargetPlatform.iOS,
+      ControllerKeyboardInputMode.auto,
+    );
+    try {
+      await harness.mount(tester);
+      await tester.testTextInput.receiveAction(TextInputAction.newline);
+      await harness.mount(tester);
+      const echo = TextEditingValue(
+        text: '1111\n',
+        selection: TextSelection.collapsed(offset: 5),
+      );
+      tester.testTextInput.updateEditingValue(echo);
+      await tester.pump();
+      tester.testTextInput.updateEditingValue(echo);
+      await tester.pump();
+      await harness.keyboard.idle;
+      expect(harness.events, _enter);
+      // The next pasted newline is literal, even immediately after Return.
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '1111\n\n',
+          selection: TextSelection.collapsed(offset: 6),
+        ),
+      );
+      await tester.pump();
+      await harness.keyboard.idle;
+      expect(harness.events, [..._enter, ('text', '\n', 0, 0)]);
+    } finally {
+      await harness.unmount(tester);
+    }
+  });
+
+  testWidgets(
+    'replacing the editor controller discards a pending Return echo',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final first = _KeyboardHarness(
+        TargetPlatform.iOS,
+        ControllerKeyboardInputMode.auto,
+      );
+      final replacement = _KeyboardHarness(
+        TargetPlatform.iOS,
+        ControllerKeyboardInputMode.auto,
+      );
+      try {
+        await first.mount(tester);
+        await tester.testTextInput.receiveAction(TextInputAction.newline);
+        replacement.focus.requestFocus();
+        await replacement.mount(tester);
+        tester.testTextInput.updateEditingValue(
+          const TextEditingValue(
+            text: '1111\n',
+            selection: TextSelection.collapsed(offset: 5),
+          ),
+        );
+        await tester.pump();
+        await first.keyboard.idle;
+        await replacement.keyboard.idle;
+        expect(first.events, _enter);
+        expect(replacement.events, [('text', '\n', 0, 0)]);
+      } finally {
+        await replacement.unmount(tester);
+        first.text.dispose();
+        first.focus.dispose();
+      }
+    },
+  );
+
+  testWidgets('iOS coalesced Return echoes preserve subsequent typing', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final harness = _KeyboardHarness(
+      TargetPlatform.iOS,
+      ControllerKeyboardInputMode.auto,
+    );
+    try {
+      await harness.mount(tester);
+      await tester.testTextInput.receiveAction(TextInputAction.newline);
+      await tester.testTextInput.receiveAction(TextInputAction.newline);
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '1111\n\nx',
+          selection: TextSelection.collapsed(offset: 7),
+        ),
+      );
+      await tester.pump();
+      await harness.keyboard.idle;
+      expect(harness.events, [..._enter, ..._enter, ('text', 'x', 0, 0)]);
+    } finally {
+      await harness.unmount(tester);
+    }
+  });
+
+  testWidgets('iOS Return over an editor selection does not send a deletion', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final harness = _KeyboardHarness(
+      TargetPlatform.iOS,
+      ControllerKeyboardInputMode.auto,
+    );
+    try {
+      await harness.mount(tester);
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '1111',
+          selection: TextSelection(baseOffset: 2, extentOffset: 4),
+        ),
+      );
+      await tester.pump();
+      await harness.nativeReturn(tester);
+      await tester.pump();
+      await harness.keyboard.idle;
+      expect(harness.events, _enter);
+      expect(harness.text.text, '11\n');
+    } finally {
+      await harness.unmount(tester);
+    }
   });
 }

@@ -125,6 +125,7 @@ final class CommittedTextIntent extends KeyboardIntent {
     this.sourceLanguageTag = '',
     this.sourceLayoutType = '',
     this.consumeOneShot = true,
+    this.allowMobileShortcut = false,
   }) : super(source);
 
   final String text;
@@ -135,6 +136,8 @@ final class CommittedTextIntent extends KeyboardIntent {
   final String sourceLanguageTag;
   final String sourceLayoutType;
   final bool consumeOneShot;
+  // Only direct mobile edits opt in; paste and IME commits stay literal.
+  final bool allowMobileShortcut;
 }
 
 final class KeyboardResetIntent extends KeyboardIntent {

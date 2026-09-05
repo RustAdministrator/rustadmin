@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
@@ -8,6 +10,7 @@ import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/generated_bridge.dart';
 import 'package:flutter_hbb/mobile/mobile_modifier_state.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_text_input.dart';
+import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_hbb/models/input_model.dart';
 import 'package:flutter_hbb/models/keyboard_intent.dart';
 import 'package:flutter_hbb/models/model.dart';
@@ -131,6 +134,116 @@ class _TestRustadminImpl implements Rustadmin {
   }
 }
 
+class _NativeTypingHarness {
+  _NativeTypingHarness(this.inputModel) {
+    text.addListener(() {
+      final returnBaseline = text.returnEchoBaseline;
+      if (returnBaseline != null) _previous = returnBaseline;
+      final composing = text.value.composing;
+      if (composing.isValid && !composing.isCollapsed) return;
+      final edit = mobileCommittedTextEdit(_previous, text.text);
+      _previous = text.text;
+      if (edit.isEmpty) return;
+      inputModel.inputMobileTextEdit(
+        text: edit.text,
+        deleteBeforeGraphemes: edit.deleteBeforeGraphemes,
+        deleteAfterGraphemes: edit.deleteAfterGraphemes,
+        allowModifierShortcuts: !text.isLiteralEdit,
+      );
+    });
+  }
+
+  final InputModel inputModel;
+  final text = MobileRemoteTextEditingController(text: '1111');
+  final focus = FocusNode();
+  String _previous = '1111';
+
+  Future<void> mount(WidgetTester tester, {required bool isMac}) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Column(
+            children: [
+              MobileRemoteTextInput(
+                controller: text,
+                focusNode: focus,
+                onEnter: () => inputModel.inputKey('VK_ENTER'),
+              ),
+              AnimatedBuilder(
+                animation: inputModel.mobileModifierState,
+                builder: (context, _) => MobileRemoteKeyHelpTools(
+                  ctrlActive: inputModel.ctrl,
+                  altActive: inputModel.alt,
+                  shiftActive: inputModel.shift,
+                  commandActive: inputModel.command,
+                  ctrlLocked:
+                      inputModel.mobileModifierState.modeFor(
+                        MobileModifierKey.ctrl,
+                      ) ==
+                      MobileModifierMode.locked,
+                  shiftLocked:
+                      inputModel.mobileModifierState.modeFor(
+                        MobileModifierKey.shift,
+                      ) ==
+                      MobileModifierMode.locked,
+                  commandLocked:
+                      inputModel.mobileModifierState.modeFor(
+                        MobileModifierKey.command,
+                      ) ==
+                      MobileModifierMode.locked,
+                  functionKeysActive: false,
+                  moreKeysActive: true,
+                  isMac: isMac,
+                  showWindowsLinuxKeys: !isMac,
+                  quickKeyOrder: mobileRemoteDefaultQuickKeyOrder,
+                  onCtrl: () =>
+                      inputModel.tapMobileModifier(MobileModifierKey.ctrl),
+                  onAlt: () =>
+                      inputModel.tapMobileModifier(MobileModifierKey.alt),
+                  onShift: () =>
+                      inputModel.tapMobileModifier(MobileModifierKey.shift),
+                  onCommand: () =>
+                      inputModel.tapMobileModifier(MobileModifierKey.command),
+                  onCtrlDoubleTap: () =>
+                      inputModel.lockMobileModifier(MobileModifierKey.ctrl),
+                  onShiftDoubleTap: () =>
+                      inputModel.lockMobileModifier(MobileModifierKey.shift),
+                  onCommandDoubleTap: () =>
+                      inputModel.lockMobileModifier(MobileModifierKey.command),
+                  onFunctionKeys: () {},
+                  onMoreKeys: () {},
+                  onKeyPressed: inputModel.inputKey,
+                  onShortcutPressed: (_) {},
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  Future<void> type(WidgetTester tester, String value) async {
+    tester.testTextInput.updateEditingValue(
+      TextEditingValue(
+        text: value,
+        selection: TextSelection.collapsed(offset: value.length),
+      ),
+    );
+    await tester.pump();
+    await inputModel.keyboardDispatchIdle;
+  }
+
+  Future<void> unmount(WidgetTester tester) async {
+    await tester.pumpWidget(const SizedBox.shrink());
+    text.dispose();
+    focus.dispose();
+    debugDefaultTargetPlatformOverride = null;
+  }
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -161,6 +274,149 @@ void main() {
   tearDown(() {
     inputModel.disposeRelativeMouseMode();
     KeyboardEnabledState.delete(testFfi.id);
+  });
+
+  for (final peer in [
+    kPeerPlatformMacOS,
+    kPeerPlatformWindows,
+    kPeerPlatformLinux,
+  ]) {
+    for (final mode in [
+      kKeyboardInputModeAuto,
+      kKeyboardInputModeText,
+      kKeyboardInputModePhysical,
+    ]) {
+      for (final (modifier, name, usage) in [
+        (MobileModifierKey.ctrl, 'ctrl', 0xe0),
+        (MobileModifierKey.shift, 'shift', 0xe1),
+        (MobileModifierKey.command, 'command', 0xe3),
+      ]) {
+        testWidgets('native typing reaches $peer as $name+C in $mode mode', (
+          tester,
+        ) async {
+          testFfi.ffiModel.pi.platform = peer;
+          await inputModel.setKeyboardInputMode(mode);
+          final harness = _NativeTypingHarness(inputModel);
+          try {
+            await harness.mount(tester, isMac: peer == kPeerPlatformMacOS);
+            await tester.tap(find.byKey(Key('mobile-remote-quick-$name')));
+            await tester.pump(
+              kDoubleTapTimeout + const Duration(milliseconds: 1),
+            );
+            await inputModel.keyboardDispatchIdle;
+            expect(inputModel.mobileModifierState.isActive(modifier), isTrue);
+            await harness.type(tester, '1111c');
+            expect(testImpl.plainTextEdits, 0);
+            expect(testImpl.orderedKeyboardCalls, [
+              'hid:$usage:down',
+              'hid:6:down',
+              'hid:6:up',
+              'hid:$usage:up',
+            ]);
+            expect(testImpl.inputKeyCalls, isEmpty);
+            expect(inputModel.mobileModifierState.isActive(modifier), isFalse);
+            expect(harness.focus.hasFocus, isTrue);
+            await harness.type(tester, '1111cx');
+            expect(testImpl.plainTextEdits, 1);
+            expect(testImpl.inputKeyCalls, isEmpty);
+          } finally {
+            await harness.unmount(tester);
+          }
+        });
+      }
+    }
+  }
+
+  testWidgets('native typing consumes Cmd but retains locked Shift', (
+    tester,
+  ) async {
+    final harness = _NativeTypingHarness(inputModel);
+    try {
+      await harness.mount(tester, isMac: true);
+      inputModel.tapMobileModifier(MobileModifierKey.command);
+      inputModel.lockMobileModifier(MobileModifierKey.shift);
+      await harness.type(tester, '1111c');
+      expect(testImpl.orderedKeyboardCalls, [
+        'hid:227:down',
+        'hid:225:down',
+        'hid:6:down',
+        'hid:6:up',
+        'hid:227:up',
+      ]);
+      expect(inputModel.command, isFalse);
+      expect(inputModel.shift, isTrue);
+      await harness.type(tester, '1111cz');
+      expect(testImpl.orderedKeyboardCalls.sublist(5), [
+        'hid:29:down',
+        'hid:29:up',
+      ]);
+      expect(testImpl.plainTextEdits, 0);
+      inputModel.tapMobileModifier(MobileModifierKey.shift);
+      await inputModel.keyboardDispatchIdle;
+      expect(
+        testImpl.flutterKeyCalls.last,
+        const _FlutterKeyCall(usbHid: 0xe1, down: false),
+      );
+    } finally {
+      await harness.unmount(tester);
+    }
+  });
+
+  testWidgets('a single-character paste with Cmd armed stays literal', (
+    tester,
+  ) async {
+    final harness = _NativeTypingHarness(inputModel);
+    try {
+      await harness.mount(tester, isMac: true);
+      inputModel.tapMobileModifier(MobileModifierKey.command);
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.getData') return {'text': 'c'};
+          return null;
+        },
+      );
+      final editor = tester.state<EditableTextState>(
+        find.byWidgetPredicate((widget) => widget is EditableText),
+      );
+      await editor.pasteText(SelectionChangedCause.toolbar);
+      await tester.pump();
+      await inputModel.keyboardDispatchIdle;
+      expect(testImpl.plainTextEdits, 1);
+      expect(testImpl.inputKeyCalls, isEmpty);
+      expect(testImpl.orderedKeyboardCalls, ['hid:227:down', 'hid:227:up']);
+    } finally {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      );
+      await harness.unmount(tester);
+    }
+  });
+
+  testWidgets('single-letter IME composition confirmation stays literal', (
+    tester,
+  ) async {
+    final harness = _NativeTypingHarness(inputModel);
+    try {
+      await harness.mount(tester, isMac: true);
+      inputModel.tapMobileModifier(MobileModifierKey.command);
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '1111c',
+          selection: TextSelection.collapsed(offset: 5),
+          composing: TextRange(start: 4, end: 5),
+        ),
+      );
+      await tester.pump();
+      expect(testImpl.plainTextEdits, 0);
+      await harness.type(tester, '1111c');
+      expect(testImpl.plainTextEdits, 1);
+      expect(testImpl.inputKeyCalls, isEmpty);
+      expect(testImpl.orderedKeyboardCalls, ['hid:227:down', 'hid:227:up']);
+    } finally {
+      await harness.unmount(tester);
+    }
   });
 
   test('one-shot Ctrl is explicitly released after Ctrl+A', () async {
@@ -540,7 +796,7 @@ void main() {
     testWidgets('software keyboard submit reaches the key bridge in $mode mode',
         (tester) async {
       await inputModel.setKeyboardInputMode(mode);
-      final controller = TextEditingController(text: '1111');
+      final controller = MobileRemoteTextEditingController(text: '1111');
       final focus = FocusNode();
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(

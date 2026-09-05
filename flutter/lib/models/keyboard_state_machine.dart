@@ -1,5 +1,6 @@
 import '../mobile/mobile_modifier_state.dart';
 import 'keyboard_dispatcher.dart';
+import 'keyboard_event_normalizer.dart';
 import 'keyboard_intent.dart';
 import 'keyboard_modifier_controller.dart';
 
@@ -83,7 +84,7 @@ class KeyboardStateMachine {
       case PhysicalKeyboardIntent():
         _handlePhysical(intent, context);
       case CommittedTextIntent():
-        _handleCommittedText(intent);
+        _handleCommittedText(intent, context);
       case KeyboardResetIntent():
         reset(
           intent.reason,
@@ -486,11 +487,25 @@ class KeyboardStateMachine {
     }
   }
 
-  void _handleCommittedText(CommittedTextIntent intent) {
+  void _handleCommittedText(
+    CommittedTextIntent intent,
+    KeyboardRoutingContext context,
+  ) {
     if (intent.text.isEmpty &&
         intent.deleteBeforeGraphemes == 0 &&
         intent.deleteAfterGraphemes == 0) {
       return;
+    }
+    if (intent.allowMobileShortcut && mobileModifierState.hasActive) {
+      final keys = const MobileToolbarKeyboardNormalizer().modifiedTextEdit(
+        intent,
+      );
+      if (keys.isNotEmpty) {
+        for (final key in keys) {
+          _handlePhysical(key, context);
+        }
+        return;
+      }
     }
     _queueActions([
       CommittedTextDispatch(

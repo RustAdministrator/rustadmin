@@ -123,7 +123,7 @@ class _RemotePageState extends State<RemotePage>
     inputMode: _keyboardInputModeV2,
   );
 
-  final TextEditingController _textController = TextEditingController(
+  final _textController = MobileRemoteTextEditingController(
     text: initText,
   );
 
@@ -485,7 +485,10 @@ class _RemotePageState extends State<RemotePage>
       replacedByClipboard: replacedByClipboard,
     );
     _value = newValue;
-    _inputMobileTextEdit(edit);
+    _inputMobileTextEdit(
+      edit,
+      allowModifierShortcuts: !_textController.isLiteralEdit,
+    );
   }
 
   void _handleNonIOSSoftKeyboardInput(String newValue) {
@@ -500,7 +503,11 @@ class _RemotePageState extends State<RemotePage>
       newValue,
       replacedByClipboard: replacedByClipboard,
     );
-    _inputMobileTextEdit(edit);
+    _inputMobileTextEdit(
+      edit,
+      allowModifierShortcuts:
+          !replacedByClipboard && !_textController.isLiteralEdit,
+    );
     if (!replacedByClipboard &&
         oldValue.isNotEmpty &&
         edit.deleteBeforeGraphemes == 0 &&
@@ -522,6 +529,8 @@ class _RemotePageState extends State<RemotePage>
   // handle mobile virtual keyboard
   void _handleSoftKeyboardEditingValue() {
     if (_updatingSoftKeyboardText || !_showEdit) return;
+    final returnBaseline = _textController.returnEchoBaseline;
+    if (returnBaseline != null) _value = returnBaseline;
     final composing = _textController.value.composing;
     if (composing.isValid && !composing.isCollapsed) return;
     handleSoftKeyboardInput(_textController.text);
@@ -540,12 +549,16 @@ class _RemotePageState extends State<RemotePage>
     inputModel.inputKey('VK_ENTER');
   }
 
-  void _inputMobileTextEdit(MobileCommittedTextEdit edit) {
+  void _inputMobileTextEdit(
+    MobileCommittedTextEdit edit, {
+    bool allowModifierShortcuts = false,
+  }) {
     if (edit.isEmpty) return;
     inputModel.inputMobileTextEdit(
       text: edit.text,
       deleteBeforeGraphemes: edit.deleteBeforeGraphemes,
       deleteAfterGraphemes: edit.deleteAfterGraphemes,
+      allowModifierShortcuts: allowModifierShortcuts,
     );
   }
 
