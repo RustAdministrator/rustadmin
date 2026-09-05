@@ -276,12 +276,22 @@ impl InvokeUiSession for SciterHandler {
         self.call("adaptSize", &make_args!());
     }
 
-    fn on_rgba(&self, _display: usize, rgba: &mut scrap::ImageRgb) {
-        VIDEO
+    fn on_rgba(
+        &self,
+        _context: RenderFrameContext,
+        _display: usize,
+        rgba: &mut scrap::ImageRgb,
+    ) -> RenderFrameOutcome {
+        let submitted = VIDEO
             .lock()
             .unwrap()
             .as_mut()
-            .map(|v| v.render_frame(&rgba.raw).ok());
+            .is_some_and(|video| video.render_frame(&rgba.raw).is_ok());
+        if submitted {
+            RenderFrameOutcome::submitted()
+        } else {
+            RenderFrameOutcome::rejected()
+        }
     }
 
     fn set_peer_info(&self, pi: &PeerInfo) {

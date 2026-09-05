@@ -1363,11 +1363,12 @@ fn valid_video_reference_refresh(request: &VideoReferenceRefresh) -> bool {
 }
 
 fn video_feedback_regressed(previous: &VideoFeedback, next: &VideoFeedback) -> bool {
-    previous.stream_id == next.stream_id
-        && (next.received_frame_id < previous.received_frame_id
-            || next.decoded_frame_id < previous.decoded_frame_id
-            || next.render_submitted_frame_id < previous.render_submitted_frame_id
-            || next.dropped_frames < previous.dropped_frames)
+    next.stream_id < previous.stream_id
+        || (previous.stream_id == next.stream_id
+            && (next.received_frame_id < previous.received_frame_id
+                || next.decoded_frame_id < previous.decoded_frame_id
+                || next.render_submitted_frame_id < previous.render_submitted_frame_id
+                || next.dropped_frames < previous.dropped_frames))
 }
 
 fn pending_permission_response_values<'a>(
@@ -4827,10 +4828,12 @@ impl Connection {
         // Revision 084 viewers already send valid feedback but predate the
         // explicit capability bit. Accept the message itself as proof.
         self.set_video_feedback_capability(true);
+        let video_service_name =
+            video_service::get_service_name(self.video_source(), feedback.display as usize);
         video_service::VIDEO_QOS
             .lock()
             .unwrap()
-            .user_video_feedback(self.inner.id(), &feedback);
+            .user_video_feedback(self.inner.id(), &video_service_name, &feedback);
 
         let now = Instant::now();
         let new_stream = previous
@@ -4879,7 +4882,11 @@ impl Connection {
             && video_service::VIDEO_QOS
                 .lock()
                 .unwrap()
-                .user_video_frame_rendered(self.inner.id())
+                .user_video_frame_rendered_for_service(
+                    self.inner.id(),
+                    &video_service_name,
+                    feedback.stream_id,
+                )
         {
             log::info!(
                 "#{} diag video startup released by first render submission: display={}, stream_id={}, frame_id={}",
@@ -9291,6 +9298,9 @@ mod test {
 
         next.stream_id = 8;
         assert!(!video_feedback_regressed(&previous, &next));
+
+        next.stream_id = 6;
+        assert!(video_feedback_regressed(&previous, &next));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use super::*;
 use crate::video_profile::{VideoProfile, MOVIE_DEFAULT_TARGET_FPS};
 use scrap::codec::{Quality, BR_BALANCED, BR_BEST, BR_SPEED};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     time::{Duration, Instant},
 };
 
@@ -674,6 +674,42 @@ fn minimum_ratio_for_quality(
 }
 
 // User session data structure
+#[derive(Debug, Clone)]
+struct ViewerStartupState {
+    stream_id: Option<u64>,
+    render_started: bool,
+    started_at: Instant,
+}
+
+impl ViewerStartupState {
+    fn new(now: Instant) -> Self {
+        Self {
+            stream_id: None,
+            render_started: false,
+            started_at: now,
+        }
+    }
+
+    fn begin_stream(&mut self, stream_id: u64, now: Instant) -> bool {
+        if self.stream_id == Some(stream_id) {
+            return true;
+        }
+        if self.stream_id.is_some_and(|current| stream_id < current) {
+            return false;
+        }
+        self.stream_id = Some(stream_id);
+        self.render_started = false;
+        self.started_at = now;
+        true
+    }
+
+    fn reset(&mut self, now: Instant) {
+        self.stream_id = None;
+        self.render_started = false;
+        self.started_at = now;
+    }
+}
+
 #[derive(Default, Debug, Clone)]
 struct UserData {
     auto_adjust_fps: Option<u32>, // reserve for compatibility
@@ -683,8 +719,7 @@ struct UserData {
     delay: UserDelay,
     record: bool,
     video_feedback_capable: bool,
-    video_render_started: bool,
-    video_startup_instant: Option<Instant>,
+    video_startup_by_service: BTreeMap<String, ViewerStartupState>,
     last_transport_loss_at: Option<Instant>,
     transport_loss_windows: HashMap<TransportLossKey, TransportLossWindow>,
     video_profile: VideoProfile,
@@ -995,11 +1030,12 @@ impl VideoQoS {
             .iter()
             .filter_map(|id| self.users.get(id))
         {
-            has_established_viewer |= user.video_render_started;
-            has_starting_viewer |= !user.video_render_started
-                && user
-                    .video_startup_instant
-                    .is_some_and(|started| started.elapsed() < STARTUP_SAFE_WINDOW);
+            let Some(startup) = user.video_startup_by_service.get(video_service_name) else {
+                continue;
+            };
+            has_established_viewer |= startup.render_started;
+            has_starting_viewer |=
+                !startup.render_started && startup.started_at.elapsed() < STARTUP_SAFE_WINDOW;
         }
         !has_established_viewer && has_starting_viewer
     }
@@ -1348,13 +1384,7 @@ impl VideoQoS {
 impl VideoQoS {
     // Initialize new user session
     pub fn on_connection_open(&mut self, id: i32) {
-        self.users.insert(
-            id,
-            UserData {
-                video_startup_instant: Some(Instant::now()),
-                ..Default::default()
-            },
-        );
+        self.users.insert(id, UserData::default());
         self.abr_config = Config::get_option("enable-abr") != "N";
     }
 
@@ -1420,7 +1450,10 @@ impl VideoQoS {
             user.last_transport_loss_at = None;
             user.transport_loss_windows.clear();
             user.movie_feedback_by_display.clear();
-            user.video_render_started = false;
+            let now = Instant::now();
+            for startup in user.video_startup_by_service.values_mut() {
+                startup.reset(now);
+            }
         }
         user.video_profile = profile;
         if changed {
@@ -1442,10 +1475,21 @@ impl VideoQoS {
         }
     }
 
-    pub(crate) fn user_video_feedback(&mut self, id: i32, feedback: &VideoFeedback) {
+    pub(crate) fn user_video_feedback(
+        &mut self,
+        id: i32,
+        video_service_name: &str,
+        feedback: &VideoFeedback,
+    ) {
         let Some(user) = self.users.get_mut(&id) else {
             return;
         };
+        let Some(startup) = user.video_startup_by_service.get_mut(video_service_name) else {
+            return;
+        };
+        if !startup.begin_stream(feedback.stream_id, Instant::now()) {
+            return;
+        }
         if user.video_profile != VideoProfile::Movie {
             return;
         }
@@ -1541,7 +1585,10 @@ impl VideoQoS {
         if let Some(user) = self.users.get_mut(&id) {
             user.video_feedback_capable = capable;
             if !capable {
-                user.video_render_started = false;
+                let now = Instant::now();
+                for startup in user.video_startup_by_service.values_mut() {
+                    startup.reset(now);
+                }
             }
         }
         if !capable {
@@ -1550,13 +1597,24 @@ impl VideoQoS {
         self.adjust_displays_for_user(id);
     }
 
-    pub fn user_video_frame_rendered(&mut self, id: i32) -> bool {
+    pub fn user_video_frame_rendered_for_service(
+        &mut self,
+        id: i32,
+        video_service_name: &str,
+        stream_id: u64,
+    ) -> bool {
         let highest_fps = self.user_requested_fps(id);
         let first_render = self.users.get_mut(&id).is_some_and(|user| {
-            if !user.video_feedback_capable || user.video_render_started {
+            let Some(startup) = user.video_startup_by_service.get_mut(video_service_name) else {
+                return false;
+            };
+            if !user.video_feedback_capable
+                || startup.stream_id != Some(stream_id)
+                || startup.render_started
+            {
                 return false;
             }
-            user.video_render_started = true;
+            startup.render_started = true;
             // One end-to-end rendered frame is enough to leave the conservative
             // bootstrap profile. A measured delay sample still takes priority.
             if user.delay.fps.is_none() && !user.delay.response_delayed {
@@ -1565,9 +1623,27 @@ impl VideoQoS {
             true
         });
         if first_render {
-            self.adjust_displays_for_user(id);
+            self.adjust_fps(video_service_name);
         }
         first_render
+    }
+
+    #[cfg(test)]
+    fn user_video_frame_rendered(&mut self, id: i32) -> bool {
+        let Some(video_service_name) = self.display_names_for_user(id).into_iter().min() else {
+            return false;
+        };
+        let stream_id = self
+            .users
+            .get_mut(&id)
+            .and_then(|user| user.video_startup_by_service.get_mut(&video_service_name))
+            .map(|startup| {
+                let stream_id = startup.stream_id.unwrap_or(1);
+                startup.begin_stream(stream_id, Instant::now());
+                stream_id
+            })
+            .unwrap_or(1);
+        self.user_video_frame_rendered_for_service(id, &video_service_name, stream_id)
     }
 
     pub(crate) fn user_transport_loss(
@@ -1868,14 +1944,29 @@ impl VideoQoS {
     }
 
     pub fn sync_subscribers(&mut self, video_service_name: &str, subscribers: HashSet<i32>) {
-        let changed = self
+        let previous_subscribers = self
             .displays
             .get(video_service_name)
-            .is_some_and(|display| display.subscribers != subscribers);
+            .map(|display| display.subscribers.clone())
+            .unwrap_or_default();
+        let changed = previous_subscribers != subscribers;
         if let Some(display) = self.displays.get_mut(video_service_name) {
-            display.subscribers = subscribers;
+            display.subscribers = subscribers.clone();
         }
         if changed {
+            let now = Instant::now();
+            for id in previous_subscribers.difference(&subscribers) {
+                if let Some(user) = self.users.get_mut(id) {
+                    user.video_startup_by_service.remove(video_service_name);
+                }
+            }
+            for id in subscribers.difference(&previous_subscribers) {
+                if let Some(user) = self.users.get_mut(id) {
+                    user.video_startup_by_service
+                        .entry(video_service_name.to_owned())
+                        .or_insert_with(|| ViewerStartupState::new(now));
+                }
+            }
             if !self.full_movie_mode(video_service_name) {
                 self.clear_datagram_admission_for_display(video_service_name);
             }
@@ -1942,7 +2033,11 @@ impl VideoQoS {
 
         let mut metrics = MovieViewerMetrics {
             available: true,
-            all_rendered: subscribers.iter().all(|user| user.video_render_started),
+            all_rendered: subscribers.iter().all(|user| {
+                user.video_startup_by_service
+                    .get(video_service_name)
+                    .is_some_and(|startup| startup.render_started)
+            }),
             ..Default::default()
         };
         for user in subscribers {
@@ -2351,6 +2446,24 @@ mod tests {
         qos
     }
 
+    fn establish_viewer(qos: &mut VideoQoS, id: i32, video_service_name: &str) {
+        let startup = qos
+            .users
+            .get_mut(&id)
+            .and_then(|user| user.video_startup_by_service.get_mut(video_service_name))
+            .unwrap();
+        startup.stream_id = Some(1);
+        startup.render_started = true;
+    }
+
+    fn expire_viewer_startup(qos: &mut VideoQoS, id: i32, video_service_name: &str) {
+        qos.users
+            .get_mut(&id)
+            .and_then(|user| user.video_startup_by_service.get_mut(video_service_name))
+            .unwrap()
+            .started_at = Instant::now() - STARTUP_SAFE_WINDOW - Duration::from_secs(1);
+    }
+
     fn transport_loss_sample(
         display: i32,
         stream_id: u64,
@@ -2400,7 +2513,7 @@ mod tests {
             qos.user_video_profile(*id, VideoProfile::Movie);
             qos.user_video_feedback_capability(*id, true);
             qos.user_movie_transport_capability(*id, true);
-            qos.users.get_mut(id).unwrap().video_render_started = true;
+            establish_viewer(&mut qos, *id, MONITOR_SERVICE);
             qos.users.get_mut(id).unwrap().delay.fps = Some(60);
         }
         qos.store_movie_runtime_status(MONITOR_SERVICE, 60, 60, 5_000);
@@ -2704,8 +2817,10 @@ mod tests {
         qos.user_video_frame_rendered(1);
         qos.user_video_feedback(
             1,
+            MONITOR_SERVICE,
             &VideoFeedback {
                 display: 0,
+                stream_id: 1,
                 queue_depth_frames: 2,
                 decode_time_us: 3_000,
                 render_submit_time_us: 200,
@@ -2736,8 +2851,7 @@ mod tests {
     #[test]
     fn startup_safe_mode_expires() {
         let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
-        qos.users.get_mut(&1).unwrap().video_startup_instant =
-            Some(Instant::now() - STARTUP_SAFE_WINDOW - Duration::from_secs(1));
+        expire_viewer_startup(&mut qos, 1, MONITOR_SERVICE);
 
         assert!(!qos.startup_safe_mode(MONITOR_SERVICE));
         assert_eq!(qos.ratio(MONITOR_SERVICE), BR_BALANCED);
@@ -2750,8 +2864,7 @@ mod tests {
 
         assert!(!qos.user_video_frame_rendered(1));
         assert!(qos.startup_safe_mode(MONITOR_SERVICE));
-        qos.users.get_mut(&1).unwrap().video_startup_instant =
-            Some(Instant::now() - STARTUP_SAFE_WINDOW - Duration::from_secs(1));
+        expire_viewer_startup(&mut qos, 1, MONITOR_SERVICE);
         assert!(!qos.startup_safe_mode(MONITOR_SERVICE));
     }
 
@@ -2821,10 +2934,72 @@ mod tests {
     }
 
     #[test]
+    fn render_feedback_releases_only_the_matching_video_service() {
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
+        qos.new_display(CAMERA_SERVICE.to_owned());
+        qos.sync_subscribers(CAMERA_SERVICE, HashSet::from([1]));
+        qos.user_video_feedback_capability(1, true);
+        qos.user_video_feedback(
+            1,
+            MONITOR_SERVICE,
+            &VideoFeedback {
+                display: 0,
+                stream_id: 11,
+                ..Default::default()
+            },
+        );
+        qos.user_video_feedback(
+            1,
+            CAMERA_SERVICE,
+            &VideoFeedback {
+                display: 0,
+                stream_id: 22,
+                ..Default::default()
+            },
+        );
+
+        assert!(qos.startup_safe_mode(MONITOR_SERVICE));
+        assert!(qos.startup_safe_mode(CAMERA_SERVICE));
+        assert!(qos.user_video_frame_rendered_for_service(1, MONITOR_SERVICE, 11));
+        assert!(!qos.startup_safe_mode(MONITOR_SERVICE));
+        assert!(qos.startup_safe_mode(CAMERA_SERVICE));
+    }
+
+    #[test]
+    fn stale_stream_render_feedback_cannot_release_replacement_stream() {
+        let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
+        qos.user_video_feedback_capability(1, true);
+        for stream_id in [31, 32] {
+            qos.user_video_feedback(
+                1,
+                MONITOR_SERVICE,
+                &VideoFeedback {
+                    display: 0,
+                    stream_id,
+                    ..Default::default()
+                },
+            );
+        }
+        qos.user_video_feedback(
+            1,
+            MONITOR_SERVICE,
+            &VideoFeedback {
+                display: 0,
+                stream_id: 31,
+                ..Default::default()
+            },
+        );
+
+        assert!(!qos.user_video_frame_rendered_for_service(1, MONITOR_SERVICE, 31));
+        assert!(qos.startup_safe_mode(MONITOR_SERVICE));
+        assert!(qos.user_video_frame_rendered_for_service(1, MONITOR_SERVICE, 32));
+        assert!(!qos.startup_safe_mode(MONITOR_SERVICE));
+    }
+
+    #[test]
     fn expired_existing_viewer_does_not_extend_new_viewer_startup() {
         let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1]);
-        qos.users.get_mut(&1).unwrap().video_startup_instant =
-            Some(Instant::now() - STARTUP_SAFE_WINDOW - Duration::from_secs(1));
+        expire_viewer_startup(&mut qos, 1, MONITOR_SERVICE);
         qos.on_connection_open(2);
         qos.user_video_feedback_capability(2, true);
         qos.sync_subscribers(MONITOR_SERVICE, HashSet::from([1, 2]));
@@ -3663,10 +3838,10 @@ mod tests {
         qos.sync_subscribers(CAMERA_SERVICE, HashSet::from([2]));
         qos.user_custom_fps(1, 60);
         qos.users.get_mut(&1).unwrap().delay.fps = Some(60);
-        qos.users.get_mut(&1).unwrap().video_render_started = true;
+        establish_viewer(&mut qos, 1, MONITOR_SERVICE);
         qos.users.get_mut(&2).unwrap().delay.fps = Some(2);
         qos.users.get_mut(&2).unwrap().delay.response_delayed = true;
-        qos.users.get_mut(&2).unwrap().video_render_started = true;
+        establish_viewer(&mut qos, 2, CAMERA_SERVICE);
 
         qos.adjust_fps(MONITOR_SERVICE);
         qos.adjust_fps(CAMERA_SERVICE);
@@ -3680,10 +3855,10 @@ mod tests {
         let mut qos = qos_with_viewers(MONITOR_SERVICE, &[1, 2]);
         qos.user_custom_fps(1, 60);
         qos.users.get_mut(&1).unwrap().delay.fps = Some(60);
-        qos.users.get_mut(&1).unwrap().video_render_started = true;
+        establish_viewer(&mut qos, 1, MONITOR_SERVICE);
         qos.users.get_mut(&2).unwrap().delay.fps = Some(2);
         qos.users.get_mut(&2).unwrap().delay.response_delayed = true;
-        qos.users.get_mut(&2).unwrap().video_render_started = true;
+        establish_viewer(&mut qos, 2, MONITOR_SERVICE);
 
         qos.adjust_fps(MONITOR_SERVICE);
 
