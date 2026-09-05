@@ -20,6 +20,10 @@ var recording_enabled = true; // server side
 var scroll_body = $(body);
 var peer_platform = "";
 
+handler.setScreenViewAllowed = function(allowed) {
+    $(#video-wrapper).style.set { visibility: allowed ? "visible" : "hidden" };
+}
+
 handler.setDisplay = function(x, y, w, h, cursor_embedded, scale) {
     display_width = w;
     display_height = h;

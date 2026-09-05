@@ -1857,6 +1857,8 @@ impl<T: InvokeUiSession> Session<T> {
                 ConnectionState::Disconnected => {}
             }
         }
+        self.ui_handler
+            .end_connection_runtime(connection_round_state_lock.round);
         let round = connection_round_state_lock.new_round();
         drop(connection_round_state_lock);
 
@@ -1965,6 +1967,8 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     pub fn close(&self) {
+        self.ui_handler
+            .end_connection_runtime(self.connection_round());
         log::info!(
             "diag session close requested: id={}, thread_active={}, sender_ready={}",
             self.get_id(),
@@ -2353,6 +2357,11 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
         None
     }
     fn begin_connection_runtime(&self, _connection_generation: u32) {}
+    fn authorize_connection_runtime(&self, _connection_generation: u32) {}
+    fn end_connection_runtime(&self, _connection_generation: u32) {}
+    fn screen_authority_generation(&self) -> u64 {
+        0
+    }
     fn tick_render_liveness(&self) {}
     fn msgbox(&self, msgtype: &str, title: &str, text: &str, link: &str, retry: bool);
     #[cfg(any(target_os = "android", target_os = "ios"))]

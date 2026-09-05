@@ -112,6 +112,7 @@ pub mod file_trait;
 pub mod helper;
 pub mod io_loop;
 pub mod screenshot;
+pub(crate) mod screen_authority;
 
 pub const MILLI1: Duration = Duration::from_millis(1);
 pub const SEC30: Duration = Duration::from_secs(30);
@@ -4219,6 +4220,7 @@ impl DisplayMediaIntent {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RenderFrameContext {
     pub(crate) connection_generation: u32,
+    pub(crate) screen_authority_generation: u64,
     pub(crate) display_activation_generation: u64,
     pub(crate) stream_id: u64,
     pub(crate) frame_id: u64,

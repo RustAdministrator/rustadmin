@@ -23,6 +23,18 @@ final class PermissionSessionEvent extends SessionEvent {
   final Map<String, bool> permissions;
 }
 
+final class ScreenViewAuthoritySessionEvent extends SessionEvent {
+  const ScreenViewAuthoritySessionEvent({
+    required this.connectionGeneration,
+    required this.generation,
+    required this.allowed,
+  });
+
+  final int connectionGeneration;
+  final int generation;
+  final bool allowed;
+}
+
 final class ClipboardSessionEvent extends SessionEvent {
   const ClipboardSessionEvent(this.content);
   final String content;
@@ -906,6 +918,7 @@ final class InvalidSessionEvent extends SessionEvent {
 const typedSessionEventNames = <String>{
   'connection_ready',
   'permission',
+  'screen_view_authority',
   'clipboard',
   'chat_client_mode',
   'chat_server_mode',
@@ -1003,6 +1016,23 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
         return const InvalidSessionEvent('permission', 'empty snapshot');
       }
       return PermissionSessionEvent(permissions);
+    case 'screen_view_authority':
+      final connection = event['connection_generation'];
+      final generation = event['generation'];
+      final allowed = event['allowed'];
+      if (connection is! int ||
+          connection < 0 ||
+          generation is! int ||
+          generation < 0 ||
+          allowed is! bool) {
+        return const InvalidSessionEvent(
+          'screen_view_authority', 'invalid snapshot');
+      }
+      return ScreenViewAuthoritySessionEvent(
+        connectionGeneration: connection,
+        generation: generation,
+        allowed: allowed,
+      );
     case 'clipboard':
       final content = event['content'];
       return content is String

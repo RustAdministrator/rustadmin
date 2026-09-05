@@ -52,6 +52,7 @@ import 'input_model.dart';
 import 'keyboard_intent.dart';
 import 'platform_model.dart';
 import 'session_event.dart';
+import 'screen_view_authority.dart';
 import 'session_handle.dart';
 import 'package:flutter_hbb/utils/scale.dart';
 
@@ -478,6 +479,8 @@ class FfiModel with ChangeNotifier {
       );
     } else if (event is PermissionSessionEvent) {
       updatePermissionValues(event.permissions, peerId);
+    } else if (event is ScreenViewAuthoritySessionEvent) {
+      parent.target?.applyScreenViewAuthority(event);
     } else if (event is ClipboardSessionEvent) {
       Clipboard.setData(ClipboardData(text: event.content));
     } else if (event is ClientChatSessionEvent) {
@@ -2374,6 +2377,7 @@ Size? remoteRenderableFrameSize({
 
 class ImageModel with ChangeNotifier {
   ui.Image? _image;
+  int _imageGeneration = 0;
 
   ui.Image? get image => _image;
 
@@ -2435,7 +2439,25 @@ class ImageModel with ChangeNotifier {
 
   addCallbackOnFirstImage(Function(String) cb) => callbacksOnFirstImage.add(cb);
 
-  void clearImage() => _publishImage(null);
+  void clearImage() {
+    _imageGeneration++;
+    _publishImage(null);
+  }
+
+  void revokeScreenContent() {
+    clearImage();
+    _webRgbaList.clear();
+    unawaited(_androidRenderTarget.retire());
+    _interactionGeometryInitialized = false;
+  }
+
+  void screenAuthorityChanged(bool allowed) {
+    if (allowed) {
+      notifyListeners();
+    } else {
+      revokeScreenContent();
+    }
+  }
 
   void _publishImage(ui.Image? image) {
     final previous = _image;
@@ -2480,6 +2502,10 @@ class ImageModel with ChangeNotifier {
   }
 
   decodeAndUpdate(int display, Uint8List rgba) async {
+    final authority = parent.target?.screenViewAuthority;
+    final epoch = authority?.epoch;
+    final imageGeneration = _imageGeneration;
+    if (epoch == null || !authority!.accepts(epoch)) return;
     final pid = parent.target?.id;
     final rect = parent.target?.ffiModel.pi.getDisplayRect(display);
     final image = await img.decodeImageFromPixels(
@@ -2490,11 +2516,23 @@ class ImageModel with ChangeNotifier {
           ? ui.PixelFormat.rgba8888
           : ui.PixelFormat.bgra8888,
     );
-    if (parent.target?.id != pid) return;
-    await update(image);
+    if (parent.target?.id != pid ||
+        !authority.accepts(epoch) ||
+        imageGeneration != _imageGeneration) {
+      image?.dispose();
+      return;
+    }
+    await update(image, authorityEpoch: epoch);
   }
 
-  update(ui.Image? image) async {
+  update(ui.Image? image, {int? authorityEpoch}) async {
+    final authority = parent.target?.screenViewAuthority;
+    final epoch = authorityEpoch ?? authority?.epoch;
+    final imageGeneration = _imageGeneration;
+    if (image != null && (epoch == null || !authority!.accepts(epoch))) {
+      image.dispose();
+      return;
+    }
     if (!_interactionGeometryInitialized && image != null) {
       if (isDesktop || isWebDesktop) {
         await parent.target?.canvasModel.updateViewStyle();
@@ -2504,10 +2542,14 @@ class ImageModel with ChangeNotifier {
       await _ensureInteractionGeometry();
     }
     if (image == null) {
-      _publishImage(null);
+      clearImage();
       await _androidRenderTarget.retire();
       _interactionGeometryInitialized = false;
     } else {
+      if (!authority!.accepts(epoch!) || imageGeneration != _imageGeneration) {
+        image.dispose();
+        return;
+      }
       parent.target?.canvasModel.tryApplyPendingMobileCursorFocus();
       _publishImage(image);
     }
@@ -2519,7 +2561,9 @@ class ImageModel with ChangeNotifier {
       return;
     }
     final ffi = parent.target;
-    if (ffi == null || ffi.ffiModel.pi.currentDisplay != display) {
+    if (ffi == null ||
+        !ffi.screenViewAuthority.allowed ||
+        ffi.ffiModel.pi.currentDisplay != display) {
       return;
     }
     final rect = ffi.ffiModel.pi.getDisplayRect(display);
@@ -2534,7 +2578,9 @@ class ImageModel with ChangeNotifier {
         target.height != rect.height.toInt()) {
       return;
     }
+    final epoch = ffi.screenViewAuthority.epoch;
     await _ensureInteractionGeometry();
+    if (!ffi.screenViewAuthority.accepts(epoch)) return;
     final changed = _androidRenderTarget.producerFrame(
       display: display,
       width: rect.width.toInt(),
@@ -2608,7 +2654,7 @@ class ImageModel with ChangeNotifier {
     AndroidTextureTarget? target, {
     int? intentEpoch,
   }) =>
-      target == null
+      target == null || parent.target?.screenViewAuthority.allowed != true
           ? _androidRenderTarget.retire(intentEpoch: intentEpoch)
           : _androidRenderTarget.requireTarget(
               target,
@@ -2616,7 +2662,7 @@ class ImageModel with ChangeNotifier {
             );
 
   void disposeImage() {
-    _publishImage(null);
+    clearImage();
     unawaited(_androidRenderTarget.retire());
     _interactionGeometryInitialized = false;
   }
@@ -5547,6 +5593,7 @@ enum ConnType {
 /// Flutter state manager and data communication with the Rust core.
 class FFI {
   var id = '';
+  final screenViewAuthority = ScreenViewAuthority();
   var version = '';
   var connType = ConnType.defaultConn;
   late SessionHandle<EventToUI> _sessionHandle;
@@ -5616,6 +5663,24 @@ class FFI {
         name: PeersModelName.lan, loadEvent: LoadEvent.lan, getInitPeers: null);
   }
 
+  void applyScreenViewAuthority(ScreenViewAuthoritySessionEvent event) {
+    if (!screenViewAuthority.apply(
+      connectionGeneration: event.connectionGeneration,
+      generation: event.generation,
+      allowed: event.allowed,
+    )) {
+      return;
+    }
+    imageModel.screenAuthorityChanged(event.allowed);
+    textureModel.setScreenViewAllowed(event.allowed);
+  }
+
+  void revokeScreenContent() {
+    screenViewAuthority.revoke();
+    imageModel.revokeScreenContent();
+    textureModel.setScreenViewAllowed(false);
+  }
+
   SessionHandle<EventToUI> _newSessionHandle() => SessionHandle<EventToUI>(
     sessionId: sessionId,
     closeNative: () => bind.sessionClose(sessionId: sessionId),
@@ -5665,6 +5730,7 @@ class FFI {
       }
       _sessionHandle = _newSessionHandle();
     }
+    screenViewAuthority.reset();
     this.hostWindowId = hostWindowId;
     if (isMobile) mobileReset();
     final sessionKind = SessionKind.fromLegacyFlags(
@@ -5862,17 +5928,19 @@ class FFI {
       await handleCachedSessionData(cachedData);
     }
 
-    Future<void> handleSessionMessage(EventToUI message) async {
+    Future<void> handleSessionMessage(
+      EventToUI message,
+      int screenEpoch,
+      Map<String, dynamic>? event,
+    ) async {
       if (message is EventToUI_Event) {
-        Map<String, dynamic>? event;
-        try {
-          event = json.decode(message.field0);
-        } catch (e) {
-          debugPrint('json.decode fail1(): $e, ${message.field0}');
-        }
         if (event != null) await cb(event);
       } else if (message is EventToUI_Rgba) {
         final display = message.field0;
+        if (!screenViewAuthority.accepts(screenEpoch)) {
+          platformFFI.nextRgba(sessionId, display);
+          return;
+        }
         if (isAndroid) imageModel.setAndroidSurfaceTextureActive(false);
         final sz = platformFFI.getRgbaSize(sessionId, display);
         if (sz == 0) {
@@ -5882,11 +5950,16 @@ class FFI {
         final rgba = platformFFI.getRgba(sessionId, display, sz);
         if (rgba != null) {
           await onEvent2UIRgba();
+          if (!screenViewAuthority.accepts(screenEpoch)) {
+            platformFFI.nextRgba(sessionId, display);
+            return;
+          }
           await imageModel.onRgba(display, rgba);
         } else {
           platformFFI.nextRgba(sessionId, display);
         }
       } else if (message is EventToUI_Texture) {
+        if (!screenViewAuthority.accepts(screenEpoch)) return;
         final display = message.field0;
         final gpuTexture = message.field1;
         debugPrint(
@@ -5899,6 +5972,7 @@ class FFI {
         if (isAndroid) {
           await imageModel.onAndroidSurfaceTextureFrame(display, gpuTexture);
         }
+        if (!screenViewAuthority.accepts(screenEpoch)) return;
         textureModel.setTextureType(display: display, gpuTexture: gpuTexture);
         await onEvent2UIRgba();
       }
@@ -5909,16 +5983,36 @@ class FFI {
         return;
       }
       if (message is EventToUI_Event && message.field0 == 'close') {
+        revokeScreenContent();
         streamCloseQueued = true;
         unawaited(_sessionHandle.remoteClosedAfterEvents(sessionGeneration));
         debugPrint('Exit session event loop');
         return;
       }
+      Map<String, dynamic>? event;
+      if (message is EventToUI_Event) {
+        try {
+          event = json.decode(message.field0);
+        } catch (error) {
+          reportEventError(error, StackTrace.current);
+        }
+        if (event?['name'] == 'screen_view_authority') {
+          final snapshot = decodeTypedSessionEvent(event!);
+          if (snapshot is ScreenViewAuthoritySessionEvent) {
+            // Revoke before the serial event queue can finish an older decode.
+            applyScreenViewAuthority(snapshot);
+          }
+          return;
+        }
+      }
       if (tabWindowId != null && !isToNewWindowNotified.value) {
         isToNewWindowNotified.value = true;
         unawaited(dispatchSessionEvent(transferSessionToTab));
       }
-      unawaited(dispatchSessionEvent(() => handleSessionMessage(message)));
+      final screenEpoch = screenViewAuthority.epoch;
+      unawaited(dispatchSessionEvent(
+        () => handleSessionMessage(message, screenEpoch, event),
+      ));
     });
     await _sessionHandle.bindSubscription(sessionGeneration, subscription);
     if (!_sessionHandle.accepts(sessionGeneration)) return;
@@ -5997,17 +6091,22 @@ class FFI {
   /// Clear session-scoped state while keeping the mobile page reusable.
   Future<void> resetMobileSessionForReconnect({
     required bool closeSession,
-  }) => _sessionHandle.close(
-    nativeClosePolicy: closeSession
-        ? NativeSessionClosePolicy.requestClose
-        : NativeSessionClosePolicy.alreadyClosed,
-    cleanup: _cleanupMobileSessionState,
-  );
+  }) {
+    revokeScreenContent();
+    return _sessionHandle.close(
+      nativeClosePolicy: closeSession
+          ? NativeSessionClosePolicy.requestClose
+          : NativeSessionClosePolicy.alreadyClosed,
+      cleanup: _cleanupMobileSessionState,
+    );
+  }
 
   /// Close the remote session.
   Future<void> close(
-      {bool closeSession = true, bool saveCanvasConfig = true}) =>
-      _sessionHandle.close(
+      {bool closeSession = true, bool saveCanvasConfig = true}) {
+    final hadRenderableFrame = imageModel.hasRenderableFrame;
+    revokeScreenContent();
+    return _sessionHandle.close(
         nativeClosePolicy: closeSession
             ? NativeSessionClosePolicy.requestClose
             : NativeSessionClosePolicy.alreadyClosed,
@@ -6019,7 +6118,7 @@ class FFI {
           }
           _terminalModels.clear();
           if (saveCanvasConfig &&
-              imageModel.hasRenderableFrame &&
+              hadRenderableFrame &&
               !isWebDesktop) {
             await setCanvasConfig(
                 sessionId,
@@ -6046,6 +6145,7 @@ class FFI {
           id = '';
         },
       );
+  }
 
   void setMethodCallHandler(FMethod callback) {
     platformFFI.setMethodCallHandler(callback);

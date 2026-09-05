@@ -172,10 +172,43 @@ class TextureModel {
   final Map<int, _Control> _control = {};
   final Map<int, _PixelbufferTexture> _pixelbufferRenderTextures = {};
   final Map<int, _GpuTexture> _gpuRenderTextures = {};
+  bool _screenViewAllowed = true;
+  Future<void>? _screenRetirement;
+
+  void setScreenViewAllowed(bool allowed) {
+    _screenViewAllowed = allowed;
+    final ffi = parent.target;
+    if (ffi == null) return;
+    if (!allowed) {
+      // Publish the empty target before awaiting native teardown. Keep the Rx
+      // objects so existing widgets observe both removal and replacement.
+      for (final control in _control.values) {
+        control.setRgbaTextureId(-1);
+        control.setGpuTextureId(-1);
+      }
+      final previous = _screenRetirement;
+      final current = _destroyAll(ffi, keepControls: true);
+      _screenRetirement = Future.wait<void>([
+        if (previous != null) previous,
+        current,
+      ]).then<void>((_) {}, onError: (Object error, StackTrace stackTrace) {
+        debugPrint('Screen target retirement failed: $error\n$stackTrace');
+      });
+    } else if (isDesktop) {
+      final epoch = ffi.screenViewAuthority.epoch;
+      final retirement = _screenRetirement ?? Future<void>.value();
+      retirement.then((_) {
+        if (_screenViewAllowed && ffi.screenViewAuthority.accepts(epoch)) {
+          updateCurrentDisplay(ffi.ffiModel.pi.currentDisplay);
+        }
+      });
+    }
+  }
 
   TextureModel(this.parent);
 
   setTextureType({required int display, required bool gpuTexture}) {
+    if (!_screenViewAllowed) return;
     debugPrint("setTextureType: display=$display, isGpuTexture=$gpuTexture");
     ensureControl(display);
     _control[display]?.setTextureType(gpuTexture: gpuTexture);
@@ -195,11 +228,13 @@ class TextureModel {
   }
 
   setRgbaTextureId({required int display, required int id}) {
+    if (!_screenViewAllowed) return;
     ensureControl(display);
     _control[display]?.setRgbaTextureId(id);
   }
 
   setGpuTextureId({required int display, required int id}) {
+    if (!_screenViewAllowed) return;
     ensureControl(display);
     _control[display]?.setGpuTextureId(id);
   }
@@ -210,7 +245,7 @@ class TextureModel {
   }
 
   updateCurrentDisplay(int curDisplay) {
-    if (isWeb) return;
+    if (isWeb || !_screenViewAllowed) return;
     final ffi = parent.target;
     if (ffi == null) return;
     tryCreateTexture(int idx) {
@@ -271,7 +306,7 @@ class TextureModel {
     await _destroyAll(ffi);
   }
 
-  Future<void> _destroyAll(FFI ffi) async {
+  Future<void> _destroyAll(FFI ffi, {bool keepControls = false}) async {
     final textures = <Future<void>>[
       ..._pixelbufferRenderTextures.values.map(
         (texture) => texture.destroy(ffi),
@@ -280,7 +315,7 @@ class TextureModel {
     ];
     _pixelbufferRenderTextures.clear();
     _gpuRenderTextures.clear();
-    _control.clear();
+    if (!keepControls) _control.clear();
     await Future.wait(textures);
   }
 
