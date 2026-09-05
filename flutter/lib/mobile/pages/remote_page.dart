@@ -87,6 +87,7 @@ class _RemotePageState extends State<RemotePage>
   Timer? _iosKeyboardWorkaroundTimer;
   StreamSubscription<AndroidOutgoingSessionClosedEvent>?
   _outgoingSessionClosedSubscription;
+  int? _outgoingSessionGeneration;
   StreamSubscription<bool>? _showMonitorsSubscription;
   late final MobileSessionReconnectController _reconnectController;
   bool _updatingSoftKeyboardText = false;
@@ -232,12 +233,16 @@ class _RemotePageState extends State<RemotePage>
       forceRelay: widget.forceRelay,
     );
     if (!mounted || gFFI.closed) return;
+    if (isAndroid) {
+      _outgoingSessionGeneration =
+          AndroidVpnSessionCoordinator.instance.activeSessionGeneration;
+    }
     await _refreshMobileInputSettings();
     unawaited(gFFI.qualityMonitorModel.checkShowQualityMonitor(sessionId));
   }
 
   void _handleOutgoingSessionClosed(AndroidOutgoingSessionClosedEvent event) {
-    if (!mounted) return;
+    if (!mounted || event.generation != _outgoingSessionGeneration) return;
     _reconnectController.handleSessionClosed(
       event.reason,
       isForeground:

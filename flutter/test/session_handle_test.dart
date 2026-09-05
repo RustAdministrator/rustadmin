@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:isolate';
 
 import 'package:flutter_hbb/models/session_handle.dart';
 import 'package:flutter_hbb/models/session_lifecycle.dart';
@@ -17,6 +18,185 @@ SessionHandle<int> handle({
 }
 
 void main() {
+  for (final remoteClose in [false, true]) {
+    test('async bridge stream closes (remote: $remoteClose)', () async {
+      final port = ReceivePort();
+      addTearDown(port.close);
+      final listened = Completer<void>();
+      Stream<int> bridgeStream() async* {
+        listened.complete();
+        await for (final message in port) {
+          // Model FRB's transport terminator separately from EventToUI.close.
+          if (message == -2) {
+            port.close();
+            break;
+          }
+          yield message as int;
+        }
+      }
+
+      Stream<int> setupStream() async* {
+        await Future<void>.value();
+        yield* bridgeStream();
+      }
+
+      void finishNative() {
+        port.sendPort.send(-1);
+        port.sendPort.send(-2);
+      }
+
+      final session = handle(closeNative: () async => finishNative());
+      final lease = (await session.start(
+        addNative: () async {},
+        startEvents: setupStream,
+      ))!;
+      await session.bindEventStream(
+        lease,
+        isCloseEvent: (event) => event == -1,
+        onEvent: (_) async {},
+        onError: (error, stack) => fail('bridge stream failed: $error'),
+      );
+      await listened.future;
+      if (remoteClose) {
+        finishNative();
+        await Future<void>.delayed(Duration.zero);
+        await session.waitForClose().timeout(const Duration(seconds: 2));
+      }
+      await session
+          .close(
+            nativeClosePolicy: NativeSessionClosePolicy.requestClose,
+            cleanup: () async {},
+          )
+          .timeout(const Duration(seconds: 2));
+      expect(session.canBeReplaced, isTrue);
+    });
+  }
+
+  test(
+    'native close wakes cancel, and replacement still waits for drain',
+    () async {
+      final cancelFinished = Completer<void>();
+      final trace = <String>[];
+      final stream = StreamController<int>(
+        onCancel: () {
+          trace.add('cancel');
+          return cancelFinished.future;
+        },
+      );
+      final session = handle(
+        closeNative: () async => trace.add('native-close'),
+        releasePlatformLease: (_) async => trace.add('release-lease'),
+      );
+      final lease = (await session.start(
+        acquirePlatformLease: () async => 1,
+        addNative: () async {},
+        startEvents: () => stream.stream,
+      ))!;
+      await session.bindEventStream(
+        lease,
+        isCloseEvent: (_) => false,
+        onEvent: (_) async => trace.add('stale-event'),
+        onError: (error, stack) => fail('event failed: $error'),
+      );
+      final close = session.close(
+        nativeClosePolicy: NativeSessionClosePolicy.requestClose,
+        cleanup: () async => trace.add('cleanup'),
+      );
+      var replaced = false;
+      final replace = session.prepareForReplacement().then(
+        (value) => replaced = value,
+      );
+      stream.add(7);
+      await Future<void>.delayed(Duration.zero);
+      expect(trace, ['cleanup', 'native-close', 'cancel']);
+      expect(replaced, isFalse);
+      cancelFinished.complete();
+      await Future.wait([close, replace]);
+      expect(trace, ['cleanup', 'native-close', 'cancel', 'release-lease']);
+      expect(replaced, isTrue);
+      await stream.close();
+    },
+  );
+
+  for (final explicitClose in [false, true]) {
+    test(
+      'event stream end permits reuse (close marker: $explicitClose)',
+      () async {
+        final stream = StreamController<int>();
+        final events = <int>[];
+        var leaseReleases = 0;
+        var nativeCloses = 0;
+        var cleanups = 0;
+        final session = handle(
+          closeNative: () async => nativeCloses++,
+          releasePlatformLease: (_) async => leaseReleases++,
+        );
+        final lease = (await session.start(
+          addNative: () async {},
+          acquirePlatformLease: () async => 1,
+          startEvents: () => stream.stream,
+        ))!;
+        await session.bindEventStream(
+          lease,
+          isCloseEvent: (event) => event == -1,
+          onEvent: (event) async => events.add(event),
+          onError: (error, stack) => fail('event stream failed'),
+        );
+        session.connected(lease.generation);
+        stream.add(7);
+        if (explicitClose) stream.add(-1);
+        await stream.close();
+        await session.waitForClose();
+        expect(session.isClosed, isTrue);
+        expect(events, [7]);
+        expect(leaseReleases, 1);
+        expect(
+          await session.prepareForReplacement(
+            cleanupClosedSession: () async => cleanups++,
+          ),
+          isTrue,
+        );
+        expect(cleanups, 1);
+        expect(nativeCloses, 0);
+        await session.remoteClosedAfterEvents(lease.generation);
+        expect(leaseReleases, 1);
+      },
+    );
+  }
+
+  test('replacement waits for the queued stream-close barrier', () async {
+    final stream = StreamController<int>();
+    final eventStarted = Completer<void>();
+    final eventGate = Completer<void>();
+    final session = handle(closeNative: () async {});
+    final lease = (await session.start(
+      addNative: () async {},
+      startEvents: () => stream.stream,
+    ))!;
+    await session.bindEventStream(
+      lease,
+      isCloseEvent: (event) => false,
+      onEvent: (event) async {
+        eventStarted.complete();
+        await eventGate.future;
+      },
+      onError: (error, stack) => fail('event stream failed'),
+    );
+    session.connected(lease.generation);
+    stream.add(7);
+    await eventStarted.future;
+    await stream.close();
+    var replaced = false;
+    final replacement = session
+        .prepareForReplacement(cleanupClosedSession: () async {})
+        .then((value) => replaced = value);
+    await Future<void>.delayed(Duration.zero);
+    expect(replaced, isFalse);
+    eventGate.complete();
+    await replacement;
+    expect(replaced, isTrue);
+  });
+
   test('legacy flags resolve one typed session kind', () {
     expect(
       SessionKind.fromLegacyFlags(
