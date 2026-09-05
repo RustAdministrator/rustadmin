@@ -3006,7 +3006,9 @@ class CanvasModel with ChangeNotifier {
   static double get bottomToEdge =>
       isDesktop ? windowBorderWidth + kDragToResizeAreaPadding.bottom : 0;
 
-  Size getSize() {
+  // Fit/zoom limits use the full app viewport. Cursor reveal, edge scrolling,
+  // and panning use the unobscured viewport above the keyboard/key-help bar.
+  Size getSize({bool includeKeyboardArea = false}) {
     final mediaData = MediaQueryData.fromView(ui.window);
     final size = mediaData.size;
     // If minimized, w or h may be negative here.
@@ -3014,18 +3016,22 @@ class CanvasModel with ChangeNotifier {
     double h = size.height - topToEdge - bottomToEdge;
     if (isMobileClient) {
       // Account for horizontal safe area insets on both orientations.
-      w = w - mediaData.padding.left - mediaData.padding.right;
+      final padding = includeKeyboardArea
+          ? mediaData.viewPadding
+          : mediaData.padding;
+      w = w - padding.left - padding.right;
       // Portrait excludes the status-bar/notch inset. Landscape intentionally
       // keeps the existing full-height behavior because the home indicator
       // auto-hides during a remote session.
       final isPortrait = size.height > size.width;
-      final topInset = isPortrait ? mediaData.padding.top : 0.0;
+      final topInset = isPortrait ? padding.top : 0.0;
       h = mobileRemoteUsableViewportHeight(
         screenHeight: size.height - topToEdge - bottomToEdge,
         topInset: topInset,
-        keyboardInset: mediaData.viewInsets.bottom,
-        keyHelpTop:
-            parent.target?.cursorModel.keyHelpToolsRectToAdjustCanvas?.top,
+        keyboardInset: includeKeyboardArea ? 0 : mediaData.viewInsets.bottom,
+        keyHelpTop: includeKeyboardArea
+            ? null
+            : parent.target?.cursorModel.keyHelpToolsRectToAdjustCanvas?.top,
       );
     }
     return Size(w < 0 ? 0 : w, h < 0 ? 0 : h);
@@ -3051,7 +3057,7 @@ class CanvasModel with ChangeNotifier {
   double _mobileMinimumScale() {
     return mobileRemoteMinimumCanvasScale(
       texture: _mobileTextureSize(),
-      viewport: size,
+      viewport: getSize(includeKeyboardArea: true),
     );
   }
 
@@ -3071,17 +3077,18 @@ class CanvasModel with ChangeNotifier {
 
   void _applyPendingMobileFit() {
     final texture = _mobileTextureSize();
+    final fitViewport = getSize(includeKeyboardArea: true);
     if (texture.width <= 0 ||
         texture.height <= 0 ||
-        size.width <= 0 ||
-        size.height <= 0) {
+        fitViewport.width <= 0 ||
+        fitViewport.height <= 0) {
       return;
     }
     _devicePixelRatio = ui.window.devicePixelRatio;
     _scale = mobileRemoteScaleForMode(
       mode: _mobileViewScaleMode,
       texture: texture,
-      viewport: size,
+      viewport: fitViewport,
       devicePixelRatio: _devicePixelRatio,
     );
     _scale = max(_scale, _mobileMinimumScale());
@@ -3104,7 +3111,7 @@ class CanvasModel with ChangeNotifier {
         bind.mainSetCommon(
           key: 'debug-probe-log',
           value:
-              'Android mobile viewport fit: mode=${_mobileViewScaleMode.value}, viewport=${size.width}x${size.height}, texture=${texture.width}x${texture.height}, scale=$_scale',
+              'Android mobile viewport fit: mode=${_mobileViewScaleMode.value}, viewport=${fitViewport.width}x${fitViewport.height}, visible=${size.width}x${size.height}, texture=${texture.width}x${texture.height}, scale=$_scale',
         ),
       );
     }
