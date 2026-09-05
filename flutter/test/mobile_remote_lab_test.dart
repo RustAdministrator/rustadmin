@@ -1205,7 +1205,7 @@ void main() {
     expect(find.text('Ctrl'), findsOneWidget);
     expect(find.text('Esc'), findsOneWidget);
     expect(find.text('Ctrl+C'), findsOneWidget);
-    expect(find.byIcon(Icons.keyboard_arrow_left), findsOneWidget);
+    expect(find.byIcon(Icons.arrow_left), findsOneWidget);
 
     await tester.tap(find.text('Fn'));
     await tester.pumpAndSettle();

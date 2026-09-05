@@ -684,10 +684,10 @@ void main() {
     );
 
     for (final entry in const <(IconData, String)>[
-      (Icons.keyboard_arrow_left, 'VK_LEFT'),
-      (Icons.keyboard_arrow_up, 'VK_UP'),
-      (Icons.keyboard_arrow_down, 'VK_DOWN'),
-      (Icons.keyboard_arrow_right, 'VK_RIGHT'),
+      (Icons.arrow_left, 'VK_LEFT'),
+      (Icons.arrow_drop_up, 'VK_UP'),
+      (Icons.arrow_drop_down, 'VK_DOWN'),
+      (Icons.arrow_right, 'VK_RIGHT'),
     ]) {
       await tester.ensureVisible(find.byIcon(entry.$1));
       await tester.tap(find.byIcon(entry.$1));

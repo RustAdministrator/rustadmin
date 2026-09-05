@@ -1,5 +1,6 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 import '../../common/quality_monitor_settings.dart';
 import '../../consts.dart';
@@ -1247,37 +1248,70 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
     BuildContext context,
     String text,
     VoidCallback onPressed, {
-    bool active = false,
+    bool? active,
     bool locked = false,
     VoidCallback? onDoublePressed,
     IconData? icon,
+    double iconSize = 18,
+    String? svgAsset,
+    String? semanticLabel,
   }) {
-    assert(!locked || active);
+    assert(!locked || active == true);
+    assert(icon == null || svgAsset == null);
+    final label = _label(semanticLabel ?? text);
     final foregroundColor = locked
         ? Colors.white
         : mobileRemoteToolbarForegroundColor(context);
+    final Widget content;
+    if (icon != null) {
+      content = Icon(
+        icon,
+        size: iconSize,
+        color: foregroundColor,
+        // Physical key directions must not mirror with the local UI language.
+        textDirection: TextDirection.ltr,
+      );
+    } else if (svgAsset != null) {
+      content = SvgPicture.asset(
+        svgAsset,
+        width: 18,
+        height: 18,
+        colorFilter: ColorFilter.mode(foregroundColor, BlendMode.srcIn),
+        excludeFromSemantics: true,
+      );
+    } else {
+      content = Text(
+        _label(text),
+        textAlign: TextAlign.center,
+        style: TextStyle(color: foregroundColor, fontSize: 10),
+      );
+    }
     return SizedBox.square(
       dimension: 36 * 1.1,
-      child: Material(
-        color: locked
-            ? mobileRemoteAccentColor
-            : active
-            ? mobileRemoteToolbarActiveBackgroundColor(context)
-            : mobileRemoteQuickKeyButtonBackgroundColor(context),
-        borderRadius: BorderRadius.circular(4),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onPressed,
-          onDoubleTap: onDoublePressed,
-          child: icon != null
-              ? Icon(icon, size: 18, color: foregroundColor)
-              : Center(
-                  child: Text(
-                    _label(text),
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: foregroundColor, fontSize: 10),
-                  ),
-                ),
+      child: Semantics(
+        label: label,
+        button: true,
+        toggled: active,
+        value: locked ? _label('Locked') : null,
+        onTap: onPressed,
+        excludeSemantics: true,
+        child: Tooltip(
+          message: label,
+          excludeFromSemantics: true,
+          child: Material(
+            color: locked
+                ? mobileRemoteAccentColor
+                : active == true
+                ? mobileRemoteToolbarActiveBackgroundColor(context)
+                : mobileRemoteQuickKeyButtonBackgroundColor(context),
+            borderRadius: BorderRadius.circular(4),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: onPressed,
+              onDoubleTap: onDoublePressed,
+              child: Center(child: content),
+            ),
+          ),
         ),
       ),
     );
@@ -1296,6 +1330,8 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
           active: ctrlActive,
           locked: ctrlLocked,
           onDoublePressed: onCtrlDoubleTap,
+          icon: isMac ? Icons.keyboard_control_key : null,
+          semanticLabel: 'Control',
         ),
       ),
       MobileRemoteQuickKey.alt: KeyedSubtree(
@@ -1307,6 +1343,8 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
           active: altActive,
           locked: altLocked,
           onDoublePressed: onAltDoubleTap,
+          icon: isMac ? Icons.keyboard_option_key : null,
+          semanticLabel: isMac ? 'Option' : 'Alt',
         ),
       ),
       MobileRemoteQuickKey.shift: KeyedSubtree(
@@ -1318,6 +1356,7 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
           active: shiftActive,
           locked: shiftLocked,
           onDoublePressed: onShiftDoubleTap,
+          svgAsset: 'assets/keyboard_shift.svg',
         ),
       ),
       MobileRemoteQuickKey.command: KeyedSubtree(
@@ -1329,6 +1368,9 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
           active: commandActive,
           locked: commandLocked,
           onDoublePressed: onCommandDoubleTap,
+          icon: isMac ? Icons.keyboard_command_key : null,
+          svgAsset: isMac ? null : 'assets/win.svg',
+          semanticLabel: isMac ? 'Command' : 'Windows',
         ),
       ),
       MobileRemoteQuickKey.functionKeys: KeyedSubtree(
@@ -1341,6 +1383,7 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
           ),
           onFunctionKeys,
           active: functionKeysActive,
+          semanticLabel: 'Function keys',
         ),
       ),
       MobileRemoteQuickKey.extendedKeys: KeyedSubtree(
@@ -1353,6 +1396,7 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
           ),
           onMoreKeys,
           active: moreKeysActive,
+          semanticLabel: 'More keys',
         ),
       ),
     };
@@ -1367,13 +1411,40 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
     } else if (moreKeysActive) {
       expandedKeys.addAll([
         _button(context, 'Esc', () => onKeyPressed('VK_ESCAPE')),
-        _button(context, 'Tab', () => onKeyPressed('VK_TAB')),
-        _button(context, 'Home', () => onKeyPressed('VK_HOME')),
-        _button(context, 'End', () => onKeyPressed('VK_END')),
+        _button(
+          context,
+          'Tab',
+          () => onKeyPressed('VK_TAB'),
+          icon: Icons.keyboard_tab,
+        ),
+        _button(
+          context,
+          'Home',
+          () => onKeyPressed('VK_HOME'),
+          icon: Icons.first_page,
+        ),
+        _button(
+          context,
+          'End',
+          () => onKeyPressed('VK_END'),
+          icon: Icons.last_page,
+        ),
         _button(context, 'Ins', () => onKeyPressed('VK_INSERT')),
         _button(context, 'Del', () => onKeyPressed('VK_DELETE')),
-        _button(context, 'PgUp', () => onKeyPressed('VK_PRIOR')),
-        _button(context, 'PgDn', () => onKeyPressed('VK_NEXT')),
+        _button(
+          context,
+          'PgUp',
+          () => onKeyPressed('VK_PRIOR'),
+          icon: Icons.keyboard_double_arrow_up,
+          semanticLabel: 'Page Up',
+        ),
+        _button(
+          context,
+          'PgDn',
+          () => onKeyPressed('VK_NEXT'),
+          icon: Icons.keyboard_double_arrow_down,
+          semanticLabel: 'Page Down',
+        ),
         if (showWindowsLinuxKeys)
           _button(context, 'PrtScr', () => onKeyPressed('VK_SNAPSHOT')),
         if (showWindowsLinuxKeys)
@@ -1382,30 +1453,40 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
           _button(context, 'Pause', () => onKeyPressed('VK_PAUSE')),
         if (showWindowsLinuxKeys)
           _button(context, 'Menu', () => onKeyPressed('Apps')),
-        _button(context, 'Enter', () => onKeyPressed('VK_ENTER')),
         _button(
           context,
-          '',
+          'Enter',
+          () => onKeyPressed('VK_ENTER'),
+          icon: Icons.keyboard_return,
+        ),
+        _button(
+          context,
+          'Left',
           () => onKeyPressed('VK_LEFT'),
-          icon: Icons.keyboard_arrow_left,
+          icon: Icons.arrow_left,
+          // Filled triangles occupy less of the font's box than other icons.
+          iconSize: 28,
         ),
         _button(
           context,
-          '',
+          'Up',
           () => onKeyPressed('VK_UP'),
-          icon: Icons.keyboard_arrow_up,
+          icon: Icons.arrow_drop_up,
+          iconSize: 28,
         ),
         _button(
           context,
-          '',
+          'Down',
           () => onKeyPressed('VK_DOWN'),
-          icon: Icons.keyboard_arrow_down,
+          icon: Icons.arrow_drop_down,
+          iconSize: 28,
         ),
         _button(
           context,
-          '',
+          'Right',
           () => onKeyPressed('VK_RIGHT'),
-          icon: Icons.keyboard_arrow_right,
+          icon: Icons.arrow_right,
+          iconSize: 28,
         ),
         _button(
           context,
