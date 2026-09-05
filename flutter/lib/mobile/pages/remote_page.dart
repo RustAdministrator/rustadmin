@@ -1517,17 +1517,11 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
       onFunctionKeys: () {
         setState(() {
           _fn = !_fn;
-          if (_fn) {
-            _more = false;
-          }
         });
       },
       onMoreKeys: () {
         setState(() {
           _more = !_more;
-          if (_more) {
-            _fn = false;
-          }
         });
       },
       onKeyPressed: inputModel.inputKey,

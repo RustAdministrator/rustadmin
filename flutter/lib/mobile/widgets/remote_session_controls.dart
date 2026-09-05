@@ -1161,13 +1161,12 @@ enum MobileRemoteQuickKey {
   extendedKeys,
 }
 
+// Only modifiers are reorderable; expansion controls belong to fixed groups.
 const mobileRemoteDefaultQuickKeyOrder = <MobileRemoteQuickKey>[
   MobileRemoteQuickKey.ctrl,
   MobileRemoteQuickKey.alt,
   MobileRemoteQuickKey.shift,
   MobileRemoteQuickKey.command,
-  MobileRemoteQuickKey.functionKeys,
-  MobileRemoteQuickKey.extendedKeys,
 ];
 
 String mobileRemoteQuickKeyLabel(
@@ -1185,6 +1184,8 @@ String mobileRemoteQuickKeyLabel(
 }
 
 class MobileRemoteKeyHelpTools extends StatelessWidget {
+  static const _buttonSize = 36 * 1.1;
+
   const MobileRemoteKeyHelpTools({
     super.key,
     required this.ctrlActive,
@@ -1287,7 +1288,7 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
       );
     }
     return SizedBox.square(
-      dimension: 36 * 1.1,
+      dimension: _buttonSize,
       child: Semantics(
         label: label,
         button: true,
@@ -1400,121 +1401,178 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
         ),
       ),
     };
-    final expandedKeys = <Widget>[];
-    if (functionKeysActive) {
-      for (var index = 1; index <= 12; index++) {
-        final name = 'F$index';
-        expandedKeys.add(
-          _button(context, name, () => onKeyPressed('VK_$name')),
-        );
-      }
-    } else if (moreKeysActive) {
-      expandedKeys.addAll([
-        _button(context, 'Esc', () => onKeyPressed('VK_ESCAPE')),
-        _button(
-          context,
-          'Tab',
-          () => onKeyPressed('VK_TAB'),
-          icon: Icons.keyboard_tab,
+    final groups = <(String, List<Widget>)>[
+      (
+        'modifiers',
+        [
+          for (final key in quickKeyOrder)
+            if (key != MobileRemoteQuickKey.functionKeys &&
+                key != MobileRemoteQuickKey.extendedKeys)
+              quickButtons[key]!,
+        ],
+      ),
+      if (moreKeysActive)
+        (
+          'editing',
+          [
+            _button(context, 'Del', () => onKeyPressed('VK_DELETE')),
+            _button(context, 'Esc', () => onKeyPressed('VK_ESCAPE')),
+            _button(
+              context,
+              'Tab',
+              () => onKeyPressed('VK_TAB'),
+              icon: Icons.keyboard_tab,
+            ),
+            _button(context, 'Ins', () => onKeyPressed('VK_INSERT')),
+          ],
         ),
-        _button(
-          context,
-          'Home',
-          () => onKeyPressed('VK_HOME'),
-          icon: Icons.first_page,
+      if (moreKeysActive)
+        (
+          'enter',
+          [
+            _button(
+              context,
+              'Enter',
+              () => onKeyPressed('VK_ENTER'),
+              icon: Icons.keyboard_return,
+            ),
+          ],
         ),
-        _button(
-          context,
-          'End',
-          () => onKeyPressed('VK_END'),
-          icon: Icons.last_page,
+      if (moreKeysActive)
+        (
+          'arrows',
+          [
+            _button(
+              context,
+              'Left',
+              () => onKeyPressed('VK_LEFT'),
+              icon: Icons.arrow_left,
+              // Filled triangles occupy less of the font's box than other icons.
+              iconSize: 28,
+            ),
+            _button(
+              context,
+              'Up',
+              () => onKeyPressed('VK_UP'),
+              icon: Icons.arrow_drop_up,
+              iconSize: 28,
+            ),
+            _button(
+              context,
+              'Down',
+              () => onKeyPressed('VK_DOWN'),
+              icon: Icons.arrow_drop_down,
+              iconSize: 28,
+            ),
+            _button(
+              context,
+              'Right',
+              () => onKeyPressed('VK_RIGHT'),
+              icon: Icons.arrow_right,
+              iconSize: 28,
+            ),
+          ],
         ),
-        _button(context, 'Ins', () => onKeyPressed('VK_INSERT')),
-        _button(context, 'Del', () => onKeyPressed('VK_DELETE')),
-        _button(
-          context,
-          'PgUp',
-          () => onKeyPressed('VK_PRIOR'),
-          icon: Icons.keyboard_double_arrow_up,
-          semanticLabel: 'Page Up',
+      if (moreKeysActive)
+        (
+          'navigation',
+          [
+            _button(
+              context,
+              'Home',
+              () => onKeyPressed('VK_HOME'),
+              icon: Icons.first_page,
+            ),
+            _button(
+              context,
+              'End',
+              () => onKeyPressed('VK_END'),
+              icon: Icons.last_page,
+            ),
+            _button(
+              context,
+              'PgUp',
+              () => onKeyPressed('VK_PRIOR'),
+              icon: Icons.keyboard_double_arrow_up,
+              semanticLabel: 'Page Up',
+            ),
+            _button(
+              context,
+              'PgDn',
+              () => onKeyPressed('VK_NEXT'),
+              icon: Icons.keyboard_double_arrow_down,
+              semanticLabel: 'Page Down',
+            ),
+          ],
         ),
-        _button(
-          context,
-          'PgDn',
-          () => onKeyPressed('VK_NEXT'),
-          icon: Icons.keyboard_double_arrow_down,
-          semanticLabel: 'Page Down',
+      (
+        'function-keys',
+        [
+          quickButtons[MobileRemoteQuickKey.functionKeys]!,
+          if (functionKeysActive)
+            for (var index = 1; index <= 12; index++)
+              _button(context, 'F$index', () => onKeyPressed('VK_F$index')),
+        ],
+      ),
+      if (moreKeysActive && showWindowsLinuxKeys)
+        (
+          'pause-break',
+          [
+            _button(context, 'Pause', () => onKeyPressed('VK_PAUSE')),
+            _button(context, 'Break', () => onKeyPressed('VK_CANCEL')),
+          ],
         ),
-        if (showWindowsLinuxKeys)
-          _button(context, 'PrtScr', () => onKeyPressed('VK_SNAPSHOT')),
-        if (showWindowsLinuxKeys)
-          _button(context, 'ScrollLock', () => onKeyPressed('VK_SCROLL')),
-        if (showWindowsLinuxKeys)
-          _button(context, 'Pause', () => onKeyPressed('VK_PAUSE')),
-        if (showWindowsLinuxKeys)
-          _button(context, 'Menu', () => onKeyPressed('Apps')),
-        _button(
-          context,
-          'Enter',
-          () => onKeyPressed('VK_ENTER'),
-          icon: Icons.keyboard_return,
-        ),
-        _button(
-          context,
-          'Left',
-          () => onKeyPressed('VK_LEFT'),
-          icon: Icons.arrow_left,
-          // Filled triangles occupy less of the font's box than other icons.
-          iconSize: 28,
-        ),
-        _button(
-          context,
-          'Up',
-          () => onKeyPressed('VK_UP'),
-          icon: Icons.arrow_drop_up,
-          iconSize: 28,
-        ),
-        _button(
-          context,
-          'Down',
-          () => onKeyPressed('VK_DOWN'),
-          icon: Icons.arrow_drop_down,
-          iconSize: 28,
-        ),
-        _button(
-          context,
-          'Right',
-          () => onKeyPressed('VK_RIGHT'),
-          icon: Icons.arrow_right,
-          iconSize: 28,
-        ),
-        _button(
-          context,
-          isMac ? 'Cmd+C' : 'Ctrl+C',
-          () => onShortcutPressed('VK_C'),
-        ),
-        _button(
-          context,
-          isMac ? 'Cmd+V' : 'Ctrl+V',
-          () => onShortcutPressed('VK_V'),
-        ),
-        _button(
-          context,
-          isMac ? 'Cmd+S' : 'Ctrl+S',
-          () => onShortcutPressed('VK_S'),
-        ),
-      ]);
-    }
-
-    final allButtons = <Widget>[
-      for (final key in quickKeyOrder) quickButtons[key]!,
-      ...expandedKeys,
+      (
+        'other',
+        [
+          quickButtons[MobileRemoteQuickKey.extendedKeys]!,
+          if (moreKeysActive) ...[
+            if (showWindowsLinuxKeys)
+              _button(context, 'PrtScr', () => onKeyPressed('VK_SNAPSHOT')),
+            if (showWindowsLinuxKeys)
+              _button(context, 'ScrollLock', () => onKeyPressed('VK_SCROLL')),
+            if (showWindowsLinuxKeys)
+              _button(context, 'Menu', () => onKeyPressed('Apps')),
+            _button(
+              context,
+              isMac ? 'Cmd+C' : 'Ctrl+C',
+              () => onShortcutPressed('VK_C'),
+            ),
+            _button(
+              context,
+              isMac ? 'Cmd+V' : 'Ctrl+V',
+              () => onShortcutPressed('VK_V'),
+            ),
+            _button(
+              context,
+              isMac ? 'Cmd+S' : 'Ctrl+S',
+              () => onShortcutPressed('VK_S'),
+            ),
+          ],
+        ],
+      ),
     ];
     return Container(
       key: const Key('mobile-remote-key-help-strip'),
       color: mobileRemoteQuickKeyStripBackgroundColor(context),
       padding: const EdgeInsets.symmetric(vertical: 6),
-      child: _MobileKeyHelpScrollStrip(buttons: allButtons, spacing: spacing),
+      child: _MobileKeyHelpScrollStrip(
+        spacing: _buttonSize / 2,
+        buttons: [
+          for (final (name, buttons) in groups)
+            if (buttons.isNotEmpty)
+              Row(
+                key: Key('mobile-remote-key-group-$name'),
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (var index = 0; index < buttons.length; index++) ...[
+                    if (index > 0) const SizedBox(width: spacing),
+                    buttons[index],
+                  ],
+                ],
+              ),
+        ],
+      ),
     );
   }
 }

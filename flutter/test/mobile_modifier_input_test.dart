@@ -327,6 +327,29 @@ void main() {
     }
   }
 
+  for (final mode in [
+    kKeyboardInputModeAuto,
+    kKeyboardInputModeText,
+    kKeyboardInputModePhysical,
+  ]) {
+    test(
+      'Pause and Break reach distinct named-key bridge events in $mode',
+      () async {
+        await inputModel.setKeyboardInputMode(mode);
+        inputModel.inputKey('VK_PAUSE');
+        inputModel.inputKey('VK_CANCEL');
+        await inputModel.keyboardDispatchIdle;
+        expect(testImpl.orderedKeyboardCalls, [
+          'legacy:VK_PAUSE:down',
+          'legacy:VK_PAUSE:up',
+          'legacy:VK_CANCEL:down',
+          'legacy:VK_CANCEL:up',
+        ]);
+        expect(testImpl.plainTextEdits, 0);
+      },
+    );
+  }
+
   testWidgets('native typing consumes Cmd but retains locked Shift', (
     tester,
   ) async {

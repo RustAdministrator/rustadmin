@@ -114,9 +114,21 @@ void main() {
       (toolbar.click('VK_ENTER').first as PhysicalKeyboardIntent).key,
       const HidKey(0x07, 0x28),
     );
-    for (final name in const ['VK_SNAPSHOT', 'VK_SCROLL', 'VK_PAUSE', 'Apps']) {
+    for (final name in const [
+      'VK_SNAPSHOT',
+      'VK_SCROLL',
+      'VK_PAUSE',
+      'VK_CANCEL',
+      'Apps',
+    ]) {
       expect(toolbar.click(name), hasLength(2), reason: name);
     }
+    final cancel = toolbar.click('VK_CANCEL').first as PhysicalKeyboardIntent;
+    expect(
+      cancel.key,
+      HidKey.fromFlutterUsage(PhysicalKeyboardKey.abort.usbHidUsage),
+    );
+    expect(cancel.legacyFallbackName, 'VK_CANCEL');
   });
 
   test('mobile text keeps stable HID identity without guessing layout', () {

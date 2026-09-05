@@ -32,6 +32,7 @@ const canonicalLegacyKeyNamesByFlutterUsage = <int, String>{
   0x00070047: 'VK_SCROLL',
   0x00070048: 'VK_PAUSE',
   0x00070065: 'Apps',
+  0x0007009b: 'VK_CANCEL', // Break/Cancel, distinct from Pause.
 };
 
 class HidKey implements Comparable<HidKey> {

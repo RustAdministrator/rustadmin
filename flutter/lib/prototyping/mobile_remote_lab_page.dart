@@ -2525,17 +2525,11 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
           onFunctionKeys: () {
             setState(() {
               _keyboardFunctionKeys = !_keyboardFunctionKeys;
-              if (_keyboardFunctionKeys) {
-                _keyboardMoreKeys = false;
-              }
             });
           },
           onMoreKeys: () {
             setState(() {
               _keyboardMoreKeys = !_keyboardMoreKeys;
-              if (_keyboardMoreKeys) {
-                _keyboardFunctionKeys = false;
-              }
             });
           },
           onKeyPressed: _showKeyboardPreviewAction,

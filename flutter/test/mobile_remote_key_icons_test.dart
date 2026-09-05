@@ -13,6 +13,7 @@ Future<void> pumpKeyTools(
   bool active = false,
   bool locked = false,
   bool functionKeys = false,
+  bool moreKeys = true,
   List<MobileRemoteQuickKey> order = mobileRemoteDefaultQuickKeyOrder,
   ValueChanged<String>? onKey,
   ValueChanged<String>? onModifier,
@@ -38,7 +39,7 @@ Future<void> pumpKeyTools(
                 shiftLocked: locked,
                 commandLocked: locked,
                 functionKeysActive: functionKeys,
-                moreKeysActive: !functionKeys,
+                moreKeysActive: moreKeys,
                 isMac: isMac,
                 showWindowsLinuxKeys: !isMac,
                 quickKeyOrder: order,
@@ -276,7 +277,7 @@ void main() {
   ) async {
     final sent = <String>[];
     await pumpKeyTools(tester, functionKeys: true, onKey: sent.add);
-    expect(find.byIcon(Icons.first_page), findsNothing);
+    expect(find.byIcon(Icons.first_page), findsOneWidget);
     for (var index = 1; index <= 12; index++) {
       final key = find.text('F$index');
       await tester.ensureVisible(key);
@@ -303,14 +304,7 @@ void main() {
   ) async {
     final order = mobileRemoteDefaultQuickKeyOrder.reversed.toList();
     await pumpKeyTools(tester, order: order);
-    final names = [
-      'extended-keys',
-      'function-keys',
-      'command',
-      'shift',
-      'alt',
-      'ctrl',
-    ];
+    final names = ['command', 'shift', 'alt', 'ctrl'];
     var previousX = double.negativeInfinity;
     for (final name in names) {
       final button = quickKey(name);
@@ -319,5 +313,108 @@ void main() {
       expect(tester.getSize(button), const Size.square(39.6));
       previousX = x;
     }
+    expect(
+      tester.getTopLeft(quickKey('function-keys')).dx,
+      greaterThan(previousX),
+    );
+    expect(
+      tester.getTopLeft(quickKey('extended-keys')).dx,
+      greaterThan(tester.getTopLeft(quickKey('function-keys')).dx),
+    );
+  });
+
+  for (final isMac in [false, true]) {
+    for (final functionKeys in [false, true]) {
+      testWidgets(
+        'custom keys have ordered groups and half-key gaps (Mac: $isMac, Fn: $functionKeys)',
+        (tester) async {
+          await pumpKeyTools(tester, isMac: isMac, functionKeys: functionKeys);
+          final groups = <String, List<String>>{
+            'modifiers': [
+              'Control',
+              isMac ? 'Option' : 'Alt',
+              'Shift',
+              isMac ? 'Command' : 'Windows',
+            ],
+            'editing': ['Del', 'Esc', 'Tab', 'Ins'],
+            'enter': ['Enter'],
+            'arrows': ['Left', 'Up', 'Down', 'Right'],
+            'navigation': ['Home', 'End', 'Page Up', 'Page Down'],
+            'function-keys': [
+              'Function keys',
+              if (functionKeys)
+                for (var i = 1; i <= 12; i++) 'F$i',
+            ],
+            if (!isMac) 'pause-break': ['Pause', 'Break'],
+            'other': [
+              'More keys',
+              if (!isMac) ...['PrtScr', 'ScrollLock', 'Menu'],
+              for (final letter in ['C', 'V', 'S'])
+                '${isMac ? 'Cmd' : 'Ctrl'}+$letter',
+            ],
+          };
+          Rect? previous;
+          for (final entry in groups.entries) {
+            final group = find.byKey(
+              Key('mobile-remote-key-group-${entry.key}'),
+            );
+            final labels = tester
+                .widgetList<Tooltip>(
+                  find.descendant(of: group, matching: find.byType(Tooltip)),
+                )
+                .map((tooltip) => tooltip.message);
+            expect(labels, entry.value);
+            final rect = tester.getRect(group);
+            expect(rect.height, closeTo(39.6, 0.000001));
+            expect(
+              rect.width,
+              closeTo(
+                entry.value.length * 39.6 + (entry.value.length - 1) * 4,
+                0.000001,
+              ),
+            );
+            if (previous != null) {
+              expect(rect.left - previous.right, closeTo(39.6 / 2, 0.000001));
+              expect(rect.top, previous.top);
+            }
+            previous = rect;
+          }
+          if (isMac) expect(find.text('Break'), findsNothing);
+          expect(tester.takeException(), isNull);
+        },
+      );
+    }
+  }
+
+  testWidgets(
+    'collapsing extended groups retains Fn and has no empty group gaps',
+    (tester) async {
+      await pumpKeyTools(tester, moreKeys: false, functionKeys: true);
+      final modifiers = tester.getRect(
+        find.byKey(const Key('mobile-remote-key-group-modifiers')),
+      );
+      final functions = tester.getRect(
+        find.byKey(const Key('mobile-remote-key-group-function-keys')),
+      );
+      final other = tester.getRect(
+        find.byKey(const Key('mobile-remote-key-group-other')),
+      );
+      expect(functions.left - modifiers.right, closeTo(19.8, 0.000001));
+      expect(other.left - functions.right, closeTo(19.8, 0.000001));
+      expect(find.byIcon(Icons.keyboard_return), findsNothing);
+      expect(find.text('F1'), findsOneWidget);
+      expect(find.text('F12'), findsOneWidget);
+    },
+  );
+
+  testWidgets('Pause and Break send distinct control keys', (tester) async {
+    final sent = <String>[];
+    await pumpKeyTools(tester, onKey: sent.add);
+    for (final label in ['Pause', 'Break']) {
+      await tester.ensureVisible(find.text(label));
+      await tester.tap(find.text(label));
+      await tester.pump();
+    }
+    expect(sent, ['VK_PAUSE', 'VK_CANCEL']);
   });
 }

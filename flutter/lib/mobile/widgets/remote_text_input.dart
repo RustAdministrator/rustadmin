@@ -71,6 +71,7 @@ class MobileRemoteTextInput extends StatelessWidget {
     controller: controller,
     focusNode: focusNode,
     onEnter: onEnter,
+    keyboardAppearance: Theme.of(context).brightness,
   );
 }
 
@@ -78,6 +79,7 @@ class _RemoteEditableText extends EditableText {
   _RemoteEditableText({
     required super.controller,
     required super.focusNode,
+    required super.keyboardAppearance,
     required this.onEnter,
   }) : super(
          style: const TextStyle(color: Colors.transparent, fontSize: 14),

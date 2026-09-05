@@ -107,9 +107,13 @@ class _KeyboardHarness {
     );
   }
 
-  Future<void> mount(WidgetTester tester) async {
+  Future<void> mount(
+    WidgetTester tester, {
+    Brightness brightness = Brightness.light,
+  }) async {
     await tester.pumpWidget(
       MaterialApp(
+        theme: ThemeData(brightness: brightness),
         home: Scaffold(
           body: SizedBox(
             width: 0,
@@ -138,6 +142,63 @@ class _KeyboardHarness {
 
 void main() {
   tearDown(() => debugDefaultTargetPlatformOverride = null);
+
+  for (final brightness in Brightness.values) {
+    testWidgets('iOS native keyboard uses the app $brightness theme', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      final harness = _KeyboardHarness(
+        TargetPlatform.iOS,
+        ControllerKeyboardInputMode.auto,
+      );
+      try {
+        await harness.mount(tester, brightness: brightness);
+        expect(
+          tester.testTextInput.setClientArgs!['keyboardAppearance'],
+          brightness.toString(),
+        );
+        await harness.nativeReturn(tester);
+        await tester.pump();
+        await harness.keyboard.idle;
+        expect(harness.events, _enter);
+        expect(harness.focus.hasFocus, isTrue);
+        expect(tester.testTextInput.isVisible, isTrue);
+      } finally {
+        await harness.unmount(tester);
+      }
+    });
+  }
+
+  testWidgets('reopening iOS keyboard picks up a changed app theme', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final harness = _KeyboardHarness(
+      TargetPlatform.iOS,
+      ControllerKeyboardInputMode.auto,
+    );
+    try {
+      await harness.mount(tester, brightness: Brightness.dark);
+      expect(
+        tester.testTextInput.setClientArgs!['keyboardAppearance'],
+        'Brightness.dark',
+      );
+      harness.focus.unfocus();
+      await tester.pumpWidget(const SizedBox.shrink());
+      await harness.mount(tester, brightness: Brightness.light);
+      expect(
+        tester.testTextInput.setClientArgs!['keyboardAppearance'],
+        'Brightness.light',
+      );
+      await harness.nativeReturn(tester);
+      await tester.pump();
+      await harness.keyboard.idle;
+      expect(harness.events, _enter);
+    } finally {
+      await harness.unmount(tester);
+    }
+  });
 
   for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
     for (final mode in ControllerKeyboardInputMode.values) {
