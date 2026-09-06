@@ -304,7 +304,7 @@ void main() {
   ) async {
     final order = mobileRemoteDefaultQuickKeyOrder.reversed.toList();
     await pumpKeyTools(tester, order: order);
-    final names = ['command', 'shift', 'alt', 'ctrl'];
+    final names = ['command', 'alt', 'ctrl', 'shift'];
     var previousX = double.negativeInfinity;
     for (final name in names) {
       final button = quickKey(name);
@@ -331,9 +331,9 @@ void main() {
           await pumpKeyTools(tester, isMac: isMac, functionKeys: functionKeys);
           final groups = <String, List<String>>{
             'modifiers': [
+              'Shift',
               'Control',
               isMac ? 'Option' : 'Alt',
-              'Shift',
               isMac ? 'Command' : 'Windows',
             ],
             'editing': ['Del', 'Esc', 'Tab', 'Ins'],

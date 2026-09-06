@@ -1163,9 +1163,9 @@ enum MobileRemoteQuickKey {
 
 // Only modifiers are reorderable; expansion controls belong to fixed groups.
 const mobileRemoteDefaultQuickKeyOrder = <MobileRemoteQuickKey>[
+  MobileRemoteQuickKey.shift,
   MobileRemoteQuickKey.ctrl,
   MobileRemoteQuickKey.alt,
-  MobileRemoteQuickKey.shift,
   MobileRemoteQuickKey.command,
 ];
 
