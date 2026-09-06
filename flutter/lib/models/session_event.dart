@@ -144,6 +144,7 @@ final class FollowCurrentDisplaySessionEvent extends SessionEvent {
 
 final class SessionDisplayValue {
   const SessionDisplayValue({
+    this.name,
     this.x,
     this.y,
     this.width,
@@ -154,6 +155,7 @@ final class SessionDisplayValue {
     this.scaledWidth,
   });
 
+  final String? name;
   final double? x;
   final double? y;
   final int? width;
@@ -164,6 +166,7 @@ final class SessionDisplayValue {
   final int? scaledWidth;
 
   Map<String, Object> toLegacyMap() => {
+    if (name != null) 'display_name': name!,
     if (x != null) 'x': x!,
     if (y != null) 'y': y!,
     if (width != null) 'width': width!,
@@ -2272,6 +2275,9 @@ List<SessionDisplayValue>? _decodeDisplays(Object? raw) {
 
 SessionDisplayValue? _decodeDisplay(Object? raw) {
   if (raw is! Map) return null;
+  final rawName = raw['display_name'];
+  // Optional presentation metadata must not invalidate otherwise usable geometry.
+  final name = rawName is String && rawName.length <= 256 ? rawName : null;
   final x = raw.containsKey('x') ? _decodeDouble(raw['x']) : null;
   final y = raw.containsKey('y') ? _decodeDouble(raw['y']) : null;
   final width = raw.containsKey('width') ? _decodeInt(raw['width']) : null;
@@ -2310,6 +2316,7 @@ SessionDisplayValue? _decodeDisplay(Object? raw) {
     _ => _decodeInt(cursor) == 1,
   };
   return SessionDisplayValue(
+    name: name,
     x: x,
     y: y,
     width: width,

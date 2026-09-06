@@ -1561,7 +1561,7 @@ class _MonitorMenu extends StatelessWidget {
   }
 
   buildOneMonitorButton(i, curDisplay) => Text(
-        '${i + 1}',
+        ffi.ffiModel.pi.monitorLabel(i),
         style: TextStyle(
           color: i == curDisplay
               ? _ToolbarTheme.blueColor
@@ -1588,11 +1588,12 @@ class _MonitorMenu extends StatelessWidget {
                 stackVertically: isMulti && _isToolbarVertical(context));
           }
           return _IconMenuButton(
+            key: ValueKey('remote-monitor-$i'),
             tooltip: isMulti
                 ? ''
                 : isAllMonitors
                     ? 'all monitors'
-                    : '#${i + 1} monitor',
+                    : '#${pi.monitorLabel(i)} monitor',
             hMargin: isMulti ? null : 6,
             vMargin: isMulti ? null : 12,
             topLevel: false,
@@ -1689,7 +1690,7 @@ class _MonitorMenu extends StatelessWidget {
               ),
               child: Center(
                   child: Text(
-                '${i + 1}',
+                pi.monitorLabel(i),
                 style: TextStyle(
                   color: display.value == i
                       ? activeTextColor
@@ -1743,7 +1744,7 @@ class _MonitorMenu extends StatelessWidget {
             ),
             child: Center(
                 child: Text(
-              '${i + 1}',
+              pi.monitorLabel(i),
               style: TextStyle(
                 color: display.value == i
                     ? activeTextColor

@@ -797,6 +797,7 @@ class _RemotePageState extends State<RemotePage>
       listenable: gFFI.qualityMonitorModel.showListenable,
       builder: (context, _) => Obx(() {
         final pi = ffiModel.pi;
+        final monitorLabels = pi.monitorLabels;
         final currentDisplay = CurrentDisplayState.find(widget.id).value;
         final monitors = !_showMonitorsInToolbar || pi.displays.length <= 1
             ? const <MobileRemoteToolbarMonitor>[]
@@ -804,8 +805,8 @@ class _RemotePageState extends State<RemotePage>
                 for (var index = 0; index < pi.displays.length; index++)
                   MobileRemoteToolbarMonitor(
                     value: index,
-                    label: '${index + 1}',
-                    tooltip: '#${index + 1} ${translate('Monitor')}',
+                    label: monitorLabels[index],
+                    tooltip: '#${monitorLabels[index]} ${translate('Monitor')}',
                     selected: currentDisplay == index,
                     onPressed: () {
                       if (currentDisplay != index) {

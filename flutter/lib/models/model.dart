@@ -50,6 +50,7 @@ import '../common/widgets/dialog.dart';
 import 'android_render_target_controller.dart';
 import 'input_model.dart';
 import 'keyboard_intent.dart';
+import 'monitor_labels.dart';
 import 'platform_model.dart';
 import 'session_event.dart';
 import 'screen_view_authority.dart';
@@ -1008,6 +1009,8 @@ class FfiModel with ChangeNotifier {
     }
 
     final newDisplay = _displayFromSessionValue(event.display);
+    // SwitchDisplay carries geometry, not the host's display identity.
+    newDisplay.name = event.display.name ?? _pi.displays[display].name;
     newDisplay._scale = _pi.scaleOfDisplay(display);
     _pi.displays[display] = newDisplay;
 
@@ -2055,6 +2058,7 @@ class FfiModel with ChangeNotifier {
 
   Display _displayFromSessionValue(SessionDisplayValue value) {
     final display = Display();
+    display.name = value.name ?? '';
     display.x = value.x ?? display.x;
     display.y = value.y ?? display.y;
     display.width = value.width ?? display.width;
@@ -6186,6 +6190,7 @@ const kInvalidResolutionValue = -1;
 const kVirtualDisplayResolutionValue = 0;
 
 class Display {
+  String name = '';
   double x = 0;
   double y = 0;
   int width = 0;
@@ -6212,6 +6217,7 @@ class Display {
       _innerEqual(other);
 
   bool _innerEqual(Display other) =>
+      other.name == name &&
       other.x == x &&
       other.y == y &&
       other.width == width &&
@@ -6265,6 +6271,17 @@ class PeerInfo with ChangeNotifier {
 
   RxInt displaysCount = 0.obs;
   RxBool isSet = false.obs;
+
+  /// Human-facing numbering only; selection and input still use array indices.
+  List<String> get monitorLabels => monitorLabelsForDisplays(
+        displays.map((display) => display.name),
+        isWindows: platform == 'Windows',
+      );
+
+  String monitorLabel(int displayIndex) =>
+      displayIndex >= 0 && displayIndex < displays.length
+          ? monitorLabels[displayIndex]
+          : '${displayIndex + 1}';
 
   bool get isWayland => platformAdditions[kPlatformAdditionsIsWayland] == true;
   bool get isHeadless => platformAdditions[kPlatformAdditionsHeadless] == true;

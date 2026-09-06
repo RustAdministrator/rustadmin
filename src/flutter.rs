@@ -525,6 +525,63 @@ fn apply_display_intent_effects(session: &FlutterSession, effects: &DisplayInten
 }
 
 #[cfg(test)]
+mod display_metadata_tests {
+    use super::{DisplayInfo, FlutterHandler, Resolution};
+
+    #[test]
+    fn display_metadata_keeps_names_geometry_and_capture_order() {
+        let displays = vec![
+            DisplayInfo {
+                name: r"\\.\DISPLAY2".into(),
+                x: -1920,
+                width: 1920,
+                height: 1080,
+                cursor_embedded: true,
+                scale: 1.5,
+                original_resolution: Some(Resolution {
+                    width: 1280,
+                    height: 720,
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            },
+            DisplayInfo {
+                name: r"\\.\DISPLAY1".into(),
+                width: 2560,
+                height: 1440,
+                ..Default::default()
+            },
+        ];
+        let payload: serde_json::Value =
+            serde_json::from_str(&FlutterHandler::make_displays_msg(&displays)).unwrap();
+        assert_eq!(payload[0]["display_name"], r"\\.\DISPLAY2");
+        assert_eq!(payload[1]["display_name"], r"\\.\DISPLAY1");
+        assert_eq!(payload[0]["x"], -1920);
+        assert_eq!(payload[1]["x"], 0);
+        assert_eq!(payload[0]["cursor_embedded"], 1);
+        assert_eq!(payload[1]["cursor_embedded"], 0);
+        assert_eq!(payload[0]["scaled_width"], 1280);
+        assert_eq!(payload[0]["original_width"], 1280);
+        assert_eq!(payload[0]["original_height"], 720);
+        assert_eq!(payload[1]["width"], 2560);
+        assert_eq!(payload[1]["height"], 1440);
+        assert!(payload[1].get("scaled_width").is_none());
+        assert!(payload[1].get("original_width").is_none());
+    }
+
+    #[test]
+    fn display_metadata_accepts_unnamed_legacy_displays_and_empty_snapshots() {
+        let payload: serde_json::Value = serde_json::from_str(
+            &FlutterHandler::make_displays_msg(&[DisplayInfo::default()]),
+        )
+        .unwrap();
+        assert_eq!(payload[0]["display_name"], "");
+        assert_eq!(FlutterHandler::make_displays_msg(&[]), "[]");
+    }
+}
+
+#[cfg(test)]
 mod display_intent_tests {
     use super::{
         aggregate_display_intents, reduce_display_intent, DisplayDemandDelta,
@@ -1716,18 +1773,24 @@ impl FlutterHandler {
         }
     }
 
-    fn make_displays_msg(displays: &Vec<DisplayInfo>) -> String {
-        let mut msg_vec = Vec::new();
+    fn make_displays_msg(displays: &[DisplayInfo]) -> String {
+        let mut msg_vec = Vec::with_capacity(displays.len());
         for ref d in displays.iter() {
-            let mut h: HashMap<&str, i32> = Default::default();
-            h.insert("x", d.x);
-            h.insert("y", d.y);
-            h.insert("width", d.width);
-            h.insert("height", d.height);
-            h.insert("cursor_embedded", if d.cursor_embedded { 1 } else { 0 });
+            let mut h = serde_json::Map::new();
+            // Presentation metadata only: the array order remains the capture index.
+            // Use a separate key from the enclosing event's "name" discriminator.
+            h.insert("display_name".into(), json!(d.name));
+            h.insert("x".into(), json!(d.x));
+            h.insert("y".into(), json!(d.y));
+            h.insert("width".into(), json!(d.width));
+            h.insert("height".into(), json!(d.height));
+            h.insert(
+                "cursor_embedded".into(),
+                json!(if d.cursor_embedded { 1 } else { 0 }),
+            );
             if let Some(original_resolution) = d.original_resolution.as_ref() {
-                h.insert("original_width", original_resolution.width);
-                h.insert("original_height", original_resolution.height);
+                h.insert("original_width".into(), json!(original_resolution.width));
+                h.insert("original_height".into(), json!(original_resolution.height));
             }
             // Don't convert scale (x 100) to i32 directly.
             // (d.scale * 100.0f64) as i32 may produces inaccuracies.
@@ -1743,7 +1806,7 @@ impl FlutterHandler {
             // Send scaled_width for accurate logical scale calculation.
             if d.scale > 0.0 {
                 let scaled_width = (d.width as f64 / d.scale).round() as i32;
-                h.insert("scaled_width", scaled_width);
+                h.insert("scaled_width".into(), json!(scaled_width));
             }
             msg_vec.push(h);
         }

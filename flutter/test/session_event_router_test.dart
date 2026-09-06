@@ -1,7 +1,9 @@
+import 'dart:convert';
+
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
-import 'package:flutter_hbb/generated_bridge.dart';
+import 'package:flutter_hbb/generated_bridge.dart' hide Display;
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
@@ -35,6 +37,13 @@ class _RouterRustadminImpl implements Rustadmin {
     }
     if (invocation.memberName == #sessionSendMouse) {
       return Future<void>.value();
+    }
+    if (invocation.memberName == #peerGetSessionsCount) return 1;
+    if (invocation.memberName == #sessionSetSize) return Future<void>.value();
+    if (invocation.memberName == #sessionGetViewStyle ||
+        invocation.memberName == #sessionGetScrollStyle ||
+        invocation.memberName == #sessionGetOption) {
+      return Future<String?>.value(null);
     }
     if (invocation.memberName == #sessionSubmitDirectPairingPassphrase) {
       if (invocation.namedArguments[#approved] == false) pairingRejects++;
@@ -123,6 +132,55 @@ void main() {
     await listener({'name': 'cursor_position', 'x': 'nan', 'y': '1'});
     expect(ffi.cursorModel.x, 12.5);
     expect(ffi.cursorModel.y, -4);
+  });
+
+  test('monitor labels survive switching, topology updates, and legacy peers', () async {
+    final listener = ffi.ffiModel.startEventListener(ffi.sessionId, peerId);
+    final pi = ffi.ffiModel.pi;
+    pi.platform = 'Windows';
+    pi.isSupportMultiUiSession = true;
+    pi.displays.addAll([
+      Display()..name = r'\\.\DISPLAY2',
+      Display()..name = r'\\.\DISPLAY1',
+    ]);
+    pi.currentDisplay = 0;
+    CurrentDisplayState.find(peerId).value = 0;
+
+    await listener({
+      'name': 'switch_display',
+      'display': 1,
+      'width': 2560,
+      'height': 1440,
+      'resolutions': [],
+    });
+    expect(pi.monitorLabels, ['2', '1']);
+    expect(pi.displays[1].width, 2560);
+    expect(pi.currentDisplay, 0);
+    expect(CurrentDisplayState.find(peerId).value, 0);
+
+    await listener({
+      'name': 'sync_peer_info',
+      'displays': [
+        {'display_name': r'\\.\DISPLAY4', 'width': 1920, 'height': 1080},
+        {'display_name': r'\\.\DISPLAY2', 'x': -1920, 'width': 1920, 'height': 1080},
+      ],
+    });
+    expect(pi.monitorLabels, ['4', '2']);
+    expect(pi.displays.map((d) => d.x), [0, -1920]);
+    expect(pi.currentDisplay, 0);
+    final cached = jsonDecode(ffi.ffiModel.cachedPeerData.peerInfo['displays']) as List;
+    expect(cached[0]['display_name'], r'\\.\DISPLAY4');
+    expect(cached[1]['display_name'], r'\\.\DISPLAY2');
+
+    await listener({
+      'name': 'sync_peer_info',
+      'displays': [
+        {'width': 1920, 'height': 1080},
+        {'x': -1920, 'width': 1920, 'height': 1080},
+      ],
+    });
+    expect(pi.monitorLabels, ['1', '2']);
+    expect(pi.displays.map((d) => d.name), ['', '']);
   });
 
   test('cursor shape decoder enforces dimensions and byte payload', () {

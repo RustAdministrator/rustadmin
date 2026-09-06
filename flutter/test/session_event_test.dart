@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_hbb/models/session_event.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -130,8 +132,16 @@ void main() {
               'hostname': 'host',
               'platform': 'Windows',
               'sas_enabled': 'true',
-              'displays':
-                  '[{"x":0,"y":0,"width":1920,"height":1080,"cursor_embedded":0}]',
+              'displays': jsonEncode([
+                {
+                  'display_name': r'\\.\DISPLAY2',
+                  'x': 0,
+                  'y': 0,
+                  'width': 1920,
+                  'height': 1080,
+                  'cursor_embedded': 0,
+                },
+              ]),
               'version': '2.0.5',
               'features':
                   '{"privacy_mode":true,"keyboard_v2_physical_key":true}',
@@ -143,6 +153,7 @@ void main() {
 
     expect(event.sasEnabled, isTrue);
     expect(event.displays.single.width, 1920);
+    expect(event.displays.single.name, r'\\.\DISPLAY2');
     expect(event.features.privacyMode, isTrue);
     expect(event.features.keyboardV2PhysicalKey, isTrue);
     expect(event.resolutions.single.height, 1080);
@@ -153,7 +164,49 @@ void main() {
       Map<String, dynamic>.from(cachedPayload),
     );
     expect(cached, isA<PeerInfoSessionEvent>());
-    expect((cached! as PeerInfoSessionEvent).resolutions, isEmpty);
+    final cachedPeerInfo = cached! as PeerInfoSessionEvent;
+    expect(cachedPeerInfo.resolutions, isEmpty);
+    expect(cachedPeerInfo.displays.single.name, r'\\.\DISPLAY2');
+  });
+
+  test('display names survive sync and cached snapshot round trips', () {
+    final sync = decodeTypedSessionEvent({
+      'name': 'sync_peer_info',
+      'displays': jsonEncode([
+        {'display_name': r'\\.\DISPLAY2', 'x': -1920},
+        {'display_name': r'\\.\DISPLAY1', 'x': 0},
+      ]),
+    })! as SyncPeerInfoSessionEvent;
+    final cached = decodeTypedSessionEvent({
+      'name': 'sync_peer_info',
+      'displays': jsonEncode([
+        for (final display in sync.displays!) display.toLegacyMap(),
+      ]),
+    })! as SyncPeerInfoSessionEvent;
+    expect(cached.displays!.map((d) => d.name), [r'\\.\DISPLAY2', r'\\.\DISPLAY1']);
+    expect(cached.displays!.map((d) => d.x), [-1920, 0]);
+  });
+
+  test('optional display names do not break legacy or malformed metadata', () {
+    for (final name in [null, 42, false, 'x' * 257]) {
+      final sync = decodeTypedSessionEvent({
+        'name': 'sync_peer_info',
+        'displays': [
+          {'display_name': name, 'width': 1920},
+        ],
+      })! as SyncPeerInfoSessionEvent;
+      expect(sync.displays!.single.name, isNull);
+      expect(sync.displays!.single.width, 1920);
+    }
+    final switched = decodeTypedSessionEvent({
+      'name': 'switch_display',
+      'display': 0,
+      'width': 1920,
+      'resolutions': [],
+    })! as SwitchDisplaySessionEvent;
+    expect(switched.display.name, isNull,
+        reason: 'The event discriminator is not a display name');
+    expect(switched.display.toLegacyMap().containsKey('display_name'), isFalse);
   });
 
   test('decodes terminal responses into bounded typed payloads', () {

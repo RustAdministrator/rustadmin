@@ -5,7 +5,7 @@ import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/common/widgets/remote_input.dart';
 import 'package:flutter_hbb/desktop/pages/remote_page.dart';
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
-import 'package:flutter_hbb/generated_bridge.dart';
+import 'package:flutter_hbb/generated_bridge.dart' hide Display;
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
@@ -17,12 +17,26 @@ class _TestRustadminImpl implements Rustadmin {
   String toolbarDragX = '';
   String toolbarOrientation = '';
   bool qualityMonitorVisible = false;
+  bool showMonitorsToolbar = false;
+  final switchedDisplays = <List<int>>[];
 
   @override
   dynamic noSuchMethod(Invocation invocation) {
     final name = invocation.memberName;
     if (name == #translate) {
       return invocation.namedArguments[#name] as String;
+    }
+    if (name == #mainGetUserDefaultOption &&
+        invocation.namedArguments[#key] == 'show_monitors_toolbar') {
+      return showMonitorsToolbar ? 'Y' : '';
+    }
+    if (name == #sessionSwitchDisplay) {
+      switchedDisplays.add(
+          List<int>.from(invocation.namedArguments[#value] as List<int>));
+      return Future<void>.value();
+    }
+    if (name == #sessionSetSize || name == #sessionSendMouse) {
+      return Future<void>.value();
     }
     if (name == #getLocalFlutterOption ||
         name == #mainGetLocalOption ||
@@ -126,6 +140,93 @@ void main() {
       isFalse,
     );
   });
+
+  for (final inline in [false, true]) {
+    for (final vertical in [false, true]) {
+      testWidgets(
+        'desktop monitor labels retain capture targets (inline: $inline, vertical: $vertical)',
+        (tester) async {
+          const peerId = 'toolbar-monitor-test-peer';
+          initSharedStates(peerId);
+          addTearDown(() => removeSharedStates(peerId));
+          testImpl.showMonitorsToolbar = inline;
+          testImpl.toolbarOrientation = vertical ? 'vertical' : '';
+          testImpl.switchedDisplays.clear();
+          addTearDown(() {
+            testImpl.showMonitorsToolbar = false;
+            testImpl.toolbarOrientation = '';
+          });
+          final ffi = FFI(null)
+            ..id = peerId
+            ..connType = ConnType.viewCamera;
+          addTearDown(ffi.inputModel.disposeRelativeMouseMode);
+          final pi = ffi.ffiModel.pi;
+          pi.platform = 'Windows';
+          pi.displays.addAll([
+            Display()..name = r'\\.\DISPLAY2'..x = -1920,
+            Display()..name = r'\\.\DISPLAY1',
+            Display()..name = r'\\.\DISPLAY3'..x = 1920,
+          ]);
+          pi.displaysCount.value = pi.displays.length;
+          await tester.pumpWidget(MaterialApp(
+            theme: MyTheme.lightTheme,
+            home: Scaffold(
+              body: MultiProvider(
+                providers: [
+                  ChangeNotifierProvider.value(value: ffi.ffiModel),
+                  ChangeNotifierProvider.value(value: ffi.imageModel),
+                  ChangeNotifierProvider.value(value: ffi.cursorModel),
+                  ChangeNotifierProvider.value(value: ffi.canvasModel),
+                  ChangeNotifierProvider.value(value: ffi.recordingModel),
+                ],
+                child: RemoteToolbar(
+                  id: peerId,
+                  ffi: ffi,
+                  state: ToolbarState()..initialized.value = true,
+                  onEnterOrLeaveImageSetter: (_, __) {},
+                  onEnterOrLeaveImageCleaner: (_) {},
+                  onImagePointerStateSetter: (_, __) {},
+                  onImagePointerStateCleaner: (_) {},
+                  onWindowPointerStateSetter: (_, __) {},
+                  onWindowPointerStateCleaner: (_) {},
+                  onMenuFocusChanged: (_) {},
+                  onCloseConnection: () {},
+                  setRemoteState: (_) {},
+                ),
+              ),
+            ),
+          ));
+          await tester.pumpAndSettle();
+          if (!inline) {
+            // The miniature layout uses the same labels as the picker.
+            final map = find.byTooltip('Select Monitor');
+            expect(
+              tester.widgetList<Text>(find.descendant(of: map, matching: find.byType(Text)))
+                  .map((text) => text.data),
+              ['2', '1', '3'],
+            );
+            await tester.tap(map);
+            await tester.pumpAndSettle();
+          }
+          for (var i = 0; i < 3; i++) {
+            expect(find.descendant(
+              of: find.byKey(ValueKey('remote-monitor-$i')),
+              matching: find.text(['2', '1', '3'][i]),
+            ), findsOneWidget);
+          }
+          await tester.tap(find.byKey(const ValueKey('remote-monitor-1')));
+          await tester.pumpAndSettle();
+          expect(testImpl.switchedDisplays, [[1]]);
+          expect(pi.currentDisplay, 1);
+          expect(CurrentDisplayState.find(peerId).value, 1);
+          expect(pi.displays.map((d) => d.name),
+              [r'\\.\DISPLAY2', r'\\.\DISPLAY1', r'\\.\DISPLAY3']);
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+        },
+      );
+    }
+  }
 
   testWidgets('an open toolbar menu blocks remote canvas focus stealing', (
     tester,
