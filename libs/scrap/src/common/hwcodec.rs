@@ -20,7 +20,7 @@ use hwcodec::{
         Quality::{self, *},
         RateControl::{self, *},
     },
-    ffmpeg::AVPixelFormat,
+    ffmpeg::{AVHWDeviceType, AVPixelFormat},
     ffmpeg_ram::{
         decode::{DecodeContext, DecodeFrame, Decoder},
         encode::{EncodeContext, EncodeFrame, Encoder},
@@ -29,6 +29,7 @@ use hwcodec::{
 };
 
 const DEFAULT_PIXFMT: AVPixelFormat = AVPixelFormat::AV_PIX_FMT_NV12;
+const DECODER_PROBE_VERSION: u32 = 1;
 pub const DEFAULT_FPS: i32 = DEFAULT_ENCODER_FPS as i32;
 const DEFAULT_GOP: i32 = i32::MAX;
 const DEFAULT_HW_QUALITY: Quality = Quality_Default;
@@ -268,6 +269,59 @@ mod tests {
     use super::*;
     use hbb_common::message_proto::video_frame;
     use std::sync::OnceLock;
+
+    #[test]
+    fn decoder_capability_requires_a_probed_result() {
+        for format in [CodecFormat::H264, CodecFormat::H265, CodecFormat::AV1] {
+            assert!(HwRamDecoder::select_probed(format.clone(), vec![], true).is_none());
+            assert!(HwRamDecoder::select_probed(format, vec![], false).is_none());
+        }
+    }
+
+    #[test]
+    fn decoder_capability_respects_hardware_option_and_probed_software() {
+        let hw = CodecInfo {
+            name: "h264_cuvid".to_owned(),
+            format: DataFormat::H264,
+            hwdevice: AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+            priority: 1,
+            ..Default::default()
+        };
+        assert!(HwRamDecoder::select_probed(CodecFormat::H264, vec![hw.clone()], false).is_none());
+        let soft = CodecInfo::soft().h264.unwrap();
+        let candidates = vec![hw, soft];
+        assert_eq!(
+            HwRamDecoder::select_probed(CodecFormat::H264, candidates.clone(), true)
+                .unwrap()
+                .name,
+            "h264_cuvid"
+        );
+        assert_eq!(
+            HwRamDecoder::select_probed(CodecFormat::H264, candidates, false)
+                .unwrap()
+                .name,
+            "h264"
+        );
+    }
+
+    #[test]
+    fn decoder_capability_rejects_legacy_cache_without_discarding_encoders() {
+        let mut config = HwCodecConfig {
+            ram_decode: vec![CodecInfo::soft().h264.unwrap()],
+            ram_encode: vec![CodecInfo {
+                name: "h264_nvenc".to_owned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        config.discard_unverified_decoders();
+        assert!(config.ram_decode.is_empty());
+        assert_eq!(config.ram_encode.len(), 1);
+        config.decoder_probe_version = DECODER_PROBE_VERSION;
+        config.ram_decode = vec![CodecInfo::soft().h264.unwrap()];
+        config.discard_unverified_decoders();
+        assert_eq!(config.ram_decode.len(), 1);
+    }
 
     #[test]
     fn set_encoded_video_frames_routes_av1_to_av1_union() {
@@ -1064,44 +1118,29 @@ pub struct HwRamDecoder {
 
 impl HwRamDecoder {
     pub fn try_get(format: CodecFormat) -> Option<CodecInfo> {
-        let mut info = None;
-        let soft = CodecInfo::soft();
+        Self::select_probed(
+            format,
+            HwCodecConfig::get().ram_decode,
+            enable_hwcodec_option(),
+        )
+        .or_else(|| Self::select_probed(format, Decoder::available_software_decoders(), false))
+    }
+
+    fn select_probed(
+        format: CodecFormat,
+        mut codecs: Vec<CodecInfo>,
+        hardware: bool,
+    ) -> Option<CodecInfo> {
+        if !hardware {
+            codecs.retain(|c| c.hwdevice == AVHWDeviceType::AV_HWDEVICE_TYPE_NONE);
+        }
+        let best = CodecInfo::prioritized(codecs);
         match format {
-            CodecFormat::H264 => {
-                if let Some(v) = soft.h264 {
-                    info = Some(v);
-                }
-            }
-            CodecFormat::H265 => {
-                if let Some(v) = soft.h265 {
-                    info = Some(v);
-                }
-            }
-            CodecFormat::AV1 => {}
-            _ => {}
+            CodecFormat::H264 => best.h264,
+            CodecFormat::H265 => best.h265,
+            CodecFormat::AV1 => best.av1,
+            _ => None,
         }
-        if enable_hwcodec_option() {
-            let best = CodecInfo::prioritized(HwCodecConfig::get().ram_decode);
-            match format {
-                CodecFormat::H264 => {
-                    if let Some(v) = best.h264 {
-                        info = Some(v);
-                    }
-                }
-                CodecFormat::H265 => {
-                    if let Some(v) = best.h265 {
-                        info = Some(v);
-                    }
-                }
-                CodecFormat::AV1 => {
-                    if let Some(v) = best.av1 {
-                        info = Some(v);
-                    }
-                }
-                _ => {}
-            }
-        }
-        info
     }
 
     pub fn new(format: CodecFormat) -> ResultType<Self> {
@@ -1249,6 +1288,8 @@ fn get_mime_type(codec: DataFormat) -> &'static str {
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct HwCodecConfig {
     #[serde(default)]
+    pub decoder_probe_version: u32,
+    #[serde(default)]
     pub signature: u64,
     #[serde(default)]
     pub ram_encode: Vec<CodecInfo>,
@@ -1278,9 +1319,16 @@ struct HwCodecConfig2 {
 // portable: ui start check process, check process send to ui
 // sciter and unilink: get from ipc server
 impl HwCodecConfig {
+    fn discard_unverified_decoders(&mut self) {
+        if self.decoder_probe_version != DECODER_PROBE_VERSION {
+            self.ram_decode.clear();
+        }
+    }
+
     #[cfg(not(target_os = "android"))]
     pub fn set(config: String) {
-        let config: HwCodecConfig = serde_json::from_str(&config).unwrap_or_default();
+        let mut config: HwCodecConfig = serde_json::from_str(&config).unwrap_or_default();
+        config.discard_unverified_decoders();
         log::info!("set hwcodec config");
         log::debug!("{config:?}");
         #[cfg(any(windows, target_os = "macos"))]
@@ -1376,7 +1424,8 @@ impl HwCodecConfig {
                 None => {
                     log::info!("try load cached hwcodec config");
                     let c = hbb_common::config::common_load::<HwCodecConfig2>("_hwcodec");
-                    let c: HwCodecConfig = serde_json::from_str(&c.config).unwrap_or_default();
+                    let mut c: HwCodecConfig = serde_json::from_str(&c.config).unwrap_or_default();
+                    c.discard_unverified_decoders();
                     let new_signature = hwcodec::common::get_gpu_signature();
                     if c.signature == new_signature {
                         log::debug!("load cached hwcodec config: {c:?}");
@@ -1479,6 +1528,7 @@ pub fn check_available_hwcodec() -> String {
     let vram_string = "".to_owned();
     let ram_encode = Encoder::available_encoders_with_probe_report(ctx, Some(vram_string));
     let c = HwCodecConfig {
+        decoder_probe_version: DECODER_PROBE_VERSION,
         ram_encode: ram_encode.codecs,
         transient_probe_failure: ram_encode.transient_failure,
         ram_decode: Decoder::available_decoders(),
