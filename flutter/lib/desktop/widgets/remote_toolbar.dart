@@ -1499,9 +1499,9 @@ class _MonitorMenu extends StatelessWidget {
       !isWeb && ffi.ffiModel.pi.isSupportMultiDisplay;
 
   @override
-  Widget build(BuildContext context) => showMonitorsToolbar
+  Widget build(BuildContext context) => Obx(() => showMonitorsToolbar
       ? buildMultiMonitorMenu(context)
-      : Obx(() => buildMonitorMenu(context));
+      : buildMonitorMenu(context));
 
   Widget buildMonitorMenu(BuildContext context) {
     final width = SimpleWrapper<double>(0);
@@ -1628,7 +1628,7 @@ class _MonitorMenu extends StatelessWidget {
           );
         });
 
-    for (int i = 0; i < pi.displays.length; i++) {
+    for (final i in pi.monitorOrder) {
       monitorList.add(buildMonitorButton(i));
     }
     if (supportIndividualWindows && pi.displays.length > 1) {
@@ -1669,7 +1669,7 @@ class _MonitorMenu extends StatelessWidget {
         final scale = slotSize / maxWidth;
         final children = <Widget>[];
         var top = 0.0;
-        for (var i = 0; i < displaySizes.length; i++) {
+        for (final i in pi.monitorOrder) {
           final size = displaySizes[i];
           final monitorWidth = size.width * scale;
           final monitorHeight = size.height * scale;

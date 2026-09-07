@@ -298,27 +298,19 @@ void main() {
 
   testWidgets('toolbar monitor labels do not change capture targets', (tester) async {
     var selected = -1;
-    final labels = monitorLabelsForDisplays(
-      [r'\\.\DISPLAY2', r'\\.\DISPLAY1'],
-      isWindows: true,
-    );
+    const origins = [Offset(1920, 0), Offset(-1920, 0), Offset.zero];
+    final labels = monitorLabelsForDisplays(origins);
     await pumpToolbar(
       tester,
       monitors: [
-        MobileRemoteToolbarMonitor(
-          value: 0,
-          label: labels[0],
-          tooltip: '#${labels[0]} monitor',
-          selected: true,
-          onPressed: () => selected = 0,
-        ),
-        MobileRemoteToolbarMonitor(
-          value: 1,
-          label: labels[1],
-          tooltip: '#${labels[1]} monitor',
-          selected: false,
-          onPressed: () => selected = 1,
-        ),
+        for (final i in monitorOrderForDisplays(origins))
+          MobileRemoteToolbarMonitor(
+            value: i,
+            label: labels[i],
+            tooltip: '#${labels[i]} monitor',
+            selected: i == 2,
+            onPressed: () => selected = i,
+          ),
       ],
     );
     await tester.pumpAndSettle();
@@ -328,9 +320,15 @@ void main() {
       findsOneWidget,
     );
     await tester.tap(find.byTooltip('#2 monitor'));
-    expect(selected, 0);
+    expect(selected, 2);
     await tester.tap(find.byTooltip('#1 monitor'));
     expect(selected, 1);
+    await tester.tap(find.byTooltip('#3 monitor'));
+    expect(selected, 0);
+    expect(tester.getCenter(find.byTooltip('#1 monitor')).dx,
+        lessThan(tester.getCenter(find.byTooltip('#2 monitor')).dx));
+    expect(tester.getCenter(find.byTooltip('#2 monitor')).dx,
+        lessThan(tester.getCenter(find.byTooltip('#3 monitor')).dx));
   });
 
   testWidgets('toolbar exposes a reactive QM toggle', (tester) async {

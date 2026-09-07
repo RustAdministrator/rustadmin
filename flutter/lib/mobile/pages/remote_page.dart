@@ -802,7 +802,7 @@ class _RemotePageState extends State<RemotePage>
         final monitors = !_showMonitorsInToolbar || pi.displays.length <= 1
             ? const <MobileRemoteToolbarMonitor>[]
             : <MobileRemoteToolbarMonitor>[
-                for (var index = 0; index < pi.displays.length; index++)
+                for (final index in pi.monitorOrder)
                   MobileRemoteToolbarMonitor(
                     value: index,
                     label: monitorLabels[index],
@@ -1699,7 +1699,8 @@ void showOptions(
     final numBgSelected = Theme.of(
       context,
     ).colorScheme.primary.withOpacity(0.6);
-    for (var i = 0; i < pi.displays.length; ++i) {
+    final monitorLabels = pi.monitorLabels;
+    for (final i in pi.monitorOrder) {
       children.add(
         InkWell(
           onTap: () {
@@ -1717,7 +1718,7 @@ void showOptions(
             ),
             child: Center(
               child: Text(
-                (i + 1).toString(),
+                monitorLabels[i],
                 style: TextStyle(
                   color: i == cur ? numColorSelected : numColorUnselected,
                   fontWeight: FontWeight.bold,

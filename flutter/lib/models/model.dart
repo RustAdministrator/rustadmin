@@ -1817,10 +1817,6 @@ class FfiModel with ChangeNotifier {
     _pi.platform = event.platform;
     _pi.sasEnabled = event.sasEnabled;
     final currentDisplay = event.currentDisplay;
-    if (_pi.primaryDisplay == kInvalidDisplayIndex) {
-      _pi.primaryDisplay = currentDisplay;
-    }
-
     if (bind.peerGetSessionsCount(
             id: peerId, connType: parent.target!.connType.index) <=
         1) {
@@ -1878,6 +1874,11 @@ class FfiModel with ChangeNotifier {
       ];
       _pi.displays.value = newDisplays;
       _pi.displaysCount.value = _pi.displays.length;
+      // Login reports the host primary. A cached window's current display may
+      // instead be an explicit selection, so do not treat it as primary metadata.
+      _pi.updatePrimaryDisplay(
+        reportedPrimary: isCache ? null : currentDisplay,
+      );
       if (_pi.currentDisplay < _pi.displays.length) {
         // now replaced to _updateCurDisplay
         await updateCurDisplay(sessionId);
@@ -1994,18 +1995,16 @@ class FfiModel with ChangeNotifier {
       return;
     }
 
-    // to-do: peer currentDisplay is the primary display, but the primary display may not be the first display.
-    // local primary display also may not be the first display.
-    //
-    // 0 is assumed to be the primary display here, for now.
-
-    // move to the first display and set fullscreen
+    final remoteDisplays = _pi.primaryFirstMonitorOrder;
+    if (remoteDisplays.isEmpty) return;
+    // Keep the host primary in the initial window. Remaining windows follow
+    // spatial order, while all requests still carry the original capture index.
     bind.sessionSwitchDisplay(
       isDesktop: isDesktop,
       sessionId: sessionId,
-      value: Int32List.fromList([0]),
+      value: Int32List.fromList([remoteDisplays.first]),
     );
-    _pi.currentDisplay = 0;
+    _pi.currentDisplay = remoteDisplays.first;
     try {
       CurrentDisplayState.find(peerId).value = _pi.currentDisplay;
     } catch (e) {
@@ -2021,7 +2020,7 @@ class FfiModel with ChangeNotifier {
         : screenRectList.length;
     for (var i = 1; i < length; i++) {
       openMonitorInNewTabOrWindow(
-        i,
+        remoteDisplays[i],
         peerId,
         _pi,
         screenRect: screenRectList[i],
@@ -2115,6 +2114,7 @@ class FfiModel with ChangeNotifier {
       ];
       _pi.displays.value = newDisplays;
       _pi.displaysCount.value = _pi.displays.length;
+      _pi.updatePrimaryDisplay();
 
       if (_pi.currentDisplay == kAllDisplayValue) {
         await updateCurDisplay(sessionId);
@@ -2128,11 +2128,7 @@ class FfiModel with ChangeNotifier {
             // Notify to switch display
             msgBox(sessionId, 'custom-nook-nocancel-hasclose-info', 'Prompt',
                 'display_is_plugged_out_msg', '', parent.target!.dialogManager);
-            final isPeerPrimaryDisplayValid =
-                pi.primaryDisplay == kInvalidDisplayIndex ||
-                    pi.primaryDisplay >= pi.displays.length;
-            final newDisplay =
-                isPeerPrimaryDisplayValid ? 0 : pi.primaryDisplay;
+            final newDisplay = pi.primaryFirstMonitorOrder.first;
             bind.sessionSwitchDisplay(
               isDesktop: isDesktop,
               sessionId: sessionId,
@@ -6273,10 +6269,45 @@ class PeerInfo with ChangeNotifier {
   RxBool isSet = false.obs;
 
   /// Human-facing numbering only; selection and input still use array indices.
-  List<String> get monitorLabels => monitorLabelsForDisplays(
-        displays.map((display) => display.name),
-        isWindows: platform == 'Windows',
+  List<int> get monitorOrder => monitorOrderForDisplays(
+        displays.map((display) => Offset(display.x, display.y)),
       );
+
+  List<String> get monitorLabels => monitorLabelsForDisplays(
+        displays.map((display) => Offset(display.x, display.y)),
+      );
+
+  List<int> get primaryFirstMonitorOrder {
+    final order = monitorOrder;
+    if (order.remove(primaryDisplay)) order.insert(0, primaryDisplay);
+    return order;
+  }
+
+  /// Refresh metadata without overriding this window's selected display.
+  void updatePrimaryDisplay({int? reportedPrimary}) {
+    if (reportedPrimary != null &&
+        reportedPrimary >= 0 &&
+        reportedPrimary < displays.length) {
+      primaryDisplay = reportedPrimary;
+      return;
+    }
+    // Windows defines the primary desktop source at (0, 0). This also works
+    // with older hosts and topology updates that carry no explicit primary ID.
+    // Do not guess for mirrored sources or apply this Windows rule to Linux.
+    if (platform == 'Windows') {
+      final atOrigin = <int>[
+        for (var i = 0; i < displays.length; i++)
+          if (displays[i].x == 0 && displays[i].y == 0) i,
+      ];
+      if (atOrigin.length == 1) {
+        primaryDisplay = atOrigin.single;
+        return;
+      }
+    }
+    if (primaryDisplay < 0 || primaryDisplay >= displays.length) {
+      primaryDisplay = kInvalidDisplayIndex;
+    }
+  }
 
   String monitorLabel(int displayIndex) =>
       displayIndex >= 0 && displayIndex < displays.length

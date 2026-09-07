@@ -163,10 +163,13 @@ void main() {
           final pi = ffi.ffiModel.pi;
           pi.platform = 'Windows';
           pi.displays.addAll([
+            Display()..name = r'\\.\DISPLAY1'..x = 1920,
             Display()..name = r'\\.\DISPLAY2'..x = -1920,
-            Display()..name = r'\\.\DISPLAY1',
-            Display()..name = r'\\.\DISPLAY3'..x = 1920,
+            Display()..name = r'\\.\DISPLAY3',
           ]);
+          pi.updatePrimaryDisplay(reportedPrimary: 2);
+          pi.currentDisplay = pi.primaryDisplay;
+          CurrentDisplayState.find(peerId).value = pi.currentDisplay;
           pi.displaysCount.value = pi.displays.length;
           await tester.pumpWidget(MaterialApp(
             theme: MyTheme.lightTheme,
@@ -182,7 +185,9 @@ void main() {
                 child: RemoteToolbar(
                   id: peerId,
                   ffi: ffi,
-                  state: ToolbarState()..initialized.value = true,
+                  state: ToolbarState()
+                    ..initialized.value = true
+                    ..vertical.value = vertical,
                   onEnterOrLeaveImageSetter: (_, __) {},
                   onEnterOrLeaveImageCleaner: (_) {},
                   onImagePointerStateSetter: (_, __) {},
@@ -203,7 +208,7 @@ void main() {
             expect(
               tester.widgetList<Text>(find.descendant(of: map, matching: find.byType(Text)))
                   .map((text) => text.data),
-              ['2', '1', '3'],
+              vertical ? ['1', '2', '3'] : ['3', '1', '2'],
             );
             await tester.tap(map);
             await tester.pumpAndSettle();
@@ -211,16 +216,31 @@ void main() {
           for (var i = 0; i < 3; i++) {
             expect(find.descendant(
               of: find.byKey(ValueKey('remote-monitor-$i')),
-              matching: find.text(['2', '1', '3'][i]),
+              matching: find.text(['3', '1', '2'][i]),
             ), findsOneWidget);
           }
+          double position(int i) {
+            final center = tester.getCenter(find.byKey(ValueKey('remote-monitor-$i')));
+            return inline && vertical ? center.dy : center.dx;
+          }
+          expect(position(1), lessThan(position(2)));
+          expect(position(2), lessThan(position(0)));
+          expect(pi.currentDisplay, 2);
           await tester.tap(find.byKey(const ValueKey('remote-monitor-1')));
           await tester.pumpAndSettle();
           expect(testImpl.switchedDisplays, [[1]]);
           expect(pi.currentDisplay, 1);
           expect(CurrentDisplayState.find(peerId).value, 1);
           expect(pi.displays.map((d) => d.name),
-              [r'\\.\DISPLAY2', r'\\.\DISPLAY1', r'\\.\DISPLAY3']);
+              [r'\\.\DISPLAY1', r'\\.\DISPLAY2', r'\\.\DISPLAY3']);
+          if (inline) {
+            // Reordering at the same count must rebuild the button sequence.
+            pi.displays[0] = Display()..name = r'\\.\DISPLAY1'..x = -3840;
+            await tester.pumpAndSettle();
+            expect(position(0), lessThan(position(1)));
+            expect(position(1), lessThan(position(2)));
+            expect(pi.currentDisplay, 1);
+          }
           await tester.pumpWidget(const SizedBox.shrink());
           await tester.pumpAndSettle();
         },

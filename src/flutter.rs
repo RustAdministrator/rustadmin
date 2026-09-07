@@ -675,6 +675,20 @@ mod display_intent_tests {
     }
 
     #[test]
+    fn host_primary_seeds_new_view_but_not_explicit_monitor_window() {
+        // Capture indices [1, 2, 0] are presented as toolbar [1, 2, 3]. The
+        // primary is capture 2, not capture 0 or its human-facing label 2.
+        let mut new_view = ViewDisplayIntent::default();
+        assert!(new_view.seed_initial_display(2));
+        assert_eq!(new_view.displays, vec![2]);
+
+        let mut explicit_window = ViewDisplayIntent::default();
+        explicit_window.set_wire_displays(&[0]);
+        assert!(!explicit_window.seed_initial_display(2));
+        assert_eq!(explicit_window.displays, vec![0]);
+    }
+
+    #[test]
     fn newer_aggregate_intent_adopts_retained_activation_work() {
         let state = set_view(DisplayIntentReducerState::default(), 1, &[0, 1]);
         let activation_b = state.media_intent.activation(1).unwrap().generation;
