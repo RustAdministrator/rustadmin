@@ -23,6 +23,7 @@ import '../../consts.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../widgets/dialog.dart';
+import '../widgets/mobile_app_version.dart';
 import '../mobile_remote_settings_repository.dart';
 import '../widgets/mobile_settings_layout.dart';
 import '../widgets/remote_session_controls.dart';
@@ -1377,7 +1378,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
           tiles: [
             SettingsTile(
               key: const ValueKey('mobile-settings-tile-about-version'),
-              title: Text('${translate("Version")}: $version'),
+              title: const MobileAppVersion(),
               leading: Icon(Icons.info),
             ),
             if (isAndroid)
@@ -1911,14 +1912,7 @@ void showAbout(OverlayDialogManager dialogManager) {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              FutureBuilder<String>(
-                future: bind.mainGetVersion(),
-                initialData: version,
-                builder: (context, snapshot) {
-                  final appVersion = (snapshot.data ?? version);
-                  return Text('Version: $appVersion');
-                },
-              ),
+              const MobileAppVersion(),
               InkWell(
                 onTap: () async {
                   await launchUrl(Uri.parse(kRustAdminSourceUrl));
