@@ -7,6 +7,33 @@ import org.junit.Test
 
 class AndroidKeyToUsbHidTest {
     @Test
+    fun lockMetadataUsesBridgeBitsNotWireMaskBits() {
+        for (bits in 0..7) {
+            var meta = KeyEvent.META_SHIFT_ON or KeyEvent.META_ALT_RIGHT_ON
+            if (bits and 1 != 0) meta = meta or KeyEvent.META_CAPS_LOCK_ON
+            if (bits and 2 != 0) meta = meta or KeyEvent.META_NUM_LOCK_ON
+            if (bits and 4 != 0) meta = meta or KeyEvent.META_SCROLL_LOCK_ON
+            assertEquals(bits shl 1, AndroidMetaStateToUsbHid.bridgeLockModes(meta))
+        }
+    }
+
+    @Test
+    fun downRepeatAndUpKeepLockStateWithoutChangingModifierIdentity() {
+        val router = AndroidPhysicalKeyRouter()
+        val meta = KeyEvent.META_CAPS_LOCK_ON or KeyEvent.META_NUM_LOCK_ON or KeyEvent.META_SHIFT_RIGHT_ON
+        for ((action, count) in listOf(KeyEvent.ACTION_DOWN to 0, KeyEvent.ACTION_DOWN to 2, KeyEvent.ACTION_UP to 0)) {
+            val events = router.route(action, KeyEvent.KEYCODE_A, meta, count)!!
+            assertEquals(1, events.size)
+            assertEquals(6, events.single().lockModes)
+            assertEquals(listOf(0xe5), events.single().modifierUsages)
+        }
+        val alt = router.route(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ALT_RIGHT, meta)!!.single()
+        assertEquals(0xe6, alt.usbHidUsage)
+        assertEquals(6, alt.lockModes)
+        assertEquals(emptyList<Int>(), alt.modifierUsages)
+    }
+
+    @Test
     fun mapsPrintableKeyPositionsIndependentlyOfLanguage() {
         assertEquals(0x04, AndroidKeyToUsbHid.map(KeyEvent.KEYCODE_A))
         assertEquals(0x14, AndroidKeyToUsbHid.map(KeyEvent.KEYCODE_Q))

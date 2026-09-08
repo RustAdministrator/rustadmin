@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import '../consts.dart';
+import '../models/keyboard_lock_modes.dart';
 
 bool useAndroidNativeRemoteKeyboard({
   required bool isAndroidClient,
@@ -28,12 +29,15 @@ sealed class AndroidRemoteKeyboardEvent {
         final usage = arguments['usb_hid_usage'];
         final down = arguments['down'];
         final repeat = arguments['repeat'] ?? false;
+        final lockModes = arguments['lock_modes'] ?? 0;
         final modifiers = arguments['modifier_usages'] ?? const <int>[];
         if (usage is! int ||
             usage < 0x04 ||
             usage > 0xe7 ||
             down is! bool ||
             repeat is! bool ||
+            lockModes is! int ||
+            !KeyboardBridgeLockModes.isValid(lockModes) ||
             modifiers is! List ||
             modifiers.length > 8 ||
             modifiers.any(
@@ -46,6 +50,7 @@ sealed class AndroidRemoteKeyboardEvent {
           usage,
           down,
           repeat: repeat,
+          lockModes: lockModes,
           modifierUsages: modifiers.cast<int>(),
         );
       case 'text':
@@ -80,12 +85,14 @@ final class AndroidRemotePhysicalKeyEvent extends AndroidRemoteKeyboardEvent {
     this.usbHidUsage,
     this.down, {
     this.repeat = false,
+    this.lockModes = 0,
     this.modifierUsages = const <int>[],
   });
 
   final int usbHidUsage;
   final bool down;
   final bool repeat;
+  final int lockModes;
   final List<int> modifierUsages;
 }
 

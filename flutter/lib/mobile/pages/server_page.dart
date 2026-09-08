@@ -994,6 +994,7 @@ void androidChannelInit() {
                     event.usbHidUsage,
                     event.down,
                     repeat: event.repeat,
+                    lockModes: event.lockModes,
                     modifierUsages: event.modifierUsages,
                   ),
                 );

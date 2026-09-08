@@ -13,6 +13,7 @@ import 'package:flutter_hbb/mobile/widgets/remote_text_input.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_hbb/models/input_model.dart';
 import 'package:flutter_hbb/models/keyboard_intent.dart';
+import 'package:flutter_hbb/models/keyboard_lock_modes.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -54,6 +55,7 @@ class _FlutterKeyCall {
 class _TestRustadminImpl implements Rustadmin {
   final inputKeyCalls = <_InputKeyCall>[];
   final flutterKeyCalls = <_FlutterKeyCall>[];
+  final flutterLockModes = <int>[];
   final orderedKeyboardCalls = <String>[];
   int plainTextEdits = 0;
   int sourceLayoutTextEdits = 0;
@@ -105,6 +107,7 @@ class _TestRustadminImpl implements Rustadmin {
       final usbHid = invocation.namedArguments[#usbHid] as int;
       final down = invocation.namedArguments[#downOrUp] as bool;
       flutterKeyCalls.add(_FlutterKeyCall(usbHid: usbHid, down: down));
+      flutterLockModes.add(invocation.namedArguments[#lockModes] as int);
       orderedKeyboardCalls.add('hid:$usbHid:${down ? 'down' : 'up'}');
       if (blockFlutterKeyCalls) {
         final completer = Completer<void>();
@@ -260,6 +263,7 @@ void main() {
   setUp(() {
     testImpl.inputKeyCalls.clear();
     testImpl.flutterKeyCalls.clear();
+    testImpl.flutterLockModes.clear();
     testImpl.orderedKeyboardCalls.clear();
     testImpl.plainTextEdits = 0;
     testImpl.sourceLayoutTextEdits = 0;
@@ -735,6 +739,75 @@ void main() {
       allowBlockedReleases: true,
     );
   });
+
+  test(
+    'native locks reach the bridge without reading stale Flutter lock state',
+    () async {
+      final keyboard = HardwareKeyboard.instance;
+      keyboard.handleKeyEvent(
+        KeyDownEvent(
+          physicalKey: PhysicalKeyboardKey.capsLock,
+          logicalKey: LogicalKeyboardKey.capsLock,
+          timeStamp: Duration.zero,
+        ),
+      );
+      keyboard.handleKeyEvent(
+        KeyUpEvent(
+          physicalKey: PhysicalKeyboardKey.capsLock,
+          logicalKey: LogicalKeyboardKey.capsLock,
+          timeStamp: Duration.zero,
+        ),
+      );
+      addTearDown(keyboard.clearState);
+      expect(keyboard.lockModesEnabled, contains(KeyboardLockMode.capsLock));
+
+      for (final locks in [
+        0,
+        KeyboardBridgeLockModes.caps,
+        KeyboardBridgeLockModes.num,
+        KeyboardBridgeLockModes.scroll,
+        14,
+      ]) {
+        await inputModel.inputAndroidRemotePhysicalKey(
+          0x04,
+          true,
+          lockModes: locks,
+        );
+        await inputModel.inputAndroidRemotePhysicalKey(
+          0x04,
+          false,
+          lockModes: locks,
+        );
+      }
+      expect(testImpl.flutterLockModes, [0, 0, 2, 2, 4, 4, 8, 8, 14, 14]);
+      expect(testImpl.plainTextEdits, 0);
+      expect(testImpl.sourceLayoutTextEdits, 0);
+    },
+  );
+
+  test(
+    'Caps with Shift and NumLock on the keypad retain native masks',
+    () async {
+      await inputModel.inputAndroidRemotePhysicalKey(0xe1, true, lockModes: 2);
+      await inputModel.inputAndroidRemotePhysicalKey(
+        0x04,
+        true,
+        lockModes: 2,
+        modifierUsages: [0xe1],
+      );
+      await inputModel.inputAndroidRemotePhysicalKey(
+        0x04,
+        false,
+        lockModes: 2,
+        modifierUsages: [0xe1],
+      );
+      await inputModel.inputAndroidRemotePhysicalKey(0xe1, false, lockModes: 2);
+      await inputModel.inputAndroidRemotePhysicalKey(0x59, true, lockModes: 4);
+      await inputModel.inputAndroidRemotePhysicalKey(0x59, false, lockModes: 4);
+      expect(testImpl.flutterLockModes, [2, 2, 2, 2, 4, 4]);
+      expect(inputModel.shift, isFalse);
+    },
+  );
 
   test('Android physical key bridge preserves modifier ordering', () async {
     testImpl.blockFlutterKeyCalls = true;

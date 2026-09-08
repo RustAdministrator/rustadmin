@@ -21,6 +21,7 @@ internal sealed interface RemoteKeyboardEvent {
         val usbHidUsage: Int,
         val down: Boolean,
         val repeat: Boolean = false,
+        val lockModes: Int = 0,
         val modifierUsages: List<Int> = emptyList(),
     ) : RemoteKeyboardEvent
     data class CommittedText(val text: String) : RemoteKeyboardEvent
@@ -136,6 +137,15 @@ internal object AndroidKeyToUsbHid {
 }
 
 internal object AndroidMetaStateToUsbHid {
+    fun bridgeLockModes(metaState: Int): Int {
+        // Legacy bridge representation; Rust alone maps it to the V2 wire bits.
+        var locks = 0
+        if (metaState and KeyEvent.META_CAPS_LOCK_ON != 0) locks = locks or 2
+        if (metaState and KeyEvent.META_NUM_LOCK_ON != 0) locks = locks or 4
+        if (metaState and KeyEvent.META_SCROLL_LOCK_ON != 0) locks = locks or 8
+        return locks
+    }
+
     fun modifiers(metaState: Int): List<Int> = buildList {
         addModifierPair(
             metaState = metaState,
@@ -195,6 +205,7 @@ internal class AndroidPhysicalKeyRouter {
         repeatCount: Int = 0,
     ): List<RemoteKeyboardEvent.PhysicalKey>? {
         val usage = AndroidKeyToUsbHid.map(keyCode) ?: return null
+        val lockModes = AndroidMetaStateToUsbHid.bridgeLockModes(metaState)
         val modifiers =
             if (usage in 0xe0..0xe7) emptyList()
             else AndroidMetaStateToUsbHid.modifiers(metaState)
@@ -204,6 +215,7 @@ internal class AndroidPhysicalKeyRouter {
                     usage,
                     true,
                     repeat = repeatCount > 0,
+                    lockModes = lockModes,
                     modifierUsages = modifiers,
                 ),
             )
@@ -211,6 +223,7 @@ internal class AndroidPhysicalKeyRouter {
                 RemoteKeyboardEvent.PhysicalKey(
                     usage,
                     false,
+                    lockModes = lockModes,
                     modifierUsages = modifiers,
                 ),
             )
@@ -221,6 +234,7 @@ internal class AndroidPhysicalKeyRouter {
                     usage,
                     true,
                     repeat = true,
+                    lockModes = lockModes,
                     modifierUsages = modifiers,
                 )
             }
@@ -389,6 +403,7 @@ internal class RemoteKeyboardController(
                                 "usb_hid_usage" to event.usbHidUsage,
                                 "down" to event.down,
                                 "repeat" to event.repeat,
+                                "lock_modes" to event.lockModes,
                                 "modifier_usages" to event.modifierUsages,
                             ),
                         )

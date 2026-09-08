@@ -2,6 +2,48 @@ import 'package:flutter_hbb/mobile/android_remote_keyboard.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('native lock modes retain every bridge bit combination', () {
+    for (var locks = 0; locks <= 14; locks += 2) {
+      final event =
+          AndroidRemoteKeyboardEvent.tryParse({
+                'session_id': 'session-1',
+                'kind': 'physical',
+                'usb_hid_usage': 0x04,
+                'down': true,
+                'lock_modes': locks,
+              })
+              as AndroidRemotePhysicalKeyEvent;
+      expect(event.lockModes, locks);
+    }
+    final legacy =
+        AndroidRemoteKeyboardEvent.tryParse({
+              'session_id': 'session-1',
+              'kind': 'physical',
+              'usb_hid_usage': 0x04,
+              'down': false,
+            })
+            as AndroidRemotePhysicalKeyEvent;
+    expect(legacy.lockModes, 0);
+  });
+
+  test(
+    'rejects invalid native bridge lock modes instead of accepting wire bits',
+    () {
+      for (final locks in <Object>[-1, 1, 3, 16, '2', true]) {
+        expect(
+          AndroidRemoteKeyboardEvent.tryParse({
+            'session_id': 'session-1',
+            'kind': 'physical',
+            'usb_hid_usage': 0x04,
+            'down': true,
+            'lock_modes': locks,
+          }),
+          isNull,
+        );
+      }
+    },
+  );
+
   test('native fallback editor is limited to capable Android peers', () {
     expect(
       useAndroidNativeRemoteKeyboard(

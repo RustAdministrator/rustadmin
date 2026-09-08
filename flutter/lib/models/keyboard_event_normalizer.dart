@@ -2,6 +2,7 @@ import 'package:flutter/services.dart';
 
 import '../consts.dart';
 import 'keyboard_intent.dart';
+import 'keyboard_lock_modes.dart';
 
 final Map<String, HidKey> _canonicalHidByLegacyName =
     _buildCanonicalHidByLegacyName();
@@ -107,7 +108,11 @@ class AndroidHardwareKeyboardNormalizer {
     Iterable<int> modifierUsages = const <int>[],
     int lockMask = 0,
   }) {
-    if (usbHidUsage < 0x04 || usbHidUsage > 0xe7) return null;
+    if (usbHidUsage < 0x04 ||
+        usbHidUsage > 0xe7 ||
+        !KeyboardBridgeLockModes.isValid(lockMask)) {
+      return null;
+    }
     return PhysicalKeyboardIntent(
       key: HidKey(HidKey.keyboardUsagePage, usbHidUsage),
       action: repeat

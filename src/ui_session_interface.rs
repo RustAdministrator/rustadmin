@@ -2959,5 +2959,9 @@ mod mobile_soft_keyboard_tests {
             keyboard_v2_lock_mask((1 << 1) | (1 << 3)),
             hbb_common::keyboard::KEYBOARD_LOCK_CAPS | hbb_common::keyboard::KEYBOARD_LOCK_SCROLL
         );
+        for wire_mask in 0..=7 {
+            assert_eq!(keyboard_v2_lock_mask(wire_mask << 1), wire_mask as u32);
+        }
+        assert_eq!(keyboard_v2_lock_mask(1), 0);
     }
 }

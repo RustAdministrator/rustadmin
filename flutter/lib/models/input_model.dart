@@ -20,6 +20,7 @@ import 'keyboard_dispatcher.dart';
 import 'keyboard_event_normalizer.dart';
 import 'keyboard_input_controller.dart';
 import 'keyboard_intent.dart';
+import 'keyboard_lock_modes.dart';
 import 'keyboard_modifier_controller.dart';
 import '../common.dart';
 import '../consts.dart';
@@ -415,30 +416,27 @@ class InputModel {
   }
 
   int _buildLockModes(bool iosCapsLock) {
-    const capslock = 1;
-    const numlock = 2;
-    const scrolllock = 3;
     int lockModes = 0;
     if (isIOS) {
       if (iosCapsLock) {
-        lockModes |= (1 << capslock);
+        lockModes |= KeyboardBridgeLockModes.caps;
       }
       // Ignore "NumLock/ScrollLock" on iOS for now.
     } else {
       if (HardwareKeyboard.instance.lockModesEnabled.contains(
         KeyboardLockMode.capsLock,
       )) {
-        lockModes |= (1 << capslock);
+        lockModes |= KeyboardBridgeLockModes.caps;
       }
       if (HardwareKeyboard.instance.lockModesEnabled.contains(
         KeyboardLockMode.numLock,
       )) {
-        lockModes |= (1 << numlock);
+        lockModes |= KeyboardBridgeLockModes.num;
       }
       if (HardwareKeyboard.instance.lockModesEnabled.contains(
         KeyboardLockMode.scrollLock,
       )) {
-        lockModes |= (1 << scrolllock);
+        lockModes |= KeyboardBridgeLockModes.scroll;
       }
     }
     return lockModes;
@@ -599,6 +597,7 @@ class InputModel {
     int usbHidUsage,
     bool down, {
     bool repeat = false,
+    int lockModes = 0,
     Iterable<int> modifierUsages = const <int>[],
   }) {
     final intent = _androidKeyboardNormalizer.physical(
@@ -606,7 +605,7 @@ class InputModel {
       down: down,
       repeat: repeat,
       modifierUsages: modifierUsages,
-      lockMask: _buildLockModes(false),
+      lockMask: lockModes,
     );
     if (intent != null) {
       return _keyboardInput.handleAndWait(intent, _keyboardRoutingContext);

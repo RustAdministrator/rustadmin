@@ -130,7 +130,13 @@ mode changes, reconnect, and session close cancel pending commands and may
 bypass the permission gate only for key-up recovery actions.
 
 The Android physical adapter reports the mapped HID, repeat flag, and
-side-specific modifier snapshot with each hardware event. It is stateless; the
+side-specific modifier snapshot with each hardware event. It also reports
+`lock_modes` from that event's native meta state, not Flutter's lock cache while
+the native editor owns focus. This bridge field uses Caps/Num/Scroll bits
+`2/4/8`; Rust converts them once to V2 wire bits `1/2/4`. Missing metadata in
+older native-channel payloads retains the zero-lock default; unknown bits are
+rejected. The protocol and legacy peer lock representation are unchanged.
+The adapter is stateless; the
 shared Dart state machine reconciles explicit and reported modifiers and owns
 their lifetimes. The existing fallback editor can still pass bounded text when
 Android provides no stable physical identity, but this phase does not add an
