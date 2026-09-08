@@ -274,6 +274,7 @@ void main() {
     var closeCount = 0;
     var showToolbar = true;
     late StateSetter rebuildRemotePage;
+    late ToolbarWindowPointerHandler windowPointer;
 
     await tester.pumpWidget(
       MaterialApp(
@@ -308,7 +309,8 @@ void main() {
                             onEnterOrLeaveImageCleaner: (_) {},
                             onImagePointerStateSetter: (_, __) {},
                             onImagePointerStateCleaner: (_) {},
-                            onWindowPointerStateSetter: (_, __) {},
+                            onWindowPointerStateSetter: (_, handler) =>
+                                windowPointer = handler,
                             onWindowPointerStateCleaner: (_) {},
                             onMenuFocusChanged: (menuOpen) {
                               menuFocusChanges.add(menuOpen);
@@ -531,6 +533,46 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Scale original'), findsOneWidget);
     expect(rawKeyFocusNode.canRequestFocus, isFalse);
+
+    // Exercise a click with a frame between down/up after repeated dim/reveal
+    // cycles, for both toolbar orientations on every desktop platform variant.
+    for (final vertical in [true, false]) {
+      for (final pinned in [true, false]) {
+        await tester.tapAt(const Offset(780, 550), kind: PointerDeviceKind.mouse);
+        await tester.pumpAndSettle();
+        state.vertical.value = vertical;
+        await state.setPin(pinned);
+        windowPointer(null);
+        await tester.pump();
+        await tester.pump(const Duration(seconds: 6));
+        if (pinned) {
+          expect(toolbarOpacity().opacity, lessThan(1));
+        } else {
+          final ignored = find.ancestor(
+            of: find.byTooltip('Display Settings'),
+            matching: find.byWidgetPredicate(
+                (w) => w is IgnorePointer && w.ignoring),
+          );
+          expect(ignored, findsWidgets);
+          windowPointer(const Offset(8, 1));
+          await tester.pump();
+          await tester.pump(const Duration(milliseconds: 200));
+        }
+        final click = await tester.startGesture(
+          tester.getCenter(find.byTooltip('Display Settings')),
+          kind: PointerDeviceKind.mouse,
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+        await click.up();
+        await tester.pumpAndSettle();
+        expect(
+          find.text('Scale original'), findsOneWidget,
+          reason: 'first click after dim/reveal: '
+              'vertical=$vertical, pinned=$pinned',
+        );
+        expect(rawKeyFocusNode.canRequestFocus, isFalse);
+      }
+    }
 
     // Disposing the toolbar during an asynchronous group close must cancel the
     // coordinator generation and restore the remote-input focus gate.

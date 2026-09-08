@@ -155,6 +155,23 @@ void main() {
     expect(harness.coordinator.phase, ToolbarMenuPhase.open);
   });
 
+  test('a stale open acknowledgement does not consume the next click', () {
+    final harness = _MenuHarness();
+    addTearDown(harness.coordinator.dispose);
+    harness.coordinator.activate('display');
+    harness.flushScheduled();
+
+    // An overlay has disappeared before its close acknowledgement reaches the
+    // coordinator. The next click expresses a new open, not a close of nothing.
+    harness.menu('display').isOpen = false;
+    harness.groupOpen = false;
+    harness.coordinator.activate('display');
+    harness.flushScheduled();
+
+    expect(harness.menu('display').openCalls, 2);
+    expect(harness.coordinator.phase, ToolbarMenuPhase.open);
+  });
+
   test('latest rapid activation wins and obsolete callbacks are ignored', () {
     final harness = _MenuHarness();
     addTearDown(harness.coordinator.dispose);
