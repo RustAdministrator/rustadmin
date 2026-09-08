@@ -54,26 +54,28 @@ internal object AndroidInputLayoutMetadata {
 }
 
 internal object AndroidCommittedTextBounds {
-    const val MAX_UTF8_BYTES = 2048
+    const val MAX_UTF8_BYTES = 64 * 1024
 
-    fun truncateUtf8(value: String): String {
-        if (value.toByteArray(Charsets.UTF_8).size <= MAX_UTF8_BYTES) return value
-
+    fun validate(value: String): AndroidInputRejection? {
         var index = 0
         var bytes = 0
         while (index < value.length) {
-            val codePoint = value.codePointAt(index)
-            val encodedBytes = when {
-                codePoint <= 0x7f -> 1
-                codePoint <= 0x7ff -> 2
-                codePoint <= 0xffff -> 3
-                else -> 4
+            val unit = value[index]
+            if (Character.isHighSurrogate(unit)) {
+                if (index + 1 >= value.length || !Character.isLowSurrogate(value[index + 1])) {
+                    return AndroidInputRejection.INVALID_TEXT
+                }
+                bytes += 4
+                index += 2
+            } else if (Character.isLowSurrogate(unit)) {
+                return AndroidInputRejection.INVALID_TEXT
+            } else {
+                bytes += if (unit.code <= 0x7f) 1 else if (unit.code <= 0x7ff) 2 else 3
+                index++
             }
-            if (bytes + encodedBytes > MAX_UTF8_BYTES) break
-            bytes += encodedBytes
-            index += Character.charCount(codePoint)
+            if (bytes > MAX_UTF8_BYTES) return AndroidInputRejection.TEXT_SIZE
         }
-        return value.substring(0, index)
+        return null
     }
 }
 
@@ -313,9 +315,11 @@ internal class RemoteKeyboardInputView(
 
         val text = event.characters
         if (!text.isNullOrEmpty()) {
-            val boundedText = AndroidCommittedTextBounds.truncateUtf8(text)
-            if (boundedText.isNotEmpty()) {
-                emit(RemoteKeyboardEvent.CommittedText(boundedText))
+            val rejection = AndroidCommittedTextBounds.validate(text)
+            if (rejection == null) {
+                emit(RemoteKeyboardEvent.CommittedText(text))
+            } else {
+                emit(RemoteKeyboardEvent.Rejected(rejection))
             }
             return true
         }
@@ -437,7 +441,14 @@ internal class RemoteKeyboardController(
                             "modifier_usages" to event.modifierUsages,
                         ))
                     }
-                    is RemoteKeyboardEvent.Rejected -> diagnostics.rejected(event.reason)
+                    is RemoteKeyboardEvent.Rejected -> {
+                        diagnostics.rejected(event.reason)
+                        emitToFlutter(mapOf(
+                            "session_id" to currentSessionId,
+                            "kind" to "rejected",
+                            "reason" to event.reason.diagnosticName,
+                        ))
+                    }
                 }
             }
         }

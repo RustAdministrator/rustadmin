@@ -169,6 +169,26 @@ unowned key. Coalesced physical and toolbar modifier owners share the same
 lease. This is local transport-attempt accounting, not a remote acknowledgement
 or a second pressed-key routing model.
 
+Committed-text admission is all-or-nothing per controller operation: at most
+64 KiB of valid UTF-8, with no truncation or replacement of unpaired UTF-16
+surrogates. The Android bridge passes the whole accepted operation. Rust then
+splits V2 text at scalar boundaries into messages of at most 2048 bytes (or the
+smaller negotiated peer limit). It validates scalar fit before sending any
+delete-before/delete-after messages. A zero advertised limit retains the
+compatibility default of 2048 bytes.
+
+The controller reserves at most 64 KiB of pending text, 64 pending text/edit
+operations, and 65536 pending deletion graphemes. Each edit must also have
+nonnegative deletion counts whose sum is at most 65536. Reservations include
+the running operation and are released on completion, failure, or cancellation
+when the queue drains. Empty-text edits consume operation and deletion budgets.
+Physical releases do not consume text budgets. Refused operations report a
+typed, content-free reason through nonfatal UI feedback and do not consume
+one-shot modifiers. Once a text transport call starts, its chunks finish in
+order; cancellation skips queued operations, not part of an in-flight edit.
+This provides local ordering and admission, not remote atomic rollback or
+delivery acknowledgement.
+
 Android `ACTION_MULTIPLE` and native editor control clicks normalize into a
 controller-local bounded press batch (1-64 presses), not held-key repeats.
 The state machine emits complete down/up pairs, or repeats without releasing

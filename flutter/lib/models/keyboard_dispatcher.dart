@@ -4,6 +4,7 @@ import '../consts.dart';
 import 'keyboard_command_queue.dart';
 import 'keyboard_intent.dart';
 import 'keyboard_modifier_controller.dart';
+import 'keyboard_text_policy.dart';
 
 enum KeyboardPhysicalTransport { hid, legacy }
 
@@ -112,6 +113,7 @@ typedef KeyboardTextSink =
 class KeyboardDispatchDiagnostics {
   int ignoredLegacyKeys = 0;
   int retiredCommands = 0;
+  int rejectedTextOperations = 0;
 }
 
 class KeyboardDispatcher {
@@ -121,20 +123,29 @@ class KeyboardDispatcher {
     required KeyboardLegacySink sendLegacy,
     required KeyboardTextSink sendText,
     KeyboardCommandErrorHandler? onError,
+    KeyboardInputRejectionHandler? onInputRejected,
   }) : _canDispatch = canDispatch,
        _sendHid = sendHid,
        _sendLegacy = sendLegacy,
        _sendText = sendText,
-       _queue = KeyboardCommandQueue(onError: onError);
+       _queue = KeyboardCommandQueue(onError: onError),
+       _onInputRejected = onInputRejected;
 
   final KeyboardCanDispatch _canDispatch;
   final KeyboardHidSink _sendHid;
   final KeyboardLegacySink _sendLegacy;
   final KeyboardTextSink _sendText;
   final KeyboardCommandQueue _queue;
+  final KeyboardInputRejectionHandler? _onInputRejected;
+  int _pendingTextBytes = 0;
+  int _pendingTextOperations = 0;
+  int _pendingEditGraphemes = 0;
   final diagnostics = KeyboardDispatchDiagnostics();
 
   Future<void> get idle => _queue.idle;
+  int get pendingTextBytes => _pendingTextBytes;
+  int get pendingTextOperations => _pendingTextOperations;
+  int get pendingEditGraphemes => _pendingEditGraphemes;
 
   KeyboardPhysicalTransport selectPhysicalTransport(
     PhysicalKeyboardIntent intent,
@@ -175,15 +186,72 @@ class KeyboardDispatcher {
     return KeyboardPhysicalTransport.legacy;
   }
 
-  Future<void> dispatchAll(Iterable<KeyboardDispatchAction> actions) {
+  Future<void> dispatchAll(Iterable<KeyboardDispatchAction> actions) =>
+      tryDispatchAll(actions).completion;
+
+  ({bool accepted, Future<void> completion}) tryDispatchAll(
+    Iterable<KeyboardDispatchAction> actions,
+  ) {
+    final batch = actions.toList(growable: false);
+    final costs = <int>[];
+    var bytes = 0;
+    var operations = 0;
+    var edits = 0;
+    for (final action in batch) {
+      if (action is! CommittedTextDispatch) {
+        costs.add(0);
+        continue;
+      }
+      final checked = KeyboardTextPolicy.inspect(action.text);
+      final rejection = checked.rejection;
+      if (rejection != null) return _rejectText(rejection);
+      final editCost =
+          action.deleteBeforeGraphemes + action.deleteAfterGraphemes;
+      if (action.deleteBeforeGraphemes < 0 ||
+          action.deleteAfterGraphemes < 0 ||
+          editCost > KeyboardTextPolicy.maxEditGraphemes) {
+        return _rejectText(KeyboardInputRejection.invalidText);
+      }
+      edits += editCost;
+      bytes += checked.bytes;
+      operations++;
+      costs.add(checked.bytes);
+    }
+    if (_pendingTextBytes + bytes > KeyboardTextPolicy.maxPendingBytes ||
+        _pendingEditGraphemes + edits > KeyboardTextPolicy.maxEditGraphemes ||
+        _pendingTextOperations + operations >
+            KeyboardTextPolicy.maxPendingOperations) {
+      return _rejectText(KeyboardInputRejection.textQueueFull);
+    }
+    _pendingTextBytes += bytes;
+    _pendingTextOperations += operations;
+    _pendingEditGraphemes += edits;
     Future<void> tail = _queue.idle;
-    for (final action in actions) {
+    for (var index = 0; index < batch.length; index++) {
+      final action = batch[index];
       final release =
           action is PhysicalKeyboardDispatch &&
           action.action == KeyboardIntentAction.up;
       tail = _queue.enqueue(() => _dispatch(action), keepOnCancel: release);
+      if (action is CommittedTextDispatch) {
+        final cost = costs[index];
+        tail = tail.whenComplete(() {
+          _pendingTextBytes -= cost;
+          _pendingTextOperations--;
+          _pendingEditGraphemes -=
+              action.deleteBeforeGraphemes + action.deleteAfterGraphemes;
+        });
+      }
     }
-    return tail;
+    return (accepted: true, completion: tail);
+  }
+
+  ({bool accepted, Future<void> completion}) _rejectText(
+    KeyboardInputRejection reason,
+  ) {
+    diagnostics.rejectedTextOperations++;
+    _onInputRejected?.call(reason);
+    return (accepted: false, completion: Future<void>.value());
   }
 
   void invalidatePending() {

@@ -1252,6 +1252,21 @@ impl<T: InvokeUiSession> Session<T> {
         source_layout_type: &str,
         prefer_physical: bool,
     ) {
+        let advertised_max = usize::try_from(capabilities.max_committed_text_bytes)
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(hbb_common::keyboard::MAX_COMMITTED_TEXT_BYTES);
+        let max_bytes = advertised_max
+            .max(1)
+            .min(hbb_common::keyboard::MAX_COMMITTED_TEXT_BYTES);
+        let chunks = split_committed_text(value, max_bytes);
+        if !value.is_empty() && chunks.is_empty() {
+            log::warn!("Keyboard V2 text exceeds the negotiated scalar limit");
+            self.ui_handler
+                .msgbox("custom-nocancel-info", "Error", "Invalid format", "", false);
+            return;
+        }
+
         let delete_limit = hbb_common::keyboard::MAX_TEXT_DELETE_GRAPHEMES;
         while delete_before_graphemes > delete_limit {
             self.send_committed_text_chunk(
@@ -1276,14 +1291,6 @@ impl<T: InvokeUiSession> Session<T> {
             delete_after_graphemes -= delete_limit;
         }
 
-        let advertised_max = usize::try_from(capabilities.max_committed_text_bytes)
-            .ok()
-            .filter(|value| *value > 0)
-            .unwrap_or(hbb_common::keyboard::MAX_COMMITTED_TEXT_BYTES);
-        let max_bytes = advertised_max
-            .max(1)
-            .min(hbb_common::keyboard::MAX_COMMITTED_TEXT_BYTES);
-        let chunks = split_committed_text(value, max_bytes);
         if chunks.is_empty() {
             if value.is_empty() && (delete_before_graphemes != 0 || delete_after_graphemes != 0) {
                 self.send_committed_text_chunk(
@@ -1294,8 +1301,6 @@ impl<T: InvokeUiSession> Session<T> {
                     source_layout_type,
                     prefer_physical,
                 );
-            } else if !value.is_empty() {
-                log::warn!("Keyboard V2 text contains a scalar larger than the negotiated limit");
             }
             return;
         }
@@ -2945,6 +2950,104 @@ mod mobile_soft_keyboard_tests {
         let text = "a\u{1f642}b";
         assert_eq!(split_committed_text(text, 5), vec!["a\u{1f642}", "b"]);
         assert!(split_committed_text("\u{1f642}", 3).is_empty());
+    }
+
+    #[cfg(feature = "flutter")]
+    fn capture_committed_text(
+        text: &str,
+        before: u32,
+        after: u32,
+        max_bytes: u32,
+    ) -> Vec<KeyboardInput> {
+        let (sender, mut receiver) = mpsc::unbounded_channel::<Data>();
+        let session: Session<crate::flutter::FlutterHandler> = Session {
+            sender: Arc::new(RwLock::new(Some(sender))),
+            ..Default::default()
+        };
+        session.send_committed_text_v2_with_source_layout(
+            text,
+            before,
+            after,
+            &KeyboardCapabilities {
+                max_committed_text_bytes: max_bytes,
+                ..Default::default()
+            },
+            "en-US",
+            "qwerty",
+            false,
+        );
+        let mut inputs = Vec::new();
+        while let Ok(data) = receiver.try_recv() {
+            let Data::Message(message) = data else {
+                panic!("unexpected non-message keyboard output");
+            };
+            let Some(message::Union::KeyboardInput(input)) = message.union else {
+                panic!("unexpected non-keyboard message");
+            };
+            inputs.push(input);
+        }
+        inputs
+    }
+
+    #[cfg(feature = "flutter")]
+    #[test]
+    fn committed_text_rejects_scalar_before_sending_any_deletions() {
+        assert!(capture_committed_text("a\u{1f642}", 65, 65, 3).is_empty());
+    }
+
+    #[cfg(feature = "flutter")]
+    #[test]
+    fn committed_text_sends_ordered_complete_edit_with_bounded_chunks() {
+        let inputs = capture_committed_text("a\u{1f642}b", 65, 65, 5);
+        assert_eq!(inputs.len(), 4);
+        let epoch = inputs[0].input_epoch;
+        assert_ne!(epoch, 0);
+        let mut actual = Vec::new();
+        for (index, input) in inputs.into_iter().enumerate() {
+            assert_eq!(input.input_epoch, epoch);
+            assert_eq!(input.sequence, index as u64 + 1);
+            let Some(keyboard_input::Union::CommittedText(text)) = input.union else {
+                panic!("unexpected keyboard payload");
+            };
+            assert_eq!(text.source_language_tag, "en-US");
+            assert_eq!(text.source_layout_type, "qwerty");
+            assert!(!text.prefer_physical);
+            actual.push((
+                text.text,
+                text.delete_before_graphemes,
+                text.delete_after_graphemes,
+            ));
+        }
+        assert_eq!(
+            actual,
+            vec![
+                (String::new(), 64, 0),
+                (String::new(), 0, 64),
+                ("a\u{1f642}".to_owned(), 1, 1),
+                ("b".to_owned(), 0, 0),
+            ]
+        );
+    }
+
+    #[cfg(feature = "flutter")]
+    #[test]
+    fn committed_text_long_operation_reassembles_with_default_or_oversized_peer_limit() {
+        let original = "a\u{1f642}e\u{301}".repeat(8192);
+        assert_eq!(original.len(), 65536);
+        for advertised in [0, 2048, 4096] {
+            let inputs = capture_committed_text(&original, 0, 0, advertised);
+            let mut reconstructed = String::new();
+            assert_eq!(inputs.len(), 32);
+            for input in inputs {
+                let Some(keyboard_input::Union::CommittedText(text)) = input.union else {
+                    panic!("unexpected keyboard payload");
+                };
+                assert!(text.text.len() <= 2048);
+                reconstructed.push_str(&text.text);
+            }
+            assert_eq!(reconstructed, original);
+        }
+        assert!(capture_committed_text("", 0, 0, 0).is_empty());
     }
 
     #[test]

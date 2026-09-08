@@ -1,6 +1,5 @@
-import 'dart:convert';
-
 import '../consts.dart';
+import '../models/keyboard_text_policy.dart';
 import '../models/keyboard_lock_modes.dart';
 import '../models/keyboard_intent.dart' show PhysicalKeyPressBatchIntent;
 
@@ -71,10 +70,10 @@ sealed class AndroidRemoteKeyboardEvent {
         );
       case 'text':
         final text = arguments['text'];
-        if (text is! String ||
-            text.isEmpty ||
-            utf8.encode(text).length > 2048) {
-          return null;
+        if (text is! String || text.isEmpty) return null;
+        final rejection = KeyboardTextPolicy.inspect(text).rejection;
+        if (rejection != null) {
+          return AndroidRemoteInputRejectedEvent(sessionId, rejection);
         }
         return AndroidRemoteCommittedTextEvent(
           sessionId,
@@ -84,6 +83,16 @@ sealed class AndroidRemoteKeyboardEvent {
           ),
           sourceLayoutType: _validatedMetadata(arguments['source_layout_type']),
         );
+      case 'rejected':
+        final reason = switch (arguments['reason']) {
+          'text_size' => KeyboardInputRejection.textTooLarge,
+          'invalid_text' => KeyboardInputRejection.invalidText,
+          'press_count' => KeyboardInputRejection.pressCount,
+          _ => null,
+        };
+        return reason == null
+            ? null
+            : AndroidRemoteInputRejectedEvent(sessionId, reason);
       default:
         return null;
     }
@@ -124,6 +133,11 @@ final class AndroidRemotePressBatchEvent extends AndroidRemoteKeyboardEvent {
   final int count;
   final int lockModes;
   final List<int> modifierUsages;
+}
+
+final class AndroidRemoteInputRejectedEvent extends AndroidRemoteKeyboardEvent {
+  const AndroidRemoteInputRejectedEvent(super.sessionId, this.reason);
+  final KeyboardInputRejection reason;
 }
 
 final class AndroidRemoteCommittedTextEvent extends AndroidRemoteKeyboardEvent {

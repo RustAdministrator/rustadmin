@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_hbb/models/keyboard_dispatcher.dart';
 import 'package:flutter_hbb/models/keyboard_input_controller.dart';
 import 'package:flutter_hbb/models/keyboard_intent.dart';
+import 'package:flutter_hbb/models/keyboard_text_policy.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class _ControllerEvent {
@@ -25,9 +26,11 @@ class _ControllerHarness {
   bool allowed = true;
   Completer<void>? hidGate;
   final events = <_ControllerEvent>[];
+  final rejected = <KeyboardInputRejection>[];
 
   late final KeyboardInputController controller = KeyboardInputController(
     canDispatch: () => allowed,
+    onInputRejected: rejected.add,
     sendHid: ({required key, required action, required lockMask}) async {
       events.add(_ControllerEvent('hid', key: key, action: action));
       await hidGate?.future;
@@ -77,6 +80,85 @@ PhysicalKeyboardIntent _physical(HidKey key, KeyboardIntentAction action) =>
     );
 
 void main() {
+  test(
+    'rejected committed text retains one-shot Shift for the next input',
+    () async {
+      final h = _ControllerHarness();
+      h.controller.handle(
+        const SyntheticModifierIntent(
+          modifier: CanonicalModifier.shift,
+          action: SyntheticModifierAction.toggle,
+        ),
+        _mapContext,
+      );
+      await h.controller.idle;
+      await h.controller.handleAndWait(
+        CommittedTextIntent(
+          text: List.filled(65537, 'x').join(),
+          source: KeyboardInputSource.androidNativeText,
+        ),
+        _mapContext,
+      );
+      expect(h.rejected, [KeyboardInputRejection.textTooLarge]);
+      expect(h.controller.effectiveModifiers.shift, isTrue);
+      expect(h.events.where((event) => event.kind == 'text'), isEmpty);
+      await h.controller.handleAndWait(
+        const CommittedTextIntent(
+          text: 'accepted',
+          source: KeyboardInputSource.androidNativeText,
+        ),
+        _mapContext,
+      );
+      await h.controller.idle;
+      expect(h.controller.effectiveModifiers.shift, isFalse);
+      expect(
+        h.events.where((event) => event.kind == 'text').single.text,
+        'accepted',
+      );
+    },
+  );
+
+  test(
+    'rejected text-routed press and release do not consume one-shot Shift',
+    () async {
+      final h = _ControllerHarness();
+      const context = KeyboardRoutingContext(
+        keyboardMode: ControllerKeyboardMode.map,
+        inputMode: ControllerKeyboardInputMode.text,
+        clientKind: KeyboardClientKind.android,
+        peerIsAndroid: false,
+      );
+      h.controller.handle(
+        const SyntheticModifierIntent(
+          modifier: CanonicalModifier.shift,
+          action: SyntheticModifierAction.toggle,
+        ),
+        context,
+      );
+      final oversized = List.filled(65537, 'x').join();
+      for (final action in [
+        KeyboardIntentAction.down,
+        KeyboardIntentAction.repeat,
+        KeyboardIntentAction.up,
+      ]) {
+        h.controller.handle(
+          PhysicalKeyboardIntent(
+            key: const HidKey(7, 4),
+            action: action,
+            textCandidate: oversized,
+            source: KeyboardInputSource.androidHardwareKeyboard,
+          ),
+          context,
+        );
+      }
+      await h.controller.idle;
+      expect(h.rejected, isNotEmpty);
+      expect(h.controller.effectiveModifiers.shift, isTrue);
+      expect(h.events.where((event) => event.kind == 'text'), isEmpty);
+      await h.controller.reset(KeyboardResetReason.manual);
+    },
+  );
+
   for (final context in [_mapContext, _legacyContext]) {
     test(
       'cancelled unstarted down has no release in ${context.keyboardMode}',

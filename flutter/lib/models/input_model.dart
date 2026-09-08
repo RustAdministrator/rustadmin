@@ -21,6 +21,7 @@ import 'keyboard_event_normalizer.dart';
 import 'keyboard_input_controller.dart';
 import 'keyboard_intent.dart';
 import 'keyboard_lock_modes.dart';
+import 'keyboard_text_policy.dart';
 import 'keyboard_modifier_controller.dart';
 import '../common.dart';
 import '../consts.dart';
@@ -349,6 +350,7 @@ class InputModel {
         );
         debugPrintStack(stackTrace: stackTrace);
       },
+      onInputRejected: reportKeyboardRejection,
     );
     _relativeMouse = RelativeMouseModel(
       sessionId: sessionId,
@@ -643,6 +645,16 @@ class InputModel {
     );
     if (intent == null) return Future<void>.value();
     return _keyboardInput.handleAndWait(intent, _keyboardRoutingContext);
+  }
+
+  void reportKeyboardRejection(KeyboardInputRejection reason) {
+    debugPrint('Keyboard input rejected: ${reason.name}');
+    final detail = switch (reason) {
+      KeyboardInputRejection.textTooLarge => '${translate("Size")} > 64 KiB',
+      KeyboardInputRejection.textQueueFull => translate('Too frequent'),
+      _ => translate('Invalid format'),
+    };
+    showToast('${translate("Failed")}: $detail');
   }
 
   /// Send key stroke event.

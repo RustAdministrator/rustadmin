@@ -99,9 +99,10 @@ class KeyboardStateMachine {
     return _lastDispatch;
   }
 
-  Future<void> _queueActions(Iterable<KeyboardDispatchAction> actions) {
-    _lastDispatch = _dispatcher.dispatchAll(actions);
-    return _lastDispatch;
+  bool _queueActions(Iterable<KeyboardDispatchAction> actions) {
+    final result = _dispatcher.tryDispatchAll(actions);
+    _lastDispatch = result.completion;
+    return result.accepted;
   }
 
   void _handleSyntheticModifier(
@@ -478,10 +479,10 @@ class KeyboardStateMachine {
       case ActiveKeyRoute.text:
         final text = intent.textCandidate;
         if (text != null && text.isNotEmpty) {
-          _queueActions([
+          final accepted = _queueActions([
             CommittedTextDispatch(text: text, source: intent.source),
           ]);
-          _mobileModifiers.consumeOneShot();
+          if (accepted) _mobileModifiers.consumeOneShot();
         }
       case ActiveKeyRoute.ignored:
         diagnostics.ignoredIntents += 1;
@@ -537,7 +538,7 @@ class KeyboardStateMachine {
         ]);
       }
     }
-    if (!intent.key.isModifier) {
+    if (!intent.key.isModifier && active.route == ActiveKeyRoute.physical) {
       _mobileModifiers.consumeOneShot();
     }
   }
@@ -562,7 +563,7 @@ class KeyboardStateMachine {
         return;
       }
     }
-    _queueActions([
+    final accepted = _queueActions([
       CommittedTextDispatch(
         text: intent.text,
         source: intent.source,
@@ -572,7 +573,7 @@ class KeyboardStateMachine {
         sourceLayoutType: intent.sourceLayoutType,
       ),
     ]);
-    if (intent.consumeOneShot) {
+    if (accepted && intent.consumeOneShot) {
       _mobileModifiers.consumeOneShot();
     }
   }

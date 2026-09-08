@@ -8,6 +8,8 @@ internal enum class AndroidInputFailure(val diagnosticName: String) {
 
 internal enum class AndroidInputRejection(val diagnosticName: String) {
     PRESS_COUNT("press_count"),
+    TEXT_SIZE("text_size"),
+    INVALID_TEXT("invalid_text"),
 }
 
 // Input entrypoints use typed fields rather than formatting nodes, events, or

@@ -227,20 +227,24 @@ class AndroidKeyToUsbHidTest {
     }
 
     @Test
-    fun committedTextLimitUsesUtf8BytesWithoutSplittingCodePoints() {
-        val exact = "😀".repeat(512)
-        assertEquals(exact, AndroidCommittedTextBounds.truncateUtf8(exact))
-
-        val oversized = "€".repeat(683)
-        val bounded = AndroidCommittedTextBounds.truncateUtf8(oversized)
-        assertEquals(2046, bounded.toByteArray(Charsets.UTF_8).size)
-        assertEquals(682, bounded.length)
-
-        val splitCandidate = "a".repeat(2047) + "😀"
+    fun committedTextLimitAcceptsWholeOperationsAndNeverTruncates() {
+        val exact = "😀".repeat(16384)
+        assertNull(AndroidCommittedTextBounds.validate(exact))
+        assertNull(AndroidCommittedTextBounds.validate("a".repeat(65536)))
+        assertNull(AndroidCommittedTextBounds.validate("€".repeat(21845)))
+        assertNull(AndroidCommittedTextBounds.validate("a".repeat(2047) + "😀"))
+        assertEquals(AndroidInputRejection.TEXT_SIZE, AndroidCommittedTextBounds.validate(exact + "a"))
         assertEquals(
-            "a".repeat(2047),
-            AndroidCommittedTextBounds.truncateUtf8(splitCandidate),
+            AndroidInputRejection.TEXT_SIZE,
+            AndroidCommittedTextBounds.validate("a".repeat(65533) + "😀"),
         )
+    }
+
+    @Test
+    fun committedTextRejectsUnpairedSurrogates() {
+        for (text in listOf("\uD800", "\uDC00", "\uD800a", "\uD800\uD800")) {
+            assertEquals(AndroidInputRejection.INVALID_TEXT, AndroidCommittedTextBounds.validate(text))
+        }
     }
 
 }

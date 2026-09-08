@@ -59,6 +59,7 @@ class _TestRustadminImpl implements Rustadmin {
   final orderedKeyboardCalls = <String>[];
   int plainTextEdits = 0;
   int sourceLayoutTextEdits = 0;
+  final committedTexts = <String>[];
   int lastDeleteBeforeGraphemes = 0;
   final pendingFlutterKeyCalls = <Completer<void>>[];
   bool blockFlutterKeyCalls = false;
@@ -118,12 +119,14 @@ class _TestRustadminImpl implements Rustadmin {
     }
     if (invocation.memberName == #sessionInputTextEdit) {
       plainTextEdits += 1;
+      committedTexts.add(invocation.namedArguments[#value] as String);
       lastDeleteBeforeGraphemes =
           invocation.namedArguments[#deleteBeforeGraphemes] as int;
       return Future<void>.value();
     }
     if (invocation.memberName == #sessionInputTextEditWithSourceLayout) {
       sourceLayoutTextEdits += 1;
+      committedTexts.add(invocation.namedArguments[#value] as String);
       return Future<void>.value();
     }
     if (invocation.memberName == #sessionSendMouse) {
@@ -267,6 +270,7 @@ void main() {
     testImpl.orderedKeyboardCalls.clear();
     testImpl.plainTextEdits = 0;
     testImpl.sourceLayoutTextEdits = 0;
+    testImpl.committedTexts.clear();
     testImpl.lastDeleteBeforeGraphemes = 0;
     testImpl.pendingFlutterKeyCalls.clear();
     testImpl.blockFlutterKeyCalls = false;
@@ -863,6 +867,29 @@ void main() {
 
     expect(testImpl.plainTextEdits, 0);
     expect(testImpl.sourceLayoutTextEdits, 1);
+  });
+
+  test('Android long text reaches FFI whole and oversize sends nothing', () async {
+    final text = List.filled(65536, 'x').join();
+    await inputModel.inputAndroidRemoteCommittedText(
+      text,
+      sourceLanguageTag: '',
+      sourceLayoutType: '',
+    );
+    await inputModel.inputAndroidRemoteCommittedText(
+      text,
+      sourceLanguageTag: 'en-US',
+      sourceLayoutType: 'qwerty',
+    );
+    expect(testImpl.committedTexts, [text, text]);
+    await inputModel.inputAndroidRemoteCommittedText(
+      '${text}x',
+      sourceLanguageTag: '',
+      sourceLayoutType: '',
+    );
+    expect(testImpl.committedTexts, [text, text]);
+    expect(testImpl.flutterKeyCalls, isEmpty);
+    expect(testImpl.inputKeyCalls, isEmpty);
   });
 
   test('Android Physical preserves source-layout compatibility path', () async {

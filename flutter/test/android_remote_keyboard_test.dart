@@ -1,7 +1,62 @@
 import 'package:flutter_hbb/mobile/android_remote_keyboard.dart';
+import 'package:flutter_hbb/models/keyboard_text_policy.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('native text validation reports typed failures without content', () {
+    for (final entry in {
+      '${List.filled(16384, '\u{1f642}').join()}a':
+          KeyboardInputRejection.textTooLarge,
+      String.fromCharCode(0xd800): KeyboardInputRejection.invalidText,
+    }.entries) {
+      final event = AndroidRemoteKeyboardEvent.tryParse({
+        'session_id': 'session-1',
+        'kind': 'text',
+        'text': entry.key,
+      });
+      expect(event, isA<AndroidRemoteInputRejectedEvent>());
+      expect((event as AndroidRemoteInputRejectedEvent).reason, entry.value);
+    }
+    final exact = List.filled(16384, '\u{1f642}').join();
+    final event = AndroidRemoteKeyboardEvent.tryParse({
+      'session_id': 'session-1',
+      'kind': 'text',
+      'text': exact,
+    });
+    expect((event as AndroidRemoteCommittedTextEvent).text, exact);
+    for (final reason in ['text_size', 'invalid_text', 'press_count']) {
+      expect(
+        AndroidRemoteKeyboardEvent.tryParse({
+          'session_id': 'session-1',
+          'kind': 'rejected',
+          'reason': reason,
+        }),
+        isA<AndroidRemoteInputRejectedEvent>(),
+      );
+    }
+    for (final reason in [null, true, 42, 'arbitrary content']) {
+      expect(
+        AndroidRemoteKeyboardEvent.tryParse({
+          'session_id': 'session-1',
+          'kind': 'rejected',
+          'reason': reason,
+        }),
+        isNull,
+      );
+    }
+  });
+
+  test('a native commit larger than a wire packet is preserved whole', () {
+    final text = List.filled(4096, 'x').join();
+    final event = AndroidRemoteKeyboardEvent.tryParse({
+      'session_id': 'session-1',
+      'kind': 'text',
+      'text': text,
+    });
+    expect(event, isA<AndroidRemoteCommittedTextEvent>());
+    expect((event as AndroidRemoteCommittedTextEvent).text, text);
+  });
+
   test('press batches preserve metadata and reject invalid counts', () {
     Map<String, Object> payload(Object count) => {
       'session_id': 'session-1',
@@ -140,7 +195,7 @@ void main() {
       AndroidRemoteKeyboardEvent.tryParse({
         'session_id': 'session-1',
         'kind': 'text',
-        'text': List.filled(512, '😀').join(),
+        'text': List.filled(16384, '😀').join(),
       }),
       isA<AndroidRemoteCommittedTextEvent>(),
     );
@@ -148,9 +203,9 @@ void main() {
       AndroidRemoteKeyboardEvent.tryParse({
         'session_id': 'session-1',
         'kind': 'text',
-        'text': List.filled(683, '€').join(),
+        'text': List.filled(21846, '€').join(),
       }),
-      isNull,
+      isA<AndroidRemoteInputRejectedEvent>(),
     );
   });
 
@@ -198,9 +253,9 @@ void main() {
       AndroidRemoteKeyboardEvent.tryParse({
         'session_id': 'session-1',
         'kind': 'text',
-        'text': List.filled(2049, 'x').join(),
+        'text': List.filled(65537, 'x').join(),
       }),
-      isNull,
+      isA<AndroidRemoteInputRejectedEvent>(),
     );
     final sanitized =
         AndroidRemoteKeyboardEvent.tryParse({

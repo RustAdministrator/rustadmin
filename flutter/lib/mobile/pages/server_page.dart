@@ -1015,6 +1015,8 @@ void androidChannelInit() {
                     modifierUsages: event.modifierUsages,
                   ),
                 );
+              case AndroidRemoteInputRejectedEvent():
+                gFFI.inputModel.reportKeyboardRejection(event.reason);
             }
             break;
           }
