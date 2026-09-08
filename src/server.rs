@@ -78,6 +78,7 @@ mod helper_retry;
 #[cfg(windows)]
 pub mod user_capture_helper;
 mod video_qos;
+mod video_queue;
 pub mod video_service;
 
 #[cfg(all(target_os = "windows", feature = "flutter"))]
