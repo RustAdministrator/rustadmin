@@ -196,7 +196,6 @@ pub struct Session<T: InvokeUiSession> {
     pub args: Vec<String>,
     pub lc: Arc<RwLock<LoginConfigHandler>>,
     pub sender: Arc<RwLock<Option<mpsc::UnboundedSender<Data>>>>,
-    pub thread: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
     pub ui_handler: T,
     pub server_keyboard_enabled: Arc<RwLock<bool>>,
     pub server_file_transfer_enabled: Arc<RwLock<bool>>,
@@ -230,14 +229,15 @@ pub struct ChangeDisplayRecord {
     height: i32,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConnectionState {
     Connecting,
     Connected,
     Disconnected,
 }
 
-/// ConnectionRoundState is used to control the reconnecting logic.
+/// Sole authority for native connection attempts; UI views and worker handles
+/// are resources, not evidence that a transport is running.
 pub struct ConnectionRoundState {
     round: u32,
     state: ConnectionState,
@@ -245,28 +245,29 @@ pub struct ConnectionRoundState {
 }
 
 impl ConnectionRoundState {
-    pub fn new_round(&mut self) -> u32 {
-        self.round += 1;
+    fn try_start(&mut self, reconnect: bool) -> Option<u32> {
+        match self.state {
+            ConnectionState::Connecting => return None,
+            ConnectionState::Connected if !reconnect => return None,
+            _ => {}
+        }
+        self.round = self.round.wrapping_add(1);
         self.state = ConnectionState::Connecting;
         self.changed_at = Instant::now();
-        self.round
+        Some(self.round)
     }
 
-    pub fn set_connected(&mut self) {
+    pub fn set_connected(&mut self, round: u32) -> bool {
+        if self.round != round || self.state != ConnectionState::Connecting {
+            return false;
+        }
         self.state = ConnectionState::Connected;
         self.changed_at = Instant::now();
-    }
-
-    pub fn is_round_gt(&self, round: u32) -> bool {
-        if round == u32::MAX && self.round == 0 {
-            true
-        } else {
-            round < self.round
-        }
+        true
     }
 
     pub fn set_disconnected(&mut self, round: u32) -> bool {
-        if self.is_round_gt(round) {
+        if self.round != round {
             false
         } else {
             self.state = ConnectionState::Disconnected;
@@ -280,9 +281,26 @@ impl Default for ConnectionRoundState {
     fn default() -> Self {
         Self {
             round: 0,
-            state: ConnectionState::Connecting,
+            state: ConnectionState::Disconnected,
             changed_at: Instant::now(),
         }
+    }
+}
+
+pub(crate) struct ConnectionAttempt {
+    round: u32,
+    sender: mpsc::UnboundedSender<Data>,
+    receiver: mpsc::UnboundedReceiver<Data>,
+}
+
+struct ConnectionAttemptLifetime<T: InvokeUiSession> {
+    session: Session<T>,
+    round: u32,
+}
+
+impl<T: InvokeUiSession> Drop for ConnectionAttemptLifetime<T> {
+    fn drop(&mut self) {
+        self.session.finish_connection_attempt(self.round);
     }
 }
 
@@ -1821,49 +1839,93 @@ impl<T: InvokeUiSession> Session<T> {
         }
     }
 
+    pub fn start_connection_if_needed(&self) {
+        self.start_connection(false, false);
+    }
+
+    pub fn run_connection_if_needed(&self) {
+        if let Some(attempt) = self.prepare_connection_attempt(false, false) {
+            io_loop(self.clone(), attempt);
+        }
+    }
+
     pub fn reconnect(&self, force_relay: bool) {
-        // 1. If current session is connecting, do not reconnect.
-        // 2. If the connection is established, send `Data::Close`.
-        // 3. If the connection is disconnected, do nothing.
-        let mut connection_round_state_lock = self.connection_round_state.lock().unwrap();
-        if self.thread.lock().unwrap().is_some() {
-            match connection_round_state_lock.state {
-                ConnectionState::Connecting => {
-                    log::info!(
-                        "diag session reconnect ignored while connecting: id={}, force_relay={force_relay}",
-                        self.get_id()
-                    );
-                    return;
-                }
-                ConnectionState::Connected => {
-                    log::info!(
-                        "diag session reconnect closing current connection: id={}, force_relay={force_relay}",
-                        self.get_id()
-                    );
-                    self.send(Data::Close)
-                }
-                ConnectionState::Disconnected => {}
+        self.start_connection(true, force_relay);
+    }
+
+    pub(crate) fn prepare_connection_attempt(
+        &self,
+        reconnect: bool,
+        force_relay: bool,
+    ) -> Option<ConnectionAttempt> {
+        let mut state = self.connection_round_state.lock().unwrap();
+        let previous_round = state.round;
+        let previous_state = state.state;
+        let Some(round) = state.try_start(reconnect) else {
+            log::info!(
+                "diag session start reused active attempt: id={}, round={}, state={:?}, reconnect={reconnect}",
+                self.get_id(), state.round, state.state
+            );
+            return None;
+        };
+        self.ui_handler.end_connection_runtime(previous_round);
+        if previous_state == ConnectionState::Connected {
+            self.send(Data::Close);
+        }
+        if reconnect || previous_round != 0 {
+            let mut lc = self.lc.write().unwrap();
+            if force_relay {
+                lc.force_relay = true;
+            }
+            lc.peer_info = None;
+            self.reconnect_count.fetch_add(1, Ordering::SeqCst);
+        }
+        self.ui_handler.begin_connection_runtime(round);
+        // Reserve the attempt and publish its command channel before launching
+        // the worker, so concurrent attaches coalesce and an immediate close is
+        // never sent to the previous attempt's channel.
+        let (sender, receiver) = mpsc::unbounded_channel();
+        *self.sender.write().unwrap() = Some(sender.clone());
+        log::info!(
+            "Session {} start: round={round}, previous_state={previous_state:?}, reconnect={reconnect}",
+            self.get_id()
+        );
+        Some(ConnectionAttempt {
+            round,
+            sender,
+            receiver,
+        })
+    }
+
+    fn start_connection(&self, reconnect: bool, force_relay: bool) {
+        let Some(attempt) = self.prepare_connection_attempt(reconnect, force_relay) else {
+            return;
+        };
+        let round = attempt.round;
+        let session = self.clone();
+        // Retired workers finish independently; their generation cannot publish
+        // connection state or remove the current attempt's command channel.
+        if let Err(err) = std::thread::Builder::new().spawn(move || io_loop(session, attempt)) {
+            if self.finish_connection_attempt(round) {
+                self.on_error(&format!("Failed to start connection worker: {err}"));
             }
         }
-        self.ui_handler
-            .end_connection_runtime(connection_round_state_lock.round);
-        let round = connection_round_state_lock.new_round();
-        drop(connection_round_state_lock);
+    }
 
-        let cloned = self.clone();
-
-        // override only if true
-        if true == force_relay {
-            self.lc.write().unwrap().force_relay = true;
+    fn finish_connection_attempt(&self, round: u32) -> bool {
+        let mut state = self.connection_round_state.lock().unwrap();
+        if state.set_disconnected(round) {
+            self.sender.write().unwrap().take();
+            self.ui_handler.end_connection_runtime(round);
+            true
+        } else {
+            false
         }
-        self.lc.write().unwrap().peer_info = None;
-        self.reconnect_count.fetch_add(1, Ordering::SeqCst);
-        let mut lock = self.thread.lock().unwrap();
-        // No need to join the previous thread, because it will exit automatically.
-        // And the previous thread will not change important states.
-        *lock = Some(std::thread::spawn(move || {
-            io_loop(cloned, round);
-        }));
+    }
+
+    pub(crate) fn is_current_connection_attempt(&self, round: u32) -> bool {
+        let state = self.connection_round_state.lock().unwrap();
+        state.round == round && state.state != ConnectionState::Disconnected
     }
 
     #[cfg(not(feature = "flutter"))]
@@ -1955,17 +2017,23 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     pub fn close(&self) {
-        self.ui_handler
-            .end_connection_runtime(self.connection_round());
-        log::info!(
-            "diag session close requested: id={}, thread_active={}, sender_ready={}",
-            self.get_id(),
-            self.thread.lock().unwrap().is_some(),
-            self.sender.read().unwrap().is_some()
-        );
-        self.confirm_direct_trust_response(false);
-        self.submit_direct_pairing_passphrase_response(None);
-        self.send(Data::Close);
+        {
+            let mut state = self.connection_round_state.lock().unwrap();
+            log::info!(
+                "diag session close requested: id={}, round={}, state={:?}",
+                self.get_id(),
+                state.round,
+                state.state
+            );
+            self.ui_handler.end_connection_runtime(state.round);
+            state.state = ConnectionState::Disconnected;
+            state.changed_at = Instant::now();
+            if let Some(sender) = self.sender.write().unwrap().take() {
+                sender.send(Data::Close).ok();
+            }
+            self.confirm_direct_trust_response(false);
+            self.submit_direct_pairing_passphrase_response(None);
+        }
     }
 
     pub fn is_connection_alive(&self) -> bool {
@@ -2705,12 +2773,21 @@ impl<T: InvokeUiSession> Session<T> {
 }
 
 #[tokio::main(flavor = "current_thread")]
-pub async fn io_loop<T: InvokeUiSession>(handler: Session<T>, round: u32) {
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    let (sender, receiver) = mpsc::unbounded_channel::<Data>();
+async fn io_loop<T: InvokeUiSession>(handler: Session<T>, attempt: ConnectionAttempt) {
+    let ConnectionAttempt {
+        round,
+        sender,
+        receiver,
+    } = attempt;
+    let _lifetime = ConnectionAttemptLifetime {
+        session: handler.clone(),
+        round,
+    };
+    if !handler.is_current_connection_attempt(round) {
+        return;
+    }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    let (sender, mut receiver) = mpsc::unbounded_channel::<Data>();
-    *handler.sender.write().unwrap() = Some(sender.clone());
+    let mut receiver = receiver;
     let token = LocalConfig::get_option("access_token");
     let key = crate::get_key(false).await;
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -2837,6 +2914,167 @@ async fn start_one_port_forward<T: InvokeUiSession>(
 async fn send_note(url: String, id: String, sid: u64, note: String) {
     let body = serde_json::json!({ "id": id, "session_id": sid, "note": note });
     allow_err!(crate::post_request(url, body.to_string(), "").await);
+}
+
+#[cfg(test)]
+mod connection_round_tests {
+    use super::*;
+
+    #[test]
+    fn idle_is_not_connecting_and_each_start_is_reserved_once() {
+        let mut state = ConnectionRoundState::default();
+        assert_eq!(state.state, ConnectionState::Disconnected);
+        assert_eq!(state.try_start(false), Some(1));
+        assert_eq!(state.try_start(false), None);
+        assert_eq!(state.try_start(true), None);
+        assert!(state.set_connected(1));
+        assert_eq!(state.try_start(false), None);
+        assert_eq!(state.try_start(true), Some(2));
+    }
+
+    #[test]
+    fn failed_retry_can_be_started_again_without_removing_ui_views() {
+        let mut state = ConnectionRoundState::default();
+        assert_eq!(state.try_start(false), Some(1));
+        assert!(state.set_connected(1));
+        assert!(state.set_disconnected(1));
+        assert_eq!(state.try_start(true), Some(2));
+        assert!(state.set_disconnected(2));
+        assert_eq!(state.try_start(false), Some(3));
+        assert!(state.set_connected(3));
+    }
+
+    #[test]
+    fn retired_or_future_completions_cannot_change_current_state() {
+        let mut state = ConnectionRoundState::default();
+        assert_eq!(state.try_start(false), Some(1));
+        assert!(state.set_disconnected(1));
+        assert!(!state.set_connected(1));
+        assert_eq!(state.try_start(false), Some(2));
+        assert!(!state.set_connected(1));
+        assert!(!state.set_disconnected(1));
+        assert!(!state.set_disconnected(3));
+        assert_eq!(state.state, ConnectionState::Connecting);
+        assert!(state.set_connected(2));
+        assert!(!state.set_disconnected(1));
+        assert_eq!(state.state, ConnectionState::Connected);
+    }
+
+    #[test]
+    fn generation_wrap_still_rejects_previous_completion() {
+        let mut state = ConnectionRoundState {
+            round: u32::MAX,
+            ..Default::default()
+        };
+        assert_eq!(state.try_start(false), Some(0));
+        assert!(!state.set_connected(u32::MAX));
+        assert!(!state.set_disconnected(u32::MAX));
+        assert!(state.set_connected(0));
+    }
+}
+
+#[cfg(all(test, feature = "flutter"))]
+mod connection_attempt_tests {
+    use super::*;
+
+    type TestSession = Session<crate::flutter::FlutterHandler>;
+
+    #[test]
+    fn concurrent_attach_and_retry_claim_only_one_worker() {
+        let session = TestSession::default();
+        assert!(!session.is_connection_alive());
+        let attempts = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|index| {
+                    let session = &session;
+                    scope.spawn(move || session.prepare_connection_attempt(index % 2 == 0, false))
+                })
+                .collect();
+            workers
+                .into_iter()
+                .filter_map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].round, 1);
+        assert!(session.is_connection_alive());
+        session.finish_connection_attempt(1);
+    }
+
+    #[test]
+    fn close_before_worker_start_retires_published_channel() {
+        let session = TestSession::default();
+        let mut old = session.prepare_connection_attempt(false, false).unwrap();
+        session.close();
+        assert!(matches!(old.receiver.try_recv(), Ok(Data::Close)));
+        assert!(!session.is_current_connection_attempt(old.round));
+        assert!(!session
+            .connection_round_state
+            .lock()
+            .unwrap()
+            .set_connected(old.round));
+        assert!(session.sender.read().unwrap().is_none());
+
+        let current = session.prepare_connection_attempt(false, false).unwrap();
+        drop(ConnectionAttemptLifetime {
+            session: session.clone(),
+            round: old.round,
+        });
+        assert!(session.is_current_connection_attempt(current.round));
+        assert!(session
+            .sender
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .same_channel(&current.sender));
+        session.finish_connection_attempt(current.round);
+    }
+
+    #[test]
+    fn live_attach_preserves_connection_and_explicit_retry_closes_old_channel() {
+        let session = TestSession::default();
+        let mut old = session.prepare_connection_attempt(false, false).unwrap();
+        assert!(session
+            .connection_round_state
+            .lock()
+            .unwrap()
+            .set_connected(old.round));
+        assert!(session.prepare_connection_attempt(false, false).is_none());
+        assert!(session
+            .sender
+            .read()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .same_channel(&old.sender));
+        assert!(old.receiver.try_recv().is_err());
+
+        let current = session.prepare_connection_attempt(true, true).unwrap();
+        assert!(matches!(old.receiver.try_recv(), Ok(Data::Close)));
+        assert!(session.lc.read().unwrap().force_relay);
+        assert_eq!(session.reconnect_count.load(Ordering::SeqCst), 1);
+        session.finish_connection_attempt(old.round);
+        assert!(session.is_current_connection_attempt(current.round));
+        session.finish_connection_attempt(current.round);
+    }
+
+    #[test]
+    fn failed_attempt_cleanup_allows_reopen_and_clears_dead_sender() {
+        let session = TestSession::default();
+        let old = session.prepare_connection_attempt(false, false).unwrap();
+        drop(old.receiver);
+        drop(ConnectionAttemptLifetime {
+            session: session.clone(),
+            round: old.round,
+        });
+        assert!(!session.is_connection_alive());
+        assert!(session.sender.read().unwrap().is_none());
+        let current = session.prepare_connection_attempt(false, false).unwrap();
+        assert_eq!(current.round, old.round + 1);
+        assert_eq!(session.reconnect_count.load(Ordering::SeqCst), 1);
+        session.finish_connection_attempt(current.round);
+    }
 }
 
 #[cfg(test)]

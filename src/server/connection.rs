@@ -6933,43 +6933,23 @@ impl Connection {
             set
         );
         let source_count = Self::video_source_count(video_source);
-        let valid_add = add
-            .iter()
-            .copied()
-            .filter(|display| *display < source_count)
-            .collect::<Vec<_>>();
-        let valid_sub = sub
-            .iter()
-            .copied()
-            .filter(|display| *display < source_count)
-            .collect::<Vec<_>>();
-        let valid_set = set
-            .iter()
-            .copied()
-            .filter(|display| *display < source_count)
-            .collect::<Vec<_>>();
-        let invalid_count =
-            add.len() + sub.len() + set.len() - valid_add.len() - valid_sub.len() - valid_set.len();
-        if invalid_count != 0 {
+        let Some((operation, displays)) =
+            super::CaptureDisplaysOperation::validated_request(add, sub, set, source_count)
+        else {
             log::warn!(
-                "#{} ignore {} invalid {:?} indices, available source count: {}",
+                "#{} ignore invalid {:?} capture request, available source count: {}",
                 self.inner.id(),
-                invalid_count,
                 video_source,
                 source_count
             );
-        }
-        // An invalid non-empty request must not degrade into an empty set request,
-        // which would unsubscribe every current display.
-        if (!add.is_empty() && valid_add.is_empty())
-            || (add.is_empty() && !sub.is_empty() && valid_sub.is_empty())
-            || (add.is_empty() && sub.is_empty() && !set.is_empty() && valid_set.is_empty())
-        {
             return;
-        }
+        };
         if let Some(server) = self.server.upgrade() {
             let mut lock = server.write().unwrap();
-            for display in valid_add.iter() {
+            for display in displays
+                .iter()
+                .filter(|_| operation != super::CaptureDisplaysOperation::ExcludeListed)
+            {
                 let service_name = video_service::get_service_name(video_source, *display);
                 if !lock.contains(&service_name) {
                     log::info!(
@@ -6980,24 +6960,7 @@ impl Connection {
                     lock.add_service(Box::new(video_service::new(video_source, *display)));
                 }
             }
-            for display in valid_set.iter() {
-                let service_name = video_service::get_service_name(video_source, *display);
-                if !lock.contains(&service_name) {
-                    log::info!(
-                        "#{} add video service from capture_displays: {}",
-                        self.inner.id(),
-                        service_name
-                    );
-                    lock.add_service(Box::new(video_service::new(video_source, *display)));
-                }
-            }
-            if !add.is_empty() {
-                lock.capture_displays(self.inner.clone(), video_source, &valid_add, true, false);
-            } else if !sub.is_empty() {
-                lock.capture_displays(self.inner.clone(), video_source, &valid_sub, false, true);
-            } else {
-                lock.capture_displays(self.inner.clone(), video_source, &valid_set, true, true);
-            }
+            lock.capture_displays(self.inner.clone(), video_source, &displays, operation);
             self.multi_ui_session = lock.get_subbed_displays_count(self.inner.id()) > 1;
             if self.follow_remote_window {
                 lock.subscribe(

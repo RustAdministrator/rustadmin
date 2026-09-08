@@ -1,3 +1,4 @@
+use super::display_control::{DisplayControlCommand, DisplayIntentOutbox};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::clipboard::{update_clipboard_with_direction, ClipboardSide};
 #[cfg(not(any(target_os = "ios")))]
@@ -121,7 +122,7 @@ fn is_critical_client_input(message: &Message) -> bool {
     }
 }
 
-fn is_would_block_error(error: &hbb_common::anyhow::Error) -> bool {
+pub(super) fn is_would_block_error(error: &hbb_common::anyhow::Error) -> bool {
     error.chain().any(|cause| {
         cause
             .downcast_ref::<std::io::Error>()
@@ -134,6 +135,16 @@ fn should_wait_for_startup_keyframe(
     payload_stats: Option<(usize, usize, bool)>,
 ) -> bool {
     frame_id != 0 && payload_stats.is_some_and(|(_, _, has_keyframe)| !has_keyframe)
+}
+
+fn display_metadata_requires_decoder_reset(
+    retained_metadata_echo: bool,
+    previous: Option<(i32, i32)>,
+    next: (i32, i32),
+) -> bool {
+    // A metadata echo for a retained stream does not own its decoder lifetime.
+    // Preserve unsolicited/legacy reset behavior and actual resolution changes.
+    !retained_metadata_echo || next.0 <= 0 || next.1 <= 0 || previous != Some(next)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -444,6 +455,7 @@ pub struct Remote<T: InvokeUiSession> {
     is_connected: bool,
     connection_video_ready: bool,
     display_startup: DisplayStartupController,
+    display_outbox: DisplayIntentOutbox,
     #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
     client_conn_id: i32, // used for file clipboard
     data_count: Arc<AtomicUsize>,
@@ -502,6 +514,7 @@ impl<T: InvokeUiSession> Remote<T> {
             is_connected: false,
             connection_video_ready: false,
             display_startup: DisplayStartupController::default(),
+            display_outbox: DisplayIntentOutbox::default(),
             #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
             client_conn_id: 0,
             data_count: Arc::new(AtomicUsize::new(0)),
@@ -520,6 +533,30 @@ impl<T: InvokeUiSession> Remote<T> {
     }
 
     fn reconcile_display_intent(&mut self, intent: &DisplayMediaIntent) {
+        self.display_outbox.observe(self.connection_round, intent);
+        if let Some(display) = intent
+            .replacement_display
+            .and_then(|display| i32::try_from(display).ok())
+        {
+            let config = self.handler.lc.read().unwrap();
+            self.display_outbox.replace(
+                self.connection_round,
+                intent,
+                display,
+                config.get_custom_resolution(display).unwrap_or((0, 0)),
+                crate::common::is_support_multi_ui_session_num(config.version)
+                    && !cfg!(any(target_os = "android", target_os = "ios")),
+            );
+        }
+        if (
+            intent.logical_session_generation,
+            intent.aggregate_generation,
+        ) <= (
+            self.display_startup.logical_session_generation,
+            self.display_startup.aggregate_generation,
+        ) {
+            return;
+        }
         let previous_generation = self.display_startup.aggregate_generation;
         let retired = self.display_startup.reconcile(intent);
         for display in &retired {
@@ -565,52 +602,64 @@ impl<T: InvokeUiSession> Remote<T> {
             return;
         };
         self.reconcile_display_intent(&intent);
-        if intent.displays.is_empty()
-            || !crate::common::is_support_multi_ui_session_num(
-                self.handler.lc.read().unwrap().version,
-            )
+        if !self.is_connected
+            || !self
+                .handler
+                .is_current_connection_attempt(self.connection_round)
         {
             return;
         }
-        let set = intent
-            .displays
-            .iter()
-            .filter_map(|entry| i32::try_from(entry.display).ok())
-            .collect::<Vec<_>>();
-        let mut misc = Misc::new();
-        misc.set_capture_displays(CaptureDisplays {
-            set,
-            ..Default::default()
-        });
-        let mut message = Message::new();
-        message.set_misc(misc);
-        if let Err(error) = peer.send(&message).await {
-            log::warn!(
-                "diag viewer display intent reconnect sync failed: logical_generation={}, connection_generation={}, aggregate_generation={}, err={error}",
-                intent.logical_session_generation,
-                self.connection_round,
-                intent.aggregate_generation
-            );
-        } else {
-            log::info!(
-                "diag viewer display intent reconnect sync: logical_generation={}, connection_generation={}, aggregate_generation={}, displays={:?}",
-                intent.logical_session_generation,
-                self.connection_round,
-                intent.aggregate_generation,
-                intent
-                    .displays
-                    .iter()
-                    .map(|entry| entry.display)
-                    .collect::<Vec<_>>()
-            );
+        let supports_set =
+            crate::common::is_support_multi_ui_session_num(self.handler.lc.read().unwrap().version);
+        // Bound work per wakeup, including the legacy replacement's optional
+        // select/refresh. Re-read the owner between admission attempts.
+        for _ in 0..3 {
+            if !self
+                .handler
+                .is_current_connection_attempt(self.connection_round)
+            {
+                break;
+            }
+            if let Some(latest) = self.handler.ui_handler.display_media_intent() {
+                self.reconcile_display_intent(&latest);
+            }
+            let Some(command) = self
+                .display_outbox
+                .pending(self.connection_round, supports_set)
+            else {
+                break;
+            };
+            match peer.send_tagged("DisplayIntent", &command.message()).await {
+                Ok(()) => {
+                    if let DisplayControlCommand::Refresh(display) = command {
+                        if let Some(thread) = self.video_threads.get_mut(&(display as usize)) {
+                            *thread.discard_queue.write().unwrap() = true;
+                        }
+                    }
+                    self.display_outbox.admit(self.connection_round, &command);
+                    log::info!(
+                        "diag viewer display intent admitted: logical_generation={}, connection_generation={}, aggregate_generation={}, command={command:?}",
+                        self.display_startup.logical_session_generation,
+                        self.connection_round, self.display_startup.aggregate_generation,
+                    );
+                }
+                Err(error) => {
+                    if self.display_outbox.record_failure() {
+                        log::warn!(
+                            "diag viewer display intent pending: logical_generation={}, connection_generation={}, aggregate_generation={}, command={command:?}, err={error}",
+                            self.display_startup.logical_session_generation,
+                            self.connection_round, self.display_startup.aggregate_generation,
+                        );
+                    }
+                    break;
+                }
+            }
         }
     }
 
     pub async fn io_loop(&mut self, key: &str, token: &str, round: u32) {
         self.connection_round = round;
-        self.handler
-            .ui_handler
-            .begin_connection_runtime(self.connection_round);
+        self.display_outbox = DisplayIntentOutbox::new(round);
         let _render_lifetime = ConnectionRenderLifetime {
             handler: self.handler.ui_handler.clone(),
             round,
@@ -666,11 +715,15 @@ impl<T: InvokeUiSession> Remote<T> {
             Ok(((mut peer, direct, pk, kcp, stream_type), (feedback, rendezvous_server))) => {
                 let _direct_peer_session =
                     client::peer_online::track_direct_peer_session(&self.handler.get_id());
-                self.handler
+                if !self
+                    .handler
                     .connection_round_state
                     .lock()
                     .unwrap()
-                    .set_connected();
+                    .set_connected(round)
+                {
+                    return;
+                }
                 self.handler.mark_remote_activity();
                 self.handler
                     .set_connection_type(peer.is_secured(), direct, stream_type); // flutter -> connection_ready
@@ -812,11 +865,7 @@ impl<T: InvokeUiSession> Remote<T> {
                             }
                         }
                         _ = status_timer.tick() => {
-                            if let Some(intent) = self.handler.ui_handler.display_media_intent() {
-                                if intent.aggregate_generation != self.display_startup.aggregate_generation {
-                                    self.reconcile_display_intent(&intent);
-                                }
-                            }
+                            self.sync_display_intent_to_peer(&mut peer).await;
                             self.handler.ui_handler.tick_render_liveness();
                             let startup_actions = self.display_startup.tick(
                                 expects_video,
@@ -1261,16 +1310,13 @@ impl<T: InvokeUiSession> Remote<T> {
             }
             Err(err) => {
                 self.handler.ui_handler.end_connection_runtime(round);
-                self.handler.on_establish_connection_error(err.to_string());
+                if self.handler.is_current_connection_attempt(round) {
+                    self.handler.on_establish_connection_error(err.to_string());
+                }
             }
         }
-        // set_disconnected_ok is used to check if new connection round is started.
-        let _set_disconnected_ok = self
-            .handler
-            .connection_round_state
-            .lock()
-            .unwrap()
-            .set_disconnected(round);
+        // The outer attempt lifetime publishes Disconnected after cleanup.
+        let _current_attempt = self.handler.is_current_connection_attempt(round);
 
         #[cfg(not(target_os = "ios"))]
         if self.handler.is_default() {
@@ -1283,7 +1329,7 @@ impl<T: InvokeUiSession> Remote<T> {
                 Client::try_stop_clipboard();
             }
             #[cfg(not(feature = "flutter"))]
-            if _set_disconnected_ok {
+            if _current_attempt {
                 Client::try_stop_clipboard();
             }
         }
@@ -1530,6 +1576,14 @@ impl<T: InvokeUiSession> Remote<T> {
                 self.check_clipboard_file_context();
             }
             Data::Message(msg) => {
+                // Legacy helpers (including software-rendered SwitchDisplay) may
+                // still enqueue a per-view set. Flutter's aggregate owner wins.
+                if matches!(msg.misc().union, Some(misc::Union::CaptureDisplays(_)))
+                    && self.handler.ui_handler.display_media_intent().is_some()
+                {
+                    self.sync_display_intent_to_peer(peer).await;
+                    return true;
+                }
                 match &msg.union {
                     Some(message::Union::Misc(misc)) => match misc.union {
                         Some(misc::Union::RefreshVideo(_)) => {
@@ -2008,8 +2062,10 @@ impl<T: InvokeUiSession> Remote<T> {
                     }
                 }
             },
-            Data::DisplayIntent(intent) => {
-                self.reconcile_display_intent(&intent);
+            Data::DisplayIntent(_) => {
+                // Events can arrive after a newer UI transaction. Read the owner,
+                // never replay the event's stale snapshot onto the peer.
+                self.sync_display_intent_to_peer(peer).await;
             }
             Data::TakeScreenshot((display, sid)) => {
                 let mut msg = Message::new();
@@ -2799,7 +2855,6 @@ impl<T: InvokeUiSession> Remote<T> {
                         self.handler
                             .ui_handler
                             .authorize_connection_runtime(self.connection_round);
-                        self.sync_display_intent_to_peer(peer).await;
                         #[cfg(all(target_os = "windows", not(feature = "flutter")))]
                         self.check_clipboard_file_context();
                         if self.handler.is_default() {
@@ -2887,6 +2942,7 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
 
                         self.is_connected = true;
+                        self.sync_display_intent_to_peer(peer).await;
                     }
                     _ => {}
                 },
@@ -3329,8 +3385,43 @@ impl<T: InvokeUiSession> Remote<T> {
                             .msgbox(msgtype, "Permission request", &text, "");
                     }
                     Some(misc::Union::SwitchDisplay(s)) => {
+                        // PeerInfo dimensions can predate a custom resolution.
+                        // Prefer the dimensions of the retained decoded stream.
+                        let previous_dimensions = self
+                            .video_threads
+                            .get(&(s.display as usize))
+                            .and_then(|thread| *thread.frame_resolution.read().unwrap())
+                            .and_then(|(width, height)| {
+                                Some((i32::try_from(width).ok()?, i32::try_from(height).ok()?))
+                            })
+                            .or_else(|| {
+                                self.handler
+                                    .lc
+                                    .read()
+                                    .unwrap()
+                                    .peer_info
+                                    .as_ref()
+                                    .and_then(|pi| pi.displays.get(s.display as usize))
+                                    .map(|display| (display.width, display.height))
+                            });
+                        let retained_metadata_echo =
+                            self.display_outbox.take_metadata_selection(s.display)
+                                && self
+                                    .display_startup
+                                    .displays
+                                    .get(&(s.display as usize))
+                                    .is_some_and(|state| state.first_frame_received);
+                        let reset_decoder = display_metadata_requires_decoder_reset(
+                            retained_metadata_echo,
+                            previous_dimensions,
+                            (s.width, s.height),
+                        );
                         self.handler.handle_peer_switch_display(&s);
-                        if let Some(thread) = self.video_threads.get_mut(&(s.display as usize)) {
+                        if let Some(thread) = self
+                            .video_threads
+                            .get_mut(&(s.display as usize))
+                            .filter(|_| reset_decoder)
+                        {
                             let dimensions = (s.width > 0 && s.height > 0)
                                 .then_some((s.width as usize, s.height as usize));
                             thread.video_sender.send(MediaData::Reset(dimensions)).ok();
@@ -4121,6 +4212,30 @@ mod tests {
     use hbb_common::tokio::time::{Duration, Instant};
 
     #[test]
+    fn retained_display_metadata_does_not_reset_decoder_but_resolution_change_does() {
+        assert!(!super::display_metadata_requires_decoder_reset(
+            true,
+            Some((1920, 1080)),
+            (1920, 1080)
+        ));
+        assert!(super::display_metadata_requires_decoder_reset(
+            true,
+            Some((1920, 1080)),
+            (1280, 720)
+        ));
+        assert!(super::display_metadata_requires_decoder_reset(
+            false,
+            Some((1920, 1080)),
+            (1920, 1080)
+        ));
+        assert!(super::display_metadata_requires_decoder_reset(
+            true,
+            None,
+            (1920, 1080)
+        ));
+    }
+
+    #[test]
     fn critical_input_retry_excludes_disposable_mouse_movement() {
         let mut message = Message::new();
         message.set_key_event(KeyEvent::new());
@@ -4316,6 +4431,7 @@ mod tests {
         DisplayMediaIntent {
             logical_session_generation: 1,
             aggregate_generation: generation,
+            replacement_display: None,
             displays: displays
                 .iter()
                 .map(|(display, activation_generation)| DisplayActivation {

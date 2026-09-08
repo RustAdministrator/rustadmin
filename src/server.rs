@@ -109,6 +109,58 @@ pub struct Server {
     id_count: i32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CaptureDisplaysOperation {
+    Include,
+    ExcludeListed,
+    Set,
+}
+
+impl CaptureDisplaysOperation {
+    pub(super) fn request<'a>(
+        add: &'a [usize],
+        sub: &'a [usize],
+        set: &'a [usize],
+    ) -> (Self, &'a [usize]) {
+        if !add.is_empty() {
+            (Self::Include, add)
+        } else if !sub.is_empty() {
+            (Self::ExcludeListed, sub)
+        } else {
+            (Self::Set, set)
+        }
+    }
+
+    pub(super) fn validated_request(
+        add: &[usize],
+        sub: &[usize],
+        set: &[usize],
+        available: usize,
+    ) -> Option<(Self, Vec<usize>)> {
+        let (operation, requested) = Self::request(add, sub, set);
+        let mut valid = requested
+            .iter()
+            .copied()
+            .filter(|display| *display < available)
+            .collect::<Vec<_>>();
+        // An invalid nonempty SET must not become an unsubscribe-all request.
+        if !requested.is_empty() && valid.is_empty() {
+            return None;
+        }
+        valid.sort_unstable();
+        valid.dedup();
+        Some((operation, valid))
+    }
+
+    fn subscription(self, listed: bool, subscribed: bool) -> bool {
+        match self {
+            Self::Include => subscribed || listed,
+            Self::ExcludeListed => subscribed && !listed,
+            Self::Set => listed,
+        }
+    }
+}
+
 pub type ServerPtr = Arc<RwLock<Server>>;
 pub type ServerPtrWeak = Weak<RwLock<Server>>;
 
@@ -779,32 +831,40 @@ impl Server {
         conn: ConnInner,
         source: VideoSource,
         displays: &[usize],
-        include: bool,
-        exclude: bool,
+        operation: CaptureDisplaysOperation,
     ) {
         log::info!(
-            "server capture_displays: conn_id={}, source={:?}, displays={:?}, include={}, exclude={}",
+            "server capture_displays: conn_id={}, source={:?}, displays={:?}, operation={:?}",
             conn.id(),
             source,
             displays,
-            include,
-            exclude
+            operation
         );
         let displays = displays
             .iter()
             .map(|d| video_service::get_service_name(source, *d))
             .collect::<Vec<_>>();
-        let keys = self.services.keys().cloned().collect::<Vec<_>>();
+        let mut keys = self.services.keys().cloned().collect::<Vec<_>>();
+        keys.sort_unstable();
         for name in keys.iter() {
             if Self::is_video_service_name(&name) {
-                if displays.contains(&name) {
-                    if include {
-                        self.subscribe(&name, conn.clone(), true);
-                    }
-                } else {
-                    if exclude {
-                        self.subscribe(&name, conn.clone(), false);
-                    }
+                let Some(service) = self.services.get(name) else {
+                    continue;
+                };
+                let before = service.is_subed(conn.id());
+                let after = operation.subscription(displays.contains(name), before);
+                let stream_before = before
+                    .then(|| service.get_option(video_service::OPTION_DIAGNOSTIC_STREAM_ID))
+                    .flatten();
+                self.subscribe(name, conn.clone(), after);
+                if before && after {
+                    let stream_after = self.services.get(name).and_then(|service| {
+                        service.get_option(video_service::OPTION_DIAGNOSTIC_STREAM_ID)
+                    });
+                    log::info!(
+                        "diag retained video subscription: conn_id={}, service={}, operation={:?}, stream_before={:?}, stream_after={:?}, subscription_unchanged=true",
+                        conn.id(), name, operation, stream_before, stream_after,
+                    );
                 }
             }
         }
@@ -829,6 +889,115 @@ impl Drop for Server {
         }
         #[cfg(target_os = "linux")]
         wayland::clear();
+    }
+}
+
+#[cfg(test)]
+mod capture_displays_tests {
+    use super::*;
+
+    fn fixture() -> (Server, Vec<GenericService>) {
+        let mut server = Server {
+            connections: HashMap::new(),
+            services: HashMap::new(),
+            id_count: 0,
+        };
+        let services = (0..3)
+            .map(|display| {
+                let service = GenericService::new(
+                    video_service::get_service_name(VideoSource::Monitor, display),
+                    true,
+                );
+                service.set_option(
+                    video_service::OPTION_DIAGNOSTIC_STREAM_ID,
+                    &(100 + display).to_string(),
+                );
+                server.add_service(Box::new(service.clone()));
+                service
+            })
+            .collect();
+        (server, services)
+    }
+
+    fn apply(server: &mut Server, conn: i32, add: &[usize], sub: &[usize], set: &[usize]) {
+        if let Some((operation, displays)) =
+            CaptureDisplaysOperation::validated_request(add, sub, set, 3)
+        {
+            server.capture_displays(
+                ConnInner::new(conn, None, None),
+                VideoSource::Monitor,
+                &displays,
+                operation,
+            );
+        }
+    }
+
+    fn subscribed(services: &[GenericService], conn: i32) -> Vec<usize> {
+        services
+            .iter()
+            .enumerate()
+            .filter_map(|(display, service)| service.is_subed(conn).then_some(display))
+            .collect()
+    }
+
+    #[test]
+    fn capture_displays_wire_operation_truth_table_and_empty_set() {
+        let (mut server, services) = fixture();
+        apply(&mut server, 1, &[], &[], &[0]);
+        apply(&mut server, 1, &[1], &[], &[]);
+        assert_eq!(subscribed(&services, 1), vec![0, 1]);
+        apply(&mut server, 1, &[], &[0], &[]);
+        assert_eq!(subscribed(&services, 1), vec![1]);
+        apply(&mut server, 1, &[], &[0], &[]);
+        assert_eq!(subscribed(&services, 1), vec![1]);
+        apply(&mut server, 1, &[], &[], &[0, 2]);
+        assert_eq!(subscribed(&services, 1), vec![0, 2]);
+        apply(&mut server, 1, &[], &[], &[]);
+        assert!(subscribed(&services, 1).is_empty());
+    }
+
+    #[test]
+    fn capture_displays_preserves_retained_service_and_other_connection() {
+        let (mut server, services) = fixture();
+        apply(&mut server, 1, &[], &[], &[0, 1, 2]);
+        apply(&mut server, 2, &[], &[], &[1]);
+        for service in &services {
+            service.snapshot(|_| Ok(())).unwrap();
+        }
+        apply(&mut server, 1, &[], &[], &[0, 2]);
+        assert_eq!(subscribed(&services, 1), vec![0, 2]);
+        assert_eq!(subscribed(&services, 2), vec![1]);
+        for (display, service) in services.iter().enumerate() {
+            service
+                .snapshot(|_| panic!("retained subscription requested a new snapshot"))
+                .unwrap();
+            assert_eq!(
+                service.get_option(video_service::OPTION_DIAGNOSTIC_STREAM_ID),
+                Some((100 + display).to_string())
+            );
+        }
+        apply(&mut server, 1, &[], &[], &[2]);
+        services[2]
+            .snapshot(|_| panic!("shrink restarted retained subscription"))
+            .unwrap();
+        assert_eq!(subscribed(&services, 1), vec![2]);
+    }
+
+    #[test]
+    fn capture_displays_invalid_requests_cannot_unsubscribe_or_fall_through() {
+        let (mut server, services) = fixture();
+        apply(&mut server, 1, &[], &[], &[1]);
+        for (add, sub, set) in [
+            (vec![], vec![], vec![usize::MAX]),
+            (vec![9], vec![], vec![]),
+            (vec![], vec![9], vec![]),
+            (vec![9], vec![], vec![0]),
+        ] {
+            apply(&mut server, 1, &add, &sub, &set);
+            assert_eq!(subscribed(&services, 1), vec![1]);
+        }
+        apply(&mut server, 1, &[], &[], &[0, 0, usize::MAX, 2]);
+        assert_eq!(subscribed(&services, 1), vec![0, 2]);
     }
 }
 

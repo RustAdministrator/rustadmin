@@ -108,6 +108,9 @@ fn next_video_stream_id() -> u64 {
     }
 }
 
+// Last started stream, for subscription diagnostics only; never a liveness signal.
+pub(super) const OPTION_DIAGNOSTIC_STREAM_ID: &str = "diagnostic-stream-id";
+
 fn stamp_video_frame(
     vf: &mut hbb_common::message_proto::VideoFrame,
     stream_id: u64,
@@ -2913,6 +2916,7 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut hw_no_valid_frame_since: Option<Instant> = None;
     let mut first_frame = true;
     let stream_id = next_video_stream_id();
+    sp.set_option(OPTION_DIAGNOSTIC_STREAM_ID, &stream_id.to_string());
     let mut next_frame_id = 1;
     let mut reference_refresh_pending = None;
     #[cfg(windows)]
