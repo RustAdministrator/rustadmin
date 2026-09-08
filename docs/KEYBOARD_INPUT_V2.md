@@ -78,6 +78,19 @@ cleanup path.
 The setting is stored per peer. Existing `mobile-physical-key-input` values are
 used only as a one-time compatibility default when no V2 mode has been stored.
 
+Text dispatch captures a `literal` flag before queueing. Auto/Text commits and
+text-routed keys set it; Physical commits retain the compatibility path. Both
+Flutter text FFI functions carry the flag explicitly, so Rust cannot reinterpret
+an Auto text operation using a later session preference. Source language/layout
+metadata does not override literal semantics: V2 `prefer_physical` stays false.
+Without layout-aware V2 support, literal text falls back to plain V2 text or a
+legacy `KeyEvent.seq` with both scan-code/source-layout flags disabled. Existing
+platform text-injection backends are unchanged.
+
+Text-routed key repeats retain the initial source metadata and literal meaning.
+The FFI signature change requires regenerating the ignored bridge outputs and
+rebuilding the Dart and native libraries together; it does not change protobuf.
+
 ## Controller Pipeline
 
 Before the controller pipeline was consolidated, the input sources followed

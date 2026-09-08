@@ -14,6 +14,7 @@ KeyboardDispatcher _dispatcher() => KeyboardDispatcher(
         required deleteAfterGraphemes,
         required sourceLanguageTag,
         required sourceLayoutType,
+        required literal,
       }) {},
 );
 
@@ -55,6 +56,7 @@ void main() {
             required deleteAfterGraphemes,
             required sourceLanguageTag,
             required sourceLayoutType,
+            required literal,
           }) {},
     );
     for (final transport in KeyboardPhysicalTransport.values) {
@@ -167,6 +169,7 @@ void main() {
             required deleteAfterGraphemes,
             required sourceLanguageTag,
             required sourceLayoutType,
+            required literal,
           }) {},
     );
 

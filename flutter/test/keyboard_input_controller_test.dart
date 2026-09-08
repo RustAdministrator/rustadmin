@@ -52,6 +52,7 @@ class _ControllerHarness {
           required deleteAfterGraphemes,
           required sourceLanguageTag,
           required sourceLayoutType,
+          required literal,
         }) {
           events.add(_ControllerEvent('text', text: text));
         },

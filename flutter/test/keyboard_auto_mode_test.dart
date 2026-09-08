@@ -14,6 +14,7 @@ const _auto = KeyboardRoutingContext(
 
 class _Harness {
   final events = <String>[];
+  final textChoices = <({bool literal, String language, String layout})>[];
   KeyboardRoutingContext context = _auto;
   Completer<void>? hidGate;
   bool allowed = true;
@@ -33,8 +34,14 @@ class _Harness {
           required deleteAfterGraphemes,
           required sourceLanguageTag,
           required sourceLayoutType,
+          required literal,
         }) {
           events.add('text:$text');
+          textChoices.add((
+            literal: literal,
+            language: sourceLanguageTag,
+            layout: sourceLayoutType,
+          ));
         },
   );
 
@@ -43,6 +50,8 @@ class _Harness {
     KeyboardIntentAction action, {
     int usage = 4,
     String? text = 'a',
+    String language = '',
+    String layout = '',
     Set<HidKey> modifiers = const {},
   }) => controller.handleAndWait(
     PhysicalKeyboardIntent(
@@ -51,6 +60,8 @@ class _Harness {
       origin: origin,
       action: action,
       textCandidate: text,
+      sourceLanguageTag: language,
+      sourceLayoutType: layout,
       reportedModifiers: modifiers,
     ),
     context,
@@ -73,6 +84,78 @@ class _Harness {
 }
 
 void main() {
+  test(
+    'queued text retains its chosen semantic when a later context changes',
+    () async {
+      final h = _Harness()..hidGate = Completer<void>();
+      final key = h.key(
+        KeyboardInputOrigin.hardware,
+        KeyboardIntentAction.down,
+      );
+      final literal = h.controller.handleAndWait(
+        const CommittedTextIntent(
+          text: 'auto',
+          source: KeyboardInputSource.androidNativeText,
+          sourceLanguageTag: 'de-DE',
+          sourceLayoutType: 'qwertz',
+        ),
+        _auto,
+      );
+      final physicalContext = const KeyboardRoutingContext(
+        keyboardMode: ControllerKeyboardMode.map,
+        inputMode: ControllerKeyboardInputMode.physical,
+        clientKind: KeyboardClientKind.android,
+        peerIsAndroid: false,
+      );
+      final compatible = h.controller.handleAndWait(
+        const CommittedTextIntent(
+          text: 'physical',
+          source: KeyboardInputSource.androidNativeText,
+          sourceLanguageTag: 'fr-FR',
+          sourceLayoutType: 'azerty',
+        ),
+        physicalContext,
+      );
+      h.hidGate!.complete();
+      await Future.wait([key, literal, compatible]);
+      expect(h.textChoices, [
+        (literal: true, language: 'de-DE', layout: 'qwertz'),
+        (literal: false, language: 'fr-FR', layout: 'azerty'),
+      ]);
+      await h.key(KeyboardInputOrigin.hardware, KeyboardIntentAction.up);
+    },
+  );
+
+  test(
+    'text-routed key pins literal semantics and source metadata on repeat',
+    () async {
+      final h = _Harness();
+      await h.key(
+        KeyboardInputOrigin.ime,
+        KeyboardIntentAction.down,
+        language: 'de-DE',
+        layout: 'qwertz',
+      );
+      h.context = const KeyboardRoutingContext(
+        keyboardMode: ControllerKeyboardMode.map,
+        inputMode: ControllerKeyboardInputMode.physical,
+        clientKind: KeyboardClientKind.android,
+        peerIsAndroid: false,
+      );
+      await h.key(
+        KeyboardInputOrigin.ime,
+        KeyboardIntentAction.repeat,
+        language: 'fr-FR',
+        layout: 'azerty',
+      );
+      await h.key(KeyboardInputOrigin.ime, KeyboardIntentAction.up);
+      expect(
+        h.textChoices,
+        List.filled(2, (literal: true, language: 'de-DE', layout: 'qwertz')),
+      );
+    },
+  );
+
   test(
     'explicit toolbar Shift keeps a native IME key on the command route',
     () async {

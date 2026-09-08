@@ -926,9 +926,15 @@ pub fn session_input_text_edit(
     value: String,
     delete_before_graphemes: u32,
     delete_after_graphemes: u32,
+    literal: bool,
 ) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
-        session.input_text_edit(&value, delete_before_graphemes, delete_after_graphemes);
+        session.input_text_edit(
+            &value,
+            delete_before_graphemes,
+            delete_after_graphemes,
+            literal,
+        );
     }
 }
 
@@ -937,12 +943,14 @@ pub fn session_input_text_edit_with_source_layout(
     value: String,
     source_language_tag: String,
     source_layout_type: String,
+    literal: bool,
 ) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         session.input_text_edit_with_source_layout(
             &value,
             &source_language_tag,
             &source_layout_type,
+            literal,
         );
     }
 }

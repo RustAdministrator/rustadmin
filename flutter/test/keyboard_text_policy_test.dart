@@ -27,6 +27,7 @@ class _Harness {
           required deleteAfterGraphemes,
           required sourceLanguageTag,
           required sourceLayoutType,
+          required literal,
         }) async {
           events.add(text);
           await gate.future;

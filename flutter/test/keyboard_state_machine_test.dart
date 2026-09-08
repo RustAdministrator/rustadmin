@@ -56,6 +56,7 @@ class _Harness {
           required deleteAfterGraphemes,
           required sourceLanguageTag,
           required sourceLayoutType,
+          required literal,
         }) {
           events.add(
             _TransportEvent(

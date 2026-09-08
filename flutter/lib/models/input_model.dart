@@ -322,6 +322,7 @@ class InputModel {
             required deleteAfterGraphemes,
             required sourceLanguageTag,
             required sourceLayoutType,
+            required literal,
           }) {
             if ((sourceLanguageTag.isNotEmpty || sourceLayoutType.isNotEmpty) &&
                 deleteBeforeGraphemes == 0 &&
@@ -330,6 +331,7 @@ class InputModel {
                 () => bind.sessionInputTextEditWithSourceLayout(
                   sessionId: sessionId,
                   value: text,
+                  literal: literal,
                   sourceLanguageTag: sourceLanguageTag,
                   sourceLayoutType: sourceLayoutType,
                 ),
@@ -339,6 +341,7 @@ class InputModel {
               () => bind.sessionInputTextEdit(
                 sessionId: sessionId,
                 value: text,
+                literal: literal,
                 deleteBeforeGraphemes: deleteBeforeGraphemes,
                 deleteAfterGraphemes: deleteAfterGraphemes,
               ),

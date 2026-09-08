@@ -74,6 +74,7 @@ final class CommittedTextDispatch extends KeyboardDispatchAction {
   const CommittedTextDispatch({
     required this.text,
     required this.source,
+    this.literal = true,
     this.deleteBeforeGraphemes = 0,
     this.deleteAfterGraphemes = 0,
     this.sourceLanguageTag = '',
@@ -81,6 +82,7 @@ final class CommittedTextDispatch extends KeyboardDispatchAction {
   });
 
   final String text;
+  final bool literal;
   final KeyboardInputSource source;
   final int deleteBeforeGraphemes;
   final int deleteAfterGraphemes;
@@ -104,6 +106,7 @@ typedef KeyboardLegacySink =
 typedef KeyboardTextSink =
     FutureOr<void> Function({
       required String text,
+      required bool literal,
       required int deleteBeforeGraphemes,
       required int deleteAfterGraphemes,
       required String sourceLanguageTag,
@@ -288,6 +291,7 @@ class KeyboardDispatcher {
         await Future<void>.sync(
           () => _sendText(
             text: action.text,
+            literal: action.literal,
             deleteBeforeGraphemes: action.deleteBeforeGraphemes,
             deleteAfterGraphemes: action.deleteAfterGraphemes,
             sourceLanguageTag: action.sourceLanguageTag,

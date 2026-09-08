@@ -29,6 +29,8 @@ class _ActiveRoute {
     required this.lease,
     required this.source,
     required this.lockMask,
+    this.sourceLanguageTag = '',
+    this.sourceLayoutType = '',
     this.legacyName,
   });
 
@@ -36,6 +38,8 @@ class _ActiveRoute {
   final KeyboardPhysicalDispatchLease lease;
   final KeyboardInputSource source;
   final int lockMask;
+  final String sourceLanguageTag;
+  final String sourceLayoutType;
   final String? legacyName;
 }
 
@@ -453,6 +457,8 @@ class KeyboardStateMachine {
       lease: lease,
       source: intent.source,
       lockMask: intent.lockMask,
+      sourceLanguageTag: intent.sourceLanguageTag,
+      sourceLayoutType: intent.sourceLayoutType,
       legacyName: shared != null
           ? shared.legacyName
           : intent.legacyFallbackName ?? intent.textCandidate,
@@ -478,7 +484,12 @@ class KeyboardStateMachine {
         final text = intent.textCandidate;
         if (text != null && text.isNotEmpty) {
           final accepted = _queueActions([
-            CommittedTextDispatch(text: text, source: intent.source),
+            CommittedTextDispatch(
+              text: text,
+              source: active.source,
+              sourceLanguageTag: active.sourceLanguageTag,
+              sourceLayoutType: active.sourceLayoutType,
+            ),
           ]);
           if (accepted) _mobileModifiers.consumeOneShot();
         }
@@ -504,7 +515,12 @@ class KeyboardStateMachine {
         final text = intent.textCandidate;
         if (text != null && text.isNotEmpty) {
           final accepted = _queueActions([
-            CommittedTextDispatch(text: text, source: intent.source),
+            CommittedTextDispatch(
+              text: text,
+              source: active.source,
+              sourceLanguageTag: active.sourceLanguageTag,
+              sourceLayoutType: active.sourceLayoutType,
+            ),
           ]);
           if (accepted) _mobileModifiers.consumeOneShot();
         }
@@ -564,6 +580,7 @@ class KeyboardStateMachine {
     final accepted = _queueActions([
       CommittedTextDispatch(
         text: intent.text,
+        literal: context.inputMode != ControllerKeyboardInputMode.physical,
         source: intent.source,
         deleteBeforeGraphemes: intent.deleteBeforeGraphemes,
         deleteAfterGraphemes: intent.deleteAfterGraphemes,

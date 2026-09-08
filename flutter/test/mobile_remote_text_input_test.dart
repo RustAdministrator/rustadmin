@@ -47,6 +47,7 @@ class _KeyboardHarness {
           required deleteAfterGraphemes,
           required sourceLanguageTag,
           required sourceLayoutType,
+          required literal,
         }) {
           events.add((
             'text',

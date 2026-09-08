@@ -60,6 +60,7 @@ class _TestRustadminImpl implements Rustadmin {
   int plainTextEdits = 0;
   int sourceLayoutTextEdits = 0;
   final committedTexts = <String>[];
+  final textLiteralChoices = <bool?>[];
   int lastDeleteBeforeGraphemes = 0;
   final pendingFlutterKeyCalls = <Completer<void>>[];
   bool blockFlutterKeyCalls = false;
@@ -120,6 +121,7 @@ class _TestRustadminImpl implements Rustadmin {
     if (invocation.memberName == #sessionInputTextEdit) {
       plainTextEdits += 1;
       committedTexts.add(invocation.namedArguments[#value] as String);
+      textLiteralChoices.add(invocation.namedArguments[#literal] as bool?);
       lastDeleteBeforeGraphemes =
           invocation.namedArguments[#deleteBeforeGraphemes] as int;
       return Future<void>.value();
@@ -127,6 +129,7 @@ class _TestRustadminImpl implements Rustadmin {
     if (invocation.memberName == #sessionInputTextEditWithSourceLayout) {
       sourceLayoutTextEdits += 1;
       committedTexts.add(invocation.namedArguments[#value] as String);
+      textLiteralChoices.add(invocation.namedArguments[#literal] as bool?);
       return Future<void>.value();
     }
     if (invocation.memberName == #sessionSendMouse) {
@@ -271,6 +274,7 @@ void main() {
     testImpl.plainTextEdits = 0;
     testImpl.sourceLayoutTextEdits = 0;
     testImpl.committedTexts.clear();
+    testImpl.textLiteralChoices.clear();
     testImpl.lastDeleteBeforeGraphemes = 0;
     testImpl.pendingFlutterKeyCalls.clear();
     testImpl.blockFlutterKeyCalls = false;
@@ -867,6 +871,25 @@ void main() {
 
     expect(testImpl.plainTextEdits, 0);
     expect(testImpl.sourceLayoutTextEdits, 1);
+  });
+
+  test('Auto and Text carry literal semantics to FFI even with layout metadata', () async {
+    for (final mode in [
+      kKeyboardInputModeAuto,
+      kKeyboardInputModeText,
+      kKeyboardInputModePhysical,
+    ]) {
+      await inputModel.setKeyboardInputMode(mode);
+      for (final language in ['', 'ru-RU']) {
+        await inputModel.inputAndroidRemoteCommittedText(
+          'content',
+          origin: KeyboardInputOrigin.ime,
+          sourceLanguageTag: language,
+          sourceLayoutType: language.isEmpty ? '' : 'qwerty',
+        );
+      }
+    }
+    expect(testImpl.textLiteralChoices, [true, true, true, true, false, false]);
   });
 
   test('Auto routes confirmed IME keys and batches to text through FFI', () async {

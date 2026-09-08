@@ -575,6 +575,7 @@ class RustadminImpl {
       required String value,
       required int deleteBeforeGraphemes,
       required int deleteAfterGraphemes,
+      required bool literal,
       dynamic hint}) async {
     for (var i = 0; i < deleteBeforeGraphemes; i++) {
       js.context.callMethod('setByName', [
@@ -598,12 +599,14 @@ class RustadminImpl {
       required String value,
       required String sourceLanguageTag,
       required String sourceLayoutType,
+      required bool literal,
       dynamic hint}) {
     return sessionInputTextEdit(
         sessionId: sessionId,
         value: value,
         deleteBeforeGraphemes: 0,
-        deleteAfterGraphemes: 0);
+        deleteAfterGraphemes: 0,
+        literal: literal);
   }
 
   Future<void> sessionSendChat(
