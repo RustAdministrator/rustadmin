@@ -161,6 +161,31 @@ duplicate key-up events are ignored. Reset releases only keys that were
 physically dispatched, in deterministic non-modifier-then-modifier order,
 clears synthetic modifier latches, and emits no release for text-routed keys.
 
+Queued releases retain their state-machine-owned dispatch lease until the queue
+drains. Cancellation drops obsolete down/repeat/text commands, but preserves
+key-up cleanup in FIFO order. A release is sent only if its matching transport
+down was actually started; a down skipped before dispatch cannot release an
+unowned key. Coalesced physical and toolbar modifier owners share the same
+lease. This is local transport-attempt accounting, not a remote acknowledgement
+or a second pressed-key routing model.
+
+Android `ACTION_MULTIPLE` and native editor control clicks normalize into a
+controller-local bounded press batch (1-64 presses), not held-key repeats.
+The state machine emits complete down/up pairs, or repeats without releasing
+an existing physical owner. Ordinary hardware autorepeat remains repeated down
+until the actual up. Invalid batch counts are rejected without partial input.
+The batch is expanded through the existing dispatcher and adds no wire message.
+
+For local WSL/Linux validation with an installed Flutter SDK, run the existing
+Flutter and Android JVM suites together:
+
+```sh
+python3 scripts/verify_android_keyboard.py --flutter /path/to/flutter/bin/flutter
+```
+
+The runner uses the cached dependencies, stops on the first failed command,
+and does not replace native Rust tests or physical-device acceptance.
+
 Legacy and Translate modes retain the existing legacy named-key path. Desktop
 Map mode, supported mobile physical input, and Android native hardware input
 use canonical keyboard-page HID. Synthetic toolbar modifiers also use HID so

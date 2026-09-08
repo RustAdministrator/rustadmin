@@ -115,6 +115,22 @@ final class PhysicalKeyboardIntent extends KeyboardIntent {
   final Set<HidKey> reportedModifiers;
 }
 
+final class PhysicalKeyPressBatchIntent extends KeyboardIntent {
+  const PhysicalKeyPressBatchIntent({
+    required this.key,
+    required this.count,
+    required KeyboardInputSource source,
+    this.lockMask = 0,
+    this.reportedModifiers = const <HidKey>{},
+  }) : super(source);
+
+  static const maxCount = 64;
+  final HidKey key;
+  final int count;
+  final int lockMask;
+  final Set<HidKey> reportedModifiers;
+}
+
 final class CommittedTextIntent extends KeyboardIntent {
   const CommittedTextIntent({
     required this.text,

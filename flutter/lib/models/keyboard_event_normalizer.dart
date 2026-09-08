@@ -101,6 +101,29 @@ class FlutterKeyboardEventNormalizer {
 class AndroidHardwareKeyboardNormalizer {
   const AndroidHardwareKeyboardNormalizer();
 
+  PhysicalKeyPressBatchIntent? pressBatch({
+    required int usbHidUsage,
+    required int count,
+    Iterable<int> modifierUsages = const <int>[],
+    int lockMask = 0,
+  }) {
+    if (count < 1 || count > PhysicalKeyPressBatchIntent.maxCount) return null;
+    final key = physical(
+      usbHidUsage: usbHidUsage,
+      down: true,
+      modifierUsages: modifierUsages,
+      lockMask: lockMask,
+    );
+    if (key == null) return null;
+    return PhysicalKeyPressBatchIntent(
+      key: key.key,
+      count: count,
+      source: key.source,
+      lockMask: key.lockMask,
+      reportedModifiers: key.reportedModifiers,
+    );
+  }
+
   PhysicalKeyboardIntent? physical({
     required int usbHidUsage,
     required bool down,

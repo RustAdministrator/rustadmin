@@ -24,6 +24,13 @@ internal sealed interface RemoteKeyboardEvent {
         val lockModes: Int = 0,
         val modifierUsages: List<Int> = emptyList(),
     ) : RemoteKeyboardEvent
+    data class PhysicalPressBatch(
+        val usbHidUsage: Int,
+        val count: Int,
+        val lockModes: Int = 0,
+        val modifierUsages: List<Int> = emptyList(),
+    ) : RemoteKeyboardEvent
+    data class Rejected(val reason: AndroidInputRejection) : RemoteKeyboardEvent
     data class CommittedText(val text: String) : RemoteKeyboardEvent
 }
 
@@ -203,7 +210,7 @@ internal class AndroidPhysicalKeyRouter {
         keyCode: Int,
         metaState: Int,
         repeatCount: Int = 0,
-    ): List<RemoteKeyboardEvent.PhysicalKey>? {
+    ): List<RemoteKeyboardEvent>? {
         val usage = AndroidKeyToUsbHid.map(keyCode) ?: return null
         val lockModes = AndroidMetaStateToUsbHid.bridgeLockModes(metaState)
         val modifiers =
@@ -227,16 +234,10 @@ internal class AndroidPhysicalKeyRouter {
                     modifierUsages = modifiers,
                 ),
             )
-            KeyEvent.ACTION_MULTIPLE -> List(
-                repeatCount.coerceIn(1, MAX_SYNTHETIC_REPEAT_COUNT),
-            ) {
-                RemoteKeyboardEvent.PhysicalKey(
-                    usage,
-                    true,
-                    repeat = true,
-                    lockModes = lockModes,
-                    modifierUsages = modifiers,
-                )
+            KeyEvent.ACTION_MULTIPLE -> if (repeatCount in 1..MAX_SYNTHETIC_REPEAT_COUNT) {
+                listOf(RemoteKeyboardEvent.PhysicalPressBatch(usage, repeatCount, lockModes, modifiers))
+            } else {
+                listOf(RemoteKeyboardEvent.Rejected(AndroidInputRejection.PRESS_COUNT))
             }
             else -> null
         }
@@ -291,6 +292,9 @@ internal class RemoteKeyboardInputView(
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean = routeKeyEvent(event)
 
     @Suppress("DEPRECATION")
+    override fun onKeyMultiple(keyCode: Int, count: Int, event: KeyEvent): Boolean = routeKeyEvent(event)
+
+    @Suppress("DEPRECATION")
     private fun routeKeyEvent(event: KeyEvent): Boolean {
         when (event.action) {
             KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP, KeyEvent.ACTION_MULTIPLE -> {
@@ -320,8 +324,7 @@ internal class RemoteKeyboardInputView(
 
     private fun emitKeyClick(keyCode: Int) {
         val usage = AndroidKeyToUsbHid.map(keyCode) ?: return
-        emit(RemoteKeyboardEvent.PhysicalKey(usage, true))
-        emit(RemoteKeyboardEvent.PhysicalKey(usage, false))
+        emit(RemoteKeyboardEvent.PhysicalPressBatch(usage, 1))
     }
 
     private companion object {
@@ -422,6 +425,19 @@ internal class RemoteKeyboardController(
                             ),
                         )
                     }
+                    is RemoteKeyboardEvent.PhysicalPressBatch -> {
+                        physicalEvents += event.count * 2L
+                        syntheticModifierEvents += event.modifierUsages.size
+                        emitToFlutter(mapOf(
+                            "session_id" to currentSessionId,
+                            "kind" to "press_batch",
+                            "usb_hid_usage" to event.usbHidUsage,
+                            "count" to event.count,
+                            "lock_modes" to event.lockModes,
+                            "modifier_usages" to event.modifierUsages,
+                        ))
+                    }
+                    is RemoteKeyboardEvent.Rejected -> diagnostics.rejected(event.reason)
                 }
             }
         }

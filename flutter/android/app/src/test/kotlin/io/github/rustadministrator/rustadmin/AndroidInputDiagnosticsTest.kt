@@ -6,6 +6,14 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AndroidInputDiagnosticsTest {
+    @Test
+    fun rejectedBatchDiagnosticContainsOnlyTheFixedReason() {
+        val emitted = mutableListOf<String>()
+        val diagnostics = AndroidInputDiagnostics { _, message -> emitted.add(message) }
+        diagnostics.rejected(AndroidInputRejection.PRESS_COUNT)
+        assertEquals(listOf("Android input rejected: reason=press_count"), emitted)
+    }
+
     private class SensitiveFailure : IllegalStateException("private-test-content") {
         override fun toString(): String = throw AssertionError("Do not format exceptions")
     }

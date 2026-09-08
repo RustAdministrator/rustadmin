@@ -39,20 +39,30 @@ sealed class KeyboardDispatchAction {
   const KeyboardDispatchAction();
 }
 
+// Owned by one state-machine route (shared by coalesced modifier owners).
+// It records a transport attempt, not an acknowledgement from the peer.
+class KeyboardPhysicalDispatchLease {
+  KeyboardPhysicalDispatchLease({required this.key, required this.transport});
+
+  final HidKey key;
+  final KeyboardPhysicalTransport transport;
+  bool _downStarted = false;
+}
+
 final class PhysicalKeyboardDispatch extends KeyboardDispatchAction {
   const PhysicalKeyboardDispatch({
-    required this.key,
+    required this.lease,
     required this.action,
-    required this.transport,
     required this.modifiers,
     required this.source,
     this.lockMask = 0,
     this.legacyName,
   });
 
-  final HidKey key;
+  final KeyboardPhysicalDispatchLease lease;
+  HidKey get key => lease.key;
   final KeyboardIntentAction action;
-  final KeyboardPhysicalTransport transport;
+  KeyboardPhysicalTransport get transport => lease.transport;
   final KeyboardModifiers modifiers;
   final KeyboardInputSource source;
   final int lockMask;
@@ -168,7 +178,10 @@ class KeyboardDispatcher {
   Future<void> dispatchAll(Iterable<KeyboardDispatchAction> actions) {
     Future<void> tail = _queue.idle;
     for (final action in actions) {
-      tail = _queue.enqueue(() => _dispatch(action));
+      final release =
+          action is PhysicalKeyboardDispatch &&
+          action.action == KeyboardIntentAction.up;
+      tail = _queue.enqueue(() => _dispatch(action), keepOnCancel: release);
     }
     return tail;
   }
@@ -184,21 +197,17 @@ class KeyboardDispatcher {
     Future<void> tail = _queue.idle;
     for (final release in releases) {
       if (release.action != KeyboardIntentAction.up) continue;
-      tail = _queue.enqueue(
-        () => _dispatch(release, allowBlockedRelease: true),
-      );
+      tail = _queue.enqueue(() => _dispatch(release), keepOnCancel: true);
     }
     return tail;
   }
 
-  Future<void> _dispatch(
-    KeyboardDispatchAction action, {
-    bool allowBlockedRelease = false,
-  }) async {
-    final isRelease =
+  Future<void> _dispatch(KeyboardDispatchAction action) async {
+    final ownedRelease =
         action is PhysicalKeyboardDispatch &&
-        action.action == KeyboardIntentAction.up;
-    if (!_canDispatch() && !(allowBlockedRelease && isRelease)) return;
+        action.action == KeyboardIntentAction.up &&
+        action.lease._downStarted;
+    if (!_canDispatch() && !ownedRelease) return;
     switch (action) {
       case PhysicalKeyboardDispatch():
         await _dispatchPhysical(action);
@@ -222,6 +231,7 @@ class KeyboardDispatcher {
 
   Future<void> _dispatchPhysical(PhysicalKeyboardDispatch action) async {
     if (action.transport == KeyboardPhysicalTransport.hid) {
+      if (!_beginPhysicalAttempt(action)) return;
       await Future<void>.sync(
         () => _sendHid(
           key: action.key,
@@ -240,6 +250,7 @@ class KeyboardDispatcher {
       diagnostics.ignoredLegacyKeys += 1;
       return;
     }
+    if (!_beginPhysicalAttempt(action)) return;
     await Future<void>.sync(
       () => _sendLegacy(
         name: legacyName,
@@ -247,5 +258,16 @@ class KeyboardDispatcher {
         modifiers: action.modifiers,
       ),
     );
+  }
+
+  bool _beginPhysicalAttempt(PhysicalKeyboardDispatch action) {
+    if (action.action == KeyboardIntentAction.up) {
+      if (!action.lease._downStarted) return false;
+      action.lease._downStarted = false;
+    } else {
+      // A failed call may still have delivered its down. Keep the paired up.
+      action.lease._downStarted = true;
+    }
+    return true;
   }
 }

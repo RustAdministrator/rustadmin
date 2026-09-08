@@ -5,10 +5,11 @@ typedef KeyboardCommandErrorHandler =
     void Function(Object error, StackTrace stackTrace);
 
 class _QueuedKeyboardCommand {
-  _QueuedKeyboardCommand(this.generation, this.command);
+  _QueuedKeyboardCommand(this.generation, this.command, this.keepOnCancel);
 
   final int generation;
   final Future<void> Function() command;
+  final bool keepOnCancel;
   final completion = Completer<void>();
 }
 
@@ -21,8 +22,11 @@ class KeyboardCommandQueue {
   bool _running = false;
   var _generation = 0;
 
-  Future<void> enqueue(Future<void> Function() command) {
-    final queued = _QueuedKeyboardCommand(_generation, command);
+  Future<void> enqueue(
+    Future<void> Function() command, {
+    bool keepOnCancel = false,
+  }) {
+    final queued = _QueuedKeyboardCommand(_generation, command, keepOnCancel);
     _pending.addLast(queued);
     _idle ??= Completer<void>();
     _start();
@@ -41,7 +45,9 @@ class KeyboardCommandQueue {
     while (_pending.isNotEmpty) {
       final queued = _pending.removeFirst();
       try {
-        if (queued.generation == _generation) await queued.command();
+        if (queued.keepOnCancel || queued.generation == _generation) {
+          await queued.command();
+        }
       } catch (error, stackTrace) {
         onError?.call(error, stackTrace);
       } finally {

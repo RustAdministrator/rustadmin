@@ -24,13 +24,29 @@ class AndroidKeyToUsbHidTest {
         for ((action, count) in listOf(KeyEvent.ACTION_DOWN to 0, KeyEvent.ACTION_DOWN to 2, KeyEvent.ACTION_UP to 0)) {
             val events = router.route(action, KeyEvent.KEYCODE_A, meta, count)!!
             assertEquals(1, events.size)
-            assertEquals(6, events.single().lockModes)
-            assertEquals(listOf(0xe5), events.single().modifierUsages)
+            val event = events.single() as RemoteKeyboardEvent.PhysicalKey
+            assertEquals(6, event.lockModes)
+            assertEquals(listOf(0xe5), event.modifierUsages)
         }
-        val alt = router.route(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ALT_RIGHT, meta)!!.single()
+        val alt = router.route(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ALT_RIGHT, meta)!!.single() as RemoteKeyboardEvent.PhysicalKey
         assertEquals(0xe6, alt.usbHidUsage)
         assertEquals(6, alt.lockModes)
         assertEquals(emptyList<Int>(), alt.modifierUsages)
+    }
+
+    @Test
+    fun actionMultipleReportsOneBoundedPressBatchNotHeldRepeats() {
+        val router = AndroidPhysicalKeyRouter()
+        for (count in listOf(1, 3, 64)) {
+            val events = router.route(KeyEvent.ACTION_MULTIPLE, KeyEvent.KEYCODE_A,
+                KeyEvent.META_SHIFT_RIGHT_ON or KeyEvent.META_CAPS_LOCK_ON, count)!!
+            assertEquals(listOf(RemoteKeyboardEvent.PhysicalPressBatch(0x04, count, 2, listOf(0xe5))), events)
+        }
+        for (count in listOf(-1, 0, 65, Int.MAX_VALUE)) {
+            assertEquals(listOf(RemoteKeyboardEvent.Rejected(AndroidInputRejection.PRESS_COUNT)),
+                router.route(KeyEvent.ACTION_MULTIPLE, KeyEvent.KEYCODE_A, 0, count))
+        }
+        assertNull(router.route(KeyEvent.ACTION_MULTIPLE, KeyEvent.KEYCODE_UNKNOWN, 0, 0))
     }
 
     @Test

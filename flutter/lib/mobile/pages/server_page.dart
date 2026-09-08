@@ -1006,6 +1006,15 @@ void androidChannelInit() {
                     sourceLayoutType: event.sourceLayoutType,
                   ),
                 );
+              case AndroidRemotePressBatchEvent():
+                unawaited(
+                  gFFI.inputModel.inputAndroidRemotePressBatch(
+                    event.usbHidUsage,
+                    event.count,
+                    lockModes: event.lockModes,
+                    modifierUsages: event.modifierUsages,
+                  ),
+                );
             }
             break;
           }

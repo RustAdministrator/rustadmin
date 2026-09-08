@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import '../consts.dart';
 import '../models/keyboard_lock_modes.dart';
+import '../models/keyboard_intent.dart' show PhysicalKeyPressBatchIntent;
 
 bool useAndroidNativeRemoteKeyboard({
   required bool isAndroidClient,
@@ -26,16 +27,13 @@ sealed class AndroidRemoteKeyboardEvent {
     }
     switch (kind) {
       case 'physical':
+      case 'press_batch':
         final usage = arguments['usb_hid_usage'];
-        final down = arguments['down'];
-        final repeat = arguments['repeat'] ?? false;
         final lockModes = arguments['lock_modes'] ?? 0;
         final modifiers = arguments['modifier_usages'] ?? const <int>[];
         if (usage is! int ||
             usage < 0x04 ||
             usage > 0xe7 ||
-            down is! bool ||
-            repeat is! bool ||
             lockModes is! int ||
             !KeyboardBridgeLockModes.isValid(lockModes) ||
             modifiers is! List ||
@@ -45,6 +43,24 @@ sealed class AndroidRemoteKeyboardEvent {
             )) {
           return null;
         }
+        if (kind == 'press_batch') {
+          final count = arguments['count'];
+          if (count is! int ||
+              count < 1 ||
+              count > PhysicalKeyPressBatchIntent.maxCount) {
+            return null;
+          }
+          return AndroidRemotePressBatchEvent(
+            sessionId,
+            usage,
+            count,
+            lockModes: lockModes,
+            modifierUsages: modifiers.cast<int>(),
+          );
+        }
+        final down = arguments['down'];
+        final repeat = arguments['repeat'] ?? false;
+        if (down is! bool || repeat is! bool) return null;
         return AndroidRemotePhysicalKeyEvent(
           sessionId,
           usage,
@@ -92,6 +108,20 @@ final class AndroidRemotePhysicalKeyEvent extends AndroidRemoteKeyboardEvent {
   final int usbHidUsage;
   final bool down;
   final bool repeat;
+  final int lockModes;
+  final List<int> modifierUsages;
+}
+
+final class AndroidRemotePressBatchEvent extends AndroidRemoteKeyboardEvent {
+  const AndroidRemotePressBatchEvent(
+    super.sessionId,
+    this.usbHidUsage,
+    this.count, {
+    this.lockModes = 0,
+    this.modifierUsages = const <int>[],
+  });
+  final int usbHidUsage;
+  final int count;
   final int lockModes;
   final List<int> modifierUsages;
 }

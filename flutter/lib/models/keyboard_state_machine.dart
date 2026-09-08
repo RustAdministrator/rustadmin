@@ -16,14 +16,14 @@ class KeyboardStateDiagnostics {
 class _ActiveRoute {
   const _ActiveRoute({
     required this.route,
-    required this.transport,
+    required this.lease,
     required this.source,
     required this.lockMask,
     this.legacyName,
   });
 
   final ActiveKeyRoute route;
-  final KeyboardPhysicalTransport transport;
+  final KeyboardPhysicalDispatchLease lease;
   final KeyboardInputSource source;
   final int lockMask;
   final String? legacyName;
@@ -46,8 +46,8 @@ class KeyboardStateMachine {
   final Map<HidKey, _ActiveRoute> _activeRoutes = <HidKey, _ActiveRoute>{};
   final Set<HidKey> _physicallyPressedKeys = <HidKey>{};
   final Set<HidKey> _physicallyDispatchedKeys = <HidKey>{};
-  final Map<HidKey, KeyboardPhysicalTransport> _syntheticModifierTransports =
-      <HidKey, KeyboardPhysicalTransport>{};
+  final Map<HidKey, KeyboardPhysicalDispatchLease> _syntheticModifierLeases =
+      <HidKey, KeyboardPhysicalDispatchLease>{};
   final Set<HidKey> _explicitModifierKeys = <HidKey>{};
   final Set<HidKey> _reportedSyntheticModifiers = <HidKey>{};
   final Map<HidKey, Set<HidKey>> _reportedModifiersByKey =
@@ -83,6 +83,8 @@ class KeyboardStateMachine {
     switch (intent) {
       case PhysicalKeyboardIntent():
         _handlePhysical(intent, context);
+      case PhysicalKeyPressBatchIntent():
+        _handlePressBatch(intent, context);
       case CommittedTextIntent():
         _handleCommittedText(intent, context);
       case KeyboardResetIntent():
@@ -128,7 +130,7 @@ class KeyboardStateMachine {
     KeyboardRoutingContext context,
   ) {
     final key = _leftModifierKey(modifier);
-    if (_syntheticModifierTransports.containsKey(key)) return;
+    if (_syntheticModifierLeases.containsKey(key)) return;
     final canonicalIntent = PhysicalKeyboardIntent(
       key: key,
       action: KeyboardIntentAction.down,
@@ -136,18 +138,23 @@ class KeyboardStateMachine {
       synthetic: true,
     );
     final active = _activeRoutes[key];
-    final transport =
+    final lease =
         _physicallyDispatchedKeys.contains(key) &&
             active?.route == ActiveKeyRoute.physical
-        ? active!.transport
-        : _dispatcher.selectPhysicalTransport(canonicalIntent, context);
-    _syntheticModifierTransports[key] = transport;
+        ? active!.lease
+        : KeyboardPhysicalDispatchLease(
+            key: key,
+            transport: _dispatcher.selectPhysicalTransport(
+              canonicalIntent,
+              context,
+            ),
+          );
+    _syntheticModifierLeases[key] = lease;
     if (_physicallyDispatchedKeys.contains(key)) return;
     _queueActions([
       PhysicalKeyboardDispatch(
-        key: key,
+        lease: lease,
         action: KeyboardIntentAction.down,
-        transport: transport,
         modifiers: effectiveModifiers,
         source: KeyboardInputSource.syntheticModifier,
       ),
@@ -159,8 +166,8 @@ class KeyboardStateMachine {
     KeyboardModifiers remaining,
   ) {
     final key = _leftModifierKey(modifier);
-    final transport = _syntheticModifierTransports.remove(key);
-    if (transport == null) return;
+    final lease = _syntheticModifierLeases.remove(key);
+    if (lease == null) return;
 
     final active = _activeRoutes[key];
     if (_physicallyPressedKeys.contains(key) &&
@@ -168,7 +175,7 @@ class KeyboardStateMachine {
       if (!_physicallyDispatchedKeys.contains(key)) {
         _activeRoutes[key] = _ActiveRoute(
           route: active!.route,
-          transport: transport,
+          lease: lease,
           source: active.source,
           lockMask: active.lockMask,
           legacyName: active.legacyName,
@@ -179,9 +186,8 @@ class KeyboardStateMachine {
     }
     _queueActions([
       PhysicalKeyboardDispatch(
-        key: key,
+        lease: lease,
         action: KeyboardIntentAction.up,
-        transport: transport,
         modifiers: physicalModifiers.merge(remaining),
         source: KeyboardInputSource.syntheticModifier,
       ),
@@ -200,7 +206,7 @@ class KeyboardStateMachine {
         _activeRoutes.isNotEmpty ||
         _physicallyPressedKeys.isNotEmpty ||
         _physicallyDispatchedKeys.isNotEmpty ||
-        _syntheticModifierTransports.isNotEmpty ||
+        _syntheticModifierLeases.isNotEmpty ||
         _explicitModifierKeys.isNotEmpty ||
         _reportedSyntheticModifiers.isNotEmpty ||
         _reportedModifiersByKey.isNotEmpty ||
@@ -219,9 +225,8 @@ class KeyboardStateMachine {
       if (active == null || active.route != ActiveKeyRoute.physical) continue;
       releases.add(
         PhysicalKeyboardDispatch(
-          key: key,
+          lease: active.lease,
           action: KeyboardIntentAction.up,
-          transport: active.transport,
           modifiers: effectiveModifiers,
           source: active.source,
           lockMask: active.lockMask,
@@ -234,22 +239,22 @@ class KeyboardStateMachine {
 
     final modifierKeys = <HidKey>{
       ...keys.where((key) => key.isModifier),
-      ..._syntheticModifierTransports.keys,
+      ..._syntheticModifierLeases.keys,
     }.toList()..sort();
     for (final key in modifierKeys) {
       final active = _activeRoutes[key];
       _physicalModifiers.setPressed(key, false);
+      final lease =
+          active != null &&
+              active.route == ActiveKeyRoute.physical &&
+              _physicallyDispatchedKeys.contains(key)
+          ? active.lease
+          : _syntheticModifierLeases[key];
+      if (lease == null) continue;
       releases.add(
         PhysicalKeyboardDispatch(
-          key: key,
+          lease: lease,
           action: KeyboardIntentAction.up,
-          transport:
-              active != null &&
-                  active.route == ActiveKeyRoute.physical &&
-                  _physicallyDispatchedKeys.contains(key)
-              ? active.transport
-              : _syntheticModifierTransports[key] ??
-                    KeyboardPhysicalTransport.hid,
           modifiers: physicalModifiers,
           source: active?.source ?? KeyboardInputSource.syntheticModifier,
           lockMask: active?.lockMask ?? 0,
@@ -261,7 +266,7 @@ class KeyboardStateMachine {
     _activeRoutes.clear();
     _physicallyPressedKeys.clear();
     _physicallyDispatchedKeys.clear();
-    _syntheticModifierTransports.clear();
+    _syntheticModifierLeases.clear();
     _explicitModifierKeys.clear();
     _reportedSyntheticModifiers.clear();
     _reportedModifiersByKey.clear();
@@ -278,6 +283,56 @@ class KeyboardStateMachine {
 
   void invalidatePending() {
     _dispatcher.invalidatePending();
+  }
+
+  void _handlePressBatch(
+    PhysicalKeyPressBatchIntent batch,
+    KeyboardRoutingContext context,
+  ) {
+    if (batch.count < 1 || batch.count > PhysicalKeyPressBatchIntent.maxCount) {
+      diagnostics.ignoredIntents += 1;
+      return;
+    }
+    PhysicalKeyboardIntent event(KeyboardIntentAction action) =>
+        PhysicalKeyboardIntent(
+          key: batch.key,
+          action: action,
+          source: batch.source,
+          synthetic: true,
+          lockMask: batch.lockMask,
+          reportedModifiers: batch.reportedModifiers,
+        );
+    final active = _activeRoutes[batch.key];
+    if (active != null) {
+      if (active.route != ActiveKeyRoute.physical) {
+        // A physical batch supplies no text for an existing text-routed key.
+        diagnostics.ignoredIntents += 1;
+        return;
+      }
+      // Borrow additional reported modifiers without replacing a held key's
+      // route or consuming its real key-up.
+      if (!batch.key.isModifier) {
+        _reconcileReportedModifiers({
+          ..._reportedModifierUnion(),
+          ...batch.reportedModifiers,
+        }, context);
+      }
+      try {
+        for (var i = 0; i < batch.count; i++) {
+          _repeat(event(KeyboardIntentAction.repeat), active);
+          if (!batch.key.isModifier) _mobileModifiers.consumeOneShot();
+        }
+      } finally {
+        if (!batch.key.isModifier) {
+          _reconcileReportedModifiers(_reportedModifierUnion(), context);
+        }
+      }
+      return;
+    }
+    for (var i = 0; i < batch.count; i++) {
+      _handlePhysical(event(KeyboardIntentAction.down), context);
+      _handlePhysical(event(KeyboardIntentAction.up), context);
+    }
   }
 
   void _handlePhysical(
@@ -393,9 +448,12 @@ class KeyboardStateMachine {
       _physicalModifiers.setPressed(intent.key, true);
     }
     final transport = _dispatcher.selectPhysicalTransport(intent, context);
+    final lease =
+        _syntheticModifierLeases[intent.key] ??
+        KeyboardPhysicalDispatchLease(key: intent.key, transport: transport);
     final active = _ActiveRoute(
       route: route,
-      transport: transport,
+      lease: lease,
       source: intent.source,
       lockMask: intent.lockMask,
       legacyName: intent.legacyFallbackName ?? intent.textCandidate,
@@ -404,13 +462,12 @@ class KeyboardStateMachine {
 
     switch (route) {
       case ActiveKeyRoute.physical:
-        if (!_syntheticModifierTransports.containsKey(intent.key)) {
+        if (!_syntheticModifierLeases.containsKey(intent.key)) {
           _physicallyDispatchedKeys.add(intent.key);
           _queueActions([
             PhysicalKeyboardDispatch(
-              key: intent.key,
+              lease: lease,
               action: action,
-              transport: transport,
               modifiers: effectiveModifiers,
               source: intent.source,
               lockMask: intent.lockMask,
@@ -436,9 +493,8 @@ class KeyboardStateMachine {
       case ActiveKeyRoute.physical:
         _queueActions([
           PhysicalKeyboardDispatch(
-            key: intent.key,
+            lease: active.lease,
             action: KeyboardIntentAction.repeat,
-            transport: active.transport,
             modifiers: effectiveModifiers,
             source: active.source,
             lockMask: intent.lockMask,
@@ -468,12 +524,11 @@ class KeyboardStateMachine {
     _physicalModifiers.setPressed(intent.key, false);
     if (active.route == ActiveKeyRoute.physical &&
         _physicallyDispatchedKeys.remove(intent.key)) {
-      if (!_syntheticModifierTransports.containsKey(intent.key)) {
+      if (!_syntheticModifierLeases.containsKey(intent.key)) {
         _queueActions([
           PhysicalKeyboardDispatch(
-            key: intent.key,
+            lease: active.lease,
             action: KeyboardIntentAction.up,
-            transport: active.transport,
             modifiers: effectiveModifiers,
             source: active.source,
             lockMask: intent.lockMask,

@@ -2,6 +2,27 @@ import 'package:flutter_hbb/mobile/android_remote_keyboard.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('press batches preserve metadata and reject invalid counts', () {
+    Map<String, Object> payload(Object count) => {
+      'session_id': 'session-1',
+      'kind': 'press_batch',
+      'usb_hid_usage': 0x04,
+      'count': count,
+      'lock_modes': 2,
+      'modifier_usages': [0xe5],
+    };
+    final event =
+        AndroidRemoteKeyboardEvent.tryParse(payload(64))
+            as AndroidRemotePressBatchEvent;
+    expect(event.count, 64);
+    expect(event.usbHidUsage, 0x04);
+    expect(event.lockModes, 2);
+    expect(event.modifierUsages, [0xe5]);
+    for (final invalid in <Object>[-1, 0, 65, '3', true]) {
+      expect(AndroidRemoteKeyboardEvent.tryParse(payload(invalid)), isNull);
+    }
+  });
+
   test('native lock modes retain every bridge bit combination', () {
     for (var locks = 0; locks <= 14; locks += 2) {
       final event =

@@ -6,6 +6,10 @@ internal enum class AndroidInputFailure(val diagnosticName: String) {
     END_GESTURE("end_gesture"),
 }
 
+internal enum class AndroidInputRejection(val diagnosticName: String) {
+    PRESS_COUNT("press_count"),
+}
+
 // Input entrypoints use typed fields rather than formatting nodes, events, or
 // exception messages. The sink is injectable without Android runtime objects.
 internal class AndroidInputDiagnostics(
@@ -19,6 +23,10 @@ internal class AndroidInputDiagnostics(
 ) {
     fun accessibilityConnected() {
         emit("info", "Android input service connected")
+    }
+
+    fun rejected(reason: AndroidInputRejection) {
+        emit("error", "Android input rejected: reason=${reason.diagnosticName}")
     }
 
     fun failure(operation: AndroidInputFailure, error: Throwable) {

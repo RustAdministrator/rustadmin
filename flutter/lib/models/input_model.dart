@@ -629,6 +629,22 @@ class InputModel {
     return Future<void>.value();
   }
 
+  Future<void> inputAndroidRemotePressBatch(
+    int usbHidUsage,
+    int count, {
+    int lockModes = 0,
+    Iterable<int> modifierUsages = const <int>[],
+  }) {
+    final intent = _androidKeyboardNormalizer.pressBatch(
+      usbHidUsage: usbHidUsage,
+      count: count,
+      lockMask: lockModes,
+      modifierUsages: modifierUsages,
+    );
+    if (intent == null) return Future<void>.value();
+    return _keyboardInput.handleAndWait(intent, _keyboardRoutingContext);
+  }
+
   /// Send key stroke event.
   /// [down] indicates the key's state(down or up).
   /// [press] indicates a click event(down and up).

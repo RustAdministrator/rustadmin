@@ -809,6 +809,17 @@ void main() {
     },
   );
 
+  test('Android press batch reaches the existing bridge as complete clicks', () async {
+    await inputModel.inputAndroidRemotePressBatch(0x04, 2, lockModes: 6);
+    expect(testImpl.flutterKeyCalls, [
+      const _FlutterKeyCall(usbHid: 0x04, down: true),
+      const _FlutterKeyCall(usbHid: 0x04, down: false),
+      const _FlutterKeyCall(usbHid: 0x04, down: true),
+      const _FlutterKeyCall(usbHid: 0x04, down: false),
+    ]);
+    expect(testImpl.flutterLockModes, [6, 6, 6, 6]);
+  });
+
   test('Android physical key bridge preserves modifier ordering', () async {
     testImpl.blockFlutterKeyCalls = true;
 

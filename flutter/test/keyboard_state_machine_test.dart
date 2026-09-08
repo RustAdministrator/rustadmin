@@ -101,6 +101,189 @@ PhysicalKeyboardIntent _physical(
 );
 
 void main() {
+  PhysicalKeyPressBatchIntent batch(
+    int count, {
+    Set<HidKey> modifiers = const {},
+  }) => PhysicalKeyPressBatchIntent(
+    key: const HidKey(0x07, 0x04),
+    count: count,
+    source: KeyboardInputSource.androidHardwareKeyboard,
+    reportedModifiers: modifiers,
+  );
+
+  test(
+    'press batch emits complete presses and leaves no active route',
+    () async {
+      final harness = _Harness();
+      await harness.state.handle(batch(3), _desktopMap);
+      await harness.state.idle;
+      expect(harness.events.map((event) => event.action), [
+        for (var i = 0; i < 3; i++) ...[
+          KeyboardIntentAction.down,
+          KeyboardIntentAction.up,
+        ],
+      ]);
+      expect(harness.state.activeRouteCount, 0);
+      expect(harness.state.physicallyPressedKeys, isEmpty);
+      expect(harness.state.physicallyDispatchedKeys, isEmpty);
+    },
+  );
+
+  test('press batch does not release an existing physical owner', () async {
+    final harness = _Harness();
+    const key = HidKey(0x07, 0x04);
+    await harness.state.handle(
+      _physical(key, KeyboardIntentAction.down),
+      _desktopMap,
+    );
+    await harness.state.handle(batch(2), _desktopMap);
+    await harness.state.idle;
+    expect(harness.events.map((event) => event.action), [
+      KeyboardIntentAction.down,
+      KeyboardIntentAction.repeat,
+      KeyboardIntentAction.repeat,
+    ]);
+    expect(harness.state.physicallyPressedKeys, contains(key));
+    await harness.state.handle(
+      _physical(key, KeyboardIntentAction.up),
+      _desktopMap,
+    );
+    await harness.state.idle;
+    expect(harness.events.last.action, KeyboardIntentAction.up);
+    expect(harness.state.activeRouteCount, 0);
+  });
+
+  test(
+    'batch temporarily borrows modifiers without clearing the held key',
+    () async {
+      final harness = _Harness();
+      const key = HidKey(0x07, 0x04);
+      await harness.state.handle(
+        _physical(key, KeyboardIntentAction.down),
+        _desktopMap,
+      );
+      await harness.state.handle(
+        batch(1, modifiers: {HidKey.shiftRight}),
+        _desktopMap,
+      );
+      await harness.state.idle;
+      expect(harness.events.map((event) => (event.key, event.action)), [
+        (key, KeyboardIntentAction.down),
+        (HidKey.shiftRight, KeyboardIntentAction.down),
+        (key, KeyboardIntentAction.repeat),
+        (HidKey.shiftRight, KeyboardIntentAction.up),
+      ]);
+      expect(harness.state.physicalModifiers.shift, isFalse);
+      expect(harness.state.physicallyPressedKeys, {key});
+      await harness.state.reset(
+        KeyboardResetReason.focusLoss,
+        invalidatePending: true,
+        allowBlockedReleases: true,
+      );
+    },
+  );
+
+  test(
+    'batch preserves a real Shift owner and consumes one-shot only once',
+    () async {
+      final harness = _Harness();
+      await harness.state.handle(
+        _physical(HidKey.shiftRight, KeyboardIntentAction.down),
+        _desktopMap,
+      );
+      await harness.state.handle(
+        const SyntheticModifierIntent(
+          modifier: CanonicalModifier.control,
+          action: SyntheticModifierAction.toggle,
+        ),
+        _desktopMap,
+      );
+      await harness.state.handle(
+        batch(2, modifiers: {HidKey.shiftRight}),
+        _desktopMap,
+      );
+      await harness.state.idle;
+      expect(harness.state.physicalModifiers.shift, isTrue);
+      expect(harness.state.mobileModifierState.hasActive, isFalse);
+      expect(
+        harness.events
+            .where((event) => event.key == HidKey.shiftRight)
+            .map((event) => event.action),
+        [KeyboardIntentAction.down],
+      );
+      expect(
+        harness.events
+            .where((event) => event.key == HidKey.controlLeft)
+            .map((event) => event.action),
+        [KeyboardIntentAction.down, KeyboardIntentAction.up],
+      );
+      await harness.state.reset(
+        KeyboardResetReason.keyboardHide,
+        invalidatePending: true,
+        allowBlockedReleases: true,
+      );
+    },
+  );
+
+  test('reset during a queued batch releases only the started press', () async {
+    final harness = _Harness()..hidGate = Completer<void>();
+    harness.state.handle(batch(3), _desktopMap);
+    await Future<void>.delayed(Duration.zero);
+    harness.allowed = false;
+    final reset = harness.state.reset(
+      KeyboardResetReason.sessionClose,
+      invalidatePending: true,
+      allowBlockedReleases: true,
+    );
+    harness.hidGate!.complete();
+    await reset;
+    expect(harness.events.map((event) => event.action), [
+      KeyboardIntentAction.down,
+      KeyboardIntentAction.up,
+    ]);
+    expect(harness.state.activeRouteCount, 0);
+  });
+
+  test('invalid batch counts have no input effects', () async {
+    final harness = _Harness();
+    for (final count in [-1, 0, 65]) {
+      await harness.state.handle(batch(count), _desktopMap);
+    }
+    await harness.state.idle;
+    expect(harness.events, isEmpty);
+    expect(harness.state.physicallyPressedKeys, isEmpty);
+  });
+
+  test(
+    'physical batch cannot alter an existing text route or inject its modifiers',
+    () async {
+      final harness = _Harness();
+      const key = HidKey(0x07, 0x04);
+      const context = KeyboardRoutingContext(
+        keyboardMode: ControllerKeyboardMode.map,
+        inputMode: ControllerKeyboardInputMode.text,
+        clientKind: KeyboardClientKind.desktop,
+        peerIsAndroid: false,
+      );
+      await harness.state.handle(
+        _physical(key, KeyboardIntentAction.down, text: 'a'),
+        context,
+      );
+      await harness.state.handle(
+        batch(2, modifiers: {HidKey.altRight}),
+        context,
+      );
+      await harness.state.handle(
+        _physical(key, KeyboardIntentAction.up),
+        context,
+      );
+      await harness.state.idle;
+      expect(harness.events.map((event) => event.kind), ['text']);
+      expect(harness.state.physicalModifiers.alt, isFalse);
+      expect(harness.state.activeRouteCount, 0);
+    },
+  );
+
   group('desktop mode selection', () {
     test('Legacy and Translate do not enter Map transport', () {
       expect(
