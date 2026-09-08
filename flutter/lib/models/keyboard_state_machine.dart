@@ -3,8 +3,18 @@ import 'keyboard_dispatcher.dart';
 import 'keyboard_event_normalizer.dart';
 import 'keyboard_intent.dart';
 import 'keyboard_modifier_controller.dart';
+import 'keyboard_text_policy.dart';
 
 enum ActiveKeyRoute { physical, text, ignored }
+
+// Reported modifiers and explicit keys are owners in the same route table.
+typedef _KeyOwner = ({HidKey key, KeyboardInputOrigin origin, bool reported});
+
+_KeyOwner _owner(PhysicalKeyboardIntent intent) =>
+    (key: intent.key, origin: intent.origin, reported: false);
+
+_KeyOwner _reportedOwner(HidKey key) =>
+    (key: key, origin: KeyboardInputOrigin.unknown, reported: true);
 
 class KeyboardStateDiagnostics {
   int unknownKeyUps = 0;
@@ -43,15 +53,11 @@ class KeyboardStateMachine {
   final SideSpecificModifierState _physicalModifiers =
       SideSpecificModifierState();
   late final MobileKeyboardModifierController _mobileModifiers;
-  final Map<HidKey, _ActiveRoute> _activeRoutes = <HidKey, _ActiveRoute>{};
-  final Set<HidKey> _physicallyPressedKeys = <HidKey>{};
-  final Set<HidKey> _physicallyDispatchedKeys = <HidKey>{};
+  final Map<_KeyOwner, _ActiveRoute> _activeRoutes = {};
   final Map<HidKey, KeyboardPhysicalDispatchLease> _syntheticModifierLeases =
       <HidKey, KeyboardPhysicalDispatchLease>{};
-  final Set<HidKey> _explicitModifierKeys = <HidKey>{};
   final Set<HidKey> _reportedSyntheticModifiers = <HidKey>{};
-  final Map<HidKey, Set<HidKey>> _reportedModifiersByKey =
-      <HidKey, Set<HidKey>>{};
+  final Map<_KeyOwner, Set<HidKey>> _reportedModifiersByKey = {};
   final diagnostics = KeyboardStateDiagnostics();
   int _resetGeneration = 0;
   Future<void> _lastDispatch = Future<void>.value();
@@ -61,14 +67,35 @@ class KeyboardStateMachine {
   KeyboardModifiers get effectiveModifiers =>
       physicalModifiers.merge(_mobileModifiers.snapshot);
   Set<HidKey> get physicallyPressedKeys =>
-      Set<HidKey>.unmodifiable(_physicallyPressedKeys);
-  Set<HidKey> get physicallyDispatchedKeys =>
-      Set<HidKey>.unmodifiable(_physicallyDispatchedKeys);
+      Set<HidKey>.unmodifiable(_activeRoutes.keys.map((owner) => owner.key));
+  Set<HidKey> get physicallyDispatchedKeys => Set<HidKey>.unmodifiable(
+    _activeRoutes.entries
+        .where((entry) => entry.value.route == ActiveKeyRoute.physical)
+        .map((entry) => entry.key.key),
+  );
   int get activeRouteCount => _activeRoutes.length;
   int get resetGeneration => _resetGeneration;
   Future<void> get idle => _dispatcher.idle;
 
-  ActiveKeyRoute? routeFor(HidKey key) => _activeRoutes[key]?.route;
+  ActiveKeyRoute? routeFor(HidKey key, {KeyboardInputOrigin? origin}) {
+    for (final entry in _activeRoutes.entries) {
+      if (entry.key.key == key &&
+          (origin == null || entry.key.origin == origin)) {
+        return entry.value.route;
+      }
+    }
+    return null;
+  }
+
+  _ActiveRoute? _physicalRouteFor(HidKey key) {
+    for (final entry in _activeRoutes.entries) {
+      if (entry.key.key == key &&
+          entry.value.route == ActiveKeyRoute.physical) {
+        return entry.value;
+      }
+    }
+    return null;
+  }
 
   void setLegacyPhysicalModifier(MobileModifierKey modifier, bool pressed) {
     _physicalModifiers.setAggregate(modifier, pressed);
@@ -138,11 +165,9 @@ class KeyboardStateMachine {
       source: KeyboardInputSource.syntheticModifier,
       synthetic: true,
     );
-    final active = _activeRoutes[key];
-    final lease =
-        _physicallyDispatchedKeys.contains(key) &&
-            active?.route == ActiveKeyRoute.physical
-        ? active!.lease
+    final active = _physicalRouteFor(key);
+    final lease = active != null
+        ? active.lease
         : KeyboardPhysicalDispatchLease(
             key: key,
             transport: _dispatcher.selectPhysicalTransport(
@@ -151,7 +176,7 @@ class KeyboardStateMachine {
             ),
           );
     _syntheticModifierLeases[key] = lease;
-    if (_physicallyDispatchedKeys.contains(key)) return;
+    if (active != null) return;
     _queueActions([
       PhysicalKeyboardDispatch(
         lease: lease,
@@ -170,21 +195,7 @@ class KeyboardStateMachine {
     final lease = _syntheticModifierLeases.remove(key);
     if (lease == null) return;
 
-    final active = _activeRoutes[key];
-    if (_physicallyPressedKeys.contains(key) &&
-        active?.route == ActiveKeyRoute.physical) {
-      if (!_physicallyDispatchedKeys.contains(key)) {
-        _activeRoutes[key] = _ActiveRoute(
-          route: active!.route,
-          lease: lease,
-          source: active.source,
-          lockMask: active.lockMask,
-          legacyName: active.legacyName,
-        );
-      }
-      _physicallyDispatchedKeys.add(key);
-      return;
-    }
+    if (_physicalRouteFor(key) != null) return;
     _queueActions([
       PhysicalKeyboardDispatch(
         lease: lease,
@@ -205,10 +216,7 @@ class KeyboardStateMachine {
     }
     final hadState =
         _activeRoutes.isNotEmpty ||
-        _physicallyPressedKeys.isNotEmpty ||
-        _physicallyDispatchedKeys.isNotEmpty ||
         _syntheticModifierLeases.isNotEmpty ||
-        _explicitModifierKeys.isNotEmpty ||
         _reportedSyntheticModifiers.isNotEmpty ||
         _reportedModifiersByKey.isNotEmpty ||
         physicalModifiers.alt ||
@@ -218,11 +226,11 @@ class KeyboardStateMachine {
         mobileModifierState.hasActive;
     if (!hadState) return idle;
 
-    final keys = _physicallyDispatchedKeys.toList(growable: false)
+    final keys = physicallyDispatchedKeys.toList(growable: false)
       ..sort((left, right) => left.compareTo(right));
     final releases = <PhysicalKeyboardDispatch>[];
     for (final key in keys.where((key) => !key.isModifier)) {
-      final active = _activeRoutes[key];
+      final active = _physicalRouteFor(key);
       if (active == null || active.route != ActiveKeyRoute.physical) continue;
       releases.add(
         PhysicalKeyboardDispatch(
@@ -243,14 +251,9 @@ class KeyboardStateMachine {
       ..._syntheticModifierLeases.keys,
     }.toList()..sort();
     for (final key in modifierKeys) {
-      final active = _activeRoutes[key];
+      final active = _physicalRouteFor(key);
       _physicalModifiers.setPressed(key, false);
-      final lease =
-          active != null &&
-              active.route == ActiveKeyRoute.physical &&
-              _physicallyDispatchedKeys.contains(key)
-          ? active.lease
-          : _syntheticModifierLeases[key];
+      final lease = active?.lease ?? _syntheticModifierLeases[key];
       if (lease == null) continue;
       releases.add(
         PhysicalKeyboardDispatch(
@@ -265,10 +268,7 @@ class KeyboardStateMachine {
     }
 
     _activeRoutes.clear();
-    _physicallyPressedKeys.clear();
-    _physicallyDispatchedKeys.clear();
     _syntheticModifierLeases.clear();
-    _explicitModifierKeys.clear();
     _reportedSyntheticModifiers.clear();
     _reportedModifiersByKey.clear();
     _physicalModifiers.clear();
@@ -307,16 +307,22 @@ class KeyboardStateMachine {
           lockMask: batch.lockMask,
           reportedModifiers: batch.reportedModifiers,
         );
-    final active = _activeRoutes[batch.key];
+    final down = event(KeyboardIntentAction.down);
+    final active =
+        _activeRoutes[_owner(down)] ??
+        (_selectRoute(down, context) == ActiveKeyRoute.physical
+            ? _physicalRouteFor(batch.key)
+            : null);
     if (active != null) {
-      if (active.route != ActiveKeyRoute.physical) {
-        // A physical batch supplies no text for an existing text-routed key.
+      if (active.route == ActiveKeyRoute.ignored ||
+          (active.route == ActiveKeyRoute.text &&
+              batch.textCandidate == null)) {
         diagnostics.ignoredIntents += 1;
         return;
       }
       // Borrow additional reported modifiers without replacing a held key's
       // route or consuming its real key-up.
-      if (!batch.key.isModifier) {
+      if (!batch.key.isModifier && active.route == ActiveKeyRoute.physical) {
         _reconcileReportedModifiers({
           ..._reportedModifierUnion(),
           ...batch.reportedModifiers,
@@ -325,10 +331,13 @@ class KeyboardStateMachine {
       try {
         for (var i = 0; i < batch.count; i++) {
           _repeat(event(KeyboardIntentAction.repeat), active);
-          if (!batch.key.isModifier) _mobileModifiers.consumeOneShot();
+          if (!batch.key.isModifier &&
+              active.route == ActiveKeyRoute.physical) {
+            _mobileModifiers.consumeOneShot();
+          }
         }
       } finally {
-        if (!batch.key.isModifier) {
+        if (!batch.key.isModifier && active.route == ActiveKeyRoute.physical) {
           _reconcileReportedModifiers(_reportedModifierUnion(), context);
         }
       }
@@ -344,45 +353,29 @@ class KeyboardStateMachine {
     PhysicalKeyboardIntent intent,
     KeyboardRoutingContext context,
   ) {
+    final owner = _owner(intent);
+    final existing = _activeRoutes[owner];
+    if (intent.action == KeyboardIntentAction.down && existing != null) {
+      diagnostics.duplicateDowns += 1;
+      return;
+    }
     final reconcileAndroidModifiers =
         intent.source == KeyboardInputSource.androidHardwareKeyboard &&
         !intent.key.isModifier;
     if (reconcileAndroidModifiers &&
+        (existing?.route ?? _selectRoute(intent, context)) ==
+            ActiveKeyRoute.physical &&
         (intent.action == KeyboardIntentAction.down ||
             (intent.action == KeyboardIntentAction.repeat &&
-                !_reportedModifiersByKey.containsKey(intent.key)))) {
-      _reportedModifiersByKey[intent.key] = intent.reportedModifiers;
+                !_reportedModifiersByKey.containsKey(owner)))) {
+      _reportedModifiersByKey[owner] = intent.reportedModifiers;
       _reconcileReportedModifiers(_reportedModifierUnion(), context);
-    }
-
-    if (intent.key.isModifier && !intent.synthetic) {
-      if (intent.action == KeyboardIntentAction.down) {
-        if (!_explicitModifierKeys.add(intent.key)) {
-          diagnostics.duplicateDowns += 1;
-          return;
-        }
-        if (_activeRoutes.containsKey(intent.key)) return;
-      } else if (intent.action == KeyboardIntentAction.repeat) {
-        _explicitModifierKeys.add(intent.key);
-      } else if (intent.action == KeyboardIntentAction.up) {
-        if (!_explicitModifierKeys.remove(intent.key)) {
-          diagnostics.unknownKeyUps += 1;
-          return;
-        }
-        if (_reportedSyntheticModifiers.contains(intent.key)) return;
-      }
     }
 
     switch (intent.action) {
       case KeyboardIntentAction.down:
-        final existing = _activeRoutes[intent.key];
-        if (existing != null) {
-          diagnostics.duplicateDowns += 1;
-          return;
-        }
         _start(intent, context, KeyboardIntentAction.down);
       case KeyboardIntentAction.repeat:
-        final existing = _activeRoutes[intent.key];
         if (existing == null) {
           _start(intent, context, KeyboardIntentAction.repeat);
         } else {
@@ -393,7 +386,7 @@ class KeyboardStateMachine {
     }
 
     if (reconcileAndroidModifiers && intent.action == KeyboardIntentAction.up) {
-      _reportedModifiersByKey.remove(intent.key);
+      _reportedModifiersByKey.remove(owner);
       _reconcileReportedModifiers(_reportedModifierUnion(), context);
     }
   }
@@ -413,7 +406,6 @@ class KeyboardStateMachine {
 
     for (final key in removed) {
       _reportedSyntheticModifiers.remove(key);
-      if (_explicitModifierKeys.contains(key)) continue;
       _finish(
         PhysicalKeyboardIntent(
           key: key,
@@ -421,14 +413,11 @@ class KeyboardStateMachine {
           source: KeyboardInputSource.androidHardwareKeyboard,
           synthetic: true,
         ),
+        owner: _reportedOwner(key),
       );
     }
     for (final key in added) {
       _reportedSyntheticModifiers.add(key);
-      if (_explicitModifierKeys.contains(key) ||
-          _activeRoutes.containsKey(key)) {
-        continue;
-      }
       _start(
         PhysicalKeyboardIntent(
           key: key,
@@ -438,6 +427,7 @@ class KeyboardStateMachine {
         ),
         context,
         KeyboardIntentAction.down,
+        owner: _reportedOwner(key),
       );
     }
   }
@@ -445,38 +435,42 @@ class KeyboardStateMachine {
   void _start(
     PhysicalKeyboardIntent intent,
     KeyboardRoutingContext context,
-    KeyboardIntentAction action,
-  ) {
-    _physicallyPressedKeys.add(intent.key);
+    KeyboardIntentAction action, {
+    _KeyOwner? owner,
+  }) {
     final route = _selectRoute(intent, context);
     if (route != ActiveKeyRoute.ignored) {
       _physicalModifiers.setPressed(intent.key, true);
     }
     final transport = _dispatcher.selectPhysicalTransport(intent, context);
+    final shared = _physicalRouteFor(intent.key);
     final lease =
         _syntheticModifierLeases[intent.key] ??
+        shared?.lease ??
         KeyboardPhysicalDispatchLease(key: intent.key, transport: transport);
     final active = _ActiveRoute(
       route: route,
       lease: lease,
       source: intent.source,
       lockMask: intent.lockMask,
-      legacyName: intent.legacyFallbackName ?? intent.textCandidate,
+      legacyName: shared != null
+          ? shared.legacyName
+          : intent.legacyFallbackName ?? intent.textCandidate,
     );
-    _activeRoutes[intent.key] = active;
+    _activeRoutes[owner ?? _owner(intent)] = active;
 
     switch (route) {
       case ActiveKeyRoute.physical:
-        if (!_syntheticModifierLeases.containsKey(intent.key)) {
-          _physicallyDispatchedKeys.add(intent.key);
+        if (!_syntheticModifierLeases.containsKey(intent.key) &&
+            (shared == null || !intent.key.isModifier)) {
           _queueActions([
             PhysicalKeyboardDispatch(
               lease: lease,
-              action: action,
+              action: shared == null ? action : KeyboardIntentAction.repeat,
               modifiers: effectiveModifiers,
               source: intent.source,
               lockMask: intent.lockMask,
-              legacyName: intent.legacyFallbackName ?? intent.textCandidate,
+              legacyName: active.legacyName,
             ),
           ]);
         }
@@ -509,26 +503,26 @@ class KeyboardStateMachine {
       case ActiveKeyRoute.text:
         final text = intent.textCandidate;
         if (text != null && text.isNotEmpty) {
-          _queueActions([
+          final accepted = _queueActions([
             CommittedTextDispatch(text: text, source: intent.source),
           ]);
+          if (accepted) _mobileModifiers.consumeOneShot();
         }
       case ActiveKeyRoute.ignored:
         diagnostics.ignoredIntents += 1;
     }
   }
 
-  void _finish(PhysicalKeyboardIntent intent) {
-    final active = _activeRoutes.remove(intent.key);
+  void _finish(PhysicalKeyboardIntent intent, {_KeyOwner? owner}) {
+    final active = _activeRoutes.remove(owner ?? _owner(intent));
     if (active == null) {
       diagnostics.unknownKeyUps += 1;
       return;
     }
 
-    _physicallyPressedKeys.remove(intent.key);
-    _physicalModifiers.setPressed(intent.key, false);
-    if (active.route == ActiveKeyRoute.physical &&
-        _physicallyDispatchedKeys.remove(intent.key)) {
+    final lastPhysical = _physicalRouteFor(intent.key) == null;
+    if (lastPhysical) _physicalModifiers.setPressed(intent.key, false);
+    if (active.route == ActiveKeyRoute.physical && lastPhysical) {
       if (!_syntheticModifierLeases.containsKey(intent.key)) {
         _queueActions([
           PhysicalKeyboardDispatch(
@@ -594,13 +588,44 @@ class KeyboardStateMachine {
     final modifiers = effectiveModifiers;
     final text = intent.textCandidate;
     final maySendText =
-        context.inputMode == ControllerKeyboardInputMode.text &&
-        text != null &&
-        text.isNotEmpty &&
+        (context.inputMode == ControllerKeyboardInputMode.text ||
+            (context.inputMode == ControllerKeyboardInputMode.auto &&
+                intent.origin == KeyboardInputOrigin.ime &&
+                !mobileModifierState.hasActive)) &&
+        _mayRouteCandidateAsText(intent.key, text) &&
         !modifiers.ctrl &&
         !modifiers.alt &&
-        !modifiers.command;
+        !modifiers.command &&
+        !intent.reportedModifiers.any(
+          (key) =>
+              key.modifier == CanonicalModifier.control ||
+              key.modifier == CanonicalModifier.alt ||
+              key.modifier == CanonicalModifier.meta,
+        );
     return maySendText ? ActiveKeyRoute.text : ActiveKeyRoute.physical;
+  }
+
+  static bool _mayRouteCandidateAsText(HidKey key, String? text) {
+    if (text == null || text.isEmpty) return false;
+    final usage = key.usage;
+    if (key.usagePage == HidKey.keyboardUsagePage &&
+        ((usage >= 0x28 && usage <= 0x2b) ||
+            (usage >= 0x39 && usage <= 0x53) ||
+            usage == 0x58 ||
+            usage == 0x65 ||
+            (usage >= 0x68 && usage <= 0x73))) {
+      return false;
+    }
+    // Invalid or oversized text stays on the text route so admission reports
+    // refusal; it must not silently turn into a physical fallback.
+    if (KeyboardTextPolicy.inspect(text).rejection != null) return true;
+    return !text.runes.any(
+      (scalar) =>
+          scalar < 0x20 ||
+          (scalar >= 0x7f && scalar <= 0x9f) ||
+          scalar == 0x2028 ||
+          scalar == 0x2029,
+    );
   }
 
   static HidKey _leftModifierKey(MobileModifierKey modifier) =>

@@ -869,7 +869,7 @@ void main() {
     expect(testImpl.sourceLayoutTextEdits, 1);
   });
 
-  test('origin metadata alone does not change pre-migration Auto routing', () async {
+  test('Auto routes confirmed IME keys and batches to text through FFI', () async {
     for (final origin in KeyboardInputOrigin.values) {
       await inputModel.inputAndroidRemotePhysicalKey(
         0x14,
@@ -889,8 +889,8 @@ void main() {
         sourceLayoutType: 'qwertz',
       );
     }
-    expect(testImpl.flutterKeyCalls.length, 24);
-    expect(testImpl.committedTexts, isEmpty);
+    expect(testImpl.flutterKeyCalls.length, 18);
+    expect(testImpl.committedTexts, ['@', '@', '@']);
   });
 
   test('Android long text reaches FFI whole and oversize sends nothing', () async {

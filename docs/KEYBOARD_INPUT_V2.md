@@ -63,10 +63,11 @@ cleanup path.
 
 ## Client Modes
 
-- `Auto`: Android first requests fallback-editor key events and sends keys with
-  stable positions as physical HID. IME output which has no physical key
-  identity falls back to committed text. Other mobile clients keep the same
-  text/physical split.
+- `Auto`: Android uses physical HID for hardware and unknown-origin keys.
+  Confirmed printable IME key output is routed as text, even when a HID identity
+  is available. Navigation, control characters and explicit toolbar modifier
+  chords remain physical. IME output without a key identity retains its committed-text path.
+  This does not promise Unicode support in firmware or VM consoles.
 - `Text`: IME commits use text, and printable hardware input may use committed
   text when no Control, Alt, or Meta chord is active.
 - `Physical`: Android uses the same fallback editor but prioritizes physical
@@ -148,7 +149,7 @@ up after the key, while coalescing ownership when the same physical side is
 already held. The dispatcher pins the selected HID or legacy bridge path until
 the final owner releases the modifier.
 
-For each physical down, the state machine records exactly one route:
+For each HID/origin owner, the state machine records exactly one route:
 
 - `physical`: dispatch down/repeat/up through the same HID or legacy transport;
 - `text`: dispatch the supplied text once and suppress physical release;
@@ -160,6 +161,14 @@ ordinary down is ignored rather than promoted to a repeat. Unknown and
 duplicate key-up events are ignored. Reset releases only keys that were
 physically dispatched, in deterministic non-modifier-then-modifier order,
 clears synthetic modifier latches, and emits no release for text-routed keys.
+
+Hardware and IME owners of the same HID have independent routes and lifetimes.
+Physical owners share one dispatch lease: an additional non-modifier press is
+a repeated down, and only the last physical owner sends up. Reported modifier
+owners are distinguished from explicit modifier owners within the same route
+table. Pressed/dispatched key snapshots are derived from that table. A late
+IME release after reset cannot remove a fresh hardware owner. IME modifiers
+reported only alongside a text-routed key are not injected physically.
 
 Queued releases retain their state-machine-owned dispatch lease until the queue
 drains. Cancellation drops obsolete down/repeat/text commands, but preserves
@@ -213,7 +222,7 @@ device data alone proves IME or hardware origin. Older native envelopes default
 to unknown, and cannot claim toolbar origin. Flutter events without equivalent
 device evidence also remain unknown; toolbar and direct text-editor intents
 have known local origins. No adapter owns pressed state or transport selection.
-Adding this metadata does not by itself change Auto routing.
+Only the canonical state machine uses origin to select Auto routes.
 
 The classification uses the documented meanings of
 [KeyEvent flags](https://developer.android.com/reference/android/view/KeyEvent),
