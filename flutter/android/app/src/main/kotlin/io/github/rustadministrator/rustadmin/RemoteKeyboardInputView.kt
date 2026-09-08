@@ -14,7 +14,6 @@ import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
-import ffi.FFI
 import java.util.Locale
 
 internal sealed interface RemoteKeyboardEvent {
@@ -320,6 +319,7 @@ internal class RemoteKeyboardController(
     private val activity: Activity,
     private val emitToFlutter: (Map<String, Any>) -> Unit,
 ) {
+    private val diagnostics = AndroidInputDiagnostics()
     private var view: RemoteKeyboardInputView? = null
     private var sessionId = ""
     private var mode = "auto"
@@ -345,10 +345,7 @@ internal class RemoteKeyboardController(
             inputMethodManager.restartInput(inputView)
             inputMethodManager.showSoftInput(inputView, InputMethodManager.SHOW_IMPLICIT)
         }
-        FFI.logDiagnostic(
-            "info",
-            "Android remote keyboard enabled: mode=$mode, route=fallback-input-connection",
-        )
+        diagnostics.keyboardEnabled(mode)
         return true
     }
 
@@ -361,10 +358,7 @@ internal class RemoteKeyboardController(
         inputView.clearFocus()
         inputView.visibility = View.GONE
         if (sessionId.isNotEmpty()) {
-            FFI.logDiagnostic(
-                "info",
-                "Android remote keyboard disabled: mode=$mode, physical_events=$physicalEvents, synthetic_modifier_events=$syntheticModifierEvents, text_fallbacks=$textFallbacks",
-            )
+            diagnostics.keyboardDisabled(mode, physicalEvents, syntheticModifierEvents, textFallbacks)
         }
         sessionId = ""
         physicalEvents = 0

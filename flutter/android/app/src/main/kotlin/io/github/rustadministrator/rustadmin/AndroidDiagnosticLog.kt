@@ -14,6 +14,11 @@ internal object AndroidDiagnosticLog {
         persist("warn", tag, message)
     }
 
+    fun error(tag: String, message: String) {
+        Log.e(tag, message)
+        persist("error", tag, message)
+    }
+
     fun error(tag: String, message: String, error: RuntimeException) {
         Log.e(tag, message, error)
         persist(
