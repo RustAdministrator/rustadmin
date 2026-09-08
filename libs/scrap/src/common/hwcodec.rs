@@ -29,7 +29,7 @@ use hwcodec::{
 };
 
 const DEFAULT_PIXFMT: AVPixelFormat = AVPixelFormat::AV_PIX_FMT_NV12;
-const DECODER_PROBE_VERSION: u32 = 1;
+const DECODER_PROBE_VERSION: u32 = 2;
 pub const DEFAULT_FPS: i32 = DEFAULT_ENCODER_FPS as i32;
 const DEFAULT_GOP: i32 = i32::MAX;
 const DEFAULT_HW_QUALITY: Quality = Quality_Default;
@@ -323,6 +323,113 @@ mod tests {
         assert_eq!(config.ram_decode.len(), 1);
     }
 
+    fn decoder_candidates() -> Vec<CodecInfo> {
+        vec![
+            CodecInfo {
+                name: "h264".into(),
+                format: DataFormat::H264,
+                hwdevice: AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
+                priority: 0,
+                ..Default::default()
+            },
+            CodecInfo {
+                name: "h264_cuvid".into(),
+                format: DataFormat::H264,
+                hwdevice: AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                priority: 1,
+                ..Default::default()
+            },
+            CodecInfo {
+                name: "hevc_cuvid".into(),
+                format: DataFormat::H265,
+                hwdevice: AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA,
+                priority: 1,
+                ..Default::default()
+            },
+        ]
+    }
+
+    #[test]
+    fn decoder_creation_tries_another_probed_backend_without_losing_capabilities() {
+        let capabilities = decoder_candidates();
+        let mut tried = Vec::new();
+        let (_, chosen) =
+            HwRamDecoder::create_probed(CodecFormat::H264, capabilities.clone(), true, 0, |info| {
+                tried.push(info.name.clone());
+                if info.hwdevice == AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA {
+                    bail!("injected transient device failure");
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(tried, ["h264", "h264_cuvid"]);
+        assert_eq!(chosen.name, "h264_cuvid");
+        assert_eq!(capabilities, decoder_candidates());
+        assert!(HwRamDecoder::select_probed(CodecFormat::H265, capabilities, true).is_some());
+    }
+
+    #[test]
+    fn decoder_creation_failure_does_not_remove_another_format_or_display() {
+        let capabilities = decoder_candidates();
+        let failed = HwRamDecoder::create_probed::<()>(
+            CodecFormat::H264,
+            capabilities.clone(),
+            true,
+            0,
+            |_| bail!("injected allocation failure"),
+        );
+        assert!(failed.is_err());
+        for format in [CodecFormat::H264, CodecFormat::H265] {
+            let healthy =
+                HwRamDecoder::create_probed(format, capabilities.clone(), true, 0, |_| Ok(()));
+            assert!(
+                healthy.is_ok(),
+                "the other display must retain {:?}",
+                format
+            );
+        }
+        assert_eq!(capabilities, decoder_candidates());
+    }
+
+    #[test]
+    fn decoder_recovery_rotates_validated_backends_and_wraps() {
+        for (fallback, expected) in [(0, "h264"), (1, "h264_cuvid"), (2, "h264")] {
+            let (_, chosen) = HwRamDecoder::create_probed(
+                CodecFormat::H264,
+                decoder_candidates(),
+                true,
+                fallback,
+                |_| Ok(()),
+            )
+            .unwrap();
+            assert_eq!(chosen.name, expected);
+        }
+    }
+
+    #[test]
+    fn decoder_creation_respects_hardware_preference_and_probed_software() {
+        let candidates = decoder_candidates();
+        assert!(HwRamDecoder::create_probed::<()>(
+            CodecFormat::H264,
+            candidates.clone(),
+            false,
+            0,
+            |_| { panic!("hardware creation must not be attempted when disabled") }
+        )
+        .is_err());
+        let mut with_software = candidates;
+        with_software.push(CodecInfo::soft().h264.unwrap());
+        let (_, chosen) = HwRamDecoder::create_probed(
+            CodecFormat::H264,
+            with_software,
+            false,
+            usize::MAX,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(chosen.hwdevice, AVHWDeviceType::AV_HWDEVICE_TYPE_NONE);
+    }
+
     #[test]
     fn set_encoded_video_frames_routes_av1_to_av1_union() {
         let mut vf = VideoFrame::new();
@@ -592,6 +699,7 @@ mod tests {
 
     #[test]
     #[ignore = "requires NVIDIA NVENC and intentionally churns HEVC encoder sessions"]
+    #[cfg(any(windows, target_os = "linux"))]
     fn nvenc_hevc_delivery_recovery_recreate_stress() {
         const WIDTH: usize = 2560;
         const HEIGHT: usize = 1440;
@@ -787,7 +895,11 @@ mod tests {
         for frame_index in 0..FRAME_COUNT {
             fill_nv12_frame(&mut yuv, &linesize, &offset, WIDTH, HEIGHT, frame_index);
             let started = std::time::Instant::now();
-            let encoded = encoder.encode(&yuv, (frame_index * 1_000 / DEFAULT_FPS as usize) as i64);
+            let encoded = encoder.encode(
+                &yuv,
+                (frame_index * 1_000 / DEFAULT_FPS as usize) as i64,
+                false,
+            );
             encode_time += started.elapsed();
             match encoded {
                 Ok(frames) => {
@@ -1144,23 +1256,74 @@ impl HwRamDecoder {
     }
 
     pub fn new(format: CodecFormat) -> ResultType<Self> {
-        let info = HwRamDecoder::try_get(format);
-        log::info!("try create {info:?} ram decoder");
-        let Some(info) = info else {
-            bail!("unsupported format: {:?}", format);
-        };
-        let ctx = DecodeContext {
-            name: info.name.clone(),
-            device_type: info.hwdevice.clone(),
-            thread_count: codec_thread_num(16) as _,
-        };
-        match Decoder::new(ctx) {
-            Ok(decoder) => Ok(HwRamDecoder { decoder, info }),
-            Err(_) => {
-                HwCodecConfig::clear(false, false);
-                Err(anyhow!(format!("Failed to create decoder")))
+        Self::new_with_fallback(format, 0)
+    }
+
+    pub fn new_with_fallback(format: CodecFormat, fallback: usize) -> ResultType<Self> {
+        let mut candidates = HwCodecConfig::get().ram_decode;
+        if matches!(format, CodecFormat::H264 | CodecFormat::H265) {
+            for software in Decoder::available_software_decoders() {
+                if !candidates
+                    .iter()
+                    .any(|c| c.name == software.name && c.hwdevice == software.hwdevice)
+                {
+                    candidates.push(software);
+                }
             }
         }
+        let (decoder, info) = Self::create_probed(
+            format,
+            candidates,
+            enable_hwcodec_option(),
+            fallback,
+            |info| {
+                let ctx = DecodeContext {
+                    name: info.name.clone(),
+                    device_type: info.hwdevice,
+                    thread_count: codec_thread_num(16) as _,
+                };
+                Decoder::new(ctx).map_err(|_| anyhow!("Failed to create decoder {}", info.name))
+            },
+        )?;
+        Ok(Self { decoder, info })
+    }
+
+    fn create_probed<T>(
+        format: CodecFormat,
+        mut candidates: Vec<CodecInfo>,
+        hardware: bool,
+        fallback: usize,
+        mut create: impl FnMut(&CodecInfo) -> ResultType<T>,
+    ) -> ResultType<(T, CodecInfo)> {
+        candidates.retain(|c| {
+            (hardware || c.hwdevice == AVHWDeviceType::AV_HWDEVICE_TYPE_NONE)
+                && matches!(
+                    (format, c.format),
+                    (CodecFormat::H264, DataFormat::H264)
+                        | (CodecFormat::H265, DataFormat::H265)
+                        | (CodecFormat::AV1, DataFormat::AV1)
+                )
+        });
+        candidates.sort_by_key(|c| c.priority);
+        if candidates.is_empty() {
+            bail!("unsupported format: {format:?}");
+        }
+        let offset = fallback % candidates.len();
+        candidates.rotate_left(offset);
+        let mut last_error = anyhow!("Failed to create {format:?} decoder");
+        for info in candidates {
+            log::info!("try create {info:?} ram decoder");
+            match create(&info) {
+                Ok(decoder) => return Ok((decoder, info)),
+                Err(error) => {
+                    // An instance failure says nothing about other displays,
+                    // formats, or the machine's independently probed capabilities.
+                    log::warn!("ram decoder {} creation failed: {error}", info.name);
+                    last_error = error;
+                }
+            }
+        }
+        Err(last_error)
     }
     pub fn decode<'a>(&'a mut self, data: &[u8]) -> ResultType<Vec<HwRamDecoderImage<'a>>> {
         match self.decoder.decode(data) {

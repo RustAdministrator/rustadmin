@@ -604,7 +604,6 @@ impl<T: InvokeUiSession> Session<T> {
             && self.lc.read().unwrap().enable_file_copy_paste.v
     }
 
-    #[cfg(feature = "flutter")]
     pub fn refresh_video(&self, display: i32) {
         if crate::common::is_support_multi_ui_session_num(self.lc.read().unwrap().version) {
             self.send(Data::Message(LoginConfigHandler::refresh_display(
@@ -625,11 +624,6 @@ impl<T: InvokeUiSession> Session<T> {
         let mut msg_out = Message::new();
         msg_out.set_misc(misc);
         self.send(Data::Message(msg_out));
-    }
-
-    #[cfg(not(feature = "flutter"))]
-    pub fn refresh_video(&self, _display: i32) {
-        self.send(Data::Message(LoginConfigHandler::refresh()));
     }
 
     pub fn record_screen(&self, start: bool) {
@@ -712,13 +706,7 @@ impl<T: InvokeUiSession> Session<T> {
 
     pub fn alternative_codecs(&self) -> (bool, bool, bool, bool, bool, bool, bool) {
         let luid = self.lc.read().unwrap().adapter_luid;
-        let mark_unsupported = self.lc.read().unwrap().mark_unsupported.clone();
-        let decoder = scrap::codec::Decoder::supported_decodings(
-            None,
-            use_texture_render(),
-            luid,
-            &mark_unsupported,
-        );
+        let decoder = scrap::codec::Decoder::supported_decodings(None, use_texture_render(), luid);
         let mut vp8 = decoder.ability_vp8 > 0;
         let mut av1 = decoder.ability_av1 > 0;
         let mut av1_hw = decoder.ability_av1 > 0;
