@@ -82,16 +82,6 @@ const HQ_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_secs(6);
 // service-wide coalescing window so one lost refresh cannot create a 2s stall.
 const DELIVERY_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_millis(250);
 const IN_PLACE_REFERENCE_REFRESH_TIMEOUT: Duration = Duration::from_secs(1);
-#[cfg(any(windows, test))]
-const USER_CAPTURE_HELPER_STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
-#[cfg(any(windows, test))]
-const USER_CAPTURE_HELPER_FIRST_RETRY_COOLDOWN: Duration = Duration::from_secs(5);
-#[cfg(any(windows, test))]
-const USER_CAPTURE_HELPER_SECOND_RETRY_COOLDOWN: Duration = Duration::from_secs(30);
-#[cfg(any(windows, test))]
-const USER_CAPTURE_HELPER_MAX_FAILURES: u32 = 3;
-#[cfg(any(windows, test))]
-const USER_CAPTURE_HELPER_STALE_ATTEMPT_GRACE: Duration = Duration::from_secs(2);
 #[cfg(windows)]
 const INSTALLED_SECURE_CAPTURE_HELPER_START_COOLDOWN: Duration = Duration::from_secs(5);
 #[cfg(windows)]
@@ -132,6 +122,57 @@ enum ReferenceRefreshReason {
     DeliveryRecovery,
     SecureDesktopTransition,
     MovieCadenceChange,
+    SubscriberJoin,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SubscriberJoinAction {
+    Wait,
+    Reference,
+    Restart,
+}
+
+fn subscriber_join_action(
+    pending: bool,
+    has_encoded_frame: bool,
+    replayable_frame: bool,
+    started: &mut Option<Instant>,
+    now: Instant,
+) -> SubscriberJoinAction {
+    if !pending {
+        *started = None;
+        SubscriberJoinAction::Wait
+    } else if !has_encoded_frame {
+        // Hardware encoders can consume several inputs before emitting their
+        // first packet. An empty output is not a completed startup or a join.
+        SubscriberJoinAction::Wait
+    } else if !replayable_frame
+        || started.is_some_and(|at| now.saturating_duration_since(at) >= Duration::from_secs(10))
+    {
+        SubscriberJoinAction::Restart
+    } else if started.is_none() {
+        *started = Some(now);
+        SubscriberJoinAction::Reference
+    } else {
+        SubscriberJoinAction::Wait
+    }
+}
+
+fn starts_with_keyframe(frame: &hbb_common::message_proto::VideoFrame) -> bool {
+    use hbb_common::message_proto::video_frame::Union;
+    match frame.union.as_ref() {
+        Some(
+            Union::Vp8s(frames)
+            | Union::Vp9s(frames)
+            | Union::Av1s(frames)
+            | Union::H264s(frames)
+            | Union::H265s(frames),
+        ) => frames
+            .frames
+            .first()
+            .is_some_and(|frame| frame.key && !frame.data.is_empty()),
+        _ => false,
+    }
 }
 
 #[derive(Debug)]
@@ -246,153 +287,6 @@ fn capture_frame_label(frame: &scrap::Frame<'_>) -> &'static str {
 }
 
 #[cfg(any(windows, test))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum UserCaptureHelperRetryPhase {
-    Ready,
-    Active { started_at: Instant },
-    Cooldown { retry_at: Instant },
-    RetryQueued,
-    Suppressed,
-    Manual,
-}
-
-#[cfg(any(windows, test))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct UserCaptureHelperRetrySnapshot {
-    state: &'static str,
-    failures: u32,
-    retry_in_ms: u64,
-}
-
-#[cfg(any(windows, test))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct UserCaptureHelperAttempt {
-    number: u32,
-    retry: bool,
-}
-
-#[cfg(any(windows, test))]
-#[derive(Debug)]
-struct UserCaptureHelperRetryPolicy {
-    phase: UserCaptureHelperRetryPhase,
-    failures: u32,
-}
-
-#[cfg(any(windows, test))]
-impl Default for UserCaptureHelperRetryPolicy {
-    fn default() -> Self {
-        Self {
-            phase: UserCaptureHelperRetryPhase::Ready,
-            failures: 0,
-        }
-    }
-}
-
-#[cfg(any(windows, test))]
-impl UserCaptureHelperRetryPolicy {
-    fn reset(&mut self) -> bool {
-        let changed = self.phase != UserCaptureHelperRetryPhase::Ready || self.failures != 0;
-        self.phase = UserCaptureHelperRetryPhase::Ready;
-        self.failures = 0;
-        changed
-    }
-
-    fn set_manual(&mut self) -> bool {
-        let changed = self.phase != UserCaptureHelperRetryPhase::Manual || self.failures != 0;
-        self.phase = UserCaptureHelperRetryPhase::Manual;
-        self.failures = 0;
-        changed
-    }
-
-    fn try_begin_attempt(&mut self, now: Instant) -> Option<UserCaptureHelperAttempt> {
-        self.expire_stale_attempt(now);
-        let retry = match self.phase {
-            UserCaptureHelperRetryPhase::Ready => false,
-            UserCaptureHelperRetryPhase::RetryQueued => true,
-            UserCaptureHelperRetryPhase::Cooldown { retry_at } if now >= retry_at => true,
-            _ => return None,
-        };
-        self.phase = UserCaptureHelperRetryPhase::Active { started_at: now };
-        Some(UserCaptureHelperAttempt {
-            number: self.failures.saturating_add(1),
-            retry,
-        })
-    }
-
-    fn record_failure(&mut self, now: Instant) -> UserCaptureHelperRetrySnapshot {
-        if !matches!(self.phase, UserCaptureHelperRetryPhase::Active { .. }) {
-            return self.snapshot(now);
-        }
-        self.failures = self.failures.saturating_add(1);
-        self.phase = if self.failures >= USER_CAPTURE_HELPER_MAX_FAILURES {
-            UserCaptureHelperRetryPhase::Suppressed
-        } else {
-            let cooldown = if self.failures == 1 {
-                USER_CAPTURE_HELPER_FIRST_RETRY_COOLDOWN
-            } else {
-                USER_CAPTURE_HELPER_SECOND_RETRY_COOLDOWN
-            };
-            UserCaptureHelperRetryPhase::Cooldown {
-                retry_at: now.checked_add(cooldown).unwrap_or(now),
-            }
-        };
-        self.snapshot(now)
-    }
-
-    fn record_success(&mut self) -> bool {
-        if matches!(self.phase, UserCaptureHelperRetryPhase::Active { .. }) {
-            self.reset()
-        } else {
-            false
-        }
-    }
-
-    fn queue_retry_if_due(&mut self, now: Instant) -> bool {
-        self.expire_stale_attempt(now);
-        if matches!(self.phase, UserCaptureHelperRetryPhase::Cooldown { retry_at } if now >= retry_at)
-        {
-            self.phase = UserCaptureHelperRetryPhase::RetryQueued;
-            return true;
-        }
-        false
-    }
-
-    fn snapshot(&self, now: Instant) -> UserCaptureHelperRetrySnapshot {
-        let (state, retry_in_ms) = match self.phase {
-            UserCaptureHelperRetryPhase::Ready => ("ready", 0),
-            UserCaptureHelperRetryPhase::Active { .. } => ("active", 0),
-            UserCaptureHelperRetryPhase::Cooldown { retry_at } => (
-                "cooldown",
-                retry_at
-                    .saturating_duration_since(now)
-                    .as_millis()
-                    .min(u64::MAX as u128) as u64,
-            ),
-            UserCaptureHelperRetryPhase::RetryQueued => ("retry-queued", 0),
-            UserCaptureHelperRetryPhase::Suppressed => ("suppressed", 0),
-            UserCaptureHelperRetryPhase::Manual => ("manual", 0),
-        };
-        UserCaptureHelperRetrySnapshot {
-            state,
-            failures: self.failures,
-            retry_in_ms,
-        }
-    }
-
-    fn expire_stale_attempt(&mut self, now: Instant) {
-        let stale_after = USER_CAPTURE_HELPER_STARTUP_TIMEOUT
-            .saturating_add(USER_CAPTURE_HELPER_STALE_ATTEMPT_GRACE);
-        if matches!(
-            self.phase,
-            UserCaptureHelperRetryPhase::Active { started_at }
-                if now.saturating_duration_since(started_at) >= stale_after
-        ) {
-            self.record_failure(now);
-        }
-    }
-}
-
-#[cfg(any(windows, test))]
 fn capture_backend_allows_user_helper_retry(preference: CaptureBackend) -> bool {
     matches!(
         preference,
@@ -442,8 +336,8 @@ lazy_static::lazy_static! {
 lazy_static::lazy_static! {
     static ref LAST_INSTALLED_SECURE_CAPTURE_HELPER_START: std::sync::Mutex<Option<Instant>> =
         Default::default();
-    static ref USER_CAPTURE_HELPER_RETRY_POLICY:
-        std::sync::Mutex<UserCaptureHelperRetryPolicy> = Default::default();
+    static ref USER_CAPTURE_HELPERS:
+        Arc<std::sync::Mutex<super::helper_retry::HelperCoordinator>> = Default::default();
 }
 
 struct Screenshot {
@@ -496,7 +390,12 @@ pub fn set_capture_backend_preference(backend: CaptureBackend) {
         | CaptureBackend::CaptureBackendGdi => backend,
         _ => CaptureBackend::CaptureBackendAuto,
     };
-    *CAPTURE_BACKEND_PREFERENCE.lock().unwrap() = normalized;
+    let mut preference = CAPTURE_BACKEND_PREFERENCE.lock().unwrap();
+    if *preference == normalized {
+        return;
+    }
+    *preference = normalized;
+    drop(preference);
     #[cfg(windows)]
     if capture_backend_allows_user_helper_retry(normalized) {
         reset_user_capture_helper_retry("capture backend requested");
@@ -508,101 +407,54 @@ pub fn set_capture_backend_preference(backend: CaptureBackend) {
 
 #[cfg(windows)]
 fn reset_user_capture_helper_retry(reason: &str) {
-    let mut policy = USER_CAPTURE_HELPER_RETRY_POLICY.lock().unwrap();
-    if policy.reset() {
-        log::info!(
-            "user capture helper retry reset: reason={}, state=ready, failures=0",
-            reason
-        );
-    }
+    USER_CAPTURE_HELPERS.lock().unwrap().reset(true);
+    log::info!("user capture helper coordinator reset: reason={reason}");
 }
 
 #[cfg(windows)]
 fn disable_user_capture_helper_retry(reason: &str) {
-    let mut policy = USER_CAPTURE_HELPER_RETRY_POLICY.lock().unwrap();
-    if policy.set_manual() {
-        log::info!(
-            "user capture helper retry disabled: reason={}, state=manual, failures=0",
-            reason
-        );
-    }
+    USER_CAPTURE_HELPERS.lock().unwrap().reset(false);
+    log::info!("user capture helper coordinator disabled: reason={reason}");
 }
 
 #[cfg(windows)]
-fn begin_user_capture_helper_attempt(
-    backend: UserCaptureBackend,
+fn helper_key(
+    owner: &mut super::helper_retry::HelperCoordinator,
     display: usize,
-) -> Option<UserCaptureHelperAttempt> {
-    let now = Instant::now();
-    let mut policy = USER_CAPTURE_HELPER_RETRY_POLICY.lock().unwrap();
-    let attempt = policy.try_begin_attempt(now);
-    let snapshot = policy.snapshot(now);
-    if let Some(attempt) = attempt {
-        log::info!(
-            "user capture helper attempt started: backend={}, display={}, attempt={}, retry={}, state={}, failures={}",
-            backend.as_str(),
-            display,
-            attempt.number,
-            attempt.retry,
-            snapshot.state,
-            snapshot.failures
-        );
-    }
-    attempt
-}
-
-#[cfg(windows)]
-fn record_user_capture_helper_failure(reason: &str) {
-    let now = Instant::now();
-    let mut policy = USER_CAPTURE_HELPER_RETRY_POLICY.lock().unwrap();
-    let snapshot = policy.record_failure(now);
-    log::warn!(
-        "user capture helper attempt failed: reason={}, state={}, failures={}, retry_in_ms={}",
-        reason,
-        snapshot.state,
-        snapshot.failures,
-        snapshot.retry_in_ms
-    );
-}
-
-#[cfg(windows)]
-fn record_user_capture_helper_success(capture_backend: &str) {
-    let mut policy = USER_CAPTURE_HELPER_RETRY_POLICY.lock().unwrap();
-    let failures = policy.failures;
-    if policy.record_success() && failures > 0 {
-        log::info!(
-            "user capture helper recovered: capture_backend={}, previous_failures={}, state=ready",
-            capture_backend,
-            failures
-        );
+    backend: UserCaptureBackend,
+) -> super::helper_retry::HelperKey {
+    // Sample under the coordinator lock so concurrent capture threads cannot
+    // publish an older observation after a newer desktop transition.
+    let session = crate::platform::windows::get_current_process_session_id().unwrap_or(u32::MAX);
+    let secure = crate::platform::windows::is_prelogin()
+        || crate::platform::windows::is_locked()
+        || crate::platform::windows::is_logon_ui_for_capture();
+    super::helper_retry::HelperKey {
+        desktop_generation: owner.observe_desktop(session, secure),
+        display,
+        backend: backend as u32,
     }
 }
 
 #[cfg(windows)]
-fn queue_user_capture_helper_retry_if_due(reason: &str) -> bool {
-    let now = Instant::now();
-    let mut policy = USER_CAPTURE_HELPER_RETRY_POLICY.lock().unwrap();
-    if !policy.queue_retry_if_due(now) {
-        return false;
-    }
-    let snapshot = policy.snapshot(now);
-    log::info!(
-        "user capture helper retry queued: reason={}, state={}, failures={}, retry_in_ms={}",
-        reason,
-        snapshot.state,
-        snapshot.failures,
-        snapshot.retry_in_ms
-    );
-    true
+fn queue_user_capture_helper_retry_if_due(display: usize, preference: CaptureBackend) -> bool {
+    let mut owner = USER_CAPTURE_HELPERS.lock().unwrap();
+    let backends: &[UserCaptureBackend] = match preference {
+        CaptureBackend::CaptureBackendDxgi => &[UserCaptureBackend::Dxgi],
+        CaptureBackend::CaptureBackendWgc => &[UserCaptureBackend::Wgc],
+        _ => &[UserCaptureBackend::Wgc, UserCaptureBackend::Dxgi],
+    };
+    backends.iter().any(|backend| {
+        let key = helper_key(&mut owner, display, *backend);
+        owner.retry_due(key, Instant::now())
+    })
 }
 
 #[cfg(windows)]
-fn user_capture_helper_retry_snapshot() -> UserCaptureHelperRetrySnapshot {
-    let now = Instant::now();
-    USER_CAPTURE_HELPER_RETRY_POLICY
-        .lock()
-        .unwrap()
-        .snapshot(now)
+fn helper_startup_protects_refresh(display: usize) -> bool {
+    let mut owner = USER_CAPTURE_HELPERS.lock().unwrap();
+    let _ = helper_key(&mut owner, display, UserCaptureBackend::Wgc);
+    owner.protects_refresh(display, Instant::now())
 }
 
 struct VideoFrameController {
@@ -1215,7 +1067,7 @@ fn should_use_user_capture_helper(
     privacy_mode_id: i32,
     backend: UserCaptureBackend,
     display: usize,
-) -> bool {
+) -> Option<super::helper_retry::HelperAttemptLease> {
     let privacy_mode_ok = privacy_mode_id == INVALID_PRIVACY_MODE_CONN_ID;
     let is_root = crate::platform::is_root();
     let installed = is_installed();
@@ -1225,11 +1077,14 @@ fn should_use_user_capture_helper(
         && is_root
         && installed
         && !desktop_state.requires_secure_capture();
+    let mut owner = USER_CAPTURE_HELPERS.lock().unwrap();
+    let key = helper_key(&mut owner, display, backend);
     let attempt = prerequisites_met
-        .then(|| begin_user_capture_helper_attempt(backend, display))
+        .then(|| owner.begin(key, Instant::now()))
         .flatten();
     let use_helper = attempt.is_some();
-    let retry = user_capture_helper_retry_snapshot();
+    let retry_state = owner.state(key);
+    drop(owner);
     let mut blocked_by = Vec::new();
     if !privacy_mode_ok {
         blocked_by.push("privacy_mode");
@@ -1256,7 +1111,7 @@ fn should_use_user_capture_helper(
         blocked_by.push("logon_ui");
     }
     if prerequisites_met && attempt.is_none() {
-        blocked_by.push(retry.state);
+        blocked_by.push(retry_state);
     }
     let blocked_by = if blocked_by.is_empty() {
         "none".to_owned()
@@ -1264,14 +1119,14 @@ fn should_use_user_capture_helper(
         blocked_by.join(",")
     };
     log::info!(
-        "user capture helper decision: use_helper={}, backend={}, display={}, blocked_by={}, retry_state={}, retry_failures={}, retry_in_ms={}, privacy_mode_id={}, portable_service_running={}, is_root={}, installed={}, prelogin={}, locked={}, desktop_changed={}, logon_ui={}",
+        "user capture helper decision: use_helper={}, backend={}, display={}, blocked_by={}, retry_state={}, key={:?}, attempt={:?}, privacy_mode_id={}, portable_service_running={}, is_root={}, installed={}, prelogin={}, locked={}, desktop_changed={}, logon_ui={}",
         use_helper,
         backend.as_str(),
         display,
         blocked_by,
-        retry.state,
-        retry.failures,
-        retry.retry_in_ms,
+        retry_state,
+        key,
+        attempt,
         privacy_mode_id,
         portable_service_running,
         is_root,
@@ -1281,7 +1136,9 @@ fn should_use_user_capture_helper(
         desktop_state.desktop_changed,
         desktop_state.logon_ui
     );
-    use_helper
+    attempt.map(|token| {
+        super::helper_retry::HelperAttemptLease::new(USER_CAPTURE_HELPERS.clone(), token)
+    })
 }
 
 #[cfg(windows)]
@@ -1298,7 +1155,7 @@ fn create_wgc_priority_capturer(
     width: usize,
     height: usize,
 ) -> ResultType<Box<dyn TraitCapturer>> {
-    if should_use_user_capture_helper(
+    if let Some(attempt) = should_use_user_capture_helper(
         portable_service_running,
         privacy_mode_id,
         UserCaptureBackend::Wgc,
@@ -1309,13 +1166,13 @@ fn create_wgc_priority_capturer(
             current,
             width,
             height,
+            attempt,
         ) {
             Ok(capturer) => {
                 log::info!("Create capturer via user WGC helper");
                 return Ok(capturer);
             }
             Err(err) => {
-                record_user_capture_helper_failure("WGC helper initialization failed");
                 log::warn!(
                     "Failed to create user WGC helper capturer, falling back to direct WGC: {}",
                     err
@@ -1378,7 +1235,7 @@ fn create_dxgi_priority_capturer(
 ) -> ResultType<Box<dyn TraitCapturer>> {
     let width = display.width();
     let height = display.height();
-    if should_use_user_capture_helper(
+    if let Some(attempt) = should_use_user_capture_helper(
         portable_service_running,
         privacy_mode_id,
         UserCaptureBackend::Dxgi,
@@ -1389,6 +1246,7 @@ fn create_dxgi_priority_capturer(
             current,
             width,
             height,
+            attempt,
         ) {
             Ok(capturer) => {
                 log::info!(
@@ -1400,7 +1258,6 @@ fn create_dxgi_priority_capturer(
                 return Ok(capturer);
             }
             Err(err) => {
-                record_user_capture_helper_failure("DXGI helper initialization failed");
                 log::warn!(
                     "Failed to create user DXGI helper capturer, falling back to direct dxgi|gdi: {}",
                     err
@@ -1542,11 +1399,9 @@ mod tests {
         secure_capture_helper_ready, should_force_privileged_secure_capturer,
         stale_secure_capture_helper_on_user_desktop, stamp_video_frame, windows_capture_route,
         DurationSamples, HqReferenceRefreshPolicy, MovieFramePacer, MovieHostCadenceWindow,
-        ReferenceRefreshReason, UserCaptureHelperRetryPolicy, VideoFrameController, VideoSource,
-        VideoStreamKey, WindowsCaptureRoute, DELIVERY_REFERENCE_REFRESH_COOLDOWN,
-        HOST_VIDEO_DIAG_SAMPLE_CAPACITY, HQ_REFERENCE_REFRESH_COOLDOWN,
-        USER_CAPTURE_HELPER_FIRST_RETRY_COOLDOWN, USER_CAPTURE_HELPER_SECOND_RETRY_COOLDOWN,
-        USER_CAPTURE_HELPER_STALE_ATTEMPT_GRACE, USER_CAPTURE_HELPER_STARTUP_TIMEOUT,
+        ReferenceRefreshReason, VideoFrameController, VideoSource, VideoStreamKey,
+        WindowsCaptureRoute, DELIVERY_REFERENCE_REFRESH_COOLDOWN, HOST_VIDEO_DIAG_SAMPLE_CAPACITY,
+        HQ_REFERENCE_REFRESH_COOLDOWN,
     };
     use hbb_common::message_proto::{option_message::CaptureBackend, VideoFrame};
     use std::{
@@ -1578,6 +1433,131 @@ mod tests {
         assert!(should_force_privileged_secure_capturer(
             false, true, false, false, false, true
         ));
+    }
+
+    #[test]
+    fn subscriber_join_waits_for_encoder_warmup_and_bounds_reference_wait() {
+        use super::{subscriber_join_action, SubscriberJoinAction::*};
+        let now = Instant::now();
+        let mut started = None;
+        for second in 0..5 {
+            assert_eq!(
+                subscriber_join_action(
+                    true,
+                    false,
+                    false,
+                    &mut started,
+                    now + Duration::from_secs(second)
+                ),
+                Wait
+            );
+        }
+        assert_eq!(
+            subscriber_join_action(true, true, true, &mut started, now),
+            Reference
+        );
+        assert_eq!(
+            subscriber_join_action(true, true, true, &mut started, now + Duration::from_secs(1)),
+            Wait
+        );
+        assert_eq!(
+            subscriber_join_action(
+                true,
+                true,
+                true,
+                &mut started,
+                now + Duration::from_secs(10)
+            ),
+            Restart
+        );
+        assert_eq!(
+            subscriber_join_action(false, true, true, &mut started, now),
+            Wait
+        );
+        assert!(started.is_none());
+        assert_eq!(
+            subscriber_join_action(true, true, false, &mut started, now),
+            Restart
+        );
+    }
+
+    #[test]
+    fn subscriber_join_requires_a_nonempty_leading_reference_frame() {
+        use hbb_common::message_proto::{EncodedVideoFrame, EncodedVideoFrames};
+        let key = EncodedVideoFrame {
+            key: true,
+            data: vec![1].into(),
+            ..Default::default()
+        };
+        let delta = EncodedVideoFrame {
+            key: false,
+            data: vec![2].into(),
+            ..Default::default()
+        };
+        let mut vf = VideoFrame::new();
+        vf.set_vp9s(EncodedVideoFrames {
+            frames: vec![delta.clone(), key.clone()],
+            ..Default::default()
+        });
+        assert!(!super::starts_with_keyframe(&vf));
+        vf.set_h264s(EncodedVideoFrames {
+            frames: vec![key, delta],
+            ..Default::default()
+        });
+        assert!(super::starts_with_keyframe(&vf));
+        vf.set_h265s(EncodedVideoFrames {
+            frames: vec![EncodedVideoFrame {
+                key: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        assert!(!super::starts_with_keyframe(&vf));
+    }
+
+    #[test]
+    fn cached_cpu_reference_decodes_for_existing_and_new_viewer() {
+        use scrap::{
+            codec::{Encoder, EncoderCfg},
+            EncodeInput, VpxDecoder, VpxDecoderConfig, VpxEncoderConfig, VpxVideoCodecId,
+        };
+        for codec in [VpxVideoCodecId::VP8, VpxVideoCodecId::VP9] {
+            let config = EncoderCfg::VPX(VpxEncoderConfig {
+                width: 64,
+                height: 64,
+                quality: 1.0,
+                fps: 30,
+                codec,
+                keyframe_interval: None,
+            });
+            let mut encoder = Encoder::new(config.clone(), false).unwrap();
+            let format = encoder.yuvfmt();
+            let yuv = vec![128; format.v + format.stride[2] * format.h.div_ceil(2)];
+            let initial = encoder
+                .encode_to_message(EncodeInput::YUV(&yuv), 0)
+                .unwrap();
+            let payload = |frame: &VideoFrame| match frame.union.as_ref().unwrap() {
+                hbb_common::message_proto::video_frame::Union::Vp8s(frames)
+                | hbb_common::message_proto::video_frame::Union::Vp9s(frames) => {
+                    frames.frames[0].data.clone()
+                }
+                _ => panic!("unexpected test codec"),
+            };
+            let mut existing = VpxDecoder::new(VpxDecoderConfig { codec }).unwrap();
+            assert_eq!(existing.decode(&payload(&initial)).unwrap().count(), 1);
+            // Production fallback replaces only the encoder, retaining capture,
+            // cached YUV, stream/frame counters, and the existing decoder.
+            if !encoder.request_keyframe() {
+                encoder = super::recreate_encoder_at_quality(&config, false, 1.0).unwrap();
+            }
+            let reference = encoder
+                .encode_to_message(EncodeInput::YUV(&yuv), 33)
+                .unwrap();
+            assert!(super::starts_with_keyframe(&reference));
+            assert_eq!(existing.decode(&payload(&reference)).unwrap().count(), 1);
+            let mut newcomer = VpxDecoder::new(VpxDecoderConfig { codec }).unwrap();
+            assert_eq!(newcomer.decode(&payload(&reference)).unwrap().count(), 1);
+        }
     }
 
     #[test]
@@ -1640,110 +1620,6 @@ mod tests {
             windows_capture_route(CaptureBackend::CaptureBackendAuto, false),
             WindowsCaptureRoute::Auto
         );
-    }
-
-    #[test]
-    fn user_capture_helper_retry_is_bounded_and_consumed_once() {
-        let start = Instant::now();
-        let mut policy = UserCaptureHelperRetryPolicy::default();
-
-        let initial = policy.try_begin_attempt(start).unwrap();
-        assert_eq!((initial.number, initial.retry), (1, false));
-        let first_failure = policy.record_failure(start);
-        assert_eq!(first_failure.state, "cooldown");
-        assert_eq!(
-            first_failure.retry_in_ms,
-            USER_CAPTURE_HELPER_FIRST_RETRY_COOLDOWN.as_millis() as u64
-        );
-        assert!(policy
-            .try_begin_attempt(start + USER_CAPTURE_HELPER_FIRST_RETRY_COOLDOWN / 2)
-            .is_none());
-
-        let first_retry_at = start + USER_CAPTURE_HELPER_FIRST_RETRY_COOLDOWN;
-        assert!(policy.queue_retry_if_due(first_retry_at));
-        assert!(!policy.queue_retry_if_due(first_retry_at));
-        let first_retry = policy.try_begin_attempt(first_retry_at).unwrap();
-        assert_eq!((first_retry.number, first_retry.retry), (2, true));
-        let second_failure = policy.record_failure(first_retry_at);
-        assert_eq!(second_failure.state, "cooldown");
-        assert_eq!(
-            second_failure.retry_in_ms,
-            USER_CAPTURE_HELPER_SECOND_RETRY_COOLDOWN.as_millis() as u64
-        );
-
-        let second_retry_at = first_retry_at + USER_CAPTURE_HELPER_SECOND_RETRY_COOLDOWN;
-        assert!(policy.queue_retry_if_due(second_retry_at));
-        let second_retry = policy.try_begin_attempt(second_retry_at).unwrap();
-        assert_eq!((second_retry.number, second_retry.retry), (3, true));
-        let final_failure = policy.record_failure(second_retry_at);
-        assert_eq!(final_failure.state, "suppressed");
-        assert!(!policy.queue_retry_if_due(second_retry_at + Duration::from_secs(300)));
-        assert!(policy
-            .try_begin_attempt(second_retry_at + Duration::from_secs(300))
-            .is_none());
-    }
-
-    #[test]
-    fn user_capture_helper_success_and_manual_override_reset_cleanly() {
-        let start = Instant::now();
-        let mut policy = UserCaptureHelperRetryPolicy::default();
-        assert!(policy.try_begin_attempt(start).is_some());
-        policy.record_failure(start);
-        let retry_at = start + USER_CAPTURE_HELPER_FIRST_RETRY_COOLDOWN;
-        assert!(policy.queue_retry_if_due(retry_at));
-        assert!(policy.try_begin_attempt(retry_at).is_some());
-        assert!(policy.record_success());
-        assert_eq!(policy.snapshot(retry_at).state, "ready");
-        assert_eq!(policy.snapshot(retry_at).failures, 0);
-
-        assert!(policy.set_manual());
-        assert!(policy.try_begin_attempt(retry_at).is_none());
-        assert_eq!(policy.record_failure(retry_at).state, "manual");
-        assert!(!policy.record_success());
-        assert!(policy.reset());
-        assert!(policy.try_begin_attempt(retry_at).is_some());
-    }
-
-    #[test]
-    fn abandoned_user_capture_helper_attempt_enters_cooldown() {
-        let start = Instant::now();
-        let mut policy = UserCaptureHelperRetryPolicy::default();
-        assert!(policy.try_begin_attempt(start).is_some());
-        let stale_at =
-            start + USER_CAPTURE_HELPER_STARTUP_TIMEOUT + USER_CAPTURE_HELPER_STALE_ATTEMPT_GRACE;
-
-        assert!(!policy.queue_retry_if_due(stale_at));
-        let snapshot = policy.snapshot(stale_at);
-        assert_eq!(snapshot.state, "cooldown");
-        assert_eq!(snapshot.failures, 1);
-        assert_eq!(
-            snapshot.retry_in_ms,
-            USER_CAPTURE_HELPER_FIRST_RETRY_COOLDOWN.as_millis() as u64
-        );
-    }
-
-    #[test]
-    fn concurrent_user_capture_helper_retry_is_queued_once() {
-        let start = Instant::now();
-        let mut policy = UserCaptureHelperRetryPolicy::default();
-        assert!(policy.try_begin_attempt(start).is_some());
-        policy.record_failure(start);
-        let retry_at = start + USER_CAPTURE_HELPER_FIRST_RETRY_COOLDOWN;
-        let policy = Arc::new(Mutex::new(policy));
-
-        let mut workers = Vec::new();
-        for _ in 0..8 {
-            let policy = policy.clone();
-            workers.push(std::thread::spawn(move || {
-                policy.lock().unwrap().queue_retry_if_due(retry_at)
-            }));
-        }
-        let queued = workers
-            .into_iter()
-            .map(|worker| worker.join().unwrap())
-            .filter(|queued| *queued)
-            .count();
-        assert_eq!(queued, 1);
     }
 
     #[test]
@@ -2886,8 +2762,6 @@ fn run(vs: VideoService) -> ResultType<()> {
     #[cfg(windows)]
     let mut try_gdi = 1;
     #[cfg(windows)]
-    let mut user_capture_helper_no_frame_since: Option<Instant> = None;
-    #[cfg(windows)]
     let mut mag_no_frame_count = 0u32;
     #[cfg(windows)]
     let mut last_desktop_capture_state = WindowsCaptureDesktopState::current();
@@ -2919,6 +2793,7 @@ fn run(vs: VideoService) -> ResultType<()> {
     sp.set_option(OPTION_DIAGNOSTIC_STREAM_ID, &stream_id.to_string());
     let mut next_frame_id = 1;
     let mut reference_refresh_pending = None;
+    let mut subscriber_join_started: Option<Instant> = None;
     #[cfg(windows)]
     let mut secure_desktop_reference_refresh_pending = None;
     let mut reference_refresh_policy = HqReferenceRefreshPolicy::new(
@@ -3153,6 +3028,28 @@ fn run(vs: VideoService) -> ResultType<()> {
             }
         }
         let reference_refresh_eligible = hq_reference_refresh_eligible(&encoder_cfg, codec_format);
+        // Codec/chroma/resolution changes still use their existing SWITCH paths
+        // before encoding. A compatible CPU-backed join can reuse cached YUV on
+        // a static desktop. Texture-only capture has no owned replayable frame;
+        // retain its compatibility restart instead of stranding a new viewer.
+        let subscriber_join_reason = match subscriber_join_action(
+            sp.has_pending_subscribers(),
+            next_frame_id > 1,
+            !yuv.is_empty(),
+            &mut subscriber_join_started,
+            Instant::now(),
+        ) {
+            SubscriberJoinAction::Wait => None,
+            SubscriberJoinAction::Reference => Some(ReferenceRefreshReason::SubscriberJoin),
+            SubscriberJoinAction::Restart => {
+                log::info!(
+                    "switch for subscriber join: replayable_frame={}, reference_timed_out={}",
+                    !yuv.is_empty(),
+                    subscriber_join_started.is_some()
+                );
+                bail!("SWITCH");
+            }
+        };
         let policy_refresh_reason = reference_refresh_policy.evaluate(
             reference_refresh_eligible,
             qos_update.startup_safe,
@@ -3170,6 +3067,7 @@ fn run(vs: VideoService) -> ResultType<()> {
         #[cfg(not(windows))]
         let secure_desktop_refresh_reason: Option<ReferenceRefreshReason> = None;
         let refresh_reason = secure_desktop_refresh_reason
+            .or(subscriber_join_reason)
             .or(delivery_refresh_reason)
             .or(policy_refresh_reason);
         if cadence_recreated || reference_recreated_after_timeout {
@@ -3184,6 +3082,7 @@ fn run(vs: VideoService) -> ResultType<()> {
         } else if let Some(reason) = refresh_reason {
             let refresh_started = Instant::now();
             if encoder.request_keyframe() {
+                repeat_encode_counter = 0;
                 let bitrate = encoder.bitrate();
                 log::info!(
                     "diag video reference refresh requested in-place: service={}, display={}, codec={:?}, reason={:?}, ratio={}, bitrate={}, qos_previous_bitrate={}, ratio_changed={}, startup_safe={}",
@@ -3251,11 +3150,24 @@ fn run(vs: VideoService) -> ResultType<()> {
             }
         }
         if sp.is_option_true(OPTION_REFRESH) {
-            if vs.source.is_monitor() {
-                let _ = try_broadcast_display_changed(&sp, display_idx, &c, true);
+            #[cfg(windows)]
+            let protected = vs.source.is_monitor() && helper_startup_protects_refresh(display_idx);
+            #[cfg(not(windows))]
+            let protected = false;
+            if protected {
+                // Consume/coalesce the request; do not cancel an active or
+                // queued helper attempt, or bypass its per-key cooldown.
+                sp.set_option_bool(OPTION_REFRESH, false);
+                log::info!(
+                    "coalesced capture refresh during helper startup: display={display_idx}"
+                );
+            } else {
+                if vs.source.is_monitor() {
+                    let _ = try_broadcast_display_changed(&sp, display_idx, &c, true);
+                }
+                log::info!("switch to refresh");
+                bail!("SWITCH");
             }
-            log::info!("switch to refresh");
-            bail!("SWITCH");
         }
         let negotiated_codec = Encoder::negotiated_codec();
         if codec_format != negotiated_codec {
@@ -3298,6 +3210,10 @@ fn run(vs: VideoService) -> ResultType<()> {
         #[cfg(windows)]
         {
             let desktop_state = WindowsCaptureDesktopState::current();
+            {
+                let mut owner = USER_CAPTURE_HELPERS.lock().unwrap();
+                let _ = helper_key(&mut owner, display_idx, UserCaptureBackend::Wgc);
+            }
             let desktop_changed = desktop_state.desktop_changed;
             if desktop_state.requires_secure_capture() {
                 last_secure_desktop_seen = Some(Instant::now());
@@ -3370,7 +3286,6 @@ fn run(vs: VideoService) -> ResultType<()> {
                         "interactive desktop restored; leaving SYSTEM helper capture, stop_requested={}",
                         stop_requested
                     );
-                    reset_user_capture_helper_retry("interactive desktop restored");
                     bail!("SWITCH");
                 }
                 if c.is_mag() {
@@ -3388,9 +3303,6 @@ fn run(vs: VideoService) -> ResultType<()> {
                         bail!("SWITCH");
                     }
                     if !desktop_state.requires_secure_capture() {
-                        reset_user_capture_helper_retry(
-                            "interactive desktop restored while using magnifier",
-                        );
                         log::info!(
                             "returned to user desktop while using magnifier; switch capture backend"
                         );
@@ -3437,7 +3349,6 @@ fn run(vs: VideoService) -> ResultType<()> {
                     SECURE_DESKTOP_EXIT_DEBOUNCE.as_millis(),
                     stop_requested
                 );
-                reset_user_capture_helper_retry("secure desktop exit stabilized");
                 bail!("SWITCH");
             }
             let retry_preference = *CAPTURE_BACKEND_PREFERENCE.lock().unwrap();
@@ -3448,7 +3359,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                 && is_installed()
                 && !desktop_state.requires_secure_capture()
                 && capture_backend_allows_user_helper_retry(retry_preference)
-                && queue_user_capture_helper_retry_if_due("interactive WinMag fallback")
+                && queue_user_capture_helper_retry_if_due(display_idx, retry_preference)
             {
                 log::info!(
                     "interactive WinMag fallback reached user capture helper retry deadline; restarting video service"
@@ -3509,8 +3420,6 @@ fn run(vs: VideoService) -> ResultType<()> {
         } else {
             spf
         };
-        #[cfg(windows)]
-        let using_user_capture_helper = c.is_user_capture_helper();
         let captured_frame = c.frame(capture_timeout);
         let capture_call_elapsed = capture_call_started.elapsed();
         host_diag.record_capture_call(capture_call_elapsed);
@@ -3523,10 +3432,6 @@ fn run(vs: VideoService) -> ResultType<()> {
                 if frame.valid() {
                     #[cfg(windows)]
                     {
-                        if using_user_capture_helper {
-                            record_user_capture_helper_success(capture_backend);
-                        }
-                        user_capture_helper_no_frame_since = None;
                         mag_no_frame_count = 0;
                     }
                     host_diag.record_valid_capture(Instant::now());
@@ -3681,18 +3586,6 @@ fn run(vs: VideoService) -> ResultType<()> {
                     }
                 }
                 #[cfg(windows)]
-                if c.is_user_capture_helper() && first_frame {
-                    let first_no_frame = *user_capture_helper_no_frame_since.get_or_insert(now);
-                    if first_no_frame.elapsed() >= USER_CAPTURE_HELPER_STARTUP_TIMEOUT {
-                        record_user_capture_helper_failure("startup frame timeout");
-                        log::warn!(
-                            "User capture helper did not produce startup frame after {:?}; switching to bounded fallback",
-                            USER_CAPTURE_HELPER_STARTUP_TIMEOUT
-                        );
-                        bail!("SWITCH");
-                    }
-                }
-                #[cfg(windows)]
                 if try_gdi > 0 && !c.is_gdi() && !c.is_cpu_only() {
                     if try_gdi > 3 {
                         if try_set_magnifier_fallback(&mut c, "no_image_mag") {
@@ -3725,7 +3618,9 @@ fn run(vs: VideoService) -> ResultType<()> {
                         }
                     }
                 }
-                if !encoder.latency_free() && yuv.len() > 0 {
+                if (!encoder.latency_free() || reference_refresh_pending.is_some())
+                    && !yuv.is_empty()
+                {
                     // yun.len() > 0 means the frame is not texture.
                     if repeat_encode_counter < repeat_encode_max {
                         repeat_encode_counter += 1;
@@ -3767,7 +3662,6 @@ fn run(vs: VideoService) -> ResultType<()> {
 
                 #[cfg(windows)]
                 if c.is_user_capture_helper() {
-                    record_user_capture_helper_failure("capture error");
                     log::warn!(
                         "User capture helper returned capture error; switching to bounded fallback: {:?}",
                         err
@@ -4323,15 +4217,6 @@ fn handle_one_frame(
     width: usize,
     height: usize,
 ) -> ResultType<HashSet<i32>> {
-    sp.snapshot(|sps| {
-        // so that new sub and old sub share the same encoder after switch
-        if sps.has_subscribes() {
-            log::info!("switch due to new subscriber");
-            bail!("SWITCH");
-        }
-        Ok(())
-    })?;
-
     let mut send_conn_ids: HashSet<i32> = Default::default();
     let first = *first_frame;
     *first_frame = false;
@@ -4343,6 +4228,7 @@ fn handle_one_frame(
             let frame_id = stamp_video_frame(&mut vf, stream_id, next_frame_id, ms);
             let (payload_bytes, frame_count, has_keyframe) =
                 scrap::codec::video_frame_payload_stats(&vf).unwrap_or((0, 0, false));
+            let admits_subscriber = starts_with_keyframe(&vf);
             let mut msg = Message::new();
             msg.set_video_frame(vf);
             recorder
@@ -4350,7 +4236,7 @@ fn handle_one_frame(
                 .unwrap()
                 .as_mut()
                 .map(|r| r.write_message(&msg, width, height));
-            send_conn_ids = sp.send_video_frame(msg);
+            send_conn_ids = sp.send_video_frame_with_join(msg, admits_subscriber);
             if first {
                 log::info!(
                     "diag first video frame encoded: service={}, display={}, stream_id={}, frame_id={}, width={}, height={}, targets={:?}, negotiated={:?}, hardware={}, bitrate={}, payload_bytes={}, frame_count={}, keyframe={}, capture_ms={}",

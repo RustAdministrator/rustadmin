@@ -688,6 +688,7 @@ pub mod client {
     static NEXT_GENERATION: AtomicU32 = AtomicU32::new(1);
 
     pub struct UserCaptureHelperCapturer {
+        attempt: Option<super::super::helper_retry::HelperAttemptLease>,
         shmem_name: String,
         shmem: crate::portable_service::SharedMemory,
         process: HANDLE,
@@ -762,12 +763,12 @@ pub mod client {
                     Ok(process) => process,
                     Err(err) => {
                         schedule_remove_shmem_flink(shmem_name);
-                        return Err(err).with_context(|| "Failed to launch user capture helper");
+                        return Err(err).context(super::super::helper_retry::HelperLaunchFailure);
                     }
                 };
             if process.is_null() {
                 schedule_remove_shmem_flink(shmem_name);
-                bail!("Failed to launch user capture helper");
+                return Err(super::super::helper_retry::HelperLaunchFailure.into());
             }
             log::info!(
                 "Launched user capture helper: requested_backend={} helper CPU, display={}, session={}, shmem={}, size={}",
@@ -778,6 +779,7 @@ pub mod client {
                 shmem_size
             );
             Ok(Self {
+                attempt: None,
                 shmem_name,
                 shmem,
                 process,
@@ -842,12 +844,25 @@ pub mod client {
                     ));
                 }
                 if !validate_frame_length(self.shmem.len(), info.length) {
+                    if let Some(attempt) = self.attempt.as_mut() {
+                        attempt.failure(false);
+                    }
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "invalid user capture helper frame length",
                     ));
                 }
                 self.last_counter = info.counter;
+                if self
+                    .attempt
+                    .as_mut()
+                    .is_some_and(|attempt| !attempt.success())
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "retired user capture helper attempt",
+                    ));
+                }
                 unsafe {
                     let data =
                         slice::from_raw_parts(self.shmem.as_ptr().add(ADDR_FRAME), info.length);
@@ -858,7 +873,18 @@ pub mod client {
                     )));
                 }
             }
-            match info.status {
+            // A valid frame already in shared memory wins over the polling
+            // deadline; encoder initialization may delay our first frame call.
+            if let Some(attempt) = self.attempt.as_mut() {
+                if attempt.startup_timed_out() {
+                    attempt.failure(false);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "user capture helper startup timed out",
+                    ));
+                }
+            }
+            let result = match info.status {
                 STATUS_ERROR => Err(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     "user capture helper backend error",
@@ -871,7 +897,17 @@ pub mod client {
                     std::io::ErrorKind::WouldBlock,
                     "user capture helper would block",
                 )),
+            };
+            if result
+                .as_ref()
+                .err()
+                .is_some_and(|err| err.kind() != std::io::ErrorKind::WouldBlock)
+            {
+                if let Some(attempt) = self.attempt.as_mut() {
+                    attempt.failure(false);
+                }
             }
+            result
         }
 
         fn is_gdi(&self) -> bool {
@@ -913,13 +949,21 @@ pub mod client {
         current_display: usize,
         width: usize,
         height: usize,
+        mut attempt: super::super::helper_retry::HelperAttemptLease,
     ) -> ResultType<Box<dyn TraitCapturer>> {
-        Ok(Box::new(UserCaptureHelperCapturer::new(
-            backend,
-            current_display,
-            width,
-            height,
-        )?))
+        match UserCaptureHelperCapturer::new(backend, current_display, width, height) {
+            Ok(mut capturer) => {
+                capturer.attempt = Some(attempt);
+                Ok(Box::new(capturer))
+            }
+            Err(err) => {
+                attempt.failure(
+                    err.downcast_ref::<super::super::helper_retry::HelperLaunchFailure>()
+                        .is_some(),
+                );
+                Err(err)
+            }
+        }
     }
 }
 

@@ -110,6 +110,7 @@ pub use super::lang::*;
 
 mod decoder_recovery;
 mod display_control;
+mod startup_recovery;
 pub mod file_trait;
 pub mod helper;
 pub mod io_loop;

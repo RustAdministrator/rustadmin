@@ -3637,6 +3637,9 @@ impl Connection {
         }
         let mut platform_additions = serde_json::Map::new();
         platform_additions.insert("full_version".into(), json!(crate::FULL_VERSION));
+        // Transport-independent support advertisement; old peers ignore it.
+        platform_additions.insert("support_video_reference_refresh".into(), json!(true));
+        platform_additions.insert("display_set_starts_capture".into(), json!(true));
         #[cfg(target_os = "linux")]
         {
             if crate::platform::current_is_wayland() {

@@ -210,6 +210,7 @@ struct SessionHandler {
     event_stream: Option<StreamSink<EventToUI>>,
     display_intent: ViewDisplayIntent,
     event_stream_generation: u64,
+    render_event_sequence: u64,
     render_bindings: BTreeMap<usize, ViewDisplayRenderBinding>,
     renderer: VideoRenderer,
     #[cfg(all(target_os = "android", feature = "mediacodec"))]
@@ -1090,6 +1091,36 @@ mod display_intent_tests {
     }
 
     #[test]
+    fn zero_frame_waiting_age_and_failure_remain_observational() {
+        let context = render_context(1, 1, 0, 0);
+        let mut binding = ViewDisplayRenderBinding::waiting(context);
+        let start = binding.created_at;
+        assert_eq!(binding.phase, ViewRenderPhase::AwaitingFrame);
+        assert_eq!(binding.elapsed_ms(start + Duration::from_secs(16)), 16_000);
+        assert!(!binding.mark_stale_if_due(start + Duration::from_secs(300)));
+        binding.phase = ViewRenderPhase::Failed;
+        assert!(binding.observe(
+            render_context(1, 1, 20, 1),
+            4,
+            true,
+            true,
+            start + Duration::from_secs(301)
+        ));
+        assert_eq!(binding.phase, ViewRenderPhase::Live);
+        assert_eq!(binding.elapsed_ms(start + Duration::from_secs(302)), 1000);
+    }
+
+    #[test]
+    fn missing_event_sink_does_not_mark_render_status_as_delivered() {
+        let mut binding = ViewDisplayRenderBinding::waiting(render_context(1, 1, 0, 0));
+        let mut sequence = 0;
+        super::emit_render_binding_state(&None, &mut sequence, 1, 0, 2, &mut binding);
+        assert!(binding.notification_dirty);
+        assert_eq!(binding.notified_attachment, 0);
+        assert_eq!(sequence, 0);
+    }
+
+    #[test]
     fn ending_screen_authority_hides_cached_pixels_and_clears_every_binding() {
         let handler = FlutterHandler::default();
         handler.begin_connection_runtime(1);
@@ -1239,6 +1270,7 @@ enum RenderType {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ViewRenderPhase {
+    AwaitingFrame,
     AwaitingTarget,
     Live,
     Stale,
@@ -1248,6 +1280,7 @@ enum ViewRenderPhase {
 impl ViewRenderPhase {
     fn as_str(self) -> &'static str {
         match self {
+            Self::AwaitingFrame => "awaiting-frame",
             Self::AwaitingTarget => "awaiting-target",
             Self::Live => "live",
             Self::Stale => "stale",
@@ -1265,6 +1298,10 @@ struct ViewDisplayRenderBinding {
     submitted_frame_id: u64,
     last_submission: Option<Instant>,
     phase: ViewRenderPhase,
+    created_at: Instant,
+    notification_dirty: bool,
+    notified_attachment: u64,
+    notified_age_seconds: u64,
 }
 
 impl ViewDisplayRenderBinding {
@@ -1277,7 +1314,24 @@ impl ViewDisplayRenderBinding {
             submitted_frame_id: 0,
             last_submission: None,
             phase: ViewRenderPhase::AwaitingTarget,
+            created_at: Instant::now(),
+            notification_dirty: true,
+            notified_attachment: 0,
+            notified_age_seconds: 0,
         }
+    }
+
+    fn waiting(context: RenderFrameContext) -> Self {
+        Self {
+            phase: ViewRenderPhase::AwaitingFrame,
+            ..Self::new(context, 0)
+        }
+    }
+
+    fn elapsed_ms(&self, now: Instant) -> u64 {
+        now.saturating_duration_since(self.last_submission.unwrap_or(self.created_at))
+            .as_millis()
+            .min(u64::MAX as u128) as u64
     }
 
     fn observe(
@@ -1305,7 +1359,9 @@ impl ViewDisplayRenderBinding {
         } else {
             self.phase = ViewRenderPhase::AwaitingTarget;
         }
-        previous_phase != self.phase || dependency_changed
+        let changed = previous_phase != self.phase || dependency_changed;
+        self.notification_dirty |= changed;
+        changed
     }
 
     fn mark_stale_if_due(&mut self, now: Instant) -> bool {
@@ -1317,6 +1373,7 @@ impl ViewDisplayRenderBinding {
             return false;
         }
         self.phase = ViewRenderPhase::Stale;
+        self.notification_dirty = true;
         true
     }
 }
@@ -1825,16 +1882,14 @@ impl SessionHandler {
             target_exists,
             now,
         );
-        let phase = binding.phase;
-        let submitted_frame_id = binding.submitted_frame_id;
         if changed {
             emit_render_binding_state(
                 &self.event_stream,
+                &mut self.render_event_sequence,
+                self.event_stream_generation,
                 display,
-                context,
-                render_target_generation,
-                submitted_frame_id,
-                phase,
+                context.screen_authority_generation,
+                binding,
             );
         }
         if submitted {
@@ -1847,29 +1902,39 @@ impl SessionHandler {
 
 fn emit_render_binding_state(
     event_stream: &Option<StreamSink<EventToUI>>,
+    sequence: &mut u64,
+    attachment: u64,
     display: usize,
-    context: RenderFrameContext,
-    render_target_generation: u64,
-    submitted_frame_id: u64,
-    phase: ViewRenderPhase,
+    authority_generation: u64,
+    binding: &mut ViewDisplayRenderBinding,
 ) {
     let Some(event_stream) = event_stream else {
         return;
     };
-    event_stream.add(EventToUI::Event(
+    *sequence = sequence.saturating_add(1);
+    let elapsed_ms = binding.elapsed_ms(Instant::now());
+    let admitted = event_stream.add(EventToUI::Event(
         json!({
             "name": "display_render_state",
             "display": display,
-            "state": phase.as_str(),
-            "connection_generation": context.connection_generation,
-            "display_activation_generation": context.display_activation_generation,
-            "render_target_generation": render_target_generation,
-            "stream_id": context.stream_id,
-            "submitted_frame_id": submitted_frame_id,
+            "state": binding.phase.as_str(),
+            "connection_generation": binding.connection_generation,
+            "screen_authority_generation": authority_generation,
+            "display_activation_generation": binding.display_activation_generation,
+            "render_target_generation": binding.render_target_generation,
+            "stream_id": binding.stream_id,
+            "submitted_frame_id": binding.submitted_frame_id,
+            "sequence": *sequence,
+            "elapsed_ms": elapsed_ms,
             "presentation_confirmed": false,
         })
         .to_string(),
     ));
+    if admitted {
+        binding.notification_dirty = false;
+        binding.notified_attachment = attachment;
+        binding.notified_age_seconds = elapsed_ms / 1000;
+    }
 }
 
 fn emit_screen_authority(
@@ -2615,28 +2680,89 @@ impl InvokeUiSession for FlutterHandler {
         self.screen_authority.read().unwrap().generation
     }
 
+    fn display_startup_state(&self, context: RenderFrameContext, display: usize, failed: bool) {
+        let authority = self.screen_authority.read().unwrap();
+        let mut handlers = self.session_handlers.write().unwrap();
+        if !authority.accepts(
+            context.connection_generation,
+            context.screen_authority_generation,
+        ) || !self.accepts_render_context(display, context)
+        {
+            return;
+        }
+        for handler in handlers.values_mut().filter(|handler| {
+            handler.event_stream.is_some() && handler.display_intent.displays.contains(&display)
+        }) {
+            let binding = handler
+                .render_bindings
+                .entry(display)
+                .or_insert_with(|| ViewDisplayRenderBinding::waiting(context));
+            let same_activation = binding.connection_generation == context.connection_generation
+                && binding.display_activation_generation == context.display_activation_generation;
+            if same_activation && binding.stream_id > context.stream_id {
+                continue;
+            }
+            if !same_activation || binding.stream_id != context.stream_id {
+                *binding = ViewDisplayRenderBinding::waiting(context);
+            }
+            if failed && binding.phase != ViewRenderPhase::Failed {
+                binding.phase = ViewRenderPhase::Failed;
+                binding.notification_dirty = true;
+            }
+            if binding.notification_dirty {
+                emit_render_binding_state(
+                    &handler.event_stream,
+                    &mut handler.render_event_sequence,
+                    handler.event_stream_generation,
+                    display,
+                    authority.generation,
+                    binding,
+                );
+            }
+        }
+    }
+
     fn tick_render_liveness(&self) {
         let authority = self.screen_authority.read().unwrap();
+        if !authority.allowed {
+            return;
+        }
         let now = Instant::now();
         let mut handlers = self.session_handlers.write().unwrap();
-        for handler in handlers.values_mut() {
-            let event_stream = &handler.event_stream;
-            let render_bindings = &mut handler.render_bindings;
-            for (display, binding) in render_bindings.iter_mut() {
-                if binding.mark_stale_if_due(now) {
+        let intent = self.current_display_media_intent();
+        for handler in handlers
+            .values_mut()
+            .filter(|handler| handler.event_stream.is_some())
+        {
+            for display in &handler.display_intent.displays {
+                let Some(activation) = intent.activation(*display) else {
+                    continue;
+                };
+                handler.render_bindings.entry(*display).or_insert_with(|| {
+                    ViewDisplayRenderBinding::waiting(RenderFrameContext {
+                        connection_generation: authority.connection_generation,
+                        screen_authority_generation: authority.generation,
+                        display_activation_generation: activation.generation,
+                        stream_id: 0,
+                        frame_id: 0,
+                    })
+                });
+            }
+            for (display, binding) in handler.render_bindings.iter_mut() {
+                binding.mark_stale_if_due(now);
+                let age_changed = binding.phase != ViewRenderPhase::Live
+                    && binding.elapsed_ms(now) / 1000 != binding.notified_age_seconds;
+                if binding.notification_dirty
+                    || binding.notified_attachment != handler.event_stream_generation
+                    || age_changed
+                {
                     emit_render_binding_state(
-                        event_stream,
+                        &handler.event_stream,
+                        &mut handler.render_event_sequence,
+                        handler.event_stream_generation,
                         *display,
-                        RenderFrameContext {
-                            connection_generation: binding.connection_generation,
-                            screen_authority_generation: authority.generation,
-                            display_activation_generation: binding.display_activation_generation,
-                            stream_id: binding.stream_id,
-                            frame_id: binding.submitted_frame_id,
-                        },
-                        binding.render_target_generation,
-                        binding.submitted_frame_id,
-                        binding.phase,
+                        authority.generation,
+                        binding,
                     );
                 }
             }

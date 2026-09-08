@@ -219,6 +219,31 @@ impl<T: Subscriber + From<ConnInner>> ServiceTmpl<T> {
         ids
     }
 
+    pub fn has_pending_subscribers(&self) -> bool {
+        !self.0.read().unwrap().new_subscribes.is_empty()
+    }
+
+    /// Promotion and first reference-frame delivery share the service lock. A
+    /// subscriber arriving after this keyframe stays pending for the next one.
+    /// `snapshot` cannot provide this guarantee: its Drop promotes even on error.
+    pub fn send_video_frame_with_join(
+        &self,
+        msg: Message,
+        starts_with_keyframe: bool,
+    ) -> HashSet<i32> {
+        let msg = Arc::new(msg);
+        let mut lock = self.0.write().unwrap();
+        if starts_with_keyframe {
+            lock.swap_new_subscribes();
+        }
+        let mut ids = HashSet::with_capacity(lock.subscribes.len());
+        for s in lock.subscribes.values_mut() {
+            s.send(msg.clone());
+            ids.insert(s.id());
+        }
+        ids
+    }
+
     pub fn snapshot<F>(&self, callback: F) -> ResultType<()>
     where
         F: FnMut(ServiceSwap<T>) -> ResultType<()>,
@@ -385,5 +410,110 @@ impl<T: Subscriber + From<ConnInner>> ServiceSwap<T> {
 impl<T: Subscriber + From<ConnInner>> Drop for ServiceSwap<T> {
     fn drop(&mut self) {
         (self.0).0.write().unwrap().swap_new_subscribes();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct TestSubscriber {
+        id: i32,
+        frames: Arc<Mutex<Vec<(u64, u64)>>>,
+    }
+
+    impl From<ConnInner> for TestSubscriber {
+        fn from(conn: ConnInner) -> Self {
+            Self {
+                id: conn.id(),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl Subscriber for TestSubscriber {
+        fn id(&self) -> i32 {
+            self.id
+        }
+        fn send(&mut self, msg: Arc<Message>) {
+            if let Some(message::Union::VideoFrame(frame)) = msg.union.as_ref() {
+                self.frames
+                    .lock()
+                    .unwrap()
+                    .push((frame.stream_id, frame.frame_id));
+            }
+        }
+    }
+
+    fn frame(id: u64) -> Message {
+        let mut msg = Message::new();
+        msg.set_video_frame(hbb_common::message_proto::VideoFrame {
+            stream_id: 99,
+            frame_id: id,
+            ..Default::default()
+        });
+        msg
+    }
+
+    #[test]
+    fn subscriber_join_delivers_reference_before_delta_without_replacing_stream() {
+        let service = ServiceTmpl::<TestSubscriber>::new("join-test".into(), true);
+        let a = Arc::new(Mutex::new(Vec::new()));
+        let b = Arc::new(Mutex::new(Vec::new()));
+        service.0.write().unwrap().new_subscribes.insert(
+            1,
+            TestSubscriber {
+                id: 1,
+                frames: a.clone(),
+            },
+        );
+        assert!(service
+            .send_video_frame_with_join(frame(1), false)
+            .is_empty());
+        assert_eq!(
+            service.send_video_frame_with_join(frame(2), true),
+            HashSet::from([1])
+        );
+        service.0.write().unwrap().new_subscribes.insert(
+            2,
+            TestSubscriber {
+                id: 2,
+                frames: b.clone(),
+            },
+        );
+        assert_eq!(
+            service.send_video_frame_with_join(frame(3), false),
+            HashSet::from([1])
+        );
+        assert!(b.lock().unwrap().is_empty());
+        assert!(service.has_pending_subscribers());
+        assert_eq!(
+            service.send_video_frame_with_join(frame(4), true),
+            HashSet::from([1, 2])
+        );
+        service.send_video_frame_with_join(frame(5), false);
+        assert!(!service.has_pending_subscribers());
+        assert_eq!(*a.lock().unwrap(), [(99, 2), (99, 3), (99, 4), (99, 5)]);
+        assert_eq!(*b.lock().unwrap(), [(99, 4), (99, 5)]);
+    }
+
+    #[test]
+    fn legacy_snapshot_promotes_even_when_callback_requests_switch() {
+        let service = ServiceTmpl::<TestSubscriber>::new("snapshot-test".into(), true);
+        service.0.write().unwrap().new_subscribes.insert(
+            1,
+            TestSubscriber {
+                id: 1,
+                ..Default::default()
+            },
+        );
+        assert!(service.snapshot(|_| bail!("SWITCH")).is_err());
+        assert!(!service.has_pending_subscribers());
+        // This characterizes why an in-place join must not use snapshot/Drop.
+        assert_eq!(
+            service.send_video_frame_with_join(frame(1), false),
+            HashSet::from([1])
+        );
     }
 }

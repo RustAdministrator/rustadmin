@@ -54,6 +54,8 @@ import 'monitor_labels.dart';
 import 'platform_model.dart';
 import 'session_event.dart';
 import 'screen_view_authority.dart';
+import 'display_render_state.dart';
+import '../common/widgets/display_render_status.dart';
 import 'session_handle.dart';
 import 'package:flutter_hbb/utils/scale.dart';
 
@@ -482,6 +484,8 @@ class FfiModel with ChangeNotifier {
       updatePermissionValues(event.permissions, peerId);
     } else if (event is ScreenViewAuthoritySessionEvent) {
       parent.target?.applyScreenViewAuthority(event);
+    } else if (event is DisplayRenderStateSessionEvent) {
+      parent.target?.displayRenderStates.apply(event);
     } else if (event is ClipboardSessionEvent) {
       Clipboard.setData(ClipboardData(text: event.content));
     } else if (event is ClientChatSessionEvent) {
@@ -1638,7 +1642,21 @@ class FfiModel with ChangeNotifier {
     dialogManager.show(
       (setState, close, context) => CustomAlertDialog(
           title: null,
-          content: SelectionArea(child: msgboxContent(type, title, text)),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            SelectionArea(child: msgboxContent(type, title, text)),
+            if (parent.target case final ffi?)
+              DisplayRenderStatus(
+                model: ffi.displayRenderStates,
+                inline: true,
+                translate: translate,
+                label: (display) =>
+                    '${translate("Display")} ${pi.monitorLabel(display)}',
+                visible: (display) =>
+                    display < pi.displays.length &&
+                    (pi.currentDisplay == kAllDisplayValue ||
+                        pi.currentDisplay == display),
+              ),
+          ]),
           actions: [
             dialogButton("Cancel", onPressed: onClose, isOutline: true)
           ],
@@ -5601,6 +5619,7 @@ enum ConnType {
 class FFI {
   var id = '';
   final screenViewAuthority = ScreenViewAuthority();
+  final displayRenderStates = DisplayRenderStateModel();
   var version = '';
   var connType = ConnType.defaultConn;
   late SessionHandle<EventToUI> _sessionHandle;
@@ -5679,11 +5698,13 @@ class FFI {
       return;
     }
     imageModel.screenAuthorityChanged(event.allowed);
+    displayRenderStates.setAuthority(event);
     textureModel.setScreenViewAllowed(event.allowed);
   }
 
   void revokeScreenContent() {
     screenViewAuthority.revoke();
+    displayRenderStates.clear();
     imageModel.revokeScreenContent();
     textureModel.setScreenViewAllowed(false);
   }
@@ -5738,6 +5759,7 @@ class FFI {
       _sessionHandle = _newSessionHandle();
     }
     screenViewAuthority.reset();
+    displayRenderStates.clear(reset: true);
     this.hostWindowId = hostWindowId;
     if (isMobile) mobileReset();
     final sessionKind = SessionKind.fromLegacyFlags(

@@ -2,6 +2,16 @@
 use super::DisplayMediaIntent;
 use hbb_common::message_proto::{CaptureDisplays, Message, Misc, SwitchDisplay};
 
+pub(super) fn replacement_refresh_required(
+    supports_set: bool,
+    desktop_viewer: bool,
+    display_set_starts_capture: bool,
+) -> bool {
+    // Updated hosts start new subscriptions and detect resolution changes on
+    // their capture loop. Older desktop hosts retain the compatibility refresh.
+    supports_set && desktop_viewer && !display_set_starts_capture
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum DisplayControlCommand {
     Set(Vec<i32>),
@@ -197,6 +207,14 @@ mod tests {
     use super::*;
     use crate::client::DisplayActivation;
     use hbb_common::tokio;
+
+    #[test]
+    fn replacement_refresh_is_only_an_older_desktop_host_fallback() {
+        assert!(replacement_refresh_required(true, true, false));
+        assert!(!replacement_refresh_required(true, true, true));
+        assert!(!replacement_refresh_required(true, false, false));
+        assert!(!replacement_refresh_required(false, true, false));
+    }
 
     fn intent(generation: u64, displays: &[usize]) -> DisplayMediaIntent {
         DisplayMediaIntent {

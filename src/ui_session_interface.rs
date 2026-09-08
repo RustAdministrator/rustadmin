@@ -2419,6 +2419,7 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
         0
     }
     fn tick_render_liveness(&self) {}
+    fn display_startup_state(&self, _context: RenderFrameContext, _display: usize, _failed: bool) {}
     fn msgbox(&self, msgtype: &str, title: &str, text: &str, link: &str, retry: bool);
     #[cfg(any(target_os = "android", target_os = "ios"))]
     fn clipboard(&self, content: String);

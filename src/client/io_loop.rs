@@ -1,4 +1,5 @@
 use super::display_control::{DisplayControlCommand, DisplayIntentOutbox};
+use super::startup_recovery::{StartupRecovery, StartupRecoveryAction};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::clipboard::{update_clipboard_with_direction, ClipboardSide};
 #[cfg(not(any(target_os = "ios")))]
@@ -60,11 +61,6 @@ use std::{
     },
 };
 
-const NO_VIDEO_START_TIMEOUT: Duration = Duration::from_secs(15);
-const NO_VIDEO_START_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
-const NO_VIDEO_START_MAX_REFRESHES: usize = 6;
-const NO_VIDEO_START_STALLED_LOG_INTERVAL: Duration = Duration::from_secs(30);
-const STARTUP_KEYFRAME_REFRESH_INTERVAL: Duration = Duration::from_millis(750);
 const FPS_CONTROL_SUMMARY_LOG_INTERVAL: Duration = Duration::from_secs(30);
 const CLIENT_ASYNC_OUTBOX_CAPACITY: usize = 256;
 const CLIENT_VIDEO_FEEDBACK_LATEST_KEY_BASE: u64 = 1 << 32;
@@ -147,131 +143,14 @@ fn display_metadata_requires_decoder_reset(
     !retained_metadata_echo || next.0 <= 0 || next.1 <= 0 || previous != Some(next)
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum StartupKeyframeAction {
-    Wait,
-    Refresh { attempt: usize, dropped_deltas: u64 },
-}
-
-#[derive(Debug, Default)]
-struct StartupKeyframeRecovery {
-    last_refresh: Option<Instant>,
-    refresh_count: usize,
-    dropped_deltas: u64,
-}
-
-impl StartupKeyframeRecovery {
-    fn observe_delta(&mut self, now: Instant) -> StartupKeyframeAction {
-        self.dropped_deltas = self.dropped_deltas.saturating_add(1);
-        let refresh_due = self
-            .last_refresh
-            .map(|last| now.saturating_duration_since(last) >= STARTUP_KEYFRAME_REFRESH_INTERVAL)
-            .unwrap_or(true);
-        if !refresh_due {
-            return StartupKeyframeAction::Wait;
-        }
-        self.last_refresh = Some(now);
-        self.refresh_count = self.refresh_count.saturating_add(1);
-        StartupKeyframeAction::Refresh {
-            attempt: self.refresh_count,
-            dropped_deltas: self.dropped_deltas,
-        }
-    }
-
-    fn reset(&mut self) {
-        *self = Self::default();
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum NoVideoStartupAction {
-    None,
-    Refresh {
-        attempt: usize,
-        elapsed_ms: u128,
-    },
-    Stalled {
-        elapsed_ms: u128,
-        refresh_attempts: usize,
-    },
-}
-
-#[derive(Debug, Default)]
-struct NoVideoStartupWatchdog {
-    since: Option<Instant>,
-    last_refresh: Option<Instant>,
-    refresh_count: usize,
-    last_stalled_log: Option<Instant>,
-}
-
-impl NoVideoStartupWatchdog {
-    fn reset(&mut self) {
-        self.since = None;
-        self.last_refresh = None;
-        self.refresh_count = 0;
-        self.last_stalled_log = None;
-    }
-
-    fn tick(
-        &mut self,
-        expects_video: bool,
-        is_connected: bool,
-        first_frame: bool,
-        now: Instant,
-    ) -> NoVideoStartupAction {
-        if !expects_video || !is_connected || first_frame {
-            self.reset();
-            return NoVideoStartupAction::None;
-        }
-
-        let Some(since) = self.since else {
-            self.since = Some(now);
-            return NoVideoStartupAction::None;
-        };
-
-        let elapsed = now.saturating_duration_since(since);
-        if elapsed < NO_VIDEO_START_TIMEOUT {
-            return NoVideoStartupAction::None;
-        }
-
-        let can_refresh = self.refresh_count < NO_VIDEO_START_MAX_REFRESHES
-            && self
-                .last_refresh
-                .map(|last| now.saturating_duration_since(last) >= NO_VIDEO_START_REFRESH_INTERVAL)
-                .unwrap_or(true);
-        if can_refresh {
-            self.refresh_count += 1;
-            self.last_refresh = Some(now);
-            return NoVideoStartupAction::Refresh {
-                attempt: self.refresh_count,
-                elapsed_ms: elapsed.as_millis(),
-            };
-        }
-
-        let should_log_stalled = self
-            .last_stalled_log
-            .map(|last| now.saturating_duration_since(last) >= NO_VIDEO_START_STALLED_LOG_INTERVAL)
-            .unwrap_or(true);
-        if should_log_stalled {
-            self.last_stalled_log = Some(now);
-            return NoVideoStartupAction::Stalled {
-                elapsed_ms: elapsed.as_millis(),
-                refresh_attempts: self.refresh_count,
-            };
-        }
-
-        NoVideoStartupAction::None
-    }
-}
-
 #[derive(Debug)]
 struct DisplayStartupState {
     activation_generation: u64,
     stream_id: u64,
     render_stream_id: Arc<AtomicU64>,
     first_frame_received: bool,
-    keyframe_recovery: StartupKeyframeRecovery,
-    watchdog: NoVideoStartupWatchdog,
+    received_frame_id: u64,
+    recovery: StartupRecovery,
 }
 
 impl DisplayStartupState {
@@ -281,12 +160,12 @@ impl DisplayStartupState {
             stream_id: 0,
             render_stream_id: Arc::new(AtomicU64::new(0)),
             first_frame_received: false,
-            keyframe_recovery: StartupKeyframeRecovery::default(),
-            watchdog: NoVideoStartupWatchdog::default(),
+            received_frame_id: 0,
+            recovery: StartupRecovery::default(),
         }
     }
 
-    fn begin_stream(&mut self, stream_id: u64) -> Result<bool, u64> {
+    fn begin_stream(&mut self, stream_id: u64, now: Instant) -> Result<bool, u64> {
         if self.stream_id == stream_id {
             return Ok(false);
         }
@@ -296,8 +175,8 @@ impl DisplayStartupState {
         self.stream_id = stream_id;
         self.render_stream_id.store(stream_id, Ordering::Release);
         self.first_frame_received = false;
-        self.keyframe_recovery.reset();
-        self.watchdog.reset();
+        self.received_frame_id = 0;
+        self.recovery.new_stream(now);
         Ok(true)
     }
 }
@@ -309,10 +188,6 @@ enum DisplayStartupFrameAction {
         expected_stream_id: u64,
     },
     WaitForKeyframe,
-    Refresh {
-        attempt: usize,
-        dropped_deltas: u64,
-    },
     Accept {
         first_for_display: bool,
         stream_changed: bool,
@@ -386,30 +261,26 @@ impl DisplayStartupController {
         let Some(state) = self.displays.get_mut(&display) else {
             return DisplayStartupFrameAction::RejectUndesired;
         };
-        let stream_changed = match state.begin_stream(stream_id) {
+        let stream_changed = match state.begin_stream(stream_id, now) {
             Ok(changed) => changed,
             Err(expected_stream_id) => {
                 return DisplayStartupFrameAction::RejectStaleStream { expected_stream_id };
             }
         };
-        if !state.first_frame_received && should_wait_for_startup_keyframe(frame_id, payload_stats)
-        {
-            return match state.keyframe_recovery.observe_delta(now) {
-                StartupKeyframeAction::Wait => DisplayStartupFrameAction::WaitForKeyframe,
-                StartupKeyframeAction::Refresh {
-                    attempt,
-                    dropped_deltas,
-                } => DisplayStartupFrameAction::Refresh {
-                    attempt,
-                    dropped_deltas,
-                },
-            };
+        state.received_frame_id = state.received_frame_id.max(frame_id);
+        let dropped_delta = !state.first_frame_received
+            && should_wait_for_startup_keyframe(frame_id, payload_stats);
+        state.recovery.received(
+            payload_stats.is_some_and(|(_, _, keyframe)| keyframe),
+            dropped_delta,
+            now,
+        );
+        if dropped_delta {
+            return DisplayStartupFrameAction::WaitForKeyframe;
         }
         let first_for_display = !state.first_frame_received;
         if first_for_display {
             state.first_frame_received = true;
-            state.keyframe_recovery.reset();
-            state.watchdog.reset();
         }
         DisplayStartupFrameAction::Accept {
             first_for_display,
@@ -422,18 +293,21 @@ impl DisplayStartupController {
         &mut self,
         expects_video: bool,
         is_connected: bool,
+        scoped_supported: bool,
         now: Instant,
-    ) -> Vec<(usize, NoVideoStartupAction)> {
+    ) -> Vec<(usize, StartupRecoveryAction)> {
+        if !expects_video || !is_connected {
+            return Vec::new();
+        }
         self.displays
             .iter_mut()
             .filter_map(|(display, state)| {
-                let action = state.watchdog.tick(
-                    expects_video,
-                    is_connected,
-                    state.first_frame_received,
+                let action = state.recovery.next(
                     now,
-                );
-                (action != NoVideoStartupAction::None).then_some((*display, action))
+                    state.stream_id != 0 && state.received_frame_id != 0,
+                    scoped_supported,
+                )?;
+                Some((*display, action))
             })
             .collect()
     }
@@ -477,6 +351,8 @@ struct ParsedPeerInfo {
     idd_impl: String,
     support_view_camera: bool,
     support_terminal: bool,
+    support_video_reference_refresh: bool,
+    display_set_starts_capture: bool,
 }
 
 fn session_permission_response_msgbox_type(approved: bool) -> &'static str {
@@ -536,6 +412,7 @@ impl<T: InvokeUiSession> Remote<T> {
         self.display_outbox.observe(self.connection_round, intent);
         if let Some(display) = intent
             .replacement_display
+            .filter(|_| self.is_connected)
             .and_then(|display| i32::try_from(display).ok())
         {
             let config = self.handler.lc.read().unwrap();
@@ -544,8 +421,11 @@ impl<T: InvokeUiSession> Remote<T> {
                 intent,
                 display,
                 config.get_custom_resolution(display).unwrap_or((0, 0)),
-                crate::common::is_support_multi_ui_session_num(config.version)
-                    && !cfg!(any(target_os = "android", target_os = "ios")),
+                super::display_control::replacement_refresh_required(
+                    crate::common::is_support_multi_ui_session_num(config.version),
+                    !cfg!(any(target_os = "android", target_os = "ios")),
+                    self.peer_info.display_set_starts_capture,
+                ),
             );
         }
         if (
@@ -583,6 +463,105 @@ impl<T: InvokeUiSession> Remote<T> {
             client::LoginConfigHandler::refresh_display(display)
         } else {
             client::LoginConfigHandler::refresh()
+        }
+    }
+
+    async fn recover_display_startup(&mut self, peer: &mut Stream, expects_video: bool) {
+        if !expects_video
+            || !self.is_connected
+            || !self
+                .handler
+                .is_current_connection_attempt(self.connection_round)
+        {
+            return;
+        }
+        for (display, state) in self.display_startup.displays.iter_mut() {
+            if let Some(thread) = self
+                .video_threads
+                .get(display)
+                .filter(|thread| thread.stream_id == state.stream_id)
+            {
+                let feedback = thread.video_feedback.lock().unwrap();
+                if (feedback.stream_id == state.stream_id && feedback.decoded_frame_id != 0)
+                    || (state.stream_id == 0 && thread.frame_resolution.read().unwrap().is_some())
+                {
+                    state.recovery.decoded();
+                }
+            }
+            self.handler.ui_handler.display_startup_state(
+                RenderFrameContext {
+                    connection_generation: self.connection_round,
+                    screen_authority_generation: self
+                        .handler
+                        .ui_handler
+                        .screen_authority_generation(),
+                    display_activation_generation: state.activation_generation,
+                    stream_id: state.stream_id,
+                    frame_id: state.received_frame_id,
+                },
+                *display,
+                state.recovery.is_failed(),
+            );
+        }
+        let actions = self.display_startup.tick(
+            true,
+            true,
+            self.peer_info.support_video_reference_refresh,
+            Instant::now(),
+        );
+        for (display, action) in actions {
+            if !self
+                .handler
+                .is_current_connection_attempt(self.connection_round)
+            {
+                break;
+            }
+            let Some(state) = self.display_startup.displays.get(&display) else {
+                continue;
+            };
+            let context = RenderFrameContext {
+                connection_generation: self.connection_round,
+                screen_authority_generation: self.handler.ui_handler.screen_authority_generation(),
+                display_activation_generation: state.activation_generation,
+                stream_id: state.stream_id,
+                frame_id: state.received_frame_id,
+            };
+            if action == StartupRecoveryAction::Failed {
+                self.handler
+                    .ui_handler
+                    .display_startup_state(context, display, true);
+                log::warn!("display startup recovery exhausted: connection={}, display={}, activation={}, stream={}", self.connection_round, display, state.activation_generation, state.stream_id);
+                continue;
+            }
+            let message = if action == StartupRecoveryAction::Reference {
+                let Ok(display) = i32::try_from(display) else {
+                    continue;
+                };
+                let mut misc = Misc::new();
+                misc.set_video_reference_refresh(VideoReferenceRefresh {
+                    display,
+                    stream_id: state.stream_id,
+                    received_frame_id: state.received_frame_id,
+                    dropped_frames: state.recovery.dropped_deltas,
+                    strict_recovery: true,
+                    ..Default::default()
+                });
+                let mut message = Message::new();
+                message.set_misc(misc);
+                message
+            } else {
+                self.startup_refresh_message(display)
+            };
+            if let Some(state) = self.display_startup.displays.get_mut(&display) {
+                state.recovery.attempted(Instant::now());
+            }
+            match peer.send_tagged("DisplayStartupRecovery", &message).await {
+                Ok(()) => {
+                    if let Some(state) = self.display_startup.displays.get_mut(&display) { state.recovery.admitted(action, Instant::now()); }
+                    log::info!("display startup recovery admitted: connection={}, display={}, activation={}, stream={}, action={action:?}", self.connection_round, display, context.display_activation_generation, context.stream_id);
+                }
+                Err(error) => log::warn!("display startup recovery pending: display={display}, action={action:?}, err={error}"),
+            }
         }
     }
 
@@ -867,64 +846,7 @@ impl<T: InvokeUiSession> Remote<T> {
                         _ = status_timer.tick() => {
                             self.sync_display_intent_to_peer(&mut peer).await;
                             self.handler.ui_handler.tick_render_liveness();
-                            let startup_actions = self.display_startup.tick(
-                                expects_video,
-                                self.is_connected,
-                                Instant::now(),
-                            );
-                            for (display, action) in startup_actions {
-                                let (activation_generation, stream_id) = self
-                                    .display_startup
-                                    .displays
-                                    .get(&display)
-                                    .map(|state| (state.activation_generation, state.stream_id))
-                                    .unwrap_or_default();
-                                match action {
-                                    NoVideoStartupAction::Refresh { attempt, elapsed_ms } => {
-                                        log::warn!(
-                                            "diag client display startup retry: id={}, connection_generation={}, aggregate_generation={}, display={}, activation_generation={}, stream_id={}, elapsed_ms={}, refresh_attempt={}/{}",
-                                            self.handler.get_id(),
-                                            self.connection_round,
-                                            self.display_startup.aggregate_generation,
-                                            display,
-                                            activation_generation,
-                                            stream_id,
-                                            elapsed_ms,
-                                            attempt,
-                                            NO_VIDEO_START_MAX_REFRESHES
-                                        );
-                                        let msg = self.startup_refresh_message(display);
-                                        if let Err(err) = peer.send(&msg).await {
-                                            log::warn!(
-                                                "diag client display startup refresh failed: id={}, display={}, activation_generation={}, attempt={}, err={}",
-                                                self.handler.get_id(),
-                                                display,
-                                                activation_generation,
-                                                attempt,
-                                                err
-                                            );
-                                        }
-                                    }
-                                    NoVideoStartupAction::Stalled {
-                                        elapsed_ms,
-                                        refresh_attempts,
-                                    } => {
-                                        log::warn!(
-                                            "diag client display startup stalled: id={}, connection_generation={}, aggregate_generation={}, display={}, activation_generation={}, stream_id={}, elapsed_ms={}, refresh_attempts={}/{}",
-                                            self.handler.get_id(),
-                                            self.connection_round,
-                                            self.display_startup.aggregate_generation,
-                                            display,
-                                            activation_generation,
-                                            stream_id,
-                                            elapsed_ms,
-                                            refresh_attempts,
-                                            NO_VIDEO_START_MAX_REFRESHES
-                                        );
-                                    }
-                                    NoVideoStartupAction::None => {}
-                                }
-                            }
+                            self.recover_display_startup(&mut peer, expects_video).await;
 
                             let elapsed = fps_instant.elapsed().as_millis();
                             if elapsed < 1000 {
@@ -2607,37 +2529,8 @@ impl<T: InvokeUiSession> Remote<T> {
                                 );
                                 return true;
                             }
-                            DisplayStartupFrameAction::WaitForKeyframe => return true,
-                            DisplayStartupFrameAction::Refresh {
-                                attempt,
-                                dropped_deltas,
-                            } => {
-                                log::warn!(
-                                    "diag video startup keyframe recovery: connection_generation={}, aggregate_generation={}, display={}, activation_generation={}, stream_id={}, frame_id={}, format={:?}, payload_bytes={}, dropped_deltas={}, refresh_attempt={}",
-                                    self.connection_round,
-                                    self.display_startup.aggregate_generation,
-                                    display,
-                                    self.display_startup
-                                        .activation(display)
-                                        .map(|activation| activation.generation)
-                                        .unwrap_or_default(),
-                                    vf.stream_id,
-                                    vf.frame_id,
-                                    CodecFormat::from(&vf),
-                                    payload_bytes,
-                                    dropped_deltas,
-                                    attempt
-                                );
-                                let refresh = self.startup_refresh_message(display);
-                                if let Err(error) = peer.send(&refresh).await {
-                                    log::warn!(
-                                        "diag video startup keyframe request failed: display={}, stream_id={}, attempt={}, err={}",
-                                        display,
-                                        vf.stream_id,
-                                        attempt,
-                                        error
-                                    );
-                                }
+                            DisplayStartupFrameAction::WaitForKeyframe => {
+                                self.recover_display_startup(peer, true).await;
                                 return true;
                             }
                             DisplayStartupFrameAction::Accept {
@@ -2942,6 +2835,13 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
 
                         self.is_connected = true;
+                        #[cfg(feature = "quic-transport")]
+                        if peer
+                            .quic_stats()
+                            .is_some_and(|stats| stats.application_protocol >= 3)
+                        {
+                            self.peer_info.support_video_reference_refresh = true;
+                        }
                         self.sync_display_intent_to_peer(peer).await;
                     }
                     _ => {}
@@ -3715,6 +3615,8 @@ impl<T: InvokeUiSession> Remote<T> {
 
     fn set_peer_info(&mut self, pi: &PeerInfo) {
         self.peer_info.platform = pi.platform.clone();
+        self.peer_info.support_video_reference_refresh = false;
+        self.peer_info.display_set_starts_capture = false;
 
         // Check features field for terminal support
         if let Some(features) = pi.features.as_ref() {
@@ -3724,6 +3626,14 @@ impl<T: InvokeUiSession> Remote<T> {
         if let Ok(platform_additions) =
             serde_json::from_str::<HashMap<String, serde_json::Value>>(&pi.platform_additions)
         {
+            self.peer_info.support_video_reference_refresh = platform_additions
+                .get("support_video_reference_refresh")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            self.peer_info.display_set_starts_capture = platform_additions
+                .get("display_set_starts_capture")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             self.peer_info.is_installed = platform_additions
                 .get("is_installed")
                 .map(|v| v.as_bool())
@@ -4202,9 +4112,7 @@ mod tests {
     use super::{
         is_critical_client_input, is_would_block_error, session_permission_response_msgbox_type,
         should_wait_for_startup_keyframe, DisplayStartupController, DisplayStartupFrameAction,
-        NoVideoStartupAction, NoVideoStartupWatchdog, StartupKeyframeAction,
-        StartupKeyframeRecovery, NO_VIDEO_START_MAX_REFRESHES, NO_VIDEO_START_REFRESH_INTERVAL,
-        NO_VIDEO_START_TIMEOUT, STARTUP_KEYFRAME_REFRESH_INTERVAL,
+        StartupRecoveryAction,
     };
     use crate::client::{DisplayActivation, DisplayMediaIntent};
     use crate::input::{MOUSE_TYPE_DOWN, MOUSE_TYPE_MOVE_RELATIVE};
@@ -4290,143 +4198,6 @@ mod tests {
         assert!(!should_wait_for_startup_keyframe(2, None));
     }
 
-    #[test]
-    fn startup_keyframe_recovery_retries_at_a_bounded_rate() {
-        let mut recovery = StartupKeyframeRecovery::default();
-        let start = Instant::now();
-        assert_eq!(
-            recovery.observe_delta(start),
-            StartupKeyframeAction::Refresh {
-                attempt: 1,
-                dropped_deltas: 1
-            }
-        );
-        assert_eq!(
-            recovery.observe_delta(start + STARTUP_KEYFRAME_REFRESH_INTERVAL / 2),
-            StartupKeyframeAction::Wait
-        );
-        assert_eq!(
-            recovery.observe_delta(start + STARTUP_KEYFRAME_REFRESH_INTERVAL),
-            StartupKeyframeAction::Refresh {
-                attempt: 2,
-                dropped_deltas: 3
-            }
-        );
-        recovery.reset();
-        assert_eq!(
-            recovery.observe_delta(start + STARTUP_KEYFRAME_REFRESH_INTERVAL),
-            StartupKeyframeAction::Refresh {
-                attempt: 1,
-                dropped_deltas: 1
-            }
-        );
-    }
-
-    #[test]
-    fn no_video_watchdog_waits_until_start_timeout() {
-        let mut watchdog = NoVideoStartupWatchdog::default();
-        let start = Instant::now();
-
-        assert_eq!(
-            watchdog.tick(true, true, false, start),
-            NoVideoStartupAction::None
-        );
-        assert_eq!(
-            watchdog.tick(
-                true,
-                true,
-                false,
-                start + NO_VIDEO_START_TIMEOUT - Duration::from_millis(1)
-            ),
-            NoVideoStartupAction::None
-        );
-    }
-
-    #[test]
-    fn no_video_watchdog_retries_refresh_without_close_action() {
-        let mut watchdog = NoVideoStartupWatchdog::default();
-        let start = Instant::now();
-        assert_eq!(
-            watchdog.tick(true, true, false, start),
-            NoVideoStartupAction::None
-        );
-
-        assert_eq!(
-            watchdog.tick(true, true, false, start + NO_VIDEO_START_TIMEOUT),
-            NoVideoStartupAction::Refresh {
-                attempt: 1,
-                elapsed_ms: NO_VIDEO_START_TIMEOUT.as_millis()
-            }
-        );
-
-        assert_eq!(
-            watchdog.tick(
-                true,
-                true,
-                false,
-                start + NO_VIDEO_START_TIMEOUT + NO_VIDEO_START_REFRESH_INTERVAL
-            ),
-            NoVideoStartupAction::Refresh {
-                attempt: 2,
-                elapsed_ms: (NO_VIDEO_START_TIMEOUT + NO_VIDEO_START_REFRESH_INTERVAL).as_millis()
-            }
-        );
-    }
-
-    #[test]
-    fn no_video_watchdog_caps_refreshes_and_stays_alive() {
-        let mut watchdog = NoVideoStartupWatchdog::default();
-        let start = Instant::now();
-        assert_eq!(
-            watchdog.tick(true, true, false, start),
-            NoVideoStartupAction::None
-        );
-
-        for attempt in 1..=NO_VIDEO_START_MAX_REFRESHES {
-            let now = start
-                + NO_VIDEO_START_TIMEOUT
-                + NO_VIDEO_START_REFRESH_INTERVAL * (attempt as u32 - 1);
-            assert_eq!(
-                watchdog.tick(true, true, false, now),
-                NoVideoStartupAction::Refresh {
-                    attempt,
-                    elapsed_ms: now.saturating_duration_since(start).as_millis()
-                }
-            );
-        }
-
-        let after_cap = start
-            + NO_VIDEO_START_TIMEOUT
-            + NO_VIDEO_START_REFRESH_INTERVAL * NO_VIDEO_START_MAX_REFRESHES as u32;
-        assert!(matches!(
-            watchdog.tick(true, true, false, after_cap),
-            NoVideoStartupAction::Stalled { .. }
-        ));
-    }
-
-    #[test]
-    fn no_video_watchdog_resets_after_first_frame() {
-        let mut watchdog = NoVideoStartupWatchdog::default();
-        let start = Instant::now();
-        assert_eq!(
-            watchdog.tick(true, true, false, start),
-            NoVideoStartupAction::None
-        );
-        assert!(matches!(
-            watchdog.tick(true, true, false, start + NO_VIDEO_START_TIMEOUT),
-            NoVideoStartupAction::Refresh { .. }
-        ));
-
-        assert_eq!(
-            watchdog.tick(true, true, true, start + NO_VIDEO_START_TIMEOUT),
-            NoVideoStartupAction::None
-        );
-        assert_eq!(
-            watchdog.tick(true, true, false, start + NO_VIDEO_START_TIMEOUT),
-            NoVideoStartupAction::None
-        );
-    }
-
     fn media_intent(generation: u64, displays: &[(usize, u64)]) -> DisplayMediaIntent {
         DisplayMediaIntent {
             logical_session_generation: 1,
@@ -4456,15 +4227,18 @@ mod tests {
                 ..
             }
         ));
-        assert!(startup.tick(true, true, start).is_empty());
-        let actions = startup.tick(true, true, start + NO_VIDEO_START_TIMEOUT);
+        startup.displays.get_mut(&0).unwrap().recovery.decoded();
+        assert!(startup.tick(true, true, false, start).is_empty());
+        let actions = startup.tick(
+            true,
+            true,
+            false,
+            start + super::super::startup_recovery::FIRST_CAPTURE_RETRY,
+        );
 
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].0, 1);
-        assert!(matches!(
-            actions[0].1,
-            NoVideoStartupAction::Refresh { attempt: 1, .. }
-        ));
+        assert!(matches!(actions[0].1, StartupRecoveryAction::Capture));
     }
 
     #[test]
@@ -4475,7 +4249,7 @@ mod tests {
 
         assert!(matches!(
             startup.observe_frame(1, 8, 2, Some((100, 1, false)), start),
-            DisplayStartupFrameAction::Refresh { attempt: 1, .. }
+            DisplayStartupFrameAction::WaitForKeyframe
         ));
         assert!(matches!(
             startup.observe_frame(0, 7, 1, Some((100, 1, true)), start),
@@ -4487,7 +4261,7 @@ mod tests {
                 8,
                 3,
                 Some((100, 1, false)),
-                start + STARTUP_KEYFRAME_REFRESH_INTERVAL / 2,
+                start + Duration::from_millis(375),
             ),
             DisplayStartupFrameAction::WaitForKeyframe
         );
