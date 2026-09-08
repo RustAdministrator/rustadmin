@@ -1257,7 +1257,7 @@ impl<T: InvokeUiSession> Remote<T> {
         }
 
         #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
-        if self.handler.is_default() && _set_disconnected_ok {
+        if self.handler.is_default() && _current_attempt {
             crate::clipboard::try_empty_clipboard_files(ClipboardSide::Client, self.client_conn_id);
         }
     }
