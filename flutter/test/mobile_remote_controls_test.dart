@@ -6,6 +6,7 @@ import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
 import 'package:flutter_hbb/mobile/mobile_modifier_state.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
+import 'package:flutter_hbb/models/monitor_labels.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -295,25 +296,21 @@ void main() {
     expect(find.byIcon(Icons.keyboard_arrow_right), findsOneWidget);
   });
 
-  testWidgets('toolbar exposes direct monitor buttons', (tester) async {
+  testWidgets('toolbar monitor labels do not change capture targets', (tester) async {
     var selected = -1;
+    const origins = [Offset(1920, 0), Offset(-1920, 0), Offset.zero];
+    final labels = monitorLabelsForDisplays(origins);
     await pumpToolbar(
       tester,
       monitors: [
-        MobileRemoteToolbarMonitor(
-          value: 0,
-          label: '1',
-          tooltip: '#1 monitor',
-          selected: true,
-          onPressed: () => selected = 0,
-        ),
-        MobileRemoteToolbarMonitor(
-          value: 1,
-          label: '2',
-          tooltip: '#2 monitor',
-          selected: false,
-          onPressed: () => selected = 1,
-        ),
+        for (final i in monitorOrderForDisplays(origins))
+          MobileRemoteToolbarMonitor(
+            value: i,
+            label: labels[i],
+            tooltip: '#${labels[i]} monitor',
+            selected: i == 2,
+            onPressed: () => selected = i,
+          ),
       ],
     );
     await tester.pumpAndSettle();
@@ -323,7 +320,15 @@ void main() {
       findsOneWidget,
     );
     await tester.tap(find.byTooltip('#2 monitor'));
+    expect(selected, 2);
+    await tester.tap(find.byTooltip('#1 monitor'));
     expect(selected, 1);
+    await tester.tap(find.byTooltip('#3 monitor'));
+    expect(selected, 0);
+    expect(tester.getCenter(find.byTooltip('#1 monitor')).dx,
+        lessThan(tester.getCenter(find.byTooltip('#2 monitor')).dx));
+    expect(tester.getCenter(find.byTooltip('#2 monitor')).dx,
+        lessThan(tester.getCenter(find.byTooltip('#3 monitor')).dx));
   });
 
   testWidgets('toolbar exposes a reactive QM toggle', (tester) async {
@@ -684,10 +689,10 @@ void main() {
     );
 
     for (final entry in const <(IconData, String)>[
-      (Icons.keyboard_arrow_left, 'VK_LEFT'),
-      (Icons.keyboard_arrow_up, 'VK_UP'),
-      (Icons.keyboard_arrow_down, 'VK_DOWN'),
-      (Icons.keyboard_arrow_right, 'VK_RIGHT'),
+      (Icons.arrow_left, 'VK_LEFT'),
+      (Icons.arrow_drop_up, 'VK_UP'),
+      (Icons.arrow_drop_down, 'VK_DOWN'),
+      (Icons.arrow_right, 'VK_RIGHT'),
     ]) {
       await tester.ensureVisible(find.byIcon(entry.$1));
       await tester.tap(find.byIcon(entry.$1));

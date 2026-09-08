@@ -77,6 +77,17 @@ const CRITICAL_INPUT_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(10),
 ];
 
+struct ConnectionRenderLifetime<T: InvokeUiSession> {
+    handler: T,
+    round: u32,
+}
+
+impl<T: InvokeUiSession> Drop for ConnectionRenderLifetime<T> {
+    fn drop(&mut self) {
+        self.handler.end_connection_runtime(self.round);
+    }
+}
+
 fn client_outbound_message_kind(message: &Message) -> &'static str {
     if let Some(message::Union::Misc(misc)) = &message.union {
         if matches!(&misc.union, Some(misc::Union::VideoFeedback(_))) {
@@ -600,6 +611,10 @@ impl<T: InvokeUiSession> Remote<T> {
         self.handler
             .ui_handler
             .begin_connection_runtime(self.connection_round);
+        let _render_lifetime = ConnectionRenderLifetime {
+            handler: self.handler.ui_handler.clone(),
+            round,
+        };
         if let Some(intent) = self.handler.ui_handler.display_media_intent() {
             self.reconcile_display_intent(&intent);
         }
@@ -710,6 +725,7 @@ impl<T: InvokeUiSession> Remote<T> {
                             if let Some(res) = res {
                                 match res {
                                     Err(err) => {
+                                        self.handler.ui_handler.end_connection_runtime(round);
                                         log::warn!(
                                             "diag client stream read error: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, err={}",
                                             self.handler.get_id(),
@@ -742,6 +758,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                     }
                                 }
                             } else {
+                                self.handler.ui_handler.end_connection_runtime(round);
                                 log::warn!(
                                     "diag client stream ended by peer: id={}, is_connected={}, video_packet_seen={}, video_format={:?}",
                                     self.handler.get_id(),
@@ -772,6 +789,7 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
                         _ = self.timer.tick() => {
                             if last_recv_time.elapsed() >= SEC30 {
+                                self.handler.ui_handler.end_connection_runtime(round);
                                 log::warn!(
                                     "diag client receive timeout: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, elapsed_ms={}",
                                     self.handler.get_id(),
@@ -1227,6 +1245,7 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
                     }
                 }
+                self.handler.ui_handler.end_connection_runtime(round);
                 log::debug!("Exit io_loop of id={}", self.handler.get_id());
                 // Stop client audio server.
                 if let Some(s) = self.stop_voice_call_sender.take() {
@@ -1241,6 +1260,7 @@ impl<T: InvokeUiSession> Remote<T> {
                 }
             }
             Err(err) => {
+                self.handler.ui_handler.end_connection_runtime(round);
                 self.handler.on_establish_connection_error(err.to_string());
             }
         }
@@ -1472,6 +1492,9 @@ impl<T: InvokeUiSession> Remote<T> {
     async fn handle_msg_from_ui(&mut self, data: Data, peer: &mut Stream) -> bool {
         match data {
             Data::Close => {
+                self.handler
+                    .ui_handler
+                    .end_connection_runtime(self.connection_round);
                 log::info!(
                     "diag client io_loop received Data::Close: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, video_threads={}, sent_close_reason={}",
                     self.handler.get_id(),
@@ -2773,6 +2796,9 @@ impl<T: InvokeUiSession> Remote<T> {
                             }
                         }
                         self.handler.handle_peer_info(pi);
+                        self.handler
+                            .ui_handler
+                            .authorize_connection_runtime(self.connection_round);
                         self.sync_display_intent_to_peer(peer).await;
                         #[cfg(all(target_os = "windows", not(feature = "flutter")))]
                         self.check_clipboard_file_context();
@@ -3329,6 +3355,9 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
                     }
                     Some(misc::Union::CloseReason(c)) => {
+                        self.handler
+                            .ui_handler
+                            .end_connection_runtime(self.connection_round);
                         log::warn!(
                             "diag client received remote close reason: id={}, is_connected={}, video_packet_seen={}, video_format={:?}, reason={}",
                             self.handler.get_id(),
@@ -3924,6 +3953,7 @@ impl<T: InvokeUiSession> Remote<T> {
         };
         let handler = self.handler.ui_handler.clone();
         let connection_generation = self.connection_round;
+        let screen_authority_generation = handler.screen_authority_generation();
         crate::client::start_video_thread(
             self.handler.clone(),
             display,
@@ -3952,6 +3982,7 @@ impl<T: InvokeUiSession> Remote<T> {
                 }
                 let context = RenderFrameContext {
                     connection_generation,
+                    screen_authority_generation,
                     display_activation_generation: activation_generation,
                     stream_id,
                     frame_id,

@@ -604,7 +604,6 @@ impl<T: InvokeUiSession> Session<T> {
             && self.lc.read().unwrap().enable_file_copy_paste.v
     }
 
-    #[cfg(feature = "flutter")]
     pub fn refresh_video(&self, display: i32) {
         if crate::common::is_support_multi_ui_session_num(self.lc.read().unwrap().version) {
             self.send(Data::Message(LoginConfigHandler::refresh_display(
@@ -625,11 +624,6 @@ impl<T: InvokeUiSession> Session<T> {
         let mut msg_out = Message::new();
         msg_out.set_misc(misc);
         self.send(Data::Message(msg_out));
-    }
-
-    #[cfg(not(feature = "flutter"))]
-    pub fn refresh_video(&self, _display: i32) {
-        self.send(Data::Message(LoginConfigHandler::refresh()));
     }
 
     pub fn record_screen(&self, start: bool) {
@@ -712,13 +706,7 @@ impl<T: InvokeUiSession> Session<T> {
 
     pub fn alternative_codecs(&self) -> (bool, bool, bool, bool, bool, bool, bool) {
         let luid = self.lc.read().unwrap().adapter_luid;
-        let mark_unsupported = self.lc.read().unwrap().mark_unsupported.clone();
-        let decoder = scrap::codec::Decoder::supported_decodings(
-            None,
-            use_texture_render(),
-            luid,
-            &mark_unsupported,
-        );
+        let decoder = scrap::codec::Decoder::supported_decodings(None, use_texture_render(), luid);
         let mut vp8 = decoder.ability_vp8 > 0;
         let mut av1 = decoder.ability_av1 > 0;
         let mut av1_hw = decoder.ability_av1 > 0;
@@ -1857,6 +1845,8 @@ impl<T: InvokeUiSession> Session<T> {
                 ConnectionState::Disconnected => {}
             }
         }
+        self.ui_handler
+            .end_connection_runtime(connection_round_state_lock.round);
         let round = connection_round_state_lock.new_round();
         drop(connection_round_state_lock);
 
@@ -1965,6 +1955,8 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     pub fn close(&self) {
+        self.ui_handler
+            .end_connection_runtime(self.connection_round());
         log::info!(
             "diag session close requested: id={}, thread_active={}, sender_ready={}",
             self.get_id(),
@@ -2353,6 +2345,11 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
         None
     }
     fn begin_connection_runtime(&self, _connection_generation: u32) {}
+    fn authorize_connection_runtime(&self, _connection_generation: u32) {}
+    fn end_connection_runtime(&self, _connection_generation: u32) {}
+    fn screen_authority_generation(&self) -> u64 {
+        0
+    }
     fn tick_render_liveness(&self) {}
     fn msgbox(&self, msgtype: &str, title: &str, text: &str, link: &str, retry: bool);
     #[cfg(any(target_os = "android", target_os = "ios"))]

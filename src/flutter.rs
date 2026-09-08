@@ -525,6 +525,63 @@ fn apply_display_intent_effects(session: &FlutterSession, effects: &DisplayInten
 }
 
 #[cfg(test)]
+mod display_metadata_tests {
+    use super::{DisplayInfo, FlutterHandler, Resolution};
+
+    #[test]
+    fn display_metadata_keeps_names_geometry_and_capture_order() {
+        let displays = vec![
+            DisplayInfo {
+                name: r"\\.\DISPLAY2".into(),
+                x: -1920,
+                width: 1920,
+                height: 1080,
+                cursor_embedded: true,
+                scale: 1.5,
+                original_resolution: Some(Resolution {
+                    width: 1280,
+                    height: 720,
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            },
+            DisplayInfo {
+                name: r"\\.\DISPLAY1".into(),
+                width: 2560,
+                height: 1440,
+                ..Default::default()
+            },
+        ];
+        let payload: serde_json::Value =
+            serde_json::from_str(&FlutterHandler::make_displays_msg(&displays)).unwrap();
+        assert_eq!(payload[0]["display_name"], r"\\.\DISPLAY2");
+        assert_eq!(payload[1]["display_name"], r"\\.\DISPLAY1");
+        assert_eq!(payload[0]["x"], -1920);
+        assert_eq!(payload[1]["x"], 0);
+        assert_eq!(payload[0]["cursor_embedded"], 1);
+        assert_eq!(payload[1]["cursor_embedded"], 0);
+        assert_eq!(payload[0]["scaled_width"], 1280);
+        assert_eq!(payload[0]["original_width"], 1280);
+        assert_eq!(payload[0]["original_height"], 720);
+        assert_eq!(payload[1]["width"], 2560);
+        assert_eq!(payload[1]["height"], 1440);
+        assert!(payload[1].get("scaled_width").is_none());
+        assert!(payload[1].get("original_width").is_none());
+    }
+
+    #[test]
+    fn display_metadata_accepts_unnamed_legacy_displays_and_empty_snapshots() {
+        let payload: serde_json::Value = serde_json::from_str(
+            &FlutterHandler::make_displays_msg(&[DisplayInfo::default()]),
+        )
+        .unwrap();
+        assert_eq!(payload[0]["display_name"], "");
+        assert_eq!(FlutterHandler::make_displays_msg(&[]), "[]");
+    }
+}
+
+#[cfg(test)]
 mod display_intent_tests {
     use super::{
         aggregate_display_intents, reduce_display_intent, DisplayDemandDelta,
@@ -615,6 +672,20 @@ mod display_intent_tests {
         intent.seed_initial_display(0);
 
         assert_eq!(intent.displays, vec![1]);
+    }
+
+    #[test]
+    fn host_primary_seeds_new_view_but_not_explicit_monitor_window() {
+        // Capture indices [1, 2, 0] are presented as toolbar [1, 2, 3]. The
+        // primary is capture 2, not capture 0 or its human-facing label 2.
+        let mut new_view = ViewDisplayIntent::default();
+        assert!(new_view.seed_initial_display(2));
+        assert_eq!(new_view.displays, vec![2]);
+
+        let mut explicit_window = ViewDisplayIntent::default();
+        explicit_window.set_wire_displays(&[0]);
+        assert!(!explicit_window.seed_initial_display(2));
+        assert_eq!(explicit_window.displays, vec![0]);
     }
 
     #[test]
@@ -768,6 +839,7 @@ mod display_intent_tests {
     ) -> RenderFrameContext {
         RenderFrameContext {
             connection_generation,
+            screen_authority_generation: 0,
             display_activation_generation,
             stream_id,
             frame_id,
@@ -784,6 +856,65 @@ mod display_intent_tests {
         assert_eq!(binding.phase, ViewRenderPhase::AwaitingTarget);
         assert_eq!(binding.submitted_frame_id, 0);
         assert!(binding.last_submission.is_none());
+    }
+
+    #[test]
+    fn ending_screen_authority_hides_cached_pixels_and_clears_every_binding() {
+        let handler = FlutterHandler::default();
+        handler.begin_connection_runtime(1);
+        handler.authorize_connection_runtime(1);
+        let epoch = handler.screen_authority_generation();
+        handler.display_rgbas.write().unwrap().insert(
+            0,
+            super::RgbaData {
+                data: vec![1, 2, 3, 4],
+                valid: true,
+                screen_authority_generation: epoch,
+            },
+        );
+        for view in 1..=2 {
+            let mut session = super::SessionHandler::default();
+            session.render_bindings.insert(
+                0,
+                ViewDisplayRenderBinding::new(
+                    RenderFrameContext {
+                        screen_authority_generation: epoch,
+                        ..render_context(1, 1, 1, 1)
+                    },
+                    1,
+                ),
+            );
+            handler
+                .session_handlers
+                .write()
+                .unwrap()
+                .insert(SessionID::from_u128(view), session);
+        }
+        assert!(!handler.get_rgba(0).is_null());
+        handler.set_permission("keyboard", false);
+        handler.update_privacy_mode();
+        assert!(!handler.get_rgba(0).is_null());
+        assert_eq!(handler.screen_authority_generation(), epoch);
+
+        handler.end_connection_runtime(1);
+        assert!(handler.get_rgba(0).is_null());
+        assert!(handler
+            .session_handlers
+            .read()
+            .unwrap()
+            .values()
+            .all(|session| session.render_bindings.is_empty()));
+        // Revocation does not recycle a buffer that Dart still owns.
+        assert!(handler.display_rgbas.read().unwrap().get(&0).unwrap().valid);
+        handler.authorize_connection_runtime(1);
+        assert!(handler.get_rgba(0).is_null());
+        handler.begin_connection_runtime(2);
+        handler.authorize_connection_runtime(2);
+        assert!(handler.get_rgba(0).is_null());
+        handler.end_connection_runtime(1);
+        assert!(handler.screen_authority.read().unwrap().allowed);
+        handler.next_rgba(0);
+        assert!(!handler.display_rgbas.read().unwrap().get(&0).unwrap().valid);
     }
 
     #[test]
@@ -1007,6 +1138,8 @@ pub struct FlutterHandler {
     session_handlers: Arc<RwLock<HashMap<SessionID, SessionHandler>>>,
     display_intent_reducer: Arc<RwLock<DisplayIntentReducerState>>,
     connection_generation: Arc<AtomicUsize>,
+    // Held through native render submission; revocation cannot race a submit.
+    screen_authority: Arc<RwLock<crate::client::screen_authority::ScreenViewAuthority>>,
     display_rgbas: Arc<RwLock<HashMap<usize, RgbaData>>>,
     peer_info: Arc<RwLock<PeerInfo>>,
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1020,6 +1153,7 @@ impl Default for FlutterHandler {
             session_handlers: Default::default(),
             display_intent_reducer: Default::default(),
             connection_generation: Default::default(),
+            screen_authority: Default::default(),
             display_rgbas: Default::default(),
             peer_info: Default::default(),
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1037,6 +1171,7 @@ struct RgbaData {
     // We must check the `rgba_valid` before reading [rgba].
     data: Vec<u8>,
     valid: bool,
+    screen_authority_generation: u64,
 }
 
 pub type FlutterRgbaRendererPluginOnRgba = unsafe extern "C" fn(
@@ -1506,7 +1641,45 @@ fn emit_render_binding_state(
     ));
 }
 
+fn emit_screen_authority(
+    event_stream: &Option<StreamSink<EventToUI>>,
+    authority: crate::client::screen_authority::ScreenViewAuthority,
+) {
+    if let Some(stream) = event_stream {
+        stream.add(EventToUI::Event(
+            json!({
+                "name": "screen_view_authority",
+                "connection_generation": authority.connection_generation,
+                "generation": authority.generation,
+                "allowed": authority.allowed,
+            })
+            .to_string(),
+        ));
+    }
+}
+
 impl FlutterHandler {
+    fn update_screen_authority(
+        &self,
+        update: impl FnOnce(&mut crate::client::screen_authority::ScreenViewAuthority) -> bool,
+    ) {
+        let mut authority = self.screen_authority.write().unwrap();
+        if !update(&mut authority) {
+            return;
+        }
+        self.connection_generation
+            .store(authority.connection_generation as usize, Ordering::Release);
+        // Outstanding RGBA allocations stay leased until Dart calls next_rgba.
+        // Generation checks hide them without recycling a buffer being decoded.
+        for handler in self.session_handlers.write().unwrap().values_mut() {
+            handler.render_bindings.clear();
+            handler.renderer.reset_all_display_render_type();
+            #[cfg(all(target_os = "android", feature = "mediacodec"))]
+            handler.texture_notified.write().unwrap().clear();
+            emit_screen_authority(&handler.event_stream, *authority);
+        }
+    }
+
     fn accepts_render_context(&self, display: usize, context: RenderFrameContext) -> bool {
         self.connection_generation.load(Ordering::Acquire) == context.connection_generation as usize
             && self
@@ -1606,18 +1779,24 @@ impl FlutterHandler {
         }
     }
 
-    fn make_displays_msg(displays: &Vec<DisplayInfo>) -> String {
-        let mut msg_vec = Vec::new();
+    fn make_displays_msg(displays: &[DisplayInfo]) -> String {
+        let mut msg_vec = Vec::with_capacity(displays.len());
         for ref d in displays.iter() {
-            let mut h: HashMap<&str, i32> = Default::default();
-            h.insert("x", d.x);
-            h.insert("y", d.y);
-            h.insert("width", d.width);
-            h.insert("height", d.height);
-            h.insert("cursor_embedded", if d.cursor_embedded { 1 } else { 0 });
+            let mut h = serde_json::Map::new();
+            // Presentation metadata only: the array order remains the capture index.
+            // Use a separate key from the enclosing event's "name" discriminator.
+            h.insert("display_name".into(), json!(d.name));
+            h.insert("x".into(), json!(d.x));
+            h.insert("y".into(), json!(d.y));
+            h.insert("width".into(), json!(d.width));
+            h.insert("height".into(), json!(d.height));
+            h.insert(
+                "cursor_embedded".into(),
+                json!(if d.cursor_embedded { 1 } else { 0 }),
+            );
             if let Some(original_resolution) = d.original_resolution.as_ref() {
-                h.insert("original_width", original_resolution.width);
-                h.insert("original_height", original_resolution.height);
+                h.insert("original_width".into(), json!(original_resolution.width));
+                h.insert("original_height".into(), json!(original_resolution.height));
             }
             // Don't convert scale (x 100) to i32 directly.
             // (d.scale * 100.0f64) as i32 may produces inaccuracies.
@@ -1633,7 +1812,7 @@ impl FlutterHandler {
             // Send scaled_width for accurate logical scale calculation.
             if d.scale > 0.0 {
                 let scaled_width = (d.width as f64 / d.scale).round() as i32;
-                h.insert("scaled_width", scaled_width);
+                h.insert("scaled_width".into(), json!(scaled_width));
             }
             msg_vec.push(h);
         }
@@ -2111,6 +2290,13 @@ impl InvokeUiSession for FlutterHandler {
         display: usize,
         rgba: &mut scrap::ImageRgb,
     ) -> RenderFrameOutcome {
+        let authority = self.screen_authority.read().unwrap();
+        if !authority.accepts(
+            context.connection_generation,
+            context.screen_authority_generation,
+        ) {
+            return RenderFrameOutcome::default();
+        }
         if !self.accepts_render_context(display, context) {
             return RenderFrameOutcome::default();
         }
@@ -2131,6 +2317,13 @@ impl InvokeUiSession for FlutterHandler {
         display: usize,
         rgba: &mut scrap::ImageRgb,
     ) -> RenderFrameOutcome {
+        let authority = self.screen_authority.read().unwrap();
+        if !authority.accepts(
+            context.connection_generation,
+            context.screen_authority_generation,
+        ) {
+            return RenderFrameOutcome::default();
+        }
         if !self.accepts_render_context(display, context) {
             return RenderFrameOutcome::default();
         }
@@ -2142,38 +2335,23 @@ impl InvokeUiSession for FlutterHandler {
     }
 
     fn begin_connection_runtime(&self, connection_generation: u32) {
-        let previous = self
-            .connection_generation
-            .swap(connection_generation as usize, Ordering::AcqRel);
-        if previous == connection_generation as usize {
-            return;
-        }
-        let mut handlers = self.session_handlers.write().unwrap();
-        for handler in handlers.values_mut() {
-            let event_stream = &handler.event_stream;
-            let render_bindings = &mut handler.render_bindings;
-            for (display, binding) in render_bindings.iter_mut() {
-                if binding.phase == ViewRenderPhase::Live {
-                    binding.phase = ViewRenderPhase::Stale;
-                    emit_render_binding_state(
-                        event_stream,
-                        *display,
-                        RenderFrameContext {
-                            connection_generation,
-                            display_activation_generation: binding.display_activation_generation,
-                            stream_id: binding.stream_id,
-                            frame_id: binding.submitted_frame_id,
-                        },
-                        binding.render_target_generation,
-                        binding.submitted_frame_id,
-                        binding.phase,
-                    );
-                }
-            }
-        }
+        self.update_screen_authority(|authority| authority.begin(connection_generation));
+    }
+
+    fn authorize_connection_runtime(&self, connection_generation: u32) {
+        self.update_screen_authority(|authority| authority.authorize(connection_generation));
+    }
+
+    fn end_connection_runtime(&self, connection_generation: u32) {
+        self.update_screen_authority(|authority| authority.end(connection_generation));
+    }
+
+    fn screen_authority_generation(&self) -> u64 {
+        self.screen_authority.read().unwrap().generation
     }
 
     fn tick_render_liveness(&self) {
+        let authority = self.screen_authority.read().unwrap();
         let now = Instant::now();
         let mut handlers = self.session_handlers.write().unwrap();
         for handler in handlers.values_mut() {
@@ -2186,6 +2364,7 @@ impl InvokeUiSession for FlutterHandler {
                         *display,
                         RenderFrameContext {
                             connection_generation: binding.connection_generation,
+                            screen_authority_generation: authority.generation,
                             display_activation_generation: binding.display_activation_generation,
                             stream_id: binding.stream_id,
                             frame_id: binding.submitted_frame_id,
@@ -2210,6 +2389,13 @@ impl InvokeUiSession for FlutterHandler {
         display: usize,
         texture: *mut c_void,
     ) -> RenderFrameOutcome {
+        let authority = self.screen_authority.read().unwrap();
+        if !authority.accepts(
+            context.connection_generation,
+            context.screen_authority_generation,
+        ) {
+            return RenderFrameOutcome::default();
+        }
         if !self.use_texture_render.load(Ordering::Relaxed) {
             return RenderFrameOutcome::default();
         }
@@ -2247,6 +2433,13 @@ impl InvokeUiSession for FlutterHandler {
         display: usize,
         _texture: *mut c_void,
     ) -> RenderFrameOutcome {
+        let authority = self.screen_authority.read().unwrap();
+        if !authority.accepts(
+            context.connection_generation,
+            context.screen_authority_generation,
+        ) {
+            return RenderFrameOutcome::default();
+        }
         if !self.use_texture_render.load(Ordering::Relaxed) {
             return RenderFrameOutcome::default();
         }
@@ -2522,8 +2715,12 @@ impl InvokeUiSession for FlutterHandler {
 
     #[inline]
     fn get_rgba(&self, _display: usize) -> *const u8 {
+        let authority = self.screen_authority.read().unwrap();
         if let Some(rgba_data) = self.display_rgbas.read().unwrap().get(&_display) {
-            if rgba_data.valid {
+            if rgba_data.valid
+                && authority.allowed
+                && rgba_data.screen_authority_generation == authority.generation
+            {
                 return rgba_data.data.as_ptr();
             }
         }
@@ -2642,6 +2839,7 @@ impl FlutterHandler {
                 return RenderFrameOutcome::default();
             } else {
                 rgba_data.valid = true;
+                rgba_data.screen_authority_generation = context.screen_authority_generation;
             }
             // Return the rgba buffer to the video handler for reusing allocated rgba buffer.
             std::mem::swap::<Vec<u8>>(&mut rgba.raw, &mut rgba_data.data);
@@ -2649,6 +2847,7 @@ impl FlutterHandler {
             let mut rgba_data = RgbaData::default();
             std::mem::swap::<Vec<u8>>(&mut rgba.raw, &mut rgba_data.data);
             rgba_data.valid = true;
+            rgba_data.screen_authority_generation = context.screen_authority_generation;
             rgba_write_lock.insert(display, rgba_data);
         }
         drop(rgba_write_lock);
@@ -2865,6 +3064,7 @@ fn session_start_with_display_intent(
     let mut is_connected = false;
     let mut started = None;
     for s in sessions::get_sessions() {
+        let authority = s.screen_authority.read().unwrap();
         let mut handlers = s.session_handlers.write().unwrap();
         if let Some(h) = handlers.get_mut(session_id) {
             is_connected = h.event_stream.is_some();
@@ -2876,6 +3076,7 @@ fn session_start_with_display_intent(
                 .retain(|display, _| h.display_intent.displays.contains(display));
             h.event_stream_generation = h.event_stream_generation.saturating_add(1).max(1);
             h.event_stream = Some(event_stream);
+            emit_screen_authority(&h.event_stream, *authority);
             let event = ViewIntentEvent::Upsert {
                 view_id: *session_id,
                 displays: h.display_intent.displays.clone(),
@@ -2885,6 +3086,7 @@ fn session_start_with_display_intent(
             let is_first_ui_session = handlers.len() == 1;
             let effects = s.ui_handler.reduce_view_intent(event, &current);
             drop(handlers);
+            drop(authority);
             started = Some((s, is_first_ui_session, effects));
             break;
         }
@@ -3318,11 +3520,17 @@ fn char_to_session_id(c: *const char) -> ResultType<SessionID> {
 
 pub fn session_get_rgba_size(session_id: SessionID, display: usize) -> usize {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        let authority = session.screen_authority.read().unwrap();
         return session
             .display_rgbas
             .read()
             .unwrap()
             .get(&display)
+            .filter(|rgba| {
+                rgba.valid
+                    && authority.allowed
+                    && rgba.screen_authority_generation == authority.generation
+            })
             .map_or(0, |rgba| rgba.data.len());
     }
     0

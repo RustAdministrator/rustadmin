@@ -183,14 +183,24 @@ class SessionHandle<T> {
   Future<void> bindEventStream(
     SessionStartLease<T> lease, {
     required bool Function(T event) isCloseEvent,
-    required Future<void> Function(T event) onEvent,
+    required Future<void> Function()? Function(T event) prepareEvent,
+    void Function()? onClosed,
     required void Function(Object error, StackTrace stackTrace) onError,
   }) async {
     var ended = false;
     void finish() {
       if (ended) return;
       ended = true;
-      unawaited(remoteClosedAfterEvents(lease.generation).catchError(onError));
+      if (!accepts(lease.generation)) return;
+      try {
+        onClosed?.call();
+      } catch (error, stackTrace) {
+        onError(error, stackTrace);
+      } finally {
+        unawaited(
+          remoteClosedAfterEvents(lease.generation).catchError(onError),
+        );
+      }
     }
 
     final subscription = lease.events.listen(
@@ -199,13 +209,18 @@ class SessionHandle<T> {
         if (isCloseEvent(event)) {
           finish();
         } else {
-          unawaited(
-            dispatchEvent(
-              lease.generation,
-              () => onEvent(event),
-              onError: onError,
-            ),
-          );
+          try {
+            // Capture authority at arrival, before older asynchronous events
+            // drain. A control event may revoke queued work and return null.
+            final dispatch = prepareEvent(event);
+            if (dispatch != null) {
+              unawaited(
+                dispatchEvent(lease.generation, dispatch, onError: onError),
+              );
+            }
+          } catch (error, stackTrace) {
+            onError(error, stackTrace);
+          }
         }
       },
       onDone: finish,

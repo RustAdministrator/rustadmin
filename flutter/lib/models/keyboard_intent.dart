@@ -32,6 +32,7 @@ const canonicalLegacyKeyNamesByFlutterUsage = <int, String>{
   0x00070047: 'VK_SCROLL',
   0x00070048: 'VK_PAUSE',
   0x00070065: 'Apps',
+  0x0007009b: 'VK_CANCEL', // Break/Cancel, distinct from Pause.
 };
 
 class HidKey implements Comparable<HidKey> {
@@ -125,6 +126,7 @@ final class CommittedTextIntent extends KeyboardIntent {
     this.sourceLanguageTag = '',
     this.sourceLayoutType = '',
     this.consumeOneShot = true,
+    this.allowMobileShortcut = false,
   }) : super(source);
 
   final String text;
@@ -135,6 +137,8 @@ final class CommittedTextIntent extends KeyboardIntent {
   final String sourceLanguageTag;
   final String sourceLayoutType;
   final bool consumeOneShot;
+  // Only direct mobile edits opt in; paste and IME commits stay literal.
+  final bool allowMobileShortcut;
 }
 
 final class KeyboardResetIntent extends KeyboardIntent {

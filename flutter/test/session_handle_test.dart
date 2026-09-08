@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:isolate';
 
+import 'package:flutter_hbb/models/screen_view_authority.dart';
 import 'package:flutter_hbb/models/session_handle.dart';
 import 'package:flutter_hbb/models/session_lifecycle.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -18,6 +19,88 @@ SessionHandle<int> handle({
 }
 
 void main() {
+  test(
+    'authority revocation precedes an older queued media completion',
+    () async {
+      final stream = StreamController<int>();
+      final authority = ScreenViewAuthority();
+      final decodeStarted = Completer<void>();
+      final decodeGate = Completer<void>();
+      final revoked = Completer<void>();
+      var published = false;
+      final session = handle(closeNative: () async {});
+      final lease = (await session.start(
+        addNative: () async {},
+        startEvents: () => stream.stream,
+      ))!;
+      await session.bindEventStream(
+        lease,
+        isCloseEvent: (_) => false,
+        onClosed: authority.revoke,
+        prepareEvent: (event) {
+          if (event == 2) {
+            authority.revoke();
+            revoked.complete();
+            return null;
+          }
+          final epoch = authority.epoch;
+          return () async {
+            decodeStarted.complete();
+            await decodeGate.future;
+            published = authority.accepts(epoch);
+          };
+        },
+        onError: (error, stack) => fail('event failed: $error'),
+      );
+      stream.add(1);
+      await decodeStarted.future;
+      stream.add(2);
+      await revoked.future;
+      expect(authority.allowed, isFalse);
+      decodeGate.complete();
+      await stream.close();
+      await session.waitForClose();
+      expect(published, isFalse);
+      expect(
+        await session.prepareForReplacement(cleanupClosedSession: () async {}),
+        isTrue,
+      );
+    },
+  );
+
+  test('preparation and close-hook errors do not strand teardown', () async {
+    final stream = StreamController<int>();
+    final errors = <Object>[];
+    final events = <int>[];
+    final session = handle(closeNative: () async {});
+    final lease = (await session.start(
+      addNative: () async {},
+      startEvents: () => stream.stream,
+    ))!;
+    await session.bindEventStream(
+      lease,
+      isCloseEvent: (event) => event == -1,
+      onClosed: () => throw StateError('close hook failed'),
+      prepareEvent: (event) {
+        if (event == 1) throw FormatException('invalid envelope');
+        return () async => events.add(event);
+      },
+      onError: (error, stack) => errors.add(error),
+    );
+    stream.add(1);
+    stream.add(2);
+    stream.add(-1);
+    await stream.close();
+    await session.waitForClose();
+    expect(events, [2]);
+    expect(errors.whereType<FormatException>(), hasLength(1));
+    expect(errors.whereType<StateError>(), hasLength(1));
+    expect(
+      await session.prepareForReplacement(cleanupClosedSession: () async {}),
+      isTrue,
+    );
+  });
+
   for (final remoteClose in [false, true]) {
     test('async bridge stream closes (remote: $remoteClose)', () async {
       final port = ReceivePort();
@@ -53,7 +136,7 @@ void main() {
       await session.bindEventStream(
         lease,
         isCloseEvent: (event) => event == -1,
-        onEvent: (_) async {},
+        prepareEvent: (_) => () async {},
         onError: (error, stack) => fail('bridge stream failed: $error'),
       );
       await listened.future;
@@ -95,7 +178,8 @@ void main() {
       await session.bindEventStream(
         lease,
         isCloseEvent: (_) => false,
-        onEvent: (_) async => trace.add('stale-event'),
+        prepareEvent: (_) =>
+            () async => trace.add('stale-event'),
         onError: (error, stack) => fail('event failed: $error'),
       );
       final close = session.close(
@@ -127,6 +211,7 @@ void main() {
         var leaseReleases = 0;
         var nativeCloses = 0;
         var cleanups = 0;
+        var closeNotifications = 0;
         final session = handle(
           closeNative: () async => nativeCloses++,
           releasePlatformLease: (_) async => leaseReleases++,
@@ -139,7 +224,9 @@ void main() {
         await session.bindEventStream(
           lease,
           isCloseEvent: (event) => event == -1,
-          onEvent: (event) async => events.add(event),
+          onClosed: () => closeNotifications++,
+          prepareEvent: (event) =>
+              () async => events.add(event),
           onError: (error, stack) => fail('event stream failed'),
         );
         session.connected(lease.generation);
@@ -150,6 +237,7 @@ void main() {
         expect(session.isClosed, isTrue);
         expect(events, [7]);
         expect(leaseReleases, 1);
+        expect(closeNotifications, 1);
         expect(
           await session.prepareForReplacement(
             cleanupClosedSession: () async => cleanups++,
@@ -176,7 +264,7 @@ void main() {
     await session.bindEventStream(
       lease,
       isCloseEvent: (event) => false,
-      onEvent: (event) async {
+      prepareEvent: (event) => () async {
         eventStarted.complete();
         await eventGate.future;
       },

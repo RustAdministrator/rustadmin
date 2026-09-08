@@ -23,6 +23,7 @@ cert.pfx
 *.bak
 *png
 *svg
+!flutter/assets/keyboard_shift.svg
 *jpg
 !flutter/third_party/
 !flutter/third_party/**/

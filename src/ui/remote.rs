@@ -29,6 +29,12 @@ lazy_static::lazy_static! {
     static ref VIDEO: Arc<Mutex<Option<Video>>> = Default::default();
 }
 
+#[derive(Default)]
+struct ScreenRenderState {
+    authority: crate::client::screen_authority::ScreenViewAuthority,
+    visible: bool,
+}
+
 /// SciterHandler
 /// * element
 /// * close_state  for file path when close
@@ -36,9 +42,21 @@ lazy_static::lazy_static! {
 pub struct SciterHandler {
     element: Arc<Mutex<Option<Element>>>,
     close_state: HashMap<String, String>,
+    screen_render: Arc<RwLock<ScreenRenderState>>,
 }
 
 impl SciterHandler {
+    fn update_screen_authority(
+        &self,
+        update: impl FnOnce(&mut crate::client::screen_authority::ScreenViewAuthority) -> bool,
+    ) {
+        let mut state = self.screen_render.write().unwrap();
+        if update(&mut state.authority) && !state.authority.allowed {
+            state.visible = false;
+            self.call("setScreenViewAllowed", &make_args!(false));
+        }
+    }
+
     #[inline]
     fn call(&self, func: &str, args: &[Value]) {
         if let Some(ref e) = self.element.lock().unwrap().as_ref() {
@@ -276,18 +294,45 @@ impl InvokeUiSession for SciterHandler {
         self.call("adaptSize", &make_args!());
     }
 
+    fn begin_connection_runtime(&self, connection_generation: u32) {
+        self.update_screen_authority(|authority| authority.begin(connection_generation));
+    }
+
+    fn authorize_connection_runtime(&self, connection_generation: u32) {
+        self.update_screen_authority(|authority| authority.authorize(connection_generation));
+    }
+
+    fn end_connection_runtime(&self, connection_generation: u32) {
+        self.update_screen_authority(|authority| authority.end(connection_generation));
+    }
+
+    fn screen_authority_generation(&self) -> u64 {
+        self.screen_render.read().unwrap().authority.generation
+    }
+
     fn on_rgba(
         &self,
-        _context: RenderFrameContext,
+        context: RenderFrameContext,
         _display: usize,
         rgba: &mut scrap::ImageRgb,
     ) -> RenderFrameOutcome {
+        let mut state = self.screen_render.write().unwrap();
+        if !state.authority.accepts(
+            context.connection_generation,
+            context.screen_authority_generation,
+        ) {
+            return RenderFrameOutcome::default();
+        }
         let submitted = VIDEO
             .lock()
             .unwrap()
             .as_mut()
             .is_some_and(|video| video.render_frame(&rgba.raw).is_ok());
         if submitted {
+            if !state.visible {
+                state.visible = true;
+                self.call("setScreenViewAllowed", &make_args!(true));
+            }
             RenderFrameOutcome::submitted()
         } else {
             RenderFrameOutcome::rejected()

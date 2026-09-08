@@ -12,6 +12,7 @@ import 'package:flutter_hbb/mobile/widgets/floating_mouse.dart';
 import 'package:flutter_hbb/mobile/widgets/floating_mouse_widgets.dart';
 import 'package:flutter_hbb/mobile/widgets/gesture_help.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
+import 'package:flutter_hbb/mobile/widgets/remote_text_input.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_keyboard_visibility/flutter_keyboard_visibility.dart';
 import 'package:flutter_svg/svg.dart';
@@ -123,7 +124,7 @@ class _RemotePageState extends State<RemotePage>
     inputMode: _keyboardInputModeV2,
   );
 
-  final TextEditingController _textController = TextEditingController(
+  final _textController = MobileRemoteTextEditingController(
     text: initText,
   );
 
@@ -489,7 +490,10 @@ class _RemotePageState extends State<RemotePage>
       replacedByClipboard: replacedByClipboard,
     );
     _value = newValue;
-    _inputMobileTextEdit(edit);
+    _inputMobileTextEdit(
+      edit,
+      allowModifierShortcuts: !_textController.isLiteralEdit,
+    );
   }
 
   void _handleNonIOSSoftKeyboardInput(String newValue) {
@@ -504,7 +508,11 @@ class _RemotePageState extends State<RemotePage>
       newValue,
       replacedByClipboard: replacedByClipboard,
     );
-    _inputMobileTextEdit(edit);
+    _inputMobileTextEdit(
+      edit,
+      allowModifierShortcuts:
+          !replacedByClipboard && !_textController.isLiteralEdit,
+    );
     if (!replacedByClipboard &&
         oldValue.isNotEmpty &&
         edit.deleteBeforeGraphemes == 0 &&
@@ -526,6 +534,8 @@ class _RemotePageState extends State<RemotePage>
   // handle mobile virtual keyboard
   void _handleSoftKeyboardEditingValue() {
     if (_updatingSoftKeyboardText || !_showEdit) return;
+    final returnBaseline = _textController.returnEchoBaseline;
+    if (returnBaseline != null) _value = returnBaseline;
     final composing = _textController.value.composing;
     if (composing.isValid && !composing.isCollapsed) return;
     handleSoftKeyboardInput(_textController.text);
@@ -539,35 +549,21 @@ class _RemotePageState extends State<RemotePage>
     }
   }
 
-  void inputChar(String char) {
-    if (char == '\n') {
-      char = 'VK_RETURN';
-    } else if (_physicalKeyInput &&
-        char.length == 1 &&
-        !inputModel.ctrl &&
-        !inputModel.alt &&
-        !inputModel.shift &&
-        !inputModel.command) {
-      _inputMobileString(char);
-      return;
-    } else if (char == ' ') {
-      char = 'VK_SPACE';
-    }
-    inputModel.inputKey(char);
+  void _handleSoftKeyboardEnter() {
+    if (_updatingSoftKeyboardText || !_showEdit) return;
+    inputModel.inputKey('VK_ENTER');
   }
 
-  void _inputMobileString(String value) {
-    _inputMobileTextEdit(
-      MobileCommittedTextEdit(text: value, deleteBeforeGraphemes: 0),
-    );
-  }
-
-  void _inputMobileTextEdit(MobileCommittedTextEdit edit) {
+  void _inputMobileTextEdit(
+    MobileCommittedTextEdit edit, {
+    bool allowModifierShortcuts = false,
+  }) {
     if (edit.isEmpty) return;
     inputModel.inputMobileTextEdit(
       text: edit.text,
       deleteBeforeGraphemes: edit.deleteBeforeGraphemes,
       deleteAfterGraphemes: edit.deleteAfterGraphemes,
+      allowModifierShortcuts: allowModifierShortcuts,
     );
   }
 
@@ -806,15 +802,16 @@ class _RemotePageState extends State<RemotePage>
       listenable: gFFI.qualityMonitorModel.showListenable,
       builder: (context, _) => Obx(() {
         final pi = ffiModel.pi;
+        final monitorLabels = pi.monitorLabels;
         final currentDisplay = CurrentDisplayState.find(widget.id).value;
         final monitors = !_showMonitorsInToolbar || pi.displays.length <= 1
             ? const <MobileRemoteToolbarMonitor>[]
             : <MobileRemoteToolbarMonitor>[
-                for (var index = 0; index < pi.displays.length; index++)
+                for (final index in pi.monitorOrder)
                   MobileRemoteToolbarMonitor(
                     value: index,
-                    label: '${index + 1}',
-                    tooltip: '#${index + 1} ${translate('Monitor')}',
+                    label: monitorLabels[index],
+                    tooltip: '#${monitorLabels[index]} ${translate('Monitor')}',
                     selected: currentDisplay == index,
                     onPressed: () {
                       if (currentDisplay != index) {
@@ -928,28 +925,10 @@ class _RemotePageState extends State<RemotePage>
                 height: 0,
                 child: !_showEdit || _usesAndroidNativeKeyboardInput
                     ? Container()
-                    : TextFormField(
-                        textInputAction: TextInputAction.newline,
-                        autocorrect: false,
-                        // Flutter 3.16.9 Android.
-                        // `enableSuggestions` causes secure keyboard to be shown.
-                        // https://github.com/flutter/flutter/issues/139143
-                        // https://github.com/flutter/flutter/issues/146540
-                        // enableSuggestions: false,
-                        autofocus: true,
+                    : MobileRemoteTextInput(
                         focusNode: _mobileFocusNode,
-                        maxLines: null,
                         controller: _textController,
-                        // trick way to make backspace work always
-                        keyboardType: TextInputType.multiline,
-                        // `onChanged` may be called depending on the input method if this widget is wrapped in
-                        // `Focus(onKeyEvent: ..., child: ...)`
-                        // For `Backspace` button in the soft keyboard:
-                        // en/fr input method:
-                        //      1. The button will not trigger `onKeyEvent` if the text field is not empty.
-                        //      2. The button will trigger `onKeyEvent` if the text field is empty.
-                        // ko/zh/ja input method: the button will trigger `onKeyEvent`
-                        //                     and the event will not popup if `KeyEventResult.handled` is returned.
+                        onEnter: _handleSoftKeyboardEnter,
                       ).workaroundFreezeLinuxMint(),
               ),
             ];
@@ -1544,17 +1523,11 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
       onFunctionKeys: () {
         setState(() {
           _fn = !_fn;
-          if (_fn) {
-            _more = false;
-          }
         });
       },
       onMoreKeys: () {
         setState(() {
           _more = !_more;
-          if (_more) {
-            _fn = false;
-          }
         });
       },
       onKeyPressed: inputModel.inputKey,
@@ -1731,7 +1704,8 @@ void showOptions(
     final numBgSelected = Theme.of(
       context,
     ).colorScheme.primary.withOpacity(0.6);
-    for (var i = 0; i < pi.displays.length; ++i) {
+    final monitorLabels = pi.monitorLabels;
+    for (final i in pi.monitorOrder) {
       children.add(
         InkWell(
           onTap: () {
@@ -1749,7 +1723,7 @@ void showOptions(
             ),
             child: Center(
               child: Text(
-                (i + 1).toString(),
+                monitorLabels[i],
                 style: TextStyle(
                   color: i == cur ? numColorSelected : numColorUnselected,
                   fontWeight: FontWeight.bold,

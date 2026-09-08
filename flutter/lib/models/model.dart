@@ -50,8 +50,10 @@ import '../common/widgets/dialog.dart';
 import 'android_render_target_controller.dart';
 import 'input_model.dart';
 import 'keyboard_intent.dart';
+import 'monitor_labels.dart';
 import 'platform_model.dart';
 import 'session_event.dart';
+import 'screen_view_authority.dart';
 import 'session_handle.dart';
 import 'package:flutter_hbb/utils/scale.dart';
 
@@ -478,6 +480,8 @@ class FfiModel with ChangeNotifier {
       );
     } else if (event is PermissionSessionEvent) {
       updatePermissionValues(event.permissions, peerId);
+    } else if (event is ScreenViewAuthoritySessionEvent) {
+      parent.target?.applyScreenViewAuthority(event);
     } else if (event is ClipboardSessionEvent) {
       Clipboard.setData(ClipboardData(text: event.content));
     } else if (event is ClientChatSessionEvent) {
@@ -1005,6 +1009,8 @@ class FfiModel with ChangeNotifier {
     }
 
     final newDisplay = _displayFromSessionValue(event.display);
+    // SwitchDisplay carries geometry, not the host's display identity.
+    newDisplay.name = event.display.name ?? _pi.displays[display].name;
     newDisplay._scale = _pi.scaleOfDisplay(display);
     _pi.displays[display] = newDisplay;
 
@@ -1811,10 +1817,6 @@ class FfiModel with ChangeNotifier {
     _pi.platform = event.platform;
     _pi.sasEnabled = event.sasEnabled;
     final currentDisplay = event.currentDisplay;
-    if (_pi.primaryDisplay == kInvalidDisplayIndex) {
-      _pi.primaryDisplay = currentDisplay;
-    }
-
     if (bind.peerGetSessionsCount(
             id: peerId, connType: parent.target!.connType.index) <=
         1) {
@@ -1872,6 +1874,11 @@ class FfiModel with ChangeNotifier {
       ];
       _pi.displays.value = newDisplays;
       _pi.displaysCount.value = _pi.displays.length;
+      // Login reports the host primary. A cached window's current display may
+      // instead be an explicit selection, so do not treat it as primary metadata.
+      _pi.updatePrimaryDisplay(
+        reportedPrimary: isCache ? null : currentDisplay,
+      );
       if (_pi.currentDisplay < _pi.displays.length) {
         // now replaced to _updateCurDisplay
         await updateCurDisplay(sessionId);
@@ -1988,18 +1995,16 @@ class FfiModel with ChangeNotifier {
       return;
     }
 
-    // to-do: peer currentDisplay is the primary display, but the primary display may not be the first display.
-    // local primary display also may not be the first display.
-    //
-    // 0 is assumed to be the primary display here, for now.
-
-    // move to the first display and set fullscreen
+    final remoteDisplays = _pi.primaryFirstMonitorOrder;
+    if (remoteDisplays.isEmpty) return;
+    // Keep the host primary in the initial window. Remaining windows follow
+    // spatial order, while all requests still carry the original capture index.
     bind.sessionSwitchDisplay(
       isDesktop: isDesktop,
       sessionId: sessionId,
-      value: Int32List.fromList([0]),
+      value: Int32List.fromList([remoteDisplays.first]),
     );
-    _pi.currentDisplay = 0;
+    _pi.currentDisplay = remoteDisplays.first;
     try {
       CurrentDisplayState.find(peerId).value = _pi.currentDisplay;
     } catch (e) {
@@ -2015,7 +2020,7 @@ class FfiModel with ChangeNotifier {
         : screenRectList.length;
     for (var i = 1; i < length; i++) {
       openMonitorInNewTabOrWindow(
-        i,
+        remoteDisplays[i],
         peerId,
         _pi,
         screenRect: screenRectList[i],
@@ -2052,6 +2057,7 @@ class FfiModel with ChangeNotifier {
 
   Display _displayFromSessionValue(SessionDisplayValue value) {
     final display = Display();
+    display.name = value.name ?? '';
     display.x = value.x ?? display.x;
     display.y = value.y ?? display.y;
     display.width = value.width ?? display.width;
@@ -2108,6 +2114,7 @@ class FfiModel with ChangeNotifier {
       ];
       _pi.displays.value = newDisplays;
       _pi.displaysCount.value = _pi.displays.length;
+      _pi.updatePrimaryDisplay();
 
       if (_pi.currentDisplay == kAllDisplayValue) {
         await updateCurDisplay(sessionId);
@@ -2121,11 +2128,7 @@ class FfiModel with ChangeNotifier {
             // Notify to switch display
             msgBox(sessionId, 'custom-nook-nocancel-hasclose-info', 'Prompt',
                 'display_is_plugged_out_msg', '', parent.target!.dialogManager);
-            final isPeerPrimaryDisplayValid =
-                pi.primaryDisplay == kInvalidDisplayIndex ||
-                    pi.primaryDisplay >= pi.displays.length;
-            final newDisplay =
-                isPeerPrimaryDisplayValid ? 0 : pi.primaryDisplay;
+            final newDisplay = pi.primaryFirstMonitorOrder.first;
             bind.sessionSwitchDisplay(
               isDesktop: isDesktop,
               sessionId: sessionId,
@@ -2374,6 +2377,7 @@ Size? remoteRenderableFrameSize({
 
 class ImageModel with ChangeNotifier {
   ui.Image? _image;
+  int _imageGeneration = 0;
 
   ui.Image? get image => _image;
 
@@ -2435,7 +2439,25 @@ class ImageModel with ChangeNotifier {
 
   addCallbackOnFirstImage(Function(String) cb) => callbacksOnFirstImage.add(cb);
 
-  void clearImage() => _publishImage(null);
+  void clearImage() {
+    _imageGeneration++;
+    _publishImage(null);
+  }
+
+  void revokeScreenContent() {
+    clearImage();
+    _webRgbaList.clear();
+    unawaited(_androidRenderTarget.retire());
+    _interactionGeometryInitialized = false;
+  }
+
+  void screenAuthorityChanged(bool allowed) {
+    if (allowed) {
+      notifyListeners();
+    } else {
+      revokeScreenContent();
+    }
+  }
 
   void _publishImage(ui.Image? image) {
     final previous = _image;
@@ -2480,6 +2502,10 @@ class ImageModel with ChangeNotifier {
   }
 
   decodeAndUpdate(int display, Uint8List rgba) async {
+    final authority = parent.target?.screenViewAuthority;
+    final epoch = authority?.epoch;
+    final imageGeneration = _imageGeneration;
+    if (epoch == null || !authority!.accepts(epoch)) return;
     final pid = parent.target?.id;
     final rect = parent.target?.ffiModel.pi.getDisplayRect(display);
     final image = await img.decodeImageFromPixels(
@@ -2490,11 +2516,23 @@ class ImageModel with ChangeNotifier {
           ? ui.PixelFormat.rgba8888
           : ui.PixelFormat.bgra8888,
     );
-    if (parent.target?.id != pid) return;
-    await update(image);
+    if (parent.target?.id != pid ||
+        !authority.accepts(epoch) ||
+        imageGeneration != _imageGeneration) {
+      image?.dispose();
+      return;
+    }
+    await update(image, authorityEpoch: epoch);
   }
 
-  update(ui.Image? image) async {
+  update(ui.Image? image, {int? authorityEpoch}) async {
+    final authority = parent.target?.screenViewAuthority;
+    final epoch = authorityEpoch ?? authority?.epoch;
+    final imageGeneration = _imageGeneration;
+    if (image != null && (epoch == null || !authority!.accepts(epoch))) {
+      image.dispose();
+      return;
+    }
     if (!_interactionGeometryInitialized && image != null) {
       if (isDesktop || isWebDesktop) {
         await parent.target?.canvasModel.updateViewStyle();
@@ -2504,10 +2542,14 @@ class ImageModel with ChangeNotifier {
       await _ensureInteractionGeometry();
     }
     if (image == null) {
-      _publishImage(null);
+      clearImage();
       await _androidRenderTarget.retire();
       _interactionGeometryInitialized = false;
     } else {
+      if (!authority!.accepts(epoch!) || imageGeneration != _imageGeneration) {
+        image.dispose();
+        return;
+      }
       parent.target?.canvasModel.tryApplyPendingMobileCursorFocus();
       _publishImage(image);
     }
@@ -2519,7 +2561,9 @@ class ImageModel with ChangeNotifier {
       return;
     }
     final ffi = parent.target;
-    if (ffi == null || ffi.ffiModel.pi.currentDisplay != display) {
+    if (ffi == null ||
+        !ffi.screenViewAuthority.allowed ||
+        ffi.ffiModel.pi.currentDisplay != display) {
       return;
     }
     final rect = ffi.ffiModel.pi.getDisplayRect(display);
@@ -2534,7 +2578,9 @@ class ImageModel with ChangeNotifier {
         target.height != rect.height.toInt()) {
       return;
     }
+    final epoch = ffi.screenViewAuthority.epoch;
     await _ensureInteractionGeometry();
+    if (!ffi.screenViewAuthority.accepts(epoch)) return;
     final changed = _androidRenderTarget.producerFrame(
       display: display,
       width: rect.width.toInt(),
@@ -2608,7 +2654,7 @@ class ImageModel with ChangeNotifier {
     AndroidTextureTarget? target, {
     int? intentEpoch,
   }) =>
-      target == null
+      target == null || parent.target?.screenViewAuthority.allowed != true
           ? _androidRenderTarget.retire(intentEpoch: intentEpoch)
           : _androidRenderTarget.requireTarget(
               target,
@@ -2616,7 +2662,7 @@ class ImageModel with ChangeNotifier {
             );
 
   void disposeImage() {
-    _publishImage(null);
+    clearImage();
     unawaited(_androidRenderTarget.retire());
     _interactionGeometryInitialized = false;
   }
@@ -2960,7 +3006,9 @@ class CanvasModel with ChangeNotifier {
   static double get bottomToEdge =>
       isDesktop ? windowBorderWidth + kDragToResizeAreaPadding.bottom : 0;
 
-  Size getSize() {
+  // Fit/zoom limits use the full app viewport. Cursor reveal, edge scrolling,
+  // and panning use the unobscured viewport above the keyboard/key-help bar.
+  Size getSize({bool includeKeyboardArea = false}) {
     final mediaData = MediaQueryData.fromView(ui.window);
     final size = mediaData.size;
     // If minimized, w or h may be negative here.
@@ -2968,18 +3016,22 @@ class CanvasModel with ChangeNotifier {
     double h = size.height - topToEdge - bottomToEdge;
     if (isMobileClient) {
       // Account for horizontal safe area insets on both orientations.
-      w = w - mediaData.padding.left - mediaData.padding.right;
+      final padding = includeKeyboardArea
+          ? mediaData.viewPadding
+          : mediaData.padding;
+      w = w - padding.left - padding.right;
       // Portrait excludes the status-bar/notch inset. Landscape intentionally
       // keeps the existing full-height behavior because the home indicator
       // auto-hides during a remote session.
       final isPortrait = size.height > size.width;
-      final topInset = isPortrait ? mediaData.padding.top : 0.0;
+      final topInset = isPortrait ? padding.top : 0.0;
       h = mobileRemoteUsableViewportHeight(
         screenHeight: size.height - topToEdge - bottomToEdge,
         topInset: topInset,
-        keyboardInset: mediaData.viewInsets.bottom,
-        keyHelpTop:
-            parent.target?.cursorModel.keyHelpToolsRectToAdjustCanvas?.top,
+        keyboardInset: includeKeyboardArea ? 0 : mediaData.viewInsets.bottom,
+        keyHelpTop: includeKeyboardArea
+            ? null
+            : parent.target?.cursorModel.keyHelpToolsRectToAdjustCanvas?.top,
       );
     }
     return Size(w < 0 ? 0 : w, h < 0 ? 0 : h);
@@ -3005,7 +3057,7 @@ class CanvasModel with ChangeNotifier {
   double _mobileMinimumScale() {
     return mobileRemoteMinimumCanvasScale(
       texture: _mobileTextureSize(),
-      viewport: size,
+      viewport: getSize(includeKeyboardArea: true),
     );
   }
 
@@ -3025,17 +3077,18 @@ class CanvasModel with ChangeNotifier {
 
   void _applyPendingMobileFit() {
     final texture = _mobileTextureSize();
+    final fitViewport = getSize(includeKeyboardArea: true);
     if (texture.width <= 0 ||
         texture.height <= 0 ||
-        size.width <= 0 ||
-        size.height <= 0) {
+        fitViewport.width <= 0 ||
+        fitViewport.height <= 0) {
       return;
     }
     _devicePixelRatio = ui.window.devicePixelRatio;
     _scale = mobileRemoteScaleForMode(
       mode: _mobileViewScaleMode,
       texture: texture,
-      viewport: size,
+      viewport: fitViewport,
       devicePixelRatio: _devicePixelRatio,
     );
     _scale = max(_scale, _mobileMinimumScale());
@@ -3058,7 +3111,7 @@ class CanvasModel with ChangeNotifier {
         bind.mainSetCommon(
           key: 'debug-probe-log',
           value:
-              'Android mobile viewport fit: mode=${_mobileViewScaleMode.value}, viewport=${size.width}x${size.height}, texture=${texture.width}x${texture.height}, scale=$_scale',
+              'Android mobile viewport fit: mode=${_mobileViewScaleMode.value}, viewport=${fitViewport.width}x${fitViewport.height}, visible=${size.width}x${size.height}, texture=${texture.width}x${texture.height}, scale=$_scale',
         ),
       );
     }
@@ -5560,6 +5613,7 @@ enum ConnType {
 /// Flutter state manager and data communication with the Rust core.
 class FFI {
   var id = '';
+  final screenViewAuthority = ScreenViewAuthority();
   var version = '';
   var connType = ConnType.defaultConn;
   late SessionHandle<EventToUI> _sessionHandle;
@@ -5629,6 +5683,24 @@ class FFI {
         name: PeersModelName.lan, loadEvent: LoadEvent.lan, getInitPeers: null);
   }
 
+  void applyScreenViewAuthority(ScreenViewAuthoritySessionEvent event) {
+    if (!screenViewAuthority.apply(
+      connectionGeneration: event.connectionGeneration,
+      generation: event.generation,
+      allowed: event.allowed,
+    )) {
+      return;
+    }
+    imageModel.screenAuthorityChanged(event.allowed);
+    textureModel.setScreenViewAllowed(event.allowed);
+  }
+
+  void revokeScreenContent() {
+    screenViewAuthority.revoke();
+    imageModel.revokeScreenContent();
+    textureModel.setScreenViewAllowed(false);
+  }
+
   SessionHandle<EventToUI> _newSessionHandle() => SessionHandle<EventToUI>(
     sessionId: sessionId,
     closeNative: () => bind.sessionClose(sessionId: sessionId),
@@ -5678,6 +5750,7 @@ class FFI {
       }
       _sessionHandle = _newSessionHandle();
     }
+    screenViewAuthority.reset();
     this.hostWindowId = hostWindowId;
     if (isMobile) mobileReset();
     final sessionKind = SessionKind.fromLegacyFlags(
@@ -5874,17 +5947,19 @@ class FFI {
       await handleCachedSessionData(cachedData);
     }
 
-    Future<void> handleSessionMessage(EventToUI message) async {
+    Future<void> handleSessionMessage(
+      EventToUI message,
+      int screenEpoch,
+      Map<String, dynamic>? event,
+    ) async {
       if (message is EventToUI_Event) {
-        Map<String, dynamic>? event;
-        try {
-          event = json.decode(message.field0);
-        } catch (e) {
-          debugPrint('json.decode fail1(): $e, ${message.field0}');
-        }
         if (event != null) await cb(event);
       } else if (message is EventToUI_Rgba) {
         final display = message.field0;
+        if (!screenViewAuthority.accepts(screenEpoch)) {
+          platformFFI.nextRgba(sessionId, display);
+          return;
+        }
         if (isAndroid) imageModel.setAndroidSurfaceTextureActive(false);
         final sz = platformFFI.getRgbaSize(sessionId, display);
         if (sz == 0) {
@@ -5894,11 +5969,16 @@ class FFI {
         final rgba = platformFFI.getRgba(sessionId, display, sz);
         if (rgba != null) {
           await onEvent2UIRgba();
+          if (!screenViewAuthority.accepts(screenEpoch)) {
+            platformFFI.nextRgba(sessionId, display);
+            return;
+          }
           await imageModel.onRgba(display, rgba);
         } else {
           platformFFI.nextRgba(sessionId, display);
         }
       } else if (message is EventToUI_Texture) {
+        if (!screenViewAuthority.accepts(screenEpoch)) return;
         final display = message.field0;
         final gpuTexture = message.field1;
         debugPrint(
@@ -5911,6 +5991,7 @@ class FFI {
         if (isAndroid) {
           await imageModel.onAndroidSurfaceTextureFrame(display, gpuTexture);
         }
+        if (!screenViewAuthority.accepts(screenEpoch)) return;
         textureModel.setTextureType(display: display, gpuTexture: gpuTexture);
         await onEvent2UIRgba();
       }
@@ -5920,14 +6001,30 @@ class FFI {
       lease,
       isCloseEvent: (message) =>
           message is EventToUI_Event && message.field0 == 'close',
-      onEvent: (message) async {
-        if (tabWindowId != null && !isToNewWindowNotified.value) {
-          isToNewWindowNotified.value = true;
-          await transferSessionToTab();
+      onClosed: revokeScreenContent,
+      prepareEvent: (message) {
+        Map<String, dynamic>? event;
+        if (message is EventToUI_Event) {
+          event = json.decode(message.field0);
+          if (event?['name'] == 'screen_view_authority') {
+            final snapshot = decodeTypedSessionEvent(event!);
+            if (snapshot is ScreenViewAuthoritySessionEvent) {
+              // Revoke before the serial event queue can finish an older decode.
+              applyScreenViewAuthority(snapshot);
+            }
+            return null;
+          }
         }
-        if (sessionHandle.accepts(sessionGeneration)) {
-          await handleSessionMessage(message);
-        }
+        final screenEpoch = screenViewAuthority.epoch;
+        return () async {
+          if (tabWindowId != null && !isToNewWindowNotified.value) {
+            isToNewWindowNotified.value = true;
+            await transferSessionToTab();
+          }
+          if (sessionHandle.accepts(sessionGeneration)) {
+            await handleSessionMessage(message, screenEpoch, event);
+          }
+        };
       },
       onError: reportEventError,
     );
@@ -6007,17 +6104,22 @@ class FFI {
   /// Clear session-scoped state while keeping the mobile page reusable.
   Future<void> resetMobileSessionForReconnect({
     required bool closeSession,
-  }) => _sessionHandle.close(
-    nativeClosePolicy: closeSession
-        ? NativeSessionClosePolicy.requestClose
-        : NativeSessionClosePolicy.alreadyClosed,
-    cleanup: _cleanupMobileSessionState,
-  );
+  }) {
+    revokeScreenContent();
+    return _sessionHandle.close(
+      nativeClosePolicy: closeSession
+          ? NativeSessionClosePolicy.requestClose
+          : NativeSessionClosePolicy.alreadyClosed,
+      cleanup: _cleanupMobileSessionState,
+    );
+  }
 
   /// Close the remote session.
   Future<void> close(
-      {bool closeSession = true, bool saveCanvasConfig = true}) =>
-      _sessionHandle.close(
+      {bool closeSession = true, bool saveCanvasConfig = true}) {
+    final hadRenderableFrame = imageModel.hasRenderableFrame;
+    revokeScreenContent();
+    return _sessionHandle.close(
         nativeClosePolicy: closeSession
             ? NativeSessionClosePolicy.requestClose
             : NativeSessionClosePolicy.alreadyClosed,
@@ -6029,7 +6131,7 @@ class FFI {
           }
           _terminalModels.clear();
           if (saveCanvasConfig &&
-              imageModel.hasRenderableFrame &&
+              hadRenderableFrame &&
               !isWebDesktop) {
             await setCanvasConfig(
                 sessionId,
@@ -6056,6 +6158,7 @@ class FFI {
           id = '';
         },
       );
+  }
 
   void setMethodCallHandler(FMethod callback) {
     platformFFI.setMethodCallHandler(callback);
@@ -6089,6 +6192,7 @@ const kInvalidResolutionValue = -1;
 const kVirtualDisplayResolutionValue = 0;
 
 class Display {
+  String name = '';
   double x = 0;
   double y = 0;
   int width = 0;
@@ -6115,6 +6219,7 @@ class Display {
       _innerEqual(other);
 
   bool _innerEqual(Display other) =>
+      other.name == name &&
       other.x == x &&
       other.y == y &&
       other.width == width &&
@@ -6168,6 +6273,52 @@ class PeerInfo with ChangeNotifier {
 
   RxInt displaysCount = 0.obs;
   RxBool isSet = false.obs;
+
+  /// Human-facing numbering only; selection and input still use array indices.
+  List<int> get monitorOrder => monitorOrderForDisplays(
+        displays.map((display) => Offset(display.x, display.y)),
+      );
+
+  List<String> get monitorLabels => monitorLabelsForDisplays(
+        displays.map((display) => Offset(display.x, display.y)),
+      );
+
+  List<int> get primaryFirstMonitorOrder {
+    final order = monitorOrder;
+    if (order.remove(primaryDisplay)) order.insert(0, primaryDisplay);
+    return order;
+  }
+
+  /// Refresh metadata without overriding this window's selected display.
+  void updatePrimaryDisplay({int? reportedPrimary}) {
+    if (reportedPrimary != null &&
+        reportedPrimary >= 0 &&
+        reportedPrimary < displays.length) {
+      primaryDisplay = reportedPrimary;
+      return;
+    }
+    // Windows defines the primary desktop source at (0, 0). This also works
+    // with older hosts and topology updates that carry no explicit primary ID.
+    // Do not guess for mirrored sources or apply this Windows rule to Linux.
+    if (platform == 'Windows') {
+      final atOrigin = <int>[
+        for (var i = 0; i < displays.length; i++)
+          if (displays[i].x == 0 && displays[i].y == 0) i,
+      ];
+      if (atOrigin.length == 1) {
+        primaryDisplay = atOrigin.single;
+        return;
+      }
+    }
+    if (primaryDisplay < 0 || primaryDisplay >= displays.length) {
+      primaryDisplay = kInvalidDisplayIndex;
+    }
+  }
+
+  String monitorLabel(int displayIndex) =>
+      displayIndex >= 0 && displayIndex < displays.length
+          ? monitorLabels[displayIndex]
+          : '${displayIndex + 1}';
 
   bool get isWayland => platformAdditions[kPlatformAdditionsIsWayland] == true;
   bool get isHeadless => platformAdditions[kPlatformAdditionsHeadless] == true;

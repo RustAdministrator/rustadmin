@@ -108,10 +108,12 @@ use crate::ui_session_interface::SessionPermissionConfig;
 
 pub use super::lang::*;
 
+mod decoder_recovery;
 pub mod file_trait;
 pub mod helper;
 pub mod io_loop;
 pub mod screenshot;
+pub(crate) mod screen_authority;
 
 pub const MILLI1: Duration = Duration::from_millis(1);
 pub const SEC30: Duration = Duration::from_secs(30);
@@ -119,7 +121,6 @@ pub const VIDEO_QUEUE_SIZE: usize = 120;
 pub(crate) const MOVIE_VIDEO_QUEUE_MAX_AGE_MS: u64 = 100;
 const MOVIE_VIDEO_REFRESH_COOLDOWN: Duration = Duration::from_millis(500);
 const VIDEO_FEEDBACK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
-const MAX_DECODE_FAIL_COUNTER: usize = 3;
 const DEFAULT_CUSTOM_IMAGE_QUALITY: i32 = 50;
 const MIN_CUSTOM_IMAGE_QUALITY: i32 = 10;
 const MAX_CUSTOM_IMAGE_QUALITY: i32 = 0xFFF;
@@ -2551,10 +2552,12 @@ pub struct VideoHandler {
     recorder: Arc<Mutex<Option<Recorder>>>,
     record: bool,
     _display: usize, // useful for debug
-    fail_counter: usize,
+    recovery: decoder_recovery::DecoderRecovery,
+    decoder_fallback: usize,
     decode_wait_counter: usize,
     first_frame: bool,
     stream_id: u64,
+    last_frame_id: u64,
 }
 
 impl VideoHandler {
@@ -2590,15 +2593,26 @@ impl VideoHandler {
             recorder: Default::default(),
             record: false,
             _display,
-            fail_counter: 0,
+            recovery: Default::default(),
+            decoder_fallback: 0,
             decode_wait_counter: 0,
             first_frame: true,
             stream_id: 0,
+            last_frame_id: 0,
         }
     }
 
     pub fn decoder_backend(&self) -> &'static str {
         self.decoder.backend()
+    }
+
+    fn recover_decoder_if_due(&mut self, now: std::time::Instant) -> Option<usize> {
+        let attempt = self.recovery.take_due(now)?;
+        if attempt > 1 {
+            self.decoder_fallback = self.decoder_fallback.saturating_add(1);
+        }
+        self.reset(None, None);
+        Some(attempt)
     }
 
     /// Handle a new video frame.
@@ -2613,11 +2627,25 @@ impl VideoHandler {
         let stream_id = vf.stream_id;
         let frame_id = vf.frame_id;
         let capture_time_ms = vf.capture_time_ms;
+        if !decoder_recovery::frame_is_current(
+            self.stream_id,
+            self.last_frame_id,
+            stream_id,
+            frame_id,
+        ) {
+            return Ok(DecodeOutcome::OutputPending);
+        }
         let stream_changed = stream_id != 0 && self.stream_id != 0 && stream_id != self.stream_id;
         if format != self.decoder.format() || stream_changed {
             self.reset(Some(format), None);
         }
         self.stream_id = stream_id;
+        self.last_frame_id = frame_id;
+        let has_keyframe =
+            scrap::codec::video_frame_payload_stats(&vf).is_some_and(|(_, _, keyframe)| keyframe);
+        if !self.recovery.accepts_frame(frame_id != 0, has_keyframe) {
+            return Ok(DecodeOutcome::OutputPending);
+        }
         match &vf.union {
             Some(frame) => {
                 let res = self.decoder.handle_video_frame(
@@ -2651,11 +2679,12 @@ impl VideoHandler {
                                 self.decoder.valid()
                             );
                         }
-                        self.fail_counter = 0;
+                        self.recovery.succeeded();
                         self.decode_wait_counter = 0;
                         self.first_frame = false;
                     }
                     Ok(DecodeOutcome::OutputPending | DecodeOutcome::InputBackpressure) => {
+                        self.recovery.pending(std::time::Instant::now());
                         self.decode_wait_counter = self.decode_wait_counter.saturating_add(1);
                         if self.first_frame
                             && (self.decode_wait_counter == 1
@@ -2676,26 +2705,17 @@ impl VideoHandler {
                         }
                     }
                     Err(error) => {
-                        if self.fail_counter < usize::MAX {
-                            if self.first_frame {
-                                log::error!(
-                                    "diag first video frame decode failed: display={}, format={:?}, pixelbuffer={}, chroma={:?}, decoder_valid={}, err={error:?}",
-                                    self._display,
-                                    self.decoder.format(),
-                                    *pixelbuffer,
-                                    chroma,
-                                    self.decoder.valid()
-                                );
-                                self.fail_counter = MAX_DECODE_FAIL_COUNTER;
-                            } else {
-                                self.fail_counter += 1;
-                            }
+                        if self.first_frame {
                             log::error!(
-                                "Failed to handle video frame, fail counter: {}",
-                                self.fail_counter
+                                "diag first video frame decode failed: display={}, format={:?}, pixelbuffer={}, chroma={:?}, decoder_valid={}, err={error:?}",
+                                self._display,
+                                self.decoder.format(),
+                                *pixelbuffer,
+                                chroma,
+                                self.decoder.valid()
                             );
                         }
-                        self.first_frame = false;
+                        self.recovery.failed(std::time::Instant::now());
                     }
                 }
                 if self.record {
@@ -2728,16 +2748,25 @@ impl VideoHandler {
         self.rgb.set_align(crate::get_dst_align_rgba());
         let luid = Self::get_adapter_luid();
         let format = format.unwrap_or(self.decoder.format());
+        if format != self.decoder.format() {
+            self.recovery = Default::default();
+            self.decoder_fallback = 0;
+        }
         if decoder_dimensions.is_some() {
             self.decoder_dimensions = decoder_dimensions;
         }
-        #[cfg(feature = "mediacodec")]
-        self.decoder.release_media_codec();
-        self.decoder = Decoder::new(format, luid, self.decoder_dimensions, self._display);
-        self.fail_counter = 0;
+        self.decoder.release();
+        self.decoder = Decoder::new_with_fallback(
+            format,
+            luid,
+            self.decoder_dimensions,
+            self._display,
+            self.decoder_fallback,
+        );
         self.decode_wait_counter = 0;
         self.first_frame = true;
-        self.stream_id = 0;
+        // Retain the input watermark across local resets: queued old frames
+        // must not replace the new stream or reseed a freshly reset decoder.
     }
 
     /// Start or stop screen record.
@@ -2843,7 +2872,6 @@ pub struct LoginConfigHandler {
     pub custom_fps: Arc<Mutex<Option<usize>>>,
     pub last_auto_fps: Option<usize>,
     pub adapter_luid: Option<i64>,
-    pub mark_unsupported: Vec<CodecFormat>,
     pub selected_windows_session_id: Option<u32>,
     pub peer_info: Option<PeerInfo>,
     password_source: PasswordSource, // where the sent password comes from
@@ -3460,11 +3488,10 @@ impl LoginConfigHandler {
         }
         let supported_decoding = self.get_supported_decoding();
         log::info!(
-            "diag viewer supported_decoding on login: id={}, texture_render={}, adapter_luid={:?}, mark_unsupported={:?}, h264={}, h265={}, vp9={}, av1={}, video_feedback={}, prefer={:?}",
+            "diag viewer supported_decoding on login: id={}, texture_render={}, adapter_luid={:?}, h264={}, h265={}, vp9={}, av1={}, video_feedback={}, prefer={:?}",
             self.id,
             use_texture_render(),
             self.adapter_luid,
-            self.mark_unsupported,
             supported_decoding.ability_h264,
             supported_decoding.ability_h265,
             supported_decoding.ability_vp9,
@@ -3478,12 +3505,8 @@ impl LoginConfigHandler {
 
     pub fn get_supported_decoding(&self) -> SupportedDecoding {
         get_hwcodec_config();
-        let mut decoding = Decoder::supported_decodings(
-            Some(&self.id),
-            use_texture_render(),
-            self.adapter_luid,
-            &self.mark_unsupported,
-        );
+        let mut decoding =
+            Decoder::supported_decodings(Some(&self.id), use_texture_render(), self.adapter_luid);
         decoding.video_feedback = true;
         decoding
     }
@@ -4122,15 +4145,13 @@ impl LoginConfigHandler {
             Some(&self.id),
             use_texture_render(),
             self.adapter_luid,
-            &self.mark_unsupported,
         );
         decoding.video_feedback = true;
         log::info!(
-            "diag viewer supported_decoding update: id={}, texture_render={}, adapter_luid={:?}, mark_unsupported={:?}, h264={}, h265={}, vp9={}, av1={}, video_feedback={}, prefer={:?}",
+            "diag viewer supported_decoding update: id={}, texture_render={}, adapter_luid={:?}, h264={}, h265={}, vp9={}, av1={}, video_feedback={}, prefer={:?}",
             self.id,
             use_texture_render(),
             self.adapter_luid,
-            self.mark_unsupported,
             decoding.ability_h264,
             decoding.ability_h265,
             decoding.ability_vp9,
@@ -4219,6 +4240,7 @@ impl DisplayMediaIntent {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RenderFrameContext {
     pub(crate) connection_generation: u32,
+    pub(crate) screen_authority_generation: u64,
     pub(crate) display_activation_generation: u64,
     pub(crate) stream_id: u64,
     pub(crate) frame_id: u64,
@@ -4535,12 +4557,36 @@ pub fn start_video_thread<F, T>(
         #[cfg(windows)]
         sync_cpu_usage();
         get_hwcodec_config();
-        let mut video_handler = None;
+        let mut video_handler: Option<VideoHandler> = None;
         let mut count = 0;
         let mut duration = std::time::Duration::ZERO;
         let mut skip_beginning = 0;
         loop {
-            if let Ok(data) = video_receiver.recv() {
+            if let Some(handler) = video_handler.as_mut() {
+                if let Some(attempt) = handler.recover_decoder_if_due(std::time::Instant::now()) {
+                    log::warn!(
+                        "recover video decoder locally: display={}, format={:?}, attempt={}, fallback={}",
+                        display,
+                        handler.decoder.format(),
+                        attempt,
+                        handler.decoder_fallback
+                    );
+                    *decoder_backend.write().unwrap() = Some(handler.decoder_backend());
+                    session.refresh_video(display as _);
+                }
+            }
+            // Only recovering/stalled displays need a timer. Healthy and idle
+            // workers remain blocked on input, with no periodic codec probing.
+            let wait = video_handler
+                .as_ref()
+                .and_then(|handler| handler.recovery.wait_duration(std::time::Instant::now()));
+            let received = match wait {
+                Some(wait) => video_receiver.recv_timeout(wait),
+                None => video_receiver
+                    .recv()
+                    .map_err(|_| RecvTimeoutError::Disconnected),
+            };
+            if let Ok(data) = received {
                 match data {
                     MediaData::VideoFrame(_) | MediaData::VideoQueue => {
                         let vf = match data {
@@ -4697,45 +4743,12 @@ pub fn start_video_thread<F, T>(
                                     );
                                 }
                                 Err(e) => {
-                                    // This is a simple workaround.
-                                    //
-                                    // I only see the following error:
-                                    // FailedCall("errcode=1 scrap::common::vpxcodec:libs\\scrap\\src\\common\\vpxcodec.rs:433:9")
-                                    // When switching from all displays to one display, the error occurs.
-                                    // eg:
-                                    // 1. Connect to a device with two displays (A and B).
-                                    // 2. Switch to display A. The error occurs.
-                                    // 3. If the error does not occur. Switch from A to display B. The error occurs.
-                                    //
-                                    // to-do: fix the error
-                                    log::error!("handle video frame error, {}", e);
-                                    session.refresh_video(display as _);
+                                    log::warn!("display {display} decode failed; scheduling local recovery: {e}");
                                 }
                                 Ok(
                                     DecodeOutcome::OutputPending | DecodeOutcome::InputBackpressure,
                                 ) => {}
                             }
-                        }
-
-                        // check invalid decoders
-                        let mut should_update_supported = false;
-                        if let Some(handler) = video_handler.as_mut() {
-                            if !handler.decoder.valid()
-                                || handler.fail_counter >= MAX_DECODE_FAIL_COUNTER
-                            {
-                                let mut lc = session.lc.write().unwrap();
-                                let format = handler.decoder.format();
-                                if !lc.mark_unsupported.contains(&format) {
-                                    lc.mark_unsupported.push(format);
-                                    should_update_supported = true;
-                                    log::info!("mark {format:?} decoder as unsupported, valid:{}, fail_counter:{}, all unsupported:{:?}", handler.decoder.valid(), handler.fail_counter, lc.mark_unsupported);
-                                }
-                            }
-                        }
-                        if should_update_supported {
-                            session.send(Data::Message(
-                                session.lc.read().unwrap().update_supported_decodings(),
-                            ));
                         }
                     }
                     MediaData::Reset(decoder_dimensions) => {
@@ -4752,7 +4765,7 @@ pub fn start_video_thread<F, T>(
                     }
                     _ => {}
                 }
-            } else {
+            } else if matches!(received, Err(RecvTimeoutError::Disconnected)) {
                 break;
             }
         }
@@ -6354,6 +6367,69 @@ pub mod peer_online {
 #[cfg(test)]
 mod video_feedback_tests {
     use super::*;
+
+    #[test]
+    fn video_handler_decode_error_only_recovers_its_own_display() {
+        let mut a = VideoHandler::new(CodecFormat::VP9, 0, None);
+        let b = VideoHandler::new(CodecFormat::VP9, 1, None);
+        assert!(a.decoder.valid() && b.decoder.valid());
+        let mut invalid = frame(7, 1, 0);
+        invalid.set_vp9s(EncodedVideoFrames {
+            frames: vec![EncodedVideoFrame {
+                data: vec![0xff].into(),
+                key: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        assert!(a.handle_frame(invalid, &mut true, &mut None).is_err());
+        let now = std::time::Instant::now();
+        assert_eq!(a.recover_decoder_if_due(now), Some(1));
+        assert!(a.decoder.valid());
+        assert!(!a.recovery.accepts_frame(true, false));
+        assert!(b.decoder.valid());
+        assert_eq!(b.recovery.wait_duration(now), None);
+    }
+
+    #[test]
+    fn video_handler_same_codec_reset_preserves_recovery_backoff_and_watermark() {
+        let now = std::time::Instant::now();
+        let mut handler = VideoHandler::new(CodecFormat::VP9, 0, None);
+        handler.stream_id = 7;
+        handler.last_frame_id = 10;
+        handler.recovery.failed(now);
+        assert_eq!(handler.recover_decoder_if_due(now), Some(1));
+        let remaining = handler.recovery.wait_duration(now);
+        handler.reset(Some(CodecFormat::VP9), None);
+        assert_eq!(handler.recovery.wait_duration(now), remaining);
+        assert_eq!(handler.recover_decoder_if_due(now), None);
+        assert_eq!((handler.stream_id, handler.last_frame_id), (7, 10));
+    }
+
+    #[test]
+    fn video_handler_codec_change_starts_with_fresh_decoder_selection() {
+        let now = std::time::Instant::now();
+        let mut handler = VideoHandler::new(CodecFormat::VP9, 0, None);
+        handler.decoder_fallback = 3;
+        handler.recovery.failed(now);
+        handler.reset(Some(CodecFormat::VP8), None);
+        assert!(handler.decoder.valid());
+        assert_eq!(handler.decoder.format(), CodecFormat::VP8);
+        assert_eq!(handler.decoder_fallback, 0);
+        assert_eq!(handler.recovery.wait_duration(now), None);
+    }
+
+    #[test]
+    fn video_handler_rejects_old_queued_stream_before_changing_decoder() {
+        let mut handler = VideoHandler::new(CodecFormat::VP9, 0, None);
+        handler.stream_id = 12;
+        handler.last_frame_id = 3;
+        let result = handler.handle_frame(frame(11, 50, 0), &mut true, &mut None);
+        assert_eq!(result.unwrap(), DecodeOutcome::OutputPending);
+        assert_eq!(handler.decoder.format(), CodecFormat::VP9);
+        assert!(handler.decoder.valid());
+        assert_eq!((handler.stream_id, handler.last_frame_id), (12, 3));
+    }
 
     fn frame(stream_id: u64, frame_id: u64, display: i32) -> VideoFrame {
         VideoFrame {
