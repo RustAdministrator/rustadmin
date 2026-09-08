@@ -14,6 +14,7 @@ class KeyboardInputController {
     required KeyboardHidSink sendHid,
     required KeyboardLegacySink sendLegacy,
     required KeyboardTextSink sendText,
+    KeyboardDeadKeyComposer? composeDeadKey,
     KeyboardCommandErrorHandler? onError,
     KeyboardInputRejectionHandler? onInputRejected,
   }) : _canDispatch = canDispatch {
@@ -22,6 +23,7 @@ class KeyboardInputController {
       sendHid: sendHid,
       sendLegacy: sendLegacy,
       sendText: sendText,
+      composeDeadKey: composeDeadKey,
       onError: onError,
       onInputRejected: onInputRejected,
     );

@@ -13,9 +13,11 @@ class _Harness {
   final rejected = <KeyboardInputRejection>[];
   bool allowed = true;
   bool failText = false;
+  Completer<int?>? composition;
   late final dispatcher = KeyboardDispatcher(
     canDispatch: () => allowed,
     onInputRejected: rejected.add,
+    composeDeadKey: (accent, base) => composition?.future,
     sendHid: ({required key, required action, required lockMask}) {
       events.add('hid:$action');
     },
@@ -45,6 +47,43 @@ CommittedTextDispatch _text(String value, {int before = 0, int after = 0}) =>
     );
 
 void main() {
+  test('dead-key reservation includes fallback and refunds on async cancellation', () async {
+    final h = _Harness()..composition = Completer<int?>();
+    final waiting = h.dispatcher.dispatchAll([
+      const CommittedTextDispatch(text: 'e', deadKeyAccent: 0x5e,
+        source: KeyboardInputSource.androidNativeText),
+    ]);
+    expect(h.dispatcher.pendingTextBytes, 5);
+    expect(h.dispatcher.pendingTextOperations, 1);
+    final queued = h.dispatcher.dispatchAll([_text('later')]);
+    expect(h.dispatcher.pendingTextBytes, 10);
+    h.dispatcher.invalidatePending();
+    h.composition!.complete(0xea);
+    h.gate.complete();
+    await Future.wait([waiting, queued]);
+    expect(h.events, isEmpty);
+    expect(h.dispatcher.pendingTextBytes, 0);
+    expect(h.dispatcher.pendingTextOperations, 0);
+    await h.dispatcher.dispatchAll([_text('fresh')]);
+    expect(h.events, ['fresh']);
+  });
+
+  test('dead-key metadata is validated before queue admission', () async {
+    final h = _Harness();
+    for (final accent in [-1, 0, 0x7f, 0xd800, 0x2028, 0x110000]) {
+      expect(h.dispatcher.tryDispatchAll([
+        CommittedTextDispatch(text: 'e', deadKeyAccent: accent,
+          source: KeyboardInputSource.androidNativeText),
+      ]).accepted, isFalse);
+    }
+    expect(h.dispatcher.tryDispatchAll([
+      const CommittedTextDispatch(text: 'e', deadKeyAccent: 0x5e,
+        literal: false, source: KeyboardInputSource.androidNativeText),
+    ]).accepted, isFalse);
+    expect(h.dispatcher.pendingTextBytes, 0);
+    expect(h.events, isEmpty);
+  });
+
   test('UTF-8 admission preserves exact boundaries and validates scalars', () {
     for (final unit in [
       'a',

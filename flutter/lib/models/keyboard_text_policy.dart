@@ -14,6 +14,14 @@ abstract final class KeyboardTextPolicy {
   static const maxPendingOperations = 64;
   static const maxEditGraphemes = 64 * 1024;
 
+  static bool isPrintableScalar(int scalar) =>
+      scalar >= 0x20 &&
+      scalar <= 0x10ffff &&
+      !(scalar >= 0x7f && scalar <= 0x9f) &&
+      !(scalar >= 0xd800 && scalar <= 0xdfff) &&
+      scalar != 0x2028 &&
+      scalar != 0x2029;
+
   // Count without allocating an unbounded encoded copy or replacing malformed
   // UTF-16. Wire chunking remains in Rust with the negotiated per-message cap.
   static ({int bytes, KeyboardInputRejection? rejection}) inspect(String text) {

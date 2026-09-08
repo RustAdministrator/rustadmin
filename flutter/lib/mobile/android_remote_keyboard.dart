@@ -39,6 +39,13 @@ sealed class AndroidRemoteKeyboardEvent {
         final lockModes = arguments['lock_modes'] ?? 0;
         final modifiers = arguments['modifier_usages'] ?? const <int>[];
         final candidate = arguments['text_candidate'] ?? '';
+        final accent = arguments['dead_key_accent'];
+        if (accent != null &&
+            (accent is! int ||
+                !KeyboardTextPolicy.isPrintableScalar(accent) ||
+                candidate != '')) {
+          return null;
+        }
         if (candidate is! String ||
             candidate.length > 2 ||
             KeyboardTextPolicy.inspect(candidate).rejection != null ||
@@ -70,6 +77,7 @@ sealed class AndroidRemoteKeyboardEvent {
             count,
             origin: origin,
             textCandidate: candidate.isEmpty ? null : candidate,
+            deadKeyAccent: accent as int?,
             sourceLanguageTag: _validatedMetadata(
               arguments['source_language_tag'],
             ),
@@ -89,6 +97,7 @@ sealed class AndroidRemoteKeyboardEvent {
           down,
           origin: origin,
           textCandidate: candidate.isEmpty ? null : candidate,
+          deadKeyAccent: accent as int?,
           sourceLanguageTag: _validatedMetadata(
             arguments['source_language_tag'],
           ),
@@ -141,6 +150,7 @@ final class AndroidRemotePhysicalKeyEvent extends AndroidRemoteKeyboardEvent {
     this.down, {
     this.origin = KeyboardInputOrigin.unknown,
     this.textCandidate,
+    this.deadKeyAccent,
     this.sourceLanguageTag = '',
     this.sourceLayoutType = '',
     this.repeat = false,
@@ -152,6 +162,7 @@ final class AndroidRemotePhysicalKeyEvent extends AndroidRemoteKeyboardEvent {
   final bool down;
   final KeyboardInputOrigin origin;
   final String? textCandidate;
+  final int? deadKeyAccent;
   final String sourceLanguageTag;
   final String sourceLayoutType;
   final bool repeat;
@@ -166,6 +177,7 @@ final class AndroidRemotePressBatchEvent extends AndroidRemoteKeyboardEvent {
     this.count, {
     this.origin = KeyboardInputOrigin.unknown,
     this.textCandidate,
+    this.deadKeyAccent,
     this.sourceLanguageTag = '',
     this.sourceLayoutType = '',
     this.lockModes = 0,
@@ -175,6 +187,7 @@ final class AndroidRemotePressBatchEvent extends AndroidRemoteKeyboardEvent {
   final int count;
   final KeyboardInputOrigin origin;
   final String? textCandidate;
+  final int? deadKeyAccent;
   final String sourceLanguageTag;
   final String sourceLayoutType;
   final int lockModes;

@@ -75,6 +75,7 @@ final class CommittedTextDispatch extends KeyboardDispatchAction {
     required this.text,
     required this.source,
     this.literal = true,
+    this.deadKeyAccent,
     this.deleteBeforeGraphemes = 0,
     this.deleteAfterGraphemes = 0,
     this.sourceLanguageTag = '',
@@ -83,6 +84,7 @@ final class CommittedTextDispatch extends KeyboardDispatchAction {
 
   final String text;
   final bool literal;
+  final int? deadKeyAccent;
   final KeyboardInputSource source;
   final int deleteBeforeGraphemes;
   final int deleteAfterGraphemes;
@@ -91,6 +93,7 @@ final class CommittedTextDispatch extends KeyboardDispatchAction {
 }
 
 typedef KeyboardCanDispatch = bool Function();
+typedef KeyboardDeadKeyComposer = FutureOr<int?> Function(int accent, int base);
 typedef KeyboardHidSink =
     FutureOr<void> Function({
       required HidKey key,
@@ -117,6 +120,7 @@ class KeyboardDispatchDiagnostics {
   int ignoredLegacyKeys = 0;
   int retiredCommands = 0;
   int rejectedTextOperations = 0;
+  int deadKeyFallbacks = 0;
 }
 
 class KeyboardDispatcher {
@@ -125,12 +129,14 @@ class KeyboardDispatcher {
     required KeyboardHidSink sendHid,
     required KeyboardLegacySink sendLegacy,
     required KeyboardTextSink sendText,
+    KeyboardDeadKeyComposer? composeDeadKey,
     KeyboardCommandErrorHandler? onError,
     KeyboardInputRejectionHandler? onInputRejected,
   }) : _canDispatch = canDispatch,
        _sendHid = sendHid,
        _sendLegacy = sendLegacy,
        _sendText = sendText,
+       _composeDeadKey = composeDeadKey,
        _queue = KeyboardCommandQueue(onError: onError),
        _onInputRejected = onInputRejected;
 
@@ -138,6 +144,7 @@ class KeyboardDispatcher {
   final KeyboardHidSink _sendHid;
   final KeyboardLegacySink _sendLegacy;
   final KeyboardTextSink _sendText;
+  final KeyboardDeadKeyComposer? _composeDeadKey;
   final KeyboardCommandQueue _queue;
   final KeyboardInputRejectionHandler? _onInputRejected;
   int _pendingTextBytes = 0;
@@ -208,6 +215,16 @@ class KeyboardDispatcher {
       final checked = KeyboardTextPolicy.inspect(action.text);
       final rejection = checked.rejection;
       if (rejection != null) return _rejectText(rejection);
+      final accent = action.deadKeyAccent;
+      if (accent != null &&
+          (!action.literal || !KeyboardTextPolicy.isPrintableScalar(accent))) {
+        return _rejectText(KeyboardInputRejection.invalidText);
+      }
+      // Reserve the uncomposed fallback, including a supplementary accent.
+      final byteCost = checked.bytes + (accent == null ? 0 : 4);
+      if (byteCost > KeyboardTextPolicy.maxOperationBytes) {
+        return _rejectText(KeyboardInputRejection.textTooLarge);
+      }
       final editCost =
           action.deleteBeforeGraphemes + action.deleteAfterGraphemes;
       if (action.deleteBeforeGraphemes < 0 ||
@@ -216,9 +233,9 @@ class KeyboardDispatcher {
         return _rejectText(KeyboardInputRejection.invalidText);
       }
       edits += editCost;
-      bytes += checked.bytes;
+      bytes += byteCost;
       operations++;
-      costs.add(checked.bytes);
+      costs.add(byteCost);
     }
     if (_pendingTextBytes + bytes > KeyboardTextPolicy.maxPendingBytes ||
         _pendingEditGraphemes + edits > KeyboardTextPolicy.maxEditGraphemes ||
@@ -288,9 +305,33 @@ class KeyboardDispatcher {
             action.deleteAfterGraphemes == 0) {
           return;
         }
+        final generation = _queue.generation;
+        var text = action.text;
+        final accent = action.deadKeyAccent;
+        if (accent != null) {
+          int? composed;
+          final scalars = text.runes;
+          if (_composeDeadKey != null && scalars.length == 1) {
+            try {
+              composed = await Future<int?>.sync(
+                () => _composeDeadKey(accent, scalars.first),
+              ).timeout(const Duration(seconds: 1));
+            } catch (_) {
+              // Unsupported platforms and failed native calls keep both scalars.
+            }
+          }
+          if (generation != _queue.generation || !_canDispatch()) return;
+          if (composed != null &&
+              KeyboardTextPolicy.isPrintableScalar(composed)) {
+            text = String.fromCharCode(composed);
+          } else {
+            diagnostics.deadKeyFallbacks++;
+            text = String.fromCharCode(accent) + text;
+          }
+        }
         await Future<void>.sync(
           () => _sendText(
-            text: action.text,
+            text: text,
             literal: action.literal,
             deleteBeforeGraphemes: action.deleteBeforeGraphemes,
             deleteAfterGraphemes: action.deleteAfterGraphemes,

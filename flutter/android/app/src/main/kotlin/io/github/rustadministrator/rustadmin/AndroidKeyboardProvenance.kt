@@ -2,6 +2,7 @@ package io.github.rustadministrator.rustadmin
 
 import android.view.InputDevice
 import android.view.KeyEvent
+import android.view.KeyCharacterMap
 
 internal enum class AndroidKeyboardOrigin(val wireName: String) {
     HARDWARE("hardware"),
@@ -41,5 +42,28 @@ internal object AndroidKeyboardProvenance {
         // Android dead-key values carry COMBINING_ACCENT in the high bit and
         // deliberately fail the scalar range check above.
         return String(Character.toChars(unicodeCodePoint))
+    }
+
+    fun deadKeyAccent(value: Int): Int? {
+        if (value and KeyCharacterMap.COMBINING_ACCENT == 0) return null
+        val accent = value and KeyCharacterMap.COMBINING_ACCENT_MASK
+        return accent.takeIf { textCandidate(it) != null && it != 0x2028 && it != 0x2029 }
+    }
+
+    fun composeDeadKey(
+        accent: Int,
+        base: Int,
+        resolve: (Int, Int) -> Int = KeyCharacterMap::getDeadChar,
+    ): Int {
+        // AOSP getDeadChar narrows its input to char internally. Preserve
+        // supplementary scalars through the caller's literal fallback.
+        if (accent > 0xffff || base > 0xffff ||
+            textCandidate(accent) == null || textCandidate(base) == null ||
+            accent in 0x2028..0x2029 || base in 0x2028..0x2029
+        ) return 0
+        val composed = resolve(accent, base)
+        return composed.takeIf {
+            textCandidate(it) != null && it !in 0x2028..0x2029
+        } ?: 0
     }
 }

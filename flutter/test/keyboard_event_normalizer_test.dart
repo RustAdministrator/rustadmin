@@ -7,6 +7,18 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   const normalizer = FlutterKeyboardEventNormalizer();
 
+  test('Android dead accent survives physical and complete-press normalization', () {
+    const android = AndroidHardwareKeyboardNormalizer();
+    for (final down in [true, false]) {
+      expect(android.physical(usbHidUsage: 0x34, down: down,
+        deadKeyAccent: 0x2c6)!.deadKeyAccent, 0x2c6);
+    }
+    expect(android.physical(usbHidUsage: 0x34, down: true, repeat: true,
+      deadKeyAccent: 0x2c6)!.deadKeyAccent, 0x2c6);
+    expect(android.pressBatch(usbHidUsage: 0x34, count: 3,
+      deadKeyAccent: 0x2c6)!.deadKeyAccent, 0x2c6);
+  });
+
   test(
     'Android provenance and candidates survive every canonical event shape',
     () {

@@ -110,6 +110,7 @@ final class PhysicalKeyboardIntent extends KeyboardIntent {
     required KeyboardInputSource source,
     KeyboardInputOrigin? origin,
     this.textCandidate,
+    this.deadKeyAccent,
     this.sourceLanguageTag = '',
     this.sourceLayoutType = '',
     this.legacyFallbackName,
@@ -122,6 +123,7 @@ final class PhysicalKeyboardIntent extends KeyboardIntent {
   final HidKey key;
   final KeyboardIntentAction action;
   final String? textCandidate;
+  final int? deadKeyAccent;
   final String sourceLanguageTag;
   final String sourceLayoutType;
   final String? legacyFallbackName;
@@ -138,6 +140,7 @@ final class PhysicalKeyPressBatchIntent extends KeyboardIntent {
     required KeyboardInputSource source,
     KeyboardInputOrigin? origin,
     this.textCandidate,
+    this.deadKeyAccent,
     this.sourceLanguageTag = '',
     this.sourceLayoutType = '',
     this.lockMask = 0,
@@ -148,6 +151,7 @@ final class PhysicalKeyPressBatchIntent extends KeyboardIntent {
   final HidKey key;
   final int count;
   final String? textCandidate;
+  final int? deadKeyAccent;
   final String sourceLanguageTag;
   final String sourceLayoutType;
   final int lockMask;

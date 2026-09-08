@@ -182,6 +182,12 @@ owners are distinguished from explicit modifier owners within the same route
 table. Pressed/dispatched key snapshots are derived from that table. A late
 IME release after reset cannot remove a fresh hardware owner. IME modifiers
 reported only alongside a text-routed key are not injected physically.
+In Auto, explicit IME modifier downs stay deferred in the same owner table
+until an IME physical command needs them. Their ups/reset need no transport
+release unless the modifier was promoted. Reported right Alt (optionally with
+left Control) can accompany an authoritative printable IME candidate without
+becoming a shortcut; left Alt, right Control, Meta, and real hardware/toolbar
+shortcut owners still select physical commands. No layout is inferred from HID.
 
 Queued releases retain their state-machine-owned dispatch lease until the queue
 drains. Cancellation drops obsolete down/repeat/text commands, but preserves
@@ -225,6 +231,19 @@ key adapter and is not evidence that a physical keyboard produced the event.
 Native key and batch envelopes preserve HID, a bounded scalar text candidate,
 lock/modifier metadata and IME language/layout metadata. A candidate is not a
 second committed-text event and does not itself select a route.
+
+Android dead-key flags are carried separately as one validated accent scalar.
+On a text route, the state machine owns one pending accent, bound to origin,
+source language/layout and input mode. The next matching candidate is composed
+inside one ordered text operation using a stateless Android
+`KeyCharacterMap.getDeadChar` call. Unsupported pairs or native failures send
+the original accent and base literally. Supplementary scalars bypass that
+Android API's internal UTF-16 narrowing and are preserved by the fallback.
+Backspace cancels an unsent accent locally; a physical command, changed
+origin/layout/mode, reset, or authoritative IME commit clears pending state.
+Queue admission reserves four additional UTF-8 bytes for fallback. Cancellation
+and permission are checked again after the bounded native call, before sending.
+This does not implement an InputConnection composition buffer.
 
 Android classification first honors soft-keyboard/editor-action flags. A
 virtual hard-key area remains unknown. Hardware requires a positive device ID,
@@ -272,7 +291,7 @@ The remaining keyboard work does not yet:
 - implement Android `InputConnection` composition and committed-edit handling;
 - implement iOS `UITextInput` or native `UIKey` adapters;
 - add a Keyboard V2 snapshot/reset protobuf message or protocol version;
-- add speculative deferred-modifier or layout-specific AltGr synthesis;
+- add layout-specific AltGr synthesis or infer text from a QWERTY HID table;
 - change Windows, macOS, X11, or Wayland host injection;
 - synchronize, activate, or silently change the remote keyboard layout.
 

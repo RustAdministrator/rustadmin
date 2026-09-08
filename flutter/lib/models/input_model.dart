@@ -287,6 +287,13 @@ class InputModel {
     sessionId = parent.target!.sessionId;
     _keyboardInput = KeyboardInputController(
       canDispatch: () => keyboardPerm && !isViewOnly && !isViewCamera,
+      composeDeadKey: (accent, base) async {
+        final value = await platformFFI.invokeMethod(
+          'compose_remote_dead_key',
+          {'accent': accent, 'base': base},
+        );
+        return value is int ? value : null;
+      },
       sendHid: ({required key, required action, required lockMask}) {
         if (key.usagePage != HidKey.keyboardUsagePage) {
           return Future<void>.value();
@@ -604,6 +611,7 @@ class InputModel {
     bool repeat = false,
     KeyboardInputOrigin origin = KeyboardInputOrigin.unknown,
     String? textCandidate,
+    int? deadKeyAccent,
     String sourceLanguageTag = '',
     String sourceLayoutType = '',
     int lockModes = 0,
@@ -614,6 +622,7 @@ class InputModel {
       down: down,
       origin: origin,
       textCandidate: textCandidate,
+      deadKeyAccent: deadKeyAccent,
       sourceLanguageTag: sourceLanguageTag,
       sourceLayoutType: sourceLayoutType,
       repeat: repeat,
@@ -649,6 +658,7 @@ class InputModel {
     int count, {
     KeyboardInputOrigin origin = KeyboardInputOrigin.unknown,
     String? textCandidate,
+    int? deadKeyAccent,
     String sourceLanguageTag = '',
     String sourceLayoutType = '',
     int lockModes = 0,
@@ -659,6 +669,7 @@ class InputModel {
       count: count,
       origin: origin,
       textCandidate: textCandidate,
+      deadKeyAccent: deadKeyAccent,
       sourceLanguageTag: sourceLanguageTag,
       sourceLayoutType: sourceLayoutType,
       lockMask: lockModes,

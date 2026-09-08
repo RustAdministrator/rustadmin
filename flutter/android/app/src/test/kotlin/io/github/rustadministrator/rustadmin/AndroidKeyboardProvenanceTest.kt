@@ -7,6 +7,47 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 class AndroidKeyboardProvenanceTest {
+    @Test
+    fun deadAccentIsSeparatedFromCandidateForEveryPhysicalAction() {
+        val router = AndroidPhysicalKeyRouter()
+        for (action in listOf(KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP, KeyEvent.ACTION_MULTIPLE)) {
+            val event = router.route(action, KeyEvent.KEYCODE_APOSTROPHE, 0,
+                2, AndroidKeyboardOrigin.IME, Int.MIN_VALUE or 0x2c6)!!.single()
+            when (event) {
+                is RemoteKeyboardEvent.PhysicalKey -> {
+                    assertEquals(0x2c6, event.deadKeyAccent)
+                    assertNull(event.textCandidate)
+                }
+                is RemoteKeyboardEvent.PhysicalPressBatch -> {
+                    assertEquals(0x2c6, event.deadKeyAccent)
+                    assertNull(event.textCandidate)
+                }
+                else -> throw AssertionError("Expected physical key")
+            }
+        }
+        assertNull(AndroidKeyboardProvenance.deadKeyAccent(0x5e))
+        for (value in listOf(0, 9, 0x7f, 0xd800, 0x2028, 0x110000)) {
+            assertNull(AndroidKeyboardProvenance.deadKeyAccent(Int.MIN_VALUE or value))
+        }
+    }
+
+    @Test
+    fun deadCompositionGuardsNativeCharNarrowingAndInvalidResults() {
+        for (value in listOf(-1, 0, 9, 0x7f, 0xd800, 0x2028, 0x1f642, 0x110000)) {
+            val forbidden: (Int, Int) -> Int = { _, _ -> throw AssertionError("Resolver must not run") }
+            assertEquals(0, AndroidKeyboardProvenance.composeDeadKey(0x5e, value, forbidden))
+            assertEquals(0, AndroidKeyboardProvenance.composeDeadKey(value, 0x65, forbidden))
+        }
+        assertEquals(0xea, AndroidKeyboardProvenance.composeDeadKey(0x5e, 0x65) { accent, base ->
+            assertEquals(0x5e, accent)
+            assertEquals(0x65, base)
+            0xea
+        })
+        for (invalid in listOf(0, 9, 0xd800, 0x2029, 0x110000)) {
+            assertEquals(0, AndroidKeyboardProvenance.composeDeadKey(0x5e, 0x65) { _, _ -> invalid })
+        }
+    }
+
     private fun classify(
         connection: Boolean = false,
         flags: Int = 0,

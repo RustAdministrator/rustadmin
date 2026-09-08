@@ -25,6 +25,7 @@ internal sealed interface RemoteKeyboardEvent {
         val modifierUsages: List<Int> = emptyList(),
         val origin: AndroidKeyboardOrigin = AndroidKeyboardOrigin.UNKNOWN,
         val textCandidate: String? = null,
+        val deadKeyAccent: Int? = null,
     ) : RemoteKeyboardEvent
     data class PhysicalPressBatch(
         val usbHidUsage: Int,
@@ -33,6 +34,7 @@ internal sealed interface RemoteKeyboardEvent {
         val modifierUsages: List<Int> = emptyList(),
         val origin: AndroidKeyboardOrigin = AndroidKeyboardOrigin.UNKNOWN,
         val textCandidate: String? = null,
+        val deadKeyAccent: Int? = null,
     ) : RemoteKeyboardEvent
     data class Rejected(val reason: AndroidInputRejection) : RemoteKeyboardEvent
     data class CommittedText(
@@ -224,6 +226,7 @@ internal class AndroidPhysicalKeyRouter {
     ): List<RemoteKeyboardEvent>? {
         val usage = AndroidKeyToUsbHid.map(keyCode) ?: return null
         val candidate = AndroidKeyboardProvenance.textCandidate(unicodeCodePoint)
+        val accent = AndroidKeyboardProvenance.deadKeyAccent(unicodeCodePoint)
         val lockModes = AndroidMetaStateToUsbHid.bridgeLockModes(metaState)
         val modifiers =
             if (usage in 0xe0..0xe7) emptyList()
@@ -238,6 +241,7 @@ internal class AndroidPhysicalKeyRouter {
                     modifierUsages = modifiers,
                     origin = origin,
                     textCandidate = candidate,
+                    deadKeyAccent = accent,
                 ),
             )
             KeyEvent.ACTION_UP -> listOf(
@@ -248,11 +252,12 @@ internal class AndroidPhysicalKeyRouter {
                     modifierUsages = modifiers,
                     origin = origin,
                     textCandidate = candidate,
+                    deadKeyAccent = accent,
                 ),
             )
             KeyEvent.ACTION_MULTIPLE -> if (repeatCount in 1..MAX_SYNTHETIC_REPEAT_COUNT) {
                 listOf(RemoteKeyboardEvent.PhysicalPressBatch(
-                    usage, repeatCount, lockModes, modifiers, origin, candidate,
+                    usage, repeatCount, lockModes, modifiers, origin, candidate, accent,
                 ))
             } else {
                 listOf(RemoteKeyboardEvent.Rejected(AndroidInputRejection.PRESS_COUNT))
@@ -365,7 +370,7 @@ internal class RemoteKeyboardInputView(
 
 internal class RemoteKeyboardController(
     private val activity: Activity,
-    private val emitToFlutter: (Map<String, Any>) -> Unit,
+    private val emitToFlutter: (Map<String, Any?>) -> Unit,
 ) {
     private val diagnostics = AndroidInputDiagnostics()
     private var view: RemoteKeyboardInputView? = null
@@ -443,6 +448,7 @@ internal class RemoteKeyboardController(
                                 "modifier_usages" to event.modifierUsages,
                                 "origin" to event.origin.wireName,
                                 "text_candidate" to event.textCandidate.orEmpty(),
+                                "dead_key_accent" to event.deadKeyAccent,
                                 "source_language_tag" to layout.languageTag,
                                 "source_layout_type" to layout.layoutType,
                             ),
@@ -477,6 +483,7 @@ internal class RemoteKeyboardController(
                             "modifier_usages" to event.modifierUsages,
                             "origin" to event.origin.wireName,
                             "text_candidate" to event.textCandidate.orEmpty(),
+                            "dead_key_accent" to event.deadKeyAccent,
                             "source_language_tag" to layout.languageTag,
                             "source_layout_type" to layout.layoutType,
                         ))

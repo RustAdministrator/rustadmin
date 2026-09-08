@@ -85,6 +85,178 @@ class _Harness {
 
 void main() {
   test(
+    'confirmed IME AltGr symbols do not inject reported Ctrl or Alt',
+    () async {
+      for (final text in ['@', '?', '\u20ac', '\u00e9', '\u{1f642}']) {
+        final h = _Harness();
+        await h.key(
+          KeyboardInputOrigin.ime,
+          KeyboardIntentAction.down,
+          usage: 0x14,
+          text: text,
+          modifiers: {HidKey.controlLeft, HidKey.altRight},
+        );
+        await h.key(
+          KeyboardInputOrigin.ime,
+          KeyboardIntentAction.up,
+          usage: 0x14,
+        );
+        expect(h.events, ['text:$text']);
+        expect(h.controller.effectiveModifiers.ctrl, isFalse);
+        expect(h.controller.effectiveModifiers.alt, isFalse);
+      }
+    },
+  );
+
+  test('explicit IME AltGr modifiers wait for text or a command', () async {
+    final h = _Harness();
+    await h.key(
+      KeyboardInputOrigin.ime,
+      KeyboardIntentAction.down,
+      usage: 0xe0,
+      text: null,
+    );
+    await h.key(
+      KeyboardInputOrigin.ime,
+      KeyboardIntentAction.down,
+      usage: 0xe6,
+      text: null,
+    );
+    expect(h.events, isEmpty);
+    await h.key(
+      KeyboardInputOrigin.ime,
+      KeyboardIntentAction.down,
+      usage: 0x14,
+      text: '@',
+      modifiers: {HidKey.controlLeft, HidKey.altRight},
+    );
+    await h.key(KeyboardInputOrigin.ime, KeyboardIntentAction.up, usage: 0x14);
+    await h.key(KeyboardInputOrigin.ime, KeyboardIntentAction.up, usage: 0xe6);
+    await h.key(KeyboardInputOrigin.ime, KeyboardIntentAction.up, usage: 0xe0);
+    expect(h.events, ['text:@']);
+  });
+
+  test('deferred IME Control is sent before its physical command', () async {
+    final h = _Harness();
+    await h.key(
+      KeyboardInputOrigin.ime,
+      KeyboardIntentAction.down,
+      usage: 0xe0,
+      text: null,
+    );
+    expect(h.events, isEmpty);
+    await h.key(
+      KeyboardInputOrigin.ime,
+      KeyboardIntentAction.down,
+      usage: 6,
+      text: 'c',
+    );
+    await h.key(KeyboardInputOrigin.ime, KeyboardIntentAction.up, usage: 6);
+    await h.key(KeyboardInputOrigin.ime, KeyboardIntentAction.up, usage: 0xe0);
+    expect(h.events, ['224:down', '6:down', '6:up', '224:up']);
+  });
+
+  test('explicit IME Shift does not surround authoritative text', () async {
+    final h = _Harness();
+    await h.key(
+      KeyboardInputOrigin.ime,
+      KeyboardIntentAction.down,
+      usage: 0xe1,
+      text: null,
+    );
+    await h.key(KeyboardInputOrigin.ime, KeyboardIntentAction.down, text: '?');
+    await h.key(KeyboardInputOrigin.ime, KeyboardIntentAction.up);
+    await h.key(KeyboardInputOrigin.ime, KeyboardIntentAction.up, usage: 0xe1);
+    expect(h.events, ['text:?']);
+  });
+
+  test(
+    'real Control and left Alt chords are not guessed to be AltGr',
+    () async {
+      final h = _Harness();
+      await h.key(
+        KeyboardInputOrigin.hardware,
+        KeyboardIntentAction.down,
+        usage: 0xe0,
+      );
+      await h.key(
+        KeyboardInputOrigin.ime,
+        KeyboardIntentAction.down,
+        text: '@',
+        modifiers: {HidKey.altRight},
+      );
+      await h.key(KeyboardInputOrigin.ime, KeyboardIntentAction.up);
+      await h.key(
+        KeyboardInputOrigin.hardware,
+        KeyboardIntentAction.up,
+        usage: 0xe0,
+      );
+      expect(h.events.where((event) => event.startsWith('text:')), isEmpty);
+      final left = _Harness();
+      await left.key(
+        KeyboardInputOrigin.ime,
+        KeyboardIntentAction.down,
+        text: '@',
+        modifiers: {HidKey.controlLeft, HidKey.altLeft},
+      );
+      await left.key(KeyboardInputOrigin.ime, KeyboardIntentAction.up);
+      expect(left.events.where((event) => event.startsWith('text:')), isEmpty);
+    },
+  );
+
+  test(
+    'reset drops unmaterialized IME modifiers without remote releases',
+    () async {
+      final h = _Harness();
+      await h.key(
+        KeyboardInputOrigin.ime,
+        KeyboardIntentAction.down,
+        usage: 0xe1,
+      );
+      await h.controller.reset(
+        KeyboardResetReason.focusLoss,
+        invalidatePending: true,
+        allowBlockedReleases: true,
+      );
+      await h.key(
+        KeyboardInputOrigin.ime,
+        KeyboardIntentAction.up,
+        usage: 0xe1,
+      );
+      expect(h.events, isEmpty);
+    },
+  );
+
+  test(
+    'borrowed IME command batch materializes its own deferred modifier',
+    () async {
+      final h = _Harness();
+      await h.key(KeyboardInputOrigin.hardware, KeyboardIntentAction.down);
+      await h.key(
+        KeyboardInputOrigin.ime,
+        KeyboardIntentAction.down,
+        usage: 0xe0,
+      );
+      await h.batch(KeyboardInputOrigin.ime);
+      await h.key(
+        KeyboardInputOrigin.ime,
+        KeyboardIntentAction.up,
+        usage: 0xe0,
+      );
+      await h.key(KeyboardInputOrigin.hardware, KeyboardIntentAction.up);
+      expect(h.events, [
+        '4:down',
+        '224:down',
+        '4:repeat',
+        '4:repeat',
+        '4:repeat',
+        '224:up',
+        '4:up',
+      ]);
+    },
+  );
+
+  test(
     'queued text retains its chosen semantic when a later context changes',
     () async {
       final h = _Harness()..hidGate = Completer<void>();

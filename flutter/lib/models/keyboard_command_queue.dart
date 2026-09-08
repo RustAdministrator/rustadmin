@@ -34,6 +34,7 @@ class KeyboardCommandQueue {
   }
 
   Future<void> get idle => _idle?.future ?? Future<void>.value();
+  int get generation => _generation;
 
   void _start() {
     if (_running) return;

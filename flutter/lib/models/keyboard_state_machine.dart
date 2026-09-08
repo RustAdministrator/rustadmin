@@ -5,7 +5,7 @@ import 'keyboard_intent.dart';
 import 'keyboard_modifier_controller.dart';
 import 'keyboard_text_policy.dart';
 
-enum ActiveKeyRoute { physical, text, ignored }
+enum ActiveKeyRoute { physical, text, deferredModifier, ignored }
 
 // Reported modifiers and explicit keys are owners in the same route table.
 typedef _KeyOwner = ({HidKey key, KeyboardInputOrigin origin, bool reported});
@@ -15,6 +15,14 @@ _KeyOwner _owner(PhysicalKeyboardIntent intent) =>
 
 _KeyOwner _reportedOwner(HidKey key) =>
     (key: key, origin: KeyboardInputOrigin.unknown, reported: true);
+
+typedef _PendingDeadKey = ({
+  int accent,
+  KeyboardInputOrigin origin,
+  String language,
+  String layout,
+  ControllerKeyboardInputMode mode,
+});
 
 class KeyboardStateDiagnostics {
   int unknownKeyUps = 0;
@@ -63,6 +71,7 @@ class KeyboardStateMachine {
   final Set<HidKey> _reportedSyntheticModifiers = <HidKey>{};
   final Map<_KeyOwner, Set<HidKey>> _reportedModifiersByKey = {};
   final diagnostics = KeyboardStateDiagnostics();
+  _PendingDeadKey? _pendingDeadKey;
   int _resetGeneration = 0;
   Future<void> _lastDispatch = Future<void>.value();
 
@@ -111,6 +120,7 @@ class KeyboardStateMachine {
 
   Future<void> handle(KeyboardIntent intent, KeyboardRoutingContext context) {
     _lastDispatch = Future<void>.value();
+    if (_pendingDeadKey?.mode != context.inputMode) _pendingDeadKey = null;
     switch (intent) {
       case PhysicalKeyboardIntent():
         _handlePhysical(intent, context);
@@ -140,6 +150,7 @@ class KeyboardStateMachine {
     SyntheticModifierIntent intent,
     KeyboardRoutingContext context,
   ) {
+    _pendingDeadKey = null;
     final modifier = _mobileModifier(intent.modifier);
     final wasActive = mobileModifierState.isActive(modifier);
     switch (intent.action) {
@@ -219,6 +230,7 @@ class KeyboardStateMachine {
       _dispatcher.invalidatePending();
     }
     final hadState =
+        _pendingDeadKey != null ||
         _activeRoutes.isNotEmpty ||
         _syntheticModifierLeases.isNotEmpty ||
         _reportedSyntheticModifiers.isNotEmpty ||
@@ -272,6 +284,7 @@ class KeyboardStateMachine {
     }
 
     _activeRoutes.clear();
+    _pendingDeadKey = null;
     _syntheticModifierLeases.clear();
     _reportedSyntheticModifiers.clear();
     _reportedModifiersByKey.clear();
@@ -305,6 +318,7 @@ class KeyboardStateMachine {
           source: batch.source,
           origin: batch.origin,
           textCandidate: batch.textCandidate,
+          deadKeyAccent: batch.deadKeyAccent,
           sourceLanguageTag: batch.sourceLanguageTag,
           sourceLayoutType: batch.sourceLayoutType,
           synthetic: true,
@@ -320,12 +334,17 @@ class KeyboardStateMachine {
     if (active != null) {
       if (active.route == ActiveKeyRoute.ignored ||
           (active.route == ActiveKeyRoute.text &&
-              batch.textCandidate == null)) {
+              batch.textCandidate == null &&
+              batch.deadKeyAccent == null)) {
         diagnostics.ignoredIntents += 1;
         return;
       }
       // Borrow additional reported modifiers without replacing a held key's
       // route or consuming its real key-up.
+      if (active.route == ActiveKeyRoute.physical &&
+          batch.origin == KeyboardInputOrigin.ime) {
+        _promoteImeModifiers(context);
+      }
       if (!batch.key.isModifier && active.route == ActiveKeyRoute.physical) {
         _reconcileReportedModifiers({
           ..._reportedModifierUnion(),
@@ -334,7 +353,7 @@ class KeyboardStateMachine {
       }
       try {
         for (var i = 0; i < batch.count; i++) {
-          _repeat(event(KeyboardIntentAction.repeat), active);
+          _repeat(event(KeyboardIntentAction.repeat), active, context);
           if (!batch.key.isModifier &&
               active.route == ActiveKeyRoute.physical) {
             _mobileModifiers.consumeOneShot();
@@ -363,6 +382,41 @@ class KeyboardStateMachine {
       diagnostics.duplicateDowns += 1;
       return;
     }
+    if (intent.action != KeyboardIntentAction.up) {
+      final pending = _pendingDeadKey;
+      final route = existing?.route ?? _selectRoute(intent, context);
+      if (pending != null && !intent.key.isModifier) {
+        final matches = _matchesDeadKey(intent, pending);
+        // Backspace cancels an unsent accent locally, with its up/repeats
+        // pinned to the same ignored route.
+        if (existing == null &&
+            matches &&
+            intent.key == const HidKey(7, 0x2a) &&
+            !effectiveModifiers.ctrl &&
+            !effectiveModifiers.alt &&
+            !effectiveModifiers.command &&
+            intent.reportedModifiers.isEmpty &&
+            _deferredImeModifiers.isEmpty) {
+          _pendingDeadKey = null;
+          _start(
+            intent, context, intent.action,
+            forcedRoute: ActiveKeyRoute.ignored,
+          );
+          return;
+        }
+        if (!matches || route != ActiveKeyRoute.text) _pendingDeadKey = null;
+      } else if (route == ActiveKeyRoute.physical &&
+          intent.key.modifier != CanonicalModifier.shift) {
+        _pendingDeadKey = null;
+      }
+    }
+    if (!intent.key.isModifier &&
+        intent.origin == KeyboardInputOrigin.ime &&
+        intent.action != KeyboardIntentAction.up &&
+        (existing?.route ?? _selectRoute(intent, context)) ==
+            ActiveKeyRoute.physical) {
+      _promoteImeModifiers(context);
+    }
     final reconcileAndroidModifiers =
         intent.source == KeyboardInputSource.androidHardwareKeyboard &&
         !intent.key.isModifier;
@@ -383,7 +437,7 @@ class KeyboardStateMachine {
         if (existing == null) {
           _start(intent, context, KeyboardIntentAction.repeat);
         } else {
-          _repeat(intent, existing);
+          _repeat(intent, existing, context);
         }
       case KeyboardIntentAction.up:
         _finish(intent);
@@ -398,6 +452,38 @@ class KeyboardStateMachine {
   Set<HidKey> _reportedModifierUnion() => <HidKey>{
     for (final modifiers in _reportedModifiersByKey.values) ...modifiers,
   };
+
+  Set<HidKey> get _deferredImeModifiers => {
+    for (final entry in _activeRoutes.entries)
+      if (entry.value.route == ActiveKeyRoute.deferredModifier) entry.key.key,
+  };
+
+  void _promoteImeModifiers(KeyboardRoutingContext context) {
+    final deferred =
+        _activeRoutes.entries
+            .where(
+              (entry) => entry.value.route == ActiveKeyRoute.deferredModifier,
+            )
+            .toList()
+          ..sort((a, b) => a.key.key.compareTo(b.key.key));
+    for (final entry in deferred) {
+      // A modifier becomes a physical owner only when an IME command needs it.
+      _start(
+        PhysicalKeyboardIntent(
+          key: entry.key.key,
+          action: KeyboardIntentAction.down,
+          source: entry.value.source,
+          origin: entry.key.origin,
+          lockMask: entry.value.lockMask,
+          legacyFallbackName: entry.value.legacyName,
+        ),
+        context,
+        KeyboardIntentAction.down,
+        owner: entry.key,
+        forcedRoute: ActiveKeyRoute.physical,
+      );
+    }
+  }
 
   void _reconcileReportedModifiers(
     Set<HidKey> reported,
@@ -441,9 +527,10 @@ class KeyboardStateMachine {
     KeyboardRoutingContext context,
     KeyboardIntentAction action, {
     _KeyOwner? owner,
+    ActiveKeyRoute? forcedRoute,
   }) {
-    final route = _selectRoute(intent, context);
-    if (route != ActiveKeyRoute.ignored) {
+    final route = forcedRoute ?? _selectRoute(intent, context);
+    if (route == ActiveKeyRoute.physical) {
       _physicalModifiers.setPressed(intent.key, true);
     }
     final transport = _dispatcher.selectPhysicalTransport(intent, context);
@@ -481,26 +568,24 @@ class KeyboardStateMachine {
           ]);
         }
       case ActiveKeyRoute.text:
-        final text = intent.textCandidate;
-        if (text != null && text.isNotEmpty) {
-          final accepted = _queueActions([
-            CommittedTextDispatch(
-              text: text,
-              source: active.source,
-              sourceLanguageTag: active.sourceLanguageTag,
-              sourceLayoutType: active.sourceLayoutType,
-            ),
-          ]);
-          if (accepted) _mobileModifiers.consumeOneShot();
-        }
+        _queueCandidate(intent, active, context);
       case ActiveKeyRoute.ignored:
         diagnostics.ignoredIntents += 1;
+      case ActiveKeyRoute.deferredModifier:
+        break;
     }
   }
 
-  void _repeat(PhysicalKeyboardIntent intent, _ActiveRoute active) {
+  void _repeat(
+    PhysicalKeyboardIntent intent,
+    _ActiveRoute active,
+    KeyboardRoutingContext context,
+  ) {
     switch (active.route) {
       case ActiveKeyRoute.physical:
+        if (intent.key.modifier != CanonicalModifier.shift) {
+          _pendingDeadKey = null;
+        }
         _queueActions([
           PhysicalKeyboardDispatch(
             lease: active.lease,
@@ -512,20 +597,65 @@ class KeyboardStateMachine {
           ),
         ]);
       case ActiveKeyRoute.text:
-        final text = intent.textCandidate;
-        if (text != null && text.isNotEmpty) {
-          final accepted = _queueActions([
-            CommittedTextDispatch(
-              text: text,
-              source: active.source,
-              sourceLanguageTag: active.sourceLanguageTag,
-              sourceLayoutType: active.sourceLayoutType,
-            ),
-          ]);
-          if (accepted) _mobileModifiers.consumeOneShot();
-        }
+        _queueCandidate(intent, active, context);
       case ActiveKeyRoute.ignored:
         diagnostics.ignoredIntents += 1;
+      case ActiveKeyRoute.deferredModifier:
+        break;
+    }
+  }
+
+  static bool _matchesDeadKey(
+    PhysicalKeyboardIntent intent,
+    _PendingDeadKey pending,
+  ) =>
+      intent.origin == pending.origin &&
+      intent.sourceLanguageTag == pending.language &&
+      intent.sourceLayoutType == pending.layout;
+
+  static String? _candidateText(PhysicalKeyboardIntent intent) {
+    final accent = intent.deadKeyAccent;
+    return accent != null && KeyboardTextPolicy.isPrintableScalar(accent)
+        ? String.fromCharCode(accent)
+        : intent.textCandidate;
+  }
+
+  void _queueCandidate(
+    PhysicalKeyboardIntent intent,
+    _ActiveRoute active,
+    KeyboardRoutingContext context,
+  ) {
+    final text = _candidateText(intent);
+    if (text == null || text.isEmpty) return;
+    var pending = _pendingDeadKey;
+    if (pending != null && !_matchesDeadKey(intent, pending)) {
+      _pendingDeadKey = pending = null;
+    }
+    final accent = intent.deadKeyAccent;
+    if (pending == null &&
+        accent != null &&
+        KeyboardTextPolicy.isPrintableScalar(accent)) {
+      _pendingDeadKey = (
+        accent: accent,
+        origin: intent.origin,
+        language: active.sourceLanguageTag,
+        layout: active.sourceLayoutType,
+        mode: context.inputMode,
+      );
+      return;
+    }
+    final accepted = _queueActions([
+      CommittedTextDispatch(
+        text: text,
+        deadKeyAccent: pending?.accent,
+        source: active.source,
+        sourceLanguageTag: active.sourceLanguageTag,
+        sourceLayoutType: active.sourceLayoutType,
+      ),
+    ]);
+    if (accepted) {
+      _pendingDeadKey = null;
+      _mobileModifiers.consumeOneShot();
     }
   }
 
@@ -537,7 +667,9 @@ class KeyboardStateMachine {
     }
 
     final lastPhysical = _physicalRouteFor(intent.key) == null;
-    if (lastPhysical) _physicalModifiers.setPressed(intent.key, false);
+    if (lastPhysical && active.route == ActiveKeyRoute.physical) {
+      _physicalModifiers.setPressed(intent.key, false);
+    }
     if (active.route == ActiveKeyRoute.physical && lastPhysical) {
       if (!_syntheticModifierLeases.containsKey(intent.key)) {
         _queueActions([
@@ -561,6 +693,8 @@ class KeyboardStateMachine {
     CommittedTextIntent intent,
     KeyboardRoutingContext context,
   ) {
+    // Native commits already include the IME's composition result.
+    _pendingDeadKey = null;
     if (intent.text.isEmpty &&
         intent.deleteBeforeGraphemes == 0 &&
         intent.deleteAfterGraphemes == 0) {
@@ -600,10 +734,27 @@ class KeyboardStateMachine {
     if (context.ignoreMeta && intent.key.modifier == CanonicalModifier.meta) {
       return ActiveKeyRoute.ignored;
     }
-    if (intent.key.isModifier) return ActiveKeyRoute.physical;
+    final imeAuto =
+        context.inputMode == ControllerKeyboardInputMode.auto &&
+        intent.origin == KeyboardInputOrigin.ime;
+    if (intent.key.isModifier) {
+      return imeAuto
+          ? ActiveKeyRoute.deferredModifier
+          : ActiveKeyRoute.physical;
+    }
 
     final modifiers = effectiveModifiers;
-    final text = intent.textCandidate;
+    final text = _candidateText(intent);
+    final reported = <HidKey>{
+      ...intent.reportedModifiers,
+      if (imeAuto) ..._deferredImeModifiers,
+    };
+    final altGrText =
+        imeAuto &&
+        reported.contains(HidKey.altRight) &&
+        !reported.contains(HidKey.altLeft) &&
+        !reported.contains(HidKey.controlRight) &&
+        !reported.any((key) => key.modifier == CanonicalModifier.meta);
     final maySendText =
         (context.inputMode == ControllerKeyboardInputMode.text ||
             (context.inputMode == ControllerKeyboardInputMode.auto &&
@@ -613,10 +764,11 @@ class KeyboardStateMachine {
         !modifiers.ctrl &&
         !modifiers.alt &&
         !modifiers.command &&
-        !intent.reportedModifiers.any(
+        !reported.any(
           (key) =>
-              key.modifier == CanonicalModifier.control ||
-              key.modifier == CanonicalModifier.alt ||
+              (!altGrText &&
+                  (key.modifier == CanonicalModifier.control ||
+                      key.modifier == CanonicalModifier.alt)) ||
               key.modifier == CanonicalModifier.meta,
         );
     return maySendText ? ActiveKeyRoute.text : ActiveKeyRoute.physical;

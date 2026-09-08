@@ -4,6 +4,34 @@ import 'package:flutter_hbb/models/keyboard_intent.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('native dead-key metadata carries one scalar without a competing candidate', () {
+    for (final kind in ['physical', 'press_batch']) {
+      Map<String, Object> payload(Object accent) => {
+        'session_id': 'session-1',
+        'kind': kind,
+        'usb_hid_usage': 0x34,
+        'down': true,
+        'count': 3,
+        'origin': 'ime',
+        'dead_key_accent': accent,
+      };
+      for (final accent in [0x5e, 0x2c6, 0x1f642]) {
+        final event = AndroidRemoteKeyboardEvent.tryParse(payload(accent));
+        expect(switch (event) {
+          AndroidRemotePhysicalKeyEvent() => event.deadKeyAccent,
+          AndroidRemotePressBatchEvent() => event.deadKeyAccent,
+          _ => null,
+        }, accent);
+      }
+      for (final invalid in [-1, 0, 9, 0x7f, 0xd800, 0x2028, 0x110000, true, '^']) {
+        expect(AndroidRemoteKeyboardEvent.tryParse(payload(invalid)), isNull);
+      }
+      expect(AndroidRemoteKeyboardEvent.tryParse({
+        ...payload(0x5e), 'text_candidate': 'e',
+      }), isNull);
+    }
+  });
+
   test('native provenance metadata is bounded and defaults to unknown', () {
     for (final kind in ['physical', 'press_batch']) {
       Map<String, Object> payload() => {
