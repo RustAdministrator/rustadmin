@@ -599,12 +599,20 @@ class InputModel {
     int usbHidUsage,
     bool down, {
     bool repeat = false,
+    KeyboardInputOrigin origin = KeyboardInputOrigin.unknown,
+    String? textCandidate,
+    String sourceLanguageTag = '',
+    String sourceLayoutType = '',
     int lockModes = 0,
     Iterable<int> modifierUsages = const <int>[],
   }) {
     final intent = _androidKeyboardNormalizer.physical(
       usbHidUsage: usbHidUsage,
       down: down,
+      origin: origin,
+      textCandidate: textCandidate,
+      sourceLanguageTag: sourceLanguageTag,
+      sourceLayoutType: sourceLayoutType,
       repeat: repeat,
       modifierUsages: modifierUsages,
       lockMask: lockModes,
@@ -617,11 +625,13 @@ class InputModel {
 
   Future<void> inputAndroidRemoteCommittedText(
     String text, {
+    KeyboardInputOrigin origin = KeyboardInputOrigin.unknown,
     required String sourceLanguageTag,
     required String sourceLayoutType,
   }) {
     final intent = _androidKeyboardNormalizer.text(
       text,
+      origin: origin,
       sourceLanguageTag: sourceLanguageTag,
       sourceLayoutType: sourceLayoutType,
     );
@@ -634,12 +644,20 @@ class InputModel {
   Future<void> inputAndroidRemotePressBatch(
     int usbHidUsage,
     int count, {
+    KeyboardInputOrigin origin = KeyboardInputOrigin.unknown,
+    String? textCandidate,
+    String sourceLanguageTag = '',
+    String sourceLayoutType = '',
     int lockModes = 0,
     Iterable<int> modifierUsages = const <int>[],
   }) {
     final intent = _androidKeyboardNormalizer.pressBatch(
       usbHidUsage: usbHidUsage,
       count: count,
+      origin: origin,
+      textCandidate: textCandidate,
+      sourceLanguageTag: sourceLanguageTag,
+      sourceLayoutType: sourceLayoutType,
       lockMask: lockModes,
       modifierUsages: modifierUsages,
     );

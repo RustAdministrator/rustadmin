@@ -1,5 +1,7 @@
 enum KeyboardIntentAction { down, up, repeat }
 
+enum KeyboardInputOrigin { hardware, ime, toolbar, unknown }
+
 enum KeyboardInputSource {
   flutterKeyEvent,
   flutterRawKeyEvent,
@@ -87,9 +89,18 @@ class HidKey implements Comparable<HidKey> {
 }
 
 sealed class KeyboardIntent {
-  const KeyboardIntent(this.source);
+  const KeyboardIntent(this.source, {KeyboardInputOrigin? origin})
+    : origin =
+          origin ??
+          (source == KeyboardInputSource.mobileToolbar ||
+                  source == KeyboardInputSource.syntheticModifier
+              ? KeyboardInputOrigin.toolbar
+              : source == KeyboardInputSource.futureIme
+              ? KeyboardInputOrigin.ime
+              : KeyboardInputOrigin.unknown);
 
   final KeyboardInputSource source;
+  final KeyboardInputOrigin origin;
 }
 
 final class PhysicalKeyboardIntent extends KeyboardIntent {
@@ -97,17 +108,22 @@ final class PhysicalKeyboardIntent extends KeyboardIntent {
     required this.key,
     required this.action,
     required KeyboardInputSource source,
+    KeyboardInputOrigin? origin,
     this.textCandidate,
+    this.sourceLanguageTag = '',
+    this.sourceLayoutType = '',
     this.legacyFallbackName,
     this.logicalKeyId,
     this.synthetic = false,
     this.lockMask = 0,
     this.reportedModifiers = const <HidKey>{},
-  }) : super(source);
+  }) : super(source, origin: origin);
 
   final HidKey key;
   final KeyboardIntentAction action;
   final String? textCandidate;
+  final String sourceLanguageTag;
+  final String sourceLayoutType;
   final String? legacyFallbackName;
   final int? logicalKeyId;
   final bool synthetic;
@@ -120,13 +136,20 @@ final class PhysicalKeyPressBatchIntent extends KeyboardIntent {
     required this.key,
     required this.count,
     required KeyboardInputSource source,
+    KeyboardInputOrigin? origin,
+    this.textCandidate,
+    this.sourceLanguageTag = '',
+    this.sourceLayoutType = '',
     this.lockMask = 0,
     this.reportedModifiers = const <HidKey>{},
-  }) : super(source);
+  }) : super(source, origin: origin);
 
   static const maxCount = 64;
   final HidKey key;
   final int count;
+  final String? textCandidate;
+  final String sourceLanguageTag;
+  final String sourceLayoutType;
   final int lockMask;
   final Set<HidKey> reportedModifiers;
 }
@@ -135,6 +158,7 @@ final class CommittedTextIntent extends KeyboardIntent {
   const CommittedTextIntent({
     required this.text,
     required KeyboardInputSource source,
+    KeyboardInputOrigin? origin,
     this.originatingKey,
     this.repeat = false,
     this.deleteBeforeGraphemes = 0,
@@ -143,7 +167,7 @@ final class CommittedTextIntent extends KeyboardIntent {
     this.sourceLayoutType = '',
     this.consumeOneShot = true,
     this.allowMobileShortcut = false,
-  }) : super(source);
+  }) : super(source, origin: origin);
 
   final String text;
   final HidKey? originatingKey;

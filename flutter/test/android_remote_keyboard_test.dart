@@ -1,8 +1,88 @@
 import 'package:flutter_hbb/mobile/android_remote_keyboard.dart';
 import 'package:flutter_hbb/models/keyboard_text_policy.dart';
+import 'package:flutter_hbb/models/keyboard_intent.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('native provenance metadata is bounded and defaults to unknown', () {
+    for (final kind in ['physical', 'press_batch']) {
+      Map<String, Object> payload() => {
+        'session_id': 'session-1',
+        'kind': kind,
+        'usb_hid_usage': 0x14,
+        'down': true,
+        'count': 3,
+        'text_candidate': '@',
+        'source_language_tag': 'de-DE',
+        'source_layout_type': 'qwertz',
+      };
+      for (final name in ['hardware', 'ime', 'unknown']) {
+        final event = AndroidRemoteKeyboardEvent.tryParse({
+          ...payload(),
+          'origin': name,
+        });
+        if (event is AndroidRemotePhysicalKeyEvent) {
+          expect(event.origin.name, name);
+          expect(event.textCandidate, '@');
+          expect(event.sourceLanguageTag, 'de-DE');
+        } else {
+          final batch = event as AndroidRemotePressBatchEvent;
+          expect(batch.origin.name, name);
+          expect(batch.textCandidate, '@');
+          expect(batch.sourceLayoutType, 'qwertz');
+        }
+      }
+      for (final invalid in [
+        true,
+        'ab',
+        String.fromCharCode(0xd800),
+        List.filled(65537, 'x').join(),
+      ]) {
+        expect(
+          AndroidRemoteKeyboardEvent.tryParse({
+            ...payload(),
+            'text_candidate': invalid,
+          }),
+          isNull,
+        );
+      }
+    }
+    final old =
+        AndroidRemoteKeyboardEvent.tryParse({
+              'session_id': 'session-1',
+              'kind': 'physical',
+              'usb_hid_usage': 0x14,
+              'down': true,
+            })
+            as AndroidRemotePhysicalKeyEvent;
+    expect(old.origin, KeyboardInputOrigin.unknown);
+    expect(old.textCandidate, isNull);
+    final text =
+        AndroidRemoteKeyboardEvent.tryParse({
+              'session_id': 'session-1',
+              'kind': 'text',
+              'text': 'committed',
+              'origin': 'ime',
+            })
+            as AndroidRemoteCommittedTextEvent;
+    expect(text.origin, KeyboardInputOrigin.ime);
+  });
+
+  test('invalid native origin cannot masquerade as a hardware event', () {
+    for (final origin in [true, 1, 'hardware-ish', 'toolbar']) {
+      expect(
+        AndroidRemoteKeyboardEvent.tryParse({
+          'session_id': 'session-1',
+          'kind': 'physical',
+          'usb_hid_usage': 0x04,
+          'down': true,
+          'origin': origin,
+        }),
+        isNull,
+      );
+    }
+  });
+
   test('native text validation reports typed failures without content', () {
     for (final entry in {
       '${List.filled(16384, '\u{1f642}').join()}a':

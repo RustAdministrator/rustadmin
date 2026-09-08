@@ -869,6 +869,30 @@ void main() {
     expect(testImpl.sourceLayoutTextEdits, 1);
   });
 
+  test('origin metadata alone does not change pre-migration Auto routing', () async {
+    for (final origin in KeyboardInputOrigin.values) {
+      await inputModel.inputAndroidRemotePhysicalKey(
+        0x14,
+        true,
+        origin: origin,
+        textCandidate: '@',
+        sourceLanguageTag: 'de-DE',
+        sourceLayoutType: 'qwertz',
+      );
+      await inputModel.inputAndroidRemotePhysicalKey(0x14, false, origin: origin);
+      await inputModel.inputAndroidRemotePressBatch(
+        0x14,
+        2,
+        origin: origin,
+        textCandidate: '@',
+        sourceLanguageTag: 'de-DE',
+        sourceLayoutType: 'qwertz',
+      );
+    }
+    expect(testImpl.flutterKeyCalls.length, 24);
+    expect(testImpl.committedTexts, isEmpty);
+  });
+
   test('Android long text reaches FFI whole and oversize sends nothing', () async {
     final text = List.filled(65536, 'x').join();
     await inputModel.inputAndroidRemoteCommittedText(

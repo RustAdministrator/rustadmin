@@ -23,15 +23,22 @@ internal sealed interface RemoteKeyboardEvent {
         val repeat: Boolean = false,
         val lockModes: Int = 0,
         val modifierUsages: List<Int> = emptyList(),
+        val origin: AndroidKeyboardOrigin = AndroidKeyboardOrigin.UNKNOWN,
+        val textCandidate: String? = null,
     ) : RemoteKeyboardEvent
     data class PhysicalPressBatch(
         val usbHidUsage: Int,
         val count: Int,
         val lockModes: Int = 0,
         val modifierUsages: List<Int> = emptyList(),
+        val origin: AndroidKeyboardOrigin = AndroidKeyboardOrigin.UNKNOWN,
+        val textCandidate: String? = null,
     ) : RemoteKeyboardEvent
     data class Rejected(val reason: AndroidInputRejection) : RemoteKeyboardEvent
-    data class CommittedText(val text: String) : RemoteKeyboardEvent
+    data class CommittedText(
+        val text: String,
+        val origin: AndroidKeyboardOrigin = AndroidKeyboardOrigin.UNKNOWN,
+    ) : RemoteKeyboardEvent
 }
 
 internal data class AndroidInputLayoutInfo(
@@ -212,8 +219,11 @@ internal class AndroidPhysicalKeyRouter {
         keyCode: Int,
         metaState: Int,
         repeatCount: Int = 0,
+        origin: AndroidKeyboardOrigin = AndroidKeyboardOrigin.UNKNOWN,
+        unicodeCodePoint: Int = 0,
     ): List<RemoteKeyboardEvent>? {
         val usage = AndroidKeyToUsbHid.map(keyCode) ?: return null
+        val candidate = AndroidKeyboardProvenance.textCandidate(unicodeCodePoint)
         val lockModes = AndroidMetaStateToUsbHid.bridgeLockModes(metaState)
         val modifiers =
             if (usage in 0xe0..0xe7) emptyList()
@@ -226,6 +236,8 @@ internal class AndroidPhysicalKeyRouter {
                     repeat = repeatCount > 0,
                     lockModes = lockModes,
                     modifierUsages = modifiers,
+                    origin = origin,
+                    textCandidate = candidate,
                 ),
             )
             KeyEvent.ACTION_UP -> listOf(
@@ -234,10 +246,14 @@ internal class AndroidPhysicalKeyRouter {
                     false,
                     lockModes = lockModes,
                     modifierUsages = modifiers,
+                    origin = origin,
+                    textCandidate = candidate,
                 ),
             )
             KeyEvent.ACTION_MULTIPLE -> if (repeatCount in 1..MAX_SYNTHETIC_REPEAT_COUNT) {
-                listOf(RemoteKeyboardEvent.PhysicalPressBatch(usage, repeatCount, lockModes, modifiers))
+                listOf(RemoteKeyboardEvent.PhysicalPressBatch(
+                    usage, repeatCount, lockModes, modifiers, origin, candidate,
+                ))
             } else {
                 listOf(RemoteKeyboardEvent.Rejected(AndroidInputRejection.PRESS_COUNT))
             }
@@ -256,7 +272,7 @@ internal class RemoteKeyboardInputView(
 ) : View(context) {
     private val physicalKeyRouter = AndroidPhysicalKeyRouter()
     private val fallbackConnection = object : BaseInputConnection(this, false) {
-        override fun sendKeyEvent(event: KeyEvent): Boolean = routeKeyEvent(event)
+        override fun sendKeyEvent(event: KeyEvent): Boolean = routeKeyEvent(event, fromInputConnection = true)
 
         override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
             repeat(beforeLength.coerceIn(0, MAX_SYNTHETIC_DELETE_COUNT)) {
@@ -297,7 +313,16 @@ internal class RemoteKeyboardInputView(
     override fun onKeyMultiple(keyCode: Int, count: Int, event: KeyEvent): Boolean = routeKeyEvent(event)
 
     @Suppress("DEPRECATION")
-    private fun routeKeyEvent(event: KeyEvent): Boolean {
+    private fun routeKeyEvent(event: KeyEvent, fromInputConnection: Boolean = false): Boolean {
+        val device = event.device
+        val origin = AndroidKeyboardProvenance.classify(
+            fromInputConnection,
+            event.flags,
+            event.deviceId,
+            event.source,
+            device?.sources ?: 0,
+            device?.isVirtual,
+        )
         when (event.action) {
             KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP, KeyEvent.ACTION_MULTIPLE -> {
                 val routed = physicalKeyRouter.route(
@@ -305,6 +330,8 @@ internal class RemoteKeyboardInputView(
                     event.keyCode,
                     event.metaState,
                     event.repeatCount,
+                    origin,
+                    event.unicodeChar,
                 )
                 if (routed != null) {
                     routed.forEach(emit)
@@ -317,7 +344,7 @@ internal class RemoteKeyboardInputView(
         if (!text.isNullOrEmpty()) {
             val rejection = AndroidCommittedTextBounds.validate(text)
             if (rejection == null) {
-                emit(RemoteKeyboardEvent.CommittedText(text))
+                emit(RemoteKeyboardEvent.CommittedText(text, origin))
             } else {
                 emit(RemoteKeyboardEvent.Rejected(rejection))
             }
@@ -328,7 +355,7 @@ internal class RemoteKeyboardInputView(
 
     private fun emitKeyClick(keyCode: Int) {
         val usage = AndroidKeyToUsbHid.map(keyCode) ?: return
-        emit(RemoteKeyboardEvent.PhysicalPressBatch(usage, 1))
+        emit(RemoteKeyboardEvent.PhysicalPressBatch(usage, 1, origin = AndroidKeyboardOrigin.IME))
     }
 
     private companion object {
@@ -403,6 +430,8 @@ internal class RemoteKeyboardController(
                     is RemoteKeyboardEvent.PhysicalKey -> {
                         physicalEvents += 1
                         syntheticModifierEvents += event.modifierUsages.size
+                        val layout = if (event.origin == AndroidKeyboardOrigin.IME) currentInputLayout()
+                            else AndroidInputLayoutInfo("", "")
                         emitToFlutter(
                             mapOf(
                                 "session_id" to currentSessionId,
@@ -412,6 +441,10 @@ internal class RemoteKeyboardController(
                                 "repeat" to event.repeat,
                                 "lock_modes" to event.lockModes,
                                 "modifier_usages" to event.modifierUsages,
+                                "origin" to event.origin.wireName,
+                                "text_candidate" to event.textCandidate.orEmpty(),
+                                "source_language_tag" to layout.languageTag,
+                                "source_layout_type" to layout.layoutType,
                             ),
                         )
                     }
@@ -424,6 +457,7 @@ internal class RemoteKeyboardController(
                                 "session_id" to currentSessionId,
                                 "kind" to "text",
                                 "text" to event.text,
+                                "origin" to event.origin.wireName,
                                 "source_language_tag" to layout.languageTag,
                                 "source_layout_type" to layout.layoutType,
                             ),
@@ -432,6 +466,8 @@ internal class RemoteKeyboardController(
                     is RemoteKeyboardEvent.PhysicalPressBatch -> {
                         physicalEvents += event.count * 2L
                         syntheticModifierEvents += event.modifierUsages.size
+                        val layout = if (event.origin == AndroidKeyboardOrigin.IME) currentInputLayout()
+                            else AndroidInputLayoutInfo("", "")
                         emitToFlutter(mapOf(
                             "session_id" to currentSessionId,
                             "kind" to "press_batch",
@@ -439,6 +475,10 @@ internal class RemoteKeyboardController(
                             "count" to event.count,
                             "lock_modes" to event.lockModes,
                             "modifier_usages" to event.modifierUsages,
+                            "origin" to event.origin.wireName,
+                            "text_candidate" to event.textCandidate.orEmpty(),
+                            "source_language_tag" to layout.languageTag,
+                            "source_layout_type" to layout.layoutType,
                         ))
                     }
                     is RemoteKeyboardEvent.Rejected -> {

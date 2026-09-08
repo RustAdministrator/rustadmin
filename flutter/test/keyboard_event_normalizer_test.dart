@@ -8,6 +8,54 @@ void main() {
   const normalizer = FlutterKeyboardEventNormalizer();
 
   test(
+    'Android provenance and candidates survive every canonical event shape',
+    () {
+      const android = AndroidHardwareKeyboardNormalizer();
+      for (final origin in KeyboardInputOrigin.values) {
+        final key = android.physical(
+          usbHidUsage: 0x14,
+          down: true,
+          origin: origin,
+          textCandidate: '@',
+          sourceLanguageTag: 'de-DE',
+          sourceLayoutType: 'qwertz',
+        );
+        expect(key!.origin, origin);
+        expect(key.textCandidate, '@');
+        expect(key.key, const HidKey(7, 0x14));
+        expect(key.sourceLanguageTag, 'de-DE');
+        final batch = android.pressBatch(
+          usbHidUsage: 0x14,
+          count: 3,
+          origin: origin,
+          textCandidate: '@',
+          sourceLanguageTag: 'de-DE',
+          sourceLayoutType: 'qwertz',
+        );
+        expect(batch!.origin, origin);
+        expect(batch.textCandidate, '@');
+        expect(batch.sourceLayoutType, 'qwertz');
+        expect(android.text('text', origin: origin)!.origin, origin);
+      }
+      expect(
+        android.physical(usbHidUsage: 0x14, down: true)!.origin,
+        KeyboardInputOrigin.unknown,
+      );
+      expect(
+        const MobileToolbarKeyboardNormalizer().click('VK_A').first.origin,
+        KeyboardInputOrigin.toolbar,
+      );
+      expect(
+        const CommittedTextIntent(
+          text: 'x',
+          source: KeyboardInputSource.futureIme,
+        ).origin,
+        KeyboardInputOrigin.ime,
+      );
+    },
+  );
+
+  test(
     'native normalizer preserves bridge lock bits and rejects unknown bits',
     () {
       const android = AndroidHardwareKeyboardNormalizer();

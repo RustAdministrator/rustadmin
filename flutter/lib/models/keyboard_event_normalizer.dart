@@ -104,6 +104,10 @@ class AndroidHardwareKeyboardNormalizer {
   PhysicalKeyPressBatchIntent? pressBatch({
     required int usbHidUsage,
     required int count,
+    KeyboardInputOrigin origin = KeyboardInputOrigin.unknown,
+    String? textCandidate,
+    String sourceLanguageTag = '',
+    String sourceLayoutType = '',
     Iterable<int> modifierUsages = const <int>[],
     int lockMask = 0,
   }) {
@@ -111,6 +115,10 @@ class AndroidHardwareKeyboardNormalizer {
     final key = physical(
       usbHidUsage: usbHidUsage,
       down: true,
+      origin: origin,
+      textCandidate: textCandidate,
+      sourceLanguageTag: sourceLanguageTag,
+      sourceLayoutType: sourceLayoutType,
       modifierUsages: modifierUsages,
       lockMask: lockMask,
     );
@@ -119,6 +127,10 @@ class AndroidHardwareKeyboardNormalizer {
       key: key.key,
       count: count,
       source: key.source,
+      origin: key.origin,
+      textCandidate: key.textCandidate,
+      sourceLanguageTag: key.sourceLanguageTag,
+      sourceLayoutType: key.sourceLayoutType,
       lockMask: key.lockMask,
       reportedModifiers: key.reportedModifiers,
     );
@@ -127,6 +139,10 @@ class AndroidHardwareKeyboardNormalizer {
   PhysicalKeyboardIntent? physical({
     required int usbHidUsage,
     required bool down,
+    KeyboardInputOrigin origin = KeyboardInputOrigin.unknown,
+    String? textCandidate,
+    String sourceLanguageTag = '',
+    String sourceLayoutType = '',
     bool repeat = false,
     Iterable<int> modifierUsages = const <int>[],
     int lockMask = 0,
@@ -144,6 +160,10 @@ class AndroidHardwareKeyboardNormalizer {
           ? KeyboardIntentAction.down
           : KeyboardIntentAction.up,
       source: KeyboardInputSource.androidHardwareKeyboard,
+      origin: origin,
+      textCandidate: textCandidate,
+      sourceLanguageTag: sourceLanguageTag,
+      sourceLayoutType: sourceLayoutType,
       lockMask: lockMask,
       reportedModifiers: <HidKey>{
         for (final usage in modifierUsages)
@@ -155,6 +175,7 @@ class AndroidHardwareKeyboardNormalizer {
 
   CommittedTextIntent? text(
     String value, {
+    KeyboardInputOrigin origin = KeyboardInputOrigin.unknown,
     String sourceLanguageTag = '',
     String sourceLayoutType = '',
   }) {
@@ -162,6 +183,7 @@ class AndroidHardwareKeyboardNormalizer {
     return CommittedTextIntent(
       text: value,
       source: KeyboardInputSource.androidNativeText,
+      origin: origin,
       sourceLanguageTag: sourceLanguageTag,
       sourceLayoutType: sourceLayoutType,
     );

@@ -1,7 +1,8 @@
 import '../consts.dart';
 import '../models/keyboard_text_policy.dart';
 import '../models/keyboard_lock_modes.dart';
-import '../models/keyboard_intent.dart' show PhysicalKeyPressBatchIntent;
+import '../models/keyboard_intent.dart'
+    show PhysicalKeyPressBatchIntent, KeyboardInputOrigin;
 
 bool useAndroidNativeRemoteKeyboard({
   required bool isAndroidClient,
@@ -24,12 +25,26 @@ sealed class AndroidRemoteKeyboardEvent {
     if (sessionId is! String || sessionId.isEmpty || kind is! String) {
       return null;
     }
+    final origin = switch (arguments['origin']) {
+      null || 'unknown' => KeyboardInputOrigin.unknown,
+      'hardware' => KeyboardInputOrigin.hardware,
+      'ime' => KeyboardInputOrigin.ime,
+      _ => null,
+    };
+    if (origin == null) return null;
     switch (kind) {
       case 'physical':
       case 'press_batch':
         final usage = arguments['usb_hid_usage'];
         final lockModes = arguments['lock_modes'] ?? 0;
         final modifiers = arguments['modifier_usages'] ?? const <int>[];
+        final candidate = arguments['text_candidate'] ?? '';
+        if (candidate is! String ||
+            candidate.length > 2 ||
+            KeyboardTextPolicy.inspect(candidate).rejection != null ||
+            candidate.runes.length > 1) {
+          return null;
+        }
         if (usage is! int ||
             usage < 0x04 ||
             usage > 0xe7 ||
@@ -53,6 +68,14 @@ sealed class AndroidRemoteKeyboardEvent {
             sessionId,
             usage,
             count,
+            origin: origin,
+            textCandidate: candidate.isEmpty ? null : candidate,
+            sourceLanguageTag: _validatedMetadata(
+              arguments['source_language_tag'],
+            ),
+            sourceLayoutType: _validatedMetadata(
+              arguments['source_layout_type'],
+            ),
             lockModes: lockModes,
             modifierUsages: modifiers.cast<int>(),
           );
@@ -64,6 +87,12 @@ sealed class AndroidRemoteKeyboardEvent {
           sessionId,
           usage,
           down,
+          origin: origin,
+          textCandidate: candidate.isEmpty ? null : candidate,
+          sourceLanguageTag: _validatedMetadata(
+            arguments['source_language_tag'],
+          ),
+          sourceLayoutType: _validatedMetadata(arguments['source_layout_type']),
           repeat: repeat,
           lockModes: lockModes,
           modifierUsages: modifiers.cast<int>(),
@@ -78,6 +107,7 @@ sealed class AndroidRemoteKeyboardEvent {
         return AndroidRemoteCommittedTextEvent(
           sessionId,
           text,
+          origin: origin,
           sourceLanguageTag: _validatedMetadata(
             arguments['source_language_tag'],
           ),
@@ -109,6 +139,10 @@ final class AndroidRemotePhysicalKeyEvent extends AndroidRemoteKeyboardEvent {
     super.sessionId,
     this.usbHidUsage,
     this.down, {
+    this.origin = KeyboardInputOrigin.unknown,
+    this.textCandidate,
+    this.sourceLanguageTag = '',
+    this.sourceLayoutType = '',
     this.repeat = false,
     this.lockModes = 0,
     this.modifierUsages = const <int>[],
@@ -116,6 +150,10 @@ final class AndroidRemotePhysicalKeyEvent extends AndroidRemoteKeyboardEvent {
 
   final int usbHidUsage;
   final bool down;
+  final KeyboardInputOrigin origin;
+  final String? textCandidate;
+  final String sourceLanguageTag;
+  final String sourceLayoutType;
   final bool repeat;
   final int lockModes;
   final List<int> modifierUsages;
@@ -126,11 +164,19 @@ final class AndroidRemotePressBatchEvent extends AndroidRemoteKeyboardEvent {
     super.sessionId,
     this.usbHidUsage,
     this.count, {
+    this.origin = KeyboardInputOrigin.unknown,
+    this.textCandidate,
+    this.sourceLanguageTag = '',
+    this.sourceLayoutType = '',
     this.lockModes = 0,
     this.modifierUsages = const <int>[],
   });
   final int usbHidUsage;
   final int count;
+  final KeyboardInputOrigin origin;
+  final String? textCandidate;
+  final String sourceLanguageTag;
+  final String sourceLayoutType;
   final int lockModes;
   final List<int> modifierUsages;
 }
@@ -144,11 +190,13 @@ final class AndroidRemoteCommittedTextEvent extends AndroidRemoteKeyboardEvent {
   const AndroidRemoteCommittedTextEvent(
     super.sessionId,
     this.text, {
+    this.origin = KeyboardInputOrigin.unknown,
     this.sourceLanguageTag = '',
     this.sourceLayoutType = '',
   });
 
   final String text;
+  final KeyboardInputOrigin origin;
   final String sourceLanguageTag;
   final String sourceLayoutType;
 }

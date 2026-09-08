@@ -196,6 +196,30 @@ an existing physical owner. Ordinary hardware autorepeat remains repeated down
 until the actual up. Invalid batch counts are rejected without partial input.
 The batch is expanded through the existing dispatcher and adds no wire message.
 
+Each canonical intent also carries controller-local origin (`hardware`, `ime`,
+`toolbar`, or `unknown`), separate from its adapter/source enum. In particular,
+the compatibility source name `androidHardwareKeyboard` identifies the native
+key adapter and is not evidence that a physical keyboard produced the event.
+Native key and batch envelopes preserve HID, a bounded scalar text candidate,
+lock/modifier metadata and IME language/layout metadata. A candidate is not a
+second committed-text event and does not itself select a route.
+
+Android classification first honors soft-keyboard/editor-action flags. A
+virtual hard-key area remains unknown. Hardware requires a positive device ID,
+a resolved nonvirtual device and keyboard evidence in both event and device
+sources. A remaining event delivered through InputConnection is IME-origin;
+other ambiguous events remain unknown. Neither `deviceId=-1` nor missing
+device data alone proves IME or hardware origin. Older native envelopes default
+to unknown, and cannot claim toolbar origin. Flutter events without equivalent
+device evidence also remain unknown; toolbar and direct text-editor intents
+have known local origins. No adapter owns pressed state or transport selection.
+Adding this metadata does not by itself change Auto routing.
+
+The classification uses the documented meanings of
+[KeyEvent flags](https://developer.android.com/reference/android/view/KeyEvent),
+[InputDevice.isVirtual](https://developer.android.com/reference/android/view/InputDevice#isVirtual()),
+and the [InputConnection delivery API](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/core/java/android/view/inputmethod/InputConnection.java).
+
 For local WSL/Linux validation with an installed Flutter SDK, run the existing
 Flutter and Android JVM suites together:
 
