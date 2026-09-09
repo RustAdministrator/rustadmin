@@ -63,17 +63,19 @@ find_frb_codegen() {
   return 1
 }
 
-generate_ios_bridge_header_if_needed() {
+generate_ios_bridge() {
   local ios_header="${SCRIPT_DIR}/ios/Runner/bridge_generated.h"
-  [[ -f "${ios_header}" ]] && return 0
 
   local frb_codegen
   if ! frb_codegen="$(find_frb_codegen)"; then
-    echo "error: missing ${ios_header}" >&2
+    echo "error: iOS builds require fresh Rust, Dart, and C bridge bindings." >&2
     echo "       Set FRB_CODEGEN or install flutter_rust_bridge_codegen before packaging." >&2
-    exit 1
+    return 1
   fi
 
+  # These ignored outputs may exist but disagree after a merge or failed codegen.
+  # Regenerate them together before compiling Rust, for both device and simulator.
+  echo "Generating iOS Rust, Dart, and C bridge bindings"
   "${frb_codegen}" \
     --rust-input "${REPO_DIR}/src/flutter_ffi.rs" \
     --dart-output "${SCRIPT_DIR}/lib/generated_bridge.dart" \
@@ -85,5 +87,6 @@ prepare_ios_flutter_build() {
   resolve_flutter_tools
   configure_ios_pub_cache "$1"
   apply_flutter_patch_if_requested
-  generate_ios_bridge_header_if_needed
+  (cd "${SCRIPT_DIR}" && "${FLUTTER_BIN}" pub get) || return 1
+  generate_ios_bridge || return 1
 }

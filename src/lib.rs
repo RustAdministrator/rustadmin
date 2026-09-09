@@ -63,6 +63,7 @@ pub mod flutter_ffi;
 use common::*;
 mod auth_2fa;
 #[cfg(feature = "cli")]
+/// cbindgen:ignore
 pub mod cli;
 #[cfg(not(target_os = "ios"))]
 mod clipboard;
