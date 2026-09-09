@@ -4397,15 +4397,7 @@ pub mod sessions {
                         flutter_rust_bridge::rust2dart::Rust2Dart::new(-138),
                     ));
                     handlers.insert(id, handler);
-                    let current = aggregate_active_display_intents(&handlers);
-                    session.ui_handler.reduce_view_intent(
-                        ViewIntentEvent::Upsert {
-                            view_id: id,
-                            displays: vec![display as usize],
-                            active: true,
-                        },
-                        &current,
-                    );
+                    session.ui_handler.reconcile_view_intent(&handlers);
                 }
             }
             let retained_activation = session
