@@ -7,6 +7,54 @@ import org.junit.Test
 
 class AndroidKeyToUsbHidTest {
     @Test
+    fun sharedAndroidKeyCodesUseOnlyConfirmedHardwareScanEvidence() {
+        val router = AndroidPhysicalKeyRouter()
+        for ((keyCode, scanCode, usage) in listOf(
+            Triple(KeyEvent.KEYCODE_NUMPAD_COMMA, 95, 0x8c),
+            Triple(KeyEvent.KEYCODE_NUMPAD_COMMA, 121, 0x85),
+            Triple(KeyEvent.KEYCODE_BACKSLASH, 86, 0x64),
+            Triple(KeyEvent.KEYCODE_BACKSLASH, 43, 0x31),
+        )) {
+            val key = router.route(KeyEvent.ACTION_DOWN, keyCode, 0,
+                origin = AndroidKeyboardOrigin.HARDWARE, scanCode = scanCode)!!.single()
+                as RemoteKeyboardEvent.PhysicalKey
+            assertEquals(usage, key.usbHidUsage)
+            for (origin in listOf(AndroidKeyboardOrigin.IME, AndroidKeyboardOrigin.UNKNOWN)) {
+                val unconfirmed = router.route(KeyEvent.ACTION_DOWN, keyCode, 0,
+                    origin = origin, scanCode = scanCode)!!.single() as RemoteKeyboardEvent.PhysicalKey
+                assertEquals(AndroidKeyToUsbHid.map(keyCode), unconfirmed.usbHidUsage)
+            }
+        }
+    }
+
+    @Test
+    fun jisKoreanAndNumpadUseDistinctStandardHidUsages() {
+        val expected = mapOf(
+            KeyEvent.KEYCODE_NUMPAD_EQUALS to 0x67,
+            KeyEvent.KEYCODE_NUMPAD_COMMA to 0x85,
+            KeyEvent.KEYCODE_RO to 0x87,
+            KeyEvent.KEYCODE_KATAKANA_HIRAGANA to 0x88,
+            KeyEvent.KEYCODE_YEN to 0x89,
+            KeyEvent.KEYCODE_HENKAN to 0x8a,
+            KeyEvent.KEYCODE_MUHENKAN to 0x8b,
+            KeyEvent.KEYCODE_KANA to 0x90,
+            KeyEvent.KEYCODE_EISU to 0x91,
+            KeyEvent.KEYCODE_ZENKAKU_HANKAKU to 0x94,
+        )
+        val router = AndroidPhysicalKeyRouter()
+        for ((keyCode, usage) in expected) {
+            assertEquals(usage, AndroidKeyToUsbHid.map(keyCode))
+            for (action in listOf(KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP)) {
+                val key = router.route(action, keyCode, KeyEvent.META_NUM_LOCK_ON,
+                    origin = AndroidKeyboardOrigin.HARDWARE)!!.single() as RemoteKeyboardEvent.PhysicalKey
+                assertEquals(usage, key.usbHidUsage)
+                assertEquals(action == KeyEvent.ACTION_DOWN, key.down)
+                assertEquals(4, key.lockModes)
+            }
+        }
+    }
+
+    @Test
     fun lockMetadataUsesBridgeBitsNotWireMaskBits() {
         for (bits in 0..7) {
             var meta = KeyEvent.META_SHIFT_ON or KeyEvent.META_ALT_RIGHT_ON

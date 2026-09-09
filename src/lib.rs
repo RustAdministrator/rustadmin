@@ -20,6 +20,8 @@ compile_error!("The linux-pkg-config Cargo feature is supported only on Linux.")
 compile_error!("The screencapturekit Cargo feature is supported only on macOS.");
 
 mod keyboard;
+mod keyboard_input_policy;
+mod keyboard_hid;
 /// cbindgen:ignore
 pub mod platform;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]

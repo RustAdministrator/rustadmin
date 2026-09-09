@@ -1000,6 +1000,9 @@ pub fn session_peer_option(session_id: SessionID, name: String, value: String) {
 
 pub fn session_get_peer_option(session_id: SessionID, name: String) -> String {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        if name == crate::keyboard_input_policy::OPTION_KEYBOARD_INPUT_MODE_V2 {
+            return session.migrate_keyboard_input_preference();
+        }
         return session.get_option(name);
     }
     "".to_string()

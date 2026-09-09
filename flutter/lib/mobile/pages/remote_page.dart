@@ -1098,9 +1098,6 @@ class _RemotePageState extends State<RemotePage>
                             value,
                           );
                           final physical = value != kKeyboardInputModeText;
-                          await _settingsRepository.storePhysicalKeyInput(
-                            physical,
-                          );
                           if (mounted) {
                             setState(() {
                               _physicalKeyInput = physical;
@@ -1163,13 +1160,20 @@ class _RemotePageState extends State<RemotePage>
                               ),
                               onChanged: gFFI.ffiModel.viewOnly
                                   ? null
-                                  : (value) {
+                                  : (value) async {
                                       if (value == null) return;
-                                      setState(() => _physicalKeyInput = value);
-                                      unawaited(
-                                        _settingsRepository
-                                            .storePhysicalKeyInput(value),
+                                      final mode = value
+                                          ? kKeyboardInputModeAuto
+                                          : kKeyboardInputModeText;
+                                      await gFFI.inputModel.setKeyboardInputMode(mode);
+                                      await _settingsRepository.storePhysicalKeyInput(
+                                        value,
                                       );
+                                      if (!mounted) return;
+                                      setState(() {
+                                        _physicalKeyInput = value;
+                                        _keyboardInputModeV2 = mode;
+                                      });
                                     },
                             ),
                           for (var i = 0; i < keyboardToggles.length; i++)

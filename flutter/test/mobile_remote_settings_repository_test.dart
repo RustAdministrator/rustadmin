@@ -5,6 +5,45 @@ import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('explicit new mode overrides every legacy physical flag in the snapshot', () async {
+    for (final mode in ['auto', 'text', 'physical', 'PHYSICAL', 'future-mode']) {
+      for (final legacy in ['', 'Y', 'N', 'n']) {
+        final repository = MobileRemoteSettingsRepository(
+          readUserDefault: (_) => '',
+          readLocal: (_) => '',
+          readPeer: (key) async => switch (key) {
+            kOptionKeyboardInputModeV2 => mode,
+            kOptionMobilePhysicalKeyInput => legacy,
+            _ => '',
+          },
+        );
+        final settings = await repository.readSession();
+        final expected = mode == 'future-mode' ? 'auto' : mode.toLowerCase();
+        expect(settings.keyboardInputMode, expected);
+        expect(settings.physicalKeyInput, expected != 'text');
+      }
+    }
+  });
+
+  test('new mode writes its legacy mirror and old toggle is an explicit choice', () async {
+    final peer = <String, String>{};
+    final repository = MobileRemoteSettingsRepository(
+      readUserDefault: (_) => '',
+      readLocal: (_) => '',
+      readPeer: (key) async => peer[key] ?? '',
+      writePeer: (key, value) async { peer[key] = value; },
+    );
+    await repository.storeKeyboardInputMode('physical');
+    expect(peer[kOptionKeyboardInputModeV2], 'physical');
+    expect(peer[kOptionMobilePhysicalKeyInput], 'Y');
+    await repository.storePhysicalKeyInput(false);
+    expect(peer[kOptionKeyboardInputModeV2], 'text');
+    expect(peer[kOptionMobilePhysicalKeyInput], 'N');
+    await repository.storePhysicalKeyInput(true);
+    expect(peer[kOptionKeyboardInputModeV2], 'auto');
+    expect(peer[kOptionMobilePhysicalKeyInput], 'Y');
+  });
+
   test('registry keys are unique within each legal scope', () {
     expect(MobileRemoteSettingsRegistry.hasUniqueScopedKeys(), isTrue);
     expect(

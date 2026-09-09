@@ -72,12 +72,8 @@ class _KeyboardInputModeCodec implements SettingCodec<String> {
   const _KeyboardInputModeCodec();
 
   @override
-  String decode(String raw) => switch (raw.toLowerCase()) {
-    kKeyboardInputModeAuto => kKeyboardInputModeAuto,
-    kKeyboardInputModeText => kKeyboardInputModeText,
-    kKeyboardInputModePhysical => kKeyboardInputModePhysical,
-    _ => '',
-  };
+  String decode(String raw) =>
+      raw.isEmpty ? '' : mobileKeyboardInputV2Mode(raw, '');
 
   @override
   String encode(String value) => decode(value);
@@ -249,10 +245,14 @@ class MobileRemoteSettingsRepository {
     final cursorInertia = await _readPeer(
       MobileRemoteSettingsRegistry.cursorInertiaPeer,
     );
-    final physicalKeyInput =
+    final legacyPhysicalKeyInput =
         await _readPeer(MobileRemoteSettingsRegistry.physicalKeyInput) ?? true;
-    final keyboardInputMode =
+    final storedKeyboardInputMode =
         await _readPeer(MobileRemoteSettingsRegistry.keyboardInputMode) ?? '';
+    final keyboardInputMode = mobileKeyboardInputV2Mode(
+      storedKeyboardInputMode,
+      mobileVmPhysicalInputOption(legacyPhysicalKeyInput),
+    );
     return MobileRemoteSettingsSnapshot(
       toolbarTransparency: MobileRemoteToolbarTransparencySettings.fromStored(
         overlapOpacityPercent:
@@ -266,11 +266,8 @@ class MobileRemoteSettingsRepository {
         (cursorInertia ?? defaults.cursorInertia.durationMs).toString(),
         fallback: defaults.cursorInertia,
       ),
-      physicalKeyInput: physicalKeyInput,
-      keyboardInputMode: mobileKeyboardInputV2Mode(
-        keyboardInputMode,
-        mobileVmPhysicalInputOption(physicalKeyInput),
-      ),
+      physicalKeyInput: keyboardInputMode != kKeyboardInputModeText,
+      keyboardInputMode: keyboardInputMode,
     );
   }
 
@@ -307,10 +304,18 @@ class MobileRemoteSettingsRepository {
       _storePeer(MobileRemoteSettingsRegistry.cursorInertiaPeer, value);
 
   Future<void> storePhysicalKeyInput(bool value) =>
-      _storePeer(MobileRemoteSettingsRegistry.physicalKeyInput, value);
+      storeKeyboardInputMode(
+        value ? kKeyboardInputModeAuto : kKeyboardInputModeText,
+      );
 
-  Future<void> storeKeyboardInputMode(String value) =>
-      _storePeer(MobileRemoteSettingsRegistry.keyboardInputMode, value);
+  Future<void> storeKeyboardInputMode(String value) async {
+    final mode = mobileKeyboardInputV2Mode(value, '');
+    await _storePeer(MobileRemoteSettingsRegistry.keyboardInputMode, mode);
+    await _storePeer(
+      MobileRemoteSettingsRegistry.physicalKeyInput,
+      mode != kKeyboardInputModeText,
+    );
+  }
 }
 
 class MobileRemoteDefaultsRepository {

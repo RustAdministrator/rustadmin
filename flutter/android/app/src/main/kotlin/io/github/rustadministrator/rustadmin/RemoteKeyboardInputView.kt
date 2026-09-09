@@ -89,7 +89,7 @@ internal object AndroidCommittedTextBounds {
 }
 
 internal object AndroidKeyToUsbHid {
-    fun map(keyCode: Int): Int? = when (keyCode) {
+    fun map(keyCode: Int, hardwareScanCode: Int = 0): Int? = when (keyCode) {
         in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z ->
             0x04 + keyCode - KeyEvent.KEYCODE_A
 
@@ -106,7 +106,7 @@ internal object AndroidKeyToUsbHid {
         KeyEvent.KEYCODE_EQUALS -> 0x2e
         KeyEvent.KEYCODE_LEFT_BRACKET -> 0x2f
         KeyEvent.KEYCODE_RIGHT_BRACKET -> 0x30
-        KeyEvent.KEYCODE_BACKSLASH -> 0x31
+        KeyEvent.KEYCODE_BACKSLASH -> if (hardwareScanCode == 86) 0x64 else 0x31
         KeyEvent.KEYCODE_SEMICOLON -> 0x33
         KeyEvent.KEYCODE_APOSTROPHE -> 0x34
         KeyEvent.KEYCODE_GRAVE -> 0x35
@@ -142,6 +142,17 @@ internal object AndroidKeyToUsbHid {
         KeyEvent.KEYCODE_NUMPAD_0 -> 0x62
         KeyEvent.KEYCODE_NUMPAD_DOT -> 0x63
         KeyEvent.KEYCODE_MENU -> 0x65
+        KeyEvent.KEYCODE_NUMPAD_EQUALS -> 0x67
+        KeyEvent.KEYCODE_NUMPAD_COMMA -> if (hardwareScanCode == 95) 0x8c else 0x85
+        KeyEvent.KEYCODE_RO -> 0x87
+        KeyEvent.KEYCODE_KATAKANA_HIRAGANA -> 0x88
+        KeyEvent.KEYCODE_YEN -> 0x89
+        KeyEvent.KEYCODE_HENKAN -> 0x8a
+        KeyEvent.KEYCODE_MUHENKAN -> 0x8b
+        // Generic.kl maps Linux HANGEUL/HANJA to KANA/EISU.
+        KeyEvent.KEYCODE_KANA -> 0x90
+        KeyEvent.KEYCODE_EISU -> 0x91
+        KeyEvent.KEYCODE_ZENKAKU_HANKAKU -> 0x94
         KeyEvent.KEYCODE_CTRL_LEFT -> 0xe0
         KeyEvent.KEYCODE_SHIFT_LEFT -> 0xe1
         KeyEvent.KEYCODE_ALT_LEFT -> 0xe2
@@ -223,8 +234,11 @@ internal class AndroidPhysicalKeyRouter {
         repeatCount: Int = 0,
         origin: AndroidKeyboardOrigin = AndroidKeyboardOrigin.UNKNOWN,
         unicodeCodePoint: Int = 0,
+        scanCode: Int = 0,
     ): List<RemoteKeyboardEvent>? {
-        val usage = AndroidKeyToUsbHid.map(keyCode) ?: return null
+        val usage = AndroidKeyToUsbHid.map(
+            keyCode, if (origin == AndroidKeyboardOrigin.HARDWARE) scanCode else 0,
+        ) ?: return null
         val candidate = AndroidKeyboardProvenance.textCandidate(unicodeCodePoint)
         val accent = AndroidKeyboardProvenance.deadKeyAccent(unicodeCodePoint)
         val lockModes = AndroidMetaStateToUsbHid.bridgeLockModes(metaState)
@@ -337,6 +351,7 @@ internal class RemoteKeyboardInputView(
                     event.repeatCount,
                     origin,
                     event.unicodeChar,
+                    event.scanCode,
                 )
                 if (routed != null) {
                     routed.forEach(emit)

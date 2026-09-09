@@ -56,33 +56,12 @@ use crate::client::{
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::common::GrabState;
 use crate::keyboard;
+use crate::keyboard_input_policy::{
+    KeyboardInputPreference, OPTION_KEYBOARD_INPUT_MODE_V2, OPTION_MOBILE_PHYSICAL_KEY_INPUT,
+};
 use crate::{client::Data, client::Interface};
 
 const CHANGE_RESOLUTION_VALID_TIMEOUT_SECS: u64 = 15;
-const OPTION_MOBILE_PHYSICAL_KEY_INPUT: &str = "mobile-physical-key-input";
-const OPTION_KEYBOARD_INPUT_MODE_V2: &str = "keyboard-input-mode-v2";
-const KEYBOARD_INPUT_MODE_AUTO: &str = "auto";
-const KEYBOARD_INPUT_MODE_TEXT: &str = "text";
-const KEYBOARD_INPUT_MODE_PHYSICAL: &str = "physical";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum KeyboardInputPreference {
-    Auto,
-    Text,
-    Physical,
-}
-
-impl KeyboardInputPreference {
-    fn from_options(mode: &str, legacy_physical_key_input: &str) -> Self {
-        match mode.to_ascii_lowercase().as_str() {
-            KEYBOARD_INPUT_MODE_TEXT => Self::Text,
-            KEYBOARD_INPUT_MODE_PHYSICAL => Self::Physical,
-            KEYBOARD_INPUT_MODE_AUTO => Self::Auto,
-            _ if legacy_physical_key_input.eq_ignore_ascii_case("N") => Self::Text,
-            _ => Self::Auto,
-        }
-    }
-}
 
 #[derive(Default)]
 pub(crate) struct KeyboardInputSendState {
@@ -90,22 +69,14 @@ pub(crate) struct KeyboardInputSendState {
     epoch: u64,
     sequence: u64,
     pressed_hid_usages: HashSet<u32>,
-    text_hid_usages: HashSet<u32>,
-}
-
-fn mobile_physical_key_input_enabled(is_mobile: bool, stored_value: &str) -> bool {
-    is_mobile && !stored_value.eq_ignore_ascii_case("N")
 }
 
 fn legacy_soft_keyboard_physical_input(
     preference: KeyboardInputPreference,
     is_mobile: bool,
-    stored_value: &str,
     literal: bool,
 ) -> bool {
-    !literal
-        && preference != KeyboardInputPreference::Text
-        && mobile_physical_key_input_enabled(is_mobile, stored_value)
+    !literal && preference.physical_keys_enabled(is_mobile)
 }
 
 fn mobile_soft_keyboard_mode(
@@ -1094,10 +1065,25 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     fn keyboard_input_preference(&self) -> KeyboardInputPreference {
+        let lc = self.lc.read().unwrap();
         KeyboardInputPreference::from_options(
-            &self.get_option(OPTION_KEYBOARD_INPUT_MODE_V2.to_owned()),
-            &self.get_option(OPTION_MOBILE_PHYSICAL_KEY_INPUT.to_owned()),
+            &lc.get_option(OPTION_KEYBOARD_INPUT_MODE_V2),
+            &lc.get_option(OPTION_MOBILE_PHYSICAL_KEY_INPUT),
         )
+    }
+
+    pub fn migrate_keyboard_input_preference(&self) -> String {
+        // Serialize the absence check with explicit option writes. Never
+        // replace a newer, including unknown future, input-mode value.
+        let mut lc = self.lc.write().unwrap();
+        let mode = lc.get_option(OPTION_KEYBOARD_INPUT_MODE_V2);
+        let legacy = lc.get_option(OPTION_MOBILE_PHYSICAL_KEY_INPUT);
+        if let Some(migrated) = KeyboardInputPreference::migration_value(&mode, &legacy) {
+            lc.set_option(OPTION_KEYBOARD_INPUT_MODE_V2.to_owned(), migrated.to_owned());
+            migrated.to_owned()
+        } else {
+            mode
+        }
     }
 
     fn keyboard_v2_capabilities(&self) -> Option<KeyboardCapabilities> {
@@ -1154,13 +1140,12 @@ impl<T: InvokeUiSession> Session<T> {
 
     fn try_send_physical_keyboard_v2(
         &self,
-        character: &str,
         usb_hid: i32,
         lock_modes: i32,
         down: bool,
     ) -> bool {
         self.reset_keyboard_input_state_for_round();
-        let Some(capabilities) = self
+        let Some(_) = self
             .keyboard_v2_capabilities()
             .filter(|capabilities| capabilities.physical_key)
         else {
@@ -1176,8 +1161,7 @@ impl<T: InvokeUiSession> Session<T> {
             return false;
         }
 
-        let preference = self.keyboard_input_preference();
-        let (repeat, modifier_mask, suppress_release, committed_text) = {
+        let (repeat, modifier_mask) = {
             let mut state = self.keyboard_input_send_state.lock().unwrap();
             let repeat = if down {
                 !state.pressed_hid_usages.insert(usage)
@@ -1186,32 +1170,8 @@ impl<T: InvokeUiSession> Session<T> {
                 false
             };
             let modifier_mask = keyboard_v2_modifier_mask(&state.pressed_hid_usages);
-            let suppress_release = !down && state.text_hid_usages.remove(&usage);
-            let committed_text = if down
-                && preference == KeyboardInputPreference::Text
-                && keyboard_v2_modifier_bit(usage).is_none()
-                && modifier_mask
-                    & (hbb_common::keyboard::KEYBOARD_MODIFIER_CONTROL
-                        | hbb_common::keyboard::KEYBOARD_MODIFIER_ALT
-                        | hbb_common::keyboard::KEYBOARD_MODIFIER_META)
-                    == 0
-                && !character.is_empty()
-            {
-                state.text_hid_usages.insert(usage);
-                Some(character.to_owned())
-            } else {
-                None
-            };
-            (repeat, modifier_mask, suppress_release, committed_text)
+            (repeat, modifier_mask)
         };
-
-        if suppress_release {
-            return true;
-        }
-        if let Some(text) = committed_text {
-            self.send_committed_text_v2(&text, 0, 0, &capabilities);
-            return true;
-        }
 
         let mut input = self.next_keyboard_input();
         input.set_physical_key(PhysicalKey {
@@ -1355,7 +1315,6 @@ impl<T: InvokeUiSession> Session<T> {
         let physical_key_input = legacy_soft_keyboard_physical_input(
             self.keyboard_input_preference(),
             cfg!(any(target_os = "android", target_os = "ios")),
-            &self.get_option(OPTION_MOBILE_PHYSICAL_KEY_INPUT.to_owned()),
             literal,
         );
         let peer_platform = self.peer_platform();
@@ -1462,7 +1421,7 @@ impl<T: InvokeUiSession> Session<T> {
             return configured_mode.to_owned();
         }
         mobile_physical_keyboard_mode(
-            self.get_option(OPTION_MOBILE_PHYSICAL_KEY_INPUT.to_owned()) == "Y",
+            self.keyboard_input_preference().physical_keys_enabled(true),
             &self.peer_platform(),
             self.is_keyboard_mode_supported(KeyboardMode::Map.to_string()),
             configured_mode,
@@ -1553,7 +1512,7 @@ impl<T: InvokeUiSession> Session<T> {
     ) {
         if character == "flutter_key" {
             self._handle_key_flutter_simulation(keyboard_mode, usb_hid, down_or_up);
-        } else if self.try_send_physical_keyboard_v2(character, usb_hid, lock_modes, down_or_up) {
+        } else if self.try_send_physical_keyboard_v2(usb_hid, lock_modes, down_or_up) {
             return;
         } else {
             self._handle_key_non_flutter_simulation(
@@ -2888,44 +2847,32 @@ mod mobile_soft_keyboard_tests {
 
     #[test]
     fn mobile_vm_physical_input_defaults_on_and_preserves_explicit_opt_out() {
-        assert!(mobile_physical_key_input_enabled(true, ""));
-        assert!(mobile_physical_key_input_enabled(true, "Y"));
-        assert!(!mobile_physical_key_input_enabled(true, "N"));
-        assert!(!mobile_physical_key_input_enabled(false, ""));
+        for (stored, enabled) in [("", true), ("Y", true), ("N", false), ("n", false)] {
+            let preference = KeyboardInputPreference::from_options("", stored);
+            assert_eq!(preference.physical_keys_enabled(true), enabled);
+            assert!(!preference.physical_keys_enabled(false));
+        }
     }
 
     #[test]
-    fn nonliteral_compatibility_retains_legacy_physical_toggle() {
-        assert!(legacy_soft_keyboard_physical_input(
-            KeyboardInputPreference::Auto,
-            true,
-            "Y",
-            false,
-        ));
-        assert!(!legacy_soft_keyboard_physical_input(
-            KeyboardInputPreference::Auto,
-            true,
-            "N",
-            false,
-        ));
-        assert!(!legacy_soft_keyboard_physical_input(
-            KeyboardInputPreference::Text,
-            true,
-            "Y",
-            false,
-        ));
-        assert!(legacy_soft_keyboard_physical_input(
-            KeyboardInputPreference::Physical,
-            true,
-            "Y",
-            false,
-        ));
-        assert!(!legacy_soft_keyboard_physical_input(
-            KeyboardInputPreference::Physical,
-            true,
-            "N",
-            false,
-        ));
+    fn all_physical_paths_use_the_resolved_preference() {
+        for mode in ["auto", "text", "physical", "PHYSICAL", "future-mode"] {
+            for legacy in ["", "Y", "N", "n"] {
+                let preference = KeyboardInputPreference::from_options(mode, legacy);
+                let enabled = mode != "text";
+                assert_eq!(preference.physical_keys_enabled(true), enabled);
+                assert_eq!(
+                    legacy_soft_keyboard_physical_input(preference, true, false),
+                    enabled
+                );
+                assert_eq!(
+                    mobile_physical_keyboard_mode(
+                        preference.physical_keys_enabled(true), "Windows", true, "legacy"
+                    ),
+                    if enabled { "map" } else { "legacy" }
+                );
+            }
+        }
     }
 
     #[test]
@@ -2946,15 +2893,12 @@ mod mobile_soft_keyboard_tests {
 
     #[test]
     fn literal_text_overrides_legacy_physical_toggles_and_platform_modes() {
-        for preference in [
-            KeyboardInputPreference::Auto,
-            KeyboardInputPreference::Text,
-            KeyboardInputPreference::Physical,
-        ] {
+        for mode in ["", "auto", "text", "physical"] {
             for stored in ["", "Y", "N"] {
+                let preference = KeyboardInputPreference::from_options(mode, stored);
                 for is_mobile in [false, true] {
                     let physical =
-                        legacy_soft_keyboard_physical_input(preference, is_mobile, stored, true);
+                        legacy_soft_keyboard_physical_input(preference, is_mobile, true);
                     assert!(!physical);
                     for platform in ["Windows", "Linux", "Mac OS", "Android"] {
                         for translate_supported in [false, true] {
@@ -2987,6 +2931,24 @@ mod mobile_soft_keyboard_tests {
         assert_eq!(
             KeyboardInputPreference::from_options("physical", "N"),
             KeyboardInputPreference::Physical
+        );
+        for mode in ["auto", "text", "physical", "PHYSICAL", "future-mode"] {
+            for legacy in ["", "Y", "N", "n"] {
+                assert_eq!(KeyboardInputPreference::migration_value(mode, legacy), None);
+            }
+        }
+        for legacy in ["N", "n"] {
+            assert_eq!(
+                KeyboardInputPreference::migration_value("", legacy),
+                Some("text")
+            );
+        }
+        assert_eq!(KeyboardInputPreference::migration_value("", "Y"), Some("auto"));
+        assert_eq!(KeyboardInputPreference::migration_value("", ""), None);
+        assert_eq!(KeyboardInputPreference::migration_value("", "invalid"), None);
+        assert_eq!(
+            KeyboardInputPreference::from_options("future-mode", "N"),
+            KeyboardInputPreference::Auto
         );
     }
 
@@ -3030,6 +2992,38 @@ mod mobile_soft_keyboard_tests {
                 .insert(OPTION_MOBILE_PHYSICAL_KEY_INPUT.to_owned(), "Y".to_owned());
         }
         (session, receiver)
+    }
+
+    #[cfg(feature = "flutter")]
+    #[test]
+    fn physical_bridge_never_reinterprets_the_controller_route_as_text() {
+        for mode in ["auto", "text", "physical"] {
+            let (session, mut receiver) = text_session(
+                mode,
+                Some(KeyboardCapabilities {
+                    protocol_version: hbb_common::keyboard::KEYBOARD_INPUT_PROTOCOL_VERSION,
+                    physical_key: true,
+                    committed_text: true,
+                    ..Default::default()
+                }),
+            );
+            for (down, repeat) in [(true, false), (true, true), (false, false)] {
+                session.handle_flutter_key_event("map", "a", 0x04, 0, down);
+                let Data::Message(message) = receiver.try_recv().unwrap() else {
+                    panic!("expected message")
+                };
+                let Some(message::Union::KeyboardInput(input)) = message.union else {
+                    panic!("expected V2 input")
+                };
+                let Some(keyboard_input::Union::PhysicalKey(key)) = input.union else {
+                    panic!("physical bridge must not select text")
+                };
+                assert_eq!(key.usb_hid_usage, 0x04);
+                assert_eq!(key.down, down);
+                assert_eq!(key.repeat, repeat);
+            }
+            assert!(receiver.try_recv().is_err());
+        }
     }
 
     #[cfg(feature = "flutter")]

@@ -284,6 +284,37 @@ Left and right Control, Shift, Alt, and Meta remain distinct. Right Alt/AltGr is
 keyboard-page usage `0xE6`; the controller does not rewrite it as generic Alt
 or synthesize Ctrl+Alt.
 
+### International HID Compatibility
+
+The receiver's small `keyboard_hid` table corrects international usages before
+the existing rdev conversion. It does not change the raw-key injection backend.
+The mobile legacy Map fallback uses the same table when encoding a desktop
+peer's keycodes, so the fix does not depend on the peer advertising V2.
+Windows uses set-1 scan codes, Linux uses evdev codes plus the existing Xorg
+offset of eight, and macOS uses native virtual-key codes. Down, repeat and up
+use the same conversion. Ordinary keys and macOS ISO handling keep their
+existing rdev path.
+
+The mappings were checked against:
+
+- [Microsoft USB HID to PS/2 translation table](https://download.microsoft.com/download/1/6/1/161ba512-40e2-4cc9-843a-923143f3456c/translate.pdf).
+- [Linux HID input table](https://github.com/torvalds/linux/blob/master/drivers/hid/hid-input.c).
+- [Apple USB to virtual-key table](https://github.com/apple-oss-distributions/IOHIDFamily/blob/main/IOHIDFamily/Cosmo_USB2ADB.c).
+- [Android keyboard device table](https://source.android.com/docs/core/interaction/input/keyboard-devices) and [Generic.kl](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/data/keyboards/Generic.kl).
+
+HID `0x90/0x91` are LANG1/LANG2, not Henkan/Muhenkan (`0x8a/0x8b`).
+The latter have no native Apple mapping and are rejected on macOS rather than
+being renamed to Kana/Eisu. Keypad Equal `0x67` remains distinct from AS/400
+Equal `0x86`. Confirmed Android hardware scan codes disambiguate the shared
+backslash and keypad-comma keycodes; IME/unknown sources do not supply that
+hardware evidence. Table tests do not establish physical-device acceptance.
+
+The input preference resolves the new mode before the old physical-input flag.
+A recognized old Y/N flag is persisted into the new option only when that
+option is empty, under the same configuration lock as explicit option writes.
+Unknown nonempty new values are preserved. The legacy checkbox is an explicit
+Auto/Text choice, while the new mode writes its legacy mirror for older clients.
+
 ### Deferred Work
 
 The remaining keyboard work does not yet:

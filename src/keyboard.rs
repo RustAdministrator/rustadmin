@@ -1426,15 +1426,28 @@ fn _map_keyboard_mode(_peer: &str, event: &Event, mut key_event: KeyEvent) -> Op
         _ => event.position_code as _,
     };
     #[cfg(any(target_os = "android", target_os = "ios"))]
+    use crate::keyboard_hid::{keycode_from_usb_hid, HidTarget};
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     let keycode = match _peer {
-        OS_LOWER_WINDOWS => rdev::usb_hid_code_to_win_scancode(event.usb_hid as _)?,
-        OS_LOWER_LINUX => rdev::usb_hid_code_to_linux_code(event.usb_hid as _)?,
+        OS_LOWER_WINDOWS => keycode_from_usb_hid(
+            HidTarget::Windows, event.usb_hid as _, |usage| {
+                rdev::usb_hid_code_to_win_scancode(usage).map(|code| code as u32)
+            },
+        )? as _,
+        OS_LOWER_LINUX => keycode_from_usb_hid(
+            HidTarget::Linux, event.usb_hid as _, |usage| {
+                rdev::usb_hid_code_to_linux_code(usage).map(|code| code as u32)
+            },
+        )? as _,
         OS_LOWER_MACOS => {
-            if hbb_common::config::LocalConfig::get_kb_layout_type() == "ISO" {
-                rdev::usb_hid_code_to_macos_iso_code(event.usb_hid as _)?
-            } else {
-                rdev::usb_hid_code_to_macos_code(event.usb_hid as _)?
-            }
+            keycode_from_usb_hid(HidTarget::MacOs, event.usb_hid as _, |usage| {
+                let code = if hbb_common::config::LocalConfig::get_kb_layout_type() == "ISO" {
+                    rdev::usb_hid_code_to_macos_iso_code(usage)
+                } else {
+                    rdev::usb_hid_code_to_macos_code(usage)
+                };
+                code.map(|code| code as u32)
+            })? as _
         }
         OS_LOWER_ANDROID => rdev::usb_hid_code_to_android_key_code(event.usb_hid as _)?,
         _ => event.usb_hid as _,

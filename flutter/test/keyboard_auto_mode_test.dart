@@ -412,7 +412,10 @@ void main() {
   test(
     'commands and control characters never become printable IME text',
     () async {
-      for (final usage in [0x28, 0x2a, 0x2b, 0x3a, 0x50, 0x58]) {
+      for (final usage in [
+        0x28, 0x2a, 0x2b, 0x3a, 0x50, 0x58,
+        0x88, 0x8a, 0x8b, 0x90, 0x91, 0x92, 0x93, 0x94,
+      ]) {
         final h = _Harness();
         await h.key(
           KeyboardInputOrigin.ime,

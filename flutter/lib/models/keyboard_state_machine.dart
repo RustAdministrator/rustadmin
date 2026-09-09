@@ -782,6 +782,9 @@ class KeyboardStateMachine {
             (usage >= 0x39 && usage <= 0x53) ||
             usage == 0x58 ||
             usage == 0x65 ||
+            usage == 0x88 ||
+            (usage >= 0x8a && usage <= 0x8b) ||
+            (usage >= 0x90 && usage <= 0x94) ||
             (usage >= 0x68 && usage <= 0x73))) {
       return false;
     }
