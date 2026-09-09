@@ -1,6 +1,7 @@
 package hbb;
 import android.view.KeyEvent
 import android.view.KeyCharacterMap
+import android.os.SystemClock
 import hbb.MessageOuterClass.KeyboardMode
 import hbb.MessageOuterClass.ControlKey
 
@@ -37,10 +38,11 @@ object KeyEventConverter {
             action = KeyEvent.ACTION_UP
         }
 
-        return KeyEvent(0, 0, action, chrValue, 0, modifiers)
+        val now = SystemClock.uptimeMillis()
+        return KeyEvent(now, now, action, chrValue, 0, KeyEvent.normalizeMetaState(modifiers))
     }
 
-    private fun convertModifier(controlKey: hbb.MessageOuterClass.ControlKey): Int {
+    internal fun convertModifier(controlKey: hbb.MessageOuterClass.ControlKey): Int {
         // Add logic to map ControlKey values to Android KeyEvent key codes.
         // You'll need to provide the mapping for each key.
         return when (controlKey) {
@@ -48,6 +50,7 @@ object KeyEventConverter {
             ControlKey.Control -> KeyEvent.META_CTRL_ON
             ControlKey.CapsLock -> KeyEvent.META_CAPS_LOCK_ON
             ControlKey.Meta -> KeyEvent.META_META_ON
+            ControlKey.RWin -> KeyEvent.META_META_RIGHT_ON
             ControlKey.NumLock -> KeyEvent.META_NUM_LOCK_ON
             ControlKey.RShift -> KeyEvent.META_SHIFT_RIGHT_ON
             ControlKey.Shift -> KeyEvent.META_SHIFT_ON
@@ -58,6 +61,7 @@ object KeyEventConverter {
     }
 
     private fun convertUnicodeToKeyCode(unicode: Int): Int {
+        if (unicode !in 0..0xffff || unicode in 0xd800..0xdfff) return KeyEvent.KEYCODE_UNKNOWN
         val charMap = KeyCharacterMap.load(KeyCharacterMap.VIRTUAL_KEYBOARD)
         val events = charMap.getEvents(charArrayOf(unicode.toChar()))
         if (events != null && events.size > 0) {
@@ -66,7 +70,7 @@ object KeyEventConverter {
         return 0
     }
 
-    private fun convertControlKeyToKeyCode(controlKey: hbb.MessageOuterClass.ControlKey): Int {
+    internal fun convertControlKeyToKeyCode(controlKey: hbb.MessageOuterClass.ControlKey): Int {
         // Add logic to map ControlKey values to Android KeyEvent key codes.
         // You'll need to provide the mapping for each key.
         return when (controlKey) {
@@ -75,6 +79,7 @@ object KeyEventConverter {
             ControlKey.Control -> KeyEvent.KEYCODE_CTRL_LEFT
             ControlKey.CapsLock -> KeyEvent.KEYCODE_CAPS_LOCK
             ControlKey.Meta -> KeyEvent.KEYCODE_META_LEFT
+            ControlKey.RWin -> KeyEvent.KEYCODE_META_RIGHT
             ControlKey.NumLock -> KeyEvent.KEYCODE_NUM_LOCK
             ControlKey.RShift -> KeyEvent.KEYCODE_SHIFT_RIGHT
             ControlKey.Shift -> KeyEvent.KEYCODE_SHIFT_LEFT

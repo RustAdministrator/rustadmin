@@ -315,6 +315,52 @@ option is empty, under the same configuration lock as explicit option writes.
 Unknown nonempty new values are preserved. The legacy checkbox is an explicit
 Auto/Text choice, while the new mode writes its legacy mirror for older clients.
 
+### Android Host Fallback
+
+Android remains a legacy `KeyEvent` host; these changes do not enable V2 host
+capabilities. Host keyboard dispatch is serialized on the service's main
+handler. On API 33+, a currently available accessibility input connection is
+used once. Its `commitText` and `sendKeyEvent` methods return void, so neither
+an exception nor the absence of delivery confirmation triggers a second
+accessibility attempt. A missing connection permits fallback on every supported
+API level, including Android 13+.
+
+Fallback resolves only `FOCUS_INPUT`. It never searches accessibility focus,
+descendants, another field, or the window root. Before each action, the target
+must still match the current input-focused node and refresh successfully as
+focused, enabled and visible. Text replacement additionally requires an
+editable, non-password node advertising `ACTION_SET_TEXT`, known valid selection
+offsets and bounded valid text. Password fields require an input connection;
+masked accessibility text cannot safely reconstruct their contents.
+
+Committed text replaces the selected range, including reversed selections.
+Accessibility selection offsets are native UTF-16 offsets, not grapheme counts;
+offsets inside a surrogate pair are rejected. The existing and resulting field
+text must each fit the 64 KiB UTF-8 budget. Unknown offsets and oversized text
+are rejected with content-free diagnostics, never clamped or truncated. Native
+`EditText` handles physical editing and deletion in the fallback calculation;
+the scratch editor cannot execute clipboard shortcuts and is cleared afterward.
+
+The same target and text state are checked again before publication. A successful
+`ACTION_SET_TEXT` is not repeated if selection restoration fails or focus changes.
+This is best-effort accessibility editing, not an atomic transaction with the
+remote application. An application may transform inserted text; in that case a
+selection based on the original result is not applied.
+
+Non-editable nodes receive only explicitly supported click or scroll actions,
+never `ACTION_SET_TEXT`. Editable Enter can use advertised `ACTION_IME_ENTER`
+on API 30+. Existing mouse-protocol Back/Home/Recents actions remain separate
+from editing Home/End. RWin maps to right Meta, keyboard and gesture times use
+the monotonic uptime clock, and synthetic press releases preserve event metadata.
+Text commits are atomic operations here and are not repeated for key-up.
+
+References: [AccessibilityInputConnection](https://developer.android.com/reference/android/accessibilityservice/InputMethod.AccessibilityInputConnection)
+and [AccessibilityNodeInfo](https://developer.android.com/reference/android/view/accessibility/AccessibilityNodeInfo).
+JVM policy tests cover replacement, Unicode offsets, bounded operations,
+connection selection, stale snapshots and partial writes. Actual platform editor
+behavior, node providers and Android 12/13+ devices still require runtime tests;
+this fallback does not promise generic game or application key injection.
+
 ### Deferred Work
 
 The remaining keyboard work does not yet:

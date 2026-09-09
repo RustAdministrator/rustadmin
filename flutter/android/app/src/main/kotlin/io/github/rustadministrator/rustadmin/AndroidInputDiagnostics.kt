@@ -4,12 +4,19 @@ internal enum class AndroidInputFailure(val diagnosticName: String) {
     CLICK("click"),
     DISPATCH_GESTURE("dispatch_gesture"),
     END_GESTURE("end_gesture"),
+    HOST_KEY_DECODE("host_key_decode"),
+    HOST_KEY_DISPATCH("host_key_dispatch"),
 }
 
 internal enum class AndroidInputRejection(val diagnosticName: String) {
     PRESS_COUNT("press_count"),
     TEXT_SIZE("text_size"),
     INVALID_TEXT("invalid_text"),
+    HOST_TARGET("host_target"),
+    HOST_EDIT("host_edit"),
+    HOST_SELECTION("host_selection"),
+    HOST_ACTION("host_action"),
+    HOST_KEY("host_key"),
 }
 
 // Input entrypoints use typed fields rather than formatting nodes, events, or
