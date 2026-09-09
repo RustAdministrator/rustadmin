@@ -1055,6 +1055,9 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       closeGroup: _menuController.close,
       scheduleCallback: (callback) {
         WidgetsBinding.instance.addPostFrameCallback((_) => callback());
+        // addPostFrameCallback alone does not request a frame. An ignored open
+        // during overlay teardown must not wait for another click to reconcile.
+        WidgetsBinding.instance.ensureVisualUpdate();
       },
     )..addListener(_handleMenuCoordinatorChanged);
     _initDragBounds();
@@ -1499,9 +1502,9 @@ class _MonitorMenu extends StatelessWidget {
       !isWeb && ffi.ffiModel.pi.isSupportMultiDisplay;
 
   @override
-  Widget build(BuildContext context) => showMonitorsToolbar
+  Widget build(BuildContext context) => Obx(() => showMonitorsToolbar
       ? buildMultiMonitorMenu(context)
-      : Obx(() => buildMonitorMenu(context));
+      : buildMonitorMenu(context));
 
   Widget buildMonitorMenu(BuildContext context) {
     final width = SimpleWrapper<double>(0);
@@ -1561,7 +1564,7 @@ class _MonitorMenu extends StatelessWidget {
   }
 
   buildOneMonitorButton(i, curDisplay) => Text(
-        '${i + 1}',
+        ffi.ffiModel.pi.monitorLabel(i),
         style: TextStyle(
           color: i == curDisplay
               ? _ToolbarTheme.blueColor
@@ -1588,11 +1591,12 @@ class _MonitorMenu extends StatelessWidget {
                 stackVertically: isMulti && _isToolbarVertical(context));
           }
           return _IconMenuButton(
+            key: ValueKey('remote-monitor-$i'),
             tooltip: isMulti
                 ? ''
                 : isAllMonitors
                     ? 'all monitors'
-                    : '#${i + 1} monitor',
+                    : '#${pi.monitorLabel(i)} monitor',
             hMargin: isMulti ? null : 6,
             vMargin: isMulti ? null : 12,
             topLevel: false,
@@ -1627,7 +1631,7 @@ class _MonitorMenu extends StatelessWidget {
           );
         });
 
-    for (int i = 0; i < pi.displays.length; i++) {
+    for (final i in pi.monitorOrder) {
       monitorList.add(buildMonitorButton(i));
     }
     if (supportIndividualWindows && pi.displays.length > 1) {
@@ -1668,7 +1672,7 @@ class _MonitorMenu extends StatelessWidget {
         final scale = slotSize / maxWidth;
         final children = <Widget>[];
         var top = 0.0;
-        for (var i = 0; i < displaySizes.length; i++) {
+        for (final i in pi.monitorOrder) {
           final size = displaySizes[i];
           final monitorWidth = size.width * scale;
           final monitorHeight = size.height * scale;
@@ -1689,7 +1693,7 @@ class _MonitorMenu extends StatelessWidget {
               ),
               child: Center(
                   child: Text(
-                '${i + 1}',
+                pi.monitorLabel(i),
                 style: TextStyle(
                   color: display.value == i
                       ? activeTextColor
@@ -1743,7 +1747,7 @@ class _MonitorMenu extends StatelessWidget {
             ),
             child: Center(
                 child: Text(
-              '${i + 1}',
+              pi.monitorLabel(i),
               style: TextStyle(
                 color: display.value == i
                     ? activeTextColor

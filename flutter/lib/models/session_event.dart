@@ -23,9 +23,48 @@ final class PermissionSessionEvent extends SessionEvent {
   final Map<String, bool> permissions;
 }
 
+final class ScreenViewAuthoritySessionEvent extends SessionEvent {
+  const ScreenViewAuthoritySessionEvent({
+    required this.connectionGeneration,
+    required this.generation,
+    required this.allowed,
+  });
+
+  final int connectionGeneration;
+  final int generation;
+  final bool allowed;
+}
+
 final class ClipboardSessionEvent extends SessionEvent {
   const ClipboardSessionEvent(this.content);
   final String content;
+}
+
+enum DisplayRenderPhase { awaitingFrame, awaitingTarget, live, stale, failed }
+
+final class DisplayRenderStateSessionEvent extends SessionEvent {
+  const DisplayRenderStateSessionEvent({
+    required this.display,
+    required this.phase,
+    required this.connectionGeneration,
+    required this.authorityGeneration,
+    required this.activationGeneration,
+    required this.targetGeneration,
+    required this.streamId,
+    required this.submittedFrameId,
+    required this.sequence,
+    required this.elapsedMs,
+  });
+  final int display;
+  final DisplayRenderPhase phase;
+  final int connectionGeneration;
+  final int authorityGeneration;
+  final int activationGeneration;
+  final int targetGeneration;
+  final int streamId;
+  final int submittedFrameId;
+  final int sequence;
+  final int elapsedMs;
 }
 
 final class ClientChatSessionEvent extends SessionEvent {
@@ -132,6 +171,7 @@ final class FollowCurrentDisplaySessionEvent extends SessionEvent {
 
 final class SessionDisplayValue {
   const SessionDisplayValue({
+    this.name,
     this.x,
     this.y,
     this.width,
@@ -142,6 +182,7 @@ final class SessionDisplayValue {
     this.scaledWidth,
   });
 
+  final String? name;
   final double? x;
   final double? y;
   final int? width;
@@ -152,6 +193,7 @@ final class SessionDisplayValue {
   final int? scaledWidth;
 
   Map<String, Object> toLegacyMap() => {
+    if (name != null) 'display_name': name!,
     if (x != null) 'x': x!,
     if (y != null) 'y': y!,
     if (width != null) 'width': width!,
@@ -906,6 +948,8 @@ final class InvalidSessionEvent extends SessionEvent {
 const typedSessionEventNames = <String>{
   'connection_ready',
   'permission',
+  'screen_view_authority',
+  'display_render_state',
   'clipboard',
   'chat_client_mode',
   'chat_server_mode',
@@ -1003,6 +1047,57 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
         return const InvalidSessionEvent('permission', 'empty snapshot');
       }
       return PermissionSessionEvent(permissions);
+    case 'screen_view_authority':
+      final connection = event['connection_generation'];
+      final generation = event['generation'];
+      final allowed = event['allowed'];
+      if (connection is! int ||
+          connection < 0 ||
+          generation is! int ||
+          generation < 0 ||
+          allowed is! bool) {
+        return const InvalidSessionEvent(
+          'screen_view_authority', 'invalid snapshot');
+      }
+      return ScreenViewAuthoritySessionEvent(
+        connectionGeneration: connection,
+        generation: generation,
+        allowed: allowed,
+      );
+    case 'display_render_state':
+      final phase = switch (event['state']) {
+        'awaiting-frame' => DisplayRenderPhase.awaitingFrame,
+        'awaiting-target' => DisplayRenderPhase.awaitingTarget,
+        'live' => DisplayRenderPhase.live,
+        'stale' => DisplayRenderPhase.stale,
+        'failed' => DisplayRenderPhase.failed,
+        _ => null,
+      };
+      const fields = [
+        'display', 'connection_generation', 'screen_authority_generation',
+        'display_activation_generation', 'render_target_generation', 'stream_id',
+        'submitted_frame_id', 'sequence', 'elapsed_ms',
+      ];
+      if (phase == null ||
+          event['presentation_confirmed'] != false ||
+          fields.any((key) => event[key] is! int || (event[key] as int) < 0) ||
+          event['sequence'] == 0 ||
+          event['display_activation_generation'] == 0) {
+        return const InvalidSessionEvent(
+            'display_render_state', 'invalid snapshot');
+      }
+      return DisplayRenderStateSessionEvent(
+        display: event['display'] as int,
+        phase: phase,
+        connectionGeneration: event['connection_generation'] as int,
+        authorityGeneration: event['screen_authority_generation'] as int,
+        activationGeneration: event['display_activation_generation'] as int,
+        targetGeneration: event['render_target_generation'] as int,
+        streamId: event['stream_id'] as int,
+        submittedFrameId: event['submitted_frame_id'] as int,
+        sequence: event['sequence'] as int,
+        elapsedMs: event['elapsed_ms'] as int,
+      );
     case 'clipboard':
       final content = event['content'];
       return content is String
@@ -2242,6 +2337,9 @@ List<SessionDisplayValue>? _decodeDisplays(Object? raw) {
 
 SessionDisplayValue? _decodeDisplay(Object? raw) {
   if (raw is! Map) return null;
+  final rawName = raw['display_name'];
+  // Optional presentation metadata must not invalidate otherwise usable geometry.
+  final name = rawName is String && rawName.length <= 256 ? rawName : null;
   final x = raw.containsKey('x') ? _decodeDouble(raw['x']) : null;
   final y = raw.containsKey('y') ? _decodeDouble(raw['y']) : null;
   final width = raw.containsKey('width') ? _decodeInt(raw['width']) : null;
@@ -2280,6 +2378,7 @@ SessionDisplayValue? _decodeDisplay(Object? raw) {
     _ => _decodeInt(cursor) == 1,
   };
   return SessionDisplayValue(
+    name: name,
     x: x,
     y: y,
     width: width,

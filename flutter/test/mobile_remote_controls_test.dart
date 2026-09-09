@@ -6,6 +6,7 @@ import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
 import 'package:flutter_hbb/mobile/mobile_modifier_state.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
+import 'package:flutter_hbb/models/monitor_labels.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -47,6 +48,7 @@ void main() {
   Future<void> pumpToolbar(
     WidgetTester tester, {
     ThemeData? theme,
+    Size surfaceSize = const Size(320, 600),
     Offset? cursorPosition,
     List<MobileRemoteToolbarMonitor> monitors = const [],
     MobileRemoteToolbarTransparencySettings transparencySettings =
@@ -65,8 +67,8 @@ void main() {
           : ThemeMode.light,
       home: Scaffold(
         body: SizedBox(
-          width: 320,
-          height: 600,
+          width: surfaceSize.width,
+          height: surfaceSize.height,
           child: MobileRemoteToolbar(
             onDisconnect: () {},
             onOptions: () {},
@@ -229,6 +231,18 @@ void main() {
     await pumpToolbar(tester, onPlacementChanged: (value) => placement = value);
     await tester.pump();
 
+    // Eight buttons previously fitted this 320px surface at 40px each. The
+    // 16px gap around a 24px icon becomes 8px, without shrinking the icon.
+    final horizontalGap =
+        tester.getCenter(find.byTooltip('Display and session options')).dx -
+        tester.getCenter(find.byTooltip('Collapse toolbar')).dx -
+        24;
+    expect(horizontalGap, 8);
+    expect(
+      tester.widget<IconButton>(find.widgetWithIcon(IconButton, Icons.tv)).iconSize,
+      24,
+    );
+
     expect(
       tester.getCenter(find.byTooltip('Collapse toolbar')).dx,
       lessThan(tester.getCenter(find.byTooltip('Disconnect')).dx),
@@ -250,7 +264,7 @@ void main() {
         tester.getCenter(find.byTooltip('Display and session options')).dy -
         tester.getCenter(find.byTooltip('Collapse toolbar')).dy -
         24;
-    expect(verticalIconGap, 12);
+    expect(verticalIconGap, 6);
     await tester.tap(find.byTooltip('Collapse toolbar'));
     await tester.pumpAndSettle();
     expect(find.byTooltip('Show toolbar'), findsOneWidget);
@@ -265,6 +279,22 @@ void main() {
 
     await tester.tap(find.byTooltip('Display and session options'));
     await tester.pump();
+  });
+
+  testWidgets('toolbar halves roomy gaps without enlarging narrow layouts', (
+    tester,
+  ) async {
+    for (final size in [const Size(800, 600), const Size(160, 600)]) {
+      await pumpToolbar(tester, surfaceSize: size);
+      await tester.pump();
+      final stride =
+          tester.getCenter(find.byTooltip('Display and session options')).dx -
+          tester.getCenter(find.byTooltip('Collapse toolbar')).dx;
+      // Roomy: 48 -> 36 (24px icon gap -> 12). Narrow: retain 160/8,
+      // since there was no positive icon gap to halve in the first place.
+      expect(stride, size.width == 800 ? 36 : 20);
+      expect(tester.takeException(), isNull);
+    }
   });
 
   testWidgets('collapse arrow follows toolbar orientation and nearest edge', (
@@ -295,25 +325,21 @@ void main() {
     expect(find.byIcon(Icons.keyboard_arrow_right), findsOneWidget);
   });
 
-  testWidgets('toolbar exposes direct monitor buttons', (tester) async {
+  testWidgets('toolbar monitor labels do not change capture targets', (tester) async {
     var selected = -1;
+    const origins = [Offset(1920, 0), Offset(-1920, 0), Offset.zero];
+    final labels = monitorLabelsForDisplays(origins);
     await pumpToolbar(
       tester,
       monitors: [
-        MobileRemoteToolbarMonitor(
-          value: 0,
-          label: '1',
-          tooltip: '#1 monitor',
-          selected: true,
-          onPressed: () => selected = 0,
-        ),
-        MobileRemoteToolbarMonitor(
-          value: 1,
-          label: '2',
-          tooltip: '#2 monitor',
-          selected: false,
-          onPressed: () => selected = 1,
-        ),
+        for (final i in monitorOrderForDisplays(origins))
+          MobileRemoteToolbarMonitor(
+            value: i,
+            label: labels[i],
+            tooltip: '#${labels[i]} monitor',
+            selected: i == 2,
+            onPressed: () => selected = i,
+          ),
       ],
     );
     await tester.pumpAndSettle();
@@ -323,7 +349,15 @@ void main() {
       findsOneWidget,
     );
     await tester.tap(find.byTooltip('#2 monitor'));
+    expect(selected, 2);
+    await tester.tap(find.byTooltip('#1 monitor'));
     expect(selected, 1);
+    await tester.tap(find.byTooltip('#3 monitor'));
+    expect(selected, 0);
+    expect(tester.getCenter(find.byTooltip('#1 monitor')).dx,
+        lessThan(tester.getCenter(find.byTooltip('#2 monitor')).dx));
+    expect(tester.getCenter(find.byTooltip('#2 monitor')).dx,
+        lessThan(tester.getCenter(find.byTooltip('#3 monitor')).dx));
   });
 
   testWidgets('toolbar exposes a reactive QM toggle', (tester) async {
@@ -684,10 +718,10 @@ void main() {
     );
 
     for (final entry in const <(IconData, String)>[
-      (Icons.keyboard_arrow_left, 'VK_LEFT'),
-      (Icons.keyboard_arrow_up, 'VK_UP'),
-      (Icons.keyboard_arrow_down, 'VK_DOWN'),
-      (Icons.keyboard_arrow_right, 'VK_RIGHT'),
+      (Icons.arrow_left, 'VK_LEFT'),
+      (Icons.arrow_drop_up, 'VK_UP'),
+      (Icons.arrow_drop_down, 'VK_DOWN'),
+      (Icons.arrow_right, 'VK_RIGHT'),
     ]) {
       await tester.ensureVisible(find.byIcon(entry.$1));
       await tester.tap(find.byIcon(entry.$1));

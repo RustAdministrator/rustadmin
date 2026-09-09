@@ -675,6 +675,8 @@ void main() {
 
     await tester.tap(find.byTooltip('Keyboard'));
     await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Fn'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Fn'));
     await tester.pumpAndSettle();
 
@@ -694,8 +696,10 @@ void main() {
     );
 
     final scrollableState = tester.state<ScrollableState>(scrollable);
-    expect(scrollableState.position.pixels, 0);
+    expect(scrollableState.position.pixels, greaterThan(0));
     expect(find.text('F12'), findsOneWidget);
+    expect(find.text('Esc'), findsOneWidget);
+    expect(find.byIcon(Icons.first_page), findsOneWidget);
   });
 
   testWidgets(
@@ -1205,8 +1209,10 @@ void main() {
     expect(find.text('Ctrl'), findsOneWidget);
     expect(find.text('Esc'), findsOneWidget);
     expect(find.text('Ctrl+C'), findsOneWidget);
-    expect(find.byIcon(Icons.keyboard_arrow_left), findsOneWidget);
+    expect(find.byIcon(Icons.arrow_left), findsOneWidget);
 
+    await tester.ensureVisible(find.text('Fn'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('Fn'));
     await tester.pumpAndSettle();
     expect(find.text('F1'), findsOneWidget);

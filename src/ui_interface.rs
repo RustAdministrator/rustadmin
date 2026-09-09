@@ -1183,8 +1183,7 @@ pub fn has_vram() -> bool {
 #[cfg(feature = "flutter")]
 #[inline]
 pub fn supported_hwdecodings() -> (bool, bool, bool) {
-    let decoding =
-        scrap::codec::Decoder::supported_decodings(None, use_texture_render(), None, &vec![]);
+    let decoding = scrap::codec::Decoder::supported_decodings(None, use_texture_render(), None);
     #[allow(unused_mut)]
     let (av1, mut h264, mut h265) = (
         decoding.ability_av1 > 0,

@@ -352,18 +352,16 @@ impl VRamDecoder {
     }
 
     pub fn new(format: CodecFormat, luid: Option<i64>) -> ResultType<Self> {
-        let ctx = Self::try_get(format, luid).ok_or(anyhow!("Failed to get decode context"))?;
-        log::info!("try create vram decoder: {ctx:?}");
-        match Decoder::new(ctx) {
-            Ok(decoder) => Ok(Self { decoder }),
-            Err(_) => {
-                HwCodecConfig::clear(true, false);
-                Err(anyhow!(format!(
-                    "Failed to create decoder, format: {:?}",
-                    format
-                )))
+        let mut candidates = Self::available(format, luid);
+        candidates.sort_by_key(|ctx| ctx.driver != Driver::FFMPEG);
+        for ctx in candidates {
+            log::info!("try create vram decoder: {ctx:?}");
+            if let Ok(decoder) = Decoder::new(ctx) {
+                return Ok(Self { decoder });
             }
         }
+        // Preserve capabilities on all adapters when one decoder cannot open.
+        Err(anyhow!("Failed to create vram decoder, format: {format:?}"))
     }
     pub fn decode<'a>(&'a mut self, data: &[u8]) -> ResultType<Vec<VRamDecoderImage<'a>>> {
         match self.decoder.decode(data) {

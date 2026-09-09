@@ -1,7 +1,7 @@
 use crate::{
     client::*,
     flutter_ffi::{EventToUI, SessionID},
-    ui_session_interface::{io_loop, InvokeUiSession, Session},
+    ui_session_interface::{InvokeUiSession, Session},
 };
 use flutter_rust_bridge::StreamSink;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -210,6 +210,7 @@ struct SessionHandler {
     event_stream: Option<StreamSink<EventToUI>>,
     display_intent: ViewDisplayIntent,
     event_stream_generation: u64,
+    render_event_sequence: u64,
     render_bindings: BTreeMap<usize, ViewDisplayRenderBinding>,
     renderer: VideoRenderer,
     #[cfg(all(target_os = "android", feature = "mediacodec"))]
@@ -304,6 +305,7 @@ struct ReducerViewIntent {
     generation: u64,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ViewIntentEvent {
     Upsert {
@@ -347,6 +349,7 @@ struct DisplayIntentEffects {
     media_intent: DisplayMediaIntent,
 }
 
+#[cfg(test)]
 fn reduce_display_intent(
     mut state: DisplayIntentReducerState,
     event: ViewIntentEvent,
@@ -402,6 +405,13 @@ fn reduce_display_intent(
         );
     }
 
+    reconcile_display_media(state, previous_media_intent)
+}
+
+fn reconcile_display_media(
+    mut state: DisplayIntentReducerState,
+    previous_media_intent: DisplayMediaIntent,
+) -> (DisplayIntentReducerState, DisplayIntentEffects) {
     let mut demand = BTreeMap::<usize, usize>::new();
     for view in state.views.values().filter(|view| view.active) {
         for display in &view.displays {
@@ -460,6 +470,7 @@ fn reduce_display_intent(
         logical_session_generation: state.logical_session_generation,
         aggregate_generation: state.aggregate_generation,
         displays,
+        replacement_display: None,
     };
     let delta = DisplayDemandDelta::between(
         previous_media_intent
@@ -474,14 +485,22 @@ fn reduce_display_intent(
             .map(|entry| entry.display)
             .collect(),
     );
-    let effects = DisplayIntentEffects {
+    let mut effects = DisplayIntentEffects {
         changed: true,
         delta,
         media_intent: state.media_intent.clone(),
     };
+    if is_single_display_replacement(
+        &effects,
+        state.views.values().filter(|view| view.active).count(),
+    ) {
+        state.media_intent.replacement_display = Some(effects.delta.current[0]);
+        effects.media_intent = state.media_intent.clone();
+    }
     (state, effects)
 }
 
+#[cfg(test)]
 fn aggregate_display_intents<'a>(intents: impl Iterator<Item = &'a [usize]>) -> Vec<usize> {
     let mut displays = Vec::new();
     for intent in intents {
@@ -492,36 +511,76 @@ fn aggregate_display_intents<'a>(intents: impl Iterator<Item = &'a [usize]>) -> 
     displays
 }
 
-fn aggregate_active_display_intents(handlers: &HashMap<SessionID, SessionHandler>) -> Vec<usize> {
-    aggregate_display_intents(
-        handlers
-            .values()
-            .filter(|handler| handler.event_stream.is_some())
-            .map(|handler| handler.display_intent.displays.as_slice()),
-    )
-}
-
-fn wire_display_indices(displays: &[usize]) -> Vec<i32> {
-    displays
-        .iter()
-        .filter_map(|display| i32::try_from(*display).ok())
-        .collect()
-}
-
 fn apply_display_intent_effects(session: &FlutterSession, effects: &DisplayIntentEffects) {
     if !effects.changed {
         return;
     }
-    let added = wire_display_indices(&effects.delta.added);
-    if !added.is_empty() {
-        session.capture_displays(added, vec![], vec![]);
+    // The connection loop owns coalescing, set-only wire effects and retries.
+    session.send(Data::DisplayIntent(effects.media_intent.clone()));
+}
+
+fn is_single_display_replacement(effects: &DisplayIntentEffects, active_views: usize) -> bool {
+    active_views == 1
+        && effects.delta.previous.len() == 1
+        && effects.delta.current.len() == 1
+        && !effects.delta.added.is_empty()
+}
+
+#[cfg(test)]
+mod display_metadata_tests {
+    use super::{DisplayInfo, FlutterHandler, Resolution};
+
+    #[test]
+    fn display_metadata_keeps_names_geometry_and_capture_order() {
+        let displays = vec![
+            DisplayInfo {
+                name: r"\\.\DISPLAY2".into(),
+                x: -1920,
+                width: 1920,
+                height: 1080,
+                cursor_embedded: true,
+                scale: 1.5,
+                original_resolution: Some(Resolution {
+                    width: 1280,
+                    height: 720,
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            },
+            DisplayInfo {
+                name: r"\\.\DISPLAY1".into(),
+                width: 2560,
+                height: 1440,
+                ..Default::default()
+            },
+        ];
+        let payload: serde_json::Value =
+            serde_json::from_str(&FlutterHandler::make_displays_msg(&displays)).unwrap();
+        assert_eq!(payload[0]["display_name"], r"\\.\DISPLAY2");
+        assert_eq!(payload[1]["display_name"], r"\\.\DISPLAY1");
+        assert_eq!(payload[0]["x"], -1920);
+        assert_eq!(payload[1]["x"], 0);
+        assert_eq!(payload[0]["cursor_embedded"], 1);
+        assert_eq!(payload[1]["cursor_embedded"], 0);
+        assert_eq!(payload[0]["scaled_width"], 1280);
+        assert_eq!(payload[0]["original_width"], 1280);
+        assert_eq!(payload[0]["original_height"], 720);
+        assert_eq!(payload[1]["width"], 2560);
+        assert_eq!(payload[1]["height"], 1440);
+        assert!(payload[1].get("scaled_width").is_none());
+        assert!(payload[1].get("original_width").is_none());
     }
 
-    let removed = wire_display_indices(&effects.delta.removed);
-    if !removed.is_empty() {
-        session.capture_displays(vec![], removed, vec![]);
+    #[test]
+    fn display_metadata_accepts_unnamed_legacy_displays_and_empty_snapshots() {
+        let payload: serde_json::Value = serde_json::from_str(
+            &FlutterHandler::make_displays_msg(&[DisplayInfo::default()]),
+        )
+        .unwrap();
+        assert_eq!(payload[0]["display_name"], "");
+        assert_eq!(FlutterHandler::make_displays_msg(&[]), "[]");
     }
-    session.send(Data::DisplayIntent(effects.media_intent.clone()));
 }
 
 #[cfg(test)]
@@ -609,12 +668,198 @@ mod display_intent_tests {
     }
 
     #[test]
-    fn renderer_size_only_seeds_initial_intent_once() {
+    fn host_initial_display_only_seeds_intent_once() {
         let mut intent = ViewDisplayIntent::default();
         intent.seed_initial_display(1);
         intent.seed_initial_display(0);
 
         assert_eq!(intent.displays, vec![1]);
+    }
+
+    // These tests only inspect sink presence; they never post to this dummy port.
+    fn active_handler(displays: Option<&[i32]>) -> super::SessionHandler {
+        let mut handler = super::SessionHandler::default();
+        if let Some(displays) = displays {
+            handler.display_intent.set_wire_displays(displays);
+        }
+        handler.event_stream = Some(super::StreamSink::new(
+            flutter_rust_bridge::rust2dart::Rust2Dart::new(0),
+        ));
+        handler
+    }
+
+    #[test]
+    fn registry_snapshot_removes_unshared_view_without_invalidating_retained_resources() {
+        let handler = FlutterHandler::default();
+        let mut views = handler.session_handlers.write().unwrap();
+        views.insert(SessionID::from_u128(1), active_handler(Some(&[0, 1])));
+        views.insert(SessionID::from_u128(2), active_handler(Some(&[1])));
+        let first = handler.reconcile_view_intent(&views);
+        let activation = first.media_intent.activation(1).unwrap().generation;
+        let retained = views.get_mut(&SessionID::from_u128(2)).unwrap();
+        retained.renderer.set_size(1, 1920, 1080);
+        retained.render_bindings.insert(
+            1,
+            ViewDisplayRenderBinding::new(render_context(1, activation, 99, 1), 4),
+        );
+        views.remove(&SessionID::from_u128(1));
+        let effects = handler.reconcile_view_intent(&views);
+        assert_eq!(effects.delta.removed, vec![0]);
+        assert_eq!(
+            effects.media_intent.activation(1).unwrap().generation,
+            activation
+        );
+        let retained = &views[&SessionID::from_u128(2)];
+        assert_eq!(retained.render_bindings[&1].stream_id, 99);
+        assert_eq!(retained.render_bindings[&1].render_target_generation, 4);
+        assert_eq!(
+            retained.renderer.map_display_sessions.read().unwrap()[&1].size,
+            (1920, 1080)
+        );
+        assert!(!handler.reconcile_view_intent(&views).changed);
+    }
+
+    #[test]
+    fn registry_snapshot_repairs_missing_shadow_view_without_panicking_or_retiring_retained_work() {
+        let handler = FlutterHandler::default();
+        let mut views = handler.session_handlers.write().unwrap();
+        views.insert(SessionID::from_u128(1), active_handler(Some(&[1])));
+        let first = handler.reconcile_view_intent(&views);
+        let activation = first.media_intent.activation(1).unwrap().generation;
+        // Simulate a stale/missing registry mirror; production always rebuilds
+        // the complete snapshot while the registry transaction is still locked.
+        handler
+            .display_intent_reducer
+            .write()
+            .unwrap()
+            .views
+            .clear();
+        let next = handler.reconcile_view_intent(&views);
+        assert!(!next.changed);
+        assert_eq!(
+            next.media_intent.activation(1).unwrap().generation,
+            activation
+        );
+        assert!(!handler.display_intent_reducer.is_poisoned());
+    }
+
+    #[test]
+    fn peer_seeding_covers_active_views_without_overriding_explicit_or_inactive_views() {
+        let handler = FlutterHandler::default();
+        {
+            let mut views = handler.session_handlers.write().unwrap();
+            views.insert(SessionID::from_u128(1), active_handler(None));
+            views.insert(SessionID::from_u128(2), active_handler(Some(&[0])));
+            views.insert(SessionID::from_u128(3), super::SessionHandler::default());
+        }
+        handler.seed_views_from_peer(2);
+        let views = handler.session_handlers.read().unwrap();
+        assert_eq!(
+            views[&SessionID::from_u128(1)].display_intent.displays,
+            vec![2]
+        );
+        assert_eq!(
+            views[&SessionID::from_u128(2)].display_intent.displays,
+            vec![0]
+        );
+        assert!(!views[&SessionID::from_u128(3)].display_intent.initialized);
+        assert_eq!(handler.current_display_media_intent().displays.len(), 2);
+    }
+
+    #[test]
+    fn replacement_policy_is_published_atomically_with_the_registry_snapshot() {
+        let handler = FlutterHandler::default();
+        let id = SessionID::from_u128(1);
+        {
+            let mut views = handler.session_handlers.write().unwrap();
+            views.insert(id, active_handler(Some(&[0])));
+            handler.reconcile_view_intent(&views);
+            views
+                .get_mut(&id)
+                .unwrap()
+                .display_intent
+                .set_wire_displays(&[1]);
+            handler.reconcile_view_intent(&views);
+        }
+        // A timer can read the new intent before its UI wakeup is delivered.
+        // It must see the custom-resolution replacement policy immediately,
+        // not prematurely issue a metadata-only select.
+        let replacement = handler.current_display_media_intent();
+        assert_eq!(replacement.replacement_display, Some(1));
+        let mut views = handler.session_handlers.write().unwrap();
+        assert!(!handler.reconcile_view_intent(&views).changed);
+        assert_eq!(handler.current_display_media_intent(), replacement);
+        views
+            .get_mut(&id)
+            .unwrap()
+            .display_intent
+            .set_wire_displays(&[0, 1]);
+        handler.reconcile_view_intent(&views);
+        views
+            .get_mut(&id)
+            .unwrap()
+            .display_intent
+            .set_wire_displays(&[1]);
+        let shrink = handler.reconcile_view_intent(&views);
+        assert_eq!(shrink.media_intent.replacement_display, None);
+        assert_eq!(
+            shrink.media_intent.activation(1).unwrap().generation,
+            replacement.activation(1).unwrap().generation,
+        );
+    }
+
+    #[test]
+    fn renderer_size_callback_does_not_seed_or_expand_intent() {
+        let session_id = SessionID::from_u128(150_001);
+        let session = std::sync::Arc::new(super::Session::<FlutterHandler>::default());
+        super::sessions::insert_session(session_id, super::ConnType::DEFAULT_CONN, session.clone());
+        super::session_set_size(session_id, 2, 1920, 1080);
+        assert!(
+            !session.session_handlers.read().unwrap()[&session_id]
+                .display_intent
+                .initialized
+        );
+        assert!(session
+            .ui_handler
+            .current_display_media_intent()
+            .displays
+            .is_empty());
+        assert!(super::sessions::remove_session_by_session_id(&session_id).is_some());
+    }
+
+    #[test]
+    fn only_genuine_single_view_replacement_uses_legacy_reset_effects() {
+        for (previous, current, views, expected) in [
+            (vec![0, 1], vec![1], 1, false),
+            (vec![0, 1, 2], vec![0, 2], 1, false),
+            (vec![0], vec![0, 1], 1, false),
+            (vec![0], vec![1], 1, true),
+            (vec![0], vec![1], 2, false),
+            (vec![1], vec![1], 1, false),
+        ] {
+            let effects = super::DisplayIntentEffects {
+                delta: DisplayDemandDelta::between(previous, current),
+                ..Default::default()
+            };
+            assert_eq!(
+                super::is_single_display_replacement(&effects, views),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn host_primary_seeds_new_view_but_not_explicit_monitor_window() {
+        // Capture indices [1, 2, 0] are presented as toolbar [1, 2, 3]. The
+        // primary is capture 2, not capture 0 or its human-facing label 2.
+        let mut new_view = ViewDisplayIntent::default();
+        assert!(new_view.seed_initial_display(2));
+        assert_eq!(new_view.displays, vec![2]);
+
+        let mut explicit_window = ViewDisplayIntent::default();
+        explicit_window.set_wire_displays(&[0]);
+        assert!(!explicit_window.seed_initial_display(2));
+        assert_eq!(explicit_window.displays, vec![0]);
     }
 
     #[test]
@@ -768,10 +1013,69 @@ mod display_intent_tests {
     ) -> RenderFrameContext {
         RenderFrameContext {
             connection_generation,
+            screen_authority_generation: 0,
             display_activation_generation,
             stream_id,
             frame_id,
         }
+    }
+
+    #[test]
+    fn retained_views_do_not_prevent_native_connection_restart() {
+        let session = super::Session::<FlutterHandler>::default();
+        // Both views may be registered before the first event subscription is
+        // attached. Neither their count nor their lifetime owns the transport.
+        for view in 1..=2 {
+            let mut handler = super::SessionHandler::default();
+            handler
+                .display_intent
+                .set_wire_displays(&[(view - 1) as i32]);
+            session
+                .session_handlers
+                .write()
+                .unwrap()
+                .insert(SessionID::from_u128(view), handler);
+        }
+        assert!(session.prepare_connection_attempt(false, false).is_some());
+        let first = session.connection_round();
+        assert!(session
+            .connection_round_state
+            .lock()
+            .unwrap()
+            .set_connected(first));
+        assert!(session.prepare_connection_attempt(false, false).is_none());
+        assert!(session
+            .connection_round_state
+            .lock()
+            .unwrap()
+            .set_disconnected(first));
+
+        // Automatic reconnect fails while the host service is being replaced.
+        assert!(session.prepare_connection_attempt(true, false).is_some());
+        let retry = session.connection_round();
+        assert!(session
+            .connection_round_state
+            .lock()
+            .unwrap()
+            .set_disconnected(retry));
+
+        // Reopening or transferring a view must reserve a fresh connection even
+        // though the old views and their desired monitor sets are still present.
+        assert!(session.prepare_connection_attempt(false, false).is_some());
+        assert_eq!(session.connection_round(), retry + 1);
+        assert!(session.prepare_connection_attempt(false, false).is_none());
+        let handlers = session.session_handlers.read().unwrap();
+        assert_eq!(handlers.len(), 2);
+        assert_eq!(
+            handlers[&SessionID::from_u128(1)].display_intent.displays,
+            vec![0]
+        );
+        assert_eq!(
+            handlers[&SessionID::from_u128(2)].display_intent.displays,
+            vec![1]
+        );
+        drop(handlers);
+        session.close();
     }
 
     #[test]
@@ -784,6 +1088,95 @@ mod display_intent_tests {
         assert_eq!(binding.phase, ViewRenderPhase::AwaitingTarget);
         assert_eq!(binding.submitted_frame_id, 0);
         assert!(binding.last_submission.is_none());
+    }
+
+    #[test]
+    fn zero_frame_waiting_age_and_failure_remain_observational() {
+        let context = render_context(1, 1, 0, 0);
+        let mut binding = ViewDisplayRenderBinding::waiting(context);
+        let start = binding.created_at;
+        assert_eq!(binding.phase, ViewRenderPhase::AwaitingFrame);
+        assert_eq!(binding.elapsed_ms(start + Duration::from_secs(16)), 16_000);
+        assert!(!binding.mark_stale_if_due(start + Duration::from_secs(300)));
+        binding.phase = ViewRenderPhase::Failed;
+        assert!(binding.observe(
+            render_context(1, 1, 20, 1),
+            4,
+            true,
+            true,
+            start + Duration::from_secs(301)
+        ));
+        assert_eq!(binding.phase, ViewRenderPhase::Live);
+        assert_eq!(binding.elapsed_ms(start + Duration::from_secs(302)), 1000);
+    }
+
+    #[test]
+    fn missing_event_sink_does_not_mark_render_status_as_delivered() {
+        let mut binding = ViewDisplayRenderBinding::waiting(render_context(1, 1, 0, 0));
+        let mut sequence = 0;
+        super::emit_render_binding_state(&None, &mut sequence, 1, 0, 2, &mut binding);
+        assert!(binding.notification_dirty);
+        assert_eq!(binding.notified_attachment, 0);
+        assert_eq!(sequence, 0);
+    }
+
+    #[test]
+    fn ending_screen_authority_hides_cached_pixels_and_clears_every_binding() {
+        let handler = FlutterHandler::default();
+        handler.begin_connection_runtime(1);
+        handler.authorize_connection_runtime(1);
+        let epoch = handler.screen_authority_generation();
+        handler.display_rgbas.write().unwrap().insert(
+            0,
+            super::RgbaData {
+                data: vec![1, 2, 3, 4],
+                valid: true,
+                screen_authority_generation: epoch,
+            },
+        );
+        for view in 1..=2 {
+            let mut session = super::SessionHandler::default();
+            session.render_bindings.insert(
+                0,
+                ViewDisplayRenderBinding::new(
+                    RenderFrameContext {
+                        screen_authority_generation: epoch,
+                        ..render_context(1, 1, 1, 1)
+                    },
+                    1,
+                ),
+            );
+            handler
+                .session_handlers
+                .write()
+                .unwrap()
+                .insert(SessionID::from_u128(view), session);
+        }
+        assert!(!handler.get_rgba(0).is_null());
+        handler.set_permission("keyboard", false);
+        handler.update_privacy_mode();
+        assert!(!handler.get_rgba(0).is_null());
+        assert_eq!(handler.screen_authority_generation(), epoch);
+
+        handler.end_connection_runtime(1);
+        assert!(handler.get_rgba(0).is_null());
+        assert!(handler
+            .session_handlers
+            .read()
+            .unwrap()
+            .values()
+            .all(|session| session.render_bindings.is_empty()));
+        // Revocation does not recycle a buffer that Dart still owns.
+        assert!(handler.display_rgbas.read().unwrap().get(&0).unwrap().valid);
+        handler.authorize_connection_runtime(1);
+        assert!(handler.get_rgba(0).is_null());
+        handler.begin_connection_runtime(2);
+        handler.authorize_connection_runtime(2);
+        assert!(handler.get_rgba(0).is_null());
+        handler.end_connection_runtime(1);
+        assert!(handler.screen_authority.read().unwrap().allowed);
+        handler.next_rgba(0);
+        assert!(!handler.display_rgbas.read().unwrap().get(&0).unwrap().valid);
     }
 
     #[test]
@@ -877,6 +1270,7 @@ enum RenderType {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ViewRenderPhase {
+    AwaitingFrame,
     AwaitingTarget,
     Live,
     Stale,
@@ -886,6 +1280,7 @@ enum ViewRenderPhase {
 impl ViewRenderPhase {
     fn as_str(self) -> &'static str {
         match self {
+            Self::AwaitingFrame => "awaiting-frame",
             Self::AwaitingTarget => "awaiting-target",
             Self::Live => "live",
             Self::Stale => "stale",
@@ -903,6 +1298,10 @@ struct ViewDisplayRenderBinding {
     submitted_frame_id: u64,
     last_submission: Option<Instant>,
     phase: ViewRenderPhase,
+    created_at: Instant,
+    notification_dirty: bool,
+    notified_attachment: u64,
+    notified_age_seconds: u64,
 }
 
 impl ViewDisplayRenderBinding {
@@ -915,7 +1314,24 @@ impl ViewDisplayRenderBinding {
             submitted_frame_id: 0,
             last_submission: None,
             phase: ViewRenderPhase::AwaitingTarget,
+            created_at: Instant::now(),
+            notification_dirty: true,
+            notified_attachment: 0,
+            notified_age_seconds: 0,
         }
+    }
+
+    fn waiting(context: RenderFrameContext) -> Self {
+        Self {
+            phase: ViewRenderPhase::AwaitingFrame,
+            ..Self::new(context, 0)
+        }
+    }
+
+    fn elapsed_ms(&self, now: Instant) -> u64 {
+        now.saturating_duration_since(self.last_submission.unwrap_or(self.created_at))
+            .as_millis()
+            .min(u64::MAX as u128) as u64
     }
 
     fn observe(
@@ -943,7 +1359,9 @@ impl ViewDisplayRenderBinding {
         } else {
             self.phase = ViewRenderPhase::AwaitingTarget;
         }
-        previous_phase != self.phase || dependency_changed
+        let changed = previous_phase != self.phase || dependency_changed;
+        self.notification_dirty |= changed;
+        changed
     }
 
     fn mark_stale_if_due(&mut self, now: Instant) -> bool {
@@ -955,6 +1373,7 @@ impl ViewDisplayRenderBinding {
             return false;
         }
         self.phase = ViewRenderPhase::Stale;
+        self.notification_dirty = true;
         true
     }
 }
@@ -1007,6 +1426,8 @@ pub struct FlutterHandler {
     session_handlers: Arc<RwLock<HashMap<SessionID, SessionHandler>>>,
     display_intent_reducer: Arc<RwLock<DisplayIntentReducerState>>,
     connection_generation: Arc<AtomicUsize>,
+    // Held through native render submission; revocation cannot race a submit.
+    screen_authority: Arc<RwLock<crate::client::screen_authority::ScreenViewAuthority>>,
     display_rgbas: Arc<RwLock<HashMap<usize, RgbaData>>>,
     peer_info: Arc<RwLock<PeerInfo>>,
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1020,6 +1441,7 @@ impl Default for FlutterHandler {
             session_handlers: Default::default(),
             display_intent_reducer: Default::default(),
             connection_generation: Default::default(),
+            screen_authority: Default::default(),
             display_rgbas: Default::default(),
             peer_info: Default::default(),
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1037,6 +1459,7 @@ struct RgbaData {
     // We must check the `rgba_valid` before reading [rgba].
     data: Vec<u8>,
     valid: bool,
+    screen_authority_generation: u64,
 }
 
 pub type FlutterRgbaRendererPluginOnRgba = unsafe extern "C" fn(
@@ -1459,16 +1882,14 @@ impl SessionHandler {
             target_exists,
             now,
         );
-        let phase = binding.phase;
-        let submitted_frame_id = binding.submitted_frame_id;
         if changed {
             emit_render_binding_state(
                 &self.event_stream,
+                &mut self.render_event_sequence,
+                self.event_stream_generation,
                 display,
-                context,
-                render_target_generation,
-                submitted_frame_id,
-                phase,
+                context.screen_authority_generation,
+                binding,
             );
         }
         if submitted {
@@ -1481,32 +1902,80 @@ impl SessionHandler {
 
 fn emit_render_binding_state(
     event_stream: &Option<StreamSink<EventToUI>>,
+    sequence: &mut u64,
+    attachment: u64,
     display: usize,
-    context: RenderFrameContext,
-    render_target_generation: u64,
-    submitted_frame_id: u64,
-    phase: ViewRenderPhase,
+    authority_generation: u64,
+    binding: &mut ViewDisplayRenderBinding,
 ) {
     let Some(event_stream) = event_stream else {
         return;
     };
-    event_stream.add(EventToUI::Event(
+    *sequence = sequence.saturating_add(1);
+    let elapsed_ms = binding.elapsed_ms(Instant::now());
+    let admitted = event_stream.add(EventToUI::Event(
         json!({
             "name": "display_render_state",
             "display": display,
-            "state": phase.as_str(),
-            "connection_generation": context.connection_generation,
-            "display_activation_generation": context.display_activation_generation,
-            "render_target_generation": render_target_generation,
-            "stream_id": context.stream_id,
-            "submitted_frame_id": submitted_frame_id,
+            "state": binding.phase.as_str(),
+            "connection_generation": binding.connection_generation,
+            "screen_authority_generation": authority_generation,
+            "display_activation_generation": binding.display_activation_generation,
+            "render_target_generation": binding.render_target_generation,
+            "stream_id": binding.stream_id,
+            "submitted_frame_id": binding.submitted_frame_id,
+            "sequence": *sequence,
+            "elapsed_ms": elapsed_ms,
             "presentation_confirmed": false,
         })
         .to_string(),
     ));
+    if admitted {
+        binding.notification_dirty = false;
+        binding.notified_attachment = attachment;
+        binding.notified_age_seconds = elapsed_ms / 1000;
+    }
+}
+
+fn emit_screen_authority(
+    event_stream: &Option<StreamSink<EventToUI>>,
+    authority: crate::client::screen_authority::ScreenViewAuthority,
+) {
+    if let Some(stream) = event_stream {
+        stream.add(EventToUI::Event(
+            json!({
+                "name": "screen_view_authority",
+                "connection_generation": authority.connection_generation,
+                "generation": authority.generation,
+                "allowed": authority.allowed,
+            })
+            .to_string(),
+        ));
+    }
 }
 
 impl FlutterHandler {
+    fn update_screen_authority(
+        &self,
+        update: impl FnOnce(&mut crate::client::screen_authority::ScreenViewAuthority) -> bool,
+    ) {
+        let mut authority = self.screen_authority.write().unwrap();
+        if !update(&mut authority) {
+            return;
+        }
+        self.connection_generation
+            .store(authority.connection_generation as usize, Ordering::Release);
+        // Outstanding RGBA allocations stay leased until Dart calls next_rgba.
+        // Generation checks hide them without recycling a buffer being decoded.
+        for handler in self.session_handlers.write().unwrap().values_mut() {
+            handler.render_bindings.clear();
+            handler.renderer.reset_all_display_render_type();
+            #[cfg(all(target_os = "android", feature = "mediacodec"))]
+            handler.texture_notified.write().unwrap().clear();
+            emit_screen_authority(&handler.event_stream, *authority);
+        }
+    }
+
     fn accepts_render_context(&self, display: usize, context: RenderFrameContext) -> bool {
         self.connection_generation.load(Ordering::Acquire) == context.connection_generation as usize
             && self
@@ -1520,28 +1989,54 @@ impl FlutterHandler {
                 })
     }
 
+    // Call only while holding the view registry lock. Reconcile one complete
+    // snapshot, not a shadow event that can arrive after a newer transaction.
+    fn reconcile_view_intent(
+        &self,
+        handlers: &HashMap<SessionID, SessionHandler>,
+    ) -> DisplayIntentEffects {
+        let mut reducer = self.display_intent_reducer.write().unwrap();
+        let previous = reducer.media_intent.clone();
+        let mut next = reducer.clone();
+        next.views = handlers
+            .iter()
+            .map(|(view_id, handler)| {
+                (
+                    *view_id,
+                    ReducerViewIntent {
+                        displays: handler.display_intent.displays.clone(),
+                        active: handler.event_stream.is_some(),
+                        generation: handler.display_intent.generation,
+                    },
+                )
+            })
+            .collect();
+        let (next, effects) = reconcile_display_media(next, previous);
+        *reducer = next;
+        effects
+    }
+
+    #[cfg(test)]
     fn reduce_view_intent(
         &self,
         event: ViewIntentEvent,
-        legacy_current: &[usize],
+        _legacy_current: &[usize],
     ) -> DisplayIntentEffects {
         let mut reducer = self.display_intent_reducer.write().unwrap();
         let (next, effects) = reduce_display_intent(reducer.clone(), event);
-        let reduced_current = effects
-            .media_intent
-            .displays
-            .iter()
-            .map(|entry| entry.display)
-            .collect::<Vec<_>>();
-        if reduced_current != legacy_current {
-            log::error!(
-                "display intent shadow mismatch: legacy={legacy_current:?}, reducer={reduced_current:?}, aggregate_generation={}",
-                effects.media_intent.aggregate_generation
-            );
-            debug_assert_eq!(reduced_current, legacy_current);
-        }
         *reducer = next;
         effects
+    }
+
+    fn seed_views_from_peer(&self, current_display: usize) {
+        let mut handlers = self.session_handlers.write().unwrap();
+        for handler in handlers
+            .values_mut()
+            .filter(|handler| handler.event_stream.is_some())
+        {
+            handler.display_intent.seed_initial_display(current_display);
+        }
+        self.reconcile_view_intent(&handlers);
     }
 
     fn current_display_media_intent(&self) -> DisplayMediaIntent {
@@ -1606,18 +2101,24 @@ impl FlutterHandler {
         }
     }
 
-    fn make_displays_msg(displays: &Vec<DisplayInfo>) -> String {
-        let mut msg_vec = Vec::new();
+    fn make_displays_msg(displays: &[DisplayInfo]) -> String {
+        let mut msg_vec = Vec::with_capacity(displays.len());
         for ref d in displays.iter() {
-            let mut h: HashMap<&str, i32> = Default::default();
-            h.insert("x", d.x);
-            h.insert("y", d.y);
-            h.insert("width", d.width);
-            h.insert("height", d.height);
-            h.insert("cursor_embedded", if d.cursor_embedded { 1 } else { 0 });
+            let mut h = serde_json::Map::new();
+            // Presentation metadata only: the array order remains the capture index.
+            // Use a separate key from the enclosing event's "name" discriminator.
+            h.insert("display_name".into(), json!(d.name));
+            h.insert("x".into(), json!(d.x));
+            h.insert("y".into(), json!(d.y));
+            h.insert("width".into(), json!(d.width));
+            h.insert("height".into(), json!(d.height));
+            h.insert(
+                "cursor_embedded".into(),
+                json!(if d.cursor_embedded { 1 } else { 0 }),
+            );
             if let Some(original_resolution) = d.original_resolution.as_ref() {
-                h.insert("original_width", original_resolution.width);
-                h.insert("original_height", original_resolution.height);
+                h.insert("original_width".into(), json!(original_resolution.width));
+                h.insert("original_height".into(), json!(original_resolution.height));
             }
             // Don't convert scale (x 100) to i32 directly.
             // (d.scale * 100.0f64) as i32 may produces inaccuracies.
@@ -1633,7 +2134,7 @@ impl FlutterHandler {
             // Send scaled_width for accurate logical scale calculation.
             if d.scale > 0.0 {
                 let scaled_width = (d.width as f64 / d.scale).round() as i32;
-                h.insert("scaled_width", scaled_width);
+                h.insert("scaled_width".into(), json!(scaled_width));
             }
             msg_vec.push(h);
         }
@@ -2111,6 +2612,13 @@ impl InvokeUiSession for FlutterHandler {
         display: usize,
         rgba: &mut scrap::ImageRgb,
     ) -> RenderFrameOutcome {
+        let authority = self.screen_authority.read().unwrap();
+        if !authority.accepts(
+            context.connection_generation,
+            context.screen_authority_generation,
+        ) {
+            return RenderFrameOutcome::default();
+        }
         if !self.accepts_render_context(display, context) {
             return RenderFrameOutcome::default();
         }
@@ -2131,6 +2639,13 @@ impl InvokeUiSession for FlutterHandler {
         display: usize,
         rgba: &mut scrap::ImageRgb,
     ) -> RenderFrameOutcome {
+        let authority = self.screen_authority.read().unwrap();
+        if !authority.accepts(
+            context.connection_generation,
+            context.screen_authority_generation,
+        ) {
+            return RenderFrameOutcome::default();
+        }
         if !self.accepts_render_context(display, context) {
             return RenderFrameOutcome::default();
         }
@@ -2142,57 +2657,104 @@ impl InvokeUiSession for FlutterHandler {
     }
 
     fn begin_connection_runtime(&self, connection_generation: u32) {
-        let previous = self
-            .connection_generation
-            .swap(connection_generation as usize, Ordering::AcqRel);
-        if previous == connection_generation as usize {
+        self.update_screen_authority(|authority| authority.begin(connection_generation));
+    }
+
+    fn authorize_connection_runtime(&self, connection_generation: u32) {
+        self.update_screen_authority(|authority| authority.authorize(connection_generation));
+    }
+
+    fn end_connection_runtime(&self, connection_generation: u32) {
+        self.update_screen_authority(|authority| authority.end(connection_generation));
+    }
+
+    fn screen_authority_generation(&self) -> u64 {
+        self.screen_authority.read().unwrap().generation
+    }
+
+    fn display_startup_state(&self, context: RenderFrameContext, display: usize, failed: bool) {
+        let authority = self.screen_authority.read().unwrap();
+        let mut handlers = self.session_handlers.write().unwrap();
+        if !authority.accepts(
+            context.connection_generation,
+            context.screen_authority_generation,
+        ) || !self.accepts_render_context(display, context)
+        {
             return;
         }
-        let mut handlers = self.session_handlers.write().unwrap();
-        for handler in handlers.values_mut() {
-            let event_stream = &handler.event_stream;
-            let render_bindings = &mut handler.render_bindings;
-            for (display, binding) in render_bindings.iter_mut() {
-                if binding.phase == ViewRenderPhase::Live {
-                    binding.phase = ViewRenderPhase::Stale;
-                    emit_render_binding_state(
-                        event_stream,
-                        *display,
-                        RenderFrameContext {
-                            connection_generation,
-                            display_activation_generation: binding.display_activation_generation,
-                            stream_id: binding.stream_id,
-                            frame_id: binding.submitted_frame_id,
-                        },
-                        binding.render_target_generation,
-                        binding.submitted_frame_id,
-                        binding.phase,
-                    );
-                }
+        for handler in handlers.values_mut().filter(|handler| {
+            handler.event_stream.is_some() && handler.display_intent.displays.contains(&display)
+        }) {
+            let binding = handler
+                .render_bindings
+                .entry(display)
+                .or_insert_with(|| ViewDisplayRenderBinding::waiting(context));
+            let same_activation = binding.connection_generation == context.connection_generation
+                && binding.display_activation_generation == context.display_activation_generation;
+            if same_activation && binding.stream_id > context.stream_id {
+                continue;
+            }
+            if !same_activation || binding.stream_id != context.stream_id {
+                *binding = ViewDisplayRenderBinding::waiting(context);
+            }
+            if failed && binding.phase != ViewRenderPhase::Failed {
+                binding.phase = ViewRenderPhase::Failed;
+                binding.notification_dirty = true;
+            }
+            if binding.notification_dirty {
+                emit_render_binding_state(
+                    &handler.event_stream,
+                    &mut handler.render_event_sequence,
+                    handler.event_stream_generation,
+                    display,
+                    authority.generation,
+                    binding,
+                );
             }
         }
     }
 
     fn tick_render_liveness(&self) {
+        let authority = self.screen_authority.read().unwrap();
+        if !authority.allowed {
+            return;
+        }
         let now = Instant::now();
         let mut handlers = self.session_handlers.write().unwrap();
-        for handler in handlers.values_mut() {
-            let event_stream = &handler.event_stream;
-            let render_bindings = &mut handler.render_bindings;
-            for (display, binding) in render_bindings.iter_mut() {
-                if binding.mark_stale_if_due(now) {
+        let intent = self.current_display_media_intent();
+        for handler in handlers
+            .values_mut()
+            .filter(|handler| handler.event_stream.is_some())
+        {
+            for display in &handler.display_intent.displays {
+                let Some(activation) = intent.activation(*display) else {
+                    continue;
+                };
+                handler.render_bindings.entry(*display).or_insert_with(|| {
+                    ViewDisplayRenderBinding::waiting(RenderFrameContext {
+                        connection_generation: authority.connection_generation,
+                        screen_authority_generation: authority.generation,
+                        display_activation_generation: activation.generation,
+                        stream_id: 0,
+                        frame_id: 0,
+                    })
+                });
+            }
+            for (display, binding) in handler.render_bindings.iter_mut() {
+                binding.mark_stale_if_due(now);
+                let age_changed = binding.phase != ViewRenderPhase::Live
+                    && binding.elapsed_ms(now) / 1000 != binding.notified_age_seconds;
+                if binding.notification_dirty
+                    || binding.notified_attachment != handler.event_stream_generation
+                    || age_changed
+                {
                     emit_render_binding_state(
-                        event_stream,
+                        &handler.event_stream,
+                        &mut handler.render_event_sequence,
+                        handler.event_stream_generation,
                         *display,
-                        RenderFrameContext {
-                            connection_generation: binding.connection_generation,
-                            display_activation_generation: binding.display_activation_generation,
-                            stream_id: binding.stream_id,
-                            frame_id: binding.submitted_frame_id,
-                        },
-                        binding.render_target_generation,
-                        binding.submitted_frame_id,
-                        binding.phase,
+                        authority.generation,
+                        binding,
                     );
                 }
             }
@@ -2210,6 +2772,13 @@ impl InvokeUiSession for FlutterHandler {
         display: usize,
         texture: *mut c_void,
     ) -> RenderFrameOutcome {
+        let authority = self.screen_authority.read().unwrap();
+        if !authority.accepts(
+            context.connection_generation,
+            context.screen_authority_generation,
+        ) {
+            return RenderFrameOutcome::default();
+        }
         if !self.use_texture_render.load(Ordering::Relaxed) {
             return RenderFrameOutcome::default();
         }
@@ -2247,6 +2816,13 @@ impl InvokeUiSession for FlutterHandler {
         display: usize,
         _texture: *mut c_void,
     ) -> RenderFrameOutcome {
+        let authority = self.screen_authority.read().unwrap();
+        if !authority.accepts(
+            context.connection_generation,
+            context.screen_authority_generation,
+        ) {
+            return RenderFrameOutcome::default();
+        }
         if !self.use_texture_render.load(Ordering::Relaxed) {
             return RenderFrameOutcome::default();
         }
@@ -2309,35 +2885,7 @@ impl InvokeUiSession for FlutterHandler {
         let resolutions = serialize_resolutions(&pi.resolutions.resolutions);
         *self.peer_info.write().unwrap() = pi.clone();
         if let Ok(current_display) = usize::try_from(pi.current_display) {
-            let uninitialized = self
-                .session_handlers
-                .read()
-                .unwrap()
-                .iter()
-                .filter_map(|(session_id, handler)| {
-                    (handler.event_stream.is_some() && !handler.display_intent.initialized)
-                        .then_some(*session_id)
-                })
-                .collect::<Vec<_>>();
-            for session_id in uninitialized {
-                let (event, current) = {
-                    let mut handlers = self.session_handlers.write().unwrap();
-                    let Some(handler) = handlers.get_mut(&session_id) else {
-                        continue;
-                    };
-                    if !handler.display_intent.seed_initial_display(current_display) {
-                        continue;
-                    }
-                    let event = ViewIntentEvent::Upsert {
-                        view_id: session_id,
-                        displays: handler.display_intent.displays.clone(),
-                        active: true,
-                    };
-                    let current = aggregate_active_display_intents(&handlers);
-                    (event, current)
-                };
-                self.reduce_view_intent(event, &current);
-            }
+            self.seed_views_from_peer(current_display);
         }
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         let is_support_multi_ui_session = crate::common::is_support_multi_ui_session(&pi.version);
@@ -2522,8 +3070,12 @@ impl InvokeUiSession for FlutterHandler {
 
     #[inline]
     fn get_rgba(&self, _display: usize) -> *const u8 {
+        let authority = self.screen_authority.read().unwrap();
         if let Some(rgba_data) = self.display_rgbas.read().unwrap().get(&_display) {
-            if rgba_data.valid {
+            if rgba_data.valid
+                && authority.allowed
+                && rgba_data.screen_authority_generation == authority.generation
+            {
                 return rgba_data.data.as_ptr();
             }
         }
@@ -2642,6 +3194,7 @@ impl FlutterHandler {
                 return RenderFrameOutcome::default();
             } else {
                 rgba_data.valid = true;
+                rgba_data.screen_authority_generation = context.screen_authority_generation;
             }
             // Return the rgba buffer to the video handler for reusing allocated rgba buffer.
             std::mem::swap::<Vec<u8>>(&mut rgba.raw, &mut rgba_data.data);
@@ -2649,6 +3202,7 @@ impl FlutterHandler {
             let mut rgba_data = RgbaData::default();
             std::mem::swap::<Vec<u8>>(&mut rgba.raw, &mut rgba_data.data);
             rgba_data.valid = true;
+            rgba_data.screen_authority_generation = context.screen_authority_generation;
             rgba_write_lock.insert(display, rgba_data);
         }
         drop(rgba_write_lock);
@@ -2859,37 +3413,38 @@ fn session_start_with_display_intent(
     event_stream: StreamSink<EventToUI>,
     displays: Option<&[i32]>,
 ) -> ResultType<(FlutterSession, DisplayIntentEffects)> {
-    // is_connected is used to indicate whether to start a peer connection. For two cases:
-    // 1. "Move tab to new window"
-    // 2. multi ui session within the same peer connection.
-    let mut is_connected = false;
     let mut started = None;
     for s in sessions::get_sessions() {
+        // Keep PeerInfo stable until the view is active. Otherwise PeerInfo can
+        // arrive between the snapshot and attachment, miss this inactive view,
+        // and leave it unseeded now that renderer sizing cannot supply intent.
+        let peer = s.peer_info.read().unwrap();
+        let initial_display = (!peer.version.is_empty())
+            .then(|| usize::try_from(peer.current_display).ok())
+            .flatten();
+        let authority = s.screen_authority.read().unwrap();
         let mut handlers = s.session_handlers.write().unwrap();
         if let Some(h) = handlers.get_mut(session_id) {
-            is_connected = h.event_stream.is_some();
             try_send_close_event(&h.event_stream);
             if let Some(displays) = displays {
                 h.display_intent.set_wire_displays(displays);
+            } else if let Some(display) = initial_display {
+                h.display_intent.seed_initial_display(display);
             }
             h.render_bindings
                 .retain(|display, _| h.display_intent.displays.contains(display));
             h.event_stream_generation = h.event_stream_generation.saturating_add(1).max(1);
             h.event_stream = Some(event_stream);
-            let event = ViewIntentEvent::Upsert {
-                view_id: *session_id,
-                displays: h.display_intent.displays.clone(),
-                active: true,
-            };
-            let current = aggregate_active_display_intents(&handlers);
-            let is_first_ui_session = handlers.len() == 1;
-            let effects = s.ui_handler.reduce_view_intent(event, &current);
+            emit_screen_authority(&h.event_stream, *authority);
+            let effects = s.ui_handler.reconcile_view_intent(&handlers);
             drop(handlers);
-            started = Some((s, is_first_ui_session, effects));
+            drop(authority);
+            drop(peer);
+            started = Some((s, effects));
             break;
         }
     }
-    let Some((session, is_first_ui_session, display_effects)) = started else {
+    let Some((session, display_effects)) = started else {
         bail!(
             "No session with peer id {}, session id: {}",
             id,
@@ -2897,22 +3452,9 @@ fn session_start_with_display_intent(
         );
     };
 
-    if !is_connected && is_first_ui_session {
-        log::info!(
-            "Session {} start, use texture render: {}",
-            id,
-            session.use_texture_render.load(Ordering::Relaxed)
-        );
-        let session_for_io = (*session).clone();
-        std::thread::spawn(move || {
-            let round = session_for_io
-                .connection_round_state
-                .lock()
-                .unwrap()
-                .new_round();
-            io_loop(session_for_io, round);
-        });
-    }
+    // A view may outlive its transport. Attaching/moving a view must consult
+    // the native attempt owner, never the view count or event subscription.
+    session.start_connection_if_needed();
     Ok((session, display_effects))
 }
 
@@ -3318,11 +3860,17 @@ fn char_to_session_id(c: *const char) -> ResultType<SessionID> {
 
 pub fn session_get_rgba_size(session_id: SessionID, display: usize) -> usize {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        let authority = session.screen_authority.read().unwrap();
         return session
             .display_rgbas
             .read()
             .unwrap()
             .get(&display)
+            .filter(|rgba| {
+                rgba.valid
+                    && authority.allowed
+                    && rgba.screen_authority_generation == authority.generation
+            })
             .map_or(0, |rgba| rgba.data.len());
     }
     0
@@ -3348,31 +3896,13 @@ pub fn session_next_rgba(session_id: SessionID, display: usize) {
 #[inline]
 pub fn session_set_size(session_id: SessionID, display: usize, width: usize, height: usize) {
     for s in sessions::get_sessions() {
-        let effects = {
-            let mut handlers = s.ui_handler.session_handlers.write().unwrap();
-            let Some(h) = handlers.get_mut(&session_id) else {
-                continue;
-            };
-            // The first UI session has no explicit display intent until its initial
-            // renderer is sized. Seed it once; later target setup must not expand intent.
-            let intent_changed = h.display_intent.seed_initial_display(display);
+        let mut handlers = s.ui_handler.session_handlers.write().unwrap();
+        if let Some(h) = handlers.get_mut(&session_id) {
+            // Only PeerInfo/view activation seeds intent. A late renderer callback
+            // must never subscribe a display that the user no longer wants.
             h.renderer.set_size(display, width, height);
-            if intent_changed {
-                let event = ViewIntentEvent::Upsert {
-                    view_id: session_id,
-                    displays: h.display_intent.displays.clone(),
-                    active: h.event_stream.is_some(),
-                };
-                let current = aggregate_active_display_intents(&handlers);
-                Some(s.ui_handler.reduce_view_intent(event, &current))
-            } else {
-                None
-            }
-        };
-        if let Some(effects) = effects {
-            apply_display_intent_effects(&s, &effects);
+            break;
         }
-        break;
     }
 }
 
@@ -3801,10 +4331,7 @@ pub mod sessions {
                     if handlers.is_empty() {
                         remove_peer_key = Some(peer_key.clone());
                     } else {
-                        let current = aggregate_active_display_intents(&handlers);
-                        let effects = s
-                            .ui_handler
-                            .reduce_view_intent(ViewIntentEvent::Remove { view_id: *id }, &current);
+                        let effects = s.ui_handler.reconcile_view_intent(&handlers);
                         display_reconcile = Some((s.clone(), effects));
                     }
                     break;
@@ -3924,7 +4451,7 @@ pub mod sessions {
         }
     }
 
-    pub fn session_switch_display(is_desktop: bool, session_id: SessionID, value: Vec<i32>) {
+    pub fn session_switch_display(_is_desktop: bool, session_id: SessionID, value: Vec<i32>) {
         for s in SESSIONS.read().unwrap().values() {
             let update = {
                 let mut handlers = s.ui_handler.session_handlers.write().unwrap();
@@ -3936,18 +4463,12 @@ pub mod sessions {
                 handler
                     .render_bindings
                     .retain(|display, _| handler.display_intent.displays.contains(display));
-                let event = ViewIntentEvent::Upsert {
-                    view_id: session_id,
-                    displays: handler.display_intent.displays.clone(),
-                    active: is_active,
-                };
-                let current = aggregate_active_display_intents(&handlers);
                 let active_ui_sessions = handlers
                     .values()
                     .filter(|handler| handler.event_stream.is_some())
                     .count();
                 (
-                    s.ui_handler.reduce_view_intent(event, &current),
+                    s.ui_handler.reconcile_view_intent(&handlers),
                     active_ui_sessions,
                     is_active,
                 )
@@ -3958,44 +4479,15 @@ pub mod sessions {
                 break;
             }
             let legacy_single_display =
-                display_effects.delta.current.len() == 1 && active_ui_sessions == 1;
+                is_single_display_replacement(&display_effects, active_ui_sessions);
 
             if legacy_single_display {
                 let display = display_effects.delta.current[0];
-                let Ok(display_wire) = i32::try_from(display) else {
-                    break;
-                };
                 // Preserve the established one-view replacement behavior. Multi-view
                 // updates below are declarative and must not reset another view's decoder.
-                s.switch_display(display_wire);
                 s.next_rgba(display);
-                if is_desktop {
-                    s.capture_displays(
-                        vec![],
-                        vec![],
-                        wire_display_indices(&display_effects.delta.current),
-                    );
-                } else {
-                    s.capture_displays(vec![], vec![], vec![display_wire]);
-                }
-
-                #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                if crate::common::is_support_multi_ui_session(
-                    &s.ui_handler.peer_info.read().unwrap().version,
-                ) {
-                    s.refresh_video(display_wire);
-                }
-                s.send(Data::DisplayIntent(display_effects.media_intent.clone()));
-            } else if is_desktop {
-                apply_display_intent_effects(s, &display_effects);
-            } else {
-                s.capture_displays(
-                    vec![],
-                    vec![],
-                    wire_display_indices(&display_effects.delta.current),
-                );
-                s.send(Data::DisplayIntent(display_effects.media_intent.clone()));
             }
+            apply_display_intent_effects(s, &display_effects);
             break;
         }
     }
@@ -4009,19 +4501,11 @@ pub mod sessions {
                 .or_insert(session)
                 .clone()
         };
-        let current = {
+        {
             let mut handlers = session.ui_handler.session_handlers.write().unwrap();
             handlers.insert(session_id, Default::default());
-            aggregate_active_display_intents(&handlers)
-        };
-        session.ui_handler.reduce_view_intent(
-            ViewIntentEvent::Upsert {
-                view_id: session_id,
-                displays: Vec::new(),
-                active: false,
-            },
-            &current,
-        );
+            session.ui_handler.reconcile_view_intent(&handlers);
+        }
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         update_session_count_to_server();
     }
@@ -4049,22 +4533,11 @@ pub mod sessions {
             #[cfg(any(target_os = "android", target_os = "ios"))]
             let is_support_multi_ui_session = false;
             h.renderer.is_support_multi_ui_session = is_support_multi_ui_session;
-            let current = {
+            {
                 let mut handlers = s.ui_handler.session_handlers.write().unwrap();
                 handlers.insert(session_id, h);
-                aggregate_active_display_intents(&handlers)
-            };
-            s.ui_handler.reduce_view_intent(
-                ViewIntentEvent::Upsert {
-                    view_id: session_id,
-                    displays: displays
-                        .iter()
-                        .filter_map(|display| usize::try_from(*display).ok())
-                        .collect(),
-                    active: false,
-                },
-                &current,
-            );
+                s.ui_handler.reconcile_view_intent(&handlers);
+            }
             // If the session is a single display session, it may be a software rgba rendered display.
             // If this is the second time the display is opened, the old valid flag may be true.
             if displays.len() == 1 {

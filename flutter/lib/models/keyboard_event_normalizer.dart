@@ -143,6 +143,65 @@ class AndroidHardwareKeyboardNormalizer {
 class MobileToolbarKeyboardNormalizer {
   const MobileToolbarKeyboardNormalizer();
 
+  /// Turns a direct software-keyboard edit into a modifier-bearing key click.
+  /// Bulk insertion, replacement, and composed Unicode remain text edits.
+  List<PhysicalKeyboardIntent> modifiedTextEdit(CommittedTextIntent edit) {
+    if (edit.text.isEmpty) {
+      if (edit.deleteBeforeGraphemes == 1 && edit.deleteAfterGraphemes == 0) {
+        return _modifiedClick(_physicalKeyFor('VK_BACK'));
+      }
+      if (edit.deleteAfterGraphemes == 1 && edit.deleteBeforeGraphemes == 0) {
+        return _modifiedClick(_physicalKeyFor('VK_DELETE'));
+      }
+      return const [];
+    }
+    if (edit.deleteBeforeGraphemes != 0 ||
+        edit.deleteAfterGraphemes != 0 ||
+        edit.text.length != 1) {
+      return const [];
+    }
+    final code = edit.text.codeUnitAt(0);
+    if (code < 0x20 || code > 0x7e) return const [];
+    final text = edit.text.toUpperCase();
+    if (_isAsciiLetterOrDigit(text)) {
+      return _modifiedClick(_physicalKeyFor('VK_$text'));
+    }
+    // Standard base keys only: do not infer layout-dependent Shift/AltGr
+    // combinations from a composed symbol.
+    final key = const {
+      ' ': PhysicalKeyboardKey.space,
+      '-': PhysicalKeyboardKey.minus,
+      '=': PhysicalKeyboardKey.equal,
+      '[': PhysicalKeyboardKey.bracketLeft,
+      ']': PhysicalKeyboardKey.bracketRight,
+      '\\': PhysicalKeyboardKey.backslash,
+      ';': PhysicalKeyboardKey.semicolon,
+      "'": PhysicalKeyboardKey.quote,
+      '`': PhysicalKeyboardKey.backquote,
+      ',': PhysicalKeyboardKey.comma,
+      '.': PhysicalKeyboardKey.period,
+      '/': PhysicalKeyboardKey.slash,
+    }[edit.text];
+    return _modifiedClick(
+      key == null ? null : HidKey.fromFlutterUsage(key.usbHidUsage),
+    );
+  }
+
+  List<PhysicalKeyboardIntent> _modifiedClick(HidKey? key) {
+    if (key == null) return const [];
+    // No legacy fallback: macOS legacy character input can bypass Shift.
+    // HID also keeps the modifier and letter on the same physical transport.
+    return [
+      for (final action in [KeyboardIntentAction.down, KeyboardIntentAction.up])
+        PhysicalKeyboardIntent(
+          key: key,
+          action: action,
+          source: KeyboardInputSource.mobileToolbar,
+          synthetic: true,
+        ),
+    ];
+  }
+
   List<KeyboardIntent> click(String legacyName) {
     final key = _physicalKeyFor(legacyName);
     if (key == null) {

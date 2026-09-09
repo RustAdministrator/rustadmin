@@ -1,5 +1,6 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 import '../../common/quality_monitor_settings.dart';
 import '../../consts.dart';
@@ -986,9 +987,15 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
         final maximumExtent = _vertical
             ? _maximumVerticalButtonExtent
             : _maximumButtonExtent;
-        final extent = availableExtent.isFinite && availableExtent > 0
+        final previousExtent = availableExtent.isFinite && availableExtent > 0
             ? (availableExtent / itemCount).clamp(0.0, maximumExtent)
             : maximumExtent;
+        // Halve the visible icon gap after fitting to the available screen,
+        // including the already compact vertical layout. Keep icon size intact
+        // and do not enlarge slots on exceptionally narrow screens.
+        final extent = previousExtent > _iconSize
+            ? _iconSize + (previousExtent - _iconSize) * 0.5
+            : previousExtent;
         final items = _collapsed
             ? [
                 _iconButton(
@@ -1160,13 +1167,12 @@ enum MobileRemoteQuickKey {
   extendedKeys,
 }
 
+// Only modifiers are reorderable; expansion controls belong to fixed groups.
 const mobileRemoteDefaultQuickKeyOrder = <MobileRemoteQuickKey>[
+  MobileRemoteQuickKey.shift,
   MobileRemoteQuickKey.ctrl,
   MobileRemoteQuickKey.alt,
-  MobileRemoteQuickKey.shift,
   MobileRemoteQuickKey.command,
-  MobileRemoteQuickKey.functionKeys,
-  MobileRemoteQuickKey.extendedKeys,
 ];
 
 String mobileRemoteQuickKeyLabel(
@@ -1184,6 +1190,8 @@ String mobileRemoteQuickKeyLabel(
 }
 
 class MobileRemoteKeyHelpTools extends StatelessWidget {
+  static const _buttonSize = 36 * 1.1;
+
   const MobileRemoteKeyHelpTools({
     super.key,
     required this.ctrlActive,
@@ -1247,37 +1255,70 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
     BuildContext context,
     String text,
     VoidCallback onPressed, {
-    bool active = false,
+    bool? active,
     bool locked = false,
     VoidCallback? onDoublePressed,
     IconData? icon,
+    double iconSize = 18,
+    String? svgAsset,
+    String? semanticLabel,
   }) {
-    assert(!locked || active);
+    assert(!locked || active == true);
+    assert(icon == null || svgAsset == null);
+    final label = _label(semanticLabel ?? text);
     final foregroundColor = locked
         ? Colors.white
         : mobileRemoteToolbarForegroundColor(context);
+    final Widget content;
+    if (icon != null) {
+      content = Icon(
+        icon,
+        size: iconSize,
+        color: foregroundColor,
+        // Physical key directions must not mirror with the local UI language.
+        textDirection: TextDirection.ltr,
+      );
+    } else if (svgAsset != null) {
+      content = SvgPicture.asset(
+        svgAsset,
+        width: 18,
+        height: 18,
+        colorFilter: ColorFilter.mode(foregroundColor, BlendMode.srcIn),
+        excludeFromSemantics: true,
+      );
+    } else {
+      content = Text(
+        _label(text),
+        textAlign: TextAlign.center,
+        style: TextStyle(color: foregroundColor, fontSize: 10),
+      );
+    }
     return SizedBox.square(
-      dimension: 36 * 1.1,
-      child: Material(
-        color: locked
-            ? mobileRemoteAccentColor
-            : active
-            ? mobileRemoteToolbarActiveBackgroundColor(context)
-            : mobileRemoteQuickKeyButtonBackgroundColor(context),
-        borderRadius: BorderRadius.circular(4),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: onPressed,
-          onDoubleTap: onDoublePressed,
-          child: icon != null
-              ? Icon(icon, size: 18, color: foregroundColor)
-              : Center(
-                  child: Text(
-                    _label(text),
-                    textAlign: TextAlign.center,
-                    style: TextStyle(color: foregroundColor, fontSize: 10),
-                  ),
-                ),
+      dimension: _buttonSize,
+      child: Semantics(
+        label: label,
+        button: true,
+        toggled: active,
+        value: locked ? _label('Locked') : null,
+        onTap: onPressed,
+        excludeSemantics: true,
+        child: Tooltip(
+          message: label,
+          excludeFromSemantics: true,
+          child: Material(
+            color: locked
+                ? mobileRemoteAccentColor
+                : active == true
+                ? mobileRemoteToolbarActiveBackgroundColor(context)
+                : mobileRemoteQuickKeyButtonBackgroundColor(context),
+            borderRadius: BorderRadius.circular(4),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: onPressed,
+              onDoubleTap: onDoublePressed,
+              child: Center(child: content),
+            ),
+          ),
         ),
       ),
     );
@@ -1296,6 +1337,8 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
           active: ctrlActive,
           locked: ctrlLocked,
           onDoublePressed: onCtrlDoubleTap,
+          icon: isMac ? Icons.keyboard_control_key : null,
+          semanticLabel: 'Control',
         ),
       ),
       MobileRemoteQuickKey.alt: KeyedSubtree(
@@ -1307,6 +1350,8 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
           active: altActive,
           locked: altLocked,
           onDoublePressed: onAltDoubleTap,
+          icon: isMac ? Icons.keyboard_option_key : null,
+          semanticLabel: isMac ? 'Option' : 'Alt',
         ),
       ),
       MobileRemoteQuickKey.shift: KeyedSubtree(
@@ -1318,6 +1363,7 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
           active: shiftActive,
           locked: shiftLocked,
           onDoublePressed: onShiftDoubleTap,
+          svgAsset: 'assets/keyboard_shift.svg',
         ),
       ),
       MobileRemoteQuickKey.command: KeyedSubtree(
@@ -1329,6 +1375,9 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
           active: commandActive,
           locked: commandLocked,
           onDoublePressed: onCommandDoubleTap,
+          icon: isMac ? Icons.keyboard_command_key : null,
+          svgAsset: isMac ? null : 'assets/win.svg',
+          semanticLabel: isMac ? 'Command' : 'Windows',
         ),
       ),
       MobileRemoteQuickKey.functionKeys: KeyedSubtree(
@@ -1341,6 +1390,7 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
           ),
           onFunctionKeys,
           active: functionKeysActive,
+          semanticLabel: 'Function keys',
         ),
       ),
       MobileRemoteQuickKey.extendedKeys: KeyedSubtree(
@@ -1353,87 +1403,182 @@ class MobileRemoteKeyHelpTools extends StatelessWidget {
           ),
           onMoreKeys,
           active: moreKeysActive,
+          semanticLabel: 'More keys',
         ),
       ),
     };
-    final expandedKeys = <Widget>[];
-    if (functionKeysActive) {
-      for (var index = 1; index <= 12; index++) {
-        final name = 'F$index';
-        expandedKeys.add(
-          _button(context, name, () => onKeyPressed('VK_$name')),
-        );
-      }
-    } else if (moreKeysActive) {
-      expandedKeys.addAll([
-        _button(context, 'Esc', () => onKeyPressed('VK_ESCAPE')),
-        _button(context, 'Tab', () => onKeyPressed('VK_TAB')),
-        _button(context, 'Home', () => onKeyPressed('VK_HOME')),
-        _button(context, 'End', () => onKeyPressed('VK_END')),
-        _button(context, 'Ins', () => onKeyPressed('VK_INSERT')),
-        _button(context, 'Del', () => onKeyPressed('VK_DELETE')),
-        _button(context, 'PgUp', () => onKeyPressed('VK_PRIOR')),
-        _button(context, 'PgDn', () => onKeyPressed('VK_NEXT')),
-        if (showWindowsLinuxKeys)
-          _button(context, 'PrtScr', () => onKeyPressed('VK_SNAPSHOT')),
-        if (showWindowsLinuxKeys)
-          _button(context, 'ScrollLock', () => onKeyPressed('VK_SCROLL')),
-        if (showWindowsLinuxKeys)
-          _button(context, 'Pause', () => onKeyPressed('VK_PAUSE')),
-        if (showWindowsLinuxKeys)
-          _button(context, 'Menu', () => onKeyPressed('Apps')),
-        _button(context, 'Enter', () => onKeyPressed('VK_ENTER')),
-        _button(
-          context,
-          '',
-          () => onKeyPressed('VK_LEFT'),
-          icon: Icons.keyboard_arrow_left,
+    final groups = <(String, List<Widget>)>[
+      (
+        'modifiers',
+        [
+          for (final key in quickKeyOrder)
+            if (key != MobileRemoteQuickKey.functionKeys &&
+                key != MobileRemoteQuickKey.extendedKeys)
+              quickButtons[key]!,
+        ],
+      ),
+      if (moreKeysActive)
+        (
+          'editing',
+          [
+            _button(context, 'Del', () => onKeyPressed('VK_DELETE')),
+            _button(context, 'Esc', () => onKeyPressed('VK_ESCAPE')),
+            _button(
+              context,
+              'Tab',
+              () => onKeyPressed('VK_TAB'),
+              icon: Icons.keyboard_tab,
+            ),
+            _button(context, 'Ins', () => onKeyPressed('VK_INSERT')),
+          ],
         ),
-        _button(
-          context,
-          '',
-          () => onKeyPressed('VK_UP'),
-          icon: Icons.keyboard_arrow_up,
+      if (moreKeysActive)
+        (
+          'enter',
+          [
+            _button(
+              context,
+              'Enter',
+              () => onKeyPressed('VK_ENTER'),
+              icon: Icons.keyboard_return,
+            ),
+          ],
         ),
-        _button(
-          context,
-          '',
-          () => onKeyPressed('VK_DOWN'),
-          icon: Icons.keyboard_arrow_down,
+      if (moreKeysActive)
+        (
+          'arrows',
+          [
+            _button(
+              context,
+              'Left',
+              () => onKeyPressed('VK_LEFT'),
+              icon: Icons.arrow_left,
+              // Filled triangles occupy less of the font's box than other icons.
+              iconSize: 28,
+            ),
+            _button(
+              context,
+              'Up',
+              () => onKeyPressed('VK_UP'),
+              icon: Icons.arrow_drop_up,
+              iconSize: 28,
+            ),
+            _button(
+              context,
+              'Down',
+              () => onKeyPressed('VK_DOWN'),
+              icon: Icons.arrow_drop_down,
+              iconSize: 28,
+            ),
+            _button(
+              context,
+              'Right',
+              () => onKeyPressed('VK_RIGHT'),
+              icon: Icons.arrow_right,
+              iconSize: 28,
+            ),
+          ],
         ),
-        _button(
-          context,
-          '',
-          () => onKeyPressed('VK_RIGHT'),
-          icon: Icons.keyboard_arrow_right,
+      if (moreKeysActive)
+        (
+          'navigation',
+          [
+            _button(
+              context,
+              'Home',
+              () => onKeyPressed('VK_HOME'),
+              icon: Icons.first_page,
+            ),
+            _button(
+              context,
+              'End',
+              () => onKeyPressed('VK_END'),
+              icon: Icons.last_page,
+            ),
+            _button(
+              context,
+              'PgUp',
+              () => onKeyPressed('VK_PRIOR'),
+              icon: Icons.keyboard_double_arrow_up,
+              semanticLabel: 'Page Up',
+            ),
+            _button(
+              context,
+              'PgDn',
+              () => onKeyPressed('VK_NEXT'),
+              icon: Icons.keyboard_double_arrow_down,
+              semanticLabel: 'Page Down',
+            ),
+          ],
         ),
-        _button(
-          context,
-          isMac ? 'Cmd+C' : 'Ctrl+C',
-          () => onShortcutPressed('VK_C'),
+      (
+        'function-keys',
+        [
+          quickButtons[MobileRemoteQuickKey.functionKeys]!,
+          if (functionKeysActive)
+            for (var index = 1; index <= 12; index++)
+              _button(context, 'F$index', () => onKeyPressed('VK_F$index')),
+        ],
+      ),
+      if (moreKeysActive && showWindowsLinuxKeys)
+        (
+          'pause-break',
+          [
+            _button(context, 'Pause', () => onKeyPressed('VK_PAUSE')),
+            _button(context, 'Break', () => onKeyPressed('VK_CANCEL')),
+          ],
         ),
-        _button(
-          context,
-          isMac ? 'Cmd+V' : 'Ctrl+V',
-          () => onShortcutPressed('VK_V'),
-        ),
-        _button(
-          context,
-          isMac ? 'Cmd+S' : 'Ctrl+S',
-          () => onShortcutPressed('VK_S'),
-        ),
-      ]);
-    }
-
-    final allButtons = <Widget>[
-      for (final key in quickKeyOrder) quickButtons[key]!,
-      ...expandedKeys,
+      (
+        'other',
+        [
+          quickButtons[MobileRemoteQuickKey.extendedKeys]!,
+          if (moreKeysActive) ...[
+            if (showWindowsLinuxKeys)
+              _button(context, 'PrtScr', () => onKeyPressed('VK_SNAPSHOT')),
+            if (showWindowsLinuxKeys)
+              _button(context, 'ScrollLock', () => onKeyPressed('VK_SCROLL')),
+            if (showWindowsLinuxKeys)
+              _button(context, 'Menu', () => onKeyPressed('Apps')),
+            _button(
+              context,
+              isMac ? 'Cmd+C' : 'Ctrl+C',
+              () => onShortcutPressed('VK_C'),
+            ),
+            _button(
+              context,
+              isMac ? 'Cmd+V' : 'Ctrl+V',
+              () => onShortcutPressed('VK_V'),
+            ),
+            _button(
+              context,
+              isMac ? 'Cmd+S' : 'Ctrl+S',
+              () => onShortcutPressed('VK_S'),
+            ),
+          ],
+        ],
+      ),
     ];
     return Container(
       key: const Key('mobile-remote-key-help-strip'),
       color: mobileRemoteQuickKeyStripBackgroundColor(context),
       padding: const EdgeInsets.symmetric(vertical: 6),
-      child: _MobileKeyHelpScrollStrip(buttons: allButtons, spacing: spacing),
+      child: _MobileKeyHelpScrollStrip(
+        spacing: _buttonSize / 2,
+        buttons: [
+          for (final (name, buttons) in groups)
+            if (buttons.isNotEmpty)
+              Row(
+                key: Key('mobile-remote-key-group-$name'),
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (var index = 0; index < buttons.length; index++) ...[
+                    if (index > 0) const SizedBox(width: spacing),
+                    buttons[index],
+                  ],
+                ],
+              ),
+        ],
+      ),
     );
   }
 }

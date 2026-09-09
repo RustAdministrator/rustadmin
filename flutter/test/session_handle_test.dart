@@ -3,6 +3,7 @@ import 'dart:isolate';
 
 import 'package:flutter_hbb/models/session_handle.dart';
 import 'package:flutter_hbb/models/session_lifecycle.dart';
+import 'package:flutter_hbb/models/screen_view_authority.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:uuid/uuid.dart';
 
@@ -53,7 +54,7 @@ void main() {
       await session.bindEventStream(
         lease,
         isCloseEvent: (event) => event == -1,
-        onEvent: (_) async {},
+        prepareEvent: (_) => () async {},
         onError: (error, stack) => fail('bridge stream failed: $error'),
       );
       await listened.future;
@@ -95,7 +96,7 @@ void main() {
       await session.bindEventStream(
         lease,
         isCloseEvent: (_) => false,
-        onEvent: (_) async => trace.add('stale-event'),
+        prepareEvent: (_) => () async => trace.add('stale-event'),
         onError: (error, stack) => fail('event failed: $error'),
       );
       final close = session.close(
@@ -139,7 +140,7 @@ void main() {
         await session.bindEventStream(
           lease,
           isCloseEvent: (event) => event == -1,
-          onEvent: (event) async => events.add(event),
+          prepareEvent: (event) => () async => events.add(event),
           onError: (error, stack) => fail('event stream failed'),
         );
         session.connected(lease.generation);
@@ -176,7 +177,7 @@ void main() {
     await session.bindEventStream(
       lease,
       isCloseEvent: (event) => false,
-      onEvent: (event) async {
+      prepareEvent: (event) => () async {
         eventStarted.complete();
         await eventGate.future;
       },
@@ -196,6 +197,69 @@ void main() {
     await replacement;
     expect(replaced, isTrue);
   });
+
+  for (final ending in ['authority', 'close', 'done']) {
+    test('screen $ending fences an active decode before stream drain', () async {
+      final stream = StreamController<int>(sync: true);
+      final authority = ScreenViewAuthority();
+      final decodeStarted = Completer<void>();
+      final decodeGate = Completer<void>();
+      var published = false;
+      var closed = 0;
+      var releases = 0;
+      final session = handle(
+        closeNative: () async => fail('remote end must not close native twice'),
+        releasePlatformLease: (_) async => releases++,
+      );
+      final lease = (await session.start(
+        acquirePlatformLease: () async => 1,
+        addNative: () async {},
+        startEvents: () => stream.stream,
+      ))!;
+      await session.bindEventStream(
+        lease,
+        isCloseEvent: (event) => event == -1,
+        prepareEvent: (event) {
+          if (event == 0) {
+            authority.revoke();
+            return null;
+          }
+          final epoch = authority.epoch;
+          return () async {
+            decodeStarted.complete();
+            await decodeGate.future;
+            published = authority.accepts(epoch);
+          };
+        },
+        onStreamClosed: () {
+          closed++;
+          authority.revoke();
+        },
+        onError: (error, stack) => fail('event stream failed: $error'),
+      );
+      stream.add(7);
+      await decodeStarted.future;
+      if (ending == 'authority') stream.add(0);
+      if (ending == 'close') {
+        stream.add(-1);
+        stream.add(-1);
+        stream.add(8);
+      }
+      if (ending == 'done') await stream.close();
+      expect(authority.allowed, isFalse);
+      expect(releases, 0);
+      decodeGate.complete();
+      if (ending != 'done') await stream.close();
+      await session.waitForClose();
+      expect(published, isFalse);
+      expect(closed, 1);
+      expect(releases, 1);
+      expect(
+        await session.prepareForReplacement(cleanupClosedSession: () async {}),
+        isTrue,
+      );
+    });
+  }
 
   test('legacy flags resolve one typed session kind', () {
     expect(

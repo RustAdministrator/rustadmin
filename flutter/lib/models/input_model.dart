@@ -697,11 +697,17 @@ class InputModel {
     required String text,
     required int deleteBeforeGraphemes,
     required int deleteAfterGraphemes,
+    bool allowModifierShortcuts = false,
   }) {
-    inputCommittedText(
-      text,
-      deleteBeforeGraphemes: deleteBeforeGraphemes,
-      deleteAfterGraphemes: deleteAfterGraphemes,
+    _keyboardInput.handle(
+      CommittedTextIntent(
+        text: text,
+        source: KeyboardInputSource.futureIme,
+        deleteBeforeGraphemes: deleteBeforeGraphemes,
+        deleteAfterGraphemes: deleteAfterGraphemes,
+        allowMobileShortcut: allowModifierShortcuts,
+      ),
+      _keyboardRoutingContext,
     );
   }
 

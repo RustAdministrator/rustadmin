@@ -71,7 +71,7 @@ use serde_json::{json, value::Value};
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use std::sync::atomic::Ordering;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     net::Ipv6Addr,
     num::NonZeroI64,
     path::PathBuf,
@@ -89,8 +89,7 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE};
 #[cfg(windows)]
 use crate::virtual_display_manager;
 pub type Sender = mpsc::UnboundedSender<(Instant, Arc<Message>)>;
-type QueuedVideoMessage = (Instant, Arc<Message>);
-const VIDEO_QUEUE_CAPACITY: usize = 8;
+use super::video_queue::{video_queue, Drops as VideoQueueDrops, VideoQueueSender};
 const SERVER_ASYNC_OUTBOX_CAPACITY: usize = 256;
 const SERVER_VIDEO_LATEST_KEY_FALLBACK: u64 = 1 << 63;
 #[cfg(feature = "quic-transport")]
@@ -119,113 +118,9 @@ fn server_video_latest_key(frame: &VideoFrame) -> u64 {
     }
 }
 
-struct VideoQueueInner {
-    messages: std::sync::Mutex<VecDeque<QueuedVideoMessage>>,
-    drop_diagnostics: std::sync::Mutex<VideoQueueDropDiagnostics>,
-    notify: hbb_common::tokio::sync::Notify,
-}
-
-struct VideoQueueDropDiagnostics {
-    dropped_since_log: usize,
-    last_log: Instant,
-}
-
-#[derive(Clone)]
-pub(crate) struct VideoQueueSender {
-    inner: Arc<VideoQueueInner>,
-}
-
-struct VideoQueueReceiver {
-    inner: Arc<VideoQueueInner>,
-}
-
-fn video_queue() -> (VideoQueueSender, VideoQueueReceiver) {
-    let inner = Arc::new(VideoQueueInner {
-        messages: std::sync::Mutex::new(VecDeque::with_capacity(VIDEO_QUEUE_CAPACITY)),
-        drop_diagnostics: std::sync::Mutex::new(VideoQueueDropDiagnostics {
-            dropped_since_log: 0,
-            last_log: Instant::now(),
-        }),
-        notify: hbb_common::tokio::sync::Notify::new(),
-    });
-    (
-        VideoQueueSender {
-            inner: inner.clone(),
-        },
-        VideoQueueReceiver { inner },
-    )
-}
-
-fn is_video_frame(message: &Message) -> bool {
-    matches!(&message.union, Some(message::Union::VideoFrame(_)))
-}
-
-impl VideoQueueSender {
-    fn send(&self, message: QueuedVideoMessage) -> Option<QueuedVideoMessage> {
-        let incoming_is_video = is_video_frame(&message.1);
-        let mut messages = self.inner.messages.lock().unwrap();
-        let dropped = if messages.len() >= VIDEO_QUEUE_CAPACITY {
-            if let Some(position) = messages
-                .iter()
-                .position(|(_, queued)| is_video_frame(queued))
-            {
-                messages.remove(position)
-            } else if incoming_is_video {
-                return Some(message);
-            } else {
-                messages.pop_front()
-            }
-        } else {
-            None
-        };
-        messages.push_back(message);
-        drop(messages);
-        self.inner.notify.notify_one();
-        dropped
-    }
-
-    fn record_drop(&self, conn_id: i32, queued_at: Instant) {
-        let mut diagnostics = self.inner.drop_diagnostics.lock().unwrap();
-        diagnostics.dropped_since_log += 1;
-        if diagnostics.last_log.elapsed() < VIDEO_STALE_DROP_LOG_INTERVAL {
-            return;
-        }
-        let queue_depth = self.inner.messages.lock().unwrap().len();
-        log::warn!(
-            "#{conn_id} diag bounded video queue dropped stale frames: dropped_since_last_log={}, queue_depth={}, queue_capacity={}, dropped_queue_latency_ms={}",
-            diagnostics.dropped_since_log,
-            queue_depth,
-            VIDEO_QUEUE_CAPACITY,
-            queued_at.elapsed().as_millis()
-        );
-        diagnostics.dropped_since_log = 0;
-        diagnostics.last_log = Instant::now();
-    }
-}
-
-impl VideoQueueReceiver {
-    async fn recv(&mut self) -> QueuedVideoMessage {
-        loop {
-            let notified = self.inner.notify.notified();
-            if let Some(message) = self.inner.messages.lock().unwrap().pop_front() {
-                return message;
-            }
-            notified.await;
-        }
-    }
-}
-
 #[cfg(test)]
 mod video_queue_tests {
     use super::*;
-
-    fn video_message(frame_id: u64) -> Arc<Message> {
-        let mut frame = VideoFrame::new();
-        frame.frame_id = frame_id;
-        let mut message = Message::new();
-        message.set_video_frame(frame);
-        Arc::new(message)
-    }
 
     #[test]
     fn full_movie_gate_requires_v4_reliable_keyframes_and_barrier() {
@@ -386,49 +281,6 @@ mod video_queue_tests {
     fn transport_counter_delta_handles_counter_reset() {
         assert_eq!(transport_counter_delta(15, 10), 5);
         assert_eq!(transport_counter_delta(3, 10), 3);
-    }
-
-    #[test]
-    fn bounded_video_queue_evicts_oldest_video_frame() {
-        let (sender, _receiver) = video_queue();
-        for frame_id in 1..=VIDEO_QUEUE_CAPACITY as u64 {
-            assert!(sender
-                .send((Instant::now(), video_message(frame_id)))
-                .is_none());
-        }
-
-        let dropped = sender
-            .send((Instant::now(), video_message(99)))
-            .expect("full queue must evict a video frame");
-        let Some(message::Union::VideoFrame(frame)) = &dropped.1.union else {
-            panic!("evicted message must be a video frame");
-        };
-        assert_eq!(frame.frame_id, 1);
-        assert_eq!(
-            sender.inner.messages.lock().unwrap().len(),
-            VIDEO_QUEUE_CAPACITY
-        );
-    }
-
-    #[test]
-    fn bounded_video_queue_preserves_ordering_messages() {
-        let (sender, _receiver) = video_queue();
-        let ordering_message = Arc::new(Message::new());
-        assert!(sender
-            .send((Instant::now(), ordering_message.clone()))
-            .is_none());
-        for frame_id in 1..VIDEO_QUEUE_CAPACITY as u64 {
-            assert!(sender
-                .send((Instant::now(), video_message(frame_id)))
-                .is_none());
-        }
-
-        let dropped = sender
-            .send((Instant::now(), video_message(99)))
-            .expect("full queue must evict a video frame");
-        assert!(is_video_frame(&dropped.1));
-        let messages = sender.inner.messages.lock().unwrap();
-        assert!(Arc::ptr_eq(&messages.front().unwrap().1, &ordering_message));
     }
 }
 
@@ -1587,6 +1439,19 @@ pub struct Connection {
 }
 
 impl ConnInner {
+    fn notify_video_drops(&self, drops: VideoQueueDrops) {
+        for (display, instant) in drops.times.into_iter().enumerate() {
+            if let Some(instant) = instant {
+                video_service::notify_video_frame_fetched(
+                    self.video_source,
+                    display,
+                    self.id,
+                    Some(instant.into()),
+                );
+            }
+        }
+    }
+
     pub(crate) fn new(id: i32, tx: Option<Sender>, tx_video: Option<VideoQueueSender>) -> Self {
         Self {
             id,
@@ -1617,17 +1482,7 @@ impl Subscriber for ConnInner {
         let queued = (Instant::now(), msg);
         if tx_by_video {
             if let Some(tx) = self.tx_video.as_ref() {
-                if let Some((instant, dropped)) = tx.send(queued) {
-                    tx.record_drop(self.id, instant);
-                    if let Some(message::Union::VideoFrame(frame)) = &dropped.union {
-                        video_service::notify_video_frame_fetched(
-                            self.video_source,
-                            frame.display as usize,
-                            self.id,
-                            Some(instant.into()),
-                        );
-                    }
-                }
+                self.notify_video_drops(tx.send(queued));
             }
         } else if let Some(tx) = self.tx.as_ref() {
             allow_err!(tx.send(queued));
@@ -1644,8 +1499,6 @@ const SEND_TIMEOUT_OTHER: u64 = SEND_TIMEOUT_VIDEO * 10;
 const SEND_TIMEOUT_VIDEO_STARTUP: u64 = 60_000;
 const VIDEO_STARTUP_SEND_TIMEOUT_WINDOW: Duration = Duration::from_secs(60);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
-const VIDEO_FRAME_STALE_DROP_AFTER: Duration = Duration::from_secs(3);
-const VIDEO_STALE_DROP_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
 fn steady_send_timeout_ms(file_transfer: bool, port_forward: bool, terminal: bool) -> u64 {
     if file_transfer || port_forward || terminal {
@@ -1937,8 +1790,7 @@ impl Connection {
             crate::rustdesk_interval(time::interval(VIDEO_DELIVERY_TICK_INTERVAL));
         let mut quic_admission_sample_at = Instant::now();
         let mut first_video_frame_sent = false;
-        let mut stale_video_drop_log_at: Option<Instant> = None;
-        let mut stale_video_drop_count = 0u64;
+        let mut pending_video_ordering = None;
 
         #[cfg(feature = "unix-file-copy-paste")]
         let rx_clip_holder;
@@ -2216,38 +2068,22 @@ impl Connection {
                         break;
                     }
                 }
-                (instant, value) = rx_video.recv() => {
+                queued = rx_video.recv(), if pending_video_ordering.is_none() => {
+                    let (instant, value) = match queued {
+                        Ok(item) => item,
+                        Err(reason) => { conn.on_close(reason, false).await; break; }
+                    };
                     let is_video_frame = matches!(&value.union, Some(message::Union::VideoFrame(_)));
-                    if is_video_frame && first_video_frame_sent && instant.elapsed() >= VIDEO_FRAME_STALE_DROP_AFTER {
-                        stale_video_drop_count += 1;
-                        if stale_video_drop_log_at
-                            .map(|last| last.elapsed() >= VIDEO_STALE_DROP_LOG_INTERVAL)
-                            .unwrap_or(true)
-                        {
-                            log::warn!(
-                                "#{} diag stale video frame dropped before send: queue_latency_ms={}, dropped_since_last_log={}",
-                                conn.inner.id(),
-                                instant.elapsed().as_millis(),
-                                stale_video_drop_count
-                            );
-                            stale_video_drop_log_at = Some(Instant::now());
-                            stale_video_drop_count = 0;
-                        }
-                        if !conn.video_ack_required {
-                            if let Some(message::Union::VideoFrame(vf)) = &value.union {
-                                video_service::notify_video_frame_fetched(
-                                    conn.video_source(),
-                                    vf.display as usize,
-                                    id,
-                                    Some(instant.into()),
-                                );
-                            }
+                    if VideoQueueSender::stale_delta(&(instant, value.clone())) {
+                        if let Some(tx) = &conn.inner.tx_video {
+                            conn.inner.notify_video_drops(tx.lose(&(instant, value)));
                         }
                         continue;
                     }
                     let send_result = if let Some(message::Union::VideoFrame(frame)) = &value.union {
                         conn.stream
-                            .send_latest(
+                            .send_video(
+                                frame.display,
                                 server_video_latest_key(frame),
                                 "VideoFrame",
                                 &value as &Message,
@@ -2259,6 +2095,17 @@ impl Connection {
                             .await
                     };
                     if let Err(err) = send_result {
+                        if err.chain().any(|cause| cause.downcast_ref::<std::io::Error>()
+                            .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)) {
+                            if is_video_frame {
+                                if let Some(tx) = &conn.inner.tx_video {
+                                    conn.inner.notify_video_drops(tx.lose(&(instant, value)));
+                                }
+                            } else {
+                                pending_video_ordering = Some((instant, value));
+                            }
+                            continue;
+                        }
                         let kind = stream_message_kind(&value);
                         if is_video_frame {
                             log::warn!(
@@ -2405,6 +2252,23 @@ impl Connection {
                     }
                 }
                 _ = video_delivery_timer.tick() => {
+                    if let Some((_, message)) = pending_video_ordering.as_ref() {
+                        match conn.stream.send_ordering_tagged("VideoOrdering", message.as_ref()).await {
+                            Ok(()) => pending_video_ordering = None,
+                            Err(error) if error.chain().any(|cause| cause.downcast_ref::<std::io::Error>()
+                                .is_some_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)) => {},
+                            Err(error) => { conn.on_close(&error.to_string(), false).await; break; }
+                        }
+                    }
+                    if let Some(tx) = &conn.inner.tx_video {
+                        for (display, recovery) in tx.recovery_due(std::time::Instant::now()).into_iter().enumerate() {
+                            if let Some((stream_id, loss_events)) = recovery {
+                                log::warn!("#{} video queue reference recovery: display={}, stream={}, loss_events={}",
+                                    conn.inner.id(), display, stream_id, loss_events);
+                                conn.refresh_video_reference(display);
+                            }
+                        }
+                    }
                     if conn
                         .video_feedback_capable
                         .load(std::sync::atomic::Ordering::Relaxed)
@@ -3637,6 +3501,9 @@ impl Connection {
         }
         let mut platform_additions = serde_json::Map::new();
         platform_additions.insert("full_version".into(), json!(crate::FULL_VERSION));
+        // Transport-independent support advertisement; old peers ignore it.
+        platform_additions.insert("support_video_reference_refresh".into(), json!(true));
+        platform_additions.insert("display_set_starts_capture".into(), json!(true));
         #[cfg(target_os = "linux")]
         {
             if crate::platform::current_is_wayland() {
@@ -6888,6 +6755,16 @@ impl Connection {
             lock.subscribe(&old_service_name, self.inner.clone(), false);
         }
         lock.subscribe(&new_service_name, self.inner.clone(), true);
+        if let Some(tx) = self.inner.tx_video.as_ref() {
+            let subscribed: Vec<_> = (0..source_count)
+                .filter(|display| {
+                    lock.services
+                        .get(&video_service::get_service_name(self.video_source(), *display))
+                        .is_some_and(|service| service.is_subed(self.inner.id()))
+                })
+                .collect();
+            self.inner.notify_video_drops(tx.set_displays(&subscribed));
+        }
         self.display_idx = display_idx;
         true
     }
@@ -6933,43 +6810,23 @@ impl Connection {
             set
         );
         let source_count = Self::video_source_count(video_source);
-        let valid_add = add
-            .iter()
-            .copied()
-            .filter(|display| *display < source_count)
-            .collect::<Vec<_>>();
-        let valid_sub = sub
-            .iter()
-            .copied()
-            .filter(|display| *display < source_count)
-            .collect::<Vec<_>>();
-        let valid_set = set
-            .iter()
-            .copied()
-            .filter(|display| *display < source_count)
-            .collect::<Vec<_>>();
-        let invalid_count =
-            add.len() + sub.len() + set.len() - valid_add.len() - valid_sub.len() - valid_set.len();
-        if invalid_count != 0 {
+        let Some((operation, displays)) =
+            super::CaptureDisplaysOperation::validated_request(add, sub, set, source_count)
+        else {
             log::warn!(
-                "#{} ignore {} invalid {:?} indices, available source count: {}",
+                "#{} ignore invalid {:?} capture request, available source count: {}",
                 self.inner.id(),
-                invalid_count,
                 video_source,
                 source_count
             );
-        }
-        // An invalid non-empty request must not degrade into an empty set request,
-        // which would unsubscribe every current display.
-        if (!add.is_empty() && valid_add.is_empty())
-            || (add.is_empty() && !sub.is_empty() && valid_sub.is_empty())
-            || (add.is_empty() && sub.is_empty() && !set.is_empty() && valid_set.is_empty())
-        {
             return;
-        }
+        };
         if let Some(server) = self.server.upgrade() {
             let mut lock = server.write().unwrap();
-            for display in valid_add.iter() {
+            for display in displays
+                .iter()
+                .filter(|_| operation != super::CaptureDisplaysOperation::ExcludeListed)
+            {
                 let service_name = video_service::get_service_name(video_source, *display);
                 if !lock.contains(&service_name) {
                     log::info!(
@@ -6980,23 +6837,16 @@ impl Connection {
                     lock.add_service(Box::new(video_service::new(video_source, *display)));
                 }
             }
-            for display in valid_set.iter() {
-                let service_name = video_service::get_service_name(video_source, *display);
-                if !lock.contains(&service_name) {
-                    log::info!(
-                        "#{} add video service from capture_displays: {}",
-                        self.inner.id(),
-                        service_name
-                    );
-                    lock.add_service(Box::new(video_service::new(video_source, *display)));
-                }
-            }
-            if !add.is_empty() {
-                lock.capture_displays(self.inner.clone(), video_source, &valid_add, true, false);
-            } else if !sub.is_empty() {
-                lock.capture_displays(self.inner.clone(), video_source, &valid_sub, false, true);
-            } else {
-                lock.capture_displays(self.inner.clone(), video_source, &valid_set, true, true);
+            lock.capture_displays(self.inner.clone(), video_source, &displays, operation);
+            if let Some(tx) = &self.inner.tx_video {
+                let subscribed: Vec<_> = (0..source_count)
+                    .filter(|display| {
+                        lock.services
+                            .get(&video_service::get_service_name(video_source, *display))
+                            .is_some_and(|service| service.is_subed(self.inner.id()))
+                    })
+                    .collect();
+                self.inner.notify_video_drops(tx.set_displays(&subscribed));
             }
             self.multi_ui_session = lock.get_subbed_displays_count(self.inner.id()) > 1;
             if self.follow_remote_window {

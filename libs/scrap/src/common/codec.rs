@@ -719,21 +719,34 @@ pub fn video_frame_payload_stats(vf: &VideoFrame) -> Option<(usize, usize, bool)
 }
 
 impl Decoder {
-    #[cfg(feature = "mediacodec")]
-    pub fn release_media_codec(&mut self) {
-        let released_h264 = self.h264_media_codec.take().is_some();
-        let released_h265 = self.h265_media_codec.take().is_some();
-        let released = released_h264 || released_h265;
-        if released {
-            log::info!("released Android MediaCodec decoder before stream replacement");
+    pub fn release(&mut self) {
+        // Drop the old GPU/MediaCodec allocation before opening a replacement.
+        self.vp8 = None;
+        self.vp9 = None;
+        self.av1 = None;
+        #[cfg(feature = "hwcodec")]
+        {
+            self.av1_ram = None;
+            self.h264_ram = None;
+            self.h265_ram = None;
         }
+        #[cfg(feature = "vram")]
+        {
+            self.h264_vram = None;
+            self.h265_vram = None;
+        }
+        #[cfg(feature = "mediacodec")]
+        {
+            self.h264_media_codec = None;
+            self.h265_media_codec = None;
+        }
+        self.valid = false;
     }
 
     pub fn supported_decodings(
         id_for_perfer: Option<&str>,
         _use_texture_render: bool,
         _luid: Option<i64>,
-        mark_unsupported: &Vec<CodecFormat>,
     ) -> SupportedDecoding {
         let (prefer, prefer_chroma) = Self::preference(id_for_perfer);
         let av1_software_decoding = !disable_av1();
@@ -799,16 +812,6 @@ impl Decoder {
                     0
                 };
         }
-        for unsupported in mark_unsupported {
-            match unsupported {
-                CodecFormat::VP8 => decoding.ability_vp8 = 0,
-                CodecFormat::VP9 => decoding.ability_vp9 = 0,
-                CodecFormat::AV1 => decoding.ability_av1 = 0,
-                CodecFormat::H264 => decoding.ability_h264 = 0,
-                CodecFormat::H265 => decoding.ability_h265 = 0,
-                _ => {}
-            }
-        }
         decoding
     }
 
@@ -818,8 +821,18 @@ impl Decoder {
         _dimensions: Option<(usize, usize)>,
         _display: usize,
     ) -> Decoder {
+        Self::new_with_fallback(format, _luid, _dimensions, _display, 0)
+    }
+
+    pub fn new_with_fallback(
+        format: CodecFormat,
+        _luid: Option<i64>,
+        _dimensions: Option<(usize, usize)>,
+        _display: usize,
+        _fallback: usize,
+    ) -> Decoder {
         log::info!(
-            "try create new decoder, format: {format:?}, _luid: {_luid:?}, dimensions: {_dimensions:?}"
+            "try create new decoder, format: {format:?}, _luid: {_luid:?}, dimensions: {_dimensions:?}, fallback: {_fallback}"
         );
         let (mut vp8, mut vp9, mut av1) = (None, None, None);
         #[cfg(feature = "hwcodec")]
@@ -851,7 +864,7 @@ impl Decoder {
             }
             CodecFormat::AV1 => {
                 #[cfg(feature = "hwcodec")]
-                if !valid {
+                if _fallback == 0 {
                     match HwRamDecoder::new(format) {
                         Ok(v) => av1_ram = Some(v),
                         Err(e) => log::error!("create AV1 ram decoder failed: {}", e),
@@ -873,56 +886,55 @@ impl Decoder {
                     valid = av1.is_some();
                 }
             }
-            CodecFormat::H264 => {
-                #[cfg(feature = "vram")]
-                if !valid && enable_vram_option(false) && _luid.clone().unwrap_or_default() != 0 {
-                    match VRamDecoder::new(format, _luid) {
-                        Ok(v) => h264_vram = Some(v),
-                        Err(e) => log::error!("create H264 vram decoder failed: {}", e),
+            CodecFormat::H264 | CodecFormat::H265 => {
+                // Try platform output first normally, RAM backends first during
+                // recovery. Keep the other path as a last resort on every OS.
+                for platform in [_fallback == 0, _fallback != 0] {
+                    if valid {
+                        break;
                     }
-                    valid = h264_vram.is_some();
-                }
-                #[cfg(feature = "mediacodec")]
-                if !valid && enable_hwcodec_option() {
-                    h264_media_codec = MediaCodecDecoder::new(format, _dimensions, _display);
-                    if h264_media_codec.is_none() {
-                        log::error!("create H264 media codec decoder failed");
+                    if platform {
+                        #[cfg(feature = "vram")]
+                        if enable_vram_option(false) && _luid.unwrap_or_default() != 0 {
+                            match VRamDecoder::new(format, _luid) {
+                                Ok(v) => {
+                                    valid = true;
+                                    if format == CodecFormat::H264 {
+                                        h264_vram = Some(v);
+                                    } else {
+                                        h265_vram = Some(v);
+                                    }
+                                }
+                                Err(e) => log::error!("create {format:?} vram decoder failed: {e}"),
+                            }
+                        }
+                        #[cfg(feature = "mediacodec")]
+                        if !valid && enable_hwcodec_option() {
+                            let decoder = MediaCodecDecoder::new(format, _dimensions, _display);
+                            valid = decoder.is_some();
+                            if !valid {
+                                log::error!("create {format:?} media codec decoder failed");
+                            }
+                            if format == CodecFormat::H264 {
+                                h264_media_codec = decoder;
+                            } else {
+                                h265_media_codec = decoder;
+                            }
+                        }
+                    } else {
+                        #[cfg(feature = "hwcodec")]
+                        match HwRamDecoder::new_with_fallback(format, _fallback.saturating_sub(1)) {
+                            Ok(v) => {
+                                valid = true;
+                                if format == CodecFormat::H264 {
+                                    h264_ram = Some(v);
+                                } else {
+                                    h265_ram = Some(v);
+                                }
+                            }
+                            Err(e) => log::error!("create {format:?} ram decoder failed: {e}"),
+                        }
                     }
-                    valid = h264_media_codec.is_some();
-                }
-                #[cfg(feature = "hwcodec")]
-                if !valid {
-                    match HwRamDecoder::new(format) {
-                        Ok(v) => h264_ram = Some(v),
-                        Err(e) => log::error!("create H264 ram decoder failed: {}", e),
-                    }
-                    valid = h264_ram.is_some();
-                }
-            }
-            CodecFormat::H265 => {
-                #[cfg(feature = "vram")]
-                if !valid && enable_vram_option(false) && _luid.clone().unwrap_or_default() != 0 {
-                    match VRamDecoder::new(format, _luid) {
-                        Ok(v) => h265_vram = Some(v),
-                        Err(e) => log::error!("create H265 vram decoder failed: {}", e),
-                    }
-                    valid = h265_vram.is_some();
-                }
-                #[cfg(feature = "mediacodec")]
-                if !valid && enable_hwcodec_option() {
-                    h265_media_codec = MediaCodecDecoder::new(format, _dimensions, _display);
-                    if h265_media_codec.is_none() {
-                        log::error!("create H265 media codec decoder failed");
-                    }
-                    valid = h265_media_codec.is_some();
-                }
-                #[cfg(feature = "hwcodec")]
-                if !valid {
-                    match HwRamDecoder::new(format) {
-                        Ok(v) => h265_ram = Some(v),
-                        Err(e) => log::error!("create H265 ram decoder failed: {}", e),
-                    }
-                    valid = h265_ram.is_some();
                 }
             }
             CodecFormat::Unknown => {

@@ -183,13 +183,21 @@ class SessionHandle<T> {
   Future<void> bindEventStream(
     SessionStartLease<T> lease, {
     required bool Function(T event) isCloseEvent,
-    required Future<void> Function(T event) onEvent,
+    required Future<void> Function()? Function(T event) prepareEvent,
     required void Function(Object error, StackTrace stackTrace) onError,
+    void Function()? onStreamClosed,
   }) async {
     var ended = false;
     void finish() {
       if (ended) return;
       ended = true;
+      if (accepts(lease.generation)) {
+        try {
+          onStreamClosed?.call();
+        } catch (error, stackTrace) {
+          onError(error, stackTrace);
+        }
+      }
       unawaited(remoteClosedAfterEvents(lease.generation).catchError(onError));
     }
 
@@ -199,13 +207,19 @@ class SessionHandle<T> {
         if (isCloseEvent(event)) {
           finish();
         } else {
-          unawaited(
-            dispatchEvent(
-              lease.generation,
-              () => onEvent(event),
-              onError: onError,
-            ),
-          );
+          try {
+            // Capture authority before older asynchronous rendering completes.
+            final dispatch = prepareEvent(event);
+            if (dispatch != null) {
+              unawaited(dispatchEvent(
+                lease.generation,
+                dispatch,
+                onError: onError,
+              ));
+            }
+          } catch (error, stackTrace) {
+            onError(error, stackTrace);
+          }
         }
       },
       onDone: finish,

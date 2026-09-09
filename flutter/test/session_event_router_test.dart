@@ -1,7 +1,11 @@
+import 'dart:convert';
+
+import 'package:flutter/services.dart';
+
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
-import 'package:flutter_hbb/generated_bridge.dart';
+import 'package:flutter_hbb/generated_bridge.dart' hide Display;
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
@@ -12,17 +16,30 @@ import 'package:get/get.dart';
 class _RouterRustadminImpl implements Rustadmin {
   int pairingRejects = 0;
   int trustRejects = 0;
+  int sessionsCount = 1;
 
   @override
   dynamic noSuchMethod(Invocation invocation) {
+    if (invocation.memberName == #getNextTextureKey ||
+        invocation.memberName == #getNextRenderTargetToken) {
+      return 1;
+    }
     if (invocation.memberName == #translate) {
       return invocation.namedArguments[#name] as String;
+    }
+    if (invocation.memberName == #versionToNumber) {
+      return (invocation.namedArguments[#v] as String)
+          .split('.')
+          .fold<int>(0, (value, part) => value * 1000 + int.parse(part));
     }
     if (invocation.memberName == #mainGetLocalOption ||
         invocation.memberName == #mainGetUserDefaultOption ||
         invocation.memberName == #getLocalFlutterOption ||
         invocation.memberName == #mainSupportedInputSource ||
-        invocation.memberName == #mainGetDisplays) {
+        invocation.memberName == #mainGetInputSource ||
+        invocation.memberName == #mainGetDisplays ||
+        invocation.memberName == #sessionGetAuditServerSync ||
+        invocation.memberName == #sessionGetUseAllMyDisplaysForTheRemoteSession) {
       return '';
     }
     if (invocation.memberName == #isDisableAb ||
@@ -30,11 +47,26 @@ class _RouterRustadminImpl implements Rustadmin {
         invocation.memberName == #isDisableGroupPanel ||
         invocation.memberName == #mainCurrentIsWayland ||
         invocation.memberName == #mainHasFileClipboard ||
+        invocation.memberName == #mainHasGpuTextureRender ||
         invocation.memberName == #sessionGetToggleOptionSync) {
       return false;
     }
-    if (invocation.memberName == #sessionSendMouse) {
+    if (invocation.memberName == #isSupportMultiUiSession ||
+        invocation.memberName == #sessionIsKeyboardModeSupported) {
+      return true;
+    }
+    if (invocation.memberName == #sessionSendMouse ||
+        invocation.memberName == #sessionSetKeyboardMode ||
+        invocation.memberName == #mainLoadRecentPeers) {
       return Future<void>.value();
+    }
+    if (invocation.memberName == #peerGetSessionsCount) return sessionsCount;
+    if (invocation.memberName == #sessionSetSize) return Future<void>.value();
+    if (invocation.memberName == #sessionGetViewStyle ||
+        invocation.memberName == #sessionGetScrollStyle ||
+        invocation.memberName == #sessionGetOption ||
+        invocation.memberName == #sessionGetKeyboardMode) {
+      return Future<String?>.value(null);
     }
     if (invocation.memberName == #sessionSubmitDirectPairingPassphrase) {
       if (invocation.namedArguments[#approved] == false) pairingRejects++;
@@ -59,11 +91,25 @@ void main() {
     isTest = true;
     rustadmin = _RouterRustadminImpl();
     platformFFI.initForTest(rustadmin);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('texture_rgba_renderer'),
+          (call) async => call.method == 'createTexture' ? -1 : null,
+        );
+  });
+
+  tearDownAll(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('texture_rgba_renderer'),
+          null,
+        );
   });
 
   setUp(() {
     rustadmin.pairingRejects = 0;
     rustadmin.trustRejects = 0;
+    rustadmin.sessionsCount = 1;
     initSharedStates(peerId);
     ffi = FFI(null)..id = peerId;
     Get.put(
@@ -79,6 +125,53 @@ void main() {
     Get.delete<DesktopTabController>();
     removeSharedStates(peerId);
   });
+
+  test(
+    'routes authoritative display status without changing readiness',
+    () async {
+      final listener = ffi.ffiModel.startEventListener(ffi.sessionId, peerId);
+      await listener({
+        'name': 'screen_view_authority',
+        'connection_generation': 1,
+        'generation': 2,
+        'allowed': true,
+      });
+      final status = <String, dynamic>{
+        'name': 'display_render_state',
+        'display': 0,
+        'state': 'failed',
+        'connection_generation': 1,
+        'screen_authority_generation': 2,
+        'display_activation_generation': 1,
+        'render_target_generation': 0,
+        'stream_id': 0,
+        'submitted_frame_id': 0,
+        'sequence': 1,
+        'elapsed_ms': 110000,
+        'presentation_confirmed': false,
+      };
+      await listener(status);
+      expect(
+        ffi.displayRenderStates.states[0]!.phase,
+        DisplayRenderPhase.failed,
+      );
+      expect(ffi.ffiModel.waitForFirstImage.isTrue, isTrue);
+      await listener({...status, 'state': 'live', 'sequence': 0});
+      expect(
+        ffi.displayRenderStates.states[0]!.phase,
+        DisplayRenderPhase.failed,
+      );
+      await listener({
+        'name': 'screen_view_authority',
+        'connection_generation': 1,
+        'generation': 3,
+        'allowed': false,
+      });
+      expect(ffi.displayRenderStates.states, isEmpty);
+      await listener({...status, 'state': 'live', 'sequence': 2});
+      expect(ffi.displayRenderStates.states, isEmpty);
+    },
+  );
 
   test(
     'routes typed model events and rejects malformed known events',
@@ -123,6 +216,100 @@ void main() {
     await listener({'name': 'cursor_position', 'x': 'nan', 'y': '1'});
     expect(ffi.cursorModel.x, 12.5);
     expect(ffi.cursorModel.y, -4);
+  });
+
+  test('connection opens primary idx3 as spatial monitor 2 and refreshes on reconnect', () async {
+    final listener = ffi.ffiModel.startEventListener(ffi.sessionId, peerId);
+    final pi = ffi.ffiModel.pi;
+    final login = <String, dynamic>{
+      'name': 'peer_info',
+      'username': 'user',
+      'hostname': 'three-monitors',
+      'platform': 'Windows',
+      'version': '2.0.5',
+      'current_display': 2,
+      'features': <String, bool>{},
+      'displays': [
+        {'x': 1920, 'width': 1920, 'height': 1080},
+        {'x': -1920, 'width': 1920, 'height': 1080},
+        {'x': 0, 'width': 1920, 'height': 1080},
+      ],
+    };
+    await listener(login);
+    expect(pi.primaryDisplay, 2);
+    expect(pi.currentDisplay, 2);
+    expect(CurrentDisplayState.find(peerId).value, 2);
+    expect(pi.monitorOrder, [1, 2, 0]);
+    expect(pi.monitorLabel(pi.currentDisplay), '2');
+
+    await listener({...login, 'current_display': 1});
+    expect(pi.primaryDisplay, 1);
+    expect(pi.currentDisplay, 1);
+    expect(CurrentDisplayState.find(peerId).value, 1);
+
+    // Another explicit monitor window must not be redirected to the primary.
+    rustadmin.sessionsCount = 2;
+    pi.currentDisplay = 0;
+    await listener(login);
+    expect(pi.primaryDisplay, 2);
+    expect(pi.currentDisplay, 0);
+    expect(CurrentDisplayState.find(peerId).value, 0);
+
+    // Cached current_display is a window selection, not primary metadata.
+    final cached = decodeTypedSessionEvent({...login, 'current_display': 0});
+    await ffi.ffiModel.handlePeerInfoEvent(cached as PeerInfoSessionEvent, peerId, true);
+    expect(pi.primaryDisplay, 2);
+    expect(pi.currentDisplay, 0);
+  });
+
+  test('monitor labels survive switching, topology updates, and legacy peers', () async {
+    final listener = ffi.ffiModel.startEventListener(ffi.sessionId, peerId);
+    final pi = ffi.ffiModel.pi;
+    pi.platform = 'Windows';
+    pi.isSupportMultiUiSession = true;
+    pi.displays.addAll([
+      Display()..name = r'\\.\DISPLAY2'..x = 1920,
+      Display()..name = r'\\.\DISPLAY1',
+    ]);
+    pi.currentDisplay = 0;
+    CurrentDisplayState.find(peerId).value = 0;
+
+    await listener({
+      'name': 'switch_display',
+      'display': 1,
+      'width': 2560,
+      'height': 1440,
+      'resolutions': [],
+    });
+    expect(pi.monitorLabels, ['2', '1']);
+    expect(pi.displays[1].width, 2560);
+    expect(pi.currentDisplay, 0);
+    expect(CurrentDisplayState.find(peerId).value, 0);
+
+    await listener({
+      'name': 'sync_peer_info',
+      'displays': [
+        {'display_name': r'\\.\DISPLAY4', 'width': 1920, 'height': 1080},
+        {'display_name': r'\\.\DISPLAY2', 'x': -1920, 'width': 1920, 'height': 1080},
+      ],
+    });
+    expect(pi.monitorLabels, ['2', '1']);
+    expect(pi.primaryDisplay, 0);
+    expect(pi.displays.map((d) => d.x), [0, -1920]);
+    expect(pi.currentDisplay, 0);
+    final cached = jsonDecode(ffi.ffiModel.cachedPeerData.peerInfo['displays']) as List;
+    expect(cached[0]['display_name'], r'\\.\DISPLAY4');
+    expect(cached[1]['display_name'], r'\\.\DISPLAY2');
+
+    await listener({
+      'name': 'sync_peer_info',
+      'displays': [
+        {'width': 1920, 'height': 1080},
+        {'x': -1920, 'width': 1920, 'height': 1080},
+      ],
+    });
+    expect(pi.monitorLabels, ['2', '1']);
+    expect(pi.displays.map((d) => d.name), ['', '']);
   });
 
   test('cursor shape decoder enforces dimensions and byte payload', () {
