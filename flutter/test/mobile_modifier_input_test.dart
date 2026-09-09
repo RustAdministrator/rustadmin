@@ -13,6 +13,7 @@ import 'package:flutter_hbb/mobile/widgets/remote_text_input.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_hbb/models/input_model.dart';
 import 'package:flutter_hbb/models/keyboard_intent.dart';
+import 'package:flutter_hbb/models/keyboard_lock_modes.dart';
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -54,9 +55,12 @@ class _FlutterKeyCall {
 class _TestRustadminImpl implements Rustadmin {
   final inputKeyCalls = <_InputKeyCall>[];
   final flutterKeyCalls = <_FlutterKeyCall>[];
+  final flutterLockModes = <int>[];
   final orderedKeyboardCalls = <String>[];
   int plainTextEdits = 0;
   int sourceLayoutTextEdits = 0;
+  final committedTexts = <String>[];
+  final textLiteralChoices = <bool?>[];
   int lastDeleteBeforeGraphemes = 0;
   final pendingFlutterKeyCalls = <Completer<void>>[];
   bool blockFlutterKeyCalls = false;
@@ -105,6 +109,7 @@ class _TestRustadminImpl implements Rustadmin {
       final usbHid = invocation.namedArguments[#usbHid] as int;
       final down = invocation.namedArguments[#downOrUp] as bool;
       flutterKeyCalls.add(_FlutterKeyCall(usbHid: usbHid, down: down));
+      flutterLockModes.add(invocation.namedArguments[#lockModes] as int);
       orderedKeyboardCalls.add('hid:$usbHid:${down ? 'down' : 'up'}');
       if (blockFlutterKeyCalls) {
         final completer = Completer<void>();
@@ -115,12 +120,16 @@ class _TestRustadminImpl implements Rustadmin {
     }
     if (invocation.memberName == #sessionInputTextEdit) {
       plainTextEdits += 1;
+      committedTexts.add(invocation.namedArguments[#value] as String);
+      textLiteralChoices.add(invocation.namedArguments[#literal] as bool?);
       lastDeleteBeforeGraphemes =
           invocation.namedArguments[#deleteBeforeGraphemes] as int;
       return Future<void>.value();
     }
     if (invocation.memberName == #sessionInputTextEditWithSourceLayout) {
       sourceLayoutTextEdits += 1;
+      committedTexts.add(invocation.namedArguments[#value] as String);
+      textLiteralChoices.add(invocation.namedArguments[#literal] as bool?);
       return Future<void>.value();
     }
     if (invocation.memberName == #sessionSendMouse) {
@@ -260,9 +269,12 @@ void main() {
   setUp(() {
     testImpl.inputKeyCalls.clear();
     testImpl.flutterKeyCalls.clear();
+    testImpl.flutterLockModes.clear();
     testImpl.orderedKeyboardCalls.clear();
     testImpl.plainTextEdits = 0;
     testImpl.sourceLayoutTextEdits = 0;
+    testImpl.committedTexts.clear();
+    testImpl.textLiteralChoices.clear();
     testImpl.lastDeleteBeforeGraphemes = 0;
     testImpl.pendingFlutterKeyCalls.clear();
     testImpl.blockFlutterKeyCalls = false;
@@ -736,6 +748,86 @@ void main() {
     );
   });
 
+  test(
+    'native locks reach the bridge without reading stale Flutter lock state',
+    () async {
+      final keyboard = HardwareKeyboard.instance;
+      keyboard.handleKeyEvent(
+        KeyDownEvent(
+          physicalKey: PhysicalKeyboardKey.capsLock,
+          logicalKey: LogicalKeyboardKey.capsLock,
+          timeStamp: Duration.zero,
+        ),
+      );
+      keyboard.handleKeyEvent(
+        KeyUpEvent(
+          physicalKey: PhysicalKeyboardKey.capsLock,
+          logicalKey: LogicalKeyboardKey.capsLock,
+          timeStamp: Duration.zero,
+        ),
+      );
+      addTearDown(keyboard.clearState);
+      expect(keyboard.lockModesEnabled, contains(KeyboardLockMode.capsLock));
+
+      for (final locks in [
+        0,
+        KeyboardBridgeLockModes.caps,
+        KeyboardBridgeLockModes.num,
+        KeyboardBridgeLockModes.scroll,
+        14,
+      ]) {
+        await inputModel.inputAndroidRemotePhysicalKey(
+          0x04,
+          true,
+          lockModes: locks,
+        );
+        await inputModel.inputAndroidRemotePhysicalKey(
+          0x04,
+          false,
+          lockModes: locks,
+        );
+      }
+      expect(testImpl.flutterLockModes, [0, 0, 2, 2, 4, 4, 8, 8, 14, 14]);
+      expect(testImpl.plainTextEdits, 0);
+      expect(testImpl.sourceLayoutTextEdits, 0);
+    },
+  );
+
+  test(
+    'Caps with Shift and NumLock on the keypad retain native masks',
+    () async {
+      await inputModel.inputAndroidRemotePhysicalKey(0xe1, true, lockModes: 2);
+      await inputModel.inputAndroidRemotePhysicalKey(
+        0x04,
+        true,
+        lockModes: 2,
+        modifierUsages: [0xe1],
+      );
+      await inputModel.inputAndroidRemotePhysicalKey(
+        0x04,
+        false,
+        lockModes: 2,
+        modifierUsages: [0xe1],
+      );
+      await inputModel.inputAndroidRemotePhysicalKey(0xe1, false, lockModes: 2);
+      await inputModel.inputAndroidRemotePhysicalKey(0x59, true, lockModes: 4);
+      await inputModel.inputAndroidRemotePhysicalKey(0x59, false, lockModes: 4);
+      expect(testImpl.flutterLockModes, [2, 2, 2, 2, 4, 4]);
+      expect(inputModel.shift, isFalse);
+    },
+  );
+
+  test('Android press batch reaches the existing bridge as complete clicks', () async {
+    await inputModel.inputAndroidRemotePressBatch(0x04, 2, lockModes: 6);
+    expect(testImpl.flutterKeyCalls, [
+      const _FlutterKeyCall(usbHid: 0x04, down: true),
+      const _FlutterKeyCall(usbHid: 0x04, down: false),
+      const _FlutterKeyCall(usbHid: 0x04, down: true),
+      const _FlutterKeyCall(usbHid: 0x04, down: false),
+    ]);
+    expect(testImpl.flutterLockModes, [6, 6, 6, 6]);
+  });
+
   test('Android physical key bridge preserves modifier ordering', () async {
     testImpl.blockFlutterKeyCalls = true;
 
@@ -779,6 +871,72 @@ void main() {
 
     expect(testImpl.plainTextEdits, 0);
     expect(testImpl.sourceLayoutTextEdits, 1);
+  });
+
+  test('Auto and Text carry literal semantics to FFI even with layout metadata', () async {
+    for (final mode in [
+      kKeyboardInputModeAuto,
+      kKeyboardInputModeText,
+      kKeyboardInputModePhysical,
+    ]) {
+      await inputModel.setKeyboardInputMode(mode);
+      for (final language in ['', 'ru-RU']) {
+        await inputModel.inputAndroidRemoteCommittedText(
+          'content',
+          origin: KeyboardInputOrigin.ime,
+          sourceLanguageTag: language,
+          sourceLayoutType: language.isEmpty ? '' : 'qwerty',
+        );
+      }
+    }
+    expect(testImpl.textLiteralChoices, [true, true, true, true, false, false]);
+  });
+
+  test('Auto routes confirmed IME keys and batches to text through FFI', () async {
+    for (final origin in KeyboardInputOrigin.values) {
+      await inputModel.inputAndroidRemotePhysicalKey(
+        0x14,
+        true,
+        origin: origin,
+        textCandidate: '@',
+        sourceLanguageTag: 'de-DE',
+        sourceLayoutType: 'qwertz',
+      );
+      await inputModel.inputAndroidRemotePhysicalKey(0x14, false, origin: origin);
+      await inputModel.inputAndroidRemotePressBatch(
+        0x14,
+        2,
+        origin: origin,
+        textCandidate: '@',
+        sourceLanguageTag: 'de-DE',
+        sourceLayoutType: 'qwertz',
+      );
+    }
+    expect(testImpl.flutterKeyCalls.length, 18);
+    expect(testImpl.committedTexts, ['@', '@', '@']);
+  });
+
+  test('Android long text reaches FFI whole and oversize sends nothing', () async {
+    final text = List.filled(65536, 'x').join();
+    await inputModel.inputAndroidRemoteCommittedText(
+      text,
+      sourceLanguageTag: '',
+      sourceLayoutType: '',
+    );
+    await inputModel.inputAndroidRemoteCommittedText(
+      text,
+      sourceLanguageTag: 'en-US',
+      sourceLayoutType: 'qwerty',
+    );
+    expect(testImpl.committedTexts, [text, text]);
+    await inputModel.inputAndroidRemoteCommittedText(
+      '${text}x',
+      sourceLanguageTag: '',
+      sourceLayoutType: '',
+    );
+    expect(testImpl.committedTexts, [text, text]);
+    expect(testImpl.flutterKeyCalls, isEmpty);
+    expect(testImpl.inputKeyCalls, isEmpty);
   });
 
   test('Android Physical preserves source-layout compatibility path', () async {

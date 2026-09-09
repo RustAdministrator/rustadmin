@@ -191,14 +191,16 @@ class SessionHandle<T> {
     void finish() {
       if (ended) return;
       ended = true;
-      if (accepts(lease.generation)) {
-        try {
-          onStreamClosed?.call();
-        } catch (error, stackTrace) {
-          onError(error, stackTrace);
-        }
+      if (!accepts(lease.generation)) return;
+      try {
+        onStreamClosed?.call();
+      } catch (error, stackTrace) {
+        onError(error, stackTrace);
+      } finally {
+        unawaited(
+          remoteClosedAfterEvents(lease.generation).catchError(onError),
+        );
       }
-      unawaited(remoteClosedAfterEvents(lease.generation).catchError(onError));
     }
 
     final subscription = lease.events.listen(
@@ -208,14 +210,13 @@ class SessionHandle<T> {
           finish();
         } else {
           try {
-            // Capture authority before older asynchronous rendering completes.
+            // Capture authority at arrival, before older asynchronous events
+            // drain. A control event may revoke queued work and return null.
             final dispatch = prepareEvent(event);
             if (dispatch != null) {
-              unawaited(dispatchEvent(
-                lease.generation,
-                dispatch,
-                onError: onError,
-              ));
+              unawaited(
+                dispatchEvent(lease.generation, dispatch, onError: onError),
+              );
             }
           } catch (error, stackTrace) {
             onError(error, stackTrace);

@@ -63,10 +63,11 @@ cleanup path.
 
 ## Client Modes
 
-- `Auto`: Android first requests fallback-editor key events and sends keys with
-  stable positions as physical HID. IME output which has no physical key
-  identity falls back to committed text. Other mobile clients keep the same
-  text/physical split.
+- `Auto`: Android uses physical HID for hardware and unknown-origin keys.
+  Confirmed printable IME key output is routed as text, even when a HID identity
+  is available. Navigation, control characters and explicit toolbar modifier
+  chords remain physical. IME output without a key identity retains its committed-text path.
+  This does not promise Unicode support in firmware or VM consoles.
 - `Text`: IME commits use text, and printable hardware input may use committed
   text when no Control, Alt, or Meta chord is active.
 - `Physical`: Android uses the same fallback editor but prioritizes physical
@@ -76,6 +77,19 @@ cleanup path.
 
 The setting is stored per peer. Existing `mobile-physical-key-input` values are
 used only as a one-time compatibility default when no V2 mode has been stored.
+
+Text dispatch captures a `literal` flag before queueing. Auto/Text commits and
+text-routed keys set it; Physical commits retain the compatibility path. Both
+Flutter text FFI functions carry the flag explicitly, so Rust cannot reinterpret
+an Auto text operation using a later session preference. Source language/layout
+metadata does not override literal semantics: V2 `prefer_physical` stays false.
+Without layout-aware V2 support, literal text falls back to plain V2 text or a
+legacy `KeyEvent.seq` with both scan-code/source-layout flags disabled. Existing
+platform text-injection backends are unchanged.
+
+Text-routed key repeats retain the initial source metadata and literal meaning.
+The FFI signature change requires regenerating the ignored bridge outputs and
+rebuilding the Dart and native libraries together; it does not change protobuf.
 
 ## Controller Pipeline
 
@@ -130,7 +144,13 @@ mode changes, reconnect, and session close cancel pending commands and may
 bypass the permission gate only for key-up recovery actions.
 
 The Android physical adapter reports the mapped HID, repeat flag, and
-side-specific modifier snapshot with each hardware event. It is stateless; the
+side-specific modifier snapshot with each hardware event. It also reports
+`lock_modes` from that event's native meta state, not Flutter's lock cache while
+the native editor owns focus. This bridge field uses Caps/Num/Scroll bits
+`2/4/8`; Rust converts them once to V2 wire bits `1/2/4`. Missing metadata in
+older native-channel payloads retains the zero-lock default; unknown bits are
+rejected. The protocol and legacy peer lock representation are unchanged.
+The adapter is stateless; the
 shared Dart state machine reconciles explicit and reported modifiers and owns
 their lifetimes. The existing fallback editor can still pass bounded text when
 Android provides no stable physical identity, but this phase does not add an
@@ -142,7 +162,7 @@ up after the key, while coalescing ownership when the same physical side is
 already held. The dispatcher pins the selected HID or legacy bridge path until
 the final owner releases the modifier.
 
-For each physical down, the state machine records exactly one route:
+For each HID/origin owner, the state machine records exactly one route:
 
 - `physical`: dispatch down/repeat/up through the same HID or legacy transport;
 - `text`: dispatch the supplied text once and suppress physical release;
@@ -154,6 +174,102 @@ ordinary down is ignored rather than promoted to a repeat. Unknown and
 duplicate key-up events are ignored. Reset releases only keys that were
 physically dispatched, in deterministic non-modifier-then-modifier order,
 clears synthetic modifier latches, and emits no release for text-routed keys.
+
+Hardware and IME owners of the same HID have independent routes and lifetimes.
+Physical owners share one dispatch lease: an additional non-modifier press is
+a repeated down, and only the last physical owner sends up. Reported modifier
+owners are distinguished from explicit modifier owners within the same route
+table. Pressed/dispatched key snapshots are derived from that table. A late
+IME release after reset cannot remove a fresh hardware owner. IME modifiers
+reported only alongside a text-routed key are not injected physically.
+In Auto, explicit IME modifier downs stay deferred in the same owner table
+until an IME physical command needs them. Their ups/reset need no transport
+release unless the modifier was promoted. Reported right Alt (optionally with
+left Control) can accompany an authoritative printable IME candidate without
+becoming a shortcut; left Alt, right Control, Meta, and real hardware/toolbar
+shortcut owners still select physical commands. No layout is inferred from HID.
+
+Queued releases retain their state-machine-owned dispatch lease until the queue
+drains. Cancellation drops obsolete down/repeat/text commands, but preserves
+key-up cleanup in FIFO order. A release is sent only if its matching transport
+down was actually started; a down skipped before dispatch cannot release an
+unowned key. Coalesced physical and toolbar modifier owners share the same
+lease. This is local transport-attempt accounting, not a remote acknowledgement
+or a second pressed-key routing model.
+
+Committed-text admission is all-or-nothing per controller operation: at most
+64 KiB of valid UTF-8, with no truncation or replacement of unpaired UTF-16
+surrogates. The Android bridge passes the whole accepted operation. Rust then
+splits V2 text at scalar boundaries into messages of at most 2048 bytes (or the
+smaller negotiated peer limit). It validates scalar fit before sending any
+delete-before/delete-after messages. A zero advertised limit retains the
+compatibility default of 2048 bytes.
+
+The controller reserves at most 64 KiB of pending text, 64 pending text/edit
+operations, and 65536 pending deletion graphemes. Each edit must also have
+nonnegative deletion counts whose sum is at most 65536. Reservations include
+the running operation and are released on completion, failure, or cancellation
+when the queue drains. Empty-text edits consume operation and deletion budgets.
+Physical releases do not consume text budgets. Refused operations report a
+typed, content-free reason through nonfatal UI feedback and do not consume
+one-shot modifiers. Once a text transport call starts, its chunks finish in
+order; cancellation skips queued operations, not part of an in-flight edit.
+This provides local ordering and admission, not remote atomic rollback or
+delivery acknowledgement.
+
+Android `ACTION_MULTIPLE` and native editor control clicks normalize into a
+controller-local bounded press batch (1-64 presses), not held-key repeats.
+The state machine emits complete down/up pairs, or repeats without releasing
+an existing physical owner. Ordinary hardware autorepeat remains repeated down
+until the actual up. Invalid batch counts are rejected without partial input.
+The batch is expanded through the existing dispatcher and adds no wire message.
+
+Each canonical intent also carries controller-local origin (`hardware`, `ime`,
+`toolbar`, or `unknown`), separate from its adapter/source enum. In particular,
+the compatibility source name `androidHardwareKeyboard` identifies the native
+key adapter and is not evidence that a physical keyboard produced the event.
+Native key and batch envelopes preserve HID, a bounded scalar text candidate,
+lock/modifier metadata and IME language/layout metadata. A candidate is not a
+second committed-text event and does not itself select a route.
+
+Android dead-key flags are carried separately as one validated accent scalar.
+On a text route, the state machine owns one pending accent, bound to origin,
+source language/layout and input mode. The next matching candidate is composed
+inside one ordered text operation using a stateless Android
+`KeyCharacterMap.getDeadChar` call. Unsupported pairs or native failures send
+the original accent and base literally. Supplementary scalars bypass that
+Android API's internal UTF-16 narrowing and are preserved by the fallback.
+Backspace cancels an unsent accent locally; a physical command, changed
+origin/layout/mode, reset, or authoritative IME commit clears pending state.
+Queue admission reserves four additional UTF-8 bytes for fallback. Cancellation
+and permission are checked again after the bounded native call, before sending.
+This does not implement an InputConnection composition buffer.
+
+Android classification first honors soft-keyboard/editor-action flags. A
+virtual hard-key area remains unknown. Hardware requires a positive device ID,
+a resolved nonvirtual device and keyboard evidence in both event and device
+sources. A remaining event delivered through InputConnection is IME-origin;
+other ambiguous events remain unknown. Neither `deviceId=-1` nor missing
+device data alone proves IME or hardware origin. Older native envelopes default
+to unknown, and cannot claim toolbar origin. Flutter events without equivalent
+device evidence also remain unknown; toolbar and direct text-editor intents
+have known local origins. No adapter owns pressed state or transport selection.
+Only the canonical state machine uses origin to select Auto routes.
+
+The classification uses the documented meanings of
+[KeyEvent flags](https://developer.android.com/reference/android/view/KeyEvent),
+[InputDevice.isVirtual](https://developer.android.com/reference/android/view/InputDevice#isVirtual()),
+and the [InputConnection delivery API](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/core/java/android/view/inputmethod/InputConnection.java).
+
+For local WSL/Linux validation with an installed Flutter SDK, run the existing
+Flutter and Android JVM suites together:
+
+```sh
+python3 scripts/verify_android_keyboard.py --flutter /path/to/flutter/bin/flutter
+```
+
+The runner uses the cached dependencies, stops on the first failed command,
+and does not replace native Rust tests or physical-device acceptance.
 
 Legacy and Translate modes retain the existing legacy named-key path. Desktop
 Map mode, supported mobile physical input, and Android native hardware input
@@ -168,6 +284,83 @@ Left and right Control, Shift, Alt, and Meta remain distinct. Right Alt/AltGr is
 keyboard-page usage `0xE6`; the controller does not rewrite it as generic Alt
 or synthesize Ctrl+Alt.
 
+### International HID Compatibility
+
+The receiver's small `keyboard_hid` table corrects international usages before
+the existing rdev conversion. It does not change the raw-key injection backend.
+The mobile legacy Map fallback uses the same table when encoding a desktop
+peer's keycodes, so the fix does not depend on the peer advertising V2.
+Windows uses set-1 scan codes, Linux uses evdev codes plus the existing Xorg
+offset of eight, and macOS uses native virtual-key codes. Down, repeat and up
+use the same conversion. Ordinary keys and macOS ISO handling keep their
+existing rdev path.
+
+The mappings were checked against:
+
+- [Microsoft USB HID to PS/2 translation table](https://download.microsoft.com/download/1/6/1/161ba512-40e2-4cc9-843a-923143f3456c/translate.pdf).
+- [Linux HID input table](https://github.com/torvalds/linux/blob/master/drivers/hid/hid-input.c).
+- [Apple USB to virtual-key table](https://github.com/apple-oss-distributions/IOHIDFamily/blob/main/IOHIDFamily/Cosmo_USB2ADB.c).
+- [Android keyboard device table](https://source.android.com/docs/core/interaction/input/keyboard-devices) and [Generic.kl](https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/data/keyboards/Generic.kl).
+
+HID `0x90/0x91` are LANG1/LANG2, not Henkan/Muhenkan (`0x8a/0x8b`).
+The latter have no native Apple mapping and are rejected on macOS rather than
+being renamed to Kana/Eisu. Keypad Equal `0x67` remains distinct from AS/400
+Equal `0x86`. Confirmed Android hardware scan codes disambiguate the shared
+backslash and keypad-comma keycodes; IME/unknown sources do not supply that
+hardware evidence. Table tests do not establish physical-device acceptance.
+
+The input preference resolves the new mode before the old physical-input flag.
+A recognized old Y/N flag is persisted into the new option only when that
+option is empty, under the same configuration lock as explicit option writes.
+Unknown nonempty new values are preserved. The legacy checkbox is an explicit
+Auto/Text choice, while the new mode writes its legacy mirror for older clients.
+
+### Android Host Fallback
+
+Android remains a legacy `KeyEvent` host; these changes do not enable V2 host
+capabilities. Host keyboard dispatch is serialized on the service's main
+handler. On API 33+, a currently available accessibility input connection is
+used once. Its `commitText` and `sendKeyEvent` methods return void, so neither
+an exception nor the absence of delivery confirmation triggers a second
+accessibility attempt. A missing connection permits fallback on every supported
+API level, including Android 13+.
+
+Fallback resolves only `FOCUS_INPUT`. It never searches accessibility focus,
+descendants, another field, or the window root. Before each action, the target
+must still match the current input-focused node and refresh successfully as
+focused, enabled and visible. Text replacement additionally requires an
+editable, non-password node advertising `ACTION_SET_TEXT`, known valid selection
+offsets and bounded valid text. Password fields require an input connection;
+masked accessibility text cannot safely reconstruct their contents.
+
+Committed text replaces the selected range, including reversed selections.
+Accessibility selection offsets are native UTF-16 offsets, not grapheme counts;
+offsets inside a surrogate pair are rejected. The existing and resulting field
+text must each fit the 64 KiB UTF-8 budget. Unknown offsets and oversized text
+are rejected with content-free diagnostics, never clamped or truncated. Native
+`EditText` handles physical editing and deletion in the fallback calculation;
+the scratch editor cannot execute clipboard shortcuts and is cleared afterward.
+
+The same target and text state are checked again before publication. A successful
+`ACTION_SET_TEXT` is not repeated if selection restoration fails or focus changes.
+This is best-effort accessibility editing, not an atomic transaction with the
+remote application. An application may transform inserted text; in that case a
+selection based on the original result is not applied.
+
+Non-editable nodes receive only explicitly supported click or scroll actions,
+never `ACTION_SET_TEXT`. Editable Enter can use advertised `ACTION_IME_ENTER`
+on API 30+. Existing mouse-protocol Back/Home/Recents actions remain separate
+from editing Home/End. RWin maps to right Meta, keyboard and gesture times use
+the monotonic uptime clock, and synthetic press releases preserve event metadata.
+Text commits are atomic operations here and are not repeated for key-up.
+
+References: [AccessibilityInputConnection](https://developer.android.com/reference/android/accessibilityservice/InputMethod.AccessibilityInputConnection)
+and [AccessibilityNodeInfo](https://developer.android.com/reference/android/view/accessibility/AccessibilityNodeInfo).
+JVM policy tests cover replacement, Unicode offsets, bounded operations,
+connection selection, stale snapshots and partial writes. Actual platform editor
+behavior, node providers and Android 12/13+ devices still require runtime tests;
+this fallback does not promise generic game or application key injection.
+
 ### Deferred Work
 
 The remaining keyboard work does not yet:
@@ -175,7 +368,7 @@ The remaining keyboard work does not yet:
 - implement Android `InputConnection` composition and committed-edit handling;
 - implement iOS `UITextInput` or native `UIKey` adapters;
 - add a Keyboard V2 snapshot/reset protobuf message or protocol version;
-- add speculative deferred-modifier or layout-specific AltGr synthesis;
+- add layout-specific AltGr synthesis or infer text from a QWERTY HID table;
 - change Windows, macOS, X11, or Wayland host injection;
 - synchronize, activate, or silently change the remote keyboard layout.
 

@@ -4,6 +4,27 @@ import 'package:flutter_hbb/models/keyboard_command_queue.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('cleanup retains FIFO through repeated cancellation', () async {
+    final gate = Completer<void>();
+    final calls = <String>[];
+    final queue = KeyboardCommandQueue();
+    final started = queue.enqueue(() async {
+      calls.add('started');
+      await gate.future;
+    });
+    final stale = queue.enqueue(() async => calls.add('stale'));
+    final cleanup = queue.enqueue(
+      () async => calls.add('cleanup'),
+      keepOnCancel: true,
+    );
+    queue.cancelPending();
+    queue.cancelPending();
+    final fresh = queue.enqueue(() async => calls.add('fresh'));
+    gate.complete();
+    await Future.wait([started, stale, cleanup, fresh]);
+    expect(calls, ['started', 'cleanup', 'fresh']);
+  });
+
   test('commands execute strictly in enqueue order', () async {
     final firstGate = Completer<void>();
     final calls = <String>[];

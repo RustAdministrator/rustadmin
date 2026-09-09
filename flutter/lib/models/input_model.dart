@@ -20,6 +20,8 @@ import 'keyboard_dispatcher.dart';
 import 'keyboard_event_normalizer.dart';
 import 'keyboard_input_controller.dart';
 import 'keyboard_intent.dart';
+import 'keyboard_lock_modes.dart';
+import 'keyboard_text_policy.dart';
 import 'keyboard_modifier_controller.dart';
 import '../common.dart';
 import '../consts.dart';
@@ -285,6 +287,13 @@ class InputModel {
     sessionId = parent.target!.sessionId;
     _keyboardInput = KeyboardInputController(
       canDispatch: () => keyboardPerm && !isViewOnly && !isViewCamera,
+      composeDeadKey: (accent, base) async {
+        final value = await platformFFI.invokeMethod(
+          'compose_remote_dead_key',
+          {'accent': accent, 'base': base},
+        );
+        return value is int ? value : null;
+      },
       sendHid: ({required key, required action, required lockMask}) {
         if (key.usagePage != HidKey.keyboardUsagePage) {
           return Future<void>.value();
@@ -320,6 +329,7 @@ class InputModel {
             required deleteAfterGraphemes,
             required sourceLanguageTag,
             required sourceLayoutType,
+            required literal,
           }) {
             if ((sourceLanguageTag.isNotEmpty || sourceLayoutType.isNotEmpty) &&
                 deleteBeforeGraphemes == 0 &&
@@ -328,6 +338,7 @@ class InputModel {
                 () => bind.sessionInputTextEditWithSourceLayout(
                   sessionId: sessionId,
                   value: text,
+                  literal: literal,
                   sourceLanguageTag: sourceLanguageTag,
                   sourceLayoutType: sourceLayoutType,
                 ),
@@ -337,6 +348,7 @@ class InputModel {
               () => bind.sessionInputTextEdit(
                 sessionId: sessionId,
                 value: text,
+                literal: literal,
                 deleteBeforeGraphemes: deleteBeforeGraphemes,
                 deleteAfterGraphemes: deleteAfterGraphemes,
               ),
@@ -348,6 +360,7 @@ class InputModel {
         );
         debugPrintStack(stackTrace: stackTrace);
       },
+      onInputRejected: reportKeyboardRejection,
     );
     _relativeMouse = RelativeMouseModel(
       sessionId: sessionId,
@@ -415,30 +428,27 @@ class InputModel {
   }
 
   int _buildLockModes(bool iosCapsLock) {
-    const capslock = 1;
-    const numlock = 2;
-    const scrolllock = 3;
     int lockModes = 0;
     if (isIOS) {
       if (iosCapsLock) {
-        lockModes |= (1 << capslock);
+        lockModes |= KeyboardBridgeLockModes.caps;
       }
       // Ignore "NumLock/ScrollLock" on iOS for now.
     } else {
       if (HardwareKeyboard.instance.lockModesEnabled.contains(
         KeyboardLockMode.capsLock,
       )) {
-        lockModes |= (1 << capslock);
+        lockModes |= KeyboardBridgeLockModes.caps;
       }
       if (HardwareKeyboard.instance.lockModesEnabled.contains(
         KeyboardLockMode.numLock,
       )) {
-        lockModes |= (1 << numlock);
+        lockModes |= KeyboardBridgeLockModes.num;
       }
       if (HardwareKeyboard.instance.lockModesEnabled.contains(
         KeyboardLockMode.scrollLock,
       )) {
-        lockModes |= (1 << scrolllock);
+        lockModes |= KeyboardBridgeLockModes.scroll;
       }
     }
     return lockModes;
@@ -599,14 +609,25 @@ class InputModel {
     int usbHidUsage,
     bool down, {
     bool repeat = false,
+    KeyboardInputOrigin origin = KeyboardInputOrigin.unknown,
+    String? textCandidate,
+    int? deadKeyAccent,
+    String sourceLanguageTag = '',
+    String sourceLayoutType = '',
+    int lockModes = 0,
     Iterable<int> modifierUsages = const <int>[],
   }) {
     final intent = _androidKeyboardNormalizer.physical(
       usbHidUsage: usbHidUsage,
       down: down,
+      origin: origin,
+      textCandidate: textCandidate,
+      deadKeyAccent: deadKeyAccent,
+      sourceLanguageTag: sourceLanguageTag,
+      sourceLayoutType: sourceLayoutType,
       repeat: repeat,
       modifierUsages: modifierUsages,
-      lockMask: _buildLockModes(false),
+      lockMask: lockModes,
     );
     if (intent != null) {
       return _keyboardInput.handleAndWait(intent, _keyboardRoutingContext);
@@ -616,11 +637,13 @@ class InputModel {
 
   Future<void> inputAndroidRemoteCommittedText(
     String text, {
+    KeyboardInputOrigin origin = KeyboardInputOrigin.unknown,
     required String sourceLanguageTag,
     required String sourceLayoutType,
   }) {
     final intent = _androidKeyboardNormalizer.text(
       text,
+      origin: origin,
       sourceLanguageTag: sourceLanguageTag,
       sourceLayoutType: sourceLayoutType,
     );
@@ -628,6 +651,42 @@ class InputModel {
       return _keyboardInput.handleAndWait(intent, _keyboardRoutingContext);
     }
     return Future<void>.value();
+  }
+
+  Future<void> inputAndroidRemotePressBatch(
+    int usbHidUsage,
+    int count, {
+    KeyboardInputOrigin origin = KeyboardInputOrigin.unknown,
+    String? textCandidate,
+    int? deadKeyAccent,
+    String sourceLanguageTag = '',
+    String sourceLayoutType = '',
+    int lockModes = 0,
+    Iterable<int> modifierUsages = const <int>[],
+  }) {
+    final intent = _androidKeyboardNormalizer.pressBatch(
+      usbHidUsage: usbHidUsage,
+      count: count,
+      origin: origin,
+      textCandidate: textCandidate,
+      deadKeyAccent: deadKeyAccent,
+      sourceLanguageTag: sourceLanguageTag,
+      sourceLayoutType: sourceLayoutType,
+      lockMask: lockModes,
+      modifierUsages: modifierUsages,
+    );
+    if (intent == null) return Future<void>.value();
+    return _keyboardInput.handleAndWait(intent, _keyboardRoutingContext);
+  }
+
+  void reportKeyboardRejection(KeyboardInputRejection reason) {
+    debugPrint('Keyboard input rejected: ${reason.name}');
+    final detail = switch (reason) {
+      KeyboardInputRejection.textTooLarge => '${translate("Size")} > 64 KiB',
+      KeyboardInputRejection.textQueueFull => translate('Too frequent'),
+      _ => translate('Invalid format'),
+    };
+    showToast('${translate("Failed")}: $detail');
   }
 
   /// Send key stroke event.

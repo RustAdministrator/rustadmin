@@ -1,10 +1,103 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/models/keyboard_event_normalizer.dart';
 import 'package:flutter_hbb/models/keyboard_intent.dart';
+import 'package:flutter_hbb/models/keyboard_lock_modes.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   const normalizer = FlutterKeyboardEventNormalizer();
+
+  test('Android dead accent survives physical and complete-press normalization', () {
+    const android = AndroidHardwareKeyboardNormalizer();
+    for (final down in [true, false]) {
+      expect(android.physical(usbHidUsage: 0x34, down: down,
+        deadKeyAccent: 0x2c6)!.deadKeyAccent, 0x2c6);
+    }
+    expect(android.physical(usbHidUsage: 0x34, down: true, repeat: true,
+      deadKeyAccent: 0x2c6)!.deadKeyAccent, 0x2c6);
+    expect(android.pressBatch(usbHidUsage: 0x34, count: 3,
+      deadKeyAccent: 0x2c6)!.deadKeyAccent, 0x2c6);
+  });
+
+  test(
+    'Android provenance and candidates survive every canonical event shape',
+    () {
+      const android = AndroidHardwareKeyboardNormalizer();
+      for (final origin in KeyboardInputOrigin.values) {
+        final key = android.physical(
+          usbHidUsage: 0x14,
+          down: true,
+          origin: origin,
+          textCandidate: '@',
+          sourceLanguageTag: 'de-DE',
+          sourceLayoutType: 'qwertz',
+        );
+        expect(key!.origin, origin);
+        expect(key.textCandidate, '@');
+        expect(key.key, const HidKey(7, 0x14));
+        expect(key.sourceLanguageTag, 'de-DE');
+        final batch = android.pressBatch(
+          usbHidUsage: 0x14,
+          count: 3,
+          origin: origin,
+          textCandidate: '@',
+          sourceLanguageTag: 'de-DE',
+          sourceLayoutType: 'qwertz',
+        );
+        expect(batch!.origin, origin);
+        expect(batch.textCandidate, '@');
+        expect(batch.sourceLayoutType, 'qwertz');
+        expect(android.text('text', origin: origin)!.origin, origin);
+      }
+      expect(
+        android.physical(usbHidUsage: 0x14, down: true)!.origin,
+        KeyboardInputOrigin.unknown,
+      );
+      expect(
+        const MobileToolbarKeyboardNormalizer().click('VK_A').first.origin,
+        KeyboardInputOrigin.toolbar,
+      );
+      expect(
+        const CommittedTextIntent(
+          text: 'x',
+          source: KeyboardInputSource.futureIme,
+        ).origin,
+        KeyboardInputOrigin.ime,
+      );
+    },
+  );
+
+  test(
+    'native normalizer preserves bridge lock bits and rejects unknown bits',
+    () {
+      const android = AndroidHardwareKeyboardNormalizer();
+      expect(KeyboardBridgeLockModes.caps, 2);
+      expect(KeyboardBridgeLockModes.num, 4);
+      expect(KeyboardBridgeLockModes.scroll, 8);
+      for (var locks = 0; locks <= KeyboardBridgeLockModes.known; locks += 2) {
+        for (final down in [true, false]) {
+          expect(
+            android
+                .physical(usbHidUsage: 0x04, down: down, lockMask: locks)
+                ?.lockMask,
+            locks,
+          );
+        }
+      }
+      expect(
+        android
+            .physical(usbHidUsage: 0x04, down: true, repeat: true, lockMask: 14)
+            ?.lockMask,
+        14,
+      );
+      for (final invalid in [-1, 1, 3, 16]) {
+        expect(
+          android.physical(usbHidUsage: 0x04, down: true, lockMask: invalid),
+          isNull,
+        );
+      }
+    },
+  );
 
   test('Flutter KeyEvent and RawKeyEvent A-down normalize identically', () {
     final keyEvent = normalizer.fromKeyEvent(

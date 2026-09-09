@@ -7,6 +7,97 @@ import org.junit.Test
 
 class AndroidKeyToUsbHidTest {
     @Test
+    fun sharedAndroidKeyCodesUseOnlyConfirmedHardwareScanEvidence() {
+        val router = AndroidPhysicalKeyRouter()
+        for ((keyCode, scanCode, usage) in listOf(
+            Triple(KeyEvent.KEYCODE_NUMPAD_COMMA, 95, 0x8c),
+            Triple(KeyEvent.KEYCODE_NUMPAD_COMMA, 121, 0x85),
+            Triple(KeyEvent.KEYCODE_BACKSLASH, 86, 0x64),
+            Triple(KeyEvent.KEYCODE_BACKSLASH, 43, 0x31),
+        )) {
+            val key = router.route(KeyEvent.ACTION_DOWN, keyCode, 0,
+                origin = AndroidKeyboardOrigin.HARDWARE, scanCode = scanCode)!!.single()
+                as RemoteKeyboardEvent.PhysicalKey
+            assertEquals(usage, key.usbHidUsage)
+            for (origin in listOf(AndroidKeyboardOrigin.IME, AndroidKeyboardOrigin.UNKNOWN)) {
+                val unconfirmed = router.route(KeyEvent.ACTION_DOWN, keyCode, 0,
+                    origin = origin, scanCode = scanCode)!!.single() as RemoteKeyboardEvent.PhysicalKey
+                assertEquals(AndroidKeyToUsbHid.map(keyCode), unconfirmed.usbHidUsage)
+            }
+        }
+    }
+
+    @Test
+    fun jisKoreanAndNumpadUseDistinctStandardHidUsages() {
+        val expected = mapOf(
+            KeyEvent.KEYCODE_NUMPAD_EQUALS to 0x67,
+            KeyEvent.KEYCODE_NUMPAD_COMMA to 0x85,
+            KeyEvent.KEYCODE_RO to 0x87,
+            KeyEvent.KEYCODE_KATAKANA_HIRAGANA to 0x88,
+            KeyEvent.KEYCODE_YEN to 0x89,
+            KeyEvent.KEYCODE_HENKAN to 0x8a,
+            KeyEvent.KEYCODE_MUHENKAN to 0x8b,
+            KeyEvent.KEYCODE_KANA to 0x90,
+            KeyEvent.KEYCODE_EISU to 0x91,
+            KeyEvent.KEYCODE_ZENKAKU_HANKAKU to 0x94,
+        )
+        val router = AndroidPhysicalKeyRouter()
+        for ((keyCode, usage) in expected) {
+            assertEquals(usage, AndroidKeyToUsbHid.map(keyCode))
+            for (action in listOf(KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP)) {
+                val key = router.route(action, keyCode, KeyEvent.META_NUM_LOCK_ON,
+                    origin = AndroidKeyboardOrigin.HARDWARE)!!.single() as RemoteKeyboardEvent.PhysicalKey
+                assertEquals(usage, key.usbHidUsage)
+                assertEquals(action == KeyEvent.ACTION_DOWN, key.down)
+                assertEquals(4, key.lockModes)
+            }
+        }
+    }
+
+    @Test
+    fun lockMetadataUsesBridgeBitsNotWireMaskBits() {
+        for (bits in 0..7) {
+            var meta = KeyEvent.META_SHIFT_ON or KeyEvent.META_ALT_RIGHT_ON
+            if (bits and 1 != 0) meta = meta or KeyEvent.META_CAPS_LOCK_ON
+            if (bits and 2 != 0) meta = meta or KeyEvent.META_NUM_LOCK_ON
+            if (bits and 4 != 0) meta = meta or KeyEvent.META_SCROLL_LOCK_ON
+            assertEquals(bits shl 1, AndroidMetaStateToUsbHid.bridgeLockModes(meta))
+        }
+    }
+
+    @Test
+    fun downRepeatAndUpKeepLockStateWithoutChangingModifierIdentity() {
+        val router = AndroidPhysicalKeyRouter()
+        val meta = KeyEvent.META_CAPS_LOCK_ON or KeyEvent.META_NUM_LOCK_ON or KeyEvent.META_SHIFT_RIGHT_ON
+        for ((action, count) in listOf(KeyEvent.ACTION_DOWN to 0, KeyEvent.ACTION_DOWN to 2, KeyEvent.ACTION_UP to 0)) {
+            val events = router.route(action, KeyEvent.KEYCODE_A, meta, count)!!
+            assertEquals(1, events.size)
+            val event = events.single() as RemoteKeyboardEvent.PhysicalKey
+            assertEquals(6, event.lockModes)
+            assertEquals(listOf(0xe5), event.modifierUsages)
+        }
+        val alt = router.route(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_ALT_RIGHT, meta)!!.single() as RemoteKeyboardEvent.PhysicalKey
+        assertEquals(0xe6, alt.usbHidUsage)
+        assertEquals(6, alt.lockModes)
+        assertEquals(emptyList<Int>(), alt.modifierUsages)
+    }
+
+    @Test
+    fun actionMultipleReportsOneBoundedPressBatchNotHeldRepeats() {
+        val router = AndroidPhysicalKeyRouter()
+        for (count in listOf(1, 3, 64)) {
+            val events = router.route(KeyEvent.ACTION_MULTIPLE, KeyEvent.KEYCODE_A,
+                KeyEvent.META_SHIFT_RIGHT_ON or KeyEvent.META_CAPS_LOCK_ON, count)!!
+            assertEquals(listOf(RemoteKeyboardEvent.PhysicalPressBatch(0x04, count, 2, listOf(0xe5))), events)
+        }
+        for (count in listOf(-1, 0, 65, Int.MAX_VALUE)) {
+            assertEquals(listOf(RemoteKeyboardEvent.Rejected(AndroidInputRejection.PRESS_COUNT)),
+                router.route(KeyEvent.ACTION_MULTIPLE, KeyEvent.KEYCODE_A, 0, count))
+        }
+        assertNull(router.route(KeyEvent.ACTION_MULTIPLE, KeyEvent.KEYCODE_UNKNOWN, 0, 0))
+    }
+
+    @Test
     fun mapsPrintableKeyPositionsIndependentlyOfLanguage() {
         assertEquals(0x04, AndroidKeyToUsbHid.map(KeyEvent.KEYCODE_A))
         assertEquals(0x14, AndroidKeyToUsbHid.map(KeyEvent.KEYCODE_Q))
@@ -184,20 +275,24 @@ class AndroidKeyToUsbHidTest {
     }
 
     @Test
-    fun committedTextLimitUsesUtf8BytesWithoutSplittingCodePoints() {
-        val exact = "😀".repeat(512)
-        assertEquals(exact, AndroidCommittedTextBounds.truncateUtf8(exact))
-
-        val oversized = "€".repeat(683)
-        val bounded = AndroidCommittedTextBounds.truncateUtf8(oversized)
-        assertEquals(2046, bounded.toByteArray(Charsets.UTF_8).size)
-        assertEquals(682, bounded.length)
-
-        val splitCandidate = "a".repeat(2047) + "😀"
+    fun committedTextLimitAcceptsWholeOperationsAndNeverTruncates() {
+        val exact = "😀".repeat(16384)
+        assertNull(AndroidCommittedTextBounds.validate(exact))
+        assertNull(AndroidCommittedTextBounds.validate("a".repeat(65536)))
+        assertNull(AndroidCommittedTextBounds.validate("€".repeat(21845)))
+        assertNull(AndroidCommittedTextBounds.validate("a".repeat(2047) + "😀"))
+        assertEquals(AndroidInputRejection.TEXT_SIZE, AndroidCommittedTextBounds.validate(exact + "a"))
         assertEquals(
-            "a".repeat(2047),
-            AndroidCommittedTextBounds.truncateUtf8(splitCandidate),
+            AndroidInputRejection.TEXT_SIZE,
+            AndroidCommittedTextBounds.validate("a".repeat(65533) + "😀"),
         )
+    }
+
+    @Test
+    fun committedTextRejectsUnpairedSurrogates() {
+        for (text in listOf("\uD800", "\uDC00", "\uD800a", "\uD800\uD800")) {
+            assertEquals(AndroidInputRejection.INVALID_TEXT, AndroidCommittedTextBounds.validate(text))
+        }
     }
 
 }

@@ -2,6 +2,7 @@ import 'package:flutter/services.dart';
 
 import '../consts.dart';
 import 'keyboard_intent.dart';
+import 'keyboard_lock_modes.dart';
 
 final Map<String, HidKey> _canonicalHidByLegacyName =
     _buildCanonicalHidByLegacyName();
@@ -100,14 +101,61 @@ class FlutterKeyboardEventNormalizer {
 class AndroidHardwareKeyboardNormalizer {
   const AndroidHardwareKeyboardNormalizer();
 
+  PhysicalKeyPressBatchIntent? pressBatch({
+    required int usbHidUsage,
+    required int count,
+    KeyboardInputOrigin origin = KeyboardInputOrigin.unknown,
+    String? textCandidate,
+    int? deadKeyAccent,
+    String sourceLanguageTag = '',
+    String sourceLayoutType = '',
+    Iterable<int> modifierUsages = const <int>[],
+    int lockMask = 0,
+  }) {
+    if (count < 1 || count > PhysicalKeyPressBatchIntent.maxCount) return null;
+    final key = physical(
+      usbHidUsage: usbHidUsage,
+      down: true,
+      origin: origin,
+      textCandidate: textCandidate,
+      deadKeyAccent: deadKeyAccent,
+      sourceLanguageTag: sourceLanguageTag,
+      sourceLayoutType: sourceLayoutType,
+      modifierUsages: modifierUsages,
+      lockMask: lockMask,
+    );
+    if (key == null) return null;
+    return PhysicalKeyPressBatchIntent(
+      key: key.key,
+      count: count,
+      source: key.source,
+      origin: key.origin,
+      textCandidate: key.textCandidate,
+      deadKeyAccent: key.deadKeyAccent,
+      sourceLanguageTag: key.sourceLanguageTag,
+      sourceLayoutType: key.sourceLayoutType,
+      lockMask: key.lockMask,
+      reportedModifiers: key.reportedModifiers,
+    );
+  }
+
   PhysicalKeyboardIntent? physical({
     required int usbHidUsage,
     required bool down,
+    KeyboardInputOrigin origin = KeyboardInputOrigin.unknown,
+    String? textCandidate,
+    int? deadKeyAccent,
+    String sourceLanguageTag = '',
+    String sourceLayoutType = '',
     bool repeat = false,
     Iterable<int> modifierUsages = const <int>[],
     int lockMask = 0,
   }) {
-    if (usbHidUsage < 0x04 || usbHidUsage > 0xe7) return null;
+    if (usbHidUsage < 0x04 ||
+        usbHidUsage > 0xe7 ||
+        !KeyboardBridgeLockModes.isValid(lockMask)) {
+      return null;
+    }
     return PhysicalKeyboardIntent(
       key: HidKey(HidKey.keyboardUsagePage, usbHidUsage),
       action: repeat
@@ -116,6 +164,11 @@ class AndroidHardwareKeyboardNormalizer {
           ? KeyboardIntentAction.down
           : KeyboardIntentAction.up,
       source: KeyboardInputSource.androidHardwareKeyboard,
+      origin: origin,
+      textCandidate: textCandidate,
+      deadKeyAccent: deadKeyAccent,
+      sourceLanguageTag: sourceLanguageTag,
+      sourceLayoutType: sourceLayoutType,
       lockMask: lockMask,
       reportedModifiers: <HidKey>{
         for (final usage in modifierUsages)
@@ -127,6 +180,7 @@ class AndroidHardwareKeyboardNormalizer {
 
   CommittedTextIntent? text(
     String value, {
+    KeyboardInputOrigin origin = KeyboardInputOrigin.unknown,
     String sourceLanguageTag = '',
     String sourceLayoutType = '',
   }) {
@@ -134,6 +188,7 @@ class AndroidHardwareKeyboardNormalizer {
     return CommittedTextIntent(
       text: value,
       source: KeyboardInputSource.androidNativeText,
+      origin: origin,
       sourceLanguageTag: sourceLanguageTag,
       sourceLayoutType: sourceLayoutType,
     );

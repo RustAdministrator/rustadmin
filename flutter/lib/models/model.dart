@@ -6034,6 +6034,7 @@ class FFI {
           if (event?['name'] == 'screen_view_authority') {
             final snapshot = decodeTypedSessionEvent(event!);
             if (snapshot is ScreenViewAuthoritySessionEvent) {
+              // Revoke before the serial event queue can finish an older decode.
               applyScreenViewAuthority(snapshot);
             }
             return null;

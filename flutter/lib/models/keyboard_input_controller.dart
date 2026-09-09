@@ -4,6 +4,7 @@ import 'keyboard_dispatcher.dart';
 import 'keyboard_intent.dart';
 import 'keyboard_modifier_controller.dart';
 import 'keyboard_state_machine.dart';
+import 'keyboard_text_policy.dart';
 
 typedef KeyboardDispatchAllowed = bool Function();
 
@@ -13,14 +14,18 @@ class KeyboardInputController {
     required KeyboardHidSink sendHid,
     required KeyboardLegacySink sendLegacy,
     required KeyboardTextSink sendText,
+    KeyboardDeadKeyComposer? composeDeadKey,
     KeyboardCommandErrorHandler? onError,
+    KeyboardInputRejectionHandler? onInputRejected,
   }) : _canDispatch = canDispatch {
     _dispatcher = KeyboardDispatcher(
       canDispatch: canDispatch,
       sendHid: sendHid,
       sendLegacy: sendLegacy,
       sendText: sendText,
+      composeDeadKey: composeDeadKey,
       onError: onError,
+      onInputRejected: onInputRejected,
     );
     _state = KeyboardStateMachine(dispatcher: _dispatcher);
   }

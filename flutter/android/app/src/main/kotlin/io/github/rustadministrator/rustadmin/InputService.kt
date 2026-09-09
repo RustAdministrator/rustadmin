@@ -13,7 +13,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.util.Log
+import android.os.SystemClock
 import android.widget.EditText
 import android.view.accessibility.AccessibilityEvent
 import android.view.ViewGroup.LayoutParams
@@ -25,7 +25,6 @@ import android.media.AudioManager
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.accessibilityservice.AccessibilityServiceInfo.FLAG_INPUT_METHOD_EDITOR
 import android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
-import android.view.inputmethod.EditorInfo
 import androidx.annotation.RequiresApi
 import java.util.*
 import java.lang.Character
@@ -68,7 +67,8 @@ class InputService : AccessibilityService() {
             get() = ctx != null
     }
 
-    private val logTag = "input service"
+    private val diagnostics = AndroidInputDiagnostics()
+    private val inputHandler = Handler(Looper.getMainLooper())
     private var leftIsDown = false
     private var touchPath = Path()
     private var stroke: GestureDescription.StrokeDescription? = null
@@ -104,7 +104,6 @@ class InputService : AccessibilityService() {
             mouseY = y * SCREEN_INFO.scale
             if (isWaitingLongPress) {
                 val delta = abs(oldX - mouseX) + abs(oldY - mouseY)
-                Log.d(logTag,"delta:$delta")
                 if (delta > 8) {
                     isWaitingLongPress = false
                 }
@@ -283,10 +282,9 @@ class InputService : AccessibilityService() {
             val longPressStroke = GestureDescription.StrokeDescription(path, 0, duration)
             val builder = GestureDescription.Builder()
             builder.addStroke(longPressStroke)
-            Log.d(logTag, "performClick x:$x y:$y time:$duration")
             dispatchGesture(builder.build(), null, null)
         } catch (e: Exception) {
-            Log.e(logTag, "performClick, error:$e")
+            diagnostics.failure(AndroidInputFailure.CLICK, e)
         }
     }
 
@@ -302,7 +300,7 @@ class InputService : AccessibilityService() {
             touchPath = Path()
         }
         touchPath.moveTo(x.toFloat(), y.toFloat())
-        lastTouchGestureStartTime = System.currentTimeMillis()
+        lastTouchGestureStartTime = SystemClock.uptimeMillis()
         lastX = x
         lastY = y
         gestureActive = true
@@ -311,7 +309,7 @@ class InputService : AccessibilityService() {
     @RequiresApi(Build.VERSION_CODES.N)
     private fun doDispatchGesture(x: Int, y: Int, willContinue: Boolean) {
         touchPath.lineTo(x.toFloat(), y.toFloat())
-        var duration = System.currentTimeMillis() - lastTouchGestureStartTime
+        var duration = SystemClock.uptimeMillis() - lastTouchGestureStartTime
         if (duration <= 0) {
             duration = 1
         }
@@ -346,11 +344,10 @@ class InputService : AccessibilityService() {
             stroke?.let {
                 val builder = GestureDescription.Builder()
                 builder.addStroke(it)
-                Log.d(logTag, "doDispatchGesture x:$x y:$y time:$duration")
                 dispatchGesture(builder.build(), null, null)
             }
         } catch (e: Exception) {
-            Log.e(logTag, "doDispatchGesture, willContinue:$willContinue, error:$e")
+            diagnostics.failure(AndroidInputFailure.DISPATCH_GESTURE, e)
         }
     }
 
@@ -360,7 +357,7 @@ class InputService : AccessibilityService() {
             doDispatchGesture(x, y, true)
             touchPath.reset()
             touchPath.moveTo(x.toFloat(), y.toFloat())
-            lastTouchGestureStartTime = System.currentTimeMillis()
+            lastTouchGestureStartTime = SystemClock.uptimeMillis()
             lastX = x
             lastY = y
         } else {
@@ -372,7 +369,7 @@ class InputService : AccessibilityService() {
     private fun endGestureBelowO(x: Int, y: Int) {
         try {
             touchPath.lineTo(x.toFloat(), y.toFloat())
-            var duration = System.currentTimeMillis() - lastTouchGestureStartTime
+            var duration = SystemClock.uptimeMillis() - lastTouchGestureStartTime
             if (duration <= 0) {
                 duration = 1
             }
@@ -383,10 +380,9 @@ class InputService : AccessibilityService() {
             )
             val builder = GestureDescription.Builder()
             builder.addStroke(stroke)
-            Log.d(logTag, "end gesture x:$x y:$y time:$duration")
             dispatchGesture(builder.build(), null, null)
         } catch (e: Exception) {
-            Log.e(logTag, "endGesture error:$e")
+            diagnostics.failure(AndroidInputFailure.END_GESTURE, e)
         }
     }
 
@@ -404,76 +400,70 @@ class InputService : AccessibilityService() {
 
     @RequiresApi(Build.VERSION_CODES.N)
     fun onKeyEvent(data: ByteArray) {
-        val keyEvent = KeyEvent.parseFrom(data)
-        val keyboardMode = keyEvent.getMode()
-
-        var textToCommit: String? = null
-
-        // [down] indicates the key's state(down or up).
-        // [press] indicates a click event(down and up).
-        // https://github.com/rustdesk/rustdesk/blob/3a7594755341f023f56fa4b6a43b60d6b47df88d/flutter/lib/models/input_model.dart#L688
-        if (keyEvent.hasSeq()) {
-            textToCommit = keyEvent.getSeq()
-        } else if (keyboardMode == KeyboardMode.Legacy) {
-            if (keyEvent.hasChr() && (keyEvent.getDown() || keyEvent.getPress())) {
-                val chr = keyEvent.getChr()
-                if (chr != null) {
-                    textToCommit = String(Character.toChars(chr))
+        val keyEvent = try {
+            KeyEvent.parseFrom(data)
+        } catch (error: Exception) {
+            diagnostics.failure(AndroidInputFailure.HOST_KEY_DECODE, error)
+            return
+        }
+        val textToCommit = when {
+            keyEvent.hasSeq() -> keyEvent.seq
+            keyEvent.mode == KeyboardMode.Legacy && keyEvent.hasChr() -> {
+                if (!keyEvent.down && !keyEvent.press) return
+                val scalar = keyEvent.chr
+                if (!Character.isValidCodePoint(scalar) || scalar in 0xd800..0xdfff) {
+                    diagnostics.rejected(AndroidInputRejection.INVALID_TEXT)
+                    return
                 }
+                String(Character.toChars(scalar))
             }
-        } else if (keyboardMode == KeyboardMode.Translate) {
-        } else {
+            else -> null
         }
-
-
-        var ke: KeyEventAndroid? = null
-        if (Build.VERSION.SDK_INT < 33 || textToCommit == null) {
-            ke = KeyEventConverter.toAndroidKeyEvent(keyEvent)
-        }
-        ke?.let { event ->
-            if (tryHandleVolumeKeyEvent(event)) {
-                return
-            } else if (tryHandlePowerKeyEvent(event)) {
+        if (textToCommit != null) {
+            AndroidCommittedTextBounds.validate(textToCommit)?.let {
+                diagnostics.rejected(it)
                 return
             }
+            if (textToCommit.isEmpty()) return
         }
+        inputHandler.post {
+            if (ctx !== this) return@post
+            try {
+                dispatchHostKey(keyEvent, textToCommit)
+            } catch (error: Exception) {
+                diagnostics.failure(AndroidInputFailure.HOST_KEY_DISPATCH, error)
+            }
+        }
+    }
 
-        if (Build.VERSION.SDK_INT >= 33) {
-            getInputMethod()?.let { inputMethod ->
-                inputMethod.getCurrentInputConnection()?.let { inputConnection ->
+    private fun dispatchHostKey(keyEvent: KeyEvent, textToCommit: String?) {
+        val event = if (textToCommit == null) KeyEventConverter.toAndroidKeyEvent(keyEvent) else null
+        if (event != null) {
+            if (tryHandleVolumeKeyEvent(event) || tryHandlePowerKeyEvent(event)) {
+                if (keyEvent.press) tryHandlePowerKeyEvent(KeyEventAndroid.changeAction(event, KeyEventAndroid.ACTION_UP))
+                return
+            }
+            if (event.keyCode == KeyEventAndroid.KEYCODE_UNKNOWN) {
+                diagnostics.rejected(AndroidInputRejection.HOST_KEY)
+                return
+            }
+        }
+        val connectionDispatch: (() -> Unit)? = if (Build.VERSION.SDK_INT >= 33) {
+            getInputMethod()?.getCurrentInputConnection()?.let { connection ->
+                {
                     if (textToCommit != null) {
-                        textToCommit?.let { text ->
-                            inputConnection.commitText(text, 1, null)
-                        }
-                    } else {
-                        ke?.let { event ->
-                            inputConnection.sendKeyEvent(event)
-                            if (keyEvent.getPress()) {
-                                val actionUpEvent = KeyEventAndroid(KeyEventAndroid.ACTION_UP, event.keyCode)
-                                inputConnection.sendKeyEvent(actionUpEvent)
-                            }
+                        connection.commitText(textToCommit, 1, null)
+                    } else if (event != null) {
+                        connection.sendKeyEvent(event)
+                        if (keyEvent.press) {
+                            connection.sendKeyEvent(KeyEventAndroid.changeAction(event, KeyEventAndroid.ACTION_UP))
                         }
                     }
                 }
             }
-        } else {
-            val handler = Handler(Looper.getMainLooper())
-            handler.post {
-                ke?.let { event ->
-                    val possibleNodes = possibleAccessibiltyNodes()
-                    Log.d(logTag, "possibleNodes:$possibleNodes")
-                    for (item in possibleNodes) {
-                        val success = trySendKeyEvent(event, item, textToCommit)
-                        if (success) {
-                            if (keyEvent.getPress()) {
-                                val actionUpEvent = KeyEventAndroid(KeyEventAndroid.ACTION_UP, event.keyCode)
-                                trySendKeyEvent(actionUpEvent, item, textToCommit)
-                            }
-                            break
-                        }
-                    }
-                }
-            }
+        } else null
+        dispatchAndroidHostInput(connectionDispatch) {
+            dispatchHostAccessibility(event, textToCommit, keyEvent.press)
         }
     }
 
@@ -514,217 +504,148 @@ class InputService : AccessibilityService() {
         return false
     }
 
-    private fun insertAccessibilityNode(list: LinkedList<AccessibilityNodeInfo>, node: AccessibilityNodeInfo) {
+    private fun isCurrentInputFocus(node: AccessibilityNodeInfo): Boolean {
+        if (!node.refresh() || !node.isFocused || !node.isEnabled || !node.isVisibleToUser) return false
+        val current = findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: return false
+        try {
+            return current == node
+        } finally {
+            if (Build.VERSION.SDK_INT < 33 && current !== node) current.recycle()
+        }
+    }
+
+    private fun supportsAction(node: AccessibilityNodeInfo, action: Int): Boolean =
+        node.actionList.any { it.id == action }
+
+    private inner class FocusedTextTarget(private val node: AccessibilityNodeInfo) : AndroidHostTextTarget {
+        private fun isEligible(): Boolean = isCurrentInputFocus(node) && node.isEditable &&
+            !node.isPassword && supportsAction(node, AccessibilityNodeInfo.ACTION_SET_TEXT)
+
+        override fun read(): AndroidHostTextState? {
+            if (!isEligible()) return null
+            val showingHint = Build.VERSION.SDK_INT >= 26 && node.isShowingHintText
+            val rawText = if (showingHint) "" else node.text ?: ""
+            if (rawText.length > AndroidCommittedTextBounds.MAX_UTF8_BYTES) return null
+            val text = rawText.toString()
+            return AndroidHostTextState(text, node.textSelectionStart, node.textSelectionEnd)
+                .takeIf { it.isValid() }
+        }
+
+        override fun setText(expected: AndroidHostTextState, value: String): Boolean {
+            if (read() != expected) return false
+            return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value)
+            })
+        }
+
+        override fun setSelection(expectedText: String, start: Int, end: Int): Boolean {
+            if (read()?.text != expectedText || !supportsAction(node, AccessibilityNodeInfo.ACTION_SET_SELECTION)) return false
+            return node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, Bundle().apply {
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, start)
+                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, end)
+            })
+        }
+    }
+
+    private fun dispatchHostAccessibility(event: KeyEventAndroid?, text: String?, press: Boolean) {
+        // Key-up does not reapply an edit or activate a newly focused control.
+        if (text == null && event?.action != KeyEventAndroid.ACTION_DOWN) return
+        val node = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
         if (node == null) {
+            diagnostics.rejected(AndroidInputRejection.HOST_TARGET)
             return
         }
-        if (list.contains(node)) {
-            return
-        }
-        list.add(node)
-    }
-
-    private fun findChildNode(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
-        if (node == null) {
-            return null
-        }
-        if (node.isEditable() && node.isFocusable()) {
-            return node
-        }
-        val childCount = node.getChildCount()
-        for (i in 0 until childCount) {
-            val child = node.getChild(i)
-            if (child != null) {
-                if (child.isEditable() && child.isFocusable()) {
-                    return child
+        try {
+            if (!isCurrentInputFocus(node)) {
+                diagnostics.rejected(AndroidInputRejection.HOST_TARGET)
+                return
+            }
+            if (!node.isEditable) {
+                if (text != null || event == null || !performHostNodeAction(node, event)) {
+                    diagnostics.rejected(AndroidInputRejection.HOST_ACTION)
                 }
-                if (Build.VERSION.SDK_INT < 33) {
-                    child.recycle()
+                return
+            }
+            if (text == null && event?.keyCode == KeyEventAndroid.KEYCODE_ENTER &&
+                !event.isCtrlPressed && !event.isAltPressed && !event.isMetaPressed && !event.isShiftPressed &&
+                Build.VERSION.SDK_INT >= 30 &&
+                supportsAction(node, AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)) {
+                if (!isCurrentInputFocus(node) ||
+                    !node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)) {
+                    diagnostics.rejected(AndroidInputRejection.HOST_ACTION)
                 }
+                return
             }
-        }
-        for (i in 0 until childCount) {
-            val child = node.getChild(i)
-            if (child != null) {
-                val result = findChildNode(child)
-                if (Build.VERSION.SDK_INT < 33) {
-                    if (child != result) {
-                        child.recycle()
-                    }
-                }
-                if (result != null) {
-                    return result
-                }
+            val target = FocusedTextTarget(node)
+            val before = target.read()
+            if (before == null) {
+                diagnostics.rejected(AndroidInputRejection.HOST_TARGET)
+                return
             }
+            val after = if (text != null) before.replaceSelection(text)
+                else event?.let { calculateHostKeyEdit(node, before, it, press) }
+            if (after == null) {
+                diagnostics.rejected(AndroidInputRejection.HOST_EDIT)
+                return
+            }
+            when (applyAndroidHostEdit(target, before, after)) {
+                AndroidHostEditResult.REJECTED -> diagnostics.rejected(AndroidInputRejection.HOST_EDIT)
+                AndroidHostEditResult.TEXT_APPLIED_SELECTION_UNCONFIRMED ->
+                    diagnostics.rejected(AndroidInputRejection.HOST_SELECTION)
+                AndroidHostEditResult.APPLIED -> Unit
+            }
+        } finally {
+            fakeEditTextForTextStateCalculation?.setText(null)
+            if (Build.VERSION.SDK_INT < 33) node.recycle()
         }
-        return null
     }
 
-    private fun possibleAccessibiltyNodes(): LinkedList<AccessibilityNodeInfo> {
-        val linkedList = LinkedList<AccessibilityNodeInfo>()
-        val latestList = LinkedList<AccessibilityNodeInfo>()
-
-        val focusInput = findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-        var focusAccessibilityInput = findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
-
-        val rootInActiveWindow = getRootInActiveWindow()
-
-        Log.d(logTag, "focusInput:$focusInput focusAccessibilityInput:$focusAccessibilityInput rootInActiveWindow:$rootInActiveWindow")
-
-        if (focusInput != null) {
-            if (focusInput.isFocusable() && focusInput.isEditable()) {
-                insertAccessibilityNode(linkedList, focusInput)
-            } else {
-                insertAccessibilityNode(latestList, focusInput)
-            }
+    private fun performHostNodeAction(node: AccessibilityNodeInfo, event: KeyEventAndroid): Boolean {
+        if (event.isCtrlPressed || event.isAltPressed || event.isMetaPressed || event.isShiftPressed) return false
+        val action = when (event.keyCode) {
+            KeyEventAndroid.KEYCODE_ENTER, KeyEventAndroid.KEYCODE_DPAD_CENTER,
+            KeyEventAndroid.KEYCODE_SPACE -> AccessibilityNodeInfo.ACTION_CLICK
+            KeyEventAndroid.KEYCODE_DPAD_DOWN, KeyEventAndroid.KEYCODE_PAGE_DOWN -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+            KeyEventAndroid.KEYCODE_DPAD_UP, KeyEventAndroid.KEYCODE_PAGE_UP -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+            KeyEventAndroid.KEYCODE_DPAD_LEFT -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.id
+            KeyEventAndroid.KEYCODE_DPAD_RIGHT -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.id
+            else -> return false
         }
-
-        if (focusAccessibilityInput != null) {
-            if (focusAccessibilityInput.isFocusable() && focusAccessibilityInput.isEditable()) {
-                insertAccessibilityNode(linkedList, focusAccessibilityInput)
-            } else {
-                insertAccessibilityNode(latestList, focusAccessibilityInput)
-            }
-        }
-
-        val childFromFocusInput = findChildNode(focusInput)
-        Log.d(logTag, "childFromFocusInput:$childFromFocusInput")
-
-        if (childFromFocusInput != null) {
-            insertAccessibilityNode(linkedList, childFromFocusInput)
-        }
-
-        val childFromFocusAccessibilityInput = findChildNode(focusAccessibilityInput)
-        if (childFromFocusAccessibilityInput != null) {
-            insertAccessibilityNode(linkedList, childFromFocusAccessibilityInput)
-        }
-        Log.d(logTag, "childFromFocusAccessibilityInput:$childFromFocusAccessibilityInput")
-
-        if (rootInActiveWindow != null) {
-            insertAccessibilityNode(linkedList, rootInActiveWindow)
-        }
-
-        for (item in latestList) {
-            insertAccessibilityNode(linkedList, item)
-        }
-
-        return linkedList
+        return isCurrentInputFocus(node) && supportsAction(node, action) && node.performAction(action)
     }
 
-    private fun trySendKeyEvent(event: KeyEventAndroid, node: AccessibilityNodeInfo, textToCommit: String?): Boolean {
-        node.refresh()
-        this.fakeEditTextForTextStateCalculation?.setSelection(0,0)
-        this.fakeEditTextForTextStateCalculation?.setText(null)
-
-        val text = node.getText()
-        var isShowingHint = false
-        if (Build.VERSION.SDK_INT >= 26) {
-            isShowingHint = node.isShowingHintText()
+    private fun calculateHostKeyEdit(
+        node: AccessibilityNodeInfo,
+        before: AndroidHostTextState,
+        event: KeyEventAndroid,
+        press: Boolean,
+    ): AndroidHostTextState? {
+        val editingCommand = when (event.keyCode) {
+            KeyEventAndroid.KEYCODE_DEL, KeyEventAndroid.KEYCODE_FORWARD_DEL,
+            KeyEventAndroid.KEYCODE_DPAD_LEFT, KeyEventAndroid.KEYCODE_DPAD_RIGHT,
+            KeyEventAndroid.KEYCODE_DPAD_UP, KeyEventAndroid.KEYCODE_DPAD_DOWN,
+            KeyEventAndroid.KEYCODE_MOVE_HOME, KeyEventAndroid.KEYCODE_MOVE_END,
+            KeyEventAndroid.KEYCODE_PAGE_UP, KeyEventAndroid.KEYCODE_PAGE_DOWN -> true
+            else -> false
         }
-
-        var textSelectionStart = node.textSelectionStart
-        var textSelectionEnd = node.textSelectionEnd
-
-        if (text != null) {
-            if (textSelectionStart > text.length) {
-                textSelectionStart = text.length
-            }
-            if (textSelectionEnd > text.length) {
-                textSelectionEnd = text.length
-            }
-            if (textSelectionStart > textSelectionEnd) {
-                textSelectionStart = textSelectionEnd
-            }
-        }
-
-        var success = false
-
-
-        if (textToCommit != null) {
-            if ((textSelectionStart == -1) || (textSelectionEnd == -1)) {
-                val newText = textToCommit
-                this.fakeEditTextForTextStateCalculation?.setText(newText)
-                success = updateTextForAccessibilityNode(node)
-            } else if (text != null) {
-                this.fakeEditTextForTextStateCalculation?.setText(text)
-                this.fakeEditTextForTextStateCalculation?.setSelection(
-                    textSelectionStart,
-                    textSelectionEnd
-                )
-                this.fakeEditTextForTextStateCalculation?.text?.insert(textSelectionStart, textToCommit)
-                success = updateTextAndSelectionForAccessibiltyNode(node)
-            }
-        } else {
-            if (isShowingHint) {
-                this.fakeEditTextForTextStateCalculation?.setText(null)
-            } else {
-                this.fakeEditTextForTextStateCalculation?.setText(text)
-            }
-            if (textSelectionStart != -1 && textSelectionEnd != -1) {
-                Log.d(logTag, "setting selection $textSelectionStart $textSelectionEnd")
-                this.fakeEditTextForTextStateCalculation?.setSelection(
-                    textSelectionStart,
-                    textSelectionEnd
-                )
-            }
-
-            this.fakeEditTextForTextStateCalculation?.let {
-                // This is essiential to make sure layout object is created. OnKeyDown may not work if layout is not created.
-                val rect = Rect()
-                node.getBoundsInScreen(rect)
-
-                it.layout(rect.left, rect.top, rect.right, rect.bottom)
-                it.onPreDraw()
-                if (event.action == KeyEventAndroid.ACTION_DOWN) {
-                    val succ = it.onKeyDown(event.getKeyCode(), event)
-                    Log.d(logTag, "onKeyDown $succ")
-                } else if (event.action == KeyEventAndroid.ACTION_UP) {
-                    val success = it.onKeyUp(event.getKeyCode(), event)
-                    Log.d(logTag, "keyup $success")
-                } else {}
-            }
-
-            success = updateTextAndSelectionForAccessibiltyNode(node)
-        }
-        return success
-    }
-
-    fun updateTextForAccessibilityNode(node: AccessibilityNodeInfo): Boolean {
-        var success = false
-        this.fakeEditTextForTextStateCalculation?.text?.let {
-            val arguments = Bundle()
-            arguments.putCharSequence(
-                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
-                it.toString()
-            )
-            success = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
-        }
-        return success
-    }
-
-    fun updateTextAndSelectionForAccessibiltyNode(node: AccessibilityNodeInfo): Boolean {
-        var success = updateTextForAccessibilityNode(node)
-
-        if (success) {
-            val selectionStart = this.fakeEditTextForTextStateCalculation?.selectionStart
-            val selectionEnd = this.fakeEditTextForTextStateCalculation?.selectionEnd
-
-            if (selectionStart != null && selectionEnd != null) {
-                val arguments = Bundle()
-                arguments.putInt(
-                    AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT,
-                    selectionStart
-                )
-                arguments.putInt(
-                    AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT,
-                    selectionEnd
-                )
-                success = node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, arguments)
-                Log.d(logTag, "Update selection to $selectionStart $selectionEnd success:$success")
-            }
-        }
-
-        return success
+        // Do not let the scratch editor execute clipboard or application shortcuts.
+        val selectAll = event.keyCode == KeyEventAndroid.KEYCODE_A && event.isCtrlPressed
+        if (event.isMetaPressed || (event.isCtrlPressed && !editingCommand && !selectAll) ||
+            (!editingCommand && !selectAll && event.unicodeChar == 0)) return null
+        val editor = fakeEditTextForTextStateCalculation ?: return null
+        editor.inputType = node.inputType
+        editor.setSingleLine(!node.isMultiLine)
+        editor.setText(before.text)
+        editor.setSelection(before.selectionStart, before.selectionEnd)
+        val rect = Rect()
+        node.getBoundsInScreen(rect)
+        // Use the platform editor for navigation/deletion, including grapheme handling.
+        editor.layout(0, 0, rect.width().coerceIn(1, 8192), rect.height().coerceIn(1, 8192))
+        editor.onPreDraw()
+        if (!editor.onKeyDown(event.keyCode, event)) return null
+        if (press) editor.onKeyUp(event.keyCode, KeyEventAndroid.changeAction(event, KeyEventAndroid.ACTION_UP))
+        return AndroidHostTextState(editor.text.toString(), editor.selectionStart, editor.selectionEnd)
+            .takeIf { it.isValid() }
     }
 
 
@@ -745,13 +666,14 @@ class InputService : AccessibilityService() {
         // Size here doesn't matter, we won't show this view.
         fakeEditTextForTextStateCalculation?.layoutParams = LayoutParams(100, 100)
         fakeEditTextForTextStateCalculation?.onPreDraw()
-        val layout = fakeEditTextForTextStateCalculation?.getLayout()
-        Log.d(logTag, "fakeEditTextForTextStateCalculation layout:$layout")
-        Log.d(logTag, "onServiceConnected!")
+        diagnostics.accessibilityConnected()
     }
 
     override fun onDestroy() {
         ctx = null
+        inputHandler.removeCallbacksAndMessages(null)
+        fakeEditTextForTextStateCalculation?.setText(null)
+        fakeEditTextForTextStateCalculation = null
         super.onDestroy()
     }
 

@@ -14,7 +14,6 @@ import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
-import ffi.FFI
 import java.util.Locale
 
 internal sealed interface RemoteKeyboardEvent {
@@ -22,9 +21,26 @@ internal sealed interface RemoteKeyboardEvent {
         val usbHidUsage: Int,
         val down: Boolean,
         val repeat: Boolean = false,
+        val lockModes: Int = 0,
         val modifierUsages: List<Int> = emptyList(),
+        val origin: AndroidKeyboardOrigin = AndroidKeyboardOrigin.UNKNOWN,
+        val textCandidate: String? = null,
+        val deadKeyAccent: Int? = null,
     ) : RemoteKeyboardEvent
-    data class CommittedText(val text: String) : RemoteKeyboardEvent
+    data class PhysicalPressBatch(
+        val usbHidUsage: Int,
+        val count: Int,
+        val lockModes: Int = 0,
+        val modifierUsages: List<Int> = emptyList(),
+        val origin: AndroidKeyboardOrigin = AndroidKeyboardOrigin.UNKNOWN,
+        val textCandidate: String? = null,
+        val deadKeyAccent: Int? = null,
+    ) : RemoteKeyboardEvent
+    data class Rejected(val reason: AndroidInputRejection) : RemoteKeyboardEvent
+    data class CommittedText(
+        val text: String,
+        val origin: AndroidKeyboardOrigin = AndroidKeyboardOrigin.UNKNOWN,
+    ) : RemoteKeyboardEvent
 }
 
 internal data class AndroidInputLayoutInfo(
@@ -47,31 +63,33 @@ internal object AndroidInputLayoutMetadata {
 }
 
 internal object AndroidCommittedTextBounds {
-    const val MAX_UTF8_BYTES = 2048
+    const val MAX_UTF8_BYTES = 64 * 1024
 
-    fun truncateUtf8(value: String): String {
-        if (value.toByteArray(Charsets.UTF_8).size <= MAX_UTF8_BYTES) return value
-
+    fun validate(value: String): AndroidInputRejection? {
         var index = 0
         var bytes = 0
         while (index < value.length) {
-            val codePoint = value.codePointAt(index)
-            val encodedBytes = when {
-                codePoint <= 0x7f -> 1
-                codePoint <= 0x7ff -> 2
-                codePoint <= 0xffff -> 3
-                else -> 4
+            val unit = value[index]
+            if (Character.isHighSurrogate(unit)) {
+                if (index + 1 >= value.length || !Character.isLowSurrogate(value[index + 1])) {
+                    return AndroidInputRejection.INVALID_TEXT
+                }
+                bytes += 4
+                index += 2
+            } else if (Character.isLowSurrogate(unit)) {
+                return AndroidInputRejection.INVALID_TEXT
+            } else {
+                bytes += if (unit.code <= 0x7f) 1 else if (unit.code <= 0x7ff) 2 else 3
+                index++
             }
-            if (bytes + encodedBytes > MAX_UTF8_BYTES) break
-            bytes += encodedBytes
-            index += Character.charCount(codePoint)
+            if (bytes > MAX_UTF8_BYTES) return AndroidInputRejection.TEXT_SIZE
         }
-        return value.substring(0, index)
+        return null
     }
 }
 
 internal object AndroidKeyToUsbHid {
-    fun map(keyCode: Int): Int? = when (keyCode) {
+    fun map(keyCode: Int, hardwareScanCode: Int = 0): Int? = when (keyCode) {
         in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z ->
             0x04 + keyCode - KeyEvent.KEYCODE_A
 
@@ -88,7 +106,7 @@ internal object AndroidKeyToUsbHid {
         KeyEvent.KEYCODE_EQUALS -> 0x2e
         KeyEvent.KEYCODE_LEFT_BRACKET -> 0x2f
         KeyEvent.KEYCODE_RIGHT_BRACKET -> 0x30
-        KeyEvent.KEYCODE_BACKSLASH -> 0x31
+        KeyEvent.KEYCODE_BACKSLASH -> if (hardwareScanCode == 86) 0x64 else 0x31
         KeyEvent.KEYCODE_SEMICOLON -> 0x33
         KeyEvent.KEYCODE_APOSTROPHE -> 0x34
         KeyEvent.KEYCODE_GRAVE -> 0x35
@@ -124,6 +142,17 @@ internal object AndroidKeyToUsbHid {
         KeyEvent.KEYCODE_NUMPAD_0 -> 0x62
         KeyEvent.KEYCODE_NUMPAD_DOT -> 0x63
         KeyEvent.KEYCODE_MENU -> 0x65
+        KeyEvent.KEYCODE_NUMPAD_EQUALS -> 0x67
+        KeyEvent.KEYCODE_NUMPAD_COMMA -> if (hardwareScanCode == 95) 0x8c else 0x85
+        KeyEvent.KEYCODE_RO -> 0x87
+        KeyEvent.KEYCODE_KATAKANA_HIRAGANA -> 0x88
+        KeyEvent.KEYCODE_YEN -> 0x89
+        KeyEvent.KEYCODE_HENKAN -> 0x8a
+        KeyEvent.KEYCODE_MUHENKAN -> 0x8b
+        // Generic.kl maps Linux HANGEUL/HANJA to KANA/EISU.
+        KeyEvent.KEYCODE_KANA -> 0x90
+        KeyEvent.KEYCODE_EISU -> 0x91
+        KeyEvent.KEYCODE_ZENKAKU_HANKAKU -> 0x94
         KeyEvent.KEYCODE_CTRL_LEFT -> 0xe0
         KeyEvent.KEYCODE_SHIFT_LEFT -> 0xe1
         KeyEvent.KEYCODE_ALT_LEFT -> 0xe2
@@ -137,6 +166,15 @@ internal object AndroidKeyToUsbHid {
 }
 
 internal object AndroidMetaStateToUsbHid {
+    fun bridgeLockModes(metaState: Int): Int {
+        // Legacy bridge representation; Rust alone maps it to the V2 wire bits.
+        var locks = 0
+        if (metaState and KeyEvent.META_CAPS_LOCK_ON != 0) locks = locks or 2
+        if (metaState and KeyEvent.META_NUM_LOCK_ON != 0) locks = locks or 4
+        if (metaState and KeyEvent.META_SCROLL_LOCK_ON != 0) locks = locks or 8
+        return locks
+    }
+
     fun modifiers(metaState: Int): List<Int> = buildList {
         addModifierPair(
             metaState = metaState,
@@ -194,8 +232,16 @@ internal class AndroidPhysicalKeyRouter {
         keyCode: Int,
         metaState: Int,
         repeatCount: Int = 0,
-    ): List<RemoteKeyboardEvent.PhysicalKey>? {
-        val usage = AndroidKeyToUsbHid.map(keyCode) ?: return null
+        origin: AndroidKeyboardOrigin = AndroidKeyboardOrigin.UNKNOWN,
+        unicodeCodePoint: Int = 0,
+        scanCode: Int = 0,
+    ): List<RemoteKeyboardEvent>? {
+        val usage = AndroidKeyToUsbHid.map(
+            keyCode, if (origin == AndroidKeyboardOrigin.HARDWARE) scanCode else 0,
+        ) ?: return null
+        val candidate = AndroidKeyboardProvenance.textCandidate(unicodeCodePoint)
+        val accent = AndroidKeyboardProvenance.deadKeyAccent(unicodeCodePoint)
+        val lockModes = AndroidMetaStateToUsbHid.bridgeLockModes(metaState)
         val modifiers =
             if (usage in 0xe0..0xe7) emptyList()
             else AndroidMetaStateToUsbHid.modifiers(metaState)
@@ -205,25 +251,30 @@ internal class AndroidPhysicalKeyRouter {
                     usage,
                     true,
                     repeat = repeatCount > 0,
+                    lockModes = lockModes,
                     modifierUsages = modifiers,
+                    origin = origin,
+                    textCandidate = candidate,
+                    deadKeyAccent = accent,
                 ),
             )
             KeyEvent.ACTION_UP -> listOf(
                 RemoteKeyboardEvent.PhysicalKey(
                     usage,
                     false,
+                    lockModes = lockModes,
                     modifierUsages = modifiers,
+                    origin = origin,
+                    textCandidate = candidate,
+                    deadKeyAccent = accent,
                 ),
             )
-            KeyEvent.ACTION_MULTIPLE -> List(
-                repeatCount.coerceIn(1, MAX_SYNTHETIC_REPEAT_COUNT),
-            ) {
-                RemoteKeyboardEvent.PhysicalKey(
-                    usage,
-                    true,
-                    repeat = true,
-                    modifierUsages = modifiers,
-                )
+            KeyEvent.ACTION_MULTIPLE -> if (repeatCount in 1..MAX_SYNTHETIC_REPEAT_COUNT) {
+                listOf(RemoteKeyboardEvent.PhysicalPressBatch(
+                    usage, repeatCount, lockModes, modifiers, origin, candidate, accent,
+                ))
+            } else {
+                listOf(RemoteKeyboardEvent.Rejected(AndroidInputRejection.PRESS_COUNT))
             }
             else -> null
         }
@@ -240,7 +291,7 @@ internal class RemoteKeyboardInputView(
 ) : View(context) {
     private val physicalKeyRouter = AndroidPhysicalKeyRouter()
     private val fallbackConnection = object : BaseInputConnection(this, false) {
-        override fun sendKeyEvent(event: KeyEvent): Boolean = routeKeyEvent(event)
+        override fun sendKeyEvent(event: KeyEvent): Boolean = routeKeyEvent(event, fromInputConnection = true)
 
         override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
             repeat(beforeLength.coerceIn(0, MAX_SYNTHETIC_DELETE_COUNT)) {
@@ -278,7 +329,19 @@ internal class RemoteKeyboardInputView(
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean = routeKeyEvent(event)
 
     @Suppress("DEPRECATION")
-    private fun routeKeyEvent(event: KeyEvent): Boolean {
+    override fun onKeyMultiple(keyCode: Int, count: Int, event: KeyEvent): Boolean = routeKeyEvent(event)
+
+    @Suppress("DEPRECATION")
+    private fun routeKeyEvent(event: KeyEvent, fromInputConnection: Boolean = false): Boolean {
+        val device = event.device
+        val origin = AndroidKeyboardProvenance.classify(
+            fromInputConnection,
+            event.flags,
+            event.deviceId,
+            event.source,
+            device?.sources ?: 0,
+            device?.isVirtual,
+        )
         when (event.action) {
             KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP, KeyEvent.ACTION_MULTIPLE -> {
                 val routed = physicalKeyRouter.route(
@@ -286,6 +349,9 @@ internal class RemoteKeyboardInputView(
                     event.keyCode,
                     event.metaState,
                     event.repeatCount,
+                    origin,
+                    event.unicodeChar,
+                    event.scanCode,
                 )
                 if (routed != null) {
                     routed.forEach(emit)
@@ -296,9 +362,11 @@ internal class RemoteKeyboardInputView(
 
         val text = event.characters
         if (!text.isNullOrEmpty()) {
-            val boundedText = AndroidCommittedTextBounds.truncateUtf8(text)
-            if (boundedText.isNotEmpty()) {
-                emit(RemoteKeyboardEvent.CommittedText(boundedText))
+            val rejection = AndroidCommittedTextBounds.validate(text)
+            if (rejection == null) {
+                emit(RemoteKeyboardEvent.CommittedText(text, origin))
+            } else {
+                emit(RemoteKeyboardEvent.Rejected(rejection))
             }
             return true
         }
@@ -307,8 +375,7 @@ internal class RemoteKeyboardInputView(
 
     private fun emitKeyClick(keyCode: Int) {
         val usage = AndroidKeyToUsbHid.map(keyCode) ?: return
-        emit(RemoteKeyboardEvent.PhysicalKey(usage, true))
-        emit(RemoteKeyboardEvent.PhysicalKey(usage, false))
+        emit(RemoteKeyboardEvent.PhysicalPressBatch(usage, 1, origin = AndroidKeyboardOrigin.IME))
     }
 
     private companion object {
@@ -318,8 +385,9 @@ internal class RemoteKeyboardInputView(
 
 internal class RemoteKeyboardController(
     private val activity: Activity,
-    private val emitToFlutter: (Map<String, Any>) -> Unit,
+    private val emitToFlutter: (Map<String, Any?>) -> Unit,
 ) {
+    private val diagnostics = AndroidInputDiagnostics()
     private var view: RemoteKeyboardInputView? = null
     private var sessionId = ""
     private var mode = "auto"
@@ -345,10 +413,7 @@ internal class RemoteKeyboardController(
             inputMethodManager.restartInput(inputView)
             inputMethodManager.showSoftInput(inputView, InputMethodManager.SHOW_IMPLICIT)
         }
-        FFI.logDiagnostic(
-            "info",
-            "Android remote keyboard enabled: mode=$mode, route=fallback-input-connection",
-        )
+        diagnostics.keyboardEnabled(mode)
         return true
     }
 
@@ -361,10 +426,7 @@ internal class RemoteKeyboardController(
         inputView.clearFocus()
         inputView.visibility = View.GONE
         if (sessionId.isNotEmpty()) {
-            FFI.logDiagnostic(
-                "info",
-                "Android remote keyboard disabled: mode=$mode, physical_events=$physicalEvents, synthetic_modifier_events=$syntheticModifierEvents, text_fallbacks=$textFallbacks",
-            )
+            diagnostics.keyboardDisabled(mode, physicalEvents, syntheticModifierEvents, textFallbacks)
         }
         sessionId = ""
         physicalEvents = 0
@@ -388,6 +450,8 @@ internal class RemoteKeyboardController(
                     is RemoteKeyboardEvent.PhysicalKey -> {
                         physicalEvents += 1
                         syntheticModifierEvents += event.modifierUsages.size
+                        val layout = if (event.origin == AndroidKeyboardOrigin.IME) currentInputLayout()
+                            else AndroidInputLayoutInfo("", "")
                         emitToFlutter(
                             mapOf(
                                 "session_id" to currentSessionId,
@@ -395,7 +459,13 @@ internal class RemoteKeyboardController(
                                 "usb_hid_usage" to event.usbHidUsage,
                                 "down" to event.down,
                                 "repeat" to event.repeat,
+                                "lock_modes" to event.lockModes,
                                 "modifier_usages" to event.modifierUsages,
+                                "origin" to event.origin.wireName,
+                                "text_candidate" to event.textCandidate.orEmpty(),
+                                "dead_key_accent" to event.deadKeyAccent,
+                                "source_language_tag" to layout.languageTag,
+                                "source_layout_type" to layout.layoutType,
                             ),
                         )
                     }
@@ -408,10 +478,38 @@ internal class RemoteKeyboardController(
                                 "session_id" to currentSessionId,
                                 "kind" to "text",
                                 "text" to event.text,
+                                "origin" to event.origin.wireName,
                                 "source_language_tag" to layout.languageTag,
                                 "source_layout_type" to layout.layoutType,
                             ),
                         )
+                    }
+                    is RemoteKeyboardEvent.PhysicalPressBatch -> {
+                        physicalEvents += event.count * 2L
+                        syntheticModifierEvents += event.modifierUsages.size
+                        val layout = if (event.origin == AndroidKeyboardOrigin.IME) currentInputLayout()
+                            else AndroidInputLayoutInfo("", "")
+                        emitToFlutter(mapOf(
+                            "session_id" to currentSessionId,
+                            "kind" to "press_batch",
+                            "usb_hid_usage" to event.usbHidUsage,
+                            "count" to event.count,
+                            "lock_modes" to event.lockModes,
+                            "modifier_usages" to event.modifierUsages,
+                            "origin" to event.origin.wireName,
+                            "text_candidate" to event.textCandidate.orEmpty(),
+                            "dead_key_accent" to event.deadKeyAccent,
+                            "source_language_tag" to layout.languageTag,
+                            "source_layout_type" to layout.layoutType,
+                        ))
+                    }
+                    is RemoteKeyboardEvent.Rejected -> {
+                        diagnostics.rejected(event.reason)
+                        emitToFlutter(mapOf(
+                            "session_id" to currentSessionId,
+                            "kind" to "rejected",
+                            "reason" to event.reason.diagnosticName,
+                        ))
                     }
                 }
             }

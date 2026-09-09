@@ -1,7 +1,233 @@
 import 'package:flutter_hbb/mobile/android_remote_keyboard.dart';
+import 'package:flutter_hbb/models/keyboard_text_policy.dart';
+import 'package:flutter_hbb/models/keyboard_intent.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('native dead-key metadata carries one scalar without a competing candidate', () {
+    for (final kind in ['physical', 'press_batch']) {
+      Map<String, Object> payload(Object accent) => {
+        'session_id': 'session-1',
+        'kind': kind,
+        'usb_hid_usage': 0x34,
+        'down': true,
+        'count': 3,
+        'origin': 'ime',
+        'dead_key_accent': accent,
+      };
+      for (final accent in [0x5e, 0x2c6, 0x1f642]) {
+        final event = AndroidRemoteKeyboardEvent.tryParse(payload(accent));
+        expect(switch (event) {
+          AndroidRemotePhysicalKeyEvent() => event.deadKeyAccent,
+          AndroidRemotePressBatchEvent() => event.deadKeyAccent,
+          _ => null,
+        }, accent);
+      }
+      for (final invalid in [-1, 0, 9, 0x7f, 0xd800, 0x2028, 0x110000, true, '^']) {
+        expect(AndroidRemoteKeyboardEvent.tryParse(payload(invalid)), isNull);
+      }
+      expect(AndroidRemoteKeyboardEvent.tryParse({
+        ...payload(0x5e), 'text_candidate': 'e',
+      }), isNull);
+    }
+  });
+
+  test('native provenance metadata is bounded and defaults to unknown', () {
+    for (final kind in ['physical', 'press_batch']) {
+      Map<String, Object> payload() => {
+        'session_id': 'session-1',
+        'kind': kind,
+        'usb_hid_usage': 0x14,
+        'down': true,
+        'count': 3,
+        'text_candidate': '@',
+        'source_language_tag': 'de-DE',
+        'source_layout_type': 'qwertz',
+      };
+      for (final name in ['hardware', 'ime', 'unknown']) {
+        final event = AndroidRemoteKeyboardEvent.tryParse({
+          ...payload(),
+          'origin': name,
+        });
+        if (event is AndroidRemotePhysicalKeyEvent) {
+          expect(event.origin.name, name);
+          expect(event.textCandidate, '@');
+          expect(event.sourceLanguageTag, 'de-DE');
+        } else {
+          final batch = event as AndroidRemotePressBatchEvent;
+          expect(batch.origin.name, name);
+          expect(batch.textCandidate, '@');
+          expect(batch.sourceLayoutType, 'qwertz');
+        }
+      }
+      for (final invalid in [
+        true,
+        'ab',
+        String.fromCharCode(0xd800),
+        List.filled(65537, 'x').join(),
+      ]) {
+        expect(
+          AndroidRemoteKeyboardEvent.tryParse({
+            ...payload(),
+            'text_candidate': invalid,
+          }),
+          isNull,
+        );
+      }
+    }
+    final old =
+        AndroidRemoteKeyboardEvent.tryParse({
+              'session_id': 'session-1',
+              'kind': 'physical',
+              'usb_hid_usage': 0x14,
+              'down': true,
+            })
+            as AndroidRemotePhysicalKeyEvent;
+    expect(old.origin, KeyboardInputOrigin.unknown);
+    expect(old.textCandidate, isNull);
+    final text =
+        AndroidRemoteKeyboardEvent.tryParse({
+              'session_id': 'session-1',
+              'kind': 'text',
+              'text': 'committed',
+              'origin': 'ime',
+            })
+            as AndroidRemoteCommittedTextEvent;
+    expect(text.origin, KeyboardInputOrigin.ime);
+  });
+
+  test('invalid native origin cannot masquerade as a hardware event', () {
+    for (final origin in [true, 1, 'hardware-ish', 'toolbar']) {
+      expect(
+        AndroidRemoteKeyboardEvent.tryParse({
+          'session_id': 'session-1',
+          'kind': 'physical',
+          'usb_hid_usage': 0x04,
+          'down': true,
+          'origin': origin,
+        }),
+        isNull,
+      );
+    }
+  });
+
+  test('native text validation reports typed failures without content', () {
+    for (final entry in {
+      '${List.filled(16384, '\u{1f642}').join()}a':
+          KeyboardInputRejection.textTooLarge,
+      String.fromCharCode(0xd800): KeyboardInputRejection.invalidText,
+    }.entries) {
+      final event = AndroidRemoteKeyboardEvent.tryParse({
+        'session_id': 'session-1',
+        'kind': 'text',
+        'text': entry.key,
+      });
+      expect(event, isA<AndroidRemoteInputRejectedEvent>());
+      expect((event as AndroidRemoteInputRejectedEvent).reason, entry.value);
+    }
+    final exact = List.filled(16384, '\u{1f642}').join();
+    final event = AndroidRemoteKeyboardEvent.tryParse({
+      'session_id': 'session-1',
+      'kind': 'text',
+      'text': exact,
+    });
+    expect((event as AndroidRemoteCommittedTextEvent).text, exact);
+    for (final reason in ['text_size', 'invalid_text', 'press_count']) {
+      expect(
+        AndroidRemoteKeyboardEvent.tryParse({
+          'session_id': 'session-1',
+          'kind': 'rejected',
+          'reason': reason,
+        }),
+        isA<AndroidRemoteInputRejectedEvent>(),
+      );
+    }
+    for (final reason in [null, true, 42, 'arbitrary content']) {
+      expect(
+        AndroidRemoteKeyboardEvent.tryParse({
+          'session_id': 'session-1',
+          'kind': 'rejected',
+          'reason': reason,
+        }),
+        isNull,
+      );
+    }
+  });
+
+  test('a native commit larger than a wire packet is preserved whole', () {
+    final text = List.filled(4096, 'x').join();
+    final event = AndroidRemoteKeyboardEvent.tryParse({
+      'session_id': 'session-1',
+      'kind': 'text',
+      'text': text,
+    });
+    expect(event, isA<AndroidRemoteCommittedTextEvent>());
+    expect((event as AndroidRemoteCommittedTextEvent).text, text);
+  });
+
+  test('press batches preserve metadata and reject invalid counts', () {
+    Map<String, Object> payload(Object count) => {
+      'session_id': 'session-1',
+      'kind': 'press_batch',
+      'usb_hid_usage': 0x04,
+      'count': count,
+      'lock_modes': 2,
+      'modifier_usages': [0xe5],
+    };
+    final event =
+        AndroidRemoteKeyboardEvent.tryParse(payload(64))
+            as AndroidRemotePressBatchEvent;
+    expect(event.count, 64);
+    expect(event.usbHidUsage, 0x04);
+    expect(event.lockModes, 2);
+    expect(event.modifierUsages, [0xe5]);
+    for (final invalid in <Object>[-1, 0, 65, '3', true]) {
+      expect(AndroidRemoteKeyboardEvent.tryParse(payload(invalid)), isNull);
+    }
+  });
+
+  test('native lock modes retain every bridge bit combination', () {
+    for (var locks = 0; locks <= 14; locks += 2) {
+      final event =
+          AndroidRemoteKeyboardEvent.tryParse({
+                'session_id': 'session-1',
+                'kind': 'physical',
+                'usb_hid_usage': 0x04,
+                'down': true,
+                'lock_modes': locks,
+              })
+              as AndroidRemotePhysicalKeyEvent;
+      expect(event.lockModes, locks);
+    }
+    final legacy =
+        AndroidRemoteKeyboardEvent.tryParse({
+              'session_id': 'session-1',
+              'kind': 'physical',
+              'usb_hid_usage': 0x04,
+              'down': false,
+            })
+            as AndroidRemotePhysicalKeyEvent;
+    expect(legacy.lockModes, 0);
+  });
+
+  test(
+    'rejects invalid native bridge lock modes instead of accepting wire bits',
+    () {
+      for (final locks in <Object>[-1, 1, 3, 16, '2', true]) {
+        expect(
+          AndroidRemoteKeyboardEvent.tryParse({
+            'session_id': 'session-1',
+            'kind': 'physical',
+            'usb_hid_usage': 0x04,
+            'down': true,
+            'lock_modes': locks,
+          }),
+          isNull,
+        );
+      }
+    },
+  );
+
   test('native fallback editor is limited to capable Android peers', () {
     expect(
       useAndroidNativeRemoteKeyboard(
@@ -77,7 +303,7 @@ void main() {
       AndroidRemoteKeyboardEvent.tryParse({
         'session_id': 'session-1',
         'kind': 'text',
-        'text': List.filled(512, '😀').join(),
+        'text': List.filled(16384, '😀').join(),
       }),
       isA<AndroidRemoteCommittedTextEvent>(),
     );
@@ -85,9 +311,9 @@ void main() {
       AndroidRemoteKeyboardEvent.tryParse({
         'session_id': 'session-1',
         'kind': 'text',
-        'text': List.filled(683, '€').join(),
+        'text': List.filled(21846, '€').join(),
       }),
-      isNull,
+      isA<AndroidRemoteInputRejectedEvent>(),
     );
   });
 
@@ -135,9 +361,9 @@ void main() {
       AndroidRemoteKeyboardEvent.tryParse({
         'session_id': 'session-1',
         'kind': 'text',
-        'text': List.filled(2049, 'x').join(),
+        'text': List.filled(65537, 'x').join(),
       }),
-      isNull,
+      isA<AndroidRemoteInputRejectedEvent>(),
     );
     final sanitized =
         AndroidRemoteKeyboardEvent.tryParse({

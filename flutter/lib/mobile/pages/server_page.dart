@@ -993,7 +993,13 @@ void androidChannelInit() {
                   gFFI.inputModel.inputAndroidRemotePhysicalKey(
                     event.usbHidUsage,
                     event.down,
+                    origin: event.origin,
+                    textCandidate: event.textCandidate,
+                    deadKeyAccent: event.deadKeyAccent,
+                    sourceLanguageTag: event.sourceLanguageTag,
+                    sourceLayoutType: event.sourceLayoutType,
                     repeat: event.repeat,
+                    lockModes: event.lockModes,
                     modifierUsages: event.modifierUsages,
                   ),
                 );
@@ -1001,10 +1007,27 @@ void androidChannelInit() {
                 unawaited(
                   gFFI.inputModel.inputAndroidRemoteCommittedText(
                     event.text,
+                    origin: event.origin,
                     sourceLanguageTag: event.sourceLanguageTag,
                     sourceLayoutType: event.sourceLayoutType,
                   ),
                 );
+              case AndroidRemotePressBatchEvent():
+                unawaited(
+                  gFFI.inputModel.inputAndroidRemotePressBatch(
+                    event.usbHidUsage,
+                    event.count,
+                    origin: event.origin,
+                    textCandidate: event.textCandidate,
+                    deadKeyAccent: event.deadKeyAccent,
+                    sourceLanguageTag: event.sourceLanguageTag,
+                    sourceLayoutType: event.sourceLayoutType,
+                    lockModes: event.lockModes,
+                    modifierUsages: event.modifierUsages,
+                  ),
+                );
+              case AndroidRemoteInputRejectedEvent():
+                gFFI.inputModel.reportKeyboardRejection(event.reason);
             }
             break;
           }

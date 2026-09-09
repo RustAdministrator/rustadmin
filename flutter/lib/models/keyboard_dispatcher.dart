@@ -4,6 +4,7 @@ import '../consts.dart';
 import 'keyboard_command_queue.dart';
 import 'keyboard_intent.dart';
 import 'keyboard_modifier_controller.dart';
+import 'keyboard_text_policy.dart';
 
 enum KeyboardPhysicalTransport { hid, legacy }
 
@@ -39,20 +40,30 @@ sealed class KeyboardDispatchAction {
   const KeyboardDispatchAction();
 }
 
+// Owned by one state-machine route (shared by coalesced modifier owners).
+// It records a transport attempt, not an acknowledgement from the peer.
+class KeyboardPhysicalDispatchLease {
+  KeyboardPhysicalDispatchLease({required this.key, required this.transport});
+
+  final HidKey key;
+  final KeyboardPhysicalTransport transport;
+  bool _downStarted = false;
+}
+
 final class PhysicalKeyboardDispatch extends KeyboardDispatchAction {
   const PhysicalKeyboardDispatch({
-    required this.key,
+    required this.lease,
     required this.action,
-    required this.transport,
     required this.modifiers,
     required this.source,
     this.lockMask = 0,
     this.legacyName,
   });
 
-  final HidKey key;
+  final KeyboardPhysicalDispatchLease lease;
+  HidKey get key => lease.key;
   final KeyboardIntentAction action;
-  final KeyboardPhysicalTransport transport;
+  KeyboardPhysicalTransport get transport => lease.transport;
   final KeyboardModifiers modifiers;
   final KeyboardInputSource source;
   final int lockMask;
@@ -63,6 +74,8 @@ final class CommittedTextDispatch extends KeyboardDispatchAction {
   const CommittedTextDispatch({
     required this.text,
     required this.source,
+    this.literal = true,
+    this.deadKeyAccent,
     this.deleteBeforeGraphemes = 0,
     this.deleteAfterGraphemes = 0,
     this.sourceLanguageTag = '',
@@ -70,6 +83,8 @@ final class CommittedTextDispatch extends KeyboardDispatchAction {
   });
 
   final String text;
+  final bool literal;
+  final int? deadKeyAccent;
   final KeyboardInputSource source;
   final int deleteBeforeGraphemes;
   final int deleteAfterGraphemes;
@@ -78,6 +93,7 @@ final class CommittedTextDispatch extends KeyboardDispatchAction {
 }
 
 typedef KeyboardCanDispatch = bool Function();
+typedef KeyboardDeadKeyComposer = FutureOr<int?> Function(int accent, int base);
 typedef KeyboardHidSink =
     FutureOr<void> Function({
       required HidKey key,
@@ -93,6 +109,7 @@ typedef KeyboardLegacySink =
 typedef KeyboardTextSink =
     FutureOr<void> Function({
       required String text,
+      required bool literal,
       required int deleteBeforeGraphemes,
       required int deleteAfterGraphemes,
       required String sourceLanguageTag,
@@ -102,6 +119,8 @@ typedef KeyboardTextSink =
 class KeyboardDispatchDiagnostics {
   int ignoredLegacyKeys = 0;
   int retiredCommands = 0;
+  int rejectedTextOperations = 0;
+  int deadKeyFallbacks = 0;
 }
 
 class KeyboardDispatcher {
@@ -110,21 +129,33 @@ class KeyboardDispatcher {
     required KeyboardHidSink sendHid,
     required KeyboardLegacySink sendLegacy,
     required KeyboardTextSink sendText,
+    KeyboardDeadKeyComposer? composeDeadKey,
     KeyboardCommandErrorHandler? onError,
+    KeyboardInputRejectionHandler? onInputRejected,
   }) : _canDispatch = canDispatch,
        _sendHid = sendHid,
        _sendLegacy = sendLegacy,
        _sendText = sendText,
-       _queue = KeyboardCommandQueue(onError: onError);
+       _composeDeadKey = composeDeadKey,
+       _queue = KeyboardCommandQueue(onError: onError),
+       _onInputRejected = onInputRejected;
 
   final KeyboardCanDispatch _canDispatch;
   final KeyboardHidSink _sendHid;
   final KeyboardLegacySink _sendLegacy;
   final KeyboardTextSink _sendText;
+  final KeyboardDeadKeyComposer? _composeDeadKey;
   final KeyboardCommandQueue _queue;
+  final KeyboardInputRejectionHandler? _onInputRejected;
+  int _pendingTextBytes = 0;
+  int _pendingTextOperations = 0;
+  int _pendingEditGraphemes = 0;
   final diagnostics = KeyboardDispatchDiagnostics();
 
   Future<void> get idle => _queue.idle;
+  int get pendingTextBytes => _pendingTextBytes;
+  int get pendingTextOperations => _pendingTextOperations;
+  int get pendingEditGraphemes => _pendingEditGraphemes;
 
   KeyboardPhysicalTransport selectPhysicalTransport(
     PhysicalKeyboardIntent intent,
@@ -165,12 +196,82 @@ class KeyboardDispatcher {
     return KeyboardPhysicalTransport.legacy;
   }
 
-  Future<void> dispatchAll(Iterable<KeyboardDispatchAction> actions) {
-    Future<void> tail = _queue.idle;
-    for (final action in actions) {
-      tail = _queue.enqueue(() => _dispatch(action));
+  Future<void> dispatchAll(Iterable<KeyboardDispatchAction> actions) =>
+      tryDispatchAll(actions).completion;
+
+  ({bool accepted, Future<void> completion}) tryDispatchAll(
+    Iterable<KeyboardDispatchAction> actions,
+  ) {
+    final batch = actions.toList(growable: false);
+    final costs = <int>[];
+    var bytes = 0;
+    var operations = 0;
+    var edits = 0;
+    for (final action in batch) {
+      if (action is! CommittedTextDispatch) {
+        costs.add(0);
+        continue;
+      }
+      final checked = KeyboardTextPolicy.inspect(action.text);
+      final rejection = checked.rejection;
+      if (rejection != null) return _rejectText(rejection);
+      final accent = action.deadKeyAccent;
+      if (accent != null &&
+          (!action.literal || !KeyboardTextPolicy.isPrintableScalar(accent))) {
+        return _rejectText(KeyboardInputRejection.invalidText);
+      }
+      // Reserve the uncomposed fallback, including a supplementary accent.
+      final byteCost = checked.bytes + (accent == null ? 0 : 4);
+      if (byteCost > KeyboardTextPolicy.maxOperationBytes) {
+        return _rejectText(KeyboardInputRejection.textTooLarge);
+      }
+      final editCost =
+          action.deleteBeforeGraphemes + action.deleteAfterGraphemes;
+      if (action.deleteBeforeGraphemes < 0 ||
+          action.deleteAfterGraphemes < 0 ||
+          editCost > KeyboardTextPolicy.maxEditGraphemes) {
+        return _rejectText(KeyboardInputRejection.invalidText);
+      }
+      edits += editCost;
+      bytes += byteCost;
+      operations++;
+      costs.add(byteCost);
     }
-    return tail;
+    if (_pendingTextBytes + bytes > KeyboardTextPolicy.maxPendingBytes ||
+        _pendingEditGraphemes + edits > KeyboardTextPolicy.maxEditGraphemes ||
+        _pendingTextOperations + operations >
+            KeyboardTextPolicy.maxPendingOperations) {
+      return _rejectText(KeyboardInputRejection.textQueueFull);
+    }
+    _pendingTextBytes += bytes;
+    _pendingTextOperations += operations;
+    _pendingEditGraphemes += edits;
+    Future<void> tail = _queue.idle;
+    for (var index = 0; index < batch.length; index++) {
+      final action = batch[index];
+      final release =
+          action is PhysicalKeyboardDispatch &&
+          action.action == KeyboardIntentAction.up;
+      tail = _queue.enqueue(() => _dispatch(action), keepOnCancel: release);
+      if (action is CommittedTextDispatch) {
+        final cost = costs[index];
+        tail = tail.whenComplete(() {
+          _pendingTextBytes -= cost;
+          _pendingTextOperations--;
+          _pendingEditGraphemes -=
+              action.deleteBeforeGraphemes + action.deleteAfterGraphemes;
+        });
+      }
+    }
+    return (accepted: true, completion: tail);
+  }
+
+  ({bool accepted, Future<void> completion}) _rejectText(
+    KeyboardInputRejection reason,
+  ) {
+    diagnostics.rejectedTextOperations++;
+    _onInputRejected?.call(reason);
+    return (accepted: false, completion: Future<void>.value());
   }
 
   void invalidatePending() {
@@ -184,21 +285,17 @@ class KeyboardDispatcher {
     Future<void> tail = _queue.idle;
     for (final release in releases) {
       if (release.action != KeyboardIntentAction.up) continue;
-      tail = _queue.enqueue(
-        () => _dispatch(release, allowBlockedRelease: true),
-      );
+      tail = _queue.enqueue(() => _dispatch(release), keepOnCancel: true);
     }
     return tail;
   }
 
-  Future<void> _dispatch(
-    KeyboardDispatchAction action, {
-    bool allowBlockedRelease = false,
-  }) async {
-    final isRelease =
+  Future<void> _dispatch(KeyboardDispatchAction action) async {
+    final ownedRelease =
         action is PhysicalKeyboardDispatch &&
-        action.action == KeyboardIntentAction.up;
-    if (!_canDispatch() && !(allowBlockedRelease && isRelease)) return;
+        action.action == KeyboardIntentAction.up &&
+        action.lease._downStarted;
+    if (!_canDispatch() && !ownedRelease) return;
     switch (action) {
       case PhysicalKeyboardDispatch():
         await _dispatchPhysical(action);
@@ -208,9 +305,34 @@ class KeyboardDispatcher {
             action.deleteAfterGraphemes == 0) {
           return;
         }
+        final generation = _queue.generation;
+        var text = action.text;
+        final accent = action.deadKeyAccent;
+        if (accent != null) {
+          int? composed;
+          final scalars = text.runes;
+          if (_composeDeadKey != null && scalars.length == 1) {
+            try {
+              composed = await Future<int?>.sync(
+                () => _composeDeadKey(accent, scalars.first),
+              ).timeout(const Duration(seconds: 1));
+            } catch (_) {
+              // Unsupported platforms and failed native calls keep both scalars.
+            }
+          }
+          if (generation != _queue.generation || !_canDispatch()) return;
+          if (composed != null &&
+              KeyboardTextPolicy.isPrintableScalar(composed)) {
+            text = String.fromCharCode(composed);
+          } else {
+            diagnostics.deadKeyFallbacks++;
+            text = String.fromCharCode(accent) + text;
+          }
+        }
         await Future<void>.sync(
           () => _sendText(
-            text: action.text,
+            text: text,
+            literal: action.literal,
             deleteBeforeGraphemes: action.deleteBeforeGraphemes,
             deleteAfterGraphemes: action.deleteAfterGraphemes,
             sourceLanguageTag: action.sourceLanguageTag,
@@ -222,6 +344,7 @@ class KeyboardDispatcher {
 
   Future<void> _dispatchPhysical(PhysicalKeyboardDispatch action) async {
     if (action.transport == KeyboardPhysicalTransport.hid) {
+      if (!_beginPhysicalAttempt(action)) return;
       await Future<void>.sync(
         () => _sendHid(
           key: action.key,
@@ -240,6 +363,7 @@ class KeyboardDispatcher {
       diagnostics.ignoredLegacyKeys += 1;
       return;
     }
+    if (!_beginPhysicalAttempt(action)) return;
     await Future<void>.sync(
       () => _sendLegacy(
         name: legacyName,
@@ -247,5 +371,16 @@ class KeyboardDispatcher {
         modifiers: action.modifiers,
       ),
     );
+  }
+
+  bool _beginPhysicalAttempt(PhysicalKeyboardDispatch action) {
+    if (action.action == KeyboardIntentAction.up) {
+      if (!action.lease._downStarted) return false;
+      action.lease._downStarted = false;
+    } else {
+      // A failed call may still have delivered its down. Keep the paired up.
+      action.lease._downStarted = true;
+    }
+    return true;
   }
 }

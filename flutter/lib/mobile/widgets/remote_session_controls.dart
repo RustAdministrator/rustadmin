@@ -1786,10 +1786,12 @@ String mobileKeyboardInputV2Mode(String storedValue, String legacyPhysical) {
     case kKeyboardInputModePhysical:
     case kKeyboardInputModeAuto:
       return storedValue.toLowerCase();
-    default:
+    case '':
       return mobileVmPhysicalInputEnabled(legacyPhysical)
           ? kKeyboardInputModeAuto
           : kKeyboardInputModeText;
+    default:
+      return kKeyboardInputModeAuto;
   }
 }
 

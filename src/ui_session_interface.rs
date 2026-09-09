@@ -56,33 +56,12 @@ use crate::client::{
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use crate::common::GrabState;
 use crate::keyboard;
+use crate::keyboard_input_policy::{
+    KeyboardInputPreference, OPTION_KEYBOARD_INPUT_MODE_V2, OPTION_MOBILE_PHYSICAL_KEY_INPUT,
+};
 use crate::{client::Data, client::Interface};
 
 const CHANGE_RESOLUTION_VALID_TIMEOUT_SECS: u64 = 15;
-const OPTION_MOBILE_PHYSICAL_KEY_INPUT: &str = "mobile-physical-key-input";
-const OPTION_KEYBOARD_INPUT_MODE_V2: &str = "keyboard-input-mode-v2";
-const KEYBOARD_INPUT_MODE_AUTO: &str = "auto";
-const KEYBOARD_INPUT_MODE_TEXT: &str = "text";
-const KEYBOARD_INPUT_MODE_PHYSICAL: &str = "physical";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum KeyboardInputPreference {
-    Auto,
-    Text,
-    Physical,
-}
-
-impl KeyboardInputPreference {
-    fn from_options(mode: &str, legacy_physical_key_input: &str) -> Self {
-        match mode.to_ascii_lowercase().as_str() {
-            KEYBOARD_INPUT_MODE_TEXT => Self::Text,
-            KEYBOARD_INPUT_MODE_PHYSICAL => Self::Physical,
-            KEYBOARD_INPUT_MODE_AUTO => Self::Auto,
-            _ if legacy_physical_key_input.eq_ignore_ascii_case("N") => Self::Text,
-            _ => Self::Auto,
-        }
-    }
-}
 
 #[derive(Default)]
 pub(crate) struct KeyboardInputSendState {
@@ -90,20 +69,14 @@ pub(crate) struct KeyboardInputSendState {
     epoch: u64,
     sequence: u64,
     pressed_hid_usages: HashSet<u32>,
-    text_hid_usages: HashSet<u32>,
-}
-
-fn mobile_physical_key_input_enabled(is_mobile: bool, stored_value: &str) -> bool {
-    is_mobile && !stored_value.eq_ignore_ascii_case("N")
 }
 
 fn legacy_soft_keyboard_physical_input(
     preference: KeyboardInputPreference,
     is_mobile: bool,
-    stored_value: &str,
+    literal: bool,
 ) -> bool {
-    preference != KeyboardInputPreference::Text
-        && mobile_physical_key_input_enabled(is_mobile, stored_value)
+    !literal && preference.physical_keys_enabled(is_mobile)
 }
 
 fn mobile_soft_keyboard_mode(
@@ -1110,10 +1083,25 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     fn keyboard_input_preference(&self) -> KeyboardInputPreference {
+        let lc = self.lc.read().unwrap();
         KeyboardInputPreference::from_options(
-            &self.get_option(OPTION_KEYBOARD_INPUT_MODE_V2.to_owned()),
-            &self.get_option(OPTION_MOBILE_PHYSICAL_KEY_INPUT.to_owned()),
+            &lc.get_option(OPTION_KEYBOARD_INPUT_MODE_V2),
+            &lc.get_option(OPTION_MOBILE_PHYSICAL_KEY_INPUT),
         )
+    }
+
+    pub fn migrate_keyboard_input_preference(&self) -> String {
+        // Serialize the absence check with explicit option writes. Never
+        // replace a newer, including unknown future, input-mode value.
+        let mut lc = self.lc.write().unwrap();
+        let mode = lc.get_option(OPTION_KEYBOARD_INPUT_MODE_V2);
+        let legacy = lc.get_option(OPTION_MOBILE_PHYSICAL_KEY_INPUT);
+        if let Some(migrated) = KeyboardInputPreference::migration_value(&mode, &legacy) {
+            lc.set_option(OPTION_KEYBOARD_INPUT_MODE_V2.to_owned(), migrated.to_owned());
+            migrated.to_owned()
+        } else {
+            mode
+        }
     }
 
     fn keyboard_v2_capabilities(&self) -> Option<KeyboardCapabilities> {
@@ -1170,13 +1158,12 @@ impl<T: InvokeUiSession> Session<T> {
 
     fn try_send_physical_keyboard_v2(
         &self,
-        character: &str,
         usb_hid: i32,
         lock_modes: i32,
         down: bool,
     ) -> bool {
         self.reset_keyboard_input_state_for_round();
-        let Some(capabilities) = self
+        let Some(_) = self
             .keyboard_v2_capabilities()
             .filter(|capabilities| capabilities.physical_key)
         else {
@@ -1192,8 +1179,7 @@ impl<T: InvokeUiSession> Session<T> {
             return false;
         }
 
-        let preference = self.keyboard_input_preference();
-        let (repeat, modifier_mask, suppress_release, committed_text) = {
+        let (repeat, modifier_mask) = {
             let mut state = self.keyboard_input_send_state.lock().unwrap();
             let repeat = if down {
                 !state.pressed_hid_usages.insert(usage)
@@ -1202,32 +1188,8 @@ impl<T: InvokeUiSession> Session<T> {
                 false
             };
             let modifier_mask = keyboard_v2_modifier_mask(&state.pressed_hid_usages);
-            let suppress_release = !down && state.text_hid_usages.remove(&usage);
-            let committed_text = if down
-                && preference == KeyboardInputPreference::Text
-                && keyboard_v2_modifier_bit(usage).is_none()
-                && modifier_mask
-                    & (hbb_common::keyboard::KEYBOARD_MODIFIER_CONTROL
-                        | hbb_common::keyboard::KEYBOARD_MODIFIER_ALT
-                        | hbb_common::keyboard::KEYBOARD_MODIFIER_META)
-                    == 0
-                && !character.is_empty()
-            {
-                state.text_hid_usages.insert(usage);
-                Some(character.to_owned())
-            } else {
-                None
-            };
-            (repeat, modifier_mask, suppress_release, committed_text)
+            (repeat, modifier_mask)
         };
-
-        if suppress_release {
-            return true;
-        }
-        if let Some(text) = committed_text {
-            self.send_committed_text_v2(&text, 0, 0, &capabilities);
-            return true;
-        }
 
         let mut input = self.next_keyboard_input();
         input.set_physical_key(PhysicalKey {
@@ -1270,6 +1232,21 @@ impl<T: InvokeUiSession> Session<T> {
         source_layout_type: &str,
         prefer_physical: bool,
     ) {
+        let advertised_max = usize::try_from(capabilities.max_committed_text_bytes)
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(hbb_common::keyboard::MAX_COMMITTED_TEXT_BYTES);
+        let max_bytes = advertised_max
+            .max(1)
+            .min(hbb_common::keyboard::MAX_COMMITTED_TEXT_BYTES);
+        let chunks = split_committed_text(value, max_bytes);
+        if !value.is_empty() && chunks.is_empty() {
+            log::warn!("Keyboard V2 text exceeds the negotiated scalar limit");
+            self.ui_handler
+                .msgbox("custom-nocancel-info", "Error", "Invalid format", "", false);
+            return;
+        }
+
         let delete_limit = hbb_common::keyboard::MAX_TEXT_DELETE_GRAPHEMES;
         while delete_before_graphemes > delete_limit {
             self.send_committed_text_chunk(
@@ -1294,14 +1271,6 @@ impl<T: InvokeUiSession> Session<T> {
             delete_after_graphemes -= delete_limit;
         }
 
-        let advertised_max = usize::try_from(capabilities.max_committed_text_bytes)
-            .ok()
-            .filter(|value| *value > 0)
-            .unwrap_or(hbb_common::keyboard::MAX_COMMITTED_TEXT_BYTES);
-        let max_bytes = advertised_max
-            .max(1)
-            .min(hbb_common::keyboard::MAX_COMMITTED_TEXT_BYTES);
-        let chunks = split_committed_text(value, max_bytes);
         if chunks.is_empty() {
             if value.is_empty() && (delete_before_graphemes != 0 || delete_after_graphemes != 0) {
                 self.send_committed_text_chunk(
@@ -1312,8 +1281,6 @@ impl<T: InvokeUiSession> Session<T> {
                     source_layout_type,
                     prefer_physical,
                 );
-            } else if !value.is_empty() {
-                log::warn!("Keyboard V2 text contains a scalar larger than the negotiated limit");
             }
             return;
         }
@@ -1360,13 +1327,13 @@ impl<T: InvokeUiSession> Session<T> {
         self.send_keyboard_input(input);
     }
 
-    fn send_legacy_text(&self, value: &str) {
+    fn send_legacy_text(&self, value: &str, literal: bool) {
         let mut key_event = KeyEvent::new();
         key_event.set_seq(value.to_owned());
         let physical_key_input = legacy_soft_keyboard_physical_input(
             self.keyboard_input_preference(),
             cfg!(any(target_os = "android", target_os = "ios")),
-            &self.get_option(OPTION_MOBILE_PHYSICAL_KEY_INPUT.to_owned()),
+            literal,
         );
         let peer_platform = self.peer_platform();
         let translate_supported =
@@ -1401,6 +1368,7 @@ impl<T: InvokeUiSession> Session<T> {
         value: &str,
         delete_before_graphemes: u32,
         delete_after_graphemes: u32,
+        literal: bool,
     ) {
         let capabilities = self.keyboard_v2_capabilities();
         if let Some(capabilities) = capabilities
@@ -1423,7 +1391,7 @@ impl<T: InvokeUiSession> Session<T> {
             self.send_legacy_control_click(ControlKey::Delete);
         }
         if !value.is_empty() {
-            self.send_legacy_text(value);
+            self.send_legacy_text(value, literal);
         }
     }
 
@@ -1432,6 +1400,7 @@ impl<T: InvokeUiSession> Session<T> {
         value: &str,
         source_language_tag: &str,
         source_layout_type: &str,
+        literal: bool,
     ) {
         let capabilities = self.keyboard_v2_capabilities();
         if let Some(capabilities) = capabilities.as_ref().filter(|capabilities| {
@@ -1449,15 +1418,20 @@ impl<T: InvokeUiSession> Session<T> {
                 capabilities,
                 source_language_tag,
                 source_layout_type,
-                true,
+                !literal,
             );
             return;
         }
-        self.input_text_edit(value, 0, 0);
+        self.input_text_edit(value, 0, 0, literal);
     }
 
     pub fn input_string(&self, value: &str) {
-        self.input_text_edit(value, 0, 0);
+        self.input_text_edit(
+            value,
+            0,
+            0,
+            self.keyboard_input_preference() != KeyboardInputPreference::Physical,
+        );
     }
 
     pub fn mobile_physical_keyboard_mode(&self, configured_mode: &str) -> String {
@@ -1465,7 +1439,7 @@ impl<T: InvokeUiSession> Session<T> {
             return configured_mode.to_owned();
         }
         mobile_physical_keyboard_mode(
-            self.get_option(OPTION_MOBILE_PHYSICAL_KEY_INPUT.to_owned()) == "Y",
+            self.keyboard_input_preference().physical_keys_enabled(true),
             &self.peer_platform(),
             self.is_keyboard_mode_supported(KeyboardMode::Map.to_string()),
             configured_mode,
@@ -1556,7 +1530,7 @@ impl<T: InvokeUiSession> Session<T> {
     ) {
         if character == "flutter_key" {
             self._handle_key_flutter_simulation(keyboard_mode, usb_hid, down_or_up);
-        } else if self.try_send_physical_keyboard_v2(character, usb_hid, lock_modes, down_or_up) {
+        } else if self.try_send_physical_keyboard_v2(usb_hid, lock_modes, down_or_up) {
             return;
         } else {
             self._handle_key_non_flutter_simulation(
@@ -3112,39 +3086,32 @@ mod mobile_soft_keyboard_tests {
 
     #[test]
     fn mobile_vm_physical_input_defaults_on_and_preserves_explicit_opt_out() {
-        assert!(mobile_physical_key_input_enabled(true, ""));
-        assert!(mobile_physical_key_input_enabled(true, "Y"));
-        assert!(!mobile_physical_key_input_enabled(true, "N"));
-        assert!(!mobile_physical_key_input_enabled(false, ""));
+        for (stored, enabled) in [("", true), ("Y", true), ("N", false), ("n", false)] {
+            let preference = KeyboardInputPreference::from_options("", stored);
+            assert_eq!(preference.physical_keys_enabled(true), enabled);
+            assert!(!preference.physical_keys_enabled(false));
+        }
     }
 
     #[test]
-    fn legacy_compatibility_toggle_remains_effective_in_auto() {
-        assert!(legacy_soft_keyboard_physical_input(
-            KeyboardInputPreference::Auto,
-            true,
-            "Y"
-        ));
-        assert!(!legacy_soft_keyboard_physical_input(
-            KeyboardInputPreference::Auto,
-            true,
-            "N"
-        ));
-        assert!(!legacy_soft_keyboard_physical_input(
-            KeyboardInputPreference::Text,
-            true,
-            "Y"
-        ));
-        assert!(legacy_soft_keyboard_physical_input(
-            KeyboardInputPreference::Physical,
-            true,
-            "Y"
-        ));
-        assert!(!legacy_soft_keyboard_physical_input(
-            KeyboardInputPreference::Physical,
-            true,
-            "N"
-        ));
+    fn all_physical_paths_use_the_resolved_preference() {
+        for mode in ["auto", "text", "physical", "PHYSICAL", "future-mode"] {
+            for legacy in ["", "Y", "N", "n"] {
+                let preference = KeyboardInputPreference::from_options(mode, legacy);
+                let enabled = mode != "text";
+                assert_eq!(preference.physical_keys_enabled(true), enabled);
+                assert_eq!(
+                    legacy_soft_keyboard_physical_input(preference, true, false),
+                    enabled
+                );
+                assert_eq!(
+                    mobile_physical_keyboard_mode(
+                        preference.physical_keys_enabled(true), "Windows", true, "legacy"
+                    ),
+                    if enabled { "map" } else { "legacy" }
+                );
+            }
+        }
     }
 
     #[test]
@@ -3164,6 +3131,33 @@ mod mobile_soft_keyboard_tests {
     }
 
     #[test]
+    fn literal_text_overrides_legacy_physical_toggles_and_platform_modes() {
+        for mode in ["", "auto", "text", "physical"] {
+            for stored in ["", "Y", "N"] {
+                let preference = KeyboardInputPreference::from_options(mode, stored);
+                for is_mobile in [false, true] {
+                    let physical =
+                        legacy_soft_keyboard_physical_input(preference, is_mobile, true);
+                    assert!(!physical);
+                    for platform in ["Windows", "Linux", "Mac OS", "Android"] {
+                        for translate_supported in [false, true] {
+                            assert_eq!(
+                                mobile_soft_keyboard_mode(physical, platform, translate_supported),
+                                KeyboardMode::Legacy
+                            );
+                            assert!(!mobile_scan_code_text(
+                                physical,
+                                platform,
+                                translate_supported
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn keyboard_v2_mode_migrates_the_legacy_physical_toggle() {
         assert_eq!(
             KeyboardInputPreference::from_options("", ""),
@@ -3177,6 +3171,24 @@ mod mobile_soft_keyboard_tests {
             KeyboardInputPreference::from_options("physical", "N"),
             KeyboardInputPreference::Physical
         );
+        for mode in ["auto", "text", "physical", "PHYSICAL", "future-mode"] {
+            for legacy in ["", "Y", "N", "n"] {
+                assert_eq!(KeyboardInputPreference::migration_value(mode, legacy), None);
+            }
+        }
+        for legacy in ["N", "n"] {
+            assert_eq!(
+                KeyboardInputPreference::migration_value("", legacy),
+                Some("text")
+            );
+        }
+        assert_eq!(KeyboardInputPreference::migration_value("", "Y"), Some("auto"));
+        assert_eq!(KeyboardInputPreference::migration_value("", ""), None);
+        assert_eq!(KeyboardInputPreference::migration_value("", "invalid"), None);
+        assert_eq!(
+            KeyboardInputPreference::from_options("future-mode", "N"),
+            KeyboardInputPreference::Auto
+        );
     }
 
     #[test]
@@ -3184,6 +3196,270 @@ mod mobile_soft_keyboard_tests {
         let text = "a\u{1f642}b";
         assert_eq!(split_committed_text(text, 5), vec!["a\u{1f642}", "b"]);
         assert!(split_committed_text("\u{1f642}", 3).is_empty());
+    }
+
+    #[cfg(feature = "flutter")]
+    fn text_session(
+        mode: &str,
+        capabilities: Option<KeyboardCapabilities>,
+    ) -> (
+        Session<crate::flutter::FlutterHandler>,
+        mpsc::UnboundedReceiver<Data>,
+    ) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let session = Session {
+            sender: Arc::new(RwLock::new(Some(sender))),
+            ..Default::default()
+        };
+        {
+            let mut lc = session.lc.write().unwrap();
+            lc.version = get_version_number("1.2.0");
+            lc.peer_info = capabilities.map(|keyboard| PeerInfo {
+                features: Some(Features {
+                    keyboard: Some(keyboard).into(),
+                    ..Default::default()
+                })
+                .into(),
+                ..Default::default()
+            });
+            let config = lc.get_config();
+            config.info.platform = "Windows".to_owned();
+            config
+                .options
+                .insert(OPTION_KEYBOARD_INPUT_MODE_V2.to_owned(), mode.to_owned());
+            config
+                .options
+                .insert(OPTION_MOBILE_PHYSICAL_KEY_INPUT.to_owned(), "Y".to_owned());
+        }
+        (session, receiver)
+    }
+
+    #[cfg(feature = "flutter")]
+    #[test]
+    fn physical_bridge_never_reinterprets_the_controller_route_as_text() {
+        for mode in ["auto", "text", "physical"] {
+            let (session, mut receiver) = text_session(
+                mode,
+                Some(KeyboardCapabilities {
+                    protocol_version: hbb_common::keyboard::KEYBOARD_INPUT_PROTOCOL_VERSION,
+                    physical_key: true,
+                    committed_text: true,
+                    ..Default::default()
+                }),
+            );
+            for (down, repeat) in [(true, false), (true, true), (false, false)] {
+                session.handle_flutter_key_event("map", "a", 0x04, 0, down);
+                let Data::Message(message) = receiver.try_recv().unwrap() else {
+                    panic!("expected message")
+                };
+                let Some(message::Union::KeyboardInput(input)) = message.union else {
+                    panic!("expected V2 input")
+                };
+                let Some(keyboard_input::Union::PhysicalKey(key)) = input.union else {
+                    panic!("physical bridge must not select text")
+                };
+                assert_eq!(key.usb_hid_usage, 0x04);
+                assert_eq!(key.down, down);
+                assert_eq!(key.repeat, repeat);
+            }
+            assert!(receiver.try_recv().is_err());
+        }
+    }
+
+    #[cfg(feature = "flutter")]
+    #[test]
+    fn captured_text_semantics_override_current_mode_with_layout_metadata() {
+        for mode in ["auto", "text", "physical"] {
+            for literal in [false, true] {
+                let (session, mut receiver) = text_session(
+                    mode,
+                    Some(KeyboardCapabilities {
+                        protocol_version: hbb_common::keyboard::KEYBOARD_INPUT_PROTOCOL_VERSION,
+                        committed_text: true,
+                        layout_aware_text: true,
+                        max_committed_text_bytes: 5,
+                        ..Default::default()
+                    }),
+                );
+                session.input_text_edit_with_source_layout(
+                    "a\u{1f642}b",
+                    "de-DE",
+                    "qwertz",
+                    literal,
+                );
+                let mut text = String::new();
+                let mut count = 0;
+                while let Ok(Data::Message(message)) = receiver.try_recv() {
+                    let Some(message::Union::KeyboardInput(input)) = message.union else {
+                        panic!("expected V2 input")
+                    };
+                    let Some(keyboard_input::Union::CommittedText(chunk)) = input.union else {
+                        panic!("expected text payload")
+                    };
+                    assert_eq!(chunk.prefer_physical, !literal);
+                    assert_eq!(chunk.source_language_tag, "de-DE");
+                    assert_eq!(chunk.source_layout_type, "qwertz");
+                    text.push_str(&chunk.text);
+                    count += 1;
+                }
+                assert_eq!(count, 2);
+                assert_eq!(text, "a\u{1f642}b");
+            }
+        }
+    }
+
+    #[cfg(feature = "flutter")]
+    #[test]
+    fn literal_layout_text_does_not_require_a_layout_aware_peer() {
+        let (session, mut receiver) = text_session(
+            "physical",
+            Some(KeyboardCapabilities {
+                protocol_version: hbb_common::keyboard::KEYBOARD_INPUT_PROTOCOL_VERSION,
+                committed_text: true,
+                layout_aware_text: false,
+                ..Default::default()
+            }),
+        );
+        session.input_text_edit_with_source_layout("literal", "de-DE", "qwertz", true);
+        let Data::Message(message) = receiver.try_recv().unwrap() else {
+            panic!("expected message")
+        };
+        let Some(message::Union::KeyboardInput(input)) = message.union else {
+            panic!("expected V2 input")
+        };
+        let Some(keyboard_input::Union::CommittedText(text)) = input.union else {
+            panic!("expected text payload")
+        };
+        assert_eq!(text.text, "literal");
+        assert!(!text.prefer_physical);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[cfg(feature = "flutter")]
+    #[test]
+    fn literal_legacy_text_never_enables_scan_or_source_layout_flags() {
+        for mode in ["auto", "text", "physical"] {
+            for with_layout in [false, true] {
+                let (session, mut receiver) = text_session(mode, None);
+                if with_layout {
+                    session.input_text_edit_with_source_layout("literal", "de-DE", "qwertz", true);
+                } else {
+                    session.input_text_edit("literal", 0, 0, true);
+                }
+                let Data::Message(message) = receiver.try_recv().unwrap() else {
+                    panic!("expected message")
+                };
+                let Some(message::Union::KeyEvent(event)) = message.union else {
+                    panic!("expected legacy key event")
+                };
+                assert_eq!(event.mode, KeyboardMode::Legacy.into());
+                assert!(!event.scan_code_text);
+                assert!(!event.source_layout_text);
+                let Some(key_event::Union::Seq(text)) = event.union else {
+                    panic!("expected text sequence")
+                };
+                assert_eq!(text, "literal");
+                assert!(receiver.try_recv().is_err());
+            }
+        }
+    }
+
+    #[cfg(feature = "flutter")]
+    fn capture_committed_text(
+        text: &str,
+        before: u32,
+        after: u32,
+        max_bytes: u32,
+    ) -> Vec<KeyboardInput> {
+        let (sender, mut receiver) = mpsc::unbounded_channel::<Data>();
+        let session: Session<crate::flutter::FlutterHandler> = Session {
+            sender: Arc::new(RwLock::new(Some(sender))),
+            ..Default::default()
+        };
+        session.send_committed_text_v2_with_source_layout(
+            text,
+            before,
+            after,
+            &KeyboardCapabilities {
+                max_committed_text_bytes: max_bytes,
+                ..Default::default()
+            },
+            "en-US",
+            "qwerty",
+            false,
+        );
+        let mut inputs = Vec::new();
+        while let Ok(data) = receiver.try_recv() {
+            let Data::Message(message) = data else {
+                panic!("unexpected non-message keyboard output");
+            };
+            let Some(message::Union::KeyboardInput(input)) = message.union else {
+                panic!("unexpected non-keyboard message");
+            };
+            inputs.push(input);
+        }
+        inputs
+    }
+
+    #[cfg(feature = "flutter")]
+    #[test]
+    fn committed_text_rejects_scalar_before_sending_any_deletions() {
+        assert!(capture_committed_text("a\u{1f642}", 65, 65, 3).is_empty());
+    }
+
+    #[cfg(feature = "flutter")]
+    #[test]
+    fn committed_text_sends_ordered_complete_edit_with_bounded_chunks() {
+        let inputs = capture_committed_text("a\u{1f642}b", 65, 65, 5);
+        assert_eq!(inputs.len(), 4);
+        let epoch = inputs[0].input_epoch;
+        assert_ne!(epoch, 0);
+        let mut actual = Vec::new();
+        for (index, input) in inputs.into_iter().enumerate() {
+            assert_eq!(input.input_epoch, epoch);
+            assert_eq!(input.sequence, index as u64 + 1);
+            let Some(keyboard_input::Union::CommittedText(text)) = input.union else {
+                panic!("unexpected keyboard payload");
+            };
+            assert_eq!(text.source_language_tag, "en-US");
+            assert_eq!(text.source_layout_type, "qwerty");
+            assert!(!text.prefer_physical);
+            actual.push((
+                text.text,
+                text.delete_before_graphemes,
+                text.delete_after_graphemes,
+            ));
+        }
+        assert_eq!(
+            actual,
+            vec![
+                (String::new(), 64, 0),
+                (String::new(), 0, 64),
+                ("a\u{1f642}".to_owned(), 1, 1),
+                ("b".to_owned(), 0, 0),
+            ]
+        );
+    }
+
+    #[cfg(feature = "flutter")]
+    #[test]
+    fn committed_text_long_operation_reassembles_with_default_or_oversized_peer_limit() {
+        let original = "a\u{1f642}e\u{301}".repeat(8192);
+        assert_eq!(original.len(), 65536);
+        for advertised in [0, 2048, 4096] {
+            let inputs = capture_committed_text(&original, 0, 0, advertised);
+            let mut reconstructed = String::new();
+            assert_eq!(inputs.len(), 32);
+            for input in inputs {
+                let Some(keyboard_input::Union::CommittedText(text)) = input.union else {
+                    panic!("unexpected keyboard payload");
+                };
+                assert!(text.text.len() <= 2048);
+                reconstructed.push_str(&text.text);
+            }
+            assert_eq!(reconstructed, original);
+        }
+        assert!(capture_committed_text("", 0, 0, 0).is_empty());
     }
 
     #[test]
@@ -3198,5 +3474,9 @@ mod mobile_soft_keyboard_tests {
             keyboard_v2_lock_mask((1 << 1) | (1 << 3)),
             hbb_common::keyboard::KEYBOARD_LOCK_CAPS | hbb_common::keyboard::KEYBOARD_LOCK_SCROLL
         );
+        for wire_mask in 0..=7 {
+            assert_eq!(keyboard_v2_lock_mask(wire_mask << 1), wire_mask as u32);
+        }
+        assert_eq!(keyboard_v2_lock_mask(1), 0);
     }
 }

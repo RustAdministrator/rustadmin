@@ -336,6 +336,14 @@ class MainActivity : FlutterActivity() {
         flutterMethodChannel.setMethodCallHandler { call, result ->
             // make sure result will be invoked, otherwise flutter will await forever
             when (call.method) {
+                "compose_remote_dead_key" -> {
+                    val accent = call.argument<Int>("accent")
+                    val base = call.argument<Int>("base")
+                    result.success(
+                        if (accent == null || base == null) 0
+                        else AndroidKeyboardProvenance.composeDeadKey(accent, base),
+                    )
+                }
                 "create_remote_video_texture" -> {
                     val display = call.argument<Int>("display")
                     val width = call.argument<Int>("width")

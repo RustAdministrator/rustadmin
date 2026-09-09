@@ -587,22 +587,29 @@ fn update_keyboard_input_sequence(
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn platform_keycode_from_usb_hid(usage: u32) -> Option<u32> {
+    use crate::keyboard_hid::{keycode_from_usb_hid, HidTarget};
     #[cfg(target_os = "windows")]
     {
-        return rdev::usb_hid_code_to_win_scancode(usage as _).map(|code| code as u32);
+        return keycode_from_usb_hid(HidTarget::Windows, usage, |usage| {
+            rdev::usb_hid_code_to_win_scancode(usage as _).map(|code| code as u32)
+        });
     }
     #[cfg(target_os = "linux")]
     {
-        return rdev::usb_hid_code_to_linux_code(usage as _).map(|code| code as u32);
+        return keycode_from_usb_hid(HidTarget::Linux, usage, |usage| {
+            rdev::usb_hid_code_to_linux_code(usage as _).map(|code| code as u32)
+        });
     }
     #[cfg(target_os = "macos")]
     {
-        let code = if hbb_common::config::LocalConfig::get_kb_layout_type() == "ISO" {
-            rdev::usb_hid_code_to_macos_iso_code(usage as _)
-        } else {
-            rdev::usb_hid_code_to_macos_code(usage as _)
-        };
-        return code.map(|code| code as u32);
+        return keycode_from_usb_hid(HidTarget::MacOs, usage, |usage| {
+            let code = if hbb_common::config::LocalConfig::get_kb_layout_type() == "ISO" {
+                rdev::usb_hid_code_to_macos_iso_code(usage as _)
+            } else {
+                rdev::usb_hid_code_to_macos_code(usage as _)
+            };
+            code.map(|code| code as u32)
+        });
     }
     #[allow(unreachable_code)]
     None
@@ -10438,6 +10445,34 @@ mod test {
             update_keyboard_input_sequence(&mut state, 8, 1),
             KeyboardInputSequenceDecision::ResetEpoch
         );
+    }
+
+    #[test]
+    fn keyboard_v2_international_down_repeat_and_up_keep_the_same_native_code() {
+        #[cfg(target_os = "windows")]
+        let expected = [(0x88, 0x70), (0x90, 0xf2), (0x91, 0xf1)];
+        #[cfg(target_os = "linux")]
+        let expected = [(0x88, 101), (0x90, 130), (0x91, 131)];
+        #[cfg(target_os = "macos")]
+        let expected = [(0x87, 0x5e), (0x90, 0x68), (0x91, 0x66)];
+        for (usage, code) in expected {
+            for (down, repeat) in [(true, false), (true, true), (false, false)] {
+                let event = physical_key_to_key_event(&PhysicalKey {
+                    usb_hid_usage: usage,
+                    down,
+                    repeat,
+                    ..Default::default()
+                }).unwrap();
+                assert_eq!(event.chr(), code);
+                assert_eq!(event.down, down);
+                assert!(!event.press);
+                assert_eq!(event.mode.enum_value().unwrap(), KeyboardMode::Map);
+            }
+        }
+        #[cfg(target_os = "macos")]
+        for usage in [0x88, 0x8a, 0x8b, 0x94] {
+            assert!(platform_keycode_from_usb_hid(usage).is_none());
+        }
     }
 
     #[test]

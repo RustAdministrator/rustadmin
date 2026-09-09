@@ -14,6 +14,7 @@ KeyboardDispatcher _dispatcher() => KeyboardDispatcher(
         required deleteAfterGraphemes,
         required sourceLanguageTag,
         required sourceLayoutType,
+        required literal,
       }) {},
 );
 
@@ -40,6 +41,40 @@ KeyboardRoutingContext _context({
 );
 
 void main() {
+  test('recovery cannot send key-up without a started down lease', () async {
+    var released = false;
+    final dispatcher = KeyboardDispatcher(
+      canDispatch: () => true,
+      sendHid: ({required key, required action, required lockMask}) =>
+          released = true,
+      sendLegacy: ({required name, required down, required modifiers}) =>
+          released = true,
+      sendText:
+          ({
+            required text,
+            required deleteBeforeGraphemes,
+            required deleteAfterGraphemes,
+            required sourceLanguageTag,
+            required sourceLayoutType,
+            required literal,
+          }) {},
+    );
+    for (final transport in KeyboardPhysicalTransport.values) {
+      await dispatcher.dispatchRecoveryReleases([
+        PhysicalKeyboardDispatch(
+          lease: KeyboardPhysicalDispatchLease(
+            key: const HidKey(0x07, 0x04),
+            transport: transport,
+          ),
+          action: KeyboardIntentAction.up,
+          modifiers: const KeyboardModifiers(),
+          source: KeyboardInputSource.flutterKeyEvent,
+        ),
+      ]);
+    }
+    expect(released, isFalse);
+  });
+
   test('desktop and web use HID only in Map mode', () {
     final dispatcher = _dispatcher();
     for (final client in [
@@ -134,15 +169,18 @@ void main() {
             required deleteAfterGraphemes,
             required sourceLanguageTag,
             required sourceLayoutType,
+            required literal,
           }) {},
     );
 
     await dispatcher.dispatchAll([
-      const PhysicalKeyboardDispatch(
-        key: HidKey(HidKey.keyboardUsagePage, 0x46),
+      PhysicalKeyboardDispatch(
+        lease: KeyboardPhysicalDispatchLease(
+          key: const HidKey(HidKey.keyboardUsagePage, 0x46),
+          transport: KeyboardPhysicalTransport.legacy,
+        ),
         action: KeyboardIntentAction.down,
-        transport: KeyboardPhysicalTransport.legacy,
-        modifiers: KeyboardModifiers(),
+        modifiers: const KeyboardModifiers(),
         source: KeyboardInputSource.flutterKeyEvent,
       ),
     ]);
