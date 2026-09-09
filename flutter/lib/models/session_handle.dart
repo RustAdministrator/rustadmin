@@ -56,6 +56,7 @@ class SessionHandle<T> {
   Future<SessionStartLease<T>?>? _startFuture;
   Future<void>? _closeFuture;
   Future<void>? _remoteCloseFuture;
+  Future<void>? _eventCloseFuture;
   Future<void> _eventTail = Future<void>.value();
   StreamSubscription<T>? _subscription;
   int? _platformLeaseGeneration;
@@ -77,6 +78,8 @@ class SessionHandle<T> {
   bool accepts(int generation) => _lifecycle.accepts(generation);
 
   Future<void> waitForClose() async {
+    final eventClose = _eventCloseFuture;
+    if (eventClose != null) await eventClose;
     final remoteClose = _remoteCloseFuture;
     if (remoteClose != null) await remoteClose;
     final close = _closeFuture;
@@ -177,6 +180,54 @@ class SessionHandle<T> {
 
   void connected(int generation) => _lifecycle.connected(generation);
 
+  Future<void> bindEventStream(
+    SessionStartLease<T> lease, {
+    required bool Function(T event) isCloseEvent,
+    required Future<void> Function()? Function(T event) prepareEvent,
+    required void Function(Object error, StackTrace stackTrace) onError,
+    void Function()? onStreamClosed,
+  }) async {
+    var ended = false;
+    void finish() {
+      if (ended) return;
+      ended = true;
+      if (accepts(lease.generation)) {
+        try {
+          onStreamClosed?.call();
+        } catch (error, stackTrace) {
+          onError(error, stackTrace);
+        }
+      }
+      unawaited(remoteClosedAfterEvents(lease.generation).catchError(onError));
+    }
+
+    final subscription = lease.events.listen(
+      (event) {
+        if (ended || !accepts(lease.generation)) return;
+        if (isCloseEvent(event)) {
+          finish();
+        } else {
+          try {
+            // Capture authority before older asynchronous rendering completes.
+            final dispatch = prepareEvent(event);
+            if (dispatch != null) {
+              unawaited(dispatchEvent(
+                lease.generation,
+                dispatch,
+                onError: onError,
+              ));
+            }
+          } catch (error, stackTrace) {
+            onError(error, stackTrace);
+          }
+        }
+      },
+      onDone: finish,
+      onError: onError,
+    );
+    await bindSubscription(lease.generation, subscription);
+  }
+
   Future<void> dispatchEvent(
     int generation,
     Future<void> Function() dispatch, {
@@ -193,10 +244,18 @@ class SessionHandle<T> {
     return _eventTail;
   }
 
-  Future<void> remoteClosedAfterEvents(int generation) async {
-    if (!accepts(generation)) return;
-    await dispatchEvent(generation, () async {});
-    await remoteClosed(generation);
+  Future<void> remoteClosedAfterEvents(int generation) {
+    final active = _eventCloseFuture;
+    if (active != null) return active;
+    if (!accepts(generation)) return Future<void>.value();
+    late final Future<void> future;
+    future = dispatchEvent(generation, () async {})
+        .then((_) => remoteClosed(generation))
+        .whenComplete(() {
+          if (identical(_eventCloseFuture, future)) _eventCloseFuture = null;
+        });
+    _eventCloseFuture = future;
+    return future;
   }
 
   Future<void> remoteClosed(int generation) {
@@ -300,16 +359,12 @@ class SessionHandle<T> {
         await remoteClose;
       }
       try {
-        await _cancelSubscription();
+        await _eventTail;
       } finally {
         try {
-          await _eventTail;
+          await cleanup();
         } finally {
-          try {
-            await cleanup();
-          } finally {
-            _cleanupFinished = true;
-          }
+          _cleanupFinished = true;
         }
       }
     } finally {
@@ -321,9 +376,16 @@ class SessionHandle<T> {
         }
       } finally {
         try {
-          await _releasePlatformLeaseOnce();
+          // Cancellation of FRB's async* stream may need a native event to
+          // wake its ReceivePort. Close native first; beginClose already
+          // rejects stale callbacks, and replacement still waits for cancel.
+          await _cancelSubscription();
         } finally {
-          _lifecycle.closed(closeGeneration);
+          try {
+            await _releasePlatformLeaseOnce();
+          } finally {
+            _lifecycle.closed(closeGeneration);
+          }
         }
       }
     }

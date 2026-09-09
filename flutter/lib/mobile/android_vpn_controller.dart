@@ -184,12 +184,14 @@ class AndroidVpnSessionCoordinator {
 
   final Map<String, _PendingVpnLease> _pendingLeases = {};
   final StreamController<AndroidOutgoingSessionClosedEvent>
-      _sessionClosedController =
+  _sessionClosedController =
       StreamController<AndroidOutgoingSessionClosedEvent>.broadcast();
   bool _preparing = false;
   int _nextSessionGeneration = 0;
   int? _activeSessionGeneration;
   String _activeSessionId = '';
+  (String, int)? _releasedSession;
+  int? _notifiedCloseGeneration;
 
   Stream<AndroidOutgoingSessionClosedEvent> get sessionClosedEvents =>
       _sessionClosedController.stream;
@@ -341,6 +343,7 @@ class AndroidVpnSessionCoordinator {
     final lease = _pendingLeases.remove(peerId);
     lease?.expiry?.cancel();
     final generation = ++_nextSessionGeneration;
+    _releasedSession = null;
     final attached =
         await _platform.invoke('outgoing_session_attach', {
           'session_id': sessionId,
@@ -376,6 +379,11 @@ class AndroidVpnSessionCoordinator {
     });
     if (_activeSessionId == sessionId &&
         _activeSessionGeneration == generation) {
+      // The native service reports a background timeout after its drain delay,
+      // which may outlive the Rust event stream and this lease release.
+      if (generation == _nextSessionGeneration) {
+        _releasedSession = (sessionId, generation);
+      }
       _activeSessionId = '';
       _activeSessionGeneration = null;
     }
@@ -390,13 +398,21 @@ class AndroidVpnSessionCoordinator {
       String value => int.tryParse(value) ?? -1,
       _ => -1,
     };
-    if (sessionId != _activeSessionId ||
-        generation != _activeSessionGeneration) {
+    final matchesActive =
+        sessionId == _activeSessionId && generation == _activeSessionGeneration;
+    final matchesReleased =
+        _activeSessionGeneration == null &&
+        _releasedSession == (sessionId, generation);
+    if (generation != _nextSessionGeneration ||
+        generation == _notifiedCloseGeneration ||
+        (!matchesActive && !matchesReleased)) {
       _log(
         'Ignored stale Android outgoing session close: session=$sessionId, generation=$generation, activeSession=$_activeSessionId, activeGeneration=$_activeSessionGeneration',
       );
       return false;
     }
+    _releasedSession = null;
+    _notifiedCloseGeneration = generation;
     _sessionClosedController.add(
       AndroidOutgoingSessionClosedEvent(
         sessionId: sessionId,

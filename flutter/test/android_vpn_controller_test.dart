@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_hbb/mobile/android_vpn_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -9,6 +11,7 @@ class _FakeAndroidVpnPlatform implements AndroidVpnPlatformAdapter {
   Map<dynamic, dynamic>? attached;
   bool _vpnActive = false;
   int peerProbeCount = 0;
+  Completer<void>? attachGate;
 
   _FakeAndroidVpnPlatform(this.probes, {List<bool> vpnStates = const []})
     : vpnStates = List<bool>.from(vpnStates);
@@ -39,6 +42,7 @@ class _FakeAndroidVpnPlatform implements AndroidVpnPlatformAdapter {
         return true;
       case 'outgoing_session_attach':
         attached = Map<dynamic, dynamic>.from(arguments as Map);
+        await attachGate?.future;
         return true;
       case 'outgoing_session_release':
         releases.add(Map<dynamic, dynamic>.from(arguments as Map));
@@ -322,4 +326,48 @@ void main() {
     expect(platform.releases.single['generation'], 1);
     expect(coordinator.activeSessionGeneration, isNull);
   });
+
+  test(
+    'timeout after stream release is delivered once before the next attach',
+    () async {
+      final platform = _FakeAndroidVpnPlatform([]);
+      final coordinator = AndroidVpnSessionCoordinator.forTest(
+        platform: platform,
+        vpnActivationTimeout: const Duration(milliseconds: 100),
+        vpnRetryDelay: Duration.zero,
+        networkPollInterval: const Duration(milliseconds: 1),
+        peerReachabilityTimeout: const Duration(milliseconds: 100),
+        probeInterval: const Duration(milliseconds: 1),
+      );
+      final events = <AndroidOutgoingSessionClosedEvent>[];
+      final subscription = coordinator.sessionClosedEvents.listen(events.add);
+      Map<String, dynamic> closed(int generation) => {
+        'session_id': 'session-$generation',
+        'generation': generation,
+        'reason': 'background-timeout',
+      };
+
+      await coordinator.attach('10.0.0.2', 'session-1');
+      await coordinator.release(generation: 1);
+      expect(coordinator.handleNativeSessionClosed(closed(1)), isTrue);
+      expect(coordinator.handleNativeSessionClosed(closed(1)), isFalse);
+      await Future<void>.delayed(Duration.zero);
+      expect(events.map((event) => event.generation), [1]);
+
+      await coordinator.attach('10.0.0.2', 'session-2');
+      await coordinator.release(generation: 2);
+      platform.attachGate = Completer<void>();
+      final nextAttach = coordinator.attach('10.0.0.2', 'session-3');
+      expect(coordinator.handleNativeSessionClosed(closed(2)), isFalse);
+      platform.attachGate!.complete();
+      await nextAttach;
+      expect(coordinator.handleNativeSessionClosed(closed(2)), isFalse);
+      expect(coordinator.handleNativeSessionClosed(closed(3)), isTrue);
+      expect(coordinator.handleNativeSessionClosed(closed(3)), isFalse);
+      await Future<void>.delayed(Duration.zero);
+      expect(events.map((event) => event.generation), [1, 3]);
+      expect(platform.tunnelRequests, isEmpty);
+      await subscription.cancel();
+    },
+  );
 }
