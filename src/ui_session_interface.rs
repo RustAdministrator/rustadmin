@@ -2977,9 +2977,10 @@ mod mobile_soft_keyboard_tests {
             lc.version = get_version_number("1.2.0");
             lc.peer_info = capabilities.map(|keyboard| PeerInfo {
                 features: Some(Features {
-                    keyboard: Some(keyboard),
+                    keyboard: Some(keyboard).into(),
                     ..Default::default()
-                }),
+                })
+                .into(),
                 ..Default::default()
             });
             let config = lc.get_config();
