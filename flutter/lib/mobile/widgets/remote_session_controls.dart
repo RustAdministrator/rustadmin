@@ -987,9 +987,15 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
         final maximumExtent = _vertical
             ? _maximumVerticalButtonExtent
             : _maximumButtonExtent;
-        final extent = availableExtent.isFinite && availableExtent > 0
+        final previousExtent = availableExtent.isFinite && availableExtent > 0
             ? (availableExtent / itemCount).clamp(0.0, maximumExtent)
             : maximumExtent;
+        // Halve the visible icon gap after fitting to the available screen,
+        // including the already compact vertical layout. Keep icon size intact
+        // and do not enlarge slots on exceptionally narrow screens.
+        final extent = previousExtent > _iconSize
+            ? _iconSize + (previousExtent - _iconSize) * 0.5
+            : previousExtent;
         final items = _collapsed
             ? [
                 _iconButton(

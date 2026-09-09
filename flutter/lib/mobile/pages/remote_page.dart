@@ -25,6 +25,7 @@ import '../../common/session_peer_settings.dart';
 import '../../common/widgets/overlay.dart';
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/remote_input.dart';
+import '../../common/widgets/display_render_status.dart';
 import '../../models/input_model.dart';
 import '../../models/keyboard_intent.dart';
 import '../../models/android_render_target_controller.dart';
@@ -730,6 +731,16 @@ class _RemotePageState extends State<RemotePage>
                     ],
                   ),
                 ),
+              ),
+              DisplayRenderStatus(
+                model: gFFI.displayRenderStates,
+                translate: translate,
+                label: (display) =>
+                    '${translate("Display")} ${gFFI.ffiModel.pi.monitorLabel(display)}',
+                visible: (display) =>
+                    display < gFFI.ffiModel.pi.displays.length &&
+                    (gFFI.ffiModel.pi.currentDisplay == kAllDisplayValue ||
+                        gFFI.ffiModel.pi.currentDisplay == display),
               ),
               if (!isWebDesktop)
                 SafeArea(

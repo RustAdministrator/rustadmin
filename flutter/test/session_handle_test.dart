@@ -36,7 +36,7 @@ void main() {
       await session.bindEventStream(
         lease,
         isCloseEvent: (_) => false,
-        onClosed: authority.revoke,
+        onStreamClosed: authority.revoke,
         prepareEvent: (event) {
           if (event == 2) {
             authority.revoke();
@@ -80,7 +80,7 @@ void main() {
     await session.bindEventStream(
       lease,
       isCloseEvent: (event) => event == -1,
-      onClosed: () => throw StateError('close hook failed'),
+      onStreamClosed: () => throw StateError('close hook failed'),
       prepareEvent: (event) {
         if (event == 1) throw FormatException('invalid envelope');
         return () async => events.add(event);
@@ -178,8 +178,7 @@ void main() {
       await session.bindEventStream(
         lease,
         isCloseEvent: (_) => false,
-        prepareEvent: (_) =>
-            () async => trace.add('stale-event'),
+        prepareEvent: (_) => () async => trace.add('stale-event'),
         onError: (error, stack) => fail('event failed: $error'),
       );
       final close = session.close(
@@ -224,9 +223,8 @@ void main() {
         await session.bindEventStream(
           lease,
           isCloseEvent: (event) => event == -1,
-          onClosed: () => closeNotifications++,
-          prepareEvent: (event) =>
-              () async => events.add(event),
+          onStreamClosed: () => closeNotifications++,
+          prepareEvent: (event) => () async => events.add(event),
           onError: (error, stack) => fail('event stream failed'),
         );
         session.connected(lease.generation);
@@ -284,6 +282,69 @@ void main() {
     await replacement;
     expect(replaced, isTrue);
   });
+
+  for (final ending in ['authority', 'close', 'done']) {
+    test('screen $ending fences an active decode before stream drain', () async {
+      final stream = StreamController<int>(sync: true);
+      final authority = ScreenViewAuthority();
+      final decodeStarted = Completer<void>();
+      final decodeGate = Completer<void>();
+      var published = false;
+      var closed = 0;
+      var releases = 0;
+      final session = handle(
+        closeNative: () async => fail('remote end must not close native twice'),
+        releasePlatformLease: (_) async => releases++,
+      );
+      final lease = (await session.start(
+        acquirePlatformLease: () async => 1,
+        addNative: () async {},
+        startEvents: () => stream.stream,
+      ))!;
+      await session.bindEventStream(
+        lease,
+        isCloseEvent: (event) => event == -1,
+        prepareEvent: (event) {
+          if (event == 0) {
+            authority.revoke();
+            return null;
+          }
+          final epoch = authority.epoch;
+          return () async {
+            decodeStarted.complete();
+            await decodeGate.future;
+            published = authority.accepts(epoch);
+          };
+        },
+        onStreamClosed: () {
+          closed++;
+          authority.revoke();
+        },
+        onError: (error, stack) => fail('event stream failed: $error'),
+      );
+      stream.add(7);
+      await decodeStarted.future;
+      if (ending == 'authority') stream.add(0);
+      if (ending == 'close') {
+        stream.add(-1);
+        stream.add(-1);
+        stream.add(8);
+      }
+      if (ending == 'done') await stream.close();
+      expect(authority.allowed, isFalse);
+      expect(releases, 0);
+      decodeGate.complete();
+      if (ending != 'done') await stream.close();
+      await session.waitForClose();
+      expect(published, isFalse);
+      expect(closed, 1);
+      expect(releases, 1);
+      expect(
+        await session.prepareForReplacement(cleanupClosedSession: () async {}),
+        isTrue,
+      );
+    });
+  }
 
   test('legacy flags resolve one typed session kind', () {
     expect(

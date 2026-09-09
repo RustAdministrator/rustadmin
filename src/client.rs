@@ -109,6 +109,8 @@ use crate::ui_session_interface::SessionPermissionConfig;
 pub use super::lang::*;
 
 mod decoder_recovery;
+mod display_control;
+mod startup_recovery;
 pub mod file_trait;
 pub mod helper;
 pub mod io_loop;
@@ -4226,6 +4228,9 @@ pub struct DisplayMediaIntent {
     pub(crate) logical_session_generation: u64,
     pub(crate) aggregate_generation: u64,
     pub(crate) displays: Vec<DisplayActivation>,
+    // Compatibility work belongs to this snapshot, not a separately queued UI
+    // command that could arrive after a timer has already selected the display.
+    pub(crate) replacement_display: Option<usize>,
 }
 
 impl DisplayMediaIntent {

@@ -90,6 +90,18 @@ class ToolbarMenuCoordinator<T extends Object> extends ChangeNotifier {
 
     _generation += 1;
 
+    // A completed open may have lost its overlay before onClose is delivered
+    // (for example while its anchor is hidden or rebuilt). Only reconcile a
+    // settled open here: opening/closing phases still own pending user intent.
+    // Otherwise a click on the absent menu is misread as a toggle-close.
+    if (_phase == ToolbarMenuPhase.open &&
+        !_isGroupOpen() &&
+        _menus[_activeMenuId]?.isOpen() != true) {
+      _activeMenuId = null;
+      _openingGeneration = null;
+      _phase = ToolbarMenuPhase.closed;
+    }
+
     // A repeated activation toggles a pending open back off while another
     // anchor is closing.
     if (_pendingMenuId == id) {

@@ -58,9 +58,7 @@ impl PluginNativeHandler for PluginNativeSessionHandler {
                         let sessions = SESSION_HANDLER.sessions.read().unwrap();
                         for session in sessions.iter() {
                             if session.id == id {
-                                let round =
-                                    session.connection_round_state.lock().unwrap().new_round();
-                                crate::ui_session_interface::io_loop(session.clone(), round);
+                                session.run_connection_if_needed();
                             }
                         }
                     }

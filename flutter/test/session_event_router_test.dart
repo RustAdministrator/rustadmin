@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:flutter/services.dart';
+
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
@@ -18,6 +20,10 @@ class _RouterRustadminImpl implements Rustadmin {
 
   @override
   dynamic noSuchMethod(Invocation invocation) {
+    if (invocation.memberName == #getNextTextureKey ||
+        invocation.memberName == #getNextRenderTargetToken) {
+      return 1;
+    }
     if (invocation.memberName == #translate) {
       return invocation.namedArguments[#name] as String;
     }
@@ -41,6 +47,7 @@ class _RouterRustadminImpl implements Rustadmin {
         invocation.memberName == #isDisableGroupPanel ||
         invocation.memberName == #mainCurrentIsWayland ||
         invocation.memberName == #mainHasFileClipboard ||
+        invocation.memberName == #mainHasGpuTextureRender ||
         invocation.memberName == #sessionGetToggleOptionSync) {
       return false;
     }
@@ -84,6 +91,19 @@ void main() {
     isTest = true;
     rustadmin = _RouterRustadminImpl();
     platformFFI.initForTest(rustadmin);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('texture_rgba_renderer'),
+          (call) async => call.method == 'createTexture' ? -1 : null,
+        );
+  });
+
+  tearDownAll(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          const MethodChannel('texture_rgba_renderer'),
+          null,
+        );
   });
 
   setUp(() {
@@ -105,6 +125,53 @@ void main() {
     Get.delete<DesktopTabController>();
     removeSharedStates(peerId);
   });
+
+  test(
+    'routes authoritative display status without changing readiness',
+    () async {
+      final listener = ffi.ffiModel.startEventListener(ffi.sessionId, peerId);
+      await listener({
+        'name': 'screen_view_authority',
+        'connection_generation': 1,
+        'generation': 2,
+        'allowed': true,
+      });
+      final status = <String, dynamic>{
+        'name': 'display_render_state',
+        'display': 0,
+        'state': 'failed',
+        'connection_generation': 1,
+        'screen_authority_generation': 2,
+        'display_activation_generation': 1,
+        'render_target_generation': 0,
+        'stream_id': 0,
+        'submitted_frame_id': 0,
+        'sequence': 1,
+        'elapsed_ms': 110000,
+        'presentation_confirmed': false,
+      };
+      await listener(status);
+      expect(
+        ffi.displayRenderStates.states[0]!.phase,
+        DisplayRenderPhase.failed,
+      );
+      expect(ffi.ffiModel.waitForFirstImage.isTrue, isTrue);
+      await listener({...status, 'state': 'live', 'sequence': 0});
+      expect(
+        ffi.displayRenderStates.states[0]!.phase,
+        DisplayRenderPhase.failed,
+      );
+      await listener({
+        'name': 'screen_view_authority',
+        'connection_generation': 1,
+        'generation': 3,
+        'allowed': false,
+      });
+      expect(ffi.displayRenderStates.states, isEmpty);
+      await listener({...status, 'state': 'live', 'sequence': 2});
+      expect(ffi.displayRenderStates.states, isEmpty);
+    },
+  );
 
   test(
     'routes typed model events and rejects malformed known events',

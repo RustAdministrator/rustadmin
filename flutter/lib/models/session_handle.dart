@@ -184,8 +184,8 @@ class SessionHandle<T> {
     SessionStartLease<T> lease, {
     required bool Function(T event) isCloseEvent,
     required Future<void> Function()? Function(T event) prepareEvent,
-    void Function()? onClosed,
     required void Function(Object error, StackTrace stackTrace) onError,
+    void Function()? onStreamClosed,
   }) async {
     var ended = false;
     void finish() {
@@ -193,7 +193,7 @@ class SessionHandle<T> {
       ended = true;
       if (!accepts(lease.generation)) return;
       try {
-        onClosed?.call();
+        onStreamClosed?.call();
       } catch (error, stackTrace) {
         onError(error, stackTrace);
       } finally {

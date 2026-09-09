@@ -12,6 +12,7 @@ import 'package:window_manager/window_manager.dart';
 import '../../consts.dart';
 import '../../common/widgets/overlay.dart';
 import '../../common/widgets/remote_input.dart';
+import '../../common/widgets/display_render_status.dart';
 import '../../common.dart';
 import '../../common/session_peer_settings.dart';
 import '../../common/widgets/dialog.dart';
@@ -1028,6 +1029,16 @@ class _RemotePageState extends State<RemotePage>
     paints.add(PositionedQualityMonitor(
       qualityMonitorModel: _ffi.qualityMonitorModel,
       onBoundsChanged: (bounds) => _qualityMonitorBounds = bounds,
+    ));
+    paints.add(DisplayRenderStatus(
+      model: _ffi.displayRenderStates,
+      translate: translate,
+      label: (display) =>
+          '${translate("Display")} ${_ffi.ffiModel.pi.monitorLabel(display)}',
+      visible: (display) =>
+          display < _ffi.ffiModel.pi.displays.length &&
+          (_ffi.ffiModel.pi.currentDisplay == kAllDisplayValue ||
+              _ffi.ffiModel.pi.currentDisplay == display),
     ));
     return Stack(
       children: paints,

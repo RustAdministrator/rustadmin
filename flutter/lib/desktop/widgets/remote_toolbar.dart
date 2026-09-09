@@ -1055,6 +1055,9 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       closeGroup: _menuController.close,
       scheduleCallback: (callback) {
         WidgetsBinding.instance.addPostFrameCallback((_) => callback());
+        // addPostFrameCallback alone does not request a frame. An ignored open
+        // during overlay teardown must not wait for another click to reconcile.
+        WidgetsBinding.instance.ensureVisualUpdate();
       },
     )..addListener(_handleMenuCoordinatorChanged);
     _initDragBounds();

@@ -48,6 +48,7 @@ void main() {
   Future<void> pumpToolbar(
     WidgetTester tester, {
     ThemeData? theme,
+    Size surfaceSize = const Size(320, 600),
     Offset? cursorPosition,
     List<MobileRemoteToolbarMonitor> monitors = const [],
     MobileRemoteToolbarTransparencySettings transparencySettings =
@@ -66,8 +67,8 @@ void main() {
           : ThemeMode.light,
       home: Scaffold(
         body: SizedBox(
-          width: 320,
-          height: 600,
+          width: surfaceSize.width,
+          height: surfaceSize.height,
           child: MobileRemoteToolbar(
             onDisconnect: () {},
             onOptions: () {},
@@ -230,6 +231,18 @@ void main() {
     await pumpToolbar(tester, onPlacementChanged: (value) => placement = value);
     await tester.pump();
 
+    // Eight buttons previously fitted this 320px surface at 40px each. The
+    // 16px gap around a 24px icon becomes 8px, without shrinking the icon.
+    final horizontalGap =
+        tester.getCenter(find.byTooltip('Display and session options')).dx -
+        tester.getCenter(find.byTooltip('Collapse toolbar')).dx -
+        24;
+    expect(horizontalGap, 8);
+    expect(
+      tester.widget<IconButton>(find.widgetWithIcon(IconButton, Icons.tv)).iconSize,
+      24,
+    );
+
     expect(
       tester.getCenter(find.byTooltip('Collapse toolbar')).dx,
       lessThan(tester.getCenter(find.byTooltip('Disconnect')).dx),
@@ -251,7 +264,7 @@ void main() {
         tester.getCenter(find.byTooltip('Display and session options')).dy -
         tester.getCenter(find.byTooltip('Collapse toolbar')).dy -
         24;
-    expect(verticalIconGap, 12);
+    expect(verticalIconGap, 6);
     await tester.tap(find.byTooltip('Collapse toolbar'));
     await tester.pumpAndSettle();
     expect(find.byTooltip('Show toolbar'), findsOneWidget);
@@ -266,6 +279,22 @@ void main() {
 
     await tester.tap(find.byTooltip('Display and session options'));
     await tester.pump();
+  });
+
+  testWidgets('toolbar halves roomy gaps without enlarging narrow layouts', (
+    tester,
+  ) async {
+    for (final size in [const Size(800, 600), const Size(160, 600)]) {
+      await pumpToolbar(tester, surfaceSize: size);
+      await tester.pump();
+      final stride =
+          tester.getCenter(find.byTooltip('Display and session options')).dx -
+          tester.getCenter(find.byTooltip('Collapse toolbar')).dx;
+      // Roomy: 48 -> 36 (24px icon gap -> 12). Narrow: retain 160/8,
+      // since there was no positive icon gap to halve in the first place.
+      expect(stride, size.width == 800 ? 36 : 20);
+      expect(tester.takeException(), isNull);
+    }
   });
 
   testWidgets('collapse arrow follows toolbar orientation and nearest edge', (
