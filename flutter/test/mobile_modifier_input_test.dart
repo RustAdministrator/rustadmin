@@ -288,6 +288,24 @@ void main() {
     KeyboardEnabledState.delete(testFfi.id);
   });
 
+  test('latest Auto mode request routes hardware as HID after a pending Text change', () async {
+    final first = inputModel.setKeyboardInputMode(kKeyboardInputModeText);
+    final latest = inputModel.setKeyboardInputMode(kKeyboardInputModeAuto);
+    await Future.wait([first, latest]);
+    await inputModel.inputAndroidRemotePhysicalKey(
+      4, true, origin: KeyboardInputOrigin.hardware, textCandidate: 'a',
+    );
+    await inputModel.inputAndroidRemotePhysicalKey(
+      4, false, origin: KeyboardInputOrigin.hardware,
+    );
+    await inputModel.keyboardDispatchIdle;
+    expect(testImpl.committedTexts, isEmpty);
+    expect(testImpl.flutterKeyCalls, [
+      const _FlutterKeyCall(usbHid: 4, down: true),
+      const _FlutterKeyCall(usbHid: 4, down: false),
+    ]);
+  });
+
   for (final peer in [
     kPeerPlatformMacOS,
     kPeerPlatformWindows,

@@ -55,6 +55,7 @@ import 'platform_model.dart';
 import 'session_event.dart';
 import 'screen_view_authority.dart';
 import 'display_render_state.dart';
+import 'session_lifecycle.dart';
 import '../common/widgets/display_render_status.dart';
 import 'session_handle.dart';
 import 'package:flutter_hbb/utils/scale.dart';
@@ -5637,6 +5638,8 @@ class FFI {
   var connType = ConnType.defaultConn;
   late SessionHandle<EventToUI> _sessionHandle;
   bool get closed => _sessionHandle.isClosed;
+  bool get acceptsKeyboardModeChanges =>
+      !closed && _sessionHandle.phase != SessionPhase.closing;
   int? hostWindowId;
   Future<void> Function(FFI ffi, String peerId)? onAuthenticated;
 
@@ -5724,7 +5727,10 @@ class FFI {
 
   SessionHandle<EventToUI> _newSessionHandle() => SessionHandle<EventToUI>(
     sessionId: sessionId,
-    closeNative: () => bind.sessionClose(sessionId: sessionId),
+    closeNative: () async {
+      await inputModel.keyboardInputModes.endSession();
+      await bind.sessionClose(sessionId: sessionId);
+    },
     releasePlatformLease: isAndroid
         ? (generation) => AndroidVpnSessionCoordinator.instance.release(
             generation: generation,
@@ -5771,6 +5777,7 @@ class FFI {
       }
       _sessionHandle = _newSessionHandle();
     }
+    inputModel.keyboardInputModes.beginSession();
     screenViewAuthority.reset();
     displayRenderStates.clear(reset: true);
     this.hostWindowId = hostWindowId;
@@ -6024,6 +6031,7 @@ class FFI {
       isCloseEvent: (message) =>
           message is EventToUI_Event && message.field0 == 'close',
       onStreamClosed: () {
+        unawaited(inputModel.keyboardInputModes.endSession());
         revokeScreenContent();
         debugPrint('Exit session event loop');
       },
@@ -6107,6 +6115,7 @@ class FFI {
   }
 
   Future<void> _cleanupMobileSessionState() async {
+    await inputModel.keyboardInputModes.endSession();
     chatModel.close();
     for (final model in _terminalModels.values) {
       model.dispose();
@@ -6130,6 +6139,7 @@ class FFI {
   Future<void> resetMobileSessionForReconnect({
     required bool closeSession,
   }) {
+    unawaited(inputModel.keyboardInputModes.endSession());
     revokeScreenContent();
     return _sessionHandle.close(
       nativeClosePolicy: closeSession
@@ -6142,6 +6152,7 @@ class FFI {
   /// Close the remote session.
   Future<void> close(
       {bool closeSession = true, bool saveCanvasConfig = true}) {
+    unawaited(inputModel.keyboardInputModes.endSession());
     final hadRenderableFrame = imageModel.hasRenderableFrame;
     revokeScreenContent();
     return _sessionHandle.close(
@@ -6149,6 +6160,7 @@ class FFI {
             ? NativeSessionClosePolicy.requestClose
             : NativeSessionClosePolicy.alreadyClosed,
         cleanup: () async {
+          await inputModel.keyboardInputModes.idle;
           chatModel.close();
           // Close all terminal models
           for (final model in _terminalModels.values) {

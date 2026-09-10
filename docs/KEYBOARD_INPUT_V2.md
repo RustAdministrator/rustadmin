@@ -78,6 +78,28 @@ cleanup path.
 The setting is stored per peer. Existing `mobile-physical-key-input` values are
 used only as a one-time compatibility default when no V2 mode has been stored.
 
+### Mode application ownership
+
+`KeyboardInputModeController`, owned by InputModel, applies Auto/Text/Physical
+changes through one ordered, session-fenced command path. Every explicit
+request supersedes older requests and settings reads, including a request that
+matches the currently applied mode while another change is pending. New input
+is paused while the owner releases held keys and applies the preference;
+recovery key-up actions remain allowed.
+
+UI radio state, the legacy physical-key checkbox and native mobile editor
+configuration project the applied snapshot. They do not keep another mode
+value. The settings adapter retains the legacy compatibility key, writes it
+after the V2 preference, and checks request/session validity between writes.
+Admitted writes drain before native teardown and mobile SessionID reuse;
+unfinished reads cannot publish into a replacement session. Failed application
+blocks input until retry or a successful refresh, rather than using an
+uncertain preference. This is local command ordering, not a remote acknowledgement.
+
+Legacy/Map/Translate protocol selection and native desktop grab ownership are
+separate boundaries; this owner does not claim to consolidate that native key
+ledger or provide a negotiated reset/snapshot protocol.
+
 Text dispatch captures a `literal` flag before queueing. Auto/Text commits and
 text-routed keys set it; Physical commits retain the compatibility path. Both
 Flutter text FFI functions carry the flag explicitly, so Rust cannot reinterpret

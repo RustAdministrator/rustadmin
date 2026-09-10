@@ -108,8 +108,7 @@ class _RemotePageState extends State<RemotePage>
   var _toolbarPlacementSettings = MobileRemoteToolbarPlacementSettings.defaults;
   var _cursorInertiaSettings = MobileCursorInertiaSettings.defaults;
   var _showMonitorsInToolbar = false;
-  var _physicalKeyInput = true;
-  var _keyboardInputModeV2 = kKeyboardInputModeAuto;
+  late final _keyboardInputModes = inputModel.keyboardInputModes;
   var _quickKeyOrder = List<MobileRemoteQuickKey>.of(
     mobileRemoteDefaultQuickKeyOrder,
   );
@@ -122,7 +121,7 @@ class _RemotePageState extends State<RemotePage>
   bool get _usesAndroidNativeKeyboardInput => useAndroidNativeRemoteKeyboard(
     isAndroidClient: isAndroid,
     physicalKeyCapability: gFFI.ffiModel.pi.features.keyboardV2PhysicalKey,
-    inputMode: _keyboardInputModeV2,
+    inputMode: _keyboardInputModes.value.storedMode,
   );
 
   final _textController = MobileRemoteTextEditingController(
@@ -138,6 +137,7 @@ class _RemotePageState extends State<RemotePage>
   @override
   void initState() {
     super.initState();
+    _keyboardInputModes.addListener(_onKeyboardInputModeChanged);
     _reconnectController = MobileSessionReconnectController(
       resetSession: ({required closeSession}) =>
           gFFI.resetMobileSessionForReconnect(closeSession: closeSession),
@@ -269,19 +269,18 @@ class _RemotePageState extends State<RemotePage>
   }
 
   Future<void> _refreshMobileInputSettings() async {
+    final epoch = _keyboardInputModes.epoch;
     try {
+      await _keyboardInputModes.refresh();
+      if (!mounted || !_keyboardInputModes.accepts(epoch)) return;
       final settings = await _settingsRepository.readSession();
-      await gFFI.inputModel.setKeyboardInputMode(settings.keyboardInputMode);
       if (mounted &&
+          _keyboardInputModes.accepts(epoch) &&
           (settings.toolbarTransparency != _toolbarTransparencySettings ||
-              settings.cursorInertia != _cursorInertiaSettings ||
-              settings.physicalKeyInput != _physicalKeyInput ||
-              settings.keyboardInputMode != _keyboardInputModeV2)) {
+              settings.cursorInertia != _cursorInertiaSettings)) {
         setState(() {
           _toolbarTransparencySettings = settings.toolbarTransparency;
           _cursorInertiaSettings = settings.cursorInertia;
-          _physicalKeyInput = settings.physicalKeyInput;
-          _keyboardInputModeV2 = settings.keyboardInputMode;
         });
       }
     } catch (error) {
@@ -289,8 +288,35 @@ class _RemotePageState extends State<RemotePage>
     }
   }
 
+  void _onKeyboardInputModeChanged() {
+    if (!mounted) return;
+    setState(() {});
+    if (!_keyboardInputModes.canDispatch) {
+      unawaited(_setAndroidRemoteKeyboardInput(false));
+    } else if (_showEdit) {
+      final epoch = _keyboardInputModes.epoch;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _keyboardInputModes.accepts(epoch)) {
+          _requestMobileSoftKeyboard();
+        }
+      });
+    }
+  }
+
+  Future<void> _changeKeyboardInputMode(String mode, int epoch) async {
+    if (!mounted || !_keyboardInputModes.accepts(epoch)) return;
+    try {
+      await _keyboardInputModes.setMode(mode, persist: true);
+    } catch (error) {
+      if (!mounted || !_keyboardInputModes.accepts(epoch)) return;
+      debugPrint('Failed to change keyboard input mode: ${error.runtimeType}');
+      showToast(translate('Failed to change keyboard input mode'));
+    }
+  }
+
   @override
   void dispose() {
+    _keyboardInputModes.removeListener(_onKeyboardInputModeChanged);
     _reconnectController.dispose();
     _textController.removeListener(_handleSoftKeyboardEditingValue);
     WidgetsBinding.instance.removeObserver(this);
@@ -571,14 +597,16 @@ class _RemotePageState extends State<RemotePage>
   Future<void> _setAndroidRemoteKeyboardInput(bool enabled) async {
     if (!isAndroid) return;
     await gFFI.invokeMethod('set_remote_keyboard_input', {
-      'enabled': enabled && _usesAndroidNativeKeyboardInput,
+      'enabled': enabled &&
+          _keyboardInputModes.canDispatch &&
+          _usesAndroidNativeKeyboardInput,
       'session_id': sessionId.toString(),
-      'mode': _keyboardInputModeV2,
+      'mode': _keyboardInputModes.value.storedMode,
     });
   }
 
   void _requestMobileSoftKeyboard() {
-    if (!mounted || !_showEdit) return;
+    if (!mounted || !_showEdit || !_keyboardInputModes.canDispatch) return;
     if (_usesAndroidNativeKeyboardInput) {
       _mobileFocusNode.unfocus();
       unawaited(_setAndroidRemoteKeyboardInput(true));
@@ -1008,19 +1036,16 @@ class _RemotePageState extends State<RemotePage>
   }
 
   void showActions(String id) async {
+    final modeEpoch = _keyboardInputModes.epoch;
     final mobileActionMenus = _getMobileActionMenus();
     final menus = toolbarControls(context, id, gFFI);
     final keyboardToggles = toolbarKeyboardToggles(gFFI);
     final currentKeyboardMode =
         await bind.sessionGetKeyboardMode(sessionId: gFFI.sessionId) ??
         kKeyLegacyMode;
-    final mobileSettings = await _settingsRepository.readSession();
-    final physicalKeyInput = mobileSettings.physicalKeyInput;
+    if (!mounted || !_keyboardInputModes.accepts(modeEpoch)) return;
     final keyboardV2Supported =
         gFFI.ffiModel.pi.capabilities.keyboardV2CommittedText;
-    final keyboardInputMode = keyboardV2Supported
-        ? mobileSettings.keyboardInputMode
-        : null;
     final physicalKeyInputSupported =
         gFFI.ffiModel.pi.capabilities.physicalKeyInput(
       translateModeSupported: bind.sessionIsKeyboardModeSupported(
@@ -1080,26 +1105,7 @@ class _RemotePageState extends State<RemotePage>
                       ? null
                       : (value) async {
                           if (value == null) return;
-                          final keyboardWasOpen = _showEdit;
-                          await _setAndroidRemoteKeyboardInput(false);
-                          await gFFI.inputModel.setKeyboardInputMode(value);
-                          await _settingsRepository.storeKeyboardInputMode(
-                            value,
-                          );
-                          final physical = value != kKeyboardInputModeText;
-                          if (mounted) {
-                            setState(() {
-                              _physicalKeyInput = physical;
-                              _keyboardInputModeV2 = value;
-                            });
-                            if (keyboardWasOpen) {
-                              WidgetsBinding.instance.addPostFrameCallback((_) {
-                                if (mounted && _showEdit) {
-                                  _requestMobileSoftKeyboard();
-                                }
-                              });
-                            }
-                          }
+                          await _changeKeyboardInputMode(value, modeEpoch);
                         },
                 ),
           ]
@@ -1119,7 +1125,8 @@ class _RemotePageState extends State<RemotePage>
                         },
                 );
 
-            return CustomAlertDialog(
+            Widget buildDialog(BuildContext context, Widget? child) =>
+                CustomAlertDialog(
               contentBoxConstraints: BoxConstraints(
                 maxWidth: 500,
                 maxHeight: MediaQuery.sizeOf(dialogContext).height * 0.9,
@@ -1134,14 +1141,17 @@ class _RemotePageState extends State<RemotePage>
                         mode: currentKeyboardMode,
                         modes: keyboardModes,
                         modeHeading: translate('Keyboard mode'),
-                        inputMode: keyboardInputMode,
+                        inputMode: keyboardV2Supported
+                            ? _keyboardInputModes.value.storedMode
+                            : null,
                         inputModes: keyboardInputModes,
                         inputModeHeading: translate('Input mode'),
                         toggles: [
                           if (!keyboardV2Supported && physicalKeyInputSupported)
                             MobileRemoteToggleItem(
                               id: 'physical-key-input',
-                              value: physicalKeyInput,
+                              commitSelection: false,
+                              value: _keyboardInputModes.value.physicalKeyInput,
                               child: Text(
                                 translate(
                                   'Physical key input (VM compatibility)',
@@ -1154,15 +1164,10 @@ class _RemotePageState extends State<RemotePage>
                                       final mode = value
                                           ? kKeyboardInputModeAuto
                                           : kKeyboardInputModeText;
-                                      await gFFI.inputModel.setKeyboardInputMode(mode);
-                                      await _settingsRepository.storePhysicalKeyInput(
-                                        value,
+                                      await _changeKeyboardInputMode(
+                                        mode,
+                                        modeEpoch,
                                       );
-                                      if (!mounted) return;
-                                      setState(() {
-                                        _physicalKeyInput = value;
-                                        _keyboardInputModeV2 = mode;
-                                      });
                                     },
                             ),
                           for (var i = 0; i < keyboardToggles.length; i++)
@@ -1221,6 +1226,10 @@ class _RemotePageState extends State<RemotePage>
                     ),
                 ],
               ),
+            );
+            return AnimatedBuilder(
+              animation: _keyboardInputModes,
+              builder: buildDialog,
             );
           },
           clickMaskDismiss: true,

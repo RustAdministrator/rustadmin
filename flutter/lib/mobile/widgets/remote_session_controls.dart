@@ -1745,6 +1745,7 @@ class MobileRemoteToggleItem {
     required this.child,
     required this.onChanged,
     this.dividerBefore = false,
+    this.commitSelection = true,
   });
 
   final String id;
@@ -1752,6 +1753,8 @@ class MobileRemoteToggleItem {
   final Widget child;
   final ValueChanged<bool?>? onChanged;
   final bool dividerBefore;
+  /// False makes this a projection of [value], without optimistic local state.
+  final bool commitSelection;
 }
 
 bool mobileVmPhysicalInputEnabled(String storedValue) =>
@@ -2001,7 +2004,6 @@ class MobileRemoteKeyboardSettingsContent extends StatefulWidget {
 class _MobileRemoteKeyboardSettingsContentState
     extends State<MobileRemoteKeyboardSettingsContent> {
   late String _mode;
-  String? _inputMode;
   late Map<String, bool> _toggleValues;
 
   @override
@@ -2015,18 +2017,26 @@ class _MobileRemoteKeyboardSettingsContentState
     covariant MobileRemoteKeyboardSettingsContent oldWidget,
   ) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.mode != widget.mode ||
-        oldWidget.inputMode != widget.inputMode ||
-        oldWidget.toggles != widget.toggles) {
-      _resetValues();
+    if (oldWidget.mode != widget.mode) _mode = widget.mode;
+    if (oldWidget.toggles != widget.toggles) {
+      final previous = {
+        for (final toggle in oldWidget.toggles) toggle.id: toggle.value,
+      };
+      _toggleValues = {
+        for (final toggle in widget.toggles)
+          if (toggle.commitSelection)
+            toggle.id: previous[toggle.id] == toggle.value
+                ? _toggleValues[toggle.id] ?? toggle.value
+                : toggle.value,
+      };
     }
   }
 
   void _resetValues() {
     _mode = widget.mode;
-    _inputMode = widget.inputMode;
     _toggleValues = {
-      for (final toggle in widget.toggles) toggle.id: toggle.value,
+      for (final toggle in widget.toggles)
+        if (toggle.commitSelection) toggle.id: toggle.value,
     };
   }
 
@@ -2069,23 +2079,20 @@ class _MobileRemoteKeyboardSettingsContentState
             ),
           ),
         ],
-        if (widget.inputModes.isNotEmpty && _inputMode != null) ...[
+        if (widget.inputModes.isNotEmpty && widget.inputMode != null) ...[
           if (widget.modes.isNotEmpty) const Divider(),
           Text(
             widget.inputModeHeading,
             style: Theme.of(context).textTheme.labelLarge,
           ),
           RadioGroup<String>(
-            groupValue: _inputMode,
+            groupValue: widget.inputMode,
             onChanged: (value) {
               if (value == null) return;
               final item = widget.inputModes.firstWhere(
                 (candidate) => candidate.value == value,
               );
               item.onChanged?.call(value);
-              if (item.commitSelection && item.onChanged != null) {
-                setState(() => _inputMode = value);
-              }
             },
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -2110,12 +2117,14 @@ class _MobileRemoteKeyboardSettingsContentState
           CheckboxListTile(
             contentPadding: EdgeInsets.zero,
             visualDensity: VisualDensity.compact,
-            value: _toggleValues[toggle.id] ?? toggle.value,
+            value: toggle.commitSelection
+                ? _toggleValues[toggle.id] ?? toggle.value
+                : toggle.value,
             onChanged: toggle.onChanged == null
                 ? null
                 : (value) {
                     toggle.onChanged?.call(value);
-                    if (value != null) {
+                    if (value != null && toggle.commitSelection) {
                       setState(() => _toggleValues[toggle.id] = value);
                     }
                   },
@@ -2318,12 +2327,14 @@ class _MobileRemoteOptionsContentState
           key: Key('mobile-remote-options-toggle-${toggle.id}'),
           contentPadding: EdgeInsets.zero,
           visualDensity: VisualDensity.compact,
-          value: _toggleValues[toggle.id] ?? toggle.value,
+          value: toggle.commitSelection
+              ? _toggleValues[toggle.id] ?? toggle.value
+              : toggle.value,
           onChanged: toggle.onChanged == null
               ? null
               : (value) {
                   toggle.onChanged?.call(value);
-                  if (value != null) {
+                  if (value != null && toggle.commitSelection) {
                     setState(() => _toggleValues[toggle.id] = value);
                   }
                 },

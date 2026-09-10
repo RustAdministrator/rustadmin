@@ -19,6 +19,7 @@ import 'relative_mouse_model.dart';
 import 'keyboard_dispatcher.dart';
 import 'keyboard_event_normalizer.dart';
 import 'keyboard_input_controller.dart';
+import 'keyboard_input_mode_controller.dart';
 import 'keyboard_intent.dart';
 import 'keyboard_lock_modes.dart';
 import 'keyboard_text_policy.dart';
@@ -26,6 +27,7 @@ import 'keyboard_modifier_controller.dart';
 import '../common.dart';
 import '../consts.dart';
 import '../mobile/mobile_modifier_state.dart';
+import '../mobile/mobile_remote_settings_repository.dart';
 import '../mobile/mobile_viewport.dart';
 
 /// Mouse button enum.
@@ -184,8 +186,7 @@ class InputModel {
   final _flutterKeyboardNormalizer = FlutterKeyboardEventNormalizer();
   final _androidKeyboardNormalizer = AndroidHardwareKeyboardNormalizer();
   final _toolbarKeyboardNormalizer = MobileToolbarKeyboardNormalizer();
-  ControllerKeyboardInputMode _keyboardInputMode =
-      ControllerKeyboardInputMode.auto;
+  late final KeyboardInputModeController keyboardInputModes;
 
   // trackpad
   var _trackpadLastDelta = Offset.zero;
@@ -285,8 +286,25 @@ class InputModel {
 
   InputModel(this.parent) {
     sessionId = parent.target!.sessionId;
+    final modeSettings = MobileRemoteSettingsRepository.forSession(sessionId);
+    keyboardInputModes = KeyboardInputModeController(
+      resetKeyboard: () => resetKeyboard(
+        KeyboardResetReason.inputModeChange,
+        invalidatePending: true,
+        allowBlockedReleases: true,
+      ),
+      readMode: modeSettings.readKeyboardInputMode,
+      writeMode: (mode, isCurrent) => modeSettings.storeKeyboardInputMode(
+        mode,
+        isCurrent: isCurrent,
+      ),
+      sessionIsActive: () => parent.target?.acceptsKeyboardModeChanges ?? false,
+    );
     _keyboardInput = KeyboardInputController(
-      canDispatch: () => keyboardPerm && !isViewOnly && !isViewCamera,
+      canDispatch: () => keyboardInputModes.canDispatch &&
+          keyboardPerm &&
+          !isViewOnly &&
+          !isViewCamera,
       composeDeadKey: (accent, base) async {
         final value = await platformFFI.invokeMethod(
           'compose_remote_dead_key',
@@ -470,26 +488,14 @@ class InputModel {
 
   KeyboardRoutingContext get _keyboardRoutingContext => KeyboardRoutingContext(
     keyboardMode: _controllerKeyboardMode,
-    inputMode: _keyboardInputMode,
+    inputMode: keyboardInputModes.value.mode,
     clientKind: _keyboardClientKind,
     peerIsAndroid: peerPlatform == kPeerPlatformAndroid,
     ignoreMeta: isWindows || isLinux,
   );
 
-  Future<void> setKeyboardInputMode(String mode) async {
-    final next = switch (mode) {
-      kKeyboardInputModeText => ControllerKeyboardInputMode.text,
-      kKeyboardInputModePhysical => ControllerKeyboardInputMode.physical,
-      _ => ControllerKeyboardInputMode.auto,
-    };
-    if (next == _keyboardInputMode) return;
-    await resetKeyboard(
-      KeyboardResetReason.inputModeChange,
-      invalidatePending: true,
-      allowBlockedReleases: true,
-    );
-    _keyboardInputMode = next;
-  }
+  Future<bool> setKeyboardInputMode(String mode, {bool persist = false}) =>
+      keyboardInputModes.setMode(mode, persist: persist);
 
   Future<void> resetKeyboard(
     KeyboardResetReason reason, {

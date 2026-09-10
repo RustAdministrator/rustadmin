@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/common/remote_toolbar_settings.dart';
 import 'package:flutter_hbb/mobile/mobile_remote_settings_repository.dart';
@@ -5,6 +7,30 @@ import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('retired mode write cannot start or update a compatibility mirror', () async {
+    var current = false;
+    final primary = Completer<void>();
+    final writes = <String>[];
+    final repository = MobileRemoteSettingsRepository(
+      readUserDefault: (_) => '',
+      readLocal: (_) => '',
+      readPeer: (_) async => '',
+      writePeer: (key, value) async {
+        writes.add('$key=$value');
+        await primary.future;
+      },
+    );
+    await repository.storeKeyboardInputMode('physical', isCurrent: () => current);
+    expect(writes, isEmpty);
+    current = true;
+    final write = repository.storeKeyboardInputMode('text', isCurrent: () => current);
+    expect(writes, ['$kOptionKeyboardInputModeV2=text']);
+    current = false;
+    primary.complete();
+    await write;
+    expect(writes, ['$kOptionKeyboardInputModeV2=text']);
+  });
+
   test('explicit new mode overrides every legacy physical flag in the snapshot', () async {
     for (final mode in ['auto', 'text', 'physical', 'PHYSICAL', 'future-mode']) {
       for (final legacy in ['', 'Y', 'N', 'n']) {

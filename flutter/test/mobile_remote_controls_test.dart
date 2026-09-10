@@ -10,6 +10,52 @@ import 'package:flutter_hbb/models/monitor_labels.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  testWidgets('keyboard input choices only project the owner-applied value', (tester) async {
+    var applied = kKeyboardInputModeAuto;
+    String? requested;
+    bool? physicalRequested;
+    late StateSetter publish;
+    await tester.pumpWidget(MaterialApp(home: Scaffold(
+      body: StatefulBuilder(builder: (context, setState) {
+        publish = setState;
+        return MobileRemoteKeyboardSettingsContent(
+          mode: 'legacy',
+          modes: const [],
+          inputMode: applied,
+          inputModes: [
+            for (final mode in [kKeyboardInputModeAuto, kKeyboardInputModeText])
+              MobileRemoteRadioItem(
+                value: mode,
+                child: Text(mode),
+                onChanged: (value) => requested = value,
+              ),
+          ],
+          toggles: [MobileRemoteToggleItem(
+            id: 'physical-key-input',
+            value: applied != kKeyboardInputModeText,
+            child: const Text('Physical keys'),
+            commitSelection: false,
+            onChanged: (value) => physicalRequested = value,
+          )],
+        );
+      }),
+    )));
+    await tester.tap(find.text(kKeyboardInputModeText));
+    await tester.pump();
+    expect(requested, kKeyboardInputModeText);
+    expect(tester.widget<RadioGroup<String>>(find.byType(RadioGroup<String>)).groupValue,
+        kKeyboardInputModeAuto);
+    await tester.tap(find.text('Physical keys'));
+    await tester.pump();
+    expect(physicalRequested, isFalse);
+    expect(tester.widget<CheckboxListTile>(find.byType(CheckboxListTile)).value, isTrue);
+    publish(() => applied = kKeyboardInputModeText);
+    await tester.pump();
+    expect(tester.widget<RadioGroup<String>>(find.byType(RadioGroup<String>)).groupValue,
+        kKeyboardInputModeText);
+    expect(tester.widget<CheckboxListTile>(find.byType(CheckboxListTile)).value, isFalse);
+  });
+
   test('VM physical input defaults on and preserves explicit opt out', () {
     expect(mobileVmPhysicalInputEnabled(''), isTrue);
     expect(mobileVmPhysicalInputEnabled('Y'), isTrue);

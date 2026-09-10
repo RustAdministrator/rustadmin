@@ -144,15 +144,14 @@ class MobileRemoteSettingsSnapshot {
     required this.toolbarTransparency,
     required this.toolbarPlacement,
     required this.cursorInertia,
-    required this.physicalKeyInput,
     required this.keyboardInputMode,
   });
 
   final MobileRemoteToolbarTransparencySettings toolbarTransparency;
   final MobileRemoteToolbarPlacementSettings toolbarPlacement;
   final MobileCursorInertiaSettings cursorInertia;
-  final bool physicalKeyInput;
   final String keyboardInputMode;
+  bool get physicalKeyInput => keyboardInputMode != kKeyboardInputModeText;
 }
 
 class MobileRemoteSettingsRepository {
@@ -229,7 +228,6 @@ class MobileRemoteSettingsRepository {
           MobileRemoteSettingsRegistry.cursorInertiaDefault,
         ).toString(),
       ),
-      physicalKeyInput: physicalKeyInput,
       keyboardInputMode: mobileKeyboardInputV2Mode(
         '',
         mobileVmPhysicalInputOption(physicalKeyInput),
@@ -245,14 +243,7 @@ class MobileRemoteSettingsRepository {
     final cursorInertia = await _readPeer(
       MobileRemoteSettingsRegistry.cursorInertiaPeer,
     );
-    final legacyPhysicalKeyInput =
-        await _readPeer(MobileRemoteSettingsRegistry.physicalKeyInput) ?? true;
-    final storedKeyboardInputMode =
-        await _readPeer(MobileRemoteSettingsRegistry.keyboardInputMode) ?? '';
-    final keyboardInputMode = mobileKeyboardInputV2Mode(
-      storedKeyboardInputMode,
-      mobileVmPhysicalInputOption(legacyPhysicalKeyInput),
-    );
+    final keyboardInputMode = await readKeyboardInputMode();
     return MobileRemoteSettingsSnapshot(
       toolbarTransparency: MobileRemoteToolbarTransparencySettings.fromStored(
         overlapOpacityPercent:
@@ -266,7 +257,6 @@ class MobileRemoteSettingsRepository {
         (cursorInertia ?? defaults.cursorInertia.durationMs).toString(),
         fallback: defaults.cursorInertia,
       ),
-      physicalKeyInput: keyboardInputMode != kKeyboardInputModeText,
       keyboardInputMode: keyboardInputMode,
     );
   }
@@ -308,9 +298,22 @@ class MobileRemoteSettingsRepository {
         value ? kKeyboardInputModeAuto : kKeyboardInputModeText,
       );
 
-  Future<void> storeKeyboardInputMode(String value) async {
+  Future<String> readKeyboardInputMode() async {
+    final legacy =
+        await _readPeer(MobileRemoteSettingsRegistry.physicalKeyInput) ?? true;
+    final mode =
+        await _readPeer(MobileRemoteSettingsRegistry.keyboardInputMode) ?? '';
+    return mobileKeyboardInputV2Mode(mode, mobileVmPhysicalInputOption(legacy));
+  }
+
+  Future<void> storeKeyboardInputMode(
+    String value, {
+    bool Function()? isCurrent,
+  }) async {
     final mode = mobileKeyboardInputV2Mode(value, '');
+    if (isCurrent != null && !isCurrent()) return;
     await _storePeer(MobileRemoteSettingsRegistry.keyboardInputMode, mode);
+    if (isCurrent != null && !isCurrent()) return;
     await _storePeer(
       MobileRemoteSettingsRegistry.physicalKeyInput,
       mode != kKeyboardInputModeText,
