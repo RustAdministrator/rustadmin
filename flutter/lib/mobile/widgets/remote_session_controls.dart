@@ -606,7 +606,6 @@ class MobileRemoteToolbar extends StatefulWidget {
     this.onKeyboard,
     this.onGestureHelp,
     this.onMobileActions,
-    this.chatButton,
     this.monitors = const [],
     this.cursorPosition,
     this.transparencySettings =
@@ -628,7 +627,6 @@ class MobileRemoteToolbar extends StatefulWidget {
   final VoidCallback? onKeyboard;
   final VoidCallback? onGestureHelp;
   final VoidCallback? onMobileActions;
-  final Widget? chatButton;
   final List<MobileRemoteToolbarMonitor> monitors;
   final Offset? cursorPosition;
   final MobileRemoteToolbarTransparencySettings transparencySettings;
@@ -642,6 +640,7 @@ class MobileRemoteToolbar extends StatefulWidget {
 
 class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
   static const _iconSize = 24.0;
+  static const _thicknessScale = 1.5;
   static const _maximumButtonExtent = 48.0;
   static const _maximumVerticalButtonExtent =
       _iconSize + (_maximumButtonExtent - _iconSize) * 0.5;
@@ -651,6 +650,10 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
 
   bool get _vertical =>
       _placementSettings.axis == MobileRemoteToolbarAxis.vertical;
+
+  Size _buttonSize(double extent) => _vertical
+      ? Size(extent * _thicknessScale, extent)
+      : Size(extent, extent * _thicknessScale);
 
   bool get _collapseTowardPositiveEdge => _vertical
       ? _placementSettings.horizontalPosition >= 0.5
@@ -760,8 +763,8 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
     required IconData icon,
     required VoidCallback? onPressed,
   }) {
-    return SizedBox.square(
-      dimension: extent,
+    return SizedBox.fromSize(
+      size: _buttonSize(extent),
       child: IconButton(
         tooltip: tooltip,
         color: mobileRemoteToolbarForegroundColor(context),
@@ -774,28 +777,9 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
     );
   }
 
-  Widget _itemSlot(Widget child, double extent) {
-    return SizedBox.square(
-      dimension: extent,
-      child: IconButtonTheme(
-        data: IconButtonThemeData(
-          style: ButtonStyle(
-            fixedSize: WidgetStatePropertyAll(Size.square(extent)),
-            padding: const WidgetStatePropertyAll(EdgeInsets.zero),
-            iconSize: const WidgetStatePropertyAll(_iconSize),
-            foregroundColor: WidgetStatePropertyAll(
-              mobileRemoteToolbarForegroundColor(context),
-            ),
-          ),
-        ),
-        child: child,
-      ),
-    );
-  }
-
   Widget _orientationButton(double extent) {
-    return SizedBox.square(
-      dimension: extent,
+    return SizedBox.fromSize(
+      size: _buttonSize(extent),
       child: IconButton(
         tooltip: _vertical ? 'Horizontal toolbar' : 'Vertical toolbar',
         color: mobileRemoteToolbarForegroundColor(context),
@@ -829,8 +813,8 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
     final foreground = monitor.selected
         ? mobileRemoteAccentColor
         : mobileRemoteToolbarForegroundColor(context);
-    return SizedBox.square(
-      dimension: extent,
+    return SizedBox.fromSize(
+      size: _buttonSize(extent),
       child: IconButton(
         key: ValueKey('mobile-remote-monitor-${monitor.value}'),
         tooltip: monitor.tooltip,
@@ -839,36 +823,34 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
         padding: EdgeInsets.zero,
         splashRadius: extent / 2,
         onPressed: monitor.onPressed,
-        icon: monitor.allDisplays
-            ? const Icon(Icons.grid_view)
-            : Stack(
-                alignment: Alignment.center,
-                children: [
-                  const Icon(Icons.desktop_windows_outlined, size: 27),
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 3),
-                    child: SizedBox(
-                      width: 14,
-                      height: 10,
-                      child: FittedBox(
-                        fit: BoxFit.scaleDown,
-                        child: Text(
-                          monitor.label,
-                          key: ValueKey(
-                            'mobile-remote-monitor-label-${monitor.value}',
-                          ),
-                          style: TextStyle(
-                            color: foreground,
-                            fontSize: 9,
-                            fontWeight: FontWeight.w700,
-                            height: 1,
-                          ),
-                        ),
-                      ),
+        icon: Stack(
+          alignment: Alignment.center,
+          children: [
+            const Icon(Icons.desktop_windows_outlined, size: 27),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 3),
+              child: SizedBox(
+                width: 14,
+                height: 10,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    monitor.allDisplays ? '#' : monitor.label,
+                    key: ValueKey(
+                      'mobile-remote-monitor-label-${monitor.value}',
+                    ),
+                    style: TextStyle(
+                      color: foreground,
+                      fontSize: 9,
+                      fontWeight: FontWeight.w700,
+                      height: 1,
                     ),
                   ),
-                ],
+                ),
               ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -881,8 +863,8 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
       button: true,
       toggled: widget.qualityMonitorVisible,
       label: widget.qualityMonitorTooltip,
-      child: SizedBox.square(
-        dimension: extent,
+      child: SizedBox.fromSize(
+        size: _buttonSize(extent),
         child: IconButton(
           key: const Key('mobile-remote-quality-monitor'),
           tooltip: widget.qualityMonitorTooltip,
@@ -928,7 +910,8 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
         onPressed: widget.onOptions,
       ),
       _qualityMonitorButton(extent),
-      for (final monitor in widget.monitors) _monitorButton(monitor, extent),
+      for (final monitor in widget.monitors)
+        if (!monitor.allDisplays) _monitorButton(monitor, extent),
     ];
     if (widget.showInputControls) {
       items.add(
@@ -954,11 +937,9 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
         ),
       );
     }
-    final chatButton = widget.chatButton;
-    if (chatButton != null) {
-      items.add(_itemSlot(chatButton, extent));
-    }
     items.addAll([
+      for (final monitor in widget.monitors)
+        if (monitor.allDisplays) _monitorButton(monitor, extent),
       _iconButton(
         extent: extent,
         tooltip: 'More actions',
@@ -1010,9 +991,10 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
                 ),
               ]
             : _expandedItems(extent);
+        final buttonSize = _buttonSize(extent);
         final toolbarSize = _vertical
-            ? Size(extent, extent * itemCount)
-            : Size(extent * itemCount, extent);
+            ? Size(buttonSize.width, extent * itemCount)
+            : Size(extent * itemCount, buttonSize.height);
         final position = _clampPosition(
           _position(constraints, toolbarSize),
           constraints,
@@ -1021,13 +1003,13 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
         final toolbarRect = position & toolbarSize;
         final toolbarOverlapRect = mobileRemoteToolbarOverlapRect(
           toolbarRect: toolbarRect,
-          toolbarThickness: extent,
+          toolbarThickness: extent * _thicknessScale,
         );
         final qualityMonitorButtonOffset = _vertical
             ? Offset(0, extent * 2)
             : Offset(extent * 2, 0);
         final qualityMonitorButtonRect =
-            (position + qualityMonitorButtonOffset) & Size.square(extent);
+            (position + qualityMonitorButtonOffset) & buttonSize;
         final cursorOverlapsActiveQualityMonitor =
             widget.qualityMonitorVisible &&
             widget.cursorPosition != null &&

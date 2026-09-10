@@ -788,48 +788,28 @@ class _RemotePageState extends State<RemotePage>
   Widget getFloatingToolbar() {
     final ffiModel = Provider.of<FfiModel>(context);
     final cursorModel = Provider.of<CursorModel>(context);
-    final chatButton = isWeb
-        ? null
-        : futureBuilder(
-            future: gFFI.invokeMethod("get_value", "KEY_IS_SUPPORT_VOICE_CALL"),
-            hasData: (isSupportVoiceCall) => IconButton(
-              tooltip: translate('Chat'),
-              color: mobileRemoteToolbarForegroundColor(context),
-              icon: isAndroid && isSupportVoiceCall
-                  ? SvgPicture.asset(
-                      'assets/chat.svg',
-                      colorFilter: ColorFilter.mode(
-                        mobileRemoteToolbarForegroundColor(context),
-                        BlendMode.srcIn,
-                      ),
-                    )
-                  : Icon(Icons.message),
-              onPressed: () => isAndroid && isSupportVoiceCall
-                  ? showChatOptions(widget.id)
-                  : onPressedTextChat(widget.id),
-            ),
-          );
     return ListenableBuilder(
       listenable: gFFI.qualityMonitorModel.showListenable,
       builder: (context, _) => Obx(() {
         final pi = ffiModel.pi;
         final monitorLabels = pi.monitorLabels;
         final currentDisplay = CurrentDisplayState.find(widget.id).value;
-        final monitors = !_showMonitorsInToolbar || pi.displays.length <= 1
+        final monitors = pi.displays.length <= 1
             ? const <MobileRemoteToolbarMonitor>[]
             : <MobileRemoteToolbarMonitor>[
-                for (final index in pi.monitorOrder)
-                  MobileRemoteToolbarMonitor(
-                    value: index,
-                    label: monitorLabels[index],
-                    tooltip: '#${monitorLabels[index]} ${translate('Monitor')}',
-                    selected: currentDisplay == index,
-                    onPressed: () {
-                      if (currentDisplay != index) {
-                        openMonitorInTheSameTab(index, gFFI, pi);
-                      }
-                    },
-                  ),
+                if (_showMonitorsInToolbar)
+                  for (final index in pi.monitorOrder)
+                    MobileRemoteToolbarMonitor(
+                      value: index,
+                      label: monitorLabels[index],
+                      tooltip: '#${monitorLabels[index]} ${translate('Monitor')}',
+                      selected: currentDisplay == index,
+                      onPressed: () {
+                        if (currentDisplay != index) {
+                          openMonitorInTheSameTab(index, gFFI, pi);
+                        }
+                      },
+                    ),
                 if (!isWeb && pi.isSupportMultiDisplay)
                   MobileRemoteToolbarMonitor(
                     value: kAllDisplayValue,
@@ -890,7 +870,6 @@ class _RemotePageState extends State<RemotePage>
           qualityMonitorVisible: gFFI.qualityMonitorModel.showListenable.value,
           onQualityMonitor: () => unawaited(_toggleQualityMonitor()),
           qualityMonitorTooltip: translate('Quality monitor'),
-          chatButton: chatButton,
           monitors: monitors,
           cursorPosition:
               cursorModel.mobileViewportPosition - const Offset(8, 8),
@@ -1220,7 +1199,17 @@ class _RemotePageState extends State<RemotePage>
                       ],
                     ),
                 ],
-                actions: [for (final menu in menus) actionItem(menu)],
+                actions: [
+                  if (!isWeb)
+                    MobileRemoteActionItem(
+                      child: Text(translate('Chat')),
+                      onPressed: () {
+                        close();
+                        Future<void>.delayed(Duration.zero, _openChat);
+                      },
+                    ),
+                  for (final menu in menus) actionItem(menu),
+                ],
                 navigationItems: [
                   if (!gFFI.ffiModel.viewOnly)
                     MobileRemoteNavigationItem(
@@ -1319,6 +1308,17 @@ class _RemotePageState extends State<RemotePage>
         ),
       ),
     );
+  }
+
+  Future<void> _openChat() async {
+    final supportsVoice = isAndroid &&
+        await gFFI.invokeMethod('get_value', 'KEY_IS_SUPPORT_VOICE_CALL') == true;
+    if (!mounted) return;
+    if (supportsVoice) {
+      await showChatOptions(widget.id);
+    } else {
+      onPressedTextChat(widget.id);
+    }
   }
 
   onPressedTextChat(String id) {

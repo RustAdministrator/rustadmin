@@ -249,6 +249,8 @@ void main() {
     );
 
     final toolbar = find.byKey(const Key('mobile-remote-floating-toolbar'));
+    expect(tester.getSize(toolbar).height, 32 * 1.5);
+    expect(tester.getSize(find.byTooltip('Keyboard')), const Size(32, 48));
     final before = tester.getTopLeft(toolbar);
     await tester.drag(toolbar, const Offset(-60, -80));
     await tester.pumpAndSettle();
@@ -265,9 +267,12 @@ void main() {
         tester.getCenter(find.byTooltip('Collapse toolbar')).dy -
         24;
     expect(verticalIconGap, 6);
+    expect(tester.getSize(toolbar).width, 30 * 1.5);
+    expect(tester.getSize(find.byTooltip('Keyboard')), const Size(45, 30));
     await tester.tap(find.byTooltip('Collapse toolbar'));
     await tester.pumpAndSettle();
     expect(find.byTooltip('Show toolbar'), findsOneWidget);
+    expect(tester.getSize(toolbar), const Size(45, 30));
 
     await tester.tap(find.byTooltip('Show toolbar'));
     await tester.pumpAndSettle();
@@ -360,6 +365,55 @@ void main() {
         lessThan(tester.getCenter(find.byTooltip('#3 monitor')).dx));
   });
 
+  for (final axis in MobileRemoteToolbarAxis.values) {
+    testWidgets('all-monitor hash button precedes More actions in $axis',
+        (tester) async {
+      var selected = 0;
+      await pumpToolbar(
+        tester,
+        placementSettings: MobileRemoteToolbarPlacementSettings(
+          axis: axis,
+          horizontalPosition: 0.5,
+          verticalPosition: 0.5,
+        ),
+        monitors: [
+          // All-displays remains useful when individual monitor buttons are hidden.
+          MobileRemoteToolbarMonitor(
+            value: kAllDisplayValue,
+            label: 'All',
+            tooltip: 'All monitors',
+            selected: true,
+            allDisplays: true,
+            onPressed: () => selected = kAllDisplayValue,
+          ),
+        ],
+      );
+      await tester.pumpAndSettle();
+      final all = find.byTooltip('All monitors');
+      final more = find.byTooltip('More actions');
+      expect(find.descendant(of: all, matching: find.text('#')), findsOneWidget);
+      expect(find.byIcon(Icons.grid_view), findsNothing);
+      expect(find.byTooltip('Chat'), findsNothing);
+      expect(
+        tester.widget<IconButton>(find.byKey(
+          ValueKey('mobile-remote-monitor-$kAllDisplayValue'),
+        )).color,
+        mobileRemoteAccentColor,
+      );
+      final allRect = tester.getRect(all);
+      final moreRect = tester.getRect(more);
+      if (axis == MobileRemoteToolbarAxis.horizontal) {
+        expect(allRect.right, moreRect.left);
+      } else {
+        expect(allRect.bottom, moreRect.top);
+      }
+      await tester.tap(all);
+      await tester.pump();
+      expect(selected, kAllDisplayValue);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   testWidgets('toolbar exposes a reactive QM toggle', (tester) async {
     var toggleCount = 0;
     await pumpToolbar(tester, onQualityMonitor: () => toggleCount++);
@@ -407,11 +461,12 @@ void main() {
     );
     await tester.pumpAndSettle();
     final button = find.byKey(const Key('mobile-remote-quality-monitor'));
-    final buttonCenter = tester.getCenter(button);
+    // Include the added cross-axis padding, not just the old square button.
+    final buttonPoint = tester.getBottomRight(button) - const Offset(2, 2);
 
     await pumpToolbar(
       tester,
-      cursorPosition: buttonCenter,
+      cursorPosition: buttonPoint,
       qualityMonitorVisible: true,
       transparencySettings: transparency,
     );
@@ -423,7 +478,7 @@ void main() {
 
     await pumpToolbar(
       tester,
-      cursorPosition: buttonCenter,
+      cursorPosition: buttonPoint,
       transparencySettings: transparency,
     );
     await tester.pump();

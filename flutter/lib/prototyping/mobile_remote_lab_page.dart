@@ -1560,17 +1560,18 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       onQualityMonitor: () {
         setState(() => _showQualityMonitor = !_showQualityMonitor);
       },
-      monitors: !_showMonitorsInToolbar || widget.monitors.length <= 1
+      monitors: widget.monitors.length <= 1
           ? const []
           : [
-              for (var index = 0; index < widget.monitors.length; index++)
-                MobileRemoteToolbarMonitor(
-                  value: index,
-                  label: '${index + 1}',
-                  tooltip: '#${index + 1} monitor',
-                  selected: _selectedMonitor == index,
-                  onPressed: () => _selectMonitor(index),
-                ),
+              if (_showMonitorsInToolbar)
+                for (var index = 0; index < widget.monitors.length; index++)
+                  MobileRemoteToolbarMonitor(
+                    value: index,
+                    label: '${index + 1}',
+                    tooltip: '#${index + 1} monitor',
+                    selected: _selectedMonitor == index,
+                    onPressed: () => _selectMonitor(index),
+                  ),
               MobileRemoteToolbarMonitor(
                 value: _allMonitors,
                 label: 'All',
@@ -1588,12 +1589,6 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       onPlacementChanged: (settings) {
         setState(() => _toolbarPlacementSettings = settings);
       },
-      chatButton: IconButton(
-        tooltip: 'Chat',
-        color: mobileRemoteToolbarForegroundColor(context),
-        icon: const Icon(Icons.message),
-        onPressed: _showChatMenu,
-      ),
     );
   }
 
@@ -2266,6 +2261,16 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       children: [
         Text('More actions', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 8),
+        ListTile(
+          key: const Key('mobile-lab-actions-chat'),
+          contentPadding: EdgeInsets.zero,
+          visualDensity: VisualDensity.compact,
+          title: const Text('Chat'),
+          onTap: () {
+            setState(() => _panel = null);
+            _showChatMenu();
+          },
+        ),
         ListTile(
           key: const Key('mobile-lab-actions-open-keyboard'),
           contentPadding: EdgeInsets.zero,

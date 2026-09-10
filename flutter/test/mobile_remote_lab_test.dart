@@ -276,9 +276,12 @@ void main() {
       'Monitor 1',
     );
 
-    await tester.tap(find.byTooltip('Display and session options'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(InkWell, 'All'));
+    // The all-monitors shortcut is available with numbered buttons hidden.
+    expect(find.byTooltip('#1 monitor'), findsNothing);
+    final allMonitors = find.byTooltip('All monitors');
+    expect(find.descendant(of: allMonitors, matching: find.text('#')),
+        findsOneWidget);
+    await tester.tap(allMonitors);
     await tester.pumpAndSettle();
 
     expect(
@@ -896,7 +899,10 @@ void main() {
 
     await tester.tapAt(const Offset(4, 4));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Chat'));
+    expect(find.byTooltip('Chat'), findsNothing);
+    await tester.tap(find.byTooltip('More actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('mobile-lab-actions-chat')));
     await tester.pumpAndSettle();
     expect(find.text('Text chat'), findsOneWidget);
     expect(find.text('Voice call'), findsOneWidget);
@@ -943,7 +949,10 @@ void main() {
   ) async {
     await pumpPreview(tester, platform: TargetPlatform.iOS);
 
-    await tester.tap(find.byTooltip('Chat'));
+    expect(find.byTooltip('Chat'), findsNothing);
+    await tester.tap(find.byTooltip('More actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('mobile-lab-actions-chat')));
     await tester.pumpAndSettle();
     expect(find.text('Text chat'), findsOneWidget);
     expect(find.text('Voice call'), findsNothing);
@@ -1169,7 +1178,9 @@ void main() {
 
     await tester.tapAt(viewportRect.topLeft + const Offset(4, 4));
     await tester.pumpAndSettle();
-    await tester.tap(find.byTooltip('Chat'));
+    await tester.tap(find.byTooltip('More actions'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('mobile-lab-actions-chat')));
     await tester.pumpAndSettle();
     expect(
       find.descendant(of: viewport, matching: find.text('Text chat')),
