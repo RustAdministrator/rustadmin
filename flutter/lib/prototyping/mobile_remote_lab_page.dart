@@ -1560,18 +1560,17 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
       onQualityMonitor: () {
         setState(() => _showQualityMonitor = !_showQualityMonitor);
       },
-      monitors: widget.monitors.length <= 1
+      monitors: !_showMonitorsInToolbar || widget.monitors.length <= 1
           ? const []
           : [
-              if (_showMonitorsInToolbar)
-                for (var index = 0; index < widget.monitors.length; index++)
-                  MobileRemoteToolbarMonitor(
-                    value: index,
-                    label: '${index + 1}',
-                    tooltip: '#${index + 1} monitor',
-                    selected: _selectedMonitor == index,
-                    onPressed: () => _selectMonitor(index),
-                  ),
+              for (var index = 0; index < widget.monitors.length; index++)
+                MobileRemoteToolbarMonitor(
+                  value: index,
+                  label: '${index + 1}',
+                  tooltip: '#${index + 1} monitor',
+                  selected: _selectedMonitor == index,
+                  onPressed: () => _selectMonitor(index),
+                ),
               MobileRemoteToolbarMonitor(
                 value: _allMonitors,
                 label: 'All',

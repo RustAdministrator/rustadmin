@@ -276,9 +276,20 @@ void main() {
       'Monitor 1',
     );
 
-    // The all-monitors shortcut is available with numbered buttons hidden.
+    // Numbered monitors and the all-monitors shortcut share one visibility setting.
     expect(find.byTooltip('#1 monitor'), findsNothing);
     final allMonitors = find.byTooltip('All monitors');
+    expect(allMonitors, findsNothing);
+    await tester.tap(find.byTooltip('Display and session options'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(
+      find.byKey(const Key('mobile-remote-show-monitors-toolbar')),
+    );
+    await tester.tap(find.byKey(const Key('mobile-remote-show-monitors-toolbar')));
+    await tester.pumpAndSettle();
+    await tester.tapAt(const Offset(4, 4));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('#3 monitor'), findsOneWidget);
     expect(find.descendant(of: allMonitors, matching: find.text('#')),
         findsOneWidget);
     await tester.tap(allMonitors);
@@ -291,13 +302,28 @@ void main() {
 
     await tester.tap(find.byTooltip('Display and session options'));
     await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(InkWell, '3'));
+    await tester.tap(find.descendant(
+      of: find.byKey(const Key('mobile-lab-bottom-panel')),
+      matching: find.widgetWithText(InkWell, '3'),
+    ));
     await tester.pumpAndSettle();
 
     expect(
       tester.widget<Text>(find.byKey(const Key('selected-monitor-label'))).data,
       'Monitor 3',
     );
+
+    await tester.tap(find.byTooltip('Display and session options'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(
+      find.byKey(const Key('mobile-remote-show-monitors-toolbar')),
+    );
+    await tester.tap(find.byKey(const Key('mobile-remote-show-monitors-toolbar')));
+    await tester.pumpAndSettle();
+    await tester.tapAt(const Offset(4, 4));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('#3 monitor'), findsNothing);
+    expect(allMonitors, findsNothing);
   });
 
   testWidgets(

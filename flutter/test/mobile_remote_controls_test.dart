@@ -366,7 +366,7 @@ void main() {
   });
 
   for (final axis in MobileRemoteToolbarAxis.values) {
-    testWidgets('all-monitor hash button precedes More actions in $axis',
+    testWidgets('all-monitor hash button follows numbered monitors in $axis',
         (tester) async {
       var selected = 0;
       await pumpToolbar(
@@ -377,7 +377,14 @@ void main() {
           verticalPosition: 0.5,
         ),
         monitors: [
-          // All-displays remains useful when individual monitor buttons are hidden.
+          for (var index = 0; index < 3; index++)
+            MobileRemoteToolbarMonitor(
+              value: index,
+              label: '${index + 1}',
+              tooltip: '#${index + 1} monitor',
+              selected: false,
+              onPressed: () => selected = index,
+            ),
           MobileRemoteToolbarMonitor(
             value: kAllDisplayValue,
             label: 'All',
@@ -390,7 +397,8 @@ void main() {
       );
       await tester.pumpAndSettle();
       final all = find.byTooltip('All monitors');
-      final more = find.byTooltip('More actions');
+      final lastMonitor = find.byTooltip('#3 monitor');
+      final keyboard = find.byTooltip('Keyboard');
       expect(find.descendant(of: all, matching: find.text('#')), findsOneWidget);
       expect(find.byIcon(Icons.grid_view), findsNothing);
       expect(find.byTooltip('Chat'), findsNothing);
@@ -401,11 +409,14 @@ void main() {
         mobileRemoteAccentColor,
       );
       final allRect = tester.getRect(all);
-      final moreRect = tester.getRect(more);
+      final lastMonitorRect = tester.getRect(lastMonitor);
+      final keyboardRect = tester.getRect(keyboard);
       if (axis == MobileRemoteToolbarAxis.horizontal) {
-        expect(allRect.right, moreRect.left);
+        expect(lastMonitorRect.right, allRect.left);
+        expect(allRect.right, keyboardRect.left);
       } else {
-        expect(allRect.bottom, moreRect.top);
+        expect(lastMonitorRect.bottom, allRect.top);
+        expect(allRect.bottom, keyboardRect.top);
       }
       await tester.tap(all);
       await tester.pump();

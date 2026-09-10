@@ -910,8 +910,7 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
         onPressed: widget.onOptions,
       ),
       _qualityMonitorButton(extent),
-      for (final monitor in widget.monitors)
-        if (!monitor.allDisplays) _monitorButton(monitor, extent),
+      for (final monitor in widget.monitors) _monitorButton(monitor, extent),
     ];
     if (widget.showInputControls) {
       items.add(
@@ -938,8 +937,6 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
       );
     }
     items.addAll([
-      for (final monitor in widget.monitors)
-        if (monitor.allDisplays) _monitorButton(monitor, extent),
       _iconButton(
         extent: extent,
         tooltip: 'More actions',

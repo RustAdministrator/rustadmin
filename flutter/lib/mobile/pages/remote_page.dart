@@ -794,22 +794,21 @@ class _RemotePageState extends State<RemotePage>
         final pi = ffiModel.pi;
         final monitorLabels = pi.monitorLabels;
         final currentDisplay = CurrentDisplayState.find(widget.id).value;
-        final monitors = pi.displays.length <= 1
+        final monitors = !_showMonitorsInToolbar || pi.displays.length <= 1
             ? const <MobileRemoteToolbarMonitor>[]
             : <MobileRemoteToolbarMonitor>[
-                if (_showMonitorsInToolbar)
-                  for (final index in pi.monitorOrder)
-                    MobileRemoteToolbarMonitor(
-                      value: index,
-                      label: monitorLabels[index],
-                      tooltip: '#${monitorLabels[index]} ${translate('Monitor')}',
-                      selected: currentDisplay == index,
-                      onPressed: () {
-                        if (currentDisplay != index) {
-                          openMonitorInTheSameTab(index, gFFI, pi);
-                        }
-                      },
-                    ),
+                for (final index in pi.monitorOrder)
+                  MobileRemoteToolbarMonitor(
+                    value: index,
+                    label: monitorLabels[index],
+                    tooltip: '#${monitorLabels[index]} ${translate('Monitor')}',
+                    selected: currentDisplay == index,
+                    onPressed: () {
+                      if (currentDisplay != index) {
+                        openMonitorInTheSameTab(index, gFFI, pi);
+                      }
+                    },
+                  ),
                 if (!isWeb && pi.isSupportMultiDisplay)
                   MobileRemoteToolbarMonitor(
                     value: kAllDisplayValue,

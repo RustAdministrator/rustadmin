@@ -544,7 +544,13 @@ void main() {
         await state.setPin(pinned);
         windowPointer(null);
         await tester.pump();
+        final revealedButtonCenter = tester.getCenter(
+          find.byTooltip('Display Settings'),
+        );
         await tester.pump(const Duration(seconds: 6));
+        // Let the hide transition finish; firing its timer alone leaves the
+        // toolbar painted at its old position for the first animation frame.
+        await tester.pump(const Duration(milliseconds: 300));
         if (pinned) {
           expect(toolbarOpacity().opacity, lessThan(1));
         } else {
@@ -556,10 +562,11 @@ void main() {
           expect(ignored, findsWidgets);
           windowPointer(const Offset(8, 1));
           await tester.pump();
-          await tester.pump(const Duration(milliseconds: 200));
+          // Click as soon as the first revealed frame is available. Waiting
+          // for the slide animation would miss the hidden-toolbar regression.
         }
         final click = await tester.startGesture(
-          tester.getCenter(find.byTooltip('Display Settings')),
+          revealedButtonCenter,
           kind: PointerDeviceKind.mouse,
         );
         await tester.pump(const Duration(milliseconds: 100));
@@ -571,6 +578,40 @@ void main() {
               'vertical=$vertical, pinned=$pinned',
         );
         expect(rawKeyFocusNode.canRequestFocus, isFalse);
+        if (!pinned) {
+          final toolbarRect = tester.getRect(find.ancestor(
+            of: find.byTooltip('Display Settings'),
+            matching: find.byType(AnimatedSlide),
+          ));
+          final nearToolbar = vertical
+              ? Offset(toolbarRect.right + state.revealZonePx / 2,
+                  revealedButtonCenter.dy)
+              : Offset(revealedButtonCenter.dx,
+                  toolbarRect.bottom + state.revealZonePx / 2);
+          expect(nearToolbar.dy, greaterThan(state.revealZonePx));
+          await tester.tapAt(const Offset(780, 550),
+              kind: PointerDeviceKind.mouse);
+          await tester.pumpAndSettle();
+          windowPointer(null);
+          await tester.pump(const Duration(seconds: 6));
+          await tester.pump(const Duration(milliseconds: 300));
+          expect(find.byTooltip('Display Settings').hitTestable(), findsNothing);
+
+          // The window hover callback must reveal near the resting toolbar,
+          // not only at the top edge, without consuming an activation click.
+          windowPointer(nearToolbar);
+          await tester.pump();
+          expect(find.byTooltip('Display Settings').hitTestable(), findsOneWidget);
+          final nearClick = await tester.startGesture(
+            revealedButtonCenter,
+            kind: PointerDeviceKind.mouse,
+          );
+          await tester.pump();
+          await nearClick.up();
+          await tester.pumpAndSettle();
+          expect(find.text('Scale original'), findsOneWidget);
+          expect(rawKeyFocusNode.canRequestFocus, isFalse);
+        }
       }
     }
 

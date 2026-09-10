@@ -560,6 +560,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   final _fractionY = 0.0.obs;
   final _dragging = false.obs;
   final _toolbarKey = GlobalKey();
+  final _toolbarRevealKey = GlobalKey();
   final _menuController = flutter_widgets.MenuController();
   late final ToolbarMenuCoordinator<_ToolbarMenuId> _menuCoordinator;
   Offset _toolbarDragStartPointer = Offset.zero;
@@ -602,9 +603,23 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     }
   }
 
-  bool get _isInRevealZone =>
-      _lastWindowPointer != null &&
-      _lastWindowPointer!.dy <= widget.state.revealZonePx;
+  bool get _isInRevealZone {
+    final pointer = _lastWindowPointer;
+    if (pointer == null) return false;
+    if (pointer.dy <= widget.state.revealZonePx) return true;
+
+    // Measure outside the slide transform so hovering near a hidden toolbar
+    // uses its resting bounds, including the full height of a vertical bar.
+    final toolbar = _toolbarRevealKey.currentContext?.findRenderObject();
+    final viewport = context.findRenderObject();
+    if (toolbar is! RenderBox || viewport is! RenderBox || !toolbar.hasSize) {
+      return false;
+    }
+    final origin = toolbar.localToGlobal(Offset.zero, ancestor: viewport);
+    return (origin & toolbar.size)
+        .inflate(widget.state.revealZonePx.toDouble())
+        .contains(pointer);
+  }
 
   void _cancelAutoHide() {
     _autoHideTimer?.cancel();
@@ -1132,9 +1147,15 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       return Align(
         alignment: FractionalOffset(_fractionX.value, y),
         child: IgnorePointer(
+          key: _toolbarRevealKey,
           ignoring: !_visible,
           child: AnimatedSlide(
-            duration: const Duration(milliseconds: 220),
+            // A moving reveal target can miss the first down/up or move a
+            // newly opened MenuAnchor. Hide may animate; reveal must be ready
+            // for interaction on its first frame.
+            duration: _visible
+                ? Duration.zero
+                : const Duration(milliseconds: 220),
             curve: Curves.easeOutCubic,
             offset: _visible ? Offset.zero : const Offset(0, -1.15),
             child: _ToolbarOpacityLayer(
