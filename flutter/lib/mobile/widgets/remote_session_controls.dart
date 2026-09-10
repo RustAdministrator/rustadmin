@@ -640,7 +640,7 @@ class MobileRemoteToolbar extends StatefulWidget {
 
 class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
   static const _iconSize = 24.0;
-  static const _thicknessScale = 1.5;
+  static const _thicknessScale = 1.35;
   static const _maximumButtonExtent = 48.0;
   static const _maximumVerticalButtonExtent =
       _iconSize + (_maximumButtonExtent - _iconSize) * 0.5;

@@ -295,8 +295,8 @@ void main() {
     );
 
     final toolbar = find.byKey(const Key('mobile-remote-floating-toolbar'));
-    expect(tester.getSize(toolbar).height, 32 * 1.5);
-    expect(tester.getSize(find.byTooltip('Keyboard')), const Size(32, 48));
+    expect(tester.getSize(toolbar).height, 32 * 1.5 * 0.9);
+    expect(tester.getSize(find.byTooltip('Keyboard')), const Size(32, 43.2));
     final before = tester.getTopLeft(toolbar);
     await tester.drag(toolbar, const Offset(-60, -80));
     await tester.pumpAndSettle();
@@ -313,12 +313,12 @@ void main() {
         tester.getCenter(find.byTooltip('Collapse toolbar')).dy -
         24;
     expect(verticalIconGap, 6);
-    expect(tester.getSize(toolbar).width, 30 * 1.5);
-    expect(tester.getSize(find.byTooltip('Keyboard')), const Size(45, 30));
+    expect(tester.getSize(toolbar).width, 30 * 1.5 * 0.9);
+    expect(tester.getSize(find.byTooltip('Keyboard')), const Size(40.5, 30));
     await tester.tap(find.byTooltip('Collapse toolbar'));
     await tester.pumpAndSettle();
     expect(find.byTooltip('Show toolbar'), findsOneWidget);
-    expect(tester.getSize(toolbar), const Size(45, 36));
+    expect(tester.getSize(toolbar), const Size(40.5, 36));
 
     await tester.tap(find.byTooltip('Show toolbar'));
     await tester.pumpAndSettle();
