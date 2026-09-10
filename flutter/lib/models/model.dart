@@ -959,6 +959,7 @@ class FfiModel with ChangeNotifier {
 
   Future<void> updateCurDisplay(SessionID sessionId,
       {updateCursorPos = false}) async {
+    parent.target?.imageModel.synchronizeDisplayFrames();
     final newRect = displaysRect();
     if (newRect == null) {
       return;
@@ -2397,8 +2398,29 @@ Size? remoteRenderableFrameSize({
 class ImageModel with ChangeNotifier {
   ui.Image? _image;
   int _imageGeneration = 0;
+  final _displayImages = <int, ({ui.Image image, Rect rect})>{};
 
   ui.Image? get image => _image;
+  ui.Image? imageForDisplay(int display) => _displayImages[display]?.image;
+  bool get _combinedMobileView =>
+      isMobile && parent.target?.ffiModel.pi.currentDisplay == kAllDisplayValue;
+
+  // Frame ownership only; selection remains owned by the session model.
+  void synchronizeDisplayFrames() {
+    _imageGeneration++;
+    final pi = parent.target?.ffiModel.pi;
+    final removed = _displayImages.keys.where((display) =>
+        !_combinedMobileView ||
+        pi?.getDisplayRect(display) != _displayImages[display]?.rect).toList();
+    for (final display in removed) {
+      _disposeAfterFrame(_displayImages.remove(display)?.image);
+    }
+    if (removed.isNotEmpty) notifyListeners();
+    if (_combinedMobileView) {
+      _publishImage(null);
+      unawaited(_androidRenderTarget.retire());
+    }
+  }
 
   String id = '';
 
@@ -2440,7 +2462,9 @@ class ImageModel with ChangeNotifier {
   int get androidRenderTargetEpoch => _androidRenderTarget.intentEpoch;
   get androidSurfaceTextureActive =>
       _androidRenderTarget.snapshot.canRenderTexture;
-  Size? get renderFrameSize => remoteRenderableFrameSize(
+  Size? get renderFrameSize => _combinedMobileView
+      ? (_displayImages.isEmpty ? null : parent.target?.ffiModel.displaysRect()?.size)
+      : remoteRenderableFrameSize(
         softwareFrameSize: _image == null
             ? null
             : Size(_image!.width.toDouble(), _image!.height.toDouble()),
@@ -2460,6 +2484,12 @@ class ImageModel with ChangeNotifier {
 
   void clearImage() {
     _imageGeneration++;
+    for (final frame in _displayImages.values) {
+      _disposeAfterFrame(frame.image);
+    }
+    final hadDisplayImages = _displayImages.isNotEmpty;
+    _displayImages.clear();
+    if (hadDisplayImages && _image == null) notifyListeners();
     _publishImage(null);
   }
 
@@ -2483,10 +2513,15 @@ class ImageModel with ChangeNotifier {
     if (identical(previous, image)) return;
     _image = image;
     notifyListeners();
-    if (previous != null) {
+    _disposeAfterFrame(previous);
+  }
+
+  void _disposeAfterFrame(ui.Image? image) {
+    if (image != null) {
       SchedulerBinding.instance.addPostFrameCallback(
-        (_) => previous.dispose(),
+        (_) => image.dispose(),
       );
+      SchedulerBinding.instance.ensureVisualUpdate();
     }
   }
 
@@ -2526,25 +2561,33 @@ class ImageModel with ChangeNotifier {
     final imageGeneration = _imageGeneration;
     if (epoch == null || !authority!.accepts(epoch)) return;
     final pid = parent.target?.id;
+    final selection = parent.target?.ffiModel.pi.currentDisplay;
+    if (selection != kAllDisplayValue && selection != display) return;
     final rect = parent.target?.ffiModel.pi.getDisplayRect(display);
+    if (rect == null || rect.width <= 0 || rect.height <= 0) return;
     final image = await img.decodeImageFromPixels(
       rgba,
-      rect?.width.toInt() ?? 0,
-      rect?.height.toInt() ?? 0,
+      rect.width.toInt(),
+      rect.height.toInt(),
       isWeb | isWindows | isLinux
           ? ui.PixelFormat.rgba8888
           : ui.PixelFormat.bgra8888,
     );
+    // A failed frame is not a session clear, nor a reason to discard other
+    // monitors' last valid images.
+    if (image == null) return;
     if (parent.target?.id != pid ||
+        parent.target?.ffiModel.pi.currentDisplay != selection ||
+        parent.target?.ffiModel.pi.getDisplayRect(display) != rect ||
         !authority.accepts(epoch) ||
         imageGeneration != _imageGeneration) {
-      image?.dispose();
+      image.dispose();
       return;
     }
-    await update(image, authorityEpoch: epoch);
+    await update(image, authorityEpoch: epoch, display: display);
   }
 
-  update(ui.Image? image, {int? authorityEpoch}) async {
+  update(ui.Image? image, {int? authorityEpoch, int? display}) async {
     final authority = parent.target?.screenViewAuthority;
     final epoch = authorityEpoch ?? authority?.epoch;
     final imageGeneration = _imageGeneration;
@@ -2570,7 +2613,20 @@ class ImageModel with ChangeNotifier {
         return;
       }
       parent.target?.canvasModel.tryApplyPendingMobileCursorFocus();
-      _publishImage(image);
+      if (_combinedMobileView && display != null) {
+        final rect = parent.target?.ffiModel.pi.getDisplayRect(display);
+        if (rect == null) {
+          image.dispose();
+          return;
+        }
+        final previous = _displayImages[display];
+        if (identical(previous?.image, image)) return;
+        _displayImages[display] = (image: image, rect: rect);
+        notifyListeners();
+        _disposeAfterFrame(previous?.image);
+      } else {
+        _publishImage(image);
+      }
     }
   }
 
@@ -6369,6 +6425,8 @@ class PeerInfo with ChangeNotifier {
 
   bool get isSupportMultiDisplay =>
       (isDesktop || isWebDesktop) && isSupportMultiUiSession;
+  // Combined mobile rendering does not require desktop window support.
+  bool get supportsCombinedMobileDisplays => !isWeb && isSupportMultiUiSession;
   bool get forceTextureRender => currentDisplay == kAllDisplayValue;
 
   bool get cursorEmbedded => tryGetDisplay()?.cursorEmbedded ?? false;

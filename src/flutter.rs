@@ -526,6 +526,10 @@ fn is_single_display_replacement(effects: &DisplayIntentEffects, active_views: u
         && !effects.delta.added.is_empty()
 }
 
+fn supports_software_display_view(mobile_client: bool, display_count: usize) -> bool {
+    mobile_client || display_count <= 1
+}
+
 #[cfg(test)]
 mod display_metadata_tests {
     use super::{DisplayInfo, FlutterHandler, Resolution};
@@ -674,6 +678,17 @@ mod display_intent_tests {
         intent.seed_initial_display(0);
 
         assert_eq!(intent.displays, vec![1]);
+    }
+
+    #[test]
+    fn mobile_combined_views_receive_software_frames_but_desktop_uses_textures() {
+        for count in [1, 2, 3] {
+            assert!(super::supports_software_display_view(true, count));
+            assert_eq!(
+                super::supports_software_display_view(false, count),
+                count == 1
+            );
+        }
     }
 
     // These tests only inspect sink presence; they never post to this dummy port.
@@ -3218,8 +3233,12 @@ impl FlutterHandler {
         for h in handlers.values_mut() {
             #[cfg(all(target_os = "android", feature = "mediacodec"))]
             h.texture_notified.write().unwrap().remove(&display);
-            // The soft renderer does not support multi-displays session for now.
-            if h.display_intent.displays.len() > 1 {
+            // Desktop combined views use Flutter textures. Mobile retains a
+            // software image per display and composites them on one canvas.
+            if !supports_software_display_view(
+                cfg!(any(target_os = "android", target_os = "ios")),
+                h.display_intent.displays.len(),
+            ) {
                 continue;
             }
             // If there're multiple ui sessions, we only notify the ui session that has the display.

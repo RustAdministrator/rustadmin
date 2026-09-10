@@ -318,7 +318,7 @@ void main() {
     await tester.tap(find.byTooltip('Collapse toolbar'));
     await tester.pumpAndSettle();
     expect(find.byTooltip('Show toolbar'), findsOneWidget);
-    expect(tester.getSize(toolbar), const Size(45, 30));
+    expect(tester.getSize(toolbar), const Size(45, 36));
 
     await tester.tap(find.byTooltip('Show toolbar'));
     await tester.pumpAndSettle();
@@ -412,6 +412,26 @@ void main() {
   });
 
   for (final axis in MobileRemoteToolbarAxis.values) {
+    testWidgets('toolbar doubles only the end padding in $axis', (tester) async {
+      await pumpToolbar(tester, placementSettings: MobileRemoteToolbarPlacementSettings(
+        axis: axis, horizontalPosition: 0.5, verticalPosition: 0.5,
+      ));
+      final toolbar = tester.getRect(find.byKey(const Key('mobile-remote-floating-toolbar')));
+      final first = tester.getRect(find.byTooltip('Collapse toolbar'));
+      final last = tester.getRect(find.byTooltip('Disconnect'));
+      final horizontal = axis == MobileRemoteToolbarAxis.horizontal;
+      final extent = horizontal ? first.width : first.height;
+      final originalEdge = (extent - 24) / 2;
+      expect(horizontal ? first.left - toolbar.left : first.top - toolbar.top, originalEdge);
+      expect(horizontal ? toolbar.right - last.right : toolbar.bottom - last.bottom, originalEdge);
+      final firstIcon = tester.getRect(find.descendant(
+        of: find.byTooltip('Collapse toolbar'), matching: find.byType(Icon),
+      ));
+      expect(horizontal ? firstIcon.left - toolbar.left : firstIcon.top - toolbar.top,
+          originalEdge * 2);
+      expect(tester.takeException(), isNull);
+    });
+
     testWidgets('all-monitor hash button follows numbered monitors in $axis',
         (tester) async {
       var selected = 0;

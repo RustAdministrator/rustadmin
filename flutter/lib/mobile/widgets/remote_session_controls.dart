@@ -974,6 +974,9 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
         final extent = previousExtent > _iconSize
             ? _iconSize + (previousExtent - _iconSize) * 0.5
             : previousExtent;
+        // Each end already has half a slot's icon gap. Add the same amount
+        // outside the buttons, doubling end padding without changing spacing.
+        final endPadding = (extent - _iconSize).clamp(0.0, double.infinity) / 2;
         final items = _collapsed
             ? [
                 _iconButton(
@@ -990,8 +993,8 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
             : _expandedItems(extent);
         final buttonSize = _buttonSize(extent);
         final toolbarSize = _vertical
-            ? Size(buttonSize.width, extent * itemCount)
-            : Size(extent * itemCount, buttonSize.height);
+            ? Size(buttonSize.width, extent * itemCount + endPadding * 2)
+            : Size(extent * itemCount + endPadding * 2, buttonSize.height);
         final position = _clampPosition(
           _position(constraints, toolbarSize),
           constraints,
@@ -1003,8 +1006,8 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
           toolbarThickness: extent * _thicknessScale,
         );
         final qualityMonitorButtonOffset = _vertical
-            ? Offset(0, extent * 2)
-            : Offset(extent * 2, 0);
+            ? Offset(0, endPadding + extent * 2)
+            : Offset(endPadding + extent * 2, 0);
         final qualityMonitorButtonRect =
             (position + qualityMonitorButtonOffset) & buttonSize;
         final cursorOverlapsActiveQualityMonitor =
@@ -1048,10 +1051,15 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
                           color: mobileRemoteToolbarForegroundColor(context),
                         ),
                       ),
-                      child: Flex(
-                        direction: _vertical ? Axis.vertical : Axis.horizontal,
-                        mainAxisSize: MainAxisSize.min,
-                        children: items,
+                      child: Padding(
+                        padding: _vertical
+                            ? EdgeInsets.symmetric(vertical: endPadding)
+                            : EdgeInsets.symmetric(horizontal: endPadding),
+                        child: Flex(
+                          direction: _vertical ? Axis.vertical : Axis.horizontal,
+                          mainAxisSize: MainAxisSize.min,
+                          children: items,
+                        ),
                       ),
                     ),
                   ),

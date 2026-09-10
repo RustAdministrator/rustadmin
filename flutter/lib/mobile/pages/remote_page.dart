@@ -43,6 +43,38 @@ import '../widgets/dialog.dart';
 
 final initText = '1' * 1024;
 
+List<MobileRemoteToolbarMonitor> mobileRemoteToolbarMonitors({
+  required PeerInfo peer,
+  required bool showMonitors,
+  required int currentDisplay,
+  required ValueChanged<int> onSelected,
+}) {
+  if (!showMonitors || peer.displays.length <= 1) return const [];
+  void select(int display) {
+    if (currentDisplay != display) onSelected(display);
+  }
+  final labels = peer.monitorLabels;
+  return [
+    for (final index in peer.monitorOrder)
+      MobileRemoteToolbarMonitor(
+        value: index,
+        label: labels[index],
+        tooltip: '#${labels[index]} ${translate('Monitor')}',
+        selected: currentDisplay == index,
+        onPressed: () => select(index),
+      ),
+    if (peer.supportsCombinedMobileDisplays)
+      MobileRemoteToolbarMonitor(
+        value: kAllDisplayValue,
+        label: translate('All'),
+        tooltip: translate('all monitors'),
+        selected: currentDisplay == kAllDisplayValue,
+        allDisplays: true,
+        onPressed: () => select(kAllDisplayValue),
+      ),
+  ];
+}
+
 bool _showMonitorsInMobileToolbarFromUserDefaults() =>
     remoteDisplaySettings.read(
       RemoteDisplaySettingsRegistry.showMonitorsToolbar,
@@ -820,37 +852,13 @@ class _RemotePageState extends State<RemotePage>
       listenable: gFFI.qualityMonitorModel.showListenable,
       builder: (context, _) => Obx(() {
         final pi = ffiModel.pi;
-        final monitorLabels = pi.monitorLabels;
         final currentDisplay = CurrentDisplayState.find(widget.id).value;
-        final monitors = !_showMonitorsInToolbar || pi.displays.length <= 1
-            ? const <MobileRemoteToolbarMonitor>[]
-            : <MobileRemoteToolbarMonitor>[
-                for (final index in pi.monitorOrder)
-                  MobileRemoteToolbarMonitor(
-                    value: index,
-                    label: monitorLabels[index],
-                    tooltip: '#${monitorLabels[index]} ${translate('Monitor')}',
-                    selected: currentDisplay == index,
-                    onPressed: () {
-                      if (currentDisplay != index) {
-                        openMonitorInTheSameTab(index, gFFI, pi);
-                      }
-                    },
-                  ),
-                if (!isWeb && pi.isSupportMultiDisplay)
-                  MobileRemoteToolbarMonitor(
-                    value: kAllDisplayValue,
-                    label: translate('All'),
-                    tooltip: translate('all monitors'),
-                    selected: currentDisplay == kAllDisplayValue,
-                    allDisplays: true,
-                    onPressed: () {
-                      if (currentDisplay != kAllDisplayValue) {
-                        openMonitorInTheSameTab(kAllDisplayValue, gFFI, pi);
-                      }
-                    },
-                  ),
-              ];
+        final monitors = mobileRemoteToolbarMonitors(
+          peer: pi,
+          showMonitors: _showMonitorsInToolbar,
+          currentDisplay: currentDisplay,
+          onSelected: (display) => openMonitorInTheSameTab(display, gFFI, pi),
+        );
         return MobileRemoteToolbar(
           onDisconnect: _requestDisconnect,
           onOptions: () {
@@ -1588,6 +1596,32 @@ class ImagePaint extends StatelessWidget {
       }
     }
     final adjust = c.getAdjustY();
+    if (ffiModel.pi.currentDisplay == kAllDisplayValue) {
+      final bounds = ffiModel.displaysRect();
+      return Stack(
+        fit: StackFit.expand,
+        children: [
+          if (bounds != null)
+            for (var index = 0; index < ffiModel.pi.displays.length; index++)
+              if (m.imageForDisplay(index) != null)
+                Positioned(
+                  left: c.x + (ffiModel.pi.displays[index].x - bounds.left) * s,
+                  top: c.y + adjust +
+                      (ffiModel.pi.displays[index].y - bounds.top) * s,
+                  width: ffiModel.pi.displays[index].width * s /
+                      (ffiModel.isPeerLinux ? ffiModel.pi.displays[index].scale : 1),
+                  height: ffiModel.pi.displays[index].height * s /
+                      (ffiModel.isPeerLinux ? ffiModel.pi.displays[index].scale : 1),
+                  child: RawImage(
+                    key: ValueKey('mobile-combined-display-$index'),
+                    image: m.imageForDisplay(index),
+                    fit: BoxFit.fill,
+                    filterQuality: mobileRemoteTextureFilterQuality(logicalScale: s),
+                  ),
+                ),
+        ],
+      );
+    }
     final softwarePaint = CustomPaint(
       painter: ImagePainter(
         image: m.image,
