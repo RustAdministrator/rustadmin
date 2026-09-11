@@ -52,6 +52,8 @@ pub mod ipc;
 )))]
 pub mod ui;
 mod version;
+#[cfg(any(target_os = "android", test))]
+mod build_identity;
 pub use version::*;
 mod video_profile;
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]

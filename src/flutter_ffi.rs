@@ -37,7 +37,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 mod android_diagnostics;
 
 pub type SessionID = uuid::Uuid;
@@ -4252,6 +4252,16 @@ pub mod server_side {
             "".into()
         };
         return env.new_string(res).unwrap_or_default().into_raw();
+    }
+
+    #[no_mangle]
+    pub extern "system" fn Java_ffi_FFI_getNativeBuildInfo(
+        env: JNIEnv,
+        _class: JClass,
+    ) -> jstring {
+        env.new_string(crate::build_identity::diagnostic_build_identity())
+            .map(|value| value.into_raw())
+            .unwrap_or_default()
     }
 
     #[no_mangle]

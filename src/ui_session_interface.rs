@@ -205,6 +205,7 @@ pub struct ChangeDisplayRecord {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConnectionState {
     Connecting,
+    AwaitingUserApproval,
     Connected,
     Disconnected,
 }
@@ -220,7 +221,7 @@ pub struct ConnectionRoundState {
 impl ConnectionRoundState {
     fn try_start(&mut self, reconnect: bool) -> Option<u32> {
         match self.state {
-            ConnectionState::Connecting => return None,
+            ConnectionState::Connecting | ConnectionState::AwaitingUserApproval => return None,
             ConnectionState::Connected if !reconnect => return None,
             _ => {}
         }
@@ -256,6 +257,48 @@ impl Default for ConnectionRoundState {
             round: 0,
             state: ConnectionState::Disconnected,
             changed_at: Instant::now(),
+        }
+    }
+}
+
+const USER_APPROVAL_TIMEOUT: TokioDuration = TokioDuration::from_secs(120);
+
+// The connection owner, not a second liveness flag, owns interactive waits.
+struct UserApprovalGuard {
+    state: Arc<Mutex<ConnectionRoundState>>,
+    round: u32,
+}
+
+impl UserApprovalGuard {
+    fn begin(state: Arc<Mutex<ConnectionRoundState>>) -> ResultType<Self> {
+        let round = {
+            let mut current = state.lock().unwrap();
+            if current.state != ConnectionState::Connecting {
+                bail!("Handshake failed: connection is no longer awaiting authentication");
+            }
+            current.state = ConnectionState::AwaitingUserApproval;
+            current.changed_at = Instant::now();
+            current.round
+        };
+        Ok(Self { state, round })
+    }
+
+    fn with_current(&self, action: impl FnOnce()) -> bool {
+        let current = self.state.lock().unwrap();
+        if current.round != self.round || current.state != ConnectionState::AwaitingUserApproval {
+            return false;
+        }
+        action();
+        true
+    }
+}
+
+impl Drop for UserApprovalGuard {
+    fn drop(&mut self) {
+        let mut current = self.state.lock().unwrap();
+        if current.round == self.round && current.state == ConnectionState::AwaitingUserApproval {
+            current.state = ConnectionState::Connecting;
+            current.changed_at = Instant::now();
         }
     }
 }
@@ -2033,6 +2076,9 @@ impl<T: InvokeUiSession> Session<T> {
         let state = self.connection_round_state.lock().unwrap();
         match state.state {
             ConnectionState::Connecting => state.changed_at.elapsed() <= max_connecting,
+            ConnectionState::AwaitingUserApproval => {
+                state.changed_at.elapsed() <= USER_APPROVAL_TIMEOUT
+            }
             ConnectionState::Connected => self
                 .last_remote_activity
                 .lock()
@@ -2473,12 +2519,15 @@ impl<T: InvokeUiSession> Interface for Session<T> {
     ) -> ResultType<()> {
         #[cfg(feature = "flutter")]
         {
+            let approval = UserApprovalGuard::begin(self.connection_round_state.clone())?;
             let (tx, rx) = oneshot::channel();
-            {
+            if !approval.with_current(|| {
                 let mut pending = self.direct_trust_response.lock().unwrap();
                 if let Some(prev) = pending.replace(tx) {
                     let _ = prev.send(false);
                 }
+            }) {
+                bail!("Handshake failed: authentication was cancelled");
             }
             let payload = json!({
                 "peer": peer,
@@ -2495,7 +2544,17 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                 "",
                 false,
             );
-            let approved = rx.await.unwrap_or(false);
+            let response = tokio::time::timeout(USER_APPROVAL_TIMEOUT, rx).await;
+            if !approval.with_current(|| {
+                self.direct_trust_response.lock().unwrap().take();
+            }) {
+                bail!("Handshake failed: authentication was cancelled");
+            }
+            let approved = response
+                .map_err(|_| {
+                    hbb_common::anyhow::anyhow!("Handshake failed: device trust approval timed out")
+                })?
+                .unwrap_or(false);
             if !approved {
                 bail!("Handshake failed: peer trust was not approved");
             }
@@ -2516,12 +2575,15 @@ impl<T: InvokeUiSession> Interface for Session<T> {
     ) -> ResultType<String> {
         #[cfg(feature = "flutter")]
         {
+            let approval = UserApprovalGuard::begin(self.connection_round_state.clone())?;
             let (tx, rx) = oneshot::channel();
-            {
+            if !approval.with_current(|| {
                 let mut pending = self.direct_pairing_passphrase_response.lock().unwrap();
                 if let Some(prev) = pending.replace(tx) {
                     let _ = prev.send(None);
                 }
+            }) {
+                bail!("Handshake failed: authentication was cancelled");
             }
             let payload = json!({
                 "peer": peer,
@@ -2540,7 +2602,23 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                 "",
                 false,
             );
-            let passphrase = rx.await.unwrap_or(None).unwrap_or_default();
+            let response = tokio::time::timeout(USER_APPROVAL_TIMEOUT, rx).await;
+            if !approval.with_current(|| {
+                self.direct_pairing_passphrase_response
+                    .lock()
+                    .unwrap()
+                    .take();
+            }) {
+                bail!("Handshake failed: authentication was cancelled");
+            }
+            let passphrase = response
+                .map_err(|_| {
+                    hbb_common::anyhow::anyhow!(
+                        "Handshake failed: pairing passphrase input timed out"
+                    )
+                })?
+                .unwrap_or(None)
+                .unwrap_or_default();
             if passphrase.is_empty() {
                 bail!("Handshake failed: pairing passphrase was not provided");
             }
@@ -2953,6 +3031,69 @@ mod connection_attempt_tests {
     use super::*;
 
     type TestSession = Session<crate::flutter::FlutterHandler>;
+
+    #[test]
+    fn user_approval_has_its_own_bounded_deadline_and_resumes_connecting() {
+        let session = TestSession::default();
+        let attempt = session.prepare_connection_attempt(false, false).unwrap();
+        let approval = UserApprovalGuard::begin(session.connection_round_state.clone()).unwrap();
+        session.connection_round_state.lock().unwrap().changed_at =
+            Instant::now() - TokioDuration::from_secs(20);
+        assert!(session
+            .is_connection_healthy(TokioDuration::from_secs(35), TokioDuration::from_secs(15)));
+        assert!(session.prepare_connection_attempt(true, false).is_none());
+        session.connection_round_state.lock().unwrap().changed_at =
+            Instant::now() - USER_APPROVAL_TIMEOUT - TokioDuration::from_secs(1);
+        assert!(!session
+            .is_connection_healthy(TokioDuration::from_secs(35), TokioDuration::from_secs(15)));
+        drop(approval);
+        assert!(session
+            .is_connection_healthy(TokioDuration::from_secs(35), TokioDuration::from_secs(15)));
+        assert_eq!(
+            session.connection_round_state.lock().unwrap().state,
+            ConnectionState::Connecting
+        );
+        session.finish_connection_attempt(attempt.round);
+    }
+
+    #[test]
+    fn cancelled_approval_cannot_install_or_clear_a_new_round_response() {
+        let session = TestSession::default();
+        let old = session.prepare_connection_attempt(false, false).unwrap();
+        let approval = UserApprovalGuard::begin(session.connection_round_state.clone()).unwrap();
+        session.close();
+        let new = session.prepare_connection_attempt(false, false).unwrap();
+        let current = UserApprovalGuard::begin(session.connection_round_state.clone()).unwrap();
+        assert!(!approval.with_current(|| panic!("stale response accessed current prompt")));
+        drop(approval);
+        assert_eq!(
+            session.connection_round_state.lock().unwrap().state,
+            ConnectionState::AwaitingUserApproval
+        );
+        assert!(!session.is_current_connection_attempt(old.round));
+        drop(current);
+        session.finish_connection_attempt(new.round);
+    }
+
+    #[tokio::test]
+    async fn close_cancels_pending_passphrase_without_reviving_connection() {
+        let session = TestSession::default();
+        let attempt = session.prepare_connection_attempt(false, false).unwrap();
+        let prompt = session.request_pairing_passphrase("peer", "peer", true);
+        tokio::pin!(prompt);
+        tokio::select! {
+            result = &mut prompt => panic!("prompt completed before response: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        assert_eq!(
+            session.connection_round_state.lock().unwrap().state,
+            ConnectionState::AwaitingUserApproval
+        );
+        session.close();
+        assert!(prompt.await.is_err());
+        assert!(!session.is_connection_alive());
+        session.finish_connection_attempt(attempt.round);
+    }
 
     #[test]
     fn concurrent_attach_and_retry_claim_only_one_worker() {

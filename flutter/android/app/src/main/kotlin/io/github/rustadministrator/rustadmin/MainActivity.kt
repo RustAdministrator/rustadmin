@@ -697,6 +697,7 @@ class MainActivity : FlutterActivity() {
             appendLine("package=$packageName")
             appendLine("versionName=${packageInfo.versionName.orEmpty()}")
             appendLine("versionCode=$versionCode")
+            append(AndroidDiagnosticBuildInfo.read { FFI.getNativeBuildInfo() })
             appendLine("timestampMs=${System.currentTimeMillis()}")
             appendLine("sdk=${Build.VERSION.SDK_INT}")
             appendLine("release=${Build.VERSION.RELEASE}")

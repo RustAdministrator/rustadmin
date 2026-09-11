@@ -39,7 +39,7 @@ pub async fn connect_pretrusted(
     if config.mode == RemoteTransportMode::Tcp {
         return Ok(None);
     }
-    match connect_pretrusted_inner(peer_id, connect_address, &config).await {
+    match connect_pretrusted_inner(peer_id, connect_address, &config, false).await {
         Ok(stream) => Ok(Some(stream)),
         Err(DirectQuicConnectError::Unavailable(error))
             if config.mode == RemoteTransportMode::QuicPreferred =>
@@ -54,6 +54,33 @@ pub async fn connect_pretrusted(
         }
         Err(error) => Err(error.into_error()),
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct QuicIdentityRepairRequired(String);
+
+impl std::fmt::Display for QuicIdentityRepairRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "QUIC saved identity verification failed; authenticated re-pairing required: {}",
+            self.0
+        )
+    }
+}
+impl std::error::Error for QuicIdentityRepairRequired {}
+
+// This transport conveys authentication only. The caller must verify SignedId
+// against saved signing trust or prove the configured pairing passphrase before
+// returning a usable session. No stored identity is deleted here.
+pub(crate) async fn connect_pairing_candidate(peer_id: &str, address: &str) -> ResultType<Stream> {
+    let config = NetworkTransportConfig::load()?;
+    if config.mode == RemoteTransportMode::Tcp {
+        bail!("QUIC authentication recovery is disabled by the selected transport mode");
+    }
+    connect_pretrusted_inner(peer_id, address, &config, true)
+        .await
+        .map_err(DirectQuicConnectError::into_error)
 }
 
 enum DirectQuicConnectError {
@@ -81,10 +108,15 @@ async fn connect_pretrusted_inner(
     peer_id: &str,
     connect_address: &str,
     config: &NetworkTransportConfig,
+    repair: bool,
 ) -> Result<Stream, DirectQuicConnectError> {
     let store = FileTrustedPeerStore::new(&config.trusted_peer_store)
         .map_err(DirectQuicConnectError::fatal)?;
-    let trusted = store.load(peer_id).map_err(DirectQuicConnectError::fatal)?;
+    let trusted = if repair {
+        None
+    } else {
+        store.load(peer_id).map_err(DirectQuicConnectError::fatal)?
+    };
     let identity = local_tls_identity().map_err(DirectQuicConnectError::fatal)?;
     let peer_address =
         resolve_peer_address(connect_address, config.listen_port, config.enable_ipv6)
@@ -117,6 +149,14 @@ async fn connect_pretrusted_inner(
         _ => DirectQuicConnectError::fatal(error),
     })?;
     let connection = endpoint.connect(peer_address).await.map_err(|error| {
+        if trusted.is_some()
+            && matches!(
+                error,
+                QuicTransportError::Handshake(_) | QuicTransportError::CertificatePinMismatch
+            )
+        {
+            return DirectQuicConnectError::fatal(QuicIdentityRepairRequired(error.to_string()));
+        }
         let unavailable = matches!(
             error,
             QuicTransportError::Timeout(_)
@@ -124,10 +164,7 @@ async fn connect_pretrusted_inner(
                 | QuicTransportError::Unreachable(_)
                 | QuicTransportError::UdpBind(_)
         );
-        let error = anyhow!(error).context(format!(
-            "QUIC UDP connection to {peer_address} failed; check the routed path and UDP port {}",
-            peer_address.port()
-        ));
+        let error = anyhow!("QUIC connection to {peer_address} failed: {error}");
         if unavailable {
             DirectQuicConnectError::unavailable(error)
         } else {
@@ -161,7 +198,13 @@ async fn connect_pretrusted_inner(
         )
         .await
     }
-    .map_err(DirectQuicConnectError::fatal)?;
+    .map_err(|error| {
+        if trusted.is_some() && matches!(error, QuicTransportError::Authentication(_)) {
+            DirectQuicConnectError::fatal(QuicIdentityRepairRequired(error.to_string()))
+        } else {
+            DirectQuicConnectError::fatal(error)
+        }
+    })?;
     let mut application = QuicApplicationStream::establish(
         authentication,
         ApplicationQuicRole::Client,
@@ -338,10 +381,28 @@ pub fn forget_paired_peer_ids(peer_ids: &[String]) -> ResultType<Vec<String>> {
     Ok(removed_ids)
 }
 
+#[cfg(any(not(target_os = "ios"), test))]
 pub fn remember_paired_peer(
     peer_id: &str,
     identity_key: [u8; 32],
     certificate_der: &[u8],
+) -> ResultType<()> {
+    remember_peer(peer_id, identity_key, certificate_der, false)
+}
+
+pub(crate) fn remember_authenticated_peer(
+    peer_id: &str,
+    identity_key: [u8; 32],
+    certificate_der: &[u8],
+) -> ResultType<()> {
+    remember_peer(peer_id, identity_key, certificate_der, true)
+}
+
+fn remember_peer(
+    peer_id: &str,
+    identity_key: [u8; 32],
+    certificate_der: &[u8],
+    allow_replace: bool,
 ) -> ResultType<()> {
     if certificate_der.is_empty() {
         return Ok(());
@@ -364,6 +425,13 @@ pub fn remember_paired_peer(
                 && existing.certificate_pin == record.certificate_pin
                 && existing.certificate_der == record.certificate_der =>
         {
+            Ok(())
+        }
+        Some(_) if allow_replace => {
+            store.replace_authenticated(record)?;
+            hbb_common::log::info!(
+                "Replaced QUIC identity after authenticated pairing for peer {peer_id}"
+            );
             Ok(())
         }
         Some(_) => bail!(
@@ -418,6 +486,84 @@ async fn resolve_peer_address(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn changed_tls_certificate_recovery_does_not_modify_saved_trust() {
+        let directory =
+            std::env::temp_dir().join(format!("rustadmin-quic-repair-{}", uuid::Uuid::new_v4()));
+        let old_tls = LocalTlsIdentity::load_or_create(directory.join("old")).unwrap();
+        let new_tls = LocalTlsIdentity::load_or_create(directory.join("new")).unwrap();
+        let mut config =
+            NetworkTransportConfig::from_values(&Default::default(), directory.join("trust"))
+                .unwrap();
+        let mut store = FileTrustedPeerStore::new(&config.trusted_peer_store).unwrap();
+        let candidate = PairingCandidate::new(
+            "repair-peer".to_owned(),
+            [7; 32],
+            old_tls.certificate_bytes().to_vec(),
+        )
+        .unwrap();
+        let record = candidate
+            .clone()
+            .confirm(&candidate.fingerprint(), 1)
+            .unwrap();
+        store.insert(record.clone()).unwrap();
+        let options = quic_options(&config);
+        let server = QuicServerEndpoint::bind_provisional(
+            "127.0.0.1:0".parse().unwrap(),
+            new_tls.credentials().unwrap(),
+            &options,
+        )
+        .unwrap();
+        config.listen_port = server.local_addr().unwrap().port();
+        let (pk, sk) = hbb_common::sodiumoxide::crypto::sign::gen_keypair();
+        let identity = DeviceIdentity::from_bytes(&sk.0, &pk.0).unwrap();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            // The first client's saved certificate rejects this endpoint.
+            let _ = server.accept().await;
+            let connection = server.accept().await.unwrap();
+            let auth = AuthenticatedControlChannel::authenticate_server_discover_peer(
+                connection,
+                &identity,
+                options.authentication_timeout,
+            )
+            .await
+            .unwrap();
+            let _application = QuicApplicationStream::establish(
+                auth,
+                ApplicationQuicRole::Server,
+                server.local_addr().unwrap(),
+            )
+            .await
+            .unwrap();
+            let _ = ready_tx.send(());
+            let _ = done_rx.await;
+        });
+        let result =
+            connect_pretrusted_inner("repair-peer", "127.0.0.1:21118", &config, false).await;
+        let error = match result {
+            Err(error) => error.into_error(),
+            Ok(_) => panic!("changed TLS identity was accepted without recovery"),
+        };
+        assert!(
+            error.downcast_ref::<QuicIdentityRepairRequired>().is_some(),
+            "{error}"
+        );
+        let stream =
+            match connect_pretrusted_inner("repair-peer", "127.0.0.1:21118", &config, true).await {
+                Ok(stream) => stream,
+                Err(error) => panic!("candidate connection failed: {}", error.into_error()),
+            };
+        assert!(stream.is_quic());
+        assert_eq!(store.load("repair-peer").unwrap(), Some(record));
+        ready_rx.await.unwrap();
+        drop(stream);
+        let _ = done_tx.send(());
+        task.await.unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn client_bind_address_matches_peer_family() {

@@ -1,20 +1,26 @@
+#[cfg(target_os = "android")]
 use android_logger::{AndroidLogger, Config};
+#[cfg(target_os = "android")]
 use hbb_common::log::{self, Level, LevelFilter, Log, Metadata, Record};
+#[cfg(target_os = "android")]
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex, OnceLock,
+};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Mutex, OnceLock,
-    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
 const LOG_FILE_MAX_BYTES: u64 = 1024 * 1024;
+#[cfg(target_os = "android")]
 const LOG_LINE_MAX_BYTES: usize = 4 * 1024;
 
+#[cfg(target_os = "android")]
 static LOGGER: OnceLock<AndroidDiagnosticLogger> = OnceLock::new();
+#[cfg(target_os = "android")]
 pub const OPTION_ENABLE_ANDROID_DIAGNOSTIC_LOGGING: &str = "enable-android-diagnostic-logging";
 
 struct LogFile {
@@ -68,6 +74,24 @@ impl LogFile {
             .append(true)
             .open(&self.path)
             .ok();
+        self.write_build_header();
+    }
+
+    fn write_build_header(&mut self) {
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default();
+        let identity = crate::build_identity::diagnostic_build_identity().replace('\n', " ");
+        let header = format!("{timestamp_ms} INFO  [build] {identity}\n");
+        // Do not call the logger here: opening/rotating already holds its file lock.
+        if self.bytes.saturating_add(header.len() as u64) > LOG_FILE_MAX_BYTES {
+            self.rotate();
+        } else if let Some(file) = self.file.as_mut() {
+            if file.write_all(header.as_bytes()).is_ok() {
+                self.bytes += header.len() as u64;
+            }
+        }
     }
 
     fn close(&mut self) {
@@ -107,6 +131,7 @@ impl LogFile {
             .open(&self.path)
             .ok();
         self.bytes = 0;
+        self.write_build_header();
     }
 
     fn copy_tail(source: &PathBuf, destination: &PathBuf) -> std::io::Result<()> {
@@ -125,12 +150,14 @@ impl LogFile {
     }
 }
 
+#[cfg(target_os = "android")]
 struct AndroidDiagnosticLogger {
     logcat: AndroidLogger,
     file: Mutex<LogFile>,
     enabled: AtomicBool,
 }
 
+#[cfg(target_os = "android")]
 impl AndroidDiagnosticLogger {
     fn new(app_dir: &str, enabled: bool) -> Self {
         Self {
@@ -156,6 +183,7 @@ impl AndroidDiagnosticLogger {
     }
 }
 
+#[cfg(target_os = "android")]
 impl Log for AndroidDiagnosticLogger {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
         self.enabled.load(Ordering::Relaxed)
@@ -201,6 +229,7 @@ impl Log for AndroidDiagnosticLogger {
     }
 }
 
+#[cfg(target_os = "android")]
 pub fn init(app_dir: &str, enabled: bool) {
     let logger = LOGGER.get_or_init(|| AndroidDiagnosticLogger::new(app_dir, enabled));
     logger.set_enabled(enabled);
@@ -209,8 +238,59 @@ pub fn init(app_dir: &str, enabled: bool) {
     }
 }
 
+#[cfg(target_os = "android")]
 pub fn set_enabled(enabled: bool) {
     if let Some(logger) = LOGGER.get() {
         logger.set_enabled(enabled);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_identity_follows_opt_in_restart_and_rotation() {
+        let directory =
+            std::env::temp_dir().join(format!("rustadmin-build-log-{}", uuid::Uuid::new_v4()));
+        let mut log = LogFile::new(directory.to_str().unwrap(), false);
+        assert!(
+            !directory.exists(),
+            "logging disabled must not create files"
+        );
+        log.open();
+        let identity = crate::build_identity::diagnostic_build_identity().replace('\n', " ");
+        assert!(fs::read_to_string(&log.path).unwrap().contains(&identity));
+        log.write(b"first session\n");
+        log.close();
+        log.open();
+        assert_eq!(
+            fs::read_to_string(&log.path)
+                .unwrap()
+                .matches("[build]")
+                .count(),
+            2
+        );
+        // Model a new process appending to the same diagnostic history.
+        log.close();
+        let mut log = LogFile::new(directory.to_str().unwrap(), true);
+        assert_eq!(
+            fs::read_to_string(&log.path)
+                .unwrap()
+                .matches("[build]")
+                .count(),
+            3
+        );
+        let line = vec![b'x'; 4096];
+        for _ in 0..260 {
+            log.write(&line);
+        }
+        assert!(fs::read_to_string(&log.path).unwrap().contains(&identity));
+        assert!(fs::read_to_string(log.path.with_extension("log.1"))
+            .unwrap()
+            .contains(&identity));
+        assert!(log.bytes <= LOG_FILE_MAX_BYTES);
+        log.close();
+        fs::remove_dir_all(directory).unwrap();
     }
 }
