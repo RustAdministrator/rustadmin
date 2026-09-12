@@ -1542,8 +1542,13 @@ void msgBoxCommon(OverlayDialogManager dialogManager, String title,
 
 void showCodecUnavailableDialog(
     OverlayDialogManager dialogManager, String codec) {
+  final av1Encoding = codec == kAv1HardwareEncodingLabel ||
+      codec == translate(kAv1HardwareEncodingLabel);
+  final tip = av1Encoding
+      ? '${translate('codec_unavailable_tip')}\n\n${translate('av1_encoding_preference_tip')}'
+      : translate('codec_unavailable_tip');
   msgBoxCommon(dialogManager, 'Codec',
-      Text('${translate(codec)}\n\n${translate('codec_unavailable_tip')}'), [
+      Text('${translate(codec)}\n\n$tip'), [
     dialogButton('OK', onPressed: dialogManager.dismissAll),
   ]);
 }

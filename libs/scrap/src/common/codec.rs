@@ -1760,6 +1760,55 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(all(feature = "hwcodec", any(target_os = "macos", windows)))]
+    #[ignore = "requires AV1 hardware decoding and native FFmpeg libraries"]
+    fn av1_software_encoder_hardware_decoder_reference_stream() {
+        use hwcodec::ffmpeg::AVHWDeviceType;
+        use hwcodec::ffmpeg_ram::decode::{DecodeContext, Decoder as RamDecoder};
+        #[cfg(target_os = "macos")]
+        let device_type = AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX;
+        #[cfg(windows)]
+        let device_type = AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA;
+
+        let mut encoder = AomEncoder::new(
+            EncoderCfg::AOM(AomEncoderConfig {
+                width: 1280,
+                height: 720,
+                quality: 1.0,
+                fps: 30,
+                keyframe_interval: Some(120),
+            }),
+            false,
+        )
+        .unwrap();
+        let mut decoder = RamDecoder::new(DecodeContext {
+            name: "av1".into(),
+            device_type,
+            thread_count: 1,
+        })
+        .expect("AV1 hardware decoder must open");
+        let mut input = vec![128; 1280 * 720 * 3 / 2];
+        let mut saw_delta = false;
+        let mut decoded = 0;
+        for index in 0..12 {
+            let luma = 32 + index as u8 * 10;
+            input[..1280 * 720].fill(luma);
+            for packet in encoder.encode(index * 33, &input, 1).unwrap() {
+                saw_delta |= !packet.key;
+                let frames = decoder
+                    .decode(packet.data)
+                    .expect("hardware must decode RustAdmin's reference-dependent AV1 stream");
+                assert_eq!(frames.len(), 1, "each frame must deliver without buffering");
+                assert_eq!((frames[0].width, frames[0].height), (1280, 720));
+                assert!((i16::from(frames[0].data[0][0]) - i16::from(luma)).abs() <= 8);
+                decoded += frames.len();
+            }
+        }
+        assert!(saw_delta);
+        assert_eq!(decoded, 12);
+    }
+
+    #[test]
     fn encoder_fps_is_explicit_and_bounded() {
         assert_eq!(normalized_encoder_fps(0), DEFAULT_ENCODER_FPS);
         assert_eq!(normalized_encoder_fps(30), 30);

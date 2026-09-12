@@ -2,6 +2,19 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_hbb/models/model.dart';
 
 void main() {
+  test('AV1 software encoding is independent of hardware decoding', () {
+    final data = QualityMonitorData()
+      ..codecFormat = 'AV1'
+      ..encoderBackend = 'Software libaom AV1'
+      ..decoder = 'Hardware FFmpeg VideoToolbox';
+    expect(data.codecLabel, 'AV1');
+    expect(data.encoderBackend, 'Software libaom AV1');
+    expect(data.decoder, 'Hardware FFmpeg VideoToolbox');
+    data.decoder = 'Software libaom';
+    expect(data.codecLabel, 'AV1');
+    expect(data.encoderBackend, 'Software libaom AV1');
+  });
+
   test('quality monitor identifies NVENC p5 H264 and H265 as HQ', () {
     final data = QualityMonitorData()
       ..encoderBackend = 'Hardware NVIDIA NVENC p5 via FFmpeg';

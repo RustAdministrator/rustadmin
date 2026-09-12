@@ -169,6 +169,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Default Image Quality", "Default image quality"),
         ("Default Codec", "Default codec"),
         ("codec_unavailable_tip", "This codec is not available for this connection or this device. RustAdmin will keep using a working codec."),
+        ("av1_encoding_preference_tip", "This selects encoding on the remote computer, not decoding on this device. AV1 hardware encoding requires a compatible remote encoder. Either AV1 option can use hardware decoding locally when supported and enabled. Check Quality monitor > Local > Decoder API for the active decoder. AV1 4:4:4 streams may require software decoding."),
         ("Display", "Display"),
         ("Capture", "Capture"),
         ("Quality monitor", "Quality monitor"),

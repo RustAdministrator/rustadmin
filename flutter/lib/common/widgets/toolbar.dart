@@ -537,7 +537,12 @@ Future<List<TRadioMenu<String>>> toolbarCodec(
 
   TRadioMenu<String> radio(String label, String value, bool enabled) {
     return TRadioMenu<String>(
-        child: codecLabel(label, enabled),
+        child: value == 'av1' || value == 'av1-hw'
+            ? Tooltip(
+                message: translate('av1_encoding_preference_tip'),
+                child: codecLabel(label, enabled),
+              )
+            : codecLabel(label, enabled),
         value: value,
         groupValue: groupValue,
         enabled: enabled,
@@ -555,8 +560,8 @@ Future<List<TRadioMenu<String>>> toolbarCodec(
     radio(autoLabel, 'auto', true),
     radio('VP8', 'vp8', vp8),
     radio('VP9', 'vp9', true),
-    radio('AV1', 'av1', av1),
-    radio('AV1 HW', 'av1-hw', av1Hw),
+    radio(translate(kAv1SoftwareEncodingLabel), 'av1', av1),
+    radio(translate(kAv1HardwareEncodingLabel), 'av1-hw', av1Hw),
     radio('H264', 'h264', h264),
     radio('H264 HQ', 'h264-hq', h264Hq),
     radio('H265', 'h265', h265),

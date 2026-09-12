@@ -2439,10 +2439,10 @@ class _DisplayState extends State<_Display> {
       hwRadios.add(_Radio(context,
           value: 'av1-hw',
           groupValue: groupValue,
-          label: 'AV1 HW',
+          label: kAv1HardwareEncodingLabel,
           enabled: av1,
-          onDisabledTap: () =>
-              showCodecUnavailableDialog(gFFI.dialogManager, 'AV1 HW'),
+          onDisabledTap: () => showCodecUnavailableDialog(
+              gFFI.dialogManager, kAv1HardwareEncodingLabel),
           onChanged: isOptFixed ? null : onChanged));
       hwRadios.add(_Radio(context,
           value: 'h264',
@@ -2498,7 +2498,7 @@ class _DisplayState extends State<_Display> {
       _Radio(context,
           value: 'av1',
           groupValue: groupValue,
-          label: 'AV1',
+          label: kAv1SoftwareEncodingLabel,
           onChanged: isOptFixed ? null : onChanged),
       ...hwRadios,
     ]);

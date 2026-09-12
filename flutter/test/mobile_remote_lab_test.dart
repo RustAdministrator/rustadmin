@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_hbb/mobile/mobile_viewport.dart';
 import 'package:flutter_hbb/prototyping/mobile_remote_lab_page.dart';
@@ -794,6 +795,21 @@ void main() {
       );
     },
   );
+
+  testWidgets('AV1 menu describes encoding without changing preference values', (tester) async {
+    await pumpPreview(tester, size: const Size(320, 600));
+    await tester.tap(find.byTooltip('Display and session options'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('mobile-remote-options-open-codec')));
+    await tester.pumpAndSettle();
+    expect(find.text(kAv1SoftwareEncodingLabel), findsOneWidget);
+    expect(find.text(kAv1HardwareEncodingLabel), findsOneWidget);
+    final values = tester.widgetList<RadioListTile<String>>(
+      find.byType(RadioListTile<String>),
+    ).map((radio) => radio.value);
+    expect(values, containsAll(['av1', 'av1-hw']));
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('uses mobile drill-down menus for Lab option and action groups', (
     tester,

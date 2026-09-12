@@ -29,7 +29,7 @@ use hwcodec::{
 };
 
 const DEFAULT_PIXFMT: AVPixelFormat = AVPixelFormat::AV_PIX_FMT_NV12;
-const DECODER_PROBE_VERSION: u32 = 2;
+const DECODER_PROBE_VERSION: u32 = 3;
 pub const DEFAULT_FPS: i32 = DEFAULT_ENCODER_FPS as i32;
 const DEFAULT_GOP: i32 = i32::MAX;
 const DEFAULT_HW_QUALITY: Quality = Quality_Default;
@@ -321,6 +321,28 @@ mod tests {
         config.ram_decode = vec![CodecInfo::soft().h264.unwrap()];
         config.discard_unverified_decoders();
         assert_eq!(config.ram_decode.len(), 1);
+        config.decoder_probe_version = DECODER_PROBE_VERSION - 1;
+        config.discard_unverified_decoders();
+        assert!(config.ram_decode.is_empty());
+        assert_eq!(config.ram_encode.len(), 1);
+    }
+
+    #[test]
+    fn av1_decoder_selection_requires_a_probed_enabled_backend() {
+        let av1 = CodecInfo {
+            name: "av1".into(),
+            format: DataFormat::AV1,
+            hwdevice: AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+            ..Default::default()
+        };
+        assert!(HwRamDecoder::select_probed(CodecFormat::AV1, vec![], true).is_none());
+        assert!(HwRamDecoder::select_probed(CodecFormat::AV1, vec![av1.clone()], false).is_none());
+        assert_eq!(
+            HwRamDecoder::select_probed(CodecFormat::AV1, vec![av1], true)
+                .unwrap()
+                .hwdevice,
+            AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+        );
     }
 
     fn decoder_candidates() -> Vec<CodecInfo> {

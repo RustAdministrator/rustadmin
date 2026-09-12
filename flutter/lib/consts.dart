@@ -7,6 +7,9 @@ import 'package:get/get.dart';
 const int kMaxVirtualDisplayCount = 4;
 const int kAllVirtualDisplay = -1;
 
+const String kAv1SoftwareEncodingLabel = 'AV1 (software encoding)';
+const String kAv1HardwareEncodingLabel = 'AV1 (hardware encoding)';
+
 const String kRustAdminSourceUrl =
     'https://github.com/RustAdministrator/rustadmin';
 const String kRustAdminLicenseNotice =
