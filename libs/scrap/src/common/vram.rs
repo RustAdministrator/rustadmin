@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    codec::{enable_vram_option, normalized_encoder_fps, EncoderApi, EncoderCfg},
+    codec::{normalized_encoder_fps, EncoderApi, EncoderCfg},
     hwcodec::{HwCodecConfig, ERR_NO_PACKET},
     AdapterDevice, CodecFormat, EncodeInput, EncodeYuvFormat, Pixfmt,
 };
@@ -341,9 +341,8 @@ impl VRamDecoder {
     }
 
     pub fn possible_available_without_check() -> (bool, bool) {
-        if !enable_vram_option(false) {
-            return (false, false);
-        }
+        // Report the probe result independently of Auto's hardware preference.
+        // Decoder construction still validates the rendering path and adapter.
         let v = crate::hwcodec::HwCodecConfig::get().vram_decode;
         (
             v.iter().any(|d| d.data_format == DataFormat::H264),

@@ -1,3 +1,4 @@
+import 'package:flutter_hbb/common/codec_preferences.dart';
 import 'package:bot_toast/bot_toast.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -1774,20 +1775,13 @@ Future<void> _showConnectionPropertiesDialog(String id) async {
                           ),
                         ).marginOnly(top: 8),
                       DropdownButtonFormField<String>(
-                        value: properties.codecPreference,
+                        value: normalizeDecoderPreference(properties.codecPreference),
                         decoration: InputDecoration(
-                          labelText: translate('Default Codec'),
+                          labelText: translate('Default Decoder'),
                         ),
                         items: [
-                          _stringMenuItem('auto', 'Auto'),
-                          _stringMenuItem('vp8', 'VP8'),
-                          _stringMenuItem('vp9', 'VP9'),
-                          _stringMenuItem('av1', kAv1SoftwareEncodingLabel),
-                          _stringMenuItem('av1-hw', kAv1HardwareEncodingLabel),
-                          _stringMenuItem('h264', 'H264'),
-                          _stringMenuItem('h264-hq', 'H264 HQ'),
-                          _stringMenuItem('h265', 'H265'),
-                          _stringMenuItem('h265-hq', 'H265 HQ'),
+                          for (final choice in decoderCodecChoices)
+                            _stringMenuItem(choice.value, choice.label),
                         ],
                         onChanged: (value) {
                           if (value == null) return;

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter_hbb/common/widgets/codec_settings.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -87,7 +88,6 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   var _rememberPairedViewers = true;
   var _peerPairingPassphraseSet = false;
   var _enableRecordSession = false;
-  var _enableHardwareCodec = false;
   var _useTextureRender = false;
   var _allowWebSocket = false;
   var _allowIdRelayServer = false;
@@ -149,10 +149,6 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
     _enableRecordSession = option2bool(
       kOptionEnableRecordSession,
       bind.mainGetOptionSync(key: kOptionEnableRecordSession),
-    );
-    _enableHardwareCodec = option2bool(
-      kOptionEnableHwcodec,
-      bind.mainGetOptionSync(key: kOptionEnableHwcodec),
     );
     _useTextureRender = bind.mainGetUseTextureRender();
     _allowWebSocket = mainGetBoolOptionSync(kOptionAllowWebSocket);
@@ -1243,26 +1239,11 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
               ),
             ],
           ),
-        if (isAndroid)
+        if (isAndroid && bind.mainHasGpuTextureRender())
           SettingsSection(
             key: const ValueKey('mobile-settings-section-hardware'),
-            title: Text(translate('Hardware Codec')),
+            title: Text(translate('Rendering')),
             tiles: [
-              SettingsTile.switchTile(
-                title: Text(translate('Enable hardware codec')),
-                initialValue: _enableHardwareCodec,
-                onToggle: isOptionFixed(kOptionEnableHwcodec)
-                    ? null
-                    : (v) async {
-                        await mainSetBoolOption(kOptionEnableHwcodec, v);
-                        final newValue = await mainGetBoolOption(
-                          kOptionEnableHwcodec,
-                        );
-                        setState(() {
-                          _enableHardwareCodec = newValue;
-                        });
-                      },
-              ),
               if (bind.mainHasGpuTextureRender())
                 SettingsTile.switchTile(
                   title: Text(translate('Use texture rendering')),
@@ -1961,21 +1942,6 @@ class _DisplayPage extends StatefulWidget {
 class __DisplayPageState extends State<_DisplayPage> {
   @override
   Widget build(BuildContext context) {
-    final Map codecsJson = jsonDecode(bind.mainSupportedHwdecodings());
-    final av1 = codecsJson['av1'] ?? false;
-    final h264 = codecsJson['h264'] ?? false;
-    final h265 = codecsJson['h265'] ?? false;
-    var codecList = [
-      _RadioEntry('Auto', 'auto'),
-      _RadioEntry('VP8', 'vp8'),
-      _RadioEntry('VP9', 'vp9'),
-      _RadioEntry(kAv1SoftwareEncodingLabel, 'av1'),
-      _RadioEntry(kAv1HardwareEncodingLabel, 'av1-hw', enabled: av1),
-      _RadioEntry('H264', 'h264', enabled: h264),
-      _RadioEntry('H264 HQ', 'h264-hq', enabled: h264),
-      _RadioEntry('H265', 'h265', enabled: h265),
-      _RadioEntry('H265 HQ', 'h265-hq', enabled: h265),
-    ];
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(
@@ -1985,16 +1951,14 @@ class __DisplayPageState extends State<_DisplayPage> {
         title: Text(translate('Display Settings')),
         centerTitle: true,
       ),
-      body: _CompactDisplaySettings(codecList: codecList),
+      body: const _CompactDisplaySettings(),
     );
   }
 
 }
 
 class _CompactDisplaySettings extends StatefulWidget {
-  const _CompactDisplaySettings({required this.codecList});
-
-  final List<_RadioEntry> codecList;
+  const _CompactDisplaySettings();
 
   @override
   State<_CompactDisplaySettings> createState() =>
@@ -2032,23 +1996,7 @@ class _CompactDisplaySettingsState extends State<_CompactDisplaySettings> {
   List<MobileRemoteToggleItem> _runtimeDisplayToggles() {
     if (!isAndroid) return const [];
 
-    final toggles = <MobileRemoteToggleItem>[
-      MobileRemoteToggleItem(
-        id: 'display-enable-hardware-codec',
-        value: option2bool(
-          kOptionEnableHwcodec,
-          bind.mainGetOptionSync(key: kOptionEnableHwcodec),
-        ),
-        child: Text(translate('Enable hardware codec')),
-        dividerBefore: true,
-        onChanged: isOptionFixed(kOptionEnableHwcodec)
-            ? null
-            : (value) {
-                if (value == null) return;
-                unawaited(mainSetBoolOption(kOptionEnableHwcodec, value));
-              },
-      ),
-    ];
+    final toggles = <MobileRemoteToggleItem>[];
     if (bind.mainHasGpuTextureRender()) {
       toggles.add(
         MobileRemoteToggleItem(
@@ -2133,9 +2081,6 @@ class _CompactDisplaySettingsState extends State<_CompactDisplaySettings> {
     );
     final imageQuality = remoteDisplaySettings.read(
       RemoteDisplaySettingsRegistry.imageQuality,
-    );
-    final codec = remoteDisplaySettings.read(
-      RemoteDisplaySettingsRegistry.codecPreference,
     );
     var edgeThickness = remoteToolbarSettings
         .readSetting(RemoteToolbarSettingsRegistry.edgeThickness)
@@ -2350,22 +2295,10 @@ class _CompactDisplaySettingsState extends State<_CompactDisplaySettings> {
           ),
           MobileRemoteRadioSection(
             id: 'default-codec',
-            value: codec,
-            heading: Text(translate('Default Codec')),
-            items: [
-              for (final entry in widget.codecList)
-                _radioItem(
-                  entry.value,
-                  entry.label,
-                  isOptionFixed(kOptionCodecPreference)
-                      ? null
-                      : (value) => remoteDisplaySettings.write(
-                          RemoteDisplaySettingsRegistry.codecPreference,
-                          value,
-                        ),
-                  enabled: entry.enabled,
-                ),
-            ],
+            value: '',
+            heading: Text(translate('Codecs')),
+            items: const [],
+            content: const CodecSettings(),
           ),
           MobileRemoteRadioSection(
             id: 'other-default-options',
@@ -2545,8 +2478,7 @@ class __ManagePairedViewersState extends State<_ManagePairedViewers> {
 class _RadioEntry {
   final String label;
   final String value;
-  final bool enabled;
-  _RadioEntry(this.label, this.value, {this.enabled = true});
+  _RadioEntry(this.label, this.value);
 }
 
 typedef _RadioEntryGetter = String Function();
@@ -2582,11 +2514,6 @@ SettingsTile _getPopupDialogRadioEntry({
             ? null
             : (String? value) async {
                 if (value == null) return;
-                final entry = list.firstWhereOrNull((e) => e.value == value);
-                if (entry != null && !entry.enabled) {
-                  showCodecUnavailableDialog(gFFI.dialogManager, entry.label);
-                  return;
-                }
                 await asyncSetter(value);
                 init();
                 if (value != notCloseValue) {
@@ -2603,9 +2530,6 @@ SettingsTile _getPopupDialogRadioEntry({
                       (e) => getRadio(
                         Text(
                           translate(e.label),
-                          style: TextStyle(
-                            color: disabledTextColor(context, e.enabled),
-                          ),
                         ),
                         e.value,
                         groupValue.value,

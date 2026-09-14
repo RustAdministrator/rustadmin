@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter_hbb/common/widgets/codec_settings.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -444,7 +445,6 @@ class _GeneralState extends State<_General> {
         if (!isWeb) service(),
         theme(),
         _Card(title: 'Language', children: [language()]),
-        if (!isWeb) hwcodec(),
         if (isWindows) processPriority(),
         if (!isWeb) audio(context),
         if (!isWeb) record(context),
@@ -685,26 +685,6 @@ class _GeneralState extends State<_General> {
 
       return Offstage();
     });
-  }
-
-  Widget hwcodec() {
-    final hwcodec = bind.mainHasHwcodec();
-    final vram = bind.mainHasVram();
-    return Offstage(
-      offstage: !(hwcodec || vram),
-      child: _Card(title: 'Hardware Codec', children: [
-        _OptionCheckBox(
-          context,
-          'Enable hardware codec',
-          kOptionEnableHwcodec,
-          update: (bool v) {
-            if (v) {
-              bind.mainCheckHwcodec();
-            }
-          },
-        )
-      ]),
-    );
   }
 
   Widget processPriority() {
@@ -2418,90 +2398,7 @@ class _DisplayState extends State<_Display> {
   }
 
   Widget codec(BuildContext context) {
-    Future<void> onChanged(String value) async {
-      await remoteDisplaySettings.write(
-        RemoteDisplaySettingsRegistry.codecPreference,
-        value,
-      );
-      setState(() {});
-    }
-
-    final groupValue = remoteDisplaySettings.read(
-      RemoteDisplaySettingsRegistry.codecPreference,
-    );
-    var hwRadios = [];
-    final isOptFixed = isOptionFixed(kOptionCodecPreference);
-    try {
-      final Map codecsJson = jsonDecode(bind.mainSupportedHwdecodings());
-      final av1 = codecsJson['av1'] ?? false;
-      final h264 = codecsJson['h264'] ?? false;
-      final h265 = codecsJson['h265'] ?? false;
-      hwRadios.add(_Radio(context,
-          value: 'av1-hw',
-          groupValue: groupValue,
-          label: kAv1HardwareEncodingLabel,
-          enabled: av1,
-          onDisabledTap: () => showCodecUnavailableDialog(
-              gFFI.dialogManager, kAv1HardwareEncodingLabel),
-          onChanged: isOptFixed ? null : onChanged));
-      hwRadios.add(_Radio(context,
-          value: 'h264',
-          groupValue: groupValue,
-          label: 'H264',
-          enabled: h264,
-          onDisabledTap: () =>
-              showCodecUnavailableDialog(gFFI.dialogManager, 'H264'),
-          onChanged: isOptFixed ? null : onChanged));
-      hwRadios.add(_Radio(context,
-          value: 'h264-hq',
-          groupValue: groupValue,
-          label: 'H264 HQ',
-          enabled: h264,
-          onDisabledTap: () =>
-              showCodecUnavailableDialog(gFFI.dialogManager, 'H264 HQ'),
-          onChanged: isOptFixed ? null : onChanged));
-      hwRadios.add(_Radio(context,
-          value: 'h265',
-          groupValue: groupValue,
-          label: 'H265',
-          enabled: h265,
-          onDisabledTap: () =>
-              showCodecUnavailableDialog(gFFI.dialogManager, 'H265'),
-          onChanged: isOptFixed ? null : onChanged));
-      hwRadios.add(_Radio(context,
-          value: 'h265-hq',
-          groupValue: groupValue,
-          label: 'H265 HQ',
-          enabled: h265,
-          onDisabledTap: () =>
-              showCodecUnavailableDialog(gFFI.dialogManager, 'H265 HQ'),
-          onChanged: isOptFixed ? null : onChanged));
-    } catch (e) {
-      debugPrint("failed to parse supported hwdecodings, err=$e");
-    }
-    return _Card(title: 'Default Codec', children: [
-      _Radio(context,
-          value: 'auto',
-          groupValue: groupValue,
-          label: 'Auto',
-          onChanged: isOptFixed ? null : onChanged),
-      _Radio(context,
-          value: 'vp8',
-          groupValue: groupValue,
-          label: 'VP8',
-          onChanged: isOptFixed ? null : onChanged),
-      _Radio(context,
-          value: 'vp9',
-          groupValue: groupValue,
-          label: 'VP9',
-          onChanged: isOptFixed ? null : onChanged),
-      _Radio(context,
-          value: 'av1',
-          groupValue: groupValue,
-          label: kAv1SoftwareEncodingLabel,
-          onChanged: isOptFixed ? null : onChanged),
-      ...hwRadios,
-    ]);
+    return _Card(title: 'Codecs', children: [const CodecSettings()]);
   }
 
   Widget privacyModeImpl(BuildContext context) {

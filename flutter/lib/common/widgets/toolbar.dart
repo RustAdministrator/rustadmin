@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:flutter_hbb/common/codec_preferences.dart';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -500,26 +501,13 @@ Future<List<TRadioMenu<String>>> toolbarCodec(
   final alternativeCodecs =
       await bind.sessionAlternativeCodecs(sessionId: sessionId);
   final settings = SessionPeerSettingsRepository.forSession(sessionId);
-  final groupValue =
-      await settings.read(SessionPeerSettingsRegistry.codecPreference);
-  bool vp8 = false;
-  bool av1 = false;
-  bool av1Hw = false;
-  bool h264 = false;
-  bool h265 = false;
-  bool h264Hq = false;
-  bool h265Hq = false;
+  final groupValue = normalizeDecoderPreference(
+      await settings.read(SessionPeerSettingsRegistry.codecPreference));
+  Map<String, dynamic> capabilities = {};
   try {
-    final Map codecsJson = jsonDecode(alternativeCodecs);
-    vp8 = codecsJson['vp8'] ?? false;
-    av1 = codecsJson['av1'] ?? false;
-    av1Hw = codecsJson['av1Hw'] ?? false;
-    h264 = codecsJson['h264'] ?? false;
-    h265 = codecsJson['h265'] ?? false;
-    h264Hq = codecsJson['h264Hq'] ?? false;
-    h265Hq = codecsJson['h265Hq'] ?? false;
+    capabilities = jsonDecode(alternativeCodecs);
   } catch (e) {
-    debugPrint("Show Codec Preference err=$e");
+    debugPrint("Show decoder preference err=$e");
   }
 
   onChanged(String? value) async {
@@ -537,12 +525,10 @@ Future<List<TRadioMenu<String>>> toolbarCodec(
 
   TRadioMenu<String> radio(String label, String value, bool enabled) {
     return TRadioMenu<String>(
-        child: value == 'av1' || value == 'av1-hw'
-            ? Tooltip(
-                message: translate('av1_encoding_preference_tip'),
-                child: codecLabel(label, enabled),
-              )
-            : codecLabel(label, enabled),
+        child: Tooltip(
+          message: translate('decoder_preference_tip'),
+          child: codecLabel(label, enabled),
+        ),
         value: value,
         groupValue: groupValue,
         enabled: enabled,
@@ -551,21 +537,9 @@ Future<List<TRadioMenu<String>>> toolbarCodec(
             : (_) => showCodecUnavailableDialog(ffi.dialogManager, label));
   }
 
-  var autoLabel = translate('Auto');
-  if (groupValue == 'auto' &&
-      ffi.qualityMonitorModel.data.codecFormat != null) {
-    autoLabel = '$autoLabel (${ffi.qualityMonitorModel.data.codecFormat})';
-  }
   return [
-    radio(autoLabel, 'auto', true),
-    radio('VP8', 'vp8', vp8),
-    radio('VP9', 'vp9', true),
-    radio(translate(kAv1SoftwareEncodingLabel), 'av1', av1),
-    radio(translate(kAv1HardwareEncodingLabel), 'av1-hw', av1Hw),
-    radio('H264', 'h264', h264),
-    radio('H264 HQ', 'h264-hq', h264Hq),
-    radio('H265', 'h265', h265),
-    radio('H265 HQ', 'h265-hq', h265Hq),
+    for (final choice in decoderCodecChoices)
+      radio(translate(choice.label), choice.value, choice.enabled(capabilities)),
   ];
 }
 

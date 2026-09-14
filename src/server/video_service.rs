@@ -3,7 +3,6 @@
 // Our eyes can see a slight difference and even though 30FPS actually shows
 // more information and is more realistic.
 // 60FPS is commonly used in game, teamviewer 12 support this for video editing user.
-
 // how to capture with mouse cursor:
 // https://docs.microsoft.com/zh-cn/windows/win32/direct3ddxgi/desktop-dup-api?redirectedfrom=MSDN
 
@@ -3980,7 +3979,7 @@ fn get_encoder_config(
         CodecFormat::H264 | CodecFormat::H265 => {
             let high_quality = Encoder::high_quality_profile_required();
             #[cfg(feature = "vram")]
-            if !high_quality {
+            if !high_quality && scrap::codec::prefer_hardware_codec() {
                 if let Some(feature) = VRamEncoder::try_get(&c.device(), negotiated_codec) {
                     return Ok(EncoderCfg::VRAM(VRamEncoderConfig {
                         device: c.device(),
@@ -3997,7 +3996,7 @@ fn get_encoder_config(
             if let Some(hw) = if high_quality {
                 HwRamEncoder::try_get_high_quality(negotiated_codec)
             } else {
-                HwRamEncoder::try_get_hardware(negotiated_codec)
+                HwRamEncoder::preferred(negotiated_codec)
             } {
                 return Ok(EncoderCfg::HWRAM(HwRamEncoderConfig {
                     name: hw.name,
@@ -4066,26 +4065,7 @@ fn get_encoder_config(
                         profile: Default::default(),
                     }));
                 }
-                if Encoder::av1_hardware_required() {
-                    log::warn!("AV1 hardware was requested but no hardware encoder is available");
-                    let Some(fallback) = Encoder::software_fallback_codec() else {
-                        bail!(
-                            "AV1 hardware was requested but no peer-compatible VP8/VP9 fallback is available"
-                        );
-                    };
-                    return Ok(EncoderCfg::VPX(VpxEncoderConfig {
-                        width: c.width as _,
-                        height: c.height as _,
-                        quality,
-                        fps: encoder_fps,
-                        codec: if fallback == CodecFormat::VP8 {
-                            VpxVideoCodecId::VP8
-                        } else {
-                            VpxVideoCodecId::VP9
-                        },
-                        keyframe_interval,
-                    }));
-                }
+
             }
             Ok(EncoderCfg::AOM(AomEncoderConfig {
                 width: c.width as _,

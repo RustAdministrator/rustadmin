@@ -738,25 +738,28 @@ impl<T: InvokeUiSession> Session<T> {
         true
     }
 
+    pub fn alternative_decoders(&self) -> std::collections::HashMap<&'static str, bool> {
+        let lc = self.lc.read().unwrap();
+        scrap::codec::decoders_for_remote_encoding(
+            scrap::codec::decoder_capabilities_for_rendering(
+                use_texture_render(),
+                Some(lc.adapter_luid.unwrap_or_default()),
+            ),
+            &lc.supported_encoding,
+        )
+    }
+
     pub fn alternative_codecs(&self) -> (bool, bool, bool, bool, bool, bool, bool) {
-        let luid = self.lc.read().unwrap().adapter_luid;
-        let decoder = scrap::codec::Decoder::supported_decodings(None, use_texture_render(), luid);
-        let mut vp8 = decoder.ability_vp8 > 0;
-        let mut av1 = decoder.ability_av1 > 0;
-        let mut av1_hw = decoder.ability_av1 > 0;
-        let mut h264 = decoder.ability_h264 > 0;
-        let mut h265 = decoder.ability_h265 > 0;
-        let mut h264_hq = decoder.ability_h264 > 0;
-        let mut h265_hq = decoder.ability_h265 > 0;
-        let enc = &self.lc.read().unwrap().supported_encoding;
-        vp8 = vp8 && enc.vp8;
-        av1 = av1 && enc.av1;
-        av1_hw = av1_hw && enc.av1_hw;
-        h264 = h264 && enc.h264;
-        h265 = h265 && enc.h265;
-        h264_hq = h264_hq && enc.h264_hq;
-        h265_hq = h265_hq && enc.h265_hq;
-        (vp8, av1, av1_hw, h264, h265, h264_hq, h265_hq)
+        let caps = self.alternative_decoders();
+        (
+            caps["vp8"],
+            caps["av1"],
+            caps["av1Hw"],
+            caps["h264"],
+            caps["h265"],
+            false,
+            false,
+        )
     }
 
     pub fn update_supported_decodings(&self) {
@@ -766,6 +769,12 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     pub fn use_texture_render_changed(&self) {
+        self.decoder_settings_changed();
+    }
+
+    pub fn decoder_settings_changed(&self) {
+        // Backend-only changes keep the wire format, but the new decoder still
+        // needs a reference frame. Do not depend on an encoder format change.
         self.send(Data::ResetDecoder(None));
         self.update_supported_decodings();
         self.send(Data::Message(LoginConfigHandler::refresh()));
@@ -3373,6 +3382,32 @@ mod mobile_soft_keyboard_tests {
                 .insert(OPTION_MOBILE_PHYSICAL_KEY_INPUT.to_owned(), "Y".to_owned());
         }
         (session, receiver)
+    }
+
+    #[cfg(feature = "flutter")]
+    #[test]
+    fn decoder_backend_change_resets_then_requests_reference_frame() {
+        let (session, mut receiver) = text_session("auto", None);
+        session.decoder_settings_changed();
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            Data::ResetDecoder(None)
+        ));
+        let Data::Message(update) = receiver.try_recv().unwrap() else {
+            panic!("expected supported-decoding update");
+        };
+        let Some(message::Union::Misc(misc)) = update.union else {
+            panic!("expected misc update");
+        };
+        assert!(matches!(misc.union, Some(misc::Union::Option(_))));
+        let Data::Message(refresh) = receiver.try_recv().unwrap() else {
+            panic!("expected refresh after reset");
+        };
+        let Some(message::Union::Misc(misc)) = refresh.union else {
+            panic!("expected misc refresh");
+        };
+        assert!(matches!(misc.union, Some(misc::Union::RefreshVideo(true))));
+        assert!(receiver.try_recv().is_err());
     }
 
     #[cfg(feature = "flutter")]

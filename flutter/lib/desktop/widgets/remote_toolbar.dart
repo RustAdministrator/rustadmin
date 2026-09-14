@@ -2321,7 +2321,7 @@ class _DisplayMenuState extends State<_DisplayMenu> {
 
           return _SubmenuButton(
               ffi: widget.ffi,
-              child: Text(translate('Codec')),
+              child: Text(translate('Decoder')),
               menuChildren: v
                   .map((e) => RdoMenuButton(
                       value: e.value,

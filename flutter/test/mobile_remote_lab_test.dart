@@ -796,18 +796,18 @@ void main() {
     },
   );
 
-  testWidgets('AV1 menu describes encoding without changing preference values', (tester) async {
+  testWidgets('Decoder menu separates format and local HW/SW preference', (tester) async {
     await pumpPreview(tester, size: const Size(320, 600));
     await tester.tap(find.byTooltip('Display and session options'));
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('mobile-remote-options-open-codec')));
     await tester.pumpAndSettle();
-    expect(find.text(kAv1SoftwareEncodingLabel), findsOneWidget);
-    expect(find.text(kAv1HardwareEncodingLabel), findsOneWidget);
+    expect(find.text('AV1 SW'), findsOneWidget);
+    expect(find.text('AV1 HW'), findsOneWidget);
     final values = tester.widgetList<RadioListTile<String>>(
       find.byType(RadioListTile<String>),
     ).map((radio) => radio.value);
-    expect(values, containsAll(['av1', 'av1-hw']));
+    expect(values, containsAll(['av1', 'av1-hw', 'av1-sw']));
     expect(tester.takeException(), isNull);
   });
 
@@ -829,7 +829,7 @@ void main() {
     expect(find.text('Toolbar opacity under cursor'), findsOneWidget);
     expect(find.text('Cursor inertia time'), findsNothing);
     expect(find.text('Image quality'), findsOneWidget);
-    expect(find.text('Codec'), findsOneWidget);
+    expect(find.text('Decoder'), findsOneWidget);
     expect(find.text('Capture'), findsOneWidget);
     expect(find.text('Quality monitor'), findsOneWidget);
     expect(find.text('Clipboard'), findsOneWidget);
@@ -959,7 +959,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('View scale'), findsOneWidget);
     expect(find.text('Image quality'), findsOneWidget);
-    expect(find.text('Codec'), findsOneWidget);
+    expect(find.text('Decoder'), findsOneWidget);
     expect(find.text('Quality monitor'), findsOneWidget);
     expect(find.text('Clipboard'), findsOneWidget);
     expect(find.text('Capture'), findsNothing);

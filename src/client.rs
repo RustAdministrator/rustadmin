@@ -2839,6 +2839,7 @@ pub struct VideoHandler {
     _display: usize, // useful for debug
     recovery: decoder_recovery::DecoderRecovery,
     decoder_fallback: usize,
+    decoder_preference: scrap::codec::DecoderPreference,
     decode_wait_counter: usize,
     first_frame: bool,
     stream_id: u64,
@@ -2862,6 +2863,20 @@ impl VideoHandler {
         _display: usize,
         decoder_dimensions: Option<(usize, usize)>,
     ) -> Self {
+        Self::new_with_preference(
+            format,
+            _display,
+            decoder_dimensions,
+            scrap::codec::DecoderPreference::Auto,
+        )
+    }
+
+    fn new_with_preference(
+        format: CodecFormat,
+        _display: usize,
+        decoder_dimensions: Option<(usize, usize)>,
+        decoder_preference: scrap::codec::DecoderPreference,
+    ) -> Self {
         let luid = Self::get_adapter_luid();
         log::info!("new video handler for display #{_display}, format: {format:?}, luid: {luid:?}");
         let rgba_format =
@@ -2871,7 +2886,15 @@ impl VideoHandler {
                 ImageFormat::ARGB
             };
         VideoHandler {
-            decoder: Decoder::new(format, luid, decoder_dimensions, _display),
+            decoder: Decoder::new_with_preference(
+                format,
+                luid,
+                decoder_dimensions,
+                _display,
+                0,
+                decoder_preference,
+            ),
+            decoder_preference,
             decoder_dimensions,
             rgb: ImageRgb::new(rgba_format, crate::get_dst_align_rgba()),
             texture: Default::default(),
@@ -3041,12 +3064,13 @@ impl VideoHandler {
             self.decoder_dimensions = decoder_dimensions;
         }
         self.decoder.release();
-        self.decoder = Decoder::new_with_fallback(
+        self.decoder = Decoder::new_with_preference(
             format,
             luid,
             self.decoder_dimensions,
             self._display,
             self.decoder_fallback,
+            self.decoder_preference,
         );
         self.decode_wait_counter = 0;
         self.first_frame = true;
@@ -4945,8 +4969,19 @@ pub fn start_video_thread<F, T>(
                                         display.height as usize,
                                     ))
                                 });
-                            let mut handler =
-                                VideoHandler::new(format, display, decoder_dimensions);
+                            let decoder_preference = scrap::codec::DecoderPreference::from_option(
+                                &session
+                                    .lc
+                                    .read()
+                                    .unwrap()
+                                    .get_option(config::keys::OPTION_CODEC_PREFERENCE),
+                            );
+                            let mut handler = VideoHandler::new_with_preference(
+                                format,
+                                display,
+                                decoder_dimensions,
+                                decoder_preference,
+                            );
                             let record_state = session.lc.read().unwrap().record_state;
                             let record_permission = session.lc.read().unwrap().record_permission;
                             let id = session.lc.read().unwrap().id.clone();
@@ -5041,6 +5076,15 @@ pub fn start_video_thread<F, T>(
                     }
                     MediaData::Reset(decoder_dimensions) => {
                         if let Some(handler) = video_handler.as_mut() {
+                            handler.decoder_preference =
+                                scrap::codec::DecoderPreference::from_option(
+                                    &session
+                                        .lc
+                                        .read()
+                                        .unwrap()
+                                        .get_option(config::keys::OPTION_CODEC_PREFERENCE),
+                                );
+                            handler.decoder_fallback = 0;
                             handler.reset(None, decoder_dimensions);
                             *decoder_backend.write().unwrap() = Some(handler.decoder_backend());
                         }
@@ -5125,7 +5169,7 @@ fn get_hwcodec_config() {
     #[cfg(feature = "hwcodec")]
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     {
-        if !scrap::codec::enable_hwcodec_option() || scrap::hwcodec::HwCodecConfig::already_set() {
+        if scrap::hwcodec::HwCodecConfig::already_set() {
             return;
         }
         let start = std::time::Instant::now();
@@ -5141,7 +5185,7 @@ fn get_hwcodec_config() {
     #[cfg(feature = "hwcodec")]
     #[cfg(target_os = "ios")]
     {
-        if !scrap::codec::enable_hwcodec_option() || scrap::hwcodec::HwCodecConfig::already_set() {
+        if scrap::hwcodec::HwCodecConfig::already_set() {
             return;
         }
         scrap::hwcodec::start_check_process();

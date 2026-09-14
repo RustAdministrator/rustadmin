@@ -84,12 +84,9 @@ impl EncoderApi for HwRamEncoder {
     {
         match cfg {
             EncoderCfg::HWRAM(config) => {
-                // H.26x encoding is hardware/platform-only in distributed
-                // RustAdmin builds. Platform backends such as MediaCodec are
-                // accepted because the implementation is supplied by the OS
-                // or device vendor. Unknown names fail closed; do not restore
-                // libx264/libx265 or another CPU H.26x encoder here.
-                if !CodecInfo::is_hardware_encoder_name(&config.name) {
+                // Personal builds may link optional software encoders. Unknown
+                // implementations still fail closed; FFmpeg validates presence.
+                if !CodecInfo::is_supported_encoder_name(&config.name) {
                     bail!(
                         "software or unreviewed FFmpeg encoder is disabled by distribution policy: {}",
                         config.name
@@ -97,7 +94,11 @@ impl EncoderApi for HwRamEncoder {
                 }
                 let rc = Self::rate_control(&config);
                 let hw_quality = Self::encoder_quality(&config)?;
-                let pixfmt = DEFAULT_PIXFMT;
+                let pixfmt = if CodecInfo::is_software_encoder_name(&config.name) {
+                    AVPixelFormat::AV_PIX_FMT_YUV420P
+                } else {
+                    DEFAULT_PIXFMT
+                };
                 let mut bitrate =
                     Self::bitrate(&config.name, config.width, config.height, config.quality);
                 bitrate = Self::check_bitrate_range(&config, bitrate);
@@ -506,14 +507,14 @@ mod tests {
     }
 
     #[test]
-    fn software_h26x_encoders_are_rejected_before_ffi() {
-        for name in ["libx264", "libx265", "libopenh264", "h264"] {
+    fn unknown_encoders_are_rejected_before_ffi() {
+        for name in ["libopenh264", "h264", "libx264_fake"] {
             let result = HwRamEncoder::new(
                 EncoderCfg::HWRAM(encoder_config(name, HwEncoderProfile::Default)),
                 false,
             );
             let Err(error) = result else {
-                panic!("{name} unexpectedly passed the hardware-only encoder policy");
+                panic!("{name} unexpectedly passed the encoder allowlist");
             };
             assert!(
                 error.to_string().contains("distribution policy"),
@@ -1138,6 +1139,29 @@ impl HwRamEncoder {
         }
     }
 
+    pub fn try_get_software(format: CodecFormat) -> Option<CodecInfo> {
+        let encoders = HwCodecConfig::get()
+            .ram_encode
+            .into_iter()
+            .filter(|encoder| encoder.is_software_encoder())
+            .collect();
+        let best = CodecInfo::prioritized(encoders);
+        match format {
+            CodecFormat::H264 => best.h264,
+            CodecFormat::H265 => best.h265,
+            CodecFormat::AV1 => best.av1,
+            _ => None,
+        }
+    }
+
+    pub fn preferred(format: CodecFormat) -> Option<CodecInfo> {
+        if crate::codec::prefer_hardware_codec() {
+            Self::try_get_hardware(format).or_else(|| Self::try_get_software(format))
+        } else {
+            Self::try_get_software(format)
+        }
+    }
+
     pub fn try_get_high_quality(format: CodecFormat) -> Option<CodecInfo> {
         Self::select_high_quality_encoder(HwCodecConfig::get().ram_encode, format)
     }
@@ -1251,6 +1275,22 @@ pub struct HwRamDecoder {
 }
 
 impl HwRamDecoder {
+    pub fn supports(format: CodecFormat, hardware: bool) -> bool {
+        let mut candidates = HwCodecConfig::get().ram_decode;
+        if !hardware {
+            candidates.extend(Decoder::available_software_decoders());
+        }
+        candidates.into_iter().any(|codec| {
+            (codec.hwdevice != AVHWDeviceType::AV_HWDEVICE_TYPE_NONE) == hardware
+                && matches!(
+                    (format, codec.format),
+                    (CodecFormat::H264, DataFormat::H264)
+                        | (CodecFormat::H265, DataFormat::H265)
+                        | (CodecFormat::AV1, DataFormat::AV1)
+                )
+        })
+    }
+
     pub fn try_get(format: CodecFormat) -> Option<CodecInfo> {
         Self::select_probed(
             format,
@@ -1282,6 +1322,14 @@ impl HwRamDecoder {
     }
 
     pub fn new_with_fallback(format: CodecFormat, fallback: usize) -> ResultType<Self> {
+        Self::new_with_preference(format, fallback, enable_hwcodec_option())
+    }
+
+    pub fn new_with_preference(
+        format: CodecFormat,
+        fallback: usize,
+        hardware: bool,
+    ) -> ResultType<Self> {
         let mut candidates = HwCodecConfig::get().ram_decode;
         if matches!(format, CodecFormat::H264 | CodecFormat::H265) {
             for software in Decoder::available_software_decoders() {
@@ -1293,12 +1341,8 @@ impl HwRamDecoder {
                 }
             }
         }
-        let (decoder, info) = Self::create_probed(
-            format,
-            candidates,
-            enable_hwcodec_option(),
-            fallback,
-            |info| {
+        let (decoder, info) =
+            Self::create_probed(format, candidates, hardware, fallback, |info| {
                 let ctx = DecodeContext {
                     name: info.name.clone(),
                     device_type: info.hwdevice,
@@ -1751,7 +1795,7 @@ pub fn recheck_hwcodec() {
 
 #[cfg(target_os = "ios")]
 fn start_check_process_inner_ios(force: bool) {
-    if !enable_hwcodec_option() || (!force && HwCodecConfig::already_set()) {
+    if !force && HwCodecConfig::already_set() {
         return;
     }
     std::thread::spawn(|| {
@@ -1762,7 +1806,7 @@ fn start_check_process_inner_ios(force: bool) {
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn start_check_process_inner(force: bool) {
-    if !enable_hwcodec_option() || (!force && HwCodecConfig::already_set()) {
+    if !force && HwCodecConfig::already_set() {
         return;
     }
     use std::sync::Once;

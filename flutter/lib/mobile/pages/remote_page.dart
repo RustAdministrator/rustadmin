@@ -2079,7 +2079,7 @@ void showOptions(
                 radioSection(
                   'codec',
                   codecRadios,
-                  heading: Text(translate('Codec')),
+                  heading: Text(translate('Decoder')),
                   honorEnabled: true,
                 ),
                 radioSection(

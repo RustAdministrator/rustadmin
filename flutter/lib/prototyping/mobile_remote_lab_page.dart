@@ -1,3 +1,4 @@
+import 'package:flutter_hbb/common/codec_preferences.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
@@ -1787,17 +1788,10 @@ class _MobileRemotePreviewState extends State<MobileRemotePreview> {
               ? _buildCustomImageQualityPreview()
               : const SizedBox.shrink(),
         ),
-        _radioSection('codec', 'auto', const [
-          ('auto', 'Auto (VP9)'),
-          ('vp8', 'VP8'),
-          ('vp9', 'VP9'),
-          ('av1', kAv1SoftwareEncodingLabel),
-          ('av1-hw', kAv1HardwareEncodingLabel),
-          ('h264', 'H264'),
-          ('h264-hq', 'H264 HQ'),
-          ('h265', 'H265'),
-          ('h265-hq', 'H265 HQ'),
-        ], heading: 'Codec'),
+        _radioSection('codec', 'auto', [
+          for (final choice in decoderCodecChoices)
+            (choice.value, choice.label),
+        ], heading: 'Decoder'),
         if (!widget.scenario.peerIsAndroid)
           _radioSection('capture-backend', 'auto', const [
             ('auto', 'Auto (DXGI)'),

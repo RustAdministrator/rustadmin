@@ -2775,11 +2775,16 @@ pub fn main_has_vram() -> SyncReturn<bool> {
 }
 
 pub fn main_supported_hwdecodings() -> SyncReturn<String> {
-    let decoding = supported_hwdecodings();
-    let msg = HashMap::from([
-        ("av1", decoding.0),
-        ("h264", decoding.1),
-        ("h265", decoding.2),
+    let mut msg = scrap::codec::decoder_capabilities();
+    let encoding = scrap::codec::Encoder::supported_encoding();
+    msg.extend([
+        ("encVp8", encoding.vp8),
+        ("encVp9", true),
+        ("encAv1", encoding.av1),
+        ("encH264", encoding.h264),
+        ("encH265", encoding.h265),
+        ("encH264Hq", encoding.h264_hq),
+        ("encH265Hq", encoding.h265_hq),
     ]);
 
     SyncReturn(serde_json::ser::to_string(&msg).unwrap_or("".to_owned()))
@@ -3038,16 +3043,7 @@ pub fn session_get_conn_session_id(session_id: SessionID) -> SyncReturn<String> 
 
 pub fn session_alternative_codecs(session_id: SessionID) -> String {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
-        let (vp8, av1, av1_hw, h264, h265, h264_hq, h265_hq) = session.alternative_codecs();
-        let msg = HashMap::from([
-            ("vp8", vp8),
-            ("av1", av1),
-            ("av1Hw", av1_hw),
-            ("h264", h264),
-            ("h265", h265),
-            ("h264Hq", h264_hq),
-            ("h265Hq", h265_hq),
-        ]);
+        let msg = session.alternative_decoders();
         serde_json::ser::to_string(&msg).unwrap_or("".to_owned())
     } else {
         String::new()
@@ -3056,7 +3052,7 @@ pub fn session_alternative_codecs(session_id: SessionID) -> String {
 
 pub fn session_change_prefer_codec(session_id: SessionID) {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
-        session.update_supported_decodings();
+        session.decoder_settings_changed();
     }
 }
 
