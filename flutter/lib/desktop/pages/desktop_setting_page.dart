@@ -2398,7 +2398,12 @@ class _DisplayState extends State<_Display> {
   }
 
   Widget codec(BuildContext context) {
-    return _Card(title: 'Codecs', children: [const CodecSettings()]);
+    return _Card(title: 'Codecs', children: [
+      const Padding(
+        padding: EdgeInsetsDirectional.only(start: _kContentHMargin),
+        child: CodecSettings(),
+      ),
+    ]);
   }
 
   Widget privacyModeImpl(BuildContext context) {

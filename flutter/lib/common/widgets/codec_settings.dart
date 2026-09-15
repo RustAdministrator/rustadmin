@@ -40,42 +40,100 @@ class _CodecSettingsState extends State<CodecSettings> {
       kOptionEnableHwcodec,
       bind.mainGetOptionSync(key: kOptionEnableHwcodec),
     );
+    return CodecSettingsContent(
+      capabilities: caps,
+      encoder: encoder.isEmpty ? 'auto' : encoder,
+      decoder: decoder,
+      preferHardware: hardware,
+      onPreferHardware: _saving || isOptionFixed(kOptionEnableHwcodec)
+          ? null
+          : (value) => _save(() async {
+              if (value == null) return;
+              await mainSetBoolOption(kOptionEnableHwcodec, value);
+            }),
+      onEncoder: _saving || isOptionFixed(encoderCodecPreferenceKey)
+          ? null
+          : (value) => _save(() async {
+              await bind.mainSetOption(
+                key: encoderCodecPreferenceKey,
+                value: value,
+              );
+            }),
+      onDecoder: _saving || isOptionFixed(kOptionCodecPreference)
+          ? null
+          : (value) => _save(() async {
+              await remoteDisplaySettings.write(
+                RemoteDisplaySettingsRegistry.codecPreference,
+                value,
+              );
+            }),
+    );
+  }
+}
+
+class CodecSettingsContent extends StatelessWidget {
+  const CodecSettingsContent({
+    super.key,
+    required this.capabilities,
+    required this.encoder,
+    required this.decoder,
+    required this.preferHardware,
+    this.onPreferHardware,
+    this.onEncoder,
+    this.onDecoder,
+    this.localize = translate,
+  });
+
+  final Map<String, dynamic> capabilities;
+  final String encoder;
+  final String decoder;
+  final bool preferHardware;
+  final ValueChanged<bool?>? onPreferHardware;
+  final ValueChanged<String>? onEncoder;
+  final ValueChanged<String>? onDecoder;
+  final String Function(String) localize;
+
+  Future<void> _showAboutCodecs(BuildContext context) => showDialog<void>(
+    context: context,
+    builder: (dialogContext) {
+      void close() => Navigator.of(dialogContext).pop();
+      return CustomAlertDialog(
+        title: Text(localize('About codecs')),
+        content: Text(localize('codec_direction_tip')),
+        actions: [TextButton(onPressed: close, child: Text(localize('Close')))],
+        onCancel: close,
+      );
+    },
+  );
+
+  @override
+  Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        TextButton.icon(
+          onPressed: () => _showAboutCodecs(context),
+          style: TextButton.styleFrom(padding: EdgeInsets.zero),
+          icon: const Icon(Icons.help_outline, size: 18),
+          label: Text(localize('About codecs')),
+        ),
         CheckboxListTile(
           contentPadding: EdgeInsets.zero,
-          title: Text(translate('Prefer hardware codec')),
-          value: hardware,
-          onChanged: _saving || isOptionFixed(kOptionEnableHwcodec)
-              ? null
-              : (value) => _save(() async {
-                  if (value == null) return;
-                  await mainSetBoolOption(kOptionEnableHwcodec, value);
-                }),
+          controlAffinity: ListTileControlAffinity.leading,
+          dense: true,
+          visualDensity: VisualDensity.compact,
+          title: Text(localize('Prefer hardware codec')),
+          value: preferHardware,
+          onChanged: onPreferHardware,
         ),
-        Text(translate('codec_direction_tip')),
         const SizedBox(height: 8),
         CodecPreferenceColumns(
-          capabilities: caps,
-          encoder: encoder.isEmpty ? 'auto' : encoder,
+          capabilities: capabilities,
+          encoder: encoder,
           decoder: decoder,
-          onEncoder: _saving || isOptionFixed(encoderCodecPreferenceKey)
-              ? null
-              : (value) => _save(() async {
-                  await bind.mainSetOption(
-                    key: encoderCodecPreferenceKey,
-                    value: value,
-                  );
-                }),
-          onDecoder: _saving || isOptionFixed(kOptionCodecPreference)
-              ? null
-              : (value) => _save(() async {
-                  await remoteDisplaySettings.write(
-                    RemoteDisplaySettingsRegistry.codecPreference,
-                    value,
-                  );
-                }),
+          onEncoder: onEncoder,
+          onDecoder: onDecoder,
+          localize: localize,
         ),
       ],
     );
@@ -109,6 +167,7 @@ class CodecPreferenceColumns extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(localize(title)),
+        const SizedBox(height: 8),
         RadioGroup<String>(
           groupValue: selected,
           onChanged: (value) {
@@ -139,7 +198,7 @@ class CodecPreferenceColumns extends StatelessWidget {
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       _column('Encoder', encoderCodecChoices, encoder, onEncoder),
-      const SizedBox(width: 8),
+      const SizedBox(width: 16),
       _column('Decoder', decoderCodecChoices, decoder, onDecoder),
     ],
   );
