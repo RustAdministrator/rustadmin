@@ -117,15 +117,16 @@ class CodecPreferenceColumns extends StatelessWidget {
           child: Column(
             children: [
               for (final choice in choices)
-                RadioListTile<String>(
-                  key: ValueKey('$title-${choice.value}'),
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                  visualDensity: VisualDensity.compact,
-                  value: choice.value,
-                  title: Text(localize(choice.label)),
-                  enabled: onChanged != null && choice.enabled(capabilities),
-                ),
+                if (choice.visible(capabilities) || choice.value == selected)
+                  RadioListTile<String>(
+                    key: ValueKey('$title-${choice.value}'),
+                    contentPadding: EdgeInsets.zero,
+                    dense: true,
+                    visualDensity: VisualDensity.compact,
+                    value: choice.value,
+                    title: Text(localize(choice.label)),
+                    enabled: onChanged != null && choice.enabled(capabilities),
+                  ),
             ],
           ),
         ),

@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_hbb/common/codec_preferences.dart';
 import 'package:bot_toast/bot_toast.dart';
 import 'package:flutter/material.dart';
@@ -1505,7 +1507,7 @@ class _PeerConnectionProperties {
         await bind.mainGetPeerOption(id: id, key: kOptionImageQuality));
     final customImageQuality = _normalizeCustomImageQuality(
         await bind.mainGetPeerOption(id: id, key: kOptionCustomImageQuality));
-    final codecPreference = _normalizeCodecPreference(
+    final codecPreference = normalizeDecoderPreference(
         await bind.mainGetPeerOption(id: id, key: kOptionCodecPreference));
     final showQualityMonitor = option2bool(kOptionShowQualityMonitor,
         await bind.mainGetPeerOption(id: id, key: kOptionShowQualityMonitor));
@@ -1607,21 +1609,6 @@ int _normalizeCustomImageQuality(String value) {
   return quality.clamp(kMinQuality.toInt(), kMaxMoreQuality.toInt()).toInt();
 }
 
-String _normalizeCodecPreference(String value) {
-  switch (value) {
-    case 'vp8':
-    case 'vp9':
-    case 'av1':
-    case 'av1-hw':
-    case 'h264':
-    case 'h265':
-      return value;
-    case 'auto':
-    default:
-      return 'auto';
-  }
-}
-
 String _normalizeKeyboardMode(String value) {
   switch (value) {
     case kKeyLegacyMode:
@@ -1668,6 +1655,10 @@ Widget _propertiesSection(String label) {
 
 Future<void> _showConnectionPropertiesDialog(String id) async {
   final properties = await _PeerConnectionProperties.load(id);
+  Map<String, dynamic> decoderCapabilities = {};
+  try {
+    decoderCapabilities = jsonDecode(bind.mainSupportedHwdecodings());
+  } catch (_) {}
   final customQualityController =
       TextEditingController(text: properties.customImageQuality.toString());
   final wireGuardTunnelController =
@@ -1780,8 +1771,15 @@ Future<void> _showConnectionPropertiesDialog(String id) async {
                           labelText: translate('Default Decoder'),
                         ),
                         items: [
-                          for (final choice in decoderCodecChoices)
-                            _stringMenuItem(choice.value, choice.label),
+                          for (final choice in visibleDecoderCodecChoices(
+                            decoderCapabilities,
+                            selected: normalizeDecoderPreference(properties.codecPreference),
+                          ))
+                            DropdownMenuItem<String>(
+                              value: choice.value,
+                              enabled: choice.enabled(decoderCapabilities),
+                              child: Text(translate(choice.label)),
+                            ),
                         ],
                         onChanged: (value) {
                           if (value == null) return;

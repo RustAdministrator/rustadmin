@@ -1768,6 +1768,51 @@ mod tests {
         assert!(controller.delivery_ready(&HashSet::from([10])));
     }
 
+    #[cfg(feature = "hwcodec")]
+    #[test]
+    fn normal_and_hq_switches_recreate_the_encoder_without_changing_format() {
+        use super::encoder_settings_changed;
+        use scrap::{
+            codec::EncoderCfg,
+            hwcodec::{HwEncoderProfile, HwRamEncoderConfig},
+            CodecFormat,
+        };
+
+        for (name, format) in [
+            ("h264_videotoolbox", CodecFormat::H264),
+            ("hevc_nvenc", CodecFormat::H265),
+        ] {
+            for profile in [HwEncoderProfile::Default, HwEncoderProfile::HighQuality] {
+                let config = EncoderCfg::HWRAM(HwRamEncoderConfig {
+                    name: name.to_owned(),
+                    mc_name: None,
+                    width: 640,
+                    height: 360,
+                    quality: 1.0,
+                    fps: 30,
+                    keyframe_interval: None,
+                    profile,
+                });
+                let current_hq = profile == HwEncoderProfile::HighQuality;
+                assert!(!encoder_settings_changed(
+                    format, format, &config, current_hq
+                ));
+                assert!(encoder_settings_changed(
+                    format,
+                    format,
+                    &config,
+                    !current_hq
+                ));
+                assert!(encoder_settings_changed(
+                    format,
+                    CodecFormat::VP9,
+                    &config,
+                    current_hq
+                ));
+            }
+        }
+    }
+
     #[test]
     fn hq_reference_refreshes_when_startup_safe_mode_ends() {
         let now = Instant::now();
@@ -3169,9 +3214,10 @@ fn run(vs: VideoService) -> ResultType<()> {
             }
         }
         let negotiated_codec = Encoder::negotiated_codec();
-        if codec_format != negotiated_codec {
+        let requested_hq = Encoder::high_quality_profile_required();
+        if encoder_settings_changed(codec_format, negotiated_codec, &encoder_cfg, requested_hq) {
             log::info!(
-                "diag video service codec switch requested: service={}, source={:?}, display_idx={}, {:?} -> {:?}, usable={:?}, current_cfg={:?}, hardware={}, bitrate={}",
+                "diag video service codec/profile switch requested: service={}, source={:?}, display_idx={}, {:?} -> {:?}, usable={:?}, current_cfg={:?}, hardware={}, bitrate={}, requested_hq={}",
                 sp.name(),
                 vs.source,
                 display_idx,
@@ -3180,7 +3226,8 @@ fn run(vs: VideoService) -> ResultType<()> {
                 Encoder::usable_encoding(),
                 encoder_cfg,
                 encoder.is_hardware(),
-                encoder.bitrate()
+                encoder.bitrate(),
+                requested_hq
             );
             bail!("SWITCH");
         }
@@ -3880,6 +3927,15 @@ fn setup_encoder(
     );
     let encoder = Encoder::new(encoder_cfg.clone(), use_i444)?;
     Ok((encoder, encoder_cfg, codec_format, use_i444, recorder))
+}
+
+fn encoder_settings_changed(
+    current: CodecFormat,
+    requested: CodecFormat,
+    config: &EncoderCfg,
+    requested_hq: bool,
+) -> bool {
+    current != requested || config.is_high_quality() != requested_hq
 }
 
 fn hq_reference_refresh_eligible(encoder_cfg: &EncoderCfg, codec_format: CodecFormat) -> bool {

@@ -19,8 +19,10 @@ void main() {
         choice.value,
       );
     }
-    expect(normalizeDecoderPreference('h264-hq'), 'h264');
-    expect(normalizeDecoderPreference('h265-hq'), 'h265');
+    expect(normalizeDecoderPreference('h264-hq'), 'h264-hq');
+    expect(normalizeDecoderPreference('h264-hw'), 'h264');
+    expect(normalizeDecoderPreference('h265-hq'), 'h265-hq');
+    expect(normalizeDecoderPreference('h265-hw'), 'h265');
     expect(normalizeDecoderPreference('unknown'), 'auto');
     expect(normalizeDecoderPreference('av1'), 'av1');
   });
@@ -76,15 +78,120 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('Decoder-av1-hw')));
       expect(decoder, 'av1-hw');
       expect(encoder, 'av1');
-      expect(
-        tester
-            .widget<RadioListTile<String>>(
-              find.byKey(const ValueKey('Decoder-h264-sw')),
-            )
-            .enabled,
-        isFalse,
-      );
+      expect(find.byKey(const ValueKey('Decoder-h264-sw')), findsNothing);
       expect(tester.takeException(), isNull);
     });
   }
+
+  test(
+    'H26x labels have four choices in the requested order with software support',
+    () {
+      final visible = visibleDecoderCodecChoices({
+        'h264Hw': true,
+        'h264Sw': true,
+        'h265Hw': true,
+        'h265Sw': true,
+      }).toList();
+      for (final format in ['h264', 'h265']) {
+        expect(
+          visible.where((c) => c.value.startsWith(format)).map((c) => c.label),
+          [
+            '${format.toUpperCase()} SW',
+            '${format.toUpperCase()} HQ SW',
+            format.toUpperCase(),
+            '${format.toUpperCase()} HQ',
+          ],
+        );
+      }
+    },
+  );
+
+  test(
+    'HQ aliases reuse decoder capability and check the host profile separately',
+    () {
+      for (final format in ['h264', 'h265']) {
+        for (final software in [false, true]) {
+          final normal = decoderCodecChoices.singleWhere(
+            (c) => c.value == '$format${software ? '-sw' : ''}',
+          );
+          final hq = decoderCodecChoices.singleWhere(
+            (c) => c.value == '$format-hq${software ? '-sw' : ''}',
+          );
+          expect(hq.capability, normal.capability);
+          final caps = <String, dynamic>{normal.capability!: true};
+          expect(hq.enabled(caps), isTrue); // Defaults have no host yet.
+          caps[hq.requestCapability!] = false;
+          expect(normal.enabled(caps), isTrue);
+          expect(hq.enabled(caps), isFalse);
+          caps[hq.requestCapability!] = true;
+          expect(hq.enabled(caps), isTrue);
+          caps[normal.capability!] = false;
+          expect(hq.enabled(caps), isFalse);
+        }
+      }
+    },
+  );
+
+  test(
+    'software visibility depends on the local build, not the host encoder',
+    () {
+      final hardwareOnly = visibleDecoderCodecChoices({
+        'h264Hw': true,
+      }).toList();
+      expect(
+        hardwareOnly
+            .where((c) => c.value.startsWith('h264'))
+            .map((c) => c.label),
+        ['H264', 'H264 HQ'],
+      );
+      final incompatibleHost = visibleDecoderCodecChoices({
+        'local-h264Sw': true,
+        'h264Sw': false,
+        'requestH264Hq': false,
+      }).where((c) => c.value.startsWith('h264')).toList();
+      expect(incompatibleHost.map((c) => c.label), [
+        'H264 SW',
+        'H264 HQ SW',
+        'H264',
+        'H264 HQ',
+      ]);
+      final saved = visibleDecoderCodecChoices({}, selected: 'h264-hq-sw');
+      expect(saved.any((c) => c.value == 'h264-hq-sw'), isTrue);
+      expect(
+        saved.singleWhere((c) => c.value == 'h264-hq-sw').enabled({}),
+        isFalse,
+      );
+    },
+  );
+
+  testWidgets(
+    'HQ SW selects only the decoder column and survives normalization',
+    (tester) async {
+      String? encoder;
+      String? decoder;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: CodecPreferenceColumns(
+                localize: (value) => value,
+                capabilities: const {'h264Sw': true, 'h264Hw': true},
+                encoder: 'auto',
+                decoder: 'h264',
+                onEncoder: (value) => encoder = value,
+                onDecoder: (value) => decoder = value,
+              ),
+            ),
+          ),
+        ),
+      );
+      final target = find.byKey(const ValueKey('Decoder-h264-hq-sw'));
+      await tester.ensureVisible(target);
+      await tester.tap(target);
+      expect(decoder, 'h264-hq-sw');
+      expect(normalizeDecoderPreference(decoder!), 'h264-hq-sw');
+      expect(encoder, isNull);
+      expect(tester.takeException(), isNull);
+    },
+  );
 }

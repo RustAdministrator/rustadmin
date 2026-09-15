@@ -755,10 +755,10 @@ impl<T: InvokeUiSession> Session<T> {
             caps["vp8"],
             caps["av1"],
             caps["av1Hw"],
-            caps["h264"],
-            caps["h265"],
-            false,
-            false,
+            caps["h264Hw"],
+            caps["h265Hw"],
+            caps["h264Hw"] && caps["requestH264Hq"],
+            caps["h265Hw"] && caps["requestH265Hq"],
         )
     }
 

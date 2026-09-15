@@ -538,7 +538,7 @@ Future<List<TRadioMenu<String>>> toolbarCodec(
   }
 
   return [
-    for (final choice in decoderCodecChoices)
+    for (final choice in visibleDecoderCodecChoices(capabilities, selected: groupValue))
       radio(translate(choice.label), choice.value, choice.enabled(capabilities)),
   ];
 }

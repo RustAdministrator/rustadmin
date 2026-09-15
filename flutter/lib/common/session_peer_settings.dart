@@ -137,8 +137,10 @@ abstract final class SessionPeerSettingsRegistry {
         'h265-sw',
         'h264',
         'h264-hq',
+        'h264-hq-sw',
         'h265',
         'h265-hq',
+        'h265-hq-sw',
       },
     ),
   );

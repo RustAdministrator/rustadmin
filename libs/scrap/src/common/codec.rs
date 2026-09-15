@@ -59,7 +59,9 @@ impl DecoderPreference {
     pub fn from_option(value: &str) -> Self {
         if value.ends_with("-sw") {
             Self::Software
-        } else if value.ends_with("-hw") {
+        } else if value.ends_with("-hw")
+            || matches!(value, "h264" | "h265" | "h264-hq" | "h265-hq")
+        {
             Self::Hardware
         } else {
             Self::Auto
@@ -161,6 +163,17 @@ pub fn decoders_for_remote_encoding(
     mut local: HashMap<&'static str, bool>,
     remote: &SupportedEncoding,
 ) -> HashMap<&'static str, bool> {
+    // Visibility follows the local build; availability also checks the host.
+    for key in ["h264Sw", "h265Sw"] {
+        let local_key = if key == "h264Sw" {
+            "local-h264Sw"
+        } else {
+            "local-h265Sw"
+        };
+        local.insert(local_key, local.get(key).copied().unwrap_or(false));
+    }
+    local.insert("requestH264Hq", remote.h264_hq);
+    local.insert("requestH265Hq", remote.h265_hq);
     *local.entry("vp8").or_default() &= remote.vp8;
     // VP9 is the protocol baseline. Hardware flags describe the host only;
     // either implementation can produce the format a local decoder accepts.
@@ -195,6 +208,14 @@ pub enum EncoderCfg {
 }
 
 impl EncoderCfg {
+    pub fn is_high_quality(&self) -> bool {
+        #[cfg(feature = "hwcodec")]
+        if let Self::HWRAM(config) = self {
+            return config.profile == HwEncoderProfile::HighQuality;
+        }
+        false
+    }
+
     pub fn fps(&self) -> u32 {
         match self {
             Self::VPX(config) => config.fps,
@@ -291,7 +312,37 @@ fn preferred_explicit_codec(
             selected_count = count;
         }
     }
-    selected
+    selected.map(|format| {
+        let hq = match format {
+            PreferCodec::H264 => PreferCodec::H264_HQ,
+            PreferCodec::H265 => PreferCodec::H265_HQ,
+            _ => return format,
+        };
+        // HQ does not change decoding compatibility. Merge requests for the
+        // selected format without splitting its vote between normal and HQ.
+        if decodings
+            .values()
+            .any(|d| d.prefer.enum_value_or(PreferCodec::Auto) == hq)
+        {
+            hq
+        } else {
+            format
+        }
+    })
+}
+
+// Keep the effective profile in the negotiated preference, not a second
+// host-option read in each video service. Unsupported HQ remains the format.
+fn available_encoding_profile(
+    preference: PreferCodec,
+    h264_hq: bool,
+    h265_hq: bool,
+) -> PreferCodec {
+    match preference {
+        PreferCodec::H264_HQ if !h264_hq => PreferCodec::H264,
+        PreferCodec::H265_HQ if !h265_hq => PreferCodec::H265,
+        other => other,
+    }
 }
 
 fn codec_for_preference(preference: PreferCodec, auto_codec: CodecFormat) -> CodecFormat {
@@ -312,7 +363,7 @@ fn preferred_codec(
 ) -> PreferCodec {
     preferred_explicit_codec(decodings, usable).unwrap_or_else(|| {
         if usable.supports(host_default) {
-            format_request(host_default)
+            host_default
         } else {
             PreferCodec::Auto
         }
@@ -324,8 +375,10 @@ pub fn preference_from_codec_option(codec: &str) -> PreferCodec {
         "vp8" => PreferCodec::VP8,
         "vp9" => PreferCodec::VP9,
         "av1" | "av1-hw" | "av1-sw" | "av1-legacy" => PreferCodec::AV1,
-        "h264" | "h264-hw" | "h264-sw" | "h264-hq" => PreferCodec::H264,
-        "h265" | "h265-hw" | "h265-sw" | "h265-hq" => PreferCodec::H265,
+        "h264" | "h264-hw" | "h264-sw" => PreferCodec::H264,
+        "h264-hq" | "h264-hq-sw" => PreferCodec::H264_HQ,
+        "h265" | "h265-hw" | "h265-sw" => PreferCodec::H265,
+        "h265-hq" | "h265-hq-sw" => PreferCodec::H265_HQ,
         _ => PreferCodec::Auto,
     }
 }
@@ -611,7 +664,11 @@ impl Encoder {
         let host_default = preference_from_codec_option(&Config::get_option(
             hbb_common::config::keys::OPTION_ENCODER_CODEC_PREFERENCE,
         ));
-        let preference = preferred_codec(&decodings, usable, host_default);
+        let preference = available_encoding_profile(
+            preferred_codec(&decodings, usable, host_default),
+            h264_hq_useable,
+            h265_hq_useable,
+        );
         *format = codec_for_preference(preference, auto_codec);
         *ENCODE_CODEC_PREFERENCE.lock().unwrap() = preference;
         if decodings.len() > 0 {
@@ -644,20 +701,10 @@ impl Encoder {
 
     #[inline]
     pub fn high_quality_profile_required() -> bool {
-        let option = Config::get_option(hbb_common::config::keys::OPTION_ENCODER_CODEC_PREFERENCE);
-        #[cfg(feature = "hwcodec")]
-        {
-            let format = Self::negotiated_codec();
-            matches!(
-                (format, option.as_str()),
-                (CodecFormat::H264, "h264-hq") | (CodecFormat::H265, "h265-hq")
-            ) && HwRamEncoder::try_get_high_quality(format).is_some()
-        }
-        #[cfg(not(feature = "hwcodec"))]
-        {
-            let _ = option;
-            false
-        }
+        matches!(
+            Self::negotiated_prefer_codec(),
+            PreferCodec::H264_HQ | PreferCodec::H265_HQ
+        )
     }
 
     pub fn supported_encoding() -> SupportedEncoding {
@@ -1878,12 +1925,18 @@ mod tests {
     }
 
     #[test]
-    fn decoder_backend_is_local_and_format_only_is_sent() {
+    fn decoder_backend_is_local_and_hq_is_an_independent_wire_request() {
         for (option, format, hardware) in [
             ("av1-hw", PreferCodec::AV1, true),
             ("av1-sw", PreferCodec::AV1, false),
+            ("h264", PreferCodec::H264, true),
+            ("h264-hq", PreferCodec::H264_HQ, true),
+            ("h264-hq-sw", PreferCodec::H264_HQ, false),
             ("h264-hw", PreferCodec::H264, true),
             ("h264-sw", PreferCodec::H264, false),
+            ("h265", PreferCodec::H265, true),
+            ("h265-hq", PreferCodec::H265_HQ, true),
+            ("h265-hq-sw", PreferCodec::H265_HQ, false),
             ("h265-hw", PreferCodec::H265, true),
             ("h265-sw", PreferCodec::H265, false),
         ] {
@@ -1895,7 +1948,7 @@ mod tests {
                 );
             }
         }
-        for option in ["auto", "av1", "h264", "h265", "h264-hq"] {
+        for option in ["auto", "av1"] {
             assert_eq!(
                 DecoderPreference::from_option(option),
                 DecoderPreference::Auto
@@ -2029,13 +2082,13 @@ mod tests {
     }
 
     #[test]
-    fn legacy_hq_request_only_selects_format() {
+    fn hq_request_preserves_profile_without_changing_stream_format() {
         let decodings = decodings(&[PreferCodec::H264_HQ]);
         let usable = all_usable_codecs();
 
         assert_eq!(
             preferred_explicit_codec(&decodings, usable),
-            Some(PreferCodec::H264)
+            Some(PreferCodec::H264_HQ)
         );
         assert_eq!(
             codec_for_preference(PreferCodec::H264_HQ, CodecFormat::VP9),
@@ -2044,9 +2097,151 @@ mod tests {
     }
 
     #[test]
-    fn codec_option_normalizes_legacy_high_quality_preferences() {
-        assert_eq!(preference_from_codec_option("h264-hq"), PreferCodec::H264);
-        assert_eq!(preference_from_codec_option("h265-hq"), PreferCodec::H265);
+    fn codec_option_preserves_high_quality_requests() {
+        assert_eq!(preference_from_codec_option("h264-hq"), PreferCodec::H264_HQ);
+        assert_eq!(preference_from_codec_option("h265-hq"), PreferCodec::H265_HQ);
+    }
+
+    #[test]
+    fn hq_aliases_share_decoder_but_request_the_host_profile() {
+        for (normal, hq, format, request) in [
+            ("h264", "h264-hq", CodecFormat::H264, PreferCodec::H264_HQ),
+            (
+                "h264-sw",
+                "h264-hq-sw",
+                CodecFormat::H264,
+                PreferCodec::H264_HQ,
+            ),
+            ("h265", "h265-hq", CodecFormat::H265, PreferCodec::H265_HQ),
+            (
+                "h265-sw",
+                "h265-hq-sw",
+                CodecFormat::H265,
+                PreferCodec::H265_HQ,
+            ),
+        ] {
+            assert_eq!(
+                DecoderPreference::from_option(normal),
+                DecoderPreference::from_option(hq)
+            );
+            assert_eq!(preference_from_codec_option(hq), request);
+            assert_eq!(codec_for_preference(request, CodecFormat::AV1), format);
+        }
+    }
+
+    #[test]
+    fn hq_and_normal_requests_aggregate_by_format_with_viewer_priority() {
+        let usable = all_usable_codecs();
+        assert_eq!(
+            preferred_codec(
+                &decodings(&[PreferCodec::H264_HQ, PreferCodec::H264, PreferCodec::AV1]),
+                usable,
+                PreferCodec::Auto
+            ),
+            PreferCodec::H264_HQ,
+        );
+        for (viewer, host, expected) in [
+            (
+                PreferCodec::H264_HQ,
+                PreferCodec::H265,
+                PreferCodec::H264_HQ,
+            ),
+            (
+                PreferCodec::H265_HQ,
+                PreferCodec::H264_HQ,
+                PreferCodec::H265_HQ,
+            ),
+            (PreferCodec::H264, PreferCodec::H264_HQ, PreferCodec::H264),
+            (PreferCodec::H265, PreferCodec::H265_HQ, PreferCodec::H265),
+            (
+                PreferCodec::Auto,
+                PreferCodec::H264_HQ,
+                PreferCodec::H264_HQ,
+            ),
+            (
+                PreferCodec::Auto,
+                PreferCodec::H265_HQ,
+                PreferCodec::H265_HQ,
+            ),
+        ] {
+            assert_eq!(
+                preferred_codec(&decodings(&[viewer]), usable, host),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_hq_falls_back_to_the_same_normal_format() {
+        for (hq, normal) in [
+            (PreferCodec::H264_HQ, PreferCodec::H264),
+            (PreferCodec::H265_HQ, PreferCodec::H265),
+        ] {
+            assert_eq!(available_encoding_profile(hq, false, false), normal);
+            assert_eq!(available_encoding_profile(hq, true, true), hq);
+            assert_eq!(available_encoding_profile(normal, true, true), normal);
+        }
+        assert_eq!(
+            available_encoding_profile(PreferCodec::H264_HQ, false, true),
+            PreferCodec::H264
+        );
+        assert_eq!(
+            available_encoding_profile(PreferCodec::H265_HQ, true, false),
+            PreferCodec::H265
+        );
+    }
+
+    #[test]
+    fn hq_capability_is_remote_and_software_visibility_is_local() {
+        let local = HashMap::from([
+            ("h264", true),
+            ("h264Hw", false),
+            ("h264Sw", true),
+            ("h265", true),
+            ("h265Hw", true),
+            ("h265Sw", false),
+        ]);
+        let caps = decoders_for_remote_encoding(
+            local.clone(),
+            &SupportedEncoding {
+                h264: true,
+                h264_hq: true,
+                h265: true,
+                h265_hq: false,
+                ..Default::default()
+            },
+        );
+        assert!(caps["h264Sw"]);
+        assert!(!caps["h264Hw"]);
+        assert!(caps["requestH264Hq"]);
+        assert!(!caps["requestH265Hq"]);
+        let caps = decoders_for_remote_encoding(local, &SupportedEncoding::default());
+        assert!(!caps["h264Sw"]);
+        assert!(caps["local-h264Sw"]);
+        assert!(!caps["requestH264Hq"]);
+    }
+
+    #[cfg(feature = "hwcodec")]
+    #[test]
+    fn encoder_config_reports_its_actual_profile() {
+        for name in ["h264_videotoolbox", "hevc_nvenc"] {
+            for profile in [HwEncoderProfile::Default, HwEncoderProfile::HighQuality] {
+                let config = EncoderCfg::HWRAM(HwRamEncoderConfig {
+                    name: name.to_owned(),
+                    mc_name: None,
+                    width: 640,
+                    height: 360,
+                    quality: 1.0,
+                    fps: 30,
+                    keyframe_interval: None,
+                    profile,
+                });
+                assert_eq!(
+                    config.is_high_quality(),
+                    profile == HwEncoderProfile::HighQuality
+                );
+            }
+        }
     }
 
     #[test]
