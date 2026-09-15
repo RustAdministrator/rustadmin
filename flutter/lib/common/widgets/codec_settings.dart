@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/codec_preferences.dart';
@@ -16,6 +18,38 @@ class CodecSettings extends StatefulWidget {
 
 class _CodecSettingsState extends State<CodecSettings> {
   bool _saving = false;
+  Map<String, dynamic> _capabilities = {};
+  Timer? _capabilityTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _capabilities = _readCapabilities();
+    // Probing is asynchronous. Refresh this projection while settings are
+    // mounted so opening the page before the probe finishes cannot freeze it.
+    _capabilityTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      final capabilities = _readCapabilities();
+      if (!mapEquals(_capabilities, capabilities)) {
+        setState(() => _capabilities = capabilities);
+      }
+    });
+  }
+
+  Map<String, dynamic> _readCapabilities() {
+    try {
+      return Map<String, dynamic>.from(
+        jsonDecode(bind.mainSupportedHwdecodings()),
+      );
+    } catch (_) {
+      return _capabilities;
+    }
+  }
+
+  @override
+  void dispose() {
+    _capabilityTimer?.cancel();
+    super.dispose();
+  }
 
   Future<void> _save(Future<void> Function() write) async {
     setState(() => _saving = true);
@@ -28,11 +62,9 @@ class _CodecSettingsState extends State<CodecSettings> {
 
   @override
   Widget build(BuildContext context) {
-    Map<String, dynamic> caps = {};
-    try {
-      caps = jsonDecode(bind.mainSupportedHwdecodings());
-    } catch (_) {}
-    final encoder = bind.mainGetOptionSync(key: encoderCodecPreferenceKey);
+    final encoder = normalizeEncoderPreference(
+      bind.mainGetOptionSync(key: encoderCodecPreferenceKey),
+    );
     final decoder = normalizeDecoderPreference(
       remoteDisplaySettings.read(RemoteDisplaySettingsRegistry.codecPreference),
     );
@@ -41,8 +73,8 @@ class _CodecSettingsState extends State<CodecSettings> {
       bind.mainGetOptionSync(key: kOptionEnableHwcodec),
     );
     return CodecSettingsContent(
-      capabilities: caps,
-      encoder: encoder.isEmpty ? 'auto' : encoder,
+      capabilities: _capabilities,
+      encoder: encoder,
       decoder: decoder,
       preferHardware: hardware,
       onPreferHardware: _saving || isOptionFixed(kOptionEnableHwcodec)
@@ -181,9 +213,19 @@ class CodecPreferenceColumns extends StatelessWidget {
                     key: ValueKey('$title-${choice.value}'),
                     contentPadding: EdgeInsets.zero,
                     dense: true,
+                    // Keep the 16 px radio glyph; halve the former 24 px
+                    // vertical gap from the 40 px compact rows.
+                    minTileHeight: 28,
+                    minVerticalPadding: 2,
                     visualDensity: VisualDensity.compact,
                     value: choice.value,
-                    title: Text(localize(choice.label)),
+                    title: Text(
+                      localize(
+                        title == 'Decoder'
+                            ? decoderSettingsLabel(choice)
+                            : choice.label,
+                      ),
+                    ),
                     enabled: onChanged != null && choice.enabled(capabilities),
                   ),
             ],
@@ -194,12 +236,25 @@ class CodecPreferenceColumns extends StatelessWidget {
   );
 
   @override
-  Widget build(BuildContext context) => Row(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      _column('Encoder', encoderCodecChoices, encoder, onEncoder),
-      const SizedBox(width: 16),
-      _column('Decoder', decoderCodecChoices, decoder, onDecoder),
-    ],
-  );
+  Widget build(BuildContext context) {
+    final radioTheme = RadioTheme.of(context);
+    return RadioTheme(
+      data: radioTheme.copyWith(
+        visualDensity: VisualDensity(
+          horizontal:
+              radioTheme.visualDensity?.horizontal ??
+              Theme.of(context).visualDensity.horizontal,
+          vertical: -3,
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _column('Encoder', encoderCodecChoices, encoder, onEncoder),
+          const SizedBox(width: 16),
+          _column('Decoder', decoderCodecChoices, decoder, onDecoder),
+        ],
+      ),
+    );
+  }
 }

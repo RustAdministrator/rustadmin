@@ -2067,8 +2067,11 @@ async fn get_hwcodec_config_from_server_impl(force: bool) -> ResultType<()> {
     if let Some(Data::HwCodecConfig(v)) = c.next_timeout(HWCODEC_CONFIG_IPC_TIMEOUT_MS).await? {
         match v {
             Some(v) => {
-                scrap::hwcodec::HwCodecConfig::set(v);
-                return Ok(());
+                if scrap::hwcodec::HwCodecConfig::set(v) {
+                    return Ok(());
+                }
+                scrap::hwcodec::ensure_local_hwcodec_config();
+                bail!("service supplied an incompatible hwcodec probe result");
             }
             None => {
                 bail!("hwcodec config is none");

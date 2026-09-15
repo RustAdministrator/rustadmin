@@ -306,6 +306,28 @@ mod tests {
     }
 
     #[test]
+    fn only_current_probe_results_can_replace_capabilities() {
+        for json in ["", "null", "{}", "{broken", "{\"decoder_probe_version\":2}"] {
+            assert!(HwCodecConfig::verified(json).is_err());
+        }
+        let current = HwCodecConfig {
+            decoder_probe_version: DECODER_PROBE_VERSION,
+            ram_decode: decoder_candidates(),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&current).unwrap();
+        let restored = HwCodecConfig::verified(&json).unwrap();
+        assert!(!restored.needs_decoder_probe());
+        assert_eq!(restored.ram_decode.len(), current.ram_decode.len());
+        // A completed probe can legitimately find no supported decoders.
+        let empty = HwCodecConfig {
+            ram_decode: vec![],
+            ..current
+        };
+        assert!(HwCodecConfig::verified(&serde_json::to_string(&empty).unwrap()).is_ok());
+    }
+
+    #[test]
     fn decoder_capability_rejects_legacy_cache_without_discarding_encoders() {
         let mut config = HwCodecConfig {
             ram_decode: vec![CodecInfo::soft().h264.unwrap()],
@@ -316,9 +338,11 @@ mod tests {
             ..Default::default()
         };
         config.discard_unverified_decoders();
+        assert!(config.needs_decoder_probe());
         assert!(config.ram_decode.is_empty());
         assert_eq!(config.ram_encode.len(), 1);
         config.decoder_probe_version = DECODER_PROBE_VERSION;
+        assert!(!config.needs_decoder_probe());
         config.ram_decode = vec![CodecInfo::soft().h264.unwrap()];
         config.discard_unverified_decoders();
         assert_eq!(config.ram_decode.len(), 1);
@@ -1239,7 +1263,7 @@ impl HwRamEncoder {
         Self::select_preferred(
             HwCodecConfig::get().ram_encode,
             format,
-            crate::codec::prefer_hardware_codec(),
+            crate::codec::encoder_prefers_hardware(format),
         )
     }
 
@@ -1654,21 +1678,42 @@ struct HwCodecConfig2 {
     pub config: String,
 }
 
-// ipc server process start check process once, other process get from ipc server once
-// install: --server start check process, check process send to --server,  ui get from --server
-// portable: ui start check process, check process send to ui
-// sciter and unilink: get from ipc server
+// Processes may share compatible probe results through IPC. A package-launched
+// client must also be able to probe its own binary when an older service runs.
 impl HwCodecConfig {
+    fn needs_decoder_probe(&self) -> bool {
+        self.decoder_probe_version != DECODER_PROBE_VERSION
+    }
+
+    fn verified(config: &str) -> ResultType<Self> {
+        let config: Self = serde_json::from_str(config)?;
+        if config.needs_decoder_probe() {
+            bail!(
+                "incompatible decoder probe version: {} (expected {})",
+                config.decoder_probe_version,
+                DECODER_PROBE_VERSION
+            );
+        }
+        Ok(config)
+    }
+
     fn discard_unverified_decoders(&mut self) {
-        if self.decoder_probe_version != DECODER_PROBE_VERSION {
+        if self.needs_decoder_probe() {
             self.ram_decode.clear();
         }
     }
 
     #[cfg(not(target_os = "android"))]
-    pub fn set(config: String) {
-        let mut config: HwCodecConfig = serde_json::from_str(&config).unwrap_or_default();
-        config.discard_unverified_decoders();
+    pub fn set(config: String) -> bool {
+        let config = match Self::verified(&config) {
+            Ok(config) => config,
+            Err(error) => {
+                // Do not let an older installed service overwrite a newer local
+                // probe or mark an incompatible/empty result as ready.
+                log::warn!("ignoring hwcodec config: {error}");
+                return false;
+            }
+        };
         log::info!("set hwcodec config");
         log::debug!("{config:?}");
         #[cfg(any(windows, target_os = "macos"))]
@@ -1688,6 +1733,7 @@ impl HwCodecConfig {
         }
         *CONFIG.lock().unwrap() = Some(config);
         *CONFIG_SET_BY_IPC.lock().unwrap() = true;
+        true
     }
 
     pub fn get() -> HwCodecConfig {
@@ -1842,6 +1888,13 @@ impl HwCodecConfig {
     }
 }
 
+#[cfg(not(target_os = "android"))]
+pub fn ensure_local_hwcodec_config() {
+    if HwCodecConfig::get().needs_decoder_probe() {
+        start_check_process();
+    }
+}
+
 pub fn check_available_hwcodec() -> String {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     hwcodec::common::setup_parent_death_signal();
@@ -1909,10 +1962,18 @@ fn start_check_process_inner_ios(force: bool) {
     if !force && HwCodecConfig::already_set() {
         return;
     }
-    std::thread::spawn(|| {
-        let config = check_available_hwcodec();
-        HwCodecConfig::set(config);
-    });
+    fn run() {
+        std::thread::spawn(|| {
+            let config = check_available_hwcodec();
+            HwCodecConfig::set(config);
+        });
+    }
+    if force {
+        run();
+    } else {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(run);
+    }
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1933,37 +1994,61 @@ fn start_check_process_inner(force: bool) {
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn run_check_process() {
-    use hbb_common::allow_err;
+    if let Err(error) = run_local_probe() {
+        log::warn!("local hwcodec probe failed; retaining existing capabilities: {error}");
+    }
+}
 
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(_) = exe.file_name().to_owned() {
-            let arg = "--check-hwcodec-config";
-            if let Ok(mut child) = std::process::Command::new(exe).arg(arg).spawn() {
-                #[cfg(windows)]
-                hwcodec::common::child_exit_when_parent_exit(child.id());
-                // wait up to 30 seconds, it maybe slow on windows startup for poorly performing machines
-                for _ in 0..30 {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    if let Ok(Some(_)) = child.try_wait() {
-                        break;
-                    }
-                }
-                allow_err!(child.kill());
-                std::thread::sleep(std::time::Duration::from_millis(30));
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        log::info!("Check hwcodec config, exit with: {status}")
-                    }
-                    Ok(None) => {
-                        log::info!("Check hwcodec config, status not ready yet, let's really wait");
-                        let res = child.wait();
-                        log::info!("Check hwcodec config, wait result: {res:?}");
-                    }
-                    Err(e) => {
-                        log::error!("Check hwcodec config, error attempting to wait: {e}")
-                    }
-                }
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn run_local_probe() -> ResultType<()> {
+    use std::{
+        io::Read,
+        process::{Command, Stdio},
+        time::{Duration, Instant},
+    };
+
+    // Read this binary's result directly: an installed service may be a
+    // different revision or linked against different codec libraries.
+    let mut child = Command::new(std::env::current_exe()?)
+        .arg("--probe-hwcodec-config")
+        .stdout(Stdio::piped())
+        .spawn()?;
+    #[cfg(windows)]
+    hwcodec::common::child_exit_when_parent_exit(child.id());
+    let Some(stdout) = child.stdout.take() else {
+        child.kill().ok();
+        child.wait().ok();
+        bail!("missing codec probe stdout");
+    };
+    // Drain concurrently so a full pipe cannot block the isolated probe.
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.take(4 * 1024 * 1024).read_to_end(&mut bytes)?;
+        Ok::<_, std::io::Error>(bytes)
+    });
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if started.elapsed() < Duration::from_secs(30) => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            result => {
+                child.kill().ok();
+                child.wait().ok();
+                break Err(anyhow!("codec probe did not complete: {result:?}"));
             }
         }
     };
+    let bytes = reader
+        .join()
+        .map_err(|_| anyhow!("codec probe reader failed"))??;
+    if !status?.success() {
+        bail!("codec probe exited unsuccessfully");
+    }
+    let config = String::from_utf8(bytes)?;
+    if !HwCodecConfig::set(config) {
+        bail!("codec probe returned incompatible data");
+    }
+    Ok(())
 }

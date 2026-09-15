@@ -2775,17 +2775,10 @@ pub fn main_has_vram() -> SyncReturn<bool> {
 }
 
 pub fn main_supported_hwdecodings() -> SyncReturn<String> {
+    #[cfg(all(feature = "hwcodec", not(target_os = "android")))]
+    scrap::hwcodec::ensure_local_hwcodec_config();
     let mut msg = scrap::codec::decoder_capabilities();
-    let encoding = scrap::codec::Encoder::supported_encoding();
-    msg.extend([
-        ("encVp8", encoding.vp8),
-        ("encVp9", true),
-        ("encAv1", encoding.av1),
-        ("encH264", encoding.h264),
-        ("encH265", encoding.h265),
-        ("encH264Hq", encoding.h264_hq),
-        ("encH265Hq", encoding.h265_hq),
-    ]);
+    msg.extend(scrap::codec::encoder_capabilities());
 
     SyncReturn(serde_json::ser::to_string(&msg).unwrap_or("".to_owned()))
 }

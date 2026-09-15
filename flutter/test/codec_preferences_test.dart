@@ -6,6 +6,81 @@ import 'package:flutter_hbb/common/widgets/codec_settings.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test(
+    'encoder choices expose independent hardware and software capabilities',
+    () {
+      final hardware = encoderCodecChoices.singleWhere(
+        (c) => c.value == 'h264',
+      );
+      final software = encoderCodecChoices.singleWhere(
+        (c) => c.value == 'h264-sw',
+      );
+      final av1Hardware = encoderCodecChoices.singleWhere(
+        (c) => c.value == 'av1-hw',
+      );
+      final av1Software = encoderCodecChoices.singleWhere(
+        (c) => c.value == 'av1-sw',
+      );
+      expect(hardware.label, 'H264 HW');
+      expect(hardware.enabled({'encH264Hw': true, 'h264Hw': false}), isTrue);
+      expect(hardware.enabled({'encH264': true, 'encH264Sw': true}), isFalse);
+      expect(software.visible({'encH264Hw': true}), isFalse);
+      expect(software.enabled({'encH264Sw': true, 'h264Sw': false}), isTrue);
+      expect(av1Hardware.enabled({'encAv1Hw': true, 'av1Hw': false}), isTrue);
+      expect(
+        av1Software.enabled({'encAv1Sw': true, 'encAv1Hw': false}),
+        isTrue,
+      );
+      for (final choice in encoderCodecChoices) {
+        expect(normalizeEncoderPreference(choice.value), choice.value);
+      }
+      expect(normalizeEncoderPreference('h264-hw'), 'h264');
+      expect(normalizeEncoderPreference('unknown'), 'auto');
+    },
+  );
+
+  testWidgets('hardware preference does not disable explicit local choices', (
+    tester,
+  ) async {
+    for (final preferHardware in [false, true]) {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: CodecSettingsContent(
+                localize: (s) => s,
+                capabilities: const {
+                  'encAv1Hw': true,
+                  'encAv1Sw': true,
+                  'av1Hw': true,
+                  'av1Sw': true,
+                },
+                encoder: 'av1-sw',
+                decoder: 'av1-hw',
+                preferHardware: preferHardware,
+                onEncoder: (_) {},
+                onDecoder: (_) {},
+              ),
+            ),
+          ),
+        ),
+      );
+      for (final key in [
+        'Encoder-av1-hw',
+        'Encoder-av1-sw',
+        'Decoder-av1-hw',
+        'Decoder-av1-sw',
+      ]) {
+        expect(
+          tester
+              .widget<RadioListTile<String>>(find.byKey(ValueKey(key)))
+              .enabled,
+          isTrue,
+        );
+      }
+    }
+  });
+
   test('decoder defaults and peer overrides preserve all backend choices', () {
     for (final choice in decoderCodecChoices) {
       expect(

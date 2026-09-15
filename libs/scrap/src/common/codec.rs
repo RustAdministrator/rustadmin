@@ -91,6 +91,86 @@ pub fn prefer_hardware_codec() -> bool {
     )
 }
 
+pub fn encoder_prefers_hardware(format: CodecFormat) -> bool {
+    encoder_backend_preference(
+        &Config::get_option(hbb_common::config::keys::OPTION_ENCODER_CODEC_PREFERENCE),
+        format,
+        prefer_hardware_codec(),
+    )
+}
+
+fn encoder_backend_preference(option: &str, format: CodecFormat, prefer_hardware: bool) -> bool {
+    // A viewer may request a different format. Only apply a format-specific
+    // host backend choice to that format; otherwise resolve the Auto backend.
+    let selected = preference_from_codec_option(option);
+    if selected == PreferCodec::Auto
+        || codec_for_preference(selected, CodecFormat::Unknown) != format
+    {
+        prefer_hardware
+    } else {
+        DecoderPreference::from_option(option).use_hardware(prefer_hardware)
+    }
+}
+
+pub fn encoder_capabilities() -> HashMap<&'static str, bool> {
+    #[allow(unused_mut)]
+    let mut caps = HashMap::from([
+        ("encVp8", true),
+        ("encVp9", true),
+        ("encAv1Sw", !disable_av1()),
+        ("encAv1Hw", false),
+        ("encH264Sw", false),
+        ("encH264Hw", false),
+        ("encH264Hq", false),
+        ("encH265Sw", false),
+        ("encH265Hw", false),
+        ("encH265Hq", false),
+    ]);
+    #[cfg(feature = "hwcodec")]
+    for (format, hardware, software, hq) in [
+        (CodecFormat::AV1, "encAv1Hw", "encAv1Sw", None),
+        (
+            CodecFormat::H264,
+            "encH264Hw",
+            "encH264Sw",
+            Some("encH264Hq"),
+        ),
+        (
+            CodecFormat::H265,
+            "encH265Hw",
+            "encH265Sw",
+            Some("encH265Hq"),
+        ),
+    ] {
+        caps.insert(
+            hardware,
+            (format != CodecFormat::AV1 || !disable_av1())
+                && HwRamEncoder::try_get_hardware(format).is_some(),
+        );
+        if format != CodecFormat::AV1 {
+            caps.insert(software, HwRamEncoder::try_get_software(format).is_some());
+        }
+        if let Some(hq) = hq {
+            caps.insert(hq, HwRamEncoder::try_get_high_quality(format).is_some());
+        }
+    }
+    #[cfg(feature = "vram")]
+    if enable_vram_option(true) {
+        *caps.entry("encH264Hw").or_default() |=
+            !VRamEncoder::available(CodecFormat::H264).is_empty();
+        *caps.entry("encH265Hw").or_default() |=
+            !VRamEncoder::available(CodecFormat::H265).is_empty();
+    }
+    for (format, hardware, software) in [
+        ("encAv1", "encAv1Hw", "encAv1Sw"),
+        ("encH264", "encH264Hw", "encH264Sw"),
+        ("encH265", "encH265Hw", "encH265Sw"),
+    ] {
+        caps.insert(format, caps[hardware] || caps[software]);
+    }
+    caps
+}
+
 pub fn decoder_capabilities() -> HashMap<&'static str, bool> {
     decoder_capabilities_for_rendering(true, None)
 }
@@ -696,7 +776,7 @@ impl Encoder {
 
     #[inline]
     pub fn av1_hardware_allowed() -> bool {
-        prefer_hardware_codec()
+        encoder_prefers_hardware(CodecFormat::AV1)
     }
 
     #[inline]
@@ -708,10 +788,15 @@ impl Encoder {
     }
 
     pub fn supported_encoding() -> SupportedEncoding {
-        #[allow(unused_mut)]
-        let mut encoding = SupportedEncoding {
-            vp8: true,
-            av1: !disable_av1(),
+        let caps = encoder_capabilities();
+        SupportedEncoding {
+            vp8: caps["encVp8"],
+            av1: caps["encAv1"],
+            av1_hw: caps["encAv1Hw"],
+            h264: caps["encH264"],
+            h265: caps["encH265"],
+            h264_hq: caps["encH264Hq"],
+            h265_hq: caps["encH265Hq"],
             i444: Some(CodecAbility {
                 vp9: true,
                 av1: true,
@@ -719,26 +804,7 @@ impl Encoder {
             })
             .into(),
             ..Default::default()
-        };
-        #[cfg(feature = "hwcodec")]
-        {
-            encoding.av1_hw |= HwRamEncoder::try_get_hardware(CodecFormat::AV1).is_some();
-            encoding.h264 |= HwRamEncoder::try_get_hardware(CodecFormat::H264).is_some();
-            encoding.h265 |= HwRamEncoder::try_get_hardware(CodecFormat::H265).is_some();
-            encoding.h264_hq |= HwRamEncoder::try_get_high_quality(CodecFormat::H264).is_some();
-            encoding.h265_hq |= HwRamEncoder::try_get_high_quality(CodecFormat::H265).is_some();
         }
-        #[cfg(feature = "hwcodec")]
-        {
-            encoding.h264 |= HwRamEncoder::try_get_software(CodecFormat::H264).is_some();
-            encoding.h265 |= HwRamEncoder::try_get_software(CodecFormat::H265).is_some();
-        }
-        #[cfg(feature = "vram")]
-        if enable_vram_option(true) {
-            encoding.h264 |= VRamEncoder::available(CodecFormat::H264).len() > 0;
-            encoding.h265 |= VRamEncoder::available(CodecFormat::H265).len() > 0;
-        }
-        encoding
     }
 
     pub fn usable_encoding() -> Option<SupportedEncoding> {
@@ -2356,6 +2422,52 @@ mod tests {
             codec_for_preference(preference, auto_codec_for_usable(usable)),
             CodecFormat::H265,
         );
+    }
+
+    #[test]
+    fn explicit_encoder_backends_override_auto_preference_only_for_their_format() {
+        for prefer_hardware in [false, true] {
+            for (option, format, hardware) in [
+                ("av1-hw", CodecFormat::AV1, true),
+                ("av1-sw", CodecFormat::AV1, false),
+                ("h264", CodecFormat::H264, true),
+                ("h264-hw", CodecFormat::H264, true),
+                ("h264-hq", CodecFormat::H264, true),
+                ("h264-sw", CodecFormat::H264, false),
+                ("h265", CodecFormat::H265, true),
+                ("h265-hq", CodecFormat::H265, true),
+                ("h265-sw", CodecFormat::H265, false),
+            ] {
+                assert_eq!(
+                    encoder_backend_preference(option, format, prefer_hardware),
+                    hardware
+                );
+                assert_eq!(
+                    encoder_backend_preference(option, CodecFormat::VP9, prefer_hardware),
+                    prefer_hardware
+                );
+            }
+            for option in ["", "auto", "av1", "invalid"] {
+                assert_eq!(
+                    encoder_backend_preference(option, CodecFormat::AV1, prefer_hardware),
+                    prefer_hardware
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn advertised_encoding_formats_are_unions_of_local_backends() {
+        let caps = encoder_capabilities();
+        let encoding = Encoder::supported_encoding();
+        for (format, hardware, software, advertised) in [
+            ("encAv1", "encAv1Hw", "encAv1Sw", encoding.av1),
+            ("encH264", "encH264Hw", "encH264Sw", encoding.h264),
+            ("encH265", "encH265Hw", "encH265Sw", encoding.h265),
+        ] {
+            assert_eq!(caps[format], caps[hardware] || caps[software]);
+            assert_eq!(advertised, caps[format]);
+        }
     }
 
     #[test]

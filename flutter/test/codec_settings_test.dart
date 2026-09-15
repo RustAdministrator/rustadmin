@@ -1,6 +1,11 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/widgets/codec_settings.dart';
+import 'package:flutter_hbb/generated_bridge.dart';
+import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 final _explanation = List.filled(
@@ -11,6 +16,29 @@ final _explanation = List.filled(
 
 String _localize(String value) =>
     value == 'codec_direction_tip' ? _explanation : value;
+
+class _CodecBindings implements Rustadmin {
+  Map<String, bool> capabilities = {};
+  int capabilityReads = 0;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) {
+    switch (invocation.memberName) {
+      case #mainSupportedHwdecodings:
+        capabilityReads++;
+        return jsonEncode(capabilities);
+      case #mainGetOptionSync:
+      case #mainGetUserDefaultOption:
+        return '';
+      case #mainIsOptionFixed:
+        return false;
+      case #translate:
+        return invocation.namedArguments[#name] as String;
+      default:
+        return super.noSuchMethod(invocation);
+    }
+  }
+}
 
 Widget _settings({
   double textScale = 1,
@@ -55,6 +83,33 @@ Widget _settings({
 );
 
 void main() {
+  testWidgets(
+    'settings refresh late probe results and stop polling on dispose',
+    (tester) async {
+      isTest = true;
+      final native = _CodecBindings();
+      platformFFI.initForTest(native);
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(body: SingleChildScrollView(child: CodecSettings())),
+        ),
+      );
+      final encoder = find.byKey(const ValueKey('Encoder-h264'));
+      final decoder = find.byKey(const ValueKey('Decoder-h264'));
+      expect(tester.widget<RadioListTile<String>>(encoder).enabled, isFalse);
+      expect(tester.widget<RadioListTile<String>>(decoder).enabled, isFalse);
+      native.capabilities = {'encH264Hw': true, 'h264Hw': true};
+      await tester.pump(const Duration(seconds: 1));
+      expect(tester.widget<RadioListTile<String>>(encoder).enabled, isTrue);
+      expect(tester.widget<RadioListTile<String>>(decoder).enabled, isTrue);
+      await tester.pumpWidget(const SizedBox.shrink());
+      final reads = native.capabilityReads;
+      await tester.pump(const Duration(seconds: 2));
+      expect(native.capabilityReads, reads);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   for (final width in [320.0, 540.0]) {
     for (final textScale in [1.0, 2.0]) {
       testWidgets(
@@ -103,6 +158,18 @@ void main() {
           expect(encoderHeader.left, 15);
           expect(encoderHeader.top, decoderHeader.top);
           expect(encoderAuto.width, decoderAuto.width);
+          if (textScale == 1) {
+            expect(encoderAuto.height, 28);
+            expect(decoderAuto.height, 28);
+            expect(
+              tester
+                  .widget<RadioListTile<String>>(
+                    find.byKey(const ValueKey('Encoder-auto')),
+                  )
+                  .radioScaleFactor,
+              1,
+            );
+          }
           expect(decoderAuto.left - encoderAuto.right, 16);
           expect(decoderAuto.right, width - 15);
           expect(tester.takeException(), isNull);

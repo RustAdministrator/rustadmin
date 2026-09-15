@@ -5165,6 +5165,8 @@ fn fps_calculate(
 }
 
 fn get_hwcodec_config() {
+    #[cfg(all(feature = "hwcodec", not(target_os = "android")))]
+    scrap::hwcodec::ensure_local_hwcodec_config();
     // for sciter and unilink
     #[cfg(feature = "hwcodec")]
     #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]

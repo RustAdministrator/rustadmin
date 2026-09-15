@@ -4044,7 +4044,7 @@ fn get_encoder_config(
             let prefer_vram = {
                 #[cfg(feature = "hwcodec")]
                 {
-                    scrap::codec::prefer_hardware_codec()
+                    scrap::codec::encoder_prefers_hardware(negotiated_codec)
                         || ram_encoder
                             .as_ref()
                             .map_or(true, |encoder| encoder.is_hardware_encoder())
