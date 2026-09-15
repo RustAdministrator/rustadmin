@@ -121,7 +121,6 @@ impl RendezvousMediator {
         if crate::is_server() {
             crate::platform::linux_desktop_manager::start_xdesktop();
         }
-        scrap::codec::test_av1();
         loop {
             let timeout = Arc::new(RwLock::new(CONNECT_TIMEOUT));
             let conn_start_time = Instant::now();

@@ -3978,8 +3978,28 @@ fn get_encoder_config(
     match negotiated_codec {
         CodecFormat::H264 | CodecFormat::H265 => {
             let high_quality = Encoder::high_quality_profile_required();
+            #[cfg(feature = "hwcodec")]
+            let ram_encoder = if high_quality {
+                HwRamEncoder::try_get_high_quality(negotiated_codec)
+            } else {
+                HwRamEncoder::preferred(negotiated_codec)
+            };
             #[cfg(feature = "vram")]
-            if !high_quality && scrap::codec::prefer_hardware_codec() {
+            let prefer_vram = {
+                #[cfg(feature = "hwcodec")]
+                {
+                    scrap::codec::prefer_hardware_codec()
+                        || ram_encoder
+                            .as_ref()
+                            .map_or(true, |encoder| encoder.is_hardware_encoder())
+                }
+                #[cfg(not(feature = "hwcodec"))]
+                {
+                    true
+                }
+            };
+            #[cfg(feature = "vram")]
+            if !high_quality && prefer_vram {
                 if let Some(feature) = VRamEncoder::try_get(&c.device(), negotiated_codec) {
                     return Ok(EncoderCfg::VRAM(VRamEncoderConfig {
                         device: c.device(),
@@ -3993,11 +4013,7 @@ fn get_encoder_config(
                 }
             }
             #[cfg(feature = "hwcodec")]
-            if let Some(hw) = if high_quality {
-                HwRamEncoder::try_get_high_quality(negotiated_codec)
-            } else {
-                HwRamEncoder::preferred(negotiated_codec)
-            } {
+            if let Some(hw) = ram_encoder {
                 return Ok(EncoderCfg::HWRAM(HwRamEncoderConfig {
                     name: hw.name,
                     mc_name: hw.mc_name,

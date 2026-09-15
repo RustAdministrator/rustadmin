@@ -477,6 +477,87 @@ mod tests {
     }
 
     #[test]
+    fn encoder_backend_preference_ranks_candidates_without_disabling_either_kind() {
+        for (format, data_format, hw_name, sw_name) in [
+            (CodecFormat::H264, DataFormat::H264, "h264_nvenc", "libx264"),
+            (CodecFormat::H265, DataFormat::H265, "hevc_nvenc", "libx265"),
+        ] {
+            let hw = CodecInfo {
+                name: hw_name.into(),
+                format: data_format,
+                priority: 1,
+                ..Default::default()
+            };
+            let sw = CodecInfo {
+                name: sw_name.into(),
+                format: data_format,
+                priority: 0,
+                ..Default::default()
+            };
+            for prefer_hardware in [true, false] {
+                let selected = HwRamEncoder::select_preferred(
+                    vec![sw.clone(), hw.clone()],
+                    format,
+                    prefer_hardware,
+                )
+                .unwrap();
+                assert_eq!(
+                    selected.name,
+                    if prefer_hardware { hw_name } else { sw_name }
+                );
+                for only in [&hw, &sw] {
+                    assert_eq!(
+                        HwRamEncoder::select_preferred(vec![only.clone()], format, prefer_hardware)
+                            .unwrap()
+                            .name,
+                        only.name,
+                    );
+                }
+                assert!(HwRamEncoder::select_preferred(
+                    vec![sw.clone(), hw.clone()],
+                    CodecFormat::AV1,
+                    prefer_hardware,
+                )
+                .is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn decoder_hardware_preference_takes_priority_over_software_probe_rank() {
+        let hw = decoder_candidates()[1].clone();
+        let mut sw = CodecInfo::soft().h264.unwrap();
+        sw.priority = 0;
+        let (_, chosen) =
+            HwRamDecoder::create_probed(CodecFormat::H264, vec![sw, hw.clone()], true, 0, |_| {
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(chosen, hw);
+    }
+
+    #[test]
+    fn decoder_software_first_can_fall_back_to_a_hardware_only_build() {
+        let candidates = decoder_candidates();
+        let selected = super::super::codec::decoder_backend_order(false, 0)
+            .iter()
+            .copied()
+            .find_map(|hardware| {
+                HwRamDecoder::create_probed(
+                    CodecFormat::H264,
+                    candidates.clone(),
+                    hardware,
+                    0,
+                    |_| Ok(()),
+                )
+                .ok()
+            })
+            .unwrap();
+        assert_ne!(selected.1.hwdevice, AVHWDeviceType::AV_HWDEVICE_TYPE_NONE);
+        assert_eq!(candidates, decoder_candidates());
+    }
+
+    #[test]
     fn default_profile_preserves_encoder_defaults() {
         let config = encoder_config("h264_nvenc", HwEncoderProfile::Default);
         assert_eq!(
@@ -1155,11 +1236,34 @@ impl HwRamEncoder {
     }
 
     pub fn preferred(format: CodecFormat) -> Option<CodecInfo> {
-        if crate::codec::prefer_hardware_codec() {
-            Self::try_get_hardware(format).or_else(|| Self::try_get_software(format))
-        } else {
-            Self::try_get_software(format)
-        }
+        Self::select_preferred(
+            HwCodecConfig::get().ram_encode,
+            format,
+            crate::codec::prefer_hardware_codec(),
+        )
+    }
+
+    fn select_preferred(
+        encoders: Vec<CodecInfo>,
+        format: CodecFormat,
+        prefer_hardware: bool,
+    ) -> Option<CodecInfo> {
+        encoders
+            .into_iter()
+            .filter(|encoder| {
+                matches!(
+                    (format, encoder.format),
+                    (CodecFormat::H264, DataFormat::H264)
+                        | (CodecFormat::H265, DataFormat::H265)
+                        | (CodecFormat::AV1, DataFormat::AV1)
+                )
+            })
+            .min_by_key(|encoder| {
+                (
+                    encoder.is_hardware_encoder() != prefer_hardware,
+                    encoder.priority,
+                )
+            })
     }
 
     pub fn try_get_high_quality(format: CodecFormat) -> Option<CodecInfo> {
@@ -1298,6 +1402,7 @@ impl HwRamDecoder {
             enable_hwcodec_option(),
         )
         .or_else(|| Self::select_probed(format, Decoder::available_software_decoders(), false))
+        .or_else(|| Self::select_probed(format, HwCodecConfig::get().ram_decode, true))
     }
 
     fn select_probed(
@@ -1322,7 +1427,10 @@ impl HwRamDecoder {
     }
 
     pub fn new_with_fallback(format: CodecFormat, fallback: usize) -> ResultType<Self> {
-        Self::new_with_preference(format, fallback, enable_hwcodec_option())
+        let [first, second] =
+            super::codec::decoder_backend_order(enable_hwcodec_option(), fallback);
+        Self::new_with_preference(format, fallback, first)
+            .or_else(|_| Self::new_with_preference(format, fallback, second))
     }
 
     pub fn new_with_preference(
@@ -1370,7 +1478,10 @@ impl HwRamDecoder {
                         | (CodecFormat::AV1, DataFormat::AV1)
                 )
         });
-        candidates.sort_by_key(|c| c.priority);
+        // Backend preference takes priority over the probe's implementation rank.
+        candidates.sort_by_key(|c| {
+            (c.hwdevice == AVHWDeviceType::AV_HWDEVICE_TYPE_NONE, c.priority)
+        });
         if candidates.is_empty() {
             bail!("unsupported format: {format:?}");
         }

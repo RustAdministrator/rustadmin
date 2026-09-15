@@ -2059,9 +2059,7 @@ pub async fn recheck_hwcodec_config_from_server() -> ResultType<()> {
 #[cfg(feature = "hwcodec")]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn get_hwcodec_config_from_server_impl(force: bool) -> ResultType<()> {
-    if !scrap::codec::enable_hwcodec_option()
-        || (!force && scrap::hwcodec::HwCodecConfig::already_set())
-    {
+    if !force && scrap::hwcodec::HwCodecConfig::already_set() {
         return Ok(());
     }
     let mut c = connect(HWCODEC_CONFIG_IPC_TIMEOUT_MS, "").await?;
@@ -2097,7 +2095,6 @@ pub fn client_recheck_hwcodec_config_thread(wait_sec: u64) {
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn client_get_hwcodec_config_thread_inner(wait_sec: u64, force: bool) {
     if !crate::platform::is_installed()
-        || !scrap::codec::enable_hwcodec_option()
         || (!force && scrap::hwcodec::HwCodecConfig::already_set())
     {
         return;
