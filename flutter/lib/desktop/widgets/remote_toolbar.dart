@@ -35,6 +35,7 @@ import '../../common/shared_state.dart';
 import './popup_menu.dart';
 import './kb_layout_type_chooser.dart';
 import './toolbar_menu_coordinator.dart';
+import './toolbar_reveal_transition.dart';
 import 'package:flutter_hbb/utils/scale.dart';
 import 'package:flutter_hbb/common/widgets/custom_scale_base.dart';
 import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
@@ -551,7 +552,8 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   Worker? _pinWorker;
   bool _isCursorOverToolbar = false;
   int _menuHoverDepth = 0;
-  bool _visible = true;
+  final _visibility = ValueNotifier(true);
+  bool get _visible => _visibility.value;
   final _toolbarOpacityState =
       ValueNotifier<_ToolbarOpacityState>(_ToolbarOpacityState.opaque);
   bool _wasSessionHidden = false;
@@ -804,7 +806,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       _closeMenus();
     }
     setState(() {
-      _visible = value;
+      _visibility.value = value;
       if (!value) {
         _toolbarOpacityState.value = _ToolbarOpacityState.opaque;
       }
@@ -1113,6 +1115,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     _closeMenus();
     _menuCoordinator.dispose();
     _toolbarOpacityState.dispose();
+    _visibility.dispose();
     widget.onEnterOrLeaveImageCleaner(identityHashCode(this));
     widget.onImagePointerStateCleaner(identityHashCode(this));
     widget.onWindowPointerStateCleaner(identityHashCode(this));
@@ -1137,7 +1140,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       }
       if (_wasSessionHidden) {
         _wasSessionHidden = false;
-        _visible = true;
+        _visibility.value = true;
         _toolbarOpacityState.value = _ToolbarOpacityState.opaque;
       }
       final currentShape = collapse.isFalse
@@ -1146,38 +1149,28 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       final y = pin ? _fractionY.value : 0.0;
       return Align(
         alignment: FractionalOffset(_fractionX.value, y),
-        child: IgnorePointer(
+        child: ToolbarRevealTransition(
           key: _toolbarRevealKey,
-          ignoring: !_visible,
-          child: AnimatedSlide(
-            // A moving reveal target can miss the first down/up or move a
-            // newly opened MenuAnchor. Hide may animate; reveal must be ready
-            // for interaction on its first frame.
-            duration: _visible
-                ? Duration.zero
-                : const Duration(milliseconds: 220),
-            curve: Curves.easeOutCubic,
-            offset: _visible ? Offset.zero : const Offset(0, -1.15),
-            child: _ToolbarOpacityLayer(
-              state: _toolbarOpacityState,
-              visible: _visible,
-              child: Listener(
-                behavior: HitTestBehavior.translucent,
-                onPointerDown: (_) => _handleToolbarPointerDown(),
-                onPointerUp: (_) => _handleToolbarPointerUp(),
-                child: MouseRegion(
-                  onEnter: (_) => _handleToolbarPointerEnter(),
-                  onExit: (_) => _handleToolbarPointerExit(),
-                  child: _ToolbarMenuLifecycleScope(
-                    coordinator: _menuCoordinator,
-                    onMenuPointerEnter: _handleMenuPointerEnter,
-                    onMenuPointerExit: _handleMenuPointerExit,
-                    verticalToolbar: widget.state.vertical.value,
-                    openMenusLeft: _shouldOpenVerticalMenusLeft(),
-                    child: flutter_widgets.RawMenuAnchorGroup(
-                      controller: _menuController,
-                      child: currentShape,
-                    ),
+          visible: _visibility,
+          child: _ToolbarOpacityLayer(
+            state: _toolbarOpacityState,
+            visible: _visible,
+            child: Listener(
+              behavior: HitTestBehavior.translucent,
+              onPointerDown: (_) => _handleToolbarPointerDown(),
+              onPointerUp: (_) => _handleToolbarPointerUp(),
+              child: MouseRegion(
+                onEnter: (_) => _handleToolbarPointerEnter(),
+                onExit: (_) => _handleToolbarPointerExit(),
+                child: _ToolbarMenuLifecycleScope(
+                  coordinator: _menuCoordinator,
+                  onMenuPointerEnter: _handleMenuPointerEnter,
+                  onMenuPointerExit: _handleMenuPointerExit,
+                  verticalToolbar: widget.state.vertical.value,
+                  openMenusLeft: _shouldOpenVerticalMenusLeft(),
+                  child: flutter_widgets.RawMenuAnchorGroup(
+                    controller: _menuController,
+                    child: currentShape,
                   ),
                 ),
               ),

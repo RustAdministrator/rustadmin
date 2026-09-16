@@ -5,6 +5,7 @@ import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/common/widgets/remote_input.dart';
 import 'package:flutter_hbb/desktop/pages/remote_page.dart';
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
+import 'package:flutter_hbb/desktop/widgets/toolbar_reveal_transition.dart';
 import 'package:flutter_hbb/generated_bridge.dart' hide Display;
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
@@ -244,6 +245,118 @@ void main() {
           await tester.pumpWidget(const SizedBox.shrink());
           await tester.pumpAndSettle();
         },
+      );
+    }
+  }
+
+  for (final vertical in [false, true]) {
+    for (final waitForReveal in [false, true]) {
+      testWidgets(
+        'hidden toolbar receives first physical click (vertical: $vertical, wait: $waitForReveal)',
+        (tester) async {
+          const peerId = 'toolbar-physical-reveal-peer';
+          initSharedStates(peerId);
+          addTearDown(() => removeSharedStates(peerId));
+          final state = ToolbarState()
+            ..initialized.value = true
+            ..vertical.value = vertical;
+          final ffi = FFI(null)
+            ..id = peerId
+            ..connType = ConnType.viewCamera;
+          addTearDown(ffi.inputModel.disposeRelativeMouseMode);
+          ToolbarWindowPointerHandler? windowPointer;
+          var remoteDowns = 0;
+          final menuFocusChanges = <bool>[];
+          await tester.pumpWidget(
+            MaterialApp(
+              theme: MyTheme.lightTheme,
+              home: Scaffold(
+                body: MultiProvider(
+                  providers: [
+                    ChangeNotifierProvider.value(value: ffi.ffiModel),
+                    ChangeNotifierProvider.value(value: ffi.imageModel),
+                    ChangeNotifierProvider.value(value: ffi.cursorModel),
+                    ChangeNotifierProvider.value(value: ffi.canvasModel),
+                    ChangeNotifierProvider.value(value: ffi.recordingModel),
+                  ],
+                  child: MouseRegion(
+                    onEnter: (event) =>
+                        windowPointer?.call(event.localPosition),
+                    onHover: (event) =>
+                        windowPointer?.call(event.localPosition),
+                    onExit: (_) => windowPointer?.call(null),
+                    child: Stack(
+                      children: [
+                        Positioned.fill(
+                          child: Listener(
+                            behavior: HitTestBehavior.opaque,
+                            onPointerDown: (_) => remoteDowns++,
+                          ),
+                        ),
+                        // Real sessions mount the toolbar inside a nested Overlay.
+                        Overlay(
+                          initialEntries: [
+                            OverlayEntry(
+                              builder: (context) => RemoteToolbar(
+                                id: peerId,
+                                ffi: ffi,
+                                state: state,
+                                onEnterOrLeaveImageSetter: (_, __) {},
+                                onEnterOrLeaveImageCleaner: (_) {},
+                                onImagePointerStateSetter: (_, __) {},
+                                onImagePointerStateCleaner: (_) {},
+                                onWindowPointerStateSetter: (_, handler) =>
+                                    windowPointer = handler,
+                                onWindowPointerStateCleaner: (_) =>
+                                    windowPointer = null,
+                                onMenuFocusChanged: menuFocusChanges.add,
+                                onCloseConnection: () {},
+                                setRemoteState: (_) {},
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+          final target = find.byTooltip('Display Settings');
+          final center = tester.getCenter(target);
+          final mouse = await tester.createGesture(
+            kind: PointerDeviceKind.mouse,
+          );
+          await mouse.addPointer(location: const Offset(780, 550));
+          await mouse.moveTo(const Offset(779, 550));
+          await tester.pump(const Duration(seconds: 6));
+          await tester.pump(const Duration(milliseconds: 300));
+          expect(target.hitTestable(), findsNothing);
+
+          await mouse.moveTo(center);
+          if (waitForReveal) {
+            await tester.pumpAndSettle();
+            await tester.pump(const Duration(seconds: 1));
+            expect(target.hitTestable(), findsOneWidget);
+          }
+          await mouse.down(center);
+          await tester.pump(const Duration(milliseconds: 16));
+          await mouse.up();
+          await tester.pumpAndSettle();
+          expect(find.text('Scale original'), findsOneWidget);
+          expect(
+            remoteDowns,
+            0,
+            reason: 'a toolbar activation must not reach the remote desktop',
+          );
+          expect(menuFocusChanges.last, isTrue);
+          await mouse.removePointer();
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+        },
+        variant: TargetPlatformVariant.desktop(),
       );
     }
   }
@@ -554,12 +667,7 @@ void main() {
         if (pinned) {
           expect(toolbarOpacity().opacity, lessThan(1));
         } else {
-          final ignored = find.ancestor(
-            of: find.byTooltip('Display Settings'),
-            matching: find.byWidgetPredicate(
-                (w) => w is IgnorePointer && w.ignoring),
-          );
-          expect(ignored, findsWidgets);
+          expect(find.byTooltip('Display Settings').hitTestable(), findsNothing);
           windowPointer(const Offset(8, 1));
           await tester.pump();
           // Click as soon as the first revealed frame is available. Waiting
@@ -581,7 +689,7 @@ void main() {
         if (!pinned) {
           final toolbarRect = tester.getRect(find.ancestor(
             of: find.byTooltip('Display Settings'),
-            matching: find.byType(AnimatedSlide),
+            matching: find.byType(ToolbarRevealTransition),
           ));
           final nearToolbar = vertical
               ? Offset(toolbarRect.right + state.revealZonePx / 2,
