@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart' show ValueListenable, ValueNotifier;
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -35,6 +35,7 @@ import '../../common/shared_state.dart';
 import './popup_menu.dart';
 import './kb_layout_type_chooser.dart';
 import './toolbar_menu_coordinator.dart';
+import './toolbar_interaction_controller.dart';
 import './toolbar_reveal_transition.dart';
 import 'package:flutter_hbb/utils/scale.dart';
 import 'package:flutter_hbb/common/widgets/custom_scale_base.dart';
@@ -67,14 +68,14 @@ enum _ToolbarMenuId {
 }
 
 class _ToolbarMenuLifecycleScope extends InheritedWidget {
-  final ToolbarMenuCoordinator<_ToolbarMenuId> coordinator;
+  final ToolbarInteractionController<_ToolbarMenuId> interaction;
   final VoidCallback onMenuPointerEnter;
   final VoidCallback onMenuPointerExit;
   final bool verticalToolbar;
   final bool openMenusLeft;
 
   const _ToolbarMenuLifecycleScope({
-    required this.coordinator,
+    required this.interaction,
     required this.onMenuPointerEnter,
     required this.onMenuPointerExit,
     required this.verticalToolbar,
@@ -88,7 +89,7 @@ class _ToolbarMenuLifecycleScope extends InheritedWidget {
 
   @override
   bool updateShouldNotify(_ToolbarMenuLifecycleScope oldWidget) {
-    return coordinator != oldWidget.coordinator ||
+    return interaction != oldWidget.interaction ||
         onMenuPointerEnter != oldWidget.onMenuPointerEnter ||
         onMenuPointerExit != oldWidget.onMenuPointerExit ||
         verticalToolbar != oldWidget.verticalToolbar ||
@@ -96,45 +97,22 @@ class _ToolbarMenuLifecycleScope extends InheritedWidget {
   }
 }
 
-class _ToolbarOpacityState {
-  const _ToolbarOpacityState({
-    required this.opacity,
-    required this.duration,
-  });
-
-  static const opaque = _ToolbarOpacityState(
-    opacity: 1.0,
-    duration: Duration(milliseconds: 180),
-  );
-
-  final double opacity;
-  final Duration duration;
-}
-
 class _ToolbarOpacityLayer extends StatelessWidget {
-  const _ToolbarOpacityLayer({
-    required this.state,
-    required this.visible,
-    required this.child,
-  });
+  const _ToolbarOpacityLayer({required this.state, required this.child});
 
-  final ValueListenable<_ToolbarOpacityState> state;
-  final bool visible;
+  final ValueListenable<ToolbarPresentation> state;
   final Widget child;
 
   @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<_ToolbarOpacityState>(
-      valueListenable: state,
-      child: child,
-      builder: (context, value, stableChild) => AnimatedOpacity(
-        duration:
-            visible ? value.duration : const Duration(milliseconds: 180),
-        opacity: visible ? value.opacity : 0,
-        child: stableChild,
-      ),
-    );
-  }
+  Widget build(BuildContext context) => ValueListenableBuilder<ToolbarPresentation>(
+    valueListenable: state,
+    child: child,
+    builder: (context, value, stableChild) => AnimatedOpacity(
+      duration: value.duration,
+      opacity: value.visible ? value.opacity : 0,
+      child: stableChild,
+    ),
+  );
 }
 
 class ToolbarState {
@@ -544,23 +522,15 @@ class RemoteToolbar extends StatefulWidget {
 }
 
 class _RemoteToolbarState extends State<RemoteToolbar> {
-  Timer? _autoHideTimer;
-  Timer? _pinnedDimTimer;
   StreamSubscription<RemoteToolbarSettingsSnapshot>?
       _globalOptionSubscription;
   StreamSubscription<bool>? _showMonitorsSubscription;
   Worker? _pinWorker;
-  bool _isCursorOverToolbar = false;
-  int _menuHoverDepth = 0;
-  final _visibility = ValueNotifier(true);
-  bool get _visible => _visibility.value;
-  final _toolbarOpacityState =
-      ValueNotifier<_ToolbarOpacityState>(_ToolbarOpacityState.opaque);
-  bool _wasSessionHidden = false;
+  Worker? _hideWorker;
   Offset? _lastWindowPointer;
+  late final ToolbarInteractionController<_ToolbarMenuId> _interaction;
   final _fractionX = 0.5.obs;
   final _fractionY = 0.0.obs;
-  final _dragging = false.obs;
   final _toolbarKey = GlobalKey();
   final _toolbarRevealKey = GlobalKey();
   final _menuController = flutter_widgets.MenuController();
@@ -573,8 +543,6 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   double _dragRight = 1.0;
   RemoteToolbarSettingsSnapshot? _pendingGlobalOptions;
   bool _refreshingGlobalOptions = false;
-  bool _menuFocusGuardActive = false;
-  ToolbarMenuPhase _lastMenuPhase = ToolbarMenuPhase.closed;
 
   int get windowId => stateGlobal.windowId;
 
@@ -623,16 +591,6 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
         .contains(pointer);
   }
 
-  void _cancelAutoHide() {
-    _autoHideTimer?.cancel();
-    _autoHideTimer = null;
-  }
-
-  void _cancelPinnedDim() {
-    _pinnedDimTimer?.cancel();
-    _pinnedDimTimer = null;
-  }
-
   void _cancelGlobalOptionRefresh() {
     final subscription = _globalOptionSubscription;
     _globalOptionSubscription = null;
@@ -643,17 +601,6 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       unawaited(showMonitorsSubscription.cancel());
     }
   }
-
-  bool get _menuIsOpen => _menuCoordinator.isInteractionActive;
-  bool get _isCursorOverMenu => _menuHoverDepth > 0;
-  bool get _menuInteractionActive =>
-      _menuFocusGuardActive || _menuIsOpen || _isCursorOverMenu;
-  bool get _shouldDimPinnedToolbar =>
-      pin &&
-      _visible &&
-      !_isCursorOverToolbar &&
-      !_menuInteractionActive &&
-      _dragging.isFalse;
 
   void _startGlobalOptionRefresh() {
     _globalOptionSubscription = remoteToolbarSettings.watch().listen((snapshot) {
@@ -695,11 +642,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     _toolbarDragStartPointer = details.globalPosition;
     _toolbarDragStartFractionX = _fractionX.value;
     _toolbarDragStartFractionY = _fractionY.value;
-    _closeMenus();
-    _cancelAutoHide();
-    _showPinnedToolbarOpaque();
-    _setVisible(true);
-    _dragging.value = true;
+    _interaction.dragging(true);
   }
 
   void _updateToolbarDrag(BuildContext context, DragUpdateDetails details) {
@@ -733,17 +676,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
         _fractionY.value,
       ),
     );
-    _dragging.value = false;
-    if (pin) {
-      if (_shouldDimPinnedToolbar) {
-        _schedulePinnedDim();
-      }
-    } else if (!_isCursorOverToolbar &&
-        !_isCursorOverMenu &&
-        !_isInRevealZone &&
-        !_menuIsOpen) {
-      _scheduleAutoHide();
-    }
+    _interaction.dragging(false);
   }
 
   void _bindToolbarYToTopEdge() {
@@ -757,155 +690,20 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     );
   }
 
-  void _handleMenuCoordinatorChanged() {
-    if (!mounted) return;
-    final phase = _menuCoordinator.phase;
-    if (phase == ToolbarMenuPhase.closing &&
-        _lastMenuPhase != ToolbarMenuPhase.closing) {
-      // Closing overlays do not always emit a matching mouse-exit event.
-      _menuHoverDepth = 0;
-    }
-    _lastMenuPhase = phase;
-
-    if (_menuCoordinator.isInteractionActive) {
-      _setMenuFocusGuard(true);
-      _cancelAutoHide();
-      _showPinnedToolbarOpaque();
-      _setVisible(true);
-      return;
-    }
-
-    _setMenuFocusGuard(false);
-    if (hide.value) return;
-    if (pin ||
-        _isCursorOverToolbar ||
-        _isCursorOverMenu ||
-        _isInRevealZone ||
-        _menuIsOpen) {
-      _cancelAutoHide();
-      _setVisible(true);
-      if (pin && _shouldDimPinnedToolbar) {
-        _schedulePinnedDim();
-      }
-      return;
-    }
-    if (_visible) {
-      _scheduleAutoHide();
-    }
-  }
-
-  void _setMenuFocusGuard(bool active) {
-    if (_menuFocusGuardActive == active) return;
-    _menuFocusGuardActive = active;
-    widget.onMenuFocusChanged(active);
-  }
-
-  void _setVisible(bool value) {
-    if (_visible == value || !mounted) return;
-    if (!value) {
-      _closeMenus();
-    }
-    setState(() {
-      _visibility.value = value;
-      if (!value) {
-        _toolbarOpacityState.value = _ToolbarOpacityState.opaque;
-      }
-    });
-  }
-
-  void _showCurrentShape({bool scheduleHide = true}) {
-    _cancelAutoHide();
-    _showPinnedToolbarOpaque();
-    _setVisible(true);
-    if (scheduleHide &&
-        !pin &&
-        !_isCursorOverToolbar &&
-        !_isCursorOverMenu &&
-        !_isInRevealZone &&
-        !_menuIsOpen &&
-        _dragging.isFalse) {
-      _scheduleAutoHide();
-    }
-  }
-
-  void _scheduleAutoHide() {
-    if (pin || !_visible || _dragging.isTrue || _menuIsOpen) return;
-    _autoHideTimer?.cancel();
-    _cancelPinnedDim();
-    _autoHideTimer = Timer(
-      Duration(milliseconds: widget.state.hideDelayMs),
-      () {
-        if (!mounted) return;
-        if (!pin &&
-            !_isCursorOverToolbar &&
-            !_isCursorOverMenu &&
-            !_isInRevealZone &&
-            !_menuIsOpen &&
-            _dragging.isFalse) {
-          _setVisible(false);
-        }
-      },
-    );
-  }
-
-  void _setToolbarOpacity(double opacity, Duration duration) {
-    final nextOpacity = opacity.clamp(0.0, 1.0).toDouble();
-    if (!mounted) return;
-    final current = _toolbarOpacityState.value;
-    if (current.opacity == nextOpacity && current.duration == duration) {
-      return;
-    }
-    _toolbarOpacityState.value = _ToolbarOpacityState(
-      opacity: nextOpacity,
-      duration: duration,
-    );
-  }
-
-  void _showPinnedToolbarOpaque() {
-    _cancelPinnedDim();
-    _setToolbarOpacity(1.0, const Duration(milliseconds: 180));
-  }
-
-  void _schedulePinnedDim() {
-    if (!_shouldDimPinnedToolbar) return;
-    if (_pinnedDimTimer?.isActive == true ||
-        _toolbarOpacityState.value.opacity <= widget.state.pinnedDimOpacity) {
-      return;
-    }
-    _pinnedDimTimer = Timer(
-      Duration(milliseconds: widget.state.pinnedDimDelayMs),
-      () {
-        _pinnedDimTimer = null;
-        if (!_shouldDimPinnedToolbar) return;
-        _setToolbarOpacity(
-          widget.state.pinnedDimOpacity,
-          Duration(milliseconds: widget.state.pinnedDimDurationMs),
-        );
-      },
-    );
-  }
-
   void _handlePinChanged(bool pinned) {
     if (!mounted) return;
-    if (pinned) {
-      _cancelAutoHide();
-      _setVisible(true);
-      if (_shouldDimPinnedToolbar) {
-        _schedulePinnedDim();
-      } else {
-        _showPinnedToolbarOpaque();
-      }
-      return;
-    }
+    if (!pinned) _bindToolbarYToTopEdge();
+    _interaction.setPinned(pinned);
+  }
 
-    _bindToolbarYToTopEdge();
-    _showPinnedToolbarOpaque();
-    if (!_isCursorOverToolbar &&
-        !_isCursorOverMenu &&
-        !_isInRevealZone &&
-        !_menuIsOpen) {
-      _scheduleAutoHide();
-    }
+  void _updateInteractionSettings() {
+    _interaction.updateSettings(
+      hideDelay: Duration(milliseconds: widget.state.hideDelayMs),
+      dimDelay: Duration(milliseconds: widget.state.pinnedDimDelayMs),
+      dimDuration: Duration(milliseconds: widget.state.pinnedDimDurationMs),
+      dimOpacity: widget.state.pinnedDimOpacity,
+    );
+    _interaction.windowPointer(inRevealZone: _isInRevealZone);
   }
 
   Future<void> _handleGlobalOptionsMaybeChanged() async {
@@ -919,24 +717,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
         if (next == previous) continue;
         widget.state.applyUserDefaults(next);
 
-        if (pin) {
-          if (_shouldDimPinnedToolbar) {
-            _cancelPinnedDim();
-            if (_toolbarOpacityState.value.opacity < 1.0) {
-              _setToolbarOpacity(
-                widget.state.pinnedDimOpacity,
-                const Duration(milliseconds: 180),
-              );
-            } else {
-              _schedulePinnedDim();
-            }
-          } else {
-            _showPinnedToolbarOpaque();
-          }
-        } else {
-          _cancelAutoHide();
-          _handleWindowPointerState(_lastWindowPointer);
-        }
+        _updateInteractionSettings();
 
         if (widget.ffi.canvasModel.scrollStyle.stringValue ==
                 previous.scrollStyle &&
@@ -975,93 +756,18 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
   }
 
   void _handleToolbarPointerEnter() {
-    _isCursorOverToolbar = true;
-    _cancelAutoHide();
-    _showPinnedToolbarOpaque();
+    _interaction.toolbarHover(true);
     widget.ffi.canvasModel.cancelEdgeScroll();
-  }
-
-  void _handleToolbarPointerDown() {
-    // Synthesized pointer streams from nested remote-control clients do not
-    // always deliver hover/enter before the button event. Treat pointer-down
-    // as an explicit toolbar interaction. Menu activation happens in the raw
-    // pointer-up listener, so restoring opacity here cannot lose the click if
-    // this rebuild cancels the TextButton gesture recognizer.
-    _cancelAutoHide();
-    _showPinnedToolbarOpaque();
-    _setVisible(true);
-    widget.ffi.canvasModel.cancelEdgeScroll();
-  }
-
-  void _handleToolbarPointerUp() {
-    // Pointer-up reaches the menu button before the next frame, so restoring
-    // opacity here cannot replace the active gesture recognizer.
-    _showPinnedToolbarOpaque();
-  }
-
-  void _handleToolbarPointerExit() {
-    _isCursorOverToolbar = false;
-    if (pin) {
-      if (!_isCursorOverMenu && !_menuIsOpen) {
-        _schedulePinnedDim();
-      }
-    } else if (!_isCursorOverMenu && !_isInRevealZone && !_menuIsOpen) {
-      _scheduleAutoHide();
-    }
   }
 
   void _handleMenuPointerEnter() {
-    _menuHoverDepth += 1;
-    _cancelAutoHide();
-    _showPinnedToolbarOpaque();
+    _interaction.menuHover(true);
     widget.ffi.canvasModel.cancelEdgeScroll();
-  }
-
-  void _handleMenuPointerExit() {
-    if (_menuHoverDepth > 0) {
-      _menuHoverDepth -= 1;
-    }
-    if (pin) {
-      if (_shouldDimPinnedToolbar) {
-        _schedulePinnedDim();
-      }
-    } else if (!_isCursorOverToolbar &&
-        !_isCursorOverMenu &&
-        !_isInRevealZone &&
-        !_menuIsOpen) {
-      _scheduleAutoHide();
-    }
   }
 
   void _handleWindowPointerState(Offset? position) {
     _lastWindowPointer = position;
-
-    if (hide.value) return;
-
-    if (_menuIsOpen) {
-      _showCurrentShape(scheduleHide: false);
-      return;
-    }
-
-    if (!pin && _isInRevealZone) {
-      _showCurrentShape(scheduleHide: false);
-      return;
-    }
-
-    if (_lastWindowPointer == null) {
-      if (pin && !_isCursorOverToolbar) {
-        _schedulePinnedDim();
-      } else if (!pin && !_isCursorOverToolbar) {
-        _scheduleAutoHide();
-      }
-      return;
-    }
-
-    if (_visible && !pin && !_isCursorOverToolbar) {
-      _scheduleAutoHide();
-    } else if (_visible && pin && !_isCursorOverToolbar) {
-      _schedulePinnedDim();
-    }
+    _interaction.windowPointer(inRevealZone: _isInRevealZone);
   }
 
   @override
@@ -1076,10 +782,25 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
         // during overlay teardown must not wait for another click to reconcile.
         WidgetsBinding.instance.ensureVisualUpdate();
       },
-    )..addListener(_handleMenuCoordinatorChanged);
+    );
+    _interaction = ToolbarInteractionController(
+      menus: _menuCoordinator,
+      onMenuFocusChanged: widget.onMenuFocusChanged,
+      scheduleAfterFrame: (callback) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => callback());
+        WidgetsBinding.instance.ensureVisualUpdate();
+      },
+      pinned: pin,
+      hidden: hide.value,
+      hideDelay: Duration(milliseconds: widget.state.hideDelayMs),
+      dimDelay: Duration(milliseconds: widget.state.pinnedDimDelayMs),
+      dimDuration: Duration(milliseconds: widget.state.pinnedDimDurationMs),
+      dimOpacity: widget.state.pinnedDimOpacity,
+    );
     _initDragBounds();
     _startGlobalOptionRefresh();
     _pinWorker = ever<bool>(widget.state._pin, _handlePinChanged);
+    _hideWorker = ever<bool>(hide, _interaction.setHidden);
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       final settings = SessionPeerSettingsRepository.forSession(
@@ -1106,16 +827,12 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
 
   @override
   dispose() {
-    _setMenuFocusGuard(false);
-    _cancelAutoHide();
-    _cancelPinnedDim();
     _cancelGlobalOptionRefresh();
     _pinWorker?.dispose();
-    _menuCoordinator.removeListener(_handleMenuCoordinatorChanged);
+    _hideWorker?.dispose();
+    _interaction.dispose();
     _closeMenus();
     _menuCoordinator.dispose();
-    _toolbarOpacityState.dispose();
-    _visibility.dispose();
     widget.onEnterOrLeaveImageCleaner(identityHashCode(this));
     widget.onImagePointerStateCleaner(identityHashCode(this));
     widget.onWindowPointerStateCleaner(identityHashCode(this));
@@ -1129,20 +846,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       if (!widget.state.initialized.value) {
         return const SizedBox.shrink();
       }
-      // If toolbar is hidden, return empty widget
-      if (hide.value) {
-        _wasSessionHidden = true;
-        _cancelAutoHide();
-        _cancelPinnedDim();
-        _toolbarOpacityState.value = _ToolbarOpacityState.opaque;
-        _closeMenus();
-        return const SizedBox.shrink();
-      }
-      if (_wasSessionHidden) {
-        _wasSessionHidden = false;
-        _visibility.value = true;
-        _toolbarOpacityState.value = _ToolbarOpacityState.opaque;
-      }
+      if (hide.value) return const SizedBox.shrink();
       final currentShape = collapse.isFalse
           ? _buildToolbar(context)
           : _buildDraggableCollapse(context);
@@ -1151,21 +855,24 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
         alignment: FractionalOffset(_fractionX.value, y),
         child: ToolbarRevealTransition(
           key: _toolbarRevealKey,
-          visible: _visibility,
+          visible: _interaction.visibility,
           child: _ToolbarOpacityLayer(
-            state: _toolbarOpacityState,
-            visible: _visible,
+            state: _interaction,
             child: Listener(
               behavior: HitTestBehavior.translucent,
-              onPointerDown: (_) => _handleToolbarPointerDown(),
-              onPointerUp: (_) => _handleToolbarPointerUp(),
+              onPointerDown: (event) {
+                _interaction.pointerDown(event.pointer);
+                widget.ffi.canvasModel.cancelEdgeScroll();
+              },
+              onPointerUp: (event) => _interaction.pointerEnded(event.pointer),
+              onPointerCancel: (event) => _interaction.pointerEnded(event.pointer),
               child: MouseRegion(
                 onEnter: (_) => _handleToolbarPointerEnter(),
-                onExit: (_) => _handleToolbarPointerExit(),
+                onExit: (_) => _interaction.toolbarHover(false),
                 child: _ToolbarMenuLifecycleScope(
-                  coordinator: _menuCoordinator,
+                  interaction: _interaction,
                   onMenuPointerEnter: _handleMenuPointerEnter,
-                  onMenuPointerExit: _handleMenuPointerExit,
+                  onMenuPointerExit: () => _interaction.menuHover(false),
                   verticalToolbar: widget.state.vertical.value,
                   openMenusLeft: _shouldOpenVerticalMenusLeft(),
                   child: flutter_widgets.RawMenuAnchorGroup(
@@ -1185,8 +892,10 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
     final borderRadius = BorderRadius.vertical(
       bottom: Radius.circular(5),
     );
-    return Obx(() => Offstage(
-          offstage: _dragging.isTrue,
+    return AnimatedBuilder(
+      animation: _interaction,
+      builder: (context, _) => Offstage(
+          offstage: _interaction.value.dragging,
           child: Material(
             elevation: _ToolbarTheme.elevation,
             shadowColor: MyTheme.color(context).shadow,
@@ -1194,7 +903,7 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
             child: _DraggableShowHide(
               id: widget.id,
               sessionId: widget.ffi.sessionId,
-              dragging: _dragging,
+              onDraggingChanged: _interaction.dragging,
               fractionX: _fractionX,
               fractionY: _fractionY,
               toolbarState: widget.state,
@@ -1203,7 +912,8 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
               borderRadius: borderRadius,
             ),
           ),
-        ));
+        ),
+    );
   }
 
   Widget _buildToolbar(BuildContext context) {
@@ -3572,7 +3282,7 @@ class _IconMenuButtonState extends State<_IconMenuButton> {
                 ? null
                 : () {
                     if (widget.topLevel) {
-                      menuLifecycle?.coordinator.closeAll();
+                      menuLifecycle?.interaction.menus.closeAll();
                     }
                     widget.onPressed?.call();
                   },
@@ -3632,11 +3342,11 @@ class _IconSubmenuButton extends StatefulWidget {
 
 class _IconSubmenuButtonState extends State<_IconSubmenuButton> {
   bool hover = false;
-  bool _pointerMenuToggleHandled = false;
   final MenuController _menuController = MenuController();
   final FocusNode _focusNode = FocusNode(debugLabel: 'toolbarMenuButton');
   late final ToolbarMenuHandle _menuHandle;
-  ToolbarMenuCoordinator<_ToolbarMenuId>? _coordinator;
+  ToolbarInteractionController<_ToolbarMenuId>? _interaction;
+  ToolbarMenuCoordinator<_ToolbarMenuId>? get _coordinator => _interaction?.menus;
 
   @override
   void initState() {
@@ -3650,10 +3360,11 @@ class _IconSubmenuButtonState extends State<_IconSubmenuButton> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    final next = _ToolbarMenuLifecycleScope.maybeOf(context)?.coordinator;
-    if (identical(next, _coordinator)) return;
+    final next = _ToolbarMenuLifecycleScope.maybeOf(context)?.interaction;
+    if (identical(next, _interaction)) return;
+    _interaction?.cancelMenuPointer(widget.menuId);
     _coordinator?.unregisterMenu(widget.menuId, _menuHandle);
-    _coordinator = next;
+    _interaction = next;
     _coordinator?.registerMenu(widget.menuId, _menuHandle);
   }
 
@@ -3661,12 +3372,14 @@ class _IconSubmenuButtonState extends State<_IconSubmenuButton> {
   void didUpdateWidget(_IconSubmenuButton oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.menuId == widget.menuId) return;
+    _interaction?.cancelMenuPointer(oldWidget.menuId);
     _coordinator?.unregisterMenu(oldWidget.menuId, _menuHandle);
     _coordinator?.registerMenu(widget.menuId, _menuHandle);
   }
 
   @override
   void dispose() {
+    _interaction?.cancelMenuPointer(widget.menuId);
     _coordinator?.unregisterMenu(widget.menuId, _menuHandle);
     _focusNode.dispose();
     super.dispose();
@@ -3676,8 +3389,6 @@ class _IconSubmenuButtonState extends State<_IconSubmenuButton> {
   void setState(VoidCallback fn) {
     super.setState(fn);
   }
-
-  void _activateMenu() => _coordinator?.activate(widget.menuId);
 
   @override
   Widget build(BuildContext context) {
@@ -3734,33 +3445,18 @@ class _IconSubmenuButtonState extends State<_IconSubmenuButton> {
               if ((event.buttons & kPrimaryButton) == 0) {
                 return;
               }
-              _pointerMenuToggleHandled = true;
+              _interaction?.menuPointerDown(widget.menuId, event.pointer);
             },
-            onPointerUp: (_) {
-              if (!_pointerMenuToggleHandled) {
-                return;
-              }
-              // Open after pointer-down dismissal and dimming work completes.
-              // The raw listener keeps this path reliable even when closing a
-              // sibling overlay cancels the TextButton gesture recognizer.
-              _activateMenu();
-              WidgetsBinding.instance.addPostFrameCallback(
-                (_) => _pointerMenuToggleHandled = false,
-              );
-            },
-            onPointerCancel: (_) => _pointerMenuToggleHandled = false,
+            onPointerUp: (event) =>
+                _interaction?.menuPointerUp(widget.menuId, event.pointer),
+            onPointerCancel: (_) => _interaction?.cancelMenuPointer(widget.menuId),
             child: TextButton(
               focusNode: _focusNode,
               style: _ToolbarTheme.defaultMenuButtonStyle,
               onHover: (value) => setState(() {
                 hover = value;
               }),
-              onPressed: () {
-                if (_pointerMenuToggleHandled) {
-                  return;
-                }
-                _activateMenu();
-              },
+              onPressed: () => _interaction?.activateMenuFromButton(widget.menuId),
               child: child ?? buttonChild,
             ),
           ),
@@ -3901,7 +3597,7 @@ class _DraggableShowHide extends StatefulWidget {
   final SessionID sessionId;
   final RxDouble fractionX;
   final RxDouble fractionY;
-  final RxBool dragging;
+  final ValueChanged<bool> onDraggingChanged;
   final ToolbarState toolbarState;
   final BorderRadius borderRadius;
 
@@ -3914,7 +3610,7 @@ class _DraggableShowHide extends StatefulWidget {
     required this.sessionId,
     required this.fractionX,
     required this.fractionY,
-    required this.dragging,
+    required this.onDraggingChanged,
     required this.toolbarState,
     required this.setFullscreen,
     required this.setMinimize,
@@ -3961,7 +3657,7 @@ class _DraggableShowHideState extends State<_DraggableShowHide> {
           size = renderBox.size;
           position = renderBox.localToGlobal(Offset.zero);
         }
-        widget.dragging.value = true;
+        widget.onDraggingChanged(true);
       }),
       onDragEnd: (details) {
         final mediaSize = MediaQueryData.fromView(View.of(context)).size;
@@ -3995,7 +3691,7 @@ class _DraggableShowHideState extends State<_DraggableShowHide> {
             widget.fractionY.value,
           ),
         );
-        widget.dragging.value = false;
+        widget.onDraggingChanged(false);
       },
     );
   }
@@ -4160,7 +3856,7 @@ Widget _buildPointerTrackWidget(BuildContext context, Widget child, FFI? ffi) {
     return tracked;
   }
   return _ToolbarMenuLifecycleScope(
-    coordinator: menuLifecycle.coordinator,
+    interaction: menuLifecycle.interaction,
     onMenuPointerEnter: menuLifecycle.onMenuPointerEnter,
     onMenuPointerExit: menuLifecycle.onMenuPointerExit,
     verticalToolbar: menuLifecycle.verticalToolbar,
