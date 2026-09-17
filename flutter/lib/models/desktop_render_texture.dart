@@ -297,6 +297,9 @@ class TextureModel {
   resetForSessionRestart() async {
     final ffi = parent.target;
     if (ffi == null) return;
+    // Revocation already removed these targets from the maps, but their native
+    // destruction can still be in flight. Finish it before replacing the session.
+    await _screenRetirement;
     await _destroyAll(ffi);
   }
 

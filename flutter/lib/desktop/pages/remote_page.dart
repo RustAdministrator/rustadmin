@@ -19,7 +19,6 @@ import '../../common/widgets/dialog.dart';
 import '../../common/widgets/toolbar.dart';
 import '../../models/model.dart';
 import '../../models/input_model.dart';
-import '../../models/keyboard_intent.dart';
 import '../../models/platform_model.dart';
 import '../../common/shared_state.dart';
 import '../../utils/image.dart';
@@ -36,10 +35,6 @@ final SimpleWrapper<bool> _firstEnterImage = SimpleWrapper(false);
 
 // Used to skip session close if "move to new window" is clicked.
 final Map<String, bool> closeSessionOnDispose = {};
-
-const Duration _kDesktopSessionLifecycleStaleThreshold = Duration(seconds: 30);
-const Duration _kDesktopSessionEventLoopStaleThreshold = Duration(seconds: 45);
-const Duration _kDesktopSessionEventLoopCheckInterval = Duration(seconds: 5);
 
 void initializeDesktopRemoteInputSource() {
   bind.mainInitInputSource();
@@ -140,10 +135,6 @@ class _RemotePageState extends State<RemotePage>
         WidgetsBindingObserver,
         TickerProviderStateMixin {
   Timer? _timer;
-  Timer? _eventLoopStaleCheckTimer;
-  DateTime _lastEventLoopStaleCheckAt = DateTime.now();
-  DateTime? _lifecycleSuspendedAt;
-  bool _staleSessionRestartInProgress = false;
   bool _disposed = false;
   DesktopQualityMonitorWindowController? _qualityMonitorWindowController;
   int _keyboardFocusGeneration = 0;
@@ -287,8 +278,8 @@ class _RemotePageState extends State<RemotePage>
     // hosted by the main window construct RemotePage directly.
     initializeDesktopRemoteInputSource();
     WidgetsBinding.instance.addObserver(this);
-    _startEventLoopStaleCheckTimer();
     _ffi = FFI(widget.sessionId);
+    _ffi.ffiModel.reconnectController.attachFreshRestart(_restartStaleSession);
     Get.put<FFI>(_ffi, tag: _sessionRegistrationKey);
     _ffi.imageModel.addCallbackOnFirstImage((String peerId) {
       _ffi.canvasModel.activateLocalCursor();
@@ -371,124 +362,46 @@ class _RemotePageState extends State<RemotePage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
-    final now = DateTime.now();
     if (state == AppLifecycleState.resumed) {
-      final suspendedAt = _lifecycleSuspendedAt;
-      _lifecycleSuspendedAt = null;
-      if (suspendedAt != null &&
-          now.difference(suspendedAt) >=
-              _kDesktopSessionLifecycleStaleThreshold) {
-        unawaited(_restartStaleSession('desktop lifecycle resume'));
-      } else {
-        final elapsed = _takeEventLoopStaleCheckElapsed(now);
-        if (elapsed >= _kDesktopSessionEventLoopStaleThreshold) {
-          unawaited(_restartStaleSession(
-              'desktop lifecycle resume after ${elapsed.inSeconds}s event-loop gap'));
-        }
-      }
-      return;
-    }
-    if (state == AppLifecycleState.hidden &&
-        widget.windowHost?.isMainWindow == true) {
-      // Hiding the main window to the tray keeps embedded sessions alive. The
-      // event-loop gap detector still recovers a genuinely suspended session.
-      return;
-    }
-    if (state == AppLifecycleState.hidden ||
-        state == AppLifecycleState.paused ||
-        state == AppLifecycleState.detached) {
-      _lifecycleSuspendedAt ??= now;
+      _ffi.ffiModel.reconnectController.checkElapsed();
     }
   }
 
   void reconnectIfStaleOnActivation() {
-    final now = DateTime.now();
-    final elapsed = _takeEventLoopStaleCheckElapsed(now);
-    if (elapsed >= _kDesktopSessionEventLoopStaleThreshold) {
-      unawaited(_restartStaleSession(
-          'remote window activation after ${elapsed.inSeconds}s event-loop gap'));
-    }
+    _ffi.ffiModel.reconnectController.checkElapsed();
   }
 
-  void _startEventLoopStaleCheckTimer() {
-    _eventLoopStaleCheckTimer?.cancel();
-    _lastEventLoopStaleCheckAt = DateTime.now();
-    _eventLoopStaleCheckTimer = Timer.periodic(
-      _kDesktopSessionEventLoopCheckInterval,
-      (_) => _checkEventLoopStaleGap(),
+  Future<void> _restartStaleSession(
+      bool forceRelay, bool Function() isCurrent) async {
+    if (_disposed || !isCurrent()) return;
+    debugPrint('Fresh restart after desktop suspension: session=$sessionId');
+    _timer?.cancel();
+    _timer = null;
+    _ffi.dialogManager.dismissAll();
+    _ffi.dialogManager.showLoading(translate('Connecting...'), onCancel: () {
+      _ffi.ffiModel.reconnectController.stop();
+      closeConnection(id: _tabControllerKey);
+    });
+
+    // Never close Rust behind SessionHandle's back: retire and drain the old
+    // event lease, release native resources, then create a new single-use handle.
+    await _ffi.resetSessionForReconnect(closeSession: true);
+    if (_disposed || !isCurrent()) return;
+    setState(() {});
+    await _ffi.start(
+      widget.id,
+      password: widget.password,
+      isSharedPassword: widget.isSharedPassword,
+      switchUuid: widget.switchUuid,
+      forceRelay: forceRelay || widget.forceRelay == true,
+      display: widget.display,
+      displays: widget.displays,
+      hostWindowId: widget.windowHost?.windowId,
     );
-  }
-
-  void _checkEventLoopStaleGap() {
-    final now = DateTime.now();
-    final elapsed = _takeEventLoopStaleCheckElapsed(now);
-    if (elapsed >= _kDesktopSessionEventLoopStaleThreshold) {
-      unawaited(_restartStaleSession(
-          'desktop event loop resumed after ${elapsed.inSeconds}s gap'));
-    }
-  }
-
-  Duration _takeEventLoopStaleCheckElapsed(DateTime now) {
-    final elapsed = now.difference(_lastEventLoopStaleCheckAt);
-    _lastEventLoopStaleCheckAt = now;
-    return elapsed;
-  }
-
-  Future<void> _restartStaleSession(String reason) async {
-    if (_disposed || _staleSessionRestartInProgress || _ffi.closed) {
-      return;
-    }
-    _staleSessionRestartInProgress = true;
-    debugPrint('Restart stale remote session $sessionId ${widget.id}: $reason');
-    try {
-      _timer?.cancel();
-      _timer = null;
-      _ffi.inputModel.setRelativeMouseMode(false);
-      await _ffi.inputModel.resetKeyboard(
-        KeyboardResetReason.reconnect,
-        invalidatePending: true,
-        allowBlockedReleases: true,
-      );
-      _ffi.inputModel.disposeRelativeMouseMode();
-      _ffi.dialogManager.dismissAll();
-      _ffi.ffiModel.clear();
-      _ffi.ffiModel.waitForFirstImage.value = true;
-      _ffi.ffiModel.isRefreshing = false;
-      _ffi.ffiModel.waitForImageDialogShow.value = true;
-      _ffi.ffiModel.waitForImageTimer?.cancel();
-      _ffi.ffiModel.waitForImageTimer = null;
-      await _ffi.imageModel.update(null);
-      _ffi.cursorModel.clear();
-      _ffi.canvasModel.clear();
-      if (mounted) {
-        setState(() {});
-      }
-      await _ffi.textureModel.resetForSessionRestart();
-      await bind.sessionClose(sessionId: sessionId);
-      if (_disposed) {
-        return;
-      }
-      _ffi.start(
-        widget.id,
-        password: widget.password,
-        isSharedPassword: widget.isSharedPassword,
-        switchUuid: widget.switchUuid,
-        forceRelay: widget.forceRelay,
-        display: widget.display,
-        displays: widget.displays,
-        hostWindowId: widget.windowHost?.windowId,
-      );
-      _ffi.ffiModel.updateEventListener(sessionId, widget.id);
-      if (!isWeb) bind.pluginSyncUi(syncTo: kAppTypeDesktopRemote);
-      _ffi.qualityMonitorModel.checkShowQualityMonitor(sessionId);
-      _ffi.dialogManager
-          .showLoading(translate('Connecting...'), onCancel: closeConnection);
-    } catch (e) {
-      debugPrint(
-          'Failed to restart stale remote session $sessionId ${widget.id}: $e');
-    } finally {
-      _staleSessionRestartInProgress = false;
-    }
+    if (_disposed || !isCurrent()) return;
+    _ffi.ffiModel.updateEventListener(sessionId, widget.id);
+    if (!isWeb) bind.pluginSyncUi(syncTo: kAppTypeDesktopRemote);
+    _ffi.qualityMonitorModel.checkShowQualityMonitor(sessionId);
   }
 
   /// Cancel the pointer lock center debounce timer
@@ -627,6 +540,7 @@ class _RemotePageState extends State<RemotePage>
   @override
   Future<void> dispose() async {
     _disposed = true;
+    _ffi.ffiModel.reconnectController.stop();
     await _qualityMonitorWindowController?.dispose();
     _qualityMonitorWindowController = null;
     _keyboardFocusGeneration += 1;
@@ -634,8 +548,6 @@ class _RemotePageState extends State<RemotePage>
         closeSessionOnDispose.remove(_sessionRegistrationKey) ?? true;
 
     WidgetsBinding.instance.removeObserver(this);
-    _eventLoopStaleCheckTimer?.cancel();
-    _eventLoopStaleCheckTimer = null;
     // https://github.com/flutter/flutter/issues/64935
     super.dispose();
     debugPrint("REMOTE PAGE dispose session $sessionId ${widget.id}");

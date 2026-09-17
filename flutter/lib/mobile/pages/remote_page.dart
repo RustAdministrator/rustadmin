@@ -172,7 +172,7 @@ class _RemotePageState extends State<RemotePage>
     _keyboardInputModes.addListener(_onKeyboardInputModeChanged);
     _reconnectController = MobileSessionReconnectController(
       resetSession: ({required closeSession}) =>
-          gFFI.resetMobileSessionForReconnect(closeSession: closeSession),
+          gFFI.resetSessionForReconnect(closeSession: closeSession),
       prepareReconnect: _prepareBackgroundReconnect,
       connect: _connectCurrentSession,
       onReconnectStarted: () {

@@ -58,6 +58,7 @@ import 'display_render_state.dart';
 import 'session_lifecycle.dart';
 import '../common/widgets/display_render_status.dart';
 import 'session_handle.dart';
+import 'session_reconnect_controller.dart';
 import 'package:flutter_hbb/utils/scale.dart';
 
 import 'package:flutter_hbb/generated_bridge.dart'
@@ -157,9 +158,7 @@ class FfiModel with ChangeNotifier {
   bool? _direct;
   bool _touchMode = false;
   late VirtualMouseMode virtualMouseMode;
-  Timer? _timer;
-  var _reconnects = 1;
-  DateTime? _offlineReconnectStartTime;
+  late final SessionReconnectController reconnectController;
   bool _viewOnly = false;
   bool _showMyCursor = false;
   WeakReference<FFI> parent;
@@ -214,8 +213,21 @@ class FfiModel with ChangeNotifier {
   }
 
   FfiModel(this.parent) {
-    clear();
     sessionId = parent.target!.sessionId;
+    reconnectController = SessionReconnectController(
+      retry: _reconnectTransport,
+      onDiagnostic: (message) => debugPrint('Session recovery $sessionId: $message'),
+      onFailure: (error, stack) {
+        debugPrint('Fresh session reconnect failed: $error');
+        debugPrintStack(stackTrace: stack);
+        final ffi = parent.target;
+        if (ffi == null) return;
+        ffi.dialogManager.dismissAll();
+        showMsgBox(sessionId, 'error', 'Connection Error',
+            'Failed to reconnect: $error', '', false, ffi.dialogManager);
+      },
+    );
+    clear();
     cachedPeerData.permissions = _permissions;
     virtualMouseMode = VirtualMouseMode(this);
   }
@@ -305,8 +317,7 @@ class FfiModel with ChangeNotifier {
     _secure = null;
     _direct = null;
     _inputBlocked = false;
-    _timer?.cancel();
-    _timer = null;
+    reconnectController.resetBackoff();
     clearPermissions();
     waitForImageTimer?.cancel();
     _authenticatedHandoffFallbackTimer?.cancel();
@@ -1477,23 +1488,7 @@ class FfiModel with ChangeNotifier {
         title == 'Connection Error' &&
         text == 'Remote desktop is offline' &&
         _pi.isSet.isTrue) {
-      // Auto retry for ~30s (server's peer offline threshold) when controlled peer's account changes
-      // (e.g., signout, switch user, login into OS) causes temporary offline via websocket/tcp connection.
-      // The actual wait may exceed 30s (e.g., 20s elapsed + 16s next retry = 36s), which is acceptable
-      // since the controlled side reconnects quickly after account changes.
-      // Uses time-based check instead of _reconnects count because user can manually retry.
-      // https://github.com/rustdesk/rustdesk/discussions/14048
-      if (_offlineReconnectStartTime == null) {
-        // First offline, record time and start retry
-        _offlineReconnectStartTime = DateTime.now();
-        return true;
-      } else {
-        final elapsed =
-            DateTime.now().difference(_offlineReconnectStartTime!).inSeconds;
-        if (elapsed < 30) {
-          return true;
-        }
-      }
+      return reconnectController.shouldRetryOffline();
     }
     return false;
   }
@@ -1543,8 +1538,7 @@ class FfiModel with ChangeNotifier {
       if (noteAllowed && hasRetry) {
         final ffi = parent.target!;
         onSubmit = () async {
-          _timer?.cancel();
-          _timer = null;
+          reconnectController.stop();
           await showConnEndAuditDialogCloseCanceled(
               ffi: ffi, type: type, title: title, text: text);
           closeConnection();
@@ -1553,30 +1547,33 @@ class FfiModel with ChangeNotifier {
       msgBox(sessionId, type, title, text, link, dialogManager,
           hasCancel: hasCancel,
           reconnect: hasRetry ? reconnect : null,
-          reconnectTimeout: hasRetry ? _reconnects : null,
+          reconnectTimeout: hasRetry
+              ? reconnectController.nextRetryDelay.inSeconds : null,
           onSubmit: onSubmit);
     }
-    _timer?.cancel();
     if (hasRetry) {
-      _timer = Timer(Duration(seconds: _reconnects), () {
-        reconnect(dialogManager, sessionId, false);
-      });
-      _reconnects *= 2;
+      reconnectController.scheduleRetry();
     } else {
-      _reconnects = 1;
-      _offlineReconnectStartTime = null;
+      reconnectController.resetBackoff();
     }
   }
 
   void reconnect(OverlayDialogManager dialogManager, SessionID sessionId,
       bool forceRelay) {
-    // Disable relative mouse mode before reconnecting to ensure cursor is released.
-    parent.target?.inputModel.setRelativeMouseMode(false);
+    reconnectController.requestReconnect(forceRelay: forceRelay);
+  }
+
+  void _reconnectTransport(bool forceRelay) {
+    final ffi = parent.target;
+    if (ffi == null) return;
+    ffi.inputModel.setRelativeMouseMode(false);
     bind.sessionReconnect(sessionId: sessionId, forceRelay: forceRelay);
     clearPermissions();
-    dialogManager.dismissAll();
-    dialogManager.showLoading(translate('Connecting...'),
-        onCancel: closeConnection);
+    ffi.dialogManager.dismissAll();
+    ffi.dialogManager.showLoading(translate('Connecting...'), onCancel: () {
+      reconnectController.stop();
+      closeConnection();
+    });
   }
 
   Future<void> showRelayHintDialog(
@@ -1904,8 +1901,7 @@ class FfiModel with ChangeNotifier {
         await updateCurDisplay(sessionId);
       }
       if (displays.isNotEmpty) {
-        _reconnects = 1;
-        _offlineReconnectStartTime = null;
+        reconnectController.resetBackoff();
         waitForFirstImage.value = true;
         isRefreshing = false;
       }
@@ -5794,8 +5790,7 @@ class FFI {
         : null,
   );
 
-  /// Mobile reuse FFI
-  void mobileReset() {
+  void _resetWaitingForImage() {
     ffiModel.waitForFirstImage.value = true;
     ffiModel.isRefreshing = false;
     ffiModel.waitForImageDialogShow.value = true;
@@ -5826,18 +5821,19 @@ class FFI {
   }) async {
     if (!_sessionHandle.isPristine) {
       final canReplace = await _sessionHandle.prepareForReplacement(
-        cleanupClosedSession: isMobile ? _cleanupMobileSessionState : null,
+        cleanupClosedSession: isMobile ? _cleanupSessionForReconnect : null,
       );
       if (!canReplace) {
         throw StateError('Previous remote session is not fully closed');
       }
       _sessionHandle = _newSessionHandle();
     }
+    ffiModel.reconnectController.sessionStarted();
     inputModel.keyboardInputModes.beginSession();
     screenViewAuthority.reset();
     displayRenderStates.clear(reset: true);
     this.hostWindowId = hostWindowId;
-    if (isMobile) mobileReset();
+    if (isMobile) _resetWaitingForImage();
     final sessionKind = SessionKind.fromLegacyFlags(
       isFileTransfer: isFileTransfer,
       isViewCamera: isViewCamera,
@@ -6170,7 +6166,7 @@ class FFI {
         sessionId: sessionId, code: code, trustThisDevice: trustThisDevice);
   }
 
-  Future<void> _cleanupMobileSessionState() async {
+  Future<void> _cleanupSessionForReconnect() async {
     await inputModel.keyboardInputModes.endSession();
     chatModel.close();
     for (final model in _terminalModels.values) {
@@ -6188,11 +6184,11 @@ class FFI {
     ffiModel.clear();
     canvasModel.clear();
     id = '';
-    debugPrint('mobile session reset for fresh reconnect');
+    debugPrint('session reset for fresh reconnect');
   }
 
-  /// Clear session-scoped state while keeping the mobile page reusable.
-  Future<void> resetMobileSessionForReconnect({
+  /// Retire the event lease and native session before reusing this FFI.
+  Future<void> resetSessionForReconnect({
     required bool closeSession,
   }) {
     unawaited(inputModel.keyboardInputModes.endSession());
@@ -6201,13 +6197,19 @@ class FFI {
       nativeClosePolicy: closeSession
           ? NativeSessionClosePolicy.requestClose
           : NativeSessionClosePolicy.alreadyClosed,
-      cleanup: _cleanupMobileSessionState,
+      cleanup: () async {
+        if (isDesktop) await textureModel.resetForSessionRestart();
+        await _cleanupSessionForReconnect();
+        if (isDesktop) inputModel.disposeRelativeMouseMode();
+        _resetWaitingForImage();
+      },
     );
   }
 
   /// Close the remote session.
   Future<void> close(
       {bool closeSession = true, bool saveCanvasConfig = true}) {
+    ffiModel.reconnectController.stop();
     unawaited(inputModel.keyboardInputModes.endSession());
     final hadRenderableFrame = imageModel.hasRenderableFrame;
     revokeScreenContent();
