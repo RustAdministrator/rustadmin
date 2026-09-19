@@ -4810,25 +4810,25 @@ class CursorModel with ChangeNotifier {
     parent.target?.canvasModel.tryApplyPendingMobileCursorFocus();
   }
 
-  updateDisplayOrigin(double x, double y, {updateCursorPos = true}) {
+  // Display geometry is local view state. Mouse input is sent only by pointer
+  // handling paths after they have a valid remote coordinate.
+  void updateDisplayOrigin(double x, double y, {bool updateCursorPos = true}) {
     _displayOriginX = x;
     _displayOriginY = y;
     if (updateCursorPos) {
       _x = x + 1;
       _y = y + 1;
-      parent.target?.inputModel.moveMouse(x, y);
     }
     parent.target?.canvasModel.resetOffset();
     notifyListeners();
   }
 
-  updateDisplayOriginWithCursor(
+  void updateDisplayOriginWithCursor(
       double x, double y, double xCursor, double yCursor) {
     _displayOriginX = x;
     _displayOriginY = y;
     _x = xCursor;
     _y = yCursor;
-    parent.target?.inputModel.moveMouse(x, y);
     notifyListeners();
   }
 
