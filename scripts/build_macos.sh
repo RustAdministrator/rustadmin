@@ -601,13 +601,13 @@ if [[ "$sign_only" -eq 0 ]]; then
 
   if [[ "$skip_cargo" -eq 0 ]]; then
     generate_version_file
-    if ! (cd "$repo_root" && MACOSX_DEPLOYMENT_TARGET=10.15 cargo build --features "$features" --release -vv); then
+    if ! (cd "$repo_root" && MACOSX_DEPLOYMENT_TARGET=12.0 cargo build --features "$features" --release -vv); then
       if [[ "$hwcodec" -eq 1 ]]; then
         warn_hwcodec_fallback "cargo build failed with hwcodec enabled."
         hwcodec=0
         features="$(compose_cargo_features)"
         validate_platform_profile "$features"
-        (cd "$repo_root" && MACOSX_DEPLOYMENT_TARGET=10.15 cargo build --features "$features" --release -vv)
+        (cd "$repo_root" && MACOSX_DEPLOYMENT_TARGET=12.0 cargo build --features "$features" --release -vv)
       else
         exit 1
       fi

@@ -253,7 +253,7 @@ docopt = "1.1"
 name = "RustAdmin"
 identifier = "io.github.rustadministrator.rustadmin"
 icon = ["res/32x32.png", "res/128x128.png", "res/128x128@2x.png"]
-osx_minimum_system_version = "10.15"
+osx_minimum_system_version = "12.0"
 
 #https://github.com/johnthagen/min-sized-rust
 [profile.release]

@@ -114,7 +114,7 @@ if [[ "$screencapturekit" -eq 1 ]]; then
 fi
 
 if [[ "$skip_cargo" -eq 0 ]]; then
-  (cd "$repo_root" && MACOSX_DEPLOYMENT_TARGET=10.15 cargo build --features "$features" --lib)
+  (cd "$repo_root" && MACOSX_DEPLOYMENT_TARGET=12.0 cargo build --features "$features" --lib)
 fi
 
 (
