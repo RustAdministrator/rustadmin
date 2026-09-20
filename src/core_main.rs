@@ -127,11 +127,21 @@ pub fn core_main() -> Option<Vec<String>> {
     #[cfg(windows)]
     if args.is_empty() && crate::ui_interface::should_open_upgrade_page() {
         // Pass the synthesized arguments through both the core and Flutter paths so the
-        // native runner can bypass its singleton guard for the upgrade window.
+        // upgrade window is opened before the normal application flow starts.
         args.push("--install".to_owned());
         args.push("--upgrade".to_owned());
         flutter_args.push("--install".to_string());
         flutter_args.push("--upgrade".to_string());
+    }
+    #[cfg(target_os = "macos")]
+    if args.is_empty() && crate::ui_interface::should_open_upgrade_page() {
+        // The macOS runner receives the process command line directly, while the
+        // native entry point only returns whether Flutter should continue. Relaunch
+        // with explicit arguments so the upgrade page receives them.
+        match crate::run_me(vec!["--install", "--upgrade"]) {
+            Ok(_) => return None,
+            Err(err) => log::error!("Failed to start macOS upgrade page: {}", err),
+        }
     }
     if args.contains(&"--noinstall".to_string()) {
         args.clear();

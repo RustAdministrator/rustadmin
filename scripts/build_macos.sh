@@ -633,12 +633,18 @@ EOF
     esac
   fi
 
+  rustadmin_revision="$(tr -d '[:space:]' < "$repo_root/rustadmin_revision.txt")"
+  if [[ -z "$rustadmin_revision" ]]; then
+    report_error "RustAdmin revision file is empty: $repo_root/rustadmin_revision.txt"
+    exit 1
+  fi
+
   host_arch="$(uname -m)"
   clean_flutter_build_state
   if [[ "$host_arch" == "arm64" || "$host_arch" == "x86_64" ]]; then
     (
       cd "$flutter_dir"
-      flutter build macos --release --config-only
+      flutter build macos --release --config-only --build-number "$rustadmin_revision"
       clean_flutter_build_state
       xcodebuild_args=(
         -workspace macos/Runner.xcworkspace
@@ -663,7 +669,7 @@ EOF
       xcodebuild "${xcodebuild_args[@]}" build
     )
   else
-    (cd "$flutter_dir" && flutter build macos --release)
+    (cd "$flutter_dir" && flutter build macos --release --build-number "$rustadmin_revision")
   fi
 
   if [[ -f "$xcode_service" ]]; then

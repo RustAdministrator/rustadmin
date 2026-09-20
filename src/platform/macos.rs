@@ -812,6 +812,60 @@ pub fn is_installed() -> bool {
     false
 }
 
+fn installed_app_executable() -> PathBuf {
+    Path::new("/Applications")
+        .join(format!("{}.app", crate::get_app_name()))
+        .join("Contents/MacOS")
+        .join(crate::get_app_name())
+}
+
+pub fn is_installed_app() -> bool {
+    installed_app_executable().is_file()
+}
+
+pub fn is_cur_exe_the_installed() -> bool {
+    let Ok(current_exe) = std::env::current_exe() else {
+        return false;
+    };
+    let installed_exe = installed_app_executable();
+    match (
+        std::fs::canonicalize(current_exe),
+        std::fs::canonicalize(&installed_exe),
+    ) {
+        (Ok(current_exe), Ok(installed_exe)) => current_exe == installed_exe,
+        _ => false,
+    }
+}
+
+fn read_installed_bundle_value(key: &str) -> Option<String> {
+    let info_plist = installed_app_executable()
+        .parent()
+        .and_then(Path::parent)
+        .map(|contents| contents.join("Info.plist"))?;
+    let output = Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", &format!("Print :{key}"), info_plist.to_str()?])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+pub fn installed_build_info() -> Option<(String, String)> {
+    let installed_exe = installed_app_executable();
+    if !installed_exe.is_file() {
+        return None;
+    }
+
+    let version = read_installed_bundle_value("CFBundleShortVersionString")?;
+    let revision = read_installed_bundle_value("RustAdminRevision")
+        .or_else(|| read_installed_bundle_value("CFBundleVersion"))
+        .unwrap_or_default();
+    Some((version, revision))
+}
+
 pub fn quit_gui() {
     unsafe {
         let () = msg_send!(NSApp(), terminate: nil);

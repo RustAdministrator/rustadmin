@@ -106,18 +106,27 @@ pub fn goto_install() {
 
 #[inline]
 pub fn is_upgrade_mode() -> bool {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     return std::env::args().any(|arg| arg == "--upgrade") || should_open_upgrade_page();
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     return false;
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 #[inline]
 pub fn should_open_upgrade_page() -> bool {
-    return crate::platform::is_installed()
-        && !crate::platform::is_cur_exe_the_installed()
-        && is_installed_lower_version();
+    #[cfg(windows)]
+    {
+        return crate::platform::is_installed()
+            && !crate::platform::is_cur_exe_the_installed()
+            && is_installed_lower_version();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return crate::platform::macos::is_installed_app()
+            && !crate::platform::macos::is_cur_exe_the_installed()
+            && is_installed_lower_version();
+    }
 }
 
 #[inline]
@@ -133,16 +142,23 @@ pub fn install_me(_options: String, _path: String, _silent: bool, _debug: bool) 
         }
         std::process::exit(0);
     });
+    #[cfg(target_os = "macos")]
+    if is_upgrade_mode() {
+        std::thread::spawn(move || {
+            allow_err!(crate::platform::macos::update_me());
+            std::process::exit(0);
+        });
+    }
 }
 
 #[inline]
 pub fn update_me(_path: String) {
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     {
         allow_err!(crate::run_me(vec!["--install", "--upgrade"]));
         std::process::exit(0);
     }
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos")))]
     goto_install();
 }
 
@@ -576,7 +592,9 @@ pub fn set_option(key: String, value: String) {
 pub fn install_path() -> String {
     #[cfg(windows)]
     return crate::platform::windows::get_install_info().1;
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    return format!("/Applications/{}.app", crate::get_app_name());
+    #[cfg(not(any(windows, target_os = "macos")))]
     return "".to_owned();
 }
 
@@ -670,7 +688,21 @@ pub fn set_share_rdp(_enable: bool) {
 
 #[inline]
 pub fn is_installed_lower_version() -> bool {
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let Some((installed_version, installed_revision)) =
+            crate::platform::macos::installed_build_info()
+        else {
+            return false;
+        };
+        return is_current_build_newer(
+            crate::VERSION,
+            crate::RUSTADMIN_REVISION,
+            &installed_version,
+            &installed_revision,
+        );
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     return false;
     #[cfg(windows)]
     {
