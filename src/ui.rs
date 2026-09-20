@@ -240,6 +240,10 @@ impl UI {
         install_me(_options, _path, false, false);
     }
 
+    fn is_upgrade(&self) -> bool {
+        is_upgrade_mode()
+    }
+
     fn update_me(&self, _path: String) {
         update_me(_path);
     }
@@ -751,6 +755,7 @@ impl sciter::EventHandler for UI {
         fn recent_sessions_updated();
         fn get_icon();
         fn install_me(String, String);
+        fn is_upgrade();
         fn is_installed();
         fn is_root();
         fn is_release();

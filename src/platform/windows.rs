@@ -93,10 +93,11 @@ use windows::Win32::{
 use windows_service::{
     define_windows_service,
     service::{
-        ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
-        ServiceType,
+        ServiceAccess, ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState,
+        ServiceStatus, ServiceType,
     },
     service_control_handler::{self, ServiceControlHandlerResult},
+    service_manager::{ServiceManager, ServiceManagerAccess},
 };
 use winreg::{enums::*, RegKey};
 
@@ -2032,6 +2033,7 @@ reg add {subkey} /f /v DisplayIcon /t REG_SZ /d \"{display_icon}\"
 reg add {subkey} /f /v DisplayName /t REG_SZ /d \"{app_name}\"
 reg add {subkey} /f /v DisplayVersion /t REG_SZ /d \"{version}\"
 reg add {subkey} /f /v Version /t REG_SZ /d \"{version}\"
+reg add {subkey} /f /v RustAdminRevision /t REG_SZ /d \"{revision}\"
 reg add {subkey} /f /v BuildDate /t REG_SZ /d \"{build_date}\"
 reg add {subkey} /f /v InstallLocation /t REG_SZ /d \"{path}\"
 reg add {subkey} /f /v Publisher /t REG_SZ /d \"{app_name}\"
@@ -2054,6 +2056,7 @@ copy /Y \"{tmp_path}\\Uninstall {app_name}.lnk\" \"{path}\\\"
     ",
         display_icon = get_custom_icon(&path, &cur_exe).unwrap_or(exe.to_string()),
         version = crate::VERSION.replace("-", "."),
+        revision = crate::RUSTADMIN_REVISION,
         build_date = crate::BUILD_DATE,
         after_install = get_after_install(
             &exe,
@@ -3613,13 +3616,45 @@ fn get_directory_size_kb(path: &str) -> u64 {
     total_size / 1024
 }
 
+fn paths_equal(left: &str, right: &str) -> bool {
+    let normalize = |path: &str| {
+        fs::canonicalize(path)
+            .unwrap_or_else(|_| PathBuf::from(path))
+            .to_string_lossy()
+            .to_lowercase()
+    };
+    normalize(left) == normalize(right)
+}
+
 pub fn update_me(debug: bool) -> ResultType<()> {
+    update_me_inner(debug, true)
+}
+
+/// Upgrade an installed executable from a separate installer process.
+///
+/// The installer process is not included in the normal-window process scan, so
+/// it can remain alive while the service and the previous GUI are stopped.
+/// Unlike a fresh installation, this path copies over the existing directory
+/// and preserves whether the Windows service was running.
+pub fn upgrade_me(debug: bool) -> ResultType<()> {
+    update_me_inner(debug, false)?;
+    run_after_run_cmds(false);
+    Ok(())
+}
+
+fn update_me_inner(debug: bool, restore_previous_sessions: bool) -> ResultType<()> {
     let app_name = crate::get_app_name();
     let src_exe = std::env::current_exe()?.to_string_lossy().to_string();
     let (subkey, path, _, exe) = get_install_info();
     let is_installed = std::fs::metadata(&exe).is_ok();
     if !is_installed {
         bail!("{} is not installed.", &app_name);
+    }
+    let source_is_installed = paths_equal(&src_exe, &exe);
+    if source_is_installed {
+        log::info!(
+            "Upgrade source is the installed executable; updating installation metadata without copying files"
+        );
     }
 
     let app_exe_name = &format!("{}.exe", &app_name);
@@ -3638,7 +3673,13 @@ pub fn update_me(debug: bool) -> ResultType<()> {
         .flatten()
         .collect::<Vec<_>>();
     kill_process_by_pids(&app_exe_name, tray_pids)?;
-    let is_service_running = is_self_service_running();
+    let service_state = get_service_state()?;
+    log::info!(
+        "Preparing Windows upgrade: service_installed={}, service_running={}",
+        service_state.installed,
+        service_state.running
+    );
+    let is_service_running = service_state.running;
 
     let mut version_major = "0";
     let mut version_minor = "0";
@@ -3667,6 +3708,7 @@ pub fn update_me(debug: bool) -> ResultType<()> {
         display_icon: &str,
         version: &str,
         build_date: &str,
+        revision: &str,
         version_major: &str,
         version_minor: &str,
         version_build: &str,
@@ -3686,6 +3728,7 @@ pub fn update_me(debug: bool) -> ResultType<()> {
 reg add {subkey} /f /v DisplayVersion /t REG_SZ /d \"{version}\"
 reg add {subkey} /f /v Version /t REG_SZ /d \"{version}\"
 reg add {subkey} /f /v BuildDate /t REG_SZ /d \"{build_date}\"
+reg add {subkey} /f /v RustAdminRevision /t REG_SZ /d \"{revision}\"
 reg add {subkey} /f /v VersionMajor /t REG_DWORD /d {version_major}
 reg add {subkey} /f /v VersionMinor /t REG_DWORD /d {version_minor}
 reg add {subkey} /f /v VersionBuild /t REG_DWORD /d {version_build}
@@ -3701,6 +3744,7 @@ reg add {subkey} /f /v EstimatedSize /t REG_DWORD /d {size}
             &display_icon,
             &version,
             &build_date,
+            crate::RUSTADMIN_REVISION,
             &version_major,
             &version_minor,
             &version_build,
@@ -3713,6 +3757,7 @@ reg add {subkey} /f /v EstimatedSize /t REG_DWORD /d {size}
                 &display_icon,
                 &version,
                 &build_date,
+                crate::RUSTADMIN_REVISION,
                 &version_major,
                 &version_minor,
                 &version_build,
@@ -3770,14 +3815,22 @@ taskkill /F /IM {app_name}.exe{filter}
 {sleep}
     ",
         app_name = app_name,
-        copy_exe = copy_exe_cmd(&src_exe, &exe, &path)?,
-        rename_exe = rename_exe_cmd(&src_exe, &path)?,
+        copy_exe = if source_is_installed {
+            "".to_owned()
+        } else {
+            copy_exe_cmd(&src_exe, &exe, &path)?
+        },
+        rename_exe = if source_is_installed {
+            "".to_owned()
+        } else {
+            rename_exe_cmd(&src_exe, &path)?
+        },
         remove_meta_toml = remove_meta_toml_cmd(is_msi.unwrap_or(true), &path),
         sleep = if debug { "timeout 300" } else { "" },
     );
 
     let _restore_session_guard = crate::common::SimpleCallOnReturn {
-        b: true,
+        b: restore_previous_sessions,
         f: Box::new(move || {
             let is_root = is_root();
             if tray_sessions.is_empty() {
@@ -4329,6 +4382,45 @@ fn get_uninstall_amyuni_idd() -> String {
 #[inline]
 pub fn is_self_service_running() -> bool {
     is_service_running(&crate::get_app_name())
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WindowsServiceState {
+    pub installed: bool,
+    pub running: bool,
+}
+
+/// Query service registration independently from the executable installation.
+///
+/// An installed executable can run without a Windows service, and a registered
+/// service can be stopped while the user continues in portable mode. Upgrade
+/// behavior must preserve those two states independently.
+pub fn get_service_state() -> ResultType<WindowsServiceState> {
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .map_err(|err| anyhow!("Failed to connect to the Windows service manager: {err}"))?;
+
+    let service = match manager.open_service(crate::get_app_name(), ServiceAccess::QUERY_STATUS) {
+        Ok(service) => service,
+        Err(err) => {
+            if let windows_service::Error::Winapi(error) = &err {
+                if error.raw_os_error() == Some(ERROR_SERVICE_DOES_NOT_EXIST as i32) {
+                    return Ok(WindowsServiceState::default());
+                }
+            }
+            return Err(anyhow!(
+                "Failed to query RustAdmin Windows service registration: {err}"
+            ));
+        }
+    };
+
+    let running = service
+        .query_status()
+        .map(|status| status.current_state != ServiceState::Stopped)
+        .map_err(|err| anyhow!("Failed to query RustAdmin Windows service status: {err}"))?;
+    Ok(WindowsServiceState {
+        installed: true,
+        running,
+    })
 }
 
 pub fn is_service_running(service_name: &str) -> bool {

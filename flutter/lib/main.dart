@@ -118,7 +118,7 @@ Future<void> main(List<String> args) async {
     await windowManager.ensureInitialized();
     runConnectionManagerScreen();
   } else if (args.contains('--install')) {
-    runInstallPage();
+    runInstallPage(isUpgrade: args.contains('--upgrade'));
   } else {
     desktopType = DesktopType.main;
     await windowManager.ensureInitialized();
@@ -437,10 +437,10 @@ void _runApp(
   ));
 }
 
-void runInstallPage() async {
+void runInstallPage({bool isUpgrade = false}) async {
   await windowManager.ensureInitialized();
   await initEnv(kAppTypeMain);
-  _runApp('', const InstallPage(), MyTheme.currentThemeMode());
+  _runApp('', InstallPage(isUpgrade: isUpgrade), MyTheme.currentThemeMode());
   WindowOptions windowOptions =
       getHiddenTitleBarWindowOptions(size: Size(800, 600), center: true);
   windowManager.waitUntilReadyToShow(windowOptions, () async {

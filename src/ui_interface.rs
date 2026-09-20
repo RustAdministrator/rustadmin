@@ -105,18 +105,36 @@ pub fn goto_install() {
 }
 
 #[inline]
+pub fn is_upgrade_mode() -> bool {
+    #[cfg(windows)]
+    return std::env::args().any(|arg| arg == "--upgrade");
+    #[cfg(not(windows))]
+    return false;
+}
+
+#[inline]
 pub fn install_me(_options: String, _path: String, _silent: bool, _debug: bool) {
     #[cfg(windows)]
     std::thread::spawn(move || {
-        allow_err!(crate::platform::windows::install_me(
-            &_options, _path, _silent, _debug
-        ));
+        if is_upgrade_mode() {
+            allow_err!(crate::platform::windows::upgrade_me(_debug));
+        } else {
+            allow_err!(crate::platform::windows::install_me(
+                &_options, _path, _silent, _debug
+            ));
+        }
         std::process::exit(0);
     });
 }
 
 #[inline]
 pub fn update_me(_path: String) {
+    #[cfg(windows)]
+    {
+        allow_err!(crate::run_me(vec!["--install", "--upgrade"]));
+        std::process::exit(0);
+    }
+    #[cfg(not(windows))]
     goto_install();
 }
 
@@ -648,8 +666,56 @@ pub fn is_installed_lower_version() -> bool {
     return false;
     #[cfg(windows)]
     {
-        let b = crate::platform::windows::get_reg("BuildDate");
-        return crate::BUILD_DATE.cmp(&b).is_gt();
+        return is_current_build_newer(
+            crate::VERSION,
+            crate::RUSTADMIN_REVISION,
+            &crate::platform::windows::get_reg("Version"),
+            &crate::platform::windows::get_reg("RustAdminRevision"),
+        );
+    }
+}
+
+fn parse_version_parts(value: &str) -> Vec<u64> {
+    value
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect()
+}
+
+fn compare_version_parts(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_parts = parse_version_parts(left);
+    let right_parts = parse_version_parts(right);
+    let count = left_parts.len().max(right_parts.len());
+    for index in 0..count {
+        let left_part = left_parts.get(index).copied().unwrap_or_default();
+        let right_part = right_parts.get(index).copied().unwrap_or_default();
+        match left_part.cmp(&right_part) {
+            std::cmp::Ordering::Equal => {}
+            ordering => return ordering,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+fn is_current_build_newer(
+    current_version: &str,
+    current_revision: &str,
+    installed_version: &str,
+    installed_revision: &str,
+) -> bool {
+    if installed_version.is_empty() {
+        return true;
+    }
+
+    match compare_version_parts(current_version, installed_version) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => {
+            let current_revision = current_revision.parse::<u64>().unwrap_or_default();
+            let installed_revision = installed_revision.parse::<u64>().unwrap_or_default();
+            current_revision > installed_revision
+        }
     }
 }
 
@@ -1821,6 +1887,24 @@ mod tests {
     use uuid::Uuid;
 
     static TEST_UI_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn current_build_comparison_uses_revision_for_same_version() {
+        assert!(is_current_build_newer("2.0.5", "178", "2.0.5", "177"));
+        assert!(!is_current_build_newer("2.0.5", "177", "2.0.5", "178"));
+    }
+
+    #[test]
+    fn current_build_comparison_prioritizes_version() {
+        assert!(is_current_build_newer("2.0.6", "1", "2.0.5", "999"));
+        assert!(!is_current_build_newer("2.0.4", "999", "2.0.5", "1"));
+    }
+
+    #[test]
+    fn missing_installed_metadata_is_upgradable() {
+        assert!(is_current_build_newer("2.0.5", "178", "", ""));
+        assert!(is_current_build_newer("2.0.5", "178", "2.0.5", ""));
+    }
 
     #[test]
     fn test_peer_option_bridge_updates_typed_peer_fields() {

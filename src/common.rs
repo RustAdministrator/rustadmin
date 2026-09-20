@@ -830,7 +830,9 @@ pub fn run_me<T: AsRef<std::ffi::OsStr>>(args: Vec<T>) -> std::io::Result<std::p
             .iter()
             .map(|x| x.as_ref().to_string_lossy())
             .collect::<Vec<_>>();
-        if arg_strs == vec!["--install"] || arg_strs == &["--noinstall"] {
+        if arg_strs.first().map(|arg| arg.as_ref()) == Some("--install")
+            || arg_strs == &["--noinstall"]
+        {
             cmd.env(crate::platform::SET_FOREGROUND_WINDOW, "1");
             force_foreground = true;
         }

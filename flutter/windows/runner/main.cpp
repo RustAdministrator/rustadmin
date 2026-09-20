@@ -123,9 +123,14 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     is_cm_page = true;
   }
   bool is_install_page = false;
+  bool is_upgrade_page = false;
   auto installParam = std::string("--install");
+  auto upgradeParam = std::string("--upgrade");
   if (!command_line_arguments.empty() && command_line_arguments.front().compare(0, installParam.size(), installParam.c_str()) == 0) {
     is_install_page = true;
+    is_upgrade_page = std::find(command_line_arguments.begin(),
+                                command_line_arguments.end(),
+                                upgradeParam) != command_line_arguments.end();
   }
 
   command_line_arguments.insert(command_line_arguments.end(), rust_args.begin(), rust_args.end());
@@ -152,7 +157,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   if (is_cm_page) {
     window_title = app_name + L" - Connection Manager";
   } else if (is_install_page) {
-    window_title = app_name + L" - Install";
+    window_title = app_name + (is_upgrade_page ? L" - Upgrade" : L" - Install");
   } else {
     window_title = app_name;
   }

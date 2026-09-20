@@ -11,16 +11,19 @@ import 'package:path/path.dart';
 import 'package:window_manager/window_manager.dart';
 
 class InstallPage extends StatefulWidget {
-  const InstallPage({Key? key}) : super(key: key);
+  final bool isUpgrade;
+
+  const InstallPage({Key? key, this.isUpgrade = false}) : super(key: key);
 
   @override
-  State<InstallPage> createState() => _InstallPageState();
+  State<InstallPage> createState() => _InstallPageState(isUpgrade: isUpgrade);
 }
 
 class _InstallPageState extends State<InstallPage> {
+  final bool isUpgrade;
   final tabController = DesktopTabController(tabType: DesktopTabType.main);
 
-  _InstallPageState() {
+  _InstallPageState({required this.isUpgrade}) {
     Get.put<DesktopTabController>(tabController);
     const label = "install";
     tabController.add(TabInfo(
@@ -29,6 +32,7 @@ class _InstallPageState extends State<InstallPage> {
         closable: false,
         page: _InstallPageBody(
           key: const ValueKey(label),
+          isUpgrade: isUpgrade,
         )));
   }
 
@@ -53,7 +57,9 @@ class _InstallPageState extends State<InstallPage> {
 }
 
 class _InstallPageBody extends StatefulWidget {
-  const _InstallPageBody({Key? key}) : super(key: key);
+  final bool isUpgrade;
+
+  const _InstallPageBody({Key? key, required this.isUpgrade}) : super(key: key);
 
   @override
   State<_InstallPageBody> createState() => _InstallPageBodyState();
@@ -129,7 +135,7 @@ class _InstallPageBodyState extends State<_InstallPageBody>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(translate('Installation'),
+              Text(translate(widget.isUpgrade ? 'Upgrade' : 'Installation'),
                   style: Theme.of(context).textTheme.headlineMedium),
               Row(
                 children: [
@@ -148,17 +154,22 @@ class _InstallPageBodyState extends State<_InstallPageBody>
                     () => OutlinedButton.icon(
                       icon: MyTheme.desktopButtonIcon(
                           Icon(Icons.folder_outlined, size: 16)),
-                      onPressed: btnEnabled.value ? selectInstallPath : null,
+                      onPressed: btnEnabled.value && !widget.isUpgrade
+                          ? selectInstallPath
+                          : null,
                       label: Text(translate('Change Path')),
                     ),
                   )
                 ],
               ).marginSymmetric(vertical: 2 * em),
-              Option(startmenu, label: 'Create start menu shortcuts')
-                  .marginOnly(bottom: 7),
-              Option(desktopicon, label: 'Create desktop icon')
-                  .marginOnly(bottom: 7),
-              Option(printer, label: 'Install {$appName} Printer'),
+              if (!widget.isUpgrade)
+                Option(startmenu, label: 'Create start menu shortcuts')
+                    .marginOnly(bottom: 7),
+              if (!widget.isUpgrade)
+                Option(desktopicon, label: 'Create desktop icon')
+                    .marginOnly(bottom: 7),
+              if (!widget.isUpgrade)
+                Option(printer, label: 'Install {$appName} Printer'),
               Container(
                   padding: EdgeInsets.all(12),
                   decoration: BoxDecoration(
@@ -199,12 +210,14 @@ class _InstallPageBodyState extends State<_InstallPageBody>
                         () => ElevatedButton.icon(
                           icon: MyTheme.desktopButtonIcon(
                               Icon(Icons.done_rounded, size: 16)),
-                          label: Text(translate('Accept and Install')),
+                          label: Text(translate(
+                              widget.isUpgrade ? 'Upgrade' : 'Accept and Install')),
                           onPressed: btnEnabled.value ? install : null,
                         ),
                       ),
                       Offstage(
-                        offstage: bind.installShowRunWithoutInstall(),
+                        offstage: widget.isUpgrade ||
+                            bind.installShowRunWithoutInstall(),
                         child: Obx(
                           () => OutlinedButton.icon(
                             icon: MyTheme.desktopButtonIcon(
