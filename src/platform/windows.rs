@@ -3658,21 +3658,33 @@ fn update_me_inner(debug: bool, restore_previous_sessions: bool) -> ResultType<(
     }
 
     let app_exe_name = &format!("{}.exe", &app_name);
+    // The Flutter upgrade window can receive synthesized install arguments, so its
+    // OS command line may look like a normal main window. Never terminate this process.
+    let current_pid = Pid::from_u32(get_current_pid());
     let main_window_pids =
-        crate::platform::get_pids_of_process_with_args::<_, &str>(&app_exe_name, &[]);
+        crate::platform::get_pids_of_process_with_args::<_, &str>(&app_exe_name, &[])
+            .into_iter()
+            .filter(|pid| *pid != current_pid)
+            .collect::<Vec<_>>();
     let main_window_sessions = main_window_pids
         .iter()
         .map(|pid| get_session_id_of_process(pid.as_u32()))
         .flatten()
         .collect::<Vec<_>>();
-    kill_process_by_pids(&app_exe_name, main_window_pids)?;
+    // The upgrade path performs shutdown in the elevated batch below. Killing an
+    // already elevated UI here can fail before that batch gets a chance to run.
+    if restore_previous_sessions {
+        kill_process_by_pids(&app_exe_name, main_window_pids)?;
+    }
     let tray_pids = crate::platform::get_pids_of_process_with_args(&app_exe_name, &["--tray"]);
     let tray_sessions = tray_pids
         .iter()
         .map(|pid| get_session_id_of_process(pid.as_u32()))
         .flatten()
         .collect::<Vec<_>>();
-    kill_process_by_pids(&app_exe_name, tray_pids)?;
+    if restore_previous_sessions {
+        kill_process_by_pids(&app_exe_name, tray_pids)?;
+    }
     let service_state = get_service_state()?;
     log::info!(
         "Preparing Windows upgrade: service_installed={}, service_running={}",
