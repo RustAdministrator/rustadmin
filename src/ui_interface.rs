@@ -107,9 +107,17 @@ pub fn goto_install() {
 #[inline]
 pub fn is_upgrade_mode() -> bool {
     #[cfg(windows)]
-    return std::env::args().any(|arg| arg == "--upgrade");
+    return std::env::args().any(|arg| arg == "--upgrade") || should_open_upgrade_page();
     #[cfg(not(windows))]
     return false;
+}
+
+#[cfg(windows)]
+#[inline]
+pub fn should_open_upgrade_page() -> bool {
+    return crate::platform::is_installed()
+        && !crate::platform::is_cur_exe_the_installed()
+        && is_installed_lower_version();
 }
 
 #[inline]

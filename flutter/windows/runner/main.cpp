@@ -19,6 +19,18 @@ const std::vector<std::string> parameters_white_list = {"--install", "--cm"};
 
 const wchar_t* getWindowClassName();
 
+static bool has_whitelisted_parameter(
+    const std::vector<std::string>& arguments) {
+  for (const std::string& parameter : parameters_white_list) {
+    for (const std::string& argument : arguments) {
+      if (argument == parameter) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command)
 {
@@ -72,6 +84,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     }
   }
 
+  // Rust may synthesize upgrade arguments after comparing the current executable
+  // with the registered installation. Include them in native window routing too.
+  command_line_arguments.insert(command_line_arguments.end(),
+                                rust_args.begin(), rust_args.end());
+
   // Uri links dispatch
   HWND hwnd = ::FindWindowW(getWindowClassName(), app_name.c_str());
   if (hwnd != NULL) {
@@ -79,17 +96,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     // contained in whitelists. The Mobile Remote Lab is also an explicitly
     // opted-in development target: it must coexist with the normal client or
     // the native guard exits before Flutter can establish its debug service.
-    bool allow_multiple_instances = false;
+    bool allow_multiple_instances =
+        has_whitelisted_parameter(command_line_arguments) ||
+        has_whitelisted_parameter(rust_args);
 #if defined(RUSTADMIN_ALLOW_MULTIPLE_INSTANCES)
     allow_multiple_instances = true;
 #endif
-    for (auto& whitelist_param : parameters_white_list) {
-      allow_multiple_instances =
-          allow_multiple_instances ||
-          std::find(command_line_arguments.begin(),
-                    command_line_arguments.end(),
-                    whitelist_param) != command_line_arguments.end();
-    }
     if (!allow_multiple_instances) {
       if (!command_line_arguments.empty()) {
         // Dispatch command line arguments
@@ -133,7 +145,6 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                                 upgradeParam) != command_line_arguments.end();
   }
 
-  command_line_arguments.insert(command_line_arguments.end(), rust_args.begin(), rust_args.end());
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 
   FlutterWindow window(project);
