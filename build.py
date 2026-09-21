@@ -434,7 +434,8 @@ def build_flutter_dmg(version, features):
     if not skip_cargo:
         # set minimum osx build target to match the Flutter macOS project
         system2(
-            f'MACOSX_DEPLOYMENT_TARGET=12.0 cargo build --locked --features {features} --release')
+            f'MACOSX_DEPLOYMENT_TARGET=12.0 CARGO_PROFILE_RELEASE_STRIP=false '
+            f'cargo build --locked --features {features} --release')
     # copy dylib
     system2(
         "cp target/release/liblibrustdesk.dylib target/release/librustdesk.dylib")
@@ -449,6 +450,10 @@ def build_flutter_dmg(version, features):
     else:
         system2('flutter build macos --release')
     system2('cp -rf ../target/release/service ./build/macos/Build/Products/Release/RustAdmin.app/Contents/MacOS/')
+    system2(
+        '/usr/bin/strip -x build/macos/Build/Products/Release/RustAdmin.app/Contents/Frameworks/liblibrustdesk.dylib')
+    system2(
+        '/usr/bin/strip -x build/macos/Build/Products/Release/RustAdmin.app/Contents/MacOS/service')
     '''
     system2(
         "create-dmg --volname \"RustAdmin Installer\" --window-pos 200 120 --window-size 800 400 --icon-size 100 --app-drop-link 600 185 --icon RustAdmin.app 200 190 --hide-extension RustAdmin.app rustadmin.dmg ./build/macos/Build/Products/Release/RustAdmin.app")

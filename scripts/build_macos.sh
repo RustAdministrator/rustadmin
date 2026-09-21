@@ -226,6 +226,10 @@ fi
 
 export PUB_CACHE="${PUB_CACHE:-$HOME/.pub-cache-rustadmin-macos}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$(cd "$repo_root/.." && pwd)/rustadmin-target-macos}"
+# Xcode 27 rejects Mach-O files produced by rustc's release stripping path
+# when the deployment target is macOS 12.0 or newer. Strip shipped Rust
+# artifacts after the app is linked instead.
+export CARGO_PROFILE_RELEASE_STRIP=false
 cargo_release_dir="$CARGO_TARGET_DIR/release"
 xcode_rust_release_dir="$repo_root/target/release"
 xcode_librustdesk="$xcode_rust_release_dir/liblibrustdesk.dylib"
@@ -277,6 +281,18 @@ sync_macos_rust_artifacts() {
       cp -f "$cargo_service" "$xcode_service"
     fi
   fi
+}
+
+strip_macos_release_artifacts() {
+  local path
+  for path in \
+    "$app_bundle/Contents/Frameworks/liblibrustdesk.dylib" \
+    "$app_bundle/Contents/MacOS/service"; do
+    if [[ -f "$path" ]]; then
+      echo "Stripping macOS Rust artifact: $path"
+      /usr/bin/strip -x "$path"
+    fi
+  done
 }
 
 macos_hwcodec_pkg_config_available() {
@@ -682,6 +698,8 @@ if [[ ! -d "$app_bundle" ]]; then
   report_error "App bundle does not exist: $app_bundle"
   exit 1
 fi
+
+strip_macos_release_artifacts
 
 if [[ "$skip_sign" == "1" ]]; then
   signing_report_status="skipped (--no-sign/RUSTADMIN_MACOS_SKIP_SIGN=1)"
