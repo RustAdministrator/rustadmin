@@ -153,9 +153,14 @@ pub fn install_me(_options: String, _path: String, _silent: bool, _debug: bool) 
 
 #[inline]
 pub fn update_me(_path: String) {
-    #[cfg(any(windows, target_os = "macos"))]
+    #[cfg(windows)]
     {
         allow_err!(crate::run_me(vec!["--install", "--upgrade"]));
+        std::process::exit(0);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        allow_err!(crate::platform::macos::launch_updater());
         std::process::exit(0);
     }
     #[cfg(not(any(windows, target_os = "macos")))]

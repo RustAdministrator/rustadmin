@@ -692,6 +692,12 @@ EOF
     cp -f "$xcode_service" \
       "$app_bundle/Contents/MacOS/"
   fi
+
+  "$repo_root/scripts/build_macos_updater.sh" \
+    --app-bundle "$app_bundle" \
+    --version "$(sed -n 's/^version[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p' "$repo_root/Cargo.toml" | head -n 1)" \
+    --revision "$rustadmin_revision" \
+    --arch "$host_arch"
 fi
 
 if [[ ! -d "$app_bundle" ]]; then

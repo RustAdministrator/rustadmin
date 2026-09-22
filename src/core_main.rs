@@ -135,12 +135,16 @@ pub fn core_main() -> Option<Vec<String>> {
     }
     #[cfg(target_os = "macos")]
     if args.is_empty() && crate::ui_interface::should_open_upgrade_page() {
-        // The macOS runner receives the process command line directly, while the
-        // native entry point only returns whether Flutter should continue. Relaunch
-        // with explicit arguments so the upgrade page receives them.
-        match crate::run_me(vec!["--install", "--upgrade"]) {
+        match crate::platform::macos::launch_updater() {
             Ok(_) => return None,
-            Err(err) => log::error!("Failed to start macOS upgrade page: {}", err),
+            Err(err) => log::error!("Failed to start macOS updater: {}", err),
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if args.contains(&"--install".to_string()) && args.contains(&"--upgrade".to_string()) {
+        match crate::platform::macos::launch_updater() {
+            Ok(_) => return None,
+            Err(err) => log::error!("Failed to start macOS updater: {}", err),
         }
     }
     if args.contains(&"--noinstall".to_string()) {

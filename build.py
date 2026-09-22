@@ -431,6 +431,7 @@ def build_deb_from_folder(version, binary_folder):
 
 
 def build_flutter_dmg(version, features):
+    revision = Path('rustadmin_revision.txt').read_text(encoding='utf-8').strip()
     if not skip_cargo:
         # set minimum osx build target to match the Flutter macOS project
         system2(
@@ -450,6 +451,10 @@ def build_flutter_dmg(version, features):
     else:
         system2('flutter build macos --release')
     system2('cp -rf ../target/release/service ./build/macos/Build/Products/Release/RustAdmin.app/Contents/MacOS/')
+    system2(
+        f'bash ../scripts/build_macos_updater.sh '
+        f'--app-bundle build/macos/Build/Products/Release/RustAdmin.app '
+        f'--version {version} --revision {revision} --arch {platform.machine()}')
     system2(
         '/usr/bin/strip -x build/macos/Build/Products/Release/RustAdmin.app/Contents/Frameworks/liblibrustdesk.dylib')
     system2(

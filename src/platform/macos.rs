@@ -183,9 +183,8 @@ pub fn install_service() -> bool {
     is_installed_daemon(false)
 }
 
-// Remember to check if `update_daemon_agent()` need to be changed if changing `is_installed_daemon()`.
-// No need to merge the existing dup code, because the code in these two functions are too critical.
-// New code should be written in a common function.
+// Keep the inexpensive file-presence check separate from the privileged updater.
+// The standalone updater rechecks the service state immediately before changing it.
 pub fn is_installed_daemon(prompt: bool) -> bool {
     let daemon = format!("{}_service.plist", crate::get_full_name());
     let agent = format!("{}_server.plist", crate::get_full_name());
@@ -248,58 +247,6 @@ pub fn is_installed_daemon(prompt: bool) -> bool {
         }
     });
     false
-}
-
-fn update_daemon_agent(agent_plist_file: String, update_source_dir: String, sync: bool) {
-    let update_script_file = "update.scpt";
-    let Some(update_script) = PRIVILEGES_SCRIPTS_DIR.get_file(update_script_file) else {
-        return;
-    };
-    let Some(update_script_body) = update_script.contents_utf8().map(correct_app_name) else {
-        return;
-    };
-
-    let Some(daemon_plist) = PRIVILEGES_SCRIPTS_DIR.get_file("daemon.plist") else {
-        return;
-    };
-    let Some(daemon_plist_body) = daemon_plist.contents_utf8().map(correct_app_name) else {
-        return;
-    };
-    let Some(agent_plist) = PRIVILEGES_SCRIPTS_DIR.get_file("agent.plist") else {
-        return;
-    };
-    let Some(agent_plist_body) = agent_plist.contents_utf8().map(correct_app_name) else {
-        return;
-    };
-
-    let func = move || {
-        let mut binding = std::process::Command::new("osascript");
-        let cmd = binding
-            .arg("-e")
-            .arg(update_script_body)
-            .arg(daemon_plist_body)
-            .arg(agent_plist_body)
-            .arg(&get_active_username())
-            .arg(std::process::id().to_string())
-            .arg(update_source_dir);
-        match cmd.status() {
-            Err(e) => {
-                log::error!("run osascript failed: {}", e);
-            }
-            Ok(status) if !status.success() => {
-                log::warn!("run osascript failed with status: {}", status);
-            }
-            _ => {
-                let installed = std::path::Path::new(&agent_plist_file).exists();
-                log::info!("Agent file {} installed: {}", &agent_plist_file, installed);
-            }
-        }
-    };
-    if sync {
-        func();
-    } else {
-        std::thread::spawn(func);
-    }
 }
 
 fn correct_app_name(s: &str) -> String {
@@ -881,74 +828,62 @@ pub fn try_remove_temp_update_dir(dir: Option<&str>) {
     }
 }
 
-pub fn update_me() -> ResultType<()> {
-    let is_installed_daemon = is_installed_daemon(false);
-    let option_stop_service = "stop-service";
-    let is_service_stopped = hbb_common::config::option2bool(
-        option_stop_service,
-        &crate::ui_interface::get_option(option_stop_service),
-    );
-
-    let cmd = std::env::current_exe()?;
-    // RustDesk.app/Contents/MacOS/RustDesk
-    let app_dir = cmd
+pub fn launch_updater() -> ResultType<()> {
+    let current_exe = std::env::current_exe()?;
+    let app_dir = current_exe
         .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .map(|d| d.to_string_lossy().to_string());
-    let Some(app_dir) = app_dir else {
-        bail!("Unknown app directory of current exe file: {:?}", cmd);
-    };
-
+        .and_then(|path| path.parent())
+        .and_then(|path| path.parent())
+        .ok_or_else(|| anyhow!("Unknown app directory of current exe file: {current_exe:?}"))?
+        .to_path_buf();
     let app_name = crate::get_app_name();
-    if is_installed_daemon && !is_service_stopped {
-        let agent = format!("{}_server.plist", crate::get_full_name());
-        let agent_plist_file = format!("/Library/LaunchAgents/{}", agent);
-        update_daemon_agent(agent_plist_file, app_dir, true);
-    } else {
-        // `kill -9` may not work without "administrator privileges"
-        let update_body = r#"
-on run {app_name, cur_pid, app_dir, user_name}
-    set app_bundle to "/Applications/" & app_name & ".app"
-    set app_bundle_q to quoted form of app_bundle
-    set app_dir_q to quoted form of app_dir
-    set user_name_q to quoted form of user_name
-
-    set check_source to "test -d " & app_dir_q & " || exit 1;"
-    set kill_others to "pids=$(pgrep -x '" & app_name & "' | grep -vx " & cur_pid & " || true); if [ -n \"$pids\" ]; then echo \"$pids\" | xargs kill -9 || true; fi;"
-    set copy_files to "rm -rf " & app_bundle_q & " && ditto " & app_dir_q & " " & app_bundle_q & " && chown -R " & user_name_q & ":staff " & app_bundle_q & " && (xattr -r -d com.apple.quarantine " & app_bundle_q & " || true);"
-    set sh to "set -e;" & check_source & kill_others & copy_files
-
-    do shell script sh with prompt app_name & " wants to update itself" with administrator privileges
-end run
-        "#;
-        let active_user = get_active_username();
-        let status = Command::new("osascript")
-            .arg("-e")
-            .arg(update_body)
-            .arg(app_name.to_string())
-            .arg(std::process::id().to_string())
-            .arg(app_dir)
-            .arg(active_user)
-            .status();
-        match status {
-            Ok(status) if !status.success() => {
-                log::error!("osascript execution failed with status: {}", status);
-            }
-            Err(e) => {
-                log::error!("run osascript failed: {}", e);
-            }
-            _ => {}
-        }
+    let installed_app = Path::new("/Applications").join(format!("{app_name}.app"));
+    let source_is_installed = std::fs::canonicalize(&app_dir)
+        .ok()
+        .zip(std::fs::canonicalize(&installed_app).ok())
+        .map(|(source, installed)| source == installed)
+        .unwrap_or(false);
+    if source_is_installed {
+        bail!("The updater source is already the installed RustAdmin app");
     }
-    std::process::Command::new("open")
-        .arg("-n")
-        .arg(&format!("/Applications/{}.app", app_name))
-        .spawn()
-        .ok();
-    // leave open a little time
-    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let updater_bundle = app_dir.join("Contents/Resources/RustAdminUpdate.app");
+    if !updater_bundle.is_dir() {
+        bail!("RustAdminUpdate.app is missing from {app_dir:?}");
+    }
+
+    let updater_stage = std::env::temp_dir().join(format!(
+        "RustAdminUpdate-{}-{}.app",
+        std::process::id(),
+        crate::RUSTADMIN_REVISION
+    ));
+    if updater_stage.exists() {
+        std::fs::remove_dir_all(&updater_stage)?;
+    }
+    let copy_status = Command::new("ditto")
+        .arg(&updater_bundle)
+        .arg(&updater_stage)
+        .status()?;
+    if !copy_status.success() {
+        bail!("Failed to stage RustAdminUpdate.app: {copy_status}");
+    }
+
+    let updater_executable = updater_stage.join("Contents/MacOS/RustAdminUpdate");
+    Command::new(updater_executable)
+        .arg("--source")
+        .arg(&app_dir)
+        .arg("--target")
+        .arg(&installed_app)
+        .arg("--app-name")
+        .arg(&app_name)
+        .arg("--service-id")
+        .arg(crate::get_full_name())
+        .spawn()?;
     Ok(())
+}
+
+pub fn update_me() -> ResultType<()> {
+    launch_updater()
 }
 
 pub fn update_from_dmg(dmg_path: &str) -> ResultType<()> {
