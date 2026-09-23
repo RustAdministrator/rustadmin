@@ -249,6 +249,11 @@ SIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
 scripts/package_macos.sh
 ```
 
+The DMG contains `RustAdmin.app`, the separately launchable
+`RustAdminUpdate.app` with its light icon, and an Applications shortcut.
+The updater is also retained inside the main app for in-app upgrades.
+See [the macOS update workflow](../docs/macos-updater.md) for usage and validation.
+
 Fast signing and dependency verification without creating a DMG:
 
 ```bash

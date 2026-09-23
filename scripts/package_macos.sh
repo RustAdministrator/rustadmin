@@ -5,8 +5,8 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/package_macos.sh [options]
 
-Packages the built macOS RustAdmin.app into a DMG, signs the staged app and DMG,
-and notarizes it unless SKIP_NOTARY=1 is set.
+Packages RustAdmin.app and a separately launchable RustAdminUpdate.app into a DMG,
+signs both apps and the DMG, and notarizes it unless SKIP_NOTARY=1 is set.
 
 Environment:
   APP                  App bundle to package.
@@ -31,8 +31,8 @@ Environment:
                        Default: flutter/macos/Runner/Release.entitlements,
                        or ReleaseAdhoc.entitlements for SIGN_IDENTITY="-".
   SKIP_NOTARY          Set to 1 to skip notarization. Default: 0
-  SKIP_DMG             Set to 1 to stop after creating a signed app bundle in
-                       $DIST_DIR/$APP_NAME.app. Default: 0
+  SKIP_DMG             Set to 1 to write both signed app bundles to $DIST_DIR
+                       without creating a DMG. Default: 0
   NOTARY_PROFILE       Existing xcrun notarytool keychain profile. Optional.
                        Also accepts RUSTADMIN_NOTARY_PROFILE.
   NOTARY_APPLE_ID      Apple ID for notarytool portable auth. Optional.
@@ -236,6 +236,15 @@ fi
 if [[ ! -d "$APP" ]]; then
   echo "App bundle does not exist: $APP" >&2
   echo "Build it first with scripts/build_macos.sh." >&2
+  exit 1
+fi
+
+updater_relative_path="Contents/Resources/RustAdminUpdate.app"
+if [[ ! -x "$APP/$updater_relative_path/Contents/MacOS/RustAdminUpdate" ]] ||
+   [[ "$(/usr/libexec/PlistBuddy -c 'Print :RustAdminStandaloneUpdate' \
+      "$APP/$updater_relative_path/Contents/Info.plist" 2>/dev/null || true)" != "true" ]]; then
+  echo "A standalone-capable RustAdminUpdate.app is missing from $APP." >&2
+  echo "Rebuild with scripts/build_macos.sh before packaging." >&2
   exit 1
 fi
 
@@ -552,6 +561,17 @@ if [[ "$skip_app_verify" -eq 0 ]]; then
   verify_mandatory_libraries
 fi
 
+# Keep the embedded helper for in-app upgrades and expose the same executable
+# beside RustAdmin for Finder launches from the mounted DMG.
+standalone_updater="$stage_dir/RustAdminUpdate.app"
+ditto --noextattr --noacl "$APP/$updater_relative_path" "$standalone_updater"
+if [[ "$skip_sign" -eq 0 ]]; then
+  codesign_code "$standalone_updater"
+fi
+if [[ "$skip_app_verify" -eq 0 ]]; then
+  codesign --verify --deep --strict --verbose=4 "$standalone_updater"
+fi
+
 if [[ "$SKIP_DMG" == "1" ]]; then
   output_app="$DIST_DIR/$APP_NAME.app"
   echo "Writing signed app bundle: $output_app"
@@ -560,7 +580,14 @@ if [[ "$SKIP_DMG" == "1" ]]; then
   if [[ "$skip_app_verify" -eq 0 ]]; then
     codesign --verify --deep --strict --verbose=4 "$output_app"
   fi
+  output_updater="$DIST_DIR/RustAdminUpdate.app"
+  rm -rf "$output_updater"
+  ditto --noextattr --noacl "$standalone_updater" "$output_updater"
+  if [[ "$skip_app_verify" -eq 0 ]]; then
+    codesign --verify --deep --strict --verbose=4 "$output_updater"
+  fi
   echo "Created: $output_app"
+  echo "Created: $output_updater"
   exit 0
 fi
 

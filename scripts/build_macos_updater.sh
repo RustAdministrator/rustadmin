@@ -50,7 +50,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source_file="$repo_root/macos/RustAdminUpdate/RustAdminUpdate.swift"
+source_dir="$repo_root/macos/RustAdminUpdate"
+source_files=("$source_dir"/*.swift)
 icon_file="$repo_root/res/rustadmin-update-icon.icns"
 updater_bundle="$app_bundle/Contents/Resources/RustAdminUpdate.app"
 
@@ -58,7 +59,7 @@ updater_bundle="$app_bundle/Contents/Resources/RustAdminUpdate.app"
 [[ -n "$version" ]] || { echo "--version is required" >&2; exit 2; }
 [[ -n "$revision" ]] || { echo "--revision is required" >&2; exit 2; }
 [[ -d "$app_bundle" ]] || { echo "Main app bundle does not exist: $app_bundle" >&2; exit 1; }
-[[ -f "$source_file" ]] || { echo "Updater source does not exist: $source_file" >&2; exit 1; }
+[[ -f "${source_files[0]}" ]] || { echo "Updater sources do not exist: $source_dir" >&2; exit 1; }
 [[ -f "$icon_file" ]] || { echo "Updater icon does not exist: $icon_file" >&2; exit 1; }
 
 command -v xcrun >/dev/null 2>&1 || { echo "xcrun is required" >&2; exit 1; }
@@ -76,11 +77,12 @@ cp -f "$icon_file" "$updater_bundle/Contents/Resources/AppIcon.icns"
 
 xcrun swiftc \
   -swift-version 5 \
+  -parse-as-library \
   -target "$arch-apple-macos12.0" \
   -sdk "$sdk_path" \
   -framework AppKit \
   -framework Foundation \
-  "$source_file" \
+  "${source_files[@]}" \
   -o "$updater_bundle/Contents/MacOS/RustAdminUpdate"
 
 cat > "$updater_bundle/Contents/Info.plist" <<EOF
@@ -110,6 +112,8 @@ cat > "$updater_bundle/Contents/Info.plist" <<EOF
   <string>$revision</string>
   <key>LSMinimumSystemVersion</key>
   <string>12.0</string>
+  <key>RustAdminStandaloneUpdate</key>
+  <true/>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSPrincipalClass</key>
