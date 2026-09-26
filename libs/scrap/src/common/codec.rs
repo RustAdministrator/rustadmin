@@ -548,6 +548,14 @@ pub enum DecodeOutcome {
     FrameReady { frame_id: Option<u64> },
     OutputPending,
     InputBackpressure,
+    /// The decoder backend was replaced mid-stream. The new decoder has no
+    /// reference frames, so decoding resumes at the next keyframe.
+    NeedsKeyframe,
+}
+
+#[cfg(any(test, feature = "hwcodec"))]
+fn contains_keyframe(frames: &EncodedVideoFrames) -> bool {
+    frames.frames.iter().any(|frame| frame.key)
 }
 
 impl DecodeOutcome {
@@ -1327,6 +1335,9 @@ impl Decoder {
                             if self.av1.is_none() {
                                 return Err(e);
                             }
+                            if !contains_keyframe(av1s) {
+                                return Ok(DecodeOutcome::NeedsKeyframe);
+                            }
                         }
                     }
                 }
@@ -1374,6 +1385,10 @@ impl Decoder {
                                         "MediaCodec H264 failed ({error}); FFmpeg fallback failed ({fallback_error})"
                                     ));
                                 }
+                            }
+                            #[cfg(feature = "hwcodec")]
+                            if !contains_keyframe(h264s) {
+                                return Ok(DecodeOutcome::NeedsKeyframe);
                             }
                             #[cfg(not(feature = "hwcodec"))]
                             return Err(error);
@@ -1424,6 +1439,10 @@ impl Decoder {
                                         "MediaCodec H265 failed ({error}); FFmpeg fallback failed ({fallback_error})"
                                     ));
                                 }
+                            }
+                            #[cfg(feature = "hwcodec")]
+                            if !contains_keyframe(h265s) {
+                                return Ok(DecodeOutcome::NeedsKeyframe);
                             }
                             #[cfg(not(feature = "hwcodec"))]
                             return Err(error);
@@ -1905,6 +1924,21 @@ mod tests {
         }
         assert!(saw_delta);
         assert_eq!(decoded, 12);
+    }
+
+    #[test]
+    fn keyframe_detection_covers_every_frame_in_the_message() {
+        let frame = |key| hbb_common::message_proto::EncodedVideoFrame {
+            key,
+            ..Default::default()
+        };
+        let frames = |keys: &[bool]| EncodedVideoFrames {
+            frames: keys.iter().map(|key| frame(*key)).collect(),
+            ..Default::default()
+        };
+        assert!(!contains_keyframe(&frames(&[])));
+        assert!(!contains_keyframe(&frames(&[false, false])));
+        assert!(contains_keyframe(&frames(&[false, true])));
     }
 
     #[test]

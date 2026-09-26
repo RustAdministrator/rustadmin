@@ -23,6 +23,7 @@ pub(super) struct DecoderRecovery {
     attempt: usize,
     waiting_for_keyframe: bool,
     needs_reset: bool,
+    refresh_requested: bool,
 }
 
 impl DecoderRecovery {
@@ -38,6 +39,20 @@ impl DecoderRecovery {
         if self.next_retry.is_none() {
             self.next_retry = Some(now + OUTPUT_STALL_TIMEOUT);
         }
+    }
+
+    /// The decoder backend was replaced mid-stream. Keep the new decoder, ask
+    /// the host for a reference frame now, and fall back to a full local
+    /// recovery only if none decodes within the stall timeout.
+    pub(super) fn backend_switched(&mut self, now: Instant) {
+        self.waiting_for_keyframe = true;
+        self.refresh_requested = true;
+        self.next_retry.get_or_insert(now + OUTPUT_STALL_TIMEOUT);
+    }
+
+    /// Returns a pending reference-frame request that needs no decoder reset.
+    pub(super) fn take_refresh_request(&mut self) -> bool {
+        std::mem::take(&mut self.refresh_requested)
     }
 
     pub(super) fn succeeded(&mut self) {
@@ -88,6 +103,30 @@ mod tests {
         assert_eq!(recovery.take_due(now), Some(1));
         assert!(!recovery.accepts_frame(true, false));
         assert!(recovery.accepts_frame(true, true));
+    }
+
+    #[test]
+    fn backend_switch_requests_a_keyframe_without_resetting_the_decoder() {
+        let now = Instant::now();
+        let mut recovery = DecoderRecovery::default();
+        recovery.backend_switched(now);
+        assert!(recovery.take_refresh_request());
+        assert!(!recovery.take_refresh_request(), "one request per switch");
+        assert!(!recovery.accepts_frame(true, false), "delta frames wait");
+        assert_eq!(recovery.take_due(now), None, "no immediate reset");
+        assert_eq!(recovery.wait_duration(now), Some(OUTPUT_STALL_TIMEOUT));
+        assert!(recovery.accepts_frame(true, true));
+        recovery.succeeded();
+        assert_eq!(recovery.take_due(now + OUTPUT_STALL_TIMEOUT), None);
+    }
+
+    #[test]
+    fn backend_switch_without_keyframe_falls_back_to_full_recovery() {
+        let now = Instant::now();
+        let mut recovery = DecoderRecovery::default();
+        recovery.backend_switched(now);
+        assert!(recovery.take_refresh_request());
+        assert_eq!(recovery.take_due(now + OUTPUT_STALL_TIMEOUT), Some(1));
     }
 
     #[test]
