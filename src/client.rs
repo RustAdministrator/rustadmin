@@ -2476,7 +2476,9 @@ pub struct AudioHandler {
     #[cfg(not(any(target_os = "linux", target_os = "ios")))]
     device_channel: u16,
     #[cfg(not(any(target_os = "linux", target_os = "ios")))]
-    ready: Arc<std::sync::Mutex<bool>>,
+    ready: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(not(any(target_os = "linux", target_os = "ios")))]
+    resampler: Option<scrap::pcm::StreamingResampler>,
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "ios")))]
@@ -2601,10 +2603,60 @@ impl AudioBuffer {
     }
 }
 
+/// Interleaved samples (about 20 ms) queued before playback resumes after
+/// the device ran dry.
+#[cfg(any(test, not(any(target_os = "linux", target_os = "ios"))))]
+fn playback_prebuffer_samples(sample_rate: u32, channels: u16) -> usize {
+    const PLAYBACK_PREBUFFER_MS: usize = 20;
+    sample_rate as usize * PLAYBACK_PREBUFFER_MS / 1000 * usize::from(channels.max(1))
+}
+
+/// Jitter gate for the playback callback: after an underrun it waits until
+/// enough audio is queued before resuming instead of stalling the callback.
+#[cfg(any(test, not(any(target_os = "linux", target_os = "ios"))))]
+struct PlaybackGate {
+    prebuffer: usize,
+    primed: bool,
+}
+
+#[cfg(any(test, not(any(target_os = "linux", target_os = "ios"))))]
+impl PlaybackGate {
+    fn new(prebuffer: usize) -> Self {
+        Self {
+            prebuffer,
+            primed: false,
+        }
+    }
+
+    /// Number of queued samples to play for a callback requesting `requested`.
+    fn samples_to_play(&mut self, queued: usize, requested: usize) -> usize {
+        if !self.primed {
+            if queued < self.prebuffer.max(requested) {
+                return 0;
+            }
+            self.primed = true;
+        }
+        if queued < requested {
+            self.primed = false;
+        }
+        queued.min(requested)
+    }
+}
+
+/// PulseAudio playback target length: about 60 ms of f32 audio frames.
+#[cfg(any(test, target_os = "linux"))]
+fn pulse_target_length_bytes(sample_rate: u32, channels: u32) -> u32 {
+    const TARGET_MS: u64 = 60;
+    let frames = u64::from(sample_rate) * TARGET_MS / 1000;
+    let bytes = frames * u64::from(channels.max(1)) * std::mem::size_of::<f32>() as u64;
+    u32::try_from(bytes).unwrap_or(u32::MAX)
+}
+
 impl AudioHandler {
     #[cfg(target_os = "linux")]
     fn start_audio(&mut self, format0: AudioFormat) -> ResultType<()> {
         use psimple::Simple;
+        use pulse::def::BufferAttr;
         use pulse::sample::{Format, Spec};
         use pulse::stream::Direction;
 
@@ -2616,6 +2668,15 @@ impl AudioHandler {
         if !spec.is_valid() {
             bail!("Invalid audio format");
         }
+        // The server default target length is about two seconds and blocking
+        // writes would let latency grow up to it; keep it short instead.
+        let buffer_attr = BufferAttr {
+            maxlength: u32::MAX,
+            tlength: pulse_target_length_bytes(format0.sample_rate, format0.channels),
+            prebuf: u32::MAX,
+            minreq: u32::MAX,
+            fragsize: u32::MAX,
+        };
 
         self.simple = Some(Simple::new(
             None,                   // Use the default server
@@ -2625,7 +2686,7 @@ impl AudioHandler {
             "playback",             // Description of our stream
             &spec,                  // Our sample format
             None,                   // Use default channel map
-            None,                   // Use default buffering attributes
+            Some(&buffer_attr),     // Bounded playback latency
         )?);
         self.sample_rate = (format0.sample_rate, format0.sample_rate);
         Ok(())
@@ -2654,6 +2715,13 @@ impl AudioHandler {
         }
 
         self.sample_rate = (format0.sample_rate, config.sample_rate.0);
+        self.resampler = (format0.sample_rate != config.sample_rate.0).then(|| {
+            scrap::pcm::StreamingResampler::new(
+                format0.sample_rate,
+                config.sample_rate.0,
+                format0.channels as _,
+            )
+        });
         let mut build_output_stream = |config: StreamConfig| match sample_format {
             cpal::SampleFormat::I8 => self.build_output_stream::<i8>(&config, &device),
             cpal::SampleFormat::I16 => self.build_output_stream::<i16>(&config, &device),
@@ -2706,7 +2774,9 @@ impl AudioHandler {
     #[inline]
     pub fn handle_frame(&mut self, frame: AudioFrame) {
         #[cfg(not(any(target_os = "linux", target_os = "ios")))]
-        if self.audio_stream.is_none() || !self.ready.lock().unwrap().clone() {
+        if self.audio_stream.is_none()
+            || !self.ready.load(std::sync::atomic::Ordering::Relaxed)
+        {
             return;
         }
         #[cfg(target_os = "linux")]
@@ -2720,17 +2790,15 @@ impl AudioHandler {
                 let n = n * (channels as usize);
                 #[cfg(not(any(target_os = "linux", target_os = "ios")))]
                 {
-                    let sample_rate0 = self.sample_rate.0;
                     let sample_rate = self.sample_rate.1;
-                    let mut buffer = buffer[0..n].to_owned();
-                    if sample_rate != sample_rate0 {
-                        buffer = crate::audio_resample(
-                            &buffer[0..n],
-                            sample_rate0,
-                            sample_rate,
-                            channels,
-                        );
-                    }
+                    let mut buffer = match self.resampler.as_mut() {
+                        Some(resampler) => {
+                            let mut resampled = Vec::with_capacity(n + n / 4);
+                            resampler.process(&buffer[0..n], &mut resampled);
+                            resampled
+                        }
+                        None => buffer[0..n].to_owned(),
+                    };
                     if self.channels != self.device_channel {
                         buffer = crate::audio_rechannel(
                             buffer,
@@ -2769,52 +2837,31 @@ impl AudioHandler {
         let audio_buffer = self.audio_buffer.0.clone();
         let ready = self.ready.clone();
         let timeout = None;
+        let mut gate = PlaybackGate::new(playback_prebuffer_samples(
+            config.sample_rate.0,
+            config.channels,
+        ));
+        let mut elems: Vec<f32> = Vec::new();
         let stream = device.build_output_stream(
             config,
-            move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
-                if !*ready.lock().unwrap() {
-                    *ready.lock().unwrap() = true;
-                }
-
-                let mut n = data.len();
+            move |data: &mut [T], _info: &cpal::OutputCallbackInfo| {
+                ready.store(true, std::sync::atomic::Ordering::Relaxed);
+                // Never block the realtime callback waiting for network audio:
+                // play what is queued and re-prime after running dry.
                 let mut lock = audio_buffer.lock().unwrap();
-                let mut having = lock.occupied_len();
-                // android two timestamps, one from zero, another not
-                #[cfg(not(target_os = "android"))]
-                if having < n {
-                    let tms = info.timestamp();
-                    let how_long = tms
-                        .playback
-                        .duration_since(&tms.callback)
-                        .unwrap_or(Duration::from_millis(0));
-
-                    // must long enough to fight back scheuler delay
-                    if how_long > Duration::from_millis(6) && how_long < Duration::from_millis(3000)
-                    {
-                        drop(lock);
-                        std::thread::sleep(how_long.div_f32(1.2));
-                        lock = audio_buffer.lock().unwrap();
-                        having = lock.occupied_len();
-                    }
-
-                    if having < n {
-                        n = having;
-                    }
+                let n = gate.samples_to_play(lock.occupied_len(), data.len());
+                if elems.len() < n {
+                    elems.resize(n, 0.0);
                 }
-                #[cfg(target_os = "android")]
-                if having < n {
-                    n = having;
-                }
-                let mut elems = vec![0.0f32; n];
                 if n > 0 {
-                    lock.pop_slice(&mut elems);
+                    lock.pop_slice(&mut elems[..n]);
                 }
                 drop(lock);
 
-                let mut input = elems.into_iter();
+                let mut input = elems[..n].iter();
                 for sample in data.iter_mut() {
                     *sample = match input.next() {
-                        Some(x) => T::from_sample(x),
+                        Some(x) => T::from_sample(*x),
                         _ => T::from_sample(0.),
                     };
                 }
@@ -5111,8 +5158,21 @@ pub fn start_audio_thread() -> MediaSender {
     let (audio_sender, audio_receiver) = mpsc::channel::<MediaData>();
     std::thread::spawn(move || {
         let mut audio_handler = AudioHandler::default();
-        loop {
-            if let Ok(data) = audio_receiver.recv() {
+        let mut dropped_frames: u64 = 0;
+        while let Ok(data) = audio_receiver.recv() {
+            // A blocked or slow audio device must not queue unbounded latency.
+            let mut batch = vec![data];
+            batch.extend(audio_receiver.try_iter());
+            let (batch, dropped) = trim_audio_backlog(batch, MAX_QUEUED_AUDIO_FRAMES);
+            if dropped > 0 {
+                dropped_frames += dropped as u64;
+                log::debug!(
+                    "dropped {} late audio frames ({} total)",
+                    dropped,
+                    dropped_frames
+                );
+            }
+            for data in batch {
                 match data {
                     MediaData::AudioFrame(af) => {
                         audio_handler.handle_frame(*af);
@@ -5123,13 +5183,37 @@ pub fn start_audio_thread() -> MediaSender {
                     }
                     _ => {}
                 }
-            } else {
-                break;
             }
         }
         log::info!("Audio decoder loop exits");
     });
     audio_sender
+}
+
+/// About 200 ms of 10 ms Opus frames may wait for the audio device.
+const MAX_QUEUED_AUDIO_FRAMES: usize = 20;
+
+/// Drops the oldest audio frames beyond `max_frames`, keeping every
+/// non-frame message (such as format changes) in order.
+fn trim_audio_backlog(batch: Vec<MediaData>, max_frames: usize) -> (Vec<MediaData>, usize) {
+    let frames = batch
+        .iter()
+        .filter(|data| matches!(data, MediaData::AudioFrame(_)))
+        .count();
+    let mut excess = frames.saturating_sub(max_frames);
+    let dropped = excess;
+    let kept = batch
+        .into_iter()
+        .filter(|data| {
+            if excess > 0 && matches!(data, MediaData::AudioFrame(_)) {
+                excess -= 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    (kept, dropped)
 }
 
 #[inline]
@@ -6695,6 +6779,93 @@ pub mod peer_online {
             )
             .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod audio_playback_tests {
+    use super::*;
+
+    fn audio_frame(tag: u8) -> MediaData {
+        MediaData::AudioFrame(Box::new(AudioFrame {
+            data: vec![tag].into(),
+            ..Default::default()
+        }))
+    }
+
+    fn describe(batch: &[MediaData]) -> Vec<String> {
+        batch
+            .iter()
+            .map(|data| match data {
+                MediaData::AudioFrame(frame) => format!("frame{}", frame.data[0]),
+                MediaData::AudioFormat(format) => format!("format{}", format.sample_rate),
+                _ => "other".to_owned(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn audio_backlog_keeps_formats_and_newest_frames() {
+        let format = |rate| {
+            MediaData::AudioFormat(AudioFormat {
+                sample_rate: rate,
+                channels: 2,
+                ..Default::default()
+            })
+        };
+        let batch = vec![
+            audio_frame(1),
+            format(24000),
+            audio_frame(2),
+            audio_frame(3),
+            format(48000),
+            audio_frame(4),
+        ];
+        let (kept, dropped) = trim_audio_backlog(batch, 2);
+        assert_eq!(dropped, 2);
+        assert_eq!(
+            describe(&kept),
+            ["format24000", "frame3", "format48000", "frame4"]
+        );
+    }
+
+    #[test]
+    fn audio_backlog_within_limit_is_unchanged() {
+        let (kept, dropped) = trim_audio_backlog(vec![audio_frame(1), audio_frame(2)], 2);
+        assert_eq!(dropped, 0);
+        assert_eq!(describe(&kept), ["frame1", "frame2"]);
+    }
+
+    #[test]
+    fn playback_gate_primes_plays_and_reprimes_after_underrun() {
+        let mut gate = PlaybackGate::new(100);
+        assert_eq!(gate.samples_to_play(40, 32), 0, "waits for prebuffer");
+        assert_eq!(gate.samples_to_play(100, 32), 32);
+        assert_eq!(gate.samples_to_play(68, 32), 32, "keeps playing once primed");
+        assert_eq!(gate.samples_to_play(20, 32), 20, "plays the tail on underrun");
+        assert_eq!(gate.samples_to_play(60, 32), 0, "re-primes after running dry");
+        assert_eq!(gate.samples_to_play(100, 32), 32);
+    }
+
+    #[test]
+    fn playback_prebuffer_is_20_ms_of_whole_frames() {
+        assert_eq!(playback_prebuffer_samples(48000, 2), 1920);
+        assert_eq!(playback_prebuffer_samples(44100, 6), 882 * 6);
+        assert_eq!(playback_prebuffer_samples(16000, 0), 320);
+    }
+
+    #[test]
+    fn playback_gate_prebuffers_at_least_one_callback() {
+        let mut gate = PlaybackGate::new(10);
+        assert_eq!(gate.samples_to_play(50, 64), 0);
+        assert_eq!(gate.samples_to_play(64, 64), 64);
+    }
+
+    #[test]
+    fn pulse_target_length_is_about_60_ms_of_whole_frames() {
+        assert_eq!(pulse_target_length_bytes(48000, 2), 2880 * 2 * 4);
+        assert_eq!(pulse_target_length_bytes(44100, 1), 2646 * 4);
+        assert_eq!(pulse_target_length_bytes(24000, 0), 1440 * 4);
     }
 }
 
