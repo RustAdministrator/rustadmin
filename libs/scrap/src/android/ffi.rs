@@ -19,12 +19,14 @@ use std::sync::atomic::{AtomicPtr, Ordering::SeqCst};
 use std::sync::{Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use crate::pcm::PcmQueue;
+
 lazy_static! {
     static ref JVM: RwLock<Option<JavaVM>> = RwLock::new(None);
     static ref MAIN_SERVICE_CTX: RwLock<Option<GlobalRef>> = RwLock::new(None); // MainService -> video service / audio service / info
     static ref APPLICATION_CONTEXT: RwLock<Option<GlobalRef>> = RwLock::new(None);
     static ref VIDEO_RAW: Mutex<FrameRaw> = Mutex::new(FrameRaw::new("video", MAX_VIDEO_FRAME_TIMEOUT));
-    static ref AUDIO_RAW: Mutex<FrameRaw> = Mutex::new(FrameRaw::new("audio", MAX_AUDIO_FRAME_TIMEOUT));
+    static ref AUDIO_CAPTURE: Mutex<AudioCapture> = Mutex::new(AudioCapture::new());
     static ref NDK_CONTEXT_INITED: Mutex<bool> = Default::default();
     static ref MEDIA_CODEC_INFOS: RwLock<Option<MediaCodecInfos>> = RwLock::new(None);
     static ref CLIPBOARD_MANAGER: RwLock<Option<GlobalRef>> = RwLock::new(None);
@@ -33,7 +35,48 @@ lazy_static! {
 }
 
 const MAX_VIDEO_FRAME_TIMEOUT: Duration = Duration::from_millis(100);
-const MAX_AUDIO_FRAME_TIMEOUT: Duration = Duration::from_millis(1000);
+// Captured audio is 48 kHz stereo f32; keep at most 500 ms queued.
+const AUDIO_CAPTURE_CHANNELS: u16 = 2;
+const AUDIO_CAPTURE_QUEUE_SAMPLES: usize = 48_000 * AUDIO_CAPTURE_CHANNELS as usize / 2;
+
+/// Copies every captured audio chunk into a bounded FIFO. Unlike the
+/// latest-frame mailbox used for video, audio must not skip chunks.
+struct AudioCapture {
+    enable: bool,
+    queue: PcmQueue,
+    next_drop_report: u64,
+}
+
+impl AudioCapture {
+    fn new() -> Self {
+        Self {
+            enable: false,
+            queue: PcmQueue::new(AUDIO_CAPTURE_CHANNELS, AUDIO_CAPTURE_QUEUE_SAMPLES),
+            next_drop_report: 1,
+        }
+    }
+
+    fn set_enable(&mut self, value: bool) {
+        self.enable = value;
+        self.queue.clear();
+    }
+
+    fn push(&mut self, bytes: &[u8]) {
+        if !self.enable {
+            return;
+        }
+        let ignored = self.queue.push_ne_bytes(bytes);
+        if ignored != 0 {
+            log::warn!("ignored {} trailing audio bytes", ignored);
+        }
+        // Log with exponential backoff: 1, 2, 4, ... total dropped samples.
+        let dropped = self.queue.dropped_samples();
+        if dropped >= self.next_drop_report {
+            log::warn!("audio capture queue full, dropped {} samples in total", dropped);
+            self.next_drop_report = dropped.saturating_mul(2);
+        }
+    }
+}
 
 struct FrameRaw {
     name: &'static str,
@@ -108,8 +151,11 @@ pub fn get_video_raw<'a>(dst: &mut Vec<u8>, last: &mut Vec<u8>) -> Option<()> {
     VIDEO_RAW.lock().ok()?.take(dst, last)
 }
 
-pub fn get_audio_raw<'a>(dst: &mut Vec<u8>, last: &mut Vec<u8>) -> Option<()> {
-    AUDIO_RAW.lock().ok()?.take(dst, last)
+/// Fills `dst` with the oldest captured audio samples if enough are queued.
+pub fn take_audio_frame(dst: &mut [f32]) -> bool {
+    AUDIO_CAPTURE
+        .lock()
+        .map_or(false, |mut capture| capture.enable && capture.queue.pop_exact(dst))
 }
 
 pub fn get_clipboards(client: bool) -> Option<MultiClipboards> {
@@ -139,11 +185,18 @@ pub extern "system" fn Java_ffi_FFI_onAudioFrameUpdate(
     env: JNIEnv,
     _class: JClass,
     buffer: JObject,
+    len: jint,
 ) {
     let jb = JByteBuffer::from(buffer);
     if let Ok(data) = env.get_direct_buffer_address(&jb) {
-        if let Ok(len) = env.get_direct_buffer_capacity(&jb) {
-            AUDIO_RAW.lock().unwrap().update(data, len);
+        if let Ok(capacity) = env.get_direct_buffer_capacity(&jb) {
+            let len = if len > 0 { (len as usize).min(capacity) } else { 0 };
+            if data.is_null() || len == 0 {
+                return;
+            }
+            // The buffer is only valid during this call; copy it now.
+            let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+            AUDIO_CAPTURE.lock().unwrap().push(bytes);
         }
     }
 }
@@ -183,7 +236,7 @@ pub extern "system" fn Java_ffi_FFI_setFrameRawEnable(
         if name.eq("video") {
             VIDEO_RAW.lock().unwrap().set_enable(value);
         } else if name.eq("audio") {
-            AUDIO_RAW.lock().unwrap().set_enable(value);
+            AUDIO_CAPTURE.lock().unwrap().set_enable(value);
         }
     };
 }

@@ -120,13 +120,14 @@ class AudioReader(val bufSize: Int, private val maxFrames: Int) {
         }
     }
 
+    /** Returns the filled buffer and the number of bytes read into it. */
     @RequiresApi(Build.VERSION_CODES.M)
-    fun readSync(audioRecord: AudioRecord): ByteBuffer? {
+    fun readSync(audioRecord: AudioRecord): Pair<ByteBuffer, Int>? {
         val buffer = bufferPool[currentPos]
         val res = audioRecord.read(buffer, bufSize, READ_BLOCKING)
         return if (res > 0) {
             next()
-            buffer
+            Pair(buffer, res)
         } else {
             null
         }

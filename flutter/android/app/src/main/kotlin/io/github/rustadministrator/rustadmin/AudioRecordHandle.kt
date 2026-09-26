@@ -16,13 +16,15 @@ import kotlin.concurrent.thread
 const val AUDIO_ENCODING = AudioFormat.ENCODING_PCM_FLOAT //  ENCODING_OPUS need API 30
 const val AUDIO_SAMPLE_RATE = 48000
 const val AUDIO_CHANNEL_MASK = AudioFormat.CHANNEL_IN_STEREO
+// 10 ms of stereo float PCM: one Opus frame, delivered to Rust without batching.
+const val AUDIO_READ_CHUNK_BYTES = AUDIO_SAMPLE_RATE / 100 * 2 * 4
 
 class AudioRecordHandle(private var context: Context, private var isVideoStart: ()->Boolean, private var isAudioStart: ()->Boolean) {
     private val logTag = "LOG_AUDIO_RECORD_HANDLE"
 
     private var audioRecorder: AudioRecord? = null
     private var audioReader: AudioReader? = null
-    private var minBufferSize = 0
+    private var readChunkBytes = 0
     private var audioRecordStat = false
     private var audioThread: Thread? = null
 
@@ -40,7 +42,18 @@ class AudioRecordHandle(private var context: Context, private var isVideoStart: 
             return false
         }
 
+        val minBufferSize = AudioRecord.getMinBufferSize(
+            AUDIO_SAMPLE_RATE,
+            AUDIO_CHANNEL_MASK,
+            AUDIO_ENCODING
+        )
+        if (minBufferSize <= 0) {
+            Log.d(logTag, "createAudioRecorder failed, min buffer size: $minBufferSize")
+            return false
+        }
         var builder = AudioRecord.Builder()
+        // Keep reads small but leave the recorder room to absorb scheduling delays.
+        .setBufferSizeInBytes(maxOf(minBufferSize * 4, AUDIO_READ_CHUNK_BYTES * 8))
         .setAudioFormat(
             AudioFormat.Builder()
                 .setEncoding(AUDIO_ENCODING)
@@ -69,41 +82,32 @@ class AudioRecordHandle(private var context: Context, private var isVideoStart: 
 
     @RequiresApi(Build.VERSION_CODES.M)
     private fun checkAudioReader() {
-        if (audioReader != null && minBufferSize != 0) {
+        if (audioReader != null && readChunkBytes != 0) {
             return
         }
-        // read f32 to byte , length * 4
-        minBufferSize = 2 * 4 * AudioRecord.getMinBufferSize(
-            AUDIO_SAMPLE_RATE,
-            AUDIO_CHANNEL_MASK,
-            AUDIO_ENCODING
-        )
-        if (minBufferSize == 0) {
-            Log.d(logTag, "get min buffer size fail!")
-            return
-        }
-        audioReader = AudioReader(minBufferSize, 4)
-        Log.d(logTag, "init audioData len:$minBufferSize")
+        readChunkBytes = AUDIO_READ_CHUNK_BYTES
+        audioReader = AudioReader(readChunkBytes, 4)
+        Log.d(logTag, "init audioData len:$readChunkBytes")
     }
 
     @RequiresApi(Build.VERSION_CODES.M)
     fun startAudioRecorder() {
         checkAudioReader()
-        if (audioReader != null && audioRecorder != null && minBufferSize != 0) {
+        if (audioReader != null && audioRecorder != null && readChunkBytes != 0) {
             try {
                 FFI.setFrameRawEnable("audio", true)
                 audioRecorder!!.startRecording()
                 audioRecordStat = true
                 audioThread = thread {
                     while (audioRecordStat) {
-                        audioReader!!.readSync(audioRecorder!!)?.let {
-                            FFI.onAudioFrameUpdate(it)
+                        audioReader!!.readSync(audioRecorder!!)?.let { (buffer, bytes) ->
+                            FFI.onAudioFrameUpdate(buffer, bytes)
                         }
                     }
                     // let's release here rather than onDestroy to avoid threading issue
                     audioRecorder?.release()
                     audioRecorder = null
-                    minBufferSize = 0
+                    readChunkBytes = 0
                     FFI.setFrameRawEnable("audio", false)
                     Log.d(logTag, "Exit audio thread")
                 }
