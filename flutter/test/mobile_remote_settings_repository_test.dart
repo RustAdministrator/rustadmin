@@ -86,6 +86,40 @@ void main() {
     );
   });
 
+  test('toolbar keyboard hiding defaults on and stores an explicit opt-out', () async {
+    const setting = MobileRemoteSettingsRegistry.hideToolbarWithKeyboard;
+    expect(setting.key, kOptionMobileRemoteToolbarHideWithKeyboard);
+    expect(setting.scope, SettingScope.userDefault);
+    expect(setting.applyMode, SettingApplyMode.live);
+    expect(setting.codec.decode(''), isTrue);
+    expect(setting.codec.decode('Y'), isTrue);
+    expect(setting.codec.decode('N'), isFalse);
+    expect(setting.codec.encode(false), 'N');
+
+    final stored = <String, String>{};
+    final userDefaults = UserDefaultSettingsRepository(
+      (key) => stored[key] ?? '',
+      (key, value) async => stored[key] = value,
+    );
+    final defaults = MobileRemoteDefaultsRepository(userDefaults);
+    final changes = <bool>[];
+    final keys = <String>[];
+    final subscription = defaults.watchSetting(setting).listen(changes.add);
+    final keySubscription = defaults.watch().listen(keys.add);
+
+    expect(defaults.read(setting), isTrue);
+    await defaults.write(setting, false);
+    await defaults.write(setting, false);
+    await defaults.write(setting, true);
+
+    expect(stored[kOptionMobileRemoteToolbarHideWithKeyboard], 'Y');
+    expect(changes, [false, true]);
+    expect(keys, List.filled(3, kOptionMobileRemoteToolbarHideWithKeyboard));
+    await subscription.cancel();
+    await keySubscription.cancel();
+    await userDefaults.dispose();
+  });
+
   test('session values override defaults while empty values inherit', () async {
     final userDefaults = <String, String>{
       kOptionMobileRemoteToolbarOverlapOpacityPercent: '40',

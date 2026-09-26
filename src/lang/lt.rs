@@ -762,5 +762,6 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Modern", "Modernus"),
         ("Classic", "Klasikinis"),
         ("Diagnostics", "Diagnostika"),
+        ("Hide toolbar when keyboard is shown", "Slėpti įrankių juostą, kai rodoma klaviatūra"),
     ].iter().cloned().collect();
 }

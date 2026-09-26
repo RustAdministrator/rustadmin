@@ -100,6 +100,10 @@ abstract final class MobileRemoteSettingsRegistry {
     codec: _cursorInertiaCodec,
     applyMode: SettingApplyMode.nextSession,
   );
+  static const hideToolbarWithKeyboard = UserDefaultSetting<bool>(
+    key: kOptionMobileRemoteToolbarHideWithKeyboard,
+    codec: BoolOptionCodec(defaultValue: true, falseValue: 'N'),
+  );
   static const toolbarPlacement =
       LocalSetting<MobileRemoteToolbarPlacementSettings>(
         key: kOptionMobileRemoteToolbarPlacement,
@@ -127,6 +131,7 @@ abstract final class MobileRemoteSettingsRegistry {
   static const all = <SettingDefinition<dynamic>>[
     toolbarOverlapDefault,
     cursorInertiaDefault,
+    hideToolbarWithKeyboard,
     toolbarPlacement,
     toolbarOverlapPeer,
     cursorInertiaPeer,
@@ -335,9 +340,16 @@ class MobileRemoteDefaultsRepository {
     final keys = {
       MobileRemoteSettingsRegistry.toolbarOverlapDefault.key,
       MobileRemoteSettingsRegistry.cursorInertiaDefault.key,
+      MobileRemoteSettingsRegistry.hideToolbarWithKeyboard.key,
     };
     return _userDefaults.changes.where(keys.contains);
   }
+
+  Stream<T> watchSetting<T>(UserDefaultSetting<T> setting) => _userDefaults
+      .changes
+      .where((key) => key == setting.key)
+      .map((_) => read(setting))
+      .distinct();
 }
 
 final mobileRemoteDefaults = MobileRemoteDefaultsRepository(

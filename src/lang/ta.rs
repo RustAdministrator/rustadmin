@@ -762,5 +762,6 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Modern", "நவீன"),
         ("Classic", "கிளாசிக்"),
         ("Diagnostics", "ஆய்வுகள்"),
+        ("Hide toolbar when keyboard is shown", "விசைப்பலகை காட்டப்படும்போது கருவிப்பட்டையை மறை"),
     ].iter().cloned().collect();
 }

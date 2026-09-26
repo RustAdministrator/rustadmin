@@ -123,6 +123,7 @@ class _RemotePageState extends State<RemotePage>
   _outgoingSessionClosedSubscription;
   int? _outgoingSessionGeneration;
   StreamSubscription<bool>? _showMonitorsSubscription;
+  StreamSubscription<bool>? _hideToolbarWithKeyboardSubscription;
   late final MobileSessionReconnectController _reconnectController;
   bool _updatingSoftKeyboardText = false;
 
@@ -138,8 +139,14 @@ class _RemotePageState extends State<RemotePage>
   var _toolbarTransparencySettings =
       MobileRemoteToolbarTransparencySettings.defaults;
   var _toolbarPlacementSettings = MobileRemoteToolbarPlacementSettings.defaults;
+  // Last placement stored for the session; placement moved while the soft
+  // keyboard shrinks the viewport is transient and reverts on keyboard hide.
+  var _persistedToolbarPlacementSettings =
+      MobileRemoteToolbarPlacementSettings.defaults;
   var _cursorInertiaSettings = MobileCursorInertiaSettings.defaults;
   var _showMonitorsInToolbar = false;
+  var _hideToolbarWithKeyboard = true;
+  final _keyHelpToolsHeight = ValueNotifier<double>(0);
   late final _keyboardInputModes = inputModel.keyboardInputModes;
   var _quickKeyOrder = List<MobileRemoteQuickKey>.of(
     mobileRemoteDefaultQuickKeyOrder,
@@ -199,12 +206,21 @@ class _RemotePageState extends State<RemotePage>
     final defaults = _settingsRepository.readDefaults();
     _toolbarTransparencySettings = defaults.toolbarTransparency;
     _toolbarPlacementSettings = defaults.toolbarPlacement;
+    _persistedToolbarPlacementSettings = defaults.toolbarPlacement;
     _cursorInertiaSettings = defaults.cursorInertia;
     _showMonitorsInToolbar = _showMonitorsInMobileToolbarFromUserDefaults();
     _showMonitorsSubscription = remoteDisplaySettings
         .watch(RemoteDisplaySettingsRegistry.showMonitorsToolbar)
         .listen((value) {
       if (mounted) setState(() => _showMonitorsInToolbar = value);
+    });
+    _hideToolbarWithKeyboard = mobileRemoteDefaults.read(
+      MobileRemoteSettingsRegistry.hideToolbarWithKeyboard,
+    );
+    _hideToolbarWithKeyboardSubscription = mobileRemoteDefaults
+        .watchSetting(MobileRemoteSettingsRegistry.hideToolbarWithKeyboard)
+        .listen((value) {
+      if (mounted) setState(() => _hideToolbarWithKeyboard = value);
     });
     gFFI.canvasModel.initializeEdgeScrollFallback(this);
     gFFI.ffiModel.updateEventListener(sessionId, widget.id);
@@ -356,6 +372,12 @@ class _RemotePageState extends State<RemotePage>
         _outgoingSessionClosedSubscription?.cancel();
     final showMonitorsCancel = _showMonitorsSubscription?.cancel();
     if (showMonitorsCancel != null) unawaited(showMonitorsCancel);
+    final hideToolbarWithKeyboardCancel = _hideToolbarWithKeyboardSubscription
+        ?.cancel();
+    if (hideToolbarWithKeyboardCancel != null) {
+      unawaited(hideToolbarWithKeyboardCancel);
+    }
+    _keyHelpToolsHeight.dispose();
     gFFI.canvasModel.disposeEdgeScrollFallback();
     // https://github.com/flutter/flutter/issues/64935
     gFFI.dialogManager.hideMobileActionsOverlay(store: false);
@@ -459,6 +481,7 @@ class _RemotePageState extends State<RemotePage>
   );
 
   void onSoftKeyboardChanged(bool visible) {
+    if (!visible) _restorePersistedToolbarPlacement();
     if (gFFI.dialogManager.hasOpenDialogs) {
       _timer?.cancel();
       _iosKeyboardWorkaroundTimer?.cancel();
@@ -694,7 +717,11 @@ class _RemotePageState extends State<RemotePage>
       child: Scaffold(
         // workaround for https://github.com/rustdesk/rustdesk/issues/3131
         floatingActionButtonLocation: keyboardIsVisible
-            ? FABLocation(FloatingActionButtonLocation.endFloat, 0, -35)
+            ? FABLocation(
+                FloatingActionButtonLocation.endFloat,
+                0,
+                -kMobileRemoteKeyboardCollapseButtonLift,
+              )
             : null,
         floatingActionButton: !showActionButton
             ? null
@@ -807,6 +834,7 @@ class _RemotePageState extends State<RemotePage>
                   child: Align(
                     alignment: Alignment.bottomCenter,
                     child: KeyHelpTools(
+                      onHeightChanged: _onKeyHelpToolsHeightChanged,
                       keyboardIsVisible: keyboardIsVisible,
                       showGestureHelp: _showGestureHelp,
                       quickKeyOrder: _quickKeyOrder,
@@ -836,6 +864,21 @@ class _RemotePageState extends State<RemotePage>
             )
           : child,
     );
+  }
+
+  void _onKeyHelpToolsHeightChanged(double height) {
+    if (mounted) _keyHelpToolsHeight.value = height;
+  }
+
+  void _restorePersistedToolbarPlacement() {
+    if (_toolbarPlacementSettings == _persistedToolbarPlacementSettings) {
+      return;
+    }
+    if (mounted) {
+      setState(
+        () => _toolbarPlacementSettings = _persistedToolbarPlacementSettings,
+      );
+    }
   }
 
   Future<void> _toggleQualityMonitor() async {
@@ -880,6 +923,12 @@ class _RemotePageState extends State<RemotePage>
                   setState(() => _showMonitorsInToolbar = value);
                 }
               },
+              hideToolbarWithKeyboard: _hideToolbarWithKeyboard,
+              onHideToolbarWithKeyboardChanged: (value) {
+                if (mounted) {
+                  setState(() => _hideToolbarWithKeyboard = value);
+                }
+              },
               cursorInertiaSettings: _cursorInertiaSettings,
               onCursorInertiaSettingsChanged: (settings) {
                 if (mounted) {
@@ -914,6 +963,9 @@ class _RemotePageState extends State<RemotePage>
             if (mounted) {
               setState(() => _toolbarPlacementSettings = settings);
             }
+            // The keyboard shrinks the toolbar area; keep such moves transient.
+            if (keyboardVisibilityController.isVisible) return;
+            _persistedToolbarPlacementSettings = settings;
             unawaited(
               _settingsRepository.storePlacement(settings),
             );
@@ -969,10 +1021,29 @@ class _RemotePageState extends State<RemotePage>
               paints.add(
                 Positioned.fill(
                   child: Visibility(
-                    visible: !keyboardIsVisible,
+                    visible: mobileRemoteToolbarVisibleWithKeyboard(
+                      keyboardVisible: keyboardIsVisible,
+                      hideWithKeyboard: _hideToolbarWithKeyboard,
+                    ),
                     maintainState: true,
-                    child: Padding(
-                      padding: const EdgeInsets.all(8),
+                    child: ValueListenableBuilder<double>(
+                      valueListenable: _keyHelpToolsHeight,
+                      builder: (context, keyHelpToolsHeight, toolbar) =>
+                          Padding(
+                            padding: EdgeInsets.fromLTRB(
+                              8,
+                              8,
+                              8,
+                              8 +
+                                  mobileRemoteToolbarKeyboardBottomReserve(
+                                    keyboardVisible: keyboardIsVisible,
+                                    keyHelpToolsHeight: keyHelpToolsHeight,
+                                    collapseButtonVisible:
+                                        keyboardIsVisible && _showEdit,
+                                  ),
+                            ),
+                            child: toolbar,
+                          ),
                       child: getFloatingToolbar(),
                     ),
                   ),
@@ -1432,10 +1503,14 @@ class KeyHelpTools extends StatefulWidget {
   final List<MobileRemoteQuickKey> quickKeyOrder;
   final GlobalKey remoteInputRegionKey;
 
+  /// Reports the height occupied by the tools, or zero while they are hidden.
+  final ValueChanged<double>? onHeightChanged;
+
   /// need to show by external request, etc [keyboardIsVisible] or [changeTouchMode]
   bool get requestShow => keyboardIsVisible || showGestureHelp;
 
   const KeyHelpTools({
+    this.onHeightChanged,
     required this.keyboardIsVisible,
     required this.showGestureHelp,
     required this.quickKeyOrder,
@@ -1450,6 +1525,7 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
   var _more = true;
   var _fn = false;
   final _key = GlobalKey();
+  double? _reportedHeight;
 
   InputModel get inputModel => gFFI.inputModel;
 
@@ -1459,6 +1535,12 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
     });
   }
 
+  void _reportHeight(double height) {
+    if (_reportedHeight == height) return;
+    _reportedHeight = height;
+    widget.onHeightChanged?.call(height);
+  }
+
   _updateRect() {
     RenderObject? renderObject = _key.currentContext?.findRenderObject();
     if (renderObject == null) {
@@ -1466,6 +1548,7 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
     }
     if (renderObject is RenderBox) {
       final size = renderObject.size;
+      _reportHeight(size.height);
       final globalPosition = renderObject.localToGlobal(Offset.zero);
       final globalRect = globalPosition & size;
       final inputRenderObject = widget.remoteInputRegionKey.currentContext
@@ -1508,6 +1591,11 @@ class _KeyHelpToolsState extends State<KeyHelpTools> {
         null,
         widget.keyboardIsVisible,
       );
+      if (_reportedHeight != 0) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _reportHeight(0);
+        });
+      }
       return Offstage();
     }
 
@@ -1739,6 +1827,8 @@ void showOptions(
   onToolbarTransparencySettingsChanged,
   required bool showMonitorsInToolbar,
   required ValueChanged<bool> onShowMonitorsInToolbarChanged,
+  required bool hideToolbarWithKeyboard,
+  required ValueChanged<bool> onHideToolbarWithKeyboardChanged,
   required MobileCursorInertiaSettings cursorInertiaSettings,
   required ValueChanged<MobileCursorInertiaSettings>
   onCursorInertiaSettingsChanged,
@@ -1841,6 +1931,7 @@ void showOptions(
       ),
   ];
   var activeShowMonitorsInToolbar = showMonitorsInToolbar;
+  var activeHideToolbarWithKeyboard = hideToolbarWithKeyboard;
   var activeToolbarTransparencySettings = toolbarTransparencySettings;
   var activeQualityMonitorFadeSettings = qualityMonitorSettings.read();
 
@@ -2032,6 +2123,23 @@ void showOptions(
                     toolbarEnabled: !isOptionFixed(
                       kOptionMobileRemoteToolbarOverlapOpacityPercent,
                     ),
+                    hideToolbarWithKeyboardLabel: translate(
+                      'Hide toolbar when keyboard is shown',
+                    ),
+                    hideToolbarWithKeyboard: activeHideToolbarWithKeyboard,
+                    hideToolbarWithKeyboardEnabled: !isOptionFixed(
+                      kOptionMobileRemoteToolbarHideWithKeyboard,
+                    ),
+                    onHideToolbarWithKeyboardChanged: (value) {
+                      activeHideToolbarWithKeyboard = value;
+                      onHideToolbarWithKeyboardChanged(value);
+                      unawaited(
+                        mobileRemoteDefaults.write(
+                          MobileRemoteSettingsRegistry.hideToolbarWithKeyboard,
+                          value,
+                        ),
+                      );
+                    },
                     qualityMonitorOpacityEnabled: !isOptionFixed(
                       kOptionQualityMonitorInactiveOpacityPercent,
                     ),

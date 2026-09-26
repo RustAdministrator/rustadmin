@@ -1043,6 +1043,134 @@ void main() {
     );
   });
 
+  testWidgets('toolbar section exposes the keyboard hiding option', (
+    tester,
+  ) async {
+    final changes = <bool>[];
+    Widget controls({String? label, bool enabled = true}) => MaterialApp(
+      home: Scaffold(
+        body: SingleChildScrollView(
+          child: MobileOverlayAppearanceControls(
+            toolbarTitle: 'Toolbar',
+            toolbarOpacityLabel: 'Opacity under cursor',
+            qualityMonitorTitle: 'Quality monitor',
+            inactiveOpacityLabel: 'Inactive opacity',
+            fadeDelayLabel: 'Fade delay',
+            fadeDurationLabel: 'Fade duration',
+            toolbarSettings: MobileRemoteToolbarTransparencySettings.defaults,
+            qualityMonitorSettings: QualityMonitorFadeSettings.defaults,
+            onToolbarChanged: (_) {},
+            onToolbarChangeEnd: (_) {},
+            onQualityMonitorChanged: (_) {},
+            onQualityMonitorChangeEnd: (_) {},
+            hideToolbarWithKeyboardLabel: label,
+            onHideToolbarWithKeyboardChanged: changes.add,
+            hideToolbarWithKeyboardEnabled: enabled,
+          ),
+        ),
+      ),
+    );
+    const toggle = Key('mobile-toolbar-hide-with-keyboard');
+
+    await tester.pumpWidget(controls());
+    expect(find.byKey(toggle), findsNothing);
+
+    await tester.pumpWidget(
+      controls(label: 'Hide toolbar when keyboard is shown'),
+    );
+    expect(
+      tester.widget<CheckboxListTile>(find.byKey(toggle)).value,
+      isTrue,
+    );
+    await tester.tap(find.text('Hide toolbar when keyboard is shown'));
+    await tester.pump();
+    expect(changes, [false]);
+    expect(
+      tester.widget<CheckboxListTile>(find.byKey(toggle)).value,
+      isFalse,
+    );
+
+    await tester.pumpWidget(
+      controls(label: 'Hide toolbar when keyboard is shown', enabled: false),
+    );
+    await tester.tap(find.text('Hide toolbar when keyboard is shown'));
+    await tester.pump();
+    expect(changes, [false]);
+  });
+
+  test('toolbar keyboard visibility follows the optional hiding rule', () {
+    expect(
+      mobileRemoteToolbarVisibleWithKeyboard(
+        keyboardVisible: false,
+        hideWithKeyboard: true,
+      ),
+      isTrue,
+    );
+    expect(
+      mobileRemoteToolbarVisibleWithKeyboard(
+        keyboardVisible: true,
+        hideWithKeyboard: true,
+      ),
+      isFalse,
+    );
+    expect(
+      mobileRemoteToolbarVisibleWithKeyboard(
+        keyboardVisible: true,
+        hideWithKeyboard: false,
+      ),
+      isTrue,
+    );
+  });
+
+  test('toolbar keeps the key row and collapse button clear with keyboard', () {
+    const collapseButton =
+        kFloatingActionButtonMargin +
+        kMobileRemoteKeyboardCollapseButtonLift +
+        kMobileRemoteKeyboardCollapseButtonSize;
+    expect(
+      mobileRemoteToolbarKeyboardBottomReserve(
+        keyboardVisible: false,
+        keyHelpToolsHeight: 120,
+        collapseButtonVisible: true,
+      ),
+      0,
+    );
+    expect(
+      mobileRemoteToolbarKeyboardBottomReserve(
+        keyboardVisible: true,
+        keyHelpToolsHeight: 0,
+        collapseButtonVisible: true,
+      ),
+      collapseButton,
+    );
+    expect(
+      mobileRemoteToolbarKeyboardBottomReserve(
+        keyboardVisible: true,
+        keyHelpToolsHeight: 160,
+        collapseButtonVisible: true,
+      ),
+      160,
+    );
+    expect(
+      mobileRemoteToolbarKeyboardBottomReserve(
+        keyboardVisible: true,
+        keyHelpToolsHeight: 48,
+        collapseButtonVisible: false,
+      ),
+      48,
+    );
+    for (final invalid in [double.nan, double.infinity, -10.0]) {
+      expect(
+        mobileRemoteToolbarKeyboardBottomReserve(
+          keyboardVisible: true,
+          keyHelpToolsHeight: invalid,
+          collapseButtonVisible: false,
+        ),
+        0,
+      );
+    }
+  });
+
   testWidgets('options remain scrollable after rotating to landscape', (
     tester,
   ) async {
