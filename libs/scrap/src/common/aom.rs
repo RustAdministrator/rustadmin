@@ -59,6 +59,8 @@ pub enum AomScreenDetectionMode {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AomEncoderTuning {
     pub cpu_used: Option<u32>,
+    /// Encoder thread count; `None` uses the load-aware default.
+    pub threads: Option<u32>,
     pub enable_intrabc: bool,
     pub auto_tiles: bool,
     pub screen_detection: Option<AomScreenDetectionMode>,
@@ -95,6 +97,18 @@ mod webrtc {
         }
     }
 
+    // libaom limits tile rows and columns to 64 each (log2 value 6).
+    const MAX_TILE_LOG2: u32 = 6;
+
+    /// Tile rows/columns log2 value covering `threads` workers.
+    pub(super) fn tile_log2(threads: u32) -> u32 {
+        if threads <= 1 {
+            0
+        } else {
+            (u32::BITS - (threads - 1).leading_zeros()).min(MAX_TILE_LOG2)
+        }
+    }
+
     fn get_super_block_size(width: u32, height: u32, threads: u32) -> aom_superblock_size_t {
         use aom_superblock_size::*;
         let resolution = width * height;
@@ -109,6 +123,7 @@ mod webrtc {
         i: *const aom_codec_iface,
         cfg: AomEncoderConfig,
         i444: bool,
+        threads: u32,
     ) -> ResultType<aom_codec_enc_cfg> {
         let mut c = unsafe { std::mem::MaybeUninit::zeroed().assume_init() };
         call_aom!(aom_codec_enc_config_default(i, &mut c, kUsageProfile));
@@ -116,7 +131,7 @@ mod webrtc {
         // Overwrite default config with input encoder settings & RTC-relevant values.
         c.g_w = cfg.width;
         c.g_h = cfg.height;
-        c.g_threads = codec_thread_num(64) as _;
+        c.g_threads = threads.max(1);
         c.g_timebase.num = 1;
         c.g_timebase.den = kTimeBaseDen as _;
         c.g_input_bit_depth = kBitDepth;
@@ -190,8 +205,8 @@ mod webrtc {
                 } else {
                     AV1E_SET_TILE_COLUMNS
                 };
-            // Failed on android
-            call_ctl!(ctx, tile_set, (cfg.g_threads as f64 * 1.0f64).log2().ceil());
+            // The control reads an unsigned int through C varargs.
+            call_ctl!(ctx, tile_set, tile_log2(cfg.g_threads));
         }
         call_ctl!(ctx, AV1E_SET_ROW_MT, 1);
         call_ctl!(ctx, AV1E_SET_ENABLE_OBMC, 0);
@@ -325,7 +340,10 @@ impl AomEncoder {
         tuning: AomEncoderTuning,
     ) -> ResultType<Self> {
         let i = call_aom_ptr!(aom_codec_av1_cx());
-        let c = webrtc::enc_cfg(i, config, i444)?;
+        let threads = tuning
+            .threads
+            .unwrap_or_else(|| codec_thread_num(64) as u32);
+        let c = webrtc::enc_cfg(i, config, i444, threads)?;
 
         let mut ctx = Default::default();
         // Flag options: AOM_CODEC_USE_PSNR and AOM_CODEC_USE_HIGHBITDEPTH
@@ -681,3 +699,90 @@ impl Drop for Image {
 }
 
 unsafe impl Send for aom_codec_ctx_t {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tile_log2_covers_threads_and_respects_libaom_limit() {
+        for (threads, expected) in [
+            (0, 0),
+            (1, 0),
+            (2, 1),
+            (3, 2),
+            (4, 2),
+            (8, 3),
+            (16, 4),
+            (64, 6),
+            (128, 6),
+        ] {
+            assert_eq!(webrtc::tile_log2(threads), expected, "threads={threads}");
+        }
+    }
+
+    fn decoded_tile_info(width: u32, height: u32, threads: u32) -> aom_tile_info {
+        let mut encoder = AomEncoder::new_with_tuning(
+            AomEncoderConfig {
+                width,
+                height,
+                quality: 1.0,
+                fps: 30,
+                keyframe_interval: None,
+            },
+            false,
+            AomEncoderTuning {
+                threads: Some(threads),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            unsafe { (*encoder.ctx.config.enc).g_threads },
+            threads,
+            "encoder must use the requested thread count"
+        );
+        let input = vec![128u8; (width * height * 3 / 2) as usize];
+        let packets: Vec<Vec<u8>> = encoder
+            .encode(0, &input, 1)
+            .unwrap()
+            .map(|frame| frame.data.to_vec())
+            .collect();
+        assert!(!packets.is_empty(), "encoder must emit the first frame");
+        let mut decoder = AomDecoder::new().unwrap();
+        let mut decoded = 0;
+        for packet in &packets {
+            decoded += decoder.decode(packet).unwrap().count();
+        }
+        assert_eq!(decoded, 1);
+        let mut info: aom_tile_info = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            aom_codec_control(
+                &mut decoder.ctx,
+                aom_dec_control_id::AOMD_GET_TILE_INFO as i32,
+                &mut info as *mut aom_tile_info,
+            )
+        };
+        assert_eq!(result, aom_codec_err_t::AOM_CODEC_OK);
+        info
+    }
+
+    #[test]
+    fn encoder_splits_frames_into_one_tile_column_per_thread() {
+        let info = decoded_tile_info(1920, 1080, 4);
+        assert_eq!((info.tile_columns, info.tile_rows), (4, 1));
+    }
+
+    #[test]
+    fn encoder_uses_tile_rows_for_small_four_thread_frames() {
+        let info = decoded_tile_info(640, 360, 4);
+        assert_eq!(info.tile_columns, 1);
+        assert!(info.tile_rows > 1, "tile_rows={}", info.tile_rows);
+    }
+
+    #[test]
+    fn single_thread_encoder_keeps_one_tile() {
+        let info = decoded_tile_info(1920, 1080, 1);
+        assert_eq!((info.tile_columns, info.tile_rows), (1, 1));
+    }
+}
