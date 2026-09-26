@@ -373,7 +373,7 @@ impl Drop for VpxEncoder {
         unsafe {
             let result = vpx_codec_destroy(&mut self.ctx);
             if result != VPX_CODEC_OK {
-                panic!("failed to destroy vpx codec");
+                log::error!("failed to destroy vpx codec: {:?}", result);
             }
         }
     }
@@ -514,7 +514,7 @@ impl Drop for VpxDecoder {
         unsafe {
             let result = vpx_codec_destroy(&mut self.ctx);
             if result != VPX_CODEC_OK {
-                panic!("failed to destroy vpx codec");
+                log::error!("failed to destroy vpx codec: {:?}", result);
             }
         }
     }

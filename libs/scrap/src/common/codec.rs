@@ -14,9 +14,9 @@ use crate::mediacodec::{
 #[cfg(feature = "vram")]
 use crate::vram::*;
 use crate::{
-    aom::{self, AomDecoder, AomEncoder, AomEncoderConfig},
+    aom::{AomDecoder, AomEncoder, AomEncoderConfig},
     common::GoogleImage,
-    vpxcodec::{self, VpxDecoder, VpxDecoderConfig, VpxEncoder, VpxEncoderConfig, VpxVideoCodecId},
+    vpxcodec::{VpxDecoder, VpxDecoderConfig, VpxEncoder, VpxEncoderConfig, VpxVideoCodecId},
     CodecFormat, EncodeInput, EncodeYuvFormat, ImageRgb, ImageTexture,
 };
 
@@ -1460,6 +1460,23 @@ impl Decoder {
         }
     }
 
+    /// Converts the last image of one decoder call before the decoder is used
+    /// again: the next decode or flush may release or reuse its buffers.
+    fn convert_last_image<I: GoogleImage>(
+        images: impl Iterator<Item = I>,
+        rgb: &mut ImageRgb,
+        chroma: &mut Option<Chroma>,
+    ) -> bool {
+        match images.last() {
+            Some(image) => {
+                *chroma = Some(image.chroma());
+                image.to(rgb);
+                true
+            }
+            None => false,
+        }
+    }
+
     // rgb [in/out] fmt and stride must be set in ImageRgb
     fn handle_vpxs_video_frame(
         decoder: &mut VpxDecoder,
@@ -1467,24 +1484,12 @@ impl Decoder {
         rgb: &mut ImageRgb,
         chroma: &mut Option<Chroma>,
     ) -> ResultType<bool> {
-        let mut last_frame = vpxcodec::Image::new();
+        let mut ready = false;
         for vpx in vpxs.frames.iter() {
-            for frame in decoder.decode(&vpx.data)? {
-                drop(last_frame);
-                last_frame = frame;
-            }
+            ready |= Self::convert_last_image(decoder.decode(&vpx.data)?, rgb, chroma);
         }
-        for frame in decoder.flush()? {
-            drop(last_frame);
-            last_frame = frame;
-        }
-        if last_frame.is_null() {
-            Ok(false)
-        } else {
-            *chroma = Some(last_frame.chroma());
-            last_frame.to(rgb);
-            Ok(true)
-        }
+        ready |= Self::convert_last_image(decoder.flush()?, rgb, chroma);
+        Ok(ready)
     }
 
     // rgb [in/out] fmt and stride must be set in ImageRgb
@@ -1494,24 +1499,12 @@ impl Decoder {
         rgb: &mut ImageRgb,
         chroma: &mut Option<Chroma>,
     ) -> ResultType<bool> {
-        let mut last_frame = aom::Image::new();
+        let mut ready = false;
         for av1 in av1s.frames.iter() {
-            for frame in decoder.decode(&av1.data)? {
-                drop(last_frame);
-                last_frame = frame;
-            }
+            ready |= Self::convert_last_image(decoder.decode(&av1.data)?, rgb, chroma);
         }
-        for frame in decoder.flush()? {
-            drop(last_frame);
-            last_frame = frame;
-        }
-        if last_frame.is_null() {
-            Ok(false)
-        } else {
-            *chroma = Some(last_frame.chroma());
-            last_frame.to(rgb);
-            Ok(true)
-        }
+        ready |= Self::convert_last_image(decoder.flush()?, rgb, chroma);
+        Ok(ready)
     }
 
     // rgb [in/out] fmt and stride must be set in ImageRgb
@@ -1524,8 +1517,8 @@ impl Decoder {
     ) -> ResultType<bool> {
         let mut ret = false;
         for h264 in frames.frames.iter() {
-            for image in decoder.decode(&h264.data)? {
-                // TODO: just process the last frame
+            // Only the newest image of each call is presented.
+            if let Some(image) = decoder.decode(&h264.data)?.last() {
                 if image.to_fmt(rgb, i420).is_ok() {
                     ret = true;
                 }
@@ -1924,6 +1917,110 @@ mod tests {
         }
         assert!(saw_delta);
         assert_eq!(decoded, 12);
+    }
+
+    fn two_frame_message(packets: Vec<(Vec<u8>, bool)>) -> EncodedVideoFrames {
+        EncodedVideoFrames {
+            frames: packets
+                .into_iter()
+                .map(|(data, key)| hbb_common::message_proto::EncodedVideoFrame {
+                    data: data.into(),
+                    key,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn gray_frames(width: usize, height: usize) -> [Vec<u8>; 2] {
+        let mut first = vec![128u8; width * height * 3 / 2];
+        first[..width * height].fill(40);
+        let mut second = first.clone();
+        second[..width * height].fill(200);
+        [first, second]
+    }
+
+    #[test]
+    fn multi_frame_vp9_message_presents_the_newest_image() {
+        let (width, height) = (320usize, 240usize);
+        let mut encoder = VpxEncoder::new(
+            EncoderCfg::VPX(VpxEncoderConfig {
+                width: width as _,
+                height: height as _,
+                quality: 1.0,
+                fps: 30,
+                codec: VpxVideoCodecId::VP9,
+                keyframe_interval: None,
+            }),
+            false,
+        )
+        .unwrap();
+        let mut packets = Vec::new();
+        for (index, input) in gray_frames(width, height).iter().enumerate() {
+            for frame in encoder.encode(index as i64 * 33, input, 1).unwrap() {
+                packets.push((frame.data.to_vec(), frame.key));
+            }
+            for frame in encoder.flush().unwrap() {
+                packets.push((frame.data.to_vec(), frame.key));
+            }
+        }
+        assert_eq!(packets.len(), 2);
+        let mut decoder = VpxDecoder::new(VpxDecoderConfig {
+            codec: VpxVideoCodecId::VP9,
+        })
+        .unwrap();
+        let mut rgb = ImageRgb::new(crate::ImageFormat::ARGB, 1);
+        let mut chroma = None;
+        let ready = Decoder::handle_vpxs_video_frame(
+            &mut decoder,
+            &two_frame_message(packets),
+            &mut rgb,
+            &mut chroma,
+        )
+        .unwrap();
+        assert!(ready);
+        assert_eq!((rgb.w, rgb.h), (width, height));
+        assert_eq!(chroma, Some(Chroma::I420));
+        // ARGB is stored as BGRA bytes; the newest (bright) frame is shown.
+        assert!(rgb.raw[0] > 150, "pixel={:?}", &rgb.raw[..4]);
+    }
+
+    #[test]
+    fn multi_frame_av1_message_presents_the_newest_image() {
+        let (width, height) = (320usize, 240usize);
+        let mut encoder = AomEncoder::new(
+            EncoderCfg::AOM(AomEncoderConfig {
+                width: width as _,
+                height: height as _,
+                quality: 1.0,
+                fps: 30,
+                keyframe_interval: None,
+            }),
+            false,
+        )
+        .unwrap();
+        let mut packets = Vec::new();
+        for (index, input) in gray_frames(width, height).iter().enumerate() {
+            for frame in encoder.encode(index as i64 * 33, input, 1).unwrap() {
+                packets.push((frame.data.to_vec(), frame.key));
+            }
+        }
+        assert_eq!(packets.len(), 2);
+        let mut decoder = AomDecoder::new().unwrap();
+        let mut rgb = ImageRgb::new(crate::ImageFormat::ARGB, 1);
+        let mut chroma = None;
+        let ready = Decoder::handle_av1s_video_frame(
+            &mut decoder,
+            &two_frame_message(packets),
+            &mut rgb,
+            &mut chroma,
+        )
+        .unwrap();
+        assert!(ready);
+        assert_eq!((rgb.w, rgb.h), (width, height));
+        assert_eq!(chroma, Some(Chroma::I420));
+        assert!(rgb.raw[0] > 150, "pixel={:?}", &rgb.raw[..4]);
     }
 
     #[test]

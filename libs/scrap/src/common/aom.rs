@@ -523,7 +523,7 @@ impl Drop for AomEncoder {
         unsafe {
             let result = aom_codec_destroy(&mut self.ctx);
             if result != aom_codec_err_t::AOM_CODEC_OK {
-                panic!("failed to destroy aom codec");
+                log::error!("failed to destroy aom codec: {:?}", result);
             }
         }
     }
@@ -615,7 +615,7 @@ impl Drop for AomDecoder {
         unsafe {
             let result = aom_codec_destroy(&mut self.ctx);
             if result != aom_codec_err_t::AOM_CODEC_OK {
-                panic!("failed to destroy aom codec");
+                log::error!("failed to destroy aom codec: {:?}", result);
             }
         }
     }
