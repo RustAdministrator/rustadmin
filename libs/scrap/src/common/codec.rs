@@ -575,6 +575,68 @@ pub(crate) fn yuv420_planes_complete(height: i32, planes: &[(i32, usize)]) -> bo
     })
 }
 
+/// Exclusive end offset of a strided read of `rows` rows of `row_bytes` each.
+#[cfg(any(test, feature = "mediacodec"))]
+fn strided_read_end(offset: usize, stride: usize, rows: usize, row_bytes: usize) -> Option<usize> {
+    if rows == 0 || row_bytes == 0 {
+        return Some(offset);
+    }
+    offset
+        .checked_add((rows - 1).checked_mul(stride)?)?
+        .checked_add(row_bytes)
+}
+
+/// Whether a libyuv conversion of the `width` x `height` region at
+/// (`left`, `top`) stays inside a MediaCodec buffer of `len` bytes that holds a
+/// `stride` x `slice_height` luma plane followed by 4:2:0 chroma: one
+/// interleaved UV plane with the luma stride (`semi_planar`, NV12) or U and V
+/// planes with half the stride (I420).
+#[cfg(any(test, feature = "mediacodec"))]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mediacodec_yuv420_read_in_bounds(
+    len: usize,
+    stride: usize,
+    slice_height: usize,
+    left: usize,
+    top: usize,
+    width: usize,
+    height: usize,
+    semi_planar: bool,
+) -> bool {
+    let read_end = || -> Option<usize> {
+        let y_size = stride.checked_mul(slice_height)?;
+        let chroma_rows = height.div_ceil(2);
+        let chroma_width = width.div_ceil(2);
+        let y_offset = top.checked_mul(stride)?.checked_add(left)?;
+        let y_end = strided_read_end(y_offset, stride, height, width)?;
+        let chroma_end = if semi_planar {
+            let uv_offset = y_size
+                .checked_add((top / 2).checked_mul(stride)?)?
+                .checked_add((left / 2) * 2)?;
+            strided_read_end(uv_offset, stride, chroma_rows, chroma_width.checked_mul(2)?)?
+        } else {
+            let uv_stride = stride.div_ceil(2);
+            let uv_size = uv_stride.checked_mul(slice_height.div_ceil(2))?;
+            let uv_offset = (top / 2).checked_mul(uv_stride)?.checked_add(left / 2)?;
+            let u_end = strided_read_end(
+                y_size.checked_add(uv_offset)?,
+                uv_stride,
+                chroma_rows,
+                chroma_width,
+            )?;
+            let v_end = strided_read_end(
+                y_size.checked_add(uv_size)?.checked_add(uv_offset)?,
+                uv_stride,
+                chroma_rows,
+                chroma_width,
+            )?;
+            u_end.max(v_end)
+        };
+        Some(y_end.max(chroma_end))
+    };
+    read_end().is_some_and(|end| end <= len)
+}
+
 #[cfg(any(test, feature = "hwcodec"))]
 fn contains_keyframe(frames: &EncodedVideoFrames) -> bool {
     frames.frames.iter().any(|frame| frame.key)
@@ -2062,6 +2124,55 @@ mod tests {
         assert!(!yuv420_planes_complete(4, &[(0, 32), (8, 16)]));
         assert!(!yuv420_planes_complete(4, &[(-8, 32), (8, 16)]));
         assert!(!yuv420_planes_complete(4, &[]));
+    }
+
+    #[test]
+    fn mediacodec_reads_are_checked_against_the_buffer() {
+        // 1920x1080 in a 1920x1088 buffer, the usual MediaCodec layout.
+        let i420_len = 1920 * 1088 + 2 * (960 * 544);
+        let nv12_len = 1920 * 1088 + 1920 * 544;
+        assert!(mediacodec_yuv420_read_in_bounds(
+            i420_len, 1920, 1088, 0, 0, 1920, 1080, false
+        ));
+        assert!(mediacodec_yuv420_read_in_bounds(
+            nv12_len, 1920, 1088, 0, 0, 1920, 1080, true
+        ));
+        // A cropped odd-sized region inside the planes.
+        assert!(mediacodec_yuv420_read_in_bounds(
+            nv12_len, 1920, 1088, 3, 5, 1915, 1081, true
+        ));
+        // A slice height smaller than the visible height reads past the end
+        // of a minimal buffer: rejected instead of reading out of bounds.
+        let short_len = 1920 * 1000 + 1920 * 500;
+        assert!(!mediacodec_yuv420_read_in_bounds(
+            short_len, 1920, 1000, 0, 0, 1920, 1080, true
+        ));
+        // A stride smaller than the width is accepted while the reads stay
+        // inside the buffer (behavior of such devices is unchanged).
+        assert!(mediacodec_yuv420_read_in_bounds(
+            nv12_len, 1900, 1088, 0, 0, 1920, 1080, true
+        ));
+        assert!(!mediacodec_yuv420_read_in_bounds(
+            1900 * 1088 + 1900 * 544,
+            1900,
+            1088,
+            0,
+            0,
+            1920,
+            1088,
+            true
+        ));
+        // Arithmetic overflow is rejected.
+        assert!(!mediacodec_yuv420_read_in_bounds(
+            usize::MAX,
+            usize::MAX,
+            2,
+            0,
+            1,
+            16,
+            16,
+            false
+        ));
     }
 
     #[test]

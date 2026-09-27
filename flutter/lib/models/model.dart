@@ -26,6 +26,7 @@ import 'package:flutter_hbb/models/server_model.dart';
 import 'package:flutter_hbb/models/user_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/models/desktop_render_texture.dart';
+import 'package:flutter_hbb/models/native_rgba.dart';
 import 'package:flutter_hbb/models/terminal_model.dart';
 import 'package:flutter_hbb/plugin/manager.dart';
 import 'package:flutter_hbb/plugin/widgets/desc_ui.dart';
@@ -6042,22 +6043,16 @@ class FFI {
           return;
         }
         if (isAndroid) imageModel.setAndroidSurfaceTextureActive(false);
-        final sz = platformFFI.getRgbaSize(sessionId, display);
-        if (sz == 0) {
-          platformFFI.nextRgba(sessionId, display);
-          return;
-        }
-        final rgba = platformFFI.getRgba(sessionId, display, sz);
-        if (rgba != null) {
-          await onEvent2UIRgba();
-          if (!screenViewAuthority.accepts(screenEpoch)) {
-            platformFFI.nextRgba(sessionId, display);
-            return;
-          }
-          await imageModel.onRgba(display, rgba);
-        } else {
-          platformFFI.nextRgba(sessionId, display);
-        }
+        await handleNativeRgbaFrame(
+          rgbaSize: () => platformFFI.getRgbaSize(sessionId, display),
+          getRgba: (size) => platformFFI.getRgba(sessionId, display, size),
+          nextRgba: () => platformFFI.nextRgba(sessionId, display),
+          beforeFetch: onEvent2UIRgba,
+          accepts: () => screenViewAuthority.accepts(screenEpoch),
+          consume: (rgba) async {
+            await imageModel.onRgba(display, rgba);
+          },
+        );
       } else if (message is EventToUI_Texture) {
         if (!screenViewAuthority.accepts(screenEpoch)) return;
         final display = message.field0;

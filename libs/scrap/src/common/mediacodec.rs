@@ -861,6 +861,27 @@ fn copy_i420_output_to_rgba(
             layout.slice_height
         );
     }
+    if !crate::codec::mediacodec_yuv420_read_in_bounds(
+        buf.len(),
+        layout.stride,
+        layout.slice_height,
+        layout.crop_left,
+        layout.crop_top,
+        layout.visible_w,
+        layout.visible_h,
+        false,
+    ) {
+        bail!(
+            "MediaCodec I420 crop exceeds the output buffer: bytes={}, stride={}, slice_height={}, crop=({},{}) {}x{}",
+            buf.len(),
+            layout.stride,
+            layout.slice_height,
+            layout.crop_left,
+            layout.crop_top,
+            layout.visible_w,
+            layout.visible_h
+        );
+    }
     let dst_stride = rgba_stride(layout.visible_w, rgb.align());
     rgb.w = layout.visible_w;
     rgb.h = layout.visible_h;
@@ -920,6 +941,27 @@ fn copy_nv12_output_to_rgba(
             min_size,
             layout.stride,
             layout.slice_height
+        );
+    }
+    if !crate::codec::mediacodec_yuv420_read_in_bounds(
+        buf.len(),
+        layout.stride,
+        layout.slice_height,
+        layout.crop_left,
+        layout.crop_top,
+        layout.visible_w,
+        layout.visible_h,
+        true,
+    ) {
+        bail!(
+            "MediaCodec NV12 crop exceeds the output buffer: bytes={}, stride={}, slice_height={}, crop=({},{}) {}x{}",
+            buf.len(),
+            layout.stride,
+            layout.slice_height,
+            layout.crop_left,
+            layout.crop_top,
+            layout.visible_w,
+            layout.visible_h
         );
     }
     let dst_stride = rgba_stride(layout.visible_w, rgb.align());
