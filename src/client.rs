@@ -2669,6 +2669,16 @@ impl AudioBuffer {
     }
 }
 
+/// Largest channel count accepted from a peer's audio format. Peers send 1 or
+/// 2; QUIC audio datagrams already enforce the same 1..=8 range.
+const MAX_AUDIO_FORMAT_CHANNELS: u32 = 8;
+
+fn validated_audio_channels(format: &AudioFormat) -> Option<u16> {
+    (1..=MAX_AUDIO_FORMAT_CHANNELS)
+        .contains(&format.channels)
+        .then_some(format.channels as u16)
+}
+
 /// Interleaved samples (about 20 ms) queued before playback resumes after
 /// the device ran dry.
 #[cfg(any(test, not(any(target_os = "linux", target_os = "ios"))))]
@@ -2823,11 +2833,16 @@ impl AudioHandler {
 
     /// Handle audio format and create an audio decoder.
     pub fn handle_format(&mut self, f: AudioFormat) {
-        match AudioDecoder::new(f.sample_rate, if f.channels > 1 { Stereo } else { Mono }) {
+        // The channel count comes from the peer and sizes the decode buffer.
+        let Some(channels) = validated_audio_channels(&f) else {
+            log::warn!("ignored audio format with {} channels", f.channels);
+            return;
+        };
+        match AudioDecoder::new(f.sample_rate, if channels > 1 { Stereo } else { Mono }) {
             Ok(d) => {
-                let buffer = vec![0.; f.sample_rate as usize * f.channels as usize];
+                let buffer = vec![0.; f.sample_rate as usize * usize::from(channels)];
                 self.audio_decoder = Some((d, buffer));
-                self.channels = f.channels as _;
+                self.channels = channels;
                 allow_err!(self.start_audio(f));
             }
             Err(err) => {
@@ -6910,6 +6925,27 @@ mod audio_playback_tests {
                 _ => "other".to_owned(),
             })
             .collect()
+    }
+
+    #[test]
+    fn audio_format_channels_are_validated_before_allocation() {
+        let format = |channels| AudioFormat {
+            sample_rate: 48000,
+            channels,
+            ..Default::default()
+        };
+        for channels in [0, 9, 65536 + 2, u32::MAX] {
+            assert_eq!(validated_audio_channels(&format(channels)), None);
+            let mut handler = AudioHandler::default();
+            handler.handle_format(format(channels));
+            assert!(handler.audio_decoder.is_none(), "channels={channels}");
+        }
+        for channels in 1..=8 {
+            assert_eq!(
+                validated_audio_channels(&format(channels)),
+                Some(channels as u16)
+            );
+        }
     }
 
     #[test]
