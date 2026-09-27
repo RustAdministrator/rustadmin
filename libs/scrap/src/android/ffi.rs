@@ -13,19 +13,19 @@ use hbb_common::{message_proto::MultiClipboards, protobuf::Message};
 use jni::errors::{Error as JniError, Result as JniResult};
 use lazy_static::lazy_static;
 use serde::Deserialize;
-use std::ops::Not;
 use std::os::raw::c_void;
-use std::sync::atomic::{AtomicPtr, Ordering::SeqCst};
 use std::sync::{Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use crate::frame_slot::CaptureFrameSlot;
 use crate::pcm::PcmQueue;
 
 lazy_static! {
     static ref JVM: RwLock<Option<JavaVM>> = RwLock::new(None);
     static ref MAIN_SERVICE_CTX: RwLock<Option<GlobalRef>> = RwLock::new(None); // MainService -> video service / audio service / info
     static ref APPLICATION_CONTEXT: RwLock<Option<GlobalRef>> = RwLock::new(None);
-    static ref VIDEO_RAW: Mutex<FrameRaw> = Mutex::new(FrameRaw::new("video", MAX_VIDEO_FRAME_TIMEOUT));
+    static ref VIDEO_RAW: Mutex<CaptureFrameSlot> =
+        Mutex::new(CaptureFrameSlot::new("video", MAX_VIDEO_FRAME_TIMEOUT));
     static ref AUDIO_CAPTURE: Mutex<AudioCapture> = Mutex::new(AudioCapture::new());
     static ref NDK_CONTEXT_INITED: Mutex<bool> = Default::default();
     static ref MEDIA_CODEC_INFOS: RwLock<Option<MediaCodecInfos>> = RwLock::new(None);
@@ -78,75 +78,6 @@ impl AudioCapture {
     }
 }
 
-struct FrameRaw {
-    name: &'static str,
-    ptr: AtomicPtr<u8>,
-    len: usize,
-    last_update: Instant,
-    timeout: Duration,
-    enable: bool,
-}
-
-impl FrameRaw {
-    fn new(name: &'static str, timeout: Duration) -> Self {
-        FrameRaw {
-            name,
-            ptr: AtomicPtr::default(),
-            len: 0,
-            last_update: Instant::now(),
-            timeout,
-            enable: false,
-        }
-    }
-
-    fn set_enable(&mut self, value: bool) {
-        self.enable = value;
-        self.ptr.store(std::ptr::null_mut(), SeqCst);
-        self.len = 0;
-    }
-
-    fn update(&mut self, data: *mut u8, len: usize) {
-        if self.enable.not() {
-            return;
-        }
-        self.len = len;
-        self.ptr.store(data, SeqCst);
-        self.last_update = Instant::now();
-    }
-
-    // take inner data as slice
-    // release when success
-    fn take<'a>(&mut self, dst: &mut Vec<u8>, last: &mut Vec<u8>) -> Option<()> {
-        if self.enable.not() {
-            return None;
-        }
-        let ptr = self.ptr.load(SeqCst);
-        if ptr.is_null() || self.len == 0 {
-            None
-        } else {
-            if self.last_update.elapsed() > self.timeout {
-                log::trace!("Failed to take {} raw,timeout!", self.name);
-                return None;
-            }
-            let slice = unsafe { std::slice::from_raw_parts(ptr, self.len) };
-            self.release();
-            if last.len() == slice.len() && crate::would_block_if_equal(last, slice).is_err() {
-                return None;
-            }
-            dst.resize(slice.len(), 0);
-            unsafe {
-                std::ptr::copy_nonoverlapping(slice.as_ptr(), dst.as_mut_ptr(), slice.len());
-            }
-            Some(())
-        }
-    }
-
-    fn release(&mut self) {
-        self.len = 0;
-        self.ptr.store(std::ptr::null_mut(), SeqCst);
-    }
-}
-
 pub fn get_video_raw<'a>(dst: &mut Vec<u8>, last: &mut Vec<u8>) -> Option<()> {
     VIDEO_RAW.lock().ok()?.take(dst, last)
 }
@@ -175,7 +106,13 @@ pub extern "system" fn Java_ffi_FFI_onVideoFrameUpdate(
     let jb = JByteBuffer::from(buffer);
     if let Ok(data) = env.get_direct_buffer_address(&jb) {
         if let Ok(len) = env.get_direct_buffer_capacity(&jb) {
-            VIDEO_RAW.lock().unwrap().update(data, len);
+            if data.is_null() || len == 0 {
+                return;
+            }
+            // The ImageReader image is closed right after this call, which
+            // invalidates the buffer; copy the frame now.
+            let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+            VIDEO_RAW.lock().unwrap().update(bytes);
         }
     }
 }
