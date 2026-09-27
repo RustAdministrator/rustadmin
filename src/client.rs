@@ -32,8 +32,8 @@ use uuid::Uuid;
 use crate::{
     check_port,
     common::input::{MOUSE_BUTTON_LEFT, MOUSE_TYPE_DOWN, MOUSE_TYPE_UP},
-    create_symmetric_key_msg, decode_direct_id_pk, decode_id_pk, decode_secure_signed_id,
-    get_rs_pk, is_direct_handshake_ack_ok, is_keyboard_mode_supported,
+    decode_direct_id_pk, decode_id_pk, decode_secure_signed_id, get_rs_pk,
+    is_direct_handshake_ack_ok, is_keyboard_mode_supported,
     kcp_stream::KcpStream,
     secure_tcp,
     ui_interface::{get_builtin_option, resolve_avatar_url, use_texture_render},
@@ -1442,8 +1442,13 @@ impl Client {
                         }
                     }
                 }
+                let directional =
+                    crate::common::viewer_selects_directional_secretbox(secure_id.secure_channel);
                 let (asymmetric_value, symmetric_value, key) =
-                    create_symmetric_key_msg(secure_id.box_pk);
+                    crate::common::create_symmetric_key_msg_with_mode(
+                        secure_id.box_pk,
+                        directional,
+                    );
                 let remember_paired_viewers =
                     Config::get_bool_option(keys::OPTION_REMEMBER_PAIRED_VIEWERS);
                 let use_paired_viewer = secure_id.pairing_required
@@ -1517,7 +1522,13 @@ impl Client {
                     ..Default::default()
                 });
                 timeout(CONNECT_TIMEOUT, conn.send(&msg_out)).await??;
-                conn.set_key(key);
+                conn.set_key_with_mode(
+                    key,
+                    crate::common::session_nonce_mode(
+                        directional,
+                        hbb_common::tcp::SessionRole::Viewer,
+                    ),
+                );
                 if secure_id.pairing_required {
                     match timeout(READ_TIMEOUT, conn.next()).await? {
                         Some(res) => {
@@ -1735,7 +1746,10 @@ impl Client {
                         }
                     }
                 }
-                let (asymmetric_value, symmetric_value, key) = create_symmetric_key_msg(their_pk_b);
+                let directional =
+                    crate::common::viewer_selects_directional_secretbox(direct_id.secure_channel);
+                let (asymmetric_value, symmetric_value, key) =
+                    crate::common::create_symmetric_key_msg_with_mode(their_pk_b, directional);
                 let remember_paired_viewers =
                     Config::get_bool_option(keys::OPTION_REMEMBER_PAIRED_VIEWERS);
                 let use_paired_viewer = direct_id.pairing_required
@@ -1809,7 +1823,13 @@ impl Client {
                     ..Default::default()
                 });
                 timeout(CONNECT_TIMEOUT, conn.send(&msg_out)).await??;
-                conn.set_key(key);
+                conn.set_key_with_mode(
+                    key,
+                    crate::common::session_nonce_mode(
+                        directional,
+                        hbb_common::tcp::SessionRole::Viewer,
+                    ),
+                );
                 if direct_id.pairing_required {
                     match timeout(READ_TIMEOUT, conn.next()).await? {
                         Some(res) => {
@@ -7914,7 +7934,75 @@ mod security_tests {
         sign_pk: [u8; sign::PUBLICKEYBYTES],
         sign_sk: sign::SecretKey,
         pairing_passphrase: Option<String>,
+        certificate: Option<Vec<u8>>,
+    ) -> ResultType<(String, tokio::task::JoinHandle<ResultType<()>>)> {
+        spawn_direct_handshake_peer_with_channel(
+            peer_id,
+            sign_pk,
+            sign_sk,
+            pairing_passphrase,
+            certificate,
+            TestHostChannel::default(),
+        )
+        .await
+    }
+
+    /// How a mock host handles the session channel. The default models hosts
+    /// without directional nonces (legacy constructors and `Encrypt::decode`).
+    #[derive(Clone, Copy, Default)]
+    struct TestHostChannel {
+        /// Advertised `IdPk.secure_channel`; non-zero uses the current host code.
+        secure_channel: u32,
+        /// Exchange one encrypted frame each way after the handshake.
+        exchange: bool,
+    }
+
+    impl TestHostChannel {
+        fn decode_key(
+            self,
+            symmetric_value: &[u8],
+            asymmetric_value: &[u8],
+            box_sk: &box_::SecretKey,
+        ) -> ResultType<(
+            hbb_common::sodiumoxide::crypto::secretbox::Key,
+            tcp::NonceMode,
+        )> {
+            let (key, directional) = if self.secure_channel == 0 {
+                (
+                    tcp::Encrypt::decode(symmetric_value, asymmetric_value, box_sk)?,
+                    false,
+                )
+            } else {
+                tcp::Encrypt::decode_session(symmetric_value, asymmetric_value, box_sk, true)?
+            };
+            Ok((
+                key,
+                crate::common::session_nonce_mode(directional, tcp::SessionRole::Host),
+            ))
+        }
+
+        async fn finish(self, stream: &mut Stream) -> ResultType<()> {
+            if !self.exchange {
+                return Ok(());
+            }
+            stream.send_raw(b"host->viewer".to_vec()).await?;
+            let bytes = timeout(CONNECT_TIMEOUT, stream.next())
+                .await?
+                .ok_or_else(|| anyhow!("viewer closed before its test frame"))??;
+            if &bytes[..] != b"viewer->host" {
+                bail!("unexpected viewer test frame");
+            }
+            Ok(())
+        }
+    }
+
+    async fn spawn_direct_handshake_peer_with_channel(
+        peer_id: String,
+        sign_pk: [u8; sign::PUBLICKEYBYTES],
+        sign_sk: sign::SecretKey,
+        pairing_passphrase: Option<String>,
         _certificate: Option<Vec<u8>>,
+        channel: TestHostChannel,
     ) -> ResultType<(String, tokio::task::JoinHandle<ResultType<()>>)> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
@@ -7928,6 +8016,15 @@ mod security_tests {
                 .as_ref()
                 .map(|_| crate::common::create_direct_pairing_salt());
             let signed_id = match pairing_salt {
+                _ if channel.secure_channel != 0 => crate::common::create_host_signed_id(
+                    true,
+                    &peer_id,
+                    box_pk.0,
+                    &sign_pk,
+                    &sign_sk,
+                    pairing_salt,
+                    channel.secure_channel,
+                ),
                 Some(salt) => crate::common::create_direct_signed_id_with_pairing(
                     &peer_id, box_pk.0, &sign_pk, &sign_sk, salt,
                 ),
@@ -7967,17 +8064,17 @@ mod security_tests {
                 &public_key.symmetric_value,
                 pairing_salt.is_some(),
             )?;
-            let key = tcp::Encrypt::decode(
+            let (key, nonce_mode) = channel.decode_key(
                 &public_key_payload.symmetric_value,
                 &public_key.asymmetric_value,
                 &box_sk,
             )?;
+            stream.set_key_with_mode(key, nonce_mode);
             if let (Some(pairing_passphrase), Some(pairing_salt)) =
                 (pairing_passphrase.as_ref(), pairing_salt)
             {
                 let mut initiator_box_pk = [0u8; box_::PUBLICKEYBYTES];
                 initiator_box_pk.copy_from_slice(&public_key.asymmetric_value);
-                stream.set_key(key);
                 let mut ack = Message::new();
                 let mut paired_initiator = None;
                 let mut error_text = None;
@@ -8047,7 +8144,7 @@ mod security_tests {
                 });
                 stream.send(&ack).await?;
             }
-            Ok(())
+            channel.finish(&mut stream).await
         });
         Ok((addr.to_string(), handle))
     }
@@ -8140,6 +8237,25 @@ mod security_tests {
         rendezvous_sk: sign::SecretKey,
         pairing_passphrase: Option<String>,
     ) -> ResultType<(String, Vec<u8>, tokio::task::JoinHandle<ResultType<()>>)> {
+        spawn_secure_handshake_peer_with_channel(
+            peer_id,
+            sign_pk,
+            sign_sk,
+            rendezvous_sk,
+            pairing_passphrase,
+            TestHostChannel::default(),
+        )
+        .await
+    }
+
+    async fn spawn_secure_handshake_peer_with_channel(
+        peer_id: String,
+        sign_pk: [u8; sign::PUBLICKEYBYTES],
+        sign_sk: sign::SecretKey,
+        rendezvous_sk: sign::SecretKey,
+        pairing_passphrase: Option<String>,
+        channel: TestHostChannel,
+    ) -> ResultType<(String, Vec<u8>, tokio::task::JoinHandle<ResultType<()>>)> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let signed_id_pk =
@@ -8154,6 +8270,15 @@ mod security_tests {
                 .as_ref()
                 .map(|_| crate::common::create_direct_pairing_salt());
             let signed_id = match pairing_salt {
+                _ if channel.secure_channel != 0 => crate::common::create_host_signed_id(
+                    false,
+                    &peer_id,
+                    box_pk.0,
+                    &sign_pk,
+                    &sign_sk,
+                    pairing_salt,
+                    channel.secure_channel,
+                ),
                 Some(salt) => crate::common::create_secure_signed_id_with_pairing(
                     &peer_id, box_pk.0, &sign_sk, salt,
                 ),
@@ -8187,17 +8312,17 @@ mod security_tests {
                 &public_key.symmetric_value,
                 pairing_salt.is_some(),
             )?;
-            let key = tcp::Encrypt::decode(
+            let (key, nonce_mode) = channel.decode_key(
                 &public_key_payload.symmetric_value,
                 &public_key.asymmetric_value,
                 &box_sk,
             )?;
+            stream.set_key_with_mode(key, nonce_mode);
             if let (Some(pairing_passphrase), Some(pairing_salt)) =
                 (pairing_passphrase.as_ref(), pairing_salt)
             {
                 let mut initiator_box_pk = [0u8; box_::PUBLICKEYBYTES];
                 initiator_box_pk.copy_from_slice(&public_key.asymmetric_value);
-                stream.set_key(key);
                 let mut ack = Message::new();
                 let mut paired_initiator = None;
                 let mut error_text = None;
@@ -8265,7 +8390,7 @@ mod security_tests {
                 });
                 stream.send(&ack).await?;
             }
-            Ok(())
+            channel.finish(&mut stream).await
         });
         Ok((addr.to_string(), signed_id_pk, handle))
     }
@@ -8348,6 +8473,247 @@ mod security_tests {
             &peer_sign_pk.0,
         )
         .is_err());
+    }
+
+    fn negotiated_nonce_mode(conn: &Stream) -> Option<tcp::NonceMode> {
+        match conn {
+            Stream::Tcp(stream) => stream.2.as_ref().map(|encrypt| encrypt.3),
+            _ => None,
+        }
+    }
+
+    async fn exchange_as_viewer(conn: &mut Stream) -> ResultType<()> {
+        let bytes = timeout(CONNECT_TIMEOUT, conn.next())
+            .await?
+            .ok_or_else(|| anyhow!("host closed before its test frame"))??;
+        if &bytes[..] != b"host->viewer" {
+            bail!("unexpected host test frame");
+        }
+        conn.send_raw(b"viewer->host".to_vec()).await
+    }
+
+    struct RestoreOptions(Vec<(&'static str, String)>);
+
+    impl RestoreOptions {
+        fn save(keys: &[&'static str]) -> Self {
+            Self(
+                keys.iter()
+                    .map(|key| (*key, Config::get_option(key)))
+                    .collect(),
+            )
+        }
+    }
+
+    impl Drop for RestoreOptions {
+        fn drop(&mut self) {
+            for (key, value) in self.0.drain(..) {
+                Config::set_option(key.to_owned(), value);
+            }
+        }
+    }
+
+    /// Runs the real viewer handshake against a mock host and exchanges one
+    /// encrypted frame each way; returns the viewer's nonce mode.
+    async fn run_secure_channel_case(
+        direct: bool,
+        pairing: bool,
+        secure_channel: u32,
+    ) -> ResultType<Option<tcp::NonceMode>> {
+        let peer_id = format!("channel-peer-{}", Uuid::new_v4());
+        let peer_config_id = format!("channel-config-{}", Uuid::new_v4());
+        let passphrase = pairing.then(|| "channel-secret".to_owned());
+        let interface = TestInterface::new(&peer_config_id, passphrase.as_deref());
+        let (sign_pk, sign_sk) = sign::gen_keypair();
+        let channel = TestHostChannel {
+            secure_channel,
+            exchange: true,
+        };
+        let result = async {
+            let (mut conn, handle) = if direct {
+                let (addr, handle) = spawn_direct_handshake_peer_with_channel(
+                    peer_id.clone(),
+                    sign_pk.0,
+                    sign_sk,
+                    passphrase,
+                    None,
+                    channel,
+                )
+                .await?;
+                let mut conn = connect_security_test_tcp(&addr).await?;
+                Client::secure_direct_connection(&addr, &peer_config_id, &mut conn, interface)
+                    .await?;
+                (conn, handle)
+            } else {
+                let (rs_pk, rs_sk) = sign::gen_keypair();
+                let (addr, signed_id_pk, handle) = spawn_secure_handshake_peer_with_channel(
+                    peer_id.clone(),
+                    sign_pk.0,
+                    sign_sk,
+                    rs_sk,
+                    passphrase,
+                    channel,
+                )
+                .await?;
+                let mut conn = connect_security_test_tcp(&addr).await?;
+                Client::secure_connection(
+                    &peer_id,
+                    &peer_id,
+                    &peer_config_id,
+                    signed_id_pk,
+                    &crate::common::encode64(rs_pk.0),
+                    &interface,
+                    &mut conn,
+                )
+                .await?;
+                (conn, handle)
+            };
+            let mode = negotiated_nonce_mode(&conn);
+            exchange_as_viewer(&mut conn).await?;
+            handle.await??;
+            Ok(mode)
+        }
+        .await;
+        PeerConfig::remove(&peer_config_id);
+        result
+    }
+
+    #[tokio::test]
+    async fn directional_nonces_are_used_only_when_both_sides_enable_them() {
+        let _guard = lock_security_tests();
+        let _restore = RestoreOptions::save(&[
+            keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST,
+            keys::OPTION_REMEMBER_PAIRED_VIEWERS,
+            keys::OPTION_DISABLE_DIRECTIONAL_SECRETBOX,
+        ]);
+        Config::set_option(
+            keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST.to_owned(),
+            "Y".to_owned(),
+        );
+        Config::set_option(
+            keys::OPTION_REMEMBER_PAIRED_VIEWERS.to_owned(),
+            "N".to_owned(),
+        );
+        for direct in [true, false] {
+            for pairing in [false, true] {
+                // (host advertisement, viewer kill switch, expected mode)
+                for (secure_channel, viewer_disabled, directional) in [
+                    (tcp::SECURE_CHANNEL_DIRECTIONAL, false, true),
+                    (tcp::SECURE_CHANNEL_DIRECTIONAL, true, false),
+                    (0, false, false),
+                ] {
+                    Config::set_option(
+                        keys::OPTION_DISABLE_DIRECTIONAL_SECRETBOX.to_owned(),
+                        if viewer_disabled { "Y" } else { "" }.to_owned(),
+                    );
+                    let case = format!(
+                        "direct={direct} pairing={pairing} host={secure_channel} viewer_disabled={viewer_disabled}"
+                    );
+                    let mode = match run_secure_channel_case(direct, pairing, secure_channel).await
+                    {
+                        Ok(mode) => mode,
+                        Err(error) => panic!("{case}: {error}"),
+                    };
+                    assert_eq!(
+                        mode,
+                        Some(crate::common::session_nonce_mode(
+                            directional,
+                            tcp::SessionRole::Viewer
+                        )),
+                        "{case}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn viewers_without_directional_nonces_keep_working_with_new_hosts() {
+        let _guard = lock_security_tests();
+        for direct in [true, false] {
+            let (sign_pk, sign_sk) = sign::gen_keypair();
+            let (_rs_pk, rs_sk) = sign::gen_keypair();
+            let channel = TestHostChannel {
+                secure_channel: tcp::SECURE_CHANNEL_DIRECTIONAL,
+                exchange: true,
+            };
+            let (addr, handle) = if direct {
+                spawn_direct_handshake_peer_with_channel(
+                    "new-host".to_owned(),
+                    sign_pk.0,
+                    sign_sk,
+                    None,
+                    None,
+                    channel,
+                )
+                .await
+                .unwrap()
+            } else {
+                let (addr, _, handle) = spawn_secure_handshake_peer_with_channel(
+                    "new-host".to_owned(),
+                    sign_pk.0,
+                    sign_sk,
+                    rs_sk,
+                    None,
+                    channel,
+                )
+                .await
+                .unwrap();
+                (addr, handle)
+            };
+            let mut conn = connect_security_test_tcp(&addr).await.unwrap();
+            // What RustDesk and earlier RustAdmin viewers do: read the signed
+            // id, seal a 32-byte key and use legacy nonces.
+            let bytes = conn.next().await.unwrap().unwrap();
+            let Some(message::Union::SignedId(si)) =
+                Message::parse_from_bytes(&bytes).unwrap().union
+            else {
+                panic!("expected the host's signed id");
+            };
+            let box_pk = if direct {
+                decode_direct_id_pk(&si.id).unwrap().box_pk
+            } else {
+                decode_secure_signed_id(&si.id, &sign_pk).unwrap().box_pk
+            };
+            let (asymmetric_value, symmetric_value, key) =
+                crate::common::create_symmetric_key_msg(box_pk);
+            let mut msg_out = Message::new();
+            msg_out.set_public_key(PublicKey {
+                asymmetric_value,
+                symmetric_value,
+                ..Default::default()
+            });
+            conn.send(&msg_out).await.unwrap();
+            conn.set_key(key);
+            exchange_as_viewer(&mut conn).await.unwrap();
+            handle.await.unwrap().unwrap();
+        }
+    }
+
+    #[test]
+    fn directional_secretbox_kill_switch_stops_advertising_and_selecting() {
+        let _guard = lock_security_tests();
+        let _restore = RestoreOptions::save(&[keys::OPTION_DISABLE_DIRECTIONAL_SECRETBOX]);
+        Config::set_option(
+            keys::OPTION_DISABLE_DIRECTIONAL_SECRETBOX.to_owned(),
+            String::new(),
+        );
+        assert_eq!(
+            crate::common::host_secure_channel(),
+            tcp::SECURE_CHANNEL_DIRECTIONAL
+        );
+        assert!(crate::common::viewer_selects_directional_secretbox(
+            tcp::SECURE_CHANNEL_DIRECTIONAL
+        ));
+        assert!(!crate::common::viewer_selects_directional_secretbox(0));
+        assert!(!crate::common::viewer_selects_directional_secretbox(2));
+        Config::set_option(
+            keys::OPTION_DISABLE_DIRECTIONAL_SECRETBOX.to_owned(),
+            "Y".to_owned(),
+        );
+        assert_eq!(crate::common::host_secure_channel(), 0);
+        assert!(!crate::common::viewer_selects_directional_secretbox(
+            tcp::SECURE_CHANNEL_DIRECTIONAL
+        ));
     }
 
     #[tokio::test]

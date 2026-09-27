@@ -27,6 +27,7 @@ fn is_protected_remote_option(key: &str) -> bool {
             | keys::OPTION_ICE_SERVERS
             | keys::OPTION_ALLOW_WEBSOCKET
             | keys::OPTION_ALLOW_INSECURE_TLS_FALLBACK
+            | keys::OPTION_DISABLE_DIRECTIONAL_SECRETBOX
             | keys::OPTION_ALLOW_HTTPS_21114
             | keys::OPTION_USE_RAW_TCP_FOR_API
             | keys::OPTION_DIRECT_SERVER
@@ -366,6 +367,9 @@ mod tests {
         assert!(is_protected_remote_option(keys::OPTION_ALLOW_WEBSOCKET));
         assert!(is_protected_remote_option(
             keys::OPTION_ALLOW_INSECURE_TLS_FALLBACK
+        ));
+        assert!(is_protected_remote_option(
+            keys::OPTION_DISABLE_DIRECTIONAL_SECRETBOX
         ));
         assert!(is_protected_remote_option(keys::OPTION_DIRECT_SERVER));
         assert!(is_protected_remote_option(keys::OPTION_DIRECT_ACCESS_PORT));
