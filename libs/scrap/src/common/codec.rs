@@ -553,6 +553,28 @@ pub enum DecodeOutcome {
     NeedsKeyframe,
 }
 
+/// Whether each plane of a decoded 4:2:0 frame holds every row libyuv reads:
+/// `height` luma rows and `(height + 1) / 2` chroma rows. `planes` lists
+/// `(linesize, byte length)` with the luma plane first.
+#[cfg(any(test, feature = "hwcodec"))]
+pub(crate) fn yuv420_planes_complete(height: i32, planes: &[(i32, usize)]) -> bool {
+    if height <= 0 || planes.is_empty() {
+        return false;
+    }
+    let luma_rows = height as usize;
+    planes.iter().enumerate().all(|(index, (linesize, len))| {
+        let rows = if index == 0 {
+            luma_rows
+        } else {
+            luma_rows.div_ceil(2)
+        };
+        *linesize > 0
+            && (*linesize as usize)
+                .checked_mul(rows)
+                .is_some_and(|needed| *len >= needed)
+    })
+}
+
 #[cfg(any(test, feature = "hwcodec"))]
 fn contains_keyframe(frames: &EncodedVideoFrames) -> bool {
     frames.frames.iter().any(|frame| frame.key)
@@ -2021,6 +2043,25 @@ mod tests {
         assert_eq!((rgb.w, rgb.h), (width, height));
         assert_eq!(chroma, Some(Chroma::I420));
         assert!(rgb.raw[0] > 150, "pixel={:?}", &rgb.raw[..4]);
+    }
+
+    #[test]
+    fn yuv420_plane_check_requires_the_last_chroma_row() {
+        // 6x5 YUV420P: luma 8x5, chroma 4x3.
+        assert!(yuv420_planes_complete(5, &[(8, 40), (4, 12), (4, 12)]));
+        // An old decoder that copied height / 2 chroma rows is rejected.
+        assert!(!yuv420_planes_complete(5, &[(8, 40), (4, 8), (4, 8)]));
+        // NV12: interleaved UV plane with (height + 1) / 2 rows.
+        assert!(yuv420_planes_complete(5, &[(8, 40), (8, 24)]));
+        assert!(!yuv420_planes_complete(5, &[(8, 40), (8, 16)]));
+        // Even heights and larger buffers are accepted as before.
+        assert!(yuv420_planes_complete(4, &[(8, 32), (8, 16)]));
+        assert!(yuv420_planes_complete(4, &[(8, 64), (8, 64)]));
+        // Invalid geometry is rejected.
+        assert!(!yuv420_planes_complete(0, &[(8, 32), (8, 16)]));
+        assert!(!yuv420_planes_complete(4, &[(0, 32), (8, 16)]));
+        assert!(!yuv420_planes_complete(4, &[(-8, 32), (8, 16)]));
+        assert!(!yuv420_planes_complete(4, &[]));
     }
 
     #[test]

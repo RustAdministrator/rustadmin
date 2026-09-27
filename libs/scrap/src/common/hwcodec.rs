@@ -1544,6 +1544,31 @@ impl HwRamDecoderImage<'_> {
         let frame = self.frame;
         let width = frame.width;
         let height = frame.height;
+        // libyuv reads `height` luma rows and (height + 1) / 2 chroma rows;
+        // refuse planes that are shorter instead of reading past them.
+        let plane_count = match frame.pixfmt {
+            AVPixelFormat::AV_PIX_FMT_NV12 => 2,
+            AVPixelFormat::AV_PIX_FMT_YUV420P => 3,
+        };
+        let planes: Vec<(i32, usize)> = frame
+            .linesize
+            .iter()
+            .copied()
+            .zip(frame.data.iter().map(Vec::len))
+            .take(plane_count)
+            .collect();
+        if width <= 0
+            || planes.len() != plane_count
+            || !crate::codec::yuv420_planes_complete(height, &planes)
+        {
+            bail!(
+                "incomplete decoded {:?} frame: {}x{}, planes={:?}",
+                frame.pixfmt,
+                width,
+                height,
+                planes
+            );
+        }
         rgb.w = width as _;
         rgb.h = height as _;
         let dst_align = rgb.align();
