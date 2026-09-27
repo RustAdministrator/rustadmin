@@ -376,13 +376,13 @@ mod cpal_impl {
         );
         // Resampling, Opus encoding and sending run off the realtime capture
         // callback. The worker ends when the stream drops the sender.
-        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<f32>>(INPUT_QUEUE_CHUNKS);
+        let (mut capture, mut chunks) = capture_channel(INPUT_QUEUE_CHUNKS);
         std::thread::Builder::new()
             .name("audio-input-encoder".to_owned())
             .spawn(move || {
-                while let Ok(chunk) = rx.recv() {
-                    framer.push(&chunk, |frame| send_f32(frame, &mut encoder, &sp));
-                }
+                while chunks.process_next(|chunk| {
+                    framer.push(chunk, |frame| send_f32(frame, &mut encoder, &sp))
+                }) {}
             })?;
         let timeout = None;
         let stream_config = StreamConfig {
@@ -390,20 +390,10 @@ mod cpal_impl {
             sample_rate: config.sample_rate(),
             buffer_size: BufferSize::Default,
         };
-        let mut dropped_chunks: u64 = 0;
         let stream = device.build_input_stream(
             &stream_config,
             move |data: &[T], _: &InputCallbackInfo| {
-                let buffer: Vec<f32> = data.iter().map(|s| T::to_sample(*s)).collect();
-                if tx.try_send(buffer).is_err() {
-                    dropped_chunks += 1;
-                    if dropped_chunks.is_power_of_two() {
-                        log::warn!(
-                            "audio input encoder is behind, dropped {} chunks",
-                            dropped_chunks
-                        );
-                    }
-                }
+                capture.send(data.iter().map(|s| T::to_sample(*s)));
             },
             err_fn,
             timeout,
@@ -491,6 +481,91 @@ impl CapturedPcmFramer {
     }
 }
 
+/// Creates the bounded handoff between the realtime capture callback and the
+/// encoder worker. Buffers travel back to the callback for reuse, so steady
+/// capture neither allocates nor logs on the callback thread.
+#[cfg(any(test, not(any(target_os = "linux", target_os = "android"))))]
+fn capture_channel(capacity: usize) -> (CaptureSender, CaptureReceiver) {
+    let (chunk_tx, chunk_rx) = std::sync::mpsc::sync_channel(capacity);
+    let (recycle_tx, recycle_rx) = std::sync::mpsc::sync_channel(capacity);
+    let dropped = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    (
+        CaptureSender {
+            chunks: chunk_tx,
+            recycled: recycle_rx,
+            spare: None,
+            dropped: dropped.clone(),
+        },
+        CaptureReceiver {
+            chunks: chunk_rx,
+            recycle: recycle_tx,
+            dropped,
+            next_drop_report: 1,
+        },
+    )
+}
+
+#[cfg(any(test, not(any(target_os = "linux", target_os = "android"))))]
+struct CaptureSender {
+    chunks: std::sync::mpsc::SyncSender<Vec<f32>>,
+    recycled: std::sync::mpsc::Receiver<Vec<f32>>,
+    spare: Option<Vec<f32>>,
+    dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[cfg(any(test, not(any(target_os = "linux", target_os = "android"))))]
+impl CaptureSender {
+    /// Queues one callback's samples without blocking; counts a drop when the
+    /// worker is behind and keeps the rejected buffer for the next call.
+    fn send(&mut self, samples: impl Iterator<Item = f32>) {
+        let mut buffer = self
+            .spare
+            .take()
+            .or_else(|| self.recycled.try_recv().ok())
+            .unwrap_or_default();
+        buffer.clear();
+        buffer.extend(samples);
+        match self.chunks.try_send(buffer) {
+            Ok(()) => {}
+            Err(
+                std::sync::mpsc::TrySendError::Full(buffer)
+                | std::sync::mpsc::TrySendError::Disconnected(buffer),
+            ) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                self.spare = Some(buffer);
+            }
+        }
+    }
+}
+
+#[cfg(any(test, not(any(target_os = "linux", target_os = "android"))))]
+struct CaptureReceiver {
+    chunks: std::sync::mpsc::Receiver<Vec<f32>>,
+    recycle: std::sync::mpsc::SyncSender<Vec<f32>>,
+    dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    next_drop_report: u64,
+}
+
+#[cfg(any(test, not(any(target_os = "linux", target_os = "android"))))]
+impl CaptureReceiver {
+    /// Waits for the next captured chunk, passes it to `process` and returns
+    /// the buffer for reuse. Returns false once the capture side is gone.
+    fn process_next(&mut self, process: impl FnOnce(&[f32])) -> bool {
+        let Ok(chunk) = self.chunks.recv() else {
+            return false;
+        };
+        process(&chunk);
+        let _ = self.recycle.try_send(chunk);
+        // Report callback drops here, with exponential backoff: 1, 2, 4, ...
+        let dropped = self.dropped.load(Ordering::Relaxed);
+        if dropped >= self.next_drop_report {
+            log::warn!("audio input encoder is behind, dropped {} chunks", dropped);
+            self.next_drop_report = dropped.saturating_mul(2);
+        }
+        true
+    }
+}
+
 // use AUDIO_ZERO_COUNT for the Noise(Zero) Gate Attack Time
 // every audio data length is set to 480
 // MAX_AUDIO_ZERO_COUNT=800 is similar as Gate Attack Time 3~5s(Linux) || 6~8s(Windows)
@@ -558,6 +633,37 @@ fn send_f32(data: &[f32], encoder: &mut Encoder, sp: &GenericService) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_handoff_reuses_buffers() {
+        let (mut capture, mut chunks) = capture_channel(4);
+        let mut first = std::ptr::null();
+        capture.send([1.0, 2.0, 3.0].iter().copied());
+        assert!(chunks.process_next(|chunk| {
+            assert_eq!(chunk, [1.0, 2.0, 3.0]);
+            first = chunk.as_ptr();
+        }));
+        capture.send([4.0, 5.0].iter().copied());
+        assert!(chunks.process_next(|chunk| {
+            assert_eq!(chunk, [4.0, 5.0]);
+            assert_eq!(chunk.as_ptr(), first, "recycled buffer is reused");
+        }));
+    }
+
+    #[test]
+    fn capture_handoff_counts_drops_without_blocking() {
+        let (mut capture, mut chunks) = capture_channel(1);
+        capture.send([1.0].iter().copied());
+        capture.send([2.0].iter().copied());
+        capture.send([3.0].iter().copied());
+        assert_eq!(chunks.dropped.load(Ordering::Relaxed), 2);
+        assert!(chunks.process_next(|chunk| assert_eq!(chunk, [1.0])));
+        assert_eq!(chunks.next_drop_report, 4);
+        capture.send([4.0].iter().copied());
+        assert!(chunks.process_next(|chunk| assert_eq!(chunk, [4.0])));
+        drop(capture);
+        assert!(!chunks.process_next(|_| panic!("no chunk after disconnect")));
+    }
 
     #[test]
     fn opus_rate_keeps_full_band_for_common_device_rates() {
