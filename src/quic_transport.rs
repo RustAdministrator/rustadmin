@@ -1,9 +1,13 @@
 #[cfg(not(target_os = "ios"))]
 use crate::server::ServerPtr;
 #[cfg(not(target_os = "ios"))]
+use admission::{Admission, AuthenticationPools, HandshakeAdmission, PendingTicket};
+#[cfg(not(target_os = "ios"))]
 use hbb_common::config::option2bool;
 #[cfg(not(target_os = "ios"))]
-use hbb_common::transport::quic::{peer_certificate_pin, CertificatePin, QuicServerEndpoint};
+use hbb_common::transport::quic::{
+    peer_certificate_pin, CertificatePin, Incoming, IncomingHandshake, QuicServerEndpoint,
+};
 use hbb_common::{
     anyhow::{anyhow, bail, Context},
     config::Config,
@@ -30,6 +34,16 @@ use std::{
 };
 #[cfg(not(target_os = "ios"))]
 use std::{sync::Arc, time::Duration};
+
+#[cfg(not(target_os = "ios"))]
+mod admission;
+
+/// Time for application negotiation and channel setup on top of the TLS and
+/// authentication timeouts before an incoming connection is given up.
+#[cfg(not(target_os = "ios"))]
+const QUIC_ESTABLISH_GRACE: Duration = Duration::from_secs(20);
+#[cfg(not(target_os = "ios"))]
+const QUIC_REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(10);
 
 pub async fn connect_pretrusted(
     peer_id: &str,
@@ -241,9 +255,17 @@ async fn run_direct_server_once(server: ServerPtr) -> ResultType<()> {
     let bind_address = SocketAddr::new(config.listen_address, config.listen_port);
     let endpoint =
         QuicServerEndpoint::bind_provisional(bind_address, identity.credentials()?, &options)?;
-    let endpoint_address = endpoint.local_addr()?;
-    let identity = Arc::new(DeviceIdentity::from_config()?);
-    let first_contact_slots = Arc::new(tokio::sync::Semaphore::new(8));
+    let context = Arc::new(DirectServerContext {
+        store,
+        identity: DeviceIdentity::from_config()?,
+        authentication_timeout: options.authentication_timeout,
+        establish_deadline: establish_deadline(&options),
+        endpoint_address: endpoint.local_addr()?,
+        pools: AuthenticationPools::default(),
+    });
+    let admission = HandshakeAdmission::default();
+    let mut refused = 0u64;
+    let mut refusal_logged_at: Option<std::time::Instant> = None;
     loop {
         let current = NetworkTransportConfig::load()?;
         if current.mode == RemoteTransportMode::Tcp
@@ -254,96 +276,158 @@ async fn run_direct_server_once(server: ServerPtr) -> ResultType<()> {
             endpoint.close_and_wait().await;
             return Ok(());
         }
-        let connection = match endpoint.accept().await {
-            Ok(connection) => connection,
+        let incoming = match endpoint.accept_incoming().await {
+            Ok(incoming) => incoming,
             Err(QuicTransportError::Timeout(_)) => continue,
-            Err(QuicTransportError::Handshake(error)) => {
-                hbb_common::log::warn!("Rejected QUIC TLS handshake: {error}");
-                continue;
-            }
-            Err(QuicTransportError::CertificatePinMismatch)
-            | Err(QuicTransportError::MissingPeerCertificate) => {
-                hbb_common::log::warn!("Rejected QUIC peer with an untrusted certificate");
-                continue;
-            }
             Err(error) => return Err(error.into()),
         };
-        let pin = match peer_certificate_pin(&connection) {
-            Ok(pin) => pin,
-            Err(error) => {
-                hbb_common::log::warn!("Rejected QUIC peer without a pinned certificate: {error}");
+        let remote_address = incoming.remote_address();
+        let ticket = match admission.admit(
+            remote_address.ip(),
+            incoming.remote_address_validated(),
+            incoming.may_retry(),
+        ) {
+            Admission::Admitted(ticket) => ticket,
+            Admission::Retry => {
+                // A failed Retry drops, and thereby refuses, the connection.
+                if let Err(error) = incoming.retry() {
+                    hbb_common::log::debug!("QUIC Retry to {remote_address} failed: {error}");
+                }
+                continue;
+            }
+            Admission::Refuse => {
+                incoming.refuse();
+                refused += 1;
+                if refusal_logged_at
+                    .map_or(true, |logged| logged.elapsed() >= QUIC_REFUSAL_LOG_INTERVAL)
+                {
+                    hbb_common::log::warn!(
+                        "Refused {refused} QUIC connection(s) over the unauthenticated connection limits; last from {remote_address}"
+                    );
+                    refused = 0;
+                    refusal_logged_at = Some(std::time::Instant::now());
+                }
                 continue;
             }
         };
-        let peer = store
-            .load_all()?
-            .iter()
-            .find(|peer| CertificatePin(peer.certificate_pin) == pin)
-            .cloned();
-        let first_contact_permit = if peer.is_none() {
-            match first_contact_slots.clone().try_acquire_owned() {
-                Ok(permit) => Some(permit),
-                Err(_) => {
-                    hbb_common::log::warn!(
-                        "Rejected provisional QUIC peer because all first-contact slots are busy"
-                    );
-                    continue;
-                }
-            }
-        } else {
-            None
-        };
-        let remote_address = connection.remote_address();
+        let handshake = endpoint.incoming_handshake();
+        let context = context.clone();
         let server = server.clone();
-        let identity = identity.clone();
-        let authentication_timeout = options.authentication_timeout;
         tokio::spawn(async move {
-            let _first_contact_permit = first_contact_permit;
-            let peer_label = peer
-                .as_ref()
-                .map(|peer| peer.peer_id.as_str())
-                .unwrap_or("unpaired");
-            let result = async {
-                let authentication = if let Some(peer) = peer.as_ref() {
-                    AuthenticatedControlChannel::authenticate_server_discover_session(
-                        connection,
-                        identity.as_ref(),
-                        peer.identity_key,
-                        authentication_timeout,
-                    )
-                    .await?
-                } else {
-                    AuthenticatedControlChannel::authenticate_server_discover_peer(
-                        connection,
-                        identity.as_ref(),
-                        authentication_timeout,
-                    )
-                    .await?
-                };
-                let application = QuicApplicationStream::establish(
-                    authentication,
-                    ApplicationQuicRole::Server,
-                    endpoint_address,
-                )
-                .await?;
-                crate::server::create_direct_tcp_connection(
+            let result = match establish_incoming(&context, handshake, incoming, ticket).await {
+                Ok((stream, peer_label)) => crate::server::create_direct_tcp_connection(
                     server,
-                    Stream::from_quic(application),
+                    stream,
                     remote_address,
                     None,
                 )
                 .await
-            }
-            .await;
+                .map_err(|error| anyhow!("peer={peer_label}: {error}")),
+                Err(error) => Err(error),
+            };
             if let Err(error) = result {
                 hbb_common::log::warn!(
-                    "QUIC direct session failed: peer={}, address={}, error={}",
-                    peer_label,
+                    "QUIC direct session failed: address={}, error={}",
                     remote_address,
                     error
                 );
             }
         });
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
+struct DirectServerContext {
+    store: FileTrustedPeerStore,
+    identity: DeviceIdentity,
+    authentication_timeout: Duration,
+    establish_deadline: Duration,
+    endpoint_address: SocketAddr,
+    pools: AuthenticationPools,
+}
+
+#[cfg(not(target_os = "ios"))]
+fn establish_deadline(options: &QuicTransportOptions) -> Duration {
+    options
+        .connect_timeout
+        .saturating_add(options.authentication_timeout)
+        .saturating_add(QUIC_ESTABLISH_GRACE)
+}
+
+/// Runs the TLS handshake, device authentication and application setup of one
+/// incoming connection and returns the stream with a peer label for logs.
+///
+/// The pending ticket and the authentication permit cover only this bounded
+/// phase; they are released before the session runs, so sessions waiting for
+/// a login cannot block new peers.
+#[cfg(not(target_os = "ios"))]
+async fn establish_incoming(
+    context: &DirectServerContext,
+    handshake: IncomingHandshake,
+    incoming: Incoming,
+    ticket: PendingTicket,
+) -> ResultType<(Stream, String)> {
+    let result = tokio::time::timeout(context.establish_deadline, async {
+        let connection = handshake
+            .complete(incoming)
+            .await
+            .map_err(|error| match error {
+                QuicTransportError::CertificatePinMismatch
+                | QuicTransportError::MissingPeerCertificate => {
+                    anyhow!("rejected QUIC peer with an untrusted certificate")
+                }
+                error => anyhow!("rejected QUIC TLS handshake: {error}"),
+            })?;
+        let pin = peer_certificate_pin(&connection)
+            .map_err(|error| anyhow!("rejected QUIC peer without a pinned certificate: {error}"))?;
+        let peer = context
+            .store
+            .load_all()?
+            .into_iter()
+            .find(|peer| CertificatePin(peer.certificate_pin) == pin);
+        let peer_label = peer
+            .as_ref()
+            .map(|peer| peer.peer_id.clone())
+            .unwrap_or_else(|| "unpaired".to_owned());
+        let _permit = context.pools.try_acquire(peer.is_some()).ok_or_else(|| {
+            anyhow!("rejected QUIC peer {peer_label}: all authentication slots are busy")
+        })?;
+        let established = async {
+            let authentication = if let Some(peer) = peer.as_ref() {
+                AuthenticatedControlChannel::authenticate_server_discover_session(
+                    connection,
+                    &context.identity,
+                    peer.identity_key,
+                    context.authentication_timeout,
+                )
+                .await?
+            } else {
+                AuthenticatedControlChannel::authenticate_server_discover_peer(
+                    connection,
+                    &context.identity,
+                    context.authentication_timeout,
+                )
+                .await?
+            };
+            QuicApplicationStream::establish(
+                authentication,
+                ApplicationQuicRole::Server,
+                context.endpoint_address,
+            )
+            .await
+        }
+        .await
+        .map_err(|error| anyhow!("peer={peer_label}: {error}"))?;
+        Ok::<_, hbb_common::anyhow::Error>((Stream::from_quic(established), peer_label))
+    })
+    .await;
+    drop(ticket);
+    match result {
+        Ok(result) => result,
+        Err(_) => bail!(
+            "QUIC connection was not established within {:?}",
+            context.establish_deadline
+        ),
     }
 }
 
@@ -563,6 +647,163 @@ mod tests {
         let _ = done_tx.send(());
         task.await.unwrap();
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    struct DirectServerFixture {
+        directory: std::path::PathBuf,
+        config: NetworkTransportConfig,
+        endpoint: QuicServerEndpoint,
+        context: DirectServerContext,
+        admission: admission::HandshakeAdmission,
+    }
+
+    fn direct_server_fixture(values: &[(&str, &str)]) -> DirectServerFixture {
+        let directory =
+            std::env::temp_dir().join(format!("rustadmin-quic-admission-{}", uuid::Uuid::new_v4()));
+        let values = values
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        let mut config =
+            NetworkTransportConfig::from_values(&values, directory.join("viewer-trust")).unwrap();
+        let options = quic_options(&config);
+        let tls = LocalTlsIdentity::load_or_create(directory.join("host-tls")).unwrap();
+        let endpoint = QuicServerEndpoint::bind_provisional(
+            "127.0.0.1:0".parse().unwrap(),
+            tls.credentials().unwrap(),
+            &options,
+        )
+        .unwrap();
+        config.listen_port = endpoint.local_addr().unwrap().port();
+        let (pk, sk) = hbb_common::sodiumoxide::crypto::sign::gen_keypair();
+        let context = DirectServerContext {
+            store: FileTrustedPeerStore::new(directory.join("host-trust")).unwrap(),
+            identity: DeviceIdentity::from_bytes(&sk.0, &pk.0).unwrap(),
+            authentication_timeout: options.authentication_timeout,
+            establish_deadline: establish_deadline(&options),
+            endpoint_address: endpoint.local_addr().unwrap(),
+            pools: AuthenticationPools::default(),
+        };
+        DirectServerFixture {
+            directory,
+            config,
+            endpoint,
+            context,
+            admission: Default::default(),
+        }
+    }
+
+    async fn admit_next(fixture: &DirectServerFixture) -> (Incoming, PendingTicket) {
+        let incoming = fixture.endpoint.accept_incoming().await.unwrap();
+        match fixture.admission.admit(
+            incoming.remote_address().ip(),
+            incoming.remote_address_validated(),
+            incoming.may_retry(),
+        ) {
+            Admission::Admitted(ticket) => (incoming, ticket),
+            Admission::Retry | Admission::Refuse => panic!("first connection was not admitted"),
+        }
+    }
+
+    #[tokio::test]
+    async fn established_first_contacts_release_their_slots_while_sessions_stay_open() {
+        // More idle sessions than first-contact slots: before, each session
+        // kept its slot until it ended, so the last one was refused.
+        let sessions = admission::MAX_FIRST_CONTACT_AUTHENTICATIONS + 1;
+        let fixture = Arc::new(direct_server_fixture(&[]));
+        let host = {
+            let fixture = fixture.clone();
+            tokio::spawn(async move {
+                let mut streams = Vec::new();
+                for _ in 0..sessions {
+                    let (incoming, ticket) = admit_next(&fixture).await;
+                    assert_eq!(fixture.admission.pending(), 1);
+                    let (stream, peer_label) = match establish_incoming(
+                        &fixture.context,
+                        fixture.endpoint.incoming_handshake(),
+                        incoming,
+                        ticket,
+                    )
+                    .await
+                    {
+                        Ok(established) => established,
+                        Err(error) => panic!("first contact failed: {error}"),
+                    };
+                    assert!(stream.is_quic());
+                    assert_eq!(peer_label, "unpaired");
+                    assert_eq!(fixture.admission.pending(), 0);
+                    assert_eq!(
+                        fixture.context.pools.first_contact.available_permits(),
+                        admission::MAX_FIRST_CONTACT_AUTHENTICATIONS
+                    );
+                    streams.push(stream);
+                }
+                streams
+            })
+        };
+        let mut viewer_streams = Vec::new();
+        for _ in 0..sessions {
+            match connect_pretrusted_inner(
+                "first-contact-peer",
+                "127.0.0.1:21118",
+                &fixture.config,
+                true,
+            )
+            .await
+            {
+                Ok(stream) => viewer_streams.push(stream),
+                Err(error) => panic!("viewer connection failed: {}", error.into_error()),
+            }
+        }
+        let host_streams = host.await.unwrap();
+        assert_eq!(host_streams.len(), sessions);
+        drop((host_streams, viewer_streams));
+        std::fs::remove_dir_all(&fixture.directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_authentication_releases_the_pending_slot_and_permit() {
+        let fixture = Arc::new(direct_server_fixture(&[(
+            hbb_common::config::keys::OPTION_QUIC_CONNECT_TIMEOUT_MS,
+            "500",
+        )]));
+        let host = {
+            let fixture = fixture.clone();
+            tokio::spawn(async move {
+                let (incoming, ticket) = admit_next(&fixture).await;
+                let result = establish_incoming(
+                    &fixture.context,
+                    fixture.endpoint.incoming_handshake(),
+                    incoming,
+                    ticket,
+                )
+                .await;
+                assert!(
+                    result.is_err(),
+                    "a peer that never authenticates was accepted"
+                );
+                assert_eq!(fixture.admission.pending(), 0);
+                assert_eq!(
+                    fixture.context.pools.first_contact.available_permits(),
+                    admission::MAX_FIRST_CONTACT_AUTHENTICATIONS
+                );
+            })
+        };
+        // Completes TLS but never sends the device authentication.
+        let viewer_tls =
+            LocalTlsIdentity::load_or_create(fixture.directory.join("viewer-tls")).unwrap();
+        let viewer = QuicClientEndpoint::bind_provisional(
+            "127.0.0.1:0".parse().unwrap(),
+            viewer_tls.credentials().unwrap(),
+            &quic_options(&fixture.config),
+        )
+        .unwrap();
+        let _connection = viewer
+            .connect(fixture.endpoint.local_addr().unwrap())
+            .await
+            .unwrap();
+        host.await.unwrap();
+        std::fs::remove_dir_all(&fixture.directory).unwrap();
     }
 
     #[test]
