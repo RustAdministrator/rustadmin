@@ -146,3 +146,52 @@ impl Drop for KcpStream {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hbb_common::{
+        sodiumoxide::crypto::secretbox,
+        tcp::{NonceMode, SessionRole},
+    };
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn kcp_streams_exchange_frames_in_both_nonce_modes() {
+        let key = secretbox::Key([29; secretbox::KEYBYTES]);
+        let timeout = Duration::from_secs(5);
+        for (viewer_mode, host_mode) in [
+            (NonceMode::Legacy, NonceMode::Legacy),
+            (
+                NonceMode::Directional(SessionRole::Viewer),
+                NonceMode::Directional(SessionRole::Host),
+            ),
+        ] {
+            let host_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            let viewer_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+            host_socket
+                .connect(viewer_socket.local_addr().unwrap())
+                .await
+                .unwrap();
+            viewer_socket
+                .connect(host_socket.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (host, viewer) = tokio::join!(
+                KcpStream::accept(host_socket, timeout, None),
+                KcpStream::connect(viewer_socket, timeout)
+            );
+            let (_host_kcp, mut host) = host.unwrap();
+            let (_viewer_kcp, mut viewer) = viewer.unwrap();
+            viewer.set_key_with_mode(key.clone(), viewer_mode);
+            host.set_key_with_mode(key.clone(), host_mode);
+            let exchange = async {
+                viewer.send_raw(b"viewer-1".to_vec()).await.unwrap();
+                assert_eq!(&host.next().await.unwrap().unwrap()[..], b"viewer-1");
+                host.send_raw(b"host-1".to_vec()).await.unwrap();
+                assert_eq!(&viewer.next().await.unwrap().unwrap()[..], b"host-1");
+            };
+            tokio::time::timeout(timeout, exchange).await.unwrap();
+        }
+    }
+}

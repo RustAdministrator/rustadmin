@@ -317,43 +317,22 @@ async fn create_tcp_connection_with_mode(
             } else {
                 None
             };
+        // Read once so that what we advertise and what we accept match.
+        let secure_channel = crate::common::host_secure_channel();
+        let directional_offered = secure_channel == tcp::SECURE_CHANNEL_DIRECTIONAL;
         let signed_id = match handshake_mode {
             HandshakeMode::Disabled => Bytes::new(),
-            HandshakeMode::Rendezvous => pairing_salt.map_or_else(
-                || {
-                    sign::sign(
-                        &IdPk {
-                            id: Config::get_id(),
-                            pk: Bytes::from(our_pk_b.0.to_vec()),
-                            ..Default::default()
-                        }
-                        .write_to_bytes()
-                        .unwrap_or_default(),
-                        &sk,
-                    )
-                    .into()
-                },
-                |salt| {
-                    crate::common::create_secure_signed_id_with_pairing(
-                        &Config::get_id(),
-                        our_pk_b.0,
-                        &sk,
-                        salt,
-                    )
-                },
-            ),
-            HandshakeMode::Direct => pairing_salt.map_or_else(
-                || crate::common::create_direct_signed_id(&Config::get_id(), our_pk_b.0, &pk, &sk),
-                |salt| {
-                    crate::common::create_direct_signed_id_with_pairing(
-                        &Config::get_id(),
-                        our_pk_b.0,
-                        &pk,
-                        &sk,
-                        salt,
-                    )
-                },
-            ),
+            HandshakeMode::Rendezvous | HandshakeMode::Direct => {
+                crate::common::create_host_signed_id(
+                    handshake_mode == HandshakeMode::Direct,
+                    &Config::get_id(),
+                    our_pk_b.0,
+                    &pk,
+                    &sk,
+                    pairing_salt,
+                    secure_channel,
+                )
+            }
         };
         #[cfg(feature = "quic-transport")]
         let quic_identity = if handshake_mode != HandshakeMode::Disabled {
@@ -428,17 +407,21 @@ async fn create_tcp_connection_with_mode(
                                 );
                             }
                         }
-                        let key = tcp::Encrypt::decode(
+                        let (key, directional) = tcp::Encrypt::decode_session(
                             &public_key_payload.symmetric_value,
                             &public_key.asymmetric_value,
                             &our_sk_b,
+                            directional_offered,
                         )?;
+                        let nonce_mode =
+                            crate::common::session_nonce_mode(directional, tcp::SessionRole::Host);
+                        log::info!("Peer session secretbox nonces: {nonce_mode:?}");
                         if let Some(pairing_salt) = pairing_salt {
                             let remember_paired_viewers =
                                 Config::get_bool_option(keys::OPTION_REMEMBER_PAIRED_VIEWERS);
                             let mut their_pk_b = [0u8; box_::PUBLICKEYBYTES];
                             their_pk_b.copy_from_slice(&public_key.asymmetric_value);
-                            stream.set_key(key);
+                            stream.set_key_with_mode(key, nonce_mode);
                             let mut ack = Message::new();
                             let pairing_scope = match handshake_mode {
                                 HandshakeMode::Direct => Some(crate::common::DIRECT_PAIRING_SCOPE),
@@ -555,14 +538,19 @@ async fn create_tcp_connection_with_mode(
                             });
                             timeout(CONNECT_TIMEOUT, stream.send(&ack)).await??;
                         } else {
-                            stream.set_key(key);
+                            stream.set_key_with_mode(key, nonce_mode);
                         }
                     } else {
-                        stream.set_key(tcp::Encrypt::decode(
+                        let (key, directional) = tcp::Encrypt::decode_session(
                             &public_key.symmetric_value,
                             &public_key.asymmetric_value,
                             &our_sk_b,
-                        )?);
+                            directional_offered,
+                        )?;
+                        let nonce_mode =
+                            crate::common::session_nonce_mode(directional, tcp::SessionRole::Host);
+                        log::info!("Peer session secretbox nonces: {nonce_mode:?}");
+                        stream.set_key_with_mode(key, nonce_mode);
                     }
                 } else if public_key.asymmetric_value.is_empty() {
                     Config::set_key_confirmed(false);

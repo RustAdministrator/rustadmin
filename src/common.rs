@@ -35,7 +35,7 @@ use hbb_common::{
         crypto::{box_, pwhash::argon2id13, secretbox, sign},
         randombytes::randombytes,
     },
-    timeout,
+    tcp, timeout,
     tls::{get_cached_tls_accept_invalid_cert, get_cached_tls_type, upsert_tls_cache, TlsType},
     tokio::{
         self,
@@ -1206,6 +1206,8 @@ pub struct DirectSignedId {
     pub pairing_salt: Option<[u8; argon2id13::SALTBYTES]>,
     pub supports_paired_viewer_identity: bool,
     pub quic_certificate_der: Option<Vec<u8>>,
+    /// `IdPk.secure_channel` from the signed payload.
+    pub secure_channel: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1216,6 +1218,8 @@ pub struct SecureSignedId {
     pub pairing_salt: Option<[u8; argon2id13::SALTBYTES]>,
     pub supports_paired_viewer_identity: bool,
     pub quic_certificate_der: Option<Vec<u8>>,
+    /// `IdPk.secure_channel` from the signed payload.
+    pub secure_channel: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3047,13 +3051,46 @@ pub fn create_secure_signed_id_with_pairing(
     sign_sk: &sign::SecretKey,
     pairing_salt: [u8; argon2id13::SALTBYTES],
 ) -> Bytes {
-    let id_pk = IdPk {
+    sign_secure_id_with_pairing(&encode_id_pk(id, pk, 0), sign_sk, pairing_salt)
+}
+
+fn encode_id_pk(id: &str, pk: [u8; 32], secure_channel: u32) -> Vec<u8> {
+    IdPk {
         id: id.to_owned(),
         pk: Bytes::from(pk.to_vec()),
+        secure_channel,
         ..Default::default()
     }
     .write_to_bytes()
-    .unwrap_or_default();
+    .unwrap_or_default()
+}
+
+/// The signed id a host sends first in a peer handshake, in the format of
+/// its handshake mode. `secure_channel` is advertised inside the signed
+/// `IdPk`; 0 produces exactly what hosts without directional nonces send.
+pub fn create_host_signed_id(
+    direct: bool,
+    id: &str,
+    box_pk: [u8; 32],
+    sign_pk: &[u8],
+    sign_sk: &sign::SecretKey,
+    pairing_salt: Option<[u8; argon2id13::SALTBYTES]>,
+    secure_channel: u32,
+) -> Bytes {
+    let id_pk = encode_id_pk(id, box_pk, secure_channel);
+    match (direct, pairing_salt) {
+        (false, None) => sign::sign(&id_pk, sign_sk).into(),
+        (false, Some(salt)) => sign_secure_id_with_pairing(&id_pk, sign_sk, salt),
+        (true, None) => sign_direct_id(&id_pk, sign_pk, sign_sk),
+        (true, Some(salt)) => sign_direct_id_with_pairing(&id_pk, sign_pk, sign_sk, salt),
+    }
+}
+
+fn sign_secure_id_with_pairing(
+    id_pk: &[u8],
+    sign_sk: &sign::SecretKey,
+    pairing_salt: [u8; argon2id13::SALTBYTES],
+) -> Bytes {
     let mut signed_payload =
         Vec::with_capacity(SECURE_SIGNED_ID_V2_MAGIC.len() + 2 + pairing_salt.len() + id_pk.len());
     signed_payload.extend_from_slice(SECURE_SIGNED_ID_V2_MAGIC);
@@ -3062,7 +3099,7 @@ pub fn create_secure_signed_id_with_pairing(
     );
     signed_payload.push(pairing_salt.len() as u8);
     signed_payload.extend_from_slice(&pairing_salt);
-    signed_payload.extend_from_slice(&id_pk);
+    signed_payload.extend_from_slice(id_pk);
     sign::sign(&signed_payload, sign_sk).into()
 }
 
@@ -3102,6 +3139,7 @@ pub fn decode_secure_signed_id(signed: &[u8], key: &sign::PublicKey) -> ResultTy
             pairing_salt,
             supports_paired_viewer_identity,
             quic_certificate_der: None,
+            secure_channel: res.secure_channel,
         });
     }
     let res = IdPk::parse_from_bytes(&verified)?;
@@ -3115,6 +3153,7 @@ pub fn decode_secure_signed_id(signed: &[u8], key: &sign::PublicKey) -> ResultTy
         pairing_salt: None,
         supports_paired_viewer_identity: false,
         quic_certificate_der: None,
+        secure_channel: res.secure_channel,
     })
 }
 
@@ -3124,18 +3163,13 @@ pub fn create_direct_signed_id(
     sign_pk: &[u8],
     sign_sk: &sign::SecretKey,
 ) -> Bytes {
+    sign_direct_id(&encode_id_pk(id, pk, 0), sign_pk, sign_sk)
+}
+
+fn sign_direct_id(id_pk: &[u8], sign_pk: &[u8], sign_sk: &sign::SecretKey) -> Bytes {
     let mut out = Vec::new();
     out.extend_from_slice(sign_pk);
-    out.extend_from_slice(&sign::sign(
-        &IdPk {
-            id: id.to_owned(),
-            pk: Bytes::from(pk.to_vec()),
-            ..Default::default()
-        }
-        .write_to_bytes()
-        .unwrap_or_default(),
-        sign_sk,
-    ));
+    out.extend_from_slice(&sign::sign(id_pk, sign_sk));
     out.into()
 }
 
@@ -3146,20 +3180,22 @@ pub fn create_direct_signed_id_with_pairing(
     sign_sk: &sign::SecretKey,
     pairing_salt: [u8; argon2id13::SALTBYTES],
 ) -> Bytes {
-    let id_pk = IdPk {
-        id: id.to_owned(),
-        pk: Bytes::from(pk.to_vec()),
-        ..Default::default()
-    }
-    .write_to_bytes()
-    .unwrap_or_default();
+    sign_direct_id_with_pairing(&encode_id_pk(id, pk, 0), sign_pk, sign_sk, pairing_salt)
+}
+
+fn sign_direct_id_with_pairing(
+    id_pk: &[u8],
+    sign_pk: &[u8],
+    sign_sk: &sign::SecretKey,
+    pairing_salt: [u8; argon2id13::SALTBYTES],
+) -> Bytes {
     let mut signed_payload = Vec::with_capacity(2 + pairing_salt.len() + id_pk.len());
     signed_payload.push(
         DIRECT_HANDSHAKE_FLAG_PAIRING_REQUIRED | DIRECT_HANDSHAKE_FLAG_PAIRED_VIEWER_IDENTITY,
     );
     signed_payload.push(pairing_salt.len() as u8);
     signed_payload.extend_from_slice(&pairing_salt);
-    signed_payload.extend_from_slice(&id_pk);
+    signed_payload.extend_from_slice(id_pk);
 
     let mut out = Vec::with_capacity(
         DIRECT_SIGNED_ID_V2_MAGIC.len()
@@ -3322,6 +3358,7 @@ pub fn decode_direct_id_pk(payload: &[u8]) -> ResultType<DirectSignedId> {
             supports_paired_viewer_identity: flags & DIRECT_HANDSHAKE_FLAG_PAIRED_VIEWER_IDENTITY
                 != 0,
             quic_certificate_der: Some(verified[certificate_start..certificate_end].to_vec()),
+            secure_channel: res.secure_channel,
         });
     }
     if payload.starts_with(DIRECT_SIGNED_ID_V2_MAGIC) {
@@ -3370,6 +3407,7 @@ pub fn decode_direct_id_pk(payload: &[u8]) -> ResultType<DirectSignedId> {
             pairing_salt,
             supports_paired_viewer_identity,
             quic_certificate_der: None,
+            secure_channel: res.secure_channel,
         });
     }
     if payload.len() <= sign::PUBLICKEYBYTES {
@@ -3393,6 +3431,7 @@ pub fn decode_direct_id_pk(payload: &[u8]) -> ResultType<DirectSignedId> {
         pairing_salt: None,
         supports_paired_viewer_identity: false,
         quic_certificate_der: None,
+        secure_channel: res.secure_channel,
     })
 }
 
@@ -3453,12 +3492,50 @@ pub fn validate_quic_peer_binding(
 }
 
 pub fn create_symmetric_key_msg(their_pk_b: [u8; 32]) -> (Bytes, Bytes, secretbox::Key) {
+    create_symmetric_key_msg_with_mode(their_pk_b, false)
+}
+
+/// Like `create_symmetric_key_msg`; `directional` selects directional
+/// secretbox nonces by sealing the key followed by the mode byte. Only for
+/// hosts that advertised the mode, see `viewer_selects_directional_secretbox`.
+pub fn create_symmetric_key_msg_with_mode(
+    their_pk_b: [u8; 32],
+    directional: bool,
+) -> (Bytes, Bytes, secretbox::Key) {
     let their_pk_b = box_::PublicKey(their_pk_b);
     let (our_pk_b, out_sk_b) = box_::gen_keypair();
     let key = secretbox::gen_key();
     let nonce = box_::Nonce([0u8; box_::NONCEBYTES]);
-    let sealed_key = box_::seal(&key.0, &nonce, &their_pk_b, &out_sk_b);
+    let mut plaintext = key.0.to_vec();
+    if directional {
+        plaintext.push(tcp::SESSION_KEY_MODE_DIRECTIONAL);
+    }
+    let sealed_key = box_::seal(&plaintext, &nonce, &their_pk_b, &out_sk_b);
+    hbb_common::sodiumoxide::utils::memzero(&mut plaintext);
     (Vec::from(our_pk_b.0).into(), sealed_key.into(), key)
+}
+
+/// `IdPk.secure_channel` value a host advertises in its signed id.
+pub fn host_secure_channel() -> u32 {
+    if config::directional_secretbox_enabled() {
+        tcp::SECURE_CHANNEL_DIRECTIONAL
+    } else {
+        0
+    }
+}
+
+/// Whether a viewer selects directional nonces with a host whose verified
+/// signed id carried `secure_channel`.
+pub fn viewer_selects_directional_secretbox(secure_channel: u32) -> bool {
+    secure_channel == tcp::SECURE_CHANNEL_DIRECTIONAL && config::directional_secretbox_enabled()
+}
+
+pub fn session_nonce_mode(directional: bool, role: tcp::SessionRole) -> tcp::NonceMode {
+    if directional {
+        tcp::NonceMode::Directional(role)
+    } else {
+        tcp::NonceMode::Legacy
+    }
 }
 
 pub fn wrap_direct_public_key_symmetric_value(
@@ -4557,6 +4634,132 @@ mod tests {
     use uuid::Uuid;
 
     static TEST_CONFIG_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Host signed ids in all four formats (rendezvous/direct, with and
+    /// without pairing) and the host's signing key.
+    fn host_signed_ids(secure_channel: u32) -> (sign::PublicKey, Vec<(bool, Bytes)>) {
+        let (sign_pk, sign_sk) = sign::gen_keypair();
+        let salt = [4u8; argon2id13::SALTBYTES];
+        let mut ids = Vec::new();
+        for direct in [false, true] {
+            for pairing_salt in [None, Some(salt)] {
+                let signed_id = create_host_signed_id(
+                    direct,
+                    "host-id",
+                    [3u8; 32],
+                    &sign_pk.0,
+                    &sign_sk,
+                    pairing_salt,
+                    secure_channel,
+                );
+                ids.push((direct, signed_id));
+            }
+        }
+        (sign_pk, ids)
+    }
+
+    fn decode_host_signed_id(
+        sign_pk: &sign::PublicKey,
+        direct: bool,
+        signed_id: &[u8],
+    ) -> ResultType<(String, u32)> {
+        if direct {
+            let id = decode_direct_id_pk(signed_id)?;
+            Ok((id.id, id.secure_channel))
+        } else {
+            let id = decode_secure_signed_id(signed_id, sign_pk)?;
+            Ok((id.id, id.secure_channel))
+        }
+    }
+
+    #[test]
+    fn host_signed_id_without_secure_channel_matches_the_legacy_constructors() {
+        let (sign_pk, sign_sk) = sign::gen_keypair();
+        let box_pk = [3u8; 32];
+        let salt = [4u8; argon2id13::SALTBYTES];
+        let classic: Bytes = sign::sign(
+            &IdPk {
+                id: "host-id".to_owned(),
+                pk: Bytes::from(box_pk.to_vec()),
+                ..Default::default()
+            }
+            .write_to_bytes()
+            .unwrap(),
+            &sign_sk,
+        )
+        .into();
+        let host = |direct, salt| {
+            create_host_signed_id(direct, "host-id", box_pk, &sign_pk.0, &sign_sk, salt, 0)
+        };
+        assert_eq!(host(false, None), classic);
+        assert_eq!(
+            host(false, Some(salt)),
+            create_secure_signed_id_with_pairing("host-id", box_pk, &sign_sk, salt)
+        );
+        assert_eq!(
+            host(true, None),
+            create_direct_signed_id("host-id", box_pk, &sign_pk.0, &sign_sk)
+        );
+        assert_eq!(
+            host(true, Some(salt)),
+            create_direct_signed_id_with_pairing("host-id", box_pk, &sign_pk.0, &sign_sk, salt)
+        );
+    }
+
+    #[test]
+    fn secure_channel_is_advertised_inside_the_signature_of_every_format() {
+        let (sign_pk, signed_ids) = host_signed_ids(tcp::SECURE_CHANNEL_DIRECTIONAL);
+        for (direct, signed_id) in signed_ids {
+            assert_eq!(
+                decode_host_signed_id(&sign_pk, direct, &signed_id).unwrap(),
+                ("host-id".to_owned(), tcp::SECURE_CHANNEL_DIRECTIONAL)
+            );
+            // IdPk ends every signed payload; field 3 adds exactly two bytes
+            // that parsers without the field skip. Removing them (a
+            // downgrade) or setting them on a legacy id (an injection)
+            // breaks the signature.
+            assert_eq!(&signed_id[signed_id.len() - 2..], &[0x18, 0x01]);
+            let stripped = &signed_id[..signed_id.len() - 2];
+            assert!(decode_host_signed_id(&sign_pk, direct, stripped).is_err());
+        }
+        let (sign_pk, signed_ids) = host_signed_ids(0);
+        for (direct, signed_id) in signed_ids {
+            assert_eq!(
+                decode_host_signed_id(&sign_pk, direct, &signed_id)
+                    .unwrap()
+                    .1,
+                0
+            );
+            let mut injected = signed_id.to_vec();
+            injected.extend_from_slice(&[0x18, 0x01]);
+            assert!(decode_host_signed_id(&sign_pk, direct, &injected).is_err());
+        }
+    }
+
+    #[test]
+    fn symmetric_key_message_selects_the_mode_inside_the_box() {
+        let (host_pk, host_sk) = box_::gen_keypair();
+        for directional in [false, true] {
+            let (asymmetric_value, symmetric_value, key) =
+                create_symmetric_key_msg_with_mode(host_pk.0, directional);
+            let (decoded, selected) =
+                tcp::Encrypt::decode_session(&symmetric_value, &asymmetric_value, &host_sk, true)
+                    .unwrap();
+            assert_eq!((decoded.0, selected), (key.0, directional));
+            // Hosts that did not advertise the mode reject the selector.
+            assert_eq!(
+                tcp::Encrypt::decode(&symmetric_value, &asymmetric_value, &host_sk).is_ok(),
+                !directional
+            );
+        }
+        let (asymmetric_value, symmetric_value, key) = create_symmetric_key_msg(host_pk.0);
+        assert_eq!(
+            tcp::Encrypt::decode(&symmetric_value, &asymmetric_value, &host_sk)
+                .unwrap()
+                .0,
+            key.0
+        );
+    }
 
     #[inline]
     fn get_timestamp_secs() -> u128 {
