@@ -360,6 +360,10 @@ class MobileOverlayAppearanceControls extends StatefulWidget {
     required this.onQualityMonitorChanged,
     required this.onQualityMonitorChangeEnd,
     this.toolbarEnabled = true,
+    this.hideToolbarWithKeyboardLabel,
+    this.hideToolbarWithKeyboard = true,
+    this.onHideToolbarWithKeyboardChanged,
+    this.hideToolbarWithKeyboardEnabled = true,
     this.qualityMonitorOpacityEnabled = true,
     this.qualityMonitorDelayEnabled = true,
     this.qualityMonitorDurationEnabled = true,
@@ -379,6 +383,10 @@ class MobileOverlayAppearanceControls extends StatefulWidget {
   final ValueChanged<QualityMonitorFadeSettings> onQualityMonitorChanged;
   final ValueChanged<QualityMonitorFadeSettings> onQualityMonitorChangeEnd;
   final bool toolbarEnabled;
+  final String? hideToolbarWithKeyboardLabel;
+  final bool hideToolbarWithKeyboard;
+  final ValueChanged<bool>? onHideToolbarWithKeyboardChanged;
+  final bool hideToolbarWithKeyboardEnabled;
   final bool qualityMonitorOpacityEnabled;
   final bool qualityMonitorDelayEnabled;
   final bool qualityMonitorDurationEnabled;
@@ -392,12 +400,16 @@ class _MobileOverlayAppearanceControlsState
     extends State<MobileOverlayAppearanceControls> {
   late var _toolbarSettings = widget.toolbarSettings;
   late var _qualityMonitorSettings = widget.qualityMonitorSettings;
+  late var _hideToolbarWithKeyboard = widget.hideToolbarWithKeyboard;
 
   @override
   void didUpdateWidget(covariant MobileOverlayAppearanceControls oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.toolbarSettings != widget.toolbarSettings) {
       _toolbarSettings = widget.toolbarSettings;
+    }
+    if (oldWidget.hideToolbarWithKeyboard != widget.hideToolbarWithKeyboard) {
+      _hideToolbarWithKeyboard = widget.hideToolbarWithKeyboard;
     }
     if (oldWidget.qualityMonitorSettings != widget.qualityMonitorSettings) {
       _qualityMonitorSettings = widget.qualityMonitorSettings;
@@ -453,6 +465,22 @@ class _MobileOverlayAppearanceControlsState
               ? (value) => _updateToolbar(value, commit: true)
               : null,
         ),
+        if (widget.hideToolbarWithKeyboardLabel != null &&
+            widget.onHideToolbarWithKeyboardChanged != null)
+          CheckboxListTile(
+            key: const Key('mobile-toolbar-hide-with-keyboard'),
+            contentPadding: EdgeInsets.zero,
+            visualDensity: VisualDensity.compact,
+            value: _hideToolbarWithKeyboard,
+            title: Text(widget.hideToolbarWithKeyboardLabel!),
+            onChanged: widget.hideToolbarWithKeyboardEnabled
+                ? (value) {
+                    if (value == null) return;
+                    setState(() => _hideToolbarWithKeyboard = value);
+                    widget.onHideToolbarWithKeyboardChanged!(value);
+                  }
+                : null,
+          ),
         const Divider(),
         Text(
           widget.qualityMonitorTitle,
@@ -585,6 +613,37 @@ class _MobileCursorInertiaControlState
     );
   }
 }
+
+/// Whether the floating mobile toolbar is shown for the current soft keyboard
+/// state. Hiding it while the keyboard is open is the default, but optional.
+bool mobileRemoteToolbarVisibleWithKeyboard({
+  required bool keyboardVisible,
+  required bool hideWithKeyboard,
+}) => !keyboardVisible || !hideWithKeyboard;
+
+/// Height kept free at the bottom of the toolbar area while the soft keyboard
+/// is open, so the toolbar does not cover the modifier key row or the
+/// keyboard collapse button.
+double mobileRemoteToolbarKeyboardBottomReserve({
+  required bool keyboardVisible,
+  required double keyHelpToolsHeight,
+  required bool collapseButtonVisible,
+}) {
+  if (!keyboardVisible) return 0;
+  final keyHelpTools = keyHelpToolsHeight.isFinite && keyHelpToolsHeight > 0
+      ? keyHelpToolsHeight
+      : 0.0;
+  // Matches the lifted end-float button used while the keyboard is open.
+  final collapseButton = collapseButtonVisible
+      ? kFloatingActionButtonMargin +
+            kMobileRemoteKeyboardCollapseButtonLift +
+            kMobileRemoteKeyboardCollapseButtonSize
+      : 0.0;
+  return keyHelpTools > collapseButton ? keyHelpTools : collapseButton;
+}
+
+const double kMobileRemoteKeyboardCollapseButtonLift = 35;
+const double kMobileRemoteKeyboardCollapseButtonSize = 56;
 
 Rect mobileRemoteToolbarOverlapRect({
   required Rect toolbarRect,

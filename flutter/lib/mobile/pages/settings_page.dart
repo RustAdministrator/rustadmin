@@ -2100,6 +2100,9 @@ class _CompactDisplaySettingsState extends State<_CompactDisplaySettings> {
         MobileRemoteSettingsRegistry.toolbarOverlapDefault,
       ),
     );
+    final hideToolbarWithKeyboard = mobileRemoteDefaults.read(
+      MobileRemoteSettingsRegistry.hideToolbarWithKeyboard,
+    );
     var activeQualityMonitorSettings = qualityMonitorSettings.read();
 
     return Padding(
@@ -2238,6 +2241,19 @@ class _CompactDisplaySettingsState extends State<_CompactDisplaySettings> {
               qualityMonitorSettings: activeQualityMonitorSettings,
               toolbarEnabled: !isOptionFixed(
                 kOptionMobileRemoteToolbarOverlapOpacityPercent,
+              ),
+              hideToolbarWithKeyboardLabel: translate(
+                'Hide toolbar when keyboard is shown',
+              ),
+              hideToolbarWithKeyboard: hideToolbarWithKeyboard,
+              hideToolbarWithKeyboardEnabled: !isOptionFixed(
+                kOptionMobileRemoteToolbarHideWithKeyboard,
+              ),
+              onHideToolbarWithKeyboardChanged: (value) => unawaited(
+                mobileRemoteDefaults.write(
+                  MobileRemoteSettingsRegistry.hideToolbarWithKeyboard,
+                  value,
+                ),
               ),
               qualityMonitorOpacityEnabled: !isOptionFixed(
                 kOptionQualityMonitorInactiveOpacityPercent,

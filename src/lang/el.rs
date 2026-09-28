@@ -762,5 +762,6 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Modern", "Μοντέρνο"),
         ("Classic", "Κλασικό"),
         ("Diagnostics", "Διαγνωστικά"),
+        ("Hide toolbar when keyboard is shown", "Απόκρυψη γραμμής εργαλείων όταν εμφανίζεται το πληκτρολόγιο"),
     ].iter().cloned().collect();
 }

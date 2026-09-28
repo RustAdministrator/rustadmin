@@ -227,6 +227,8 @@ const String kOptionMobileRemoteToolbarOverlapOpacityPercent =
     "mobile-remote-toolbar-minimum-opacity-percent";
 const String kOptionMobileRemoteToolbarPlacement =
     "mobile-remote-toolbar-placement";
+const String kOptionMobileRemoteToolbarHideWithKeyboard =
+    "mobile-remote-toolbar-hide-with-keyboard";
 const String kOptionMobileCursorInertiaDurationMs =
     "mobile-cursor-inertia-duration-ms";
 const String kOptionMobilePhysicalKeyInput = "mobile-physical-key-input";

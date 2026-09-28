@@ -762,5 +762,6 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Modern", "Modern"),
         ("Classic", "Klassisch"),
         ("Diagnostics", "Diagnose"),
+        ("Hide toolbar when keyboard is shown", "Symbolleiste ausblenden, wenn die Tastatur angezeigt wird"),
     ].iter().cloned().collect();
 }
