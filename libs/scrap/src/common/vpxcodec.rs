@@ -39,6 +39,7 @@ pub struct VpxEncoder {
     id: VpxVideoCodecId,
     i444: bool,
     yuvfmt: EncodeYuvFormat,
+    force_keyframe: bool,
 }
 
 pub struct VpxDecoder {
@@ -165,6 +166,7 @@ impl EncoderApi for VpxEncoder {
                     id: config.codec,
                     i444,
                     yuvfmt: Self::get_yuvfmt(config.width, config.height, i444),
+                    force_keyframe: false,
                 })
             }
             _ => Err(anyhow!("encoder type mismatch")),
@@ -215,6 +217,11 @@ impl EncoderApi for VpxEncoder {
         c.rc_target_bitrate
     }
 
+    fn request_keyframe(&mut self) -> bool {
+        self.force_keyframe = true;
+        true
+    }
+
     fn support_changing_quality(&self) -> bool {
         true
     }
@@ -255,14 +262,21 @@ impl VpxEncoder {
             data.as_ptr() as _,
         ));
 
+        let flags = if self.force_keyframe {
+            VPX_EFLAG_FORCE_KF
+        } else {
+            0
+        };
         call_vpx!(vpx_codec_encode(
             &mut self.ctx,
             &image,
             pts as _,
             1, // Duration
-            0, // Flags
+            flags as _,
             VPX_DL_REALTIME as _,
         ));
+        // Cleared only after a successful call so a failed encode keeps the request.
+        self.force_keyframe = false;
 
         Ok(EncodeFrames {
             ctx: &mut self.ctx,
@@ -600,3 +614,47 @@ impl Drop for Image {
 }
 
 unsafe impl Send for vpx_codec_ctx_t {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::EncoderCfg;
+
+    #[test]
+    fn requested_keyframe_is_encoded_in_place() {
+        let (width, height) = (320usize, 240usize);
+        let mut encoder = VpxEncoder::new(
+            EncoderCfg::VPX(VpxEncoderConfig {
+                width: width as _,
+                height: height as _,
+                quality: 1.0,
+                fps: 30,
+                codec: VpxVideoCodecId::VP9,
+                keyframe_interval: None,
+            }),
+            false,
+        )
+        .unwrap();
+        let bitrate = encoder.bitrate();
+        let input = vec![128u8; width * height * 3 / 2];
+        let mut encode = |encoder: &mut VpxEncoder, index: i64| -> Option<bool> {
+            let mut key = None;
+            for frame in encoder.encode(index * 33, &input, 1).unwrap() {
+                *key.get_or_insert(false) |= frame.key;
+            }
+            for frame in encoder.flush().unwrap() {
+                *key.get_or_insert(false) |= frame.key;
+            }
+            key
+        };
+        assert_eq!(encode(&mut encoder, 0), Some(true), "first frame is a keyframe");
+        for index in 1..4 {
+            // Static deltas may be dropped by rate control, but never keyframes.
+            assert_ne!(encode(&mut encoder, index), Some(true), "frame {index}");
+        }
+        assert!(encoder.request_keyframe());
+        assert_eq!(encode(&mut encoder, 4), Some(true), "requested keyframe");
+        assert_ne!(encode(&mut encoder, 5), Some(true), "only one keyframe is forced");
+        assert_eq!(encoder.bitrate(), bitrate, "rate control is kept");
+    }
+}

@@ -73,6 +73,7 @@ pub struct AomEncoder {
     height: usize,
     i444: bool,
     yuvfmt: EncodeYuvFormat,
+    force_keyframe: bool,
 }
 
 // https://webrtc.googlesource.com/src/+/refs/heads/main/modules/video_coding/codecs/av1/libaom_av1_encoder.cc
@@ -315,6 +316,11 @@ impl EncoderApi for AomEncoder {
         Ok(())
     }
 
+    fn request_keyframe(&mut self) -> bool {
+        self.force_keyframe = true;
+        true
+    }
+
     fn bitrate(&self) -> u32 {
         let c = unsafe { *self.ctx.config.enc.to_owned() };
         c.rc_target_bitrate
@@ -369,6 +375,7 @@ impl AomEncoder {
             height: config.height as _,
             i444,
             yuvfmt: Self::get_yuvfmt(config.width, config.height, i444),
+            force_keyframe: false,
         })
     }
 
@@ -429,13 +436,20 @@ impl AomEncoder {
         ));
         let pts = webrtc::kTimeBaseDen / 1000 * ms;
         let duration = webrtc::kTimeBaseDen / 1000;
+        let flags = if self.force_keyframe {
+            AOM_EFLAG_FORCE_KF
+        } else {
+            0
+        };
         call_aom!(aom_codec_encode(
             &mut self.ctx,
             &image,
             pts as _,
             duration as _, // Duration
-            0,             // Flags
+            flags as _,
         ));
+        // Cleared only after a successful call so a failed encode keeps the request.
+        self.force_keyframe = false;
 
         Ok(EncodeFrames {
             ctx: &mut self.ctx,
@@ -765,6 +779,62 @@ mod tests {
         };
         assert_eq!(result, aom_codec_err_t::AOM_CODEC_OK);
         info
+    }
+
+    #[test]
+    fn requested_keyframe_is_encoded_in_place() {
+        let (width, height) = (1920u32, 1080u32);
+        let mut encoder = AomEncoder::new_with_tuning(
+            AomEncoderConfig {
+                width,
+                height,
+                quality: 1.0,
+                fps: 30,
+                keyframe_interval: None,
+            },
+            false,
+            AomEncoderTuning {
+                threads: Some(4),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let bitrate = encoder.bitrate();
+        let input = vec![128u8; (width * height * 3 / 2) as usize];
+        let mut encode = |encoder: &mut AomEncoder, index: i64| -> (bool, Vec<Vec<u8>>) {
+            let mut key = false;
+            let mut packets = Vec::new();
+            for frame in encoder.encode(index * 33, &input, 1).unwrap() {
+                key |= frame.key;
+                packets.push(frame.data.to_vec());
+            }
+            (key, packets)
+        };
+        assert!(encode(&mut encoder, 0).0, "the first frame is a keyframe");
+        for index in 1..4 {
+            assert!(!encode(&mut encoder, index).0, "frame {index} is a delta");
+        }
+        assert!(encoder.request_keyframe());
+        let (key, packets) = encode(&mut encoder, 4);
+        assert!(key, "the requested frame is a keyframe");
+        assert!(!encode(&mut encoder, 5).0, "only one keyframe is forced");
+        assert_eq!(encoder.bitrate(), bitrate, "rate control is kept");
+
+        // The forced keyframe keeps the tile layout of a fresh encoder.
+        let mut decoder = AomDecoder::new().unwrap();
+        for packet in &packets {
+            assert_eq!(decoder.decode(packet).unwrap().count(), 1);
+        }
+        let mut info: aom_tile_info = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            aom_codec_control(
+                &mut decoder.ctx,
+                aom_dec_control_id::AOMD_GET_TILE_INFO as i32,
+                &mut info as *mut aom_tile_info,
+            )
+        };
+        assert_eq!(result, aom_codec_err_t::AOM_CODEC_OK);
+        assert_eq!((info.tile_columns, info.tile_rows), (4, 1));
     }
 
     #[test]
