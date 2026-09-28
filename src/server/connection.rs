@@ -1409,6 +1409,8 @@ pub struct Connection {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     start_cm_ipc_para: Option<StartCmIpcPara>,
     auto_disconnect_timer: Option<(Instant, u64)>,
+    /// Set for QUIC sessions when `quic-prelogin-timeout-secs` is configured.
+    prelogin_deadline: Option<Instant>,
     authed_conn_id: Option<self::raii::AuthedConnID>,
     session_auth_kind: SessionAuthKind,
     file_remove_log_control: FileRemoveLogControl,
@@ -1507,6 +1509,20 @@ const SEND_TIMEOUT_VIDEO_STARTUP: u64 = 60_000;
 const VIDEO_STARTUP_SEND_TIMEOUT_WINDOW: Duration = Duration::from_secs(60);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Deadline for a QUIC session to become authorized when the host set
+/// `quic-prelogin-timeout-secs`; by default sessions may wait indefinitely,
+/// e.g. for a password or for the user to accept them.
+fn quic_prelogin_deadline(now: Instant) -> Option<Instant> {
+    let timeout = hbb_common::transport::configuration::NetworkTransportConfig::load()
+        .ok()?
+        .prelogin_timeout?;
+    now.checked_add(timeout)
+}
+
+fn prelogin_expired(authorized: bool, deadline: Option<Instant>, now: Instant) -> bool {
+    !authorized && deadline.map_or(false, |deadline| now >= deadline)
+}
+
 fn steady_send_timeout_ms(file_transfer: bool, port_forward: bool, terminal: bool) -> u64 {
     if file_transfer || port_forward || terminal {
         SEND_TIMEOUT_OTHER
@@ -1574,6 +1590,11 @@ impl Connection {
         #[cfg(target_os = "android")]
         let control_permissions = None;
         let _raii_id = raii::ConnectionID::new(id);
+        let prelogin_deadline = if stream.is_quic() {
+            quic_prelogin_deadline(Instant::now())
+        } else {
+            None
+        };
         let stream = stream
             .into_duplex_with_context(SERVER_ASYNC_OUTBOX_CAPACITY, format!("host_conn={id}"));
         let _raii_control_permissions_id =
@@ -1688,6 +1709,7 @@ impl Connection {
                 tx_cm_stream_ready,
             }),
             auto_disconnect_timer: None,
+            prelogin_deadline,
             authed_conn_id: None,
             session_auth_kind: SessionAuthKind::Unknown,
             file_remove_log_control: FileRemoveLogControl::new(id),
@@ -2326,6 +2348,15 @@ impl Connection {
                     #[cfg(windows)]
                     conn.portable_check();
                     raii::AuthedConnID::check_wake_lock_on_setting_changed();
+                    if prelogin_expired(conn.authorized, conn.prelogin_deadline, Instant::now()) {
+                        log::warn!(
+                            "#{} QUIC session was not authorized within the pre-login timeout",
+                            conn.inner.id()
+                        );
+                        conn.send_close_reason_no_retry("Login timed out").await;
+                        conn.on_close("Pre-login timeout", true).await;
+                        break;
+                    }
                     if let Some((instant, minute)) = conn.auto_disconnect_timer.as_ref() {
                         if instant.elapsed().as_secs() > minute * 60 {
                             conn.send_close_reason_no_retry("Connection failed due to inactivity").await;
@@ -9012,6 +9043,16 @@ mod raii {
 mod test {
     #[allow(unused)]
     use super::*;
+
+    #[test]
+    fn prelogin_deadline_only_closes_unauthorized_sessions_after_it_passes() {
+        let now = Instant::now();
+        let deadline = now + Duration::from_secs(30);
+        assert!(!prelogin_expired(false, None, now + H1));
+        assert!(!prelogin_expired(false, Some(deadline), now));
+        assert!(prelogin_expired(false, Some(deadline), deadline));
+        assert!(!prelogin_expired(true, Some(deadline), deadline + H1));
+    }
 
     #[test]
     fn cursor_tracking_follows_control_or_explicit_visibility() {
