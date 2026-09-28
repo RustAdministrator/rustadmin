@@ -601,15 +601,6 @@ pub mod server {
         }
     }
 
-    fn capture_desktop_state() -> (bool, bool, bool, bool) {
-        (
-            crate::platform::windows::is_prelogin(),
-            crate::platform::windows::is_locked(),
-            crate::platform::windows::desktop_changed(),
-            crate::platform::windows::is_logon_ui_for_capture(),
-        )
-    }
-
     fn sampled_bgr_sum(data: &[u8]) -> u64 {
         let pixels = data.len() / 4;
         if pixels == 0 {
@@ -669,7 +660,7 @@ pub mod server {
                     }
                 }
                 if c.is_none() {
-                    let (prelogin, locked, desktop_changed, logon_ui) = capture_desktop_state();
+                    let desktop_state = crate::platform::windows::capture_desktop_state();
                     let Ok(mut displays) = display_service::try_get_displays() else {
                         log::error!("Failed to get displays");
                         *EXIT.lock().unwrap() = true;
@@ -685,25 +676,23 @@ pub mod server {
                     display_height = display.height();
                     match Capturer::new(display) {
                         Ok(mut v) => {
-                            let force_gdi = force_gdi_after_rebind
-                                || prelogin
-                                || locked
-                                || desktop_changed
-                                || logon_ui;
+                            let force_gdi =
+                                force_gdi_after_rebind || desktop_state.requires_secure_capture();
                             let mut forced_gdi = false;
                             if force_gdi || dxgi_failed_times > MAX_DXGI_FAIL_TIME {
                                 dxgi_failed_times = 0;
                                 forced_gdi = v.set_gdi();
                             }
                             log::info!(
-                                "portable service capture created: display={}, size={}x{}, prelogin={}, locked={}, desktop_changed={}, logon_ui={}, force_gdi={}, forced_gdi={}, backend={}, is_gdi={}",
+                                "portable service capture created: display={}, size={}x{}, prelogin={}, locked={}, desktop_changed={}, logon_ui={}, input_desktop={}, force_gdi={}, forced_gdi={}, backend={}, is_gdi={}",
                                 current_display,
                                 display_width,
                                 display_height,
-                                prelogin,
-                                locked,
-                                desktop_changed,
-                                logon_ui,
+                                desktop_state.prelogin,
+                                desktop_state.locked,
+                                desktop_state.desktop_changed,
+                                desktop_state.logon_ui,
+                                desktop_state.input_desktop.as_str(),
                                 force_gdi,
                                 forced_gdi,
                                 v.capture_backend(),
@@ -937,6 +926,7 @@ pub mod server {
 pub mod client {
     use super::*;
     use crate::display_service;
+    use crate::platform::windows_desktop::CaptureDesktopState;
     use hbb_common::{anyhow::Context, message_proto::PointerDeviceEvent};
     use scrap::PixelBuffer;
 
@@ -1093,12 +1083,9 @@ pub mod client {
 
     fn should_use_helper_capture_for_desktop_state(
         portable_service_running: bool,
-        prelogin: bool,
-        locked: bool,
-        desktop_changed: bool,
-        logon_ui: bool,
+        desktop_state: CaptureDesktopState,
     ) -> bool {
-        portable_service_running && (prelogin || locked || desktop_changed || logon_ui)
+        portable_service_running && desktop_state.requires_secure_capture()
     }
 
     pub(crate) fn start_para_for_quick_support_process(elevated: bool) -> StartPara {
@@ -2125,24 +2112,16 @@ pub mod client {
                 lifecycle()
             );
         }
-        let prelogin = crate::platform::windows::is_prelogin();
-        let locked = crate::platform::windows::is_locked();
-        let desktop_changed = crate::platform::windows::desktop_changed();
-        let logon_ui = crate::platform::windows::is_logon_ui_for_capture();
-        if should_use_helper_capture_for_desktop_state(
-            portable_service_running,
-            prelogin,
-            locked,
-            desktop_changed,
-            logon_ui,
-        ) {
+        let desktop_state = crate::platform::windows::capture_desktop_state();
+        if should_use_helper_capture_for_desktop_state(portable_service_running, desktop_state) {
             log::info!(
-                "Portable secure desktop capture: use SYSTEM helper shared-memory capturer, display={}, prelogin={}, locked={}, desktop_changed={}, logon_ui={}",
+                "Portable secure desktop capture: use SYSTEM helper shared-memory capturer, display={}, prelogin={}, locked={}, desktop_changed={}, logon_ui={}, input_desktop={}",
                 current_display,
-                prelogin,
-                locked,
-                desktop_changed,
-                logon_ui
+                desktop_state.prelogin,
+                desktop_state.locked,
+                desktop_state.desktop_changed,
+                desktop_state.logon_ui,
+                desktop_state.input_desktop.as_str()
             );
             if !helper_ready {
                 bail!("portable service IPC is not ready for secure capture");
@@ -2248,6 +2227,7 @@ pub mod client {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::platform::windows_desktop::InputDesktopClassification;
         use std::sync::Mutex;
 
         static TEST_STATE_LOCK: Mutex<()> = Mutex::new(());
@@ -2438,24 +2418,71 @@ pub mod client {
 
         #[test]
         fn test_portable_helper_capture_only_for_secure_or_changed_desktop() {
+            let ordinary = CaptureDesktopState::new(
+                false,
+                false,
+                false,
+                false,
+                InputDesktopClassification::Default,
+            );
             assert!(!should_use_helper_capture_for_desktop_state(
-                false, true, true, true, true
+                false, ordinary
             ));
-            assert!(!should_use_helper_capture_for_desktop_state(
-                true, false, false, false, false
-            ));
-            assert!(should_use_helper_capture_for_desktop_state(
-                true, true, false, false, false
-            ));
-            assert!(should_use_helper_capture_for_desktop_state(
-                true, false, true, false, false
-            ));
-            assert!(should_use_helper_capture_for_desktop_state(
-                true, false, false, true, false
-            ));
-            assert!(should_use_helper_capture_for_desktop_state(
-                true, false, false, false, true
-            ));
+            assert!(!should_use_helper_capture_for_desktop_state(true, ordinary));
+
+            for secure_state in [
+                CaptureDesktopState::new(
+                    true,
+                    false,
+                    false,
+                    false,
+                    InputDesktopClassification::Default,
+                ),
+                CaptureDesktopState::new(
+                    false,
+                    true,
+                    false,
+                    false,
+                    InputDesktopClassification::Default,
+                ),
+                CaptureDesktopState::new(
+                    false,
+                    false,
+                    true,
+                    false,
+                    InputDesktopClassification::Default,
+                ),
+                CaptureDesktopState::new(
+                    false,
+                    false,
+                    false,
+                    true,
+                    InputDesktopClassification::Default,
+                ),
+                CaptureDesktopState::new(
+                    false,
+                    false,
+                    false,
+                    false,
+                    InputDesktopClassification::NonDefault,
+                ),
+                CaptureDesktopState::new(
+                    false,
+                    false,
+                    false,
+                    false,
+                    InputDesktopClassification::Unknown,
+                ),
+            ] {
+                assert!(!should_use_helper_capture_for_desktop_state(
+                    false,
+                    secure_state
+                ));
+                assert!(should_use_helper_capture_for_desktop_state(
+                    true,
+                    secure_state
+                ));
+            }
         }
 
         #[cfg(windows)]

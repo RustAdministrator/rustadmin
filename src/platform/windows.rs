@@ -101,6 +101,10 @@ use windows_service::{
 };
 use winreg::{enums::*, RegKey};
 
+pub use super::windows_desktop::{
+    input_desktop_classification, CaptureDesktopState, InputDesktopClassification,
+};
+
 mod acl;
 pub(crate) use acl::current_process_user_sid_string;
 pub use acl::{
@@ -1279,6 +1283,16 @@ pub fn desktop_changed() -> bool {
     unsafe { inputDesktopSelected() == FALSE }
 }
 
+pub fn capture_desktop_state() -> CaptureDesktopState {
+    CaptureDesktopState::new(
+        is_prelogin(),
+        is_locked(),
+        desktop_changed(),
+        is_logon_ui_for_capture(),
+        input_desktop_classification(),
+    )
+}
+
 pub fn try_change_desktop() -> bool {
     unsafe {
         if inputDesktopSelected() == FALSE {
@@ -1314,8 +1328,9 @@ pub fn log_lock_screen_state(context: &str) {
         Err(err) => format!("error: {err}"),
     };
     let username = get_current_session_username().unwrap_or_else(|| "<unknown>".to_owned());
+    let input_desktop = input_desktop_classification();
     log::info!(
-        "windows lock/logon state [{}]: installed={}, root={}, share_rdp={}, active_session={}, process_session={:?}, username={}, prelogin={}, locked={}, logon_ui={}, desktop_changed={}",
+        "windows lock/logon state [{}]: installed={}, root={}, share_rdp={}, active_session={}, process_session={:?}, username={}, prelogin={}, locked={}, logon_ui={}, desktop_changed={}, input_desktop={}",
         context,
         is_installed(),
         is_root(),
@@ -1327,6 +1342,7 @@ pub fn log_lock_screen_state(context: &str) {
         locked,
         logon_ui,
         desktop_changed(),
+        input_desktop.as_str(),
     );
 }
 
