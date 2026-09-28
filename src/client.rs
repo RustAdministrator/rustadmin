@@ -2962,6 +2962,11 @@ impl VideoHandler {
     }
 
     fn recover_decoder_if_due(&mut self, now: std::time::Instant) -> Option<usize> {
+        if self.recovery.take_refresh_request() {
+            // The backend was replaced in place; only a reference frame is
+            // needed, so attempt 0 keeps the current decoder.
+            return Some(0);
+        }
         let attempt = self.recovery.take_due(now)?;
         if attempt > 1 {
             self.decoder_fallback = self.decoder_fallback.saturating_add(1);
@@ -3037,6 +3042,15 @@ impl VideoHandler {
                         self.recovery.succeeded();
                         self.decode_wait_counter = 0;
                         self.first_frame = false;
+                    }
+                    Ok(DecodeOutcome::NeedsKeyframe) => {
+                        log::warn!(
+                            "video decoder backend switched mid-stream; requesting a keyframe: display={}, format={:?}, backend={}",
+                            self._display,
+                            self.decoder.format(),
+                            self.decoder.backend()
+                        );
+                        self.recovery.backend_switched(std::time::Instant::now());
                     }
                     Ok(DecodeOutcome::OutputPending | DecodeOutcome::InputBackpressure) => {
                         self.recovery.pending(std::time::Instant::now());
@@ -5114,6 +5128,10 @@ pub fn start_video_thread<F, T>(
                                 }
                                 Err(e) => {
                                     log::warn!("display {display} decode failed; scheduling local recovery: {e}");
+                                }
+                                Ok(DecodeOutcome::NeedsKeyframe) => {
+                                    *decoder_backend.write().unwrap() =
+                                        Some(handler.decoder_backend());
                                 }
                                 Ok(
                                     DecodeOutcome::OutputPending | DecodeOutcome::InputBackpressure,
