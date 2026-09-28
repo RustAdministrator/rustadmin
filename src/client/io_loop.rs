@@ -2681,6 +2681,13 @@ impl<T: InvokeUiSession> Remote<T> {
                         drop(video_queue);
                         if dropped_frames > 0 {
                             if movie_mode {
+                                // The queued deltas reference the dropped ones;
+                                // decode again only from the requested keyframe.
+                                client::start_movie_keyframe_wait(
+                                    &thread.discard_queue,
+                                    &thread.movie_keyframe_wait,
+                                    std::time::Instant::now(),
+                                );
                                 if !client::recover_movie_queue_drops(
                                     &self.handler,
                                     &thread.video_feedback,
@@ -2689,7 +2696,6 @@ impl<T: InvokeUiSession> Remote<T> {
                                     dropped_frames,
                                     "arrival-overflow",
                                 ) {
-                                    *thread.discard_queue.write().unwrap() = true;
                                     self.handler.refresh_video(display as _);
                                 }
                             } else {
@@ -3932,6 +3938,8 @@ impl<T: InvokeUiSession> Remote<T> {
         let movie_mode = Arc::new(AtomicBool::new(false));
         let newest_capture_time_ms = Arc::new(AtomicU64::new(0));
         let movie_queue_refresh = Arc::new(std::sync::Mutex::new(None));
+        let movie_keyframe_wait =
+            Arc::new(std::sync::Mutex::new(client::MovieKeyframeWait::default()));
         let video_feedback = Arc::new(std::sync::Mutex::new(
             client::VideoFeedbackTracker::default(),
         ));
@@ -3951,6 +3959,7 @@ impl<T: InvokeUiSession> Remote<T> {
             movie_mode: movie_mode.clone(),
             newest_capture_time_ms: newest_capture_time_ms.clone(),
             movie_queue_refresh: movie_queue_refresh.clone(),
+            movie_keyframe_wait: movie_keyframe_wait.clone(),
         };
         let handler = self.handler.ui_handler.clone();
         let connection_generation = self.connection_round;
@@ -3970,6 +3979,7 @@ impl<T: InvokeUiSession> Remote<T> {
             movie_mode,
             newest_capture_time_ms,
             movie_queue_refresh,
+            movie_keyframe_wait,
             move |display: usize,
                   stream_id: u64,
                   frame_id: u64,
@@ -4097,6 +4107,7 @@ struct VideoThread {
     movie_mode: Arc<AtomicBool>,
     newest_capture_time_ms: Arc<AtomicU64>,
     movie_queue_refresh: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    movie_keyframe_wait: Arc<std::sync::Mutex<client::MovieKeyframeWait>>,
     fps_control: FpsControl,
 }
 
