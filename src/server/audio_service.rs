@@ -16,10 +16,14 @@ use super::*;
 #[cfg(not(any(target_os = "linux", target_os = "android")))]
 use hbb_common::anyhow::anyhow;
 use magnum_opus::{Application::*, Channels::*, Encoder};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 
 pub const NAME: &'static str = "audio";
 pub const AUDIO_DATA_SIZE_U8: usize = 960 * 4; // 10ms in 48000 stereo
+#[cfg(target_os = "android")]
+const ANDROID_OPUS_FRAME_SAMPLES: usize = AUDIO_DATA_SIZE_U8 / 4;
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+const INPUT_QUEUE_CHUNKS: usize = 32;
 static RESTARTING: AtomicBool = AtomicBool::new(false);
 
 lazy_static::lazy_static! {
@@ -80,6 +84,7 @@ mod pa_impl {
     use super::*;
 
     // SAFETY: constrains of hbb_common::mem::aligned_u8_vec must be held
+    #[cfg(target_os = "linux")]
     unsafe fn align_to_32(data: Vec<u8>) -> Vec<u8> {
         if (data.as_ptr() as usize & 3) == 0 {
             return data;
@@ -97,9 +102,7 @@ mod pa_impl {
         RESTARTING.store(false, Ordering::SeqCst);
         #[cfg(target_os = "linux")]
         let mut stream = crate::ipc::connect(1000, "_pa").await?;
-        unsafe {
-            AUDIO_ZERO_COUNT = 0;
-        }
+        AUDIO_ZERO_COUNT.store(0, Ordering::Relaxed);
         let mut encoder = Encoder::new(crate::platform::PA_SAMPLE_RATE, Stereo, LowDelay)?;
         #[cfg(target_os = "linux")]
         allow_err!(
@@ -113,7 +116,7 @@ mod pa_impl {
         #[cfg(target_os = "linux")]
         let zero_audio_frame: Vec<f32> = vec![0.; AUDIO_DATA_SIZE_U8 / 4];
         #[cfg(target_os = "android")]
-        let mut android_data = vec![];
+        let mut android_frame = vec![0f32; ANDROID_OPUS_FRAME_SAMPLES];
         while sp.ok() && !RESTARTING.load(Ordering::SeqCst) {
             sp.snapshot(|sps| {
                 sps.send(create_format_msg(crate::platform::PA_SAMPLE_RATE, 2));
@@ -139,17 +142,17 @@ mod pa_impl {
             }
 
             #[cfg(target_os = "android")]
-            if scrap::android::ffi::get_audio_raw(&mut android_data, &mut vec![]).is_some() {
-                let data = unsafe {
-                    android_data = align_to_32(android_data);
-                    std::slice::from_raw_parts::<f32>(
-                        android_data.as_ptr() as _,
-                        android_data.len() / 4,
-                    )
-                };
-                send_f32(data, &mut encoder, &sp);
-            } else {
-                hbb_common::sleep(0.1).await;
+            {
+                let mut sent = false;
+                while scrap::android::ffi::take_audio_frame(&mut android_frame) {
+                    send_f32(&android_frame, &mut encoder, &sp);
+                    sent = true;
+                }
+                if !sent {
+                    // Chunks arrive every 10 ms; poll at that cadence instead of
+                    // sleeping long enough to back up the capture queue.
+                    hbb_common::sleep(0.01).await;
+                }
             }
         }
         Ok(())
@@ -175,7 +178,6 @@ mod cpal_impl {
 
     lazy_static::lazy_static! {
         static ref HOST: Host = cpal::default_host();
-        static ref INPUT_BUFFER: Arc<Mutex<std::collections::VecDeque<f32>>> = Default::default();
     }
 
     #[cfg(feature = "screencapturekit")]
@@ -232,31 +234,6 @@ mod cpal_impl {
         } else {
             run_restart(sp, state)
         }
-    }
-
-    fn send(
-        data: Vec<f32>,
-        sample_rate0: u32,
-        sample_rate: u32,
-        device_channel: u16,
-        encode_channel: u16,
-        encoder: &mut Encoder,
-        sp: &GenericService,
-    ) {
-        let mut data = data;
-        if sample_rate0 != sample_rate {
-            data = crate::common::audio_resample(&data, sample_rate0, sample_rate, device_channel);
-        }
-        if device_channel != encode_channel {
-            data = crate::common::audio_rechannel(
-                data,
-                sample_rate,
-                sample_rate,
-                device_channel,
-                encode_channel,
-            )
-        }
-        send_f32(&data, encoder, sp);
     }
 
     #[cfg(feature = "screencapturekit")]
@@ -350,19 +327,7 @@ mod cpal_impl {
         use cpal::SampleFormat::*;
         let (device, config) = get_device()?;
         let sp = sp.clone();
-        // Sample rate must be one of 8000, 12000, 16000, 24000, or 48000.
-        let sample_rate_0 = config.sample_rate().0;
-        let sample_rate = if sample_rate_0 < 12000 {
-            8000
-        } else if sample_rate_0 < 16000 {
-            12000
-        } else if sample_rate_0 < 24000 {
-            16000
-        } else if sample_rate_0 < 48000 {
-            24000
-        } else {
-            48000
-        };
+        let sample_rate = opus_sample_rate(config.sample_rate().0);
         let ch = if config.channels() > 1 { Stereo } else { Mono };
         let stream = match config.sample_format() {
             I8 => build_input_stream::<i8>(device, &config, sp, sample_rate, ch)?,
@@ -399,21 +364,26 @@ mod cpal_impl {
             log::trace!("an error occurred on stream: {}", err);
         };
         let sample_rate_0 = config.sample_rate().0;
-        log::debug!("Audio sample rate : {}", sample_rate);
-        unsafe {
-            AUDIO_ZERO_COUNT = 0;
-        }
+        log::debug!("Audio sample rate : {} -> {}", sample_rate_0, sample_rate);
+        AUDIO_ZERO_COUNT.store(0, Ordering::Relaxed);
         let device_channel = config.channels();
         let mut encoder = Encoder::new(sample_rate, encode_channel, LowDelay)?;
-        // https://www.opus-codec.org/docs/html_api/group__opusencoder.html#gace941e4ef26ed844879fde342ffbe546
-        // https://chromium.googlesource.com/chromium/deps/opus/+/1.1.1/include/opus.h
-        // Do not set `frame_size = sample_rate as usize / 100;`
-        // Because we find `sample_rate as usize / 100` will cause encoder error in `encoder.encode_vec_float()` sometimes.
-        // https://github.com/xiph/opus/blob/2554a89e02c7fc30a980b4f7e635ceae1ecba5d6/src/opus_encoder.c#L725
-        let frame_size = sample_rate_0 as usize / 100; // 10 ms
-        let encode_len = frame_size * encode_channel as usize;
-        let rechannel_len = encode_len * device_channel as usize / encode_channel as usize;
-        INPUT_BUFFER.lock().unwrap().clear();
+        let mut framer = CapturedPcmFramer::new(
+            sample_rate_0,
+            device_channel,
+            sample_rate,
+            encode_channel as u16,
+        );
+        // Resampling, Opus encoding and sending run off the realtime capture
+        // callback. The worker ends when the stream drops the sender.
+        let (mut capture, mut chunks) = capture_channel(INPUT_QUEUE_CHUNKS);
+        std::thread::Builder::new()
+            .name("audio-input-encoder".to_owned())
+            .spawn(move || {
+                while chunks.process_next(|chunk| {
+                    framer.push(chunk, |frame| send_f32(frame, &mut encoder, &sp))
+                }) {}
+            })?;
         let timeout = None;
         let stream_config = StreamConfig {
             channels: device_channel,
@@ -423,21 +393,7 @@ mod cpal_impl {
         let stream = device.build_input_stream(
             &stream_config,
             move |data: &[T], _: &InputCallbackInfo| {
-                let buffer: Vec<f32> = data.iter().map(|s| T::to_sample(*s)).collect();
-                let mut lock = INPUT_BUFFER.lock().unwrap();
-                lock.extend(buffer);
-                while lock.len() >= rechannel_len {
-                    let frame: Vec<f32> = lock.drain(0..rechannel_len).collect();
-                    send(
-                        frame,
-                        sample_rate_0,
-                        sample_rate,
-                        device_channel,
-                        encode_channel as _,
-                        &mut encoder,
-                        &sp,
-                    );
-                }
+                capture.send(data.iter().map(|s| T::to_sample(*s)));
             },
             err_fn,
             timeout,
@@ -459,28 +415,176 @@ fn create_format_msg(sample_rate: u32, channels: u16) -> Message {
     msg
 }
 
+/// Opus accepts 8, 12, 16, 24 and 48 kHz. Use the highest supported rate that
+/// does not exceed the device bandwidth class; 32 kHz and above (including
+/// 44.1 kHz devices) use 48 kHz instead of being reduced to 24 kHz.
+#[cfg(any(test, not(any(target_os = "linux", target_os = "android"))))]
+fn opus_sample_rate(device_rate: u32) -> u32 {
+    match device_rate {
+        0..=11_999 => 8000,
+        12_000..=15_999 => 12000,
+        16_000..=23_999 => 16000,
+        24_000..=31_999 => 24000,
+        _ => 48000,
+    }
+}
+
+/// Turns captured device PCM into exact 10 ms Opus frames: resamples with a
+/// persistent phase, converts channels and re-chunks across callbacks.
+#[cfg(any(test, not(any(target_os = "linux", target_os = "android"))))]
+struct CapturedPcmFramer {
+    resampler: scrap::pcm::StreamingResampler,
+    frames: scrap::pcm::PcmQueue,
+    frame: Vec<f32>,
+    sample_rate: u32,
+    device_channels: u16,
+    encode_channels: u16,
+}
+
+#[cfg(any(test, not(any(target_os = "linux", target_os = "android"))))]
+impl CapturedPcmFramer {
+    fn new(device_rate: u32, device_channels: u16, sample_rate: u32, encode_channels: u16) -> Self {
+        let channels = usize::from(encode_channels.max(1));
+        Self {
+            resampler: scrap::pcm::StreamingResampler::new(
+                device_rate,
+                sample_rate,
+                device_channels,
+            ),
+            // At most one second waits for a complete Opus frame.
+            frames: scrap::pcm::PcmQueue::new(encode_channels, sample_rate as usize * channels),
+            frame: vec![0.0; (sample_rate / 100) as usize * channels],
+            sample_rate,
+            device_channels,
+            encode_channels,
+        }
+    }
+
+    fn push(&mut self, input: &[f32], mut emit: impl FnMut(&[f32])) {
+        let mut resampled = Vec::with_capacity(input.len() + self.frame.len());
+        self.resampler.process(input, &mut resampled);
+        let data = if self.device_channels != self.encode_channels {
+            crate::common::audio_rechannel(
+                resampled,
+                self.sample_rate,
+                self.sample_rate,
+                self.device_channels,
+                self.encode_channels,
+            )
+        } else {
+            resampled
+        };
+        self.frames.push(&data);
+        while self.frames.pop_exact(&mut self.frame) {
+            emit(&self.frame);
+        }
+    }
+}
+
+/// Creates the bounded handoff between the realtime capture callback and the
+/// encoder worker. Buffers travel back to the callback for reuse, so steady
+/// capture neither allocates nor logs on the callback thread.
+#[cfg(any(test, not(any(target_os = "linux", target_os = "android"))))]
+fn capture_channel(capacity: usize) -> (CaptureSender, CaptureReceiver) {
+    let (chunk_tx, chunk_rx) = std::sync::mpsc::sync_channel(capacity);
+    let (recycle_tx, recycle_rx) = std::sync::mpsc::sync_channel(capacity);
+    let dropped = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    (
+        CaptureSender {
+            chunks: chunk_tx,
+            recycled: recycle_rx,
+            spare: None,
+            dropped: dropped.clone(),
+        },
+        CaptureReceiver {
+            chunks: chunk_rx,
+            recycle: recycle_tx,
+            dropped,
+            next_drop_report: 1,
+        },
+    )
+}
+
+#[cfg(any(test, not(any(target_os = "linux", target_os = "android"))))]
+struct CaptureSender {
+    chunks: std::sync::mpsc::SyncSender<Vec<f32>>,
+    recycled: std::sync::mpsc::Receiver<Vec<f32>>,
+    spare: Option<Vec<f32>>,
+    dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+#[cfg(any(test, not(any(target_os = "linux", target_os = "android"))))]
+impl CaptureSender {
+    /// Queues one callback's samples without blocking; counts a drop when the
+    /// worker is behind and keeps the rejected buffer for the next call.
+    fn send(&mut self, samples: impl Iterator<Item = f32>) {
+        let mut buffer = self
+            .spare
+            .take()
+            .or_else(|| self.recycled.try_recv().ok())
+            .unwrap_or_default();
+        buffer.clear();
+        buffer.extend(samples);
+        match self.chunks.try_send(buffer) {
+            Ok(()) => {}
+            Err(
+                std::sync::mpsc::TrySendError::Full(buffer)
+                | std::sync::mpsc::TrySendError::Disconnected(buffer),
+            ) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+                self.spare = Some(buffer);
+            }
+        }
+    }
+}
+
+#[cfg(any(test, not(any(target_os = "linux", target_os = "android"))))]
+struct CaptureReceiver {
+    chunks: std::sync::mpsc::Receiver<Vec<f32>>,
+    recycle: std::sync::mpsc::SyncSender<Vec<f32>>,
+    dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    next_drop_report: u64,
+}
+
+#[cfg(any(test, not(any(target_os = "linux", target_os = "android"))))]
+impl CaptureReceiver {
+    /// Waits for the next captured chunk, passes it to `process` and returns
+    /// the buffer for reuse. Returns false once the capture side is gone.
+    fn process_next(&mut self, process: impl FnOnce(&[f32])) -> bool {
+        let Ok(chunk) = self.chunks.recv() else {
+            return false;
+        };
+        process(&chunk);
+        let _ = self.recycle.try_send(chunk);
+        // Report callback drops here, with exponential backoff: 1, 2, 4, ...
+        let dropped = self.dropped.load(Ordering::Relaxed);
+        if dropped >= self.next_drop_report {
+            log::warn!("audio input encoder is behind, dropped {} chunks", dropped);
+            self.next_drop_report = dropped.saturating_mul(2);
+        }
+        true
+    }
+}
+
 // use AUDIO_ZERO_COUNT for the Noise(Zero) Gate Attack Time
 // every audio data length is set to 480
 // MAX_AUDIO_ZERO_COUNT=800 is similar as Gate Attack Time 3~5s(Linux) || 6~8s(Windows)
 const MAX_AUDIO_ZERO_COUNT: u16 = 800;
-static mut AUDIO_ZERO_COUNT: u16 = 0;
+static AUDIO_ZERO_COUNT: AtomicU16 = AtomicU16::new(0);
 
 fn send_f32(data: &[f32], encoder: &mut Encoder, sp: &GenericService) {
-    if data.iter().filter(|x| **x != 0.).next().is_some() {
-        unsafe {
-            AUDIO_ZERO_COUNT = 0;
-        }
+    if data.iter().any(|x| *x != 0.) {
+        AUDIO_ZERO_COUNT.store(0, Ordering::Relaxed);
     } else {
-        unsafe {
-            if AUDIO_ZERO_COUNT > MAX_AUDIO_ZERO_COUNT {
-                if AUDIO_ZERO_COUNT == MAX_AUDIO_ZERO_COUNT + 1 {
-                    log::debug!("Audio Zero Gate Attack");
-                    AUDIO_ZERO_COUNT += 1;
-                }
-                return;
+        let count = AUDIO_ZERO_COUNT.load(Ordering::Relaxed);
+        if count > MAX_AUDIO_ZERO_COUNT {
+            if count == MAX_AUDIO_ZERO_COUNT + 1 {
+                log::debug!("Audio Zero Gate Attack");
+                AUDIO_ZERO_COUNT.store(count + 1, Ordering::Relaxed);
             }
-            AUDIO_ZERO_COUNT += 1;
+            return;
         }
+        AUDIO_ZERO_COUNT.store(count + 1, Ordering::Relaxed);
     }
     #[cfg(target_os = "android")]
     {
@@ -489,7 +593,7 @@ fn send_f32(data: &[f32], encoder: &mut Encoder, sp: &GenericService) {
         // then upload in batches
         const BATCH_SIZE: usize = 960;
         let input_size = data.len();
-        if input_size > BATCH_SIZE && input_size % BATCH_SIZE == 0 {
+        if input_size >= BATCH_SIZE && input_size % BATCH_SIZE == 0 {
             let n = input_size / BATCH_SIZE;
             for i in 0..n {
                 match encoder
@@ -523,5 +627,93 @@ fn send_f32(data: &[f32], encoder: &mut Encoder, sp: &GenericService) {
             sp.send(msg_out);
         }
         Err(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_handoff_reuses_buffers() {
+        let (mut capture, mut chunks) = capture_channel(4);
+        let mut first = std::ptr::null();
+        capture.send([1.0, 2.0, 3.0].iter().copied());
+        assert!(chunks.process_next(|chunk| {
+            assert_eq!(chunk, [1.0, 2.0, 3.0]);
+            first = chunk.as_ptr();
+        }));
+        capture.send([4.0, 5.0].iter().copied());
+        assert!(chunks.process_next(|chunk| {
+            assert_eq!(chunk, [4.0, 5.0]);
+            assert_eq!(chunk.as_ptr(), first, "recycled buffer is reused");
+        }));
+    }
+
+    #[test]
+    fn capture_handoff_counts_drops_without_blocking() {
+        let (mut capture, mut chunks) = capture_channel(1);
+        capture.send([1.0].iter().copied());
+        capture.send([2.0].iter().copied());
+        capture.send([3.0].iter().copied());
+        assert_eq!(chunks.dropped.load(Ordering::Relaxed), 2);
+        assert!(chunks.process_next(|chunk| assert_eq!(chunk, [1.0])));
+        assert_eq!(chunks.next_drop_report, 4);
+        capture.send([4.0].iter().copied());
+        assert!(chunks.process_next(|chunk| assert_eq!(chunk, [4.0])));
+        drop(capture);
+        assert!(!chunks.process_next(|_| panic!("no chunk after disconnect")));
+    }
+
+    #[test]
+    fn opus_rate_keeps_full_band_for_common_device_rates() {
+        for (device, expected) in [
+            (8000, 8000),
+            (11025, 8000),
+            (12000, 12000),
+            (16000, 16000),
+            (22050, 16000),
+            (24000, 24000),
+            (32000, 48000),
+            (44100, 48000),
+            (48000, 48000),
+            (96000, 48000),
+        ] {
+            assert_eq!(opus_sample_rate(device), expected, "device={device}");
+        }
+    }
+
+    fn frames_for(device_rate: u32, device_channels: u16, callback_frames: usize) -> Vec<usize> {
+        let sample_rate = opus_sample_rate(device_rate);
+        let mut framer = CapturedPcmFramer::new(device_rate, device_channels, sample_rate, 2);
+        let input = vec![0.25f32; callback_frames * usize::from(device_channels)];
+        let mut emitted = Vec::new();
+        // One second of capture.
+        for _ in 0..(device_rate as usize / callback_frames) {
+            framer.push(&input, |frame| emitted.push(frame.len()));
+        }
+        emitted
+    }
+
+    #[test]
+    fn framer_emits_exact_opus_frames_for_441_khz_capture() {
+        let emitted = frames_for(44100, 2, 441);
+        assert!(emitted.iter().all(|len| *len == 960), "{emitted:?}");
+        assert!((99..=100).contains(&emitted.len()), "frames={}", emitted.len());
+    }
+
+    #[test]
+    fn framer_rechunks_odd_callback_sizes() {
+        let emitted = frames_for(48000, 2, 512);
+        assert!(emitted.iter().all(|len| *len == 960));
+        // 93 callbacks * 512 frames = 47616 frames -> 99 full 10 ms frames.
+        assert_eq!(emitted.len(), 99);
+    }
+
+    #[test]
+    fn framer_downmixes_surround_capture_to_the_encoder_layout() {
+        let emitted = frames_for(48000, 6, 480);
+        assert_eq!(emitted.len(), 100);
+        assert!(emitted.iter().all(|len| *len == 960));
     }
 }
