@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/consts.dart';
+import 'package:flutter_hbb/desktop/widgets/content_sized_window.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
@@ -12,28 +14,44 @@ import 'package:window_manager/window_manager.dart';
 
 class InstallPage extends StatefulWidget {
   final bool isUpgrade;
+  final ContentSizedWindowController? contentSizedWindowController;
 
-  const InstallPage({Key? key, this.isUpgrade = false}) : super(key: key);
+  const InstallPage({
+    Key? key,
+    this.isUpgrade = false,
+    this.contentSizedWindowController,
+  }) : super(key: key);
 
   @override
-  State<InstallPage> createState() => _InstallPageState(isUpgrade: isUpgrade);
+  State<InstallPage> createState() => _InstallPageState(
+    isUpgrade: isUpgrade,
+    contentSizedWindowController: contentSizedWindowController,
+  );
 }
 
 class _InstallPageState extends State<InstallPage> {
   final bool isUpgrade;
+  final ContentSizedWindowController? contentSizedWindowController;
   final tabController = DesktopTabController(tabType: DesktopTabType.main);
 
-  _InstallPageState({required this.isUpgrade}) {
+  _InstallPageState({
+    required this.isUpgrade,
+    this.contentSizedWindowController,
+  }) {
     Get.put<DesktopTabController>(tabController);
     const label = "install";
-    tabController.add(TabInfo(
+    tabController.add(
+      TabInfo(
         key: label,
         label: label,
         closable: false,
         page: _InstallPageBody(
           key: const ValueKey(label),
           isUpgrade: isUpgrade,
-        )));
+          contentSizedWindowController: contentSizedWindowController,
+        ),
+      ),
+    );
   }
 
   @override
@@ -49,8 +67,12 @@ class _InstallPageState extends State<InstallPage> {
       enableResizeEdges: windowManagerEnableResizeEdges,
       child: Container(
         child: Scaffold(
-            backgroundColor: Theme.of(context).colorScheme.background,
-            body: DesktopTab(controller: tabController)),
+          backgroundColor: Theme.of(context).colorScheme.background,
+          body: DesktopTab(
+            controller: tabController,
+            persistWindowGeometry: false,
+          ),
+        ),
       ),
     );
   }
@@ -58,8 +80,13 @@ class _InstallPageState extends State<InstallPage> {
 
 class _InstallPageBody extends StatefulWidget {
   final bool isUpgrade;
+  final ContentSizedWindowController? contentSizedWindowController;
 
-  const _InstallPageBody({Key? key, required this.isUpgrade}) : super(key: key);
+  const _InstallPageBody({
+    Key? key,
+    required this.isUpgrade,
+    this.contentSizedWindowController,
+  }) : super(key: key);
 
   @override
   State<_InstallPageBody> createState() => _InstallPageBodyState();
@@ -117,9 +144,7 @@ class _InstallPageBodyState extends State<_InstallPageBody>
                   btnEnabled.value ? option.value = !option.value : null,
             ).marginOnly(right: 8),
           ),
-          Expanded(
-            child: Text(translate(label)),
-          ),
+          Expanded(child: Text(translate(label))),
         ],
       ),
     );
@@ -130,123 +155,218 @@ class _InstallPageBodyState extends State<_InstallPageBody>
     final double em = 13;
     final isDarkTheme = MyTheme.currentThemeMode() == ThemeMode.dark;
     return Scaffold(
-        backgroundColor: null,
-        body: SingleChildScrollView(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(translate(widget.isUpgrade ? 'Upgrade' : 'Installation'),
-                  style: Theme.of(context).textTheme.headlineMedium),
-              Row(
-                children: [
-                  Text('${translate('Installation Path')}:')
-                      .marginOnly(right: 10),
-                  Expanded(
-                    child: TextField(
-                      controller: controller,
-                      readOnly: true,
-                      decoration: InputDecoration(
-                        contentPadding: EdgeInsets.all(0.75 * em),
-                      ),
-                    ).workaroundFreezeLinuxMint().marginOnly(right: 10),
+      backgroundColor: null,
+      body: ContentSizedWindow(
+        controller: widget.contentSizedWindowController,
+        padding: EdgeInsets.fromLTRB(4 * em, 3 * em, 4 * em, 24),
+        additionalWindowHeight: kUseCompatibleUiMode
+            ? 0
+            : kDesktopRemoteTabBarHeight,
+        child: Column(
+          key: const ValueKey('install-body-column'),
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              translate(widget.isUpgrade ? 'Upgrade' : 'Installation'),
+              style: Theme.of(context).textTheme.headlineMedium,
+            ),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final pathField = TextField(
+                  controller: controller,
+                  readOnly: true,
+                  decoration: InputDecoration(
+                    contentPadding: EdgeInsets.all(0.75 * em),
                   ),
-                  Obx(
-                    () => OutlinedButton.icon(
-                      icon: MyTheme.desktopButtonIcon(
-                          Icon(Icons.folder_outlined, size: 16)),
-                      onPressed: btnEnabled.value && !widget.isUpgrade
-                          ? selectInstallPath
-                          : null,
-                      label: Text(translate('Change Path')),
+                ).workaroundFreezeLinuxMint().marginOnly(right: 10);
+                final changePathButton = Obx(
+                  () => OutlinedButton.icon(
+                    icon: MyTheme.desktopButtonIcon(
+                      Icon(Icons.folder_outlined, size: 16),
                     ),
-                  )
-                ],
-              ).marginSymmetric(vertical: 2 * em),
-              if (!widget.isUpgrade)
-                Option(startmenu, label: 'Create start menu shortcuts')
-                    .marginOnly(bottom: 7),
-              if (!widget.isUpgrade)
-                Option(desktopicon, label: 'Create desktop icon')
-                    .marginOnly(bottom: 7),
-              if (!widget.isUpgrade)
-                Option(printer, label: 'Install {$appName} Printer'),
-              Container(
-                  padding: EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: isDarkTheme
-                        ? Color.fromARGB(135, 87, 87, 90)
-                        : Colors.grey[100],
-                    borderRadius: BorderRadius.circular(4.0),
-                    border: Border.all(color: Colors.grey),
+                    onPressed: btnEnabled.value && !widget.isUpgrade
+                        ? selectInstallPath
+                        : null,
+                    label: Text(translate('Change Path'), softWrap: true),
                   ),
-                  child: Row(
-                    children: [
-                      Icon(Icons.info_outline_rounded, size: 32)
-                          .marginOnly(right: 16),
-                      Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(translate('agreement_tip')),
-                        ],
-                      )
-                    ],
-                  )).marginSymmetric(vertical: 2 * em),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
+                );
+                final pathControls = LayoutBuilder(
+                  builder: (context, pathConstraints) =>
+                      pathConstraints.maxWidth < 360
+                      ? Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            pathField,
+                            Align(
+                              alignment: Alignment.centerLeft,
+                              child: ConstrainedBox(
+                                constraints: BoxConstraints(
+                                  maxWidth: pathConstraints.maxWidth,
+                                ),
+                                child: changePathButton,
+                              ),
+                            ),
+                          ],
+                        )
+                      : Row(
+                          children: [
+                            Expanded(child: pathField),
+                            ConstrainedBox(
+                              constraints: BoxConstraints(
+                                maxWidth: pathConstraints.maxWidth * 0.45,
+                              ),
+                              child: changePathButton,
+                            ),
+                          ],
+                        ),
+                );
+                return (constraints.maxWidth < 560
+                        ? Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                '${translate('Installation Path')}:',
+                              ).marginOnly(bottom: 8),
+                              pathControls,
+                            ],
+                          )
+                        : Row(
+                            children: [
+                              ConstrainedBox(
+                                constraints: BoxConstraints(
+                                  maxWidth: constraints.maxWidth * 0.35,
+                                ),
+                                child: Padding(
+                                  padding: const EdgeInsets.only(right: 10),
+                                  child: Text(
+                                    '${translate('Installation Path')}:',
+                                    softWrap: true,
+                                  ),
+                                ),
+                              ),
+                              Expanded(child: pathControls),
+                            ],
+                          ))
+                    .marginSymmetric(vertical: 2 * em);
+              },
+            ),
+            if (!widget.isUpgrade)
+              Option(
+                startmenu,
+                label: 'Create start menu shortcuts',
+              ).marginOnly(bottom: 7),
+            if (!widget.isUpgrade)
+              Option(
+                desktopicon,
+                label: 'Create desktop icon',
+              ).marginOnly(bottom: 7),
+            if (!widget.isUpgrade)
+              Option(printer, label: 'Install {$appName} Printer'),
+            Container(
+              padding: EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: isDarkTheme
+                    ? Color.fromARGB(135, 87, 87, 90)
+                    : Colors.grey[100],
+                borderRadius: BorderRadius.circular(4.0),
+                border: Border.all(color: Colors.grey),
+              ),
+              child: Row(
                 children: [
-                  // Reserve progress row height so the button row does not jump.
-                  SizedBox(
-                    height: 16,
-                    child: Obx(() => showProgress.value
+                  Icon(
+                    Icons.info_outline_rounded,
+                    size: 32,
+                  ).marginOnly(right: 16),
+                  Expanded(child: Text(translate('agreement_tip'))),
+                ],
+              ),
+            ).marginSymmetric(vertical: 2 * em),
+            Column(
+              key: const ValueKey('install-actions'),
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Reserve progress row height so the button row does not jump.
+                SizedBox(
+                  height: 16,
+                  child: Obx(
+                    () => showProgress.value
                         ? const Align(
                             alignment: Alignment.topCenter,
                             child: LinearProgressIndicator(),
                           )
-                        : const SizedBox.shrink()),
+                        : const SizedBox.shrink(),
                   ),
-                  Row(
-                    children: [
-                      Obx(
-                        () => ElevatedButton.icon(
-                          icon: MyTheme.desktopButtonIcon(
-                              Icon(Icons.done_rounded, size: 16)),
-                          label: Text(translate(
-                              widget.isUpgrade ? 'Upgrade' : 'Accept and Install')),
-                          onPressed: btnEnabled.value ? install : null,
+                ),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final installButton = Obx(
+                      () => ElevatedButton.icon(
+                        icon: MyTheme.desktopButtonIcon(
+                          Icon(Icons.done_rounded, size: 16),
                         ),
-                      ),
-                      Offstage(
-                        offstage: widget.isUpgrade ||
-                            bind.installShowRunWithoutInstall(),
-                        child: Obx(
-                          () => OutlinedButton.icon(
-                            icon: MyTheme.desktopButtonIcon(
-                                Icon(Icons.screen_share_outlined, size: 16)),
-                            label: Text(translate('Run without install')),
-                            onPressed: btnEnabled.value
-                                ? () => bind.installRunWithoutInstall()
-                                : null,
-                          ).marginOnly(left: 10),
+                        label: Text(
+                          translate(
+                            widget.isUpgrade ? 'Upgrade' : 'Accept and Install',
+                          ),
+                          softWrap: true,
                         ),
+                        onPressed: btnEnabled.value ? install : null,
                       ),
-                      Spacer(),
-                      Obx(
-                        () => OutlinedButton.icon(
-                          icon: MyTheme.desktopButtonIcon(
-                              Icon(Icons.close_rounded, size: 16)),
-                          label: Text(translate('Cancel')),
-                          onPressed: btnEnabled.value
-                              ? () => windowManager.close()
-                              : null,
+                    );
+                    final runWithoutInstall = Obx(
+                      () => OutlinedButton.icon(
+                        icon: MyTheme.desktopButtonIcon(
+                          Icon(Icons.screen_share_outlined, size: 16),
                         ),
+                        label: Text(
+                          translate('Run without install'),
+                          softWrap: true,
+                        ),
+                        onPressed: btnEnabled.value
+                            ? () => bind.installRunWithoutInstall()
+                            : null,
                       ),
-                    ],
-                  ),
-                ],
-              )
-            ],
-          ).paddingSymmetric(horizontal: 4 * em, vertical: 3 * em),
-        ));
+                    );
+                    final cancelButton = Obx(
+                      () => OutlinedButton.icon(
+                        icon: MyTheme.desktopButtonIcon(
+                          Icon(Icons.close_rounded, size: 16),
+                        ),
+                        label: Text(translate('Cancel'), softWrap: true),
+                        onPressed: btnEnabled.value
+                            ? () => windowManager.close()
+                            : null,
+                      ),
+                    );
+                    Widget constrainButton(Widget button) {
+                      return ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxWidth: constraints.maxWidth,
+                        ),
+                        child: button,
+                      );
+                    }
+
+                    return Wrap(
+                      alignment: WrapAlignment.spaceBetween,
+                      spacing: 10,
+                      runSpacing: 8,
+                      children: [
+                        constrainButton(installButton),
+                        if (!widget.isUpgrade &&
+                            !bind.installShowRunWithoutInstall())
+                          constrainButton(runWithoutInstall),
+                        constrainButton(cancelButton),
+                      ],
+                    );
+                  },
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   void install() {
@@ -264,8 +384,9 @@ class _InstallPageBodyState extends State<_InstallPageBody>
   }
 
   void selectInstallPath() async {
-    String? install_path =
-        await FilePicker.getDirectoryPath(initialDirectory: controller.text);
+    String? install_path = await FilePicker.getDirectoryPath(
+      initialDirectory: controller.text,
+    );
     if (install_path != null) {
       controller.text = join(install_path, await bind.mainGetAppName());
     }

@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 private enum TestFailure: Error, CustomStringConvertible {
     case failed(String)
@@ -39,6 +40,7 @@ private struct UpdaterTestSuite {
         try testSymlinkAliasAndDiscovery()
         try testStagingOwnershipBoundaries()
         try testPrivilegedScriptOrdering()
+        try testWindowLayoutCapsAndWidth()
     }
 
     func dumpPrivilegedScript(to path: String, compilationSafe: Bool = false) throws {
@@ -92,6 +94,97 @@ private struct UpdaterTestSuite {
             throw TestFailure.failed("BundleVersion equality included raw metadata spelling")
         }
     }
+
+    private func testWindowLayoutCapsAndWidth() throws {
+        let visibleFrame = NSRect(x: -1920, y: 0, width: 1920, height: 800)
+        let fitting = UpdaterWindowLayout.contentSize(
+            naturalContentHeight: 300,
+            visibleFrame: visibleFrame,
+            nativeChromeHeight: 24
+        )
+        guard fitting.width == 540, fitting.height == 300,
+              !UpdaterWindowLayout.needsVerticalScroll(
+                  naturalContentHeight: 300,
+                  visibleFrame: visibleFrame,
+                  nativeChromeHeight: 24
+              )
+        else {
+            throw TestFailure.failed("normal updater content did not fit the preferred width and height")
+        }
+
+        let capped = UpdaterWindowLayout.contentSize(
+            naturalContentHeight: 900,
+            visibleFrame: visibleFrame,
+            nativeChromeHeight: 24
+        )
+        guard capped.width == 540, capped.height == 776,
+              UpdaterWindowLayout.needsVerticalScroll(
+                  naturalContentHeight: 900,
+                  visibleFrame: visibleFrame,
+                  nativeChromeHeight: 24
+              )
+        else {
+            throw TestFailure.failed("tall updater content did not cap to the visible work area")
+        }
+
+        let narrowFrame = NSRect(x: 0, y: 0, width: 360, height: 480)
+        let narrow = UpdaterWindowLayout.contentSize(
+            naturalContentHeight: 200,
+            visibleFrame: narrowFrame,
+            nativeChromeHeight: 24
+        )
+        guard narrow.width == 360 else {
+            throw TestFailure.failed("updater preferred width exceeded a narrow visible work area")
+        }
+    }
+
+#if RUSTADMIN_UPDATER_UI_TESTS
+    func renderWindowLayoutPreviews(to outputDirectory: URL) throws {
+        let root = try makeTemporaryDirectory(named: "layout-preview")
+        defer { try? fileManager.removeItem(at: root) }
+
+        let target = try makeApp(
+            at: root.appendingPathComponent("installed/RustAdmin.app"),
+            version: "2.0.5",
+            revision: "182"
+        )
+        let source = try makeApp(
+            at: root.appendingPathComponent("source/RustAdmin.app"),
+            version: "2.0.6",
+            revision: "184"
+        )
+        let request = try UpdateRequest.make(
+            source: source,
+            target: target,
+            product: product
+        )
+        try fileManager.createDirectory(
+            at: outputDirectory,
+            withIntermediateDirectories: true
+        )
+
+        try UpdaterWindowPreview.render(
+            request: request,
+            status: nil,
+            visibleFrame: NSRect(x: 0, y: 0, width: 1440, height: 900),
+            to: outputDirectory.appendingPathComponent("updater-idle.png")
+        )
+        try UpdaterWindowPreview.render(
+            request: request,
+            status: "Updating RustAdmin… Approve the macOS permission request to continue. "
+                + String(repeating: "The updater is validating the staged application. ", count: 5),
+            visibleFrame: NSRect(x: 0, y: 0, width: 1440, height: 900),
+            to: outputDirectory.appendingPathComponent("updater-long-status.png")
+        )
+        try UpdaterWindowPreview.render(
+            request: request,
+            status: "Updating RustAdmin… Approve the macOS permission request to continue. "
+                + String(repeating: "The updater is validating the staged application. ", count: 5),
+            visibleFrame: NSRect(x: 0, y: 0, width: 360, height: 240),
+            to: outputDirectory.appendingPathComponent("updater-narrow-workarea.png")
+        )
+    }
+#endif
 
     private func testExplicitArgumentsAndNewerRevision() throws {
         let root = try makeTemporaryDirectory(named: "explicit")
@@ -758,6 +851,15 @@ private struct UpdaterTestsMain {
     static func main() throws {
         let suite = UpdaterTestSuite()
         let arguments = Array(CommandLine.arguments.dropFirst())
+#if RUSTADMIN_UPDATER_UI_TESTS
+        if arguments.count == 2, arguments[0] == "--render-layout-previews" {
+            try suite.renderWindowLayoutPreviews(
+                to: URL(fileURLWithPath: arguments[1], isDirectory: true)
+            )
+            print("updater layout previews written to \(arguments[1])")
+            return
+        }
+#endif
         if arguments.count == 2, arguments[0] == "--dump-privileged-script" {
             try suite.dumpPrivilegedScript(to: arguments[1])
             return

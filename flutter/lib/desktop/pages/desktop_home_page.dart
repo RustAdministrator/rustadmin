@@ -1044,106 +1044,106 @@ void setPasswordDialog({VoidCallback? notEmptyCallback}) async {
     }
 
     return CustomAlertDialog(
+      preferredContentWidth: kCredentialDialogWidth,
       title: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Icon(Icons.key, color: MyTheme.accent),
-          Text(translate("Set Password")).paddingOnly(left: 10),
+          Flexible(
+            child: Text(translate("Set Password")).paddingOnly(left: 10),
+          ),
         ],
       ),
-      content: ConstrainedBox(
-        constraints: const BoxConstraints(minWidth: 500),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            SizedBox(
-              height: showStatusTipOnMobile ? 0.0 : 6.0,
-            ),
+      content: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            height: showStatusTipOnMobile ? 0.0 : 6.0,
+          ),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  obscureText: true,
+                  decoration: InputDecoration(
+                      labelText: translate('Password'),
+                      errorText: errMsg0.isNotEmpty ? errMsg0 : null),
+                  controller: p0,
+                  autofocus: true,
+                  onChanged: (value) {
+                    rxPass.value = value.trim();
+                    setState(() {
+                      errMsg0 = '';
+                      updateCanSubmit();
+                    });
+                  },
+                  maxLength: maxLength,
+                ).workaroundFreezeLinuxMint(),
+              ),
+            ],
+          ),
+          Row(
+            children: [
+              Expanded(child: PasswordStrengthIndicator(password: rxPass)),
+            ],
+          ).marginOnly(top: 2, bottom: showStatusTipOnMobile ? 2 : 8),
+          SizedBox(
+            height: showStatusTipOnMobile ? 0.0 : 8.0,
+          ),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  obscureText: true,
+                  decoration: InputDecoration(
+                      labelText: translate('Confirmation'),
+                      errorText: errMsg1.isNotEmpty ? errMsg1 : null),
+                  controller: p1,
+                  onChanged: (value) {
+                    setState(() {
+                      errMsg1 = '';
+                      updateCanSubmit();
+                    });
+                  },
+                  maxLength: maxLength,
+                ).workaroundFreezeLinuxMint(),
+              ),
+            ],
+          ),
+          if (statusTip.isNotEmpty)
             Row(
               children: [
+                Icon(Icons.info, color: Colors.amber, size: 18)
+                    .marginOnly(right: 6),
                 Expanded(
-                  child: TextField(
-                    obscureText: true,
-                    decoration: InputDecoration(
-                        labelText: translate('Password'),
-                        errorText: errMsg0.isNotEmpty ? errMsg0 : null),
-                    controller: p0,
-                    autofocus: true,
-                    onChanged: (value) {
-                      rxPass.value = value.trim();
-                      setState(() {
-                        errMsg0 = '';
-                        updateCanSubmit();
-                      });
-                    },
-                    maxLength: maxLength,
-                  ).workaroundFreezeLinuxMint(),
-                ),
-              ],
-            ),
-            Row(
-              children: [
-                Expanded(child: PasswordStrengthIndicator(password: rxPass)),
-              ],
-            ).marginOnly(top: 2, bottom: showStatusTipOnMobile ? 2 : 8),
-            SizedBox(
-              height: showStatusTipOnMobile ? 0.0 : 8.0,
-            ),
-            Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    obscureText: true,
-                    decoration: InputDecoration(
-                        labelText: translate('Confirmation'),
-                        errorText: errMsg1.isNotEmpty ? errMsg1 : null),
-                    controller: p1,
-                    onChanged: (value) {
-                      setState(() {
-                        errMsg1 = '';
-                        updateCanSubmit();
-                      });
-                    },
-                    maxLength: maxLength,
-                  ).workaroundFreezeLinuxMint(),
-                ),
-              ],
-            ),
-            if (statusTip.isNotEmpty)
-              Row(
-                children: [
-                  Icon(Icons.info, color: Colors.amber, size: 18)
-                      .marginOnly(right: 6),
-                  Expanded(
-                      child: Text(
-                    statusTip,
-                    style: const TextStyle(fontSize: 13, height: 1.1),
-                  ))
-                ],
-              ).marginOnly(top: 6, bottom: 2),
-            SizedBox(
-              height: showStatusTipOnMobile ? 0.0 : 8.0,
-            ),
-            Obx(() => Wrap(
-                  runSpacing: showStatusTipOnMobile ? 2.0 : 8.0,
-                  spacing: 4,
-                  children: rules.map((e) {
-                    var checked = e.validate(rxPass.value.trim());
-                    return Chip(
-                        label: Text(
-                          e.name,
-                          style: TextStyle(
-                              color: checked
-                                  ? const Color(0xFF0A9471)
-                                  : Color.fromARGB(255, 198, 86, 157)),
-                        ),
-                        backgroundColor: checked
-                            ? const Color(0xFFD0F7ED)
-                            : Color.fromARGB(255, 247, 205, 232));
-                  }).toList(),
+                    child: Text(
+                  statusTip,
+                  style: const TextStyle(fontSize: 13, height: 1.1),
                 ))
-          ],
-        ),
+              ],
+            ).marginOnly(top: 6, bottom: 2),
+          SizedBox(
+            height: showStatusTipOnMobile ? 0.0 : 8.0,
+          ),
+          Obx(() => Wrap(
+                runSpacing: showStatusTipOnMobile ? 2.0 : 8.0,
+                spacing: 4,
+                children: rules.map((e) {
+                  var checked = e.validate(rxPass.value.trim());
+                  return Chip(
+                      label: Text(
+                        e.name,
+                        style: TextStyle(
+                            color: checked
+                                ? const Color(0xFF0A9471)
+                                : Color.fromARGB(255, 198, 86, 157)),
+                      ),
+                      backgroundColor: checked
+                          ? const Color(0xFFD0F7ED)
+                          : Color.fromARGB(255, 247, 205, 232));
+                }).toList(),
+              ))
+        ],
       ),
       actions: (() {
         final cancelButton = dialogButton(

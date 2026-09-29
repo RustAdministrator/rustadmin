@@ -595,9 +595,11 @@ Future<bool?> loginDialog() async {
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          translate('Login'),
-        ).marginOnly(top: MyTheme.dialogPadding),
+        Flexible(
+          child: Text(
+            translate('Login'),
+          ).marginOnly(top: MyTheme.dialogPadding),
+        ),
         MouseRegion(
           onEnter: (_) => setState(() => isCloseHovered = true),
           onExit: (_) => setState(() => isCloseHovered = false),
@@ -625,9 +627,9 @@ Future<bool?> loginDialog() async {
     final titlePadding = EdgeInsets.fromLTRB(MyTheme.dialogPadding, 0, 0, 0);
 
     return CustomAlertDialog(
+      preferredContentWidth: kCredentialDialogWidth,
       title: title,
       titlePadding: titlePadding,
-      contentBoxConstraints: BoxConstraints(minWidth: 400),
       content: Column(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
@@ -721,8 +723,8 @@ Future<bool?> verificationCodeDialog(
     getOnSubmit() => codeField.isReady ? onVerify : null;
 
     return CustomAlertDialog(
+        preferredContentWidth: kCredentialDialogWidth,
         title: Text(translate("Verification code")),
-        contentBoxConstraints: BoxConstraints(maxWidth: 300),
         content: Column(
           children: [
             Offstage(

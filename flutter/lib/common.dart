@@ -15,6 +15,8 @@ import 'package:flutter_hbb/models/peer_model.dart';
 import 'package:flutter_hbb/models/peer_tab_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
+import 'package:flutter_hbb/utils/desktop_window_geometry.dart';
+import 'package:flutter_hbb/utils/window_placement.dart';
 import 'package:flutter_hbb/utils/platform_channel.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:get/get.dart';
@@ -51,6 +53,7 @@ final globalKey = GlobalKey<NavigatorState>();
 final navigationBarKey = GlobalKey();
 
 const Size kDesktopDefaultMainWindowSize = Size(1280, 800);
+const double kCredentialDialogWidth = 500;
 
 final isAndroid = isAndroid_;
 final isIOS = isIOS_;
@@ -1249,6 +1252,7 @@ class CustomAlertDialog extends StatelessWidget {
       this.actions,
       this.contentPadding,
       this.contentBoxConstraints = const BoxConstraints(maxWidth: 500),
+      this.preferredContentWidth,
       this.scrollable = true,
       this.onSubmit,
       this.onCancel})
@@ -1260,6 +1264,7 @@ class CustomAlertDialog extends StatelessWidget {
   final List<Widget>? actions;
   final double? contentPadding;
   final BoxConstraints contentBoxConstraints;
+  final double? preferredContentWidth;
   final bool scrollable;
   final Function()? onSubmit;
   final Function()? onCancel;
@@ -1293,11 +1298,17 @@ class CustomAlertDialog extends StatelessWidget {
         return KeyEventResult.ignored;
       },
       child: AlertDialog(
+          constraints: preferredContentWidth == null
+              ? null
+              : BoxConstraints.tightFor(
+                  width: preferredContentWidth! + 2 * MyTheme.dialogPadding),
           scrollable: scrollable,
           title: title,
           content: ConstrainedBox(
             constraints: contentBoxConstraints,
-            child: content,
+            child: preferredContentWidth == null
+                ? content
+                : SizedBox(width: preferredContentWidth, child: content),
           ),
           actions: actions,
           titlePadding: titlePadding ?? MyTheme.dialogTitlePadding(),
@@ -2007,9 +2018,28 @@ class LastWindowPosition {
   double? offsetHeight;
   bool? isMaximized;
   bool? isFullscreen;
+  WindowDisplay? monitor;
 
-  LastWindowPosition(this.width, this.height, this.offsetWidth,
-      this.offsetHeight, this.isMaximized, this.isFullscreen);
+  LastWindowPosition(
+    this.width,
+    this.height,
+    this.offsetWidth,
+    this.offsetHeight,
+    this.isMaximized,
+    this.isFullscreen, {
+    this.monitor,
+  });
+
+  Rect? get frame {
+    if (width == null ||
+        height == null ||
+        offsetWidth == null ||
+        offsetHeight == null) {
+      return null;
+    }
+    final rect = Rect.fromLTWH(offsetWidth!, offsetHeight!, width!, height!);
+    return rect.isFinite && !rect.isEmpty ? rect : null;
+  }
 
   bool equals(LastWindowPosition other) {
     return ((width == other.width) &&
@@ -2017,7 +2047,10 @@ class LastWindowPosition {
         (offsetWidth == other.offsetWidth) &&
         (offsetHeight == other.offsetHeight) &&
         (isMaximized == other.isMaximized) &&
-        (isFullscreen == other.isFullscreen));
+        (isFullscreen == other.isFullscreen) &&
+        monitor?.id == other.monitor?.id &&
+        monitor?.workArea == other.monitor?.workArea &&
+        monitor?.scaleFactor == other.monitor?.scaleFactor);
   }
 
   Map<String, dynamic> toJson() {
@@ -2028,6 +2061,7 @@ class LastWindowPosition {
       "offsetHeight": offsetHeight,
       "isMaximized": isMaximized,
       "isFullscreen": isFullscreen,
+      if (monitor != null) "monitor": monitor!.toJson(),
     };
   }
 
@@ -2042,12 +2076,25 @@ class LastWindowPosition {
     }
     try {
       final m = jsonDecode(content);
-      return LastWindowPosition(m["width"], m["height"], m["offsetWidth"],
-          m["offsetHeight"], m["isMaximized"], m["isFullscreen"]);
+      if (m is! Map<String, dynamic>) return null;
+      double? number(String key) {
+        final value = m[key];
+        return value is num && value.isFinite ? value.toDouble() : null;
+      }
+
+      return LastWindowPosition(
+        number("width"),
+        number("height"),
+        number("offsetWidth"),
+        number("offsetHeight"),
+        m["isMaximized"] is bool ? m["isMaximized"] : null,
+        m["isFullscreen"] is bool ? m["isFullscreen"] : null,
+        monitor: WindowDisplay.fromJson(m["monitor"]),
+      );
     } catch (e) {
       debugPrintStack(
-          label:
-              'Failed to load LastWindowPosition "$content" ${e.toString()}');
+        label: 'Failed to load LastWindowPosition "$content" ${e.toString()}',
+      );
       return null;
     }
   }
@@ -2064,10 +2111,176 @@ typedef WindowKey = ({WindowType type, int? windowId});
 LastWindowPosition? _lastWindowPosition = null;
 final Debouncer _saveWindowDebounce = Debouncer(delay: Duration(seconds: 1));
 
+bool _mainWindowGeometryReady = false;
+LastWindowPosition? _mainWindowPosition;
+Future<void> _mainWindowSaveQueue = Future<void>.value();
+final Debouncer _mainWindowSaveDebounce = Debouncer(
+  delay: Duration(seconds: 1),
+);
+
+Future<void> _saveMainWindowPosition(bool flush) async {
+  if (flush) _mainWindowSaveDebounce.cancel();
+  final minimized = await windowManager.isMinimized();
+  final maximized = bind.isIncomingOnly()
+      ? false
+      : await windowManager.isMaximized();
+  final fullscreen = await windowManager.isFullScreen();
+  final currentFrame = minimized
+      ? null
+      : await windowManager.getBounds(
+          ignoreDevicePixelRatio: _ignoreDevicePixelRatio,
+        );
+  final previous =
+      _mainWindowPosition ??
+      LastWindowPosition.loadFromString(
+        bind.getLocalFlutterOption(k: windowFramePrefix + WindowType.Main.name),
+      );
+  final normalFrame = !minimized && !maximized && !fullscreen
+      ? currentFrame
+      : previous?.frame;
+  if (normalFrame == null || !normalFrame.isFinite || normalFrame.isEmpty) {
+    return;
+  }
+  Rect frame = normalFrame;
+
+  var monitor = previous?.monitor;
+  if (flush) {
+    try {
+      final displays = await getDesktopWindowDisplays(
+        physicalPixels: isWindows,
+      );
+      monitor = displayForWindow(frame, displays) ?? monitor;
+      if ((maximized || fullscreen) && currentFrame != null) {
+        final currentMonitor = displayForWindow(currentFrame, displays);
+        if (currentMonitor != null &&
+            currentMonitor.workArea != monitor?.workArea) {
+          final moved = restoreWindowPlacement(
+            displays: [currentMonitor],
+            defaultSize: kDesktopDefaultMainWindowSize,
+            savedFrame: frame,
+            savedDisplay: monitor,
+          );
+          frame = moved?.frame ?? frame;
+          monitor = currentMonitor;
+        }
+      }
+    } catch (error) {
+      debugPrint('Could not save main-window monitor: $error');
+    }
+  }
+  final position = LastWindowPosition(
+    frame.width,
+    frame.height,
+    frame.left,
+    frame.top,
+    minimized ? previous?.isMaximized : maximized,
+    minimized ? previous?.isFullscreen : fullscreen,
+    monitor: monitor,
+  );
+  _mainWindowPosition = position;
+  // Move/resize notifications retain the normal frame even when later closing
+  // maximized. Close/exit explicitly awaits the final persistence operation.
+  if (flush) {
+    await bind.setLocalFlutterOption(
+      k: windowFramePrefix + WindowType.Main.name,
+      v: position.toString(),
+    );
+  } else {
+    // Keep a checkpoint for installer-forced restarts; closing still performs
+    // an immediate, awaited save of the final geometry.
+    _mainWindowSaveDebounce.call(() {
+      unawaited(
+        saveWindowPosition(WindowType.Main, flush: true).catchError(
+          (Object error) => debugPrint('Geometry checkpoint failed: $error'),
+        ),
+      );
+    });
+  }
+}
+
+Future<bool> _restoreMainWindowPosition(LastWindowPosition? saved) async {
+  _mainWindowGeometryReady = false;
+  try {
+    final displays = await getDesktopWindowDisplays(physicalPixels: isWindows);
+    final restoreSize =
+        saved == null ||
+        !bind.isIncomingOnly() ||
+        bind.isOutgoingOnly() ||
+        saved.isMaximized == true;
+    var placement = restoreWindowPlacement(
+      displays: displays,
+      defaultSize: kDesktopDefaultMainWindowSize,
+      savedFrame: saved?.frame,
+      savedDisplay: saved?.monitor,
+      scaleDefaultSize: isWindows,
+    );
+    if (placement == null) return false;
+    if (!restoreSize) {
+      // The incoming-only UI sizes itself to its content. Keep that logical
+      // size, converting with the target display's DPI instead of the saved
+      // monitor's old DPI.
+      final currentSize = await windowManager.getSize();
+      final targetSize = currentSize *
+          (isWindows ? placement.display.scaleFactor : 1.0);
+      placement = restoreWindowPlacement(
+        displays: [placement.display],
+        defaultSize: targetSize,
+        savedFrame: placement.frame.topLeft & targetSize,
+        savedDisplay: placement.display,
+      ) ?? placement;
+    }
+    final frame = placement.frame;
+    // All Windows values here are physical pixels. Apply size again after the
+    // move because crossing a DPI boundary can trigger an OS size adjustment.
+    await windowManager.setSize(
+      frame.size,
+      ignoreDevicePixelRatio: _ignoreDevicePixelRatio,
+    );
+    await windowManager.setPosition(
+      frame.topLeft,
+      ignoreDevicePixelRatio: _ignoreDevicePixelRatio,
+    );
+    if (isWindows) {
+      await windowManager.setSize(
+        frame.size,
+        ignoreDevicePixelRatio: _ignoreDevicePixelRatio,
+      );
+    }
+    _mainWindowPosition = LastWindowPosition(
+      frame.width,
+      frame.height,
+      frame.left,
+      frame.top,
+      saved?.isMaximized,
+      saved?.isFullscreen,
+      monitor: placement.display,
+    );
+    if (saved?.isMaximized == true &&
+        !(bind.isIncomingOnly() || bind.isOutgoingOnly())) {
+      await windowManager.maximize();
+    }
+    return true;
+  } catch (error) {
+    debugPrint('Could not restore main-window geometry: $error');
+    return false;
+  } finally {
+    _mainWindowGeometryReady = true;
+  }
+}
+
 /// Save window position and size on exit
 /// Note that windowId must be provided if it's subwindow
 Future<void> saveWindowPosition(WindowType type,
     {int? windowId, bool? flush}) async {
+  if (type == WindowType.Main) {
+    if (!_mainWindowGeometryReady) return;
+    final save = _mainWindowSaveQueue.then((_) =>
+        _saveMainWindowPosition(flush == true));
+    _mainWindowSaveQueue = save.catchError((Object error) {
+      debugPrint('Could not save main-window geometry: $error');
+    });
+    return save;
+  }
   if (type != WindowType.Main && windowId == null) {
     debugPrint(
         "Error: windowId cannot be null when saving positions for sub window");
@@ -2093,22 +2306,7 @@ Future<void> saveWindowPosition(WindowType type,
 
   switch (type) {
     case WindowType.Main:
-      // Checking `bind.isIncomingOnly()` is a simple workaround for MacOS.
-      // `await windowManager.isMaximized()` will always return true
-      // if is not resizable. The reason is unknown.
-      //
-      // `setResizable(!bind.isIncomingOnly());` in main.dart
-      isMaximized =
-          bind.isIncomingOnly() ? false : await windowManager.isMaximized();
-      if (isFullscreen || isMaximized) {
-        setPreFrame();
-      } else {
-        position = await windowManager.getPosition(
-            ignoreDevicePixelRatio: _ignoreDevicePixelRatio);
-        sz = await windowManager.getSize(
-            ignoreDevicePixelRatio: _ignoreDevicePixelRatio);
-      }
-      break;
+      return; // Main-window persistence is handled above.
     default:
       final wc = WindowController.fromWindowId(windowId!);
       isMaximized = await wc.isMaximized();
@@ -2315,6 +2513,7 @@ Future<bool> restoreWindowPosition(WindowType type,
   if (bind
       .mainGetEnv(key: "DISABLE_RUSTDESK_RESTORE_WINDOW_POSITION")
       .isNotEmpty) {
+    if (type == WindowType.Main) _mainWindowGeometryReady = true;
     return false;
   }
   if (type != WindowType.Main && windowId == null) {
@@ -2341,30 +2540,10 @@ Future<bool> restoreWindowPosition(WindowType type,
       pos ?? bind.getLocalFlutterOption(k: windowFramePrefix + type.name);
 
   var lpos = LastWindowPosition.loadFromString(restorePos);
+  if (type == WindowType.Main) return _restoreMainWindowPosition(lpos);
   if (lpos == null) {
     debugPrint("No window position saved, trying to center the window.");
-    switch (type) {
-      case WindowType.Main:
-        // Center the main window only if no position is saved (on first run).
-        if (isWindows || isLinux) {
-          if (isWindows) {
-            // Window restore on Windows stores physical pixels.
-            final size = await _adjustRestoreMainWindowSize(null, null);
-            await windowManager.setSize(size,
-                ignoreDevicePixelRatio: _ignoreDevicePixelRatio);
-          }
-          await windowManager.center();
-        }
-        // For MacOS, the window is already centered by default.
-        // See https://github.com/rustdesk/rustdesk/blob/9b9276e7524523d7f667fefcd0694d981443df0e/flutter/macos/Runner/Base.lproj/MainMenu.xib#L333
-        // If `<windowPositionMask>` in `<window>` is not set, the window will be centered.
-        break;
-      default:
-        // No need to change the position of a sub window if no position is saved,
-        // since the default position is already centered.
-        // https://github.com/rustdesk/rustdesk/blob/317639169359936f7f9f85ef445ec9774218772d/flutter/lib/utils/multi_window_manager.dart#L163
-        break;
-    }
+    // Subwindows are already centered by their creation path.
     return true;
   }
   if (type == WindowType.RemoteDesktop || type == WindowType.ViewCamera) {
@@ -2398,47 +2577,7 @@ Future<bool> restoreWindowPosition(WindowType type,
 
   switch (type) {
     case WindowType.Main:
-      final restoreMaximized = lpos.isMaximized == true &&
-          !(bind.isIncomingOnly() || bind.isOutgoingOnly());
-      restorePos() async {
-        if (offsetLeftTop == null) {
-          await windowManager.center();
-        } else {
-          await windowManager.setPosition(offsetLeftTop,
-              ignoreDevicePixelRatio: _ignoreDevicePixelRatio);
-        }
-      }
-      if (restoreMaximized) {
-        await restorePos();
-        await windowManager.maximize();
-      } else {
-        final storeSize = !bind.isIncomingOnly() ||
-            bind.isOutgoingOnly() ||
-            lpos.isMaximized == true;
-        if (isWindows) {
-          if (storeSize) {
-            // We need to set the window size first to avoid the incorrect size in some special cases.
-            // E.g. There are two monitors, the left one is 100% DPI and the right one is 175% DPI.
-            // The window belongs to the left monitor, but if it is moved a little to the right, it will belong to the right monitor.
-            // After restoring, the size will be incorrect.
-            // See known issue in https://github.com/rustdesk/rustdesk/pull/9840
-            await windowManager.setSize(size,
-                ignoreDevicePixelRatio: _ignoreDevicePixelRatio);
-          }
-          await restorePos();
-          if (storeSize) {
-            await windowManager.setSize(size,
-                ignoreDevicePixelRatio: _ignoreDevicePixelRatio);
-          }
-        } else {
-          if (storeSize) {
-            await windowManager.setSize(size,
-                ignoreDevicePixelRatio: _ignoreDevicePixelRatio);
-          }
-          await restorePos();
-        }
-      }
-      return true;
+      return true; // Main-window placement is handled above.
     default:
       final wc = WindowController.fromWindowId(windowId!);
       restoreFrame() async {
@@ -3211,14 +3350,12 @@ Future<void> onActiveWindowChanged() async {
     }
     // close all sub windows
     try {
-      if (isLinux) {
-        await Future.wait([
-          saveWindowPosition(WindowType.Main),
-          rustDeskWinManager.closeAllSessionWindows(confirm: false)
-        ]);
-      } else {
-        await rustDeskWinManager.closeAllSessionWindows(confirm: false);
+      try {
+        await saveWindowPosition(WindowType.Main, flush: true);
+      } catch (error) {
+        debugPrint('Could not persist main-window geometry on exit: $error');
       }
+      await rustDeskWinManager.closeAllSessionWindows(confirm: false);
     } catch (err) {
       debugPrintStack(label: "$err");
     } finally {

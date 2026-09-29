@@ -257,6 +257,7 @@ class DesktopTab extends StatefulWidget {
   final TabMenuBuilder? tabMenuBuilder;
   final Widget? tail;
   final Future<bool> Function()? onWindowCloseButton;
+  final bool persistWindowGeometry;
   final TabBuilder? tabBuilder;
   final LabelGetter? labelGetter;
   final double? maxLabelWidth;
@@ -282,6 +283,7 @@ class DesktopTab extends StatefulWidget {
     this.tabMenuBuilder,
     this.tail,
     this.onWindowCloseButton,
+    this.persistWindowGeometry = true,
     this.tabBuilder,
     this.labelGetter,
     this.maxLabelWidth,
@@ -411,6 +413,7 @@ class _DesktopTabState extends State<DesktopTab>
   }
 
   _saveFrame({bool? flush}) async {
+    if (!widget.persistWindowGeometry) return;
     try {
       if (tabType == DesktopTabType.main) {
         await saveWindowPosition(WindowType.Main, flush: flush);

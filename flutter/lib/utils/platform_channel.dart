@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hbb/main.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/consts.dart';
+import 'package:flutter_hbb/utils/multi_window_manager.dart';
 
 enum SystemWindowTheme { light, dark }
 
@@ -45,6 +46,9 @@ class RdPlatformChannel {
     assert(isMacOS);
     _hostMethodChannel.setMethodCallHandler((call) async {
       switch (call.method) {
+        case 'saveWindowGeometry':
+          await saveWindowPosition(WindowType.Main, flush: true);
+          return true;
         case 'activateTab':
           final args = call.arguments as Map<dynamic, dynamic>? ?? {};
           final windowId = args['windowId'];

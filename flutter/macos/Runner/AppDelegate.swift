@@ -4,6 +4,28 @@ import FlutterMacOS
 @main
 class AppDelegate: FlutterAppDelegate {
     var launched = false
+    private var savingWindowGeometry = false
+
+    override func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !savingWindowGeometry else { return .terminateLater }
+        guard let window = sender.windows.first(where: { $0 is MainFlutterWindow }) as? MainFlutterWindow else {
+            return .terminateNow
+        }
+        savingWindowGeometry = true
+        // Command-Q bypasses windowShouldClose. Let Dart finish its config write
+        // before quitting, but never trap Quit when the Flutter engine is gone.
+        DispatchQueue.main.async {
+            var replied = false
+            let finish = {
+                guard !replied else { return }
+                replied = true
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+            window.persistGeometryBeforeExit(completion: finish)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: finish)
+        }
+        return .terminateLater
+    }
 
     private func restoreMainWindow(_ sender: NSApplication) {
         guard let window = sender.windows.first(where: { $0 is MainFlutterWindow }) else {

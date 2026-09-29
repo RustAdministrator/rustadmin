@@ -208,6 +208,18 @@ private final class TabMenuManager: NSObject {
 }
 
 class MainFlutterWindow: NSWindow {
+    private var mainHostChannel: FlutterMethodChannel?
+
+    func persistGeometryBeforeExit(completion: @escaping () -> Void) {
+        guard let channel = mainHostChannel else {
+            completion()
+            return
+        }
+        channel.invokeMethod("saveWindowGeometry", arguments: nil) { _ in
+            completion()
+        }
+    }
+
     override func awakeFromNib() {
         rustdesk_core_main();
         let flutterViewController = FlutterViewController.init()
@@ -352,6 +364,7 @@ class MainFlutterWindow: NSWindow {
     public func setMethodHandler(registrar: FlutterPluginRegistrar, isMainWindow: Bool = false) {
         let channel = FlutterMethodChannel(name: "org.rustdesk.rustdesk/host", binaryMessenger: registrar.messenger)
         if isMainWindow {
+            mainHostChannel = channel
             TabMenuManager.shared.setMainChannel(channel)
         }
         channel.setMethodCallHandler({

@@ -1254,6 +1254,7 @@ class FfiModel with ChangeNotifier {
         }
 
         return CustomAlertDialog(
+          preferredContentWidth: kCredentialDialogWidth,
           title: Text(translate('Trust this device')),
           content: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1376,6 +1377,7 @@ class FfiModel with ChangeNotifier {
         }
 
         return CustomAlertDialog(
+          preferredContentWidth: kCredentialDialogWidth,
           title: Text(translate(direct
               ? 'Pairing passphrase required'
               : 'Rendezvous pairing passphrase required')),

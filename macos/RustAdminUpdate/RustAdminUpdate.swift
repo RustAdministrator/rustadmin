@@ -790,16 +790,59 @@ enum SourceDiscovery {
     }
 }
 
-#if !RUSTADMIN_UPDATER_TESTS
+struct UpdaterWindowLayout {
+    static let preferredWidth: CGFloat = 540
+
+    static func contentSize(
+        naturalContentHeight: CGFloat,
+        visibleFrame: NSRect,
+        nativeChromeHeight: CGFloat
+    ) -> NSSize {
+        let width = max(1, min(preferredWidth, visibleFrame.width))
+        let chromeHeight = max(0, nativeChromeHeight)
+        let naturalOuterHeight = max(0, naturalContentHeight) + chromeHeight
+        let outerHeight = min(max(1, visibleFrame.height), naturalOuterHeight)
+        return NSSize(width: width, height: max(0, outerHeight - chromeHeight))
+    }
+
+    static func needsVerticalScroll(
+        naturalContentHeight: CGFloat,
+        visibleFrame: NSRect,
+        nativeChromeHeight: CGFloat
+    ) -> Bool {
+        max(0, naturalContentHeight) + max(0, nativeChromeHeight) > visibleFrame.height
+    }
+}
+
+private final class UpdaterDocumentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+#if !RUSTADMIN_UPDATER_TESTS || RUSTADMIN_UPDATER_UI_TESTS
 private final class UpdateWindowController: NSObject, NSWindowDelegate {
     private let request: UpdateRequest
     private let statusLabel = NSTextField(labelWithString: "Ready to update RustAdmin.")
+    private let explanationLabel = NSTextField(labelWithString: "RustAdmin will close, update the application and any installed service, then reopen.")
     private let progressIndicator = NSProgressIndicator()
+    private let progressContainer = NSView()
+    private let statusRow = NSStackView()
+    private let buttons = NSStackView()
+    private let content = NSStackView()
+    private let scrollView = NSScrollView()
+    private let documentView = UpdaterDocumentView()
     private let updateButton = NSButton(title: "Update", target: nil, action: nil)
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private var hasStarted = false
     private var hasFinished = false
     private var window: NSWindow!
+    private var statusLabelWidthConstraint: NSLayoutConstraint!
+    private var explanationLabelWidthConstraint: NSLayoutConstraint!
+    private var versionLabelWidthConstraint: NSLayoutConstraint!
+    private var headerWidthConstraint: NSLayoutConstraint!
+    private var buttonsWidthConstraint: NSLayoutConstraint!
+#if RUSTADMIN_UPDATER_UI_TESTS
+    var testVisibleFrame: NSRect?
+#endif
 
     var isPrivilegedUpdateRunning: Bool {
         hasStarted && !hasFinished
@@ -812,9 +855,10 @@ private final class UpdateWindowController: NSObject, NSWindowDelegate {
     }
 
     func showWindow() {
-        NSApp.activate(ignoringOtherApps: true)
         window.center()
+        fitWindowToContent(recenter: true)
         window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -835,6 +879,7 @@ private final class UpdateWindowController: NSObject, NSWindowDelegate {
         progressIndicator.isHidden = false
         progressIndicator.startAnimation(nil)
         statusLabel.stringValue = "Updating RustAdmin… Approve the macOS permission request to continue."
+        scheduleWindowFit()
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
@@ -863,6 +908,7 @@ private final class UpdateWindowController: NSObject, NSWindowDelegate {
         statusLabel.stringValue = "Update complete. Starting RustAdmin…"
         cancelButton.title = "Close"
         cancelButton.isEnabled = true
+        scheduleWindowFit()
         openBundle(request.target)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
             self?.cleanupAndTerminate()
@@ -878,6 +924,7 @@ private final class UpdateWindowController: NSObject, NSWindowDelegate {
         cancelButton.isEnabled = true
         let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         statusLabel.stringValue = message
+        scheduleWindowFit()
     }
 
     func cleanupStaging() {
@@ -899,9 +946,160 @@ private final class UpdateWindowController: NSObject, NSWindowDelegate {
         try? process.run()
     }
 
+    private func scheduleWindowFit() {
+        DispatchQueue.main.async { [weak self] in
+            self?.fitWindowToContent()
+        }
+    }
+
+    private func fitWindowToContent(recenter: Bool = false) {
+        guard let window,
+              let contentView = window.contentView
+        else {
+            return
+        }
+
+#if RUSTADMIN_UPDATER_UI_TESTS
+        let visibleFrame = testVisibleFrame ?? (window.screen ?? NSScreen.main)?.visibleFrame
+#else
+        let visibleFrame = (window.screen ?? NSScreen.main)?.visibleFrame
+#endif
+        guard let visibleFrame else {
+            return
+        }
+        let nativeChromeHeight = max(
+            0,
+            window.frame.height - window.contentRect(forFrameRect: window.frame).height
+        )
+        let targetWidth = min(UpdaterWindowLayout.preferredWidth, visibleFrame.width)
+        let oldFrame = window.frame
+        if abs(contentView.bounds.width - targetWidth) >= 0.5 {
+            window.setContentSize(
+                NSSize(
+                    width: targetWidth,
+                    height: max(1, window.contentView?.bounds.height ?? 1)
+                )
+            )
+        }
+
+        contentView.layoutSubtreeIfNeeded()
+        updateDocumentWidth()
+        updateContentWidth()
+        contentView.layoutSubtreeIfNeeded()
+        var naturalContentHeight = fittedContentHeight()
+        let shouldScroll = UpdaterWindowLayout.needsVerticalScroll(
+            naturalContentHeight: naturalContentHeight,
+            visibleFrame: visibleFrame,
+            nativeChromeHeight: nativeChromeHeight
+        )
+        if scrollView.hasVerticalScroller != shouldScroll {
+            scrollView.hasVerticalScroller = shouldScroll
+            updateDocumentWidth()
+            updateContentWidth()
+            contentView.layoutSubtreeIfNeeded()
+            naturalContentHeight = fittedContentHeight()
+        }
+
+        let targetContentSize = UpdaterWindowLayout.contentSize(
+            naturalContentHeight: naturalContentHeight,
+            visibleFrame: visibleFrame,
+            nativeChromeHeight: nativeChromeHeight
+        )
+        window.setContentSize(targetContentSize)
+        updateContentWidth()
+        updateDocumentFrame(naturalContentHeight: naturalContentHeight)
+        contentView.layoutSubtreeIfNeeded()
+        var finalFrame = window.frame
+        if recenter {
+            finalFrame.origin.x = visibleFrame.midX - finalFrame.width / 2
+            finalFrame.origin.y = visibleFrame.midY - finalFrame.height / 2
+        } else {
+            finalFrame.origin.x = oldFrame.midX - finalFrame.width / 2
+            finalFrame.origin.y = oldFrame.maxY - finalFrame.height
+        }
+        finalFrame.size.width = min(finalFrame.width, visibleFrame.width)
+        finalFrame.size.height = min(finalFrame.height, visibleFrame.height)
+        finalFrame.origin.x = min(
+            max(finalFrame.origin.x, visibleFrame.minX),
+            visibleFrame.maxX - finalFrame.width
+        )
+        finalFrame.origin.y = min(
+            max(finalFrame.origin.y, visibleFrame.minY),
+            visibleFrame.maxY - finalFrame.height
+        )
+        window.setFrame(finalFrame, display: true)
+    }
+
+    private func fittedContentHeight() -> CGFloat {
+        max(content.fittingSize.height, content.intrinsicContentSize.height)
+    }
+
+    private func updateContentWidth() {
+        let viewportWidth = max(1, scrollView.contentView.bounds.width)
+        let innerWidth = max(80, viewportWidth - 56)
+        statusLabelWidthConstraint.constant = max(60, innerWidth - 24)
+        explanationLabelWidthConstraint.constant = innerWidth
+        versionLabelWidthConstraint.constant = innerWidth
+        headerWidthConstraint.constant = innerWidth
+        buttonsWidthConstraint.constant = innerWidth
+    }
+
+    private func updateDocumentWidth() {
+        let width = max(1, scrollView.contentView.bounds.width)
+        var frame = documentView.frame
+        frame.size.width = width
+        documentView.frame = frame
+    }
+
+    private func updateDocumentFrame(naturalContentHeight: CGFloat) {
+        let viewportBounds = scrollView.contentView.bounds
+        let width = max(1, viewportBounds.width)
+        let height = max(naturalContentHeight, viewportBounds.height)
+        documentView.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: width,
+            height: max(1, height)
+        )
+        documentView.needsLayout = true
+    }
+
+#if RUSTADMIN_UPDATER_UI_TESTS
+    func setPreviewStatus(_ value: String) {
+        statusLabel.stringValue = value
+        fitWindowToContent()
+    }
+
+    var previewWindow: NSWindow { window }
+
+    func verifyPreviewLayout() throws {
+        guard scrollView.documentView === documentView else {
+            throw UpdateError.failed("Updater scrolling has no document view.")
+        }
+        let buttonFrame = documentView.convert(buttons.bounds, from: buttons)
+        guard abs(fittedContentHeight() - buttonFrame.maxY - 24) < 1 else {
+            throw UpdateError.failed("Updater has excess or missing space below its buttons.")
+        }
+        if documentView.frame.height > scrollView.contentView.bounds.height + 1 {
+            guard scrollView.hasVerticalScroller else {
+                throw UpdateError.failed("Tall updater content has no vertical scroller.")
+            }
+            scrollView.contentView.scroll(to: NSPoint(
+                x: 0,
+                y: documentView.frame.height - scrollView.contentView.bounds.height
+            ))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+            guard scrollView.contentView.bounds.contains(buttonFrame) else {
+                throw UpdateError.failed("Updater buttons cannot be reached by scrolling.")
+            }
+            scrollView.contentView.scroll(to: .zero)
+        }
+    }
+#endif
+
     private func buildWindow() {
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 540, height: 300),
+            contentRect: NSRect(x: 0, y: 0, width: UpdaterWindowLayout.preferredWidth, height: 1),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -919,21 +1117,42 @@ private final class UpdateWindowController: NSObject, NSWindowDelegate {
 
         let titleLabel = NSTextField(labelWithString: "A newer RustAdmin is ready")
         titleLabel.font = .boldSystemFont(ofSize: 20)
+        titleLabel.lineBreakMode = .byWordWrapping
+        titleLabel.maximumNumberOfLines = 0
+        titleLabel.cell?.wraps = true
+        titleLabel.cell?.isScrollable = false
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let versionLabel = NSTextField(labelWithString: "Installed: \(request.installedVersion)    New: \(request.sourceVersion)")
         versionLabel.textColor = .secondaryLabelColor
+        versionLabel.lineBreakMode = .byWordWrapping
+        versionLabel.maximumNumberOfLines = 0
+        versionLabel.cell?.wraps = true
+        versionLabel.cell?.isScrollable = false
 
-        let explanationLabel = NSTextField(labelWithString: "RustAdmin will close, update the application and any installed service, then reopen.")
         explanationLabel.lineBreakMode = .byWordWrapping
-        explanationLabel.maximumNumberOfLines = 2
+        explanationLabel.maximumNumberOfLines = 0
+        explanationLabel.cell?.wraps = true
+        explanationLabel.cell?.isScrollable = false
 
         statusLabel.lineBreakMode = .byWordWrapping
-        statusLabel.maximumNumberOfLines = 3
+        statusLabel.maximumNumberOfLines = 0
+        statusLabel.cell?.wraps = true
+        statusLabel.cell?.isScrollable = false
 
         progressIndicator.style = .spinning
         progressIndicator.controlSize = .small
         progressIndicator.isIndeterminate = true
         progressIndicator.isHidden = true
+        progressContainer.translatesAutoresizingMaskIntoConstraints = false
+        progressIndicator.translatesAutoresizingMaskIntoConstraints = false
+        progressContainer.addSubview(progressIndicator)
+        NSLayoutConstraint.activate([
+            progressContainer.widthAnchor.constraint(equalToConstant: 16),
+            progressContainer.heightAnchor.constraint(equalToConstant: 16),
+            progressIndicator.centerXAnchor.constraint(equalTo: progressContainer.centerXAnchor),
+            progressIndicator.centerYAnchor.constraint(equalTo: progressContainer.centerYAnchor),
+        ])
 
         updateButton.target = self
         updateButton.action = #selector(update)
@@ -951,37 +1170,119 @@ private final class UpdateWindowController: NSObject, NSWindowDelegate {
             iconView.heightAnchor.constraint(equalToConstant: 56),
         ])
 
-        let statusRow = NSStackView(views: [progressIndicator, statusLabel])
         statusRow.orientation = .horizontal
         statusRow.alignment = .top
         statusRow.spacing = 8
+        statusRow.addArrangedSubview(progressContainer)
+        statusRow.addArrangedSubview(statusLabel)
 
-        let buttons = NSStackView(views: [NSView(), cancelButton, updateButton])
         buttons.orientation = .horizontal
         buttons.alignment = .centerY
         buttons.spacing = 10
+        let buttonSpacer = NSView()
+        buttonSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        buttonSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        buttons.addArrangedSubview(buttonSpacer)
+        buttons.addArrangedSubview(cancelButton)
+        buttons.addArrangedSubview(updateButton)
 
-        let content = NSStackView(views: [header, versionLabel, explanationLabel, statusRow, buttons])
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 14
         content.edgeInsets = NSEdgeInsets(top: 24, left: 28, bottom: 24, right: 28)
         content.translatesAutoresizingMaskIntoConstraints = false
+        content.addArrangedSubview(header)
+        content.addArrangedSubview(versionLabel)
+        content.addArrangedSubview(explanationLabel)
+        content.addArrangedSubview(statusRow)
+        content.addArrangedSubview(buttons)
 
-        window.contentView = NSView()
-        window.contentView?.addSubview(content)
+        let windowContentView = NSView()
+        window.contentView = windowContentView
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+        scrollView.hasHorizontalScroller = false
+        scrollView.hasVerticalScroller = false
+        scrollView.autohidesScrollers = true
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        windowContentView.addSubview(scrollView)
+        documentView.translatesAutoresizingMaskIntoConstraints = true
+        scrollView.documentView = documentView
+        documentView.addSubview(content)
+        statusLabelWidthConstraint = statusLabel.widthAnchor.constraint(equalToConstant: 440)
+        explanationLabelWidthConstraint = explanationLabel.widthAnchor.constraint(equalToConstant: 440)
+        versionLabelWidthConstraint = versionLabel.widthAnchor.constraint(equalToConstant: 440)
+        headerWidthConstraint = header.widthAnchor.constraint(equalToConstant: 440)
+        buttonsWidthConstraint = buttons.widthAnchor.constraint(equalToConstant: 484)
         NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: window.contentView!.leadingAnchor),
-            content.trailingAnchor.constraint(equalTo: window.contentView!.trailingAnchor),
-            content.topAnchor.constraint(equalTo: window.contentView!.topAnchor),
-            content.bottomAnchor.constraint(equalTo: window.contentView!.bottomAnchor),
-            buttons.widthAnchor.constraint(equalTo: content.widthAnchor, constant: -56),
-            statusLabel.widthAnchor.constraint(equalToConstant: 440),
-            explanationLabel.widthAnchor.constraint(equalToConstant: 440),
+            scrollView.leadingAnchor.constraint(equalTo: windowContentView.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: windowContentView.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: windowContentView.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: windowContentView.bottomAnchor),
+            content.leadingAnchor.constraint(equalTo: documentView.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: documentView.trailingAnchor),
+            content.topAnchor.constraint(equalTo: documentView.topAnchor),
+            content.widthAnchor.constraint(equalTo: documentView.widthAnchor),
+            statusLabelWidthConstraint,
+            explanationLabelWidthConstraint,
+            versionLabelWidthConstraint,
+            headerWidthConstraint,
+            buttonsWidthConstraint,
         ])
     }
 }
 
+#endif
+
+#if RUSTADMIN_UPDATER_TESTS && RUSTADMIN_UPDATER_UI_TESTS
+enum UpdaterWindowPreview {
+    static func render(
+        request: UpdateRequest,
+        status: String?,
+        visibleFrame: NSRect,
+        to outputURL: URL
+    ) throws {
+        let application = NSApplication.shared
+        application.setActivationPolicy(.prohibited)
+        let controller = UpdateWindowController(request: request)
+        controller.testVisibleFrame = visibleFrame
+        let window = controller.previewWindow
+        controller.showWindow()
+        if let status {
+            controller.setPreviewStatus(status)
+        }
+
+        let frame = window.frame
+        guard frame.width <= visibleFrame.width + 0.5,
+              frame.height <= visibleFrame.height + 0.5,
+              frame.minX >= visibleFrame.minX - 0.5,
+              frame.maxX <= visibleFrame.maxX + 0.5,
+              frame.minY >= visibleFrame.minY - 0.5,
+              frame.maxY <= visibleFrame.maxY + 0.5
+        else {
+            throw UpdateError.failed("Updater preview frame escaped the visible work area.")
+        }
+        try controller.verifyPreviewLayout()
+
+        guard let contentView = window.contentView else {
+            throw UpdateError.failed("Updater preview window has no content view.")
+        }
+        contentView.layoutSubtreeIfNeeded()
+        contentView.displayIfNeeded()
+        guard let imageRepresentation = contentView.bitmapImageRepForCachingDisplay(in: contentView.bounds) else {
+            throw UpdateError.failed("Could not capture updater layout preview.")
+        }
+        contentView.cacheDisplay(in: contentView.bounds, to: imageRepresentation)
+        guard let imageData = imageRepresentation.representation(using: .png, properties: [:]) else {
+            throw UpdateError.failed("Could not encode updater layout preview.")
+        }
+        try imageData.write(to: outputURL, options: .atomic)
+        window.orderOut(nil)
+    }
+}
+#endif
+
+#if !RUSTADMIN_UPDATER_TESTS
 private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowController: UpdateWindowController?
 

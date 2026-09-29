@@ -358,6 +358,7 @@ Future<String> changePairingPassphrase(
     }
 
     return CustomAlertDialog(
+      preferredContentWidth: kCredentialDialogWidth,
       title: Text(translate(title)),
       content: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -897,6 +898,7 @@ void wrongPasswordDialog(SessionID sessionId,
     }
 
     return CustomAlertDialog(
+        preferredContentWidth: kCredentialDialogWidth,
         title: null,
         content: msgboxContent(type, title, text),
         onSubmit: submit,
@@ -1128,11 +1130,14 @@ _connectDialog(
     }
 
     return CustomAlertDialog(
+      preferredContentWidth: kCredentialDialogWidth,
       title: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Icon(Icons.password_rounded, color: MyTheme.accent),
-          Text(translate('Password Required')).paddingOnly(left: 10),
+          Flexible(
+            child: Text(translate('Password Required')).paddingOnly(left: 10),
+          ),
         ],
       ),
       content: Column(mainAxisSize: MainAxisSize.min, children: [
@@ -1329,6 +1334,7 @@ void showRequestElevationDialog(
     }
 
     return CustomAlertDialog(
+      preferredContentWidth: kCredentialDialogWidth,
       title: Text(translate('Request Elevation')),
       content: content,
       actions: [
@@ -2452,6 +2458,7 @@ void enter2FaDialog(
         ));
 
     return CustomAlertDialog(
+        preferredContentWidth: kCredentialDialogWidth,
         title: Text(translate('enter-2fa-title')),
         content: Column(
           children: [
@@ -2654,14 +2661,17 @@ void setSharedAbPasswordDialog(String abName, Peer peer) {
     }
 
     return CustomAlertDialog(
+      preferredContentWidth: kCredentialDialogWidth,
       title: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Icon(Icons.key, color: MyTheme.accent),
-          Text(translate(peer.password.isEmpty
-                  ? 'Set shared password'
-                  : 'Change Password'))
-              .paddingOnly(left: 10),
+          Flexible(
+            child: Text(translate(peer.password.isEmpty
+                    ? 'Set shared password'
+                    : 'Change Password'))
+                .paddingOnly(left: 10),
+          ),
         ],
       ),
       content: Obx(() => Column(children: [
@@ -2685,9 +2695,11 @@ void setSharedAbPasswordDialog(String abName, Peer peer) {
             if (!gFFI.abModel.current.isPersonal())
               Row(children: [
                 Icon(Icons.info, color: Colors.amber).marginOnly(right: 4),
-                Text(
-                  translate('share_warning_tip'),
-                  style: TextStyle(fontSize: 12),
+                Expanded(
+                  child: Text(
+                    translate('share_warning_tip'),
+                    style: TextStyle(fontSize: 12),
+                  ),
                 )
               ]).marginSymmetric(vertical: 10),
             // NOT use Offstage to wrap LinearProgressIndicator
@@ -2780,6 +2792,7 @@ void changeUnlockPinDialog(String oldPin, Function() callback) {
     }
 
     return CustomAlertDialog(
+      preferredContentWidth: kCredentialDialogWidth,
       title: Text(translate("Set PIN")),
       content: Column(
         children: [
@@ -2826,6 +2839,7 @@ void checkUnlockPinDialog(String correctPin, Function() passCallback) {
     }
 
     return CustomAlertDialog(
+      preferredContentWidth: kCredentialDialogWidth,
       content: Row(
         children: [
           Expanded(

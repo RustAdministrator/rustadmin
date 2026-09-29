@@ -18,9 +18,12 @@ import 'package:flutter_hbb/desktop/screen/desktop_port_forward_screen.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_remote_screen.dart';
 import 'package:flutter_hbb/desktop/screen/desktop_terminal_screen.dart';
 import 'package:flutter_hbb/desktop/widgets/first_run_wizard.dart';
+import 'package:flutter_hbb/desktop/widgets/content_sized_window.dart';
 import 'package:flutter_hbb/desktop/widgets/refresh_wrapper.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
+import 'package:flutter_hbb/utils/desktop_window_geometry.dart';
+import 'package:flutter_hbb/utils/window_placement.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
@@ -440,15 +443,86 @@ void _runApp(
 void runInstallPage({bool isUpgrade = false}) async {
   await windowManager.ensureInitialized();
   await initEnv(kAppTypeMain);
-  _runApp('', InstallPage(isUpgrade: isUpgrade), MyTheme.currentThemeMode());
-  WindowOptions windowOptions =
-      getHiddenTitleBarWindowOptions(size: Size(800, 600), center: true);
-  windowManager.waitUntilReadyToShow(windowOptions, () async {
-    windowManager.show();
-    windowManager.focus();
-    windowManager.setOpacity(1);
-    windowManager.setAlignment(Alignment.center); // ensure
-  });
+  await windowManager.waitUntilReadyToShow(
+    getHiddenTitleBarWindowOptions(size: const Size(800, 600)),
+  );
+  final displays = await getDesktopWindowDisplays(physicalPixels: isWindows);
+  final initial = restoreWindowPlacement(
+    displays: displays,
+    defaultSize: const Size(800, 600),
+    scaleDefaultSize: isWindows,
+  );
+  if (initial != null) {
+    await windowManager.setBounds(initial.frame, ignoreDevicePixelRatio: true);
+  }
+
+  double logicalScale() => isWindows
+      ? WidgetsBinding.instance.platformDispatcher.views.first.devicePixelRatio
+      : 1;
+  Future<WindowDisplay?> currentDisplay() async {
+    final available = await getDesktopWindowDisplays(physicalPixels: isWindows);
+    final frame = await windowManager.getBounds(ignoreDevicePixelRatio: true);
+    return displayForWindow(frame, available.isEmpty ? displays : available);
+  }
+
+  double? nativeChromeHeight;
+  var firstResize = true;
+  final sizing = ContentSizedWindowController(
+    nativeChromeHeight: () async {
+      // Read once after the first layout, before content resizing. Comparing
+      // a resized native frame with the previous Flutter frame would feed the
+      // resize delta back into the next requested height.
+      if (nativeChromeHeight == null) {
+        final outer = await windowManager.getSize();
+        final view = WidgetsBinding.instance.platformDispatcher.views.first;
+        final contentHeight = view.physicalSize.height / view.devicePixelRatio;
+        nativeChromeHeight = (outer.height - contentHeight).clamp(0.0, 120.0);
+      }
+      return nativeChromeHeight;
+    },
+    availableHeight: () async {
+      final display = await currentDisplay();
+      return display == null ? null : display.workArea.height / logicalScale();
+    },
+    onSizeChanged: (size) async {
+      final current = await windowManager.getBounds(
+        ignoreDevicePixelRatio: true,
+      );
+      final display = await currentDisplay();
+      final desired = Rect.fromLTWH(
+        current.left,
+        current.top,
+        current.width,
+        size.height * logicalScale(),
+      );
+      final placement = display == null
+          ? null
+          : restoreWindowPlacement(
+              displays: [display],
+              defaultSize: desired.size,
+              savedFrame: firstResize ? null : desired,
+              savedDisplay: display,
+            );
+      firstResize = false;
+      await windowManager.setBounds(
+        placement?.frame ?? desired,
+        ignoreDevicePixelRatio: true,
+      );
+    },
+  );
+  _runApp(
+    '',
+    InstallPage(isUpgrade: isUpgrade, contentSizedWindowController: sizing),
+    MyTheme.currentThemeMode(),
+  );
+  try {
+    await sizing.ready.timeout(const Duration(seconds: 3));
+  } on TimeoutException {
+    debugPrint('Installer content measurement delayed; showing current layout');
+  }
+  await windowManager.show();
+  await windowManager.focus();
+  await windowManager.setOpacity(1);
 }
 
 WindowOptions getHiddenTitleBarWindowOptions(

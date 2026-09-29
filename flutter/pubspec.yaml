@@ -53,6 +53,7 @@ dependencies:
   window_manager:
     git:
       url: https://github.com/rustdesk-org/window_manager
+  screen_retriever: ^0.1.9
   desktop_multi_window:
     git:
       url: https://github.com/rustdesk-org/rustdesk_desktop_multi_window
