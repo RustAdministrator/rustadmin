@@ -358,7 +358,7 @@ Future<String> changePairingPassphrase(
     }
 
     return CustomAlertDialog(
-      preferredContentWidth: kCredentialDialogWidth,
+      preferredContentWidth: credentialDialogWidth(context),
       title: Text(translate(title)),
       content: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -898,7 +898,7 @@ void wrongPasswordDialog(SessionID sessionId,
     }
 
     return CustomAlertDialog(
-        preferredContentWidth: kCredentialDialogWidth,
+        preferredContentWidth: credentialDialogWidth(context),
         title: null,
         content: msgboxContent(type, title, text),
         onSubmit: submit,
@@ -1130,7 +1130,7 @@ _connectDialog(
     }
 
     return CustomAlertDialog(
-      preferredContentWidth: kCredentialDialogWidth,
+      preferredContentWidth: credentialDialogWidth(context),
       title: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
@@ -1334,7 +1334,7 @@ void showRequestElevationDialog(
     }
 
     return CustomAlertDialog(
-      preferredContentWidth: kCredentialDialogWidth,
+      preferredContentWidth: credentialDialogWidth(context),
       title: Text(translate('Request Elevation')),
       content: content,
       actions: [
@@ -2458,7 +2458,7 @@ void enter2FaDialog(
         ));
 
     return CustomAlertDialog(
-        preferredContentWidth: kCredentialDialogWidth,
+        preferredContentWidth: credentialDialogWidth(context),
         title: Text(translate('enter-2fa-title')),
         content: Column(
           children: [
@@ -2661,7 +2661,7 @@ void setSharedAbPasswordDialog(String abName, Peer peer) {
     }
 
     return CustomAlertDialog(
-      preferredContentWidth: kCredentialDialogWidth,
+      preferredContentWidth: credentialDialogWidth(context),
       title: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
@@ -2792,7 +2792,7 @@ void changeUnlockPinDialog(String oldPin, Function() callback) {
     }
 
     return CustomAlertDialog(
-      preferredContentWidth: kCredentialDialogWidth,
+      preferredContentWidth: credentialDialogWidth(context),
       title: Text(translate("Set PIN")),
       content: Column(
         children: [
@@ -2839,7 +2839,7 @@ void checkUnlockPinDialog(String correctPin, Function() passCallback) {
     }
 
     return CustomAlertDialog(
-      preferredContentWidth: kCredentialDialogWidth,
+      preferredContentWidth: credentialDialogWidth(context),
       content: Row(
         children: [
           Expanded(

@@ -1044,7 +1044,7 @@ void setPasswordDialog({VoidCallback? notEmptyCallback}) async {
     }
 
     return CustomAlertDialog(
-      preferredContentWidth: kCredentialDialogWidth,
+      preferredContentWidth: credentialDialogWidth(context),
       title: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [

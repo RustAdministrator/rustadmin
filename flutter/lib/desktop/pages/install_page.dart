@@ -158,7 +158,7 @@ class _InstallPageBodyState extends State<_InstallPageBody>
       backgroundColor: null,
       body: ContentSizedWindow(
         controller: widget.contentSizedWindowController,
-        padding: EdgeInsets.fromLTRB(4 * em, 3 * em, 4 * em, 24),
+        padding: EdgeInsets.fromLTRB(4 * em, 3 * em, 4 * em, 4 * em),
         additionalWindowHeight: kUseCompatibleUiMode
             ? 0
             : kDesktopRemoteTabBarHeight,

@@ -1077,7 +1077,7 @@ private final class UpdateWindowController: NSObject, NSWindowDelegate {
             throw UpdateError.failed("Updater scrolling has no document view.")
         }
         let buttonFrame = documentView.convert(buttons.bounds, from: buttons)
-        guard abs(fittedContentHeight() - buttonFrame.maxY - 24) < 1 else {
+        guard abs(fittedContentHeight() - buttonFrame.maxY - 28) < 1 else {
             throw UpdateError.failed("Updater has excess or missing space below its buttons.")
         }
         if documentView.frame.height > scrollView.contentView.bounds.height + 1 {
@@ -1189,7 +1189,7 @@ private final class UpdateWindowController: NSObject, NSWindowDelegate {
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 14
-        content.edgeInsets = NSEdgeInsets(top: 24, left: 28, bottom: 24, right: 28)
+        content.edgeInsets = NSEdgeInsets(top: 24, left: 28, bottom: 28, right: 28)
         content.translatesAutoresizingMaskIntoConstraints = false
         content.addArrangedSubview(header)
         content.addArrangedSubview(versionLabel)

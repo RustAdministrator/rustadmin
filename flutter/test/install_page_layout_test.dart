@@ -115,14 +115,14 @@ void main() {
   }
 
   testWidgets(
-    'install and upgrade fit their actual content with a small footer',
+    'install and upgrade fit their actual content with matching footer padding',
     (tester) async {
       final install = await showInstaller(tester);
       final installHeight = install.last.height;
       final contentBottom = tester
           .getBottomLeft(find.byKey(const ValueKey('install-body-column')))
           .dy;
-      expect(installHeight - contentBottom, closeTo(24, 1));
+      expect(installHeight - contentBottom, closeTo(52, 1));
       expect(find.byType(Checkbox), findsNWidgets(3));
       final button = find.text('Accept and Install');
       final buttonBefore = tester.getRect(button);
@@ -140,7 +140,7 @@ void main() {
       final upgradeBottom = tester
           .getBottomLeft(find.byKey(const ValueKey('install-body-column')))
           .dy;
-      expect(upgrade.last.height - upgradeBottom, closeTo(24, 1));
+      expect(upgrade.last.height - upgradeBottom, closeTo(52, 1));
       await clearInstaller(tester);
     },
   );

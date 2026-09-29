@@ -627,7 +627,7 @@ Future<bool?> loginDialog() async {
     final titlePadding = EdgeInsets.fromLTRB(MyTheme.dialogPadding, 0, 0, 0);
 
     return CustomAlertDialog(
-      preferredContentWidth: kCredentialDialogWidth,
+      preferredContentWidth: credentialDialogWidth(context),
       title: title,
       titlePadding: titlePadding,
       content: Column(
@@ -723,7 +723,7 @@ Future<bool?> verificationCodeDialog(
     getOnSubmit() => codeField.isReady ? onVerify : null;
 
     return CustomAlertDialog(
-        preferredContentWidth: kCredentialDialogWidth,
+        preferredContentWidth: credentialDialogWidth(context),
         title: Text(translate("Verification code")),
         content: Column(
           children: [

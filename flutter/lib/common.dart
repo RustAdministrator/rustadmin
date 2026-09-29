@@ -53,7 +53,23 @@ final globalKey = GlobalKey<NavigatorState>();
 final navigationBarKey = GlobalKey();
 
 const Size kDesktopDefaultMainWindowSize = Size(1280, 800);
-const double kCredentialDialogWidth = 500;
+
+/// Keep credential prompts as wide as the pairing title plus dialog padding.
+double credentialDialogWidth(BuildContext context) {
+  final painter = TextPainter(
+    text: TextSpan(
+      text: translate('Pairing passphrase required'),
+      style: DialogTheme.of(context).titleTextStyle ??
+          Theme.of(context).textTheme.titleLarge,
+    ),
+    textDirection: Directionality.of(context),
+    textScaler: MediaQuery.textScalerOf(context),
+    maxLines: 1,
+  )..layout();
+  final width = painter.width.ceilToDouble().clamp(0.0, 500.0).toDouble();
+  painter.dispose();
+  return width;
+}
 
 final isAndroid = isAndroid_;
 final isIOS = isIOS_;

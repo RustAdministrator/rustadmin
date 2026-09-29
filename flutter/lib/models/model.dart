@@ -1254,7 +1254,7 @@ class FfiModel with ChangeNotifier {
         }
 
         return CustomAlertDialog(
-          preferredContentWidth: kCredentialDialogWidth,
+          preferredContentWidth: credentialDialogWidth(context),
           title: Text(translate('Trust this device')),
           content: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1377,7 +1377,7 @@ class FfiModel with ChangeNotifier {
         }
 
         return CustomAlertDialog(
-          preferredContentWidth: kCredentialDialogWidth,
+          preferredContentWidth: credentialDialogWidth(context),
           title: Text(translate(direct
               ? 'Pairing passphrase required'
               : 'Rendezvous pairing passphrase required')),
@@ -1385,11 +1385,6 @@ class FfiModel with ChangeNotifier {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
-                direct
-                    ? 'Enter the local or rendezvous pairing passphrase to continue this direct connection.'
-                    : 'Enter the rendezvous pairing passphrase to continue this connection.',
-              ).marginOnly(bottom: 12),
               buildLine(direct ? 'Endpoint' : 'Peer', peer),
               buildLine('Peer ID', peerId),
               TextField(
@@ -1414,6 +1409,17 @@ class FfiModel with ChangeNotifier {
                   ),
                 ),
               ),
+              Text(
+                direct
+                    ? 'Enter the local or rendezvous pairing passphrase.'
+                    : 'Enter the rendezvous pairing passphrase.',
+                style: (Theme.of(context).textTheme.bodyMedium ??
+                        DefaultTextStyle.of(context).style)
+                    .copyWith(
+                  fontSize:
+                      (Theme.of(context).textTheme.bodyMedium?.fontSize ?? 14) - 1,
+                ),
+              ).marginOnly(top: 4),
             ],
           ),
           actions: [
