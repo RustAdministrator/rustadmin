@@ -87,14 +87,37 @@ impl StatePos {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FocusDesktopIdentity {
+    Default,
+    NonDefault,
+    Unknown,
+}
+
 struct StateWindowFocus {
     display_idx: i32,
+    pending_desktop_refresh: bool,
+    last_desktop_identity: Option<FocusDesktopIdentity>,
+    desktop_unbound: bool,
+}
+
+impl Default for StateWindowFocus {
+    fn default() -> Self {
+        Self {
+            display_idx: INVALID_DISPLAY_IDX,
+            pending_desktop_refresh: false,
+            last_desktop_identity: None,
+            desktop_unbound: false,
+        }
+    }
 }
 
 impl super::service::Reset for StateWindowFocus {
     fn reset(&mut self) {
         self.display_idx = INVALID_DISPLAY_IDX;
+        self.pending_desktop_refresh = false;
+        self.last_desktop_identity = None;
+        self.desktop_unbound = false;
     }
 }
 
@@ -105,8 +128,105 @@ impl StateWindowFocus {
     }
 
     #[inline]
-    fn is_changed(&self, disp_idx: i32) -> bool {
-        self.is_valid() && self.display_idx != disp_idx
+    fn observe_sample(
+        &mut self,
+        disp_idx: Option<i32>,
+        desktop_identity: FocusDesktopIdentity,
+        desktop_transition: bool,
+        rebind_succeeded: bool,
+    ) -> bool {
+        let identity_changed = self.last_desktop_identity != Some(desktop_identity);
+        let transition_started = desktop_transition && !self.desktop_unbound;
+        if identity_changed || transition_started || rebind_succeeded {
+            self.pending_desktop_refresh = true;
+        }
+        self.last_desktop_identity = Some(desktop_identity);
+        self.desktop_unbound = desktop_transition && !rebind_succeeded;
+
+        let Some(disp_idx) = disp_idx else {
+            return false;
+        };
+
+        let should_send =
+            !self.is_valid() || self.display_idx != disp_idx || self.pending_desktop_refresh;
+        self.display_idx = disp_idx;
+        self.pending_desktop_refresh = false;
+        should_send
+    }
+
+    #[inline]
+    fn snapshot_display(&self) -> Option<i32> {
+        if self.is_valid() && !self.pending_desktop_refresh {
+            Some(self.display_idx)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod window_focus_state_tests {
+    use super::{FocusDesktopIdentity, StateWindowFocus};
+
+    #[test]
+    fn missing_transition_sample_is_retried_even_when_index_is_unchanged() {
+        let mut state = StateWindowFocus::default();
+
+        assert!(state.observe_sample(Some(1), FocusDesktopIdentity::Default, false, false));
+        assert_eq!(state.snapshot_display(), Some(1));
+
+        assert!(!state.observe_sample(None, FocusDesktopIdentity::NonDefault, true, false));
+        assert_eq!(state.snapshot_display(), None);
+
+        assert!(state.observe_sample(Some(1), FocusDesktopIdentity::NonDefault, true, false));
+        assert_eq!(state.snapshot_display(), Some(1));
+        assert!(!state.observe_sample(Some(1), FocusDesktopIdentity::NonDefault, true, false));
+    }
+
+    #[test]
+    fn snapshot_waits_for_the_first_valid_focus_sample() {
+        let mut state = StateWindowFocus::default();
+
+        assert_eq!(state.snapshot_display(), None);
+        assert!(!state.observe_sample(None, FocusDesktopIdentity::Default, false, false));
+        assert_eq!(state.snapshot_display(), None);
+
+        assert!(state.observe_sample(Some(1), FocusDesktopIdentity::Default, false, false));
+        assert_eq!(state.snapshot_display(), Some(1));
+    }
+
+    #[test]
+    fn unknown_identity_does_not_turn_a_missing_sample_into_a_snapshot() {
+        let mut state = StateWindowFocus::default();
+
+        assert!(!state.observe_sample(None, FocusDesktopIdentity::Unknown, false, false));
+        assert_eq!(state.snapshot_display(), None);
+    }
+
+    #[test]
+    fn successful_rebind_forces_one_same_index_refresh() {
+        let mut state = StateWindowFocus::default();
+
+        assert!(state.observe_sample(Some(1), FocusDesktopIdentity::NonDefault, false, false));
+        assert!(!state.observe_sample(Some(1), FocusDesktopIdentity::NonDefault, false, false));
+        assert!(state.observe_sample(Some(1), FocusDesktopIdentity::NonDefault, true, true));
+        assert!(!state.observe_sample(Some(1), FocusDesktopIdentity::NonDefault, false, false));
+    }
+
+    #[test]
+    fn leaving_uac_resumes_actual_focus_without_repeating_stable_updates() {
+        let mut state = StateWindowFocus::default();
+
+        assert!(state.observe_sample(Some(0), FocusDesktopIdentity::Default, false, false));
+        assert!(state.observe_sample(Some(1), FocusDesktopIdentity::NonDefault, true, true));
+        assert!(!state.observe_sample(None, FocusDesktopIdentity::Default, true, true));
+        assert_eq!(state.snapshot_display(), None);
+
+        assert!(state.observe_sample(Some(1), FocusDesktopIdentity::Default, false, false));
+        assert!(!state.observe_sample(Some(1), FocusDesktopIdentity::Default, false, false));
+        assert!(state.observe_sample(Some(0), FocusDesktopIdentity::Default, false, false));
+        assert_eq!(state.snapshot_display(), Some(0));
+        assert!(!state.observe_sample(Some(0), FocusDesktopIdentity::Default, false, false));
     }
 }
 
@@ -352,7 +472,9 @@ pub fn new_pos() -> GenericService {
 }
 
 pub fn new_window_focus() -> GenericService {
-    let svc = EmptyExtraFieldService::new(NAME_WINDOW_FOCUS.to_owned(), false);
+    // A focus subscriber may join while a UAC desktop is already active. Keep
+    // it pending until the sampler has a valid current-display snapshot.
+    let svc = EmptyExtraFieldService::new(NAME_WINDOW_FOCUS.to_owned(), true);
     GenericService::repeat::<StateWindowFocus, _, _>(&svc.clone(), 33, run_window_focus);
     svc.sp
 }
@@ -437,18 +559,73 @@ fn run_window_focus(sp: EmptyExtraFieldService, state: &mut StateWindowFocus) ->
     if displays.len() <= 1 {
         return Ok(());
     }
-    let disp_idx = crate::get_focused_display(displays);
-    if let Some(disp_idx) = disp_idx.map(|id| id as i32) {
-        if state.is_changed(disp_idx) {
-            let mut misc = Misc::new();
-            misc.set_follow_current_display(disp_idx as i32);
-            let mut msg_out = Message::new();
-            msg_out.set_misc(misc);
-            sp.send(msg_out);
+
+    #[cfg(target_os = "windows")]
+    let sample = {
+        let sample = crate::platform::windows::sample_focused_display(displays);
+        FocusDisplaySample {
+            display_idx: sample.display_idx,
+            desktop_identity: match sample.input_desktop {
+                crate::platform::windows::InputDesktopClassification::Default => {
+                    FocusDesktopIdentity::Default
+                }
+                crate::platform::windows::InputDesktopClassification::NonDefault => {
+                    FocusDesktopIdentity::NonDefault
+                }
+                crate::platform::windows::InputDesktopClassification::Unknown => {
+                    FocusDesktopIdentity::Unknown
+                }
+            },
+            desktop_transition: sample.desktop_transition,
+            rebind_succeeded: sample.rebind_succeeded,
         }
-        state.display_idx = disp_idx;
+    };
+    #[cfg(not(target_os = "windows"))]
+    let sample = FocusDisplaySample {
+        display_idx: crate::get_focused_display(displays),
+        desktop_identity: FocusDesktopIdentity::Default,
+        desktop_transition: false,
+        rebind_succeeded: false,
+    };
+
+    let disp_idx = sample.display_idx.map(|id| id as i32);
+    let should_send = state.observe_sample(
+        disp_idx,
+        sample.desktop_identity,
+        sample.desktop_transition,
+        sample.rebind_succeeded,
+    );
+    let Some(disp_idx) = disp_idx else {
+        return Ok(());
+    };
+
+    if should_send {
+        sp.send(window_focus_message(disp_idx));
+    }
+
+    if let Some(disp_idx) = state.snapshot_display() {
+        sp.snapshot(|sps| {
+            sps.send(window_focus_message(disp_idx));
+            Ok(())
+        })?;
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct FocusDisplaySample {
+    display_idx: Option<usize>,
+    desktop_identity: FocusDesktopIdentity,
+    desktop_transition: bool,
+    rebind_succeeded: bool,
+}
+
+fn window_focus_message(disp_idx: i32) -> Message {
+    let mut misc = Misc::new();
+    misc.set_follow_current_display(disp_idx);
+    let mut msg_out = Message::new();
+    msg_out.set_misc(misc);
+    msg_out
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]

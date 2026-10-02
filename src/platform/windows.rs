@@ -101,6 +101,7 @@ use windows_service::{
 };
 use winreg::{enums::*, RegKey};
 
+use super::windows_desktop::select_focus_display;
 pub use super::windows_desktop::{
     input_desktop_classification, CaptureDesktopState, InputDesktopClassification,
 };
@@ -202,20 +203,77 @@ const REG_NAME_INSTALL_DESKTOPSHORTCUTS: &str = "DESKTOPSHORTCUTS";
 const REG_NAME_INSTALL_STARTMENUSHORTCUTS: &str = "STARTMENUSHORTCUTS";
 pub const REG_NAME_INSTALL_PRINTER: &str = "PRINTER";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FocusDisplaySample {
+    pub(crate) display_idx: Option<usize>,
+    pub(crate) desktop_transition: bool,
+    pub(crate) rebind_succeeded: bool,
+    pub(crate) input_desktop: InputDesktopClassification,
+}
+
+pub(crate) fn sample_focused_display(displays: Vec<DisplayInfo>) -> FocusDisplaySample {
+    let mut desktop_transition = desktop_changed();
+    let _ = try_change_desktop();
+    let rebind_succeeded = desktop_transition && !desktop_changed();
+    let input_desktop = input_desktop_classification();
+    if desktop_changed() {
+        // The foreground handle may still describe the old desktop. Use only
+        // the positively identified non-default fallback until attachment succeeds.
+        desktop_transition = true;
+        return FocusDisplaySample {
+            display_idx: select_focus_display(input_desktop, None, &displays),
+            desktop_transition,
+            rebind_succeeded: false,
+            input_desktop,
+        };
+    }
+
+    let foreground_display = focused_display_from_foreground(&displays);
+    if desktop_changed() {
+        return FocusDisplaySample {
+            display_idx: select_focus_display(input_desktop, None, &displays),
+            desktop_transition: true,
+            rebind_succeeded: false,
+            input_desktop,
+        };
+    }
+
+    FocusDisplaySample {
+        display_idx: select_focus_display(input_desktop, foreground_display, &displays),
+        desktop_transition,
+        rebind_succeeded,
+        input_desktop,
+    }
+}
+
 pub fn get_focused_display(displays: Vec<DisplayInfo>) -> Option<usize> {
+    sample_focused_display(displays).display_idx
+}
+
+fn focused_display_from_foreground(displays: &[DisplayInfo]) -> Option<usize> {
+    // SAFETY: GetForegroundWindow returns a process-independent HWND that is
+    // checked for null before use. GetWindowRect writes to the valid stack
+    // rectangle and reports whether the resulting geometry is available.
     unsafe {
         let hwnd = GetForegroundWindow();
-        let mut rect: RECT = mem::zeroed();
-        if GetWindowRect(hwnd, &mut rect as *mut RECT) == 0 {
+        if hwnd.is_null() {
             return None;
         }
+        let mut rect: RECT = mem::zeroed();
+        if GetWindowRect(hwnd, &mut rect as *mut RECT) == 0
+            || rect.right <= rect.left
+            || rect.bottom <= rect.top
+        {
+            return None;
+        }
+        let center_x = i64::from(rect.left) + (i64::from(rect.right) - i64::from(rect.left)) / 2;
+        let center_y = i64::from(rect.top) + (i64::from(rect.bottom) - i64::from(rect.top)) / 2;
         displays.iter().position(|display| {
-            let center_x = rect.left + (rect.right - rect.left) / 2;
-            let center_y = rect.top + (rect.bottom - rect.top) / 2;
-            center_x >= display.x
-                && center_x < display.x + display.width
-                && center_y >= display.y
-                && center_y < display.y + display.height
+            let left = i64::from(display.x);
+            let top = i64::from(display.y);
+            let right = left + i64::from(display.width);
+            let bottom = top + i64::from(display.height);
+            center_x >= left && center_x < right && center_y >= top && center_y < bottom
         })
     }
 }

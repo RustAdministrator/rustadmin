@@ -1,6 +1,8 @@
 #[cfg(windows)]
 use std::mem::{size_of, size_of_val};
 
+use hbb_common::message_proto::DisplayInfo;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InputDesktopClassification {
     Default,
@@ -22,6 +24,38 @@ impl InputDesktopClassification {
             Self::Unknown => "unknown",
         }
     }
+}
+
+pub(crate) fn select_focus_display(
+    input_desktop: InputDesktopClassification,
+    foreground_display: Option<usize>,
+    displays: &[DisplayInfo],
+) -> Option<usize> {
+    if foreground_display.is_some() {
+        return foreground_display;
+    }
+
+    if input_desktop == InputDesktopClassification::NonDefault {
+        primary_display_index(displays)
+    } else {
+        None
+    }
+}
+
+fn primary_display_index(displays: &[DisplayInfo]) -> Option<usize> {
+    displays
+        .iter()
+        .position(|display| contains_point(display, 0, 0))
+}
+
+fn contains_point(display: &DisplayInfo, x: i32, y: i32) -> bool {
+    let x = i64::from(x);
+    let y = i64::from(y);
+    let left = i64::from(display.x);
+    let top = i64::from(display.y);
+    let right = left + i64::from(display.width);
+    let bottom = top + i64::from(display.height);
+    x >= left && x < right && y >= top && y < bottom
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -173,7 +207,8 @@ pub fn input_desktop_classification() -> InputDesktopClassification {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_input_desktop_name, InputDesktopClassification};
+    use super::{classify_input_desktop_name, select_focus_display, InputDesktopClassification};
+    use hbb_common::message_proto::DisplayInfo;
 
     #[test]
     fn classifies_only_a_complete_default_name_as_default() {
@@ -207,6 +242,59 @@ mod tests {
                 'D' as u16, 'e' as u16, 'f' as u16, 'a' as u16, 'u' as u16, 'l' as u16, 't' as u16
             ]),
             InputDesktopClassification::Unknown
+        );
+    }
+
+    #[test]
+    fn non_default_fallback_uses_primary_origin_in_display_order() {
+        let displays = [
+            DisplayInfo {
+                x: -1920,
+                y: 0,
+                width: 1920,
+                height: 1080,
+                ..Default::default()
+            },
+            DisplayInfo {
+                x: 0,
+                y: 0,
+                width: 2560,
+                height: 1440,
+                ..Default::default()
+            },
+        ];
+
+        assert_eq!(
+            select_focus_display(InputDesktopClassification::NonDefault, None, &displays),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn default_and_unknown_missing_foreground_do_not_fallback() {
+        let displays = [DisplayInfo {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            ..Default::default()
+        }];
+
+        for input_desktop in [
+            InputDesktopClassification::Default,
+            InputDesktopClassification::Unknown,
+        ] {
+            assert_eq!(select_focus_display(input_desktop, None, &displays), None);
+        }
+    }
+
+    #[test]
+    fn actual_foreground_display_wins_over_non_default_fallback() {
+        let displays = [DisplayInfo::default()];
+
+        assert_eq!(
+            select_focus_display(InputDesktopClassification::NonDefault, Some(0), &displays),
+            Some(0)
         );
     }
 }
