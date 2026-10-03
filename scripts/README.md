@@ -280,6 +280,17 @@ scripts/package_macos.sh
 If `NOTARY_PASSWORD` is omitted, `xcrun notarytool` prompts for the
 app-specific password. The script does not store credentials.
 
+## Keyboard diagnostics (macOS)
+
+Run `scripts/macos_keyboard_probe.sh` to open a focused typing window and print
+native key codes, modifiers, input-source/keyboard-layout metadata, and the
+resulting Unicode text as JSON Lines. It needs Apple's command-line developer
+tools, but no RustAdmin build or Python packages. Only the probe window's events
+are observed.
+
+See [the keyboard probe guide](macos_keyboard_probe.md) for JIS/tilde diagnosis,
+recording a sample, and the distinction between physical keys and committed text.
+
 ## Do Not Distribute
 
 Do not ship or commit platform build state:
