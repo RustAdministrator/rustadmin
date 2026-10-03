@@ -5,6 +5,8 @@ import 'package:flutter_svg/flutter_svg.dart';
 import '../../common/quality_monitor_settings.dart';
 import '../../consts.dart';
 
+export 'mobile_remote_text_edit.dart';
+
 const mobileRemoteAccentColor = Color(0xFF0071FF);
 const mobileRemoteAccentActiveColor = Color(0xAA0071FF);
 
@@ -1842,42 +1844,6 @@ String mobileKeyboardInputV2Mode(String storedValue, String legacyPhysical) {
     default:
       return kKeyboardInputModeAuto;
   }
-}
-
-class MobileCommittedTextEdit {
-  const MobileCommittedTextEdit({
-    required this.text,
-    required this.deleteBeforeGraphemes,
-    this.deleteAfterGraphemes = 0,
-  });
-
-  final String text;
-  final int deleteBeforeGraphemes;
-  final int deleteAfterGraphemes;
-
-  bool get isEmpty =>
-      text.isEmpty && deleteBeforeGraphemes == 0 && deleteAfterGraphemes == 0;
-}
-
-MobileCommittedTextEdit mobileCommittedTextEdit(
-  String oldValue,
-  String newValue, {
-  bool replacedByClipboard = false,
-}) {
-  final oldGraphemes = (replacedByClipboard ? '' : oldValue).characters.toList(
-    growable: false,
-  );
-  final newGraphemes = newValue.characters.toList(growable: false);
-  var commonPrefix = 0;
-  while (commonPrefix < oldGraphemes.length &&
-      commonPrefix < newGraphemes.length &&
-      oldGraphemes[commonPrefix] == newGraphemes[commonPrefix]) {
-    commonPrefix += 1;
-  }
-  return MobileCommittedTextEdit(
-    text: newGraphemes.skip(commonPrefix).join(),
-    deleteBeforeGraphemes: oldGraphemes.length - commonPrefix,
-  );
 }
 
 class MobileRemoteActionItem {

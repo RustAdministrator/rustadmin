@@ -126,6 +126,10 @@ class _RemotePageState extends State<RemotePage>
   StreamSubscription<bool>? _hideToolbarWithKeyboardSubscription;
   late final MobileSessionReconnectController _reconnectController;
   bool _updatingSoftKeyboardText = false;
+  var _lastSoftKeyboardValue = TextEditingValue(
+    text: initText,
+    selection: TextSelection.collapsed(offset: initText.length),
+  );
 
   final _blockableOverlayState = BlockableOverlayState();
 
@@ -548,30 +552,21 @@ class _RemotePageState extends State<RemotePage>
     return firstMarkerChanged || fullSentinelReplaced;
   }
 
-  void _handleIOSSoftKeyboardInput(String newValue) {
-    final oldValue = _value;
-    final replacedByClipboard = _softKeyboardSentinelWasReplaced(
+  void _handleIOSSoftKeyboardInput(TextEditingValue newValue) {
+    final oldValue = _lastSoftKeyboardValue.text == _value
+        ? _lastSoftKeyboardValue
+        : TextEditingValue(
+            text: _value,
+            selection: TextSelection.collapsed(offset: _value.length),
+          );
+    final edit = mobileIOSSoftKeyboardTextEdit(
       oldValue,
       newValue,
+      internalSentinel: initText,
+      hasPasteProvenance: _textController.consumePasteProvenance(oldValue),
     );
-    if (replacedByClipboard) {
-      _value = newValue;
-      _inputMobileTextEdit(
-        mobileCommittedTextEdit('', newValue, replacedByClipboard: true),
-      );
-      return;
-    }
-    var i = newValue.length - 1;
-    for (; i >= 0 && newValue[i] != '1'; --i) {}
-    var j = oldValue.length - 1;
-    for (; j >= 0 && oldValue[j] != '1'; --j) {}
-    if (i < j) j = i;
-    final edit = mobileCommittedTextEdit(
-      oldValue.substring(j + 1),
-      newValue.substring(j + 1),
-      replacedByClipboard: replacedByClipboard,
-    );
-    _value = newValue;
+    _value = newValue.text;
+    _lastSoftKeyboardValue = newValue;
     _inputMobileTextEdit(
       edit,
       allowModifierShortcuts: !_textController.isLiteralEdit,
@@ -617,7 +612,11 @@ class _RemotePageState extends State<RemotePage>
   void _handleSoftKeyboardEditingValue() {
     if (_updatingSoftKeyboardText || !_showEdit) return;
     final returnBaseline = _textController.returnEchoBaseline;
-    if (returnBaseline != null) _value = returnBaseline;
+    if (returnBaseline != null) {
+      _value = returnBaseline;
+      _lastSoftKeyboardValue =
+          _textController.returnEchoBaselineValue ?? _textController.value;
+    }
     final composing = _textController.value.composing;
     if (composing.isValid && !composing.isCollapsed) return;
     handleSoftKeyboardInput(_textController.text);
@@ -625,7 +624,14 @@ class _RemotePageState extends State<RemotePage>
 
   void handleSoftKeyboardInput(String newValue) {
     if (isIOS) {
-      _handleIOSSoftKeyboardInput(newValue);
+      _handleIOSSoftKeyboardInput(
+        _textController.value.text == newValue
+            ? _textController.value
+            : TextEditingValue(
+                text: newValue,
+                selection: TextSelection.collapsed(offset: newValue.length),
+              ),
+      );
     } else {
       _handleNonIOSSoftKeyboardInput(newValue);
     }
@@ -683,6 +689,10 @@ class _RemotePageState extends State<RemotePage>
     _updatingSoftKeyboardText = true;
     _textController.text = _value;
     _updatingSoftKeyboardText = false;
+    _lastSoftKeyboardValue = TextEditingValue(
+      text: _value,
+      selection: TextSelection.collapsed(offset: _value.length),
+    );
     setState(() => _showEdit = false);
     _timer?.cancel();
     _timer = Timer(kMobileDelaySoftKeyboard, () {

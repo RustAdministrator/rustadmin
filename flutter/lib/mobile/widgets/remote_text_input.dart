@@ -7,9 +7,14 @@ class MobileRemoteTextEditingController extends TextEditingController {
 
   bool get isLiteralEdit => _literalEditDepth != 0;
   int _literalEditDepth = 0;
+  int _pasteEditDepth = 0;
+  TextEditingValue? _pasteBaseValue;
+  bool _pasteProvenanceConsumed = false;
   // Baseline after a native Return, before any coalesced subsequent typing.
   String? get returnEchoBaseline => _returnEchoBaseline;
   String? _returnEchoBaseline;
+  TextEditingValue? get returnEchoBaselineValue => _returnEchoBaselineValue;
+  TextEditingValue? _returnEchoBaselineValue;
 
   void _literalEdit(VoidCallback edit) {
     _literalEditDepth++;
@@ -17,6 +22,35 @@ class MobileRemoteTextEditingController extends TextEditingController {
       edit();
     } finally {
       _literalEditDepth--;
+    }
+  }
+
+  void _beginPasteEdit() {
+    if (_pasteEditDepth == 0) {
+      _pasteBaseValue = value;
+      _pasteProvenanceConsumed = false;
+    }
+    _pasteEditDepth++;
+  }
+
+  bool consumePasteProvenance(TextEditingValue oldValue) {
+    if (_pasteEditDepth == 0 || _pasteProvenanceConsumed) return false;
+    _pasteProvenanceConsumed = true;
+    final baseValue = _pasteBaseValue;
+    if (baseValue == null || baseValue.text != oldValue.text) return false;
+    final baseSelection = baseValue.selection;
+    final oldSelection = oldValue.selection;
+    return !baseSelection.isValid ||
+        !oldSelection.isValid ||
+        (baseSelection.start == oldSelection.start &&
+            baseSelection.end == oldSelection.end);
+  }
+
+  void _endPasteEdit() {
+    _pasteEditDepth--;
+    if (_pasteEditDepth == 0) {
+      _pasteBaseValue = null;
+      _pasteProvenanceConsumed = false;
     }
   }
 }
@@ -32,7 +66,7 @@ class _MobileRemoteReturnTracker {
     _pendingReturns++;
   }
 
-  String? consume(TextEditingValue newValue) {
+  TextEditingValue? consume(TextEditingValue newValue) {
     final before = _beforeReturn;
     if (before == null || newValue.text == before.text) return null;
     _beforeReturn = null;
@@ -49,7 +83,13 @@ class _MobileRemoteReturnTracker {
         !newValue.text.endsWith(suffix)) {
       return null;
     }
-    return '$prefix$inserted$suffix';
+    final text = '$prefix$inserted$suffix';
+    return TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(
+        offset: prefix.length + inserted.length,
+      ),
+    );
   }
 }
 
@@ -131,7 +171,9 @@ class _RemoteEditableTextState extends EditableTextState {
   void updateEditingValue(TextEditingValue value) {
     final controller = widget.controller as MobileRemoteTextEditingController;
     final composing = value.composing.isValid && !value.composing.isCollapsed;
-    controller._returnEchoBaseline = _returnTracker.consume(value);
+    final returnBaselineValue = _returnTracker.consume(value);
+    controller._returnEchoBaseline = returnBaselineValue?.text;
+    controller._returnEchoBaselineValue = returnBaselineValue;
     try {
       if (composing || _wasComposing) {
         _asLiteral(() => super.updateEditingValue(value));
@@ -140,6 +182,7 @@ class _RemoteEditableTextState extends EditableTextState {
       }
     } finally {
       controller._returnEchoBaseline = null;
+      controller._returnEchoBaselineValue = null;
     }
     _wasComposing = composing;
   }
@@ -151,9 +194,11 @@ class _RemoteEditableTextState extends EditableTextState {
       return super.pasteText(cause);
     }
     controller._literalEditDepth++;
+    controller._beginPasteEdit();
     try {
       await super.pasteText(cause);
     } finally {
+      controller._endPasteEdit();
       controller._literalEditDepth--;
     }
   }

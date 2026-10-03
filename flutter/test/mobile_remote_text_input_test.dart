@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_session_controls.dart';
 import 'package:flutter_hbb/mobile/widgets/remote_text_input.dart';
 import 'package:flutter_hbb/models/keyboard_dispatcher.dart';
@@ -30,7 +33,10 @@ class _KeyboardHarness {
   final text = MobileRemoteTextEditingController(text: '1111');
   final focus = FocusNode();
   final events = <Object>[];
-  String _previous = '1111';
+  TextEditingValue _previous = const TextEditingValue(
+    text: '1111',
+    selection: TextSelection.collapsed(offset: 4),
+  );
   bool allowed = true;
   late final keyboard = KeyboardInputController(
     canDispatch: () => allowed,
@@ -60,11 +66,20 @@ class _KeyboardHarness {
 
   void _editingChanged() {
     final returnBaseline = text.returnEchoBaseline;
-    if (returnBaseline != null) _previous = returnBaseline;
+    if (returnBaseline != null) {
+      _previous = text.returnEchoBaselineValue ?? text.value;
+    }
     final composing = text.value.composing;
     if (composing.isValid && !composing.isCollapsed) return;
-    final edit = mobileCommittedTextEdit(_previous, text.text);
-    _previous = text.text;
+    final edit = context.clientKind == KeyboardClientKind.ios
+        ? mobileIOSSoftKeyboardTextEdit(
+            _previous,
+            text.value,
+            internalSentinel: '1111',
+            hasPasteProvenance: text.consumePasteProvenance(_previous),
+          )
+        : mobileCommittedTextEditValue(_previous, text.value);
+    _previous = text.value;
     if (edit.isEmpty) return;
     keyboard.handle(
       CommittedTextIntent(
@@ -143,6 +158,142 @@ class _KeyboardHarness {
 
 void main() {
   tearDown(() => debugDefaultTargetPlatformOverride = null);
+
+  testWidgets('iOS Backspace batches do not send the hidden buffer', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final harness = _KeyboardHarness(
+      TargetPlatform.iOS,
+      ControllerKeyboardInputMode.auto,
+    );
+    try {
+      await harness.mount(tester);
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '11',
+          selection: TextSelection.collapsed(offset: 2),
+        ),
+      );
+      await tester.pump();
+      await harness.keyboard.idle;
+      expect(harness.events, [('text', '', 2, 0)]);
+    } finally {
+      await harness.unmount(tester);
+    }
+  });
+
+  testWidgets('iOS composition deletion cannot replay earlier Return echoes', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final harness = _KeyboardHarness(
+      TargetPlatform.iOS,
+      ControllerKeyboardInputMode.auto,
+    );
+    try {
+      await harness.mount(tester);
+      await harness.nativeReturn(tester);
+      await harness.nativeReturn(tester);
+      await tester.pump();
+      tester.testTextInput.updateEditingValue(
+        harness.text.value.copyWith(
+          selection: const TextSelection.collapsed(offset: 4),
+        ),
+      );
+      const deletion = TextEditingValue(
+        text: '11\n\n',
+        selection: TextSelection.collapsed(offset: 2),
+        composing: TextRange(start: 1, end: 2),
+      );
+      tester.testTextInput.updateEditingValue(deletion);
+      await tester.pump();
+      await harness.keyboard.idle;
+      expect(harness.events, [..._enter, ..._enter]);
+      tester.testTextInput.updateEditingValue(
+        deletion.copyWith(composing: TextRange.empty),
+      );
+      await tester.pump();
+      await harness.keyboard.idle;
+      expect(harness.events, [..._enter, ..._enter, ('text', '', 2, 0)]);
+    } finally {
+      await harness.unmount(tester);
+    }
+  });
+
+  testWidgets('iOS native selected paste sends only intended text', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final harness = _KeyboardHarness(
+      TargetPlatform.iOS,
+      ControllerKeyboardInputMode.auto,
+    );
+    try {
+      await harness.mount(tester);
+      tester.testTextInput.updateEditingValue(
+        harness.text.value.copyWith(
+          selection: const TextSelection(baseOffset: 0, extentOffset: 4),
+        ),
+      );
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '1\nhello',
+          selection: TextSelection.collapsed(offset: 7),
+        ),
+      );
+      await tester.pump();
+      await harness.keyboard.idle;
+      expect(harness.events, [('text', '1\nhello', 0, 0)]);
+    } finally {
+      await harness.unmount(tester);
+    }
+  });
+
+  testWidgets('iOS deletion while awaiting clipboard is not a paste', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    final harness = _KeyboardHarness(
+      TargetPlatform.iOS,
+      ControllerKeyboardInputMode.auto,
+    );
+    final clipboard = Completer<Object?>();
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async =>
+          call.method == 'Clipboard.getData' ? clipboard.future : null,
+    );
+    try {
+      await harness.mount(tester);
+      final state = tester.state<EditableTextState>(
+        find.byWidgetPredicate((widget) => widget is EditableText),
+      );
+      final paste = state.pasteText(SelectionChangedCause.toolbar);
+      await tester.pump();
+      tester.testTextInput.updateEditingValue(
+        const TextEditingValue(
+          text: '11',
+          selection: TextSelection.collapsed(offset: 2),
+        ),
+      );
+      await tester.pump();
+      await harness.keyboard.idle;
+      expect(harness.events, [('text', '', 2, 0)]);
+      clipboard.complete(<String, Object>{'text': '1'});
+      await tester.pump();
+      await paste;
+      await harness.keyboard.idle;
+      expect(harness.events, [('text', '', 2, 0), ('text', '1', 0, 0)]);
+    } finally {
+      if (!clipboard.isCompleted) clipboard.complete(null);
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      );
+      await harness.unmount(tester);
+    }
+  });
 
   for (final brightness in Brightness.values) {
     testWidgets('iOS native keyboard uses the app $brightness theme', (
