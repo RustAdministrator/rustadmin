@@ -8,6 +8,22 @@ private let maxLogLines = 220
 private let maxLogBytes = 48 * 1024
 private let maxLogLineCharacters = 1_200
 
+private enum ProbeEventWindow {
+    case none
+    case probe
+    case foreign
+}
+
+private func admitsProbeEvent(
+    eventWindow: ProbeEventWindow,
+    appIsActive: Bool,
+    probeIsKeyWindow: Bool,
+    currentKeyWindowIsProbe: Bool
+) -> Bool {
+    guard appIsActive, probeIsKeyWindow, currentKeyWindowIsProbe else { return false }
+    return eventWindow != .foreign
+}
+
 private func scalarNames(_ text: String?) -> Any {
     guard let text else { return NSNull() }
     return text.unicodeScalars.map { String(format: "U+%04X", $0.value) }
@@ -41,8 +57,228 @@ private func modifierNames(_ flags: NSEvent.ModifierFlags) -> [String] {
     return names
 }
 
+private struct ModifierTransition {
+    let action: String?
+    let source: String
+    let groupActive: Bool?
+    let lockState: String?
+}
+
+private let deviceLeftControlMask = UInt(NX_DEVICELCTLKEYMASK)
+private let deviceLeftShiftMask = UInt(NX_DEVICELSHIFTKEYMASK)
+private let deviceRightShiftMask = UInt(NX_DEVICERSHIFTKEYMASK)
+private let deviceLeftCommandMask = UInt(NX_DEVICELCMDKEYMASK)
+private let deviceRightCommandMask = UInt(NX_DEVICERCMDKEYMASK)
+private let deviceLeftOptionMask = UInt(NX_DEVICELALTKEYMASK)
+private let deviceRightOptionMask = UInt(NX_DEVICERALTKEYMASK)
+private let deviceRightControlMask = UInt(NX_DEVICERCTLKEYMASK)
+
+private func deviceModifierMask(for keyCode: UInt16) -> UInt? {
+    switch Int(keyCode) {
+    case kVK_Control:
+        return deviceLeftControlMask
+    case kVK_Shift:
+        return deviceLeftShiftMask
+    case kVK_RightShift:
+        return deviceRightShiftMask
+    case kVK_Command:
+        return deviceLeftCommandMask
+    case kVK_RightCommand:
+        return deviceRightCommandMask
+    case kVK_Option:
+        return deviceLeftOptionMask
+    case kVK_RightOption:
+        return deviceRightOptionMask
+    case kVK_RightControl:
+        return deviceRightControlMask
+    default:
+        return nil
+    }
+}
+
+private func aggregateModifierFlag(for keyCode: UInt16) -> NSEvent.ModifierFlags? {
+    switch Int(keyCode) {
+    case kVK_Control, kVK_RightControl:
+        return .control
+    case kVK_Shift, kVK_RightShift:
+        return .shift
+    case kVK_Command, kVK_RightCommand:
+        return .command
+    case kVK_Option, kVK_RightOption:
+        return .option
+    default:
+        return nil
+    }
+}
+
+private func deviceModifierFamilyMask(for flag: NSEvent.ModifierFlags) -> UInt {
+    switch flag {
+    case .control: return deviceLeftControlMask | deviceRightControlMask
+    case .shift: return deviceLeftShiftMask | deviceRightShiftMask
+    case .command: return deviceLeftCommandMask | deviceRightCommandMask
+    case .option: return deviceLeftOptionMask | deviceRightOptionMask
+    default: return 0
+    }
+}
+
+private func modifierTransition(
+    for keyCode: UInt16,
+    flags: NSEvent.ModifierFlags
+) -> ModifierTransition {
+    if keyCode == UInt16(kVK_CapsLock) {
+        let active = flags.contains(.capsLock)
+        return ModifierTransition(
+            action: nil,
+            source: "caps_lock_state",
+            groupActive: active,
+            lockState: active ? "on" : "off"
+        )
+    }
+
+    if keyCode == UInt16(kVK_Function) {
+        let active = flags.contains(.function)
+        return ModifierTransition(
+            action: active ? "down" : "up",
+            source: "aggregate_function_flag",
+            groupActive: active,
+            lockState: nil
+        )
+    }
+
+    if let deviceMask = deviceModifierMask(for: keyCode),
+       let aggregateFlag = aggregateModifierFlag(for: keyCode) {
+        let deviceActive = flags.rawValue & deviceMask != 0
+        let groupActive = flags.contains(aggregateFlag)
+        if deviceActive {
+            return ModifierTransition(
+                action: "down",
+                source: "device_specific_modifier_bit",
+                groupActive: groupActive,
+                lockState: nil
+            )
+        }
+        if flags.rawValue & deviceModifierFamilyMask(for: aggregateFlag) != 0 {
+            return ModifierTransition(
+                action: "up",
+                source: "device_specific_modifier_bit",
+                groupActive: groupActive,
+                lockState: nil
+            )
+        }
+        if groupActive {
+            return ModifierTransition(
+                action: "changed",
+                source: "aggregate_group_active_side_unknown",
+                groupActive: true,
+                lockState: nil
+            )
+        }
+        return ModifierTransition(
+            action: "up",
+            source: "aggregate_group_inactive",
+            groupActive: false,
+            lockState: nil
+        )
+    }
+
+    return ModifierTransition(
+        action: "changed",
+        source: "unknown_modifier_transition",
+        groupActive: nil,
+        lockState: nil
+    )
+}
+
 private func physicalLabel(for keyCode: UInt16) -> String? {
     switch Int(keyCode) {
+    case kVK_Command:
+        return "leftCommand"
+    case kVK_RightCommand:
+        return "rightCommand"
+    case kVK_Shift:
+        return "leftShift"
+    case kVK_RightShift:
+        return "rightShift"
+    case kVK_Control:
+        return "leftControl"
+    case kVK_RightControl:
+        return "rightControl"
+    case kVK_Option:
+        return "leftOption"
+    case kVK_RightOption:
+        return "rightOption"
+    case kVK_Function:
+        return "fn"
+    case kVK_CapsLock:
+        return "capsLock"
+    case kVK_F1:
+        return "F1"
+    case kVK_F2:
+        return "F2"
+    case kVK_F3:
+        return "F3"
+    case kVK_F4:
+        return "F4"
+    case kVK_F5:
+        return "F5"
+    case kVK_F6:
+        return "F6"
+    case kVK_F7:
+        return "F7"
+    case kVK_F8:
+        return "F8"
+    case kVK_F9:
+        return "F9"
+    case kVK_F10:
+        return "F10"
+    case kVK_F11:
+        return "F11"
+    case kVK_F12:
+        return "F12"
+    case kVK_F13:
+        return "F13"
+    case kVK_F14:
+        return "F14"
+    case kVK_F15:
+        return "F15"
+    case kVK_F16:
+        return "F16"
+    case kVK_F17:
+        return "F17"
+    case kVK_F18:
+        return "F18"
+    case kVK_F19:
+        return "F19"
+    case kVK_F20:
+        return "F20"
+    case kVK_LeftArrow:
+        return "leftArrow"
+    case kVK_RightArrow:
+        return "rightArrow"
+    case kVK_UpArrow:
+        return "upArrow"
+    case kVK_DownArrow:
+        return "downArrow"
+    case kVK_Home:
+        return "home"
+    case kVK_End:
+        return "end"
+    case kVK_PageUp:
+        return "pageUp"
+    case kVK_PageDown:
+        return "pageDown"
+    case kVK_Escape:
+        return "escape"
+    case kVK_Return:
+        return "return"
+    case kVK_Tab:
+        return "tab"
+    case kVK_Delete:
+        return "delete"
+    case kVK_ForwardDelete:
+        return "forwardDelete"
+    case kVK_ANSI_KeypadEnter:
+        return "keypadEnter"
     case kVK_JIS_Yen:
         return "kVK_JIS_Yen"
     case kVK_JIS_Underscore:
@@ -175,6 +411,135 @@ private struct KeyboardEventRecord {
     let logLine: String
 }
 
+private struct MediaKeyDescription {
+    let label: String
+    let type: String
+}
+
+private func mediaKeyDescription(for keyCode: Int) -> MediaKeyDescription? {
+    switch keyCode {
+    case Int(NX_KEYTYPE_SOUND_UP):
+        return MediaKeyDescription(label: "volumeUp", type: "audio")
+    case Int(NX_KEYTYPE_SOUND_DOWN):
+        return MediaKeyDescription(label: "volumeDown", type: "audio")
+    case Int(NX_KEYTYPE_BRIGHTNESS_UP):
+        return MediaKeyDescription(label: "brightnessUp", type: "display")
+    case Int(NX_KEYTYPE_BRIGHTNESS_DOWN):
+        return MediaKeyDescription(label: "brightnessDown", type: "display")
+    case Int(NX_KEYTYPE_CAPS_LOCK):
+        return MediaKeyDescription(label: "capsLock", type: "modifier")
+    case Int(NX_KEYTYPE_HELP):
+        return MediaKeyDescription(label: "help", type: "system")
+    case Int(NX_POWER_KEY):
+        return MediaKeyDescription(label: "power", type: "system")
+    case Int(NX_KEYTYPE_MUTE):
+        return MediaKeyDescription(label: "mute", type: "audio")
+    case Int(NX_UP_ARROW_KEY):
+        return MediaKeyDescription(label: "upArrow", type: "navigation")
+    case Int(NX_DOWN_ARROW_KEY):
+        return MediaKeyDescription(label: "downArrow", type: "navigation")
+    case Int(NX_KEYTYPE_NUM_LOCK):
+        return MediaKeyDescription(label: "numLock", type: "modifier")
+    case Int(NX_KEYTYPE_CONTRAST_UP):
+        return MediaKeyDescription(label: "contrastUp", type: "display")
+    case Int(NX_KEYTYPE_CONTRAST_DOWN):
+        return MediaKeyDescription(label: "contrastDown", type: "display")
+    case Int(NX_KEYTYPE_LAUNCH_PANEL):
+        return MediaKeyDescription(label: "launchPanel", type: "system")
+    case Int(NX_KEYTYPE_EJECT):
+        return MediaKeyDescription(label: "eject", type: "system")
+    case Int(NX_KEYTYPE_VIDMIRROR):
+        return MediaKeyDescription(label: "videoMirror", type: "display")
+    case Int(NX_KEYTYPE_PLAY):
+        return MediaKeyDescription(label: "play", type: "transport")
+    case Int(NX_KEYTYPE_NEXT):
+        return MediaKeyDescription(label: "next", type: "transport")
+    case Int(NX_KEYTYPE_PREVIOUS):
+        return MediaKeyDescription(label: "previous", type: "transport")
+    case Int(NX_KEYTYPE_FAST):
+        return MediaKeyDescription(label: "fastForward", type: "transport")
+    case Int(NX_KEYTYPE_REWIND):
+        return MediaKeyDescription(label: "rewind", type: "transport")
+    case Int(NX_KEYTYPE_ILLUMINATION_UP):
+        return MediaKeyDescription(label: "keyboardIlluminationUp", type: "keyboard")
+    case Int(NX_KEYTYPE_ILLUMINATION_DOWN):
+        return MediaKeyDescription(label: "keyboardIlluminationDown", type: "keyboard")
+    case Int(NX_KEYTYPE_ILLUMINATION_TOGGLE):
+        return MediaKeyDescription(label: "keyboardIlluminationToggle", type: "keyboard")
+    case Int(NX_KEYTYPE_MENU):
+        return MediaKeyDescription(label: "menu", type: "system")
+    default:
+        return nil
+    }
+}
+
+private struct SystemKeyData {
+    let keyCode: Int
+    let stateCode: Int
+    let isRepeat: Bool
+    let state: String?
+}
+
+private func systemKeyData(from data1: Int) -> SystemKeyData {
+    let rawData1 = UInt32(truncatingIfNeeded: data1)
+    let keyCode = Int((rawData1 >> 16) & 0xFFFF)
+    let stateCode = Int((rawData1 >> 8) & 0xFF)
+    let isRepeat = rawData1 & 0x1 != 0
+    let state: String?
+    switch stateCode {
+    case Int(NX_KEYDOWN):
+        state = isRepeat ? "repeat" : "down"
+    case Int(NX_KEYUP):
+        state = "up"
+    default:
+        state = nil
+    }
+    return SystemKeyData(
+        keyCode: keyCode,
+        stateCode: stateCode,
+        isRepeat: isRepeat,
+        state: state
+    )
+}
+
+private func systemKeyEventRecord(_ event: NSEvent) -> KeyboardEventRecord? {
+    guard event.type == .systemDefined else { return nil }
+
+    let subtype = Int(event.subtype.rawValue)
+    guard subtype == Int(NX_SUBTYPE_AUX_CONTROL_BUTTONS) else { return nil }
+    let decodedData = systemKeyData(from: event.data1)
+    let mediaDescription: MediaKeyDescription?
+    if decodedData.state != nil {
+        mediaDescription = mediaKeyDescription(for: decodedData.keyCode)
+    } else {
+        mediaDescription = nil
+    }
+
+    let object: [String: Any] = [
+        "type": "system_key_event",
+        "phase": "systemDefined",
+        "event_timestamp_seconds": event.timestamp,
+        "subtype": subtype,
+        "rawData1": event.data1,
+        "rawData2": event.data2,
+        "media_key_code": decodedData.keyCode,
+        "media_key_label": mediaDescription?.label ?? NSNull(),
+        "media_key_type": mediaDescription?.type ?? NSNull(),
+        "state_code": decodedData.stateCode,
+        "state": decodedData.state ?? NSNull(),
+        "is_repeat": decodedData.state == nil ? NSNull() : decodedData.isRepeat,
+        "modifier_flags_raw": Int(event.modifierFlags.rawValue),
+        "modifier_flags_names": modifierNames(event.modifierFlags)
+    ]
+
+    let mediaLabel = mediaDescription?.label ?? "unknown"
+    let state = decodedData.state ?? "unknown"
+    let logLine =
+        "systemDefined subtype=\(subtype) rawData1=\(event.data1) rawData2=\(event.data2) " +
+        "mediaKey=\(mediaLabel) state=\(state)"
+    return KeyboardEventRecord(object: object, logLine: logLine)
+}
+
 private func keyboardEventRecord(_ event: NSEvent) -> KeyboardEventRecord? {
     let phase: String
     switch event.type {
@@ -204,6 +569,31 @@ private func keyboardEventRecord(_ event: NSEvent) -> KeyboardEventRecord? {
         return nil
     }
 
+    let keyAction: String?
+    let keyActionSource: String
+    let modifierGroupActive: Bool?
+    let modifierLockState: String?
+    switch event.type {
+    case .keyDown:
+        keyAction = "down"
+        keyActionSource = "event_type"
+        modifierGroupActive = nil
+        modifierLockState = nil
+    case .keyUp:
+        keyAction = "up"
+        keyActionSource = "event_type"
+        modifierGroupActive = nil
+        modifierLockState = nil
+    case .flagsChanged:
+        let transition = modifierTransition(for: event.keyCode, flags: event.modifierFlags)
+        keyAction = transition.action
+        keyActionSource = transition.source
+        modifierGroupActive = transition.groupActive
+        modifierLockState = transition.lockState
+    default:
+        return nil
+    }
+
     let keyCode = Int(event.keyCode)
     let lmKbdType = systemKeyboardType()
     let inputSource = currentInputSource().jsonObject
@@ -222,12 +612,18 @@ private func keyboardEventRecord(_ event: NSEvent) -> KeyboardEventRecord? {
         "hardware_key_code": keyCode,
         "hardware_key_code_hex": String(format: "0x%02X", event.keyCode),
         "hardware_position_label": physicalLabel(for: event.keyCode) ?? NSNull(),
+        "key_action": keyAction ?? NSNull(),
+        "key_action_source": keyActionSource,
+        "modifier_group_active": modifierGroupActive.map { $0 as Any } ?? NSNull(),
+        "modifier_lock_state": modifierLockState ?? NSNull(),
         "modifier_flags_raw": Int(event.modifierFlags.rawValue),
         "modifier_flags_names": modifierNames(event.modifierFlags),
         "is_repeat": isRepeat ?? NSNull(),
         "characters": characters ?? NSNull(),
+        "characters_status": characters.map { $0.isEmpty ? "empty" : "text" } ?? "not_available",
         "characters_unicode_scalars": scalarNames(characters),
         "characters_ignoring_modifiers": charactersIgnoringModifiers ?? NSNull(),
+        "characters_ignoring_modifiers_status": charactersIgnoringModifiers.map { $0.isEmpty ? "empty" : "text" } ?? "not_available",
         "characters_ignoring_modifiers_unicode_scalars": scalarNames(charactersIgnoringModifiers),
         "input_source": inputSource,
         "lm_kbd_type": lmKbdType,
@@ -238,10 +634,12 @@ private func keyboardEventRecord(_ event: NSEvent) -> KeyboardEventRecord? {
 
     let label = physicalLabel(for: event.keyCode).map { " (\($0))" } ?? ""
     let repeatDescription = isRepeat.map { String($0) } ?? "unavailable"
+    let lockDescription = modifierLockState.map { " lockState=\($0)" } ?? ""
     let logLine =
         "\(phase) keyCode=\(keyCode)/\(String(format: "0x%02X", event.keyCode))\(label) " +
         "flags=\(modifierNames(event.modifierFlags).joined(separator: ","))/\(event.modifierFlags.rawValue) " +
-        "repeat=\(repeatDescription) raw=\(describedText(characters)) " +
+        "action=\(keyAction ?? "unavailable") repeat=\(repeatDescription)\(lockDescription) " +
+        "raw=\(describedText(characters)) " +
         "ignoringModifiers=\(describedText(charactersIgnoringModifiers))"
     return KeyboardEventRecord(object: object, logLine: logLine)
 }
@@ -342,7 +740,7 @@ private final class ProbeWindowController: NSWindowController, NSWindowDelegate 
         guard let contentView = window?.contentView else { return }
 
         let instructions = NSTextField(
-            labelWithString: "Type in the box. The event log is bounded; stdout is JSONL. Hardware key identity and produced text are reported separately."
+            labelWithString: "Press keys or combinations in the box. The log shows key codes and modifiers even when no text appears. Stdout is JSONL."
         )
         instructions.lineBreakMode = .byWordWrapping
         instructions.maximumNumberOfLines = 2
@@ -419,7 +817,7 @@ private final class ProbeWindowController: NSWindowController, NSWindowDelegate 
 
     private func installLocalMonitor() {
         eventMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.keyDown, .keyUp, .flagsChanged]
+            matching: [.keyDown, .keyUp, .flagsChanged, .systemDefined]
         ) { [weak self] event in
             self?.record(event)
             return event
@@ -434,7 +832,9 @@ private final class ProbeWindowController: NSWindowController, NSWindowDelegate 
     }
 
     private func updateCaptureState() {
-        let isActive = NSApp.isActive && window?.isKeyWindow == true
+        let isActive = NSApp.isActive &&
+            window?.isKeyWindow == true &&
+            (window != nil && NSApp.keyWindow === window)
         guard isActive != captureIsActive else { return }
         captureIsActive = isActive
         let state = isActive ? "capture_resumed" : "capture_paused"
@@ -447,15 +847,35 @@ private final class ProbeWindowController: NSWindowController, NSWindowDelegate 
     }
 
     private func record(_ event: NSEvent) {
-        guard captureIsActive,
-              NSApp.isActive,
-              let probeWindow = window,
-              probeWindow.isKeyWindow,
-              event.window === probeWindow else {
+        guard captureIsActive, let probeWindow = window else {
             return
         }
 
-        guard let record = keyboardEventRecord(event) else { return }
+        let eventWindow: ProbeEventWindow
+        if let window = event.window {
+            eventWindow = window === probeWindow ? .probe : .foreign
+        } else {
+            eventWindow = .none
+        }
+        guard admitsProbeEvent(
+            eventWindow: eventWindow,
+            appIsActive: NSApp.isActive,
+            probeIsKeyWindow: probeWindow.isKeyWindow,
+            currentKeyWindowIsProbe: NSApp.keyWindow === probeWindow
+        ) else {
+            return
+        }
+
+        let record: KeyboardEventRecord?
+        switch event.type {
+        case .systemDefined:
+            record = systemKeyEventRecord(event)
+        case .keyDown, .keyUp, .flagsChanged:
+            record = keyboardEventRecord(event)
+        default:
+            record = nil
+        }
+        guard let record else { return }
         emit(record.object)
         appendLog(record.logLine)
     }
@@ -553,6 +973,27 @@ private func usage() {
     """)
 }
 
+private func packedSystemKeyData(keyCode: Int, stateCode: Int, isRepeat: Bool = false) -> Int {
+    let rawData1 = (UInt32(keyCode) << 16) |
+        (UInt32(stateCode) << 8) |
+        (isRepeat ? 1 : 0)
+    return Int(rawData1)
+}
+
+private func syntheticSystemEvent(subtype: Int16, data1: Int, data2: Int = 0) -> NSEvent? {
+    NSEvent.otherEvent(
+        with: .systemDefined,
+        location: .zero,
+        modifierFlags: [],
+        timestamp: 1,
+        windowNumber: 0,
+        context: nil,
+        subtype: subtype,
+        data1: data1,
+        data2: data2
+    )
+}
+
 private func runSelfTest() -> Int {
     let sample = "A~～¥\\^[]@"
     let expectedScalars = [
@@ -572,6 +1013,126 @@ private func runSelfTest() -> Int {
         return 1
     }
 
+    let focusCases: [(ProbeEventWindow, Bool, Bool, Bool, Bool)] = [
+        (.none, true, true, true, true),
+        (.probe, true, true, true, true),
+        (.foreign, true, true, true, false),
+        (.none, false, true, true, false),
+        (.none, true, false, true, false),
+        (.none, true, true, false, false)
+    ]
+    for (eventWindow, appIsActive, probeIsKeyWindow, currentKeyWindowIsProbe, expected) in focusCases {
+        guard admitsProbeEvent(
+            eventWindow: eventWindow,
+            appIsActive: appIsActive,
+            probeIsKeyWindow: probeIsKeyWindow,
+            currentKeyWindowIsProbe: currentKeyWindowIsProbe
+        ) == expected else {
+            fputs("self-test failed: foreground focus predicate\n", stderr)
+            return 1
+        }
+    }
+
+    let aggregateCommand = CGEventFlags.maskCommand.rawValue
+    let aggregateShift = CGEventFlags.maskShift.rawValue
+    let commandEventFlags = CGEventFlags(
+        rawValue: aggregateCommand | UInt64(deviceLeftCommandMask)
+    )
+    let commandAndShiftEventFlags = CGEventFlags(
+        rawValue: aggregateCommand |
+            aggregateShift |
+            UInt64(deviceLeftCommandMask) |
+            UInt64(deviceLeftShiftMask)
+    )
+    guard let commandCGEvent = CGEvent(
+        keyboardEventSource: nil,
+        virtualKey: UInt16(kVK_Command),
+        keyDown: true
+    ), let commandEvent = NSEvent(cgEvent: commandCGEvent),
+          let commandRecord = keyboardEventRecord(commandEvent),
+          commandEvent.window == nil,
+          commandRecord.object["hardware_position_label"] as? String == "leftCommand",
+          commandRecord.object["key_action"] as? String == "down" else {
+        fputs("self-test failed: windowless Command event\n", stderr)
+        return 1
+    }
+    commandCGEvent.type = .flagsChanged
+    commandCGEvent.flags = commandEventFlags
+    guard let commandFlagsEvent = NSEvent(cgEvent: commandCGEvent),
+          commandFlagsEvent.window == nil,
+          let commandFlagsRecord = keyboardEventRecord(commandFlagsEvent),
+          commandFlagsRecord.object["hardware_position_label"] as? String == "leftCommand",
+          admitsProbeEvent(
+              eventWindow: .none,
+              appIsActive: true,
+              probeIsKeyWindow: true,
+              currentKeyWindowIsProbe: true
+          ) else {
+        fputs("self-test failed: windowless Command+Shift routing\n", stderr)
+        return 1
+    }
+    guard let shiftCGEvent = CGEvent(
+        keyboardEventSource: nil,
+        virtualKey: UInt16(kVK_Shift),
+        keyDown: true
+    ), let shiftEvent = NSEvent(cgEvent: shiftCGEvent) else {
+        fputs("self-test failed: could not construct windowless Shift event\n", stderr)
+        return 1
+    }
+    shiftCGEvent.type = .flagsChanged
+    shiftCGEvent.flags = commandAndShiftEventFlags
+    guard let shiftFlagsEvent = NSEvent(cgEvent: shiftCGEvent),
+          shiftEvent.window == nil,
+          shiftFlagsEvent.window == nil,
+          let shiftFlagsRecord = keyboardEventRecord(shiftFlagsEvent),
+          shiftFlagsRecord.object["hardware_position_label"] as? String == "leftShift" else {
+        fputs("self-test failed: windowless Shift event\n", stderr)
+        return 1
+    }
+
+    let fnDown = modifierTransition(for: UInt16(kVK_Function), flags: [.function])
+    guard fnDown.action == "down", fnDown.source == "aggregate_function_flag" else {
+        fputs("self-test failed: Fn transition\n", stderr)
+        return 1
+    }
+    guard physicalLabel(for: UInt16(kVK_F1)) == "F1",
+          physicalLabel(for: UInt16(kVK_RightCommand)) == "rightCommand",
+          physicalLabel(for: UInt16(kVK_RightShift)) == "rightShift",
+          physicalLabel(for: UInt16(kVK_RightControl)) == "rightControl",
+          physicalLabel(for: UInt16(kVK_RightOption)) == "rightOption",
+          physicalLabel(for: UInt16(kVK_LeftArrow)) == "leftArrow",
+          physicalLabel(for: UInt16(kVK_Home)) == "home",
+          physicalLabel(for: UInt16(kVK_PageDown)) == "pageDown",
+          physicalLabel(for: UInt16(kVK_ANSI_KeypadEnter)) == "keypadEnter" else {
+        fputs("self-test failed: native non-printing key labels\n", stderr)
+        return 1
+    }
+
+    let capsState = modifierTransition(for: UInt16(kVK_CapsLock), flags: [.capsLock])
+    guard capsState.action == nil, capsState.lockState == "on" else {
+        fputs("self-test failed: Caps Lock state\n", stderr)
+        return 1
+    }
+    let bothShiftFlags = NSEvent.ModifierFlags(rawValue:
+        NSEvent.ModifierFlags.shift.rawValue |
+            deviceLeftShiftMask |
+            deviceRightShiftMask
+    )
+    let leftShiftReleaseFlags = NSEvent.ModifierFlags(rawValue:
+        NSEvent.ModifierFlags.shift.rawValue | deviceRightShiftMask
+    )
+    let rightShiftReleaseFlags = NSEvent.ModifierFlags(rawValue:
+        NSEvent.ModifierFlags.shift.rawValue | deviceLeftShiftMask
+    )
+    guard modifierTransition(for: UInt16(kVK_Shift), flags: bothShiftFlags).action == "down",
+          modifierTransition(for: UInt16(kVK_RightShift), flags: bothShiftFlags).action == "down",
+          modifierTransition(for: UInt16(kVK_Shift), flags: leftShiftReleaseFlags).action == "up",
+          modifierTransition(for: UInt16(kVK_RightShift), flags: rightShiftReleaseFlags).action == "up",
+          modifierTransition(for: UInt16(kVK_RightShift), flags: []).action == "up" else {
+        fputs("self-test failed: two-sided Shift release\n", stderr)
+        return 1
+    }
+
     // Construct events for serialization checks, but never post or inject them.
     guard let flagsCGEvent = CGEvent(keyboardEventSource: nil, virtualKey: 56, keyDown: true) else {
         fputs("self-test failed: could not construct flagsChanged CGEvent\n", stderr)
@@ -586,6 +1147,7 @@ private func runSelfTest() -> Int {
           let decodedFlags = decodedFlagsValue as? [String: Any],
           decodedFlags["type"] as? String == "keyboard_event",
           decodedFlags["phase"] as? String == "flagsChanged",
+          decodedFlags["key_action"] as? String == "changed",
           decodedFlags["is_repeat"] is NSNull,
           decodedFlags["characters"] is NSNull,
           decodedFlags["characters_ignoring_modifiers"] is NSNull else {
@@ -598,8 +1160,86 @@ private func runSelfTest() -> Int {
           let keyRecord = keyboardEventRecord(keyEvent),
           keyRecord.object["type"] as? String == "keyboard_event",
           keyRecord.object["phase"] as? String == "keyDown",
+          keyRecord.object["key_action"] as? String == "down",
           !(keyRecord.object["is_repeat"] is NSNull) else {
         fputs("self-test failed: keyDown serialization\n", stderr)
+        return 1
+    }
+
+    guard let keyUpCGEvent = CGEvent(keyboardEventSource: nil, virtualKey: 24, keyDown: false),
+          let keyUpEvent = NSEvent(cgEvent: keyUpCGEvent),
+          let keyUpRecord = keyboardEventRecord(keyUpEvent),
+          keyUpRecord.object["phase"] as? String == "keyUp",
+          keyUpRecord.object["key_action"] as? String == "up" else {
+        fputs("self-test failed: keyUp serialization\n", stderr)
+        return 1
+    }
+
+    let mediaDownData = packedSystemKeyData(
+        keyCode: Int(NX_KEYTYPE_SOUND_UP),
+        stateCode: Int(NX_KEYDOWN)
+    )
+    let mediaUpData = packedSystemKeyData(
+        keyCode: Int(NX_KEYTYPE_SOUND_UP),
+        stateCode: Int(NX_KEYUP)
+    )
+    let mediaRepeatData = packedSystemKeyData(
+        keyCode: Int(NX_KEYTYPE_SOUND_UP),
+        stateCode: Int(NX_KEYDOWN),
+        isRepeat: true
+    )
+    guard let mediaDownEvent = syntheticSystemEvent(
+        subtype: Int16(NX_SUBTYPE_AUX_CONTROL_BUTTONS),
+        data1: mediaDownData,
+        data2: 17
+    ), let mediaDownRecord = systemKeyEventRecord(mediaDownEvent),
+          mediaDownRecord.object["type"] as? String == "system_key_event",
+          mediaDownRecord.object["subtype"] as? Int == Int(NX_SUBTYPE_AUX_CONTROL_BUTTONS),
+          mediaDownRecord.object["rawData1"] as? Int == mediaDownData,
+          mediaDownRecord.object["rawData2"] as? Int == 17,
+          mediaDownRecord.object["media_key_label"] as? String == "volumeUp",
+          mediaDownRecord.object["media_key_type"] as? String == "audio",
+          mediaDownRecord.object["state"] as? String == "down",
+          mediaDownRecord.object["is_repeat"] as? Bool == false else {
+        fputs("self-test failed: media key down decoding\n", stderr)
+        return 1
+    }
+    guard let mediaUpEvent = syntheticSystemEvent(
+        subtype: Int16(NX_SUBTYPE_AUX_CONTROL_BUTTONS),
+        data1: mediaUpData
+    ), let mediaUpRecord = systemKeyEventRecord(mediaUpEvent),
+          mediaUpRecord.object["media_key_label"] as? String == "volumeUp",
+          mediaUpRecord.object["state"] as? String == "up" else {
+        fputs("self-test failed: media key up decoding\n", stderr)
+        return 1
+    }
+    guard let mediaRepeatEvent = syntheticSystemEvent(
+        subtype: Int16(NX_SUBTYPE_AUX_CONTROL_BUTTONS),
+        data1: mediaRepeatData
+    ), let mediaRepeatRecord = systemKeyEventRecord(mediaRepeatEvent),
+          mediaRepeatRecord.object["media_key_label"] as? String == "volumeUp",
+          mediaRepeatRecord.object["state"] as? String == "repeat",
+          mediaRepeatRecord.object["is_repeat"] as? Bool == true else {
+        fputs("self-test failed: media key repeat decoding\n", stderr)
+        return 1
+    }
+    guard let unrelatedSystemEvent = syntheticSystemEvent(
+        subtype: Int16(NX_SUBTYPE_POWER_KEY),
+        data1: mediaDownData
+    ), systemKeyEventRecord(unrelatedSystemEvent) == nil else {
+        fputs("self-test failed: unrelated system-defined event\n", stderr)
+        return 1
+    }
+    guard let unknownStateEvent = syntheticSystemEvent(
+        subtype: Int16(NX_SUBTYPE_AUX_CONTROL_BUTTONS),
+        data1: packedSystemKeyData(
+            keyCode: Int(NX_KEYTYPE_SOUND_UP),
+            stateCode: 0x7F
+        )
+    ), let unknownStateRecord = systemKeyEventRecord(unknownStateEvent),
+          unknownStateRecord.object["media_key_label"] is NSNull,
+          unknownStateRecord.object["state"] is NSNull else {
+        fputs("self-test failed: unknown system-defined state\n", stderr)
         return 1
     }
 
