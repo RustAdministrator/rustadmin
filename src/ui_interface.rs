@@ -1824,7 +1824,6 @@ pub fn check_hwcodec() {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         if crate::platform::is_installed() {
-            ipc::notify_server_to_check_hwcodec().ok();
             ipc::client_recheck_hwcodec_config_thread(3);
         } else {
             scrap::hwcodec::recheck_hwcodec();

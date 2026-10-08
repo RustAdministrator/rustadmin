@@ -17,6 +17,8 @@ $ErrorActionPreference = "Stop"
 
 $RequiredBridgeCodegenVersion = "1.80.1"
 $BridgeClassName = "Rustadmin"
+$CodecIntegrationReportKind = "rustadmin-codec-integration"
+$CodecIntegrationReportVersion = 1
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $FlutterDir = Join-Path $RepoRoot "flutter"
 $Drive = Split-Path -Qualifier $RepoRoot
@@ -481,6 +483,197 @@ function Copy-WindowsRuntimeDependencies {
     }
 }
 
+function Stop-CodecIntegrationProcess {
+    param(
+        [System.Diagnostics.Process]$Process,
+        [int]$TimeoutMilliseconds
+    )
+
+    if ($null -eq $Process) {
+        return
+    }
+    try {
+        $Process.Refresh()
+        if ($Process.HasExited) {
+            return
+        }
+        $Process.Kill()
+        if (!$Process.WaitForExit($TimeoutMilliseconds)) {
+            Write-Warning "Codec integration process did not exit within $($TimeoutMilliseconds / 1000) seconds after termination was requested."
+        }
+    }
+    catch {
+        Write-Warning "Could not terminate the codec integration process: $($_.Exception.Message)"
+    }
+}
+
+function Assert-CodecIntegrationReport {
+    param(
+        [string]$Json,
+        [string]$CodecRoot
+    )
+
+    $RepairCommand = "scripts\build_windows_ffmpeg_hardware_only.ps1"
+    if ([string]::IsNullOrWhiteSpace($Json)) {
+        throw "Linked codec integration report was empty. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+    }
+
+    try {
+        $Report = $Json | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw "Linked codec integration report was not valid JSON. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand. Original error: $($_.Exception.Message)"
+    }
+
+    foreach ($Property in @(
+        "report_kind",
+        "report_version",
+        "hwcodec_enabled",
+        "passed",
+        "linked_decoders",
+        "checks",
+        "missing_expected_decoders"
+    )) {
+        if ($Report.PSObject.Properties.Name -notcontains $Property) {
+            throw "Linked codec integration report is missing required property '$Property'. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+        }
+    }
+    if ($Report.report_kind -ne $CodecIntegrationReportKind) {
+        throw "Linked codec integration report marker '$($Report.report_kind)' did not match '$CodecIntegrationReportKind'. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+    }
+    if ($Report.report_version -ne $CodecIntegrationReportVersion) {
+        throw "Linked codec integration report version '$($Report.report_version)' did not match '$CodecIntegrationReportVersion'. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+    }
+    if ($Report.hwcodec_enabled -ne $true) {
+        throw "Linked codec integration report says hwcodec_enabled=false. Rebuild RustAdmin without -NoHwCodec. Selected FFmpeg codec root: $CodecRoot."
+    }
+
+    $Missing = @()
+    if ($null -ne $Report.missing_expected_decoders) {
+        $Missing = @($Report.missing_expected_decoders)
+    }
+    if ($Missing.Count -ne 0) {
+        $MissingNames = ($Missing | ForEach-Object { "$($_.name) ($($_.format))" }) -join ", "
+        throw "Linked codec integration report has missing expected decoders: $MissingNames. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+    }
+
+    $Checks = @()
+    if ($null -ne $Report.checks) {
+        $Checks = @($Report.checks)
+    }
+    if ($Checks.Count -ne 2) {
+        throw "Linked codec integration report must contain exactly two native decoder checks. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+    }
+    foreach ($Expected in @(
+        [PSCustomObject]@{ name = "h264"; format = "H264" },
+        [PSCustomObject]@{ name = "hevc"; format = "H265" }
+    )) {
+        $Matches = @($Checks | Where-Object { $_.expected.name -eq $Expected.name })
+        if ($Matches.Count -ne 1) {
+            throw "Linked codec integration report did not contain exactly one check for native decoder '$($Expected.name)'. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+        }
+        $Check = $Matches[0]
+        if ($Check.expected.format -ne $Expected.format) {
+            throw "Linked codec integration report used format '$($Check.expected.format)' for '$($Expected.name)', expected '$($Expected.format)'. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+        }
+        if ($Check.status -ne "validated") {
+            throw "Linked codec integration report did not validate native decoder '$($Expected.name)' ($($Expected.format)); status was '$($Check.status)'. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+        }
+    }
+    if ($Report.passed -ne $true) {
+        throw "Linked codec integration report says passed=false after both native decoder checks. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+    }
+}
+
+function Invoke-CodecIntegrationGate {
+    param(
+        [string]$BundleDir,
+        [string]$CodecRoot
+    )
+
+    $AppExe = Join-Path $BundleDir "rustadmin.exe"
+    $RepairCommand = "scripts\build_windows_ffmpeg_hardware_only.ps1"
+    Write-Host "Selected FFmpeg codec root: $CodecRoot"
+    if (!(Test-Path $AppExe)) {
+        throw "Codec integration gate could not find the bundled executable '$AppExe'. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+    }
+
+    $LogDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rustadmin-codec-integration-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+    $StdoutPath = Join-Path $LogDir "stdout.log"
+    $StderrPath = Join-Path $LogDir "stderr.log"
+    $Process = $null
+    $Passed = $false
+    $TimeoutMilliseconds = 30 * 1000
+    $CleanupTimeoutMilliseconds = 5 * 1000
+
+    Write-Host "Running linked codec integration verification: $AppExe --verify-codec-integration"
+    try {
+        $StartInfo = @{
+            FilePath = $AppExe
+            ArgumentList = @("--verify-codec-integration")
+            WorkingDirectory = $BundleDir
+            WindowStyle = "Hidden"
+            RedirectStandardOutput = $StdoutPath
+            RedirectStandardError = $StderrPath
+            PassThru = $true
+        }
+        $Process = Start-Process @StartInfo
+        if (!$Process.WaitForExit($TimeoutMilliseconds)) {
+            Stop-CodecIntegrationProcess $Process $CleanupTimeoutMilliseconds
+            throw "Linked codec integration verification timed out after $($TimeoutMilliseconds / 1000) seconds. Selected FFmpeg codec root: $CodecRoot. Rebuild that prefix with $RepairCommand, then rerun the Windows packaging gate."
+        }
+
+        $Process.Refresh()
+        $ExitCode = $Process.ExitCode
+        $Stdout = if (Test-Path $StdoutPath) { Get-Content -Raw $StdoutPath } else { "" }
+        $Stderr = if (Test-Path $StderrPath) { Get-Content -Raw $StderrPath } else { "" }
+        if (![string]::IsNullOrWhiteSpace($Stdout)) {
+            Write-Host $Stdout.TrimEnd()
+        }
+        if (![string]::IsNullOrWhiteSpace($Stderr)) {
+            Write-Host $Stderr.TrimEnd()
+        }
+        try {
+            Assert-CodecIntegrationReport $Stdout $CodecRoot
+        }
+        catch {
+            throw "Linked codec integration report validation failed. $($_.Exception.Message)"
+        }
+        if ($ExitCode -ne 0) {
+            throw @"
+Linked codec integration verification failed with exit code $ExitCode.
+The bundled executable did not validate native software H264 and HEVC decoders.
+Selected FFmpeg codec root: $CodecRoot
+Rebuild that prefix with $RepairCommand, then rebuild RustAdmin without -NoHwCodec.
+"@
+        }
+
+        Write-Host "Linked codec integration verification passed."
+        $Passed = $true
+    }
+    catch {
+        $Message = $_.Exception.Message
+        $NormalizedMessage = $Message.TrimStart()
+        if ($NormalizedMessage.StartsWith("Linked codec integration report validation failed") -or
+            $NormalizedMessage.StartsWith("Linked codec integration verification failed") -or
+            $NormalizedMessage.StartsWith("Linked codec integration verification timed out")) {
+            throw
+        }
+        throw "Could not start or complete linked codec integration verification. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand. Original error: $Message"
+    }
+    finally {
+        if ($null -ne $Process) {
+            Stop-CodecIntegrationProcess $Process $CleanupTimeoutMilliseconds
+        }
+        if ($Passed) {
+            Remove-Item -Recurse -Force $LogDir -ErrorAction SilentlyContinue
+        } else {
+            Write-Host "Codec integration logs were kept at: $LogDir"
+        }
+    }
+}
+
 $VersionInfo = Get-RustAdminVersionInfo
 Write-VersionFile $VersionInfo
 
@@ -546,4 +739,9 @@ Remove-Item -Force $StaleRuntimeIcon -ErrorAction SilentlyContinue
 Write-Host "Windows bundle:"
 Write-Host $BundleDir
 Copy-WindowsRuntimeDependencies $BundleDir $DependencyRoots
+if ($NoHwCodec) {
+    Write-Host "Skipping linked codec integration verification because -NoHwCodec was requested."
+} else {
+    Invoke-CodecIntegrationGate $BundleDir $CodecRoot
+}
 New-ReleaseZip $VersionInfo

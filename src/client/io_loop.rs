@@ -74,6 +74,22 @@ const CRITICAL_INPUT_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_millis(10),
 ];
 
+#[cfg(all(
+    feature = "hwcodec",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+fn hwcodec_capability_generation() -> u64 {
+    scrap::hwcodec::HwCodecConfig::capability_generation()
+}
+
+#[cfg(not(all(
+    feature = "hwcodec",
+    not(any(target_os = "android", target_os = "ios"))
+)))]
+fn hwcodec_capability_generation() -> u64 {
+    0
+}
+
 struct ConnectionRenderLifetime<T: InvokeUiSession> {
     handler: T,
     round: u32,
@@ -342,6 +358,7 @@ pub struct Remote<T: InvokeUiSession> {
     sent_close_reason: bool,
     last_fps_control_summary_log: Option<Instant>,
     connection_round: u32,
+    last_hwcodec_generation: u64,
 }
 
 #[derive(Default)]
@@ -405,6 +422,23 @@ impl<T: InvokeUiSession> Remote<T> {
             sent_close_reason: false,
             last_fps_control_summary_log: None,
             connection_round: 0,
+            last_hwcodec_generation: 0,
+        }
+    }
+
+    async fn refresh_supported_decodings_if_changed(&mut self, peer: &mut Stream) {
+        let generation = hwcodec_capability_generation();
+        if self.last_hwcodec_generation == generation {
+            return;
+        }
+        let msg = self.handler.lc.read().unwrap().update_supported_decodings();
+        match peer.send(&msg).await {
+            Ok(()) => {
+                self.last_hwcodec_generation = generation;
+            }
+            Err(error) => {
+                log::warn!("failed to refresh peer supported decodings: {error}");
+            }
         }
     }
 
@@ -681,6 +715,7 @@ impl<T: InvokeUiSession> Remote<T> {
         };
         let expects_video =
             conn_type == ConnType::DEFAULT_CONN || conn_type == ConnType::VIEW_CAMERA;
+        let hwcodec_generation_before_start = hwcodec_capability_generation();
 
         match Client::start(
             &self.handler.get_id(),
@@ -692,6 +727,7 @@ impl<T: InvokeUiSession> Remote<T> {
         .await
         {
             Ok(((mut peer, direct, pk, kcp, stream_type), (feedback, rendezvous_server))) => {
+                self.last_hwcodec_generation = hwcodec_generation_before_start;
                 let _direct_peer_session =
                     client::peer_online::track_direct_peer_session(&self.handler.get_id());
                 if !self
@@ -847,6 +883,14 @@ impl<T: InvokeUiSession> Remote<T> {
                             self.sync_display_intent_to_peer(&mut peer).await;
                             self.handler.ui_handler.tick_render_liveness();
                             self.recover_display_startup(&mut peer, expects_video).await;
+                            if expects_video {
+                                #[cfg(all(
+                                    feature = "hwcodec",
+                                    not(any(target_os = "android", target_os = "ios"))
+                                ))]
+                                scrap::hwcodec::ensure_local_hwcodec_config();
+                                self.refresh_supported_decodings_if_changed(&mut peer).await;
+                            }
 
                             let elapsed = fps_instant.elapsed().as_millis();
                             if elapsed < 1000 {

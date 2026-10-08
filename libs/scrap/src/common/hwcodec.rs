@@ -27,6 +27,11 @@ use hwcodec::{
         ffmpeg_linesize_offset_length, CodecInfo,
     },
 };
+#[cfg(not(target_os = "android"))]
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex, OnceLock,
+};
 
 const DEFAULT_PIXFMT: AVPixelFormat = AVPixelFormat::AV_PIX_FMT_NV12;
 const DECODER_PROBE_VERSION: u32 = 3;
@@ -40,8 +45,171 @@ crate::generate_call_macro!(call_yuv, false);
 
 #[cfg(not(target_os = "android"))]
 lazy_static::lazy_static! {
-    static ref CONFIG: std::sync::Arc<std::sync::Mutex<Option<HwCodecConfig>>> = Default::default();
-    static ref CONFIG_SET_BY_IPC: std::sync::Arc<std::sync::Mutex<bool>> = Default::default();
+    static ref CONFIG_STATE: std::sync::Arc<std::sync::Mutex<HwCodecState>> = Default::default();
+}
+
+#[cfg(not(target_os = "android"))]
+static CAPABILITY_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(not(target_os = "android"))]
+#[derive(Debug, Default)]
+struct HwCodecState {
+    config: Option<HwCodecConfig>,
+    set_by_ipc: bool,
+    local_verified: bool,
+}
+
+#[cfg(not(target_os = "android"))]
+const LOCAL_PROBE_ATTEMPTS: usize = 3;
+#[cfg(not(target_os = "android"))]
+const LOCAL_PROBE_ATTEMPT_BACKOFF_SECONDS: [u64; 2] = [1, 3];
+#[cfg(not(target_os = "android"))]
+const LOCAL_PROBE_RETRY_BACKOFF_SECONDS: [u64; 3] = [15, 60, 300];
+
+#[cfg(not(target_os = "android"))]
+#[derive(Debug, Default)]
+struct LocalProbeSchedule {
+    in_flight: bool,
+    generation: u64,
+    pending_force: bool,
+    failures: usize,
+    retry_at: Option<std::time::Instant>,
+}
+
+#[cfg(not(target_os = "android"))]
+impl LocalProbeSchedule {
+    fn admit(&mut self, now: std::time::Instant, force: bool) -> Option<u64> {
+        if self.in_flight {
+            self.pending_force |= force;
+            return None;
+        }
+        if !force && self.retry_at.is_some_and(|retry_at| now < retry_at) {
+            return None;
+        }
+        self.in_flight = true;
+        Some(self.generation)
+    }
+
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        if self.in_flight {
+            self.pending_force = true;
+        } else {
+            self.pending_force = false;
+            self.failures = 0;
+            self.retry_at = None;
+        }
+    }
+
+    fn is_current(&self, generation: u64) -> bool {
+        self.generation == generation
+    }
+
+    fn finish(&mut self, generation: u64, now: std::time::Instant, success: bool) -> bool {
+        self.in_flight = false;
+        if generation == self.generation && success {
+            self.failures = 0;
+            self.retry_at = None;
+        } else if generation == self.generation {
+            self.failures = self.failures.saturating_add(1);
+            let index = self
+                .failures
+                .saturating_sub(1)
+                .min(LOCAL_PROBE_RETRY_BACKOFF_SECONDS.len() - 1);
+            self.retry_at = Some(
+                now + std::time::Duration::from_secs(LOCAL_PROBE_RETRY_BACKOFF_SECONDS[index]),
+            );
+        } else {
+            // A reset invalidated this result. Do not apply its failure or
+            // success to the new generation; the pending force rerun owns it.
+            self.failures = 0;
+            self.retry_at = None;
+        }
+        std::mem::take(&mut self.pending_force)
+    }
+
+    fn abort(&mut self, generation: u64, now: std::time::Instant) {
+        if generation != self.generation {
+            self.in_flight = false;
+            self.pending_force = false;
+            self.failures = 0;
+            self.retry_at = None;
+            return;
+        }
+        self.in_flight = false;
+        self.pending_force = false;
+        self.failures = self.failures.saturating_add(1);
+        let index = self
+            .failures
+            .saturating_sub(1)
+            .min(LOCAL_PROBE_RETRY_BACKOFF_SECONDS.len() - 1);
+        self.retry_at =
+            Some(now + std::time::Duration::from_secs(LOCAL_PROBE_RETRY_BACKOFF_SECONDS[index]));
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+static LOCAL_PROBE_SCHEDULE: OnceLock<Mutex<LocalProbeSchedule>> = OnceLock::new();
+
+#[cfg(not(target_os = "android"))]
+fn local_probe_schedule() -> &'static Mutex<LocalProbeSchedule> {
+    LOCAL_PROBE_SCHEDULE.get_or_init(|| Mutex::new(LocalProbeSchedule::default()))
+}
+
+#[cfg(not(target_os = "android"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeConfigDisposition {
+    Accept,
+    Retryable,
+    Reject,
+}
+
+#[cfg(not(target_os = "android"))]
+fn gpu_signature_is_suspect(windows: bool, signature: u64) -> bool {
+    windows && (signature == 0 || signature == u64::MAX)
+}
+
+#[cfg(not(target_os = "android"))]
+fn service_config_disposition(
+    windows: bool,
+    config_signature: u64,
+    current_signature: u64,
+    local_verified: bool,
+    has_capabilities: bool,
+) -> ProbeConfigDisposition {
+    if local_verified || !has_capabilities {
+        return ProbeConfigDisposition::Reject;
+    }
+    if gpu_signature_is_suspect(windows, config_signature)
+        || gpu_signature_is_suspect(windows, current_signature)
+    {
+        return ProbeConfigDisposition::Reject;
+    }
+    if config_signature == current_signature {
+        ProbeConfigDisposition::Accept
+    } else {
+        ProbeConfigDisposition::Reject
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+fn local_config_disposition(
+    windows: bool,
+    config_signature: u64,
+    current_signature: u64,
+) -> ProbeConfigDisposition {
+    if gpu_signature_is_suspect(windows, config_signature)
+        || gpu_signature_is_suspect(windows, current_signature)
+    {
+        return ProbeConfigDisposition::Retryable;
+    }
+    if config_signature != current_signature {
+        return ProbeConfigDisposition::Reject;
+    }
+    // A transient encoder/backend failure does not invalidate hardware that
+    // was enumerated for the current GPU. Keep those capabilities in memory;
+    // the transient bit still prevents persistence and schedules a retry.
+    ProbeConfigDisposition::Accept
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,6 +493,115 @@ mod tests {
             ..current
         };
         assert!(HwCodecConfig::verified(&serde_json::to_string(&empty).unwrap()).is_ok());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn cache_readiness_does_not_depend_on_the_ipc_flag() {
+        let cached = HwCodecConfig {
+            decoder_probe_version: DECODER_PROBE_VERSION,
+            ..Default::default()
+        };
+        assert!(HwCodecConfig::is_config_ready(Some(&cached)));
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn local_probe_recovers_after_a_retryable_gpu_enumeration_result() {
+        assert!(gpu_signature_is_suspect(true, 0));
+        assert!(gpu_signature_is_suspect(true, u64::MAX));
+        assert!(!gpu_signature_is_suspect(false, 0));
+        assert!(!gpu_signature_is_suspect(false, u64::MAX));
+        assert_eq!(
+            local_config_disposition(true, 0, 0),
+            ProbeConfigDisposition::Retryable
+        );
+        assert_eq!(
+            local_config_disposition(true, 77, 77),
+            ProbeConfigDisposition::Accept
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn service_result_yields_to_local_verification_and_empty_context() {
+        assert_eq!(
+            service_config_disposition(true, 77, 77, true, true),
+            ProbeConfigDisposition::Reject
+        );
+        assert_eq!(
+            service_config_disposition(true, 77, 77, false, false),
+            ProbeConfigDisposition::Reject
+        );
+        assert_eq!(
+            service_config_disposition(true, 77, 77, false, true),
+            ProbeConfigDisposition::Accept
+        );
+        assert_eq!(
+            service_config_disposition(true, 0, 0, false, true),
+            ProbeConfigDisposition::Reject
+        );
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn local_probe_schedule_deduplicates_backoff_and_allows_recovery() {
+        let start = std::time::Instant::now();
+        let mut schedule = LocalProbeSchedule::default();
+        let generation = schedule.admit(start, false).unwrap();
+        assert!(schedule.admit(start, false).is_none());
+        assert!(!schedule.finish(generation, start, false));
+        assert!(schedule
+            .admit(start + std::time::Duration::from_secs(14), false)
+            .is_none());
+        let generation = schedule
+            .admit(start + std::time::Duration::from_secs(15), false)
+            .unwrap();
+        assert!(!schedule.finish(
+            generation,
+            start + std::time::Duration::from_secs(15),
+            false
+        ));
+        assert!(schedule
+            .admit(start + std::time::Duration::from_secs(74), false)
+            .is_none());
+        let generation = schedule
+            .admit(start + std::time::Duration::from_secs(75), false)
+            .unwrap();
+        assert!(!schedule.finish(
+            generation,
+            start + std::time::Duration::from_secs(75),
+            false
+        ));
+        assert!(schedule
+            .admit(start + std::time::Duration::from_secs(374), false)
+            .is_none());
+        let generation = schedule
+            .admit(start + std::time::Duration::from_secs(375), false)
+            .unwrap();
+        assert!(!schedule.finish(
+            generation,
+            start + std::time::Duration::from_secs(375),
+            true
+        ));
+        assert!(schedule
+            .admit(start + std::time::Duration::from_secs(375), false)
+            .is_some());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    #[test]
+    fn local_probe_reset_invalidates_result_and_queues_one_force_retry() {
+        let start = std::time::Instant::now();
+        let mut schedule = LocalProbeSchedule::default();
+        let generation = schedule.admit(start, false).unwrap();
+        schedule.invalidate();
+        assert!(!schedule.is_current(generation));
+        assert!(schedule.admit(start, true).is_none());
+        assert!(schedule.finish(generation, start, true));
+        let retry_generation = schedule.admit(start, true).unwrap();
+        assert_ne!(generation, retry_generation);
+        assert!(!schedule.finish(retry_generation, start, true));
     }
 
     #[test]
@@ -1674,7 +1951,7 @@ fn get_mime_type(codec: DataFormat) -> &'static str {
     }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct HwCodecConfig {
     #[serde(default)]
     pub decoder_probe_version: u32,
@@ -1710,6 +1987,37 @@ impl HwCodecConfig {
         self.decoder_probe_version != DECODER_PROBE_VERSION
     }
 
+    fn needs_probe(&self) -> bool {
+        self.needs_decoder_probe() || self.transient_probe_failure
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn is_config_ready(config: Option<&Self>) -> bool {
+        config.is_some_and(|config| !config.needs_probe())
+    }
+
+    fn has_capabilities(&self) -> bool {
+        if !self.ram_encode.is_empty() || !self.ram_decode.is_empty() {
+            return true;
+        }
+        #[cfg(feature = "vram")]
+        if !self.vram_encode.is_empty() || !self.vram_decode.is_empty() {
+            return true;
+        }
+        false
+    }
+
+    fn retain_software_capabilities(&mut self) {
+        self.ram_encode.retain(|codec| !codec.is_hardware_encoder());
+        self.ram_decode
+            .retain(|codec| codec.hwdevice == AVHWDeviceType::AV_HWDEVICE_TYPE_NONE);
+        #[cfg(feature = "vram")]
+        {
+            self.vram_encode.clear();
+            self.vram_decode.clear();
+        }
+    }
+
     fn verified(config: &str) -> ResultType<Self> {
         let config: Self = serde_json::from_str(config)?;
         if config.needs_decoder_probe() {
@@ -1729,16 +2037,33 @@ impl HwCodecConfig {
     }
 
     #[cfg(not(target_os = "android"))]
-    pub fn set(config: String) -> bool {
-        let config = match Self::verified(&config) {
-            Ok(config) => config,
-            Err(error) => {
-                // Do not let an older installed service overwrite a newer local
-                // probe or mark an incompatible/empty result as ready.
-                log::warn!("ignoring hwcodec config: {error}");
-                return false;
-            }
-        };
+    fn for_current_gpu(mut config: Self) -> Option<Self> {
+        config.discard_unverified_decoders();
+        let current_signature = hwcodec::common::get_gpu_signature();
+        if !gpu_signature_is_suspect(cfg!(windows), config.signature)
+            && !gpu_signature_is_suspect(cfg!(windows), current_signature)
+            && config.signature == current_signature
+        {
+            return Some(config);
+        }
+
+        #[cfg(windows)]
+        if gpu_signature_is_suspect(true, config.signature)
+            && gpu_signature_is_suspect(true, current_signature)
+        {
+            // A Windows service can run without the interactive GPU session.
+            // Keep only software facts until a later probe can identify the
+            // current adapter; hardware entries are not safe to advertise.
+            config.retain_software_capabilities();
+            config.signature = current_signature;
+            config.transient_probe_failure = true;
+            return Some(config);
+        }
+        None
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn apply_locked(state: &mut HwCodecState, config: HwCodecConfig, local_verified: bool) {
         log::info!("set hwcodec config");
         log::debug!("{config:?}");
         #[cfg(any(windows, target_os = "macos"))]
@@ -1756,8 +2081,98 @@ impl HwCodecConfig {
                 );
             }
         }
-        *CONFIG.lock().unwrap() = Some(config);
-        *CONFIG_SET_BY_IPC.lock().unwrap() = true;
+        state.config = Some(config);
+        state.set_by_ipc = !local_verified;
+        state.local_verified = local_verified;
+        CAPABILITY_GENERATION.fetch_add(1, Ordering::AcqRel);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub fn set(config: String) -> bool {
+        Self::set_from_service(config)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub fn set_from_service(config: String) -> bool {
+        let config = match Self::verified(&config) {
+            Ok(config) => config,
+            Err(error) => {
+                log::warn!("ignoring hwcodec config: {error}");
+                return false;
+            }
+        };
+        let current_signature = hwcodec::common::get_gpu_signature();
+        let mut state = CONFIG_STATE.lock().unwrap();
+        if service_config_disposition(
+            cfg!(windows),
+            config.signature,
+            current_signature,
+            state.local_verified,
+            config.has_capabilities(),
+        ) == ProbeConfigDisposition::Accept
+        {
+            Self::apply_locked(&mut state, config, false);
+            true
+        } else {
+            log::warn!(
+                "ignoring service hwcodec config: signature={}, current_signature={}, local_verified={}, capabilities={}",
+                config.signature,
+                current_signature,
+                state.local_verified,
+                config.has_capabilities()
+            );
+            false
+        }
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub fn set_from_local_probe(config: String) -> bool {
+        Self::set_from_local_probe_value(config, None)
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn set_from_local_probe_at(config: String, generation: u64) -> bool {
+        let schedule = local_probe_schedule().lock().unwrap();
+        if !schedule.is_current(generation) {
+            return false;
+        }
+        // Keep the schedule lock held while the config/provenance state is
+        // applied. reset() takes these locks in the same order, so an old
+        // subprocess result cannot land after a reset.
+        Self::set_from_local_probe_value(config, Some(&*schedule))
+    }
+
+    #[cfg(not(target_os = "android"))]
+    fn set_from_local_probe_value(
+        config: String,
+        _probe_schedule: Option<&LocalProbeSchedule>,
+    ) -> bool {
+        let mut config = match Self::verified(&config) {
+            Ok(config) => config,
+            Err(error) => {
+                log::warn!("ignoring local hwcodec config: {error}");
+                return false;
+            }
+        };
+        let current_signature = hwcodec::common::get_gpu_signature();
+        match local_config_disposition(cfg!(windows), config.signature, current_signature) {
+            ProbeConfigDisposition::Accept => {}
+            ProbeConfigDisposition::Retryable => {
+                config.retain_software_capabilities();
+                config.signature = current_signature;
+                config.transient_probe_failure = true;
+            }
+            ProbeConfigDisposition::Reject => {
+                log::warn!(
+                    "ignoring local hwcodec config for a different GPU: signature={}, current_signature={}",
+                    config.signature,
+                    current_signature
+                );
+                return false;
+            }
+        }
+        let mut state = CONFIG_STATE.lock().unwrap();
+        Self::apply_locked(&mut state, config, true);
         true
     }
 
@@ -1829,25 +2244,49 @@ impl HwCodecConfig {
         }
         #[cfg(any(windows, target_os = "macos"))]
         {
-            let config = CONFIG.lock().unwrap().clone();
+            let mut state = CONFIG_STATE.lock().unwrap();
+            let config = state.config.clone();
             match config {
-                Some(c) => c,
+                Some(c) => match Self::for_current_gpu(c) {
+                    Some(c) => {
+                        if state.config.as_ref() != Some(&c) {
+                            state.config = Some(c.clone());
+                            CAPABILITY_GENERATION.fetch_add(1, Ordering::AcqRel);
+                        }
+                        c
+                    }
+                    None => {
+                        log::warn!("discarding hwcodec config for an unavailable GPU");
+                        let invalidated = state.config.take().is_some()
+                            || state.set_by_ipc
+                            || state.local_verified;
+                        state.set_by_ipc = false;
+                        state.local_verified = false;
+                        if invalidated {
+                            CAPABILITY_GENERATION.fetch_add(1, Ordering::AcqRel);
+                        }
+                        HwCodecConfig::default()
+                    }
+                },
                 None => {
                     log::info!("try load cached hwcodec config");
                     let c = hbb_common::config::common_load::<HwCodecConfig2>("_hwcodec");
-                    let mut c: HwCodecConfig = serde_json::from_str(&c.config).unwrap_or_default();
-                    c.discard_unverified_decoders();
-                    let new_signature = hwcodec::common::get_gpu_signature();
-                    if c.signature == new_signature {
+                    let c: HwCodecConfig = serde_json::from_str(&c.config).unwrap_or_default();
+                    if let Some(c) = Self::for_current_gpu(c) {
                         log::debug!("load cached hwcodec config: {c:?}");
-                        *CONFIG.lock().unwrap() = Some(c.clone());
+                        state.config = Some(c.clone());
+                        state.set_by_ipc = false;
+                        state.local_verified = false;
+                        CAPABILITY_GENERATION.fetch_add(1, Ordering::AcqRel);
                         c
                     } else {
-                        log::info!(
-                            "gpu signature changed, {} -> {}",
-                            c.signature,
-                            new_signature
-                        );
+                        log::info!("cached hwcodec config does not match the current GPU");
+                        let invalidated = state.set_by_ipc || state.local_verified;
+                        state.set_by_ipc = false;
+                        state.local_verified = false;
+                        if invalidated {
+                            CAPABILITY_GENERATION.fetch_add(1, Ordering::AcqRel);
+                        }
                         HwCodecConfig::default()
                     }
                 }
@@ -1855,34 +2294,80 @@ impl HwCodecConfig {
         }
         #[cfg(target_os = "linux")]
         {
-            CONFIG.lock().unwrap().clone().unwrap_or_default()
+            let mut state = CONFIG_STATE.lock().unwrap();
+            if let Some(stored) = state.config.clone() {
+                let mut config = stored.clone();
+                config.discard_unverified_decoders();
+                if config != stored {
+                    state.config = Some(config.clone());
+                    CAPABILITY_GENERATION.fetch_add(1, Ordering::AcqRel);
+                }
+                config
+            } else {
+                HwCodecConfig::default()
+            }
         }
         #[cfg(target_os = "ios")]
         {
-            CONFIG.lock().unwrap().clone().unwrap_or_default()
+            let mut state = CONFIG_STATE.lock().unwrap();
+            if let Some(stored) = state.config.clone() {
+                let mut config = stored.clone();
+                config.discard_unverified_decoders();
+                if config != stored {
+                    state.config = Some(config.clone());
+                    CAPABILITY_GENERATION.fetch_add(1, Ordering::AcqRel);
+                }
+                config
+            } else {
+                HwCodecConfig::default()
+            }
         }
     }
 
     #[cfg(not(target_os = "android"))]
     pub fn get_set_value() -> Option<HwCodecConfig> {
-        let set = CONFIG_SET_BY_IPC.lock().unwrap().clone();
-        if set {
-            CONFIG.lock().unwrap().clone()
-        } else {
-            None
-        }
+        Self::is_ready().then(Self::get)
     }
 
     #[cfg(not(target_os = "android"))]
     pub fn already_set() -> bool {
-        CONFIG_SET_BY_IPC.lock().unwrap().clone()
+        CONFIG_STATE.lock().unwrap().set_by_ipc
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub fn is_ready() -> bool {
+        let _ = Self::get();
+        let state = CONFIG_STATE.lock().unwrap();
+        Self::is_config_ready(state.config.as_ref())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub fn needs_local_probe() -> bool {
+        let _ = Self::get();
+        let state = CONFIG_STATE.lock().unwrap();
+        !state.local_verified || !Self::is_config_ready(state.config.as_ref())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub fn local_probe_verified() -> bool {
+        CONFIG_STATE.lock().unwrap().local_verified
+    }
+
+    #[cfg(not(target_os = "android"))]
+    pub fn capability_generation() -> u64 {
+        CAPABILITY_GENERATION.load(Ordering::Acquire)
     }
 
     #[cfg(not(target_os = "android"))]
     pub fn reset() {
         log::info!("reset hwcodec config");
-        *CONFIG.lock().unwrap() = None;
-        *CONFIG_SET_BY_IPC.lock().unwrap() = false;
+        let mut schedule = local_probe_schedule().lock().unwrap();
+        schedule.invalidate();
+        let mut state = CONFIG_STATE.lock().unwrap();
+        state.config = None;
+        state.set_by_ipc = false;
+        state.local_verified = false;
+        CAPABILITY_GENERATION.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn clear(vram: bool, encode: bool) {
@@ -1891,22 +2376,30 @@ impl HwCodecConfig {
         crate::android::ffi::clear_codec_info();
         #[cfg(not(target_os = "android"))]
         {
-            let mut c = CONFIG.lock().unwrap();
-            if let Some(c) = c.as_mut() {
+            let mut state = CONFIG_STATE.lock().unwrap();
+            let mut changed = false;
+            if let Some(c) = state.config.as_mut() {
                 if vram {
                     #[cfg(feature = "vram")]
                     if encode {
+                        changed = !c.vram_encode.is_empty();
                         c.vram_encode = vec![];
                     } else {
+                        changed = !c.vram_decode.is_empty();
                         c.vram_decode = vec![];
                     }
                 } else {
                     if encode {
+                        changed = !c.ram_encode.is_empty();
                         c.ram_encode = vec![];
                     } else {
+                        changed = !c.ram_decode.is_empty();
                         c.ram_decode = vec![];
                     }
                 }
+            }
+            if changed {
+                CAPABILITY_GENERATION.fetch_add(1, Ordering::AcqRel);
             }
         }
         crate::codec::Encoder::update(crate::codec::EncodingUpdate::Check);
@@ -1915,7 +2408,7 @@ impl HwCodecConfig {
 
 #[cfg(not(target_os = "android"))]
 pub fn ensure_local_hwcodec_config() {
-    if HwCodecConfig::get().needs_decoder_probe() {
+    if HwCodecConfig::needs_local_probe() {
         start_check_process();
     }
 }
@@ -1945,87 +2438,135 @@ pub fn check_available_hwcodec() -> String {
     #[cfg(not(feature = "vram"))]
     let vram_string = "".to_owned();
     let ram_encode = Encoder::available_encoders_with_probe_report(ctx, Some(vram_string));
+    let signature = hwcodec::common::get_gpu_signature();
+    #[cfg(windows)]
+    let suspect_gpu_signature = signature == 0 || signature == u64::MAX;
+    #[cfg(not(windows))]
+    let suspect_gpu_signature = false;
     let c = HwCodecConfig {
         decoder_probe_version: DECODER_PROBE_VERSION,
         ram_encode: ram_encode.codecs,
-        transient_probe_failure: ram_encode.transient_failure,
+        transient_probe_failure: ram_encode.transient_failure || suspect_gpu_signature,
         ram_decode: Decoder::available_decoders(),
         #[cfg(feature = "vram")]
         vram_encode: vram.0,
         #[cfg(feature = "vram")]
         vram_decode: vram.1,
-        signature: hwcodec::common::get_gpu_signature(),
+        signature,
     };
     log::debug!("{c:?}");
     serde_json::to_string(&c).unwrap_or_default()
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub fn start_check_process() {
     start_check_process_inner(false);
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 pub fn recheck_hwcodec() {
     HwCodecConfig::reset();
     start_check_process_inner(true);
 }
 
-#[cfg(target_os = "ios")]
-pub fn start_check_process() {
-    start_check_process_inner_ios(false);
-}
-
-#[cfg(target_os = "ios")]
-pub fn recheck_hwcodec() {
-    HwCodecConfig::reset();
-    start_check_process_inner_ios(true);
-}
-
-#[cfg(target_os = "ios")]
-fn start_check_process_inner_ios(force: bool) {
-    if !force && HwCodecConfig::already_set() {
-        return;
-    }
-    fn run() {
-        std::thread::spawn(|| {
-            let config = check_available_hwcodec();
-            HwCodecConfig::set(config);
-        });
-    }
-    if force {
-        run();
-    } else {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(run);
-    }
-}
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[cfg(not(target_os = "android"))]
 fn start_check_process_inner(force: bool) {
-    if !force && HwCodecConfig::already_set() {
+    if !force && !HwCodecConfig::needs_local_probe() {
         return;
     }
-    use std::sync::Once;
-    if force {
-        std::thread::spawn(run_check_process);
-        return;
+    let generation = local_probe_schedule()
+        .lock()
+        .unwrap()
+        .admit(std::time::Instant::now(), force);
+    if let Some(generation) = generation {
+        let spawn_result = std::thread::Builder::new()
+            .name("hwcodec-probe".to_owned())
+            .spawn(move || run_check_process(generation));
+        if let Err(error) = spawn_result {
+            log::error!("failed to spawn local hwcodec probe: {error}");
+            local_probe_schedule()
+                .lock()
+                .unwrap()
+                .abort(generation, std::time::Instant::now());
+        }
     }
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        std::thread::spawn(run_check_process);
-    });
+}
+
+#[cfg(not(target_os = "android"))]
+fn run_check_process(generation: u64) {
+    let mut success = false;
+    for attempt in 0..LOCAL_PROBE_ATTEMPTS {
+        if !local_probe_schedule()
+            .lock()
+            .unwrap()
+            .is_current(generation)
+        {
+            break;
+        }
+        if attempt > 0 {
+            let delay_index = (attempt - 1).min(LOCAL_PROBE_ATTEMPT_BACKOFF_SECONDS.len() - 1);
+            std::thread::sleep(std::time::Duration::from_secs(
+                LOCAL_PROBE_ATTEMPT_BACKOFF_SECONDS[delay_index],
+            ));
+        }
+        if !local_probe_schedule()
+            .lock()
+            .unwrap()
+            .is_current(generation)
+        {
+            break;
+        }
+        match run_local_probe() {
+            Ok(config) => {
+                if HwCodecConfig::set_from_local_probe_at(config, generation) {
+                    if HwCodecConfig::local_probe_verified() && HwCodecConfig::is_ready() {
+                        success = true;
+                        break;
+                    }
+                    log::warn!(
+                        "local hwcodec probe attempt {}/{} returned transient capabilities",
+                        attempt + 1,
+                        LOCAL_PROBE_ATTEMPTS
+                    );
+                } else if !local_probe_schedule()
+                    .lock()
+                    .unwrap()
+                    .is_current(generation)
+                {
+                    break;
+                } else {
+                    log::warn!(
+                        "local hwcodec probe attempt {}/{} returned incompatible data",
+                        attempt + 1,
+                        LOCAL_PROBE_ATTEMPTS
+                    );
+                }
+            }
+            Err(error) => log::warn!(
+                "local hwcodec probe attempt {}/{} failed; retaining safe capabilities: {}",
+                attempt + 1,
+                LOCAL_PROBE_ATTEMPTS,
+                error
+            ),
+        }
+    }
+    let rerun = local_probe_schedule().lock().unwrap().finish(
+        generation,
+        std::time::Instant::now(),
+        success,
+    );
+    if rerun {
+        start_check_process_inner(true);
+    }
+}
+
+#[cfg(target_os = "ios")]
+fn run_local_probe() -> ResultType<String> {
+    Ok(check_available_hwcodec())
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn run_check_process() {
-    if let Err(error) = run_local_probe() {
-        log::warn!("local hwcodec probe failed; retaining existing capabilities: {error}");
-    }
-}
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn run_local_probe() -> ResultType<()> {
+fn run_local_probe() -> ResultType<String> {
     use std::{
         io::Read,
         process::{Command, Stdio},
@@ -2071,9 +2612,5 @@ fn run_local_probe() -> ResultType<()> {
     if !status?.success() {
         bail!("codec probe exited unsuccessfully");
     }
-    let config = String::from_utf8(bytes)?;
-    if !HwCodecConfig::set(config) {
-        bail!("codec probe returned incompatible data");
-    }
-    Ok(())
+    Ok(String::from_utf8(bytes)?)
 }

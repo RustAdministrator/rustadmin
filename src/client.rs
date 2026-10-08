@@ -4612,6 +4612,8 @@ impl LoginConfigHandler {
     }
 
     pub fn update_supported_decodings(&self) -> Message {
+        // Keep the same peer preference, chroma preference, render backend,
+        // and adapter context used for login capability negotiation.
         let mut decoding = scrap::codec::Decoder::supported_decodings(
             Some(&self.id),
             use_texture_render(),
@@ -5393,31 +5395,15 @@ fn fps_calculate(
 
 fn get_hwcodec_config() {
     #[cfg(all(feature = "hwcodec", not(target_os = "android")))]
-    scrap::hwcodec::ensure_local_hwcodec_config();
-    // for sciter and unilink
-    #[cfg(feature = "hwcodec")]
-    #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
     {
-        if scrap::hwcodec::HwCodecConfig::already_set() {
-            return;
+        let ready = scrap::hwcodec::HwCodecConfig::is_ready();
+        // The local probe is independent from the service result. It is
+        // isolated and single-flight, so this remains safe on every caller.
+        scrap::hwcodec::ensure_local_hwcodec_config();
+        #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+        if !ready {
+            crate::ipc::request_hwcodec_config(0, false);
         }
-        let start = std::time::Instant::now();
-        if let Err(e) = crate::ipc::get_hwcodec_config_from_server() {
-            log::error!(
-                "Failed to get hwcodec config: {e:?}, elapsed: {:?}",
-                start.elapsed()
-            );
-        } else {
-            log::info!("{:?} used to get hwcodec config", start.elapsed());
-        }
-    }
-    #[cfg(feature = "hwcodec")]
-    #[cfg(target_os = "ios")]
-    {
-        if scrap::hwcodec::HwCodecConfig::already_set() {
-            return;
-        }
-        scrap::hwcodec::start_check_process();
     }
 }
 

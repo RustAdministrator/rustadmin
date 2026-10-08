@@ -29,6 +29,10 @@ macro_rules! my_println{
 /// If it returns [`Some`], then the process will continue, and flutter gui will be started.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn core_main() -> Option<Vec<String>> {
+    let process_args: Vec<String> = std::env::args().collect();
+    if is_codec_integration_command(&process_args) {
+        run_codec_integration_command();
+    }
     if !crate::common::global_init() {
         return None;
     }
@@ -998,6 +1002,29 @@ fn is_user_main_ipc_scope_cli_command(args: &[String]) -> bool {
     )
 }
 
+fn is_codec_integration_command(args: &[String]) -> bool {
+    args.iter()
+        .skip(1)
+        .any(|arg| arg == scrap::codec_integration::VERIFY_CODEC_INTEGRATION_ARG)
+}
+
+fn run_codec_integration_command() -> ! {
+    let report = scrap::codec_integration::verify();
+    match hbb_common::serde_json::to_string_pretty(&report) {
+        Ok(output) => {
+            println!("{output}");
+            use std::io::Write as _;
+            let mut stdout = std::io::stdout();
+            let _ = stdout.flush();
+        }
+        Err(error) => {
+            eprintln!("failed to serialize codec integration report: {error}");
+            std::process::exit(2);
+        }
+    }
+    std::process::exit(if report.passed { 0 } else { 1 });
+}
+
 #[cfg(any(windows, test))]
 fn parse_silent_install_args(args: &[String]) -> (Option<bool>, bool) {
     let mut printer_override = None;
@@ -1044,11 +1071,29 @@ mod tests {
             "--cm",
             "--probe-hwcodec-config",
             "--check-hwcodec-config",
+            "--verify-codec-integration",
             "--connect",
             "--deploy",
         ] {
             assert!(!is_user_main_ipc_scope_cli_command(&args(&[command])));
         }
+    }
+
+    #[test]
+    fn codec_integration_flag_is_a_nonmanagement_command() {
+        assert!(is_codec_integration_command(&args(&[
+            "rustadmin",
+            "--verify-codec-integration",
+        ])));
+        assert!(is_codec_integration_command(&args(&[
+            "rustadmin",
+            "--no-server",
+            "--verify-codec-integration",
+        ])));
+        assert!(!is_codec_integration_command(&args(&[
+            "rustadmin",
+            "--check-hwcodec-config",
+        ])));
     }
 
     #[test]

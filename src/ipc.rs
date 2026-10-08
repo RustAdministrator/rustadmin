@@ -17,6 +17,11 @@ use serde_derive::{Deserialize, Serialize};
 use std::cell::Cell;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(all(
+    feature = "hwcodec",
+    not(any(target_os = "android", target_os = "ios"))
+))]
+use std::sync::{Mutex, OnceLock};
 use std::{
     collections::HashMap,
     sync::atomic::{AtomicBool, Ordering},
@@ -2012,7 +2017,6 @@ pub async fn connect_to_user_session(usid: Option<u32>) -> ResultType<()> {
     Ok(())
 }
 
-#[tokio::main(flavor = "current_thread")]
 pub async fn notify_server_to_check_hwcodec() -> ResultType<()> {
     connect(1_000, "").await?.send(&&Data::CheckHwcodec).await?;
     Ok(())
@@ -2021,6 +2025,206 @@ pub async fn notify_server_to_check_hwcodec() -> ResultType<()> {
 #[cfg(feature = "hwcodec")]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 const HWCODEC_CONFIG_IPC_TIMEOUT_MS: u64 = 500;
+
+#[cfg(feature = "hwcodec")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const HWCODEC_FETCH_MAX_ATTEMPTS: usize = 4;
+
+#[cfg(feature = "hwcodec")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const HWCODEC_FETCH_BACKOFF_SECONDS: [u64; 3] = [1, 3, 6];
+
+#[cfg(feature = "hwcodec")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[derive(Debug, Default)]
+struct HwCodecFetchSchedule {
+    in_flight: bool,
+    pending_force: bool,
+    failures: usize,
+    retry_at: Option<std::time::Instant>,
+}
+
+#[cfg(feature = "hwcodec")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+impl HwCodecFetchSchedule {
+    fn admit(&mut self, now: std::time::Instant, force: bool) -> bool {
+        if self.in_flight {
+            self.pending_force |= force;
+            return false;
+        }
+        if !force && self.retry_at.is_some_and(|retry_at| now < retry_at) {
+            return false;
+        }
+        self.in_flight = true;
+        true
+    }
+
+    fn finish(&mut self, now: std::time::Instant, success: bool) -> bool {
+        if self.pending_force {
+            // Keep this worker as the single flight while it immediately
+            // performs the coalesced forced refresh.
+            self.pending_force = false;
+            self.failures = 0;
+            self.retry_at = None;
+            return true;
+        }
+        self.in_flight = false;
+        if success {
+            self.failures = 0;
+            self.retry_at = None;
+            return false;
+        }
+        self.failures = self.failures.saturating_add(1);
+        let index = self
+            .failures
+            .saturating_sub(1)
+            .min(HWCODEC_FETCH_BACKOFF_SECONDS.len() - 1);
+        self.retry_at =
+            Some(now + std::time::Duration::from_secs(HWCODEC_FETCH_BACKOFF_SECONDS[index]));
+        false
+    }
+
+    fn abort(&mut self, now: std::time::Instant) {
+        self.in_flight = false;
+        self.pending_force = false;
+        self.failures = self.failures.saturating_add(1);
+        let index = self
+            .failures
+            .saturating_sub(1)
+            .min(HWCODEC_FETCH_BACKOFF_SECONDS.len() - 1);
+        self.retry_at =
+            Some(now + std::time::Duration::from_secs(HWCODEC_FETCH_BACKOFF_SECONDS[index]));
+    }
+}
+
+#[cfg(feature = "hwcodec")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+static HWCODEC_FETCH_SCHEDULE: OnceLock<Mutex<HwCodecFetchSchedule>> = OnceLock::new();
+
+#[cfg(feature = "hwcodec")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn hwcodec_fetch_schedule() -> &'static Mutex<HwCodecFetchSchedule> {
+    HWCODEC_FETCH_SCHEDULE.get_or_init(|| Mutex::new(HwCodecFetchSchedule::default()))
+}
+
+#[cfg(feature = "hwcodec")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn spawn_hwcodec_task<F, Fut>(make_task: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    let spawn_result = std::thread::Builder::new()
+        .name("hwcodec-ipc".to_owned())
+        .spawn(move || {
+            match hbb_common::tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime.block_on(make_task()),
+                Err(error) => {
+                    log::error!("failed to create hwcodec IPC runtime: {error}");
+                    hwcodec_fetch_schedule()
+                        .lock()
+                        .unwrap()
+                        .abort(std::time::Instant::now());
+                }
+            }
+        });
+    if let Err(error) = spawn_result {
+        log::error!("failed to spawn hwcodec IPC worker: {error}");
+        hwcodec_fetch_schedule()
+            .lock()
+            .unwrap()
+            .abort(std::time::Instant::now());
+    }
+}
+
+#[cfg(feature = "hwcodec")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn request_hwcodec_config(wait_sec: u64, force: bool) {
+    if !force {
+        // A cache or service result can be ready for immediate use while the
+        // current client still needs its own isolated verification.
+        scrap::hwcodec::ensure_local_hwcodec_config();
+        if scrap::hwcodec::HwCodecConfig::is_ready() {
+            return;
+        }
+    }
+    let admitted = hwcodec_fetch_schedule()
+        .lock()
+        .unwrap()
+        .admit(std::time::Instant::now(), force);
+    if admitted {
+        spawn_hwcodec_task(move || run_hwcodec_config_fetch(wait_sec, force));
+    }
+}
+
+#[cfg(feature = "hwcodec")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+async fn run_hwcodec_config_fetch(wait_sec: u64, mut force: bool) {
+    let mut attempt = 0;
+    loop {
+        if attempt == 0 {
+            if wait_sec > 0 {
+                hbb_common::tokio::time::sleep(std::time::Duration::from_secs(wait_sec)).await;
+            }
+            if force {
+                if let Err(error) = notify_server_to_check_hwcodec().await {
+                    log::warn!("failed to request the service hwcodec recheck: {error}");
+                }
+            }
+        } else {
+            let delay_index = (attempt - 1).min(HWCODEC_FETCH_BACKOFF_SECONDS.len() - 1);
+            hbb_common::tokio::time::sleep(std::time::Duration::from_secs(
+                HWCODEC_FETCH_BACKOFF_SECONDS[delay_index],
+            ))
+            .await;
+        }
+
+        let result = if force {
+            recheck_hwcodec_config_from_server().await
+        } else {
+            get_hwcodec_config_from_server().await
+        };
+        match result {
+            Ok(()) => {
+                let rerun = hwcodec_fetch_schedule()
+                    .lock()
+                    .unwrap()
+                    .finish(std::time::Instant::now(), true);
+                if rerun {
+                    force = true;
+                    attempt = 0;
+                    continue;
+                }
+                return;
+            }
+            Err(error) => {
+                log::debug!(
+                    "hwcodec service fetch attempt {}/{} failed: {error}",
+                    attempt + 1,
+                    HWCODEC_FETCH_MAX_ATTEMPTS
+                );
+            }
+        }
+        attempt += 1;
+        if attempt < HWCODEC_FETCH_MAX_ATTEMPTS {
+            continue;
+        }
+
+        let rerun = hwcodec_fetch_schedule()
+            .lock()
+            .unwrap()
+            .finish(std::time::Instant::now(), false);
+        if rerun {
+            force = true;
+            attempt = 0;
+            continue;
+        }
+        return;
+    }
+}
 
 #[cfg(target_os = "windows")]
 pub async fn get_port_forward_session_count(ms_timeout: u64) -> ResultType<usize> {
@@ -2044,14 +2248,12 @@ pub async fn get_controlled_session_count(ms_timeout: u64) -> ResultType<usize> 
 
 #[cfg(feature = "hwcodec")]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-#[tokio::main(flavor = "current_thread")]
 pub async fn get_hwcodec_config_from_server() -> ResultType<()> {
     get_hwcodec_config_from_server_impl(false).await
 }
 
 #[cfg(feature = "hwcodec")]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-#[tokio::main(flavor = "current_thread")]
 pub async fn recheck_hwcodec_config_from_server() -> ResultType<()> {
     get_hwcodec_config_from_server_impl(true).await
 }
@@ -2059,7 +2261,8 @@ pub async fn recheck_hwcodec_config_from_server() -> ResultType<()> {
 #[cfg(feature = "hwcodec")]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn get_hwcodec_config_from_server_impl(force: bool) -> ResultType<()> {
-    if !force && scrap::hwcodec::HwCodecConfig::already_set() {
+    if !force && scrap::hwcodec::HwCodecConfig::is_ready() {
+        scrap::hwcodec::ensure_local_hwcodec_config();
         return Ok(());
     }
     let mut c = connect(HWCODEC_CONFIG_IPC_TIMEOUT_MS, "").await?;
@@ -2067,10 +2270,16 @@ async fn get_hwcodec_config_from_server_impl(force: bool) -> ResultType<()> {
     if let Some(Data::HwCodecConfig(v)) = c.next_timeout(HWCODEC_CONFIG_IPC_TIMEOUT_MS).await? {
         match v {
             Some(v) => {
-                if scrap::hwcodec::HwCodecConfig::set(v) {
+                if scrap::hwcodec::HwCodecConfig::set(v)
+                    && scrap::hwcodec::HwCodecConfig::is_ready()
+                {
+                    scrap::hwcodec::ensure_local_hwcodec_config();
                     return Ok(());
                 }
                 scrap::hwcodec::ensure_local_hwcodec_config();
+                if scrap::hwcodec::HwCodecConfig::is_ready() {
+                    return Ok(());
+                }
                 bail!("service supplied an incompatible hwcodec probe result");
             }
             None => {
@@ -2084,54 +2293,14 @@ async fn get_hwcodec_config_from_server_impl(force: bool) -> ResultType<()> {
 #[cfg(feature = "hwcodec")]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn client_get_hwcodec_config_thread(wait_sec: u64) {
-    client_get_hwcodec_config_thread_inner(wait_sec, false);
+    request_hwcodec_config(wait_sec, false);
 }
 
 #[cfg(feature = "hwcodec")]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn client_recheck_hwcodec_config_thread(wait_sec: u64) {
-    scrap::hwcodec::HwCodecConfig::reset();
-    client_get_hwcodec_config_thread_inner(wait_sec, true);
-}
-
-#[cfg(feature = "hwcodec")]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn client_get_hwcodec_config_thread_inner(wait_sec: u64, force: bool) {
-    if !crate::platform::is_installed()
-        || (!force && scrap::hwcodec::HwCodecConfig::already_set())
-    {
-        return;
-    }
-    if force {
-        spawn_hwcodec_config_fetcher(wait_sec, true);
-        return;
-    }
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(move || {
-        spawn_hwcodec_config_fetcher(wait_sec, false);
-    });
-}
-
-#[cfg(feature = "hwcodec")]
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn spawn_hwcodec_config_fetcher(wait_sec: u64, force: bool) {
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        let mut intervals: Vec<u64> = vec![wait_sec, 3, 3, 6, 9, 12];
-        for i in intervals.drain(..) {
-            if i > 0 {
-                std::thread::sleep(std::time::Duration::from_secs(i));
-            }
-            let fetched = if force {
-                recheck_hwcodec_config_from_server().is_ok()
-            } else {
-                get_hwcodec_config_from_server().is_ok()
-            };
-            if fetched {
-                break;
-            }
-        }
-    });
+    scrap::hwcodec::recheck_hwcodec();
+    request_hwcodec_config(wait_sec, true);
 }
 
 #[cfg(feature = "hwcodec")]
@@ -2383,6 +2552,81 @@ mod test {
     #[test]
     fn test_select_server_uid_fails_when_multiple_servers_are_ambiguous() {
         assert!(select_server_uid_for_user_main_ipc(&[501, 502], None, false).is_err());
+    }
+
+    #[cfg(all(
+        feature = "hwcodec",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
+    #[test]
+    fn hwcodec_fetch_schedule_deduplicates_and_backoffs() {
+        let start = std::time::Instant::now();
+        let mut schedule = HwCodecFetchSchedule::default();
+        assert!(schedule.admit(start, false));
+        assert!(!schedule.admit(start, false));
+        assert!(!schedule.admit(start, true));
+        assert!(schedule.pending_force);
+
+        assert!(schedule.finish(start, false));
+        assert!(schedule.in_flight);
+        assert!(!schedule.pending_force);
+        assert!(!schedule.admit(start, false));
+        assert!(!schedule.finish(start, true));
+        assert!(!schedule.in_flight);
+        assert!(!schedule.pending_force);
+
+        assert!(schedule.admit(start, false));
+        assert!(!schedule.finish(start, false));
+        assert!(!schedule.admit(start + std::time::Duration::from_millis(500), false));
+        assert!(schedule.admit(start + std::time::Duration::from_millis(500), true));
+        assert!(!schedule.finish(start + std::time::Duration::from_millis(500), true));
+    }
+
+    #[cfg(all(
+        feature = "hwcodec",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn hwcodec_task_uses_current_thread_runtime_without_nested_runtime() {
+        let (sender, receiver) = hbb_common::tokio::sync::oneshot::channel();
+        spawn_hwcodec_task(move || async move {
+            let _ = sender.send(());
+        });
+        assert!(matches!(
+            hbb_common::tokio::time::timeout(std::time::Duration::from_secs(1), receiver).await,
+            Ok(Ok(()))
+        ));
+    }
+
+    #[cfg(all(
+        feature = "hwcodec",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hwcodec_task_uses_multi_thread_runtime_without_nested_runtime() {
+        let (sender, receiver) = hbb_common::tokio::sync::oneshot::channel();
+        spawn_hwcodec_task(move || async move {
+            let _ = sender.send(());
+        });
+        assert!(matches!(
+            hbb_common::tokio::time::timeout(std::time::Duration::from_secs(1), receiver).await,
+            Ok(Ok(()))
+        ));
+    }
+
+    #[cfg(all(
+        feature = "hwcodec",
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
+    #[test]
+    fn hwcodec_task_creates_one_fallback_runtime_outside_tokio() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        spawn_hwcodec_task(move || async move {
+            sender.send(()).ok();
+        });
+        assert!(receiver
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok());
     }
 
     #[cfg(target_os = "linux")]

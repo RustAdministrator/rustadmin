@@ -36,6 +36,7 @@ cfg_if! {
 }
 
 pub mod codec;
+pub mod codec_integration;
 pub mod convert;
 #[cfg(any(target_os = "android", test))]
 pub mod frame_slot;
