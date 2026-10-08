@@ -1009,6 +1009,13 @@ fn is_codec_integration_command(args: &[String]) -> bool {
 }
 
 fn run_codec_integration_command() -> ! {
+    if let Err(error) = hbb_common::env_logger::Builder::new()
+        .filter_level(hbb_common::log::LevelFilter::Debug)
+        .target(hbb_common::env_logger::Target::Stderr)
+        .try_init()
+    {
+        eprintln!("failed to initialize codec integration logger: {error}");
+    }
     let report = scrap::codec_integration::verify();
     match hbb_common::serde_json::to_string_pretty(&report) {
         Ok(output) => {

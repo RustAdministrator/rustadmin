@@ -69,6 +69,23 @@ The Windows build and validation scripts set `RUSTDESK_WINDOWS_CODEC_ROOT` and
 `CMAKE_PREFIX_PATH` from `-DepsRoot`, so clean machines do not fall back to an
 incomplete Visual Studio vcpkg prefix.
 
+With `hwcodec` enabled, the release gate runs the bundled executable with
+`--verify-codec-integration`. It checks the linked FFmpeg library for native
+H.264 (`h264`) and HEVC (`hevc`) software decoders and sample-decodes them;
+this decode check is separate from H.264/H.265 encoding, which remains
+hardware/platform-only under the policy above. The command writes one
+versioned JSON report to stdout and diagnostics to stderr. On a failed gate,
+the wrapper keeps both files under the reported `%TEMP%\rustadmin-codec-integration-*`
+directory as `stdout.log` and `stderr.log`.
+
+If the diagnostics show that the selected FFmpeg prefix lacks the native
+decoders, rebuild that prefix with
+`scripts\build_windows_ffmpeg_hardware_only.ps1`. If an FFmpeg diagnostic
+binary lists them but the verifier logs `avcodec_find_decoder_by_name` failures,
+check for stale linked libraries or bundled DLLs and force a RustAdmin native
+relink against the selected prefix. Windows `-Clean` refreshes Flutter/intermediate
+assets and does not clear Cargo output.
+
 The scripts also generate `flutter_rust_bridge` files when they are missing or
 older than `src/flutter_ffi.rs`. Install the generator once:
 
