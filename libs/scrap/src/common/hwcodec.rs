@@ -34,7 +34,9 @@ use std::sync::{
 };
 
 const DEFAULT_PIXFMT: AVPixelFormat = AVPixelFormat::AV_PIX_FMT_NV12;
-const DECODER_PROBE_VERSION: u32 = 3;
+// This version gates the complete codec capability result, including encoder
+// high-quality probe bits carried by CodecInfo.
+const DECODER_PROBE_VERSION: u32 = 4;
 pub const DEFAULT_FPS: i32 = DEFAULT_ENCODER_FPS as i32;
 const DEFAULT_GOP: i32 = i32::MAX;
 const DEFAULT_HW_QUALITY: Quality = Quality_Default;
@@ -610,6 +612,7 @@ mod tests {
             ram_decode: vec![CodecInfo::soft().h264.unwrap()],
             ram_encode: vec![CodecInfo {
                 name: "h264_nvenc".to_owned(),
+                high_quality: true,
                 ..Default::default()
             }],
             ..Default::default()
@@ -618,6 +621,7 @@ mod tests {
         assert!(config.needs_decoder_probe());
         assert!(config.ram_decode.is_empty());
         assert_eq!(config.ram_encode.len(), 1);
+        assert!(!config.ram_encode[0].high_quality);
         config.decoder_probe_version = DECODER_PROBE_VERSION;
         assert!(!config.needs_decoder_probe());
         config.ram_decode = vec![CodecInfo::soft().h264.unwrap()];
@@ -919,6 +923,7 @@ mod tests {
                     name: "h264_nvenc".to_owned(),
                     format: DataFormat::H264,
                     priority: 1,
+                    high_quality: true,
                     ..Default::default()
                 },
                 CodecInfo {
@@ -949,6 +954,7 @@ mod tests {
                     name: "hevc_videotoolbox".to_owned(),
                     format: DataFormat::H265,
                     priority: 0,
+                    high_quality: true,
                     ..Default::default()
                 },
             ],
@@ -957,6 +963,52 @@ mod tests {
         .expect("HEVC VideoToolbox should be selected");
 
         assert_eq!(encoder.name, "hevc_videotoolbox");
+    }
+
+    #[test]
+    fn high_quality_selection_rejects_name_only_capability() {
+        let encoder = CodecInfo {
+            name: "h264_nvenc".to_owned(),
+            format: DataFormat::H264,
+            ..Default::default()
+        };
+
+        assert!(!encoder.high_quality);
+        assert!(
+            HwRamEncoder::select_high_quality_encoder(vec![encoder], CodecFormat::H264,).is_none()
+        );
+    }
+
+    #[test]
+    fn legacy_cache_defaults_hq_to_false_and_requires_reprobe() {
+        let mut legacy_codec = serde_json::to_value(CodecInfo {
+            name: "h264_nvenc".to_owned(),
+            format: DataFormat::H264,
+            ..Default::default()
+        })
+        .expect("codec capability should serialize");
+        legacy_codec
+            .as_object_mut()
+            .expect("codec capability should be an object")
+            .remove("high_quality");
+        let legacy_codec: CodecInfo =
+            serde_json::from_value(legacy_codec).expect("legacy codec should deserialize");
+        assert!(!legacy_codec.high_quality);
+
+        let legacy = HwCodecConfig {
+            decoder_probe_version: DECODER_PROBE_VERSION - 1,
+            ram_encode: vec![legacy_codec.clone()],
+            ..Default::default()
+        };
+        assert!(legacy.needs_probe());
+        assert!(HwCodecConfig::verified(
+            &serde_json::to_string(&legacy).expect("legacy config should serialize")
+        )
+        .is_err());
+        assert!(
+            HwRamEncoder::select_high_quality_encoder(vec![legacy_codec], CodecFormat::H264,)
+                .is_none()
+        );
     }
 
     fn probed_hwcodec_config() -> &'static HwCodecConfig {
@@ -1466,8 +1518,7 @@ impl HwRamEncoder {
     }
 
     pub fn supports_high_quality_profile(name: &str) -> bool {
-        (name.contains("nvenc") || name.contains("videotoolbox"))
-            && (name.contains("h264") || name.contains("hevc"))
+        CodecInfo::supports_high_quality_profile(name)
     }
 
     fn encoder_quality(config: &HwRamEncoderConfig) -> ResultType<Quality> {
@@ -1583,7 +1634,9 @@ impl HwRamEncoder {
         encoders
             .into_iter()
             .filter(|encoder| {
-                encoder.format == data_format && Self::supports_high_quality_profile(&encoder.name)
+                encoder.format == data_format
+                    && encoder.high_quality
+                    && Self::supports_high_quality_profile(&encoder.name)
             })
             .min_by_key(|encoder| encoder.priority)
     }
@@ -2033,6 +2086,9 @@ impl HwCodecConfig {
     fn discard_unverified_decoders(&mut self) {
         if self.needs_decoder_probe() {
             self.ram_decode.clear();
+            for codec in &mut self.ram_encode {
+                codec.high_quality = false;
+            }
         }
     }
 
@@ -2232,6 +2288,7 @@ impl HwCodecConfig {
                             format: t.data_format,
                             hwdevice: hwcodec::ffmpeg::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE,
                             priority: 0,
+                            high_quality: false,
                         });
                     }
                 });

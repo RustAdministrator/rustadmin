@@ -8,7 +8,8 @@ param(
     [string]$BuildDir = "",
     [string]$CMakeExe = "cmake.exe",
     [switch]$Clean,
-    [switch]$Resume
+    [switch]$Resume,
+    [switch]$IncludeSoftwareDecoders
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,7 +42,10 @@ if ($Clean) {
 # Distribution policy: H.264/H.265 encoding is hardware/platform-only. Keep
 # GPL/nonfree and external codec autodetection disabled so libx264, libx265,
 # libopenh264, or another CPU H.26x encoder cannot enter the prefix. Native
-# H.264/HEVC decoders and parsers remain enabled for client-side fallback.
+# H.264/HEVC decoder registration is optional. Do not add a disable-list for
+# h264/hevc: FFmpeg hardware paths such as D3D11VA/DXVA2 can share those native
+# registrations. -IncludeSoftwareDecoders explicitly requests the optional
+# software decoder entries for a private/custom build.
 # D3D12VA is intentionally omitted from the requested feature set: the native
 # backend may still autodetect its decoders, but its encoder sources require
 # newer AV1 SDK declarations than Windows SDK 22621. The explicit deny-lists
@@ -84,6 +88,13 @@ $DisabledFeatures = @(
     "d3d12_motion_estimator",
     "d3d12_video_process_reference_info"
 ) -join ";"
+$DecoderSelection = ""
+if ($IncludeSoftwareDecoders) {
+    Write-Warning "-IncludeSoftwareDecoders adds optional software H.264/H.265 decoder registrations. This build is for private/custom use and is not approved for public distribution; review applicable implementation licenses and patent obligations."
+    $DecoderSelection = "h264;hevc;av1"
+} else {
+    Write-Host "Clearing optional native H.264/HEVC software decoder selection; hardware-native decoder paths may share those registrations."
+}
 
 $ConfigureArgs = @(
     "-S", $SourceRoot,
@@ -108,7 +119,9 @@ $ConfigureArgs = @(
     "-DFFMPEG_DISABLE_FEATURES=$DisabledFeatures",
     "-DFFMPEG_ENABLE_ENCODERS=$HardwareEncoders",
     "-DFFMPEG_DISABLE_ENCODERS=$DisabledEncoders",
-    "-DFFMPEG_ENABLE_DECODERS=h264;hevc;av1",
+    # Explicitly clear a prior private decoder selection when -Resume is used
+    # without -IncludeSoftwareDecoders; do not disable shared native HW paths.
+    "-DFFMPEG_ENABLE_DECODERS=$DecoderSelection",
     "-DFFMPEG_ENABLE_PARSERS=h264;hevc;av1",
     "-DFFMPEG_NATIVE_DEFAULT_COMPONENT_SET=COMMON",
     "-DFFMPEG_NATIVE_REQUIRE_STATIC_EXTERNAL_DEPENDENCIES=OFF",
@@ -158,13 +171,19 @@ foreach ($Forbidden in @("libx264", "libx265", "libopenh264")) {
         throw "Forbidden software H.26x encoder is present: $Forbidden"
     }
 }
-foreach ($Required in @("h264", "hevc")) {
-    if ($Decoders -notmatch "(?m)^\s*[A-Z\.]{6}\s+$Required\s") {
-        throw "Required software decoder is missing: $Required"
+if ($IncludeSoftwareDecoders) {
+    foreach ($Required in @("h264", "hevc")) {
+        if ($Decoders -notmatch "(?m)^\s*[A-Z\.]{6}\s+$Required\s") {
+            throw "Requested software decoder is missing: $Required"
+        }
     }
-    $ParserMacro = "CONFIG_$($Required.ToUpperInvariant())_PARSER"
+} else {
+    Write-Host "Native H.264/HEVC software decoder registrations were not required; hardware-native registration remains optional and is not treated as a GPU test."
+}
+foreach ($RequiredParser in @("h264", "hevc")) {
+    $ParserMacro = "CONFIG_$($RequiredParser.ToUpperInvariant())_PARSER"
     if ($ConfigComponents -notmatch "(?m)^\s*#\s*define\s+$ParserMacro\s+1\b") {
-        throw "Required parser is missing: $Required"
+        throw "Required parser is missing: $RequiredParser"
     }
 }
 foreach ($RequiredHardware in @("h264_(nvenc|amf|qsv)", "hevc_(nvenc|amf|qsv)")) {

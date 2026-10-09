@@ -18,7 +18,7 @@ $ErrorActionPreference = "Stop"
 $RequiredBridgeCodegenVersion = "1.80.1"
 $BridgeClassName = "Rustadmin"
 $CodecIntegrationReportKind = "rustadmin-codec-integration"
-$CodecIntegrationReportVersion = 1
+$CodecIntegrationReportVersion = 2
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $FlutterDir = Join-Path $RepoRoot "flutter"
 $Drive = Split-Path -Qualifier $RepoRoot
@@ -508,94 +508,283 @@ function Stop-CodecIntegrationProcess {
 }
 
 function Assert-CodecIntegrationReport {
+    [CmdletBinding()]
     param(
         [string]$Json,
-        [string]$CodecRoot
+        [string]$CodecRoot,
+        [bool]$ExpectedHwCodec = $true
     )
 
-    $RepairCommand = "scripts\build_windows_ffmpeg_hardware_only.ps1"
+    $ExpectedReportKind = if ($null -ne $CodecIntegrationReportKind) {
+        $CodecIntegrationReportKind
+    } else {
+        "rustadmin-codec-integration"
+    }
+    $ExpectedReportVersion = if ($null -ne $CodecIntegrationReportVersion) {
+        $CodecIntegrationReportVersion
+    } else {
+        2
+    }
+    $PrefixAdvice = "FFmpeg root '$CodecRoot': check native relink and prefix selection; rebuild FFmpeg only if its inventory or component configuration is missing."
+    $CoreAdvice = "Core VP8/VP9/AV1 uses linked libvpx/libaom. Check those baseline libraries and the RustAdmin native relink; this failure is independent of the FFmpeg prefix."
     if ([string]::IsNullOrWhiteSpace($Json)) {
-        throw "Linked codec integration report was empty. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+        throw "Linked codec integration report was empty. $PrefixAdvice"
     }
 
     try {
         $Report = $Json | ConvertFrom-Json -ErrorAction Stop
     }
     catch {
-        throw "Linked codec integration report was not valid JSON. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand. Original error: $($_.Exception.Message)"
+        throw "Linked codec integration report was not valid JSON. Check the bundled executable and its native link before changing the FFmpeg prefix. $PrefixAdvice Original error: $($_.Exception.Message)"
     }
 
-    foreach ($Property in @(
+    if (!$Json.TrimStart().StartsWith("{") -or $null -eq $Report -or $Report -isnot [pscustomobject]) {
+        throw "Linked codec integration report must be one JSON object. Check the bundled executable and its native link. $PrefixAdvice"
+    }
+
+    $RequiredProperties = @(
         "report_kind",
         "report_version",
         "hwcodec_enabled",
         "passed",
-        "linked_decoders",
-        "checks",
-        "missing_expected_decoders"
-    )) {
-        if ($Report.PSObject.Properties.Name -notcontains $Property) {
-            throw "Linked codec integration report is missing required property '$Property'. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+        "registered_encoders",
+        "registered_decoders",
+        "core_roundtrips",
+        "optional_software_decoders",
+        "warnings"
+    )
+    $ReportProperties = @($Report.PSObject.Properties.Name)
+    foreach ($Property in $RequiredProperties) {
+        if ($ReportProperties -notcontains $Property) {
+            throw "Linked codec integration report is missing required v2 property '$Property'. Check the bundled executable and native link; this is not by itself a reason to rebuild FFmpeg. $PrefixAdvice"
         }
     }
-    if ($Report.report_kind -ne $CodecIntegrationReportKind) {
-        throw "Linked codec integration report marker '$($Report.report_kind)' did not match '$CodecIntegrationReportKind'. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+
+    if ($Report.report_kind -isnot [string] -or [string]::IsNullOrWhiteSpace($Report.report_kind)) {
+        throw "Linked codec integration report property 'report_kind' must be a non-empty string. Check the bundled executable and native link. $PrefixAdvice"
     }
-    if ($Report.report_version -ne $CodecIntegrationReportVersion) {
-        throw "Linked codec integration report version '$($Report.report_version)' did not match '$CodecIntegrationReportVersion'. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
-    }
-    if ($Report.hwcodec_enabled -ne $true) {
-        throw "Linked codec integration report says hwcodec_enabled=false. Rebuild RustAdmin without -NoHwCodec. Selected FFmpeg codec root: $CodecRoot."
+    if ($Report.report_kind -ne $ExpectedReportKind) {
+        throw "Linked codec integration report marker '$($Report.report_kind)' did not match '$ExpectedReportKind'. Check the bundled executable and native link before changing the FFmpeg prefix. $PrefixAdvice"
     }
 
-    $Missing = @()
-    if ($null -ne $Report.missing_expected_decoders) {
-        $Missing = @($Report.missing_expected_decoders)
+    $Version = $Report.PSObject.Properties["report_version"].Value
+    if ($null -eq $Version) {
+        throw "Linked codec integration report property 'report_version' must be an integer. Check the bundled executable and native link. $PrefixAdvice"
     }
-    if ($Missing.Count -ne 0) {
-        $MissingNames = ($Missing | ForEach-Object { "$($_.name) ($($_.format))" }) -join ", "
-        throw "Linked codec integration report has missing expected decoders: $MissingNames. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+    $IntegerTypes = @("Byte", "Int16", "Int32", "Int64", "SByte", "UInt16", "UInt32", "UInt64")
+    if ($IntegerTypes -notcontains $Version.GetType().Name -or $Version -ne $ExpectedReportVersion) {
+        throw "Linked codec integration report version '$($Report.report_version)' was not integer schema version $ExpectedReportVersion. Check the bundled executable and native link before changing the FFmpeg prefix. $PrefixAdvice"
     }
 
-    $Checks = @()
-    if ($null -ne $Report.checks) {
-        $Checks = @($Report.checks)
+    if ($Report.hwcodec_enabled -isnot [bool]) {
+        throw "Linked codec integration report property 'hwcodec_enabled' must be boolean. Check the bundled executable and native link. $PrefixAdvice"
     }
-    if ($Checks.Count -ne 2) {
-        throw "Linked codec integration report must contain exactly two native decoder checks. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+    if ($Report.hwcodec_enabled -ne $ExpectedHwCodec) {
+        if ($ExpectedHwCodec) {
+            throw "Linked codec integration report says hwcodec_enabled=false, but the normal gate expected true. Rebuild RustAdmin without -NoHwCodec; changing the FFmpeg prefix will not enable the RustAdmin hwcodec feature. Selected FFmpeg codec root: $CodecRoot."
+        }
+        throw "Linked codec integration report says hwcodec_enabled=true, but the -NoHwCodec gate expected false. Check that the bundled executable matches the requested software-only build; changing the FFmpeg prefix will not disable the RustAdmin hwcodec feature. Selected FFmpeg codec root: $CodecRoot."
     }
-    foreach ($Expected in @(
+    if ($Report.passed -isnot [bool]) {
+        throw "Linked codec integration report property 'passed' must be boolean. Check the bundled executable and native link. $PrefixAdvice"
+    }
+
+    foreach ($Property in @(
+        "registered_encoders",
+        "registered_decoders",
+        "core_roundtrips",
+        "optional_software_decoders",
+        "warnings"
+    )) {
+        $Value = $Report.PSObject.Properties[$Property].Value
+        if ($Value -isnot [System.Array]) {
+            throw "Linked codec integration report property '$Property' must be a JSON array. Check the bundled executable and native link; do not rebuild FFmpeg solely for malformed report data. $PrefixAdvice"
+        }
+    }
+
+    foreach ($WarningText in @($Report.PSObject.Properties["warnings"].Value)) {
+        if ($WarningText -isnot [string] -or [string]::IsNullOrWhiteSpace($WarningText)) {
+            throw "Linked codec integration report warning entries must be non-empty strings. Check the bundled executable and native link. $PrefixAdvice"
+        }
+        Write-Warning $WarningText
+    }
+
+    function Assert-CodecInventoryEntry {
+        param(
+            $Entry,
+            [string]$Section
+        )
+
+        if ($null -eq $Entry -or $Entry -isnot [pscustomobject]) {
+            throw "Linked codec integration report '$Section' entries must be JSON objects. Check the bundled executable and native link. $PrefixAdvice"
+        }
+        $EntryProperties = @($Entry.PSObject.Properties.Name)
+        foreach ($Property in @("name", "format")) {
+            if ($EntryProperties -notcontains $Property) {
+                throw "Linked codec integration report '$Section' entry is missing '$Property'. Check the bundled executable and native link. $PrefixAdvice"
+            }
+        }
+        if ($Entry.name -isnot [string] -or [string]::IsNullOrWhiteSpace($Entry.name)) {
+            throw "Linked codec integration report '$Section' entry name must be a non-empty string. Check the bundled executable and native link. $PrefixAdvice"
+        }
+        if ($Entry.format -isnot [string] -or @("VP8", "VP9", "AV1", "H264", "H265") -notcontains $Entry.format) {
+            throw "Linked codec integration report '$Section' entry format '$($Entry.format)' is invalid. Check the bundled executable and native link. $PrefixAdvice"
+        }
+    }
+
+    function Assert-CodecCheckEntry {
+        param(
+            $Entry,
+            [string]$Section
+        )
+
+        if ($null -eq $Entry -or $Entry -isnot [pscustomobject]) {
+            throw "Linked codec integration report '$Section' entries must be JSON objects. Check the bundled executable and native link. $PrefixAdvice"
+        }
+        $EntryProperties = @($Entry.PSObject.Properties.Name)
+        foreach ($Property in @("name", "format", "status", "detail")) {
+            if ($EntryProperties -notcontains $Property) {
+                throw "Linked codec integration report '$Section' entry is missing '$Property'. Check the bundled executable and native link. $PrefixAdvice"
+            }
+        }
+        if ($Entry.name -isnot [string] -or [string]::IsNullOrWhiteSpace($Entry.name)) {
+            throw "Linked codec integration report '$Section' entry name must be a non-empty string. Check the bundled executable and native link. $PrefixAdvice"
+        }
+        if ($Entry.format -isnot [string] -or @("VP8", "VP9", "AV1", "H264", "H265") -notcontains $Entry.format) {
+            throw "Linked codec integration report '$Section' entry format '$($Entry.format)' is invalid. Check the bundled executable and native link. $PrefixAdvice"
+        }
+        if ($Entry.status -isnot [string] -or @("validated", "not_built", "failed") -notcontains $Entry.status) {
+            throw "Linked codec integration report '$Section' entry status '$($Entry.status)' is invalid. Check the bundled executable and native link. $PrefixAdvice"
+        }
+        if ($null -ne $Entry.PSObject.Properties["detail"].Value -and $Entry.PSObject.Properties["detail"].Value -isnot [string]) {
+            throw "Linked codec integration report '$Section' entry detail must be null or a string. Check the bundled executable and native link. $PrefixAdvice"
+        }
+    }
+
+    foreach ($Entry in @($Report.PSObject.Properties["registered_encoders"].Value)) {
+        Assert-CodecInventoryEntry $Entry "registered_encoders"
+    }
+    foreach ($Entry in @($Report.PSObject.Properties["registered_decoders"].Value)) {
+        Assert-CodecInventoryEntry $Entry "registered_decoders"
+    }
+
+    $CoreRoundtrips = @($Report.PSObject.Properties["core_roundtrips"].Value)
+    if ($CoreRoundtrips.Count -ne 3) {
+        throw "Linked codec integration report must contain exactly three core roundtrips for VP8, VP9, and AV1. $CoreAdvice"
+    }
+    $ExpectedCoreFormats = @("VP8", "VP9", "AV1")
+    $SeenCoreFormats = @{}
+    foreach ($Check in $CoreRoundtrips) {
+        Assert-CodecCheckEntry $Check "core_roundtrips"
+        if ($ExpectedCoreFormats -notcontains $Check.format) {
+            throw "Linked codec integration report core roundtrip format '$($Check.format)' is not one of VP8, VP9, or AV1. Check the bundled executable and native link. $PrefixAdvice"
+        }
+        if ($SeenCoreFormats.ContainsKey($Check.format)) {
+            throw "Linked codec integration report contains duplicate core roundtrip format '$($Check.format)'. Check the bundled executable and native link. $PrefixAdvice"
+        }
+        $SeenCoreFormats[$Check.format] = $true
+        if ($Check.status -ne "validated") {
+            throw "Core codec roundtrip '$($Check.name)' ($($Check.format)) was not validated; status was '$($Check.status)'. $CoreAdvice"
+        }
+    }
+    foreach ($Format in $ExpectedCoreFormats) {
+        if (!$SeenCoreFormats.ContainsKey($Format)) {
+            throw "Linked codec integration report is missing core roundtrip format '$Format'. $CoreAdvice"
+        }
+    }
+
+    $OptionalSoftwareDecoders = @($Report.PSObject.Properties["optional_software_decoders"].Value)
+    if (!$ExpectedHwCodec) {
+        if ($OptionalSoftwareDecoders.Count -ne 0) {
+            throw "Linked codec integration report must contain an empty optional_software_decoders array when hwcodec_enabled=false. Check that the bundled executable matches the requested software-only build. $PrefixAdvice"
+        }
+    } elseif ($OptionalSoftwareDecoders.Count -ne 2) {
+        throw "Linked codec integration report must contain exactly the optional h264/H264 and hevc/H265 software decoder checks. Check the bundled executable and native link; do not assume missing optional codecs require an FFmpeg rebuild. $PrefixAdvice"
+    }
+    $ExpectedOptional = @(
         [PSCustomObject]@{ name = "h264"; format = "H264" },
         [PSCustomObject]@{ name = "hevc"; format = "H265" }
-    )) {
-        $Matches = @($Checks | Where-Object { $_.expected.name -eq $Expected.name })
-        if ($Matches.Count -ne 1) {
-            throw "Linked codec integration report did not contain exactly one check for native decoder '$($Expected.name)'. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+    )
+    $SeenOptional = @{}
+    foreach ($Check in $OptionalSoftwareDecoders) {
+        Assert-CodecCheckEntry $Check "optional_software_decoders"
+        $Expected = @($ExpectedOptional | Where-Object { $_.name -eq $Check.name })
+        if ($Expected.Count -ne 1 -or $Expected[0].format -ne $Check.format) {
+            throw "Linked codec integration report optional software decoder '$($Check.name)' used format '$($Check.format)'; expected h264/H264 and hevc/H265. Check the bundled executable and native link. $PrefixAdvice"
         }
-        $Check = $Matches[0]
-        if ($Check.expected.format -ne $Expected.format) {
-            throw "Linked codec integration report used format '$($Check.expected.format)' for '$($Expected.name)', expected '$($Expected.format)'. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+        if ($SeenOptional.ContainsKey($Check.name)) {
+            throw "Linked codec integration report contains duplicate optional software decoder '$($Check.name)'. Check the bundled executable and native link. $PrefixAdvice"
         }
-        if ($Check.status -ne "validated") {
-            throw "Linked codec integration report did not validate native decoder '$($Expected.name)' ($($Expected.format)); status was '$($Check.status)'. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+        $SeenOptional[$Check.name] = $true
+        if ($Check.status -eq "failed") {
+            throw "Optional software decoder '$($Check.name)' ($($Check.format)) is present but failed its real-frame probe. Inspect stderr and the selected prefix/native relink; rebuild FFmpeg only if its decoder configuration is wrong. $PrefixAdvice"
+        }
+        if ($Check.status -ne "validated" -and $Check.status -ne "not_built") {
+            throw "Optional software decoder '$($Check.name)' ($($Check.format)) has invalid status '$($Check.status)'. Check the bundled executable and native link. $PrefixAdvice"
         }
     }
+    if ($ExpectedHwCodec) {
+        foreach ($Expected in $ExpectedOptional) {
+            if (!$SeenOptional.ContainsKey($Expected.name)) {
+                throw "Linked codec integration report is missing optional software decoder '$($Expected.name)' ($($Expected.format)). Check the bundled executable and native link; this is not by itself a reason to rebuild FFmpeg. $PrefixAdvice"
+            }
+        }
+    }
+
     if ($Report.passed -ne $true) {
-        throw "Linked codec integration report says passed=false after both native decoder checks. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+        throw "Linked codec integration report says passed=false after v2 core and optional checks. Check the selected FFmpeg prefix, retained stdout/stderr logs, and RustAdmin native relink; rebuild FFmpeg only if its component configuration is missing. $PrefixAdvice"
     }
+
+    return $Report
+}
+
+function Write-CodecPolicyFile {
+    param(
+        [string]$BundleDir,
+        [string]$CodecRoot,
+        $Report
+    )
+
+    $PolicyPath = Join-Path $BundleDir "CODEC-POLICY.txt"
+    $Warnings = @($Report.PSObject.Properties["warnings"].Value)
+    if ($Warnings.Count -eq 0) {
+        if (Test-Path $PolicyPath) {
+            Remove-Item -Force $PolicyPath
+        }
+        return
+    }
+    $Lines = @(
+        "RustAdmin codec integration policy",
+        "report_kind: $($Report.report_kind)",
+        "report_version: $($Report.report_version)",
+        "hwcodec_enabled: $($Report.hwcodec_enabled)",
+        "selected_ffmpeg_codec_root: $CodecRoot",
+        "",
+        "Core roundtrips: VP8, VP9, and AV1 must be validated.",
+        "Optional software H.264/H.265 decoders may be validated or not_built when hwcodec is enabled; software-only reports leave this list empty.",
+        "Registered encoder/decoder lists are inventories and make no GPU claim.",
+        "",
+        "Warnings:"
+    )
+    foreach ($WarningText in $Warnings) {
+        $Lines += "- $WarningText"
+    }
+    Set-Content -Path $PolicyPath -Value $Lines -Encoding UTF8
+    Write-Host "Codec policy report: $PolicyPath"
 }
 
 function Invoke-CodecIntegrationGate {
     param(
         [string]$BundleDir,
-        [string]$CodecRoot
+        [string]$CodecRoot,
+        [bool]$ExpectedHwCodec = $true
     )
 
     $AppExe = Join-Path $BundleDir "rustadmin.exe"
-    $RepairCommand = "scripts\build_windows_ffmpeg_hardware_only.ps1"
     Write-Host "Selected FFmpeg codec root: $CodecRoot"
+    Write-Host "Expected hwcodec_enabled: $ExpectedHwCodec"
     if (!(Test-Path $AppExe)) {
-        throw "Codec integration gate could not find the bundled executable '$AppExe'. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand."
+        throw "Codec integration gate could not find the bundled executable '$AppExe'. Check the Windows bundle and RustAdmin build output; this is not an FFmpeg-prefix validation failure."
     }
 
     $LogDir = Join-Path ([System.IO.Path]::GetTempPath()) ("rustadmin-codec-integration-" + [Guid]::NewGuid().ToString("N"))
@@ -621,7 +810,7 @@ function Invoke-CodecIntegrationGate {
         $Process = Start-Process @StartInfo
         if (!$Process.WaitForExit($TimeoutMilliseconds)) {
             Stop-CodecIntegrationProcess $Process $CleanupTimeoutMilliseconds
-            throw "Linked codec integration verification timed out after $($TimeoutMilliseconds / 1000) seconds. Selected FFmpeg codec root: $CodecRoot. Rebuild that prefix with $RepairCommand, then rerun the Windows packaging gate."
+            throw "Linked codec integration verification timed out after $($TimeoutMilliseconds / 1000) seconds. Check the kept stdout/stderr logs, executable, and prefix selection; rebuild FFmpeg only if its inventory/configuration is missing, otherwise relink RustAdmin or repair the bundle. Selected FFmpeg codec root: $CodecRoot."
         }
 
         $Process.Refresh()
@@ -635,17 +824,18 @@ function Invoke-CodecIntegrationGate {
             Write-Host $Stderr.TrimEnd()
         }
         try {
-            Assert-CodecIntegrationReport $Stdout $CodecRoot
+            $Report = Assert-CodecIntegrationReport -Json $Stdout -CodecRoot $CodecRoot -ExpectedHwCodec $ExpectedHwCodec
         }
         catch {
             throw "Linked codec integration report validation failed. $($_.Exception.Message)"
         }
+        Write-CodecPolicyFile $BundleDir $CodecRoot $Report
         if ($ExitCode -ne 0) {
             throw @"
 Linked codec integration verification failed with exit code $ExitCode.
-The bundled executable did not validate native software H264 and HEVC decoders.
+The bundled executable returned failure after the v2 codec report was parsed.
 Selected FFmpeg codec root: $CodecRoot
-Rebuild that prefix with $RepairCommand, then rebuild RustAdmin without -NoHwCodec.
+Inspect the kept stdout.log and stderr.log, verify the selected prefix and RustAdmin native relink, and rebuild FFmpeg only if its component inventory/configuration is missing.
 "@
         }
 
@@ -660,7 +850,7 @@ Rebuild that prefix with $RepairCommand, then rebuild RustAdmin without -NoHwCod
             $NormalizedMessage.StartsWith("Linked codec integration verification timed out")) {
             throw
         }
-        throw "Could not start or complete linked codec integration verification. Selected FFmpeg codec root: $CodecRoot. Rebuild the prefix with $RepairCommand. Original error: $Message"
+        throw "Could not start or complete linked codec integration verification. Selected FFmpeg codec root: $CodecRoot. Check the bundled executable, selected prefix, and RustAdmin native relink; rebuild FFmpeg only if the prefix inventory/configuration is missing. Original error: $Message"
     }
     finally {
         if ($null -ne $Process) {
@@ -739,9 +929,5 @@ Remove-Item -Force $StaleRuntimeIcon -ErrorAction SilentlyContinue
 Write-Host "Windows bundle:"
 Write-Host $BundleDir
 Copy-WindowsRuntimeDependencies $BundleDir $DependencyRoots
-if ($NoHwCodec) {
-    Write-Host "Skipping linked codec integration verification because -NoHwCodec was requested."
-} else {
-    Invoke-CodecIntegrationGate $BundleDir $CodecRoot
-}
+Invoke-CodecIntegrationGate $BundleDir $CodecRoot (-not $NoHwCodec)
 New-ReleaseZip $VersionInfo
