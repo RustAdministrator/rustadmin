@@ -159,6 +159,95 @@ pub(crate) fn record_os_credential_failure(scope: FailureScope) {
     }
 }
 
+/// Per source and account failures of the pre-authorization account check
+/// (legacy order only), kept next to the host-wide back-off above.
+const KEYED_MAX_ENTRIES: usize = 1024;
+const KEYED_FREE_FAILURES: i32 = 3;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct OsCredentialKey {
+    source: std::net::IpAddr,
+    user: String,
+}
+
+impl OsCredentialKey {
+    pub(crate) fn new(source: Option<std::net::IpAddr>, user: &str) -> Self {
+        Self {
+            source: super::pairing_guard::source_key(
+                source.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+            ),
+            user: user.trim().to_lowercase(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct KeyedState {
+    failures: i32,
+    backoff_until_ms: i64,
+    last_ms: i64,
+}
+
+#[derive(Default)]
+struct KeyedFailures {
+    entries: std::collections::HashMap<OsCredentialKey, KeyedState>,
+}
+
+impl KeyedFailures {
+    fn remaining_ms(&mut self, key: &OsCredentialKey, now_ms: i64) -> i64 {
+        let Some(state) = self.entries.get_mut(key) else {
+            return 0;
+        };
+        if now_ms.saturating_sub(state.last_ms) >= OS_CREDENTIAL_LOGIN_TOTAL_IDLE_RESET_MS {
+            self.entries.remove(key);
+            return 0;
+        }
+        (state.backoff_until_ms - now_ms).max(0)
+    }
+
+    fn record_failure(&mut self, key: &OsCredentialKey, now_ms: i64) {
+        if !self.entries.contains_key(key) && self.entries.len() >= KEYED_MAX_ENTRIES {
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, state)| state.last_ms)
+                .map(|(key, _)| key.clone())
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        let state = self.entries.entry(key.clone()).or_default();
+        state.failures = state.failures.saturating_add(1);
+        state.last_ms = now_ms;
+        let steps = state.failures - KEYED_FREE_FAILURES;
+        if steps > 0 {
+            let seconds = (OS_CREDENTIAL_LOGIN_BACKOFF_BASE_SECONDS << (steps - 1).min(7) as u32)
+                .min(OS_CREDENTIAL_LOGIN_BACKOFF_MAX_SECONDS);
+            state.backoff_until_ms = now_ms + seconds * 1_000;
+        }
+    }
+
+    fn record_success(&mut self, key: &OsCredentialKey) {
+        self.entries.remove(key);
+    }
+}
+
+lazy_static::lazy_static! {
+    static ref KEYED_FAILURES: Mutex<KeyedFailures> = Mutex::new(KeyedFailures::default());
+}
+
+pub(crate) fn keyed_backoff_remaining_ms(key: &OsCredentialKey, now_ms: i64) -> i64 {
+    KEYED_FAILURES.lock().unwrap().remaining_ms(key, now_ms)
+}
+
+pub(crate) fn keyed_record_failure(key: &OsCredentialKey, now_ms: i64) {
+    KEYED_FAILURES.lock().unwrap().record_failure(key, now_ms);
+}
+
+pub(crate) fn keyed_record_success(key: &OsCredentialKey) {
+    KEYED_FAILURES.lock().unwrap().record_success(key);
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) fn try_acquire_os_credential_login_gate() -> Result<OwnedMutexGuard<()>, ()> {
     OS_CREDENTIAL_LOGIN_MUTEX
@@ -227,5 +316,53 @@ mod tests {
         assert!(second.audit.is_some());
 
         clear_os_credential_failure_state(FailureScope::TerminalOsLogin);
+    }
+
+    fn key(last: u8, user: &str) -> OsCredentialKey {
+        OsCredentialKey::new(
+            Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(
+                192, 0, 2, last,
+            ))),
+            user,
+        )
+    }
+
+    #[test]
+    fn keyed_failures_back_off_per_source_and_account() {
+        let mut tracker = KeyedFailures::default();
+        let a = key(1, "Administrator");
+        for attempt in 0..KEYED_FREE_FAILURES {
+            assert_eq!(tracker.remaining_ms(&a, attempt as i64), 0);
+            tracker.record_failure(&a, attempt as i64);
+        }
+        assert_eq!(tracker.remaining_ms(&a, 10), 0);
+        tracker.record_failure(&a, 10);
+        assert!(tracker.remaining_ms(&a, 11) > 0);
+        // Case and padding of the account name do not give a fresh budget.
+        assert!(tracker.remaining_ms(&key(1, " administrator "), 11) > 0);
+        // Another source or another account is untouched.
+        assert_eq!(tracker.remaining_ms(&key(2, "Administrator"), 11), 0);
+        assert_eq!(tracker.remaining_ms(&key(1, "other"), 11), 0);
+        // Success clears it; idleness clears it as well.
+        tracker.record_success(&a);
+        assert_eq!(tracker.remaining_ms(&a, 12), 0);
+    }
+
+    #[test]
+    fn keyed_failures_forget_idle_entries_and_stay_bounded() {
+        let mut tracker = KeyedFailures::default();
+        let a = key(1, "admin");
+        for attempt in 0..6 {
+            tracker.record_failure(&a, attempt);
+        }
+        assert!(tracker.remaining_ms(&a, 10) > 0);
+        assert_eq!(
+            tracker.remaining_ms(&a, OS_CREDENTIAL_LOGIN_TOTAL_IDLE_RESET_MS + 10),
+            0
+        );
+        for index in 0..(KEYED_MAX_ENTRIES + 50) {
+            tracker.record_failure(&key(1, &format!("user{index}")), index as i64);
+        }
+        assert_eq!(tracker.entries.len(), KEYED_MAX_ENTRIES);
     }
 }

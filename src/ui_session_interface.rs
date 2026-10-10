@@ -2525,6 +2525,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         fingerprint: &str,
         trust_phrase: &str,
         direct: bool,
+        context: &crate::client::PeerTrustContext,
     ) -> ResultType<()> {
         #[cfg(feature = "flutter")]
         {
@@ -2544,6 +2545,8 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                 "fingerprint": fingerprint,
                 "trust_phrase": trust_phrase,
                 "direct": direct,
+                "trust_kind": if context.key_change { "key_change" } else { "first_contact" },
+                "previous_fingerprint": context.previous_fingerprint,
             })
             .to_string();
             self.ui_handler.msgbox(
@@ -2571,7 +2574,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         }
         #[cfg(not(feature = "flutter"))]
         {
-            let _ = (peer, peer_id, fingerprint, trust_phrase, direct);
+            let _ = (peer, peer_id, fingerprint, trust_phrase, direct, context);
             bail!("Handshake failed: peer trust approval is not supported by this client UI")
         }
     }
