@@ -723,6 +723,15 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("view_camera_unsupported_tip", "Удалённое устройство не поддерживает просмотр камеры."),
         ("Terminal", "Терминал"),
         ("Enable terminal", "Включить терминал"),
+        ("Switch sides", "Поменяться сторонами"),
+        (
+            "The remote user asks this computer to end the current session and open a connection back to theirs, so that you control their computer instead.",
+            "Удалённый пользователь просит этот компьютер завершить текущий сеанс и подключиться к его компьютеру, чтобы вы управляли его компьютером.",
+        ),
+        (
+            "Check Windows account before access approval (terminal)",
+            "Проверять учётную запись Windows до подтверждения доступа (терминал)",
+        ),
         ("New tab", "Новая вкладка"),
         ("Keep terminal sessions on disconnect", "Сохранять сеансы терминала при отключении"),
         ("Terminal (Run as administrator)", "Терминал (администратор)"),

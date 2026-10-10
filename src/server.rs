@@ -70,6 +70,9 @@ mod connection;
 pub mod display_service;
 mod input_authorization;
 mod login_failure_check;
+mod pairing_guard;
+mod permission_prompt;
+mod prelogin_admission;
 #[cfg(windows)]
 pub mod portable_service;
 mod service;
@@ -291,6 +294,15 @@ async fn create_tcp_connection_with_mode(
     control_permissions: Option<ControlPermissions>,
 ) -> ResultType<()> {
     let mut stream = stream;
+    // Refuse before any key derivation: a peer outside the whitelist gets no
+    // pairing work done on its behalf. The connection itself repeats the check
+    // and tells the peer why.
+    if !crate::common::ip_allowed_by_whitelist(&Config::get_option("whitelist"), addr.ip()) {
+        bail!("Connection from {} is outside the configured whitelist", addr.ip());
+    }
+    // Held until the connection logs in (or ends).
+    let prelogin_ticket = prelogin_admission::try_admit(addr.ip())
+        .map_err(|reason| hbb_common::anyhow::anyhow!("Too many connections waiting to log in ({reason:?})"))?;
     let id = server.write().unwrap().get_new_id();
     let (sk, pk) = Config::get_key_pair();
     if handshake_mode != HandshakeMode::Disabled {
@@ -433,15 +445,21 @@ async fn create_tcp_connection_with_mode(
                             let mut paired_initiator = None;
                             let mut error_text = None;
                             if let Some(pairing_proof) = public_key_payload.pairing_proof {
-                                let expected_proof = crate::common::compute_direct_pairing_proof(
-                                    &pairing_passphrase,
-                                    &pairing_salt,
-                                    &Config::get_id(),
-                                    &local_sign_pk,
-                                    &our_pk_b.0,
-                                    &their_pk_b,
-                                )?;
-                                if pairing_proof == expected_proof {
+                                // Bounded per source and run off the connection task.
+                                let verdict = pairing_guard::check_pairing_proof(
+                                    addr.ip(),
+                                    pairing_guard::ProofInput {
+                                        passphrase: pairing_passphrase.clone(),
+                                        salt: pairing_salt,
+                                        peer_id: Config::get_id(),
+                                        responder_sign_pk: local_sign_pk,
+                                        responder_box_pk: our_pk_b.0,
+                                        initiator_box_pk: their_pk_b,
+                                    },
+                                    pairing_proof,
+                                )
+                                .await?;
+                                if verdict == pairing_guard::Verdict::Match {
                                     if remember_paired_viewers {
                                         if let Some(initiator) =
                                             public_key_payload.initiator.as_ref()
@@ -455,6 +473,13 @@ async fn create_tcp_connection_with_mode(
                                             }
                                         }
                                     }
+                                } else if matches!(verdict, pairing_guard::Verdict::Rejected(_)) {
+                                    // Nothing was checked; say so, so that a
+                                    // correct passphrase is not blamed.
+                                    error_text = Some(
+                                        "Handshake failed: too many pairing attempts, try again later"
+                                            .to_owned(),
+                                    );
                                 } else {
                                     error_text = Some(
                                         "Handshake failed: pairing passphrase rejected".to_owned(),
@@ -585,6 +610,7 @@ async fn create_tcp_connection_with_mode(
         id,
         Arc::downgrade(&server),
         control_permissions,
+        prelogin_ticket,
     )
     .await;
     Ok(())
