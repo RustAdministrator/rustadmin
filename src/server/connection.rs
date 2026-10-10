@@ -33,7 +33,6 @@ use crate::{
 };
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use crate::{common::DEVICE_NAME, flutter::connection_manager::start_channel};
-use cidr_utils::cidr::IpCidr;
 #[cfg(target_os = "linux")]
 use hbb_common::platform::linux::run_cmds;
 #[cfg(target_os = "android")]
@@ -342,6 +341,45 @@ fn should_use_terminal_os_login_scope(is_terminal: bool, os_login_username: &str
     cfg!(target_os = "windows") && is_terminal && !os_login_username.trim().is_empty()
 }
 
+/// Logs the Windows account on and checks that it is an administrator. Blocks;
+/// call from a blocking thread.
+#[cfg(target_os = "windows")]
+fn verify_os_admin(username: &str, password: &str) -> Result<(), &'static str> {
+    let check_admin_res = crate::platform::get_logon_user_token(username, password).map(|token| {
+        let is_token_admin = crate::platform::is_user_token_admin(token);
+        unsafe {
+            hbb_common::allow_err!(CloseHandle(HANDLE(token as _)));
+        };
+        is_token_admin
+    });
+    match check_admin_res {
+        Ok(Ok(true)) => Ok(()),
+        Ok(Ok(false)) => Err(TERMINAL_OS_LOGIN_FAILED_MSG),
+        Ok(Err(e)) => {
+            log::error!("Failed to check if the user is an administrator: {}", e);
+            Err(TERMINAL_OS_LOGIN_FAILED_MSG)
+        }
+        Err(e) => {
+            log::error!("Failed to get logon user token: {}", e);
+            Err(TERMINAL_OS_LOGIN_FAILED_MSG)
+        }
+    }
+}
+
+/// Whether the Windows account of a terminal login may be checked now.
+///
+/// Checking it answers "is this password right for that account" to whoever
+/// asked, so it waits until the access password (or the local click) has been
+/// accepted. `legacy_order` is the `allow-terminal-os-login-before-authorization`
+/// setting that restores the old order.
+fn terminal_os_login_check_allowed(
+    os_scope: bool,
+    access_verified: bool,
+    legacy_order: bool,
+) -> bool {
+    !os_scope || access_verified || legacy_order
+}
+
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 lazy_static::lazy_static! {
     static ref WALLPAPER_REMOVER: Arc<Mutex<Option<WallPaperRemover>>> = Default::default();
@@ -447,6 +485,36 @@ struct Session {
 struct SessionPermissionGrants {
     permissions: HashSet<String>,
     connection_types: HashSet<String>,
+    /// Permissions the local user switched off. A grant (or the keyboard
+    /// default) does not silently bring them back: the peer has to ask again.
+    suspended: HashSet<String>,
+}
+
+impl SessionPermissionGrants {
+    fn grant(&mut self, name: &str) {
+        self.permissions.insert(name.to_owned());
+        self.suspended.remove(name);
+    }
+
+    fn suspend(&mut self, name: &str) {
+        self.suspended.insert(name.to_owned());
+    }
+
+    fn resume(&mut self, name: &str) {
+        self.suspended.remove(name);
+    }
+
+    fn grant_active(&self, name: &str) -> bool {
+        self.permissions.contains(name) && !self.suspended.contains(name)
+    }
+
+    fn is_suspended(&self, name: &str) -> bool {
+        self.suspended.contains(name)
+    }
+
+    fn revoke_connection(&mut self, grant_name: &str) {
+        self.connection_types.remove(grant_name);
+    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -672,7 +740,7 @@ fn switch_permission_policy_denial_reason(
     name: &str,
     enabled: bool,
 ) -> Option<&'static str> {
-    switch_permission_policy_denial_reason_with_grant(auth_kind, name, enabled, false)
+    switch_permission_policy_denial_reason_with_grant(auth_kind, name, enabled, false, false)
 }
 
 fn switch_permission_policy_denial_reason_with_grant(
@@ -680,12 +748,17 @@ fn switch_permission_policy_denial_reason_with_grant(
     name: &str,
     enabled: bool,
     has_grant: bool,
+    suspended: bool,
 ) -> Option<&'static str> {
-    if !enabled
-        || auth_kind.is_unattended_access()
-        || low_permission_default(name, true)
-        || has_grant
-    {
+    if !enabled || auth_kind.is_unattended_access() {
+        return None;
+    }
+    if suspended {
+        // The local user switched this off; only a fresh local decision brings
+        // it back.
+        return Some("Permission was switched off locally and needs approval again.");
+    }
+    if low_permission_default(name, true) || has_grant {
         return None;
     }
     Some("Permission upgrades require local approval for this session.")
@@ -699,11 +772,26 @@ struct StartCmIpcPara {
     tx_cm_stream_ready: mpsc::Sender<()>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct PendingPermissionRequest {
     name: String,
     enabled: bool,
     requested_at: Instant,
+    /// Monotonic time (`permission_prompt::mono_ms`) at which the prompt was
+    /// registered; low-permission input after it taints an approval.
+    shown_at_ms: u64,
+    /// Held only when this build shows the prompt in an overlay, so that other
+    /// sessions' input is paused while it is on screen.
+    #[allow(dead_code)] // held for its `Drop`, which releases the registry slot
+    guard: Option<permission_prompt::PromptGuard>,
+}
+
+/// The overlay that can mask input exists in the Flutter desktop manager only.
+fn permission_prompt_overlay_available() -> bool {
+    cfg!(all(
+        feature = "flutter",
+        not(any(target_os = "android", target_os = "ios"))
+    ))
 }
 
 const PENDING_PERMISSION_REQUEST_TIMEOUT_SECS: u64 = 120;
@@ -1300,6 +1388,105 @@ fn permission_request_connection_type(name: &str) -> Option<AuthConnType> {
     }
 }
 
+/// Tracks whether a second factor has been asked of this connection. An `Auth2fa`
+/// message only means something after the first factor succeeded and `REQUIRE_2FA`
+/// was sent, so it must never authorize a connection on its own.
+#[derive(Debug, Default)]
+struct TwoFactorGate {
+    awaiting: bool,
+}
+
+impl TwoFactorGate {
+    /// `REQUIRE_2FA` was sent after the first factor succeeded.
+    fn challenge_sent(&mut self) {
+        self.awaiting = true;
+    }
+
+    /// A new `LoginRequest` starts the exchange over.
+    fn login_request_received(&mut self) {
+        self.awaiting = false;
+    }
+
+    /// The connection no longer needs a second factor.
+    fn finished(&mut self) {
+        self.awaiting = false;
+    }
+
+    fn accepts_response(&self) -> bool {
+        self.awaiting
+    }
+}
+
+/// Connection type selected by the `union` of a `LoginRequest`; no union means a
+/// remote-desktop session.
+fn login_request_conn_type(union: Option<&login_request::Union>) -> AuthConnType {
+    match union {
+        Some(login_request::Union::FileTransfer(_)) => AuthConnType::FileTransfer,
+        Some(login_request::Union::PortForward(_)) => AuthConnType::PortForward,
+        Some(login_request::Union::ViewCamera(_)) => AuthConnType::ViewCamera,
+        Some(login_request::Union::Terminal(_)) => AuthConnType::Terminal,
+        _ => AuthConnType::Remote,
+    }
+}
+
+/// Connection type implied by the selectors that `LoginRequest` sets before
+/// authorization. The consent policy, the denial log, the audit record and the
+/// connection setup all use this one mapping, so they cannot disagree about
+/// what the session is.
+fn conn_type_from_selectors(
+    file_transfer: bool,
+    port_forward: bool,
+    view_camera: bool,
+    terminal: bool,
+) -> AuthConnType {
+    if file_transfer {
+        AuthConnType::FileTransfer
+    } else if port_forward {
+        AuthConnType::PortForward
+    } else if view_camera {
+        AuthConnType::ViewCamera
+    } else if terminal {
+        AuthConnType::Terminal
+    } else {
+        AuthConnType::Remote
+    }
+}
+
+fn conn_type_label(conn_type: AuthConnType) -> &'static str {
+    match conn_type {
+        AuthConnType::Remote => "remote",
+        AuthConnType::FileTransfer => "file-transfer",
+        AuthConnType::PortForward => "port-forward",
+        AuthConnType::ViewCamera => "view-camera",
+        AuthConnType::Terminal => "terminal",
+    }
+}
+
+/// Numeric connection type written to the connection audit record.
+fn conn_type_audit_code(conn_type: AuthConnType) -> i32 {
+    match conn_type {
+        AuthConnType::Remote => 0,
+        AuthConnType::FileTransfer => 1,
+        AuthConnType::PortForward => 2,
+        AuthConnType::ViewCamera => 3,
+        AuthConnType::Terminal => 4,
+    }
+}
+
+/// A connection keeps the type of its first pre-authorization `LoginRequest`.
+/// The local user approves a connection type per session, so a later request
+/// for another type must not re-select it.
+fn login_conn_type_change_denied(admitted: Option<AuthConnType>, requested: AuthConnType) -> bool {
+    matches!(admitted, Some(admitted) if admitted != requested)
+}
+
+/// Address a port-forward connection may dial: only the target stored by a
+/// `PortForward` login, and only while the connection is classified as port
+/// forwarding. It never comes from the latest `LoginRequest`.
+fn port_forward_connect_target(conn_type: AuthConnType, stored_address: &str) -> Option<&str> {
+    (conn_type == AuthConnType::PortForward && !stored_address.is_empty()).then_some(stored_address)
+}
+
 fn permission_request_label(name: &str) -> &'static str {
     match name {
         "keyboard" => "keyboard and mouse control",
@@ -1313,8 +1500,165 @@ fn permission_request_label(name: &str) -> &'static str {
         "port_forward" => "TCP tunneling",
         "view_camera" => "camera viewing",
         "terminal" => "terminal access",
+        "switch_sides" => "switching sides",
         _ => "permission",
     }
+}
+
+/// Name the host gives to the local prompt that asks whether this device may
+/// connect back to the requesting peer ("switch sides").
+const SWITCH_SIDES_PERMISSION: &str = "switch_sides";
+/// Ids of prompts the host raises itself start here, away from the ids a peer
+/// picks for its own requests.
+const LOCAL_PERMISSION_REQUEST_ID_BASE: u64 = 1 << 63;
+/// The TestDelay a host sends to a peer. Without an authorized session only
+/// the measured round trip is included and the telemetry is not even gathered.
+fn test_delay_message(
+    authorized: bool,
+    last_delay: u32,
+    telemetry: impl FnOnce() -> TestDelay,
+) -> TestDelay {
+    if !authorized {
+        return TestDelay {
+            last_delay,
+            ..Default::default()
+        };
+    }
+    let mut message = telemetry();
+    message.last_delay = last_delay;
+    message
+}
+
+const SWITCH_SIDES_TOKEN_TTL: Duration = Duration::from_secs(10);
+const SWITCH_SIDES_MAX_TOKENS: usize = 8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SwitchSidesDecision {
+    Allow,
+    NeedsApproval,
+    Deny(&'static str),
+}
+
+/// Whether a peer's request that this device connect back to it may proceed.
+/// Only a remote-desktop session can ask; unattended sessions, sessions that
+/// were granted it and the `allow-unapproved-switch-sides` rollback skip the
+/// local prompt.
+#[allow(dead_code)]
+fn switch_sides_policy(
+    auth_kind: SessionAuthKind,
+    conn_type: AuthConnType,
+    granted: bool,
+    allow_unapproved: bool,
+) -> SwitchSidesDecision {
+    if conn_type != AuthConnType::Remote {
+        return SwitchSidesDecision::Deny(
+            "Switching sides is available for remote desktop sessions only.",
+        );
+    }
+    if allow_unapproved || granted || auth_kind.is_unattended_access() {
+        return SwitchSidesDecision::Allow;
+    }
+    SwitchSidesDecision::NeedsApproval
+}
+
+/// A peer id that is safe to hand to `--connect`: 6..=16 letters, digits,
+/// `_` or `-` (not starting with `-`), optionally followed by `@server`, which
+/// must be the rendezvous server this device is configured for.
+#[allow(dead_code)]
+fn switch_sides_peer_id(peer_id: &str, configured_server: &str) -> Option<String> {
+    let (base, server) = match peer_id.split_once('@') {
+        Some((base, server)) => (base, Some(server)),
+        None => (peer_id, None),
+    };
+    let valid_base = (6..=16).contains(&base.len())
+        && !base.starts_with('-')
+        && base
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if !valid_base {
+        return None;
+    }
+    if let Some(server) = server {
+        let configured = configured_server.trim();
+        if configured.is_empty() || server != configured {
+            return None;
+        }
+    }
+    Some(peer_id.to_owned())
+}
+
+/// Where the connect-back goes. A direct endpoint the peer announced for its
+/// own address wins; with the ID/relay route disabled only an endpoint inferred
+/// from the observed address is acceptable, never the rendezvous id.
+#[allow(dead_code)]
+fn switch_sides_target(
+    direct_endpoint: Option<String>,
+    inferred_endpoint: Option<String>,
+    allow_id_relay: bool,
+    peer_id: &str,
+    configured_server: &str,
+) -> Option<String> {
+    if let Some(endpoint) = direct_endpoint {
+        return Some(endpoint);
+    }
+    if !allow_id_relay {
+        return inferred_endpoint;
+    }
+    switch_sides_peer_id(peer_id, configured_server)
+}
+
+/// Removes the token for `uuid` if it is there and has not expired. Expired
+/// tokens are dropped on the way; a token with another uuid is never touched.
+#[allow(dead_code)]
+fn take_switch_sides_token(
+    tokens: &mut HashMap<String, (Instant, uuid::Uuid)>,
+    uuid: &uuid::Uuid,
+    now: Instant,
+) -> bool {
+    tokens
+        .retain(|_, (created, _)| now.saturating_duration_since(*created) < SWITCH_SIDES_TOKEN_TTL);
+    match tokens.iter().find(|(_, (_, stored))| stored == uuid) {
+        Some((key, _)) => {
+            let key = key.clone();
+            tokens.remove(&key);
+            true
+        }
+        None => false,
+    }
+}
+
+#[allow(dead_code)]
+fn insert_switch_sides_token(
+    tokens: &mut HashMap<String, (Instant, uuid::Uuid)>,
+    key: String,
+    uuid: uuid::Uuid,
+    now: Instant,
+) {
+    tokens
+        .retain(|_, (created, _)| now.saturating_duration_since(*created) < SWITCH_SIDES_TOKEN_TTL);
+    while tokens.len() >= SWITCH_SIDES_MAX_TOKENS && !tokens.contains_key(&key) {
+        let Some(oldest) = tokens
+            .iter()
+            .min_by_key(|(_, (created, _))| *created)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        tokens.remove(&oldest);
+    }
+    tokens.insert(key, (now, uuid));
+}
+
+/// The peer id without a `@server` part or padding, the key the spawned client
+/// and the host agree on.
+#[allow(dead_code)]
+fn switch_sides_key(id: &str) -> String {
+    id.trim().split('@').next().unwrap_or("").to_owned()
+}
+
+#[allow(dead_code)]
+fn port_forward_port_valid(port: i32) -> bool {
+    (1..=65535).contains(&port)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1349,9 +1693,13 @@ pub struct Connection {
     terminal: bool,
     port_forward_socket: Option<Framed<TcpStream, BytesCodec>>,
     port_forward_address: String,
+    port_forward_rdp: bool,
+    // Connection type of the first pre-authorization `LoginRequest`.
+    admitted_conn_type: Option<AuthConnType>,
     tx_to_cm: mpsc::UnboundedSender<ipc::Data>,
     authorized: bool,
     require_2fa: Option<totp_rs::TOTP>,
+    two_factor_gate: TwoFactorGate,
     keyboard: bool,
     clipboard: bool,
     audio: bool,
@@ -1382,6 +1730,7 @@ pub struct Connection {
     audio_sender: Option<MediaSender>,
     // audio by the remote peer/client
     tx_input: std_mpsc::Sender<MessageInput>,
+    input_pause: permission_prompt::InputPauseFlags,
     // handle input messages
     video_ack_required: bool,
     requested_video_profile: VideoProfile,
@@ -1409,8 +1758,11 @@ pub struct Connection {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     start_cm_ipc_para: Option<StartCmIpcPara>,
     auto_disconnect_timer: Option<(Instant, u64)>,
-    /// Set for QUIC sessions when `quic-prelogin-timeout-secs` is configured.
+    /// Deadline for the session to log in (all transports, see `prelogin_timeout_for`).
     prelogin_deadline: Option<Instant>,
+    /// Frees the pre-login admission slot when the session logs in or ends.
+    #[allow(dead_code)] // held for its `Drop`
+    prelogin_ticket: Option<super::prelogin_admission::PreloginTicket>,
     authed_conn_id: Option<self::raii::AuthedConnID>,
     session_auth_kind: SessionAuthKind,
     file_remove_log_control: FileRemoveLogControl,
@@ -1441,6 +1793,11 @@ pub struct Connection {
     terminal_user_token: Option<TerminalUserToken>,
     terminal_generic_service: Option<Box<GenericService>>,
     pending_permission_requests: HashMap<u64, PendingPermissionRequest>,
+    /// (request id, connect target, token) of a switch-sides request that waits
+    /// for the local user.
+    #[cfg(feature = "flutter")]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pending_switch_sides: Option<(u64, String, uuid::Uuid)>,
     video_feedback_by_display: HashMap<i32, VideoFeedbackDiagnostics>,
     video_feedback_capable: AtomicBool,
     video_delivery: VideoDeliveryController,
@@ -1509,14 +1866,35 @@ const SEND_TIMEOUT_VIDEO_STARTUP: u64 = 60_000;
 const VIDEO_STARTUP_SEND_TIMEOUT_WINDOW: Duration = Duration::from_secs(60);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Deadline for a QUIC session to become authorized when the host set
-/// `quic-prelogin-timeout-secs`; by default sessions may wait indefinitely,
-/// e.g. for a password or for the user to accept them.
-fn quic_prelogin_deadline(now: Instant) -> Option<Instant> {
-    let timeout = hbb_common::transport::configuration::NetworkTransportConfig::load()
-        .ok()?
-        .prelogin_timeout?;
-    now.checked_add(timeout)
+/// How long a session may wait to become authorized. QUIC sessions read
+/// `quic-prelogin-timeout-secs`, TCP and relayed sessions
+/// `tcp-prelogin-timeout-secs`; both default to ten minutes, `0` disables.
+/// An unreadable value keeps the default instead of lifting the limit.
+fn prelogin_timeout_for(is_quic: bool) -> Option<Duration> {
+    use hbb_common::config::keys;
+    let key = if is_quic {
+        keys::OPTION_QUIC_PRELOGIN_TIMEOUT_SECS
+    } else {
+        keys::OPTION_TCP_PRELOGIN_TIMEOUT_SECS
+    };
+    prelogin_timeout_from_value(key, &Config::get_option(key))
+}
+
+fn prelogin_timeout_from_value(key: &str, value: &str) -> Option<Duration> {
+    use hbb_common::transport::configuration::{
+        parse_prelogin_timeout, DEFAULT_PRELOGIN_TIMEOUT_SECS,
+    };
+    match parse_prelogin_timeout(value) {
+        Ok(timeout) => timeout,
+        Err(error) => {
+            log::warn!("Ignoring invalid {key}: {error}");
+            Some(Duration::from_secs(DEFAULT_PRELOGIN_TIMEOUT_SECS))
+        }
+    }
+}
+
+fn prelogin_deadline(now: Instant, is_quic: bool) -> Option<Instant> {
+    now.checked_add(prelogin_timeout_for(is_quic)?)
 }
 
 fn prelogin_expired(authorized: bool, deadline: Option<Instant>, now: Instant) -> bool {
@@ -1585,16 +1963,13 @@ impl Connection {
         id: i32,
         server: super::ServerPtrWeak,
         control_permissions: Option<ControlPermissions>,
+        prelogin_ticket: super::prelogin_admission::PreloginTicket,
     ) {
         // Android is not supported yet, so we always set control_permissions to None.
         #[cfg(target_os = "android")]
         let control_permissions = None;
         let _raii_id = raii::ConnectionID::new(id);
-        let prelogin_deadline = if stream.is_quic() {
-            quic_prelogin_deadline(Instant::now())
-        } else {
-            None
-        };
+        let prelogin_deadline = prelogin_deadline(Instant::now(), stream.is_quic());
         let stream = stream
             .into_duplex_with_context(SERVER_ASYNC_OUTBOX_CAPACITY, format!("host_conn={id}"));
         let _raii_control_permissions_id =
@@ -1636,6 +2011,7 @@ impl Connection {
                 video_source: VideoSource::Monitor,
             },
             require_2fa: crate::auth_2fa::get_2fa(None),
+            two_factor_gate: TwoFactorGate::default(),
             // Login replaces this fallback with the primary index from the same
             // refreshed display snapshot sent to the peer.
             display_idx: 0,
@@ -1650,6 +2026,8 @@ impl Connection {
             terminal: false,
             port_forward_socket: None,
             port_forward_address: "".to_owned(),
+            port_forward_rdp: false,
+            admitted_conn_type: None,
             tx_to_cm,
             authorized: false,
             keyboard: Self::permission(keys::OPTION_ENABLE_KEYBOARD, &control_permissions),
@@ -1677,6 +2055,7 @@ impl Connection {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             show_my_cursor: false,
             tx_input,
+            input_pause: permission_prompt::InputPauseFlags::default(),
             video_ack_required: false,
             requested_video_profile: VideoProfile::Standard,
             effective_movie_mode: EffectiveMovieMode::Off,
@@ -1710,6 +2089,7 @@ impl Connection {
             }),
             auto_disconnect_timer: None,
             prelogin_deadline,
+            prelogin_ticket: Some(prelogin_ticket),
             authed_conn_id: None,
             session_auth_kind: SessionAuthKind::Unknown,
             file_remove_log_control: FileRemoveLogControl::new(id),
@@ -1728,6 +2108,9 @@ impl Connection {
             terminal_user_token: None,
             terminal_generic_service: None,
             pending_permission_requests: HashMap::new(),
+            #[cfg(feature = "flutter")]
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            pending_switch_sides: None,
             video_feedback_by_display: HashMap::new(),
             video_feedback_capable: AtomicBool::new(false),
             video_delivery: VideoDeliveryController::default(),
@@ -1813,7 +2196,10 @@ impl Connection {
         );
 
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        std::thread::spawn(move || Self::handle_input(_rx_input, tx_cloned));
+        {
+            let input_pause = conn.input_pause.clone();
+            std::thread::spawn(move || Self::handle_input(_rx_input, tx_cloned, input_pause));
+        }
         let mut second_timer = crate::rustdesk_interval(time::interval(Duration::from_secs(1)));
         let mut video_delivery_timer =
             crate::rustdesk_interval(time::interval(VIDEO_DELIVERY_TICK_INTERVAL));
@@ -1850,7 +2236,7 @@ impl Connection {
                 Some(data) = rx_from_cm.recv() => {
                     match data {
                         ipc::Data::Authorize => {
-                            conn.session_auth_kind = SessionAuthKind::ClickApproval;
+                            conn.set_session_auth_kind(SessionAuthKind::ClickApproval);
                             log::info!(
                                 "Connection {} approved by local user as {} session",
                                 conn.inner.id(),
@@ -1867,6 +2253,7 @@ impl Connection {
                         ipc::Data::Close => {
                             conn.chat_unanswered = false; // seen
                             conn.file_transferred = false; //seen
+                            conn.revoke_session_connection_grant_on_local_close();
                             conn.send_close_reason_no_retry("").await;
                             conn.on_close("connection manager", true).await;
                             break;
@@ -1891,11 +2278,21 @@ impl Connection {
                         }
                         ipc::Data::SwitchPermission{name, enabled} => {
                             log::info!("Change permission {} -> {}", name, enabled);
+                            // This arm is the local user's own switch. Turning a
+                            // permission off suspends it so that a later request
+                            // from the peer is shown again; turning it back on is
+                            // the local decision that resumes it.
+                            if enabled {
+                                conn.resume_session_permission(&name);
+                            } else {
+                                conn.suspend_session_permission(&name);
+                            }
                             if let Some(reason) = switch_permission_policy_denial_reason_with_grant(
                                 conn.session_auth_kind,
                                 &name,
                                 enabled,
                                 conn.session_permission_granted(&name),
+                                conn.session_permission_suspended(&name),
                             ) {
                                 log::warn!(
                                     "Denied permission change {} -> {} for {} session: {}",
@@ -1917,10 +2314,14 @@ impl Connection {
                             enabled,
                             approved,
                         } => {
-                            conn.handle_permission_request_result(
-                                request_id, name, enabled, approved,
-                            )
-                            .await;
+                            if !conn
+                                .handle_permission_request_result(
+                                    request_id, name, enabled, approved,
+                                )
+                                .await
+                            {
+                                break;
+                            }
                         }
                         ipc::Data::RawMessage(bytes) => {
                             let bytes_len = bytes.len();
@@ -2350,7 +2751,7 @@ impl Connection {
                     raii::AuthedConnID::check_wake_lock_on_setting_changed();
                     if prelogin_expired(conn.authorized, conn.prelogin_deadline, Instant::now()) {
                         log::warn!(
-                            "#{} QUIC session was not authorized within the pre-login timeout",
+                            "#{} session was not authorized within the pre-login timeout",
                             conn.inner.id()
                         );
                         conn.send_close_reason_no_retry("Login timed out").await;
@@ -2376,86 +2777,94 @@ impl Connection {
                     // The control end will jump out of the loop after receiving LoginResponse and will not reply to the TestDelay
                     if conn.last_test_delay.is_none() && !(conn.port_forward_socket.is_some() && conn.authorized) {
                         conn.last_test_delay = Some(Instant::now());
-                        let (
-                            target_bitrate,
-                            capture_backend,
-                            capture_frame,
-                            encoder_backend,
-                            encoder_input,
-                            target_fps,
-                            pacing_fps,
-                            host_pipeline_p95_us,
-                        ) = {
-                            let video_qos = video_service::VIDEO_QOS.lock().unwrap();
-                            let video_service_name = video_service::get_service_name(
-                                conn.video_source(),
-                                conn.display_idx,
-                            );
-                            let (
-                                capture_backend,
-                                capture_frame,
-                                encoder_backend,
-                                encoder_input,
-                            ) =
-                                video_qos.pipeline_status(&video_service_name);
-                            let (target_fps, pacing_fps, host_pipeline_p95_us) =
-                                video_qos.movie_runtime_status(&video_service_name);
-                            (
-                                video_qos.bitrate(&video_service_name),
-                                capture_backend.unwrap_or_default(),
-                                capture_frame.unwrap_or_default(),
-                                encoder_backend.unwrap_or_default(),
-                                encoder_input.unwrap_or_default(),
-                                target_fps,
-                                pacing_fps,
-                                host_pipeline_p95_us,
-                            )
-                        };
-                        let delivery_status = conn.video_delivery.status(conn.display_idx as i32);
+                        // Before login the peer gets the round-trip figure only;
+                        // the pipeline details are for an authorized session.
+                        let test_delay = test_delay_message(
+                            conn.authorized,
+                            conn.network_delay,
+                            || {
+                                let (
+                                    target_bitrate,
+                                    capture_backend,
+                                    capture_frame,
+                                    encoder_backend,
+                                    encoder_input,
+                                    target_fps,
+                                    pacing_fps,
+                                    host_pipeline_p95_us,
+                                ) = {
+                                    let video_qos = video_service::VIDEO_QOS.lock().unwrap();
+                                    let video_service_name = video_service::get_service_name(
+                                        conn.video_source(),
+                                        conn.display_idx,
+                                    );
+                                    let (
+                                        capture_backend,
+                                        capture_frame,
+                                        encoder_backend,
+                                        encoder_input,
+                                    ) =
+                                        video_qos.pipeline_status(&video_service_name);
+                                    let (target_fps, pacing_fps, host_pipeline_p95_us) =
+                                        video_qos.movie_runtime_status(&video_service_name);
+                                    (
+                                        video_qos.bitrate(&video_service_name),
+                                        capture_backend.unwrap_or_default(),
+                                        capture_frame.unwrap_or_default(),
+                                        encoder_backend.unwrap_or_default(),
+                                        encoder_input.unwrap_or_default(),
+                                        target_fps,
+                                        pacing_fps,
+                                        host_pipeline_p95_us,
+                                    )
+                                };
+                                let delivery_status = conn.video_delivery.status(conn.display_idx as i32);
+                                TestDelay{
+                                    target_bitrate,
+                                    capture_backend,
+                                    capture_frame,
+                                    encoder_backend,
+                                    encoder_input,
+                                    video_delivery_phase: delivery_status
+                                        .map(|status| status.phase.as_str().to_owned())
+                                        .unwrap_or_default(),
+                                    video_recovery_count: delivery_status
+                                        .map(|status| status.recovery_count)
+                                        .unwrap_or_default(),
+                                    video_stall_ms: delivery_status
+                                        .map(|status| status.latest_stall_ms)
+                                        .unwrap_or_default(),
+                                    requested_video_profile: conn
+                                        .requested_video_profile
+                                        .config_value()
+                                        .to_owned(),
+                                    effective_video_profile: conn
+                                        .effective_movie_mode
+                                        .profile_label()
+                                        .to_owned(),
+                                    target_fps,
+                                    pacing_fps,
+                                    host_pipeline_p95_us,
+                                    movie_fallback_reason: match conn
+                                        .effective_movie_mode
+                                        .fallback_reason()
+                                    {
+                                        "none" => String::new(),
+                                        reason => reason.to_owned(),
+                                    },
+                                    movie_playout_delay_ms: if conn.requested_video_profile
+                                        == VideoProfile::Movie
+                                    {
+                                        MOVIE_PLAYOUT_DELAY_MS
+                                    } else {
+                                        0
+                                    },
+                                    ..Default::default()
+                                }
+                            },
+                        );
                         let mut msg_out = Message::new();
-                        msg_out.set_test_delay(TestDelay{
-                            last_delay: conn.network_delay,
-                            target_bitrate,
-                            capture_backend,
-                            capture_frame,
-                            encoder_backend,
-                            encoder_input,
-                            video_delivery_phase: delivery_status
-                                .map(|status| status.phase.as_str().to_owned())
-                                .unwrap_or_default(),
-                            video_recovery_count: delivery_status
-                                .map(|status| status.recovery_count)
-                                .unwrap_or_default(),
-                            video_stall_ms: delivery_status
-                                .map(|status| status.latest_stall_ms)
-                                .unwrap_or_default(),
-                            requested_video_profile: conn
-                                .requested_video_profile
-                                .config_value()
-                                .to_owned(),
-                            effective_video_profile: conn
-                                .effective_movie_mode
-                                .profile_label()
-                                .to_owned(),
-                            target_fps,
-                            pacing_fps,
-                            host_pipeline_p95_us,
-                            movie_fallback_reason: match conn
-                                .effective_movie_mode
-                                .fallback_reason()
-                            {
-                                "none" => String::new(),
-                                reason => reason.to_owned(),
-                            },
-                            movie_playout_delay_ms: if conn.requested_video_profile
-                                == VideoProfile::Movie
-                            {
-                                MOVIE_PLAYOUT_DELAY_MS
-                            } else {
-                                0
-                            },
-                            ..Default::default()
-                        });
+                        msg_out.set_test_delay(test_delay);
                         conn.send(msg_out.into()).await;
                     }
                     if conn.is_authed_remote_conn() || conn.view_camera {
@@ -2518,7 +2927,11 @@ impl Connection {
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    fn handle_input(receiver: std_mpsc::Receiver<MessageInput>, tx: Sender) {
+    fn handle_input(
+        receiver: std_mpsc::Receiver<MessageInput>,
+        tx: Sender,
+        input_pause: permission_prompt::InputPauseFlags,
+    ) {
         let mut block_input_mode = false;
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
@@ -2531,6 +2944,17 @@ impl Connection {
             match receiver.recv_timeout(std::time::Duration::from_millis(500)) {
                 Ok(v) => match v {
                     MessageInput::Mouse(mouse_input) => {
+                        // Re-checked here: the event may have been queued before a
+                        // permission prompt appeared. Releases still pass so that no
+                        // button stays held down.
+                        if permission_prompt::drop_queued_input(
+                            input_pause.paused(),
+                            permission_prompt::mouse_is_release_only(&mouse_input.msg),
+                        ) {
+                            continue;
+                        }
+                        let simulate = mouse_input.simulate;
+                        let left_up = is_left_up(&mouse_input.msg);
                         handle_mouse(
                             &mouse_input.msg,
                             mouse_input.conn_id,
@@ -2539,8 +2963,31 @@ impl Connection {
                             mouse_input.simulate,
                             mouse_input.show_cursor,
                         );
+                        if simulate {
+                            // Stamped after the platform call so that the click
+                            // window the local prompt checks covers the moment the
+                            // OS saw the event, not the moment it was queued.
+                            if left_up {
+                                CLICK_TIME.store(get_time(), Ordering::SeqCst);
+                            } else {
+                                MOUSE_MOVE_TIME.store(get_time(), Ordering::SeqCst);
+                            }
+                            if input_pause.is_low_priv() {
+                                permission_prompt::PERMISSION_PROMPTS
+                                    .note_low_priv_input(permission_prompt::mono_ms());
+                            }
+                        }
                     }
                     MessageInput::Key((mut msg, press)) => {
+                        if permission_prompt::drop_queued_input(
+                            input_pause.paused(),
+                            permission_prompt::key_is_release_only(&msg, press),
+                        ) {
+                            continue;
+                        }
+                        if is_enter(&msg) {
+                            CLICK_TIME.store(get_time(), Ordering::SeqCst);
+                        }
                         // Set the press state to false, use `down` only in `handle_key()`.
                         msg.press = false;
                         if press {
@@ -2551,9 +2998,23 @@ impl Connection {
                             msg.down = false;
                             handle_key(&msg);
                         }
+                        if input_pause.is_low_priv() {
+                            permission_prompt::PERMISSION_PROMPTS
+                                .note_low_priv_input(permission_prompt::mono_ms());
+                        }
                     }
                     MessageInput::Pointer((msg, id)) => {
+                        // Touch contacts have no per-event release flag here, so a
+                        // paused pointer event is dropped as a whole; the platform
+                        // layer ends stale contacts on the next gesture.
+                        if permission_prompt::drop_queued_input(input_pause.paused(), false) {
+                            continue;
+                        }
                         handle_pointer(&msg, id);
+                        if input_pause.is_low_priv() {
+                            permission_prompt::PERMISSION_PROMPTS
+                                .note_low_priv_input(permission_prompt::mono_ms());
+                        }
                     }
                     MessageInput::BlockOn => {
                         let (ok, msg) = crate::platform::block_input(true);
@@ -2756,8 +3217,49 @@ impl Connection {
             .lock()
             .unwrap()
             .get(&self.session_key())
-            .map(|s| s.grants.permissions.contains(name))
+            .map(|s| s.grants.grant_active(name))
             .unwrap_or(false)
+    }
+
+    fn session_permission_suspended(&self, name: &str) -> bool {
+        SESSIONS
+            .lock()
+            .unwrap()
+            .get(&self.session_key())
+            .map(|s| s.grants.is_suspended(name))
+            .unwrap_or(false)
+    }
+
+    fn suspend_session_permission(&self, name: &str) {
+        if hbb_common::config::permission_regrant_without_prompt_enabled() {
+            return;
+        }
+        if let Some(session) = SESSIONS.lock().unwrap().get_mut(&self.session_key()) {
+            session.grants.suspend(name);
+        }
+    }
+
+    fn resume_session_permission(&self, name: &str) {
+        if let Some(session) = SESSIONS.lock().unwrap().get_mut(&self.session_key()) {
+            session.grants.resume(name);
+        }
+    }
+
+    /// A connection type the local user closed from the connection manager
+    /// needs a new approval the next time it is opened.
+    fn revoke_session_connection_grant_on_local_close(&self) {
+        if hbb_common::config::permission_regrant_without_prompt_enabled() {
+            return;
+        }
+        let conn_type = self.current_conn_type();
+        if conn_type == AuthConnType::Remote {
+            return;
+        }
+        if let Some(session) = SESSIONS.lock().unwrap().get_mut(&self.session_key()) {
+            session
+                .grants
+                .revoke_connection(connection_type_grant_name(conn_type));
+        }
     }
 
     fn session_connection_granted(&self, conn_type: AuthConnType) -> bool {
@@ -2772,7 +3274,7 @@ impl Connection {
 
     fn grant_session_permission(&self, name: &str) {
         if let Some(session) = SESSIONS.lock().unwrap().get_mut(&self.session_key()) {
-            session.grants.permissions.insert(name.to_owned());
+            session.grants.grant(name);
         }
     }
 
@@ -2893,6 +3395,7 @@ impl Connection {
         self.pending_permission_requests.retain(|_, r| {
             r.requested_at.elapsed() < Duration::from_secs(PENDING_PERMISSION_REQUEST_TIMEOUT_SECS)
         });
+        self.sync_input_pause();
     }
 
     fn has_active_pending_permission_request(&self) -> bool {
@@ -2906,7 +3409,81 @@ impl Connection {
         should_block_remote_control_for_permission_prompt(
             self.session_auth_kind,
             self.has_active_pending_permission_request(),
+        ) || permission_prompt::should_pause_input(
+            self.session_auth_kind.is_low_permission_support(),
+            false,
+            permission_prompt::global_prompt_active(),
         )
+    }
+
+    fn set_session_auth_kind(&mut self, auth_kind: SessionAuthKind) {
+        self.session_auth_kind = auth_kind;
+        self.input_pause
+            .set_low_priv(auth_kind.is_low_permission_support());
+        self.sync_input_pause();
+    }
+
+    /// Publishes this connection's own prompt state to its input thread.
+    fn sync_input_pause(&self) {
+        self.input_pause
+            .set_own_prompt(should_block_remote_control_for_permission_prompt(
+                self.session_auth_kind,
+                self.has_active_pending_permission_request(),
+            ));
+    }
+
+    /// Ends this session and starts the local client that connects back.
+    #[cfg(feature = "flutter")]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    async fn start_switch_sides(&mut self, connect_target: String, uuid: uuid::Uuid) -> bool {
+        crate::server::insert_pending_switch_sides_uuid(connect_target.clone(), uuid);
+        // The token travels over the local IPC, not on the command line.
+        spawn_switch_sides_client(&connect_target);
+        self.on_close("switch sides", false).await;
+        false
+    }
+
+    /// Asks the local user before this device connects back to a peer.
+    #[cfg(feature = "flutter")]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    async fn request_switch_sides_approval(&mut self, connect_target: String, uuid: uuid::Uuid) {
+        self.cleanup_pending_permission_requests();
+        if self.pending_switch_sides.is_some() || self.pending_permission_requests.len() >= 16 {
+            log::warn!("Ignored switch sides request: another prompt is already pending");
+            return;
+        }
+        let mut request_id = LOCAL_PERMISSION_REQUEST_ID_BASE;
+        while self.pending_permission_requests.contains_key(&request_id) {
+            request_id += 1;
+        }
+        let guard =
+            permission_prompt_overlay_available().then(permission_prompt::PromptGuard::register);
+        let shown_at_ms = guard
+            .as_ref()
+            .map(permission_prompt::PromptGuard::started_ms)
+            .unwrap_or_else(permission_prompt::mono_ms);
+        self.pending_permission_requests.insert(
+            request_id,
+            PendingPermissionRequest {
+                name: SWITCH_SIDES_PERMISSION.to_owned(),
+                enabled: true,
+                requested_at: Instant::now(),
+                shown_at_ms,
+                guard,
+            },
+        );
+        self.pending_switch_sides = Some((request_id, connect_target, uuid));
+        self.sync_input_pause();
+        self.revoke_remote_input_authorization();
+        log::info!(
+            "Asking the local user to allow switching sides for {} session",
+            self.session_auth_kind.as_str()
+        );
+        self.send_to_cm(ipc::Data::PermissionRequest {
+            request_id,
+            name: SWITCH_SIDES_PERMISSION.to_owned(),
+            enabled: true,
+        });
     }
 
     async fn approve_permission_request(&mut self, request_id: u64, name: String, enabled: bool) {
@@ -2983,6 +3560,7 @@ impl Connection {
                 &name,
                 enabled,
                 self.session_permission_granted(&name),
+                self.session_permission_suspended(&name),
             )
             .is_some()
         };
@@ -3026,14 +3604,23 @@ impl Connection {
             .await;
             return;
         }
+        let guard =
+            permission_prompt_overlay_available().then(permission_prompt::PromptGuard::register);
+        let shown_at_ms = guard
+            .as_ref()
+            .map(permission_prompt::PromptGuard::started_ms)
+            .unwrap_or_else(permission_prompt::mono_ms);
         self.pending_permission_requests.insert(
             request_id,
             PendingPermissionRequest {
                 name: name.clone(),
                 enabled,
                 requested_at: Instant::now(),
+                shown_at_ms,
+                guard,
             },
         );
+        self.sync_input_pause();
         self.revoke_remote_input_authorization();
         log::info!(
             "Forwarding permission request {} ({}) from {} session to local user",
@@ -3054,13 +3641,39 @@ impl Connection {
         name: String,
         enabled: bool,
         approved: bool,
-    ) {
+    ) -> bool {
         self.cleanup_pending_permission_requests();
         let pending = self.pending_permission_requests.remove(&request_id);
+        self.sync_input_pause();
         let Some(pending) = pending else {
             log::warn!("Ignoring unknown permission request result {}", request_id);
-            return;
+            return true;
         };
+        #[cfg(feature = "flutter")]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if pending.name == SWITCH_SIDES_PERMISSION {
+            let Some((pending_id, connect_target, uuid)) = self.pending_switch_sides.take() else {
+                return true;
+            };
+            if pending_id != request_id {
+                self.pending_switch_sides = Some((pending_id, connect_target, uuid));
+                return true;
+            }
+            let expired = pending.requested_at.elapsed()
+                >= Duration::from_secs(PENDING_PERMISSION_REQUEST_TIMEOUT_SECS);
+            let tainted = permission_prompt::approval_blocked_by_input(
+                approved,
+                permission_prompt::PERMISSION_PROMPTS.low_priv_input_since(pending.shown_at_ms),
+                hbb_common::config::permission_prompt_global_input_block_enabled(),
+            );
+            if !approved || expired || tainted {
+                log::info!(
+                    "Switch sides not started (approved={approved}, expired={expired}, input_during_prompt={tainted})"
+                );
+                return true;
+            }
+            return self.start_switch_sides(connect_target, uuid).await;
+        }
         let (pending_name, pending_enabled, metadata_mismatch) =
             pending_permission_response_values(&pending, &name, enabled);
         let pending_name = pending_name.to_owned();
@@ -3082,7 +3695,7 @@ impl Connection {
                 "Permission request expired.",
             )
             .await;
-            return;
+            return true;
         }
         if !approved {
             self.deny_permission_request(
@@ -3092,22 +3705,38 @@ impl Connection {
                 "Permission request declined.",
             )
             .await;
-            return;
+            return true;
+        }
+        if permission_prompt::approval_blocked_by_input(
+            approved,
+            permission_prompt::PERMISSION_PROMPTS.low_priv_input_since(pending.shown_at_ms),
+            hbb_common::config::permission_prompt_global_input_block_enabled(),
+        ) {
+            self.deny_permission_request(
+                request_id,
+                pending_name,
+                pending_enabled,
+                "Remote input reached this device while the prompt was open; ask again.",
+            )
+            .await;
+            return true;
         }
         if let Some(reason) = self.permission_request_denial_reason(&pending_name) {
             self.deny_permission_request(request_id, pending_name, pending_enabled, reason)
                 .await;
-            return;
+            return true;
         }
         self.approve_permission_request(request_id, pending_name, pending_enabled)
             .await;
+        true
     }
 
     fn apply_session_permission_defaults(&mut self) {
         macro_rules! apply {
             ($name:literal, $field:ident) => {{
-                let allowed =
-                    session_default_permission(self.session_auth_kind, $name, self.$field);
+                let suspended = self.session_permission_suspended($name);
+                let allowed = !suspended
+                    && session_default_permission(self.session_auth_kind, $name, self.$field);
                 if self.$field != allowed {
                     self.$field = allowed;
                 }
@@ -3141,18 +3770,17 @@ impl Connection {
         }
     }
 
+    fn current_conn_type(&self) -> AuthConnType {
+        conn_type_from_selectors(
+            self.file_transfer.is_some(),
+            self.port_forward_socket.is_some() || !self.port_forward_address.is_empty(),
+            self.view_camera,
+            self.terminal,
+        )
+    }
+
     fn session_connection_policy_denial_reason(&self) -> Option<&'static str> {
-        let conn_type = if self.file_transfer.is_some() {
-            AuthConnType::FileTransfer
-        } else if self.port_forward_socket.is_some() || !self.port_forward_address.is_empty() {
-            AuthConnType::PortForward
-        } else if self.view_camera {
-            AuthConnType::ViewCamera
-        } else if self.terminal {
-            AuthConnType::Terminal
-        } else {
-            AuthConnType::Remote
-        };
+        let conn_type = self.current_conn_type();
         connection_policy_denial_reason_with_grant(
             self.session_auth_kind,
             conn_type,
@@ -3171,23 +3799,7 @@ impl Connection {
     }
 
     async fn check_whitelist(&mut self, addr: &SocketAddr) -> bool {
-        let whitelist: Vec<String> = Config::get_option("whitelist")
-            .split(",")
-            .filter(|x| !x.is_empty())
-            .map(|x| x.to_owned())
-            .collect();
-        if !whitelist.is_empty()
-            && whitelist
-                .iter()
-                .filter(|x| x == &"0.0.0.0")
-                .next()
-                .is_none()
-            && whitelist
-                .iter()
-                .filter(|x| IpCidr::from_str(x).map_or(false, |y| y.contains(addr.ip())))
-                .next()
-                .is_none()
-        {
+        if !crate::common::ip_allowed_by_whitelist(&Config::get_option("whitelist"), addr.ip()) {
             self.send_login_error("Your ip is blocked by the peer")
                 .await;
             Self::post_alarm_audit(
@@ -3241,29 +3853,35 @@ impl Connection {
     fn switch_sides_connect_target(
         &self,
         request: &hbb_common::message_proto::SwitchSidesRequest,
-    ) -> String {
-        if let Ok(peer_ip) = self.ip.split('%').next().unwrap_or(&self.ip).parse() {
-            if let Some(endpoint) = crate::common::direct_access_endpoint_for_peer_ip(
-                &request.direct_endpoints,
-                peer_ip,
-            ) {
-                log::info!("switch sides route: direct endpoint {}", endpoint);
-                return endpoint;
-            }
-            if !Config::allow_id_relay_server() {
-                let port = crate::common::get_direct_access_port();
-                if port > 0 && port <= u16::MAX as i32 {
-                    let endpoint = crate::common::format_direct_access_endpoint(peer_ip, port);
-                    log::warn!(
-                        "switch sides route: inferred direct endpoint {} from observed peer IP",
-                        endpoint
-                    );
-                    return endpoint;
-                }
-            }
+    ) -> Option<String> {
+        let peer_ip = self
+            .ip
+            .split('%')
+            .next()
+            .unwrap_or(&self.ip)
+            .parse::<std::net::IpAddr>()
+            .ok();
+        let direct = peer_ip.and_then(|peer_ip| {
+            crate::common::direct_access_endpoint_for_peer_ip(&request.direct_endpoints, peer_ip)
+        });
+        let inferred = peer_ip.and_then(|peer_ip| {
+            let port = crate::common::get_direct_access_port();
+            (port > 0 && port <= u16::MAX as i32)
+                .then(|| crate::common::format_direct_access_endpoint(peer_ip, port))
+        });
+        let allow_id_relay = Config::allow_id_relay_server();
+        let target = switch_sides_target(
+            direct,
+            inferred,
+            allow_id_relay,
+            &self.lr.my_id,
+            &Config::get_option("custom-rendezvous-server"),
+        );
+        match &target {
+            Some(target) => log::info!("switch sides route: {target}"),
+            None => log::warn!("switch sides: no acceptable route to the requesting peer"),
         }
-        log::info!("switch sides route: rendezvous id {}", self.lr.my_id);
-        self.lr.my_id.clone()
+        target
     }
 
     fn post_conn_audit(&self, v: Value) {
@@ -3371,12 +3989,13 @@ impl Connection {
         if self.port_forward_socket.is_some() {
             return true;
         }
-        let Some(login_request::Union::PortForward(pf)) = self.lr.union.as_ref() else {
+        let Some(target) =
+            port_forward_connect_target(self.current_conn_type(), &self.port_forward_address)
+        else {
             return true;
         };
-        let mut pf = pf.clone();
-        let (mut addr, is_rdp) = Self::normalize_port_forward_target(&mut pf);
-        self.port_forward_address = addr.clone();
+        let mut addr = target.to_owned();
+        let is_rdp = self.port_forward_rdp;
         match timeout(3000, TcpStream::connect(&addr)).await {
             Ok(Ok(sock)) => {
                 self.port_forward_socket = Some(Framed::new(sock, BytesCodec::new()));
@@ -3407,6 +4026,17 @@ impl Connection {
                 false
             }
         }
+    }
+
+    async fn deny_session_connection(&mut self, reason: &'static str) {
+        log::warn!(
+            "Denied {} connection for {} session: {}",
+            conn_type_label(self.current_conn_type()),
+            self.session_auth_kind.as_str(),
+            reason
+        );
+        self.send_login_error(reason).await;
+        sleep(1.).await;
     }
 
     // Returns whether this connection should be kept alive.
@@ -3443,34 +4073,18 @@ impl Connection {
                     });
                 }
             });
+            self.two_factor_gate.challenge_sent();
             self.send_login_error(crate::client::REQUIRE_2FA).await;
             // Keep the connection alive so the client can continue with 2FA.
             return true;
         }
+        self.two_factor_gate.finished();
         if let Some(reason) = self.session_connection_policy_denial_reason() {
-            log::warn!(
-                "Denied {} connection for {} session: {}",
-                if self.file_transfer.is_some() {
-                    "file-transfer"
-                } else if self.port_forward_socket.is_some()
-                    || !self.port_forward_address.is_empty()
-                {
-                    "port-forward"
-                } else if self.view_camera {
-                    "view-camera"
-                } else if self.terminal {
-                    "terminal"
-                } else {
-                    "remote"
-                },
-                self.session_auth_kind.as_str(),
-                reason
-            );
-            self.send_login_error(reason).await;
-            sleep(1.).await;
+            self.deny_session_connection(reason).await;
             return false;
         }
-        if let Some(keep_alive) = self.prepare_terminal_login_for_authorization().await {
+        // Access has been accepted by now: this is where the account is checked.
+        if let Some(keep_alive) = self.prepare_terminal_login_for_authorization(true).await {
             return keep_alive;
         }
         self.apply_session_permission_defaults();
@@ -3490,18 +4104,17 @@ impl Connection {
         if !self.connect_port_forward_if_needed().await {
             return false;
         }
+        // The consent check above ran before the awaits that prepared this
+        // connection; check the grant again for the type it ends up with.
+        if let Some(reason) = self.session_connection_policy_denial_reason() {
+            self.port_forward_socket = None;
+            self.deny_session_connection(reason).await;
+            return false;
+        }
         self.authorized = true;
-        let (conn_type, auth_conn_type) = if self.file_transfer.is_some() {
-            (1, AuthConnType::FileTransfer)
-        } else if self.port_forward_socket.is_some() {
-            (2, AuthConnType::PortForward)
-        } else if self.view_camera {
-            (3, AuthConnType::ViewCamera)
-        } else if self.terminal {
-            (4, AuthConnType::Terminal)
-        } else {
-            (0, AuthConnType::Remote)
-        };
+        self.prelogin_ticket = None;
+        let auth_conn_type = self.current_conn_type();
+        let conn_type = conn_type_audit_code(auth_conn_type);
         self.authed_conn_id = Some(self::raii::AuthedConnID::new(
             self.inner.id(),
             auth_conn_type,
@@ -4434,7 +5047,7 @@ impl Connection {
         password: Option<String>,
         tfa: Option<bool>,
     ) {
-        self.session_auth_kind = auth_kind;
+        self.set_session_auth_kind(auth_kind);
         raii::AuthedConnID::update_or_insert_session(
             self.session_key(),
             password,
@@ -4513,7 +5126,7 @@ impl Connection {
                 && (tfa && session.tfa
                     || !tfa && self.validate_password_plain(&session.random_password))
             {
-                self.session_auth_kind = session.auth_kind;
+                self.set_session_auth_kind(session.auth_kind);
                 log::info!("is recent session");
                 return true;
             }
@@ -4626,6 +5239,20 @@ impl Connection {
             keys::OPTION_ENABLE_TRUSTED_DEVICES,
             &Config::get_option(keys::OPTION_ENABLE_TRUSTED_DEVICES),
         )
+    }
+
+    // The selectors reset here decide the connection type, so every
+    // pre-authorization `LoginRequest` starts from a clean slate instead of adding
+    // to what an earlier request left behind.
+    fn reset_session_scope_for_login(&mut self) {
+        self.file_transfer = None;
+        self.view_camera = false;
+        self.inner.video_source = VideoSource::Monitor;
+        self.terminal = false;
+        self.terminal_persistent = false;
+        self.terminal_service_id.clear();
+        self.port_forward_address.clear();
+        self.port_forward_rdp = false;
     }
 
     async fn handle_login_request_without_validation(&mut self, lr: &LoginRequest) {
@@ -5065,10 +5692,28 @@ impl Connection {
         }
         // After handling CloseReason messages, proceed to process other message types
         if let Some(message::Union::LoginRequest(lr)) = msg.union {
-            self.handle_login_request_without_validation(&lr).await;
+            // An authorized connection keeps the identity and type it was authorized with; a
+            // later LoginRequest must not rebind them.
             if self.authorized {
                 return true;
             }
+            self.two_factor_gate.login_request_received();
+            self.handle_login_request_without_validation(&lr).await;
+            let requested_conn_type = login_request_conn_type(lr.union.as_ref());
+            if login_conn_type_change_denied(self.admitted_conn_type, requested_conn_type) {
+                log::warn!(
+                    "Rejected login request for {} on a connection that asked for {}",
+                    conn_type_label(requested_conn_type),
+                    self.admitted_conn_type
+                        .map(conn_type_label)
+                        .unwrap_or("remote")
+                );
+                self.send_login_error("Connection not allowed").await;
+                sleep(1.).await;
+                return false;
+            }
+            self.admitted_conn_type = Some(requested_conn_type);
+            self.reset_session_scope_for_login();
             match lr.union {
                 Some(login_request::Union::FileTransfer(ft)) => {
                     if !Self::permission(
@@ -5119,8 +5764,14 @@ impl Connection {
                         sleep(1.).await;
                         return false;
                     }
-                    let (addr, _is_rdp) = Self::normalize_port_forward_target(&mut pf);
+                    let (addr, is_rdp) = Self::normalize_port_forward_target(&mut pf);
+                    if !port_forward_port_valid(pf.port) {
+                        self.send_login_error("Invalid port").await;
+                        sleep(1.).await;
+                        return false;
+                    }
                     self.port_forward_address = addr;
+                    self.port_forward_rdp = is_rdp;
                 }
                 _ => {
                     if !self.check_privacy_mode_on().await {
@@ -5152,7 +5803,13 @@ impl Connection {
             }
 
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            if !should_use_terminal_os_login_scope(self.terminal, &lr.os_login.username) {
+            if !should_use_terminal_os_login_scope(self.terminal, &lr.os_login.username)
+                || !Config::get_bool_option(
+                    keys::OPTION_ALLOW_TERMINAL_OS_LOGIN_BEFORE_AUTHORIZATION,
+                )
+            {
+                // With the account check after authorization the manager must be
+                // up before it, so that the local user can be asked.
                 self.try_start_cm_ipc();
             }
 
@@ -5222,7 +5879,8 @@ impl Connection {
             {
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 if should_use_terminal_os_login_scope(self.terminal, &lr.os_login.username) {
-                    if let Some(keep_alive) = self.prepare_terminal_login_for_authorization().await
+                    if let Some(keep_alive) =
+                        self.prepare_terminal_login_for_authorization(false).await
                     {
                         return keep_alive;
                     }
@@ -5251,7 +5909,7 @@ impl Connection {
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]
                     if should_use_terminal_os_login_scope(self.terminal, &lr.os_login.username) {
                         if let Some(keep_alive) =
-                            self.prepare_terminal_login_for_authorization().await
+                            self.prepare_terminal_login_for_authorization(false).await
                         {
                             return keep_alive;
                         }
@@ -5296,6 +5954,12 @@ impl Connection {
                 }
             }
         } else if let Some(message::Union::Auth2fa(tfa)) = msg.union {
+            // A 2FA response counts only while this connection is waiting for one; it can
+            // neither replace the first factor nor arrive after authorization.
+            if !self.two_factor_gate.accepts_response() {
+                log::warn!("Ignored 2FA response without a pending challenge");
+                return true;
+            }
             let (failure, res) = self.check_failure(1).await;
             if !res {
                 return true;
@@ -5352,30 +6016,51 @@ impl Connection {
         } else if let Some(message::Union::SwitchSidesResponse(_s)) = msg.union {
             #[cfg(feature = "flutter")]
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            if let Some(lr) = _s.lr.clone().take() {
-                self.handle_login_request_without_validation(&lr).await;
-                SWITCH_SIDES_UUID
-                    .lock()
-                    .unwrap()
-                    .retain(|_, v| v.0.elapsed() < Duration::from_secs(10));
-                let uuid_old = SWITCH_SIDES_UUID.lock().unwrap().remove(&lr.my_id);
-                if let Ok(uuid) = uuid::Uuid::from_slice(_s.uuid.to_vec().as_ref()) {
-                    if let Some((_instant, uuid_old)) = uuid_old {
-                        if uuid == uuid_old {
-                            self.from_switch = true;
-                            if !self.send_logon_response_and_keep_alive().await {
-                                return false;
-                            }
-                            self.try_start_cm(
-                                lr.my_id.clone(),
-                                lr.my_name.clone(),
-                                self.authorized,
-                            );
-                            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                            self.try_start_cm_ipc();
-                        }
-                    }
+            {
+                // A response can only finish a login that has not happened yet.
+                if self.authorized {
+                    log::warn!("Ignored switch sides response on an authorized connection");
+                    return true;
                 }
+                let Some(lr) = _s.lr.clone().take() else {
+                    return true;
+                };
+                let Ok(uuid) = uuid::Uuid::from_slice(_s.uuid.to_vec().as_ref()) else {
+                    return true;
+                };
+                // The token is checked, and consumed, before anything of the
+                // request is applied to this connection.
+                let accepted = take_switch_sides_token(
+                    &mut SWITCH_SIDES_UUID.lock().unwrap(),
+                    &uuid,
+                    tokio::time::Instant::now(),
+                );
+                if !accepted {
+                    log::warn!("Ignored switch sides response with an unknown or expired token");
+                    return true;
+                }
+                // A switch-sides response only ever opens a remote-desktop session.
+                if lr.union.is_some()
+                    || self
+                        .admitted_conn_type
+                        .is_some_and(|conn_type| conn_type != AuthConnType::Remote)
+                {
+                    log::warn!(
+                        "Rejected switch sides response that carries a non-remote login type"
+                    );
+                    self.send_login_error("Connection not allowed").await;
+                    return false;
+                }
+                self.handle_login_request_without_validation(&lr).await;
+                self.admitted_conn_type = Some(AuthConnType::Remote);
+                self.reset_session_scope_for_login();
+                self.from_switch = true;
+                if !self.send_logon_response_and_keep_alive().await {
+                    return false;
+                }
+                self.try_start_cm(lr.my_id.clone(), lr.my_name.clone(), self.authorized);
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                self.try_start_cm_ipc();
             }
         } else if self.authorized {
             if self.port_forward_socket.is_some() {
@@ -6105,20 +6790,24 @@ impl Connection {
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]
                     Some(misc::Union::SwitchSidesRequest(s)) => {
                         if let Ok(uuid) = uuid::Uuid::from_slice(&s.uuid.to_vec()[..]) {
-                            crate::server::insert_pending_switch_sides_uuid(
-                                self.lr.my_id.clone(),
-                                uuid.clone(),
+                            let decision = switch_sides_policy(
+                                self.session_auth_kind,
+                                self.current_conn_type(),
+                                self.session_permission_granted(SWITCH_SIDES_PERMISSION),
+                                Config::get_bool_option(keys::OPTION_ALLOW_UNAPPROVED_SWITCH_SIDES),
                             );
-                            let connect_target = self.switch_sides_connect_target(&s);
-                            crate::run_me(vec![
-                                "--connect".to_owned(),
-                                connect_target,
-                                "--switch_uuid".to_owned(),
-                                uuid.to_string(),
-                            ])
-                            .ok();
-                            self.on_close("switch sides", false).await;
-                            return false;
+                            if let SwitchSidesDecision::Deny(reason) = decision {
+                                log::warn!("Denied switch sides request: {reason}");
+                                return true;
+                            }
+                            let Some(connect_target) = self.switch_sides_connect_target(&s) else {
+                                return true;
+                            };
+                            if decision == SwitchSidesDecision::Allow {
+                                return self.start_switch_sides(connect_target, uuid).await;
+                            }
+                            self.request_switch_sides_approval(connect_target, uuid)
+                                .await;
                         }
                     }
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -6272,31 +6961,12 @@ impl Connection {
         username: &str,
         password: &str,
     ) -> Option<&'static str> {
-        let check_admin_res =
-            crate::platform::get_logon_user_token(username, password).map(|token| {
-                let is_token_admin = crate::platform::is_user_token_admin(token);
-                unsafe {
-                    hbb_common::allow_err!(CloseHandle(HANDLE(token as _)));
-                };
-                is_token_admin
-            });
-        match check_admin_res {
-            Ok(Ok(b)) => {
-                if b {
-                    self.terminal_user_token = Some(TerminalUserToken::SelfUser);
-                    None
-                } else {
-                    Some(TERMINAL_OS_LOGIN_FAILED_MSG)
-                }
+        match verify_os_admin(username, password) {
+            Ok(()) => {
+                self.terminal_user_token = Some(TerminalUserToken::SelfUser);
+                None
             }
-            Ok(Err(e)) => {
-                log::error!("Failed to check if the user is an administrator: {}", e);
-                Some(TERMINAL_OS_LOGIN_FAILED_MSG)
-            }
-            Err(e) => {
-                log::error!("Failed to get logon user token: {}", e);
-                Some(TERMINAL_OS_LOGIN_FAILED_MSG)
-            }
+            Err(msg) => Some(msg),
         }
     }
 
@@ -6332,8 +7002,20 @@ impl Connection {
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    async fn prepare_terminal_login_for_authorization(&mut self) -> Option<bool> {
+    async fn prepare_terminal_login_for_authorization(
+        &mut self,
+        access_verified: bool,
+    ) -> Option<bool> {
         if !self.terminal || self.terminal_user_token.is_some() {
+            return None;
+        }
+        let legacy_order =
+            Config::get_bool_option(keys::OPTION_ALLOW_TERMINAL_OS_LOGIN_BEFORE_AUTHORIZATION);
+        if !terminal_os_login_check_allowed(
+            should_use_terminal_os_login_scope(self.terminal, &self.lr.os_login.username),
+            access_verified,
+            legacy_order,
+        ) {
             return None;
         }
 
@@ -6375,10 +7057,33 @@ impl Connection {
 
         let username = normalized_username;
         let password = self.lr.os_login.password.clone();
+        // Before authorization (legacy order only) the account is guessable by
+        // anyone who can connect, so failures are also counted per source and
+        // account, on top of the host-wide back-off.
+        let keyed = (is_terminal_os_login && !access_verified).then(|| {
+            super::login_failure_check::OsCredentialKey::new(self.ip.parse().ok(), &username)
+        });
+        if let Some(key) = keyed.as_ref() {
+            let wait_ms = super::login_failure_check::keyed_backoff_remaining_ms(key, get_time());
+            if wait_ms > 0 {
+                log::warn!(
+                    "OS credential login blocked by per-source back-off: ip={} conn_id={}",
+                    self.ip,
+                    self.inner.id()
+                );
+                self.send_login_error(format!(
+                    "Please try again in {} seconds.",
+                    (wait_ms + 999) / 1_000
+                ))
+                .await;
+                sleep(1.).await;
+                return Some(false);
+            }
+        }
         let terminal_login_error = {
             #[cfg(target_os = "windows")]
             {
-                let _os_login_concurrency_guard = if is_terminal_os_login {
+                let os_login_gate = if is_terminal_os_login {
                     let guard = try_acquire_os_credential_login_gate();
                     if guard.is_err() {
                         log::warn!(
@@ -6403,7 +7108,39 @@ impl Connection {
                 } else {
                     None
                 };
-                self.fill_terminal_user_token(&username, &password)
+                if is_terminal_os_login {
+                    // The logon call blocks; keep it off the runtime. The gate
+                    // moves into the task and stays held until it returns, even
+                    // when this side stops waiting.
+                    let (user, pass) = (username.clone(), password.clone());
+                    let task = tokio::task::spawn_blocking(move || {
+                        let _gate = os_login_gate;
+                        verify_os_admin(&user, &pass)
+                    });
+                    match tokio::time::timeout(Duration::from_secs(45), task).await {
+                        Ok(Ok(Ok(()))) => {
+                            self.terminal_user_token = Some(TerminalUserToken::SelfUser);
+                            None
+                        }
+                        Ok(Ok(Err(msg))) => Some(msg),
+                        // Not an answer about the credentials, so not a failure.
+                        Ok(Err(_)) | Err(_) => {
+                            log::warn!(
+                                "OS credential verification did not complete: ip={} conn_id={}",
+                                self.ip,
+                                self.inner.id()
+                            );
+                            self.send_login_error(
+                                "Windows account check did not complete, try again later",
+                            )
+                            .await;
+                            sleep(1.).await;
+                            return Some(false);
+                        }
+                    }
+                } else {
+                    self.fill_terminal_user_token(&username, &password)
+                }
             }
             #[cfg(not(target_os = "windows"))]
             {
@@ -6414,6 +7151,9 @@ impl Connection {
         if let Some(msg) = terminal_login_error {
             if let TerminalAuthorizationMode::OsLogin { failure, scope } = auth_mode {
                 self.update_failure_with_scope(failure, false, 0, scope);
+            }
+            if let Some(key) = keyed.as_ref() {
+                super::login_failure_check::keyed_record_failure(key, get_time());
             }
             let auth_context = if is_terminal_os_login {
                 "OS credential login verification"
@@ -6434,6 +7174,9 @@ impl Connection {
         }
         if let TerminalAuthorizationMode::OsLogin { failure, scope } = auth_mode {
             self.update_failure_with_scope(failure, true, 0, scope);
+        }
+        if let Some(key) = keyed.as_ref() {
+            super::login_failure_check::keyed_record_success(key);
         }
 
         if let Some(is_user) =
@@ -6463,7 +7206,10 @@ impl Connection {
     }
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    async fn prepare_terminal_login_for_authorization(&mut self) -> Option<bool> {
+    async fn prepare_terminal_login_for_authorization(
+        &mut self,
+        _access_verified: bool,
+    ) -> Option<bool> {
         None
     }
 
@@ -8175,30 +8921,64 @@ impl Connection {
     }
 }
 
+/// Starts the client that connects back. A service that runs as root or SYSTEM
+/// starts it in the logged-in user's session instead of its own.
+#[cfg(feature = "flutter")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn spawn_switch_sides_client(connect_target: &str) {
+    // The token itself is fetched from this process over the local IPC.
+    let args = vec!["--connect", connect_target, "--switch_uuid", "pending"];
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if crate::platform::is_root() {
+        allow_err!(crate::platform::run_as_user(args));
+        return;
+    }
+    allow_err!(crate::run_me(args));
+}
+
 #[cfg(feature = "flutter")]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn insert_switch_sides_uuid(id: String, uuid: uuid::Uuid) {
-    SWITCH_SIDES_UUID
-        .lock()
-        .unwrap()
-        .insert(id, (tokio::time::Instant::now(), uuid));
+    insert_switch_sides_token(
+        &mut SWITCH_SIDES_UUID.lock().unwrap(),
+        id,
+        uuid,
+        tokio::time::Instant::now(),
+    );
 }
 
 #[cfg(feature = "flutter")]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn insert_pending_switch_sides_uuid(id: String, uuid: uuid::Uuid) {
+    insert_switch_sides_token(
+        &mut PENDING_SWITCH_SIDES_UUID.lock().unwrap(),
+        switch_sides_key(&id),
+        uuid,
+        tokio::time::Instant::now(),
+    );
+}
+
+/// Hands the local client that was started for a switch its token, once.
+#[cfg(feature = "flutter")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn take_pending_switch_sides_uuid(id: &str) -> Option<uuid::Uuid> {
     let mut uuids = PENDING_SWITCH_SIDES_UUID.lock().unwrap();
-    uuids.retain(|_, (instant, _)| instant.elapsed() < Duration::from_secs(10));
-    uuids.insert(id, (tokio::time::Instant::now(), uuid));
+    let now = tokio::time::Instant::now();
+    uuids
+        .retain(|_, (created, _)| now.saturating_duration_since(*created) < SWITCH_SIDES_TOKEN_TTL);
+    uuids.remove(&switch_sides_key(id)).map(|(_, uuid)| uuid)
 }
 
 #[cfg(feature = "flutter")]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn remove_pending_switch_sides_uuid(id: &str, uuid: &uuid::Uuid) -> bool {
     let mut uuids = PENDING_SWITCH_SIDES_UUID.lock().unwrap();
-    uuids.retain(|_, (instant, _)| instant.elapsed() < Duration::from_secs(10));
-    if uuids.get(id).map(|(_, stored_uuid)| stored_uuid == uuid) == Some(true) {
-        uuids.remove(id);
+    let key = switch_sides_key(id);
+    let now = tokio::time::Instant::now();
+    uuids
+        .retain(|_, (created, _)| now.saturating_duration_since(*created) < SWITCH_SIDES_TOKEN_TTL);
+    if uuids.get(&key).map(|(_, stored)| stored == uuid) == Some(true) {
+        uuids.remove(&key);
         true
     } else {
         false
@@ -9043,6 +9823,369 @@ mod raii {
 mod test {
     #[allow(unused)]
     use super::*;
+
+    #[test]
+    fn two_factor_response_needs_an_outstanding_challenge() {
+        let mut gate = TwoFactorGate::default();
+        // A bare Auth2fa on a new connection must not authorize anything.
+        assert!(!gate.accepts_response());
+        gate.login_request_received();
+        assert!(!gate.accepts_response());
+        // Password accepted, REQUIRE_2FA sent: the response is now expected.
+        gate.challenge_sent();
+        assert!(gate.accepts_response());
+        // A new LoginRequest starts the exchange over.
+        gate.login_request_received();
+        assert!(!gate.accepts_response());
+        // Click authorization finished before the 2FA response arrived.
+        gate.challenge_sent();
+        gate.finished();
+        assert!(!gate.accepts_response());
+    }
+
+    #[test]
+    fn login_request_conn_type_follows_the_requested_union() {
+        use hbb_common::message_proto::{FileTransfer, PortForward, Terminal, ViewCamera};
+        assert_eq!(login_request_conn_type(None), AuthConnType::Remote);
+        assert_eq!(
+            login_request_conn_type(Some(&login_request::Union::FileTransfer(
+                FileTransfer::new()
+            ))),
+            AuthConnType::FileTransfer
+        );
+        assert_eq!(
+            login_request_conn_type(Some(&login_request::Union::PortForward(PortForward::new()))),
+            AuthConnType::PortForward
+        );
+        assert_eq!(
+            login_request_conn_type(Some(&login_request::Union::ViewCamera(ViewCamera::new()))),
+            AuthConnType::ViewCamera
+        );
+        assert_eq!(
+            login_request_conn_type(Some(&login_request::Union::Terminal(Terminal::new()))),
+            AuthConnType::Terminal
+        );
+    }
+
+    #[test]
+    fn conn_type_from_selectors_maps_one_selector_and_defaults_to_remote() {
+        use AuthConnType::*;
+        assert_eq!(conn_type_from_selectors(false, false, false, false), Remote);
+        assert_eq!(
+            conn_type_from_selectors(true, false, false, false),
+            FileTransfer
+        );
+        assert_eq!(
+            conn_type_from_selectors(false, true, false, false),
+            PortForward
+        );
+        assert_eq!(
+            conn_type_from_selectors(false, false, true, false),
+            ViewCamera
+        );
+        assert_eq!(
+            conn_type_from_selectors(false, false, false, true),
+            Terminal
+        );
+    }
+
+    #[test]
+    fn audit_and_log_names_cover_every_connection_type() {
+        use AuthConnType::*;
+        let all = [Remote, FileTransfer, PortForward, ViewCamera, Terminal];
+        let codes: Vec<i32> = all.iter().map(|t| conn_type_audit_code(*t)).collect();
+        assert_eq!(codes, vec![0, 1, 2, 3, 4]);
+        let labels: Vec<&str> = all.iter().map(|t| conn_type_label(*t)).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "remote",
+                "file-transfer",
+                "port-forward",
+                "view-camera",
+                "terminal"
+            ]
+        );
+    }
+
+    #[test]
+    fn connection_type_cannot_change_after_the_first_login_request() {
+        use AuthConnType::*;
+        // The first request selects the type; repeating it (password retry) is fine.
+        assert!(!login_conn_type_change_denied(None, PortForward));
+        assert!(!login_conn_type_change_denied(
+            Some(PortForward),
+            PortForward
+        ));
+        assert!(!login_conn_type_change_denied(Some(Remote), Remote));
+        // Consent for tunnels, then a terminal request with a valid one-time password.
+        assert!(login_conn_type_change_denied(Some(PortForward), Terminal));
+        // Consent for file transfer, then a tunnel to an arbitrary address.
+        assert!(login_conn_type_change_denied(
+            Some(FileTransfer),
+            PortForward
+        ));
+        assert!(login_conn_type_change_denied(Some(ViewCamera), Remote));
+        assert!(login_conn_type_change_denied(Some(Remote), Terminal));
+        // No pair of different types is ever accepted.
+        let all = [Remote, FileTransfer, PortForward, ViewCamera, Terminal];
+        for a in all {
+            for b in all {
+                assert_eq!(login_conn_type_change_denied(Some(a), b), a != b);
+            }
+        }
+    }
+
+    #[test]
+    fn port_forward_target_comes_only_from_a_port_forward_session() {
+        use AuthConnType::*;
+        assert_eq!(
+            port_forward_connect_target(PortForward, "10.0.0.5:22"),
+            Some("10.0.0.5:22")
+        );
+        // A stale target left by an earlier request must not be dialed for another type.
+        for conn_type in [Remote, FileTransfer, ViewCamera, Terminal] {
+            assert_eq!(port_forward_connect_target(conn_type, "10.0.0.5:22"), None);
+        }
+        assert_eq!(port_forward_connect_target(PortForward, ""), None);
+    }
+
+    #[test]
+    fn consent_policy_checks_the_type_the_selectors_end_up_with() {
+        use AuthConnType::*;
+        // A one-time-password session with a grant for tunnels only.
+        let granted_for = |conn_type: AuthConnType| conn_type == PortForward;
+        let denial = |ft: bool, pf: bool, vc: bool, term: bool| {
+            let conn_type = conn_type_from_selectors(ft, pf, vc, term);
+            connection_policy_denial_reason_with_grant(
+                SessionAuthKind::OneTimePassword,
+                conn_type,
+                granted_for(conn_type),
+            )
+        };
+        assert_eq!(denial(false, true, false, false), None);
+        assert!(denial(false, false, false, true).is_some());
+        assert!(denial(true, false, false, false).is_some());
+        assert!(denial(false, false, true, false).is_some());
+        // Remote desktop needs no grant.
+        assert_eq!(denial(false, false, false, false), None);
+    }
+
+    #[test]
+    fn switch_sides_needs_local_approval_unless_unattended_or_rolled_back() {
+        use SwitchSidesDecision::*;
+        let policy = |auth, conn, granted, legacy| switch_sides_policy(auth, conn, granted, legacy);
+        for auth in [
+            SessionAuthKind::OneTimePassword,
+            SessionAuthKind::ClickApproval,
+            SessionAuthKind::Unknown,
+        ] {
+            assert_eq!(
+                policy(auth, AuthConnType::Remote, false, false),
+                NeedsApproval
+            );
+            assert_eq!(policy(auth, AuthConnType::Remote, true, false), Allow);
+            assert_eq!(policy(auth, AuthConnType::Remote, false, true), Allow);
+        }
+        assert_eq!(
+            policy(
+                SessionAuthKind::UnattendedPassword,
+                AuthConnType::Remote,
+                false,
+                false
+            ),
+            Allow
+        );
+        // Only a remote-desktop session may ask, whatever else is set.
+        for conn in [
+            AuthConnType::FileTransfer,
+            AuthConnType::PortForward,
+            AuthConnType::ViewCamera,
+            AuthConnType::Terminal,
+        ] {
+            assert!(matches!(
+                policy(SessionAuthKind::UnattendedPassword, conn, true, true),
+                Deny(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn switch_sides_peer_ids_are_checked_before_they_reach_the_command_line() {
+        assert_eq!(
+            switch_sides_peer_id("123456789", ""),
+            Some("123456789".to_owned())
+        );
+        assert_eq!(
+            switch_sides_peer_id("my-host_01", ""),
+            Some("my-host_01".to_owned())
+        );
+        for bad in [
+            "",
+            "12345",
+            "12345678901234567",
+            "--password",
+            "-123456",
+            "123 456",
+            "123456;rm",
+            "123456/../x",
+            "12345?6",
+            "123456=1",
+            "1234&5678",
+            "1234567\n",
+        ] {
+            assert_eq!(switch_sides_peer_id(bad, ""), None, "{bad:?}");
+        }
+        // An @server must be the configured one.
+        assert_eq!(
+            switch_sides_peer_id("123456789@rdv.example", "rdv.example"),
+            Some("123456789@rdv.example".to_owned())
+        );
+        assert_eq!(
+            switch_sides_peer_id("123456789@evil.example", "rdv.example"),
+            None
+        );
+        assert_eq!(switch_sides_peer_id("123456789@rdv.example", ""), None);
+    }
+
+    #[test]
+    fn switch_sides_route_never_falls_back_to_the_id_route_when_it_is_disabled() {
+        let direct = Some("192.0.2.5:21118".to_owned());
+        let inferred = Some("192.0.2.5:21118".to_owned());
+        assert_eq!(
+            switch_sides_target(direct.clone(), None, false, "123456789", ""),
+            direct
+        );
+        assert_eq!(
+            switch_sides_target(None, inferred.clone(), false, "123456789", ""),
+            inferred
+        );
+        // ID/relay route disabled and nothing to infer: refuse.
+        assert_eq!(
+            switch_sides_target(None, None, false, "123456789", ""),
+            None
+        );
+        // ID/relay route allowed: a valid id is used, an invalid one is refused.
+        assert_eq!(
+            switch_sides_target(None, None, true, "123456789", ""),
+            Some("123456789".to_owned())
+        );
+        assert_eq!(switch_sides_target(None, None, true, "--evil", ""), None);
+    }
+
+    #[test]
+    fn switch_sides_tokens_are_consumed_only_by_their_own_uuid() {
+        let now = Instant::now();
+        let mut tokens = HashMap::new();
+        let right = uuid::Uuid::new_v4();
+        let wrong = uuid::Uuid::new_v4();
+        insert_switch_sides_token(&mut tokens, "peer".to_owned(), right, now);
+        // A wrong token neither succeeds nor burns the real one.
+        assert!(!take_switch_sides_token(&mut tokens, &wrong, now));
+        assert!(!take_switch_sides_token(&mut tokens, &wrong, now));
+        assert_eq!(tokens.len(), 1);
+        assert!(take_switch_sides_token(&mut tokens, &right, now));
+        // One use only.
+        assert!(!take_switch_sides_token(&mut tokens, &right, now));
+    }
+
+    #[test]
+    fn switch_sides_tokens_expire_and_stay_bounded() {
+        let now = Instant::now();
+        let mut tokens = HashMap::new();
+        let old = uuid::Uuid::new_v4();
+        insert_switch_sides_token(&mut tokens, "a".to_owned(), old, now);
+        assert!(!take_switch_sides_token(
+            &mut tokens,
+            &old,
+            now + SWITCH_SIDES_TOKEN_TTL
+        ));
+        assert!(tokens.is_empty());
+        for index in 0..(SWITCH_SIDES_MAX_TOKENS * 3) {
+            insert_switch_sides_token(
+                &mut tokens,
+                format!("peer{index}"),
+                uuid::Uuid::new_v4(),
+                now + Duration::from_millis(index as u64),
+            );
+        }
+        assert_eq!(tokens.len(), SWITCH_SIDES_MAX_TOKENS);
+        // The key a spawned client uses ignores the server part and padding.
+        assert_eq!(switch_sides_key(" 123456789@srv "), "123456789");
+    }
+
+    #[test]
+    fn port_forward_ports_are_range_checked() {
+        for port in [1, 22, 3389, 65535] {
+            assert!(port_forward_port_valid(port), "{port}");
+        }
+        for port in [-1, 0, 65536, i32::MAX, i32::MIN] {
+            assert!(!port_forward_port_valid(port), "{port}");
+        }
+    }
+
+    #[test]
+    fn test_delay_before_login_carries_only_the_round_trip() {
+        let telemetry = || TestDelay {
+            target_bitrate: 5000,
+            capture_backend: "dxgi".to_owned(),
+            encoder_backend: "nvenc".to_owned(),
+            requested_video_profile: "movie".to_owned(),
+            last_delay: 999,
+            ..Default::default()
+        };
+        let before = test_delay_message(false, 42, telemetry);
+        assert_eq!(before.last_delay, 42);
+        assert_eq!(before.target_bitrate, 0);
+        assert!(before.capture_backend.is_empty());
+        assert!(before.encoder_backend.is_empty());
+        assert!(before.requested_video_profile.is_empty());
+        let after = test_delay_message(true, 42, telemetry);
+        assert_eq!(after.last_delay, 42);
+        assert_eq!(after.target_bitrate, 5000);
+        assert_eq!(after.capture_backend, "dxgi");
+        // Telemetry is not collected at all before login.
+        let mut collected = false;
+        test_delay_message(false, 1, || {
+            collected = true;
+            TestDelay::default()
+        });
+        assert!(!collected);
+    }
+
+    #[test]
+    fn terminal_account_is_checked_only_after_access_is_accepted() {
+        // Windows terminal login, access not accepted yet: no oracle.
+        assert!(!terminal_os_login_check_allowed(true, false, false));
+        // Access accepted: the account is checked.
+        assert!(terminal_os_login_check_allowed(true, true, false));
+        // Legacy order restores the early check.
+        assert!(terminal_os_login_check_allowed(true, false, true));
+        // Everything that is not an OS-account login is unaffected.
+        assert!(terminal_os_login_check_allowed(false, false, false));
+    }
+
+    #[test]
+    fn prelogin_timeout_defaults_apply_to_every_transport_and_fail_closed() {
+        let ten_minutes = Some(Duration::from_secs(600));
+        assert_eq!(prelogin_timeout_from_value("tcp", ""), ten_minutes);
+        assert_eq!(prelogin_timeout_from_value("quic", ""), ten_minutes);
+        assert_eq!(prelogin_timeout_from_value("tcp", "0"), None);
+        assert_eq!(
+            prelogin_timeout_from_value("tcp", "120"),
+            Some(Duration::from_secs(120))
+        );
+        // Unreadable or out-of-range values keep the default, never "no limit".
+        for bad in ["abc", "-5", "5", "999999", "1.5"] {
+            assert_eq!(
+                prelogin_timeout_from_value("tcp", bad),
+                ten_minutes,
+                "{bad}"
+            );
+        }
+        let now = Instant::now();
+        assert!(prelogin_deadline(now, false).is_some() || prelogin_timeout_for(false).is_none());
+    }
 
     #[test]
     fn prelogin_deadline_only_closes_unauthorized_sessions_after_it_passes() {
@@ -10344,6 +11487,7 @@ mod test {
                 "clipboard",
                 true,
                 true,
+                false,
             ),
             None
         );
@@ -10353,9 +11497,92 @@ mod test {
                 "block_input",
                 true,
                 true,
+                false,
             ),
             None
         );
+    }
+
+    #[test]
+    fn locally_suspended_permissions_need_approval_even_with_a_grant() {
+        // Negative case of the silent re-grant: the grant exists, the local
+        // user switched the permission off, the peer asks again.
+        for name in ["keyboard", "clipboard", "file"] {
+            assert!(
+                switch_permission_policy_denial_reason_with_grant(
+                    SessionAuthKind::OneTimePassword,
+                    name,
+                    true,
+                    true,
+                    true,
+                )
+                .is_some(),
+                "{name}"
+            );
+        }
+        // Unattended sessions are not low-permission and are not affected.
+        assert_eq!(
+            switch_permission_policy_denial_reason_with_grant(
+                SessionAuthKind::UnattendedPassword,
+                "keyboard",
+                true,
+                true,
+                true,
+            ),
+            None
+        );
+        // Turning something off is never refused.
+        assert_eq!(
+            switch_permission_policy_denial_reason_with_grant(
+                SessionAuthKind::OneTimePassword,
+                "keyboard",
+                false,
+                false,
+                true,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn grants_suspend_resume_and_regrant() {
+        let mut grants = SessionPermissionGrants::default();
+        grants.grant("clipboard");
+        assert!(grants.grant_active("clipboard"));
+        grants.suspend("clipboard");
+        assert!(!grants.grant_active("clipboard"));
+        assert!(grants.is_suspended("clipboard"));
+        // Resuming is the local user switching it back on.
+        grants.resume("clipboard");
+        assert!(grants.grant_active("clipboard"));
+        // A new approval clears a suspension as well.
+        grants.suspend("clipboard");
+        grants.grant("clipboard");
+        assert!(grants.grant_active("clipboard"));
+        // Suspending without a grant (keyboard default) is remembered.
+        grants.suspend("keyboard");
+        assert!(grants.is_suspended("keyboard"));
+        assert!(!grants.grant_active("keyboard"));
+        grants.resume("keyboard");
+        assert!(!grants.is_suspended("keyboard"));
+    }
+
+    #[test]
+    fn closing_a_connection_type_locally_revokes_only_that_grant() {
+        let mut grants = SessionPermissionGrants::default();
+        grants
+            .connection_types
+            .insert(connection_type_grant_name(AuthConnType::FileTransfer).to_owned());
+        grants
+            .connection_types
+            .insert(connection_type_grant_name(AuthConnType::Terminal).to_owned());
+        grants.revoke_connection(connection_type_grant_name(AuthConnType::FileTransfer));
+        assert!(!grants
+            .connection_types
+            .contains(connection_type_grant_name(AuthConnType::FileTransfer)));
+        assert!(grants
+            .connection_types
+            .contains(connection_type_grant_name(AuthConnType::Terminal)));
     }
 
     #[test]
@@ -10415,6 +11642,8 @@ mod test {
             name: "clipboard".to_owned(),
             enabled: true,
             requested_at: Instant::now(),
+            shown_at_ms: 0,
+            guard: None,
         };
         let (name, enabled, mismatch) =
             pending_permission_response_values(&pending, "terminal", false);

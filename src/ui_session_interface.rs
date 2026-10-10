@@ -626,9 +626,12 @@ impl<T: InvokeUiSession> Session<T> {
         *self.server_clipboard_enabled.read().unwrap()
             && *self.server_keyboard_enabled.read().unwrap()
             && !self.lc.read().unwrap().disable_clipboard.v
-            && crate::clipboard::is_local_to_remote_clipboard_allowed(
-                crate::clipboard::ClipboardSide::Client,
-            )
+            // The session's own direction, falling back to the global one.
+            && self
+                .lc
+                .read()
+                .unwrap()
+                .is_local_to_remote_clipboard_allowed()
     }
 
     #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
@@ -2450,6 +2453,16 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn tick_render_liveness(&self) {}
     fn display_startup_state(&self, _context: RenderFrameContext, _display: usize, _failed: bool) {}
     fn msgbox(&self, msgtype: &str, title: &str, text: &str, link: &str, retry: bool);
+    /// A message box whose text the remote peer chose. UIs that can tell it
+    /// apart from the application's own prompts override this.
+    fn msgbox_from_peer(&self, msgtype: &str, title: &str, text: &str, link: &str, retry: bool) {
+        let msgtype = if crate::client::is_core_only_msgbox_type(msgtype) {
+            "info"
+        } else {
+            msgtype
+        };
+        self.msgbox(msgtype, title, text, link, retry);
+    }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     fn clipboard(&self, content: String);
     fn cancel_msgbox(&self, tag: &str);
@@ -2518,6 +2531,15 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         self.ui_handler.msgbox(msgtype, title, text, link, retry);
     }
 
+    fn msgbox_from_peer(&self, msgtype: &str, title: &str, text: &str, link: &str) {
+        let direct = self.lc.read().unwrap().direct;
+        let received = self.lc.read().unwrap().received;
+        let retry_for_relay = direct == Some(true) && !received;
+        let retry = check_if_retry(msgtype, title, text, retry_for_relay);
+        self.ui_handler
+            .msgbox_from_peer(msgtype, title, text, link, retry);
+    }
+
     async fn confirm_peer_trust(
         &self,
         peer: &str,
@@ -2525,6 +2547,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         fingerprint: &str,
         trust_phrase: &str,
         direct: bool,
+        context: &crate::client::PeerTrustContext,
     ) -> ResultType<()> {
         #[cfg(feature = "flutter")]
         {
@@ -2544,6 +2567,8 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                 "fingerprint": fingerprint,
                 "trust_phrase": trust_phrase,
                 "direct": direct,
+                "trust_kind": if context.key_change { "key_change" } else { "first_contact" },
+                "previous_fingerprint": context.previous_fingerprint,
             })
             .to_string();
             self.ui_handler.msgbox(
@@ -2571,7 +2596,7 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         }
         #[cfg(not(feature = "flutter"))]
         {
-            let _ = (peer, peer_id, fingerprint, trust_phrase, direct);
+            let _ = (peer, peer_id, fingerprint, trust_phrase, direct, context);
             bail!("Handshake failed: peer trust approval is not supported by this client UI")
         }
     }
