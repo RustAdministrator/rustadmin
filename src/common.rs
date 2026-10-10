@@ -2607,10 +2607,23 @@ pub fn pin_peer_signing_key(peer_config_id: &str, pk: &[u8]) -> ResultType<()> {
     Ok(())
 }
 
+/// Proof that the user was shown the old and the new fingerprint of a peer and
+/// approved replacing the pinned key. Only the handshake code that ran the
+/// confirmation creates it; replacing a pin without one is refused.
+#[derive(Debug)]
+pub struct PinReplacementApproval(());
+
+impl PinReplacementApproval {
+    pub(crate) fn confirmed_by_user() -> Self {
+        Self(())
+    }
+}
+
 pub fn trust_peer_signing_key_after_pairing(
     peer_id: &str,
     peer_config_id: &str,
     pk: &[u8],
+    replacement: Option<&PinReplacementApproval>,
 ) -> ResultType<()> {
     if pk.is_empty() {
         bail!("Handshake failed: empty peer signing key");
@@ -2625,6 +2638,11 @@ pub fn trust_peer_signing_key_after_pairing(
     let previous = config.options.get(PEER_OPTION_PINNED_SIGNING_KEY);
     if previous.map(|value| value.as_str()) != Some(encoded.as_str()) {
         let had_previous = previous.filter(|value| !value.is_empty()).is_some();
+        if had_previous && replacement.is_none() {
+            bail!(
+                "Handshake failed: replacing the pinned key of a peer needs the user's confirmation"
+            );
+        }
         config
             .options
             .insert(PEER_OPTION_PINNED_SIGNING_KEY.to_owned(), encoded);
@@ -6072,6 +6090,30 @@ mod tests {
         assert_ne!(proof, ack_key);
         assert_ne!(ack_key, args("other", &salt).1);
         assert_ne!(ack_key, args("secret", &create_direct_pairing_salt()).1);
+    }
+
+    #[test]
+    fn a_pinned_key_is_replaced_only_with_the_users_approval() {
+        let peer_id = format!("pin-peer-{}", uuid::Uuid::new_v4());
+        let config_id = format!("pin-config-{}", uuid::Uuid::new_v4());
+        let first = [1u8; 32];
+        let second = [2u8; 32];
+        // A first pin needs no approval.
+        trust_peer_signing_key_after_pairing(&peer_id, &config_id, &first, None).unwrap();
+        // The same key again is not a replacement.
+        trust_peer_signing_key_after_pairing(&peer_id, &config_id, &first, None).unwrap();
+        // A different key without the approval is refused and changes nothing.
+        let err = trust_peer_signing_key_after_pairing(&peer_id, &config_id, &second, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("needs the user's confirmation"), "{err}");
+        assert!(has_trusted_peer_signing_key(&config_id, &first).unwrap());
+        // With it, the key is replaced.
+        let approval = PinReplacementApproval::confirmed_by_user();
+        trust_peer_signing_key_after_pairing(&peer_id, &config_id, &second, Some(&approval))
+            .unwrap();
+        assert!(has_trusted_peer_signing_key(&config_id, &second).unwrap());
+        PeerConfig::remove(&config_id);
     }
 
     #[test]

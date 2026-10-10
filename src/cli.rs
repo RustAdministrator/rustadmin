@@ -136,17 +136,40 @@ impl Interface for Session {
         fingerprint: &str,
         trust_phrase: &str,
         direct: bool,
+        context: &crate::client::PeerTrustContext,
     ) -> hbb_common::ResultType<()> {
         let mut stdout = io::stdout();
         writeln!(
             stdout,
-            "{} first-contact trust confirmation",
-            if direct { "Direct" } else { "Secure" }
+            "{} {} trust confirmation",
+            if direct { "Direct" } else { "Secure" },
+            if context.key_change {
+                "KEY CHANGE"
+            } else {
+                "first-contact"
+            }
         )
         .ok();
         writeln!(stdout, "Peer: {}", peer).ok();
         writeln!(stdout, "Peer ID: {}", peer_id).ok();
         writeln!(stdout, "Trust phrase: {}", trust_phrase).ok();
+        if context.key_change {
+            writeln!(
+                stdout,
+                "WARNING: the key of this device is different from the one trusted before."
+            )
+            .ok();
+            writeln!(
+                stdout,
+                "Previously trusted fingerprint: {}",
+                if context.previous_fingerprint.is_empty() {
+                    "(unreadable)"
+                } else {
+                    &context.previous_fingerprint
+                }
+            )
+            .ok();
+        }
         writeln!(stdout, "Fingerprint: {}", fingerprint).ok();
         write!(
             stdout,

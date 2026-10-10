@@ -283,16 +283,52 @@ struct PendingPeerTrust {
     fingerprint: String,
     trust_phrase: String,
     replace_existing_pin: bool,
+    /// Fingerprint of the key that is pinned now, when it is being replaced
+    /// (empty when the pinned value is unreadable).
+    previous_fingerprint: Option<String>,
+}
+
+/// What the user is asked to approve: a device seen for the first time, or a
+/// device whose key differs from the one pinned earlier.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerTrustContext {
+    pub key_change: bool,
+    pub previous_fingerprint: String,
+}
+
+impl PeerTrustContext {
+    pub fn first_contact() -> Self {
+        Self {
+            key_change: false,
+            previous_fingerprint: String::new(),
+        }
+    }
+
+    pub fn key_change(previous_fingerprint: &str) -> Self {
+        Self {
+            key_change: true,
+            previous_fingerprint: previous_fingerprint.to_owned(),
+        }
+    }
 }
 
 impl PendingPeerTrust {
-    fn new(pk: &[u8], replace_existing_pin: bool) -> Self {
+    fn new(pk: &[u8], previous_fingerprint: Option<String>, replace_existing_pin: bool) -> Self {
         let fingerprint = crate::common::pk_to_fingerprint(pk.to_vec());
         let trust_phrase = crate::common::fingerprint_to_trust_phrase(&fingerprint);
         Self {
             fingerprint,
             trust_phrase,
             replace_existing_pin,
+            previous_fingerprint,
+        }
+    }
+
+    fn context(&self) -> PeerTrustContext {
+        match (&self.previous_fingerprint, self.replace_existing_pin) {
+            (Some(previous), true) => PeerTrustContext::key_change(previous),
+            (None, true) => PeerTrustContext::key_change(""),
+            _ => PeerTrustContext::first_contact(),
         }
     }
 }
@@ -304,11 +340,14 @@ fn pending_peer_trust_from_status(
     match status {
         crate::common::TrustedPeerSigningKeyStatus::Trusted => None,
         crate::common::TrustedPeerSigningKeyStatus::Missing => {
-            Some(PendingPeerTrust::new(pk, false))
+            Some(PendingPeerTrust::new(pk, None, false))
         }
-        crate::common::TrustedPeerSigningKeyStatus::Changed { .. }
-        | crate::common::TrustedPeerSigningKeyStatus::InvalidPinnedKey { .. } => {
-            Some(PendingPeerTrust::new(pk, true))
+        crate::common::TrustedPeerSigningKeyStatus::Changed {
+            expected_fingerprint,
+            ..
+        } => Some(PendingPeerTrust::new(pk, Some(expected_fingerprint), true)),
+        crate::common::TrustedPeerSigningKeyStatus::InvalidPinnedKey { .. } => {
+            Some(PendingPeerTrust::new(pk, Some(String::new()), true))
         }
     }
 }
@@ -1431,6 +1470,7 @@ impl Client {
                                 &pending.fingerprint,
                                 &pending.trust_phrase,
                                 false,
+                                &pending.context(),
                             )
                             .await?;
                         crate::common::pin_trusted_peer_signing_key(peer_id, peer_config_id, &pk)?;
@@ -1442,6 +1482,35 @@ impl Client {
                         }
                     }
                 }
+                // Replacing a pinned key is never silent: the user sees the old
+                // and the new fingerprint, whatever else the host proved.
+                if !input.repair_identity_approved
+                    && secure_id.pairing_required
+                    && pending_trust
+                        .as_ref()
+                        .is_some_and(|pending| pending.replace_existing_pin)
+                {
+                    if let Some(pending) = pending_trust.as_ref() {
+                        interface
+                            .confirm_peer_trust(
+                                peer,
+                                peer_id,
+                                &pending.fingerprint,
+                                &pending.trust_phrase,
+                                false,
+                                &pending.context(),
+                            )
+                            .await?;
+                        input.repair_identity_approved = true;
+                        if input.needs_fresh_socket(started) {
+                            input.reopen_requested = true;
+                            return Err(ReopenAfterApproval.into());
+                        }
+                    }
+                }
+                let pin_replacement = input
+                    .repair_identity_approved
+                    .then(crate::common::PinReplacementApproval::confirmed_by_user);
                 let directional =
                     crate::common::viewer_selects_directional_secretbox(secure_id.secure_channel);
                 let (asymmetric_value, symmetric_value, key) =
@@ -1613,6 +1682,7 @@ impl Client {
                         peer_id,
                         peer_config_id,
                         &pk,
+                        pin_replacement.as_ref(),
                     )?;
                     trust_was_confirmed = true;
                 }
@@ -1734,13 +1804,14 @@ impl Client {
                 let mut pending_trust =
                     pending_peer_trust_from_status(signing_key_status, &sign_pk);
                 let mut trust_was_confirmed = false;
-                if input.require_authenticated_repair
-                    && !signing_key_was_trusted
-                    && !input.repair_identity_approved
+                // Replacing a pinned key is never silent: the user sees the old
+                // and the new fingerprint, whatever else the host proved.
+                if !input.repair_identity_approved
+                    && pending_trust
+                        .as_ref()
+                        .is_some_and(|pending| pending.replace_existing_pin)
+                    && direct_id.pairing_required
                 {
-                    // A host accepting a client's pairing proof is not itself
-                    // proof that the host knew that secret. A changed signing
-                    // identity still requires the user's fingerprint check.
                     if let Some(pending) = pending_trust.as_ref() {
                         interface
                             .confirm_peer_trust(
@@ -1749,11 +1820,15 @@ impl Client {
                                 &pending.fingerprint,
                                 &pending.trust_phrase,
                                 true,
+                                &pending.context(),
                             )
                             .await?;
                         input.repair_identity_approved = true;
                     }
                 }
+                let pin_replacement = input
+                    .repair_identity_approved
+                    .then(crate::common::PinReplacementApproval::confirmed_by_user);
                 if let Some(pending) = pending_trust.as_ref() {
                     if !direct_id.pairing_required {
                         if pending.replace_existing_pin {
@@ -1773,6 +1848,7 @@ impl Client {
                                 &pending.fingerprint,
                                 &pending.trust_phrase,
                                 true,
+                                &pending.context(),
                             )
                             .await?;
                         crate::common::pin_trusted_peer_signing_key(
@@ -1954,6 +2030,7 @@ impl Client {
                         &peer_id,
                         peer_config_id,
                         &sign_pk,
+                        pin_replacement.as_ref(),
                     )?;
                     trust_was_confirmed = true;
                 }
@@ -6205,6 +6282,7 @@ pub trait Interface: Send + Sync + Clone + 'static + Sized {
         _fingerprint: &str,
         _trust_phrase: &str,
         _direct: bool,
+        _context: &PeerTrustContext,
     ) -> ResultType<()> {
         bail!("Handshake failed: peer trust approval is not supported by this client UI")
     }
@@ -7937,6 +8015,7 @@ mod security_tests {
     struct TestInterface {
         lch: Arc<RwLock<LoginConfigHandler>>,
         confirm_calls: Arc<Mutex<Vec<(String, String, String, bool)>>>,
+        confirm_contexts: Arc<Mutex<Vec<PeerTrustContext>>>,
         pairing_requests: Arc<Mutex<Vec<(String, String, bool)>>>,
         msgboxes: Arc<Mutex<Vec<(String, String, String)>>>,
         pairing_passphrase: Arc<Mutex<Option<String>>>,
@@ -8000,7 +8079,9 @@ mod security_tests {
             fingerprint: &str,
             _trust_phrase: &str,
             direct: bool,
+            context: &PeerTrustContext,
         ) -> ResultType<()> {
+            self.confirm_contexts.lock().unwrap().push(context.clone());
             self.confirm_calls.lock().unwrap().push((
                 peer.to_owned(),
                 peer_id.to_owned(),
@@ -9473,6 +9554,28 @@ mod security_tests {
         host_sign_sk: sign::SecretKey,
     ) -> ResultType<Vec<u8>> {
         let interface = TestInterface::new(peer_config_id, Some("host-proof-secret"));
+        host_proof_connect_with(
+            &interface,
+            direct,
+            proof,
+            peer_id,
+            peer_config_id,
+            host_sign_pk,
+            host_sign_sk,
+        )
+        .await
+    }
+
+    async fn host_proof_connect_with(
+        interface: &TestInterface,
+        direct: bool,
+        proof: TestHostProof,
+        peer_id: &str,
+        peer_config_id: &str,
+        host_sign_pk: [u8; sign::PUBLICKEYBYTES],
+        host_sign_sk: sign::SecretKey,
+    ) -> ResultType<Vec<u8>> {
+        let interface = interface.clone();
         let channel = TestHostChannel {
             host_proof: proof,
             ..Default::default()
@@ -9712,6 +9815,82 @@ mod security_tests {
             assert!(
                 err.contains("proved its pairing knowledge"),
                 "direct={direct}: {err}"
+            );
+            PeerConfig::remove(&peer_config_id);
+        }
+    }
+
+    #[tokio::test]
+    async fn replacing_a_pinned_key_shows_both_fingerprints_and_needs_approval() {
+        let _guard = lock_security_tests();
+        let _options = HostProofTestOptions::set("");
+        for direct in [true, false] {
+            let peer_id = format!("rotate-peer-{}", Uuid::new_v4());
+            let peer_config_id = format!("rotate-config-{}", Uuid::new_v4());
+            let interface = TestInterface::new(&peer_config_id, Some("host-proof-secret"));
+            let (old_pk, old_sk) = sign::gen_keypair();
+            host_proof_connect_with(
+                &interface,
+                direct,
+                TestHostProof::Proves,
+                &peer_id,
+                &peer_config_id,
+                old_pk.0,
+                old_sk,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("first contact, direct={direct}: {e}"));
+            // Pairing alone established the first pin: nothing to approve.
+            assert!(interface.confirm_calls.lock().unwrap().is_empty());
+
+            // The host shows up with another key and proves it knows the secret.
+            let (new_pk, new_sk) = sign::gen_keypair();
+            *interface.trust_error.lock().unwrap() = Some("declined".to_owned());
+            let err = host_proof_connect_with(
+                &interface,
+                direct,
+                TestHostProof::Proves,
+                &peer_id,
+                &peer_config_id,
+                new_pk.0,
+                new_sk.clone(),
+            )
+            .await
+            .expect_err("a key change needs the user's approval")
+            .to_string();
+            assert!(err.contains("declined"), "direct={direct}: {err}");
+            let contexts = interface.confirm_contexts.lock().unwrap().clone();
+            assert_eq!(
+                contexts,
+                vec![PeerTrustContext::key_change(
+                    &crate::common::pk_to_fingerprint(old_pk.0.to_vec())
+                )],
+                "direct={direct}"
+            );
+            assert!(
+                crate::common::has_trusted_peer_signing_key(&peer_config_id, &old_pk.0).unwrap(),
+                "declined: the old pin stays"
+            );
+            // The new key is still not the pinned one.
+            assert!(
+                crate::common::has_trusted_peer_signing_key(&peer_config_id, &new_pk.0).is_err()
+            );
+
+            // Approved: replaced, and only now.
+            *interface.trust_error.lock().unwrap() = None;
+            host_proof_connect_with(
+                &interface,
+                direct,
+                TestHostProof::Proves,
+                &peer_id,
+                &peer_config_id,
+                new_pk.0,
+                new_sk,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("approved key change, direct={direct}: {e}"));
+            assert!(
+                crate::common::has_trusted_peer_signing_key(&peer_config_id, &new_pk.0).unwrap()
             );
             PeerConfig::remove(&peer_config_id);
         }
