@@ -169,6 +169,10 @@ const String kOptionEnableAudio = "enable-audio";
 const String kOptionEnableCamera = "enable-camera";
 const String kOptionEnableTerminal = "enable-terminal";
 const String kOptionTerminalPersistent = "terminal-persistent";
+// Windows only. "Y" checks the Windows account of a terminal login before the
+// access password or the local approval was accepted (the old order).
+const String kOptionAllowTerminalOsLoginBeforeAuthorization =
+    "allow-terminal-os-login-before-authorization";
 const String kOptionEnableTunnel = "enable-tunnel";
 const String kOptionEnableRemoteRestart = "enable-remote-restart";
 const String kOptionEnableBlockInput = "enable-block-input";
