@@ -645,6 +645,126 @@ void main() {
             .dy,
         greaterThanOrEqualTo(kDesktopRemoteTabBarHeight));
 
+    // Closing everything drops the prompt and its expiry timer.
+    await gFFI.serverModel.closeAll();
+    expect(gFFI.serverModel.permissionRequest, isNull);
     await _disposeCmTestWidget(tester);
+  });
+
+  group('permission prompt hardening', () {
+    Widget overlayApp({
+      required VoidCallback onDecline,
+      required VoidCallback onAllow,
+      bool enterAccelerator = false,
+      Duration armDelay = const Duration(milliseconds: 1000),
+    }) {
+      return MaterialApp(
+        home: Scaffold(
+          body: PermissionRequestOverlay(
+            client: testClients.first,
+            title: 'Allow Clipboard?',
+            risk: 'risk',
+            onDecline: onDecline,
+            onAllow: onAllow,
+            enterAccelerator: enterAccelerator,
+            armDelay: armDelay,
+          ),
+        ),
+      );
+    }
+
+    testWidgets('Allow stays disabled until the guard period has passed',
+        (tester) async {
+      var allowed = 0;
+      await tester.pumpWidget(
+          overlayApp(onDecline: () {}, onAllow: () => allowed++));
+      final allow = find.widgetWithText(ElevatedButton, 'Allow');
+      expect(tester.widget<ElevatedButton>(allow).onPressed, isNull);
+      await tester.tap(allow, warnIfMissed: false);
+      expect(allowed, 0);
+      await tester.pump(const Duration(milliseconds: 1001));
+      expect(tester.widget<ElevatedButton>(allow).onPressed, isNotNull);
+      await tester.tap(allow);
+      expect(allowed, 1);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('Enter activates Decline, not Allow, by default',
+        (tester) async {
+      var declined = 0;
+      var allowed = 0;
+      await tester.pumpWidget(overlayApp(
+        onDecline: () => declined++,
+        onAllow: () => allowed++,
+        armDelay: Duration.zero,
+      ));
+      await tester.pump(const Duration(milliseconds: 10));
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(allowed, 0);
+      expect(declined, 1);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('Enter accelerator waits for the guard period',
+        (tester) async {
+      var allowed = 0;
+      await tester.pumpWidget(overlayApp(
+        onDecline: () {},
+        onAllow: () => allowed++,
+        enterAccelerator: true,
+      ));
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(allowed, 0, reason: 'Enter inside the guard period is ignored');
+      await tester.pump(const Duration(milliseconds: 1001));
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      expect(allowed, 1);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('Escape declines', (tester) async {
+      var declined = 0;
+      await tester.pumpWidget(
+          overlayApp(onDecline: () => declined++, onAllow: () {}));
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pump();
+      expect(declined, 1);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+
+    testWidgets('a request is dropped when it expires or its client is gone',
+        (tester) async {
+      final model = gFFI.serverModel;
+      model.clients
+        ..clear()
+        ..add(Client.fromJson(testClients[0].toJson())..disconnected = false)
+        ..add(Client.fromJson(testClients[1].toJson())..disconnected = false);
+      model.handlePermissionRequestEvent(const ClientPermissionSessionEvent(
+        kind: ClientPermissionKind.request,
+        clientId: 0,
+        requestId: '7',
+        name: 'clipboard',
+        enabled: true,
+      ));
+      expect(model.permissionRequest?.requestId, '7');
+      await tester.pump(kPermissionRequestExpiry + const Duration(seconds: 1));
+      expect(model.permissionRequest, isNull);
+
+      model.handlePermissionRequestEvent(const ClientPermissionSessionEvent(
+        kind: ClientPermissionKind.request,
+        clientId: 1,
+        requestId: '8',
+        name: 'clipboard',
+        enabled: true,
+      ));
+      expect(model.permissionRequest?.requestId, '8');
+      await tester.pump(const Duration(milliseconds: 1));
+      await model.closeAll();
+      await tester.pump();
+      expect(model.permissionRequest, isNull);
+    });
   });
 }

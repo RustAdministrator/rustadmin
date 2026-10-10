@@ -1104,6 +1104,13 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                 enabled: enabled, fakeValue: fakeValue),
             _OptionCheckBox(context, 'Enable terminal', kOptionEnableTerminal,
                 enabled: enabled, fakeValue: fakeValue),
+            if (isWindows)
+              _OptionCheckBox(
+                  context,
+                  'Check Windows account before access approval (terminal)',
+                  kOptionAllowTerminalOsLoginBeforeAuthorization,
+                  enabled: enabled,
+                  fakeValue: fakeValue),
             _OptionCheckBox(
                 context, 'Enable TCP tunneling', kOptionEnableTunnel,
                 enabled: enabled, fakeValue: fakeValue),
@@ -4134,19 +4141,8 @@ Widget _lock(
                             Text(translate(label)).marginOnly(left: 5),
                           ]).marginSymmetric(vertical: 2)),
                   onPressed: () async {
-                    if (await canBeBlocked()) {
-                      showToast(translate(
-                          'Settings are locked during support sessions'));
-                      return;
-                    }
-                    final unlockPin = bind.mainGetUnlockPin();
-                    if (unlockPin.isEmpty || isUnlockPinDisabled()) {
-                      bool checked = await callMainCheckSuperUserPermission();
-                      if (checked) {
-                        onUnlock();
-                      }
-                    } else {
-                      checkUnlockPinDialog(unlockPin, onUnlock);
+                    if (await requestSettingsWriteAccess()) {
+                      onUnlock();
                     }
                   },
                 ).marginSymmetric(horizontal: 2, vertical: 4),

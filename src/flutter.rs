@@ -2999,6 +2999,29 @@ impl InvokeUiSession for FlutterHandler {
         );
     }
 
+    fn msgbox_from_peer(&self, msgtype: &str, title: &str, text: &str, link: &str, retry: bool) {
+        // Text the remote peer chose: tagged, and never one of our own prompts.
+        let msgtype = if crate::client::is_core_only_msgbox_type(msgtype) {
+            log::warn!("Ignoring core-only message box type from the peer: {msgtype}");
+            "info"
+        } else {
+            msgtype
+        };
+        let has_retry = if retry { "true" } else { "" };
+        self.push_event(
+            "msgbox",
+            &[
+                ("type", msgtype),
+                ("title", title),
+                ("text", text),
+                ("link", link),
+                ("hasRetry", has_retry),
+                ("origin", "peer"),
+            ],
+            &[],
+        );
+    }
+
     fn cancel_msgbox(&self, tag: &str) {
         self.push_event("cancel_msgbox", &[("tag", tag)], &[]);
     }

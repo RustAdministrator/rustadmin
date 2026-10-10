@@ -2822,10 +2822,16 @@ void changeUnlockPinDialog(String oldPin, Function() callback) {
   });
 }
 
-void checkUnlockPinDialog(String correctPin, Function() passCallback) {
+void checkUnlockPinDialog(String correctPin, Function() passCallback,
+    {Function()? onCancel}) {
   final controller = TextEditingController();
   String? errorText;
   gFFI.dialogManager.show((setState, close, context) {
+    void cancel() {
+      onCancel?.call();
+      close();
+    }
+
     submit() async {
       final pin = controller.text.trim();
       if (correctPin != pin) {
@@ -2852,11 +2858,11 @@ void checkUnlockPinDialog(String correctPin, Function() passCallback) {
         ],
       ).marginOnly(bottom: 12),
       actions: [
-        dialogButton(translate("Cancel"), onPressed: close, isOutline: true),
+        dialogButton(translate("Cancel"), onPressed: cancel, isOutline: true),
         dialogButton(translate("OK"), onPressed: submit),
       ],
       onSubmit: submit,
-      onCancel: close,
+      onCancel: cancel,
     );
   });
 }
