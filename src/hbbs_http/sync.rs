@@ -43,6 +43,11 @@ fn is_protected_remote_option(key: &str) -> bool {
             | keys::OPTION_ALLOW_REMOTE_CONFIG_MODIFICATION
             | keys::OPTION_PERMISSION_PROMPT_GLOBAL_INPUT_BLOCK
             | keys::OPTION_PERMISSION_REGRANT_WITHOUT_PROMPT
+            | keys::OPTION_QUIC_PRELOGIN_TIMEOUT_SECS
+            | keys::OPTION_TCP_PRELOGIN_TIMEOUT_SECS
+            | keys::OPTION_PRELOGIN_LIMIT_MODE
+            | keys::OPTION_PRELOGIN_MAX_PER_SOURCE
+            | keys::OPTION_PRELOGIN_MAX_TOTAL
             | keys::OPTION_KEY
             | "rendezvous-servers"
     )
@@ -387,6 +392,15 @@ mod tests {
         assert!(is_protected_remote_option(
             keys::OPTION_PERMISSION_REGRANT_WITHOUT_PROMPT
         ));
+        for key in [
+            keys::OPTION_QUIC_PRELOGIN_TIMEOUT_SECS,
+            keys::OPTION_TCP_PRELOGIN_TIMEOUT_SECS,
+            keys::OPTION_PRELOGIN_LIMIT_MODE,
+            keys::OPTION_PRELOGIN_MAX_PER_SOURCE,
+            keys::OPTION_PRELOGIN_MAX_TOTAL,
+        ] {
+            assert!(is_protected_remote_option(key), "{key}");
+        }
     }
 
     #[test]

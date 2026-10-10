@@ -1562,8 +1562,11 @@ pub struct Connection {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     start_cm_ipc_para: Option<StartCmIpcPara>,
     auto_disconnect_timer: Option<(Instant, u64)>,
-    /// Set for QUIC sessions when `quic-prelogin-timeout-secs` is configured.
+    /// Deadline for the session to log in (all transports, see `prelogin_timeout_for`).
     prelogin_deadline: Option<Instant>,
+    /// Frees the pre-login admission slot when the session logs in or ends.
+    #[allow(dead_code)] // held for its `Drop`
+    prelogin_ticket: Option<super::prelogin_admission::PreloginTicket>,
     authed_conn_id: Option<self::raii::AuthedConnID>,
     session_auth_kind: SessionAuthKind,
     file_remove_log_control: FileRemoveLogControl,
@@ -1662,14 +1665,35 @@ const SEND_TIMEOUT_VIDEO_STARTUP: u64 = 60_000;
 const VIDEO_STARTUP_SEND_TIMEOUT_WINDOW: Duration = Duration::from_secs(60);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Deadline for a QUIC session to become authorized when the host set
-/// `quic-prelogin-timeout-secs`; by default sessions may wait indefinitely,
-/// e.g. for a password or for the user to accept them.
-fn quic_prelogin_deadline(now: Instant) -> Option<Instant> {
-    let timeout = hbb_common::transport::configuration::NetworkTransportConfig::load()
-        .ok()?
-        .prelogin_timeout?;
-    now.checked_add(timeout)
+/// How long a session may wait to become authorized. QUIC sessions read
+/// `quic-prelogin-timeout-secs`, TCP and relayed sessions
+/// `tcp-prelogin-timeout-secs`; both default to ten minutes, `0` disables.
+/// An unreadable value keeps the default instead of lifting the limit.
+fn prelogin_timeout_for(is_quic: bool) -> Option<Duration> {
+    use hbb_common::config::keys;
+    let key = if is_quic {
+        keys::OPTION_QUIC_PRELOGIN_TIMEOUT_SECS
+    } else {
+        keys::OPTION_TCP_PRELOGIN_TIMEOUT_SECS
+    };
+    prelogin_timeout_from_value(key, &Config::get_option(key))
+}
+
+fn prelogin_timeout_from_value(key: &str, value: &str) -> Option<Duration> {
+    use hbb_common::transport::configuration::{
+        parse_prelogin_timeout, DEFAULT_PRELOGIN_TIMEOUT_SECS,
+    };
+    match parse_prelogin_timeout(value) {
+        Ok(timeout) => timeout,
+        Err(error) => {
+            log::warn!("Ignoring invalid {key}: {error}");
+            Some(Duration::from_secs(DEFAULT_PRELOGIN_TIMEOUT_SECS))
+        }
+    }
+}
+
+fn prelogin_deadline(now: Instant, is_quic: bool) -> Option<Instant> {
+    now.checked_add(prelogin_timeout_for(is_quic)?)
 }
 
 fn prelogin_expired(authorized: bool, deadline: Option<Instant>, now: Instant) -> bool {
@@ -1738,16 +1762,13 @@ impl Connection {
         id: i32,
         server: super::ServerPtrWeak,
         control_permissions: Option<ControlPermissions>,
+        prelogin_ticket: super::prelogin_admission::PreloginTicket,
     ) {
         // Android is not supported yet, so we always set control_permissions to None.
         #[cfg(target_os = "android")]
         let control_permissions = None;
         let _raii_id = raii::ConnectionID::new(id);
-        let prelogin_deadline = if stream.is_quic() {
-            quic_prelogin_deadline(Instant::now())
-        } else {
-            None
-        };
+        let prelogin_deadline = prelogin_deadline(Instant::now(), stream.is_quic());
         let stream = stream
             .into_duplex_with_context(SERVER_ASYNC_OUTBOX_CAPACITY, format!("host_conn={id}"));
         let _raii_control_permissions_id =
@@ -1867,6 +1888,7 @@ impl Connection {
             }),
             auto_disconnect_timer: None,
             prelogin_deadline,
+            prelogin_ticket: Some(prelogin_ticket),
             authed_conn_id: None,
             session_auth_kind: SessionAuthKind::Unknown,
             file_remove_log_control: FileRemoveLogControl::new(id),
@@ -2521,7 +2543,7 @@ impl Connection {
                     raii::AuthedConnID::check_wake_lock_on_setting_changed();
                     if prelogin_expired(conn.authorized, conn.prelogin_deadline, Instant::now()) {
                         log::warn!(
-                            "#{} QUIC session was not authorized within the pre-login timeout",
+                            "#{} session was not authorized within the pre-login timeout",
                             conn.inner.id()
                         );
                         conn.send_close_reason_no_retry("Login timed out").await;
@@ -3787,6 +3809,7 @@ impl Connection {
             return false;
         }
         self.authorized = true;
+        self.prelogin_ticket = None;
         let auth_conn_type = self.current_conn_type();
         let conn_type = conn_type_audit_code(auth_conn_type);
         self.authed_conn_id = Some(self::raii::AuthedConnID::new(
@@ -9527,6 +9550,24 @@ mod test {
         assert!(denial(false, false, true, false).is_some());
         // Remote desktop needs no grant.
         assert_eq!(denial(false, false, false, false), None);
+    }
+
+    #[test]
+    fn prelogin_timeout_defaults_apply_to_every_transport_and_fail_closed() {
+        let ten_minutes = Some(Duration::from_secs(600));
+        assert_eq!(prelogin_timeout_from_value("tcp", ""), ten_minutes);
+        assert_eq!(prelogin_timeout_from_value("quic", ""), ten_minutes);
+        assert_eq!(prelogin_timeout_from_value("tcp", "0"), None);
+        assert_eq!(
+            prelogin_timeout_from_value("tcp", "120"),
+            Some(Duration::from_secs(120))
+        );
+        // Unreadable or out-of-range values keep the default, never "no limit".
+        for bad in ["abc", "-5", "5", "999999", "1.5"] {
+            assert_eq!(prelogin_timeout_from_value("tcp", bad), ten_minutes, "{bad}");
+        }
+        let now = Instant::now();
+        assert!(prelogin_deadline(now, false).is_some() || prelogin_timeout_for(false).is_none());
     }
 
     #[test]
