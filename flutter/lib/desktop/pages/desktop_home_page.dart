@@ -273,12 +273,16 @@ class _DesktopHomePageState extends State<DesktopHomePage>
         }
       },
       itemBuilder: (_) {
-        final items = <PopupMenuEntry<_HomePageMenuAction>>[
-          const PopupMenuItem<_HomePageMenuAction>(
-            value: _HomePageMenuAction.quickStart,
-            child: Text('Quick start'),
-          ),
-        ];
+        final items = <PopupMenuEntry<_HomePageMenuAction>>[];
+        // The wizard only changes settings: not offered where they are disabled.
+        if (!bind.isDisableSettings()) {
+          items.add(
+            const PopupMenuItem<_HomePageMenuAction>(
+              value: _HomePageMenuAction.quickStart,
+              child: Text('Quick start'),
+            ),
+          );
+        }
         if (!bind.isDisableSettings()) {
           items.add(
             PopupMenuItem<_HomePageMenuAction>(

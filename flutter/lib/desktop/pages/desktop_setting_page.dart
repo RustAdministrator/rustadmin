@@ -4141,19 +4141,8 @@ Widget _lock(
                             Text(translate(label)).marginOnly(left: 5),
                           ]).marginSymmetric(vertical: 2)),
                   onPressed: () async {
-                    if (await canBeBlocked()) {
-                      showToast(translate(
-                          'Settings are locked during support sessions'));
-                      return;
-                    }
-                    final unlockPin = bind.mainGetUnlockPin();
-                    if (unlockPin.isEmpty || isUnlockPinDisabled()) {
-                      bool checked = await callMainCheckSuperUserPermission();
-                      if (checked) {
-                        onUnlock();
-                      }
-                    } else {
-                      checkUnlockPinDialog(unlockPin, onUnlock);
+                    if (await requestSettingsWriteAccess()) {
+                      onUnlock();
                     }
                   },
                 ).marginSymmetric(horizontal: 2, vertical: 4),
