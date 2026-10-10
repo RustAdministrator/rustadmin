@@ -279,6 +279,26 @@ pub(crate) struct ClientClipboardContext {
 /// Client of the remote desktop.
 pub struct Client;
 
+/// Message-box types only this application raises itself (the security and the
+/// credential prompts). Kept in step with `kCoreOnlyMessageBoxTypes` in the UI.
+pub fn is_core_only_msgbox_type(msgtype: &str) -> bool {
+    matches!(
+        msgtype,
+        "input-pairing-passphrase"
+            | "input-direct-pairing-passphrase"
+            | "confirm-peer-trust"
+            | "confirm-direct-trust"
+            | "re-input-password"
+            | "input-password"
+            | "input-2fa"
+            | "session-login"
+            | "session-re-login"
+            | "session-login-password"
+            | "terminal-admin-login"
+            | "terminal-admin-login-password"
+    )
+}
+
 struct PendingPeerTrust {
     fingerprint: String,
     trust_phrase: String,
@@ -4520,7 +4540,7 @@ impl LoginConfigHandler {
         }
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "ios"))]
     pub(crate) fn clipboard_direction_policy(&self) -> crate::clipboard::ClipboardDirectionPolicy {
         let value = self.get_option(keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION);
         if value.is_empty() {
@@ -4531,7 +4551,7 @@ impl LoginConfigHandler {
         crate::clipboard::clipboard_direction_policy_from_option_value(&value)
     }
 
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[cfg(not(target_os = "ios"))]
     pub(crate) fn is_local_to_remote_clipboard_allowed(&self) -> bool {
         self.clipboard_direction_policy().allows_local_to_remote()
     }
@@ -6259,6 +6279,17 @@ pub trait Interface: Send + Sync + Clone + 'static + Sized {
     /// Send message data to remote peer.
     fn send(&self, data: Data);
     fn msgbox(&self, msgtype: &str, title: &str, text: &str, link: &str);
+    /// A message box whose text the remote peer chose. Our own security and
+    /// credential prompts are never raised on its say-so.
+    fn msgbox_from_peer(&self, msgtype: &str, title: &str, text: &str, link: &str) {
+        let msgtype = if is_core_only_msgbox_type(msgtype) {
+            log::warn!("Downgraded core-only message box type from the peer: {msgtype}");
+            "info"
+        } else {
+            msgtype
+        };
+        self.msgbox(msgtype, title, text, link);
+    }
     fn handle_login_error(&self, err: &str) -> bool;
     fn handle_peer_info(&self, pi: PeerInfo);
     fn set_multiple_windows_session(&self, sessions: Vec<WindowsSession>);

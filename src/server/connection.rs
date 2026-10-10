@@ -1511,6 +1511,24 @@ const SWITCH_SIDES_PERMISSION: &str = "switch_sides";
 /// Ids of prompts the host raises itself start here, away from the ids a peer
 /// picks for its own requests.
 const LOCAL_PERMISSION_REQUEST_ID_BASE: u64 = 1 << 63;
+/// The TestDelay a host sends to a peer. Without an authorized session only
+/// the measured round trip is included and the telemetry is not even gathered.
+fn test_delay_message(
+    authorized: bool,
+    last_delay: u32,
+    telemetry: impl FnOnce() -> TestDelay,
+) -> TestDelay {
+    if !authorized {
+        return TestDelay {
+            last_delay,
+            ..Default::default()
+        };
+    }
+    let mut message = telemetry();
+    message.last_delay = last_delay;
+    message
+}
+
 const SWITCH_SIDES_TOKEN_TTL: Duration = Duration::from_secs(10);
 const SWITCH_SIDES_MAX_TOKENS: usize = 8;
 
@@ -2759,86 +2777,94 @@ impl Connection {
                     // The control end will jump out of the loop after receiving LoginResponse and will not reply to the TestDelay
                     if conn.last_test_delay.is_none() && !(conn.port_forward_socket.is_some() && conn.authorized) {
                         conn.last_test_delay = Some(Instant::now());
-                        let (
-                            target_bitrate,
-                            capture_backend,
-                            capture_frame,
-                            encoder_backend,
-                            encoder_input,
-                            target_fps,
-                            pacing_fps,
-                            host_pipeline_p95_us,
-                        ) = {
-                            let video_qos = video_service::VIDEO_QOS.lock().unwrap();
-                            let video_service_name = video_service::get_service_name(
-                                conn.video_source(),
-                                conn.display_idx,
-                            );
-                            let (
-                                capture_backend,
-                                capture_frame,
-                                encoder_backend,
-                                encoder_input,
-                            ) =
-                                video_qos.pipeline_status(&video_service_name);
-                            let (target_fps, pacing_fps, host_pipeline_p95_us) =
-                                video_qos.movie_runtime_status(&video_service_name);
-                            (
-                                video_qos.bitrate(&video_service_name),
-                                capture_backend.unwrap_or_default(),
-                                capture_frame.unwrap_or_default(),
-                                encoder_backend.unwrap_or_default(),
-                                encoder_input.unwrap_or_default(),
-                                target_fps,
-                                pacing_fps,
-                                host_pipeline_p95_us,
-                            )
-                        };
-                        let delivery_status = conn.video_delivery.status(conn.display_idx as i32);
+                        // Before login the peer gets the round-trip figure only;
+                        // the pipeline details are for an authorized session.
+                        let test_delay = test_delay_message(
+                            conn.authorized,
+                            conn.network_delay,
+                            || {
+                                let (
+                                    target_bitrate,
+                                    capture_backend,
+                                    capture_frame,
+                                    encoder_backend,
+                                    encoder_input,
+                                    target_fps,
+                                    pacing_fps,
+                                    host_pipeline_p95_us,
+                                ) = {
+                                    let video_qos = video_service::VIDEO_QOS.lock().unwrap();
+                                    let video_service_name = video_service::get_service_name(
+                                        conn.video_source(),
+                                        conn.display_idx,
+                                    );
+                                    let (
+                                        capture_backend,
+                                        capture_frame,
+                                        encoder_backend,
+                                        encoder_input,
+                                    ) =
+                                        video_qos.pipeline_status(&video_service_name);
+                                    let (target_fps, pacing_fps, host_pipeline_p95_us) =
+                                        video_qos.movie_runtime_status(&video_service_name);
+                                    (
+                                        video_qos.bitrate(&video_service_name),
+                                        capture_backend.unwrap_or_default(),
+                                        capture_frame.unwrap_or_default(),
+                                        encoder_backend.unwrap_or_default(),
+                                        encoder_input.unwrap_or_default(),
+                                        target_fps,
+                                        pacing_fps,
+                                        host_pipeline_p95_us,
+                                    )
+                                };
+                                let delivery_status = conn.video_delivery.status(conn.display_idx as i32);
+                                TestDelay{
+                                    target_bitrate,
+                                    capture_backend,
+                                    capture_frame,
+                                    encoder_backend,
+                                    encoder_input,
+                                    video_delivery_phase: delivery_status
+                                        .map(|status| status.phase.as_str().to_owned())
+                                        .unwrap_or_default(),
+                                    video_recovery_count: delivery_status
+                                        .map(|status| status.recovery_count)
+                                        .unwrap_or_default(),
+                                    video_stall_ms: delivery_status
+                                        .map(|status| status.latest_stall_ms)
+                                        .unwrap_or_default(),
+                                    requested_video_profile: conn
+                                        .requested_video_profile
+                                        .config_value()
+                                        .to_owned(),
+                                    effective_video_profile: conn
+                                        .effective_movie_mode
+                                        .profile_label()
+                                        .to_owned(),
+                                    target_fps,
+                                    pacing_fps,
+                                    host_pipeline_p95_us,
+                                    movie_fallback_reason: match conn
+                                        .effective_movie_mode
+                                        .fallback_reason()
+                                    {
+                                        "none" => String::new(),
+                                        reason => reason.to_owned(),
+                                    },
+                                    movie_playout_delay_ms: if conn.requested_video_profile
+                                        == VideoProfile::Movie
+                                    {
+                                        MOVIE_PLAYOUT_DELAY_MS
+                                    } else {
+                                        0
+                                    },
+                                    ..Default::default()
+                                }
+                            },
+                        );
                         let mut msg_out = Message::new();
-                        msg_out.set_test_delay(TestDelay{
-                            last_delay: conn.network_delay,
-                            target_bitrate,
-                            capture_backend,
-                            capture_frame,
-                            encoder_backend,
-                            encoder_input,
-                            video_delivery_phase: delivery_status
-                                .map(|status| status.phase.as_str().to_owned())
-                                .unwrap_or_default(),
-                            video_recovery_count: delivery_status
-                                .map(|status| status.recovery_count)
-                                .unwrap_or_default(),
-                            video_stall_ms: delivery_status
-                                .map(|status| status.latest_stall_ms)
-                                .unwrap_or_default(),
-                            requested_video_profile: conn
-                                .requested_video_profile
-                                .config_value()
-                                .to_owned(),
-                            effective_video_profile: conn
-                                .effective_movie_mode
-                                .profile_label()
-                                .to_owned(),
-                            target_fps,
-                            pacing_fps,
-                            host_pipeline_p95_us,
-                            movie_fallback_reason: match conn
-                                .effective_movie_mode
-                                .fallback_reason()
-                            {
-                                "none" => String::new(),
-                                reason => reason.to_owned(),
-                            },
-                            movie_playout_delay_ms: if conn.requested_video_profile
-                                == VideoProfile::Movie
-                            {
-                                MOVIE_PLAYOUT_DELAY_MS
-                            } else {
-                                0
-                            },
-                            ..Default::default()
-                        });
+                        msg_out.set_test_delay(test_delay);
                         conn.send(msg_out.into()).await;
                     }
                     if conn.is_authed_remote_conn() || conn.view_camera {
@@ -10096,6 +10122,35 @@ mod test {
         for port in [-1, 0, 65536, i32::MAX, i32::MIN] {
             assert!(!port_forward_port_valid(port), "{port}");
         }
+    }
+
+    #[test]
+    fn test_delay_before_login_carries_only_the_round_trip() {
+        let telemetry = || TestDelay {
+            target_bitrate: 5000,
+            capture_backend: "dxgi".to_owned(),
+            encoder_backend: "nvenc".to_owned(),
+            requested_video_profile: "movie".to_owned(),
+            last_delay: 999,
+            ..Default::default()
+        };
+        let before = test_delay_message(false, 42, telemetry);
+        assert_eq!(before.last_delay, 42);
+        assert_eq!(before.target_bitrate, 0);
+        assert!(before.capture_backend.is_empty());
+        assert!(before.encoder_backend.is_empty());
+        assert!(before.requested_video_profile.is_empty());
+        let after = test_delay_message(true, 42, telemetry);
+        assert_eq!(after.last_delay, 42);
+        assert_eq!(after.target_bitrate, 5000);
+        assert_eq!(after.capture_backend, "dxgi");
+        // Telemetry is not collected at all before login.
+        let mut collected = false;
+        test_delay_message(false, 1, || {
+            collected = true;
+            TestDelay::default()
+        });
+        assert!(!collected);
     }
 
     #[test]

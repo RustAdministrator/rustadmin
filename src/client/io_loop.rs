@@ -2934,8 +2934,14 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
                     }
                     #[cfg(target_os = "android")]
-                    if !self.handler.lc.read().unwrap().disable_clipboard.v {
-                        crate::clipboard::handle_msg_clipboard(cb);
+                    {
+                        let lc = self.handler.lc.read().unwrap();
+                        if !lc.disable_clipboard.v
+                            && lc.clipboard_direction_policy().allows_remote_to_local()
+                        {
+                            drop(lc);
+                            crate::clipboard::handle_msg_clipboard(cb);
+                        }
                     }
                 }
                 Some(message::Union::MultiClipboards(_mcb)) => {
@@ -2954,8 +2960,14 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
                     }
                     #[cfg(target_os = "android")]
-                    if !self.handler.lc.read().unwrap().disable_clipboard.v {
-                        crate::clipboard::handle_msg_multi_clipboards(_mcb);
+                    {
+                        let lc = self.handler.lc.read().unwrap();
+                        if !lc.disable_clipboard.v
+                            && lc.clipboard_direction_policy().allows_remote_to_local()
+                        {
+                            drop(lc);
+                            crate::clipboard::handle_msg_multi_clipboards(_mcb);
+                        }
                     }
                 }
                 #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
@@ -3606,8 +3618,9 @@ impl<T: InvokeUiSession> Remote<T> {
                     if !msgbox.link.is_empty() {
                         log::warn!("Message box ignored external link");
                     }
+                    // The text is the peer's own: tagged as such for the UI.
                     self.handler
-                        .msgbox(&msgbox.msgtype, &msgbox.title, &msgbox.text, "");
+                        .msgbox_from_peer(&msgbox.msgtype, &msgbox.title, &msgbox.text, "");
                 }
                 Some(message::Union::VoiceCallRequest(request)) => {
                     if request.is_connect {
