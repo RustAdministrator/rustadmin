@@ -1500,8 +1500,147 @@ fn permission_request_label(name: &str) -> &'static str {
         "port_forward" => "TCP tunneling",
         "view_camera" => "camera viewing",
         "terminal" => "terminal access",
+        "switch_sides" => "switching sides",
         _ => "permission",
     }
+}
+
+/// Name the host gives to the local prompt that asks whether this device may
+/// connect back to the requesting peer ("switch sides").
+const SWITCH_SIDES_PERMISSION: &str = "switch_sides";
+/// Ids of prompts the host raises itself start here, away from the ids a peer
+/// picks for its own requests.
+const LOCAL_PERMISSION_REQUEST_ID_BASE: u64 = 1 << 63;
+const SWITCH_SIDES_TOKEN_TTL: Duration = Duration::from_secs(10);
+const SWITCH_SIDES_MAX_TOKENS: usize = 8;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SwitchSidesDecision {
+    Allow,
+    NeedsApproval,
+    Deny(&'static str),
+}
+
+/// Whether a peer's request that this device connect back to it may proceed.
+/// Only a remote-desktop session can ask; unattended sessions, sessions that
+/// were granted it and the `allow-unapproved-switch-sides` rollback skip the
+/// local prompt.
+#[allow(dead_code)]
+fn switch_sides_policy(
+    auth_kind: SessionAuthKind,
+    conn_type: AuthConnType,
+    granted: bool,
+    allow_unapproved: bool,
+) -> SwitchSidesDecision {
+    if conn_type != AuthConnType::Remote {
+        return SwitchSidesDecision::Deny(
+            "Switching sides is available for remote desktop sessions only.",
+        );
+    }
+    if allow_unapproved || granted || auth_kind.is_unattended_access() {
+        return SwitchSidesDecision::Allow;
+    }
+    SwitchSidesDecision::NeedsApproval
+}
+
+/// A peer id that is safe to hand to `--connect`: 6..=16 letters, digits,
+/// `_` or `-` (not starting with `-`), optionally followed by `@server`, which
+/// must be the rendezvous server this device is configured for.
+#[allow(dead_code)]
+fn switch_sides_peer_id(peer_id: &str, configured_server: &str) -> Option<String> {
+    let (base, server) = match peer_id.split_once('@') {
+        Some((base, server)) => (base, Some(server)),
+        None => (peer_id, None),
+    };
+    let valid_base = (6..=16).contains(&base.len())
+        && !base.starts_with('-')
+        && base
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if !valid_base {
+        return None;
+    }
+    if let Some(server) = server {
+        let configured = configured_server.trim();
+        if configured.is_empty() || server != configured {
+            return None;
+        }
+    }
+    Some(peer_id.to_owned())
+}
+
+/// Where the connect-back goes. A direct endpoint the peer announced for its
+/// own address wins; with the ID/relay route disabled only an endpoint inferred
+/// from the observed address is acceptable, never the rendezvous id.
+#[allow(dead_code)]
+fn switch_sides_target(
+    direct_endpoint: Option<String>,
+    inferred_endpoint: Option<String>,
+    allow_id_relay: bool,
+    peer_id: &str,
+    configured_server: &str,
+) -> Option<String> {
+    if let Some(endpoint) = direct_endpoint {
+        return Some(endpoint);
+    }
+    if !allow_id_relay {
+        return inferred_endpoint;
+    }
+    switch_sides_peer_id(peer_id, configured_server)
+}
+
+/// Removes the token for `uuid` if it is there and has not expired. Expired
+/// tokens are dropped on the way; a token with another uuid is never touched.
+#[allow(dead_code)]
+fn take_switch_sides_token(
+    tokens: &mut HashMap<String, (Instant, uuid::Uuid)>,
+    uuid: &uuid::Uuid,
+    now: Instant,
+) -> bool {
+    tokens
+        .retain(|_, (created, _)| now.saturating_duration_since(*created) < SWITCH_SIDES_TOKEN_TTL);
+    match tokens.iter().find(|(_, (_, stored))| stored == uuid) {
+        Some((key, _)) => {
+            let key = key.clone();
+            tokens.remove(&key);
+            true
+        }
+        None => false,
+    }
+}
+
+#[allow(dead_code)]
+fn insert_switch_sides_token(
+    tokens: &mut HashMap<String, (Instant, uuid::Uuid)>,
+    key: String,
+    uuid: uuid::Uuid,
+    now: Instant,
+) {
+    tokens
+        .retain(|_, (created, _)| now.saturating_duration_since(*created) < SWITCH_SIDES_TOKEN_TTL);
+    while tokens.len() >= SWITCH_SIDES_MAX_TOKENS && !tokens.contains_key(&key) {
+        let Some(oldest) = tokens
+            .iter()
+            .min_by_key(|(_, (created, _))| *created)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        tokens.remove(&oldest);
+    }
+    tokens.insert(key, (now, uuid));
+}
+
+/// The peer id without a `@server` part or padding, the key the spawned client
+/// and the host agree on.
+#[allow(dead_code)]
+fn switch_sides_key(id: &str) -> String {
+    id.trim().split('@').next().unwrap_or("").to_owned()
+}
+
+#[allow(dead_code)]
+fn port_forward_port_valid(port: i32) -> bool {
+    (1..=65535).contains(&port)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -1636,6 +1775,11 @@ pub struct Connection {
     terminal_user_token: Option<TerminalUserToken>,
     terminal_generic_service: Option<Box<GenericService>>,
     pending_permission_requests: HashMap<u64, PendingPermissionRequest>,
+    /// (request id, connect target, token) of a switch-sides request that waits
+    /// for the local user.
+    #[cfg(feature = "flutter")]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pending_switch_sides: Option<(u64, String, uuid::Uuid)>,
     video_feedback_by_display: HashMap<i32, VideoFeedbackDiagnostics>,
     video_feedback_capable: AtomicBool,
     video_delivery: VideoDeliveryController,
@@ -1946,6 +2090,9 @@ impl Connection {
             terminal_user_token: None,
             terminal_generic_service: None,
             pending_permission_requests: HashMap::new(),
+            #[cfg(feature = "flutter")]
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            pending_switch_sides: None,
             video_feedback_by_display: HashMap::new(),
             video_feedback_capable: AtomicBool::new(false),
             video_delivery: VideoDeliveryController::default(),
@@ -2149,10 +2296,14 @@ impl Connection {
                             enabled,
                             approved,
                         } => {
-                            conn.handle_permission_request_result(
-                                request_id, name, enabled, approved,
-                            )
-                            .await;
+                            if !conn
+                                .handle_permission_request_result(
+                                    request_id, name, enabled, approved,
+                                )
+                                .await
+                            {
+                                break;
+                            }
                         }
                         ipc::Data::RawMessage(bytes) => {
                             let bytes_len = bytes.len();
@@ -3255,6 +3406,60 @@ impl Connection {
             ));
     }
 
+    /// Ends this session and starts the local client that connects back.
+    #[cfg(feature = "flutter")]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    async fn start_switch_sides(&mut self, connect_target: String, uuid: uuid::Uuid) -> bool {
+        crate::server::insert_pending_switch_sides_uuid(connect_target.clone(), uuid);
+        // The token travels over the local IPC, not on the command line.
+        spawn_switch_sides_client(&connect_target);
+        self.on_close("switch sides", false).await;
+        false
+    }
+
+    /// Asks the local user before this device connects back to a peer.
+    #[cfg(feature = "flutter")]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    async fn request_switch_sides_approval(&mut self, connect_target: String, uuid: uuid::Uuid) {
+        self.cleanup_pending_permission_requests();
+        if self.pending_switch_sides.is_some() || self.pending_permission_requests.len() >= 16 {
+            log::warn!("Ignored switch sides request: another prompt is already pending");
+            return;
+        }
+        let mut request_id = LOCAL_PERMISSION_REQUEST_ID_BASE;
+        while self.pending_permission_requests.contains_key(&request_id) {
+            request_id += 1;
+        }
+        let guard =
+            permission_prompt_overlay_available().then(permission_prompt::PromptGuard::register);
+        let shown_at_ms = guard
+            .as_ref()
+            .map(permission_prompt::PromptGuard::started_ms)
+            .unwrap_or_else(permission_prompt::mono_ms);
+        self.pending_permission_requests.insert(
+            request_id,
+            PendingPermissionRequest {
+                name: SWITCH_SIDES_PERMISSION.to_owned(),
+                enabled: true,
+                requested_at: Instant::now(),
+                shown_at_ms,
+                guard,
+            },
+        );
+        self.pending_switch_sides = Some((request_id, connect_target, uuid));
+        self.sync_input_pause();
+        self.revoke_remote_input_authorization();
+        log::info!(
+            "Asking the local user to allow switching sides for {} session",
+            self.session_auth_kind.as_str()
+        );
+        self.send_to_cm(ipc::Data::PermissionRequest {
+            request_id,
+            name: SWITCH_SIDES_PERMISSION.to_owned(),
+            enabled: true,
+        });
+    }
+
     async fn approve_permission_request(&mut self, request_id: u64, name: String, enabled: bool) {
         if let Some(conn_type) = permission_request_connection_type(&name) {
             self.grant_session_connection(conn_type);
@@ -3410,14 +3615,39 @@ impl Connection {
         name: String,
         enabled: bool,
         approved: bool,
-    ) {
+    ) -> bool {
         self.cleanup_pending_permission_requests();
         let pending = self.pending_permission_requests.remove(&request_id);
         self.sync_input_pause();
         let Some(pending) = pending else {
             log::warn!("Ignoring unknown permission request result {}", request_id);
-            return;
+            return true;
         };
+        #[cfg(feature = "flutter")]
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if pending.name == SWITCH_SIDES_PERMISSION {
+            let Some((pending_id, connect_target, uuid)) = self.pending_switch_sides.take() else {
+                return true;
+            };
+            if pending_id != request_id {
+                self.pending_switch_sides = Some((pending_id, connect_target, uuid));
+                return true;
+            }
+            let expired = pending.requested_at.elapsed()
+                >= Duration::from_secs(PENDING_PERMISSION_REQUEST_TIMEOUT_SECS);
+            let tainted = permission_prompt::approval_blocked_by_input(
+                approved,
+                permission_prompt::PERMISSION_PROMPTS.low_priv_input_since(pending.shown_at_ms),
+                hbb_common::config::permission_prompt_global_input_block_enabled(),
+            );
+            if !approved || expired || tainted {
+                log::info!(
+                    "Switch sides not started (approved={approved}, expired={expired}, input_during_prompt={tainted})"
+                );
+                return true;
+            }
+            return self.start_switch_sides(connect_target, uuid).await;
+        }
         let (pending_name, pending_enabled, metadata_mismatch) =
             pending_permission_response_values(&pending, &name, enabled);
         let pending_name = pending_name.to_owned();
@@ -3439,7 +3669,7 @@ impl Connection {
                 "Permission request expired.",
             )
             .await;
-            return;
+            return true;
         }
         if !approved {
             self.deny_permission_request(
@@ -3449,7 +3679,7 @@ impl Connection {
                 "Permission request declined.",
             )
             .await;
-            return;
+            return true;
         }
         if permission_prompt::approval_blocked_by_input(
             approved,
@@ -3463,15 +3693,16 @@ impl Connection {
                 "Remote input reached this device while the prompt was open; ask again.",
             )
             .await;
-            return;
+            return true;
         }
         if let Some(reason) = self.permission_request_denial_reason(&pending_name) {
             self.deny_permission_request(request_id, pending_name, pending_enabled, reason)
                 .await;
-            return;
+            return true;
         }
         self.approve_permission_request(request_id, pending_name, pending_enabled)
             .await;
+        true
     }
 
     fn apply_session_permission_defaults(&mut self) {
@@ -3596,29 +3827,35 @@ impl Connection {
     fn switch_sides_connect_target(
         &self,
         request: &hbb_common::message_proto::SwitchSidesRequest,
-    ) -> String {
-        if let Ok(peer_ip) = self.ip.split('%').next().unwrap_or(&self.ip).parse() {
-            if let Some(endpoint) = crate::common::direct_access_endpoint_for_peer_ip(
-                &request.direct_endpoints,
-                peer_ip,
-            ) {
-                log::info!("switch sides route: direct endpoint {}", endpoint);
-                return endpoint;
-            }
-            if !Config::allow_id_relay_server() {
-                let port = crate::common::get_direct_access_port();
-                if port > 0 && port <= u16::MAX as i32 {
-                    let endpoint = crate::common::format_direct_access_endpoint(peer_ip, port);
-                    log::warn!(
-                        "switch sides route: inferred direct endpoint {} from observed peer IP",
-                        endpoint
-                    );
-                    return endpoint;
-                }
-            }
+    ) -> Option<String> {
+        let peer_ip = self
+            .ip
+            .split('%')
+            .next()
+            .unwrap_or(&self.ip)
+            .parse::<std::net::IpAddr>()
+            .ok();
+        let direct = peer_ip.and_then(|peer_ip| {
+            crate::common::direct_access_endpoint_for_peer_ip(&request.direct_endpoints, peer_ip)
+        });
+        let inferred = peer_ip.and_then(|peer_ip| {
+            let port = crate::common::get_direct_access_port();
+            (port > 0 && port <= u16::MAX as i32)
+                .then(|| crate::common::format_direct_access_endpoint(peer_ip, port))
+        });
+        let allow_id_relay = Config::allow_id_relay_server();
+        let target = switch_sides_target(
+            direct,
+            inferred,
+            allow_id_relay,
+            &self.lr.my_id,
+            &Config::get_option("custom-rendezvous-server"),
+        );
+        match &target {
+            Some(target) => log::info!("switch sides route: {target}"),
+            None => log::warn!("switch sides: no acceptable route to the requesting peer"),
         }
-        log::info!("switch sides route: rendezvous id {}", self.lr.my_id);
-        self.lr.my_id.clone()
+        target
     }
 
     fn post_conn_audit(&self, v: Value) {
@@ -5502,6 +5739,11 @@ impl Connection {
                         return false;
                     }
                     let (addr, is_rdp) = Self::normalize_port_forward_target(&mut pf);
+                    if !port_forward_port_valid(pf.port) {
+                        self.send_login_error("Invalid port").await;
+                        sleep(1.).await;
+                        return false;
+                    }
                     self.port_forward_address = addr;
                     self.port_forward_rdp = is_rdp;
                 }
@@ -5748,42 +5990,51 @@ impl Connection {
         } else if let Some(message::Union::SwitchSidesResponse(_s)) = msg.union {
             #[cfg(feature = "flutter")]
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            if let Some(lr) = _s.lr.clone().take() {
-                self.handle_login_request_without_validation(&lr).await;
-                SWITCH_SIDES_UUID
-                    .lock()
-                    .unwrap()
-                    .retain(|_, v| v.0.elapsed() < Duration::from_secs(10));
-                let uuid_old = SWITCH_SIDES_UUID.lock().unwrap().remove(&lr.my_id);
-                if let Ok(uuid) = uuid::Uuid::from_slice(_s.uuid.to_vec().as_ref()) {
-                    if let Some((_instant, uuid_old)) = uuid_old {
-                        if uuid == uuid_old {
-                            // A switch-sides response only ever opens a remote-desktop session.
-                            if lr.union.is_some() {
-                                log::warn!(
-                                    "Rejected switch sides response that carries a non-remote login type"
-                                );
-                                self.send_login_error("Connection not allowed").await;
-                                return false;
-                            }
-                            if !self.authorized {
-                                self.admitted_conn_type = Some(AuthConnType::Remote);
-                                self.reset_session_scope_for_login();
-                            }
-                            self.from_switch = true;
-                            if !self.send_logon_response_and_keep_alive().await {
-                                return false;
-                            }
-                            self.try_start_cm(
-                                lr.my_id.clone(),
-                                lr.my_name.clone(),
-                                self.authorized,
-                            );
-                            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-                            self.try_start_cm_ipc();
-                        }
-                    }
+            {
+                // A response can only finish a login that has not happened yet.
+                if self.authorized {
+                    log::warn!("Ignored switch sides response on an authorized connection");
+                    return true;
                 }
+                let Some(lr) = _s.lr.clone().take() else {
+                    return true;
+                };
+                let Ok(uuid) = uuid::Uuid::from_slice(_s.uuid.to_vec().as_ref()) else {
+                    return true;
+                };
+                // The token is checked, and consumed, before anything of the
+                // request is applied to this connection.
+                let accepted = take_switch_sides_token(
+                    &mut SWITCH_SIDES_UUID.lock().unwrap(),
+                    &uuid,
+                    tokio::time::Instant::now(),
+                );
+                if !accepted {
+                    log::warn!("Ignored switch sides response with an unknown or expired token");
+                    return true;
+                }
+                // A switch-sides response only ever opens a remote-desktop session.
+                if lr.union.is_some()
+                    || self
+                        .admitted_conn_type
+                        .is_some_and(|conn_type| conn_type != AuthConnType::Remote)
+                {
+                    log::warn!(
+                        "Rejected switch sides response that carries a non-remote login type"
+                    );
+                    self.send_login_error("Connection not allowed").await;
+                    return false;
+                }
+                self.handle_login_request_without_validation(&lr).await;
+                self.admitted_conn_type = Some(AuthConnType::Remote);
+                self.reset_session_scope_for_login();
+                self.from_switch = true;
+                if !self.send_logon_response_and_keep_alive().await {
+                    return false;
+                }
+                self.try_start_cm(lr.my_id.clone(), lr.my_name.clone(), self.authorized);
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                self.try_start_cm_ipc();
             }
         } else if self.authorized {
             if self.port_forward_socket.is_some() {
@@ -6513,20 +6764,24 @@ impl Connection {
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]
                     Some(misc::Union::SwitchSidesRequest(s)) => {
                         if let Ok(uuid) = uuid::Uuid::from_slice(&s.uuid.to_vec()[..]) {
-                            crate::server::insert_pending_switch_sides_uuid(
-                                self.lr.my_id.clone(),
-                                uuid.clone(),
+                            let decision = switch_sides_policy(
+                                self.session_auth_kind,
+                                self.current_conn_type(),
+                                self.session_permission_granted(SWITCH_SIDES_PERMISSION),
+                                Config::get_bool_option(keys::OPTION_ALLOW_UNAPPROVED_SWITCH_SIDES),
                             );
-                            let connect_target = self.switch_sides_connect_target(&s);
-                            crate::run_me(vec![
-                                "--connect".to_owned(),
-                                connect_target,
-                                "--switch_uuid".to_owned(),
-                                uuid.to_string(),
-                            ])
-                            .ok();
-                            self.on_close("switch sides", false).await;
-                            return false;
+                            if let SwitchSidesDecision::Deny(reason) = decision {
+                                log::warn!("Denied switch sides request: {reason}");
+                                return true;
+                            }
+                            let Some(connect_target) = self.switch_sides_connect_target(&s) else {
+                                return true;
+                            };
+                            if decision == SwitchSidesDecision::Allow {
+                                return self.start_switch_sides(connect_target, uuid).await;
+                            }
+                            self.request_switch_sides_approval(connect_target, uuid)
+                                .await;
                         }
                     }
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -8640,30 +8895,64 @@ impl Connection {
     }
 }
 
+/// Starts the client that connects back. A service that runs as root or SYSTEM
+/// starts it in the logged-in user's session instead of its own.
+#[cfg(feature = "flutter")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn spawn_switch_sides_client(connect_target: &str) {
+    // The token itself is fetched from this process over the local IPC.
+    let args = vec!["--connect", connect_target, "--switch_uuid", "pending"];
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    if crate::platform::is_root() {
+        allow_err!(crate::platform::run_as_user(args));
+        return;
+    }
+    allow_err!(crate::run_me(args));
+}
+
 #[cfg(feature = "flutter")]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn insert_switch_sides_uuid(id: String, uuid: uuid::Uuid) {
-    SWITCH_SIDES_UUID
-        .lock()
-        .unwrap()
-        .insert(id, (tokio::time::Instant::now(), uuid));
+    insert_switch_sides_token(
+        &mut SWITCH_SIDES_UUID.lock().unwrap(),
+        id,
+        uuid,
+        tokio::time::Instant::now(),
+    );
 }
 
 #[cfg(feature = "flutter")]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn insert_pending_switch_sides_uuid(id: String, uuid: uuid::Uuid) {
+    insert_switch_sides_token(
+        &mut PENDING_SWITCH_SIDES_UUID.lock().unwrap(),
+        switch_sides_key(&id),
+        uuid,
+        tokio::time::Instant::now(),
+    );
+}
+
+/// Hands the local client that was started for a switch its token, once.
+#[cfg(feature = "flutter")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub fn take_pending_switch_sides_uuid(id: &str) -> Option<uuid::Uuid> {
     let mut uuids = PENDING_SWITCH_SIDES_UUID.lock().unwrap();
-    uuids.retain(|_, (instant, _)| instant.elapsed() < Duration::from_secs(10));
-    uuids.insert(id, (tokio::time::Instant::now(), uuid));
+    let now = tokio::time::Instant::now();
+    uuids
+        .retain(|_, (created, _)| now.saturating_duration_since(*created) < SWITCH_SIDES_TOKEN_TTL);
+    uuids.remove(&switch_sides_key(id)).map(|(_, uuid)| uuid)
 }
 
 #[cfg(feature = "flutter")]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn remove_pending_switch_sides_uuid(id: &str, uuid: &uuid::Uuid) -> bool {
     let mut uuids = PENDING_SWITCH_SIDES_UUID.lock().unwrap();
-    uuids.retain(|_, (instant, _)| instant.elapsed() < Duration::from_secs(10));
-    if uuids.get(id).map(|(_, stored_uuid)| stored_uuid == uuid) == Some(true) {
-        uuids.remove(id);
+    let key = switch_sides_key(id);
+    let now = tokio::time::Instant::now();
+    uuids
+        .retain(|_, (created, _)| now.saturating_duration_since(*created) < SWITCH_SIDES_TOKEN_TTL);
+    if uuids.get(&key).map(|(_, stored)| stored == uuid) == Some(true) {
+        uuids.remove(&key);
         true
     } else {
         false
@@ -9654,6 +9943,159 @@ mod test {
         assert!(denial(false, false, true, false).is_some());
         // Remote desktop needs no grant.
         assert_eq!(denial(false, false, false, false), None);
+    }
+
+    #[test]
+    fn switch_sides_needs_local_approval_unless_unattended_or_rolled_back() {
+        use SwitchSidesDecision::*;
+        let policy = |auth, conn, granted, legacy| switch_sides_policy(auth, conn, granted, legacy);
+        for auth in [
+            SessionAuthKind::OneTimePassword,
+            SessionAuthKind::ClickApproval,
+            SessionAuthKind::Unknown,
+        ] {
+            assert_eq!(
+                policy(auth, AuthConnType::Remote, false, false),
+                NeedsApproval
+            );
+            assert_eq!(policy(auth, AuthConnType::Remote, true, false), Allow);
+            assert_eq!(policy(auth, AuthConnType::Remote, false, true), Allow);
+        }
+        assert_eq!(
+            policy(
+                SessionAuthKind::UnattendedPassword,
+                AuthConnType::Remote,
+                false,
+                false
+            ),
+            Allow
+        );
+        // Only a remote-desktop session may ask, whatever else is set.
+        for conn in [
+            AuthConnType::FileTransfer,
+            AuthConnType::PortForward,
+            AuthConnType::ViewCamera,
+            AuthConnType::Terminal,
+        ] {
+            assert!(matches!(
+                policy(SessionAuthKind::UnattendedPassword, conn, true, true),
+                Deny(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn switch_sides_peer_ids_are_checked_before_they_reach_the_command_line() {
+        assert_eq!(
+            switch_sides_peer_id("123456789", ""),
+            Some("123456789".to_owned())
+        );
+        assert_eq!(
+            switch_sides_peer_id("my-host_01", ""),
+            Some("my-host_01".to_owned())
+        );
+        for bad in [
+            "",
+            "12345",
+            "12345678901234567",
+            "--password",
+            "-123456",
+            "123 456",
+            "123456;rm",
+            "123456/../x",
+            "12345?6",
+            "123456=1",
+            "1234&5678",
+            "1234567\n",
+        ] {
+            assert_eq!(switch_sides_peer_id(bad, ""), None, "{bad:?}");
+        }
+        // An @server must be the configured one.
+        assert_eq!(
+            switch_sides_peer_id("123456789@rdv.example", "rdv.example"),
+            Some("123456789@rdv.example".to_owned())
+        );
+        assert_eq!(
+            switch_sides_peer_id("123456789@evil.example", "rdv.example"),
+            None
+        );
+        assert_eq!(switch_sides_peer_id("123456789@rdv.example", ""), None);
+    }
+
+    #[test]
+    fn switch_sides_route_never_falls_back_to_the_id_route_when_it_is_disabled() {
+        let direct = Some("192.0.2.5:21118".to_owned());
+        let inferred = Some("192.0.2.5:21118".to_owned());
+        assert_eq!(
+            switch_sides_target(direct.clone(), None, false, "123456789", ""),
+            direct
+        );
+        assert_eq!(
+            switch_sides_target(None, inferred.clone(), false, "123456789", ""),
+            inferred
+        );
+        // ID/relay route disabled and nothing to infer: refuse.
+        assert_eq!(
+            switch_sides_target(None, None, false, "123456789", ""),
+            None
+        );
+        // ID/relay route allowed: a valid id is used, an invalid one is refused.
+        assert_eq!(
+            switch_sides_target(None, None, true, "123456789", ""),
+            Some("123456789".to_owned())
+        );
+        assert_eq!(switch_sides_target(None, None, true, "--evil", ""), None);
+    }
+
+    #[test]
+    fn switch_sides_tokens_are_consumed_only_by_their_own_uuid() {
+        let now = Instant::now();
+        let mut tokens = HashMap::new();
+        let right = uuid::Uuid::new_v4();
+        let wrong = uuid::Uuid::new_v4();
+        insert_switch_sides_token(&mut tokens, "peer".to_owned(), right, now);
+        // A wrong token neither succeeds nor burns the real one.
+        assert!(!take_switch_sides_token(&mut tokens, &wrong, now));
+        assert!(!take_switch_sides_token(&mut tokens, &wrong, now));
+        assert_eq!(tokens.len(), 1);
+        assert!(take_switch_sides_token(&mut tokens, &right, now));
+        // One use only.
+        assert!(!take_switch_sides_token(&mut tokens, &right, now));
+    }
+
+    #[test]
+    fn switch_sides_tokens_expire_and_stay_bounded() {
+        let now = Instant::now();
+        let mut tokens = HashMap::new();
+        let old = uuid::Uuid::new_v4();
+        insert_switch_sides_token(&mut tokens, "a".to_owned(), old, now);
+        assert!(!take_switch_sides_token(
+            &mut tokens,
+            &old,
+            now + SWITCH_SIDES_TOKEN_TTL
+        ));
+        assert!(tokens.is_empty());
+        for index in 0..(SWITCH_SIDES_MAX_TOKENS * 3) {
+            insert_switch_sides_token(
+                &mut tokens,
+                format!("peer{index}"),
+                uuid::Uuid::new_v4(),
+                now + Duration::from_millis(index as u64),
+            );
+        }
+        assert_eq!(tokens.len(), SWITCH_SIDES_MAX_TOKENS);
+        // The key a spawned client uses ignores the server part and padding.
+        assert_eq!(switch_sides_key(" 123456789@srv "), "123456789");
+    }
+
+    #[test]
+    fn port_forward_ports_are_range_checked() {
+        for port in [1, 22, 3389, 65535] {
+            assert!(port_forward_port_valid(port), "{port}");
+        }
+        for port in [-1, 0, 65536, i32::MAX, i32::MIN] {
+            assert!(!port_forward_port_valid(port), "{port}");
+        }
     }
 
     #[test]
