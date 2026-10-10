@@ -1300,6 +1300,35 @@ fn permission_request_connection_type(name: &str) -> Option<AuthConnType> {
     }
 }
 
+/// Tracks whether a second factor has been asked of this connection. An `Auth2fa`
+/// message only means something after the first factor succeeded and `REQUIRE_2FA`
+/// was sent, so it must never authorize a connection on its own.
+#[derive(Debug, Default)]
+struct TwoFactorGate {
+    awaiting: bool,
+}
+
+impl TwoFactorGate {
+    /// `REQUIRE_2FA` was sent after the first factor succeeded.
+    fn challenge_sent(&mut self) {
+        self.awaiting = true;
+    }
+
+    /// A new `LoginRequest` starts the exchange over.
+    fn login_request_received(&mut self) {
+        self.awaiting = false;
+    }
+
+    /// The connection no longer needs a second factor.
+    fn finished(&mut self) {
+        self.awaiting = false;
+    }
+
+    fn accepts_response(&self) -> bool {
+        self.awaiting
+    }
+}
+
 /// Connection type selected by the `union` of a `LoginRequest`; no union means a
 /// remote-desktop session.
 fn login_request_conn_type(union: Option<&login_request::Union>) -> AuthConnType {
@@ -1425,6 +1454,7 @@ pub struct Connection {
     tx_to_cm: mpsc::UnboundedSender<ipc::Data>,
     authorized: bool,
     require_2fa: Option<totp_rs::TOTP>,
+    two_factor_gate: TwoFactorGate,
     keyboard: bool,
     clipboard: bool,
     audio: bool,
@@ -1709,6 +1739,7 @@ impl Connection {
                 video_source: VideoSource::Monitor,
             },
             require_2fa: crate::auth_2fa::get_2fa(None),
+            two_factor_gate: TwoFactorGate::default(),
             // Login replaces this fallback with the primary index from the same
             // refreshed display snapshot sent to the peer.
             display_idx: 0,
@@ -3529,10 +3560,12 @@ impl Connection {
                     });
                 }
             });
+            self.two_factor_gate.challenge_sent();
             self.send_login_error(crate::client::REQUIRE_2FA).await;
             // Keep the connection alive so the client can continue with 2FA.
             return true;
         }
+        self.two_factor_gate.finished();
         if let Some(reason) = self.session_connection_policy_denial_reason() {
             self.deny_session_connection(reason).await;
             return false;
@@ -5149,6 +5182,7 @@ impl Connection {
             if self.authorized {
                 return true;
             }
+            self.two_factor_gate.login_request_received();
             self.handle_login_request_without_validation(&lr).await;
             let requested_conn_type = login_request_conn_type(lr.union.as_ref());
             if login_conn_type_change_denied(self.admitted_conn_type, requested_conn_type) {
@@ -5393,6 +5427,12 @@ impl Connection {
                 }
             }
         } else if let Some(message::Union::Auth2fa(tfa)) = msg.union {
+            // A 2FA response counts only while this connection is waiting for one; it can
+            // neither replace the first factor nor arrive after authorization.
+            if !self.two_factor_gate.accepts_response() {
+                log::warn!("Ignored 2FA response without a pending challenge");
+                return true;
+            }
             let (failure, res) = self.check_failure(1).await;
             if !res {
                 return true;
@@ -9152,6 +9192,25 @@ mod raii {
 mod test {
     #[allow(unused)]
     use super::*;
+
+    #[test]
+    fn two_factor_response_needs_an_outstanding_challenge() {
+        let mut gate = TwoFactorGate::default();
+        // A bare Auth2fa on a new connection must not authorize anything.
+        assert!(!gate.accepts_response());
+        gate.login_request_received();
+        assert!(!gate.accepts_response());
+        // Password accepted, REQUIRE_2FA sent: the response is now expected.
+        gate.challenge_sent();
+        assert!(gate.accepts_response());
+        // A new LoginRequest starts the exchange over.
+        gate.login_request_received();
+        assert!(!gate.accepts_response());
+        // Click authorization finished before the 2FA response arrived.
+        gate.challenge_sent();
+        gate.finished();
+        assert!(!gate.accepts_response());
+    }
 
     #[test]
     fn login_request_conn_type_follows_the_requested_union() {
