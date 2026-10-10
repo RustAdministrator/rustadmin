@@ -344,6 +344,27 @@ void main() {
       );
     });
 
+    test('the access scope is written only when it changes and is not fixed',
+        () {
+      expect(
+        plan(initial.copyWith(directAccessScope: kDirectAccessScopeLocal))
+            .map((c) => '${c.key}=${c.value}'),
+        ['$kOptionDirectAccessScope=$kDirectAccessScopeLocal'],
+      );
+      // Empty and "any" are the same scope: no write.
+      expect(plan(initial.copyWith(directAccessScope: '')), isEmpty);
+      expect(
+        firstRunWizardChanges(
+          initial: initial,
+          result: initial.copyWith(directAccessScope: kDirectAccessScopeLocal),
+          directAccessFixed: false,
+          localPairingFixed: false,
+          directScopeFixed: true,
+        ),
+        isEmpty,
+      );
+    });
+
     test('settings managed by the deployment are never written', () {
       final edited = initial.copyWith(
         directAccessEnabled: false,

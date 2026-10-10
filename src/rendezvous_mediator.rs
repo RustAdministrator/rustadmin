@@ -862,6 +862,15 @@ async fn direct_server(server: ServerPtr) {
                 continue;
             }
             if let Ok(Ok((stream, addr))) = hbb_common::timeout(1000, l.accept()).await {
+                // Before anything is read from the peer.
+                if !crate::access_scope::peer_in_direct_access_scope(addr.ip()) {
+                    log::warn!(
+                        "Refused direct access from {}: outside the configured access scope",
+                        addr.ip()
+                    );
+                    drop(stream);
+                    continue;
+                }
                 stream.set_nodelay(true).ok();
                 log::info!("direct access from {}", addr);
                 let local_addr = stream

@@ -137,6 +137,14 @@ const String kOptionDirectServer = "direct-server";
 const String kOptionDirectAccessPort = "direct-access-port";
 const String kOptionDirectAccessPairingPassphrase =
     "direct-access-pairing-passphrase";
+// Who may reach the direct-access listeners: "local" (local network, VPN and
+// the extra networks below) or "any". Empty is "any", for installs that never
+// chose; new installs start with "local".
+const String kOptionDirectAccessScope = "direct-access-scope";
+const String kDirectAccessScopeLocal = "local";
+const String kDirectAccessScopeAny = "any";
+const String kOptionDirectAccessExtraNetworks = "direct-access-extra-networks";
+const String kOptionQuicFollowDirectServer = "quic-follow-direct-server";
 const String kOptionPeerPairingPassphrase = "peer-pairing-passphrase";
 const String kOptionRememberPairedViewers = "remember-paired-viewers";
 const String kOptionAllowUnverifiedPeerTrust = "allow-unverified-peer-trust";

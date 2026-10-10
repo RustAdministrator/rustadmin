@@ -1963,9 +1963,31 @@ String sessionClipboardDirectionToggleValue(String policy) {
       '${normalizeClipboardDirectionPolicy(policy)}';
 }
 
+/// `""` and `any` mean any address; every other value is `local`, the same
+/// reading the service applies.
+String normalizeDirectAccessScope(String value) {
+  final v = value.trim().toLowerCase();
+  return v.isEmpty || v == kDirectAccessScopeAny
+      ? kDirectAccessScopeAny
+      : kDirectAccessScopeLocal;
+}
+
 Future<void> ensureInitialClientDefaults() async {
   if (!isOptionFixed(kOptionDirectServer) &&
       (await bind.mainGetOption(key: kOptionDirectServer)).isEmpty) {
+    // A new install: direct access on, limited to the local network and VPNs,
+    // with QUIC following it. The scope is written first so there is no
+    // moment with direct access on and no scope.
+    if (!isOptionFixed(kOptionDirectAccessScope) &&
+        (await bind.mainGetOption(key: kOptionDirectAccessScope)).isEmpty) {
+      await bind.mainSetOption(
+          key: kOptionDirectAccessScope, value: kDirectAccessScopeLocal);
+    }
+    if (!isOptionFixed(kOptionQuicFollowDirectServer) &&
+        (await bind.mainGetOption(key: kOptionQuicFollowDirectServer))
+            .isEmpty) {
+      await bind.mainSetOption(key: kOptionQuicFollowDirectServer, value: 'Y');
+    }
     await bind.mainSetOption(key: kOptionDirectServer, value: 'Y');
   }
 }
