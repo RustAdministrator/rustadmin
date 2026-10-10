@@ -10,6 +10,8 @@ class _FirstRunWizardRequest {
   final bool directAccessFixed;
   final bool lanDiscoveryFixed;
   final bool localPairingFixed;
+  final bool directScopeFixed;
+  final int maxPassphraseLength;
   final Completer<FirstRunWizardSettings?> completer;
 
   const _FirstRunWizardRequest({
@@ -17,6 +19,8 @@ class _FirstRunWizardRequest {
     required this.directAccessFixed,
     required this.lanDiscoveryFixed,
     required this.localPairingFixed,
+    required this.directScopeFixed,
+    required this.maxPassphraseLength,
     required this.completer,
   });
 }
@@ -27,66 +31,219 @@ bool _firstRunWizardHostAttached = false;
 
 class FirstRunWizardSettings {
   final bool directAccessEnabled;
+
+  /// `local` or `any` (see `kOptionDirectAccessScope`).
+  final String directAccessScope;
   final String lanDiscoveryMode;
-  final String localPairingPassphrase;
+
+  /// Whether a local pairing passphrase is set now. The passphrase itself
+  /// never reaches the wizard.
+  final bool localPairingPassphraseConfigured;
+
+  /// A passphrase the user typed, exactly as typed (no trimming).
+  final String newLocalPairingPassphrase;
+
+  /// The user asked to remove the passphrase that is set.
+  final bool clearLocalPairingPassphrase;
   final bool showOnNextStart;
 
   const FirstRunWizardSettings({
     required this.directAccessEnabled,
+    this.directAccessScope = kDirectAccessScopeAny,
     required this.lanDiscoveryMode,
-    required this.localPairingPassphrase,
+    required this.localPairingPassphraseConfigured,
+    this.newLocalPairingPassphrase = '',
+    this.clearLocalPairingPassphrase = false,
     required this.showOnNextStart,
   });
 
   FirstRunWizardSettings copyWith({
     bool? directAccessEnabled,
+    String? directAccessScope,
     String? lanDiscoveryMode,
-    String? localPairingPassphrase,
+    String? newLocalPairingPassphrase,
+    bool? clearLocalPairingPassphrase,
     bool? showOnNextStart,
   }) {
     return FirstRunWizardSettings(
       directAccessEnabled: directAccessEnabled ?? this.directAccessEnabled,
+      directAccessScope: directAccessScope ?? this.directAccessScope,
       lanDiscoveryMode: lanDiscoveryMode ?? this.lanDiscoveryMode,
-      localPairingPassphrase:
-          localPairingPassphrase ?? this.localPairingPassphrase,
+      localPairingPassphraseConfigured: localPairingPassphraseConfigured,
+      newLocalPairingPassphrase:
+          newLocalPairingPassphrase ?? this.newLocalPairingPassphrase,
+      clearLocalPairingPassphrase:
+          clearLocalPairingPassphrase ?? this.clearLocalPairingPassphrase,
       showOnNextStart: showOnNextStart ?? this.showOnNextStart,
     );
   }
 }
 
+/// One setting the wizard wants to write.
+class FirstRunWizardChange {
+  final String key;
+  final String value;
+
+  const FirstRunWizardChange(this.key, this.value);
+
+  @override
+  bool operator ==(Object other) =>
+      other is FirstRunWizardChange && other.key == key && other.value == value;
+
+  @override
+  int get hashCode => Object.hash(key, value);
+
+  @override
+  String toString() => '$key=${key == kOptionDirectAccessPairingPassphrase ? '<secret>' : value}';
+}
+
+/// What applying `result` writes, given what was there and what is managed by
+/// the deployment. Only settings that actually change are listed; the LAN
+/// discovery mode is written through its own helper and is not listed here.
+List<FirstRunWizardChange> firstRunWizardChanges({
+  required FirstRunWizardSettings initial,
+  required FirstRunWizardSettings result,
+  required bool directAccessFixed,
+  required bool localPairingFixed,
+  bool directScopeFixed = false,
+}) {
+  final changes = <FirstRunWizardChange>[];
+  if (!directScopeFixed &&
+      normalizeDirectAccessScope(result.directAccessScope) !=
+          normalizeDirectAccessScope(initial.directAccessScope)) {
+    changes.add(FirstRunWizardChange(
+      kOptionDirectAccessScope,
+      normalizeDirectAccessScope(result.directAccessScope),
+    ));
+  }
+  if (!directAccessFixed &&
+      result.directAccessEnabled != initial.directAccessEnabled) {
+    // An explicit "N", not the empty default: an empty value means "never
+    // chosen" and is turned back on by the initial client defaults.
+    changes.add(FirstRunWizardChange(
+      kOptionDirectServer,
+      result.directAccessEnabled ? 'Y' : 'N',
+    ));
+  }
+  if (!localPairingFixed) {
+    if (result.newLocalPairingPassphrase.isNotEmpty) {
+      changes.add(FirstRunWizardChange(
+        kOptionDirectAccessPairingPassphrase,
+        result.newLocalPairingPassphrase,
+      ));
+    } else if (result.clearLocalPairingPassphrase &&
+        initial.localPairingPassphraseConfigured) {
+      changes.add(const FirstRunWizardChange(
+        kOptionDirectAccessPairingPassphrase,
+        '',
+      ));
+    }
+  }
+  return changes;
+}
+
+/// The platform the wizard writes through; replaced in tests.
+abstract class FirstRunWizardPlatform {
+  Future<bool> requestWriteAccess();
+  bool settingsDisabled();
+  Future<void> writeOption(String key, String value);
+  Future<void> writeLanDiscoveryMode(String mode);
+  Future<void> writeShowOnNextStart(bool show);
+}
+
+class _AppFirstRunWizardPlatform implements FirstRunWizardPlatform {
+  const _AppFirstRunWizardPlatform();
+
+  @override
+  Future<bool> requestWriteAccess() => requestSettingsWriteAccess();
+
+  @override
+  bool settingsDisabled() => bind.isDisableSettings();
+
+  @override
+  Future<void> writeOption(String key, String value) =>
+      bind.mainSetOption(key: key, value: value);
+
+  @override
+  Future<void> writeLanDiscoveryMode(String mode) => setLanDiscoveryMode(mode);
+
+  @override
+  Future<void> writeShowOnNextStart(bool show) => setShowWelcomeOnStartup(show);
+}
+
+/// Applies what the wizard returned. Settings are written only after the
+/// same unlock the Settings pages require; the "show on next start" choice is
+/// a local preference and is always kept.
+Future<void> applyFirstRunWizardResult({
+  required FirstRunWizardSettings initial,
+  required FirstRunWizardSettings result,
+  required bool directAccessFixed,
+  required bool lanDiscoveryFixed,
+  required bool localPairingFixed,
+  bool directScopeFixed = false,
+  FirstRunWizardPlatform platform = const _AppFirstRunWizardPlatform(),
+}) async {
+  final changes = firstRunWizardChanges(
+    initial: initial,
+    result: result,
+    directAccessFixed: directAccessFixed,
+    localPairingFixed: localPairingFixed,
+    directScopeFixed: directScopeFixed,
+  );
+  final lanChanged = !lanDiscoveryFixed &&
+      result.lanDiscoveryMode != initial.lanDiscoveryMode;
+  if ((changes.isNotEmpty || lanChanged) && !platform.settingsDisabled()) {
+    if (await platform.requestWriteAccess()) {
+      for (final change in changes) {
+        await platform.writeOption(change.key, change.value);
+      }
+      if (lanChanged) {
+        await platform.writeLanDiscoveryMode(result.lanDiscoveryMode);
+      }
+    }
+  }
+  await platform.writeShowOnNextStart(result.showOnNextStart);
+}
+
 Future<void> showAndApplyFirstRunWizard(BuildContext context) async {
+  if (bind.isDisableSettings()) {
+    return;
+  }
+  final initial = FirstRunWizardSettings(
+    directAccessEnabled: mainGetBoolOptionSync(kOptionDirectServer),
+    directAccessScope: normalizeDirectAccessScope(
+        bind.mainGetOptionSync(key: kOptionDirectAccessScope)),
+    lanDiscoveryMode: await loadLanDiscoveryMode(),
+    // Only whether one is set; the secret is never read into the UI.
+    localPairingPassphraseConfigured: bind
+        .mainGetOptionSync(key: kOptionDirectAccessPairingPassphrase)
+        .isNotEmpty,
+    showOnNextStart: await shouldShowWelcomeOnStartup(),
+  );
+  final directAccessFixed = isOptionFixed(kOptionDirectServer);
+  final lanDiscoveryFixed = isLanDiscoveryModeFixed();
+  final localPairingFixed = isOptionFixed(kOptionDirectAccessPairingPassphrase);
+  final directScopeFixed = isOptionFixed(kOptionDirectAccessScope);
   final result = await showFirstRunWizardDialog(
     context: context,
-    initialSettings: FirstRunWizardSettings(
-      directAccessEnabled: mainGetBoolOptionSync(kOptionDirectServer),
-      lanDiscoveryMode: await loadLanDiscoveryMode(),
-      localPairingPassphrase:
-          bind.mainGetOptionSync(key: kOptionDirectAccessPairingPassphrase),
-      showOnNextStart: await shouldShowWelcomeOnStartup(),
-    ),
-    directAccessFixed: isOptionFixed(kOptionDirectServer),
-    lanDiscoveryFixed: isLanDiscoveryModeFixed(),
-    localPairingFixed: isOptionFixed(kOptionDirectAccessPairingPassphrase),
+    initialSettings: initial,
+    directAccessFixed: directAccessFixed,
+    lanDiscoveryFixed: lanDiscoveryFixed,
+    localPairingFixed: localPairingFixed,
+    directScopeFixed: directScopeFixed,
+    maxPassphraseLength: bind.mainMaxEncryptLen(),
   );
   if (result == null) {
     return;
   }
-  if (!isOptionFixed(kOptionDirectServer)) {
-    await bind.mainSetOption(
-      key: kOptionDirectServer,
-      value: bool2option(kOptionDirectServer, result.directAccessEnabled),
-    );
-  }
-  if (!isLanDiscoveryModeFixed()) {
-    await setLanDiscoveryMode(result.lanDiscoveryMode);
-  }
-  if (!isOptionFixed(kOptionDirectAccessPairingPassphrase)) {
-    await bind.mainSetOption(
-      key: kOptionDirectAccessPairingPassphrase,
-      value: result.localPairingPassphrase,
-    );
-  }
-  await setShowWelcomeOnStartup(result.showOnNextStart);
+  await applyFirstRunWizardResult(
+    initial: initial,
+    result: result,
+    directAccessFixed: directAccessFixed,
+    lanDiscoveryFixed: lanDiscoveryFixed,
+    localPairingFixed: localPairingFixed,
+    directScopeFixed: directScopeFixed,
+  );
 }
 
 Future<FirstRunWizardSettings?> showFirstRunWizardDialog({
@@ -95,6 +252,8 @@ Future<FirstRunWizardSettings?> showFirstRunWizardDialog({
   required bool directAccessFixed,
   required bool lanDiscoveryFixed,
   required bool localPairingFixed,
+  bool directScopeFixed = false,
+  int maxPassphraseLength = 128,
 }) {
   if (!_firstRunWizardHostAttached) {
     return showDialog<FirstRunWizardSettings>(
@@ -105,6 +264,8 @@ Future<FirstRunWizardSettings?> showFirstRunWizardDialog({
         directAccessFixed: directAccessFixed,
         lanDiscoveryFixed: lanDiscoveryFixed,
         localPairingFixed: localPairingFixed,
+        directScopeFixed: directScopeFixed,
+        maxPassphraseLength: maxPassphraseLength,
       ),
     );
   }
@@ -115,6 +276,8 @@ Future<FirstRunWizardSettings?> showFirstRunWizardDialog({
     directAccessFixed: directAccessFixed,
     lanDiscoveryFixed: lanDiscoveryFixed,
     localPairingFixed: localPairingFixed,
+    directScopeFixed: directScopeFixed,
+    maxPassphraseLength: maxPassphraseLength,
     completer: completer,
   );
   return completer.future;
@@ -171,6 +334,8 @@ class _FirstRunWizardHostState extends State<FirstRunWizardHost> {
                     directAccessFixed: request.directAccessFixed,
                     lanDiscoveryFixed: request.lanDiscoveryFixed,
                     localPairingFixed: request.localPairingFixed,
+                    directScopeFixed: request.directScopeFixed,
+                    maxPassphraseLength: request.maxPassphraseLength,
                     onClose: (result) => _closeRequest(request, result),
                   ),
                 ),
@@ -187,6 +352,8 @@ class FirstRunWizardDialog extends StatefulWidget {
   final bool directAccessFixed;
   final bool lanDiscoveryFixed;
   final bool localPairingFixed;
+  final bool directScopeFixed;
+  final int maxPassphraseLength;
   final ValueChanged<FirstRunWizardSettings?>? onClose;
 
   const FirstRunWizardDialog({
@@ -195,6 +362,8 @@ class FirstRunWizardDialog extends StatefulWidget {
     required this.directAccessFixed,
     required this.lanDiscoveryFixed,
     required this.localPairingFixed,
+    this.directScopeFixed = false,
+    this.maxPassphraseLength = 128,
     this.onClose,
   });
 
@@ -214,9 +383,8 @@ class _FirstRunWizardDialogState extends State<FirstRunWizardDialog> {
   void initState() {
     super.initState();
     _settings = widget.initialSettings;
-    _pairingController = TextEditingController(
-      text: widget.initialSettings.localPairingPassphrase,
-    );
+    // Never filled in: the stored passphrase is not shown or read back.
+    _pairingController = TextEditingController();
   }
 
   @override
@@ -245,9 +413,22 @@ class _FirstRunWizardDialogState extends State<FirstRunWizardDialog> {
   }
 
   void _finish() {
-    _close(_settings.copyWith(
-      localPairingPassphrase: _pairingController.text.trim(),
-    ));
+    _close(_settings);
+  }
+
+  /// What the review page says about the passphrase.
+  String _pairingSummary() {
+    if (_settings.clearLocalPairingPassphrase) {
+      return 'Will be removed';
+    }
+    if (_settings.newLocalPairingPassphrase.isNotEmpty) {
+      return _settings.localPairingPassphraseConfigured
+          ? 'Will be replaced'
+          : 'Configured';
+    }
+    return _settings.localPairingPassphraseConfigured
+        ? 'Configured'
+        : 'Not set';
   }
 
   Widget _buildStepIndicator() {
@@ -352,6 +533,30 @@ class _FirstRunWizardDialogState extends State<FirstRunWizardDialog> {
             style: disabledStyle,
           ),
         ),
+        if (_settings.directAccessEnabled)
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            value: normalizeDirectAccessScope(_settings.directAccessScope) ==
+                kDirectAccessScopeLocal,
+            onChanged: widget.directScopeFixed
+                ? null
+                : (value) {
+                    setState(() {
+                      _settings = _settings.copyWith(
+                        directAccessScope: value
+                            ? kDirectAccessScopeLocal
+                            : kDirectAccessScopeAny,
+                      );
+                    });
+                  },
+            title: const Text('Only the local network and VPN may connect'),
+            subtitle: Text(
+              widget.directScopeFixed
+                  ? 'Managed by your deployment.'
+                  : 'Direct connections from other addresses are refused. Turn this off to accept any address.',
+              style: disabledStyle,
+            ),
+          ),
         const SizedBox(height: 6),
         Text(
           'LAN discovery',
@@ -409,14 +614,21 @@ class _FirstRunWizardDialogState extends State<FirstRunWizardDialog> {
           controller: _pairingController,
           enabled: canEditPairing,
           obscureText: _obscurePairing,
+          maxLength: widget.maxPassphraseLength,
           decoration: InputDecoration(
             labelText: 'Local pairing passphrase',
-            hintText: 'Optional',
+            hintText: _settings.localPairingPassphraseConfigured
+                ? 'Leave empty to keep the current one'
+                : 'Optional',
             helperText: widget.localPairingFixed
                 ? 'Managed by your deployment.'
-                : _settings.directAccessEnabled
-                    ? 'Optional. Require this for first direct local-only connections.'
-                    : 'Enable direct local/VPN access to require local pairing.',
+                : _settings.clearLocalPairingPassphrase
+                    ? 'The passphrase will be removed.'
+                    : _settings.directAccessEnabled
+                        ? (_settings.localPairingPassphraseConfigured
+                            ? 'A passphrase is set. Type a new one to replace it.'
+                            : 'Optional. Require this for first direct local-only connections.')
+                        : 'Enable direct local/VPN access to require local pairing.',
             suffixIcon: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -433,11 +645,18 @@ class _FirstRunWizardDialogState extends State<FirstRunWizardDialog> {
                   ),
                 ),
                 IconButton(
+                  tooltip: 'Remove the passphrase',
                   onPressed: !canEditPairing
                       ? null
                       : () {
                           _pairingController.clear();
-                          setState(() {});
+                          setState(() {
+                            _settings = _settings.copyWith(
+                              newLocalPairingPassphrase: '',
+                              clearLocalPairingPassphrase: _settings
+                                  .localPairingPassphraseConfigured,
+                            );
+                          });
                         },
                   icon: const Icon(Icons.clear, size: 18),
                 ),
@@ -446,8 +665,11 @@ class _FirstRunWizardDialogState extends State<FirstRunWizardDialog> {
           ),
           onChanged: (value) {
             setState(() {
-              _settings =
-                  _settings.copyWith(localPairingPassphrase: value.trim());
+              // Verbatim: a passphrase may begin or end with a space.
+              _settings = _settings.copyWith(
+                newLocalPairingPassphrase: value,
+                clearLocalPairingPassphrase: false,
+              );
             });
           },
         ),
@@ -484,7 +706,6 @@ class _FirstRunWizardDialogState extends State<FirstRunWizardDialog> {
   }
 
   Widget _buildReviewPage() {
-    final pairing = _pairingController.text.trim();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -492,13 +713,21 @@ class _FirstRunWizardDialogState extends State<FirstRunWizardDialog> {
           label: 'Direct local/VPN access',
           value: _settings.directAccessEnabled ? 'Enabled' : 'Disabled',
         ),
+        if (_settings.directAccessEnabled)
+          _WizardSummaryRow(
+            label: 'Who can connect directly',
+            value: normalizeDirectAccessScope(_settings.directAccessScope) ==
+                    kDirectAccessScopeLocal
+                ? 'Local network and VPN only'
+                : 'Any address',
+          ),
         _WizardSummaryRow(
           label: 'LAN discovery',
           value: _lanModeLabel(_settings.lanDiscoveryMode),
         ),
         _WizardSummaryRow(
           label: 'Local pairing passphrase',
-          value: pairing.isEmpty ? 'Not set' : 'Configured',
+          value: _pairingSummary(),
         ),
         const SizedBox(height: 18),
         Center(

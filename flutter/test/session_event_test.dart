@@ -510,7 +510,66 @@ void main() {
             as MessageBoxSessionEvent;
     expect(trust.securityDetails?.peerId, 'peer');
     expect(trust.securityDetails?.direct, isTrue);
+    expect(trust.securityDetails?.keyChange, isFalse);
+    expect(trust.securityDetails?.previousFingerprint, isEmpty);
     expect(trust.hasRetry, isFalse);
+
+    final keyChange =
+        decodeTypedSessionEvent({
+              'name': 'msgbox',
+              'type': 'confirm-peer-trust',
+              'title': 'Trust this device',
+              'text':
+                  '{"peer":"10.0.0.1","peer_id":"peer","fingerprint":"new","trust_phrase":"one two","direct":false,"trust_kind":"key_change","previous_fingerprint":"old"}',
+              'link': '',
+              'hasRetry': '',
+            })!
+            as MessageBoxSessionEvent;
+    expect(keyChange.securityDetails?.keyChange, isTrue);
+    expect(keyChange.securityDetails?.previousFingerprint, 'old');
+    expect(keyChange.securityDetails?.fingerprint, 'new');
+
+    // Text the peer chose is tagged as such and never becomes a prompt.
+    final fromPeer =
+        decodeTypedSessionEvent({
+              'name': 'msgbox',
+              'type': 'confirm-peer-trust',
+              'title': 'Trust this device',
+              'text': keyChange.text,
+              'link': '',
+              'hasRetry': 'true',
+              'origin': 'peer',
+            })!
+            as MessageBoxSessionEvent;
+    expect(fromPeer.origin, MessageBoxOrigin.peer);
+    expect(fromPeer.securityDetails, isNull);
+    expect(fromPeer.hasRetry, isFalse);
+    for (final type in [
+      'input-pairing-passphrase',
+      'confirm-direct-trust',
+      'input-password',
+      'input-2fa',
+      'terminal-admin-login',
+    ]) {
+      expect(isCoreOnlyMessageBoxType(type), isTrue, reason: type);
+    }
+    for (final type in ['error', 'info', 'on-uac', 'relay-hint']) {
+      expect(isCoreOnlyMessageBoxType(type), isFalse, reason: type);
+    }
+
+    // An unknown trust kind is not guessed at.
+    final unknownKind =
+        decodeTypedSessionEvent({
+              'name': 'msgbox',
+              'type': 'confirm-peer-trust',
+              'title': 'Trust this device',
+              'text':
+                  '{"peer":"10.0.0.1","peer_id":"peer","fingerprint":"abc","trust_phrase":"one two","direct":true,"trust_kind":"whatever"}',
+              'link': '',
+              'hasRetry': '',
+            })!
+            as MessageBoxSessionEvent;
+    expect(unknownKind.securityDetails, isNull);
 
     final malformedSecurity =
         decodeTypedSessionEvent({

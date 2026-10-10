@@ -1104,6 +1104,13 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                 enabled: enabled, fakeValue: fakeValue),
             _OptionCheckBox(context, 'Enable terminal', kOptionEnableTerminal,
                 enabled: enabled, fakeValue: fakeValue),
+            if (isWindows)
+              _OptionCheckBox(
+                  context,
+                  'Check Windows account before access approval (terminal)',
+                  kOptionAllowTerminalOsLoginBeforeAuthorization,
+                  enabled: enabled,
+                  fakeValue: fakeValue),
             _OptionCheckBox(
                 context, 'Enable TCP tunneling', kOptionEnableTunnel,
                 enabled: enabled, fakeValue: fakeValue),
@@ -1478,6 +1485,84 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
     );
   }
 
+  /// Who may reach the direct-access listeners: the scope, and for `local`
+  /// the extra networks that count as local on top of the device's own.
+  Widget directAccessScope(BuildContext context, {required bool enabled}) {
+    final scopeFixed = isOptionFixed(kOptionDirectAccessScope);
+    final extraFixed = isOptionFixed(kOptionDirectAccessExtraNetworks);
+    final scope = normalizeDirectAccessScope(
+        bind.mainGetOptionSync(key: kOptionDirectAccessScope));
+    final extraController = TextEditingController(
+        text: bind.mainGetOptionSync(key: kOptionDirectAccessExtraNetworks));
+    List<String> invalid = const [];
+    try {
+      final info = jsonDecode(
+          bind.mainGetCommonSync(key: 'direct-access-scope-info')) as Map;
+      invalid = [
+        for (final entry in (info['invalid_extra_networks'] as List? ?? []))
+          entry.toString()
+      ];
+    } catch (_) {}
+    final canEdit = enabled && !scopeFixed;
+    return Column(
+      children: [
+        _SubLabeledWidget(
+          context,
+          'Who can connect directly',
+          ComboBox(
+            enabled: canEdit,
+            keys: const [kDirectAccessScopeLocal, kDirectAccessScopeAny],
+            values: [
+              translate('Local network and VPN only'),
+              translate('Any address'),
+            ],
+            initialKey: scope,
+            onChanged: (key) async {
+              await bind.mainSetOption(key: kOptionDirectAccessScope, value: key);
+              setState(() {});
+            },
+          ),
+          enabled: canEdit,
+          leftMargin: _kCheckBoxLeftMargin,
+        ),
+        if (scope == kDirectAccessScopeLocal)
+          _SubLabeledWidget(
+            context,
+            'Also allow these networks',
+            Row(children: [
+              Expanded(
+                child: TextField(
+                  controller: extraController,
+                  enabled: enabled && !extraFixed,
+                  decoration: InputDecoration(
+                    hintText: '203.0.113.0/24, 2001:db8::/48',
+                    errorText: invalid.isEmpty
+                        ? null
+                        : '${translate('Not understood')}: ${invalid.join(', ')}',
+                    contentPadding:
+                        const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
+                  ),
+                ).workaroundFreezeLinuxMint().marginOnly(right: 15),
+              ),
+              ElevatedButton(
+                onPressed: enabled && !extraFixed
+                    ? () async {
+                        await bind.mainSetOption(
+                            key: kOptionDirectAccessExtraNetworks,
+                            value: extraController.text.trim());
+                        setState(() {});
+                      }
+                    : null,
+                child: Text(translate('Apply')),
+              ),
+            ]),
+            enabled: enabled && !extraFixed,
+            leftMargin: _kCheckBoxLeftMargin,
+          ),
+      ],
+    );
+  }
+
   List<Widget> directIp(BuildContext context) {
     TextEditingController controller = TextEditingController();
     update(bool v) => setState(() {});
@@ -1547,6 +1632,10 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                   ]),
                   enabled: enabled && !locked && !isOptFixed,
                 ),
+              ),
+              Offstage(
+                offstage: !enabled,
+                child: directAccessScope(context, enabled: enabled && !locked),
               ),
               if (showPairingPassphrase)
                 _SubLabeledWidget(
@@ -4134,19 +4223,8 @@ Widget _lock(
                             Text(translate(label)).marginOnly(left: 5),
                           ]).marginSymmetric(vertical: 2)),
                   onPressed: () async {
-                    if (await canBeBlocked()) {
-                      showToast(translate(
-                          'Settings are locked during support sessions'));
-                      return;
-                    }
-                    final unlockPin = bind.mainGetUnlockPin();
-                    if (unlockPin.isEmpty || isUnlockPinDisabled()) {
-                      bool checked = await callMainCheckSuperUserPermission();
-                      if (checked) {
-                        onUnlock();
-                      }
-                    } else {
-                      checkUnlockPinDialog(unlockPin, onUnlock);
+                    if (await requestSettingsWriteAccess()) {
+                      onUnlock();
                     }
                   },
                 ).marginSymmetric(horizontal: 2, vertical: 4),

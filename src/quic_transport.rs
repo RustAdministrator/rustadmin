@@ -230,6 +230,25 @@ async fn connect_pretrusted_inner(
     Ok(Stream::from_quic(application))
 }
 
+/// The QUIC listener runs while the transport mode asks for it and, unless
+/// `quic-follow-direct-server=N`, while direct access is switched on.
+#[cfg(not(target_os = "ios"))]
+fn quic_listener_wanted_now(config: &NetworkTransportConfig) -> bool {
+    use hbb_common::config::keys;
+    crate::access_scope::quic_listener_wanted(
+        config.mode == RemoteTransportMode::Tcp,
+        option2bool("stop-service", &Config::get_option("stop-service")),
+        option2bool(
+            keys::OPTION_QUIC_FOLLOW_DIRECT_SERVER,
+            &Config::get_option(keys::OPTION_QUIC_FOLLOW_DIRECT_SERVER),
+        ),
+        option2bool(
+            keys::OPTION_DIRECT_SERVER,
+            &Config::get_option(keys::OPTION_DIRECT_SERVER),
+        ),
+    )
+}
+
 #[cfg(not(target_os = "ios"))]
 pub async fn run_direct_server(server: ServerPtr) {
     loop {
@@ -243,9 +262,7 @@ pub async fn run_direct_server(server: ServerPtr) {
 #[cfg(not(target_os = "ios"))]
 async fn run_direct_server_once(server: ServerPtr) -> ResultType<()> {
     let config = NetworkTransportConfig::load()?;
-    if config.mode == RemoteTransportMode::Tcp
-        || option2bool("stop-service", &Config::get_option("stop-service"))
-    {
+    if !quic_listener_wanted_now(&config) {
         tokio::time::sleep(Duration::from_secs(5)).await;
         return Ok(());
     }
@@ -268,10 +285,9 @@ async fn run_direct_server_once(server: ServerPtr) -> ResultType<()> {
     let mut refusal_logged_at: Option<std::time::Instant> = None;
     loop {
         let current = NetworkTransportConfig::load()?;
-        if current.mode == RemoteTransportMode::Tcp
+        if !quic_listener_wanted_now(&current)
             || current.listen_address != config.listen_address
             || current.listen_port != config.listen_port
-            || option2bool("stop-service", &Config::get_option("stop-service"))
         {
             endpoint.close_and_wait().await;
             return Ok(());
@@ -282,6 +298,22 @@ async fn run_direct_server_once(server: ServerPtr) -> ResultType<()> {
             Err(error) => return Err(error.into()),
         };
         let remote_address = incoming.remote_address();
+        if !crate::access_scope::peer_in_direct_access_scope(remote_address.ip()) {
+            hbb_common::log::debug!(
+                "Refused QUIC connection from {}: outside the configured access scope",
+                remote_address.ip()
+            );
+            incoming.refuse();
+            continue;
+        }
+        if !crate::common::ip_allowed_by_whitelist(
+            &Config::get_option("whitelist"),
+            remote_address.ip(),
+        ) {
+            // Before any admission slot, handshake or key derivation.
+            incoming.refuse();
+            continue;
+        }
         let ticket = match admission.admit(
             remote_address.ip(),
             incoming.remote_address_validated(),

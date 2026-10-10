@@ -539,7 +539,30 @@ final class ScreenshotSessionEvent extends SessionEvent {
   final String message;
 }
 
-enum MessageBoxOrigin { core, plugin }
+/// Where a message box came from: this application's own core, a plugin, or the
+/// remote peer (text it chose itself).
+enum MessageBoxOrigin { core, plugin, peer }
+
+/// Message-box types only the local core may raise: the security prompts and
+/// the credential prompts. A message from the peer carrying one of them is
+/// shown as plain text and never opens the dialog.
+const Set<String> kCoreOnlyMessageBoxTypes = {
+  'input-pairing-passphrase',
+  'input-direct-pairing-passphrase',
+  'confirm-peer-trust',
+  'confirm-direct-trust',
+  're-input-password',
+  'input-password',
+  'input-2fa',
+  'session-login',
+  'session-re-login',
+  'session-login-password',
+  'terminal-admin-login',
+  'terminal-admin-login-password',
+};
+
+bool isCoreOnlyMessageBoxType(String type) =>
+    kCoreOnlyMessageBoxTypes.contains(type);
 
 final class SecurityPromptDetails {
   const SecurityPromptDetails({
@@ -548,6 +571,8 @@ final class SecurityPromptDetails {
     required this.direct,
     this.fingerprint = '',
     this.trustPhrase = '',
+    this.keyChange = false,
+    this.previousFingerprint = '',
   });
 
   final String peer;
@@ -555,6 +580,12 @@ final class SecurityPromptDetails {
   final bool direct;
   final String fingerprint;
   final String trustPhrase;
+
+  /// The device is known and its key differs from the one trusted before.
+  final bool keyChange;
+
+  /// Fingerprint of the key trusted before; empty when unknown or unreadable.
+  final String previousFingerprint;
 }
 
 final class MessageBoxSessionEvent extends SessionEvent {
@@ -1138,7 +1169,12 @@ SessionEvent? decodeTypedSessionEvent(Map<String, dynamic> event) {
     case 'exit_relative_mouse_mode':
       return const SessionSignalEvent(SessionSignal.exitRelativeMouseMode);
     case 'msgbox':
-      return decodeMessageBoxSessionEvent(event);
+      return decodeMessageBoxSessionEvent(
+        event,
+        origin: event['origin'] == 'peer'
+            ? MessageBoxOrigin.peer
+            : MessageBoxOrigin.core,
+      );
     case 'toast':
       final type = event['type'] ?? 'info';
       final text = event['text'] ?? '';
@@ -1914,7 +1950,13 @@ SecurityPromptDetails? _decodeSecurityPromptDetails(
   final direct = values['direct'];
   final fingerprint = values['fingerprint'] ?? '';
   final trustPhrase = values['trust_phrase'] ?? '';
-  if (peer is! String ||
+  final trustKind = values['trust_kind'] ?? 'first_contact';
+  final previousFingerprint = values['previous_fingerprint'] ?? '';
+  if (trustKind is! String ||
+      (trustKind != 'first_contact' && trustKind != 'key_change') ||
+      previousFingerprint is! String ||
+      previousFingerprint.length > 64 * 1024 ||
+      peer is! String ||
       peer.isEmpty ||
       peer.length > 4096 ||
       peerId is! String ||
@@ -1934,6 +1976,8 @@ SecurityPromptDetails? _decodeSecurityPromptDetails(
     direct: direct == true,
     fingerprint: fingerprint,
     trustPhrase: trustPhrase,
+    keyChange: trustKind == 'key_change',
+    previousFingerprint: previousFingerprint,
   );
 }
 

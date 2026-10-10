@@ -723,6 +723,26 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("view_camera_unsupported_tip", "Удалённое устройство не поддерживает просмотр камеры."),
         ("Terminal", "Терминал"),
         ("Enable terminal", "Включить терминал"),
+        ("Switch sides", "Поменяться сторонами"),
+        ("Trust the new key", "Доверять новому ключу"),
+        (
+            "The phrase matches the other device: trust",
+            "Фраза совпадает с фразой на другом устройстве: доверять",
+        ),
+        (
+            "The key of this device is different from the one you trusted before. This can mean the device was reinstalled, or that someone else is answering in its place.",
+            "Ключ этого устройства отличается от того, которому вы доверяли раньше. Возможно, устройство переустановили — или вместо него отвечает кто-то другой.",
+        ),
+        ("Previously trusted fingerprint", "Ранее доверенный отпечаток"),
+        ("New fingerprint", "Новый отпечаток"),
+        (
+            "The remote user asks this computer to end the current session and open a connection back to theirs, so that you control their computer instead.",
+            "Удалённый пользователь просит этот компьютер завершить текущий сеанс и подключиться к его компьютеру, чтобы вы управляли его компьютером.",
+        ),
+        (
+            "Check Windows account before access approval (terminal)",
+            "Проверять учётную запись Windows до подтверждения доступа (терминал)",
+        ),
         ("New tab", "Новая вкладка"),
         ("Keep terminal sessions on disconnect", "Сохранять сеансы терминала при отключении"),
         ("Terminal (Run as administrator)", "Терминал (администратор)"),

@@ -41,6 +41,31 @@ fn is_protected_remote_option(key: &str) -> bool {
             | keys::OPTION_VERIFICATION_METHOD
             | keys::OPTION_WHITELIST
             | keys::OPTION_ALLOW_REMOTE_CONFIG_MODIFICATION
+            | keys::OPTION_PERMISSION_PROMPT_GLOBAL_INPUT_BLOCK
+            | keys::OPTION_PERMISSION_REGRANT_WITHOUT_PROMPT
+            | keys::OPTION_QUIC_PRELOGIN_TIMEOUT_SECS
+            | keys::OPTION_TCP_PRELOGIN_TIMEOUT_SECS
+            | keys::OPTION_PRELOGIN_LIMIT_MODE
+            | keys::OPTION_PRELOGIN_MAX_PER_SOURCE
+            | keys::OPTION_PRELOGIN_MAX_TOTAL
+            | keys::OPTION_ALLOW_TERMINAL_OS_LOGIN_BEFORE_AUTHORIZATION
+            | keys::OPTION_ALLOW_UNAPPROVED_SWITCH_SIDES
+            | keys::OPTION_DISABLE_PAIRING_HOST_PROOF
+            | keys::OPTION_PAIRING_HOST_AUTH
+            | keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION
+            | keys::OPTION_REMEMBER_PAIRED_VIEWERS
+            | keys::OPTION_ALLOW_ID_RELAY_SERVER
+            | keys::OPTION_ENABLE_LAN_DISCOVERY
+            | keys::OPTION_ALLOW_AUTO_UPDATE
+            | keys::OPTION_REMOTE_TRANSPORT
+            | keys::OPTION_DISABLE_UDP
+            | keys::OPTION_QUIC_LISTEN_ADDRESS
+            | keys::OPTION_QUIC_LISTEN_PORT
+            | keys::OPTION_ALLOW_INSECURE_RELAY_SESSION
+            | keys::OPTION_ALLOW_SERVER_PERMISSION_GRANTS
+            | keys::OPTION_QUIC_FOLLOW_DIRECT_SERVER
+            | keys::OPTION_DIRECT_ACCESS_SCOPE
+            | keys::OPTION_DIRECT_ACCESS_EXTRA_NETWORKS
             | keys::OPTION_KEY
             | "rendezvous-servers"
     )
@@ -379,6 +404,39 @@ mod tests {
         assert!(is_protected_remote_option(keys::OPTION_APPROVE_MODE));
         assert!(is_protected_remote_option(keys::OPTION_VERIFICATION_METHOD));
         assert!(is_protected_remote_option(keys::OPTION_WHITELIST));
+        assert!(is_protected_remote_option(
+            keys::OPTION_PERMISSION_PROMPT_GLOBAL_INPUT_BLOCK
+        ));
+        assert!(is_protected_remote_option(
+            keys::OPTION_PERMISSION_REGRANT_WITHOUT_PROMPT
+        ));
+        for key in [
+            keys::OPTION_QUIC_PRELOGIN_TIMEOUT_SECS,
+            keys::OPTION_TCP_PRELOGIN_TIMEOUT_SECS,
+            keys::OPTION_PRELOGIN_LIMIT_MODE,
+            keys::OPTION_PRELOGIN_MAX_PER_SOURCE,
+            keys::OPTION_PRELOGIN_MAX_TOTAL,
+            keys::OPTION_ALLOW_TERMINAL_OS_LOGIN_BEFORE_AUTHORIZATION,
+            keys::OPTION_ALLOW_UNAPPROVED_SWITCH_SIDES,
+            keys::OPTION_DISABLE_PAIRING_HOST_PROOF,
+            keys::OPTION_PAIRING_HOST_AUTH,
+            keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION,
+            keys::OPTION_REMEMBER_PAIRED_VIEWERS,
+            keys::OPTION_ALLOW_ID_RELAY_SERVER,
+            keys::OPTION_ENABLE_LAN_DISCOVERY,
+            keys::OPTION_ALLOW_AUTO_UPDATE,
+            keys::OPTION_REMOTE_TRANSPORT,
+            keys::OPTION_DISABLE_UDP,
+            keys::OPTION_QUIC_LISTEN_ADDRESS,
+            keys::OPTION_QUIC_LISTEN_PORT,
+            keys::OPTION_ALLOW_INSECURE_RELAY_SESSION,
+            keys::OPTION_ALLOW_SERVER_PERMISSION_GRANTS,
+            keys::OPTION_QUIC_FOLLOW_DIRECT_SERVER,
+            keys::OPTION_DIRECT_ACCESS_SCOPE,
+            keys::OPTION_DIRECT_ACCESS_EXTRA_NETWORKS,
+        ] {
+            assert!(is_protected_remote_option(key), "{key}");
+        }
     }
 
     #[test]

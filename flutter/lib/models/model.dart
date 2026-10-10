@@ -1085,6 +1085,12 @@ class FfiModel with ChangeNotifier {
       msgBox(sessionId, type, title, text, link, dialogManager);
       return;
     }
+    // Text the remote peer chose can never stand in for a prompt of ours.
+    final fromPeer = event.origin == MessageBoxOrigin.peer;
+    if (fromPeer && isCoreOnlyMessageBoxType(type)) {
+      msgBox(sessionId, 'info', title, text, link, dialogManager);
+      return;
+    }
 
     void rejectSecurityPrompt({required bool pairing}) {
       () async {
@@ -1129,7 +1135,8 @@ class FfiModel with ChangeNotifier {
       } else {
         rejectSecurityPrompt(pairing: false);
       }
-    } else if (type == 'error' &&
+    } else if (!fromPeer &&
+        type == 'error' &&
         title == 'Connection Error' &&
         isResettablePeerTrustError(text)) {
       showPeerIdentityChangedDialog(sessionId, dialogManager, text);
@@ -1191,6 +1198,8 @@ class FfiModel with ChangeNotifier {
     final fingerprint = details.fingerprint;
     final trustPhrase = details.trustPhrase;
     final direct = details.direct;
+    final keyChange = details.keyChange;
+    final previousFingerprint = details.previousFingerprint;
     final controller = TextEditingController();
     String normalizePhrase(String value) =>
         value.trim().toLowerCase().split(RegExp(r'\s+')).join(' ');
@@ -1199,8 +1208,11 @@ class FfiModel with ChangeNotifier {
     dialogManager.show(
       tag: dialogTag,
       (setState, close, context) {
+        // A device seen for the first time is compared by eye and confirmed
+        // with one button; a changed key also needs the phrase typed in.
         final phraseConfirmed = !invalidTrustPayload &&
-            normalizePhrase(controller.text) == normalizedTrustPhrase;
+            (!keyChange ||
+                normalizePhrase(controller.text) == normalizedTrustPhrase);
 
         void reject() {
           () async {
@@ -1260,37 +1272,61 @@ class FfiModel with ChangeNotifier {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
+              if (keyChange)
+                Text(
+                  translate(
+                      'The key of this device is different from the one you trusted before. This can mean the device was reinstalled, or that someone else is answering in its place.'),
+                  key: const ValueKey('peer-trust-key-change-warning'),
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.error,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ).marginOnly(bottom: 12)
+              else
+                Text(
+                  direct
+                      ? 'First direct local connection. Approve and remember this device key?'
+                      : 'First secure connection for this peer. Approve and remember this device key?',
+                ).marginOnly(bottom: 12),
               Text(
-                direct
-                    ? 'First direct local connection. Approve and remember this device key?'
-                    : 'First secure connection for this peer. Approve and remember this device key?',
-              ).marginOnly(bottom: 12),
-              Text(
-                'Compare the trust phrase with the remote device, then type it below to continue.',
+                keyChange
+                    ? 'Compare the trust phrase with the remote device, then type it below to continue.'
+                    : 'Compare the trust phrase with the one shown on the other device.',
               ).marginOnly(bottom: 12),
               buildLine(direct ? 'Endpoint' : 'Peer', peer),
               buildLine('Peer ID', peerId),
               buildLine('Trust phrase', trustPhrase),
-              buildLine('Fingerprint', fingerprint),
+              if (keyChange)
+                buildLine(
+                    'Previously trusted fingerprint',
+                    previousFingerprint.isEmpty
+                        ? '(unreadable)'
+                        : previousFingerprint),
+              buildLine(keyChange ? 'New fingerprint' : 'Fingerprint', fingerprint),
               if (invalidTrustPayload)
                 Text(
                   'The trust information from the remote side is missing or invalid. Reject this connection.',
                   style: TextStyle(color: Theme.of(context).colorScheme.error),
                 ).marginOnly(bottom: 12),
-              TextField(
-                controller: controller,
-                autofocus: true,
-                onChanged: (_) => setState(() {}),
-                decoration: InputDecoration(
-                  labelText: translate('Type trust phrase'),
-                  hintText: trustPhrase,
-                ),
-              ).marginOnly(top: 8),
+              if (keyChange)
+                TextField(
+                  controller: controller,
+                  autofocus: true,
+                  onChanged: (_) => setState(() {}),
+                  decoration: InputDecoration(
+                    labelText: translate('Type trust phrase'),
+                    hintText: trustPhrase,
+                  ),
+                ).marginOnly(top: 8),
             ],
           ),
           actions: [
             dialogButton('Reject', onPressed: reject, isOutline: true),
-            dialogButton('Trust', onPressed: phraseConfirmed ? approve : null),
+            dialogButton(
+                keyChange
+                    ? 'Trust the new key'
+                    : 'The phrase matches the other device: trust',
+                onPressed: phraseConfirmed ? approve : null),
           ],
           onCancel: reject,
         );
