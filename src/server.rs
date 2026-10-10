@@ -70,6 +70,7 @@ mod connection;
 pub mod display_service;
 mod input_authorization;
 mod login_failure_check;
+mod permission_prompt;
 #[cfg(windows)]
 pub mod portable_service;
 mod service;

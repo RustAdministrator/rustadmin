@@ -3153,7 +3153,7 @@ mod proto {
     #[cfg(not(target_os = "android"))]
     use arboard::ClipboardData;
     use hbb_common::{
-        compress::{compress as compress_func, decompress},
+        compress::{compress as compress_func, decompress_limited, DEFAULT_DECOMPRESS_MAX_LEN},
         message_proto::{Clipboard, ClipboardFormat, Message, MultiClipboards},
     };
 
@@ -3254,10 +3254,27 @@ mod proto {
         }
     }
 
+    /// Length in bytes of a `width` x `height` RGBA pixel buffer, or `None` when
+    /// either size is not positive or the length does not fit in `usize`.
+    #[cfg(not(target_os = "android"))]
+    fn rgba_buffer_len(width: i32, height: i32) -> Option<usize> {
+        let width = usize::try_from(width).ok().filter(|v| *v > 0)?;
+        let height = usize::try_from(height).ok().filter(|v| *v > 0)?;
+        width.checked_mul(height)?.checked_mul(4)
+    }
+
     #[cfg(not(target_os = "android"))]
     fn from_clipboard(clipboard: Clipboard) -> Option<ClipboardData> {
         let data = if clipboard.compress {
-            decompress(&clipboard.content)
+            // An entry that cannot be decompressed within the limit is dropped; it must not
+            // turn into an empty buffer that still carries the sender's image size.
+            match decompress_limited(&clipboard.content, DEFAULT_DECOMPRESS_MAX_LEN) {
+                Ok(data) => data,
+                Err(err) => {
+                    hbb_common::log::warn!("Dropped compressed clipboard entry: {err}");
+                    return None;
+                }
+            }
         } else {
             clipboard.content.into()
         };
@@ -3265,11 +3282,24 @@ mod proto {
             Ok(ClipboardFormat::Text) => String::from_utf8(data).ok().map(ClipboardData::Text),
             Ok(ClipboardFormat::Rtf) => String::from_utf8(data).ok().map(ClipboardData::Rtf),
             Ok(ClipboardFormat::Html) => String::from_utf8(data).ok().map(ClipboardData::Html),
-            Ok(ClipboardFormat::ImageRgba) => Some(ClipboardData::Image(arboard::ImageData::rgba(
-                clipboard.width as _,
-                clipboard.height as _,
-                data.into(),
-            ))),
+            Ok(ClipboardFormat::ImageRgba) => {
+                // The clipboard library trusts the sizes it is given, so the peer's
+                // dimensions must describe exactly the bytes that arrived.
+                if rgba_buffer_len(clipboard.width, clipboard.height) != Some(data.len()) {
+                    hbb_common::log::warn!(
+                        "Dropped RGBA clipboard image: {}x{} does not match {} bytes",
+                        clipboard.width,
+                        clipboard.height,
+                        data.len()
+                    );
+                    return None;
+                }
+                Some(ClipboardData::Image(arboard::ImageData::rgba(
+                    clipboard.width as _,
+                    clipboard.height as _,
+                    data.into(),
+                )))
+            }
             Ok(ClipboardFormat::ImagePng) => {
                 Some(ClipboardData::Image(arboard::ImageData::png(data.into())))
             }
@@ -3289,6 +3319,98 @@ mod proto {
             .into_iter()
             .filter_map(from_clipboard)
             .collect()
+    }
+
+    #[cfg(all(test, not(target_os = "android")))]
+    mod rgba_tests {
+        use super::*;
+
+        fn rgba_entry(width: i32, height: i32, content: Vec<u8>, compressed: bool) -> Clipboard {
+            Clipboard {
+                compress: compressed,
+                content: content.into(),
+                width,
+                height,
+                format: ClipboardFormat::ImageRgba.into(),
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn rgba_buffer_len_rejects_non_positive_and_overflowing_sizes() {
+            assert_eq!(rgba_buffer_len(2, 3), Some(24));
+            assert_eq!(rgba_buffer_len(1, 1), Some(4));
+            assert_eq!(rgba_buffer_len(0, 5), None);
+            assert_eq!(rgba_buffer_len(5, 0), None);
+            assert_eq!(rgba_buffer_len(-1, 5), None);
+            assert_eq!(rgba_buffer_len(5, -1), None);
+            assert_eq!(rgba_buffer_len(i32::MIN, i32::MIN), None);
+            #[cfg(target_pointer_width = "32")]
+            assert_eq!(rgba_buffer_len(i32::MAX, i32::MAX), None);
+        }
+
+        #[test]
+        fn from_clipboard_accepts_a_rgba_image_whose_size_matches_its_bytes() {
+            match from_clipboard(rgba_entry(2, 2, vec![7u8; 16], false)) {
+                Some(ClipboardData::Image(arboard::ImageData::Rgba(image))) => {
+                    assert_eq!((image.width, image.height), (2, 2));
+                }
+                _ => panic!("a matching RGBA image must be accepted"),
+            }
+            let compressed = hbb_common::compress::compress(&[9u8; 16]);
+            assert!(matches!(
+                from_clipboard(rgba_entry(2, 2, compressed, true)),
+                Some(ClipboardData::Image(arboard::ImageData::Rgba(_)))
+            ));
+        }
+
+        #[test]
+        fn from_clipboard_drops_rgba_whose_size_does_not_match_its_bytes() {
+            // Too few and too many bytes for the declared size.
+            assert!(from_clipboard(rgba_entry(2, 2, vec![0u8; 15], false)).is_none());
+            assert!(from_clipboard(rgba_entry(2, 2, vec![0u8; 17], false)).is_none());
+            // No pixel data at all, as a failed decompression used to leave behind.
+            assert!(from_clipboard(rgba_entry(2, 2, Vec::new(), false)).is_none());
+            // Sizes that are not positive.
+            assert!(from_clipboard(rgba_entry(0, 2, Vec::new(), false)).is_none());
+            assert!(from_clipboard(rgba_entry(-1, 2, vec![0u8; 8], false)).is_none());
+            assert!(from_clipboard(rgba_entry(2, -1, vec![0u8; 8], false)).is_none());
+        }
+
+        #[test]
+        fn from_clipboard_drops_an_entry_that_exceeds_the_decompress_limit() {
+            // One pixel column, so the declared size matches the bytes the sender compressed.
+            let pixels = vec![0u8; DEFAULT_DECOMPRESS_MAX_LEN + 4];
+            let height = (pixels.len() / 4) as i32;
+            let compressed = hbb_common::compress::compress(&pixels);
+            assert!(from_clipboard(rgba_entry(1, height, compressed, true)).is_none());
+        }
+
+        #[test]
+        fn from_clipboard_drops_undecodable_compressed_content() {
+            assert!(from_clipboard(rgba_entry(1, 1, vec![1, 2, 3, 4], true)).is_none());
+            let text = Clipboard {
+                compress: true,
+                content: vec![0xff, 0x00, 0x13].into(),
+                format: ClipboardFormat::Text.into(),
+                ..Default::default()
+            };
+            assert!(from_clipboard(text).is_none());
+        }
+
+        #[test]
+        fn from_clipboard_still_decodes_text_within_the_limit() {
+            let text = Clipboard {
+                compress: true,
+                content: hbb_common::compress::compress(b"hello clipboard").into(),
+                format: ClipboardFormat::Text.into(),
+                ..Default::default()
+            };
+            match from_clipboard(text) {
+                Some(ClipboardData::Text(value)) => assert_eq!(value, "hello clipboard"),
+                _ => panic!("compressed text under the limit must be decoded"),
+            }
+        }
     }
 
     pub fn get_msg_if_not_support_multi_clip(
