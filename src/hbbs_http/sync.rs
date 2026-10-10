@@ -41,6 +41,8 @@ fn is_protected_remote_option(key: &str) -> bool {
             | keys::OPTION_VERIFICATION_METHOD
             | keys::OPTION_WHITELIST
             | keys::OPTION_ALLOW_REMOTE_CONFIG_MODIFICATION
+            | keys::OPTION_PERMISSION_PROMPT_GLOBAL_INPUT_BLOCK
+            | keys::OPTION_PERMISSION_REGRANT_WITHOUT_PROMPT
             | keys::OPTION_KEY
             | "rendezvous-servers"
     )
@@ -379,6 +381,12 @@ mod tests {
         assert!(is_protected_remote_option(keys::OPTION_APPROVE_MODE));
         assert!(is_protected_remote_option(keys::OPTION_VERIFICATION_METHOD));
         assert!(is_protected_remote_option(keys::OPTION_WHITELIST));
+        assert!(is_protected_remote_option(
+            keys::OPTION_PERMISSION_PROMPT_GLOBAL_INPUT_BLOCK
+        ));
+        assert!(is_protected_remote_option(
+            keys::OPTION_PERMISSION_REGRANT_WITHOUT_PROMPT
+        ));
     }
 
     #[test]
