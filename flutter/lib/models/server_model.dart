@@ -26,6 +26,10 @@ const kUseTemporaryPassword = "use-temporary-password";
 const kUsePermanentPassword = "use-permanent-password";
 const kUseBothPasswords = "use-both-passwords";
 
+/// How long the service keeps a permission request open; the prompt is dropped
+/// at the same time so that a stale answer is never offered.
+const Duration kPermissionRequestExpiry = Duration(seconds: 120);
+
 class PermissionRequestPrompt {
   const PermissionRequestPrompt({
     required this.client,
@@ -72,6 +76,7 @@ class ServerModel with ChangeNotifier {
 
   final List<Client> _clients = [];
   final List<PermissionRequestPrompt> _permissionRequests = [];
+  final Map<String, Timer> _permissionRequestTimers = {};
   bool? _permissionRequestPreviousAlwaysOnTop;
 
   Timer? cmHiddenTimer;
@@ -585,6 +590,7 @@ class ServerModel with ChangeNotifier {
         showCmWindow();
       }
     }
+    _prunePermissionRequests();
     if (_clients.length != oldClientLenght) {
       notifyListeners();
       if (isAndroid) androidUpdatekeepScreenOn();
@@ -771,7 +777,7 @@ class ServerModel with ChangeNotifier {
     if (desktopType == DesktopType.cm) {
       Future.delayed(Duration.zero, _raisePermissionRequestWindow);
     }
-    _permissionRequests.add(PermissionRequestPrompt(
+    final prompt = PermissionRequestPrompt(
       client: client,
       requestId: event.requestId,
       name: event.name,
@@ -779,8 +785,38 @@ class ServerModel with ChangeNotifier {
       title:
           '${translate('Allow')} ${translate(_permissionRequestTitle(event.name))}?',
       risk: translate(_permissionRequestRisk(event.name)),
-    ));
+    );
+    _permissionRequests.add(prompt);
+    _permissionRequestTimers[_permissionRequestKey(prompt)] =
+        Timer(kPermissionRequestExpiry, () => _dropPermissionRequest(prompt));
     notifyListeners();
+  }
+
+  String _permissionRequestKey(PermissionRequestPrompt prompt) =>
+      '${prompt.client.id}-${prompt.requestId}';
+
+  /// Removes a prompt without answering it (expired, or its client is gone).
+  void _dropPermissionRequest(PermissionRequestPrompt prompt) {
+    _permissionRequestTimers.remove(_permissionRequestKey(prompt))?.cancel();
+    final index = _permissionRequests.indexWhere((r) => r.matches(prompt));
+    if (index < 0) {
+      return;
+    }
+    _permissionRequests.removeAt(index);
+    if (_permissionRequests.isEmpty) {
+      _restorePermissionRequestWindowTop();
+    }
+    notifyListeners();
+  }
+
+  /// Drops prompts whose client has been removed or disconnected.
+  void _prunePermissionRequests() {
+    final stale = _permissionRequests
+        .where((r) => !_clients.any((c) => c.id == r.client.id && !c.disconnected))
+        .toList();
+    for (final prompt in stale) {
+      _dropPermissionRequest(prompt);
+    }
   }
 
   void respondPermissionRequest(
@@ -795,6 +831,7 @@ class ServerModel with ChangeNotifier {
         name: request.name,
         enabled: request.enabled,
         approved: approved);
+    _permissionRequestTimers.remove(_permissionRequestKey(request))?.cancel();
     _permissionRequests.removeAt(index);
     if (_permissionRequests.isEmpty) {
       _restorePermissionRequestWindowTop();
@@ -902,6 +939,7 @@ class ServerModel with ChangeNotifier {
       final index = _clients.indexOf(client);
       tabController.remove(index);
       _clients.remove(client);
+      _prunePermissionRequests();
       if (isAndroid) androidUpdatekeepScreenOn();
     }
   }
@@ -923,6 +961,7 @@ class ServerModel with ChangeNotifier {
         parent.target?.dialogManager.dismissByTag(getLoginDialogTag(id));
         parent.target?.invokeMethod("cancel_notification", id);
       }
+      _prunePermissionRequests();
       if (desktopType == DesktopType.cm && _clients.isEmpty) {
         hideCmWindow();
       }
@@ -938,6 +977,7 @@ class ServerModel with ChangeNotifier {
         _clients.map((client) => bind.cmCloseConnection(connId: client.id)));
     _clients.clear();
     tabController.state.value.tabs.clear();
+    _prunePermissionRequests();
     if (isAndroid) androidUpdatekeepScreenOn();
   }
 
@@ -999,6 +1039,10 @@ class ServerModel with ChangeNotifier {
   @override
   void dispose() {
     _statusPollTimer?.cancel();
+    for (final timer in _permissionRequestTimers.values) {
+      timer.cancel();
+    }
+    _permissionRequestTimers.clear();
     super.dispose();
   }
 }
@@ -1011,6 +1055,8 @@ class PermissionRequestOverlay extends StatefulWidget {
     required this.risk,
     required this.onDecline,
     required this.onAllow,
+    this.enterAccelerator = false,
+    this.armDelay = const Duration(milliseconds: 1000),
   }) : super(key: key);
 
   final Client client;
@@ -1018,6 +1064,15 @@ class PermissionRequestOverlay extends StatefulWidget {
   final String risk;
   final VoidCallback onDecline;
   final VoidCallback onAllow;
+
+  /// When true, Enter allows once the guard period has passed and the user has
+  /// not moved focus with Tab. Off by default: Enter then only activates the
+  /// focused button, which starts on Decline.
+  final bool enterAccelerator;
+
+  /// Allow cannot be used before this has elapsed since the prompt appeared,
+  /// so a click or key press that was already on its way cannot answer it.
+  final Duration armDelay;
 
   @override
   State<PermissionRequestOverlay> createState() =>
@@ -1027,9 +1082,22 @@ class PermissionRequestOverlay extends StatefulWidget {
 class _PermissionRequestOverlayState extends State<PermissionRequestOverlay> {
   final FocusScopeNode _scopeNode = FocusScopeNode();
   bool _tabTapped = false;
+  bool _armed = false;
+  Timer? _armTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    _armTimer = Timer(widget.armDelay, () {
+      if (mounted) {
+        setState(() => _armed = true);
+      }
+    });
+  }
 
   @override
   void dispose() {
+    _armTimer?.cancel();
     _scopeNode.dispose();
     super.dispose();
   }
@@ -1041,10 +1109,13 @@ class _PermissionRequestOverlayState extends State<PermissionRequestOverlay> {
       }
       return KeyEventResult.handled;
     }
-    if (!_tabTapped &&
-        (key.logicalKey == LogicalKeyboardKey.enter ||
-            key.logicalKey == LogicalKeyboardKey.numpadEnter)) {
-      if (key is RawKeyDownEvent) {
+    if (key.logicalKey == LogicalKeyboardKey.enter ||
+        key.logicalKey == LogicalKeyboardKey.numpadEnter) {
+      if (!widget.enterAccelerator || _tabTapped) {
+        // The focused button handles it; focus starts on Decline.
+        return KeyEventResult.ignored;
+      }
+      if (key is RawKeyDownEvent && _armed) {
         widget.onAllow();
       }
       return KeyEventResult.handled;
@@ -1121,11 +1192,14 @@ class _PermissionRequestOverlayState extends State<PermissionRequestOverlay> {
                     children: [
                       Expanded(
                         child: dialogButton('Decline',
-                            onPressed: widget.onDecline, isOutline: true),
+                            onPressed: widget.onDecline,
+                            isOutline: true,
+                            autofocus: true),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
-                        child: dialogButton('Allow', onPressed: widget.onAllow),
+                        child: dialogButton('Allow',
+                            onPressed: _armed ? widget.onAllow : null),
                       ),
                     ],
                   ),

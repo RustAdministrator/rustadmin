@@ -1190,7 +1190,7 @@ const DIRECT_HANDSHAKE_FLAG_QUIC_CERTIFICATE: u8 = 0x04;
 const DIRECT_QUIC_CERTIFICATE_MAX_LEN: usize = 16 * 1024;
 const DIRECT_PUBLIC_KEY_FLAG_PAIRING_PROOF: u8 = 0x01;
 const DIRECT_PUBLIC_KEY_FLAG_INITIATOR_ID: u8 = 0x02;
-const DIRECT_PAIRING_PROOF_LEN: usize = 32;
+pub(crate) const DIRECT_PAIRING_PROOF_LEN: usize = 32;
 pub const DIRECT_PAIRING_SCOPE: &str = "direct";
 pub const RENDEZVOUS_PAIRING_SCOPE: &str = "rendezvous";
 const PEER_OPTION_DIRECT_PAIRED_VIEWER_CONFIRMED: &str = "direct-paired-viewer-confirmed";
@@ -3732,6 +3732,22 @@ fn derive_direct_pairing_key(
     Ok(derived)
 }
 
+/// The connection whitelist: empty or containing `0.0.0.0` allows everyone,
+/// otherwise the address must lie in one of the listed networks or addresses.
+pub fn ip_allowed_by_whitelist(whitelist_option: &str, ip: std::net::IpAddr) -> bool {
+    let entries: Vec<&str> = whitelist_option
+        .split(',')
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    if entries.is_empty() || entries.iter().any(|entry| *entry == "0.0.0.0") {
+        return true;
+    }
+    entries.iter().any(|entry| {
+        <cidr_utils::cidr::IpCidr as std::str::FromStr>::from_str(entry)
+            .map_or(false, |cidr| cidr.contains(ip))
+    })
+}
+
 pub fn compute_direct_pairing_proof(
     passphrase: &str,
     salt: &[u8; argon2id13::SALTBYTES],
@@ -5720,6 +5736,27 @@ mod tests {
     fn test_decode_direct_id_pk_rejects_short_payload() {
         let err = decode_direct_id_pk(&[1u8, 2, 3]).unwrap_err().to_string();
         assert!(err.contains("missing peer signing key"));
+    }
+
+    #[test]
+    fn whitelist_allows_everyone_when_empty_or_open() {
+        let ip: std::net::IpAddr = "203.0.113.9".parse().unwrap();
+        assert!(ip_allowed_by_whitelist("", ip));
+        assert!(ip_allowed_by_whitelist(",,", ip));
+        assert!(ip_allowed_by_whitelist("10.0.0.0/8,0.0.0.0", ip));
+    }
+
+    #[test]
+    fn whitelist_matches_addresses_and_networks_only() {
+        let inside: std::net::IpAddr = "10.1.2.3".parse().unwrap();
+        let single: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+        let outside: std::net::IpAddr = "203.0.113.9".parse().unwrap();
+        let list = "10.0.0.0/8,192.0.2.7";
+        assert!(ip_allowed_by_whitelist(list, inside));
+        assert!(ip_allowed_by_whitelist(list, single));
+        assert!(!ip_allowed_by_whitelist(list, outside));
+        // An unparsable entry never matches.
+        assert!(!ip_allowed_by_whitelist("not-an-ip", inside));
     }
 
     #[test]

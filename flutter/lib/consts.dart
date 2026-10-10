@@ -338,6 +338,11 @@ const String kOptionAllowRemoveWallpaper = "allow-remove-wallpaper";
 const String kOptionStopService = "stop-service";
 const String kOptionDirectxCapture = "enable-directx-capture";
 const String kOptionAllowRemoteCmModification = "allow-remote-cm-modification";
+// While a permission prompt is on screen, input from every other
+// low-permission session is paused ("N" turns that off). Enforced in the
+// service; listed here so the key stays in the protected-options set.
+const String kOptionPermissionPromptGlobalInputBlock =
+    "permission-prompt-global-input-block";
 const String kOptionEnableUdpPunch = "enable-udp-punch";
 const String kOptionEnableIpv6Punch = "enable-ipv6-punch";
 const String kOptionEnableTrustedDevices = "enable-trusted-devices";
