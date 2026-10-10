@@ -1477,12 +1477,19 @@ impl Client {
                     Bytes::new()
                 };
                 let mut pairing_was_proven = false;
+                let mut host_ack_key: Option<[u8; 32]> = None;
                 let pairing_proof = if let Some(pairing_salt) = secure_id.pairing_salt {
                     let mut our_pk_b = [0u8; box_::PUBLICKEYBYTES];
                     our_pk_b.copy_from_slice(&asymmetric_value);
                     if use_paired_viewer {
                         None
                     } else {
+                        // A host that used to prove itself and no longer does is
+                        // refused before the user is asked for the passphrase.
+                        Self::refuse_host_proof_downgrade(
+                            peer_config_id,
+                            secure_id.supports_host_proof,
+                        )?;
                         let passphrase = match input.passphrase.take() {
                             Some(passphrase) => passphrase,
                             None => HandshakePassphrase(
@@ -1497,28 +1504,45 @@ impl Client {
                             return Err(ReopenAfterApproval.into());
                         }
                         pairing_was_proven = true;
-                        Some(crate::common::compute_direct_pairing_proof(
-                            &passphrase.0,
-                            &pairing_salt,
-                            peer_id,
-                            &pk,
-                            &secure_id.box_pk,
-                            &our_pk_b,
-                        )?)
+                        let (proof, ack_key) =
+                            crate::common::compute_direct_pairing_proof_and_ack_key(
+                                &passphrase.0,
+                                &pairing_salt,
+                                peer_id,
+                                &pk,
+                                &secure_id.box_pk,
+                                &our_pk_b,
+                            )?;
+                        host_ack_key = Some(ack_key);
+                        Some(proof)
                     }
                 } else {
                     None
                 };
+                let wrapped_symmetric_value = wrap_direct_public_key_symmetric_value_with_identity(
+                    &symmetric_value,
+                    pairing_proof,
+                    initiator_signed_id.as_ref().map(|value| value.as_ref()),
+                )?;
+                // Said inside the message the acknowledgement MAC is bound to.
+                let handshake_caps = if host_ack_key.is_some() {
+                    crate::common::HANDSHAKE_CAP_VERIFIES_HOST_ACK
+                } else {
+                    0
+                };
+                #[cfg(feature = "quic-transport")]
+                let sent_quic_identity = quic_identity.clone();
+                #[cfg(not(feature = "quic-transport"))]
+                let sent_quic_identity = Bytes::new();
+                let sent_asymmetric_value = asymmetric_value.clone();
+                let sent_symmetric_value = wrapped_symmetric_value.clone();
                 let mut msg_out = Message::new();
                 msg_out.set_public_key(PublicKey {
                     asymmetric_value,
-                    symmetric_value: wrap_direct_public_key_symmetric_value_with_identity(
-                        &symmetric_value,
-                        pairing_proof,
-                        initiator_signed_id.as_ref().map(|value| value.as_ref()),
-                    )?,
+                    symmetric_value: wrapped_symmetric_value,
                     #[cfg(feature = "quic-transport")]
                     quic_identity,
+                    handshake_caps,
                     ..Default::default()
                 });
                 timeout(CONNECT_TIMEOUT, conn.send(&msg_out)).await??;
@@ -1536,9 +1560,12 @@ impl Client {
                             let msg_in = Message::parse_from_bytes(&bytes).map_err(|e| {
                                 anyhow!("Handshake failed: invalid pairing acknowledgement: {e}")
                             })?;
-                            match msg_in.union {
-                                Some(message::Union::SignedId(si))
-                                    if is_direct_handshake_ack_ok(&si.id) => {}
+                            let ack_mac = match msg_in.union {
+                                Some(message::Union::SignedId(ack))
+                                    if is_direct_handshake_ack_ok(&ack.id) =>
+                                {
+                                    ack.host_ack_mac.to_vec()
+                                }
                                 Some(message::Union::MessageBox(msgbox))
                                     if msgbox.msgtype == "error" =>
                                 {
@@ -1555,7 +1582,22 @@ impl Client {
                                     );
                                     bail!("Handshake failed: invalid pairing acknowledgement");
                                 }
-                            }
+                            };
+                            // Before anything below pins, remembers or trusts.
+                            Self::check_host_ack(
+                                peer_config_id,
+                                secure_id.supports_host_proof,
+                                host_ack_key,
+                                &crate::common::HostAckBinding {
+                                    host_signed_id: &si.id,
+                                    host_quic_identity: &si.quic_identity,
+                                    viewer_asymmetric_value: &sent_asymmetric_value,
+                                    viewer_symmetric_value: &sent_symmetric_value,
+                                    viewer_quic_identity: &sent_quic_identity,
+                                    handshake_caps,
+                                },
+                                &ack_mac,
+                            )?;
                         }
                         None => {
                             Self::clear_refused_rendezvous_paired_viewer(
@@ -1778,12 +1820,17 @@ impl Client {
                     Bytes::new()
                 };
                 let mut pairing_was_proven = false;
+                let mut host_ack_key: Option<[u8; 32]> = None;
                 let pairing_proof = if let Some(pairing_salt) = direct_id.pairing_salt {
                     let mut our_pk_b = [0u8; box_::PUBLICKEYBYTES];
                     our_pk_b.copy_from_slice(&asymmetric_value);
                     if use_paired_viewer {
                         None
                     } else {
+                        Self::refuse_host_proof_downgrade(
+                            peer_config_id,
+                            direct_id.supports_host_proof,
+                        )?;
                         let passphrase = match input.passphrase.take() {
                             Some(passphrase) => passphrase,
                             None => HandshakePassphrase(
@@ -1798,28 +1845,44 @@ impl Client {
                             return Err(ReopenAfterApproval.into());
                         }
                         pairing_was_proven = true;
-                        Some(crate::common::compute_direct_pairing_proof(
-                            &passphrase.0,
-                            &pairing_salt,
-                            &peer_id,
-                            &sign_pk,
-                            &their_pk_b,
-                            &our_pk_b,
-                        )?)
+                        let (proof, ack_key) =
+                            crate::common::compute_direct_pairing_proof_and_ack_key(
+                                &passphrase.0,
+                                &pairing_salt,
+                                &peer_id,
+                                &sign_pk,
+                                &their_pk_b,
+                                &our_pk_b,
+                            )?;
+                        host_ack_key = Some(ack_key);
+                        Some(proof)
                     }
                 } else {
                     None
                 };
+                let wrapped_symmetric_value = wrap_direct_public_key_symmetric_value_with_identity(
+                    &symmetric_value,
+                    pairing_proof,
+                    initiator_signed_id.as_ref().map(|value| value.as_ref()),
+                )?;
+                let handshake_caps = if host_ack_key.is_some() {
+                    crate::common::HANDSHAKE_CAP_VERIFIES_HOST_ACK
+                } else {
+                    0
+                };
+                #[cfg(feature = "quic-transport")]
+                let sent_quic_identity = quic_identity.clone();
+                #[cfg(not(feature = "quic-transport"))]
+                let sent_quic_identity = Bytes::new();
+                let sent_asymmetric_value = asymmetric_value.clone();
+                let sent_symmetric_value = wrapped_symmetric_value.clone();
                 let mut msg_out = Message::new();
                 msg_out.set_public_key(PublicKey {
                     asymmetric_value,
-                    symmetric_value: wrap_direct_public_key_symmetric_value_with_identity(
-                        &symmetric_value,
-                        pairing_proof,
-                        initiator_signed_id.as_ref().map(|value| value.as_ref()),
-                    )?,
+                    symmetric_value: wrapped_symmetric_value,
                     #[cfg(feature = "quic-transport")]
                     quic_identity,
+                    handshake_caps,
                     ..Default::default()
                 });
                 timeout(CONNECT_TIMEOUT, conn.send(&msg_out)).await??;
@@ -1839,9 +1902,12 @@ impl Client {
                                     "Handshake failed: invalid direct handshake acknowledgement: {e}"
                                 )
                             })?;
-                            match msg_in.union {
-                                Some(message::Union::SignedId(si))
-                                    if is_direct_handshake_ack_ok(&si.id) => {}
+                            let ack_mac = match msg_in.union {
+                                Some(message::Union::SignedId(ack))
+                                    if is_direct_handshake_ack_ok(&ack.id) =>
+                                {
+                                    ack.host_ack_mac.to_vec()
+                                }
                                 Some(message::Union::MessageBox(msgbox))
                                     if msgbox.msgtype == "error" =>
                                 {
@@ -1858,7 +1924,21 @@ impl Client {
                                     );
                                     bail!("Handshake failed: invalid direct handshake acknowledgement");
                                 }
-                            }
+                            };
+                            Self::check_host_ack(
+                                peer_config_id,
+                                direct_id.supports_host_proof,
+                                host_ack_key,
+                                &crate::common::HostAckBinding {
+                                    host_signed_id: &si.id,
+                                    host_quic_identity: &si.quic_identity,
+                                    viewer_asymmetric_value: &sent_asymmetric_value,
+                                    viewer_symmetric_value: &sent_symmetric_value,
+                                    viewer_quic_identity: &sent_quic_identity,
+                                    handshake_caps,
+                                },
+                                &ack_mac,
+                            )?;
                         }
                         None => {
                             Self::clear_refused_direct_paired_viewer(
@@ -1908,6 +1988,54 @@ impl Client {
             None => {
                 bail!("Reset by the peer");
             }
+        }
+    }
+
+    /// A host that acknowledged a pairing proof with a valid MAC before, and
+    /// does not announce that it still can, is refused before the passphrase
+    /// is requested.
+    fn refuse_host_proof_downgrade(peer_config_id: &str, host_announced: bool) -> ResultType<()> {
+        if !host_announced
+            && hbb_common::config::pairing_host_auth() != hbb_common::config::PairingHostAuth::Off
+            && crate::common::has_host_proof_seen(peer_config_id)
+        {
+            bail!(
+                "Handshake failed: this device proved its pairing knowledge before and no longer does; reset trust for it to connect again"
+            );
+        }
+        Ok(())
+    }
+
+    /// Checks the host's acknowledgement of the pairing proof just sent.
+    /// `ack_key` is None when no proof was sent (remembered viewer identity).
+    fn check_host_ack(
+        peer_config_id: &str,
+        host_announced: bool,
+        ack_key: Option<[u8; 32]>,
+        binding: &crate::common::HostAckBinding<'_>,
+        mac: &[u8],
+    ) -> ResultType<()> {
+        let Some(ack_key) = ack_key else {
+            return Ok(());
+        };
+        let mac_present = !mac.is_empty();
+        let mac_valid = mac_present && crate::common::verify_host_ack_mac(&ack_key, binding, mac);
+        match crate::common::evaluate_host_proof(
+            hbb_common::config::pairing_host_auth(),
+            host_announced,
+            crate::common::has_host_proof_seen(peer_config_id),
+            mac_present,
+            mac_valid,
+        ) {
+            crate::common::HostProofDecision::Verified => {
+                crate::common::set_host_proof_seen(peer_config_id, true);
+                Ok(())
+            }
+            crate::common::HostProofDecision::AcceptedUnverified(reason) => {
+                log::warn!("Pairing accepted without host proof for {peer_config_id}: {reason}");
+                Ok(())
+            }
+            crate::common::HostProofDecision::Rejected(reason) => bail!("{reason}"),
         }
     }
 
@@ -7971,6 +8099,55 @@ mod security_tests {
         secure_channel: u32,
         /// Exchange one encrypted frame each way after the handshake.
         exchange: bool,
+        /// How the host treats the pairing acknowledgement MAC.
+        host_proof: TestHostProof,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    enum TestHostProof {
+        /// An older host: no announcement, no MAC.
+        #[default]
+        Absent,
+        /// Announces the capability and sends a valid MAC.
+        Proves,
+        /// Announces the capability and sends a MAC under another key.
+        WrongKey,
+        /// Announces the capability and sends no MAC (a stripped reply).
+        OmitsAfterAnnouncing,
+    }
+
+    impl TestHostProof {
+        fn announces(self) -> bool {
+            self != Self::Absent
+        }
+
+        fn mac(
+            self,
+            ack_key: [u8; 32],
+            first_signed_id: &[u8],
+            first_quic_identity: &[u8],
+            public_key: &PublicKey,
+        ) -> Bytes {
+            let key = match self {
+                Self::Proves => ack_key,
+                Self::WrongKey => [0x5a; 32],
+                Self::Absent | Self::OmitsAfterAnnouncing => return Bytes::new(),
+            };
+            Bytes::from(
+                crate::common::compute_host_ack_mac(
+                    &key,
+                    &crate::common::HostAckBinding {
+                        host_signed_id: first_signed_id,
+                        host_quic_identity: first_quic_identity,
+                        viewer_asymmetric_value: &public_key.asymmetric_value,
+                        viewer_symmetric_value: &public_key.symmetric_value,
+                        viewer_quic_identity: &public_key.quic_identity,
+                        handshake_caps: public_key.handshake_caps,
+                    },
+                )
+                .to_vec(),
+            )
+        }
     }
 
     impl TestHostChannel {
@@ -8032,15 +8209,18 @@ mod security_tests {
                 .as_ref()
                 .map(|_| crate::common::create_direct_pairing_salt());
             let signed_id = match pairing_salt {
-                _ if channel.secure_channel != 0 => crate::common::create_host_signed_id(
-                    true,
-                    &peer_id,
-                    box_pk.0,
-                    &sign_pk,
-                    &sign_sk,
-                    pairing_salt,
-                    channel.secure_channel,
-                ),
+                _ if channel.secure_channel != 0 || channel.host_proof.announces() => {
+                    crate::common::create_host_signed_id_with_proof(
+                        true,
+                        &peer_id,
+                        box_pk.0,
+                        &sign_pk,
+                        &sign_sk,
+                        pairing_salt,
+                        channel.secure_channel,
+                        channel.host_proof.announces(),
+                    )
+                }
                 Some(salt) => crate::common::create_direct_signed_id_with_pairing(
                     &peer_id, box_pk.0, &sign_pk, &sign_sk, salt,
                 ),
@@ -8048,23 +8228,28 @@ mod security_tests {
                     crate::common::create_direct_signed_id(&peer_id, box_pk.0, &sign_pk, &sign_sk)
                 }
             };
+            #[cfg(feature = "quic-transport")]
+            let first_quic_identity: Bytes = _certificate
+                .as_ref()
+                .map(|certificate| {
+                    crate::common::create_direct_signed_id_with_quic(
+                        &peer_id,
+                        box_pk.0,
+                        &sign_pk,
+                        &sign_sk,
+                        certificate,
+                    )
+                })
+                .transpose()?
+                .unwrap_or_default();
+            #[cfg(not(feature = "quic-transport"))]
+            let first_quic_identity = Bytes::new();
+            let first_signed_id = signed_id.clone();
             let mut msg_out = Message::new();
             msg_out.set_signed_id(SignedId {
                 id: signed_id,
                 #[cfg(feature = "quic-transport")]
-                quic_identity: _certificate
-                    .as_ref()
-                    .map(|certificate| {
-                        crate::common::create_direct_signed_id_with_quic(
-                            &peer_id,
-                            box_pk.0,
-                            &sign_pk,
-                            &sign_sk,
-                            certificate,
-                        )
-                    })
-                    .transpose()?
-                    .unwrap_or_default(),
+                quic_identity: first_quic_identity.clone(),
                 ..Default::default()
             });
             stream.send(&msg_out).await?;
@@ -8094,15 +8279,18 @@ mod security_tests {
                 let mut ack = Message::new();
                 let mut paired_initiator = None;
                 let mut error_text = None;
+                let mut ack_key = [0u8; 32];
                 if let Some(pairing_proof) = public_key_payload.pairing_proof {
-                    let expected_proof = crate::common::compute_direct_pairing_proof(
-                        pairing_passphrase,
-                        &pairing_salt,
-                        &peer_id,
-                        &sign_pk,
-                        &box_pk.0,
-                        &initiator_box_pk,
-                    )?;
+                    let (expected_proof, derived_ack_key) =
+                        crate::common::compute_direct_pairing_proof_and_ack_key(
+                            pairing_passphrase,
+                            &pairing_salt,
+                            &peer_id,
+                            &sign_pk,
+                            &box_pk.0,
+                            &initiator_box_pk,
+                        )?;
+                    ack_key = derived_ack_key;
                     if pairing_proof == expected_proof {
                         if let Some(initiator) = public_key_payload.initiator.as_ref() {
                             crate::common::validate_direct_public_key_initiator(
@@ -8154,8 +8342,22 @@ mod security_tests {
                         scope: crate::common::DIRECT_PAIRING_SCOPE.to_owned(),
                     });
                 }
+                let host_ack_mac = if public_key.handshake_caps
+                    & crate::common::HANDSHAKE_CAP_VERIFIES_HOST_ACK
+                    != 0
+                {
+                    channel.host_proof.mac(
+                        ack_key,
+                        &first_signed_id,
+                        &first_quic_identity,
+                        &public_key,
+                    )
+                } else {
+                    Bytes::new()
+                };
                 ack.set_signed_id(SignedId {
                     id: crate::common::direct_handshake_ack_ok(),
+                    host_ack_mac,
                     ..Default::default()
                 });
                 stream.send(&ack).await?;
@@ -8286,15 +8488,18 @@ mod security_tests {
                 .as_ref()
                 .map(|_| crate::common::create_direct_pairing_salt());
             let signed_id = match pairing_salt {
-                _ if channel.secure_channel != 0 => crate::common::create_host_signed_id(
-                    false,
-                    &peer_id,
-                    box_pk.0,
-                    &sign_pk,
-                    &sign_sk,
-                    pairing_salt,
-                    channel.secure_channel,
-                ),
+                _ if channel.secure_channel != 0 || channel.host_proof.announces() => {
+                    crate::common::create_host_signed_id_with_proof(
+                        false,
+                        &peer_id,
+                        box_pk.0,
+                        &sign_pk,
+                        &sign_sk,
+                        pairing_salt,
+                        channel.secure_channel,
+                        channel.host_proof.announces(),
+                    )
+                }
                 Some(salt) => crate::common::create_secure_signed_id_with_pairing(
                     &peer_id, box_pk.0, &sign_sk, salt,
                 ),
@@ -8310,6 +8515,8 @@ mod security_tests {
                 )
                 .into(),
             };
+            let first_signed_id = signed_id.clone();
+            let first_quic_identity = Bytes::new();
             let mut msg_out = Message::new();
             msg_out.set_signed_id(SignedId {
                 id: signed_id,
@@ -8342,15 +8549,18 @@ mod security_tests {
                 let mut ack = Message::new();
                 let mut paired_initiator = None;
                 let mut error_text = None;
+                let mut ack_key = [0u8; 32];
                 if let Some(pairing_proof) = public_key_payload.pairing_proof {
-                    let expected_proof = crate::common::compute_direct_pairing_proof(
-                        pairing_passphrase,
-                        &pairing_salt,
-                        &peer_id,
-                        &sign_pk,
-                        &box_pk.0,
-                        &initiator_box_pk,
-                    )?;
+                    let (expected_proof, derived_ack_key) =
+                        crate::common::compute_direct_pairing_proof_and_ack_key(
+                            pairing_passphrase,
+                            &pairing_salt,
+                            &peer_id,
+                            &sign_pk,
+                            &box_pk.0,
+                            &initiator_box_pk,
+                        )?;
+                    ack_key = derived_ack_key;
                     if pairing_proof == expected_proof {
                         if let Some(initiator) = public_key_payload.initiator.as_ref() {
                             crate::common::validate_direct_public_key_initiator(
@@ -8400,8 +8610,22 @@ mod security_tests {
                         scope: crate::common::RENDEZVOUS_PAIRING_SCOPE.to_owned(),
                     });
                 }
+                let host_ack_mac = if public_key.handshake_caps
+                    & crate::common::HANDSHAKE_CAP_VERIFIES_HOST_ACK
+                    != 0
+                {
+                    channel.host_proof.mac(
+                        ack_key,
+                        &first_signed_id,
+                        &first_quic_identity,
+                        &public_key,
+                    )
+                } else {
+                    Bytes::new()
+                };
                 ack.set_signed_id(SignedId {
                     id: crate::common::direct_handshake_ack_ok(),
+                    host_ack_mac,
                     ..Default::default()
                 });
                 stream.send(&ack).await?;
@@ -8543,6 +8767,7 @@ mod security_tests {
         let channel = TestHostChannel {
             secure_channel,
             exchange: true,
+            ..Default::default()
         };
         let result = async {
             let (mut conn, handle) = if direct {
@@ -8651,6 +8876,7 @@ mod security_tests {
             let channel = TestHostChannel {
                 secure_channel: tcp::SECURE_CHANNEL_DIRECTIONAL,
                 exchange: true,
+                ..Default::default()
             };
             let (addr, handle) = if direct {
                 spawn_direct_handshake_peer_with_channel(
@@ -9234,6 +9460,261 @@ mod security_tests {
             keys::OPTION_REMEMBER_PAIRED_VIEWERS.to_owned(),
             saved_remember,
         );
+    }
+
+    /// One handshake against a mock host that handles the acknowledgement MAC
+    /// as `proof` says, with the viewer's passphrase matching the host's.
+    async fn host_proof_connect(
+        direct: bool,
+        proof: TestHostProof,
+        peer_id: &str,
+        peer_config_id: &str,
+        host_sign_pk: [u8; sign::PUBLICKEYBYTES],
+        host_sign_sk: sign::SecretKey,
+    ) -> ResultType<Vec<u8>> {
+        let interface = TestInterface::new(peer_config_id, Some("host-proof-secret"));
+        let channel = TestHostChannel {
+            host_proof: proof,
+            ..Default::default()
+        };
+        if direct {
+            let (addr, handle) = spawn_direct_handshake_peer_with_channel(
+                peer_id.to_owned(),
+                host_sign_pk,
+                host_sign_sk,
+                Some("host-proof-secret".to_owned()),
+                None,
+                channel,
+            )
+            .await?;
+            let mut conn = connect_security_test_tcp(&addr).await?;
+            let result =
+                Client::secure_direct_connection(&addr, peer_config_id, &mut conn, interface).await;
+            handle.abort();
+            result
+        } else {
+            let (rs_pk, rs_sk) = sign::gen_keypair();
+            let (addr, binding, handle) = spawn_secure_handshake_peer_with_channel(
+                peer_id.to_owned(),
+                host_sign_pk,
+                host_sign_sk,
+                rs_sk,
+                Some("host-proof-secret".to_owned()),
+                channel,
+            )
+            .await?;
+            let mut conn = connect_security_test_tcp(&addr).await?;
+            let result = Client::secure_connection(
+                peer_id,
+                peer_id,
+                peer_config_id,
+                binding,
+                &crate::common::encode64(rs_pk.0),
+                &interface,
+                &mut conn,
+            )
+            .await
+            .map(Option::unwrap_or_default);
+            handle.abort();
+            result
+        }
+    }
+
+    struct HostProofTestOptions {
+        unverified: String,
+        remember: String,
+        host_auth: String,
+    }
+
+    impl HostProofTestOptions {
+        fn set(host_auth: &str) -> Self {
+            let saved = Self {
+                unverified: Config::get_option(keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST),
+                remember: Config::get_option(keys::OPTION_REMEMBER_PAIRED_VIEWERS),
+                host_auth: Config::get_option(keys::OPTION_PAIRING_HOST_AUTH),
+            };
+            Config::set_option(
+                keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST.to_owned(),
+                "N".to_owned(),
+            );
+            Config::set_option(
+                keys::OPTION_REMEMBER_PAIRED_VIEWERS.to_owned(),
+                "Y".to_owned(),
+            );
+            Config::set_option(
+                keys::OPTION_PAIRING_HOST_AUTH.to_owned(),
+                host_auth.to_owned(),
+            );
+            saved
+        }
+    }
+
+    impl Drop for HostProofTestOptions {
+        fn drop(&mut self) {
+            Config::set_option(
+                keys::OPTION_ALLOW_UNVERIFIED_PEER_TRUST.to_owned(),
+                self.unverified.clone(),
+            );
+            Config::set_option(
+                keys::OPTION_REMEMBER_PAIRED_VIEWERS.to_owned(),
+                self.remember.clone(),
+            );
+            Config::set_option(
+                keys::OPTION_PAIRING_HOST_AUTH.to_owned(),
+                self.host_auth.clone(),
+            );
+            Config::clear_paired_viewers();
+        }
+    }
+
+    #[tokio::test]
+    async fn host_that_proves_its_pairing_knowledge_is_trusted_and_remembered() {
+        let _guard = lock_security_tests();
+        let _options = HostProofTestOptions::set("");
+        for direct in [true, false] {
+            let peer_id = format!("proof-peer-{}", Uuid::new_v4());
+            let peer_config_id = format!("proof-config-{}", Uuid::new_v4());
+            let (sign_pk, sign_sk) = sign::gen_keypair();
+            let pk = host_proof_connect(
+                direct,
+                TestHostProof::Proves,
+                &peer_id,
+                &peer_config_id,
+                sign_pk.0,
+                sign_sk,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("direct={direct}: {e}"));
+            assert_eq!(pk, sign_pk.0.to_vec());
+            assert!(
+                crate::common::has_trusted_peer_signing_key(&peer_config_id, &sign_pk.0).unwrap()
+            );
+            assert!(crate::common::has_host_proof_seen(&peer_config_id));
+            PeerConfig::remove(&peer_config_id);
+        }
+    }
+
+    #[tokio::test]
+    async fn host_acknowledgement_under_another_key_is_rejected_before_trust() {
+        let _guard = lock_security_tests();
+        let _options = HostProofTestOptions::set("");
+        for direct in [true, false] {
+            for proof in [TestHostProof::WrongKey, TestHostProof::OmitsAfterAnnouncing] {
+                let peer_id = format!("proof-peer-{}", Uuid::new_v4());
+                let peer_config_id = format!("proof-config-{}", Uuid::new_v4());
+                let (sign_pk, sign_sk) = sign::gen_keypair();
+                let err = host_proof_connect(
+                    direct,
+                    proof,
+                    &peer_id,
+                    &peer_config_id,
+                    sign_pk.0,
+                    sign_sk,
+                )
+                .await
+                .expect_err("a host without the pairing secret must not be trusted")
+                .to_string();
+                assert!(
+                    err.contains("acknowledg"),
+                    "direct={direct} {proof:?}: {err}"
+                );
+                assert!(
+                    !crate::common::has_trusted_peer_signing_key(&peer_config_id, &sign_pk.0)
+                        .unwrap(),
+                    "direct={direct} {proof:?}: key was pinned"
+                );
+                assert!(!crate::common::has_host_proof_seen(&peer_config_id));
+                PeerConfig::remove(&peer_config_id);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn older_hosts_are_accepted_in_warn_mode_and_refused_in_enforce_mode() {
+        let _guard = lock_security_tests();
+        for direct in [true, false] {
+            {
+                let _options = HostProofTestOptions::set("warn");
+                let peer_id = format!("proof-peer-{}", Uuid::new_v4());
+                let peer_config_id = format!("proof-config-{}", Uuid::new_v4());
+                let (sign_pk, sign_sk) = sign::gen_keypair();
+                host_proof_connect(
+                    direct,
+                    TestHostProof::Absent,
+                    &peer_id,
+                    &peer_config_id,
+                    sign_pk.0,
+                    sign_sk,
+                )
+                .await
+                .unwrap_or_else(|e| panic!("warn, direct={direct}: {e}"));
+                assert!(!crate::common::has_host_proof_seen(&peer_config_id));
+                PeerConfig::remove(&peer_config_id);
+            }
+            {
+                let _options = HostProofTestOptions::set("enforce");
+                let peer_id = format!("proof-peer-{}", Uuid::new_v4());
+                let peer_config_id = format!("proof-config-{}", Uuid::new_v4());
+                let (sign_pk, sign_sk) = sign::gen_keypair();
+                let err = host_proof_connect(
+                    direct,
+                    TestHostProof::Absent,
+                    &peer_id,
+                    &peer_config_id,
+                    sign_pk.0,
+                    sign_sk,
+                )
+                .await
+                .expect_err("enforce mode refuses a host that cannot prove itself")
+                .to_string();
+                assert!(err.contains("cannot prove"), "direct={direct}: {err}");
+                assert!(
+                    !crate::common::has_trusted_peer_signing_key(&peer_config_id, &sign_pk.0)
+                        .unwrap()
+                );
+                PeerConfig::remove(&peer_config_id);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn host_that_proved_itself_once_cannot_drop_the_proof_later() {
+        let _guard = lock_security_tests();
+        let _options = HostProofTestOptions::set("");
+        for direct in [true, false] {
+            let peer_id = format!("proof-peer-{}", Uuid::new_v4());
+            let peer_config_id = format!("proof-config-{}", Uuid::new_v4());
+            let (sign_pk, sign_sk) = sign::gen_keypair();
+            host_proof_connect(
+                direct,
+                TestHostProof::Proves,
+                &peer_id,
+                &peer_config_id,
+                sign_pk.0,
+                sign_sk,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("direct={direct}: {e}"));
+            // The key changed (a repair or an impostor) and the new host does not
+            // prove anything: it is refused before the passphrase is requested.
+            let (other_pk, other_sk) = sign::gen_keypair();
+            let err = host_proof_connect(
+                direct,
+                TestHostProof::Absent,
+                &peer_id,
+                &peer_config_id,
+                other_pk.0,
+                other_sk,
+            )
+            .await
+            .expect_err("a downgrade must be refused")
+            .to_string();
+            assert!(
+                err.contains("proved its pairing knowledge"),
+                "direct={direct}: {err}"
+            );
+            PeerConfig::remove(&peer_config_id);
+        }
     }
 
     #[tokio::test]

@@ -50,6 +50,8 @@ fn is_protected_remote_option(key: &str) -> bool {
             | keys::OPTION_PRELOGIN_MAX_TOTAL
             | keys::OPTION_ALLOW_TERMINAL_OS_LOGIN_BEFORE_AUTHORIZATION
             | keys::OPTION_ALLOW_UNAPPROVED_SWITCH_SIDES
+            | keys::OPTION_DISABLE_PAIRING_HOST_PROOF
+            | keys::OPTION_PAIRING_HOST_AUTH
             | keys::OPTION_KEY
             | "rendezvous-servers"
     )
@@ -402,6 +404,8 @@ mod tests {
             keys::OPTION_PRELOGIN_MAX_TOTAL,
             keys::OPTION_ALLOW_TERMINAL_OS_LOGIN_BEFORE_AUTHORIZATION,
             keys::OPTION_ALLOW_UNAPPROVED_SWITCH_SIDES,
+            keys::OPTION_DISABLE_PAIRING_HOST_PROOF,
+            keys::OPTION_PAIRING_HOST_AUTH,
         ] {
             assert!(is_protected_remote_option(key), "{key}");
         }
