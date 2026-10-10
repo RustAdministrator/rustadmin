@@ -447,6 +447,36 @@ struct Session {
 struct SessionPermissionGrants {
     permissions: HashSet<String>,
     connection_types: HashSet<String>,
+    /// Permissions the local user switched off. A grant (or the keyboard
+    /// default) does not silently bring them back: the peer has to ask again.
+    suspended: HashSet<String>,
+}
+
+impl SessionPermissionGrants {
+    fn grant(&mut self, name: &str) {
+        self.permissions.insert(name.to_owned());
+        self.suspended.remove(name);
+    }
+
+    fn suspend(&mut self, name: &str) {
+        self.suspended.insert(name.to_owned());
+    }
+
+    fn resume(&mut self, name: &str) {
+        self.suspended.remove(name);
+    }
+
+    fn grant_active(&self, name: &str) -> bool {
+        self.permissions.contains(name) && !self.suspended.contains(name)
+    }
+
+    fn is_suspended(&self, name: &str) -> bool {
+        self.suspended.contains(name)
+    }
+
+    fn revoke_connection(&mut self, grant_name: &str) {
+        self.connection_types.remove(grant_name);
+    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -672,7 +702,7 @@ fn switch_permission_policy_denial_reason(
     name: &str,
     enabled: bool,
 ) -> Option<&'static str> {
-    switch_permission_policy_denial_reason_with_grant(auth_kind, name, enabled, false)
+    switch_permission_policy_denial_reason_with_grant(auth_kind, name, enabled, false, false)
 }
 
 fn switch_permission_policy_denial_reason_with_grant(
@@ -680,12 +710,17 @@ fn switch_permission_policy_denial_reason_with_grant(
     name: &str,
     enabled: bool,
     has_grant: bool,
+    suspended: bool,
 ) -> Option<&'static str> {
-    if !enabled
-        || auth_kind.is_unattended_access()
-        || low_permission_default(name, true)
-        || has_grant
-    {
+    if !enabled || auth_kind.is_unattended_access() {
+        return None;
+    }
+    if suspended {
+        // The local user switched this off; only a fresh local decision brings
+        // it back.
+        return Some("Permission was switched off locally and needs approval again.");
+    }
+    if low_permission_default(name, true) || has_grant {
         return None;
     }
     Some("Permission upgrades require local approval for this session.")
@@ -699,11 +734,26 @@ struct StartCmIpcPara {
     tx_cm_stream_ready: mpsc::Sender<()>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct PendingPermissionRequest {
     name: String,
     enabled: bool,
     requested_at: Instant,
+    /// Monotonic time (`permission_prompt::mono_ms`) at which the prompt was
+    /// registered; low-permission input after it taints an approval.
+    shown_at_ms: u64,
+    /// Held only when this build shows the prompt in an overlay, so that other
+    /// sessions' input is paused while it is on screen.
+    #[allow(dead_code)] // held for its `Drop`, which releases the registry slot
+    guard: Option<permission_prompt::PromptGuard>,
+}
+
+/// The overlay that can mask input exists in the Flutter desktop manager only.
+fn permission_prompt_overlay_available() -> bool {
+    cfg!(all(
+        feature = "flutter",
+        not(any(target_os = "android", target_os = "ios"))
+    ))
 }
 
 const PENDING_PERMISSION_REQUEST_TIMEOUT_SECS: u64 = 120;
@@ -1485,6 +1535,7 @@ pub struct Connection {
     audio_sender: Option<MediaSender>,
     // audio by the remote peer/client
     tx_input: std_mpsc::Sender<MessageInput>,
+    input_pause: permission_prompt::InputPauseFlags,
     // handle input messages
     video_ack_required: bool,
     requested_video_profile: VideoProfile,
@@ -1783,6 +1834,7 @@ impl Connection {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             show_my_cursor: false,
             tx_input,
+            input_pause: permission_prompt::InputPauseFlags::default(),
             video_ack_required: false,
             requested_video_profile: VideoProfile::Standard,
             effective_movie_mode: EffectiveMovieMode::Off,
@@ -1919,7 +1971,10 @@ impl Connection {
         );
 
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        std::thread::spawn(move || Self::handle_input(_rx_input, tx_cloned));
+        {
+            let input_pause = conn.input_pause.clone();
+            std::thread::spawn(move || Self::handle_input(_rx_input, tx_cloned, input_pause));
+        }
         let mut second_timer = crate::rustdesk_interval(time::interval(Duration::from_secs(1)));
         let mut video_delivery_timer =
             crate::rustdesk_interval(time::interval(VIDEO_DELIVERY_TICK_INTERVAL));
@@ -1956,7 +2011,7 @@ impl Connection {
                 Some(data) = rx_from_cm.recv() => {
                     match data {
                         ipc::Data::Authorize => {
-                            conn.session_auth_kind = SessionAuthKind::ClickApproval;
+                            conn.set_session_auth_kind(SessionAuthKind::ClickApproval);
                             log::info!(
                                 "Connection {} approved by local user as {} session",
                                 conn.inner.id(),
@@ -1973,6 +2028,7 @@ impl Connection {
                         ipc::Data::Close => {
                             conn.chat_unanswered = false; // seen
                             conn.file_transferred = false; //seen
+                            conn.revoke_session_connection_grant_on_local_close();
                             conn.send_close_reason_no_retry("").await;
                             conn.on_close("connection manager", true).await;
                             break;
@@ -1997,11 +2053,21 @@ impl Connection {
                         }
                         ipc::Data::SwitchPermission{name, enabled} => {
                             log::info!("Change permission {} -> {}", name, enabled);
+                            // This arm is the local user's own switch. Turning a
+                            // permission off suspends it so that a later request
+                            // from the peer is shown again; turning it back on is
+                            // the local decision that resumes it.
+                            if enabled {
+                                conn.resume_session_permission(&name);
+                            } else {
+                                conn.suspend_session_permission(&name);
+                            }
                             if let Some(reason) = switch_permission_policy_denial_reason_with_grant(
                                 conn.session_auth_kind,
                                 &name,
                                 enabled,
                                 conn.session_permission_granted(&name),
+                                conn.session_permission_suspended(&name),
                             ) {
                                 log::warn!(
                                     "Denied permission change {} -> {} for {} session: {}",
@@ -2624,7 +2690,11 @@ impl Connection {
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    fn handle_input(receiver: std_mpsc::Receiver<MessageInput>, tx: Sender) {
+    fn handle_input(
+        receiver: std_mpsc::Receiver<MessageInput>,
+        tx: Sender,
+        input_pause: permission_prompt::InputPauseFlags,
+    ) {
         let mut block_input_mode = false;
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
@@ -2637,6 +2707,17 @@ impl Connection {
             match receiver.recv_timeout(std::time::Duration::from_millis(500)) {
                 Ok(v) => match v {
                     MessageInput::Mouse(mouse_input) => {
+                        // Re-checked here: the event may have been queued before a
+                        // permission prompt appeared. Releases still pass so that no
+                        // button stays held down.
+                        if permission_prompt::drop_queued_input(
+                            input_pause.paused(),
+                            permission_prompt::mouse_is_release_only(&mouse_input.msg),
+                        ) {
+                            continue;
+                        }
+                        let simulate = mouse_input.simulate;
+                        let left_up = is_left_up(&mouse_input.msg);
                         handle_mouse(
                             &mouse_input.msg,
                             mouse_input.conn_id,
@@ -2645,8 +2726,31 @@ impl Connection {
                             mouse_input.simulate,
                             mouse_input.show_cursor,
                         );
+                        if simulate {
+                            // Stamped after the platform call so that the click
+                            // window the local prompt checks covers the moment the
+                            // OS saw the event, not the moment it was queued.
+                            if left_up {
+                                CLICK_TIME.store(get_time(), Ordering::SeqCst);
+                            } else {
+                                MOUSE_MOVE_TIME.store(get_time(), Ordering::SeqCst);
+                            }
+                            if input_pause.is_low_priv() {
+                                permission_prompt::PERMISSION_PROMPTS
+                                    .note_low_priv_input(permission_prompt::mono_ms());
+                            }
+                        }
                     }
                     MessageInput::Key((mut msg, press)) => {
+                        if permission_prompt::drop_queued_input(
+                            input_pause.paused(),
+                            permission_prompt::key_is_release_only(&msg, press),
+                        ) {
+                            continue;
+                        }
+                        if is_enter(&msg) {
+                            CLICK_TIME.store(get_time(), Ordering::SeqCst);
+                        }
                         // Set the press state to false, use `down` only in `handle_key()`.
                         msg.press = false;
                         if press {
@@ -2657,9 +2761,23 @@ impl Connection {
                             msg.down = false;
                             handle_key(&msg);
                         }
+                        if input_pause.is_low_priv() {
+                            permission_prompt::PERMISSION_PROMPTS
+                                .note_low_priv_input(permission_prompt::mono_ms());
+                        }
                     }
                     MessageInput::Pointer((msg, id)) => {
+                        // Touch contacts have no per-event release flag here, so a
+                        // paused pointer event is dropped as a whole; the platform
+                        // layer ends stale contacts on the next gesture.
+                        if permission_prompt::drop_queued_input(input_pause.paused(), false) {
+                            continue;
+                        }
                         handle_pointer(&msg, id);
+                        if input_pause.is_low_priv() {
+                            permission_prompt::PERMISSION_PROMPTS
+                                .note_low_priv_input(permission_prompt::mono_ms());
+                        }
                     }
                     MessageInput::BlockOn => {
                         let (ok, msg) = crate::platform::block_input(true);
@@ -2862,8 +2980,49 @@ impl Connection {
             .lock()
             .unwrap()
             .get(&self.session_key())
-            .map(|s| s.grants.permissions.contains(name))
+            .map(|s| s.grants.grant_active(name))
             .unwrap_or(false)
+    }
+
+    fn session_permission_suspended(&self, name: &str) -> bool {
+        SESSIONS
+            .lock()
+            .unwrap()
+            .get(&self.session_key())
+            .map(|s| s.grants.is_suspended(name))
+            .unwrap_or(false)
+    }
+
+    fn suspend_session_permission(&self, name: &str) {
+        if hbb_common::config::permission_regrant_without_prompt_enabled() {
+            return;
+        }
+        if let Some(session) = SESSIONS.lock().unwrap().get_mut(&self.session_key()) {
+            session.grants.suspend(name);
+        }
+    }
+
+    fn resume_session_permission(&self, name: &str) {
+        if let Some(session) = SESSIONS.lock().unwrap().get_mut(&self.session_key()) {
+            session.grants.resume(name);
+        }
+    }
+
+    /// A connection type the local user closed from the connection manager
+    /// needs a new approval the next time it is opened.
+    fn revoke_session_connection_grant_on_local_close(&self) {
+        if hbb_common::config::permission_regrant_without_prompt_enabled() {
+            return;
+        }
+        let conn_type = self.current_conn_type();
+        if conn_type == AuthConnType::Remote {
+            return;
+        }
+        if let Some(session) = SESSIONS.lock().unwrap().get_mut(&self.session_key()) {
+            session
+                .grants
+                .revoke_connection(connection_type_grant_name(conn_type));
+        }
     }
 
     fn session_connection_granted(&self, conn_type: AuthConnType) -> bool {
@@ -2878,7 +3037,7 @@ impl Connection {
 
     fn grant_session_permission(&self, name: &str) {
         if let Some(session) = SESSIONS.lock().unwrap().get_mut(&self.session_key()) {
-            session.grants.permissions.insert(name.to_owned());
+            session.grants.grant(name);
         }
     }
 
@@ -2999,6 +3158,7 @@ impl Connection {
         self.pending_permission_requests.retain(|_, r| {
             r.requested_at.elapsed() < Duration::from_secs(PENDING_PERMISSION_REQUEST_TIMEOUT_SECS)
         });
+        self.sync_input_pause();
     }
 
     fn has_active_pending_permission_request(&self) -> bool {
@@ -3012,7 +3172,27 @@ impl Connection {
         should_block_remote_control_for_permission_prompt(
             self.session_auth_kind,
             self.has_active_pending_permission_request(),
+        ) || permission_prompt::should_pause_input(
+            self.session_auth_kind.is_low_permission_support(),
+            false,
+            permission_prompt::global_prompt_active(),
         )
+    }
+
+    fn set_session_auth_kind(&mut self, auth_kind: SessionAuthKind) {
+        self.session_auth_kind = auth_kind;
+        self.input_pause
+            .set_low_priv(auth_kind.is_low_permission_support());
+        self.sync_input_pause();
+    }
+
+    /// Publishes this connection's own prompt state to its input thread.
+    fn sync_input_pause(&self) {
+        self.input_pause
+            .set_own_prompt(should_block_remote_control_for_permission_prompt(
+                self.session_auth_kind,
+                self.has_active_pending_permission_request(),
+            ));
     }
 
     async fn approve_permission_request(&mut self, request_id: u64, name: String, enabled: bool) {
@@ -3089,6 +3269,7 @@ impl Connection {
                 &name,
                 enabled,
                 self.session_permission_granted(&name),
+                self.session_permission_suspended(&name),
             )
             .is_some()
         };
@@ -3132,14 +3313,23 @@ impl Connection {
             .await;
             return;
         }
+        let guard =
+            permission_prompt_overlay_available().then(permission_prompt::PromptGuard::register);
+        let shown_at_ms = guard
+            .as_ref()
+            .map(permission_prompt::PromptGuard::started_ms)
+            .unwrap_or_else(permission_prompt::mono_ms);
         self.pending_permission_requests.insert(
             request_id,
             PendingPermissionRequest {
                 name: name.clone(),
                 enabled,
                 requested_at: Instant::now(),
+                shown_at_ms,
+                guard,
             },
         );
+        self.sync_input_pause();
         self.revoke_remote_input_authorization();
         log::info!(
             "Forwarding permission request {} ({}) from {} session to local user",
@@ -3163,6 +3353,7 @@ impl Connection {
     ) {
         self.cleanup_pending_permission_requests();
         let pending = self.pending_permission_requests.remove(&request_id);
+        self.sync_input_pause();
         let Some(pending) = pending else {
             log::warn!("Ignoring unknown permission request result {}", request_id);
             return;
@@ -3200,6 +3391,20 @@ impl Connection {
             .await;
             return;
         }
+        if permission_prompt::approval_blocked_by_input(
+            approved,
+            permission_prompt::PERMISSION_PROMPTS.low_priv_input_since(pending.shown_at_ms),
+            hbb_common::config::permission_prompt_global_input_block_enabled(),
+        ) {
+            self.deny_permission_request(
+                request_id,
+                pending_name,
+                pending_enabled,
+                "Remote input reached this device while the prompt was open; ask again.",
+            )
+            .await;
+            return;
+        }
         if let Some(reason) = self.permission_request_denial_reason(&pending_name) {
             self.deny_permission_request(request_id, pending_name, pending_enabled, reason)
                 .await;
@@ -3212,8 +3417,9 @@ impl Connection {
     fn apply_session_permission_defaults(&mut self) {
         macro_rules! apply {
             ($name:literal, $field:ident) => {{
-                let allowed =
-                    session_default_permission(self.session_auth_kind, $name, self.$field);
+                let suspended = self.session_permission_suspended($name);
+                let allowed = !suspended
+                    && session_default_permission(self.session_auth_kind, $name, self.$field);
                 if self.$field != allowed {
                     self.$field = allowed;
                 }
@@ -4532,7 +4738,7 @@ impl Connection {
         password: Option<String>,
         tfa: Option<bool>,
     ) {
-        self.session_auth_kind = auth_kind;
+        self.set_session_auth_kind(auth_kind);
         raii::AuthedConnID::update_or_insert_session(
             self.session_key(),
             password,
@@ -4611,7 +4817,7 @@ impl Connection {
                 && (tfa && session.tfa
                     || !tfa && self.validate_password_plain(&session.random_password))
             {
-                self.session_auth_kind = session.auth_kind;
+                self.set_session_auth_kind(session.auth_kind);
                 log::info!("is recent session");
                 return true;
             }
@@ -10640,6 +10846,7 @@ mod test {
                 "clipboard",
                 true,
                 true,
+                false,
             ),
             None
         );
@@ -10649,9 +10856,92 @@ mod test {
                 "block_input",
                 true,
                 true,
+                false,
             ),
             None
         );
+    }
+
+    #[test]
+    fn locally_suspended_permissions_need_approval_even_with_a_grant() {
+        // Negative case of the silent re-grant: the grant exists, the local
+        // user switched the permission off, the peer asks again.
+        for name in ["keyboard", "clipboard", "file"] {
+            assert!(
+                switch_permission_policy_denial_reason_with_grant(
+                    SessionAuthKind::OneTimePassword,
+                    name,
+                    true,
+                    true,
+                    true,
+                )
+                .is_some(),
+                "{name}"
+            );
+        }
+        // Unattended sessions are not low-permission and are not affected.
+        assert_eq!(
+            switch_permission_policy_denial_reason_with_grant(
+                SessionAuthKind::UnattendedPassword,
+                "keyboard",
+                true,
+                true,
+                true,
+            ),
+            None
+        );
+        // Turning something off is never refused.
+        assert_eq!(
+            switch_permission_policy_denial_reason_with_grant(
+                SessionAuthKind::OneTimePassword,
+                "keyboard",
+                false,
+                false,
+                true,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn grants_suspend_resume_and_regrant() {
+        let mut grants = SessionPermissionGrants::default();
+        grants.grant("clipboard");
+        assert!(grants.grant_active("clipboard"));
+        grants.suspend("clipboard");
+        assert!(!grants.grant_active("clipboard"));
+        assert!(grants.is_suspended("clipboard"));
+        // Resuming is the local user switching it back on.
+        grants.resume("clipboard");
+        assert!(grants.grant_active("clipboard"));
+        // A new approval clears a suspension as well.
+        grants.suspend("clipboard");
+        grants.grant("clipboard");
+        assert!(grants.grant_active("clipboard"));
+        // Suspending without a grant (keyboard default) is remembered.
+        grants.suspend("keyboard");
+        assert!(grants.is_suspended("keyboard"));
+        assert!(!grants.grant_active("keyboard"));
+        grants.resume("keyboard");
+        assert!(!grants.is_suspended("keyboard"));
+    }
+
+    #[test]
+    fn closing_a_connection_type_locally_revokes_only_that_grant() {
+        let mut grants = SessionPermissionGrants::default();
+        grants
+            .connection_types
+            .insert(connection_type_grant_name(AuthConnType::FileTransfer).to_owned());
+        grants
+            .connection_types
+            .insert(connection_type_grant_name(AuthConnType::Terminal).to_owned());
+        grants.revoke_connection(connection_type_grant_name(AuthConnType::FileTransfer));
+        assert!(!grants
+            .connection_types
+            .contains(connection_type_grant_name(AuthConnType::FileTransfer)));
+        assert!(grants
+            .connection_types
+            .contains(connection_type_grant_name(AuthConnType::Terminal)));
     }
 
     #[test]
@@ -10711,6 +11001,8 @@ mod test {
             name: "clipboard".to_owned(),
             enabled: true,
             requested_at: Instant::now(),
+            shown_at_ms: 0,
+            guard: None,
         };
         let (name, enabled, mismatch) =
             pending_permission_response_values(&pending, "terminal", false);

@@ -114,6 +114,7 @@ class ConnectionManagerState extends State<ConnectionManager>
     with WidgetsBindingObserver {
   final RxBool _controlPageBlock = false.obs;
   final RxBool _sidePageBlock = false.obs;
+  final RxBool _permissionOverlayBlock = false.obs;
 
   ConnectionManagerState() {
     gFFI.serverModel.tabController.onSelected = (client_id_str) {
@@ -230,7 +231,8 @@ class ConnectionManagerState extends State<ConnectionManager>
                           borderWidth;
                   final realChatPageWidth =
                       constrains.maxWidth - realClosedWidth;
-                  final row = Row(children: [
+                  final permissionRequest = serverModel.permissionRequest;
+                  final rowContent = Row(children: [
                     if (constrains.maxWidth >
                         kConnectionManagerWindowSizeClosedChat.width)
                       Consumer<ChatModel>(
@@ -255,7 +257,9 @@ class ConnectionManagerState extends State<ConnectionManager>
                                     mask: false,
                                   ))),
                   ]);
-                  final permissionRequest = serverModel.permissionRequest;
+                  // Nothing under an open prompt takes keyboard focus.
+                  final row = ExcludeFocus(
+                      excluding: permissionRequest != null, child: rowContent);
                   return Container(
                     color: Theme.of(context).scaffoldBackgroundColor,
                     child: Stack(
@@ -263,16 +267,31 @@ class ConnectionManagerState extends State<ConnectionManager>
                         row,
                         if (permissionRequest != null)
                           Positioned.fill(
-                            child: PermissionRequestOverlay(
-                              client: permissionRequest.client,
-                              title: permissionRequest.title,
-                              risk: permissionRequest.risk,
-                              onDecline: () =>
-                                  serverModel.respondPermissionRequest(
-                                      permissionRequest, false),
-                              onAllow: () =>
-                                  serverModel.respondPermissionRequest(
-                                      permissionRequest, true),
+                            // Same remote-input check as the other manager
+                            // controls, but always on: a prompt is decided
+                            // locally whatever allow-remote-cm-modification says.
+                            child: buildRemoteBlock(
+                              block: _permissionOverlayBlock,
+                              mask: false,
+                              child: SizedBox.expand(
+                                child: PermissionRequestOverlay(
+                                  key: ValueKey(
+                                      '${permissionRequest.client.id}-${permissionRequest.requestId}'),
+                                  client: permissionRequest.client,
+                                  title: permissionRequest.title,
+                                  risk: permissionRequest.risk,
+                                  onDecline: () =>
+                                      serverModel.respondPermissionRequest(
+                                          permissionRequest, false),
+                                  onAllow: () async {
+                                    if (await isLocalClickStrict(
+                                        permissionRequest.client.id)) {
+                                      serverModel.respondPermissionRequest(
+                                          permissionRequest, true);
+                                    }
+                                  },
+                                ),
+                              ),
                             ),
                           ),
                       ],
