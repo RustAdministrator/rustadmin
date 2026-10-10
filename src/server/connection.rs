@@ -1300,6 +1300,105 @@ fn permission_request_connection_type(name: &str) -> Option<AuthConnType> {
     }
 }
 
+/// Tracks whether a second factor has been asked of this connection. An `Auth2fa`
+/// message only means something after the first factor succeeded and `REQUIRE_2FA`
+/// was sent, so it must never authorize a connection on its own.
+#[derive(Debug, Default)]
+struct TwoFactorGate {
+    awaiting: bool,
+}
+
+impl TwoFactorGate {
+    /// `REQUIRE_2FA` was sent after the first factor succeeded.
+    fn challenge_sent(&mut self) {
+        self.awaiting = true;
+    }
+
+    /// A new `LoginRequest` starts the exchange over.
+    fn login_request_received(&mut self) {
+        self.awaiting = false;
+    }
+
+    /// The connection no longer needs a second factor.
+    fn finished(&mut self) {
+        self.awaiting = false;
+    }
+
+    fn accepts_response(&self) -> bool {
+        self.awaiting
+    }
+}
+
+/// Connection type selected by the `union` of a `LoginRequest`; no union means a
+/// remote-desktop session.
+fn login_request_conn_type(union: Option<&login_request::Union>) -> AuthConnType {
+    match union {
+        Some(login_request::Union::FileTransfer(_)) => AuthConnType::FileTransfer,
+        Some(login_request::Union::PortForward(_)) => AuthConnType::PortForward,
+        Some(login_request::Union::ViewCamera(_)) => AuthConnType::ViewCamera,
+        Some(login_request::Union::Terminal(_)) => AuthConnType::Terminal,
+        _ => AuthConnType::Remote,
+    }
+}
+
+/// Connection type implied by the selectors that `LoginRequest` sets before
+/// authorization. The consent policy, the denial log, the audit record and the
+/// connection setup all use this one mapping, so they cannot disagree about
+/// what the session is.
+fn conn_type_from_selectors(
+    file_transfer: bool,
+    port_forward: bool,
+    view_camera: bool,
+    terminal: bool,
+) -> AuthConnType {
+    if file_transfer {
+        AuthConnType::FileTransfer
+    } else if port_forward {
+        AuthConnType::PortForward
+    } else if view_camera {
+        AuthConnType::ViewCamera
+    } else if terminal {
+        AuthConnType::Terminal
+    } else {
+        AuthConnType::Remote
+    }
+}
+
+fn conn_type_label(conn_type: AuthConnType) -> &'static str {
+    match conn_type {
+        AuthConnType::Remote => "remote",
+        AuthConnType::FileTransfer => "file-transfer",
+        AuthConnType::PortForward => "port-forward",
+        AuthConnType::ViewCamera => "view-camera",
+        AuthConnType::Terminal => "terminal",
+    }
+}
+
+/// Numeric connection type written to the connection audit record.
+fn conn_type_audit_code(conn_type: AuthConnType) -> i32 {
+    match conn_type {
+        AuthConnType::Remote => 0,
+        AuthConnType::FileTransfer => 1,
+        AuthConnType::PortForward => 2,
+        AuthConnType::ViewCamera => 3,
+        AuthConnType::Terminal => 4,
+    }
+}
+
+/// A connection keeps the type of its first pre-authorization `LoginRequest`.
+/// The local user approves a connection type per session, so a later request
+/// for another type must not re-select it.
+fn login_conn_type_change_denied(admitted: Option<AuthConnType>, requested: AuthConnType) -> bool {
+    matches!(admitted, Some(admitted) if admitted != requested)
+}
+
+/// Address a port-forward connection may dial: only the target stored by a
+/// `PortForward` login, and only while the connection is classified as port
+/// forwarding. It never comes from the latest `LoginRequest`.
+fn port_forward_connect_target(conn_type: AuthConnType, stored_address: &str) -> Option<&str> {
+    (conn_type == AuthConnType::PortForward && !stored_address.is_empty()).then_some(stored_address)
+}
+
 fn permission_request_label(name: &str) -> &'static str {
     match name {
         "keyboard" => "keyboard and mouse control",
@@ -1349,9 +1448,13 @@ pub struct Connection {
     terminal: bool,
     port_forward_socket: Option<Framed<TcpStream, BytesCodec>>,
     port_forward_address: String,
+    port_forward_rdp: bool,
+    // Connection type of the first pre-authorization `LoginRequest`.
+    admitted_conn_type: Option<AuthConnType>,
     tx_to_cm: mpsc::UnboundedSender<ipc::Data>,
     authorized: bool,
     require_2fa: Option<totp_rs::TOTP>,
+    two_factor_gate: TwoFactorGate,
     keyboard: bool,
     clipboard: bool,
     audio: bool,
@@ -1636,6 +1739,7 @@ impl Connection {
                 video_source: VideoSource::Monitor,
             },
             require_2fa: crate::auth_2fa::get_2fa(None),
+            two_factor_gate: TwoFactorGate::default(),
             // Login replaces this fallback with the primary index from the same
             // refreshed display snapshot sent to the peer.
             display_idx: 0,
@@ -1650,6 +1754,8 @@ impl Connection {
             terminal: false,
             port_forward_socket: None,
             port_forward_address: "".to_owned(),
+            port_forward_rdp: false,
+            admitted_conn_type: None,
             tx_to_cm,
             authorized: false,
             keyboard: Self::permission(keys::OPTION_ENABLE_KEYBOARD, &control_permissions),
@@ -3141,18 +3247,17 @@ impl Connection {
         }
     }
 
+    fn current_conn_type(&self) -> AuthConnType {
+        conn_type_from_selectors(
+            self.file_transfer.is_some(),
+            self.port_forward_socket.is_some() || !self.port_forward_address.is_empty(),
+            self.view_camera,
+            self.terminal,
+        )
+    }
+
     fn session_connection_policy_denial_reason(&self) -> Option<&'static str> {
-        let conn_type = if self.file_transfer.is_some() {
-            AuthConnType::FileTransfer
-        } else if self.port_forward_socket.is_some() || !self.port_forward_address.is_empty() {
-            AuthConnType::PortForward
-        } else if self.view_camera {
-            AuthConnType::ViewCamera
-        } else if self.terminal {
-            AuthConnType::Terminal
-        } else {
-            AuthConnType::Remote
-        };
+        let conn_type = self.current_conn_type();
         connection_policy_denial_reason_with_grant(
             self.session_auth_kind,
             conn_type,
@@ -3371,12 +3476,13 @@ impl Connection {
         if self.port_forward_socket.is_some() {
             return true;
         }
-        let Some(login_request::Union::PortForward(pf)) = self.lr.union.as_ref() else {
+        let Some(target) =
+            port_forward_connect_target(self.current_conn_type(), &self.port_forward_address)
+        else {
             return true;
         };
-        let mut pf = pf.clone();
-        let (mut addr, is_rdp) = Self::normalize_port_forward_target(&mut pf);
-        self.port_forward_address = addr.clone();
+        let mut addr = target.to_owned();
+        let is_rdp = self.port_forward_rdp;
         match timeout(3000, TcpStream::connect(&addr)).await {
             Ok(Ok(sock)) => {
                 self.port_forward_socket = Some(Framed::new(sock, BytesCodec::new()));
@@ -3407,6 +3513,17 @@ impl Connection {
                 false
             }
         }
+    }
+
+    async fn deny_session_connection(&mut self, reason: &'static str) {
+        log::warn!(
+            "Denied {} connection for {} session: {}",
+            conn_type_label(self.current_conn_type()),
+            self.session_auth_kind.as_str(),
+            reason
+        );
+        self.send_login_error(reason).await;
+        sleep(1.).await;
     }
 
     // Returns whether this connection should be kept alive.
@@ -3443,31 +3560,14 @@ impl Connection {
                     });
                 }
             });
+            self.two_factor_gate.challenge_sent();
             self.send_login_error(crate::client::REQUIRE_2FA).await;
             // Keep the connection alive so the client can continue with 2FA.
             return true;
         }
+        self.two_factor_gate.finished();
         if let Some(reason) = self.session_connection_policy_denial_reason() {
-            log::warn!(
-                "Denied {} connection for {} session: {}",
-                if self.file_transfer.is_some() {
-                    "file-transfer"
-                } else if self.port_forward_socket.is_some()
-                    || !self.port_forward_address.is_empty()
-                {
-                    "port-forward"
-                } else if self.view_camera {
-                    "view-camera"
-                } else if self.terminal {
-                    "terminal"
-                } else {
-                    "remote"
-                },
-                self.session_auth_kind.as_str(),
-                reason
-            );
-            self.send_login_error(reason).await;
-            sleep(1.).await;
+            self.deny_session_connection(reason).await;
             return false;
         }
         if let Some(keep_alive) = self.prepare_terminal_login_for_authorization().await {
@@ -3490,18 +3590,16 @@ impl Connection {
         if !self.connect_port_forward_if_needed().await {
             return false;
         }
+        // The consent check above ran before the awaits that prepared this
+        // connection; check the grant again for the type it ends up with.
+        if let Some(reason) = self.session_connection_policy_denial_reason() {
+            self.port_forward_socket = None;
+            self.deny_session_connection(reason).await;
+            return false;
+        }
         self.authorized = true;
-        let (conn_type, auth_conn_type) = if self.file_transfer.is_some() {
-            (1, AuthConnType::FileTransfer)
-        } else if self.port_forward_socket.is_some() {
-            (2, AuthConnType::PortForward)
-        } else if self.view_camera {
-            (3, AuthConnType::ViewCamera)
-        } else if self.terminal {
-            (4, AuthConnType::Terminal)
-        } else {
-            (0, AuthConnType::Remote)
-        };
+        let auth_conn_type = self.current_conn_type();
+        let conn_type = conn_type_audit_code(auth_conn_type);
         self.authed_conn_id = Some(self::raii::AuthedConnID::new(
             self.inner.id(),
             auth_conn_type,
@@ -4628,6 +4726,20 @@ impl Connection {
         )
     }
 
+    // The selectors reset here decide the connection type, so every
+    // pre-authorization `LoginRequest` starts from a clean slate instead of adding
+    // to what an earlier request left behind.
+    fn reset_session_scope_for_login(&mut self) {
+        self.file_transfer = None;
+        self.view_camera = false;
+        self.inner.video_source = VideoSource::Monitor;
+        self.terminal = false;
+        self.terminal_persistent = false;
+        self.terminal_service_id.clear();
+        self.port_forward_address.clear();
+        self.port_forward_rdp = false;
+    }
+
     async fn handle_login_request_without_validation(&mut self, lr: &LoginRequest) {
         self.lr = lr.clone();
         self.peer_argb = crate::str2color(&format!("{}{}", &lr.my_id, &lr.my_platform), 0xff);
@@ -5065,10 +5177,28 @@ impl Connection {
         }
         // After handling CloseReason messages, proceed to process other message types
         if let Some(message::Union::LoginRequest(lr)) = msg.union {
-            self.handle_login_request_without_validation(&lr).await;
+            // An authorized connection keeps the identity and type it was authorized with; a
+            // later LoginRequest must not rebind them.
             if self.authorized {
                 return true;
             }
+            self.two_factor_gate.login_request_received();
+            self.handle_login_request_without_validation(&lr).await;
+            let requested_conn_type = login_request_conn_type(lr.union.as_ref());
+            if login_conn_type_change_denied(self.admitted_conn_type, requested_conn_type) {
+                log::warn!(
+                    "Rejected login request for {} on a connection that asked for {}",
+                    conn_type_label(requested_conn_type),
+                    self.admitted_conn_type
+                        .map(conn_type_label)
+                        .unwrap_or("remote")
+                );
+                self.send_login_error("Connection not allowed").await;
+                sleep(1.).await;
+                return false;
+            }
+            self.admitted_conn_type = Some(requested_conn_type);
+            self.reset_session_scope_for_login();
             match lr.union {
                 Some(login_request::Union::FileTransfer(ft)) => {
                     if !Self::permission(
@@ -5119,8 +5249,9 @@ impl Connection {
                         sleep(1.).await;
                         return false;
                     }
-                    let (addr, _is_rdp) = Self::normalize_port_forward_target(&mut pf);
+                    let (addr, is_rdp) = Self::normalize_port_forward_target(&mut pf);
                     self.port_forward_address = addr;
+                    self.port_forward_rdp = is_rdp;
                 }
                 _ => {
                     if !self.check_privacy_mode_on().await {
@@ -5296,6 +5427,12 @@ impl Connection {
                 }
             }
         } else if let Some(message::Union::Auth2fa(tfa)) = msg.union {
+            // A 2FA response counts only while this connection is waiting for one; it can
+            // neither replace the first factor nor arrive after authorization.
+            if !self.two_factor_gate.accepts_response() {
+                log::warn!("Ignored 2FA response without a pending challenge");
+                return true;
+            }
             let (failure, res) = self.check_failure(1).await;
             if !res {
                 return true;
@@ -5362,6 +5499,18 @@ impl Connection {
                 if let Ok(uuid) = uuid::Uuid::from_slice(_s.uuid.to_vec().as_ref()) {
                     if let Some((_instant, uuid_old)) = uuid_old {
                         if uuid == uuid_old {
+                            // A switch-sides response only ever opens a remote-desktop session.
+                            if lr.union.is_some() {
+                                log::warn!(
+                                    "Rejected switch sides response that carries a non-remote login type"
+                                );
+                                self.send_login_error("Connection not allowed").await;
+                                return false;
+                            }
+                            if !self.authorized {
+                                self.admitted_conn_type = Some(AuthConnType::Remote);
+                                self.reset_session_scope_for_login();
+                            }
                             self.from_switch = true;
                             if !self.send_logon_response_and_keep_alive().await {
                                 return false;
@@ -9043,6 +9192,153 @@ mod raii {
 mod test {
     #[allow(unused)]
     use super::*;
+
+    #[test]
+    fn two_factor_response_needs_an_outstanding_challenge() {
+        let mut gate = TwoFactorGate::default();
+        // A bare Auth2fa on a new connection must not authorize anything.
+        assert!(!gate.accepts_response());
+        gate.login_request_received();
+        assert!(!gate.accepts_response());
+        // Password accepted, REQUIRE_2FA sent: the response is now expected.
+        gate.challenge_sent();
+        assert!(gate.accepts_response());
+        // A new LoginRequest starts the exchange over.
+        gate.login_request_received();
+        assert!(!gate.accepts_response());
+        // Click authorization finished before the 2FA response arrived.
+        gate.challenge_sent();
+        gate.finished();
+        assert!(!gate.accepts_response());
+    }
+
+    #[test]
+    fn login_request_conn_type_follows_the_requested_union() {
+        use hbb_common::message_proto::{FileTransfer, PortForward, Terminal, ViewCamera};
+        assert_eq!(login_request_conn_type(None), AuthConnType::Remote);
+        assert_eq!(
+            login_request_conn_type(Some(&login_request::Union::FileTransfer(
+                FileTransfer::new()
+            ))),
+            AuthConnType::FileTransfer
+        );
+        assert_eq!(
+            login_request_conn_type(Some(&login_request::Union::PortForward(PortForward::new()))),
+            AuthConnType::PortForward
+        );
+        assert_eq!(
+            login_request_conn_type(Some(&login_request::Union::ViewCamera(ViewCamera::new()))),
+            AuthConnType::ViewCamera
+        );
+        assert_eq!(
+            login_request_conn_type(Some(&login_request::Union::Terminal(Terminal::new()))),
+            AuthConnType::Terminal
+        );
+    }
+
+    #[test]
+    fn conn_type_from_selectors_maps_one_selector_and_defaults_to_remote() {
+        use AuthConnType::*;
+        assert_eq!(conn_type_from_selectors(false, false, false, false), Remote);
+        assert_eq!(
+            conn_type_from_selectors(true, false, false, false),
+            FileTransfer
+        );
+        assert_eq!(
+            conn_type_from_selectors(false, true, false, false),
+            PortForward
+        );
+        assert_eq!(
+            conn_type_from_selectors(false, false, true, false),
+            ViewCamera
+        );
+        assert_eq!(
+            conn_type_from_selectors(false, false, false, true),
+            Terminal
+        );
+    }
+
+    #[test]
+    fn audit_and_log_names_cover_every_connection_type() {
+        use AuthConnType::*;
+        let all = [Remote, FileTransfer, PortForward, ViewCamera, Terminal];
+        let codes: Vec<i32> = all.iter().map(|t| conn_type_audit_code(*t)).collect();
+        assert_eq!(codes, vec![0, 1, 2, 3, 4]);
+        let labels: Vec<&str> = all.iter().map(|t| conn_type_label(*t)).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "remote",
+                "file-transfer",
+                "port-forward",
+                "view-camera",
+                "terminal"
+            ]
+        );
+    }
+
+    #[test]
+    fn connection_type_cannot_change_after_the_first_login_request() {
+        use AuthConnType::*;
+        // The first request selects the type; repeating it (password retry) is fine.
+        assert!(!login_conn_type_change_denied(None, PortForward));
+        assert!(!login_conn_type_change_denied(
+            Some(PortForward),
+            PortForward
+        ));
+        assert!(!login_conn_type_change_denied(Some(Remote), Remote));
+        // Consent for tunnels, then a terminal request with a valid one-time password.
+        assert!(login_conn_type_change_denied(Some(PortForward), Terminal));
+        // Consent for file transfer, then a tunnel to an arbitrary address.
+        assert!(login_conn_type_change_denied(
+            Some(FileTransfer),
+            PortForward
+        ));
+        assert!(login_conn_type_change_denied(Some(ViewCamera), Remote));
+        assert!(login_conn_type_change_denied(Some(Remote), Terminal));
+        // No pair of different types is ever accepted.
+        let all = [Remote, FileTransfer, PortForward, ViewCamera, Terminal];
+        for a in all {
+            for b in all {
+                assert_eq!(login_conn_type_change_denied(Some(a), b), a != b);
+            }
+        }
+    }
+
+    #[test]
+    fn port_forward_target_comes_only_from_a_port_forward_session() {
+        use AuthConnType::*;
+        assert_eq!(
+            port_forward_connect_target(PortForward, "10.0.0.5:22"),
+            Some("10.0.0.5:22")
+        );
+        // A stale target left by an earlier request must not be dialed for another type.
+        for conn_type in [Remote, FileTransfer, ViewCamera, Terminal] {
+            assert_eq!(port_forward_connect_target(conn_type, "10.0.0.5:22"), None);
+        }
+        assert_eq!(port_forward_connect_target(PortForward, ""), None);
+    }
+
+    #[test]
+    fn consent_policy_checks_the_type_the_selectors_end_up_with() {
+        use AuthConnType::*;
+        // A one-time-password session with a grant for tunnels only.
+        let granted_for = |conn_type: AuthConnType| conn_type == PortForward;
+        let denial = |ft: bool, pf: bool, vc: bool, term: bool| {
+            let conn_type = conn_type_from_selectors(ft, pf, vc, term);
+            connection_policy_denial_reason_with_grant(
+                SessionAuthKind::OneTimePassword,
+                conn_type,
+                granted_for(conn_type),
+            )
+        };
+        assert_eq!(denial(false, true, false, false), None);
+        assert!(denial(false, false, false, true).is_some());
+        assert!(denial(true, false, false, false).is_some());
+        assert!(denial(false, false, true, false).is_some());
+        // Remote desktop needs no grant.
+        assert_eq!(denial(false, false, false, false), None);
+    }
 
     #[test]
     fn prelogin_deadline_only_closes_unauthorized_sessions_after_it_passes() {
