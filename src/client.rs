@@ -5779,6 +5779,27 @@ async fn consume_local_switch_sides_uuid(id: &str, uuid: &Uuid) -> bool {
     }
 }
 
+#[cfg(feature = "flutter")]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+async fn fetch_local_switch_sides_uuid(id: &str) -> Option<Uuid> {
+    let mut conn = crate::ipc::connect(1000, "").await.ok()?;
+    conn.send(&crate::ipc::Data::SwitchSidesUuid(
+        String::new(),
+        id.to_owned(),
+        None,
+    ))
+    .await
+    .ok()?;
+    match conn.next_timeout(1000).await {
+        Ok(Some(crate::ipc::Data::SwitchSidesUuid(token, returned_id, Some(true))))
+            if returned_id == id =>
+        {
+            Uuid::from_str(&token).ok()
+        }
+        _ => None,
+    }
+}
+
 /// Handle hash message sent by peer.
 /// Hash will be used for login.
 ///
@@ -5801,18 +5822,27 @@ pub async fn handle_hash(
     #[cfg(feature = "flutter")]
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        let uuid = lc.write().unwrap().switch_uuid.take();
-        if let Some(uuid) = uuid {
-            if let Ok(uuid) = uuid::Uuid::from_str(&uuid) {
-                let id = lc.read().unwrap().id.clone();
-                if !consume_local_switch_sides_uuid(&id, &uuid).await {
-                    log::warn!("Ignored untrusted switch_uuid");
-                } else {
+        let switch_token = lc.write().unwrap().switch_uuid.take();
+        if let Some(switch_token) = switch_token {
+            let id = lc.read().unwrap().id.clone();
+            // `pending` means: ask the local server for the token kept for this
+            // id; a literal uuid (older launcher) is verified instead.
+            let uuid = if switch_token == "pending" {
+                fetch_local_switch_sides_uuid(&id).await
+            } else {
+                match uuid::Uuid::from_str(&switch_token) {
+                    Ok(uuid) if consume_local_switch_sides_uuid(&id, &uuid).await => Some(uuid),
+                    _ => None,
+                }
+            };
+            match uuid {
+                Some(uuid) => {
                     lc.write().unwrap().allow_switch_back_once();
                     send_switch_login_request(lc.clone(), peer, uuid).await;
                     lc.write().unwrap().password_source = Default::default();
                     return;
                 }
+                None => log::warn!("Ignored untrusted switch_uuid"),
             }
         }
     }

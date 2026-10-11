@@ -727,6 +727,8 @@ class ServerModel with ChangeNotifier {
         return 'View camera';
       case 'terminal':
         return 'Terminal';
+      case 'switch_sides':
+        return 'Switch sides';
       default:
         return 'Permission';
     }
@@ -754,6 +756,8 @@ class ServerModel with ChangeNotifier {
         return 'The remote user can view a camera connected to this device.';
       case 'terminal':
         return 'The remote user can run shell commands on this computer.';
+      case 'switch_sides':
+        return 'The remote user asks this computer to end the current session and open a connection back to theirs, so that you control their computer instead.';
       default:
         return 'The remote user is requesting an additional permission for this session.';
     }

@@ -1071,15 +1071,25 @@ async fn handle(data: Data, stream: &mut Connection) {
         #[cfg(feature = "flutter")]
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         Data::SwitchSidesUuid(uuid, id, None) => {
-            let allowed = uuid
-                .parse::<uuid::Uuid>()
-                .map(|uuid| crate::server::remove_pending_switch_sides_uuid(&id, &uuid))
-                .unwrap_or(false);
-            allow_err!(
-                stream
-                    .send(&Data::SwitchSidesUuid(uuid, id, Some(allowed)))
-                    .await
-            );
+            if uuid.is_empty() {
+                // The spawned client asks for the token that was kept for `id`.
+                let taken = crate::server::take_pending_switch_sides_uuid(&id);
+                let reply = match taken {
+                    Some(token) => Data::SwitchSidesUuid(token.to_string(), id, Some(true)),
+                    None => Data::SwitchSidesUuid(String::new(), id, Some(false)),
+                };
+                allow_err!(stream.send(&reply).await);
+            } else {
+                let allowed = uuid
+                    .parse::<uuid::Uuid>()
+                    .map(|uuid| crate::server::remove_pending_switch_sides_uuid(&id, &uuid))
+                    .unwrap_or(false);
+                allow_err!(
+                    stream
+                        .send(&Data::SwitchSidesUuid(uuid, id, Some(allowed)))
+                        .await
+                );
+            }
         }
         #[cfg(all(feature = "flutter", feature = "plugin_framework"))]
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
