@@ -299,6 +299,15 @@ pub fn is_core_only_msgbox_type(msgtype: &str) -> bool {
     )
 }
 
+/// Pure rule behind [`LoginConfigHandler::remote_clipboard_apply_allowed`].
+pub(crate) fn remote_clipboard_apply_allowed(
+    disable_clipboard: bool,
+    view_only: bool,
+    direction_allows_remote_to_local: bool,
+) -> bool {
+    !disable_clipboard && !view_only && direction_allows_remote_to_local
+}
+
 struct PendingPeerTrust {
     fingerprint: String,
     trust_phrase: String,
@@ -2914,9 +2923,9 @@ impl AudioBuffer {
     }
 }
 
-/// Largest channel count accepted from a peer's audio format. Peers send 1 or
-/// 2; QUIC audio datagrams already enforce the same 1..=8 range.
-const MAX_AUDIO_FORMAT_CHANNELS: u32 = 8;
+/// Largest channel count accepted from a peer's audio format: peers send 1 or
+/// 2, and the decoder is created for at most stereo.
+const MAX_AUDIO_FORMAT_CHANNELS: u32 = 2;
 
 fn validated_audio_channels(format: &AudioFormat) -> Option<u16> {
     (1..=MAX_AUDIO_FORMAT_CHANNELS)
@@ -4538,6 +4547,17 @@ impl LoginConfigHandler {
         } else {
             "".to_owned()
         }
+    }
+
+    /// Whether clipboard data pushed by the peer may be applied here. The
+    /// viewer asks the host not to send it when the session is view-only or
+    /// the clipboard is off, but a hostile host can ignore that request.
+    pub(crate) fn remote_clipboard_apply_allowed(&self) -> bool {
+        #[cfg(not(target_os = "ios"))]
+        let direction_allows = self.clipboard_direction_policy().allows_remote_to_local();
+        #[cfg(target_os = "ios")]
+        let direction_allows = true;
+        remote_clipboard_apply_allowed(self.disable_clipboard.v, self.view_only.v, direction_allows)
     }
 
     #[cfg(not(target_os = "ios"))]
@@ -7207,18 +7227,42 @@ mod audio_playback_tests {
             channels,
             ..Default::default()
         };
-        for channels in [0, 9, 65536 + 2, u32::MAX] {
+        for channels in [0, 3, 8, 9, 65536 + 2, u32::MAX] {
             assert_eq!(validated_audio_channels(&format(channels)), None);
             let mut handler = AudioHandler::default();
             handler.handle_format(format(channels));
             assert!(handler.audio_decoder.is_none(), "channels={channels}");
         }
-        for channels in 1..=8 {
+        for channels in 1..=2 {
             assert_eq!(
                 validated_audio_channels(&format(channels)),
                 Some(channels as u16)
             );
         }
+    }
+
+    #[test]
+    fn remote_clipboard_is_applied_only_when_nothing_forbids_it() {
+        // (disable_clipboard, view_only, direction allows) -> applied
+        for disable in [false, true] {
+            for view_only in [false, true] {
+                for direction in [false, true] {
+                    assert_eq!(
+                        remote_clipboard_apply_allowed(disable, view_only, direction),
+                        !disable && !view_only && direction,
+                        "{disable} {view_only} {direction}"
+                    );
+                }
+            }
+        }
+        // The handler reads the same flags.
+        let mut lc = LoginConfigHandler::default();
+        assert!(lc.remote_clipboard_apply_allowed());
+        lc.config.view_only.v = true;
+        assert!(!lc.remote_clipboard_apply_allowed());
+        lc.config.view_only.v = false;
+        lc.config.disable_clipboard.v = true;
+        assert!(!lc.remote_clipboard_apply_allowed());
     }
 
     #[test]

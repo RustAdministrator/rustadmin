@@ -2136,8 +2136,13 @@ impl<T: InvokeUiSession> Remote<T> {
         if !self.peer_info.is_support_virtual_display() {
             return;
         }
-        let lc = self.handler.lc.read().unwrap();
-        let displays = lc.get_option("virtual-display");
+        // The lock is not held across the sends below.
+        let displays = self
+            .handler
+            .lc
+            .read()
+            .unwrap()
+            .get_option("virtual-display");
         for d in displays.split(',') {
             if let Ok(index) = d.parse::<i32>() {
                 let mut misc = Misc::new();
@@ -2154,11 +2159,16 @@ impl<T: InvokeUiSession> Remote<T> {
     }
 
     async fn send_toggle_privacy_mode_msg(&self, peer: &mut Stream) {
-        let lc = self.handler.lc.read().unwrap();
-        if lc.version >= hbb_common::get_version_number("1.2.4")
-            && lc.get_toggle_option("privacy-mode")
-        {
-            let impl_key = lc.get_option("privacy-mode-impl-key");
+        // Read what is needed and release the lock before sending.
+        let (enabled, impl_key) = {
+            let lc = self.handler.lc.read().unwrap();
+            (
+                lc.version >= hbb_common::get_version_number("1.2.4")
+                    && lc.get_toggle_option("privacy-mode"),
+                lc.get_option("privacy-mode-impl-key"),
+            )
+        };
+        if enabled {
             if impl_key == crate::privacy_mode::PRIVACY_MODE_IMPL_WIN_VIRTUAL_DISPLAY
                 && !self.peer_info.is_support_virtual_display()
             {
@@ -2908,11 +2918,14 @@ impl<T: InvokeUiSession> Remote<T> {
                 Some(message::Union::Clipboard(cb)) => {
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]
                     {
-                        let clipboard_policy =
-                            self.handler.lc.read().unwrap().clipboard_direction_policy();
-                        if clipboard_policy.allows_remote_to_local()
-                            && !self.handler.lc.read().unwrap().disable_clipboard.v
-                        {
+                        let (apply, clipboard_policy) = {
+                            let lc = self.handler.lc.read().unwrap();
+                            (
+                                lc.remote_clipboard_apply_allowed(),
+                                lc.clipboard_direction_policy(),
+                            )
+                        };
+                        if apply {
                             update_clipboard_with_direction(
                                 vec![cb],
                                 ClipboardSide::Client,
@@ -2921,7 +2934,13 @@ impl<T: InvokeUiSession> Remote<T> {
                         }
                     }
                     #[cfg(target_os = "ios")]
-                    if !self.handler.lc.read().unwrap().disable_clipboard.v {
+                    if self
+                        .handler
+                        .lc
+                        .read()
+                        .unwrap()
+                        .remote_clipboard_apply_allowed()
+                    {
                         {
                             let content = if cb.compress {
                                 hbb_common::compress::decompress(&cb.content)
@@ -2936,9 +2955,7 @@ impl<T: InvokeUiSession> Remote<T> {
                     #[cfg(target_os = "android")]
                     {
                         let lc = self.handler.lc.read().unwrap();
-                        if !lc.disable_clipboard.v
-                            && lc.clipboard_direction_policy().allows_remote_to_local()
-                        {
+                        if lc.remote_clipboard_apply_allowed() {
                             drop(lc);
                             crate::clipboard::handle_msg_clipboard(cb);
                         }
@@ -2947,11 +2964,14 @@ impl<T: InvokeUiSession> Remote<T> {
                 Some(message::Union::MultiClipboards(_mcb)) => {
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]
                     {
-                        let clipboard_policy =
-                            self.handler.lc.read().unwrap().clipboard_direction_policy();
-                        if clipboard_policy.allows_remote_to_local()
-                            && !self.handler.lc.read().unwrap().disable_clipboard.v
-                        {
+                        let (apply, clipboard_policy) = {
+                            let lc = self.handler.lc.read().unwrap();
+                            (
+                                lc.remote_clipboard_apply_allowed(),
+                                lc.clipboard_direction_policy(),
+                            )
+                        };
+                        if apply {
                             update_clipboard_with_direction(
                                 _mcb.clipboards,
                                 ClipboardSide::Client,
@@ -2962,9 +2982,7 @@ impl<T: InvokeUiSession> Remote<T> {
                     #[cfg(target_os = "android")]
                     {
                         let lc = self.handler.lc.read().unwrap();
-                        if !lc.disable_clipboard.v
-                            && lc.clipboard_direction_policy().allows_remote_to_local()
-                        {
+                        if lc.remote_clipboard_apply_allowed() {
                             drop(lc);
                             crate::clipboard::handle_msg_multi_clipboards(_mcb);
                         }

@@ -15,7 +15,18 @@ use hbb_common::{
     ResultType,
 };
 use lazy_static::lazy_static;
-use std::{collections::HashMap, sync::RwLock, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        RwLock,
+    },
+    time::Instant,
+};
+
+/// Set while the whiteboard sender runs, so that a second start returns at
+/// once without keeping a lock held across the connection attempt.
+static WHITEBOARD_RUNNING: AtomicBool = AtomicBool::new(false);
 
 lazy_static! {
     static ref TX_WHITEBOARD: RwLock<Option<UnboundedSender<(String, CustomEvent)>>> =
@@ -32,6 +43,25 @@ struct LastCursorEvent {
     evt: Option<CustomEvent>,
     tm: Instant,
     c: usize,
+}
+
+/// Takes, from every connection whose last cursor event has been waiting for
+/// more than `quiet_ms`, that event. The caller sends them after the lock that
+/// guards `conns` has been released.
+fn take_due_cursor_events(
+    conns: &mut HashMap<String, Conn>,
+    quiet_ms: u128,
+) -> Vec<(String, CustomEvent)> {
+    let mut due = Vec::new();
+    for (k, conn) in conns.iter_mut() {
+        if conn.last_cursor_evt.tm.elapsed().as_millis() > quiet_ms {
+            if let Some(evt) = conn.last_cursor_evt.evt.take() {
+                conn.last_cursor_evt.c = 0;
+                due.push((k.clone(), evt));
+            }
+        }
+    }
+    due
 }
 
 #[inline]
@@ -135,11 +165,14 @@ fn tx_send_event(conn: &mut Conn, k: String, event: CustomEvent) {
 
 #[tokio::main(flavor = "current_thread")]
 async fn start_whiteboard_() -> ResultType<()> {
-    let mut tx_whiteboard = TX_WHITEBOARD.write().unwrap();
-    if tx_whiteboard.is_some() {
+    if WHITEBOARD_RUNNING.swap(true, Ordering::SeqCst) {
         log::warn!("Whiteboard already started");
         return Ok(());
     }
+    let _running = crate::common::SimpleCallOnReturn {
+        b: true,
+        f: Box::new(|| WHITEBOARD_RUNNING.store(false, Ordering::SeqCst)),
+    };
 
     loop {
         if !crate::platform::is_prelogin() {
@@ -207,8 +240,7 @@ async fn start_whiteboard_() -> ResultType<()> {
 
     let mut stream = stream.ok_or(anyhow!("none stream"))?;
     let (tx, mut rx) = unbounded_channel();
-    tx_whiteboard.replace(tx);
-    drop(tx_whiteboard);
+    TX_WHITEBOARD.write().unwrap().replace(tx);
     let _call_on_ret = crate::common::SimpleCallOnReturn {
         b: true,
         f: Box::new(move || {
@@ -237,14 +269,10 @@ async fn start_whiteboard_() -> ResultType<()> {
                 }
             },
             _ = timer.tick() => {
-                let mut conns = CONNS.write().unwrap();
-                for (k, conn) in conns.iter_mut() {
-                    if conn.last_cursor_evt.tm.elapsed().as_millis() > 300 {
-                        if let Some(evt) = conn.last_cursor_evt.evt.take() {
-                            allow_err!(stream.send(&Data::Whiteboard((k.clone(), evt))).await);
-                            conn.last_cursor_evt.c = 0;
-                        }
-                    }
+                // Collected under the lock, sent after it is released.
+                let due = take_due_cursor_events(&mut CONNS.write().unwrap(), 300);
+                for (k, evt) in due {
+                    allow_err!(stream.send(&Data::Whiteboard((k, evt))).await);
                 }
             }
         }
@@ -255,4 +283,48 @@ async fn start_whiteboard_() -> ResultType<()> {
             .await
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn_with(evt: Option<CustomEvent>, age_ms: u64) -> Conn {
+        Conn {
+            last_cursor_pos: (0.0, 0.0),
+            last_cursor_evt: LastCursorEvent {
+                evt,
+                tm: Instant::now() - std::time::Duration::from_millis(age_ms),
+                c: 3,
+            },
+        }
+    }
+
+    fn cursor() -> CustomEvent {
+        CustomEvent::Cursor(Cursor {
+            x: 1.0,
+            y: 2.0,
+            argb: 0,
+            btns: 0,
+            text: String::new(),
+        })
+    }
+
+    #[test]
+    fn only_events_that_waited_long_enough_are_taken_once() {
+        let mut conns = HashMap::new();
+        conns.insert("old".to_owned(), conn_with(Some(cursor()), 1000));
+        conns.insert("fresh".to_owned(), conn_with(Some(cursor()), 0));
+        conns.insert("empty".to_owned(), conn_with(None, 1000));
+
+        let due = take_due_cursor_events(&mut conns, 300);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].0, "old");
+        // Taken: the counter is reset and nothing is due again.
+        assert_eq!(conns["old"].last_cursor_evt.c, 0);
+        assert!(conns["old"].last_cursor_evt.evt.is_none());
+        assert!(take_due_cursor_events(&mut conns, 300).is_empty());
+        // The fresh one is still pending.
+        assert!(conns["fresh"].last_cursor_evt.evt.is_some());
+    }
 }

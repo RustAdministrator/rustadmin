@@ -976,8 +976,14 @@ async fn handle(data: Data, stream: &mut Connection) {
             Some(value) => {
                 let mut updated = true;
                 if name == "id" {
-                    Config::set_key_confirmed(false);
-                    Config::set_id(&value);
+                    if adopt_ipc_id(&value).is_none() {
+                        // An empty id would make the next start generate a new one.
+                        log::warn!("Ignored an empty id from IPC");
+                        updated = false;
+                    } else {
+                        Config::set_key_confirmed(false);
+                        Config::set_id(&value);
+                    }
                 } else if name == "temporary-password" {
                     password::update_temporary_password();
                 } else if name == "permanent-password" {
@@ -1970,8 +1976,17 @@ pub fn clear_paired_viewers() {
     allow_err!(set_data(&Data::ClearPairedViewers));
 }
 
+/// The id an IPC peer may set or report: never an empty one.
+fn adopt_ipc_id(id: &str) -> Option<&str> {
+    let id = id.trim();
+    (!id.is_empty()).then_some(id)
+}
+
 pub fn get_id() -> String {
     if let Ok(Some(v)) = get_config("id") {
+        let Some(v) = adopt_ipc_id(&v).map(str::to_owned) else {
+            return Config::get_id();
+        };
         // update salt also, so that next time reinstallation not causing first-time auto-login failure
         if let Ok(Some(v2)) = get_config("salt") {
             Config::set_salt(&v2);
@@ -2670,6 +2685,15 @@ mod test {
             select_server_uid_for_user_main_ipc(&[], Some(501), false).unwrap(),
             501
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn an_empty_id_is_never_adopted_from_ipc() {
+        assert_eq!(adopt_ipc_id(""), None);
+        assert_eq!(adopt_ipc_id("   "), None);
+        assert_eq!(adopt_ipc_id("123456789"), Some("123456789"));
+        assert_eq!(adopt_ipc_id(" abc "), Some("abc"));
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
