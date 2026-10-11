@@ -7732,10 +7732,34 @@ mod security_tests {
         ));
     }
 
-    fn lock_security_tests() -> std::sync::MutexGuard<'static, ()> {
-        TEST_CLIENT_SECURITY_LOCK
+    /// Serialises the tests that touch global client state. The fake hosts in
+    /// these tests do not send the pairing acknowledgement, so they run with
+    /// `pairing-host-auth=warn`; the tests of the acknowledgement itself set
+    /// their own mode.
+    struct SecurityTestGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved_host_auth: String,
+    }
+
+    impl Drop for SecurityTestGuard {
+        fn drop(&mut self) {
+            Config::set_option(
+                keys::OPTION_PAIRING_HOST_AUTH.to_owned(),
+                self.saved_host_auth.clone(),
+            );
+        }
+    }
+
+    fn lock_security_tests() -> SecurityTestGuard {
+        let lock = TEST_CLIENT_SECURITY_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let saved_host_auth = Config::get_option(keys::OPTION_PAIRING_HOST_AUTH);
+        Config::set_option(keys::OPTION_PAIRING_HOST_AUTH.to_owned(), "warn".to_owned());
+        SecurityTestGuard {
+            _lock: lock,
+            saved_host_auth,
+        }
     }
 
     #[test]

@@ -31,9 +31,9 @@ impl LimitMode {
     pub(crate) fn parse(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "off" => Self::Off,
-            "enforce" => Self::Enforce,
+            "warn" => Self::Warn,
             // Empty and unknown values keep the default.
-            _ => Self::Warn,
+            _ => Self::Enforce,
         }
     }
 }
@@ -203,13 +203,13 @@ mod tests {
     }
 
     #[test]
-    fn defaults_warn_and_garbage_falls_back() {
+    fn defaults_enforce_and_garbage_falls_back() {
         let default = Limits::from_values("", "", "");
-        assert_eq!(default.mode, LimitMode::Warn);
+        assert_eq!(default.mode, LimitMode::Enforce);
         assert_eq!(default.soft_per_source, DEFAULT_SOFT_MAX_PER_SOURCE);
         assert_eq!(default.soft_total, DEFAULT_SOFT_MAX_TOTAL);
         let odd = Limits::from_values("loud", "0", "many");
-        assert_eq!(odd.mode, LimitMode::Warn);
+        assert_eq!(odd.mode, LimitMode::Enforce);
         assert_eq!(odd.soft_per_source, DEFAULT_SOFT_MAX_PER_SOURCE);
         assert_eq!(odd.soft_total, DEFAULT_SOFT_MAX_TOTAL);
         let set = Limits::from_values(" Enforce ", "2", "5");
