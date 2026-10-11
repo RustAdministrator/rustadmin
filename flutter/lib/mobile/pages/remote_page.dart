@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_hbb/common/block_rect.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/common/widgets/toolbar.dart';
 import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
@@ -138,6 +139,28 @@ class _RemotePageState extends State<RemotePage>
   final FocusNode _mobileFocusNode = FocusNode();
   final FocusNode _physicalFocusNode = FocusNode();
   final GlobalKey _mobileRemoteInputRegionKey = GlobalKey();
+
+  /// The quality monitor floats over the touch region; touches that start on it
+  /// are not meant for the remote machine. Its rectangle, in the region's
+  /// coordinates, is registered as blocked while it is shown.
+  Rect? _qualityMonitorBlockedRect;
+
+  void _onQualityMonitorBounds(Rect? global) {
+    final previous = _qualityMonitorBlockedRect;
+    if (previous != null) {
+      gFFI.cursorModel.removeBlockedRect(previous);
+      _qualityMonitorBlockedRect = null;
+    }
+    final region = _mobileRemoteInputRegionKey.currentContext?.findRenderObject();
+    if (global == null || region is! RenderBox || !region.hasSize) {
+      return;
+    }
+    final local = localBlockRect(global, region.localToGlobal(Offset.zero));
+    if (local != null) {
+      _qualityMonitorBlockedRect = local;
+      gFFI.cursorModel.addBlockedRect(local);
+    }
+  }
   var _showEdit = false; // use soft keyboard
   var _showCustomButtonEditor = false;
   var _toolbarTransparencySettings =
@@ -368,6 +391,11 @@ class _RemotePageState extends State<RemotePage>
 
   @override
   void dispose() {
+    final monitorRect = _qualityMonitorBlockedRect;
+    if (monitorRect != null) {
+      gFFI.cursorModel.removeBlockedRect(monitorRect);
+      _qualityMonitorBlockedRect = null;
+    }
     _keyboardInputModes.removeListener(_onKeyboardInputModeChanged);
     _reconnectController.dispose();
     _textController.removeListener(_handleSoftKeyboardEditingValue);
@@ -1006,6 +1034,7 @@ class _RemotePageState extends State<RemotePage>
               const ImagePaint(),
               PositionedQualityMonitor(
                 qualityMonitorModel: gFFI.qualityMonitorModel,
+                onBoundsChanged: _onQualityMonitorBounds,
               ),
               SizedBox(
                 width: 0,
