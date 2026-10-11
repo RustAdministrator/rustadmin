@@ -299,6 +299,18 @@ fn capture_backend_allows_user_helper_retry(preference: CaptureBackend) -> bool 
     )
 }
 
+/// Only an automatic backend may be walked down the startup ladder (WGC/DXGI
+/// to magnifier to GDI) because the first frames did not come: on a static
+/// desktop the first frames legitimately do not come, and a backend that was
+/// chosen by hand must stay what was chosen.
+#[cfg(any(windows, test))]
+fn startup_fallback_permitted(preference: CaptureBackend) -> bool {
+    matches!(
+        preference,
+        CaptureBackend::CaptureBackendAuto | CaptureBackend::CaptureBackendNotSet
+    )
+}
+
 type FrameFetchedNotifierSender = UnboundedSender<(i32, Option<Instant>)>;
 type FrameFetchedNotifierReceiver = Arc<TokioMutex<UnboundedReceiver<(i32, Option<Instant>)>>>;
 
@@ -1880,6 +1892,29 @@ mod tests {
     }
 
     #[test]
+    fn gdi_fallback_is_refused_for_a_privacy_mode_capturer() {
+        use crate::privacy_mode::INVALID_PRIVACY_MODE_CONN_ID;
+        assert!(super::gdi_fallback_allowed(INVALID_PRIVACY_MODE_CONN_ID));
+        assert!(!super::gdi_fallback_allowed(1));
+        assert!(!super::gdi_fallback_allowed(42));
+    }
+
+    #[test]
+    fn only_an_automatic_backend_walks_the_startup_ladder() {
+        use CaptureBackend::*;
+        assert!(super::startup_fallback_permitted(CaptureBackendAuto));
+        assert!(super::startup_fallback_permitted(CaptureBackendNotSet));
+        for manual in [
+            CaptureBackendWgc,
+            CaptureBackendDxgi,
+            CaptureBackendWinMag,
+            CaptureBackendGdi,
+        ] {
+            assert!(!super::startup_fallback_permitted(manual), "{manual:?}");
+        }
+    }
+
+    #[test]
     fn directx_off_never_routes_to_a_direct3d_backend() {
         for backend in [
             CaptureBackend::CaptureBackendNotSet,
@@ -2797,10 +2832,26 @@ fn try_recreate_magnifier_capture(c: &mut CapturerInfo, reason: &str) -> bool {
     }
 }
 
+/// A GDI capturer does not exclude the privacy-mode window, so a capturer that
+/// was created for privacy mode must not be silently replaced by one: the
+/// caller restarts the service instead.
+#[cfg(any(windows, test))]
+fn gdi_fallback_allowed(capturer_privacy_mode_id: i32) -> bool {
+    capturer_privacy_mode_id == crate::privacy_mode::INVALID_PRIVACY_MODE_CONN_ID
+}
+
 #[cfg(windows)]
 fn try_set_gdi_fallback(c: &mut CapturerInfo, reason: &str) -> bool {
     if c.is_gdi() {
         return true;
+    }
+    if !gdi_fallback_allowed(c._capturer_privacy_mode_id) {
+        log::warn!(
+            "capture gdi fallback refused in privacy mode: reason={}, privacy_mode_id={}",
+            reason,
+            c._capturer_privacy_mode_id
+        );
+        return false;
     }
     if c.set_gdi() {
         log::info!("capture gdi fallback enabled: reason={}", reason);
@@ -3911,7 +3962,11 @@ fn run(vs: VideoService) -> ResultType<()> {
                     }
                 }
                 #[cfg(windows)]
-                if try_gdi > 0 && !c.is_gdi() && !c.is_cpu_only() {
+                if try_gdi > 0
+                    && !c.is_gdi()
+                    && !c.is_cpu_only()
+                    && startup_fallback_permitted(*CAPTURE_BACKEND_PREFERENCE.lock().unwrap())
+                {
                     if try_gdi > 3 {
                         if try_set_magnifier_fallback(&mut c, "no_image_mag") {
                             try_gdi = 0;
