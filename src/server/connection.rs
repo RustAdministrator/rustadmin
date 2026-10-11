@@ -341,6 +341,45 @@ fn should_use_terminal_os_login_scope(is_terminal: bool, os_login_username: &str
     cfg!(target_os = "windows") && is_terminal && !os_login_username.trim().is_empty()
 }
 
+/// Logs the Windows account on and checks that it is an administrator. Blocks;
+/// call from a blocking thread.
+#[cfg(target_os = "windows")]
+fn verify_os_admin(username: &str, password: &str) -> Result<(), &'static str> {
+    let check_admin_res = crate::platform::get_logon_user_token(username, password).map(|token| {
+        let is_token_admin = crate::platform::is_user_token_admin(token);
+        unsafe {
+            hbb_common::allow_err!(CloseHandle(HANDLE(token as _)));
+        };
+        is_token_admin
+    });
+    match check_admin_res {
+        Ok(Ok(true)) => Ok(()),
+        Ok(Ok(false)) => Err(TERMINAL_OS_LOGIN_FAILED_MSG),
+        Ok(Err(e)) => {
+            log::error!("Failed to check if the user is an administrator: {}", e);
+            Err(TERMINAL_OS_LOGIN_FAILED_MSG)
+        }
+        Err(e) => {
+            log::error!("Failed to get logon user token: {}", e);
+            Err(TERMINAL_OS_LOGIN_FAILED_MSG)
+        }
+    }
+}
+
+/// Whether the Windows account of a terminal login may be checked now.
+///
+/// Checking it answers "is this password right for that account" to whoever
+/// asked, so it waits until the access password (or the local click) has been
+/// accepted. `legacy_order` is the `allow-terminal-os-login-before-authorization`
+/// setting that restores the old order.
+fn terminal_os_login_check_allowed(
+    os_scope: bool,
+    access_verified: bool,
+    legacy_order: bool,
+) -> bool {
+    !os_scope || access_verified || legacy_order
+}
+
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 lazy_static::lazy_static! {
     static ref WALLPAPER_REMOVER: Arc<Mutex<Option<WallPaperRemover>>> = Default::default();
@@ -3781,7 +3820,8 @@ impl Connection {
             self.deny_session_connection(reason).await;
             return false;
         }
-        if let Some(keep_alive) = self.prepare_terminal_login_for_authorization().await {
+        // Access has been accepted by now: this is where the account is checked.
+        if let Some(keep_alive) = self.prepare_terminal_login_for_authorization(true).await {
             return keep_alive;
         }
         self.apply_session_permission_defaults();
@@ -5495,7 +5535,13 @@ impl Connection {
             }
 
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            if !should_use_terminal_os_login_scope(self.terminal, &lr.os_login.username) {
+            if !should_use_terminal_os_login_scope(self.terminal, &lr.os_login.username)
+                || !Config::get_bool_option(
+                    keys::OPTION_ALLOW_TERMINAL_OS_LOGIN_BEFORE_AUTHORIZATION,
+                )
+            {
+                // With the account check after authorization the manager must be
+                // up before it, so that the local user can be asked.
                 self.try_start_cm_ipc();
             }
 
@@ -5565,7 +5611,8 @@ impl Connection {
             {
                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
                 if should_use_terminal_os_login_scope(self.terminal, &lr.os_login.username) {
-                    if let Some(keep_alive) = self.prepare_terminal_login_for_authorization().await
+                    if let Some(keep_alive) =
+                        self.prepare_terminal_login_for_authorization(false).await
                     {
                         return keep_alive;
                     }
@@ -5594,7 +5641,7 @@ impl Connection {
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]
                     if should_use_terminal_os_login_scope(self.terminal, &lr.os_login.username) {
                         if let Some(keep_alive) =
-                            self.prepare_terminal_login_for_authorization().await
+                            self.prepare_terminal_login_for_authorization(false).await
                         {
                             return keep_alive;
                         }
@@ -6633,31 +6680,12 @@ impl Connection {
         username: &str,
         password: &str,
     ) -> Option<&'static str> {
-        let check_admin_res =
-            crate::platform::get_logon_user_token(username, password).map(|token| {
-                let is_token_admin = crate::platform::is_user_token_admin(token);
-                unsafe {
-                    hbb_common::allow_err!(CloseHandle(HANDLE(token as _)));
-                };
-                is_token_admin
-            });
-        match check_admin_res {
-            Ok(Ok(b)) => {
-                if b {
-                    self.terminal_user_token = Some(TerminalUserToken::SelfUser);
-                    None
-                } else {
-                    Some(TERMINAL_OS_LOGIN_FAILED_MSG)
-                }
+        match verify_os_admin(username, password) {
+            Ok(()) => {
+                self.terminal_user_token = Some(TerminalUserToken::SelfUser);
+                None
             }
-            Ok(Err(e)) => {
-                log::error!("Failed to check if the user is an administrator: {}", e);
-                Some(TERMINAL_OS_LOGIN_FAILED_MSG)
-            }
-            Err(e) => {
-                log::error!("Failed to get logon user token: {}", e);
-                Some(TERMINAL_OS_LOGIN_FAILED_MSG)
-            }
+            Err(msg) => Some(msg),
         }
     }
 
@@ -6693,8 +6721,20 @@ impl Connection {
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    async fn prepare_terminal_login_for_authorization(&mut self) -> Option<bool> {
+    async fn prepare_terminal_login_for_authorization(
+        &mut self,
+        access_verified: bool,
+    ) -> Option<bool> {
         if !self.terminal || self.terminal_user_token.is_some() {
+            return None;
+        }
+        let legacy_order =
+            Config::get_bool_option(keys::OPTION_ALLOW_TERMINAL_OS_LOGIN_BEFORE_AUTHORIZATION);
+        if !terminal_os_login_check_allowed(
+            should_use_terminal_os_login_scope(self.terminal, &self.lr.os_login.username),
+            access_verified,
+            legacy_order,
+        ) {
             return None;
         }
 
@@ -6736,10 +6776,33 @@ impl Connection {
 
         let username = normalized_username;
         let password = self.lr.os_login.password.clone();
+        // Before authorization (legacy order only) the account is guessable by
+        // anyone who can connect, so failures are also counted per source and
+        // account, on top of the host-wide back-off.
+        let keyed = (is_terminal_os_login && !access_verified).then(|| {
+            super::login_failure_check::OsCredentialKey::new(self.ip.parse().ok(), &username)
+        });
+        if let Some(key) = keyed.as_ref() {
+            let wait_ms = super::login_failure_check::keyed_backoff_remaining_ms(key, get_time());
+            if wait_ms > 0 {
+                log::warn!(
+                    "OS credential login blocked by per-source back-off: ip={} conn_id={}",
+                    self.ip,
+                    self.inner.id()
+                );
+                self.send_login_error(format!(
+                    "Please try again in {} seconds.",
+                    (wait_ms + 999) / 1_000
+                ))
+                .await;
+                sleep(1.).await;
+                return Some(false);
+            }
+        }
         let terminal_login_error = {
             #[cfg(target_os = "windows")]
             {
-                let _os_login_concurrency_guard = if is_terminal_os_login {
+                let os_login_gate = if is_terminal_os_login {
                     let guard = try_acquire_os_credential_login_gate();
                     if guard.is_err() {
                         log::warn!(
@@ -6764,7 +6827,39 @@ impl Connection {
                 } else {
                     None
                 };
-                self.fill_terminal_user_token(&username, &password)
+                if is_terminal_os_login {
+                    // The logon call blocks; keep it off the runtime. The gate
+                    // moves into the task and stays held until it returns, even
+                    // when this side stops waiting.
+                    let (user, pass) = (username.clone(), password.clone());
+                    let task = tokio::task::spawn_blocking(move || {
+                        let _gate = os_login_gate;
+                        verify_os_admin(&user, &pass)
+                    });
+                    match tokio::time::timeout(Duration::from_secs(45), task).await {
+                        Ok(Ok(Ok(()))) => {
+                            self.terminal_user_token = Some(TerminalUserToken::SelfUser);
+                            None
+                        }
+                        Ok(Ok(Err(msg))) => Some(msg),
+                        // Not an answer about the credentials, so not a failure.
+                        Ok(Err(_)) | Err(_) => {
+                            log::warn!(
+                                "OS credential verification did not complete: ip={} conn_id={}",
+                                self.ip,
+                                self.inner.id()
+                            );
+                            self.send_login_error(
+                                "Windows account check did not complete, try again later",
+                            )
+                            .await;
+                            sleep(1.).await;
+                            return Some(false);
+                        }
+                    }
+                } else {
+                    self.fill_terminal_user_token(&username, &password)
+                }
             }
             #[cfg(not(target_os = "windows"))]
             {
@@ -6775,6 +6870,9 @@ impl Connection {
         if let Some(msg) = terminal_login_error {
             if let TerminalAuthorizationMode::OsLogin { failure, scope } = auth_mode {
                 self.update_failure_with_scope(failure, false, 0, scope);
+            }
+            if let Some(key) = keyed.as_ref() {
+                super::login_failure_check::keyed_record_failure(key, get_time());
             }
             let auth_context = if is_terminal_os_login {
                 "OS credential login verification"
@@ -6795,6 +6893,9 @@ impl Connection {
         }
         if let TerminalAuthorizationMode::OsLogin { failure, scope } = auth_mode {
             self.update_failure_with_scope(failure, true, 0, scope);
+        }
+        if let Some(key) = keyed.as_ref() {
+            super::login_failure_check::keyed_record_success(key);
         }
 
         if let Some(is_user) =
@@ -6824,7 +6925,10 @@ impl Connection {
     }
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    async fn prepare_terminal_login_for_authorization(&mut self) -> Option<bool> {
+    async fn prepare_terminal_login_for_authorization(
+        &mut self,
+        _access_verified: bool,
+    ) -> Option<bool> {
         None
     }
 
@@ -9553,6 +9657,18 @@ mod test {
     }
 
     #[test]
+    fn terminal_account_is_checked_only_after_access_is_accepted() {
+        // Windows terminal login, access not accepted yet: no oracle.
+        assert!(!terminal_os_login_check_allowed(true, false, false));
+        // Access accepted: the account is checked.
+        assert!(terminal_os_login_check_allowed(true, true, false));
+        // Legacy order restores the early check.
+        assert!(terminal_os_login_check_allowed(true, false, true));
+        // Everything that is not an OS-account login is unaffected.
+        assert!(terminal_os_login_check_allowed(false, false, false));
+    }
+
+    #[test]
     fn prelogin_timeout_defaults_apply_to_every_transport_and_fail_closed() {
         let ten_minutes = Some(Duration::from_secs(600));
         assert_eq!(prelogin_timeout_from_value("tcp", ""), ten_minutes);
@@ -9564,7 +9680,11 @@ mod test {
         );
         // Unreadable or out-of-range values keep the default, never "no limit".
         for bad in ["abc", "-5", "5", "999999", "1.5"] {
-            assert_eq!(prelogin_timeout_from_value("tcp", bad), ten_minutes, "{bad}");
+            assert_eq!(
+                prelogin_timeout_from_value("tcp", bad),
+                ten_minutes,
+                "{bad}"
+            );
         }
         let now = Instant::now();
         assert!(prelogin_deadline(now, false).is_some() || prelogin_timeout_for(false).is_none());

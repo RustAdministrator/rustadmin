@@ -1104,6 +1104,13 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                 enabled: enabled, fakeValue: fakeValue),
             _OptionCheckBox(context, 'Enable terminal', kOptionEnableTerminal,
                 enabled: enabled, fakeValue: fakeValue),
+            if (isWindows)
+              _OptionCheckBox(
+                  context,
+                  'Check Windows account before access approval (terminal)',
+                  kOptionAllowTerminalOsLoginBeforeAuthorization,
+                  enabled: enabled,
+                  fakeValue: fakeValue),
             _OptionCheckBox(
                 context, 'Enable TCP tunneling', kOptionEnableTunnel,
                 enabled: enabled, fakeValue: fakeValue),
