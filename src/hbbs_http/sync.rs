@@ -52,6 +52,20 @@ fn is_protected_remote_option(key: &str) -> bool {
             | keys::OPTION_ALLOW_UNAPPROVED_SWITCH_SIDES
             | keys::OPTION_DISABLE_PAIRING_HOST_PROOF
             | keys::OPTION_PAIRING_HOST_AUTH
+            | keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION
+            | keys::OPTION_REMEMBER_PAIRED_VIEWERS
+            | keys::OPTION_ALLOW_ID_RELAY_SERVER
+            | keys::OPTION_ENABLE_LAN_DISCOVERY
+            | keys::OPTION_ALLOW_AUTO_UPDATE
+            | keys::OPTION_REMOTE_TRANSPORT
+            | keys::OPTION_DISABLE_UDP
+            | keys::OPTION_QUIC_LISTEN_ADDRESS
+            | keys::OPTION_QUIC_LISTEN_PORT
+            | keys::OPTION_ALLOW_INSECURE_RELAY_SESSION
+            | keys::OPTION_ALLOW_SERVER_PERMISSION_GRANTS
+            | keys::OPTION_QUIC_FOLLOW_DIRECT_SERVER
+            | keys::OPTION_DIRECT_ACCESS_SCOPE
+            | keys::OPTION_DIRECT_ACCESS_EXTRA_NETWORKS
             | keys::OPTION_KEY
             | "rendezvous-servers"
     )
@@ -406,6 +420,20 @@ mod tests {
             keys::OPTION_ALLOW_UNAPPROVED_SWITCH_SIDES,
             keys::OPTION_DISABLE_PAIRING_HOST_PROOF,
             keys::OPTION_PAIRING_HOST_AUTH,
+            keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION,
+            keys::OPTION_REMEMBER_PAIRED_VIEWERS,
+            keys::OPTION_ALLOW_ID_RELAY_SERVER,
+            keys::OPTION_ENABLE_LAN_DISCOVERY,
+            keys::OPTION_ALLOW_AUTO_UPDATE,
+            keys::OPTION_REMOTE_TRANSPORT,
+            keys::OPTION_DISABLE_UDP,
+            keys::OPTION_QUIC_LISTEN_ADDRESS,
+            keys::OPTION_QUIC_LISTEN_PORT,
+            keys::OPTION_ALLOW_INSECURE_RELAY_SESSION,
+            keys::OPTION_ALLOW_SERVER_PERMISSION_GRANTS,
+            keys::OPTION_QUIC_FOLLOW_DIRECT_SERVER,
+            keys::OPTION_DIRECT_ACCESS_SCOPE,
+            keys::OPTION_DIRECT_ACCESS_EXTRA_NETWORKS,
         ] {
             assert!(is_protected_remote_option(key), "{key}");
         }

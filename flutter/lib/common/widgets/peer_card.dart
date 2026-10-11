@@ -13,6 +13,7 @@ import 'package:provider/provider.dart';
 
 import '../../common.dart';
 import '../../common/formatter/id_formatter.dart';
+import '../peer_options.dart';
 import '../../models/peer_model.dart';
 import '../../models/platform_model.dart';
 import '../../desktop/widgets/material_mod_popup_menu.dart' as mod_menu;
@@ -1489,6 +1490,11 @@ class _PeerConnectionProperties {
   bool androidVpnPreconnect;
   String androidWireGuardTunnel;
 
+  /// What `load` found, in the encoding `toOptionMap` produces. `save` writes
+  /// only what differs from it, so that opening and confirming the dialog does
+  /// not turn unset options into explicit ones.
+  Map<String, String> _loaded = const {};
+
   _PeerConnectionProperties({
     required this.imageQuality,
     required this.customImageQuality,
@@ -1517,8 +1523,18 @@ class _PeerConnectionProperties {
         .mainGetPeerOption(id: id, key: kOptionQualityMonitorDetails));
     final keyboardMode = _normalizeKeyboardMode(
         await bind.mainGetPeerOption(id: id, key: 'keyboard_mode'));
-    final clipboardDirection = normalizeClipboardDirectionPolicy(
-        await bind.mainGetPeerOption(id: id, key: kOptionClipboardDirection));
+    final directionOption =
+        await bind.mainGetPeerOption(id: id, key: kOptionClipboardDirection);
+    final legacyDisableClipboard =
+        await bind.mainGetPeerOption(id: id, key: kOptionDisableClipboard);
+    // The per-peer `disable_clipboard` flag is "Y" or anything else; an empty
+    // value is not "disabled".
+    final clipboardDirection = effectiveClipboardDirection(
+      directionOption: directionOption,
+      legacyDisableClipboard: legacyDisableClipboard,
+      off: kClipboardDirectionOff,
+      normalize: normalizeClipboardDirectionPolicy,
+    );
     final androidVpnPreconnect = isAndroid
         ? option2bool(kOptionAndroidVpnPreconnect,
             await bind.mainGetPeerOption(
@@ -1528,7 +1544,7 @@ class _PeerConnectionProperties {
         ? await bind.mainGetPeerOption(
             id: id, key: kOptionAndroidWireGuardTunnel)
         : '';
-    return _PeerConnectionProperties(
+    final properties = _PeerConnectionProperties(
       imageQuality: imageQuality,
       customImageQuality: customImageQuality,
       codecPreference: codecPreference,
@@ -1540,53 +1556,39 @@ class _PeerConnectionProperties {
       androidVpnPreconnect: androidVpnPreconnect,
       androidWireGuardTunnel: androidWireGuardTunnel,
     );
+    properties._loaded = {
+      ...properties.toOptionMap(),
+      // What is stored, not what it was folded into.
+      kOptionDisableClipboard: legacyDisableClipboard == 'Y' ? 'Y' : 'N',
+    };
+    return properties;
   }
 
+  Map<String, String> toOptionMap() => {
+        kOptionImageQuality: imageQuality,
+        kOptionCustomImageQuality: customImageQuality.toString(),
+        kOptionCodecPreference: codecPreference,
+        kOptionShowQualityMonitor:
+            bool2option(kOptionShowQualityMonitor, showQualityMonitor),
+        kOptionQualityMonitorPosition: qualityMonitorPosition,
+        kOptionQualityMonitorDetails: qualityMonitorDetails,
+        'keyboard_mode': keyboardMode == _kKeyboardModeAuto ? '' : keyboardMode,
+        kOptionClipboardDirection: clipboardDirection,
+        kOptionDisableClipboard: bool2option(
+            kOptionDisableClipboard, clipboardDirection == kClipboardDirectionOff),
+        if (isAndroid)
+          kOptionAndroidVpnPreconnect:
+              bool2option(kOptionAndroidVpnPreconnect, androidVpnPreconnect),
+        if (isAndroid) kOptionAndroidWireGuardTunnel: androidWireGuardTunnel,
+      };
+
   Future<void> save(String id) async {
-    await bind.mainSetPeerOption(
-        id: id, key: kOptionImageQuality, value: imageQuality);
-    await bind.mainSetPeerOption(
-        id: id,
-        key: kOptionCustomImageQuality,
-        value: customImageQuality.toString());
-    await bind.mainSetPeerOption(
-        id: id, key: kOptionCodecPreference, value: codecPreference);
-    await bind.mainSetPeerOption(
-        id: id,
-        key: kOptionShowQualityMonitor,
-        value: bool2option(kOptionShowQualityMonitor, showQualityMonitor));
-    await bind.mainSetPeerOption(
-        id: id,
-        key: kOptionQualityMonitorPosition,
-        value: qualityMonitorPosition);
-    await bind.mainSetPeerOption(
-        id: id,
-        key: kOptionQualityMonitorDetails,
-        value: qualityMonitorDetails);
-    await bind.mainSetPeerOption(
-        id: id,
-        key: 'keyboard_mode',
-        value: keyboardMode == _kKeyboardModeAuto ? '' : keyboardMode);
-    await bind.mainSetPeerOption(
-        id: id, key: kOptionClipboardDirection, value: clipboardDirection);
-    await bind.mainSetPeerOption(
-      id: id,
-      key: kOptionDisableClipboard,
-      value: bool2option(kOptionDisableClipboard,
-          clipboardDirection == kClipboardDirectionOff),
-    );
-    if (isAndroid) {
+    final changed = diffPeerOptions(_loaded, toOptionMap());
+    for (final entry in changed.entries) {
       await bind.mainSetPeerOption(
-        id: id,
-        key: kOptionAndroidVpnPreconnect,
-        value: bool2option(kOptionAndroidVpnPreconnect, androidVpnPreconnect),
-      );
-      await bind.mainSetPeerOption(
-        id: id,
-        key: kOptionAndroidWireGuardTunnel,
-        value: androidWireGuardTunnel,
-      );
+          id: id, key: entry.key, value: entry.value);
     }
+    _loaded = toOptionMap();
   }
 }
 

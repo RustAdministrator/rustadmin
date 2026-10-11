@@ -112,6 +112,22 @@ pub(crate) fn clipboard_direction_policy_from_option_value(
     ClipboardDirectionPolicy::from_option_value(value)
 }
 
+/// The direction in force for a viewer session: the session's own setting if it
+/// has one, otherwise the local configuration, otherwise the global option. An
+/// empty value means "not set at this level"; a set but unknown value is `Off`.
+pub(crate) fn resolve_clipboard_direction(
+    session: &str,
+    local: &str,
+    global: &str,
+) -> ClipboardDirectionPolicy {
+    for value in [session, local, global] {
+        if !value.trim().is_empty() {
+            return ClipboardDirectionPolicy::from_option_value(value);
+        }
+    }
+    ClipboardDirectionPolicy::Both
+}
+
 // This format is used to store the flag in the clipboard.
 const RUSTDESK_CLIPBOARD_OWNER_FORMAT: &'static str = "dyn.com.rustdesk.owner";
 
@@ -407,13 +423,11 @@ pub(crate) fn clipboard_direction_policy_for_side(side: ClipboardSide) -> Clipbo
 
 #[cfg(not(target_os = "android"))]
 fn client_clipboard_direction_policy() -> ClipboardDirectionPolicy {
-    let local = LocalConfig::get_option(keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION);
-    let value = if local.is_empty() {
-        Config::get_option(keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION)
-    } else {
-        local
-    };
-    ClipboardDirectionPolicy::from_option_value(&value)
+    resolve_clipboard_direction(
+        "",
+        &LocalConfig::get_option(keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION),
+        &Config::get_option(keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION),
+    )
 }
 
 #[cfg(target_os = "android")]
@@ -2167,6 +2181,44 @@ impl std::fmt::Display for ClipboardSide {
             ClipboardSide::Host => write!(f, "host"),
             ClipboardSide::Client => write!(f, "client"),
         }
+    }
+}
+
+#[cfg(test)]
+mod clipboard_direction_resolution_tests {
+    use super::*;
+    use ClipboardDirectionPolicy::*;
+
+    #[test]
+    fn the_narrowest_level_that_is_set_decides() {
+        // Nothing set anywhere: both directions.
+        assert_eq!(resolve_clipboard_direction("", "", ""), Both);
+        // Global only.
+        assert_eq!(
+            resolve_clipboard_direction("", "", "local-to-remote"),
+            LocalToRemote
+        );
+        // Local configuration beats the global option.
+        assert_eq!(
+            resolve_clipboard_direction("", "off", "local-to-remote"),
+            Off
+        );
+        // The session beats both, including to widen: this is a per-session
+        // decision the user took on purpose.
+        assert_eq!(
+            resolve_clipboard_direction("both", "off", "remote-to-local"),
+            Both
+        );
+        assert_eq!(
+            resolve_clipboard_direction("remote-to-local", "both", "both"),
+            RemoteToLocal
+        );
+    }
+
+    #[test]
+    fn whitespace_is_unset_and_unknown_values_close_the_clipboard() {
+        assert_eq!(resolve_clipboard_direction("  ", "", "send"), LocalToRemote);
+        assert_eq!(resolve_clipboard_direction("sideways", "both", "both"), Off);
     }
 }
 

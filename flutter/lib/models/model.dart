@@ -1085,6 +1085,12 @@ class FfiModel with ChangeNotifier {
       msgBox(sessionId, type, title, text, link, dialogManager);
       return;
     }
+    // Text the remote peer chose can never stand in for a prompt of ours.
+    final fromPeer = event.origin == MessageBoxOrigin.peer;
+    if (fromPeer && isCoreOnlyMessageBoxType(type)) {
+      msgBox(sessionId, 'info', title, text, link, dialogManager);
+      return;
+    }
 
     void rejectSecurityPrompt({required bool pairing}) {
       () async {
@@ -1129,7 +1135,8 @@ class FfiModel with ChangeNotifier {
       } else {
         rejectSecurityPrompt(pairing: false);
       }
-    } else if (type == 'error' &&
+    } else if (!fromPeer &&
+        type == 'error' &&
         title == 'Connection Error' &&
         isResettablePeerTrustError(text)) {
       showPeerIdentityChangedDialog(sessionId, dialogManager, text);
