@@ -528,10 +528,20 @@ impl MediaCodecDecoder {
                         self.pending_input_bytes.saturating_sub(pending.data.len());
                     let buf = input_buffer.buffer_mut();
                     if pending.data.len() > buf.len() {
+                        let capacity = buf.len();
+                        // Hand the dequeued slot back empty; an input buffer that is
+                        // never queued is lost to the codec for good.
+                        let _ = self.decoder.queue_input_buffer(
+                            input_buffer,
+                            0,
+                            0,
+                            token as u64,
+                            0,
+                        );
                         bail!(
                             "MediaCodec input exceeds buffer capacity: input_bytes={}, capacity={}",
                             pending.data.len(),
-                            buf.len()
+                            capacity
                         );
                     }
                     for (destination, source) in buf.iter_mut().zip(pending.data.iter()) {
