@@ -299,6 +299,18 @@ fn capture_backend_allows_user_helper_retry(preference: CaptureBackend) -> bool 
     )
 }
 
+/// Only an automatic backend may be walked down the startup ladder (WGC/DXGI
+/// to magnifier to GDI) because the first frames did not come: on a static
+/// desktop the first frames legitimately do not come, and a backend that was
+/// chosen by hand must stay what was chosen.
+#[cfg(any(windows, test))]
+fn startup_fallback_permitted(preference: CaptureBackend) -> bool {
+    matches!(
+        preference,
+        CaptureBackend::CaptureBackendAuto | CaptureBackend::CaptureBackendNotSet
+    )
+}
+
 type FrameFetchedNotifierSender = UnboundedSender<(i32, Option<Instant>)>;
 type FrameFetchedNotifierReceiver = Arc<TokioMutex<UnboundedReceiver<(i32, Option<Instant>)>>>;
 
@@ -1885,6 +1897,21 @@ mod tests {
         assert!(super::gdi_fallback_allowed(INVALID_PRIVACY_MODE_CONN_ID));
         assert!(!super::gdi_fallback_allowed(1));
         assert!(!super::gdi_fallback_allowed(42));
+    }
+
+    #[test]
+    fn only_an_automatic_backend_walks_the_startup_ladder() {
+        use CaptureBackend::*;
+        assert!(super::startup_fallback_permitted(CaptureBackendAuto));
+        assert!(super::startup_fallback_permitted(CaptureBackendNotSet));
+        for manual in [
+            CaptureBackendWgc,
+            CaptureBackendDxgi,
+            CaptureBackendWinMag,
+            CaptureBackendGdi,
+        ] {
+            assert!(!super::startup_fallback_permitted(manual), "{manual:?}");
+        }
     }
 
     #[test]
@@ -3935,7 +3962,11 @@ fn run(vs: VideoService) -> ResultType<()> {
                     }
                 }
                 #[cfg(windows)]
-                if try_gdi > 0 && !c.is_gdi() && !c.is_cpu_only() {
+                if try_gdi > 0
+                    && !c.is_gdi()
+                    && !c.is_cpu_only()
+                    && startup_fallback_permitted(*CAPTURE_BACKEND_PREFERENCE.lock().unwrap())
+                {
                     if try_gdi > 3 {
                         if try_set_magnifier_fallback(&mut c, "no_image_mag") {
                             try_gdi = 0;
