@@ -1,12 +1,10 @@
 // logic from webrtc -- https://github.com/shiguredo/libwebrtc/blob/main/modules/desktop_capture/win/screen_capturer_win_magnifier.cc
 #![allow(non_snake_case)]
 
-use lazy_static;
 use std::{
     ffi::CString,
     io::{Error, ErrorKind, Result},
     mem::size_of,
-    sync::Mutex,
 };
 use winapi::{
     shared::{
@@ -48,8 +46,13 @@ extern "C" {
     pub static GUID_WICPixelFormat32bppRGBA: GUID;
 }
 
-lazy_static::lazy_static! {
-    static ref MAG_BUFFER: Mutex<(bool, Vec<u8>)> =  Default::default();
+thread_local! {
+    /// The frame the magnifier callback delivers during `frame()`. The callback
+    /// runs synchronously on the thread that called `MagSetWindowSource`, so
+    /// each capturer thread has its own buffer; a process-wide one let two
+    /// capturers (two displays, or privacy mode next to a normal one) clear
+    /// and read each other's frames.
+    static MAG_BUFFER: std::cell::RefCell<(bool, Vec<u8>)> = Default::default();
 }
 
 pub type REFWICPixelFormatGUID = *const GUID;
@@ -490,9 +493,11 @@ impl CapturerMag {
     }
 
     fn clear_data() {
-        let mut lock = MAG_BUFFER.lock().unwrap();
-        lock.0 = false;
-        lock.1.clear();
+        MAG_BUFFER.with(|buffer| {
+            let mut buffer = buffer.borrow_mut();
+            buffer.0 = false;
+            buffer.1.clear();
+        });
     }
 
     pub(crate) fn frame(&mut self, data: &mut Vec<u8>) -> Result<()> {
@@ -568,20 +573,18 @@ impl CapturerMag {
             }
         }
 
-        let mut lock = MAG_BUFFER.lock().unwrap();
-        if !lock.0 {
-            return Err(Error::new(
-                ErrorKind::WouldBlock,
-                "No data captured by magnifier",
-            ));
-        }
-
-        data.resize(lock.1.len(), 0);
-        unsafe {
-            std::ptr::copy_nonoverlapping(&mut lock.1[0], &mut data[0], data.len());
-        }
-
-        Ok(())
+        MAG_BUFFER.with(|buffer| {
+            let buffer = buffer.borrow();
+            if !buffer.0 || buffer.1.is_empty() {
+                return Err(Error::new(
+                    ErrorKind::WouldBlock,
+                    "No data captured by magnifier",
+                ));
+            }
+            data.resize(buffer.1.len(), 0);
+            data.copy_from_slice(&buffer.1);
+            Ok(())
+        })
     }
 
     fn destroy_windows(&mut self) {
@@ -628,10 +631,14 @@ impl CapturerMag {
             // log warning?
             return FALSE;
         }
-        let mut lock = MAG_BUFFER.lock().unwrap();
-        lock.1.resize(srcheader.cbSize, 0);
-        std::ptr::copy_nonoverlapping(srcdata as _, &mut lock.1[0], srcheader.cbSize);
-        lock.0 = true;
+        MAG_BUFFER.with(|buffer| {
+            let mut buffer = buffer.borrow_mut();
+            buffer.1.resize(srcheader.cbSize, 0);
+            if srcheader.cbSize > 0 {
+                std::ptr::copy_nonoverlapping(srcdata as _, buffer.1.as_mut_ptr(), srcheader.cbSize);
+            }
+            buffer.0 = true;
+        });
         TRUE
     }
 }
@@ -647,5 +654,41 @@ mod tests {
         let mut data = Vec::new();
         capture_mag.frame(&mut data).unwrap();
         println!("capture data len: {}", data.len());
+    }
+
+    /// Two capturers on two threads must each get a frame of their own size.
+    /// With one process-wide buffer one thread could clear the other's frame or
+    /// read it ("No data captured", or a frame of the other rectangle).
+    #[test]
+    fn two_capturers_on_two_threads_keep_their_own_frames() {
+        let run = |origin: (i32, i32), width: usize, height: usize| {
+            std::thread::spawn(move || {
+                let mut capturer = CapturerMag::new(origin, width, height).unwrap();
+                let mut data = Vec::new();
+                let mut frames = 0;
+                let mut wrong_size = 0;
+                for _ in 0..200 {
+                    match capturer.frame(&mut data) {
+                        Ok(()) => {
+                            frames += 1;
+                            if data.len() != width * height * 4 {
+                                wrong_size += 1;
+                            }
+                        }
+                        Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                        Err(e) => panic!("capture failed: {e}"),
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                (frames, wrong_size)
+            })
+        };
+        let first = run((0, 0), 320, 200);
+        let second = run((0, 0), 640, 360);
+        let (frames_a, wrong_a) = first.join().unwrap();
+        let (frames_b, wrong_b) = second.join().unwrap();
+        println!("frames: {frames_a}/{frames_b}, wrong size: {wrong_a}/{wrong_b}");
+        assert_eq!(wrong_a + wrong_b, 0);
+        assert!(frames_a > 0 && frames_b > 0, "no frame was captured");
     }
 }
