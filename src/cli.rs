@@ -99,10 +99,6 @@ impl Interface for Session {
     }
 
     async fn handle_hash(&self, pass: &str, hash: Hash, peer: &mut Stream) {
-        log::info!(
-            "password={}",
-            hbb_common::password_security::temporary_password()
-        );
         handle_hash(self.lc.clone(), &pass, hash, self, peer).await;
     }
 
