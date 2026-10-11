@@ -86,6 +86,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   var _enableDirectIPAccess = false;
   var _directAccessPairingPassphraseSet = false;
   var _rememberPairedViewers = true;
+  var _directAccessLocalOnly = false;
   var _peerPairingPassphraseSet = false;
   var _enableRecordSession = false;
   var _useTextureRender = false;
@@ -140,6 +141,10 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
     _directAccessPairingPassphraseSet = bind
         .mainGetOptionSync(key: kOptionDirectAccessPairingPassphrase)
         .isNotEmpty;
+    _directAccessLocalOnly =
+        normalizeDirectAccessScope(
+            bind.mainGetOptionSync(key: kOptionDirectAccessScope)) ==
+        kDirectAccessScopeLocal;
     _rememberPairedViewers = mainGetBoolOptionSync(
       kOptionRememberPairedViewers,
     );
@@ -632,6 +637,24 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                 setState(() {});
               },
       ),
+      if (_enableDirectIPAccess)
+        SettingsTile.switchTile(
+          title: Text(translate('Local network and VPN only')),
+          description: Text(translate(
+              'Direct connections from other addresses are refused.')),
+          initialValue: _directAccessLocalOnly,
+          onToggle: isOptionFixed(kOptionDirectAccessScope)
+              ? null
+              : (v) async {
+                  await bind.mainSetOption(
+                    key: kOptionDirectAccessScope,
+                    value: v ? kDirectAccessScopeLocal : kDirectAccessScopeAny,
+                  );
+                  setState(() {
+                    _directAccessLocalOnly = v;
+                  });
+                },
+        ),
       if (_enableDirectIPAccess)
         SettingsTile.switchTile(
           title: Text(translate('Remember paired viewers')),

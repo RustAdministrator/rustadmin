@@ -19,6 +19,7 @@ compile_error!("The linux-pkg-config Cargo feature is supported only on Linux.")
 #[cfg(all(not(target_os = "macos"), feature = "screencapturekit"))]
 compile_error!("The screencapturekit Cargo feature is supported only on macOS.");
 
+mod access_scope;
 mod keyboard;
 mod keyboard_input_policy;
 mod keyboard_hid;
