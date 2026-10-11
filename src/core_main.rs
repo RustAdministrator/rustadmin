@@ -27,6 +27,29 @@ macro_rules! my_println{
 /// [Note]
 /// If it returns [`None`], then the process will terminate, and flutter gui will not be started.
 /// If it returns [`Some`], then the process will continue, and flutter gui will be started.
+/// Removes `--install` (and `--upgrade`) from the argument lists when installation
+/// is disabled. Returns whether anything was removed.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub(crate) fn strip_install_args(
+    args: &mut Vec<String>,
+    flutter_args: &mut Vec<String>,
+    disabled: bool,
+) -> bool {
+    if !disabled {
+        return false;
+    }
+    let before = args.len() + flutter_args.len();
+    let had_install = args
+        .iter()
+        .chain(flutter_args.iter())
+        .any(|a| a == "--install");
+    if had_install {
+        args.retain(|a| a != "--install" && a != "--upgrade");
+        flutter_args.retain(|a| a != "--install" && a != "--upgrade");
+    }
+    args.len() + flutter_args.len() != before
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn core_main() -> Option<Vec<String>> {
     let process_args: Vec<String> = std::env::args().collect();
@@ -136,6 +159,15 @@ pub fn core_main() -> Option<Vec<String>> {
         args.push("--upgrade".to_owned());
         flutter_args.push("--install".to_string());
         flutter_args.push("--upgrade".to_string());
+    }
+    // `disable-installation` is a hard setting: an explicit `--install` (and the
+    // `--upgrade` that goes with it) must not reach the installer either.
+    if strip_install_args(
+        &mut args,
+        &mut flutter_args,
+        config::is_disable_installation(),
+    ) {
+        log::warn!("Ignoring --install: installation is disabled");
     }
     #[cfg(target_os = "macos")]
     if args.is_empty() && crate::ui_interface::should_open_upgrade_page() {
@@ -1055,6 +1087,29 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn install_arguments_are_dropped_when_installation_is_disabled() {
+        // Disabled: the explicit request and its companion are gone from both lists.
+        let mut core = args(&["--install", "--upgrade", "--connect", "123"]);
+        let mut flutter = args(&["--install"]);
+        assert!(strip_install_args(&mut core, &mut flutter, true));
+        assert_eq!(core, args(&["--connect", "123"]));
+        assert!(flutter.is_empty());
+
+        // Not disabled: untouched.
+        let mut core = args(&["--install"]);
+        let mut flutter = args(&["--install", "--upgrade"]);
+        assert!(!strip_install_args(&mut core, &mut flutter, false));
+        assert_eq!(core, args(&["--install"]));
+        assert_eq!(flutter, args(&["--install", "--upgrade"]));
+
+        // Disabled but nothing to remove (a lone `--upgrade` is not an install).
+        let mut core = args(&["--upgrade"]);
+        let mut flutter = Vec::new();
+        assert!(!strip_install_args(&mut core, &mut flutter, true));
+        assert_eq!(core, args(&["--upgrade"]));
     }
 
     #[test]

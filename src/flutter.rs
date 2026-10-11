@@ -129,6 +129,14 @@ pub extern "C" fn handle_applicationShouldOpenUntitledFile() {
     crate::platform::macos::handle_application_should_open_untitled_file();
 }
 
+/// 1 when the build or the hard settings disable installation. The Windows
+/// runner uses it to drop `--install` from the arguments it hands to Flutter.
+#[cfg(windows)]
+#[no_mangle]
+pub extern "C" fn rustdesk_is_disable_installation() -> c_int {
+    hbb_common::config::is_disable_installation() as c_int
+}
+
 #[cfg(windows)]
 #[no_mangle]
 pub extern "C" fn rustdesk_core_main_args(args_len: *mut c_int) -> *mut *mut c_char {
