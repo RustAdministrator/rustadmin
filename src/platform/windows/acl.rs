@@ -21,7 +21,7 @@ use windows::{
             OBJECT_INHERIT_ACE, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
             TOKEN_QUERY, TOKEN_USER,
         },
-        Storage::FileSystem::{FILE_ALL_ACCESS, FILE_GENERIC_WRITE},
+        Storage::FileSystem::{FILE_ALL_ACCESS, FILE_GENERIC_READ, FILE_GENERIC_WRITE},
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     },
 };
@@ -286,29 +286,21 @@ pub fn set_path_permission_for_portable_service_shmem_file(path: &Path) -> Resul
     set_path_permission_for_portable_service_shmem_impl(path, false)
 }
 
+/// Lets the interactive user's capture helper open the helper shared-memory
+/// link. Only that user's own SID is granted, with read and write access to
+/// the link and nothing that changes its ACL or removes it. There is no
+/// fallback to a group such as `Authenticated Users`: if the user cannot be
+/// determined or the grant fails, the caller must not start the helper (a
+/// fallback would let every local account read and replace the link).
 pub fn grant_user_capture_helper_shmem_file_access(path: &Path) -> ResultType<()> {
     validate_portable_service_shmem_file_target(path)?;
-    if let Ok(user_sid) = super::get_current_session_user_sid_string() {
-        if let Ok(user_sid) = sid_string_to_local_alloc_guard(&user_sid) {
-            if apply_grant_sid_allow_ace_to_path(
-                path,
-                user_sid.as_sid_ptr(),
-                FILE_ALL_ACCESS.0,
-                false,
-                false,
-            )
-            .is_ok()
-            {
-                return Ok(());
-            }
-        }
-    }
-    let authenticated_users_sid = sid_string_to_local_alloc_guard("S-1-5-11")?;
+    let user_sid = super::get_current_session_user_sid_string()?;
+    let user_sid = sid_string_to_local_alloc_guard(&user_sid)?;
     apply_grant_sid_allow_ace_to_path(
         path,
-        authenticated_users_sid.as_sid_ptr(),
-        FILE_ALL_ACCESS.0,
-        true,
+        user_sid.as_sid_ptr(),
+        FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0,
+        false,
         false,
     )
 }

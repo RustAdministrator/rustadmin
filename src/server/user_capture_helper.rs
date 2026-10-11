@@ -713,16 +713,20 @@ pub mod client {
             let shmem_name = next_shmem_name();
             let shmem_size = shmem_size_for_display(width, height);
             let shmem = crate::portable_service::SharedMemory::create(&shmem_name, shmem_size)?;
-            if let Ok(flink) = shmem_flink_path(&shmem_name) {
-                if let Err(err) =
-                    crate::platform::windows::grant_user_capture_helper_shmem_file_access(&flink)
-                {
-                    log::warn!(
-                        "Failed to grant user capture helper shared-memory access for {:?}: {}",
-                        flink,
-                        err
-                    );
-                }
+            let flink = shmem_flink_path(&shmem_name)?;
+            if let Err(err) =
+                crate::platform::windows::grant_user_capture_helper_shmem_file_access(&flink)
+            {
+                // The link is closed to everyone but the service until the
+                // session user is granted; do not widen it, do not start the helper.
+                log::warn!(
+                    "Failed to grant user capture helper shared-memory access for {:?}: {}",
+                    flink,
+                    err
+                );
+                drop(shmem);
+                let _ = std::fs::remove_file(&flink);
+                bail!("user capture helper shared-memory access was not granted: {err}");
             }
             unsafe {
                 libc::memset(shmem.as_ptr() as _, 0, shmem.len());
