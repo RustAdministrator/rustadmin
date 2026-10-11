@@ -1880,6 +1880,14 @@ mod tests {
     }
 
     #[test]
+    fn gdi_fallback_is_refused_for_a_privacy_mode_capturer() {
+        use crate::privacy_mode::INVALID_PRIVACY_MODE_CONN_ID;
+        assert!(super::gdi_fallback_allowed(INVALID_PRIVACY_MODE_CONN_ID));
+        assert!(!super::gdi_fallback_allowed(1));
+        assert!(!super::gdi_fallback_allowed(42));
+    }
+
+    #[test]
     fn directx_off_never_routes_to_a_direct3d_backend() {
         for backend in [
             CaptureBackend::CaptureBackendNotSet,
@@ -2797,10 +2805,26 @@ fn try_recreate_magnifier_capture(c: &mut CapturerInfo, reason: &str) -> bool {
     }
 }
 
+/// A GDI capturer does not exclude the privacy-mode window, so a capturer that
+/// was created for privacy mode must not be silently replaced by one: the
+/// caller restarts the service instead.
+#[cfg(any(windows, test))]
+fn gdi_fallback_allowed(capturer_privacy_mode_id: i32) -> bool {
+    capturer_privacy_mode_id == crate::privacy_mode::INVALID_PRIVACY_MODE_CONN_ID
+}
+
 #[cfg(windows)]
 fn try_set_gdi_fallback(c: &mut CapturerInfo, reason: &str) -> bool {
     if c.is_gdi() {
         return true;
+    }
+    if !gdi_fallback_allowed(c._capturer_privacy_mode_id) {
+        log::warn!(
+            "capture gdi fallback refused in privacy mode: reason={}, privacy_mode_id={}",
+            reason,
+            c._capturer_privacy_mode_id
+        );
+        return false;
     }
     if c.set_gdi() {
         log::info!("capture gdi fallback enabled: reason={}", reason);

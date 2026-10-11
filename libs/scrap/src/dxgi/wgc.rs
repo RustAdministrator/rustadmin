@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::staging_ring;
 use crate::AdapterDevice;
 use windows::{
     core::{factory, Interface},
@@ -289,23 +290,34 @@ impl CapturerWgc {
     }
 
     fn try_capture_latest(&mut self, data: &mut Vec<u8>) -> io::Result<()> {
-        let pending_before = self.pending_staging;
         let mut copied_staging = None;
         if let Ok(mut frame) = self.frame_pool.TryGetNextFrame() {
             while let Ok(next) = self.frame_pool.TryGetNextFrame() {
                 frame = next;
             }
-            copied_staging = Some(self.queue_frame_copy(&frame)?);
+            // May resize the staging textures, which drops what was pending.
+            copied_staging = self.queue_frame_copy(&frame)?;
         }
+        // Read after the copy: a resize inside it invalidated any earlier index.
+        let pending_before = self.pending_staging;
 
         if let Some(pending_staging) = pending_before {
             match self.copy_staging_to_buffer(pending_staging, data) {
                 Ok(()) => {
-                    self.pending_staging = copied_staging;
+                    self.pending_staging = staging_ring::pending_after_read(
+                        staging_ring::StagingRead::Done,
+                        copied_staging,
+                        pending_staging,
+                    );
                     return Ok(());
                 }
                 Err(err) if err.kind() == WouldBlock => {
-                    self.pending_staging = Some(pending_staging);
+                    // The newest copy, not the busy older one, is read next.
+                    self.pending_staging = staging_ring::pending_after_read(
+                        staging_ring::StagingRead::Busy,
+                        copied_staging,
+                        pending_staging,
+                    );
                     return Err(err);
                 }
                 Err(err) => return Err(err),
@@ -407,13 +419,22 @@ impl CapturerWgc {
         }
     }
 
-    fn queue_frame_copy(&mut self, frame: &Direct3D11CaptureFrame) -> io::Result<usize> {
+    /// Copies the frame into a staging texture. `Ok(None)` means nothing was
+    /// copied because the frame does not have the size the staging textures
+    /// have (it was produced before a resize): the next frame will.
+    fn queue_frame_copy(&mut self, frame: &Direct3D11CaptureFrame) -> io::Result<Option<usize>> {
         self.update_frame_size(frame)?;
         if self.staging.is_empty() {
             self.ensure_staging(self.width, self.height)?;
         }
 
         let source = Self::texture_from_frame(frame)?;
+        let mut source_desc = D3D11_TEXTURE2D_DESC::default();
+        // Safety: `source` is a valid texture and `source_desc` a valid out value.
+        unsafe { source.GetDesc(&mut source_desc) };
+        if source_desc.Width as usize != self.width || source_desc.Height as usize != self.height {
+            return Ok(None);
+        }
         let staging_index = self.next_copy_staging_index();
         let staging = self
             .staging
@@ -427,19 +448,17 @@ impl CapturerWgc {
             self.context
                 .CopyResource(&staging_resource, &source_resource);
         }
-        Ok(staging_index)
+        Ok(Some(staging_index))
     }
 
     fn next_copy_staging_index(&mut self) -> usize {
-        let pending = self.pending_staging;
-        for _ in 0..self.staging.len() {
-            let index = self.next_staging;
-            self.next_staging = (self.next_staging + 1) % self.staging.len();
-            if Some(index) != pending {
-                return index;
-            }
-        }
-        0
+        let (index, next) = staging_ring::next_copy_index(
+            self.next_staging,
+            self.staging.len(),
+            self.pending_staging,
+        );
+        self.next_staging = next;
+        index
     }
 
     fn copy_staging_to_buffer(

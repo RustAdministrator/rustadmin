@@ -40,6 +40,8 @@ pub mod codec_integration;
 pub mod convert;
 #[cfg(any(target_os = "android", test))]
 pub mod frame_slot;
+#[cfg(any(windows, test))]
+pub mod staging_ring;
 pub mod pcm;
 #[cfg(feature = "hwcodec")]
 pub mod hwcodec;
