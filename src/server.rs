@@ -852,6 +852,17 @@ impl Server {
         self.id_count
     }
 
+    /// Like `set_video_service_opt` for every monitor video service and no
+    /// camera service.
+    pub fn set_monitor_video_service_opt(&self, opt: &str, value: &str) {
+        let prefix = VideoSource::Monitor.service_name_prefix();
+        for (k, v) in self.services.iter() {
+            if k.starts_with(prefix) {
+                v.set_option(opt, value);
+            }
+        }
+    }
+
     pub fn set_video_service_opt(
         &self,
         display: Option<(VideoSource, usize)>,

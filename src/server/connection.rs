@@ -42,7 +42,7 @@ use hbb_common::{
     futures::{SinkExt, StreamExt},
     get_time, get_version_number,
     message_proto::{
-        option_message::{BoolOption, CaptureBackend},
+        option_message::BoolOption,
         permission_info::Permission,
         supported_decoding::PreferCodec,
         SessionPermissionRequest, SessionPermissionResponse, VideoFeedback, VideoFrame,
@@ -4419,7 +4419,7 @@ impl Connection {
                 Some(conn_type) => super::session_scope::scoped_option(conn_type, &o),
                 None => o,
             };
-            self.update_options(&o).await;
+            self.update_options(&o, true).await;
         }
         if let Some((dir, show_hidden)) = self.file_transfer.clone() {
             // A file-transfer session never controls the keyboard and mouse.
@@ -6763,7 +6763,7 @@ impl Connection {
                             Some(conn_type) => super::session_scope::scoped_option(conn_type, &o),
                             None => o,
                         };
-                        self.update_options(&o).await;
+                        self.update_options(&o, false).await;
                     }
                     Some(misc::Union::RefreshVideo(r)) => {
                         if r {
@@ -7842,7 +7842,19 @@ impl Connection {
         }
     }
 
-    async fn update_options(&mut self, o: &OptionMessage) {
+    /// Restarts the monitor capture services (cameras are not affected by the
+    /// capture backend) so that a changed preference takes effect.
+    fn refresh_monitor_video_services(&self) {
+        video_service::refresh();
+        if let Some(s) = self.server.upgrade() {
+            s.read().unwrap().set_monitor_video_service_opt(
+                video_service::OPTION_REFRESH,
+                super::service::SERVICE_OPTION_VALUE_TRUE,
+            );
+        }
+    }
+
+    async fn update_options(&mut self, o: &OptionMessage, at_login: bool) {
         log::info!("Option update: {:?}", o);
         if let Ok(q) = o.image_quality.enum_value() {
             let image_quality;
@@ -7886,14 +7898,20 @@ impl Connection {
             }
         }
         if let Ok(backend) = o.capture_backend.enum_value() {
-            if backend != CaptureBackend::CaptureBackendNotSet {
-                video_service::set_capture_backend_preference(backend);
+            // Only a remote-desktop viewer picks how the screen is captured, and
+            // the video services restart only when the host-wide choice changed.
+            let action = if self.view_camera || self.terminal || self.file_transfer.is_some() {
+                video_service::CaptureBackendAction::Ignore
+            } else {
+                video_service::capture_backend_action(at_login, backend)
+            };
+            if video_service::apply_capture_backend_action(self.inner.id(), action) {
                 log::info!(
-                    "#{} capture backend override requested: {:?}",
+                    "#{} capture backend request {:?} changed the preference",
                     self.inner.id(),
-                    backend
+                    action
                 );
-                self.refresh_video_display(None);
+                self.refresh_monitor_video_services();
             }
         }
         if let Some(q) = o.supported_decoding.clone().take() {
@@ -8312,6 +8330,11 @@ impl Connection {
             return;
         }
         self.closed = true;
+        // This viewer's capture-backend choice goes with it; the next most
+        // recent one (or Auto) applies again.
+        if video_service::withdraw_capture_backend_request(self.inner.id()) {
+            self.refresh_monitor_video_services();
+        }
         #[cfg(feature = "quic-transport")]
         self.stream
             .begin_quic_teardown(b"rustadmin connection closing");
