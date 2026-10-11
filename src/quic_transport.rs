@@ -282,6 +282,14 @@ async fn run_direct_server_once(server: ServerPtr) -> ResultType<()> {
             Err(error) => return Err(error.into()),
         };
         let remote_address = incoming.remote_address();
+        if !crate::common::ip_allowed_by_whitelist(
+            &Config::get_option("whitelist"),
+            remote_address.ip(),
+        ) {
+            // Before any admission slot, handshake or key derivation.
+            incoming.refuse();
+            continue;
+        }
         let ticket = match admission.admit(
             remote_address.ip(),
             incoming.remote_address_validated(),
