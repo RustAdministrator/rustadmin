@@ -921,7 +921,23 @@ pub fn extract_update_dmg(file: &str) {
 }
 
 fn extract_dmg(dmg_path: &str, target_dir: &str) -> ResultType<()> {
-    let mount_point = "/Volumes/RustDeskUpdate";
+    // A private mount point: a fixed, guessable one under /Volumes could be taken
+    // by someone else before the image is attached.
+    let mount_output = Command::new("/usr/bin/mktemp")
+        .args(["-d", "/tmp/.rustadminmount-XXXXXX"])
+        .output()?;
+    if !mount_output.status.success() {
+        bail!(
+            "Failed to create a private mount point: {:?}",
+            mount_output.status
+        );
+    }
+    let mount_point = String::from_utf8_lossy(&mount_output.stdout)
+        .trim()
+        .to_owned();
+    if mount_point.is_empty() {
+        bail!("Failed to create a private mount point");
+    }
     let target_path = Path::new(target_dir);
 
     if target_path.exists() {
@@ -929,29 +945,37 @@ fn extract_dmg(dmg_path: &str, target_dir: &str) -> ResultType<()> {
     }
     std::fs::create_dir_all(target_path)?;
 
-    let status = Command::new("hdiutil")
-        .args(&["attach", "-nobrowse", "-mountpoint", mount_point, dmg_path])
+    struct DmgGuard(String);
+    impl Drop for DmgGuard {
+        fn drop(&mut self) {
+            let _ = Command::new("/usr/bin/hdiutil")
+                .args(["detach", self.0.as_str(), "-force"])
+                .status();
+            let _ = Command::new("/bin/rmdir").arg(&self.0).status();
+        }
+    }
+    // Created before the attach so that the directory is removed on every path.
+    let _guard = DmgGuard(mount_point.clone());
+
+    let status = Command::new("/usr/bin/hdiutil")
+        .args([
+            "attach",
+            "-nobrowse",
+            "-mountpoint",
+            mount_point.as_str(),
+            dmg_path,
+        ])
         .status()?;
 
     if !status.success() {
         bail!("Failed to attach DMG image at {}: {:?}", dmg_path, status);
     }
 
-    struct DmgGuard(&'static str);
-    impl Drop for DmgGuard {
-        fn drop(&mut self) {
-            let _ = Command::new("hdiutil")
-                .args(&["detach", self.0, "-force"])
-                .status();
-        }
-    }
-    let _guard = DmgGuard(mount_point);
-
     let app_name = format!("{}.app", crate::get_app_name());
     let src_path = format!("{}/{}", mount_point, app_name);
     let dest_path = format!("{}/{}", target_dir, app_name);
 
-    let copy_status = Command::new("ditto")
+    let copy_status = Command::new("/usr/bin/ditto")
         .args(&[&src_path, &dest_path])
         .status()?;
 

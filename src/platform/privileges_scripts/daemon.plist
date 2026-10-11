@@ -23,8 +23,8 @@
         <key>WorkingDirectory</key>
         <string>/Applications/RustAdmin.app/Contents/MacOS/</string>
         <key>StandardErrorPath</key>
-        <string>/tmp/rustadmin_service.err</string>
+        <string>/var/log/rustadmin_service.err</string>
         <key>StandardOutPath</key>
-        <string>/tmp/rustadmin_service.out</string>
+        <string>/var/log/rustadmin_service.out</string>
     </dict>
 </plist>
