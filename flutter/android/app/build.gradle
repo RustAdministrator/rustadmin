@@ -11,7 +11,23 @@ plugins {
 def keystoreProperties = new Properties()
 def keystorePropertiesFile = rootProject.file('key.properties')
 if (keystorePropertiesFile.exists()) {
-    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+    // Closed again: the stream used to stay open for the whole build.
+    keystorePropertiesFile.withReader('UTF-8') { reader ->
+        keystoreProperties.load(reader)
+    }
+}
+
+// A release build without signing data used to fail late with an unclear message.
+gradle.taskGraph.whenReady { graph ->
+    def releasePackaging = graph.allTasks.any {
+        def name = it.name.toLowerCase()
+        name.contains('release') &&
+            (name.startsWith('assemble') || name.startsWith('bundle') || name.startsWith('package'))
+    }
+    if (releasePackaging && !keystorePropertiesFile.exists()) {
+        throw new GradleException(
+            "flutter/android/key.properties is missing: a release build needs the signing configuration.")
+    }
 }
 
 def localProperties = new Properties()
@@ -125,8 +141,7 @@ android {
 
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
+            // Signed with the release configuration from key.properties (see above).
             signingConfig signingConfigs.release
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules'
         }
