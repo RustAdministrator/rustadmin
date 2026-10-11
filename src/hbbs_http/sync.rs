@@ -63,6 +63,8 @@ fn is_protected_remote_option(key: &str) -> bool {
             | keys::OPTION_QUIC_LISTEN_PORT
             | keys::OPTION_ALLOW_INSECURE_RELAY_SESSION
             | keys::OPTION_ALLOW_SERVER_PERMISSION_GRANTS
+            | keys::OPTION_RELAY_SECURE_POLICY
+            | keys::OPTION_UDP_SOURCE_CHECK
             | keys::OPTION_QUIC_FOLLOW_DIRECT_SERVER
             | keys::OPTION_DIRECT_ACCESS_SCOPE
             | keys::OPTION_DIRECT_ACCESS_EXTRA_NETWORKS
@@ -435,6 +437,8 @@ mod tests {
             keys::OPTION_QUIC_LISTEN_PORT,
             keys::OPTION_ALLOW_INSECURE_RELAY_SESSION,
             keys::OPTION_ALLOW_SERVER_PERMISSION_GRANTS,
+            keys::OPTION_RELAY_SECURE_POLICY,
+            keys::OPTION_UDP_SOURCE_CHECK,
             keys::OPTION_QUIC_FOLLOW_DIRECT_SERVER,
             keys::OPTION_DIRECT_ACCESS_SCOPE,
             keys::OPTION_DIRECT_ACCESS_EXTRA_NETWORKS,

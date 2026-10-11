@@ -1972,6 +1972,24 @@ impl Connection {
         let prelogin_deadline = prelogin_deadline(Instant::now(), stream.is_quic());
         let stream = stream
             .into_duplex_with_context(SERVER_ASYNC_OUTBOX_CAPACITY, format!("host_conn={id}"));
+        // What a rendezvous/relay server sends can lower a permission but not
+        // raise one, unless the local setting says otherwise; and nothing it
+        // sends is global state until the session has authorized.
+        let allow_server_grants =
+            Config::get_option(keys::OPTION_ALLOW_SERVER_PERMISSION_GRANTS) == "Y";
+        if !allow_server_grants
+            && crate::server_mode_policy::has_server_grants(&control_permissions)
+        {
+            log::warn!(
+                "#{} ignoring permission grants sent by the rendezvous server; \
+                 set allow-server-permission-grants=Y to honour them",
+                id
+            );
+        }
+        let control_permissions = crate::server_mode_policy::strip_server_grants(
+            control_permissions,
+            allow_server_grants,
+        );
         let _raii_control_permissions_id =
             raii::ControlPermissionsID::new(id, &control_permissions);
         let hash = Hash {
@@ -4130,6 +4148,7 @@ impl Connection {
         }
         self.authorized = true;
         self.prelogin_ticket = None;
+        raii::activate_control_permissions(self.inner.id(), &self.control_permissions);
         let auth_conn_type = self.current_conn_type();
         let conn_type = conn_type_audit_code(auth_conn_type);
         self.authed_conn_id = Some(self::raii::AuthedConnID::new(
@@ -9911,17 +9930,24 @@ mod raii {
         }
     }
     impl ControlPermissionsID {
+        /// The permissions are remembered with the guard but only become
+        /// visible to the rest of the process through `activate`, after the
+        /// session has authorized.
         pub fn new(id: i32, control_permissions: &Option<ControlPermissions>) -> Self {
-            if let Some(s) = control_permissions {
-                CONTROL_PERMISSIONS_ARRAY
-                    .lock()
-                    .unwrap()
-                    .push((id, s.clone()));
-            }
             Self {
                 id,
                 control_permissions: control_permissions.clone(),
             }
+        }
+    }
+
+    /// Makes a session's control permissions visible to the process-wide
+    /// state. Repeated calls keep one entry.
+    pub fn activate_control_permissions(id: i32, control_permissions: &Option<ControlPermissions>) {
+        if let Some(s) = control_permissions {
+            let mut lock = CONTROL_PERMISSIONS_ARRAY.lock().unwrap();
+            lock.retain(|(conn_id, _)| *conn_id != id);
+            lock.push((id, s.clone()));
         }
     }
 }
@@ -9929,6 +9955,31 @@ mod raii {
 mod test {
     #[allow(unused)]
     use super::*;
+
+    #[test]
+    fn control_permissions_are_global_only_after_authorization() {
+        let id = i32::MAX - 7;
+        let permissions = Some(ControlPermissions {
+            permissions: 0b01,
+            ..Default::default()
+        });
+        let count = || {
+            CONTROL_PERMISSIONS_ARRAY
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(conn_id, _)| *conn_id == id)
+                .count()
+        };
+        {
+            let _guard = raii::ControlPermissionsID::new(id, &permissions);
+            assert_eq!(count(), 0, "an unauthorized session must not be visible");
+            raii::activate_control_permissions(id, &permissions);
+            raii::activate_control_permissions(id, &permissions);
+            assert_eq!(count(), 1);
+        }
+        assert_eq!(count(), 0, "the entry goes with the connection");
+    }
 
     #[test]
     fn two_factor_response_needs_an_outstanding_challenge() {

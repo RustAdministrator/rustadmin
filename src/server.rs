@@ -249,6 +249,39 @@ async fn accept_connection_(
     Ok(())
 }
 
+/// Applies `relay-secure-policy` to a session that was asked to run without
+/// the key exchange. `Err` carries the reason a viewer can be shown.
+pub(crate) fn relay_secure_policy_check(
+    secure: bool,
+    peer: &dyn std::fmt::Debug,
+) -> Result<(), &'static str> {
+    use crate::server_mode_policy::{relay_secure_policy, RelaySecureDecision};
+    let decision = relay_secure_policy(
+        secure,
+        crate::common::has_effective_direct_access_pairing_passphrase(),
+        Config::get_option(hbb_common::config::keys::OPTION_ALLOW_INSECURE_RELAY_SESSION) == "Y",
+        hbb_common::config::relay_secure_policy_mode(),
+    );
+    match decision {
+        RelaySecureDecision::Allow => Ok(()),
+        RelaySecureDecision::Warn => {
+            log::warn!(
+                "Relay session from {:?} runs without encryption; set relay-secure-policy=enforce to refuse such sessions",
+                peer
+            );
+            Ok(())
+        }
+        RelaySecureDecision::Refuse(reason) => {
+            log::warn!(
+                "Refusing unencrypted relay session from {:?}: {}",
+                peer,
+                reason
+            );
+            Err(reason)
+        }
+    }
+}
+
 pub async fn create_tcp_connection(
     server: ServerPtr,
     stream: Stream,
@@ -256,6 +289,9 @@ pub async fn create_tcp_connection(
     secure: bool,
     control_permissions: Option<ControlPermissions>,
 ) -> ResultType<()> {
+    if let Err(reason) = relay_secure_policy_check(secure, &addr) {
+        bail!("{}", reason);
+    }
     let handshake_mode = if secure {
         HandshakeMode::Rendezvous
     } else {
