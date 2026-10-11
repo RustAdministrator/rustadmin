@@ -5,6 +5,7 @@ import android.Manifest.permission.SYSTEM_ALERT_WINDOW
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.os.Build
 import android.util.Log
 import android.widget.Toast
@@ -13,13 +14,22 @@ import io.flutter.embedding.android.FlutterActivity
 
 const val DEBUG_BOOT_COMPLETED = "io.github.rustadministrator.rustadmin.DEBUG_BOOT_COMPLETED"
 
+/**
+ * The real boot broadcast always starts the service (subject to the user's setting and
+ * permissions); the debug stand-in only counts in a debuggable build, so a release build
+ * cannot be started by another app sending that action.
+ */
+fun isBootTriggerAllowed(action: String?, debuggable: Boolean): Boolean =
+    action == Intent.ACTION_BOOT_COMPLETED || (debuggable && action == DEBUG_BOOT_COMPLETED)
+
 class BootReceiver : BroadcastReceiver() {
     private val logTag = "tagBootReceiver"
 
     override fun onReceive(context: Context, intent: Intent) {
         Log.d(logTag, "onReceive ${intent.action}")
 
-        if (Intent.ACTION_BOOT_COMPLETED == intent.action || DEBUG_BOOT_COMPLETED == intent.action) {
+        val debuggable = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        if (isBootTriggerAllowed(intent.action, debuggable)) {
             // check SharedPreferences config
             val prefs = context.getSharedPreferences(KEY_SHARED_PREFERENCES, FlutterActivity.MODE_PRIVATE)
             if (!prefs.getBoolean(KEY_START_ON_BOOT_OPT, false)) {

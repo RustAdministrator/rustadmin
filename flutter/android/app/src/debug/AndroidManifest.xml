@@ -4,4 +4,14 @@
          to allow setting breakpoints, to provide hot reload, etc.
     -->
     <uses-permission android:name="android.permission.INTERNET"/>
+
+    <application>
+        <!-- Debug builds only: ACTION_BOOT_COMPLETED stand-in for devices
+             without root. The release manifest does not declare it. -->
+        <receiver android:name=".BootReceiver">
+            <intent-filter>
+                <action android:name="io.github.rustadministrator.rustadmin.DEBUG_BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+    </application>
 </manifest>
