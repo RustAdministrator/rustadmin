@@ -20,6 +20,10 @@ const MAX_BYTES: usize = 64 * 1024 * 1024;
 const QUANTUM: usize = 64 * 1024;
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_REFRESHES: usize = 5;
+/// After the quick refreshes are used up, a track that is still waiting for a
+/// keyframe asks again this rarely, so a stalled transport that comes back is
+/// not left on dropped deltas until the viewer happens to ask.
+const RECOVERY_HEARTBEAT: Duration = Duration::from_secs(10);
 const STALE_DELTA: Duration = Duration::from_secs(3);
 
 pub(super) type Queued = (hbb_common::tokio::time::Instant, Arc<Message>);
@@ -369,16 +373,20 @@ impl VideoQueueSender {
         let mut state = self.inner.state.lock().unwrap();
         std::array::from_fn(|display| {
             let t = &mut state.tracks[display];
+            let interval = if t.refreshes >= MAX_REFRESHES {
+                RECOVERY_HEARTBEAT
+            } else {
+                REFRESH_INTERVAL
+            };
             if !t.enabled
                 || !t.recovering
-                || t.refreshes >= MAX_REFRESHES
                 || t.last_refresh
-                    .is_some_and(|at| now.saturating_duration_since(at) < REFRESH_INTERVAL)
+                    .is_some_and(|at| now.saturating_duration_since(at) < interval)
             {
                 return None;
             }
             t.last_refresh = Some(now);
-            t.refreshes += 1;
+            t.refreshes = t.refreshes.saturating_add(1);
             Some((t.stream.unwrap_or(0), t.loss_events))
         })
     }
@@ -626,13 +634,47 @@ mod tests {
                 .iter()
                 .all(Option::is_none));
         }
-        assert!(tx
-            .recovery_due(now + REFRESH_INTERVAL * 100)
-            .iter()
-            .all(Option::is_none));
+        // The quick refreshes are spent: a heartbeat, not a burst, follows.
+        let spent = now + REFRESH_INTERVAL * MAX_REFRESHES as u32;
+        assert!(tx.recovery_due(spent)[0].is_none());
+        let beat = tx.recovery_due(spent + RECOVERY_HEARTBEAT);
+        assert!(beat[0].is_some());
+        assert!(beat[1..].iter().all(Option::is_none));
         tx.send(video(0, 1, 2, true, 1));
         tx.lose(&video(0, 1, 3, false, 1));
         assert!(tx.recovery_due(now + REFRESH_INTERVAL * 101)[0].is_some());
+    }
+
+    #[test]
+    fn a_track_still_waiting_for_a_keyframe_keeps_a_slow_heartbeat() {
+        let (tx, _) = video_queue();
+        tx.send(video(0, 1, 1, false, 1));
+        let start = Instant::now();
+        let mut requests = 0;
+        let mut quick_done = start;
+        for attempt in 0..MAX_REFRESHES {
+            let at = start + REFRESH_INTERVAL * attempt as u32;
+            if tx.recovery_due(at)[0].is_some() {
+                requests += 1;
+                quick_done = at;
+            }
+        }
+        assert_eq!(requests, MAX_REFRESHES);
+        // Deltas that keep arriving while the keyframe is missing do not
+        // restart the quick sequence and are still dropped.
+        tx.send(video(0, 1, 2, false, 1));
+        assert!(tx.recovery_due(quick_done + REFRESH_INTERVAL)[0].is_none());
+        assert!(tx.recovery_due(quick_done + RECOVERY_HEARTBEAT / 2)[0].is_none());
+        // One request per heartbeat interval, however long the wait.
+        let mut at = quick_done;
+        for _ in 0..3 {
+            at += RECOVERY_HEARTBEAT;
+            assert!(tx.recovery_due(at)[0].is_some());
+            assert!(tx.recovery_due(at + REFRESH_INTERVAL)[0].is_none());
+        }
+        // A keyframe ends the wait.
+        tx.send(video(0, 1, 3, true, 1));
+        assert!(tx.recovery_due(at + RECOVERY_HEARTBEAT * 2)[0].is_none());
     }
 
     #[test]
