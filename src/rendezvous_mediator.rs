@@ -187,6 +187,21 @@ impl RendezvousMediator {
             .unwrap_or(host.to_owned())
     }
 
+    /// The addresses the rendezvous server name resolves to, for judging where
+    /// a datagram came from. Empty when a proxy is in use or nothing resolves.
+    async fn resolve_server_addrs(host: &str) -> Vec<SocketAddr> {
+        if Config::get_socks().is_some() {
+            return Vec::new();
+        }
+        match hbb_common::tokio::net::lookup_host(host).await {
+            Ok(addrs) => addrs.collect(),
+            Err(err) => {
+                log::debug!("Cannot resolve rendezvous server {host} for the source check: {err}");
+                Vec::new()
+            }
+        }
+    }
+
     pub async fn start_udp(server: ServerPtr, host: String) -> ResultType<()> {
         let host = check_port(&host, RENDEZVOUS_PORT);
         log::info!("start udp: {host}");
@@ -211,6 +226,11 @@ impl RendezvousMediator {
         let mut last_dns_check = Instant::now();
         let mut old_latency = 0;
         let mut ema_latency = 0;
+        // Addresses the rendezvous server resolves to, for the source check;
+        // empty (nothing is judged) behind a proxy or when resolution failed.
+        let mut server_addrs = Self::resolve_server_addrs(&host).await;
+        let mut source_mismatches: u64 = 0;
+        let mut last_mismatch_log: Option<Instant> = None;
         loop {
             let mut update_latency = || {
                 last_register_resp = Some(Instant::now());
@@ -242,7 +262,35 @@ impl RendezvousMediator {
             select! {
                 n = socket.next() => {
                     match n {
-                        Some(Ok((bytes, _))) => {
+                        Some(Ok((bytes, from))) => {
+                            let action = crate::server_mode_policy::udp_source_action(
+                                hbb_common::config::udp_source_check_mode(),
+                                match &from {
+                                    TargetAddr::Ip(source) => crate::server_mode_policy::udp_source_matches(*source, &server_addrs),
+                                    // Through a proxy the source is not the server's own.
+                                    _ => None,
+                                },
+                            );
+                            if action != crate::server_mode_policy::UdpSourceAction::Accept {
+                                source_mismatches += 1;
+                                if last_mismatch_log.map_or(true, |at| at.elapsed() >= Duration::from_secs(60)) {
+                                    log::warn!(
+                                        "Rendezvous datagram from {:?} is not from {} ({} so far){}",
+                                        from,
+                                        host,
+                                        source_mismatches,
+                                        if action == crate::server_mode_policy::UdpSourceAction::Drop {
+                                            ", dropped"
+                                        } else {
+                                            "; set udp-source-check=enforce to drop such datagrams"
+                                        }
+                                    );
+                                    last_mismatch_log = Some(Instant::now());
+                                }
+                                if action == crate::server_mode_policy::UdpSourceAction::Drop {
+                                    continue;
+                                }
+                            }
                             if let Ok(msg) = Message::parse_from_bytes(&bytes) {
                                 rz.handle_resp(msg.union, Sink::Framed(&mut socket, &addr), &server, &mut update_latency).await?;
                             } else {
@@ -282,6 +330,7 @@ impl RendezvousMediator {
                                         socket = s;
                                         rz.addr = new_addr.to_owned();
                                         addr = new_addr;
+                                        server_addrs = Self::resolve_server_addrs(&host).await;
                                     }
                                     last_dns_check = Instant::now();
                                 }
@@ -501,6 +550,13 @@ impl RendezvousMediator {
             rr.uuid = uuid.clone();
             rr.relay_server = relay_server.clone();
             rr.set_id(Config::get_id());
+        }
+        if let Err(reason) = crate::server::relay_secure_policy_check(secure, &peer_addr) {
+            // The viewer is told why instead of waiting for a relay that will not come.
+            rr.refuse_reason = reason.to_owned();
+            msg_out.set_relay_response(rr);
+            socket.send(&msg_out).await?;
+            return Ok(());
         }
         msg_out.set_relay_response(rr);
         socket.send(&msg_out).await?;
