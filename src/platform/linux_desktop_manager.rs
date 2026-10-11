@@ -483,6 +483,15 @@ pub fn is_headless() -> bool {
         })
 }
 
+/// The numeric uid of an account, from the same name service lookup `id -u`
+/// does, without a shell and without building a command line from the name.
+pub fn get_uid_by_username(name: &str) -> Option<u32> {
+    if name.is_empty() {
+        return None;
+    }
+    get_user_by_name(name).map(|user| user.uid())
+}
+
 pub fn get_username() -> String {
     match &*DESKTOP_MANAGER.lock().unwrap() {
         Some(manager) => {
@@ -1049,5 +1058,20 @@ fn pam_get_service_name() -> String {
         app_name
     } else {
         "gdm".to_owned()
+    }
+}
+
+#[cfg(test)]
+mod uid_lookup_tests {
+    use super::get_uid_by_username;
+
+    #[test]
+    fn uid_lookup_uses_the_name_service_without_a_shell() {
+        assert_eq!(get_uid_by_username("root"), Some(0));
+        assert_eq!(get_uid_by_username(""), None);
+        // Names that would be dangerous in a shell command are only names here.
+        assert_eq!(get_uid_by_username("x; touch /tmp/rustadmin-sa40"), None);
+        assert_eq!(get_uid_by_username("$(id -u)"), None);
+        assert!(!std::path::Path::new("/tmp/rustadmin-sa40").exists());
     }
 }

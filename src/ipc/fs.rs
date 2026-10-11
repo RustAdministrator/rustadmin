@@ -213,8 +213,8 @@ fn remove_ipc_socket_via_secure_parent_fd(postfix: &str) -> ResultType<()> {
 //   https://man7.org/linux/man-pages/man2/open.2.html
 // - fstat(2): verify file type/metadata on opened fd
 //   https://man7.org/linux/man-pages/man2/fstat.2.html
-// - fchown(2): adopt ownership when running as root
-//   https://man7.org/linux/man-pages/man2/chown.2.html
+// - rename(2)/mkdir(2): replace a foreign-owned service directory when running as root
+//   https://man7.org/linux/man-pages/man2/rename.2.html
 // - fchmod(2): enforce exact mode on opened fd
 //   https://man7.org/linux/man-pages/man2/fchmod.2.html
 pub(crate) fn ensure_secure_ipc_parent_dir(path: &str, postfix: &str) -> ResultType<bool> {
@@ -284,7 +284,8 @@ pub(crate) fn ensure_secure_ipc_parent_dir(path: &str, postfix: &str) -> ResultT
             }
         }
     };
-    let _fd_guard = FdGuard(fd);
+    let mut fd = fd;
+    let mut _fd_guard = FdGuard(fd);
 
     let mut st: hbb_common::libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { hbb_common::libc::fstat(fd, &mut st as *mut _) } != 0 {
@@ -317,34 +318,45 @@ pub(crate) fn ensure_secure_ipc_parent_dir(path: &str, postfix: &str) -> ResultT
     let expected_uid = unsafe { hbb_common::libc::geteuid() as u32 };
     let mut owner_uid = st.st_uid as u32;
     let mut adopted_foreign_service_parent = false;
-    // Service-scoped IPC may be created by different privilege contexts historically.
-    // If running as root on protected service postfix, try adopting ownership first.
+    // Service-scoped IPC may be created by different privilege contexts historically,
+    // and any user can create `/tmp/RustAdmin-service` before the service does. Root
+    // never adopts a directory (and with it the files an unprivileged account put
+    // there): a foreign-owned one is moved aside and a fresh one is created.
     if owner_uid != expected_uid && expected_uid == 0 && config::is_service_ipc_postfix(postfix) {
-        let rc = unsafe {
-            hbb_common::libc::fchown(
-                fd,
-                expected_uid as hbb_common::libc::uid_t,
-                hbb_common::libc::gid_t::MAX,
-            )
-        };
-        if rc == 0 {
-            let mut st2: hbb_common::libc::stat = unsafe { std::mem::zeroed() };
-            if unsafe { hbb_common::libc::fstat(fd, &mut st2 as *mut _) } == 0 {
+        let replaced = replace_directory_with_fresh(parent_dir, expected_ipc_parent_mode(postfix))
+            .and_then(|aside| {
+                log::warn!(
+                    "Replaced the ipc parent dir owned by uid {owner_uid}: postfix={postfix}, parent={}, moved to {}",
+                    parent_dir.display(),
+                    aside.display()
+                );
+                let new_fd = open_ipc_parent_dir_fd(&parent_c)?;
+                let mut st2: hbb_common::libc::stat = unsafe { std::mem::zeroed() };
+                if unsafe { hbb_common::libc::fstat(new_fd, &mut st2 as *mut _) } != 0 {
+                    let err = std::io::Error::last_os_error();
+                    unsafe { hbb_common::libc::close(new_fd) };
+                    return Err(err);
+                }
+                Ok((new_fd, st2))
+            });
+        match replaced {
+            Ok((new_fd, st2)) => {
+                fd = new_fd;
+                _fd_guard = FdGuard(new_fd);
                 owner_uid = st2.st_uid as u32;
                 st = st2;
                 adopted_foreign_service_parent = true;
             }
-        } else {
-            // Keep behavior unchanged; capture errno to ease diagnosing why chown failed.
-            let err = std::io::Error::last_os_error();
-            log::warn!(
-                "Failed to chown ipc parent dir, parent={}, postfix={}, expected_uid={}, rc={}, err={:?}",
-                parent_dir.display(),
-                postfix,
-                expected_uid,
-                rc,
-                err
-            );
+            Err(err) => {
+                // The owner check below then fails closed.
+                log::warn!(
+                    "Failed to replace the foreign ipc parent dir, parent={}, postfix={}, uid={}, err={:?}",
+                    parent_dir.display(),
+                    postfix,
+                    owner_uid,
+                    err
+                );
+            }
         }
     }
     if owner_uid != expected_uid {
@@ -384,6 +396,33 @@ pub(crate) fn ensure_secure_ipc_parent_dir(path: &str, postfix: &str) -> ResultT
     let should_scrub =
         repaired_parent_mode || adopted_foreign_service_parent || had_untrusted_parent_mode;
     Ok(should_scrub)
+}
+
+/// Moves `dir` to a sibling name and creates a fresh directory in its place.
+/// The old directory (and whatever its previous owner put in it) is left
+/// untouched, so nothing in it is adopted; returns where it went.
+pub(crate) fn replace_directory_with_fresh(
+    dir: &Path,
+    mode: u32,
+) -> std::io::Result<std::path::PathBuf> {
+    let name = dir
+        .file_name()
+        .ok_or_else(|| std::io::Error::new(ErrorKind::InvalidInput, "no directory name"))?
+        .to_string_lossy()
+        .to_string();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let aside = dir.with_file_name(format!(".{name}.foreign-{}-{nanos}", std::process::id()));
+    // rename(2) of a symlink moves the link itself, never what it points to.
+    std::fs::rename(dir, &aside)?;
+    let dir_c = CString::new(dir.as_os_str().as_bytes().to_vec())
+        .map_err(|e| std::io::Error::new(ErrorKind::InvalidInput, e))?;
+    if unsafe { hbb_common::libc::mkdir(dir_c.as_ptr(), mode as hbb_common::libc::mode_t) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(aside)
 }
 
 pub(crate) fn scrub_secure_ipc_parent_dir(path: &str, postfix: &str) -> ResultType<()> {
@@ -630,7 +669,21 @@ fn read_pid_file_secure(path: &Path) -> Option<usize> {
 
 #[inline]
 async fn probe_existing_listener(postfix: &str) -> bool {
-    let Ok(mut stream) = connect(1000, postfix).await else {
+    // A responder that is not root (or this account) is not "the" listener: it
+    // must not stop the real one from taking the path over.
+    let connected = if config::is_service_ipc_postfix(postfix) {
+        let euid = unsafe { hbb_common::libc::geteuid() };
+        crate::ipc::connect_with_path_checked(
+            1000,
+            &config::Config::ipc_path(postfix),
+            &crate::ipc::trusted_service_listener_uids(euid),
+            crate::ipc::IpcOwnerMode::Enforce,
+        )
+        .await
+    } else {
+        connect(1000, postfix).await
+    };
+    let Ok(mut stream) = connected else {
         return false;
     };
     if postfix != crate::POSTFIX_SERVICE {
@@ -688,6 +741,70 @@ pub(crate) fn should_scrub_parent_entries_after_check_pid(
 
 #[cfg(test)]
 mod tests {
+    fn unique_base(tag: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "rustadmin-ipc-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    #[test]
+    fn a_foreign_service_dir_is_moved_aside_not_adopted() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = unique_base("replace");
+        let dir = base.join("RustAdmin-service");
+        std::fs::create_dir_all(&dir).unwrap();
+        // What an unprivileged account could have prepared in it.
+        std::fs::write(dir.join("ipc_service"), b"planted").unwrap();
+        std::fs::write(dir.join("ipc_service.pid"), b"1").unwrap();
+
+        let aside = super::replace_directory_with_fresh(&dir, 0o711).unwrap();
+
+        // The old content is exactly where it was put aside, untouched.
+        assert_eq!(
+            std::fs::read(aside.join("ipc_service")).unwrap(),
+            b"planted"
+        );
+        // The path now holds an empty fresh directory with the requested mode
+        // (the umask may only remove bits).
+        assert!(std::fs::read_dir(&dir).unwrap().next().is_none());
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode & !0o711, 0, "mode {mode:o}");
+        // Two replacements never collide.
+        let again = super::replace_directory_with_fresh(&dir, 0o711).unwrap();
+        assert_ne!(aside, again);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a_planted_symlink_is_moved_not_followed() {
+        use std::os::unix::fs::symlink;
+        let base = unique_base("replace-link");
+        let victim = base.join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("keep"), b"x").unwrap();
+        let dir = base.join("RustAdmin-service");
+        symlink(&victim, &dir).unwrap();
+
+        super::replace_directory_with_fresh(&dir, 0o711).unwrap();
+
+        // The link target is intact and the path is a real directory now.
+        assert_eq!(std::fs::read(victim.join("keep")).unwrap(), b"x");
+        assert!(!std::fs::symlink_metadata(&dir)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(std::fs::read_dir(&dir).unwrap().next().is_none());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     #[test]
     fn test_write_pid_file_rejects_symlink() {
         use std::os::unix::fs::symlink;

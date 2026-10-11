@@ -1263,16 +1263,121 @@ pub async fn connect(ms_timeout: u64, postfix: &str) -> ResultType<ConnectionTmp
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         let use_user_main_ipc = USE_USER_MAIN_IPC.with(|use_user_main| use_user_main.get());
-        let is_root_main_ipc =
-            unsafe { hbb_common::libc::geteuid() == 0 } && postfix.is_empty() && use_user_main_ipc;
+        let euid = unsafe { hbb_common::libc::geteuid() };
+        let is_root_main_ipc = euid == 0 && postfix.is_empty() && use_user_main_ipc;
         if is_root_main_ipc {
             let uid = user_main_ipc_server_uid()?;
             let path = Config::ipc_path_for_uid(uid, postfix);
-            return connect_with_path(ms_timeout, &path).await;
+            // The CLI talks to the user's server it picked: nobody else may stand in for it.
+            return connect_with_path_checked(
+                ms_timeout,
+                &path,
+                &[uid],
+                ipc_owner_mode_from_option(),
+            )
+            .await;
+        }
+        if config::is_service_ipc_postfix(postfix) {
+            let path = Config::ipc_path(postfix);
+            return connect_with_path_checked(
+                ms_timeout,
+                &path,
+                &trusted_service_listener_uids(euid),
+                ipc_owner_mode_from_option(),
+            )
+            .await;
         }
     }
     let path = Config::ipc_path(postfix);
     connect_with_path(ms_timeout, &path).await
+}
+
+/// How strictly the owner of a service-scoped listener is checked by clients.
+/// `warn` (default) logs and connects, `enforce` refuses, `off` skips the check.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum IpcOwnerMode {
+    Off,
+    Warn,
+    Enforce,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn parse_ipc_owner_mode(value: &str) -> IpcOwnerMode {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" => IpcOwnerMode::Off,
+        "enforce" => IpcOwnerMode::Enforce,
+        // Empty and unknown values keep the default.
+        _ => IpcOwnerMode::Warn,
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn ipc_owner_mode_from_option() -> IpcOwnerMode {
+    parse_ipc_owner_mode(&Config::get_option("service-ipc-owner-check"))
+}
+
+/// The uids a service-scoped listener may run as for a client with this
+/// effective uid: root (the real service) or the client itself (development
+/// and non-installed runs).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn trusted_service_listener_uids(euid: u32) -> [u32; 2] {
+    [0, euid]
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn is_trusted_listener_uid(listener: Option<u32>, allowed: &[u32]) -> bool {
+    listener.is_some_and(|uid| allowed.contains(&uid))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ListenerDecision {
+    Allow,
+    AllowAndWarn,
+    Reject,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn decide_listener(mode: IpcOwnerMode, trusted: bool) -> ListenerDecision {
+    match (mode, trusted) {
+        (IpcOwnerMode::Off, _) | (_, true) => ListenerDecision::Allow,
+        (IpcOwnerMode::Warn, false) => ListenerDecision::AllowAndWarn,
+        (IpcOwnerMode::Enforce, false) => ListenerDecision::Reject,
+    }
+}
+
+/// Connects and then checks, through the socket credentials, that the process
+/// that listens is one of `allowed`. A listener under another account can
+/// answer a service-scoped path only if it got there first, and must not be
+/// given the configuration the client would send or be believed about what it
+/// sends back.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) async fn connect_with_path_checked(
+    ms_timeout: u64,
+    path: &str,
+    allowed: &[u32],
+    mode: IpcOwnerMode,
+) -> ResultType<ConnectionTmpl<ConnClient>> {
+    let conn = connect_with_path(ms_timeout, path).await?;
+    if mode == IpcOwnerMode::Off {
+        return Ok(conn);
+    }
+    let listener_uid = conn.peer_uid();
+    let trusted = is_trusted_listener_uid(listener_uid, allowed);
+    match decide_listener(mode, trusted) {
+        ListenerDecision::Allow => Ok(conn),
+        ListenerDecision::AllowAndWarn => {
+            log::warn!(
+                "IPC listener at {path} runs as uid {listener_uid:?}, expected one of {allowed:?} \
+                 (service-ipc-owner-check=warn; set it to enforce to refuse)"
+            );
+            Ok(conn)
+        }
+        ListenerDecision::Reject => {
+            bail!("Refused IPC listener at {path}: uid {listener_uid:?} is not one of {allowed:?}")
+        }
+    }
 }
 
 #[inline]
@@ -1288,6 +1393,21 @@ fn select_server_uid_for_user_main_ipc(
     active_uid: Option<u32>,
     prefer_root: bool,
 ) -> ResultType<u32> {
+    select_server_uid_for_user_main_ipc_with(
+        server_uids,
+        active_uid,
+        prefer_root,
+        user_main_ipc_owner_mode_allows_untrusted(),
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn select_server_uid_for_user_main_ipc_with(
+    server_uids: &[u32],
+    active_uid: Option<u32>,
+    prefer_root: bool,
+    allow_untrusted: bool,
+) -> ResultType<u32> {
     let mut server_uids = server_uids.to_vec();
     server_uids.sort_unstable();
     server_uids.dedup();
@@ -1301,7 +1421,20 @@ fn select_server_uid_for_user_main_ipc(
             }
             bail!("No --server process found for user main IPC")
         }
-        [uid] => return Ok(*uid),
+        [uid] => {
+            // Any local user can start this executable with `--server`; a root
+            // command is only routed to root's server or the active user's.
+            if *uid == 0 || Some(*uid) == active_uid {
+                return Ok(*uid);
+            }
+            if allow_untrusted {
+                log::warn!(
+                    "Routing a root CLI command to the --server of uid {uid}, which is neither root nor the active user (service-ipc-owner-check=warn)"
+                );
+                return Ok(*uid);
+            }
+            bail!("Refused to route a root command to the --server of uid {uid}");
+        }
         _ => {}
     }
 
@@ -1312,6 +1445,13 @@ fn select_server_uid_for_user_main_ipc(
         return Ok(active_uid);
     }
     bail!("Multiple --server processes found for user main IPC");
+}
+
+/// Whether a `--server` of an unrelated account may still be a CLI target
+/// (`warn`/`off`) or not (`enforce`).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn user_main_ipc_owner_mode_allows_untrusted() -> bool {
+    ipc_owner_mode_from_option() != IpcOwnerMode::Enforce
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -1453,7 +1593,8 @@ pub async fn connect_for_uid(
     postfix: &str,
 ) -> ResultType<ConnectionTmpl<ConnClient>> {
     let path = Config::ipc_path_for_uid(uid, postfix);
-    connect_with_path(ms_timeout, &path).await
+    // The listener of that user's directory has to be that user (or root).
+    connect_with_path_checked(ms_timeout, &path, &[uid, 0], ipc_owner_mode_from_option()).await
 }
 
 #[cfg(target_os = "linux")]
@@ -2529,6 +2670,94 @@ mod test {
             select_server_uid_for_user_main_ipc(&[], Some(501), false).unwrap(),
             501
         );
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn root_commands_are_routed_only_to_root_or_the_active_user_when_enforced() {
+        let pick = |uids: &[u32], active: Option<u32>, allow: bool| {
+            select_server_uid_for_user_main_ipc_with(uids, active, false, allow)
+        };
+        // Root's own server and the active user's are always fine.
+        assert_eq!(pick(&[0], None, false).unwrap(), 0);
+        assert_eq!(pick(&[501], Some(501), false).unwrap(), 501);
+        // An unrelated account's `--server` is refused when enforced ...
+        assert!(pick(&[1234], Some(501), false).is_err());
+        assert!(pick(&[1234], None, false).is_err());
+        // ... and still used (with a warning) in the default warn mode.
+        assert_eq!(pick(&[1234], Some(501), true).unwrap(), 1234);
+        // Several servers keep their old rules.
+        assert_eq!(pick(&[0, 501], Some(501), false).unwrap(), 501);
+        assert!(pick(&[501, 502], None, false).is_err());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn listener_owner_rules() {
+        let allowed = trusted_service_listener_uids(1000);
+        assert_eq!(allowed, [0, 1000]);
+        assert!(is_trusted_listener_uid(Some(0), &allowed));
+        assert!(is_trusted_listener_uid(Some(1000), &allowed));
+        assert!(!is_trusted_listener_uid(Some(1001), &allowed));
+        // No credentials means no trust.
+        assert!(!is_trusted_listener_uid(None, &allowed));
+
+        assert_eq!(parse_ipc_owner_mode(""), IpcOwnerMode::Warn);
+        assert_eq!(parse_ipc_owner_mode("whatever"), IpcOwnerMode::Warn);
+        assert_eq!(parse_ipc_owner_mode(" Enforce "), IpcOwnerMode::Enforce);
+        assert_eq!(parse_ipc_owner_mode("OFF"), IpcOwnerMode::Off);
+
+        use IpcOwnerMode::*;
+        use ListenerDecision::*;
+        assert_eq!(decide_listener(Enforce, true), Allow);
+        assert_eq!(decide_listener(Enforce, false), Reject);
+        assert_eq!(decide_listener(Warn, false), AllowAndWarn);
+        assert_eq!(decide_listener(Warn, true), Allow);
+        assert_eq!(decide_listener(Off, false), Allow);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn a_listener_under_another_uid_is_refused_when_enforced() {
+        // The listener really is this process's uid; "another uid" is
+        // simulated by what the client expects, which exercises the actual
+        // socket credential read.
+        let dir = std::env::temp_dir().join(format!("rustadmin-ipc-owner-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("owner.sock");
+        let _ = std::fs::remove_file(&path);
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let accept = std::thread::spawn(move || {
+            // Keep the accepted connection open until the client is done.
+            let _ = listener.accept();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        });
+        let me = unsafe { hbb_common::libc::geteuid() };
+        let path_str = path.to_string_lossy().to_string();
+        let other = me.wrapping_add(1);
+
+        let refused =
+            connect_with_path_checked(1000, &path_str, &[other], IpcOwnerMode::Enforce).await;
+        assert!(refused.is_err());
+        accept.join().ok();
+
+        // The owner it should be, and the other modes, connect.
+        for (allowed, mode) in [
+            (vec![me], IpcOwnerMode::Enforce),
+            (vec![other], IpcOwnerMode::Warn),
+            (vec![other], IpcOwnerMode::Off),
+        ] {
+            let _ = std::fs::remove_file(&path);
+            let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            let accept = std::thread::spawn(move || {
+                let _ = listener.accept();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            });
+            let result = connect_with_path_checked(1000, &path_str, &allowed, mode).await;
+            assert!(result.is_ok(), "{allowed:?} {mode:?}");
+            accept.join().ok();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

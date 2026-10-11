@@ -33,8 +33,6 @@ use crate::{
 };
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use crate::{common::DEVICE_NAME, flutter::connection_manager::start_channel};
-#[cfg(target_os = "linux")]
-use hbb_common::platform::linux::run_cmds;
 #[cfg(target_os = "android")]
 use hbb_common::protobuf::EnumOrUnknown;
 use hbb_common::{
@@ -9022,13 +9020,9 @@ async fn start_ipc(
                 let _res = timeout(1_000, _rx_desktop_ready.recv()).await;
                 username = linux_desktop_manager::get_username();
             }
-            let uid = {
-                let output = run_cmds(&format!("id -u {}", &username))?;
-                let output = output.trim();
-                if output.is_empty() || !output.parse::<i32>().is_ok() {
-                    bail!("Invalid username {}", &username);
-                }
-                output.to_string()
+            let uid = match linux_desktop_manager::get_uid_by_username(&username) {
+                Some(uid) => uid.to_string(),
+                None => bail!("Invalid username {}", &username),
             };
             user = Some((uid, username));
             args = vec!["--cm-no-ui"];
@@ -9073,7 +9067,20 @@ async fn start_ipc(
         }
         for _ in 0..20 {
             sleep(0.3).await;
-            if let Ok(s) = crate::ipc::connect(1000, "_cm").await {
+            #[cfg(target_os = "linux")]
+            let connected = match user
+                .as_ref()
+                .and_then(|(uid, _)| uid.parse::<u32>().ok())
+                .filter(|_| crate::platform::is_root())
+            {
+                // A root server started the connection manager as that user: it
+                // listens under the user's directory, not root's.
+                Some(uid) => crate::ipc::connect_for_uid(1000, uid, "_cm").await,
+                None => crate::ipc::connect(1000, "_cm").await,
+            };
+            #[cfg(not(target_os = "linux"))]
+            let connected = crate::ipc::connect(1000, "_cm").await;
+            if let Ok(s) = connected {
                 stream = Some(s);
                 break;
             }
