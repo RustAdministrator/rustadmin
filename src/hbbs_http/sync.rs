@@ -69,6 +69,7 @@ fn is_protected_remote_option(key: &str) -> bool {
             | keys::OPTION_KEY
             | "rendezvous-servers"
             | "service-ipc-owner-check"
+            | "session-scope-filter"
     )
 }
 
@@ -380,6 +381,7 @@ mod tests {
     #[test]
     fn test_is_protected_remote_option_includes_security_trust_settings() {
         assert!(is_protected_remote_option("service-ipc-owner-check"));
+        assert!(is_protected_remote_option("session-scope-filter"));
         assert!(is_protected_remote_option(keys::OPTION_LAN_DISCOVERY_MODE));
         assert!(is_protected_remote_option(
             keys::OPTION_DIRECT_ACCESS_PAIRING_PASSPHRASE

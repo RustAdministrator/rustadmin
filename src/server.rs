@@ -73,6 +73,7 @@ mod login_failure_check;
 mod pairing_guard;
 mod permission_prompt;
 mod prelogin_admission;
+mod session_scope;
 #[cfg(windows)]
 pub mod portable_service;
 mod service;
