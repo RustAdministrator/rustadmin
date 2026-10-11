@@ -3548,12 +3548,14 @@ Widget dialogButton(String text,
     bool isOutline = false,
     Widget? icon,
     TextStyle? style,
-    ButtonStyle? buttonStyle}) {
+    ButtonStyle? buttonStyle,
+    bool autofocus = false}) {
   if (isDesktop || isWebDesktop) {
     final desktopIcon = icon == null ? null : MyTheme.desktopButtonIcon(icon);
     if (isOutline) {
       return icon == null
           ? OutlinedButton(
+              autofocus: autofocus,
               onPressed: onPressed,
               child: Text(translate(text), style: style),
             )
@@ -3565,6 +3567,7 @@ Widget dialogButton(String text,
     } else {
       return icon == null
           ? ElevatedButton(
+              autofocus: autofocus,
               style: ElevatedButton.styleFrom(elevation: 0).merge(buttonStyle),
               onPressed: onPressed,
               child: Text(translate(text), style: style),
@@ -3578,6 +3581,7 @@ Widget dialogButton(String text,
     }
   } else {
     return TextButton(
+      autofocus: autofocus,
       onPressed: onPressed,
       child: Text(
         translate(text),
@@ -3585,6 +3589,18 @@ Widget dialogButton(String text,
       ),
     );
   }
+}
+
+/// True when no remote click or Enter reached this device in the 120 ms before
+/// the local click. Unlike `checkClickTime` this ignores
+/// `allow-remote-cm-modification`: a permission prompt is always decided
+/// locally, whatever the manager window accepts for other controls.
+Future<bool> isLocalClickStrict(int connId) async {
+  final clickedAt = DateTime.now().millisecondsSinceEpoch;
+  await bind.cmCheckClickTime(connId: connId);
+  await Future.delayed(const Duration(milliseconds: 120));
+  final lastRemote = await bind.cmGetClickTime();
+  return clickedAt - lastRemote > 120;
 }
 
 int versionCmp(String v1, String v2) {
