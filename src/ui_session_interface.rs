@@ -356,6 +356,7 @@ impl SessionPermissionConfig {
         *self.server_clipboard_enabled.read().unwrap()
             && *self.server_keyboard_enabled.read().unwrap()
             && !self.lc.read().unwrap().disable_clipboard.v
+            && !self.lc.read().unwrap().view_only.v
             && self
                 .lc
                 .read()
@@ -368,6 +369,7 @@ impl SessionPermissionConfig {
         *self.server_keyboard_enabled.read().unwrap()
             && *self.server_file_transfer_enabled.read().unwrap()
             && self.lc.read().unwrap().enable_file_copy_paste.v
+            && !self.lc.read().unwrap().view_only.v
     }
 }
 
@@ -614,6 +616,7 @@ impl<T: InvokeUiSession> Session<T> {
         *self.server_clipboard_enabled.read().unwrap()
             && *self.server_keyboard_enabled.read().unwrap()
             && !self.lc.read().unwrap().disable_clipboard.v
+            && !self.lc.read().unwrap().view_only.v
             && self
                 .lc
                 .read()
@@ -626,6 +629,7 @@ impl<T: InvokeUiSession> Session<T> {
         *self.server_clipboard_enabled.read().unwrap()
             && *self.server_keyboard_enabled.read().unwrap()
             && !self.lc.read().unwrap().disable_clipboard.v
+            && !self.lc.read().unwrap().view_only.v
             // The session's own direction, falling back to the global one.
             && self
                 .lc
@@ -639,6 +643,7 @@ impl<T: InvokeUiSession> Session<T> {
         *self.server_keyboard_enabled.read().unwrap()
             && *self.server_file_transfer_enabled.read().unwrap()
             && self.lc.read().unwrap().enable_file_copy_paste.v
+            && !self.lc.read().unwrap().view_only.v
     }
 
     pub fn refresh_video(&self, display: i32) {
