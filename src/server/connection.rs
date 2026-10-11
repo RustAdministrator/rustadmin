@@ -1761,6 +1761,8 @@ pub struct Connection {
     /// Frees the pre-login admission slot when the session logs in or ends.
     #[allow(dead_code)] // held for its `Drop`
     prelogin_ticket: Option<super::prelogin_admission::PreloginTicket>,
+    /// Message families already reported as outside the session's scope.
+    scope_violations_reported: std::collections::HashSet<&'static str>,
     authed_conn_id: Option<self::raii::AuthedConnID>,
     session_auth_kind: SessionAuthKind,
     file_remove_log_control: FileRemoveLogControl,
@@ -2088,6 +2090,7 @@ impl Connection {
             auto_disconnect_timer: None,
             prelogin_deadline,
             prelogin_ticket: Some(prelogin_ticket),
+            scope_violations_reported: Default::default(),
             authed_conn_id: None,
             session_auth_kind: SessionAuthKind::Unknown,
             file_remove_log_control: FileRemoveLogControl::new(id),
@@ -3286,6 +3289,22 @@ impl Connection {
     }
 
     async fn apply_switch_permission(&mut self, name: &str, enabled: bool) {
+        // Input and input blocking are never granted to a session that is not
+        // a remote-desktop session (a later grant or an approved request
+        // included).
+        if enabled
+            && matches!(name, "keyboard" | "block_input")
+            && self
+                .session_conn_type()
+                .is_some_and(|conn_type| conn_type != AuthConnType::Remote)
+        {
+            log::warn!(
+                "Not enabling {} for a {:?} session",
+                name,
+                self.session_conn_type()
+            );
+            return;
+        }
         let applied = if name == "keyboard" {
             self.keyboard = enabled;
             if !enabled {
@@ -4396,9 +4415,15 @@ impl Connection {
         self.send(msg_out).await;
         self.send_permission_updates(permission_updates).await;
         if let Some(o) = self.options_in_login.take() {
+            let o = match self.session_conn_type() {
+                Some(conn_type) => super::session_scope::scoped_option(conn_type, &o),
+                None => o,
+            };
             self.update_options(&o).await;
         }
         if let Some((dir, show_hidden)) = self.file_transfer.clone() {
+            // A file-transfer session never controls the keyboard and mouse.
+            self.keyboard = false;
             let dir = if !dir.is_empty() && std::path::Path::new(&dir).is_dir() {
                 &dir
             } else {
@@ -4713,9 +4738,14 @@ impl Connection {
         let show_cursor = self.show_my_cursor;
         #[cfg(any(target_os = "android", target_os = "ios"))]
         let show_cursor = false;
+        // Only a remote-desktop session controls input; any other session type
+        // is denied here whatever its permission flags say.
+        let not_remote_session = self
+            .session_conn_type()
+            .is_some_and(|conn_type| conn_type != AuthConnType::Remote);
         let outcome = self.remote_input_authorization.evaluate(
             kind,
-            self.is_authed_view_camera_conn(),
+            self.is_authed_view_camera_conn() || not_remote_session,
             self.should_block_remote_control_for_permission_prompt(),
             self.peer_keyboard_enabled(),
             show_cursor,
@@ -6064,6 +6094,19 @@ impl Connection {
             if self.port_forward_socket.is_some() {
                 return true;
             }
+            // What this kind of session may send is checked before any handler.
+            if let Some(conn_type) = self.session_conn_type() {
+                match super::session_scope::decide(conn_type, &msg) {
+                    super::session_scope::ScopeDecision::Permit => {}
+                    super::session_scope::ScopeDecision::Ignore => return true,
+                    super::session_scope::ScopeDecision::Violation(family) => {
+                        self.note_scope_violation(conn_type, family);
+                        if Self::session_scope_filter_enabled() {
+                            return true;
+                        }
+                    }
+                }
+            }
             match msg.union {
                 #[allow(unused_mut)]
                 Some(message::Union::MouseEvent(mut me)) => {
@@ -6716,6 +6759,10 @@ impl Connection {
                         crate::clipboard::log_remote_debug_event(event);
                     }
                     Some(misc::Union::Option(o)) => {
+                        let o = match self.session_conn_type() {
+                            Some(conn_type) => super::session_scope::scoped_option(conn_type, &o),
+                            None => o,
+                        };
                         self.update_options(&o).await;
                     }
                     Some(misc::Union::RefreshVideo(r)) => {
@@ -8779,6 +8826,35 @@ impl Connection {
             peer_id: self.lr.my_id.clone(),
             name: self.lr.my_name.clone(),
             session_id: self.lr.session_id,
+        }
+    }
+
+    /// The connection type of an authorized session, if it is authorized.
+    fn session_conn_type(&self) -> Option<AuthConnType> {
+        self.authed_conn_id.as_ref().map(|id| id.conn_type())
+    }
+
+    /// `session-scope-filter=N` only reports violations instead of dropping the
+    /// messages (the kill switch).
+    fn session_scope_filter_enabled() -> bool {
+        Config::get_option("session-scope-filter") != "N"
+    }
+
+    /// Reports a message family a session type has no business sending, once
+    /// per family and connection.
+    fn note_scope_violation(&mut self, conn_type: AuthConnType, family: &'static str) {
+        if self.scope_violations_reported.insert(family) {
+            log::warn!(
+                "#{} {:?} session sent a {} message outside its scope{}",
+                self.inner.id(),
+                conn_type,
+                family,
+                if Self::session_scope_filter_enabled() {
+                    ": dropped"
+                } else {
+                    " (session-scope-filter=N: not dropped)"
+                }
+            );
         }
     }
 
