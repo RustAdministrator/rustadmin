@@ -32,7 +32,7 @@ use hbb_common::{
     sha2::{Digest, Sha256},
     socket_client,
     sodiumoxide::{
-        crypto::{box_, pwhash::argon2id13, secretbox, sign},
+        crypto::{auth::hmacsha256, box_, pwhash::argon2id13, secretbox, sign},
         randombytes::randombytes,
     },
     tcp, timeout,
@@ -1187,6 +1187,12 @@ const DIRECT_HANDSHAKE_ACK_OK: &[u8] = b"direct-ok";
 const DIRECT_HANDSHAKE_FLAG_PAIRING_REQUIRED: u8 = 0x01;
 const DIRECT_HANDSHAKE_FLAG_PAIRED_VIEWER_IDENTITY: u8 = 0x02;
 const DIRECT_HANDSHAKE_FLAG_QUIC_CERTIFICATE: u8 = 0x04;
+/// The host acknowledges a correct pairing proof with a MAC only a holder of
+/// the pairing secret can compute. Carried in V2 blobs only: the V3 decoder
+/// rejects flags it does not know, so QUIC certificate blobs never set it.
+const DIRECT_HANDSHAKE_FLAG_HOST_PROOF: u8 = 0x10;
+/// `PublicKey.handshake_caps` bit 0: the viewer verifies `SignedId.host_ack_mac`.
+pub const HANDSHAKE_CAP_VERIFIES_HOST_ACK: u32 = 1;
 const DIRECT_QUIC_CERTIFICATE_MAX_LEN: usize = 16 * 1024;
 const DIRECT_PUBLIC_KEY_FLAG_PAIRING_PROOF: u8 = 0x01;
 const DIRECT_PUBLIC_KEY_FLAG_INITIATOR_ID: u8 = 0x02;
@@ -1195,6 +1201,9 @@ pub const DIRECT_PAIRING_SCOPE: &str = "direct";
 pub const RENDEZVOUS_PAIRING_SCOPE: &str = "rendezvous";
 const PEER_OPTION_DIRECT_PAIRED_VIEWER_CONFIRMED: &str = "direct-paired-viewer-confirmed";
 const PEER_OPTION_RENDEZVOUS_PAIRED_VIEWER_CONFIRMED: &str = "rendezvous-paired-viewer-confirmed";
+/// Set once a host has acknowledged a pairing proof with a valid MAC; a later
+/// connection without one is treated as a downgrade.
+const PEER_OPTION_HOST_PROOF_SEEN: &str = "host-proof-seen";
 const PAIRED_VIEWER_CONFIRMATION_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1205,6 +1214,9 @@ pub struct DirectSignedId {
     pub pairing_required: bool,
     pub pairing_salt: Option<[u8; argon2id13::SALTBYTES]>,
     pub supports_paired_viewer_identity: bool,
+    /// The host announced (in the signed payload) that it acknowledges a
+    /// correct pairing proof with a MAC.
+    pub supports_host_proof: bool,
     pub quic_certificate_der: Option<Vec<u8>>,
     /// `IdPk.secure_channel` from the signed payload.
     pub secure_channel: u32,
@@ -1217,6 +1229,9 @@ pub struct SecureSignedId {
     pub pairing_required: bool,
     pub pairing_salt: Option<[u8; argon2id13::SALTBYTES]>,
     pub supports_paired_viewer_identity: bool,
+    /// The host announced (in the signed payload) that it acknowledges a
+    /// correct pairing proof with a MAC.
+    pub supports_host_proof: bool,
     pub quic_certificate_der: Option<Vec<u8>>,
     /// `IdPk.secure_channel` from the signed payload.
     pub secure_channel: u32,
@@ -2632,6 +2647,7 @@ fn clear_peer_pairing_options(config: &mut PeerConfig) -> bool {
         PEER_OPTION_PINNED_SIGNING_KEY,
         PEER_OPTION_DIRECT_PAIRED_VIEWER_CONFIRMED,
         PEER_OPTION_RENDEZVOUS_PAIRED_VIEWER_CONFIRMED,
+        PEER_OPTION_HOST_PROOF_SEEN,
     ] {
         changed |= config.options.remove(option).is_some();
     }
@@ -2836,6 +2852,29 @@ pub fn set_confirmed_paired_viewer(scope: &str, peer_config_id: &str, confirmed:
             != Some(value.as_str())
     } else {
         config.options.remove(option).is_some()
+    };
+    if changed {
+        config.store(peer_config_id);
+    }
+}
+
+pub fn has_host_proof_seen(peer_config_id: &str) -> bool {
+    PeerConfig::load(peer_config_id)
+        .options
+        .get(PEER_OPTION_HOST_PROOF_SEEN)
+        .is_some_and(|value| value == "Y")
+}
+
+pub fn set_host_proof_seen(peer_config_id: &str, seen: bool) {
+    let mut config = PeerConfig::load(peer_config_id);
+    let changed = if seen {
+        config
+            .options
+            .insert(PEER_OPTION_HOST_PROOF_SEEN.to_owned(), "Y".to_owned())
+            .as_deref()
+            != Some("Y")
+    } else {
+        config.options.remove(PEER_OPTION_HOST_PROOF_SEEN).is_some()
     };
     if changed {
         config.store(peer_config_id);
@@ -3051,7 +3090,7 @@ pub fn create_secure_signed_id_with_pairing(
     sign_sk: &sign::SecretKey,
     pairing_salt: [u8; argon2id13::SALTBYTES],
 ) -> Bytes {
-    sign_secure_id_with_pairing(&encode_id_pk(id, pk, 0), sign_sk, pairing_salt)
+    sign_secure_id_with_pairing(&encode_id_pk(id, pk, 0), sign_sk, pairing_salt, false)
 }
 
 fn encode_id_pk(id: &str, pk: [u8; 32], secure_channel: u32) -> Vec<u8> {
@@ -3077,12 +3116,50 @@ pub fn create_host_signed_id(
     pairing_salt: Option<[u8; argon2id13::SALTBYTES]>,
     secure_channel: u32,
 ) -> Bytes {
+    create_host_signed_id_with_proof(
+        direct,
+        id,
+        box_pk,
+        sign_pk,
+        sign_sk,
+        pairing_salt,
+        secure_channel,
+        false,
+    )
+}
+
+/// Like `create_host_signed_id`; `host_proof` announces, inside the signed
+/// payload of a pairing handshake, that the host acknowledges a correct
+/// pairing proof with a MAC (see `compute_host_ack_mac`).
+#[allow(clippy::too_many_arguments)]
+pub fn create_host_signed_id_with_proof(
+    direct: bool,
+    id: &str,
+    box_pk: [u8; 32],
+    sign_pk: &[u8],
+    sign_sk: &sign::SecretKey,
+    pairing_salt: Option<[u8; argon2id13::SALTBYTES]>,
+    secure_channel: u32,
+    host_proof: bool,
+) -> Bytes {
     let id_pk = encode_id_pk(id, box_pk, secure_channel);
     match (direct, pairing_salt) {
         (false, None) => sign::sign(&id_pk, sign_sk).into(),
-        (false, Some(salt)) => sign_secure_id_with_pairing(&id_pk, sign_sk, salt),
+        (false, Some(salt)) => sign_secure_id_with_pairing(&id_pk, sign_sk, salt, host_proof),
         (true, None) => sign_direct_id(&id_pk, sign_pk, sign_sk),
-        (true, Some(salt)) => sign_direct_id_with_pairing(&id_pk, sign_pk, sign_sk, salt),
+        (true, Some(salt)) => {
+            sign_direct_id_with_pairing(&id_pk, sign_pk, sign_sk, salt, host_proof)
+        }
+    }
+}
+
+fn pairing_handshake_flags(host_proof: bool) -> u8 {
+    let flags =
+        DIRECT_HANDSHAKE_FLAG_PAIRING_REQUIRED | DIRECT_HANDSHAKE_FLAG_PAIRED_VIEWER_IDENTITY;
+    if host_proof {
+        flags | DIRECT_HANDSHAKE_FLAG_HOST_PROOF
+    } else {
+        flags
     }
 }
 
@@ -3090,13 +3167,12 @@ fn sign_secure_id_with_pairing(
     id_pk: &[u8],
     sign_sk: &sign::SecretKey,
     pairing_salt: [u8; argon2id13::SALTBYTES],
+    host_proof: bool,
 ) -> Bytes {
     let mut signed_payload =
         Vec::with_capacity(SECURE_SIGNED_ID_V2_MAGIC.len() + 2 + pairing_salt.len() + id_pk.len());
     signed_payload.extend_from_slice(SECURE_SIGNED_ID_V2_MAGIC);
-    signed_payload.push(
-        DIRECT_HANDSHAKE_FLAG_PAIRING_REQUIRED | DIRECT_HANDSHAKE_FLAG_PAIRED_VIEWER_IDENTITY,
-    );
+    signed_payload.push(pairing_handshake_flags(host_proof));
     signed_payload.push(pairing_salt.len() as u8);
     signed_payload.extend_from_slice(&pairing_salt);
     signed_payload.extend_from_slice(id_pk);
@@ -3118,6 +3194,7 @@ pub fn decode_secure_signed_id(signed: &[u8], key: &sign::PublicKey) -> ResultTy
         let pairing_required = flags & DIRECT_HANDSHAKE_FLAG_PAIRING_REQUIRED != 0;
         let supports_paired_viewer_identity =
             flags & DIRECT_HANDSHAKE_FLAG_PAIRED_VIEWER_IDENTITY != 0;
+        let supports_host_proof = pairing_required && flags & DIRECT_HANDSHAKE_FLAG_HOST_PROOF != 0;
         let pairing_salt = if pairing_required {
             if salt_len != argon2id13::SALTBYTES {
                 bail!("Handshake failed: invalid secure pairing salt length");
@@ -3138,6 +3215,7 @@ pub fn decode_secure_signed_id(signed: &[u8], key: &sign::PublicKey) -> ResultTy
             pairing_required,
             pairing_salt,
             supports_paired_viewer_identity,
+            supports_host_proof,
             quic_certificate_der: None,
             secure_channel: res.secure_channel,
         });
@@ -3152,6 +3230,7 @@ pub fn decode_secure_signed_id(signed: &[u8], key: &sign::PublicKey) -> ResultTy
         pairing_required: false,
         pairing_salt: None,
         supports_paired_viewer_identity: false,
+        supports_host_proof: false,
         quic_certificate_der: None,
         secure_channel: res.secure_channel,
     })
@@ -3180,7 +3259,13 @@ pub fn create_direct_signed_id_with_pairing(
     sign_sk: &sign::SecretKey,
     pairing_salt: [u8; argon2id13::SALTBYTES],
 ) -> Bytes {
-    sign_direct_id_with_pairing(&encode_id_pk(id, pk, 0), sign_pk, sign_sk, pairing_salt)
+    sign_direct_id_with_pairing(
+        &encode_id_pk(id, pk, 0),
+        sign_pk,
+        sign_sk,
+        pairing_salt,
+        false,
+    )
 }
 
 fn sign_direct_id_with_pairing(
@@ -3188,11 +3273,10 @@ fn sign_direct_id_with_pairing(
     sign_pk: &[u8],
     sign_sk: &sign::SecretKey,
     pairing_salt: [u8; argon2id13::SALTBYTES],
+    host_proof: bool,
 ) -> Bytes {
     let mut signed_payload = Vec::with_capacity(2 + pairing_salt.len() + id_pk.len());
-    signed_payload.push(
-        DIRECT_HANDSHAKE_FLAG_PAIRING_REQUIRED | DIRECT_HANDSHAKE_FLAG_PAIRED_VIEWER_IDENTITY,
-    );
+    signed_payload.push(pairing_handshake_flags(host_proof));
     signed_payload.push(pairing_salt.len() as u8);
     signed_payload.extend_from_slice(&pairing_salt);
     signed_payload.extend_from_slice(id_pk);
@@ -3357,6 +3441,7 @@ pub fn decode_direct_id_pk(payload: &[u8]) -> ResultType<DirectSignedId> {
             pairing_salt,
             supports_paired_viewer_identity: flags & DIRECT_HANDSHAKE_FLAG_PAIRED_VIEWER_IDENTITY
                 != 0,
+            supports_host_proof: false,
             quic_certificate_der: Some(verified[certificate_start..certificate_end].to_vec()),
             secure_channel: res.secure_channel,
         });
@@ -3385,6 +3470,7 @@ pub fn decode_direct_id_pk(payload: &[u8]) -> ResultType<DirectSignedId> {
         let pairing_required = flags & DIRECT_HANDSHAKE_FLAG_PAIRING_REQUIRED != 0;
         let supports_paired_viewer_identity =
             flags & DIRECT_HANDSHAKE_FLAG_PAIRED_VIEWER_IDENTITY != 0;
+        let supports_host_proof = pairing_required && flags & DIRECT_HANDSHAKE_FLAG_HOST_PROOF != 0;
         let pairing_salt = if pairing_required {
             if salt_len != argon2id13::SALTBYTES {
                 bail!("Handshake failed: invalid direct pairing salt length");
@@ -3406,6 +3492,7 @@ pub fn decode_direct_id_pk(payload: &[u8]) -> ResultType<DirectSignedId> {
             pairing_required,
             pairing_salt,
             supports_paired_viewer_identity,
+            supports_host_proof,
             quic_certificate_der: None,
             secure_channel: res.secure_channel,
         });
@@ -3430,6 +3517,7 @@ pub fn decode_direct_id_pk(payload: &[u8]) -> ResultType<DirectSignedId> {
         pairing_required: false,
         pairing_salt: None,
         supports_paired_viewer_identity: false,
+        supports_host_proof: false,
         quic_certificate_der: None,
         secure_channel: res.secure_channel,
     })
@@ -3756,6 +3844,27 @@ pub fn compute_direct_pairing_proof(
     responder_box_pk: &[u8; 32],
     initiator_box_pk: &[u8; 32],
 ) -> ResultType<[u8; DIRECT_PAIRING_PROOF_LEN]> {
+    Ok(compute_direct_pairing_proof_and_ack_key(
+        passphrase,
+        salt,
+        peer_id,
+        responder_sign_pk,
+        responder_box_pk,
+        initiator_box_pk,
+    )?
+    .0)
+}
+
+/// The pairing proof and the key for the host acknowledgement MAC, from a
+/// single Argon2id derivation.
+pub fn compute_direct_pairing_proof_and_ack_key(
+    passphrase: &str,
+    salt: &[u8; argon2id13::SALTBYTES],
+    peer_id: &str,
+    responder_sign_pk: &[u8; 32],
+    responder_box_pk: &[u8; 32],
+    initiator_box_pk: &[u8; 32],
+) -> ResultType<([u8; DIRECT_PAIRING_PROOF_LEN], [u8; 32])> {
     let derived = derive_direct_pairing_key(passphrase, salt)?;
     let mut hasher = Sha256::new();
     hasher.update(b"rustdesk-direct-pairing-v1");
@@ -3767,7 +3876,110 @@ pub fn compute_direct_pairing_proof(
     let digest = hasher.finalize();
     let mut proof = [0u8; DIRECT_PAIRING_PROOF_LEN];
     proof.copy_from_slice(&digest[..DIRECT_PAIRING_PROOF_LEN]);
-    Ok(proof)
+    // A separate key for the acknowledgement: the proof itself travels in the
+    // clear (inside the encrypted channel) and must not double as a MAC key.
+    let ack_key = hmacsha256::authenticate(b"rustadmin-host-ack-v1\x01", &hmacsha256::Key(derived));
+    Ok((proof, ack_key.0))
+}
+
+/// Everything of one handshake the host acknowledgement is bound to, exactly
+/// as the two sides saw it on the wire.
+pub struct HostAckBinding<'a> {
+    /// `SignedId.id` the host sent first.
+    pub host_signed_id: &'a [u8],
+    /// `SignedId.quic_identity` the host sent first (empty if none).
+    pub host_quic_identity: &'a [u8],
+    /// The viewer's `PublicKey.asymmetric_value`.
+    pub viewer_asymmetric_value: &'a [u8],
+    /// The viewer's `PublicKey.symmetric_value`, as wrapped on the wire.
+    pub viewer_symmetric_value: &'a [u8],
+    /// The viewer's `PublicKey.quic_identity` (empty if none).
+    pub viewer_quic_identity: &'a [u8],
+    /// The viewer's `PublicKey.handshake_caps`.
+    pub handshake_caps: u32,
+}
+
+fn host_ack_transcript(binding: &HostAckBinding) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"rustadmin-host-ack-transcript-v1");
+    for part in [
+        binding.host_signed_id,
+        binding.host_quic_identity,
+        binding.viewer_asymmetric_value,
+        binding.viewer_symmetric_value,
+        binding.viewer_quic_identity,
+    ] {
+        hasher.update((part.len() as u32).to_le_bytes());
+        hasher.update(part);
+    }
+    hasher.update(binding.handshake_caps.to_le_bytes());
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+/// The MAC a host sends to show that it derived the pairing key, bound to this
+/// handshake.
+pub fn compute_host_ack_mac(ack_key: &[u8; 32], binding: &HostAckBinding) -> [u8; 32] {
+    hmacsha256::authenticate(&host_ack_transcript(binding), &hmacsha256::Key(*ack_key)).0
+}
+
+/// Constant-time check of a received host acknowledgement MAC.
+pub fn verify_host_ack_mac(ack_key: &[u8; 32], binding: &HostAckBinding, mac: &[u8]) -> bool {
+    let Some(tag) = hmacsha256::Tag::from_slice(mac) else {
+        return false;
+    };
+    hmacsha256::verify(
+        &tag,
+        &host_ack_transcript(binding),
+        &hmacsha256::Key(*ack_key),
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HostProofDecision {
+    /// The host proved it knows the pairing secret.
+    Verified,
+    /// Accepted without a proof; the reason is for the log.
+    AcceptedUnverified(&'static str),
+    Rejected(&'static str),
+}
+
+/// What the viewer does with the host acknowledgement of a pairing proof it
+/// sent. `host_announced` is the signed flag of the host's first message,
+/// `seen_before` that this host proved itself on an earlier connection.
+pub fn evaluate_host_proof(
+    mode: hbb_common::config::PairingHostAuth,
+    host_announced: bool,
+    seen_before: bool,
+    mac_present: bool,
+    mac_valid: bool,
+) -> HostProofDecision {
+    use hbb_common::config::PairingHostAuth;
+    if mode == PairingHostAuth::Off {
+        return HostProofDecision::AcceptedUnverified("host proof checking is off");
+    }
+    if mac_present {
+        return if mac_valid {
+            HostProofDecision::Verified
+        } else {
+            HostProofDecision::Rejected(
+                "Handshake failed: the host's pairing acknowledgement does not match",
+            )
+        };
+    }
+    if host_announced || seen_before {
+        return HostProofDecision::Rejected(
+            "Handshake failed: the host did not acknowledge the pairing proof it announced",
+        );
+    }
+    match mode {
+        PairingHostAuth::Enforce => HostProofDecision::Rejected(
+            "Handshake failed: the host cannot prove it knows the pairing passphrase",
+        ),
+        _ => HostProofDecision::AcceptedUnverified("the host does not prove its pairing knowledge"),
+    }
 }
 
 fn append_len_prefixed_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
@@ -5757,6 +5969,208 @@ mod tests {
         assert!(!ip_allowed_by_whitelist(list, outside));
         // An unparsable entry never matches.
         assert!(!ip_allowed_by_whitelist("not-an-ip", inside));
+    }
+
+    fn host_ack_binding_fixture() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
+        (
+            b"host-signed-id".to_vec(),
+            b"host-quic-identity".to_vec(),
+            vec![1; 32],
+            b"wrapped-symmetric".to_vec(),
+            b"viewer-quic-identity".to_vec(),
+        )
+    }
+
+    fn host_ack_binding<'a>(
+        fixture: &'a (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>),
+        caps: u32,
+    ) -> HostAckBinding<'a> {
+        HostAckBinding {
+            host_signed_id: &fixture.0,
+            host_quic_identity: &fixture.1,
+            viewer_asymmetric_value: &fixture.2,
+            viewer_symmetric_value: &fixture.3,
+            viewer_quic_identity: &fixture.4,
+            handshake_caps: caps,
+        }
+    }
+
+    #[test]
+    fn host_ack_mac_is_bound_to_every_part_of_the_handshake() {
+        let key = [7u8; 32];
+        let fixture = host_ack_binding_fixture();
+        let mac = compute_host_ack_mac(&key, &host_ack_binding(&fixture, 1));
+        assert!(verify_host_ack_mac(
+            &key,
+            &host_ack_binding(&fixture, 1),
+            &mac
+        ));
+        // Another key (a host that does not know the pairing secret).
+        assert!(!verify_host_ack_mac(
+            &[8u8; 32],
+            &host_ack_binding(&fixture, 1),
+            &mac
+        ));
+        // Stripped or changed capabilities.
+        assert!(!verify_host_ack_mac(
+            &key,
+            &host_ack_binding(&fixture, 0),
+            &mac
+        ));
+        // Each transcript part, changed on its own.
+        for index in 0..5 {
+            let mut changed = fixture.clone();
+            match index {
+                0 => changed.0.push(1),
+                1 => changed.1.push(1),
+                2 => changed.2[0] ^= 1,
+                3 => changed.3.push(1),
+                _ => changed.4.push(1),
+            }
+            assert!(
+                !verify_host_ack_mac(&key, &host_ack_binding(&changed, 1), &mac),
+                "part {index}"
+            );
+        }
+        // Moving bytes between neighbouring parts must not give the same MAC.
+        let mut shifted = fixture.clone();
+        shifted.0.extend_from_slice(&shifted.1.clone());
+        shifted.1.clear();
+        assert!(!verify_host_ack_mac(
+            &key,
+            &host_ack_binding(&shifted, 1),
+            &mac
+        ));
+        // Truncated or empty MACs never verify.
+        assert!(!verify_host_ack_mac(
+            &key,
+            &host_ack_binding(&fixture, 1),
+            &mac[..31]
+        ));
+        assert!(!verify_host_ack_mac(
+            &key,
+            &host_ack_binding(&fixture, 1),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn ack_key_depends_on_the_passphrase_and_salt_and_matches_the_proof_derivation() {
+        let salt = create_direct_pairing_salt();
+        let args = |passphrase: &str, salt: &[u8; argon2id13::SALTBYTES]| {
+            compute_direct_pairing_proof_and_ack_key(
+                passphrase, salt, "host", &[1; 32], &[2; 32], &[3; 32],
+            )
+            .unwrap()
+        };
+        let (proof, ack_key) = args("secret", &salt);
+        assert_eq!(
+            proof,
+            compute_direct_pairing_proof("secret", &salt, "host", &[1; 32], &[2; 32], &[3; 32])
+                .unwrap()
+        );
+        assert_ne!(proof, ack_key);
+        assert_ne!(ack_key, args("other", &salt).1);
+        assert_ne!(ack_key, args("secret", &create_direct_pairing_salt()).1);
+    }
+
+    #[test]
+    fn host_proof_decision_table() {
+        use hbb_common::config::PairingHostAuth::{Enforce, Off, Warn};
+        use HostProofDecision::*;
+        // A valid MAC is always the answer when checking is on.
+        for mode in [Warn, Enforce] {
+            assert_eq!(
+                evaluate_host_proof(mode, false, false, true, true),
+                Verified
+            );
+            assert_eq!(evaluate_host_proof(mode, true, true, true, true), Verified);
+        }
+        // A wrong MAC is never accepted when checking is on.
+        for mode in [Warn, Enforce] {
+            for announced in [false, true] {
+                assert!(matches!(
+                    evaluate_host_proof(mode, announced, false, true, false),
+                    Rejected(_)
+                ));
+            }
+        }
+        // Announced or seen before, a missing MAC is a downgrade in every mode.
+        for mode in [Warn, Enforce] {
+            assert!(matches!(
+                evaluate_host_proof(mode, true, false, false, false),
+                Rejected(_)
+            ));
+            assert!(matches!(
+                evaluate_host_proof(mode, false, true, false, false),
+                Rejected(_)
+            ));
+        }
+        // A host that never announced anything: warn accepts, enforce refuses.
+        assert!(matches!(
+            evaluate_host_proof(Warn, false, false, false, false),
+            AcceptedUnverified(_)
+        ));
+        assert!(matches!(
+            evaluate_host_proof(Enforce, false, false, false, false),
+            Rejected(_)
+        ));
+        // Off checks nothing.
+        for (announced, seen, present, valid) in [
+            (true, true, false, false),
+            (false, false, true, false),
+            (false, false, true, true),
+        ] {
+            assert!(matches!(
+                evaluate_host_proof(Off, announced, seen, present, valid),
+                AcceptedUnverified(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn host_proof_flag_is_signed_into_v2_blobs_only_when_asked() {
+        let (sign_pk, sign_sk) = sign::gen_keypair();
+        let (box_pk, _) = box_::gen_keypair();
+        let salt = create_direct_pairing_salt();
+        for direct in [true, false] {
+            for announce in [false, true] {
+                let blob = create_host_signed_id_with_proof(
+                    direct,
+                    "host-id",
+                    box_pk.0,
+                    &sign_pk.0,
+                    &sign_sk,
+                    Some(salt),
+                    0,
+                    announce,
+                );
+                let supports = if direct {
+                    decode_direct_id_pk(&blob).unwrap().supports_host_proof
+                } else {
+                    decode_secure_signed_id(&blob, &sign_pk)
+                        .unwrap()
+                        .supports_host_proof
+                };
+                assert_eq!(supports, announce, "direct={direct}");
+            }
+            // Without a pairing salt there is nothing to acknowledge.
+            let blob = create_host_signed_id_with_proof(
+                direct, "host-id", box_pk.0, &sign_pk.0, &sign_sk, None, 0, true,
+            );
+            let supports = if direct {
+                decode_direct_id_pk(&blob).unwrap().supports_host_proof
+            } else {
+                decode_secure_signed_id(&blob, &sign_pk)
+                    .unwrap()
+                    .supports_host_proof
+            };
+            assert!(!supports);
+        }
+        // The legacy constructor never announces it.
+        let legacy =
+            create_direct_signed_id_with_pairing("host-id", box_pk.0, &sign_pk.0, &sign_sk, salt);
+        assert!(!decode_direct_id_pk(&legacy).unwrap().supports_host_proof);
     }
 
     #[test]

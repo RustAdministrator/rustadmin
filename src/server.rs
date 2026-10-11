@@ -329,13 +329,16 @@ async fn create_tcp_connection_with_mode(
             } else {
                 None
             };
+        // Announced inside the signed first message, so that a viewer can tell a
+        // host that proves its pairing knowledge from one that was stripped of it.
+        let host_proof = pairing_salt.is_some() && hbb_common::config::pairing_host_proof_enabled();
         // Read once so that what we advertise and what we accept match.
         let secure_channel = crate::common::host_secure_channel();
         let directional_offered = secure_channel == tcp::SECURE_CHANNEL_DIRECTIONAL;
         let signed_id = match handshake_mode {
             HandshakeMode::Disabled => Bytes::new(),
             HandshakeMode::Rendezvous | HandshakeMode::Direct => {
-                crate::common::create_host_signed_id(
+                crate::common::create_host_signed_id_with_proof(
                     handshake_mode == HandshakeMode::Direct,
                     &Config::get_id(),
                     our_pk_b.0,
@@ -343,6 +346,7 @@ async fn create_tcp_connection_with_mode(
                     &sk,
                     pairing_salt,
                     secure_channel,
+                    host_proof,
                 )
             }
         };
@@ -359,6 +363,12 @@ async fn create_tcp_connection_with_mode(
         } else {
             Bytes::new()
         };
+        // Kept for the acknowledgement MAC, which binds both.
+        let first_signed_id = signed_id.clone();
+        #[cfg(feature = "quic-transport")]
+        let first_quic_identity = quic_identity.clone();
+        #[cfg(not(feature = "quic-transport"))]
+        let first_quic_identity = Bytes::new();
         msg_out.set_signed_id(SignedId {
             id: signed_id,
             #[cfg(feature = "quic-transport")]
@@ -444,9 +454,11 @@ async fn create_tcp_connection_with_mode(
                             };
                             let mut paired_initiator = None;
                             let mut error_text = None;
+                            // Set only by a pairing proof that was checked and matched.
+                            let mut host_ack_key: Option<[u8; 32]> = None;
                             if let Some(pairing_proof) = public_key_payload.pairing_proof {
                                 // Bounded per source and run off the connection task.
-                                let verdict = pairing_guard::check_pairing_proof(
+                                let (verdict, matched_key) = pairing_guard::check_pairing_proof(
                                     addr.ip(),
                                     pairing_guard::ProofInput {
                                         passphrase: pairing_passphrase.clone(),
@@ -459,6 +471,7 @@ async fn create_tcp_connection_with_mode(
                                     pairing_proof,
                                 )
                                 .await?;
+                                host_ack_key = matched_key;
                                 if verdict == pairing_guard::Verdict::Match {
                                     if remember_paired_viewers {
                                         if let Some(initiator) =
@@ -557,8 +570,36 @@ async fn create_tcp_connection_with_mode(
                                     Config::add_paired_viewer(direct_viewer);
                                 }
                             }
+                            // Only for a viewer that said it verifies it, and only
+                            // after a proof that was actually checked.
+                            let host_ack_mac = match host_ack_key {
+                                Some(ack_key)
+                                    if host_proof
+                                        && public_key.handshake_caps
+                                            & crate::common::HANDSHAKE_CAP_VERIFIES_HOST_ACK
+                                            != 0 =>
+                                {
+                                    Bytes::from(
+                                        crate::common::compute_host_ack_mac(
+                                            &ack_key,
+                                            &crate::common::HostAckBinding {
+                                                host_signed_id: &first_signed_id,
+                                                host_quic_identity: &first_quic_identity,
+                                                viewer_asymmetric_value: &public_key
+                                                    .asymmetric_value,
+                                                viewer_symmetric_value: &public_key.symmetric_value,
+                                                viewer_quic_identity: &public_key.quic_identity,
+                                                handshake_caps: public_key.handshake_caps,
+                                            },
+                                        )
+                                        .to_vec(),
+                                    )
+                                }
+                                _ => Bytes::new(),
+                            };
                             ack.set_signed_id(SignedId {
                                 id: crate::common::direct_handshake_ack_ok(),
+                                host_ack_mac,
                                 ..Default::default()
                             });
                             timeout(CONNECT_TIMEOUT, stream.send(&ack)).await??;

@@ -201,26 +201,27 @@ pub(crate) struct ProofInput {
 }
 
 /// Checks `claimed` against the proof expected for `input`, bounded per source.
+/// On a match the key for the host acknowledgement MAC is returned as well.
 pub(crate) async fn check_pairing_proof(
     source: IpAddr,
     input: ProofInput,
     claimed: [u8; crate::common::DIRECT_PAIRING_PROOF_LEN],
-) -> ResultType<Verdict> {
+) -> ResultType<(Verdict, Option<[u8; 32]>)> {
     let key = source_key(source);
     if let Err(refusal) = tracker().lock().unwrap().admit(key, now_ms()) {
         log::warn!("Pairing proof from {key} refused before the key derivation: {refusal:?}");
-        return Ok(Verdict::Rejected(refusal));
+        return Ok((Verdict::Rejected(refusal), None));
     }
     let outcome = evaluate(input, claimed).await;
     let counted = match &outcome {
-        Ok(Some(matched)) => Some(*matched),
+        Ok(Some((matched, _))) => Some(*matched),
         _ => None,
     };
     tracker().lock().unwrap().finish(key, now_ms(), counted);
     match outcome {
-        Ok(Some(true)) => Ok(Verdict::Match),
-        Ok(Some(false)) => Ok(Verdict::Mismatch),
-        Ok(None) => Ok(Verdict::Rejected(Refusal::Busy)),
+        Ok(Some((true, ack_key))) => Ok((Verdict::Match, Some(ack_key))),
+        Ok(Some((false, _))) => Ok((Verdict::Mismatch, None)),
+        Ok(None) => Ok((Verdict::Rejected(Refusal::Busy), None)),
         Err(error) => Err(error),
     }
 }
@@ -229,14 +230,14 @@ pub(crate) async fn check_pairing_proof(
 async fn evaluate(
     input: ProofInput,
     claimed: [u8; crate::common::DIRECT_PAIRING_PROOF_LEN],
-) -> ResultType<Option<bool>> {
+) -> ResultType<Option<(bool, [u8; 32])>> {
     let permit = match timeout(KDF_QUEUE_WAIT, kdf_slots().acquire()).await {
         Ok(Ok(permit)) => permit,
         Ok(Err(_)) => return Err(anyhow!("Handshake failed: pairing guard unavailable")),
         Err(_) => return Ok(None),
     };
-    let expected = tokio::task::spawn_blocking(move || {
-        crate::common::compute_direct_pairing_proof(
+    let (expected, ack_key) = tokio::task::spawn_blocking(move || {
+        crate::common::compute_direct_pairing_proof_and_ack_key(
             &input.passphrase,
             &input.salt,
             &input.peer_id,
@@ -248,7 +249,7 @@ async fn evaluate(
     .await
     .map_err(|_| anyhow!("Handshake failed: pairing check was interrupted"))??;
     drop(permit);
-    Ok(Some(memcmp(&claimed, &expected)))
+    Ok(Some((memcmp(&claimed, &expected), ack_key)))
 }
 
 #[cfg(test)]
