@@ -4,9 +4,12 @@ on run {daemon_file, agent_file, user}
 
   set sh2 to "echo " & quoted form of agent_file & " > /Library/LaunchAgents/io.github.rustadministrator.rustadmin_server.plist && chown root:wheel /Library/LaunchAgents/io.github.rustadministrator.rustadmin_server.plist;"
 
-  set sh3 to "cp -rf /Users/" & user & "/Library/Preferences/io.github.rustadministrator.rustadmin/RustAdmin.toml /var/root/Library/Preferences/io.github.rustadministrator.rustadmin/;"
+  -- The user name goes into a root shell command: quoted as one argument.
+  set prefs_dir to "/Users/" & user & "/Library/Preferences/io.github.rustadministrator.rustadmin/"
 
-  set sh4 to "cp -rf /Users/" & user & "/Library/Preferences/io.github.rustadministrator.rustadmin/RustAdmin2.toml /var/root/Library/Preferences/io.github.rustadministrator.rustadmin/;"
+  set sh3 to "cp -rf " & quoted form of (prefs_dir & "RustAdmin.toml") & " /var/root/Library/Preferences/io.github.rustadministrator.rustadmin/;"
+
+  set sh4 to "cp -rf " & quoted form of (prefs_dir & "RustAdmin2.toml") & " /var/root/Library/Preferences/io.github.rustadministrator.rustadmin/;"
 
   set sh5 to "launchctl load -w /Library/LaunchDaemons/io.github.rustadministrator.rustadmin_service.plist;"
 
