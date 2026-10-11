@@ -131,6 +131,10 @@ pub fn should_open_upgrade_page() -> bool {
 
 #[inline]
 pub fn install_me(_options: String, _path: String, _silent: bool, _debug: bool) {
+    if hbb_common::config::is_disable_installation() {
+        log::warn!("Ignoring the install request: installation is disabled");
+        return;
+    }
     #[cfg(windows)]
     std::thread::spawn(move || {
         if is_upgrade_mode() {

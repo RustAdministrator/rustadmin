@@ -1090,7 +1090,44 @@ pub fn get_full_name() -> String {
 }
 
 pub fn is_setup(name: &str) -> bool {
-    name.to_lowercase().ends_with("install.exe")
+    name.to_lowercase().ends_with("install.exe") && !hbb_common::config::is_disable_installation()
+}
+
+/// Whether an id announced by a peer we have not connected to (LAN discovery,
+/// for one) is safe to show, store and later put into a shortcut or a command
+/// line: non-empty, at most 253 characters, no control or whitespace
+/// characters and none of `" < > / \ | ? *`.
+pub fn is_valid_untrusted_peer_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 253
+        && !id.chars().any(|c| {
+            c.is_control()
+                || c.is_whitespace()
+                || matches!(c, '"' | '<' | '>' | '/' | '\\' | '|' | '?' | '*')
+        })
+}
+
+/// A string for the inside of a VBScript string literal: quotes are doubled and
+/// anything that would end the statement is refused.
+pub fn vbs_string_escape(value: &str) -> Option<String> {
+    if value.chars().any(|c| matches!(c, '\r' | '\n' | '\0')) {
+        return None;
+    }
+    Some(value.replace('"', "\"\""))
+}
+
+/// The shell command that runs an MSI update. The path is quoted, the restart
+/// is suppressed, and a path that could end the quoting is refused.
+pub fn msi_update_command(msi: &str, quiet: bool) -> ResultType<String> {
+    if msi.is_empty() || msi.chars().any(|c| matches!(c, '"' | '\r' | '\n' | '\0')) {
+        bail!("Invalid MSI path");
+    }
+    // `%` would be expanded by cmd.exe inside the quotes.
+    let msi = msi.replace('%', "%%");
+    Ok(format!(
+        "chcp 65001 && msiexec /i \"{msi}\"{} /norestart",
+        if quiet { " /qn LAUNCH_TRAY_APP=N" } else { "" }
+    ))
 }
 
 pub fn get_custom_rendezvous_server(custom: String) -> String {
@@ -6114,6 +6151,67 @@ mod tests {
             .unwrap();
         assert!(has_trusted_peer_signing_key(&config_id, &second).unwrap());
         PeerConfig::remove(&config_id);
+    }
+
+    #[test]
+    fn untrusted_peer_ids_are_filtered_before_they_reach_scripts() {
+        for good in [
+            "123456789",
+            "my-host_01",
+            "192.168.1.5:21118",
+            "[fd00::5]:21118",
+            "name@rdv.example",
+        ] {
+            assert!(is_valid_untrusted_peer_id(good), "{good}");
+        }
+        for bad in [
+            "",
+            "1\" & oWS.Run(\"calc\") & \"",
+            "a b",
+            "a\tb",
+            "a\nb",
+            "a<b",
+            "a>b",
+            "a/b",
+            "a\\b",
+            "a|b",
+            "a?b=1",
+            "a*b",
+            &"x".repeat(254),
+        ] {
+            assert!(!is_valid_untrusted_peer_id(bad), "{bad:?}");
+        }
+        assert!(is_valid_untrusted_peer_id(&"x".repeat(253)));
+    }
+
+    #[test]
+    fn vbs_strings_cannot_be_broken_out_of() {
+        assert_eq!(vbs_string_escape("a\"b").as_deref(), Some("a\"\"b"));
+        assert_eq!(
+            vbs_string_escape("C:\\Program Files").as_deref(),
+            Some("C:\\Program Files")
+        );
+        assert_eq!(vbs_string_escape("a\r\nb"), None);
+        assert_eq!(vbs_string_escape("a\0b"), None);
+    }
+
+    #[test]
+    fn msi_update_command_quotes_the_path() {
+        assert_eq!(
+            msi_update_command("C:\\Temp\\a b.msi", false).unwrap(),
+            "chcp 65001 && msiexec /i \"C:\\Temp\\a b.msi\" /norestart"
+        );
+        assert_eq!(
+            msi_update_command("C:\\x.msi", true).unwrap(),
+            "chcp 65001 && msiexec /i \"C:\\x.msi\" /qn LAUNCH_TRAY_APP=N /norestart"
+        );
+        assert!(msi_update_command("C:\\x\".msi & calc", false).is_err());
+        assert!(msi_update_command("", false).is_err());
+        assert!(msi_update_command("a\nb.msi", false).is_err());
+        assert_eq!(
+            msi_update_command("C:\\%TEMP%\\a.msi", false).unwrap(),
+            "chcp 65001 && msiexec /i \"C:\\%%TEMP%%\\a.msi\" /norestart"
+        );
     }
 
     #[test]

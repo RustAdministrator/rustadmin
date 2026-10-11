@@ -14,6 +14,7 @@
 typedef char** (*FUNC_RUSTDESK_CORE_MAIN)(int*);
 typedef void (*FUNC_RUSTDESK_FREE_ARGS)( char**, int);
 typedef int (*FUNC_RUSTDESK_GET_APP_NAME)(wchar_t*, int);
+typedef int (*FUNC_RUSTDESK_IS_DISABLE_INSTALLATION)();
 /// Note: `--server`, `--service` are already handled in [core_main.rs].
 const std::vector<std::string> parameters_white_list = {"--install", "--cm"};
 
@@ -74,6 +75,20 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   }
   std::vector<std::string> rust_args(c_args, c_args + args_len);
   free_c_args(c_args, args_len);
+
+  // With installation disabled, an explicit --install must not reach Flutter
+  // through the real command line either.
+  FUNC_RUSTDESK_IS_DISABLE_INSTALLATION is_disable_installation =
+      (FUNC_RUSTDESK_IS_DISABLE_INSTALLATION)GetProcAddress(
+          hInstance, "rustdesk_is_disable_installation");
+  if (is_disable_installation && is_disable_installation() != 0) {
+    auto drop_install = [](std::vector<std::string>& list) {
+      list.erase(std::remove(list.begin(), list.end(), std::string("--install")),
+                 list.end());
+    };
+    drop_install(command_line_arguments);
+    drop_install(rust_args);
+  }
 
   std::wstring app_name = L"RustAdmin";
   FUNC_RUSTDESK_GET_APP_NAME get_rustdesk_app_name = (FUNC_RUSTDESK_GET_APP_NAME)GetProcAddress(hInstance, "get_rustdesk_app_name");

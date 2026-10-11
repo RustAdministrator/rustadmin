@@ -407,6 +407,13 @@ fn wait_response(
                             {
                                 continue;
                             }
+                            // Signed by its own key, but the id is still the peer's text.
+                            if !crate::common::is_valid_untrusted_peer_id(&p.id) {
+                                log::warn!(
+                                    "Ignoring LAN discovery response from {addr} with an invalid id"
+                                );
+                                continue;
+                            }
                             allow_err!(tx.send(config::DiscoveryPeer {
                                 id: p.id.clone(),
                                 sign_pk: base64::encode(&sign_pk, base64::Variant::Original),

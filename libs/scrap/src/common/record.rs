@@ -38,6 +38,28 @@ pub struct RecorderContext2 {
     pub format: CodecFormat,
 }
 
+/// An id as one safe file-name component: control characters and the characters
+/// Windows and shells treat specially become `_` (an `ip:port` id would
+/// otherwise name an NTFS alternate data stream).
+pub fn sanitize_filename_component(value: &str) -> String {
+    let cleaned: String = value
+        .chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    // A component made only of dots would be a directory reference.
+    if cleaned.is_empty() || cleaned.chars().all(|c| c == '.') {
+        "_".repeat(cleaned.len().max(1))
+    } else {
+        cleaned
+    }
+}
+
 impl RecorderContext2 {
     pub fn set_filename(&mut self, ctx: &RecorderContext) -> ResultType<()> {
         if !PathBuf::from(&ctx.dir).exists() {
@@ -45,7 +67,7 @@ impl RecorderContext2 {
         }
         let file = if ctx.server { "incoming" } else { "outgoing" }.to_string()
             + "_"
-            + &ctx.id.clone()
+            + &sanitize_filename_component(&ctx.id)
             + &chrono::Local::now().format("_%Y%m%d%H%M%S%3f_").to_string()
             + &format!(
                 "{}{}_",
@@ -419,5 +441,30 @@ impl Drop for HwRecorder {
             state = RecordState::RemoveFile;
         }
         self.ctx.tx.as_ref().map(|tx| tx.send(state));
+    }
+}
+
+#[cfg(test)]
+mod filename_tests {
+    use super::sanitize_filename_component;
+
+    #[test]
+    fn ids_become_one_safe_component() {
+        assert_eq!(sanitize_filename_component("123456789"), "123456789");
+        assert_eq!(
+            sanitize_filename_component("192.168.1.2:21118"),
+            "192.168.1.2_21118"
+        );
+        assert_eq!(
+            sanitize_filename_component("[2001:db8::1]:21118"),
+            "[2001_db8__1]_21118"
+        );
+        // An alternate-data-stream, a path and control characters.
+        assert_eq!(sanitize_filename_component("a:b"), "a_b");
+        assert_eq!(sanitize_filename_component("../x\\y"), ".._x_y");
+        assert_eq!(sanitize_filename_component("a\nb\0c"), "a_b_c");
+        // Not a directory reference, and never empty.
+        assert_eq!(sanitize_filename_component(".."), "__");
+        assert_eq!(sanitize_filename_component(""), "_");
     }
 }
