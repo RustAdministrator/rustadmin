@@ -407,6 +407,76 @@ pub fn set_capture_backend_preference(backend: CaptureBackend) {
     log::info!("capture backend preference set to {:?}", normalized);
 }
 
+/// What a viewer's capture-backend option means for the host-wide preference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CaptureBackendAction {
+    /// Nothing to do: not set, or the default sent with every login.
+    Ignore,
+    /// The viewer went back to Auto after login: its earlier choice is dropped.
+    Withdraw,
+    /// An explicit backend: this viewer's choice.
+    Request(CaptureBackend),
+}
+
+pub(crate) fn capture_backend_action(
+    at_login: bool,
+    requested: CaptureBackend,
+) -> CaptureBackendAction {
+    match requested {
+        CaptureBackend::CaptureBackendNotSet => CaptureBackendAction::Ignore,
+        // Every login carries Auto when the user never chose: that must not
+        // undo what another viewer asked for.
+        CaptureBackend::CaptureBackendAuto if at_login => CaptureBackendAction::Ignore,
+        CaptureBackend::CaptureBackendAuto => CaptureBackendAction::Withdraw,
+        explicit => CaptureBackendAction::Request(explicit),
+    }
+}
+
+/// The preference in force for the live requests: the most recent explicit
+/// one, Auto when there is none.
+pub(crate) fn effective_capture_backend(requests: &[(i32, u64, CaptureBackend)]) -> CaptureBackend {
+    requests
+        .iter()
+        .max_by_key(|(_, seq, _)| *seq)
+        .map(|(_, _, backend)| *backend)
+        .unwrap_or(CaptureBackend::CaptureBackendAuto)
+}
+
+lazy_static::lazy_static! {
+    /// (connection id, sequence, explicit backend) of the viewers that asked.
+    static ref CAPTURE_BACKEND_REQUESTS: Mutex<(u64, Vec<(i32, u64, CaptureBackend)>)> =
+        Mutex::new((0, Vec::new()));
+}
+
+/// Applies one viewer's request. Returns whether the host-wide preference
+/// changed (and with it, whether the video services must be restarted).
+pub(crate) fn apply_capture_backend_action(conn_id: i32, action: CaptureBackendAction) -> bool {
+    let mut state = CAPTURE_BACKEND_REQUESTS.lock().unwrap();
+    let before = effective_capture_backend(&state.1);
+    match action {
+        CaptureBackendAction::Ignore => return false,
+        CaptureBackendAction::Withdraw => state.1.retain(|(id, _, _)| *id != conn_id),
+        CaptureBackendAction::Request(backend) => {
+            state.0 += 1;
+            let seq = state.0;
+            state.1.retain(|(id, _, _)| *id != conn_id);
+            state.1.push((conn_id, seq, backend));
+        }
+    }
+    let after = effective_capture_backend(&state.1);
+    drop(state);
+    if before == after {
+        return false;
+    }
+    set_capture_backend_preference(after);
+    true
+}
+
+/// A closing connection no longer has a say.
+pub(crate) fn withdraw_capture_backend_request(conn_id: i32) -> bool {
+    apply_capture_backend_action(conn_id, CaptureBackendAction::Withdraw)
+}
+
 #[cfg(windows)]
 fn reset_user_capture_helper_retry(reason: &str) {
     USER_CAPTURE_HELPERS.lock().unwrap().reset(true);
@@ -1281,9 +1351,20 @@ enum WindowsCaptureRoute {
 fn windows_capture_route(
     preference: CaptureBackend,
     secure_desktop_requires_helper: bool,
+    directx_enabled: bool,
 ) -> WindowsCaptureRoute {
     if secure_desktop_requires_helper {
         return WindowsCaptureRoute::SecureHelper;
+    }
+    if !directx_enabled {
+        // "DirectX capture" off means no DXGI and no WGC (both are Direct3D
+        // based): the magnifier if it was asked for, GDI otherwise.
+        return match preference {
+            CaptureBackend::CaptureBackendWinMag => {
+                WindowsCaptureRoute::Manual(CaptureBackend::CaptureBackendWinMag)
+            }
+            _ => WindowsCaptureRoute::Manual(CaptureBackend::CaptureBackendGdi),
+        };
     }
     match preference {
         CaptureBackend::CaptureBackendDxgi
@@ -1491,6 +1572,7 @@ mod tests {
             windows_capture_route(
                 CaptureBackend::CaptureBackendWgc,
                 should_force_privileged_secure_capturer(true, false, after_thread_binding),
+                true,
             ),
             WindowsCaptureRoute::SecureHelper
         );
@@ -1714,11 +1796,11 @@ mod tests {
     #[test]
     fn secure_capture_route_overrides_manual_backend() {
         assert_eq!(
-            windows_capture_route(CaptureBackend::CaptureBackendWgc, true),
+            windows_capture_route(CaptureBackend::CaptureBackendWgc, true, true),
             WindowsCaptureRoute::SecureHelper
         );
         assert_eq!(
-            windows_capture_route(CaptureBackend::CaptureBackendGdi, true),
+            windows_capture_route(CaptureBackend::CaptureBackendGdi, true, true),
             WindowsCaptureRoute::SecureHelper
         );
     }
@@ -1732,20 +1814,106 @@ mod tests {
             CaptureBackend::CaptureBackendGdi,
         ] {
             assert_eq!(
-                windows_capture_route(backend, false),
+                windows_capture_route(backend, false, true),
                 WindowsCaptureRoute::Manual(backend)
             );
         }
     }
 
     #[test]
+    fn capture_backend_requests_follow_the_most_recent_explicit_choice() {
+        use super::{capture_backend_action, effective_capture_backend, CaptureBackendAction::*};
+        use CaptureBackend::*;
+        // Login: Auto and NotSet change nothing.
+        assert_eq!(capture_backend_action(true, CaptureBackendAuto), Ignore);
+        assert_eq!(capture_backend_action(true, CaptureBackendNotSet), Ignore);
+        // Later: Auto means "back to default", NotSet still nothing.
+        assert_eq!(capture_backend_action(false, CaptureBackendAuto), Withdraw);
+        assert_eq!(capture_backend_action(false, CaptureBackendNotSet), Ignore);
+        // An explicit backend is a request whenever it arrives.
+        for at_login in [true, false] {
+            assert_eq!(
+                capture_backend_action(at_login, CaptureBackendWgc),
+                Request(CaptureBackendWgc)
+            );
+        }
+
+        assert_eq!(effective_capture_backend(&[]), CaptureBackendAuto);
+        let requests = [
+            (1, 1, CaptureBackendWgc),
+            (2, 2, CaptureBackendGdi),
+            (3, 3, CaptureBackendWinMag),
+        ];
+        assert_eq!(effective_capture_backend(&requests), CaptureBackendWinMag);
+        // The latest viewer leaving reveals the one before it.
+        assert_eq!(effective_capture_backend(&requests[..2]), CaptureBackendGdi);
+        assert_eq!(effective_capture_backend(&requests[..1]), CaptureBackendWgc);
+    }
+
+    #[test]
+    fn a_login_with_the_default_does_not_restart_capture() {
+        use super::{
+            apply_capture_backend_action, capture_backend_action, withdraw_capture_backend_request,
+        };
+        use CaptureBackend::*;
+        let conn_a = 9_001;
+        let conn_b = 9_002;
+        // A viewer asks for GDI: the preference changes once.
+        assert!(apply_capture_backend_action(
+            conn_a,
+            capture_backend_action(false, CaptureBackendGdi)
+        ));
+        // A second viewer logs in with the default: nothing changes.
+        assert!(!apply_capture_backend_action(
+            conn_b,
+            capture_backend_action(true, CaptureBackendAuto)
+        ));
+        // The same explicit choice again is not a change either.
+        assert!(!apply_capture_backend_action(
+            conn_a,
+            capture_backend_action(false, CaptureBackendGdi)
+        ));
+        // It leaving restores the default, once.
+        assert!(withdraw_capture_backend_request(conn_a));
+        assert!(!withdraw_capture_backend_request(conn_a));
+        assert!(!withdraw_capture_backend_request(conn_b));
+    }
+
+    #[test]
+    fn directx_off_never_routes_to_a_direct3d_backend() {
+        for backend in [
+            CaptureBackend::CaptureBackendNotSet,
+            CaptureBackend::CaptureBackendAuto,
+            CaptureBackend::CaptureBackendDxgi,
+            CaptureBackend::CaptureBackendWgc,
+            CaptureBackend::CaptureBackendGdi,
+        ] {
+            assert_eq!(
+                windows_capture_route(backend, false, false),
+                WindowsCaptureRoute::Manual(CaptureBackend::CaptureBackendGdi),
+                "{backend:?}"
+            );
+        }
+        // The magnifier does not use Direct3D and stays available.
+        assert_eq!(
+            windows_capture_route(CaptureBackend::CaptureBackendWinMag, false, false),
+            WindowsCaptureRoute::Manual(CaptureBackend::CaptureBackendWinMag)
+        );
+        // The secure-desktop helper still comes first.
+        assert_eq!(
+            windows_capture_route(CaptureBackend::CaptureBackendWgc, true, false),
+            WindowsCaptureRoute::SecureHelper
+        );
+    }
+
+    #[test]
     fn unset_capture_route_uses_auto() {
         assert_eq!(
-            windows_capture_route(CaptureBackend::CaptureBackendNotSet, false),
+            windows_capture_route(CaptureBackend::CaptureBackendNotSet, false, true),
             WindowsCaptureRoute::Auto
         );
         assert_eq!(
-            windows_capture_route(CaptureBackend::CaptureBackendAuto, false),
+            windows_capture_route(CaptureBackend::CaptureBackendAuto, false, true),
             WindowsCaptureRoute::Auto
         );
     }
@@ -2106,7 +2274,8 @@ fn create_windows_capturer(
         } else {
             ensure_installed_secure_capture_helper(desktop_state)
         };
-    let route = windows_capture_route(preference, secure_desktop_requires_helper);
+    let directx_enabled = scrap::codec::enable_directx_capture();
+    let route = windows_capture_route(preference, secure_desktop_requires_helper, directx_enabled);
     if route == WindowsCaptureRoute::SecureHelper {
         log::info!(
             "capture backend selected: privileged SYSTEM helper, requested={:?}, prelogin={}, locked={}, desktop_changed={}, logon_ui={}, input_desktop={}, portable_service_running={}, installed_service_can_secure_capture={}, installed_secure_helper_ready={}, lifecycle={:?}",
@@ -2179,6 +2348,11 @@ fn create_windows_capturer(
                     requested,
                     err
                 );
+                if !directx_enabled {
+                    // The Auto ladder starts with WGC and DXGI, which the option
+                    // switched off: only GDI is left to try.
+                    return create_gdi_priority_capturer(current);
+                }
             }
         }
     }
@@ -2736,8 +2910,10 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut c = get_capturer(vs.source, display_idx, last_portable_service_running)?;
     #[cfg(windows)]
     if !scrap::codec::enable_directx_capture() && !c.is_gdi() {
-        log::info!("disable dxgi with option, fall back to gdi");
-        c.set_gdi();
+        // The route above already avoids this; kept for capturers that do not
+        // come from it. `set_gdi` reports whether the switch happened.
+        let switched = c.set_gdi();
+        log::info!("disable dxgi with option, fall back to gdi: switched={switched}");
     }
     #[cfg(windows)]
     let capturer_is_gdi = c.is_gdi();
