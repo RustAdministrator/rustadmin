@@ -84,9 +84,11 @@ impl DiagnosticRedactor {
         Ok(Self {
             identities,
             secrets: Regex::new(
-                r#"(?i)\b(password|passwd|token|secret|authorization|private[_ -]?key|access[_ -]?key|unlock[_ -]?pin)\s*[:=]\s*(\"[^\"]*\"|'[^']*'|[^\s,;]+)"#,
+                // The key may be quoted (JSON), carry a prefix (`access_token`)
+                // and end with the secret word; the value is quoted or bare.
+                r#"(?i)\b([A-Za-z0-9_.-]*(?:password|passwd|passphrase|token|secret|authorization|api[_-]?key|private[_ -]?key|access[_ -]?key|unlock[_ -]?pin))[\"']?\s*[:=]\s*(\"[^\"]*\"|'[^']*'|[^\s,;]+)"#,
             )?,
-            bearer: Regex::new(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")?,
+            bearer: Regex::new(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+")?,
             url_query: Regex::new(r"(?i)(https?://[^\s?]+)\?[^\s]+")?,
             peer_id: Regex::new(r"(?i)\b(peer(?:_id)?|remote_id|fingerprint)\s*[:=]\s*[^\s,;]+")?,
             email: Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")?,
@@ -99,13 +101,14 @@ impl DiagnosticRedactor {
         for identity in &self.identities {
             output = identity.replace_all(&output, "<identity>").into_owned();
         }
+        // Bearer first: `Authorization: Bearer x` would otherwise leave `x`.
+        output = self
+            .bearer
+            .replace_all(&output, "$1 <redacted>")
+            .into_owned();
         output = self
             .secrets
             .replace_all(&output, "$1=<redacted>")
-            .into_owned();
-        output = self
-            .bearer
-            .replace_all(&output, "Bearer <redacted>")
             .into_owned();
         output = self
             .url_query
@@ -517,6 +520,30 @@ mod tests {
         assert!(!output.contains("a@example.com"));
         assert!(!output.contains("00:11:22:33:44:55"));
         assert!(!output.contains("?token=abc"));
+    }
+
+    #[test]
+    fn redactor_handles_json_prefixed_and_header_secrets() {
+        let redactor = DiagnosticRedactor::new().expect("redactor");
+        for (input, secret) in [
+            (r#"{"password":"hunter2","user":"a"}"#, "hunter2"),
+            (r#"{"access_token": "T0KEN"}"#, "T0KEN"),
+            ("access_token=T0KEN&x=1", "T0KEN"),
+            ("Authorization: Bearer abc.def-ghi", "abc.def-ghi"),
+            ("authorization=Basic Zm9vOmJhcg==", "Zm9vOmJhcg"),
+            ("api_key=K3Y", "K3Y"),
+            ("api-key: K3Y", "K3Y"),
+            ("passphrase: \"a b c\"", "a b c"),
+            ("direct-access-pairing-passphrase=s3cr3t", "s3cr3t"),
+            ("refresh_token='R3F'", "R3F"),
+        ] {
+            let output = redactor.redact(input);
+            assert!(!output.contains(secret), "{input} -> {output}");
+        }
+        // Keys that only mention a secret word are not secrets.
+        let output = redactor.redact("token_count=5 secret_santa=1x password_policy=strict");
+        assert!(output.contains("token_count=5"), "{output}");
+        assert!(output.contains("password_policy=strict"), "{output}");
     }
 
     #[test]
