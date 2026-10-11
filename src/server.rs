@@ -72,6 +72,7 @@ mod input_authorization;
 mod login_failure_check;
 mod pairing_guard;
 mod permission_prompt;
+mod prelogin_admission;
 #[cfg(windows)]
 pub mod portable_service;
 mod service;
@@ -299,6 +300,9 @@ async fn create_tcp_connection_with_mode(
     if !crate::common::ip_allowed_by_whitelist(&Config::get_option("whitelist"), addr.ip()) {
         bail!("Connection from {} is outside the configured whitelist", addr.ip());
     }
+    // Held until the connection logs in (or ends).
+    let prelogin_ticket = prelogin_admission::try_admit(addr.ip())
+        .map_err(|reason| hbb_common::anyhow::anyhow!("Too many connections waiting to log in ({reason:?})"))?;
     let id = server.write().unwrap().get_new_id();
     let (sk, pk) = Config::get_key_pair();
     if handshake_mode != HandshakeMode::Disabled {
@@ -606,6 +610,7 @@ async fn create_tcp_connection_with_mode(
         id,
         Arc::downgrade(&server),
         control_permissions,
+        prelogin_ticket,
     )
     .await;
     Ok(())
