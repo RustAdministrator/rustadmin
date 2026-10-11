@@ -31,6 +31,7 @@ import 'package:window_size/window_size.dart' as window_size;
 
 import '../consts.dart';
 import 'common/widgets/overlay.dart';
+import 'common/widgets/dialog.dart' show checkUnlockPinDialog;
 import 'mobile/pages/file_manager_page.dart';
 import 'mobile/pages/remote_page.dart';
 import 'mobile/pages/view_camera_page.dart';
@@ -1973,6 +1974,10 @@ Future<bool> shouldShowWelcomeOnStartup() async {
   if (!isDesktop || isWeb || bind.isIncomingOnly() || bind.isOutgoingOnly()) {
     return false;
   }
+  // The wizard only changes settings; where those are disabled it has no job.
+  if (bind.isDisableSettings()) {
+    return false;
+  }
   return bind.mainGetLocalOption(key: kLocalOptionShowWelcomeOnStartup) != 'N';
 }
 
@@ -3711,6 +3716,38 @@ Future<void> start_service(bool is_start) async {
   if (checked) {
     mainSetBoolOption(kOptionStopService, !is_start);
   }
+}
+
+/// The gate for changing settings from somewhere other than the Settings
+/// pages (the Quick start wizard, for one): the same unlock those pages ask
+/// for. Returns whether the caller may write settings now.
+Future<bool> requestSettingsWriteAccess() async {
+  if (bind.isDisableSettings()) {
+    return false;
+  }
+  // The Settings pages are not locked on a portable or web client either.
+  if (isWeb || !bind.mainIsInstalled()) {
+    return true;
+  }
+  if (await canBeBlocked()) {
+    showToast(translate('Settings are locked during support sessions'));
+    return false;
+  }
+  final unlockPin = bind.mainGetUnlockPin();
+  if (unlockPin.isEmpty || isUnlockPinDisabled()) {
+    return await callMainCheckSuperUserPermission();
+  }
+  final completer = Completer<bool>();
+  checkUnlockPinDialog(
+    unlockPin,
+    () {
+      if (!completer.isCompleted) completer.complete(true);
+    },
+    onCancel: () {
+      if (!completer.isCompleted) completer.complete(false);
+    },
+  );
+  return completer.future;
 }
 
 Future<bool> canBeBlocked() async {
