@@ -24,8 +24,6 @@ import android.util.Log
 import android.view.WindowManager
 import android.media.MediaCodecInfo
 import android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface
-import android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Flexible
-import android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420Planar
 import android.media.MediaCodecInfo.CodecCapabilities.COLOR_FormatYUV420SemiPlanar
 import android.media.MediaCodecList
 import android.media.MediaFormat
@@ -791,14 +789,10 @@ class MainActivity : FlutterActivity() {
                 codecObject.put("surface", surface)
                 val nv12 = caps.colorFormats.contains(COLOR_FormatYUV420SemiPlanar)
                 codecObject.put("nv12", nv12)
-                val yuv420 = caps.colorFormats.any {
-                    it == COLOR_FormatYUV420Planar ||
-                        it == COLOR_FormatYUV420SemiPlanar ||
-                        it == COLOR_FormatYUV420Flexible
-                }
+                val yuv420 = hasYuv420Output(caps.colorFormats)
                 codecObject.put("yuv420", yuv420)
                 if (codec.isEncoder && !(nv12 || surface)) return@forEach
-                if (!codec.isEncoder && !yuv420) return@forEach
+                if (!codec.isEncoder && !isDecoderListable(caps.colorFormats)) return@forEach
                 codecObject.put("min_bitrate", caps.videoCapabilities.bitrateRange.lower / 1000)
                 codecObject.put("max_bitrate", caps.videoCapabilities.bitrateRange.upper / 1000)
                 if (!codec.isEncoder) {

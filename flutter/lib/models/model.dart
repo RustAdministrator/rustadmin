@@ -5423,6 +5423,12 @@ class QualityMonitorModel with ChangeNotifier {
       if (!isQuicTransport) {
         _data.clearQuicTransportMetrics();
       }
+      // A key that is present with an empty map means "not in this message"
+      // (the sender fills every key, a map the message did not carry is empty).
+      // Only a map with values replaces what is shown; otherwise the rows blink
+      // to "-" whenever a message carries a different set of metrics.
+      bool hasDisplayValues(String key) =>
+          event.contains(key) && (event.displayMap(key)?.isNotEmpty ?? false);
       void updateTransportMetric(
           String key, void Function(String? value) update) {
         final value = eventString(key);
@@ -5543,17 +5549,17 @@ class QualityMonitorModel with ChangeNotifier {
           (evt['encoder_input'] as String).isNotEmpty) {
         _data.encoderInput = evt['encoder_input'];
       }
-      if (event.contains('decode_fps')) {
+      if (hasDisplayValues('decode_fps')) {
         _data.decodeFps = _displayMetricFromValues(
           event.displayMap('decode_fps'),
         );
       }
-      if (event.contains('video_queue')) {
+      if (hasDisplayValues('video_queue')) {
         _data.videoQueue = _displayMetricFromValues(
           event.displayMap('video_queue'),
         );
       }
-      if (event.contains('frame_resolution')) {
+      if (hasDisplayValues('frame_resolution')) {
         _data.frameResolution = _displayMetricFromValues(
           event.displayMap('frame_resolution'),
         );
@@ -5578,32 +5584,32 @@ class QualityMonitorModel with ChangeNotifier {
           (evt['auto_fps'] as String).isNotEmpty) {
         _data.autoFps = evt['auto_fps'];
       }
-      if (event.contains('video_progress')) {
+      if (hasDisplayValues('video_progress')) {
         _data.videoProgress = _displayMetricFromValues(
           event.displayMap('video_progress'),
         );
       }
-      if (event.contains('video_dropped')) {
+      if (hasDisplayValues('video_dropped')) {
         _data.videoDropped = _displayMetricFromValues(
           event.displayMap('video_dropped'),
         );
       }
-      if (event.contains('video_decode_time_us')) {
+      if (hasDisplayValues('video_decode_time_us')) {
         _data.videoDecodeTimeUs = _displayMetricFromValues(
           event.displayMap('video_decode_time_us'),
         );
       }
-      if (event.contains('video_render_submit_time_us')) {
+      if (hasDisplayValues('video_render_submit_time_us')) {
         _data.videoRenderSubmitTimeUs = _displayMetricFromValues(
           event.displayMap('video_render_submit_time_us'),
         );
       }
-      if (event.contains('video_feedback_queue')) {
+      if (hasDisplayValues('video_feedback_queue')) {
         _data.videoFeedbackQueue = _displayMetricFromValues(
           event.displayMap('video_feedback_queue'),
         );
       }
-      if (event.contains('display_refresh_millihz')) {
+      if (hasDisplayValues('display_refresh_millihz')) {
         final millihz = _displayMetricFromValues(
           event.displayMap('display_refresh_millihz'),
         );

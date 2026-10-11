@@ -1892,6 +1892,43 @@ mod tests {
     }
 
     #[test]
+    fn forced_secure_capture_with_no_extra_flag_is_exactly_helper_and_secure_desktop() {
+        // The magnifier error paths bail out when this is true; the branches
+        // that used to follow them tested the same condition and could never
+        // run. Pinned here so that they are not reintroduced.
+        for helper_active in [false, true] {
+            for desktop_state in [
+                CaptureDesktopState::new(
+                    false,
+                    false,
+                    false,
+                    false,
+                    InputDesktopClassification::Default,
+                ),
+                CaptureDesktopState::new(
+                    true,
+                    false,
+                    false,
+                    false,
+                    InputDesktopClassification::Default,
+                ),
+                CaptureDesktopState::new(
+                    false,
+                    true,
+                    false,
+                    false,
+                    InputDesktopClassification::Default,
+                ),
+            ] {
+                assert_eq!(
+                    should_force_privileged_secure_capturer(helper_active, false, desktop_state),
+                    helper_active && desktop_state.requires_secure_capture()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn gdi_fallback_is_refused_for_a_privacy_mode_capturer() {
         use crate::privacy_mode::INVALID_PRIVACY_MODE_CONN_ID;
         assert!(super::gdi_fallback_allowed(INVALID_PRIVACY_MODE_CONN_ID));
@@ -3948,18 +3985,6 @@ fn run(vs: VideoService) -> ResultType<()> {
                         );
                         bail!("SWITCH");
                     }
-                    if secure_capture_helper_active
-                        && desktop_state.requires_secure_capture()
-                        && (mag_no_frame_count == 10 || mag_no_frame_count % 60 == 0)
-                        && try_recreate_magnifier_capture(&mut c, "mag_no_frame_recreate")
-                    {
-                        log::info!(
-                            "magnifier produced no frames; recreated magnifier, no_frame_count={}",
-                            mag_no_frame_count
-                        );
-                        mag_no_frame_count = 0;
-                        continue;
-                    }
                 }
                 #[cfg(windows)]
                 if try_gdi > 0
@@ -4072,17 +4097,6 @@ fn run(vs: VideoService) -> ResultType<()> {
                             installed_secure_helper_active
                         );
                         bail!("SWITCH");
-                    }
-                    if secure_capture_helper_active && desktop_state.requires_secure_capture() {
-                        if try_recreate_magnifier_capture(&mut c, "mag_error_recreate") {
-                            log::info!("magnifier capture error; recreated magnifier: {:?}", err);
-                            continue;
-                        }
-                        log::warn!(
-                            "magnifier capture error; keep magnifier on secure/changed desktop: {:?}",
-                            err
-                        );
-                        continue;
                     }
                     if try_set_gdi_fallback(&mut c, "mag_error") {
                         log::info!("magnifier capture error, fall back to gdi: {:?}", err);

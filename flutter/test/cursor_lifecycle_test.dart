@@ -21,6 +21,17 @@ CursorShapeSessionEvent shape(int red) => CursorShapeSessionEvent(
 void main() {
   final ffi = _UnusedFfi();
 
+  test('a rectangle registered for the quality monitor blocks touches under it', () {
+    final model = CursorModel(WeakReference<FFI>(ffi))..id = '1';
+    const rect = Rect.fromLTWH(100, 200, 80, 40);
+    expect(model.shouldBlock(120, 220), isFalse);
+    model.addBlockedRect(rect);
+    expect(model.shouldBlock(120, 220), isTrue);
+    expect(model.shouldBlock(10, 10), isFalse);
+    model.removeBlockedRect(rect);
+    expect(model.shouldBlock(120, 220), isFalse);
+  });
+
   testWidgets('cursor disposal clears the published image before reuse', (
     tester,
   ) async {

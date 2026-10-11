@@ -26,6 +26,42 @@ void main() {
     expect(decoded.movieFallbackReason, hasLength(1024));
   });
 
+  test('empty per-display maps in a status message keep what is shown', () {
+    final model = QualityMonitorModel.detached();
+    addTearDown(model.dispose);
+
+    model.updateQualityStatusEvent(
+      qualityEvent({
+        'decode_fps': '{"0":"60"}',
+        'video_queue': '{"0":"2"}',
+        'frame_resolution': '{"0":"1920x1080"}',
+      }),
+    );
+    expect(model.data.decodeFps, '60');
+    expect(model.data.videoQueue, '2');
+    expect(model.data.frameResolution, '1920x1080');
+
+    // A message that carries other metrics: the display maps are present but empty.
+    model.updateQualityStatusEvent(
+      qualityEvent({
+        'delay': '12',
+        'decode_fps': '{}',
+        'video_queue': '',
+        'frame_resolution': '{}',
+      }),
+    );
+    expect(model.data.delay, '12');
+    expect(model.data.decodeFps, '60');
+    expect(model.data.videoQueue, '2');
+    expect(model.data.frameResolution, '1920x1080');
+
+    // A map with values still replaces the old one.
+    model.updateQualityStatusEvent(
+      qualityEvent({'decode_fps': '{"0":"30"}'}),
+    );
+    expect(model.data.decodeFps, '30');
+  });
+
   test('TCP transport clears and rejects stale QUIC metrics', () {
     final model = QualityMonitorModel.detached();
     addTearDown(model.dispose);
