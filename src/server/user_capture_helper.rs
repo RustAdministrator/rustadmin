@@ -713,16 +713,20 @@ pub mod client {
             let shmem_name = next_shmem_name();
             let shmem_size = shmem_size_for_display(width, height);
             let shmem = crate::portable_service::SharedMemory::create(&shmem_name, shmem_size)?;
-            if let Ok(flink) = shmem_flink_path(&shmem_name) {
-                if let Err(err) =
-                    crate::platform::windows::grant_user_capture_helper_shmem_file_access(&flink)
-                {
-                    log::warn!(
-                        "Failed to grant user capture helper shared-memory access for {:?}: {}",
-                        flink,
-                        err
-                    );
-                }
+            let flink = shmem_flink_path(&shmem_name)?;
+            if let Err(err) =
+                crate::platform::windows::grant_user_capture_helper_shmem_file_access(&flink)
+            {
+                // The link is closed to everyone but the service until the
+                // session user is granted; do not widen it, do not start the helper.
+                log::warn!(
+                    "Failed to grant user capture helper shared-memory access for {:?}: {}",
+                    flink,
+                    err
+                );
+                drop(shmem);
+                let _ = std::fs::remove_file(&flink);
+                bail!("user capture helper shared-memory access was not granted: {err}");
             }
             unsafe {
                 libc::memset(shmem.as_ptr() as _, 0, shmem.len());
@@ -981,6 +985,53 @@ mod tests {
             Some(UserCaptureBackend::Wgc)
         );
         assert_eq!(UserCaptureBackend::from_raw(u32::MAX), None);
+    }
+
+    /// Diagnostic, run by hand on Windows (`-- --ignored --nocapture`, ideally as
+    /// SYSTEM): creates a helper shared-memory flink the way the server does,
+    /// applies the grant and prints who can do what with the flink, its
+    /// directory and the backing file. Used to answer "can another account
+    /// reach the helper's frames?" without a full capture setup.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "diagnostic: prints ACLs, run by hand"]
+    fn probe_helper_shared_memory_acls() {
+        let name = next_shmem_name();
+        let shmem = crate::portable_service::SharedMemory::create(&name, 4096)
+            .expect("create shared memory");
+        let flink = shmem_flink_path(&name).expect("flink path");
+        let granted = crate::platform::windows::grant_user_capture_helper_shmem_file_access(&flink);
+        println!("PROBE flink={} grant={:?}", flink.display(), granted);
+        let mut targets = vec![
+            ("flink", flink.clone()),
+            ("flink-dir", flink.parent().unwrap().to_path_buf()),
+        ];
+        // The backing file the shared_memory crate creates for the mapping.
+        if let Ok(id) = std::fs::read_to_string(&flink) {
+            let id = id.trim().trim_start_matches('/').to_owned();
+            let backing = std::env::temp_dir().join("shared_memory-rs").join(&id);
+            println!("PROBE mapping id={id} backing={}", backing.display());
+            targets.push(("backing", backing));
+        }
+        for (title, path) in targets {
+            let out = std::process::Command::new("icacls")
+                .arg(&path)
+                .output()
+                .expect("icacls");
+            println!(
+                "PROBE --- {title}: {}\n{}",
+                path.display(),
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
+        if let Some(secs) = std::env::var("RUSTADMIN_ACL_PROBE_HOLD_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            println!("PROBE holding for {secs}s");
+            std::thread::sleep(Duration::from_secs(secs));
+        }
+        drop(shmem);
     }
 
     #[test]
