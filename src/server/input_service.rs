@@ -634,11 +634,17 @@ enum KeysDown {
     EnigoKey(u64),
 }
 
+#[derive(Clone, Copy)]
+struct PressedKey {
+    since: Instant,
+    family: KeyboardFamily,
+}
+
 lazy_static::lazy_static! {
     static ref ENIGO: Arc<Mutex<Enigo>> = {
         Arc::new(Mutex::new(Enigo::new()))
     };
-    static ref KEYS_DOWN: Arc<Mutex<HashMap<KeysDown, Instant>>> = Default::default();
+    static ref KEYS_DOWN: Arc<Mutex<HashMap<KeysDown, PressedKey>>> = Default::default();
     static ref LATEST_PEER_INPUT_CURSOR: Arc<Mutex<Input>> = Default::default();
     static ref LATEST_SYS_CURSOR_POS: Arc<Mutex<(Option<Instant>, (i32, i32))>> = Arc::new(Mutex::new((None, (INVALID_CURSOR_POS, INVALID_CURSOR_POS))));
     // Track connections that are currently using relative mouse movement.
@@ -760,11 +766,16 @@ lazy_static::lazy_static! {
 struct VirtualInputState {
     virtual_input: VirtualInput,
     capslock_down: bool,
+    physical_source: core_graphics::event_source::CGEventSource,
 }
 
 #[cfg(target_os = "macos")]
 impl VirtualInputState {
     fn new() -> Option<Self> {
+        let physical_source = core_graphics::event_source::CGEventSource::new(
+            CGEventSourceStateID::CombinedSessionState,
+        )
+        .ok()?;
         VirtualInput::new(
             CGEventSourceStateID::CombinedSessionState,
             // Note: `CGEventTapLocation::Session` will be affected by the mouse events.
@@ -785,8 +796,21 @@ impl VirtualInputState {
         .map(|virtual_input| Self {
             virtual_input,
             capslock_down: false,
+            physical_source,
         })
         .ok()
+    }
+
+    fn simulate_physical(&self, code: u16, down: bool, family: KeyboardFamily) -> ResultType<()> {
+        let event = crate::platform::macos_keyboard::new_physical_key_event(
+            self.physical_source.clone(),
+            code,
+            down,
+            family,
+        )
+        .map_err(|_| hbb_common::anyhow::anyhow!("Could not construct physical key event"))?;
+        event.post(CGEventTapLocation::Session);
+        Ok(())
     }
 
     #[inline]
@@ -796,7 +820,7 @@ impl VirtualInputState {
 }
 
 #[cfg(target_os = "macos")]
-static mut VIRTUAL_INPUT_MTX: Mutex<()> = Mutex::new(());
+static VIRTUAL_INPUT_MTX: Mutex<()> = Mutex::new(());
 #[cfg(target_os = "macos")]
 static mut VIRTUAL_INPUT_STATE: Option<VirtualInputState> = None;
 
@@ -1043,9 +1067,16 @@ pub fn release_device_modifiers() {
 }
 
 #[inline]
-fn release_record_key(record_key: KeysDown) {
+fn release_record_key(record_key: KeysDown, _family: KeyboardFamily) {
     let func = move || match record_key {
         KeysDown::RdevKey(raw_key) => {
+            #[cfg(target_os = "macos")]
+            if let RawKey::MacVirtualKeycode(code) = raw_key {
+                if _family != KeyboardFamily::Unknown {
+                    simulate_physical_macos(code as _, false, _family);
+                    return;
+                }
+            }
             simulate_(&EventType::KeyRelease(RdevKey::RawKey(raw_key)));
         }
         KeysDown::EnigoKey(key) => {
@@ -1070,10 +1101,10 @@ fn fix_key_down_timeout(force: bool) {
     let cloned = (*key_down).clone();
     drop(key_down);
 
-    for (record_key, time) in cloned.into_iter() {
-        if force || time.elapsed().as_millis() >= 360_000 {
+    for (record_key, state) in cloned.into_iter() {
+        if force || state.since.elapsed().as_millis() >= 360_000 {
             record_pressed_key(record_key, false);
-            release_record_key(record_key);
+            release_record_key(record_key, state.family);
         }
     }
 }
@@ -1606,6 +1637,20 @@ fn sim_rdev_rawkey_virtual(code: u32, keydown: bool) {
     simulate_(&event_type);
 }
 
+#[cfg(target_os = "macos")]
+fn simulate_physical_macos(code: u16, down: bool, family: KeyboardFamily) {
+    // Access uses the existing serialized native input owner; keyboard family
+    // is an event argument and is never stored as process-wide configuration.
+    unsafe {
+        let _lock = VIRTUAL_INPUT_MTX.lock();
+        if let Some(input) = VIRTUAL_INPUT_STATE.as_ref() {
+            if let Err(error) = input.simulate_physical(code, down, family) {
+                log::error!("Could not inject physical keyboard event: {error}");
+            }
+        }
+    }
+}
+
 #[inline]
 #[cfg(target_os = "macos")]
 fn simulate_(event_type: &EventType) {
@@ -1681,6 +1726,21 @@ fn map_keyboard_mode(evt: &KeyEvent) {
         return;
     }
 
+    #[cfg(target_os = "macos")]
+    if let Ok(family) = evt.keyboard_family.enum_value() {
+        if family != KeyboardFamily::Unknown {
+            let Ok(code) = u16::try_from(evt.chr()) else {
+                return;
+            };
+            record_pressed_key_with_family(
+                KeysDown::RdevKey(RawKey::MacVirtualKeycode(code as _)),
+                evt.down,
+                family,
+            );
+            simulate_physical_macos(code, evt.down, family);
+            return;
+        }
+    }
     sim_rdev_rawkey_position(evt.chr() as _, evt.down);
 }
 
@@ -1979,9 +2039,19 @@ fn release_keys(en: &mut Enigo, to_release: &Vec<Key>) {
 }
 
 fn record_pressed_key(record_key: KeysDown, down: bool) {
+    record_pressed_key_with_family(record_key, down, KeyboardFamily::Unknown);
+}
+
+fn record_pressed_key_with_family(record_key: KeysDown, down: bool, family: KeyboardFamily) {
     let mut key_down = KEYS_DOWN.lock().unwrap();
     if down {
-        key_down.insert(record_key, Instant::now());
+        key_down.insert(
+            record_key,
+            PressedKey {
+                since: Instant::now(),
+                family,
+            },
+        );
     } else {
         key_down.remove(&record_key);
     }

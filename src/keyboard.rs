@@ -433,8 +433,47 @@ pub mod client {
         if is_long_press(&event) {
             return;
         }
+        // Native rdev capture leaves usb_hid empty. Normalize positions at the
+        // source adapter, then share the same mapper and sender as Flutter HID.
+        let normalized;
+        let event = if keyboard_mode == KeyboardMode::Map && event.usb_hid == 0 {
+            use crate::keyboard_hid::{usage_from_native, HidTarget};
+            #[cfg(target_os = "windows")]
+            let usage = usage_from_native(
+                HidTarget::Windows,
+                event.position_code as u32,
+                KeyboardFamily::Unknown,
+            );
+            #[cfg(target_os = "macos")]
+            let usage = usage_from_native(
+                HidTarget::MacOs,
+                event.platform_code as u32,
+                session.native_keyboard_family(),
+            );
+            #[cfg(target_os = "linux")]
+            let usage = usage_from_native(
+                HidTarget::Linux,
+                event.position_code as u32,
+                KeyboardFamily::Unknown,
+            );
+            #[cfg(any(target_os = "ios", target_os = "android"))]
+            let usage: Option<u32> = None;
+            normalized = Event {
+                time: event.time,
+                unicode: None, // Map routes physical positions, never text candidates.
+                event_type: event.event_type.clone(),
+                platform_code: event.platform_code,
+                position_code: event.position_code,
+                usb_hid: usage.unwrap_or(0) as _,
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                extra_data: event.extra_data,
+            };
+            &normalized
+        } else {
+            event
+        };
         let peer = session.peer_platform().to_lowercase();
-        for key_event in event_to_key_events(peer, &event, keyboard_mode, lock_modes) {
+        for key_event in event_to_key_events(peer, event, keyboard_mode, lock_modes) {
             session.send_key_event(&key_event);
         }
     }
@@ -1384,6 +1423,25 @@ fn _map_keyboard_mode(_peer: &str, event: &Event, mut key_event: KeyEvent) -> Op
         }
         _ => return None,
     };
+
+    let usage = event.usb_hid as u32;
+    if crate::keyboard_hid::valid_usage(usage) {
+        let family = hbb_common::keyboard::resolve_keyboard_family(
+            "auto",
+            KeyboardFamily::Unknown,
+            hbb_common::config::LocalConfig::get_kb_layout_type() == "ISO",
+        );
+        if let Some(code) = crate::keyboard_hid::keycode_for_peer(_peer, usage, family) {
+            key_event.set_chr(code);
+            key_event.usb_hid_usage = usage;
+            return Some(key_event);
+        }
+        if crate::keyboard_hid::explicitly_unmapped(_peer, usage) {
+            return None;
+        }
+        // No canonical mapping exists. Preserve the old platform-code fallback
+        // without claiming a usable HID identity to the receiver.
+    }
 
     #[cfg(target_os = "windows")]
     let keycode = match _peer {

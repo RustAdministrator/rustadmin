@@ -309,13 +309,59 @@ or synthesize Ctrl+Alt.
 ### International HID Compatibility
 
 The receiver's small `keyboard_hid` table corrects international usages before
-the existing rdev conversion. It does not change the raw-key injection backend.
+the existing rdev conversion. Physical macOS events with an explicit family
+use the app-owned CoreGraphics constructor described below.
 The mobile legacy Map fallback uses the same table when encoding a desktop
 peer's keycodes, so the fix does not depend on the peer advertising V2.
 Windows uses set-1 scan codes, Linux uses evdev codes plus the existing Xorg
 offset of eight, and macOS uses native virtual-key codes. Down, repeat and up
 use the same conversion. Ordinary keys and macOS ISO handling keep their
 existing rdev path.
+
+### Physical keyboard family
+
+`KeyboardFamily` in `hbb_common` is the physical ANSI/ISO/JIS contract. It is
+independent of language, active input source and IME. The peer setting
+`physical-keyboard-family` accepts `auto`, `ansi`, `iso`, or `jis`; the desktop
+keyboard menu exposes it for macOS hosts. Explicit choice wins, then native
+detection, then the old ISO preference when detection is unavailable.
+Windows detects Japanese hardware using
+[GetKeyboardType(0), type 7](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getkeyboardtype).
+macOS detects through Carbon on the native main thread. Other platforms report
+Unknown until they have a hardware adapter; the override works independently.
+
+`UiSession` owns resolution and caches native detection per connection round.
+Its existing pressed-HID state retains family on down/repeat/up. The physical
+V2 payload and legacy Map envelope both carry it, and legacy Map also carries
+HID identity alongside the target-native compatibility code. A single
+`keyboard_hid::keycode_for_peer` maps both paths. Native desktop capture, which
+reports no HID in rdev, is normalized by the stateless reverse mapper using
+actual native geometry; a per-peer injection override does not redefine the
+source hardware. Flutter fallback retains its supplied HID on every platform.
+The compatibility table is also used in reverse so PC conversion keys cannot
+become USB language-key aliases. Unknown native codes keep their raw fallback.
+Modifier swaps retain their
+native-code authority. Mac V2 receivers without family support use the legacy
+Map envelope so the sender's ISO/native mapping remains authoritative. Old
+receivers ignore the added fields; absent family preserves their existing
+behavior. Both ends need this implementation for explicit macOS keyboard type
+injection; the capability
+`physical_keyboard_family` identifies supported hosts.
+
+The macOS input queue captures metadata in the event, and the native constructor
+sets the CoreGraphics keyboard-type field (ANSI 40, ISO 41, JIS 42) before
+posting. It retains CombinedSessionState, Session posting, Enigo's input marker,
+and the pinned rdev key-up Fn workaround. Timeout cleanup retains family in the
+existing pressed-key owner. Text/IME injection and input authorization retain
+their existing paths. This avoids relying on an attached JIS host keyboard for
+physical punctuation such as Shift+caret (`~`) and IntlRo (`_`). It does not
+select or synchronize the host's language/IME.
+
+Validation covers protocol compatibility, mapping, pressed-key snapshots and
+non-posted CoreGraphics event fields. Actual Windows JIS-to-Mac delivery,
+including a host with its keyboard disconnected, remains a physical-device
+acceptance check. Native desktop grab ownership is still separate from the
+Flutter state machine; this change does not claim to finish that deferred merge.
 
 The mappings were checked against:
 
@@ -391,7 +437,7 @@ The remaining keyboard work does not yet:
 - implement iOS `UITextInput` or native `UIKey` adapters;
 - add a Keyboard V2 snapshot/reset protobuf message or protocol version;
 - add layout-specific AltGr synthesis or infer text from a QWERTY HID table;
-- change Windows, macOS, X11, or Wayland host injection;
+- change host injectors beyond the macOS physical-family path above;
 - synchronize, activate, or silently change the remote keyboard layout.
 
 Physical Shift combined with framework-provided text remains a deferred-

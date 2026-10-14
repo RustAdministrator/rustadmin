@@ -652,33 +652,13 @@ fn update_keyboard_input_sequence(
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn platform_keycode_from_usb_hid(usage: u32) -> Option<u32> {
-    use crate::keyboard_hid::{keycode_from_usb_hid, HidTarget};
-    #[cfg(target_os = "windows")]
-    {
-        return keycode_from_usb_hid(HidTarget::Windows, usage, |usage| {
-            rdev::usb_hid_code_to_win_scancode(usage as _).map(|code| code as u32)
-        });
-    }
-    #[cfg(target_os = "linux")]
-    {
-        return keycode_from_usb_hid(HidTarget::Linux, usage, |usage| {
-            rdev::usb_hid_code_to_linux_code(usage as _).map(|code| code as u32)
-        });
-    }
-    #[cfg(target_os = "macos")]
-    {
-        return keycode_from_usb_hid(HidTarget::MacOs, usage, |usage| {
-            let code = if hbb_common::config::LocalConfig::get_kb_layout_type() == "ISO" {
-                rdev::usb_hid_code_to_macos_iso_code(usage as _)
-            } else {
-                rdev::usb_hid_code_to_macos_code(usage as _)
-            };
-            code.map(|code| code as u32)
-        });
-    }
-    #[allow(unreachable_code)]
-    None
+fn platform_keycode_from_usb_hid(usage: u32, family: KeyboardFamily) -> Option<u32> {
+    let family = hbb_common::keyboard::resolve_keyboard_family(
+        hbb_common::keyboard::keyboard_family_preference(family),
+        family,
+        hbb_common::config::LocalConfig::get_kb_layout_type() == "ISO",
+    );
+    crate::keyboard_hid::keycode_for_peer(std::env::consts::OS, usage, family)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -713,9 +693,12 @@ fn add_keyboard_v2_lock_modifiers(event: &mut KeyEvent, key: &PhysicalKey) {
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn physical_key_to_key_event(key: &PhysicalKey) -> Option<KeyEvent> {
-    let code = platform_keycode_from_usb_hid(key.usb_hid_usage)?;
+    let code =
+        platform_keycode_from_usb_hid(key.usb_hid_usage, key.keyboard_family.enum_value().ok()?)?;
     let mut event = KeyEvent::new();
     event.set_chr(code);
+    event.keyboard_family = key.keyboard_family;
+    event.usb_hid_usage = key.usb_hid_usage;
     event.mode = KeyboardMode::Map.into();
     event.down = key.down;
     // Repeated physical key-downs must not become legacy `press`, which
@@ -4322,6 +4305,7 @@ impl Connection {
             keyboard: Some(KeyboardCapabilities {
                 protocol_version: hbb_common::keyboard::KEYBOARD_INPUT_PROTOCOL_VERSION,
                 committed_text: true,
+                physical_keyboard_family: cfg!(target_os = "macos"),
                 physical_key: cfg!(any(
                     target_os = "windows",
                     target_os = "linux",
@@ -4929,7 +4913,21 @@ impl Connection {
     }
 
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    fn dispatch_key_event(&mut self, me: KeyEvent, stateful_physical_key: bool) {
+    fn dispatch_key_event(&mut self, mut me: KeyEvent, stateful_physical_key: bool) {
+        if me.mode.enum_value_or_default() == KeyboardMode::Map {
+            let Ok(family) = me.keyboard_family.enum_value() else {
+                return;
+            };
+            if me.usb_hid_usage != 0 {
+                if !crate::keyboard_hid::valid_usage(me.usb_hid_usage) {
+                    return;
+                }
+                let Some(code) = platform_keycode_from_usb_hid(me.usb_hid_usage, family) else {
+                    return;
+                };
+                me.set_chr(code);
+            }
+        }
         if is_enter(&me) {
             CLICK_TIME.store(get_time(), Ordering::SeqCst);
         }
@@ -11898,13 +11896,13 @@ mod test {
         }
         #[cfg(target_os = "macos")]
         for usage in [0x88, 0x8a, 0x8b, 0x94] {
-            assert!(platform_keycode_from_usb_hid(usage).is_none());
+            assert!(platform_keycode_from_usb_hid(usage, KeyboardFamily::Unknown).is_none());
         }
     }
 
     #[test]
     fn keyboard_v2_maps_standard_hid_keys_and_lock_state() {
-        assert!(platform_keycode_from_usb_hid(0x04).is_some());
+        assert!(platform_keycode_from_usb_hid(0x04, KeyboardFamily::Unknown).is_some());
         assert!(platform_keycode_from_rdev_key(rdev::usb_hid_key_from_code(0xe0)).is_some());
         let event = physical_key_to_key_event(&PhysicalKey {
             usb_hid_usage: 0x04,

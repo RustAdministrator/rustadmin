@@ -120,6 +120,13 @@ class _SignedFpsCodec implements SettingCodec<double> {
 }
 
 abstract final class SessionPeerSettingsRegistry {
+  static const physicalKeyboardFamily = PeerOptionSetting<String>(
+    key: 'physical-keyboard-family',
+    codec: AllowedStringCodec(
+      defaultValue: 'auto',
+      allowedValues: {'auto', 'ansi', 'iso', 'jis'},
+    ),
+  );
   static const codecPreference = PeerOptionSetting<String>(
     key: kOptionCodecPreference,
     codec: AllowedStringCodec(
@@ -239,6 +246,7 @@ abstract final class SessionPeerSettingsRegistry {
   );
 
   static const all = <PeerOptionSetting<dynamic>>[
+    physicalKeyboardFamily,
     codecPreference,
     videoProfile,
     captureBackend,

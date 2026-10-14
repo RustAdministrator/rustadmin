@@ -1,3 +1,7 @@
+use hbb_common::message_proto::KeyboardFamily;
+
+pub(crate) const OPTION_KEYBOARD_FAMILY: &str = "physical-keyboard-family";
+
 #[derive(Clone, Copy)]
 pub(crate) enum HidTarget {
     Windows,
@@ -37,12 +41,176 @@ pub(crate) fn keycode_from_usb_hid(
     }
 }
 
+/// The sole HID-to-native mapping used by V2 and legacy Map transport.
+/// Family describes physical geometry, independently of language or IME.
+pub(crate) fn keycode_for_peer(platform: &str, usage: u32, family: KeyboardFamily) -> Option<u32> {
+    if platform.eq_ignore_ascii_case("windows") {
+        keycode_from_usb_hid(HidTarget::Windows, usage, |usage| {
+            rdev::usb_hid_code_to_win_scancode(usage).map(|code| code as u32)
+        })
+    } else if platform.eq_ignore_ascii_case("linux") {
+        keycode_from_usb_hid(HidTarget::Linux, usage, |usage| {
+            rdev::usb_hid_code_to_linux_code(usage).map(|code| code as u32)
+        })
+    } else if platform.eq_ignore_ascii_case("macos") {
+        keycode_from_usb_hid(HidTarget::MacOs, usage, |usage| {
+            let code = if family == KeyboardFamily::Iso {
+                rdev::usb_hid_code_to_macos_iso_code(usage)
+            } else {
+                rdev::usb_hid_code_to_macos_code(usage)
+            };
+            code.map(|code| code as u32)
+        })
+    } else if platform.eq_ignore_ascii_case("android") {
+        rdev::usb_hid_code_to_android_key_code(usage).map(|code| code as u32)
+    } else {
+        None
+    }
+}
+
+/// Explicit missing native mappings must not fall back to rdev's historical
+/// language-key aliases. Ordinary unknown usages can retain the raw-code path.
+pub(crate) fn explicitly_unmapped(platform: &str, usage: u32) -> bool {
+    let column = if platform.eq_ignore_ascii_case("windows") {
+        0
+    } else if platform.eq_ignore_ascii_case("linux") {
+        1
+    } else if platform.eq_ignore_ascii_case("macos") {
+        2
+    } else {
+        return false;
+    };
+    SPECIAL_KEYCODES
+        .iter()
+        .any(|row| row.0 == usage && row.1[column].is_none())
+}
+
+/// Normalize native hardware positions without using characters or language.
+/// Consult the same compatibility table in reverse before rdev's named keys,
+/// whose historical PC conversion-key aliases do not match USB LANG usages.
+pub(crate) fn usage_from_native(
+    target: HidTarget,
+    mut code: u32,
+    family: KeyboardFamily,
+) -> Option<u32> {
+    if matches!(target, HidTarget::MacOs) && family == KeyboardFamily::Iso {
+        code = match code {
+            10 => 50,
+            50 => 10,
+            _ => code,
+        };
+    }
+    if let Some((usage, _)) = SPECIAL_KEYCODES
+        .iter()
+        .find(|row| row.1[target as usize] == Some(code))
+    {
+        return Some(*usage);
+    }
+    let key = match target {
+        HidTarget::Windows => rdev::win_key_from_scancode(code),
+        HidTarget::Linux => rdev::linux_key_from_code(code),
+        HidTarget::MacOs => rdev::macos_key_from_code(u16::try_from(code).ok()?),
+    };
+    if matches!(key, rdev::Key::Unknown(_) | rdev::Key::RawKey(_)) {
+        return None;
+    }
+    rdev::usb_hid_keycode_from_key(key).filter(|usage| valid_usage(*usage))
+}
+
+pub(crate) fn valid_usage(usage: u32) -> bool {
+    (hbb_common::keyboard::MIN_USB_HID_KEYBOARD_USAGE
+        ..=hbb_common::keyboard::MAX_USB_HID_KEYBOARD_USAGE)
+        .contains(&usage)
+}
+
+pub(crate) fn detected_keyboard_family() -> KeyboardFamily {
+    #[cfg(target_os = "macos")]
+    {
+        return crate::platform::macos_keyboard::detected_keyboard_family();
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // GetKeyboardType(0) is a read-only Win32 query with no pointer inputs.
+        // Type 7 identifies Japanese hardware; other types do not distinguish
+        // ANSI from ISO reliably, so leave them to the saved override.
+        return if unsafe { winapi::um::winuser::GetKeyboardType(0) } == 7 {
+            KeyboardFamily::Jis
+        } else {
+            KeyboardFamily::Unknown
+        };
+    }
+    #[allow(unreachable_code)]
+    KeyboardFamily::Unknown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn mapped(target: HidTarget, usage: u32) -> Option<u32> {
         keycode_from_usb_hid(target, usage, |_| panic!("unexpected fallback"))
+    }
+
+    #[test]
+    fn jis_punctuation_has_one_mapping_for_all_physical_transports() {
+        for (usage, windows, macos) in [(0x2e, 0x0d, 24), (0x87, 0x73, 94), (0x89, 0x7d, 93)] {
+            assert_eq!(
+                keycode_for_peer("Windows", usage, KeyboardFamily::Jis),
+                Some(windows)
+            );
+            assert_eq!(
+                keycode_for_peer("macOS", usage, KeyboardFamily::Jis),
+                Some(macos)
+            );
+        }
+        assert_eq!(keycode_for_peer("macOS", 0x8a, KeyboardFamily::Jis), None);
+        assert_eq!(keycode_for_peer("macOS", 0x8b, KeyboardFamily::Jis), None);
+        assert!(valid_usage(0x87));
+        assert!(!valid_usage(0));
+        assert!(explicitly_unmapped("macOS", 0x8a));
+        assert!(explicitly_unmapped("macOS", 0x8b));
+        assert!(!explicitly_unmapped("macOS", 0xa0));
+        assert!(!explicitly_unmapped("Windows", 0x8a));
+    }
+
+    #[test]
+    fn native_positions_recover_hid_without_language_or_unknown_code_aliases() {
+        for (scan, usage) in [
+            (0x0d, 0x2e),
+            (0x73, 0x87),
+            (0x7d, 0x89),
+            (0x70, 0x88),
+            (0x79, 0x8a),
+            (0x7b, 0x8b),
+            (0xf2, 0x90),
+        ] {
+            assert_eq!(
+                usage_from_native(HidTarget::Windows, scan, KeyboardFamily::Jis),
+                Some(usage)
+            );
+        }
+        for (code, usage) in [(24, 0x2e), (94, 0x87), (93, 0x89), (104, 0x90), (102, 0x91)] {
+            assert_eq!(
+                usage_from_native(HidTarget::MacOs, code, KeyboardFamily::Jis),
+                Some(usage)
+            );
+        }
+        assert_eq!(
+            usage_from_native(HidTarget::MacOs, 10, KeyboardFamily::Iso),
+            Some(0x35)
+        );
+        assert_eq!(
+            usage_from_native(HidTarget::MacOs, 50, KeyboardFamily::Iso),
+            Some(0x64)
+        );
+        assert_eq!(
+            usage_from_native(HidTarget::MacOs, 0xffff, KeyboardFamily::Ansi),
+            None
+        );
+        assert_eq!(
+            usage_from_native(HidTarget::Windows, 0xffff, KeyboardFamily::Jis),
+            None
+        );
     }
 
     #[test]

@@ -1,225 +1,221 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
-import 'package:get/get.dart';
+import 'package:flutter_hbb/common/session_peer_settings.dart';
 import 'package:flutter_hbb/consts.dart';
-import 'package:flutter_svg/flutter_svg.dart';
-import 'package:flutter_hbb/models/platform_model.dart';
+import 'package:flutter_hbb/models/keyboard_intent.dart';
+import 'package:flutter_hbb/models/model.dart';
 
 import '../../common.dart';
 
-typedef KBChosenCallback = Future<bool> Function(String);
+const _kPhysicalKeyboardFamilyAuto = 'auto';
+const _kPhysicalKeyboardFamilyAnsi = 'ansi';
+const _kPhysicalKeyboardFamilyIso = 'iso';
+const _kPhysicalKeyboardFamilyJis = 'jis';
 
-const double _kImageMarginVertical = 6.0;
-const double _kImageMarginHorizontal = 10.0;
-const double _kImageBoarderWidth = 4.0;
-const double _kImagePaddingWidth = 4.0;
-const Color _kImageBorderColor = Color.fromARGB(125, 202, 247, 2);
-const double _kBorderRadius = 6.0;
-const String _kKBLayoutTypeISO = 'ISO';
-const String _kKBLayoutTypeNotISO = 'Not ISO';
+final class _PhysicalKeyboardFamilyOption {
+  const _PhysicalKeyboardFamilyOption({
+    required this.value,
+    required this.label,
+    required this.description,
+  });
 
-const _kKBLayoutImageMap = {
-  _kKBLayoutTypeISO: 'kb_layout_iso',
-  _kKBLayoutTypeNotISO: 'kb_layout_not_iso',
+  final String value;
+  final String label;
+  final String description;
+}
+
+const _physicalKeyboardFamilyOptions = [
+  _PhysicalKeyboardFamilyOption(
+    value: _kPhysicalKeyboardFamilyAuto,
+    label: 'Auto',
+    description:
+        'Use detected keyboard hardware; choose a type if detection is unavailable.',
+  ),
+  _PhysicalKeyboardFamilyOption(
+    value: _kPhysicalKeyboardFamilyAnsi,
+    label: 'ANSI',
+    description: 'Common US-style keyboard.',
+  ),
+  _PhysicalKeyboardFamilyOption(
+    value: _kPhysicalKeyboardFamilyIso,
+    label: 'ISO',
+    description: 'Common European-style keyboard.',
+  ),
+  _PhysicalKeyboardFamilyOption(
+    value: _kPhysicalKeyboardFamilyJis,
+    label: 'JIS',
+    description:
+        'Japanese keyboard, including remote Macs without an attached keyboard.',
+  ),
+];
+
+String physicalKeyboardFamilyLabel(String value) => switch (value) {
+  _kPhysicalKeyboardFamilyAnsi => 'ANSI',
+  _kPhysicalKeyboardFamilyIso => 'ISO',
+  _kPhysicalKeyboardFamilyJis => 'JIS',
+  _ => 'Auto',
 };
 
-class _KBImage extends StatelessWidget {
-  final String kbLayoutType;
-  final double imageWidth;
-  final RxString chosenType;
-  const _KBImage({
-    Key? key,
-    required this.kbLayoutType,
-    required this.imageWidth,
-    required this.chosenType,
-  }) : super(key: key);
+bool isPhysicalKeyboardFamilyChooserSupported(String peerPlatform) =>
+    peerPlatform == kPeerPlatformMacOS && (isDesktop || isWebDesktop);
 
-  @override
-  Widget build(BuildContext context) {
-    return Obx(() {
-      return Container(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(_kBorderRadius),
-          border: Border.all(
-            color: chosenType.value == kbLayoutType
-                ? _kImageBorderColor
-                : Colors.transparent,
-            width: _kImageBoarderWidth,
-          ),
-        ),
-        margin: EdgeInsets.symmetric(
-          horizontal: _kImageMarginHorizontal,
-          vertical: _kImageMarginVertical,
-        ),
-        padding: EdgeInsets.all(_kImagePaddingWidth),
-        child: SvgPicture.asset(
-          'assets/${_kKBLayoutImageMap[kbLayoutType] ?? ""}.svg',
-          width: imageWidth -
-              _kImageMarginHorizontal * 2 -
-              _kImagePaddingWidth * 2 -
-              _kImageBoarderWidth * 2,
-        ),
-      );
-    });
-  }
-}
-
-class _KBChooser extends StatelessWidget {
-  final String kbLayoutType;
-  final double imageWidth;
-  final RxString chosenType;
-  final KBChosenCallback cb;
-  const _KBChooser({
-    Key? key,
-    required this.kbLayoutType,
-    required this.imageWidth,
-    required this.chosenType,
-    required this.cb,
-  }) : super(key: key);
-
-  @override
-  Widget build(BuildContext context) {
-    onChanged(String? v) async {
-      if (v != null) {
-        if (await cb(v)) {
-          chosenType.value = v;
-        }
-      }
-    }
-
-    return Column(
-      children: [
-        TextButton(
-          onPressed: () {
-            onChanged(kbLayoutType);
-          },
-          child: _KBImage(
-            kbLayoutType: kbLayoutType,
-            imageWidth: imageWidth,
-            chosenType: chosenType,
-          ),
-          style: TextButton.styleFrom(padding: EdgeInsets.zero),
-        ),
-        TextButton(
-          child: Row(
-            children: [
-              Obx(() => Radio(
-                    splashRadius: 0,
-                    value: kbLayoutType,
-                    groupValue: chosenType.value,
-                    onChanged: onChanged,
-                  )),
-              Text(kbLayoutType),
-            ],
-          ),
-          onPressed: () {
-            onChanged(kbLayoutType);
-          },
-        ),
-      ],
-    );
-  }
-}
-
-class KBLayoutTypeChooser extends StatelessWidget {
-  final RxString chosenType;
-  final double width;
-  final double height;
-  final double dividerWidth;
-  final KBChosenCallback cb;
-  KBLayoutTypeChooser({
-    Key? key,
-    required this.chosenType,
-    required this.width,
-    required this.height,
-    required this.dividerWidth,
-    required this.cb,
-  }) : super(key: key);
-
-  @override
-  Widget build(BuildContext context) {
-    final imageWidth = width / 2 - dividerWidth;
-    return SizedBox(
-      width: width,
-      height: height,
-      child: Center(
-        child: Row(
-          children: [
-            _KBChooser(
-              kbLayoutType: _kKBLayoutTypeISO,
-              imageWidth: imageWidth,
-              chosenType: chosenType,
-              cb: cb,
-            ),
-            VerticalDivider(
-              width: dividerWidth * 2,
-            ),
-            _KBChooser(
-              kbLayoutType: _kKBLayoutTypeNotISO,
-              imageWidth: imageWidth,
-              chosenType: chosenType,
-              cb: cb,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-RxString KBLayoutType = ''.obs;
-
-String getLocalPlatformForKBLayoutType(String peerPlatform) {
-  String localPlatform = '';
-  if (peerPlatform != kPeerPlatformMacOS) {
-    return localPlatform;
-  }
-
-  if (isWindows) {
-    localPlatform = kPeerPlatformWindows;
-  } else if (isLinux) {
-    localPlatform = kPeerPlatformLinux;
-  } else if (isWebOnWindows || isWebOnLinux) {
-    localPlatform = kPeerPlatformWebDesktop;
-  }
-  return localPlatform;
-}
-
-showKBLayoutTypeChooserIfNeeded(
+/// Kept for callers that still invoke the old automatic chooser hook.
+void showKBLayoutTypeChooserIfNeeded(
   String peerPlatform,
   OverlayDialogManager dialogManager,
-) async {
-  final localPlatform = getLocalPlatformForKBLayoutType(peerPlatform);
-  if (localPlatform == '') {
-    return;
-  }
-  KBLayoutType.value = bind.getLocalKbLayoutType();
-  if (KBLayoutType.value == _kKBLayoutTypeISO ||
-      KBLayoutType.value == _kKBLayoutTypeNotISO) {
-    return;
-  }
-  showKBLayoutTypeChooser(localPlatform, dialogManager);
+) {}
+
+const _kPhysicalKeyboardFamilySessionInactive =
+    'The remote session is no longer active.';
+const _kPhysicalKeyboardFamilyUpdateFailed =
+    'Could not update the physical keyboard type. Please try again.';
+
+String _physicalKeyboardFamilyError(Object error, StackTrace stackTrace) {
+  debugPrint('Physical keyboard family update failed (${error.runtimeType})');
+  debugPrintStack(stackTrace: stackTrace);
+  return translate(_kPhysicalKeyboardFamilyUpdateFailed);
 }
 
-showKBLayoutTypeChooser(
-  String localPlatform,
-  OverlayDialogManager dialogManager,
-) {
-  dialogManager.show((setState, close, context) {
-    return CustomAlertDialog(
-      title:
-          Text('${translate('Select local keyboard type')} ($localPlatform)'),
-      content: KBLayoutTypeChooser(
-          chosenType: KBLayoutType,
-          width: 360,
-          height: 200,
-          dividerWidth: 4.0,
-          cb: (String v) async {
-            await bind.setLocalKbLayoutType(kbLayoutType: v);
-            KBLayoutType.value = bind.getLocalKbLayoutType();
-            return v == KBLayoutType.value;
-          }),
-      actions: [dialogButton('Close', onPressed: close)],
-      onCancel: close,
+Future<void> showPhysicalKeyboardFamilyChooser(FFI ffi) async {
+  final sessionId = ffi.sessionId;
+  if (!isPhysicalKeyboardFamilyChooserSupported(ffi.ffiModel.pi.platform) ||
+      !ffi.acceptsKeyboardModeChanges) {
+    return;
+  }
+
+  final dialogTag = '$sessionId-physical-keyboard-type';
+  if (ffi.dialogManager.hasDialog(dialogTag)) return;
+
+  final settings = SessionPeerSettingsRepository.forSession(sessionId);
+  var selected = _kPhysicalKeyboardFamilyAuto;
+  String? errorText;
+  try {
+    selected = await settings.readPeer(
+      SessionPeerSettingsRegistry.physicalKeyboardFamily,
     );
-  });
+  } catch (error, stackTrace) {
+    errorText = _physicalKeyboardFamilyError(error, stackTrace);
+  }
+  if (ffi.sessionId != sessionId || !ffi.acceptsKeyboardModeChanges) return;
+
+  var dialogActive = true;
+  var busy = false;
+  bool isDialogActive() =>
+      dialogActive && ffi.dialogManager.hasDialog(dialogTag);
+  bool isSessionActive() =>
+      ffi.sessionId == sessionId && ffi.acceptsKeyboardModeChanges;
+
+  try {
+    await ffi.dialogManager.show<void>((setState, close, context) {
+      void closeDialog([dynamic result]) {
+        dialogActive = false;
+        close(result);
+      }
+
+      Future<void> onChanged(String value) async {
+        if (busy || !isDialogActive()) return;
+        if (value == selected) return;
+        if (!isSessionActive()) {
+          errorText = translate(_kPhysicalKeyboardFamilySessionInactive);
+          if (isDialogActive()) setState(() {});
+          return;
+        }
+        busy = true;
+        errorText = null;
+        try {
+          if (isDialogActive()) setState(() {});
+          await ffi.inputModel.resetKeyboard(
+            KeyboardResetReason.inputModeChange,
+            invalidatePending: true,
+            allowBlockedReleases: true,
+          );
+          if (!isDialogActive()) return;
+          if (!isSessionActive()) {
+            errorText = translate(_kPhysicalKeyboardFamilySessionInactive);
+            return;
+          }
+          await settings.write(
+            SessionPeerSettingsRegistry.physicalKeyboardFamily,
+            value,
+          );
+          if (!isDialogActive()) return;
+          if (!isSessionActive()) {
+            errorText = translate(_kPhysicalKeyboardFamilySessionInactive);
+            return;
+          }
+          selected = value;
+        } catch (error, stackTrace) {
+          if (isDialogActive()) {
+            errorText = _physicalKeyboardFamilyError(error, stackTrace);
+          }
+        } finally {
+          busy = false;
+          if (isDialogActive()) setState(() {});
+        }
+      }
+
+      final canChange = !busy && isSessionActive() && isDialogActive();
+      return CustomAlertDialog(
+        title: Text(translate('Physical keyboard type')),
+        content: SizedBox(
+          width: 480,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                translate(
+                  'Choose the type of keyboard you use. This is saved for this computer and does not change its input language.',
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                translate(
+                  'Install the latest RustAdmin on the remote Mac to use this setting.',
+                ),
+              ),
+              const SizedBox(height: 12),
+              if (busy)
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 8),
+                  child: LinearProgressIndicator(),
+                ),
+              if (errorText != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    errorText!,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                ),
+              ..._physicalKeyboardFamilyOptions.map(
+                (option) => RadioListTile<String>(
+                  key: ValueKey('physical-keyboard-family-${option.value}'),
+                  value: option.value,
+                  groupValue: selected,
+                  title: Text(translate(option.label)),
+                  subtitle: Text(translate(option.description)),
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  onChanged: canChange
+                      ? (value) {
+                          if (value != null) unawaited(onChanged(value));
+                        }
+                      : null,
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [dialogButton('Close', onPressed: closeDialog)],
+        onCancel: closeDialog,
+      );
+    }, tag: dialogTag);
+  } catch (error, stackTrace) {
+    dialogActive = false;
+    _physicalKeyboardFamilyError(error, stackTrace);
+  }
 }

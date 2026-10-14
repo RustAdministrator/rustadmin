@@ -35,7 +35,7 @@ use serde_json::json;
 ))]
 use std::ffi::c_void;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     ops::{Deref, DerefMut},
     str::FromStr,
     sync::{
@@ -68,7 +68,36 @@ pub(crate) struct KeyboardInputSendState {
     round: u32,
     epoch: u64,
     sequence: u64,
-    pressed_hid_usages: HashSet<u32>,
+    pressed_hid_usages: HashMap<u32, KeyboardFamily>,
+    detected_family: Option<KeyboardFamily>,
+}
+
+impl KeyboardInputSendState {
+    // Extend the existing pressed-key owner: repeats and releases retain the
+    // family chosen on key-down, even if a preference/detected device changes.
+    fn physical_context(
+        &mut self,
+        usage: u32,
+        down: bool,
+        family: KeyboardFamily,
+    ) -> (bool, u32, KeyboardFamily) {
+        let (repeat, family) = if down {
+            let repeat = self.pressed_hid_usages.contains_key(&usage);
+            let family = *self.pressed_hid_usages.entry(usage).or_insert(family);
+            (repeat, family)
+        } else {
+            (
+                false,
+                self.pressed_hid_usages.remove(&usage).unwrap_or(family),
+            )
+        };
+        let mask = self
+            .pressed_hid_usages
+            .keys()
+            .filter_map(|usage| keyboard_v2_modifier_bit(*usage))
+            .fold(0, |mask, bit| mask | bit);
+        (repeat, mask, family)
+    }
 }
 
 fn legacy_soft_keyboard_physical_input(
@@ -142,7 +171,8 @@ fn keyboard_v2_modifier_bit(usage: u32) -> Option<u32> {
     }
 }
 
-fn keyboard_v2_modifier_mask(pressed: &HashSet<u32>) -> u32 {
+#[cfg(test)]
+fn keyboard_v2_modifier_mask(pressed: &std::collections::HashSet<u32>) -> u32 {
     pressed
         .iter()
         .filter_map(|usage| keyboard_v2_modifier_bit(*usage))
@@ -871,6 +901,11 @@ impl<T: InvokeUiSession> Session<T> {
         let mut lc = self.lc.write().unwrap();
         if k.eq("remote_dir") {
             v = lc.get_all_remote_dir(v);
+        } else if k == crate::keyboard_hid::OPTION_KEYBOARD_FAMILY {
+            v = hbb_common::keyboard::keyboard_family_preference(
+                hbb_common::keyboard::keyboard_family_from_preference(&v),
+            )
+            .to_owned();
         }
         lc.set_option(k, v);
     }
@@ -1006,7 +1041,36 @@ impl<T: InvokeUiSession> Session<T> {
         // mode: legacy(0), map(1), translate(2), auto(3)
 
         let mut msg = evt.clone();
+        if msg.mode.enum_value_or_default() == KeyboardMode::Map {
+            self.reset_keyboard_input_state_for_round();
+            let selected = self.physical_keyboard_family();
+            let family = if crate::keyboard_hid::valid_usage(msg.usb_hid_usage) {
+                self.keyboard_input_send_state
+                    .lock()
+                    .unwrap()
+                    .physical_context(msg.usb_hid_usage, msg.down, selected)
+                    .2
+            } else {
+                selected
+            };
+            msg.keyboard_family = family.into();
+            if crate::keyboard_hid::valid_usage(msg.usb_hid_usage) {
+                let Some(code) = crate::keyboard_hid::keycode_for_peer(
+                    &self.peer_platform(),
+                    msg.usb_hid_usage,
+                    family,
+                ) else {
+                    return;
+                };
+                msg.set_chr(code);
+            }
+        }
+        let native_code = msg.chr();
         self.swap_modifier_key(&mut msg);
+        // A modifier swap is already encoded in the target-native keycode.
+        if msg.chr() != native_code {
+            msg.usb_hid_usage = 0;
+        }
         let mut msg_out = Message::new();
         msg_out.set_key_event(msg);
         self.send(Data::Message(msg_out));
@@ -1216,14 +1280,44 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Message(message));
     }
 
-    fn try_send_physical_keyboard_v2(
-        &self,
-        usb_hid: i32,
-        lock_modes: i32,
-        down: bool,
-    ) -> bool {
+    fn physical_keyboard_family(&self) -> KeyboardFamily {
+        let preference = self.get_option(crate::keyboard_hid::OPTION_KEYBOARD_FAMILY.to_owned());
+        let explicit = hbb_common::keyboard::keyboard_family_from_preference(&preference);
+        if explicit != KeyboardFamily::Unknown {
+            return explicit;
+        }
+        hbb_common::keyboard::resolve_keyboard_family(
+            &preference,
+            self.native_keyboard_family(),
+            LocalConfig::get_kb_layout_type() == "ISO",
+        )
+    }
+
+    pub(crate) fn native_keyboard_family(&self) -> KeyboardFamily {
+        let cached = self
+            .keyboard_input_send_state
+            .lock()
+            .unwrap()
+            .detected_family;
+        match cached {
+            Some(family) => family,
+            None => {
+                // Native detection may marshal to the platform thread. Never
+                // hold the send-state lock while waiting for that thread.
+                let detected = crate::keyboard_hid::detected_keyboard_family();
+                *self
+                    .keyboard_input_send_state
+                    .lock()
+                    .unwrap()
+                    .detected_family
+                    .get_or_insert(detected)
+            }
+        }
+    }
+
+    fn try_send_physical_keyboard_v2(&self, usb_hid: i32, lock_modes: i32, down: bool) -> bool {
         self.reset_keyboard_input_state_for_round();
-        let Some(_) = self
+        let Some(capabilities) = self
             .keyboard_v2_capabilities()
             .filter(|capabilities| capabilities.physical_key)
         else {
@@ -1239,21 +1333,25 @@ impl<T: InvokeUiSession> Session<T> {
             return false;
         }
 
-        let (repeat, modifier_mask) = {
-            let mut state = self.keyboard_input_send_state.lock().unwrap();
-            let repeat = if down {
-                !state.pressed_hid_usages.insert(usage)
-            } else {
-                state.pressed_hid_usages.remove(&usage);
-                false
-            };
-            let modifier_mask = keyboard_v2_modifier_mask(&state.pressed_hid_usages);
-            (repeat, modifier_mask)
-        };
+        let selected = self.physical_keyboard_family();
+        if selected != KeyboardFamily::Unknown
+            && self.peer_platform().eq_ignore_ascii_case("macos")
+            && !capabilities.physical_keyboard_family
+        {
+            // Older Mac V2 hosts map HID using their own ISO preference.
+            // Legacy Map preserves the sender's already mapped native code.
+            return false;
+        }
+        let (repeat, modifier_mask, family) = self
+            .keyboard_input_send_state
+            .lock()
+            .unwrap()
+            .physical_context(usage, down, selected);
 
         let mut input = self.next_keyboard_input();
         input.set_physical_key(PhysicalKey {
             usb_hid_usage: usage,
+            keyboard_family: family.into(),
             down,
             repeat,
             modifier_mask,
@@ -1683,10 +1781,7 @@ impl<T: InvokeUiSession> Session<T> {
             platform_code,
             position_code: position_code as _,
             event_type,
-            #[cfg(any(target_os = "android", target_os = "ios"))]
             usb_hid: usb_hid as _,
-            #[cfg(not(any(target_os = "android", target_os = "ios")))]
-            usb_hid: 0,
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             extra_data: 0,
         };
@@ -3404,6 +3499,10 @@ mod mobile_soft_keyboard_tests {
             });
             let config = lc.get_config();
             config.info.platform = "Windows".to_owned();
+            config.options.insert(
+                crate::keyboard_hid::OPTION_KEYBOARD_FAMILY.to_owned(),
+                "ansi".to_owned(),
+            );
             config
                 .options
                 .insert(OPTION_KEYBOARD_INPUT_MODE_V2.to_owned(), mode.to_owned());
@@ -3467,6 +3566,99 @@ mod mobile_soft_keyboard_tests {
                 assert_eq!(key.usb_hid_usage, 0x04);
                 assert_eq!(key.down, down);
                 assert_eq!(key.repeat, repeat);
+            }
+            assert!(receiver.try_recv().is_err());
+        }
+    }
+
+    #[cfg(feature = "flutter")]
+    #[test]
+    fn keyboard_family_uses_legacy_native_codes_for_older_mac_v2_hosts() {
+        let (session, mut receiver) = text_session("physical", Some(KeyboardCapabilities {
+            protocol_version: hbb_common::keyboard::KEYBOARD_INPUT_PROTOCOL_VERSION,
+            physical_key: true,
+            ..Default::default()
+        }));
+        {
+            let mut lc = session.lc.write().unwrap();
+            let config = lc.get_config();
+            config.info.platform = "macOS".to_owned();
+            config.options.insert(crate::keyboard_hid::OPTION_KEYBOARD_FAMILY.to_owned(), "iso".to_owned());
+        }
+        session.handle_flutter_key_event("map", "", 0x64, 0, true);
+        let Data::Message(message) = receiver.try_recv().unwrap() else {
+            panic!("expected legacy keyboard message");
+        };
+        let Some(message::Union::KeyEvent(event)) = message.union else {
+            panic!("old Mac family support requires legacy native codes");
+        };
+        assert_eq!(event.mode.enum_value(), Ok(KeyboardMode::Map));
+        assert_eq!(event.chr(), crate::keyboard_hid::keycode_for_peer(
+            "macOS", 0x64, KeyboardFamily::Iso).unwrap());
+        assert_eq!(event.keyboard_family.enum_value(), Ok(KeyboardFamily::Iso));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[cfg(feature = "flutter")]
+    #[test]
+    fn keyboard_family_v2_and_legacy_map_share_jis_identity_and_release_context() {
+        for v2 in [true, false] {
+            let capabilities = v2.then(|| KeyboardCapabilities {
+                protocol_version: hbb_common::keyboard::KEYBOARD_INPUT_PROTOCOL_VERSION,
+                physical_key: true,
+                physical_keyboard_family: true,
+                ..Default::default()
+            });
+            let (session, mut receiver) = text_session("physical", capabilities);
+            {
+                let mut lc = session.lc.write().unwrap();
+                let config = lc.get_config();
+                config.info.platform = "macOS".to_owned();
+                config.options.insert(
+                    crate::keyboard_hid::OPTION_KEYBOARD_FAMILY.to_owned(),
+                    "jis".to_owned(),
+                );
+            }
+            for down in [true, false] {
+                if !down {
+                    session.lc.write().unwrap().get_config().options.insert(
+                        crate::keyboard_hid::OPTION_KEYBOARD_FAMILY.to_owned(),
+                        "ansi".to_owned(),
+                    );
+                }
+                // Ordinary punctuation (caret position) and IntlRo/underscore.
+                for (usage, code) in [(0x2e, 24), (0x87, 94), (0x89, 93)] {
+                    if v2 {
+                        assert!(session.try_send_physical_keyboard_v2(usage, 0, down));
+                    } else {
+                        let mut event = KeyEvent::new();
+                        event.mode = KeyboardMode::Map.into();
+                        event.usb_hid_usage = usage as u32;
+                        event.down = down;
+                        event.set_chr(0xffff); // Target code must come from the shared mapper.
+                        session.send_key_event(&event);
+                    }
+                    let Data::Message(message) = receiver.try_recv().unwrap() else {
+                        panic!("expected keyboard message");
+                    };
+                    match message.union {
+                        Some(message::Union::KeyboardInput(input)) if v2 => {
+                            let Some(keyboard_input::Union::PhysicalKey(key)) = input.union else {
+                                panic!("expected physical input");
+                            };
+                            assert_eq!(key.usb_hid_usage, usage as u32);
+                            assert_eq!(key.keyboard_family.enum_value(), Ok(KeyboardFamily::Jis));
+                            assert_eq!(key.down, down);
+                        }
+                        Some(message::Union::KeyEvent(event)) if !v2 => {
+                            assert_eq!(event.usb_hid_usage, usage as u32);
+                            assert_eq!(event.chr(), code);
+                            assert_eq!(event.keyboard_family.enum_value(), Ok(KeyboardFamily::Jis));
+                            assert_eq!(event.down, down);
+                        }
+                        _ => panic!("unexpected keyboard transport"),
+                    }
+                }
             }
             assert!(receiver.try_recv().is_err());
         }
@@ -3669,8 +3861,37 @@ mod mobile_soft_keyboard_tests {
     }
 
     #[test]
+    fn physical_family_stays_with_down_repeat_up_and_recovery() {
+        let mut state = KeyboardInputSendState::default();
+        assert_eq!(
+            state.physical_context(0xe1, true, KeyboardFamily::Jis),
+            (
+                false,
+                hbb_common::keyboard::KEYBOARD_MODIFIER_SHIFT,
+                KeyboardFamily::Jis
+            )
+        );
+        assert_eq!(
+            state.physical_context(0xe1, true, KeyboardFamily::Ansi),
+            (
+                true,
+                hbb_common::keyboard::KEYBOARD_MODIFIER_SHIFT,
+                KeyboardFamily::Jis
+            )
+        );
+        assert_eq!(
+            state.physical_context(0xe1, false, KeyboardFamily::Iso),
+            (false, 0, KeyboardFamily::Jis)
+        );
+        assert_eq!(
+            state.physical_context(0xe1, true, KeyboardFamily::Iso).2,
+            KeyboardFamily::Iso
+        );
+    }
+
+    #[test]
     fn keyboard_v2_normalizes_hid_modifier_and_lock_state() {
-        let pressed = HashSet::from([0xe0, 0xe5, 0x04]);
+        let pressed = std::collections::HashSet::from([0xe0, 0xe5, 0x04]);
         assert_eq!(
             keyboard_v2_modifier_mask(&pressed),
             hbb_common::keyboard::KEYBOARD_MODIFIER_CONTROL

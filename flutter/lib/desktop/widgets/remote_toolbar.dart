@@ -2829,24 +2829,35 @@ class _KeyboardMenu extends StatelessWidget {
     });
   }
 
-  localKeyboardType() {
-    final localPlatform = getLocalPlatformForKBLayoutType(pi.platform);
-    final visible = localPlatform != '';
-    if (!visible) return Offstage();
+  Widget localKeyboardType() {
+    if (!isPhysicalKeyboardFamilyChooserSupported(pi.platform)) {
+      return const Offstage();
+    }
     final enabled = !ffi.ffiModel.viewOnly;
-    return Column(
-      children: [
-        Divider(),
-        MenuButton(
-          child: Text(
-              '${translate('Local keyboard type')}: ${KBLayoutType.value}'),
-          trailingIcon: const Icon(Icons.settings),
-          ffi: ffi,
-          onPressed: enabled
-              ? () => showKBLayoutTypeChooser(localPlatform, ffi.dialogManager)
-              : null,
-        )
-      ],
+    final settings = SessionPeerSettingsRepository.forSession(ffi.sessionId);
+    return futureBuilder(
+      future: settings.readPeer(
+        SessionPeerSettingsRegistry.physicalKeyboardFamily,
+      ),
+      hasData: (data) {
+        final family = data as String;
+        return Column(
+          children: [
+            Divider(),
+            MenuButton(
+              child: Text(
+                '${translate('Physical keyboard type')}: '
+                '${translate(physicalKeyboardFamilyLabel(family))}',
+              ),
+              trailingIcon: const Icon(Icons.settings),
+              ffi: ffi,
+              onPressed: enabled
+                  ? () => showPhysicalKeyboardFamilyChooser(ffi)
+                  : null,
+            ),
+          ],
+        );
+      },
     );
   }
 
