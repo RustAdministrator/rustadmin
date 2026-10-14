@@ -663,8 +663,20 @@ private final class ProbeTextView: NSTextView {
     }
 }
 
+private func visualizerLayoutURL() -> URL {
+    if let path = ProcessInfo.processInfo.environment["RUSTADMIN_KEYBOARD_LAYOUTS_PATH"] {
+        return URL(fileURLWithPath: path)
+    }
+    if let resource = Bundle.main.url(forResource: "macos_keyboard_layouts", withExtension: "json") {
+        return resource
+    }
+    return URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        .appendingPathComponent("macos_keyboard_layouts.json")
+}
+
 private final class ProbeWindowController: NSWindowController, NSWindowDelegate {
     private let reporter: JSONReporter
+    private let visualizer: KeyboardVisualizerController
     private let inputView = ProbeTextView(frame: .zero)
     private let logView = NSTextView(frame: .zero)
     private var eventMonitor: Any?
@@ -672,18 +684,28 @@ private final class ProbeWindowController: NSWindowController, NSWindowDelegate 
     private var logLines: [String] = []
     private var sequence = 0
 
-    init(reporter: JSONReporter) {
+    init(reporter: JSONReporter) throws {
         self.reporter = reporter
+        visualizer = try KeyboardVisualizerController(layoutURL: visualizerLayoutURL())
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 860, height: 680),
+            contentRect: NSRect(x: 0, y: 0, width: 1140, height: 850),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.title = "RustAdmin macOS Keyboard Probe"
-        window.contentMinSize = NSSize(width: 620, height: 500)
+        window.title = "RustAdmin Keyboard Analyzer"
+        window.contentMinSize = NSSize(width: 1020, height: 760)
         super.init(window: window)
         window.delegate = self
+        visualizer.onReset = { [weak self] in
+            guard let self else { return }
+            self.inputView.string = ""
+            self.logLines.removeAll(keepingCapacity: true)
+            self.logView.string = ""
+            self.emit(["type": "test_reset", "input_source": currentInputSource().jsonObject])
+            self.window?.makeFirstResponder(self.inputView)
+        }
+        visualizer.onAnnotation = { [weak self] event in self?.emit(event) }
         configureWindow()
     }
 
@@ -740,7 +762,7 @@ private final class ProbeWindowController: NSWindowController, NSWindowDelegate 
         guard let contentView = window?.contentView else { return }
 
         let instructions = NSTextField(
-            labelWithString: "Press keys or combinations in the box. The log shows key codes and modifiers even when no text appears. Stdout is JSONL."
+            labelWithString: "Press keys in the typing box to highlight them. Click a drawn key for details. A checkmark means a press was observed; it does not verify remote input."
         )
         instructions.lineBreakMode = .byWordWrapping
         instructions.maximumNumberOfLines = 2
@@ -778,7 +800,9 @@ private final class ProbeWindowController: NSWindowController, NSWindowDelegate 
         inputScroll.autohidesScrollers = true
         inputScroll.documentView = inputView
 
-        let logTitle = NSTextField(labelWithString: "Human-readable event log")
+        let inputTitle = NSTextField(labelWithString: "Typing test — actual text and input-method composition")
+        inputTitle.font = NSFont.boldSystemFont(ofSize: 12)
+        let logTitle = NSTextField(labelWithString: "Event details — native codes, modifiers and Unicode")
         logTitle.font = NSFont.boldSystemFont(ofSize: 12)
 
         logView.isEditable = false
@@ -798,9 +822,9 @@ private final class ProbeWindowController: NSWindowController, NSWindowDelegate 
         logScroll.autohidesScrollers = true
         logScroll.documentView = logView
 
-        let stack = NSStackView(views: [instructions, inputScroll, logTitle, logScroll])
+        let stack = NSStackView(views: [instructions, visualizer.view, inputTitle, inputScroll, logTitle, logScroll])
         stack.orientation = .vertical
-        stack.alignment = .width
+        stack.alignment = .leading
         stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(stack)
@@ -810,9 +834,13 @@ private final class ProbeWindowController: NSWindowController, NSWindowDelegate 
             stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
             stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 16),
             stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16),
-            inputScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 120),
-            logScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 250)
+            visualizer.view.heightAnchor.constraint(equalToConstant: 400),
+            inputScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 90),
+            logScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 100)
         ])
+        for section in [instructions, visualizer.view, inputTitle, inputScroll, logTitle, logScroll] {
+            section.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
+        }
     }
 
     private func installLocalMonitor() {
@@ -903,6 +931,7 @@ private final class ProbeWindowController: NSWindowController, NSWindowDelegate 
         sequence += 1
         var event = object
         event["sequence"] = sequence
+        visualizer.observe(event)
         reporter.emit(event)
     }
 
@@ -931,9 +960,15 @@ private final class ProbeApplicationDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         installMenu()
-        let controller = ProbeWindowController(reporter: reporter)
-        self.controller = controller
-        controller.start()
+        do {
+            let controller = try ProbeWindowController(reporter: reporter)
+            self.controller = controller
+            controller.start()
+        } catch {
+            fputs("macos_keyboard_probe: \(error.localizedDescription)\n", stderr)
+            NSAlert(error: error).runModal()
+            NSApp.terminate(nil)
+        }
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
@@ -1277,6 +1312,12 @@ private func runSelfTest() -> Int {
         return 1
     }
 
+    do {
+        try KeyboardVisualizerController.runSelfTests(layoutURL: visualizerLayoutURL())
+    } catch {
+        fputs("visual keyboard self-test failed: \(error)\n", stderr)
+        return 1
+    }
     print("macos_keyboard_probe self-test: ok")
     return 0
 }

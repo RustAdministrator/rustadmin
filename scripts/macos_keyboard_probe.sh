@@ -23,6 +23,8 @@ fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source_file="$script_dir/macos_keyboard_probe.swift"
+visualizer_file="$script_dir/macos_keyboard_visualizer.swift"
+layouts_file="$script_dir/macos_keyboard_layouts.json"
 
 command -v xcrun >/dev/null 2>&1 || {
   echo "xcrun is required to compile the macOS keyboard probe" >&2
@@ -32,6 +34,12 @@ command -v xcrun >/dev/null 2>&1 || {
   echo "Probe source does not exist: $source_file" >&2
   exit 1
 }
+for dependency in "$visualizer_file" "$layouts_file"; do
+  [[ -f "$dependency" ]] || {
+    echo "Probe dependency does not exist: $dependency" >&2
+    exit 1
+  }
+done
 
 architecture="${RUSTADMIN_MACOS_PROBE_ARCH:-$(uname -m)}"
 case "$architecture" in
@@ -50,6 +58,8 @@ cleanup() {
 trap cleanup EXIT
 
 probe_binary="$build_dir/macos_keyboard_probe"
+cp -- "$source_file" "$build_dir/main.swift"
+cp -- "$layouts_file" "$build_dir/macos_keyboard_layouts.json"
 xcrun swiftc \
   -swift-version 5 \
   -target "$architecture-apple-macos12.0" \
@@ -57,7 +67,8 @@ xcrun swiftc \
   -framework AppKit \
   -framework Carbon \
   -framework CoreGraphics \
-  "$source_file" \
+  "$build_dir/main.swift" \
+  "$visualizer_file" \
   -o "$probe_binary"
 
-"$probe_binary" "$@"
+RUSTADMIN_KEYBOARD_LAYOUTS_PATH="$build_dir/macos_keyboard_layouts.json" "$probe_binary" "$@"

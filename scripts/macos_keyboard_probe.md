@@ -1,4 +1,4 @@
-# macOS JIS keyboard probe
+# macOS keyboard analyzer
 
 `macos_keyboard_probe.sh` builds a small native AppKit diagnostic into a private
 temporary directory, launches its foreground window, and removes the temporary
@@ -12,12 +12,66 @@ Run it from the main `rustadmin` repository:
 scripts/macos_keyboard_probe.sh
 ```
 
-The window has a typing box and a bounded human-readable event log. Focus the
-typing box before testing. Key capture is paused whenever the probe window loses
-focus or the application is inactive. The local monitor admits a windowless
-AppKit key event only while the probe application is active and its window is the
+The window has a visual keyboard, an unknown/extra-key list, a typing box, and a
+bounded event log. Focus the typing box before testing. Key capture is paused
+whenever the probe window loses focus or the application is inactive. The local
+monitor admits a windowless AppKit key event only while the probe application
+is active and its window is the
 current key window; an event explicitly attached to another window is rejected.
 Close the window or choose **Quit Keyboard Probe** from the menu to finish.
+
+## Visual keyboard and test progress
+
+The keyboard drawing distinguishes keys that have not been observed, keys held
+down now, and keys with an observed press. A checkmark records a press in this
+test; it does not prove that the key produces the expected character or that a
+remote computer received it. Repeated key-down events have a separate repeat
+count. Losing focus clears held-key highlights while keeping test progress.
+
+The automatic family selection uses the native ANSI/ISO/JIS metadata. Select a
+family manually if the suggested drawing is wrong. Choose the MacBook, compact,
+or full-size shape to match the physical keyboard. Physical shape and the
+selected language/input method are independent: Japanese input can be used on
+an ANSI keyboard. The drawings are generic templates, not automatic detection
+of the exact keyboard model.
+
+Click a drawn key to inspect its native identity, observed characters, Unicode,
+modifiers, and counts. The text in the typing box is the actual native text,
+including input-method composition. Neither a key's printed legend nor a custom
+name is used to infer the character produced by an event.
+
+## Unknown keys and keyboard profiles
+
+An event that has no position in the selected drawing appears in the unknown /
+extra-key list. Recognized controls such as volume keys are extra keys; an
+unrecognized native code keeps an automatic numeric name. Ordinary keyboard
+codes and media codes have separate identities, even when their numbers match.
+
+Use **Rename selected** to add a personal label. To place an unknown entry on the
+drawing, select the entry, choose **Assign selected: click key**, then click its
+position on the keyboard. These are display annotations. They preserve the
+original codes and text in diagnostics and do not change RustAdmin input routing.
+
+Use **Save profile** to keep the chosen template, labels, and assignments;
+choose **Load profile** to reuse them in another session. Invalid or unsupported
+profiles show an error and leave the current profile intact. Profiles are saved explicitly;
+the analyzer does not install a system keyboard layout.
+
+## Reports and reset
+
+Use **Save report** to export session metadata, the current keyboard profile,
+key observations, and retained native event records as JSON. The retained
+history retains at most 4,096 records or 4 MiB of encoded events; the report
+identifies records omitted by that limit.
+Stdout continues to contain the complete sequence of JSON Lines as events
+arrive, so redirect stdout when a complete long-session trace is needed.
+
+Use **Reset test** to clear progress, held states, the typing box, and retained
+test events while keeping the keyboard profile. Focus returns to the typing
+box. Custom names and assignments are included in the report separately from
+the original native event records.
+
+## Native event records
 
 The probe writes one JSON object per line to stdout and flushes after each line.
 Redirect stdout when a machine-readable record is useful:
