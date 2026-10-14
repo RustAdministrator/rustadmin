@@ -109,7 +109,7 @@ pub(crate) fn usage_from_native(
     let key = match target {
         HidTarget::Windows => rdev::win_key_from_scancode(code),
         HidTarget::Linux => rdev::linux_key_from_code(code),
-        HidTarget::MacOs => rdev::macos_key_from_code(u16::try_from(code).ok()?),
+        HidTarget::MacOs => rdev::macos_key_from_code(u16::try_from(code).ok()?.into()),
     };
     if matches!(key, rdev::Key::Unknown(_) | rdev::Key::RawKey(_)) {
         return None;
@@ -211,6 +211,16 @@ mod tests {
             usage_from_native(HidTarget::Windows, 0xffff, KeyboardFamily::Jis),
             None
         );
+    }
+
+    #[test]
+    fn macos_rejects_codes_that_do_not_fit_the_native_keycode_alias() {
+        for (code, expected_usage) in [(24, Some(0x2e)), (0x10018, None), (u32::MAX, None)] {
+            assert_eq!(
+                usage_from_native(HidTarget::MacOs, code, KeyboardFamily::Jis),
+                expected_usage
+            );
+        }
     }
 
     #[test]
