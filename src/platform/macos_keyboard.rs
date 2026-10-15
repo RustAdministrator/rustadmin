@@ -4,6 +4,7 @@ use core_graphics::{
     event::{CGEvent, CGEventFlags, CGKeyCode, EventField},
     event_source::CGEventSource,
 };
+use foreign_types::ForeignType;
 use hbb_common::{keyboard::macos_keyboard_type, message_proto::KeyboardFamily};
 
 // These are the Carbon OSType values for the physical layouts declared in the
@@ -17,6 +18,24 @@ const K_KEYBOARD_ISO: u32 = u32::from_be_bytes(*b"ISO ");
 extern "C" {
     fn LMGetKbdType() -> u8;
     fn KBGetLayoutType(keyboard_type: i16) -> u32;
+}
+
+#[allow(improper_ctypes, non_snake_case)]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGEventSourceSetKeyboardType(
+        source: core_graphics::sys::CGEventSourceRef,
+        keyboard_type: u32,
+    );
+}
+
+/// Set the keyboard type used while CoreGraphics constructs an event.
+fn set_source_keyboard_type(source: &CGEventSource, keyboard_type: u32) {
+    // SAFETY: `source.as_ptr()` is the live `CGEventSourceRef` owned by the
+    // caller. CoreGraphics accepts that opaque pointer and the `u32` matches
+    // its `CGEventSourceKeyboardType` parameter. The source remains alive for
+    // the duration of this call.
+    unsafe { CGEventSourceSetKeyboardType(source.as_ptr(), keyboard_type) };
 }
 
 fn family_for_layout_type(layout_type: u32) -> KeyboardFamily {
@@ -92,28 +111,27 @@ fn apply_key_up_flag_workaround(event: &CGEvent, code: CGKeyCode) {
     event.set_flags(event.get_flags() & !flags_to_clear);
 }
 
-/// Construct a physical keyboard event without posting it or changing source state.
+/// Construct a physical keyboard event without posting it.
 ///
-/// The keyboard type is written on the event only when the family is known.
-/// Unknown therefore preserves CoreGraphics' baseline field. The key-up flag
-/// cleanup matches the pinned rdev macOS behavior; key-down flags are untouched.
+/// For a known family, configure the caller-owned source before construction;
+/// the input owner supplies one source per family, so this source-local change
+/// cannot overwrite another family's source. Unknown preserves CoreGraphics'
+/// baseline source. The key-up flag cleanup matches the pinned rdev macOS
+/// behavior; key-down flags are untouched.
 pub(crate) fn new_physical_key_event(
     source: CGEventSource,
     code: u16,
     down: bool,
     family: KeyboardFamily,
 ) -> Result<CGEvent, ()> {
+    if let Some(keyboard_type) = macos_keyboard_type(family) {
+        set_source_keyboard_type(&source, keyboard_type);
+    }
+
     let event = CGEvent::new_keyboard_event(source, code, down)?;
 
     if !down {
         apply_key_up_flag_workaround(&event, code);
-    }
-
-    if let Some(keyboard_type) = macos_keyboard_type(family) {
-        event.set_integer_value_field(
-            EventField::KEYBOARD_EVENT_KEYBOARD_TYPE,
-            i64::from(keyboard_type),
-        );
     }
 
     event.set_integer_value_field(
@@ -130,6 +148,64 @@ mod tests {
         event::CGEventType,
         event_source::{CGEventSource, CGEventSourceStateID},
     };
+
+    const UNICODE_BUFFER_LENGTH: usize = 32;
+
+    #[allow(non_snake_case)]
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventKeyboardGetUnicodeString(
+            event: core_graphics::sys::CGEventRef,
+            max_string_length: libc::c_ulong,
+            actual_string_length: *mut libc::c_ulong,
+            unicode_string: *mut u16,
+        );
+    }
+
+    fn unicode_payload(event: &CGEvent) -> String {
+        let mut buffer = [0_u16; UNICODE_BUFFER_LENGTH];
+        let mut actual_string_length = 0;
+        // SAFETY: `event.as_ptr()` refers to the live event for this call;
+        // `buffer` has the advertised bounded capacity and the output count
+        // points to writable storage of the exact CoreGraphics type.
+        unsafe {
+            CGEventKeyboardGetUnicodeString(
+                event.as_ptr(),
+                buffer.len() as libc::c_ulong,
+                &mut actual_string_length,
+                buffer.as_mut_ptr(),
+            );
+        }
+        let actual_string_length = usize::try_from(actual_string_length)
+            .expect("CoreGraphics Unicode length should fit in usize");
+        assert!(actual_string_length <= buffer.len());
+        String::from_utf16(&buffer[..actual_string_length])
+            .expect("CoreGraphics should return valid UTF-16")
+    }
+
+    fn native_reference_event(source: CGEventSource, code: u16, family: KeyboardFamily) -> CGEvent {
+        let keyboard_type = macos_keyboard_type(family)
+            .expect("native reference is only used for a known keyboard family");
+        set_source_keyboard_type(&source, keyboard_type);
+        CGEvent::new_keyboard_event(source, code, true)
+            .expect("CoreGraphics keyboard event should be constructible")
+    }
+
+    fn event_with_event_only_keyboard_type(code: u16, family: KeyboardFamily) -> CGEvent {
+        let source_keyboard_type = macos_keyboard_type(KeyboardFamily::Ansi)
+            .expect("event-only baseline requires the ANSI keyboard type");
+        let event_keyboard_type = macos_keyboard_type(family)
+            .expect("event-only regression is only used for a known keyboard family");
+        let source = new_combined_source();
+        set_source_keyboard_type(&source, source_keyboard_type);
+        let event = CGEvent::new_keyboard_event(source, code, true)
+            .expect("CoreGraphics keyboard event should be constructible");
+        event.set_integer_value_field(
+            EventField::KEYBOARD_EVENT_KEYBOARD_TYPE,
+            i64::from(event_keyboard_type),
+        );
+        event
+    }
 
     #[test]
     fn carbon_family_values_are_distinct_from_cg_keyboard_types() {
@@ -159,6 +235,11 @@ mod tests {
     fn new_source() -> CGEventSource {
         CGEventSource::new(CGEventSourceStateID::HIDSystemState)
             .expect("CoreGraphics HID event source should be constructible")
+    }
+
+    fn new_combined_source() -> CGEventSource {
+        CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+            .expect("CoreGraphics combined-session event source should be constructible")
     }
 
     #[test]
@@ -202,6 +283,96 @@ mod tests {
                     enigo::ENIGO_INPUT_EXTRA_VALUE
                 );
             }
+        }
+    }
+
+    #[test]
+    fn source_keyboard_type_controls_native_unicode_payload() {
+        for (family, code) in [
+            (KeyboardFamily::Ansi, 24),
+            (KeyboardFamily::Iso, 24),
+            (KeyboardFamily::Jis, 24),
+            (KeyboardFamily::Ansi, 94),
+            (KeyboardFamily::Iso, 94),
+            (KeyboardFamily::Jis, 94),
+        ] {
+            let event = new_physical_key_event(new_combined_source(), code, true, family)
+                .expect("CoreGraphics keyboard event should be constructible");
+            let reference = native_reference_event(new_combined_source(), code, family);
+
+            assert_eq!(unicode_payload(&event), unicode_payload(&reference));
+            assert_eq!(
+                event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYBOARD_TYPE),
+                i64::from(
+                    macos_keyboard_type(family)
+                        .expect("native payload test uses a known keyboard family"),
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn event_only_keyboard_type_preserves_ansi_source_payload() {
+        let jis_keyboard_type = macos_keyboard_type(KeyboardFamily::Jis)
+            .expect("event-only regression requires the JIS keyboard type");
+        for code in [24, 94] {
+            let event = event_with_event_only_keyboard_type(code, KeyboardFamily::Jis);
+            let reference =
+                native_reference_event(new_combined_source(), code, KeyboardFamily::Ansi);
+
+            assert_eq!(
+                event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYBOARD_TYPE),
+                i64::from(jis_keyboard_type)
+            );
+            assert_eq!(unicode_payload(&event), unicode_payload(&reference));
+        }
+    }
+
+    #[test]
+    fn independent_family_sources_retain_interleaved_payloads() {
+        let jis_source = new_combined_source();
+        let ansi_source = new_combined_source();
+        let cases = [
+            (KeyboardFamily::Jis, 94),
+            (KeyboardFamily::Ansi, 24),
+            (KeyboardFamily::Jis, 24),
+            (KeyboardFamily::Ansi, 24),
+            (KeyboardFamily::Jis, 94),
+        ];
+
+        let expected_payloads: Vec<String> = cases
+            .iter()
+            .map(|&(family, code)| {
+                let reference = native_reference_event(new_combined_source(), code, family);
+                unicode_payload(&reference)
+            })
+            .collect();
+
+        let mut events = Vec::with_capacity(cases.len());
+        for &(family, code) in &cases {
+            let source = match family {
+                KeyboardFamily::Ansi => &ansi_source,
+                KeyboardFamily::Jis => &jis_source,
+                _ => unreachable!("interleave cases only use ANSI and JIS sources"),
+            };
+            let event = new_physical_key_event((*source).clone(), code, true, family)
+                .expect("CoreGraphics keyboard event should be constructible");
+            events.push((event, family, code));
+        }
+
+        for ((event, family, code), expected_payload) in events.into_iter().zip(expected_payloads) {
+            assert_eq!(
+                event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
+                i64::from(code)
+            );
+            assert_eq!(
+                event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYBOARD_TYPE),
+                i64::from(
+                    macos_keyboard_type(family)
+                        .expect("interleave cases use known keyboard families"),
+                )
+            );
+            assert_eq!(unicode_payload(&event), expected_payload);
         }
     }
 

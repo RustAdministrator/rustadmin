@@ -766,16 +766,21 @@ lazy_static::lazy_static! {
 struct VirtualInputState {
     virtual_input: VirtualInput,
     capslock_down: bool,
-    physical_source: core_graphics::event_source::CGEventSource,
+    // Each reusable source is confined to one keyboard family. Its type is
+    // configured before event construction without changing other sessions.
+    physical_sources: [core_graphics::event_source::CGEventSource; 3],
 }
 
 #[cfg(target_os = "macos")]
 impl VirtualInputState {
     fn new() -> Option<Self> {
-        let physical_source = core_graphics::event_source::CGEventSource::new(
-            CGEventSourceStateID::CombinedSessionState,
-        )
-        .ok()?;
+        let new_source = || {
+            core_graphics::event_source::CGEventSource::new(
+                CGEventSourceStateID::CombinedSessionState,
+            )
+            .ok()
+        };
+        let physical_sources = [new_source()?, new_source()?, new_source()?];
         VirtualInput::new(
             CGEventSourceStateID::CombinedSessionState,
             // Note: `CGEventTapLocation::Session` will be affected by the mouse events.
@@ -796,14 +801,20 @@ impl VirtualInputState {
         .map(|virtual_input| Self {
             virtual_input,
             capslock_down: false,
-            physical_source,
+            physical_sources,
         })
         .ok()
     }
 
     fn simulate_physical(&self, code: u16, down: bool, family: KeyboardFamily) -> ResultType<()> {
+        let source = match family {
+            KeyboardFamily::Ansi => &self.physical_sources[0],
+            KeyboardFamily::Iso => &self.physical_sources[1],
+            KeyboardFamily::Jis => &self.physical_sources[2],
+            KeyboardFamily::Unknown => hbb_common::bail!("Physical keyboard family is missing"),
+        };
         let event = crate::platform::macos_keyboard::new_physical_key_event(
-            self.physical_source.clone(),
+            source.clone(),
             code,
             down,
             family,

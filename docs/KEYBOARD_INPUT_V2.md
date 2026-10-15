@@ -348,9 +348,13 @@ behavior. Both ends need this implementation for explicit macOS keyboard type
 injection; the capability
 `physical_keyboard_family` identifies supported hosts.
 
-The macOS input queue captures metadata in the event, and the native constructor
-sets the CoreGraphics keyboard-type field (ANSI 40, ISO 41, JIS 42) before
-posting. It retains CombinedSessionState, Session posting, Enigo's input marker,
+The macOS input queue captures metadata in the event. The native input owner
+keeps distinct reusable sources for ANSI, ISO and JIS. Before constructing a
+physical event, it configures that source's keyboard type (40, 41 or 42), so
+CoreGraphics generates the matching character payload as well as metadata.
+Changing only the completed event's keyboard-type field leaves the old source's
+text payload intact and is insufficient. It retains CombinedSessionState,
+Session posting, Enigo's input marker,
 and the pinned rdev key-up Fn workaround. Timeout cleanup retains family in the
 existing pressed-key owner. Text/IME injection and input authorization retain
 their existing paths. This avoids relying on an attached JIS host keyboard for
@@ -358,7 +362,8 @@ physical punctuation such as Shift+caret (`~`) and IntlRo (`_`). It does not
 select or synchronize the host's language/IME.
 
 Validation covers protocol compatibility, mapping, pressed-key snapshots and
-non-posted CoreGraphics event fields. Actual Windows JIS-to-Mac delivery,
+non-posted CoreGraphics event fields and character payloads, including retained
+events from alternating ANSI/JIS sources. Actual Windows JIS-to-Mac delivery,
 including a host with its keyboard disconnected, remains a physical-device
 acceptance check. Native desktop grab ownership is still separate from the
 Flutter state machine; this change does not claim to finish that deferred merge.
