@@ -3,6 +3,16 @@ import 'package:uuid/uuid.dart';
 import '../models/platform_model.dart';
 import 'remote_toolbar_settings.dart';
 
+const kOptionLocalLanguageShortcuts = 'local-language-shortcuts';
+const kLocalLanguageShortcutsAuto = 'auto';
+const kLocalLanguageShortcutsEnabled = 'enabled';
+const kLocalLanguageShortcutsDisabled = 'disabled';
+const kLocalLanguageShortcutsValues = <String>{
+  kLocalLanguageShortcutsAuto,
+  kLocalLanguageShortcutsEnabled,
+  kLocalLanguageShortcutsDisabled,
+};
+
 class PeerOptionSetting<T> implements SettingDefinition<T> {
   const PeerOptionSetting({
     required this.key,
@@ -120,6 +130,13 @@ class _SignedFpsCodec implements SettingCodec<double> {
 }
 
 abstract final class SessionPeerSettingsRegistry {
+  static const localLanguageShortcuts = PeerOptionSetting<String>(
+    key: kOptionLocalLanguageShortcuts,
+    codec: AllowedStringCodec(
+      defaultValue: kLocalLanguageShortcutsAuto,
+      allowedValues: kLocalLanguageShortcutsValues,
+    ),
+  );
   static const physicalKeyboardFamily = PeerOptionSetting<String>(
     key: 'physical-keyboard-family',
     codec: AllowedStringCodec(
@@ -246,6 +263,7 @@ abstract final class SessionPeerSettingsRegistry {
   );
 
   static const all = <PeerOptionSetting<dynamic>>[
+    localLanguageShortcuts,
     physicalKeyboardFamily,
     codecPreference,
     videoProfile,
@@ -273,6 +291,13 @@ abstract final class SessionPeerSettingsRegistry {
 }
 
 abstract final class RemoteAppLocalSettingsRegistry {
+  static const localLanguageShortcuts = AppLocalSetting<String>(
+    key: kOptionLocalLanguageShortcuts,
+    codec: AllowedStringCodec(
+      defaultValue: kLocalLanguageShortcutsAuto,
+      allowedValues: kLocalLanguageShortcutsValues,
+    ),
+  );
   static const clipboardDirection = AppLocalSetting<String>(
     key: kOptionClipboardDirection,
     codec: _StoredStringCodec(),
@@ -307,6 +332,7 @@ abstract final class RemoteAppLocalSettingsRegistry {
   );
 
   static const all = <AppLocalSetting<dynamic>>[
+    localLanguageShortcuts,
     clipboardDirection,
     toolbarDragLeft,
     toolbarDragRight,

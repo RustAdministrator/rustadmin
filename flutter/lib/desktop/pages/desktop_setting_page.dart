@@ -11,8 +11,10 @@ import 'package:flutter_hbb/common/transport_mode.dart';
 import 'package:flutter_hbb/common/quality_monitor_settings.dart';
 import 'package:flutter_hbb/common/remote_display_settings.dart';
 import 'package:flutter_hbb/common/remote_toolbar_settings.dart';
+import 'package:flutter_hbb/common/session_peer_settings.dart';
 import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
+import 'package:flutter_hbb/common/widgets/local_language_shortcut_settings.dart';
 import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_home_page.dart';
@@ -2189,6 +2191,7 @@ class _DisplayState extends State<_Display> {
       viewStyle(context),
       scrollStyle(context),
       toolbarAutoHide(context),
+      if (isWindows) localLanguageShortcuts(context),
       qualityMonitorAppearance(context),
       imageQuality(context),
       codec(context),
@@ -2196,6 +2199,20 @@ class _DisplayState extends State<_Display> {
       if (!isWeb) privacyModeImpl(context),
       other(context),
     ]).marginOnly(bottom: _kListViewBottomMargin);
+  }
+
+  Widget localLanguageShortcuts(BuildContext context) {
+    return _Card(
+      title: 'Keyboard',
+      children: [
+        LocalLanguageShortcutSettings(
+          enabled: !isOptionFixed(
+            RemoteAppLocalSettingsRegistry.localLanguageShortcuts.key,
+          ),
+          translateText: translate,
+        ),
+      ],
+    );
   }
 
   int _toolbarOptionValue(UserDefaultSetting<int> setting) =>

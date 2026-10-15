@@ -8,6 +8,9 @@ pub use windows::*;
 #[cfg(windows)]
 pub mod windows;
 
+#[cfg(windows)]
+pub(crate) mod windows_local_language;
+
 #[cfg(any(windows, test))]
 pub mod windows_desktop;
 

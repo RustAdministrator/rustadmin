@@ -299,7 +299,14 @@ pub fn get_builtin_option(key: &str) -> String {
 
 #[inline]
 pub fn set_local_option(key: String, value: String) {
+    #[cfg(windows)]
+    let refresh_local_language =
+        key == crate::local_language_shortcuts::OPTION_LOCAL_LANGUAGE_SHORTCUTS;
     LocalConfig::set_option(key.clone(), value);
+    #[cfg(windows)]
+    if refresh_local_language {
+        crate::keyboard::client::reset_local_language_shortcuts();
+    }
 }
 
 /// Resolve relative avatar path (e.g. "/avatar/xxx") to absolute URL

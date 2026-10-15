@@ -361,6 +361,33 @@ their existing paths. This avoids relying on an attached JIS host keyboard for
 physical punctuation such as Shift+caret (`~`) and IntlRo (`_`). It does not
 select or synchronize the host's language/IME.
 
+### Local Windows language shortcuts
+
+Windows native capture (Input source 1) can change the client's input language
+while forwarding the original shortcut to the host. The global control is in
+Settings > Display > Keyboard > Local language shortcuts; the keyboard toolbar
+offers a saved override for each peer. Both use `local-language-shortcuts` with
+`auto`, `enabled` and `disabled`. Peer Auto follows the global value. Global Auto
+enables the behavior in Map mode; Enabled also enables it in Legacy/Translate;
+Disabled retains remote-only handling. Input source 2 keeps Windows' normal
+processing and does not run the additional language-change actor.
+
+Clean configured Alt+Shift and Ctrl+Shift chords cycle input languages and
+layouts respectively, according to the client's legacy Windows hotkey settings.
+Disabled or unknown settings do not create a shortcut. Win+Space cycles installed
+input locales directly, and Shift reverses it; it does not display Windows'
+input chooser. Arbitrary application shortcuts, AltGr combinations and chords
+containing other keys are not executed locally. This changes each end's language
+independently; it does not synchronize the selected language or installed layouts.
+
+The existing grab owner holds the local recognizer and cached policy. Owner,
+focus, mode and policy changes discard pending local chords. Original events
+use the existing remote sender exactly once; local handling posts
+`WM_INPUTLANGCHANGEREQUEST` with an installed HKL to the focused RustAdmin window,
+without injecting keys. The target is fenced to the current process and original
+foreground window. Windows per-thread input scope, IME/TSF profiles, registry
+compatibility and physical shortcut delivery remain Windows acceptance checks.
+
 Validation covers protocol compatibility, mapping, pressed-key snapshots and
 non-posted CoreGraphics event fields and character payloads, including retained
 events from alternating ANSI/JIS sources. Actual Windows JIS-to-Mac delivery,

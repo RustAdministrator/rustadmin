@@ -110,6 +110,21 @@ pub mod client {
         /// Limits Source 1 routing diagnostics to one privacy-safe line per
         /// grab owner. No key value or text is logged.
         native_event_logged: bool,
+        #[cfg(windows)]
+        local_language: LocalLanguageContext,
+        #[cfg(windows)]
+        local_language_generation: u64,
+    }
+
+    #[cfg(windows)]
+    #[derive(Default)]
+    struct LocalLanguageContext {
+        state: crate::local_language_shortcuts::LocalLanguageShortcutState,
+        settings: crate::local_language_shortcuts::HotkeySettings,
+        initialized: bool,
+        enabled: bool,
+        is_map: bool,
+        window: Option<isize>,
     }
 
     /// How long after grab activity we suppress Wait from the same session.
@@ -135,6 +150,105 @@ pub mod client {
             Err(poisoned) => {
                 log::error!("[grab] recovering poisoned grab state lock");
                 poisoned.into_inner()
+            }
+        }
+    }
+
+    /// Option changes invalidate only local chord routing. They never create
+    /// remote key transitions or a second remote pressed-key owner.
+    #[cfg(windows)]
+    pub(crate) fn reset_local_language_shortcuts() {
+        let (owner, generation) = {
+            let mut gs = lock_grab_state();
+            gs.local_language = LocalLanguageContext::default();
+            gs.local_language_generation = gs.local_language_generation.wrapping_add(1);
+            (gs.owner, gs.local_language_generation)
+        };
+        #[cfg(feature = "flutter")]
+        if let Some(owner) = owner {
+            use crate::local_language_shortcuts::{self, LocalLanguageShortcutPreference};
+            use crate::platform::windows_local_language;
+            let session_id = hbb_common::SessionID::from_u128(owner);
+            let Some(session) = flutter::sessions::get_session_by_session_id(&session_id) else {
+                return;
+            };
+            let is_map = session.get_keyboard_mode() == "map";
+            let peer = session.get_option(
+                local_language_shortcuts::OPTION_LOCAL_LANGUAGE_SHORTCUTS.to_owned(),
+            );
+            let global = hbb_common::config::LocalConfig::get_option(
+                local_language_shortcuts::OPTION_LOCAL_LANGUAGE_SHORTCUTS,
+            );
+            // Registry/config reads belong to focus/option initialization, not
+            // the low-level hook's per-key execution path.
+            let context = LocalLanguageContext {
+                state: Default::default(),
+                settings: windows_local_language::load_hotkey_settings(),
+                initialized: true,
+                enabled: local_language_shortcuts::resolve(
+                    LocalLanguageShortcutPreference::from_option(&peer),
+                    LocalLanguageShortcutPreference::from_option(&global),
+                    is_map,
+                    true,
+                ),
+                is_map,
+                window: windows_local_language::foreground_window_id(),
+            };
+            let mut gs = lock_grab_state();
+            if gs.owner == Some(owner) && gs.local_language_generation == generation {
+                gs.local_language = context;
+            }
+        }
+        #[cfg(not(feature = "flutter"))]
+        let _ = (owner, generation);
+    }
+
+    #[cfg(all(windows, feature = "flutter"))]
+    fn process_local_language_shortcut<T: InvokeUiSession>(
+        session: &Session<T>,
+        session_id: u128,
+        keyboard_mode: &str,
+        event: &Event,
+    ) {
+        use crate::platform::windows_local_language;
+
+        let (key, down) = match event.event_type {
+            EventType::KeyPress(key) => (key, true),
+            EventType::KeyRelease(key) => (key, false),
+            _ => return,
+        };
+        let window = windows_local_language::foreground_window_id();
+        let permitted = *session.server_keyboard_enabled.read().unwrap()
+            && !session.lc.read().unwrap().view_only.v;
+        let is_map = keyboard_mode == "map";
+        let (action, generation) = {
+            let mut gs = lock_grab_state();
+            if gs.owner != Some(session_id) {
+                return;
+            }
+            let local = &mut gs.local_language;
+            if !permitted || window.is_none() || local.is_map != is_map {
+                local.state.reset();
+                local.window = window;
+                return;
+            }
+            if local.window != window {
+                local.state.reset();
+                local.window = window;
+            }
+            let action = if local.initialized && local.enabled {
+                local.state.process(key, down, local.settings)
+            } else {
+                None
+            };
+            (action, gs.local_language_generation)
+        };
+        // The original event has already gone through the sole remote sender.
+        // Post a locale request, never synthetic keys that could re-enter it.
+        if let (Some(window), Some(action)) = (window, action) {
+            let gs = lock_grab_state();
+            if gs.owner == Some(session_id) && gs.local_language_generation == generation {
+                windows_local_language::request_switch_for_window(window, action);
             }
         }
     }
@@ -235,6 +349,8 @@ pub mod client {
             gs.native_event_logged = true;
             (session_id, first_event)
         };
+        #[cfg(windows)]
+        let owner_id = session_id;
         let session_id = hbb_common::SessionID::from_u128(session_id);
         let Some(session) = flutter::sessions::get_session_by_session_id(&session_id) else {
             if first_event {
@@ -260,6 +376,8 @@ pub mod client {
             );
         }
         process_event_with_session(&keyboard_mode, event, None, &session);
+        #[cfg(windows)]
+        process_local_language_shortcut(&session, owner_id, &keyboard_mode, event);
         true
     }
 
@@ -292,6 +410,8 @@ pub mod client {
         #[cfg(target_os = "linux")]
         let mut disable_after_unlock = false;
         let mut gs = GRAB_STATE.lock().unwrap();
+        #[cfg(windows)]
+        let mut initialize_local_language = false;
         match state {
             GrabState::Ready => {}
             GrabState::Run => {
@@ -324,6 +444,12 @@ pub mod client {
                 #[cfg(target_os = "linux")]
                 let had_owner = gs.owner.is_some();
                 gs.owner = Some(session_id);
+                #[cfg(windows)]
+                {
+                    gs.local_language = LocalLanguageContext::default();
+                    gs.local_language_generation = gs.local_language_generation.wrapping_add(1);
+                    initialize_local_language = true;
+                }
                 gs.last_grab = Some(std::time::Instant::now());
                 // Invalidate any in-flight deferred release from the previous
                 // owner so it cannot suppress a fresh timer for the new owner.
@@ -387,6 +513,11 @@ pub mod client {
                 KEYBOARD_HOOKED.store(false, Ordering::SeqCst);
 
                 gs.owner = None;
+                #[cfg(windows)]
+                {
+                    gs.local_language = LocalLanguageContext::default();
+                    gs.local_language_generation = gs.local_language_generation.wrapping_add(1);
+                }
                 gs.last_grab = None;
                 gs.deferred_pending = false;
                 release_after_unlock = Some(take_remote_keys());
@@ -398,6 +529,10 @@ pub mod client {
             GrabState::Exit => {}
         }
         drop(gs);
+        #[cfg(windows)]
+        if initialize_local_language {
+            reset_local_language_shortcuts();
+        }
         #[cfg(target_os = "linux")]
         {
             if disable_after_unlock {

@@ -14,6 +14,7 @@ import 'package:flutter_hbb/common/widgets/toolbar.dart';
 import 'package:flutter_hbb/common/remote_toolbar_settings.dart';
 import 'package:flutter_hbb/common/remote_display_settings.dart';
 import 'package:flutter_hbb/common/session_peer_settings.dart';
+import 'package:flutter_hbb/common/widgets/local_language_shortcut_settings.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/desktop/session_tab.dart';
@@ -2721,6 +2722,7 @@ class _KeyboardMenu extends StatelessWidget {
         hoverColor: _ToolbarTheme.hoverBlueColor,
         menuChildrenGetter: (_) => [
               keyboardMode(),
+              localLanguageShortcuts(),
               localKeyboardType(),
               inputSource(),
               Divider(),
@@ -2827,6 +2829,65 @@ class _KeyboardMenu extends StatelessWidget {
       }
       return Column(children: list);
     });
+  }
+
+  Widget localLanguageShortcuts() {
+    if (!isWindows) return const Offstage();
+    final settings = SessionPeerSettingsRepository.forSession(ffi.sessionId);
+    final inputSourceBlocked = isInputSourceFlutter;
+    final enabled = !ffi.ffiModel.viewOnly && !inputSourceBlocked;
+    final inputSourceRequirement = translate(
+      localLanguageShortcutInputSourceRequirement,
+    );
+    return futureBuilder(
+      future: settings.readPeer(
+        SessionPeerSettingsRegistry.localLanguageShortcuts,
+      ),
+      hasData: (data) {
+        final groupValue = data as String;
+        Future<void> onChanged(String? value) async {
+          if (value == null || !enabled) return;
+          await settings.write(
+            SessionPeerSettingsRegistry.localLanguageShortcuts,
+            value,
+          );
+        }
+
+        final submenu = _SubmenuButton(
+          ffi: ffi,
+          child: Text(translate('Local language shortcuts')),
+          menuChildren: [
+            for (final option in localLanguageShortcutOptionValues)
+              RdoMenuButton<String>(
+                value: option,
+                groupValue: groupValue,
+                child: Text(
+                  translate(localLanguageShortcutOptionLabel(option)),
+                ),
+                onChanged: enabled ? onChanged : null,
+                ffi: ffi,
+              ),
+            const Divider(),
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 320),
+              child: Padding(
+                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                child: Text(
+                  translate(
+                    inputSourceBlocked
+                        ? localLanguageShortcutInputSourceRequirement
+                        : localLanguageShortcutPeerExplanation,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+        return inputSourceBlocked
+            ? Tooltip(message: inputSourceRequirement, child: submenu)
+            : submenu;
+      },
+    );
   }
 
   Widget localKeyboardType() {

@@ -23,6 +23,8 @@ mod access_scope;
 mod keyboard;
 mod keyboard_input_policy;
 mod keyboard_hid;
+#[cfg(any(target_os = "windows", test))]
+mod local_language_shortcuts;
 /// cbindgen:ignore
 pub mod platform;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]

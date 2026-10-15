@@ -185,6 +185,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Extended", "Extended"),
         ("Input", "Input"),
         ("Keyboard mode", "Keyboard mode"),
+        ("Local language shortcuts", "Local language shortcuts"),
         ("Input mode", "Input mode"),
         ("Text input", "Text input"),
         ("Physical keys", "Physical keys"),

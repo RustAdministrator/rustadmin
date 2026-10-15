@@ -529,6 +529,8 @@ impl<T: InvokeUiSession> Session<T> {
 
     pub fn save_keyboard_mode(&self, value: String) {
         self.lc.write().unwrap().save_keyboard_mode(value);
+        #[cfg(windows)]
+        crate::keyboard::client::reset_local_language_shortcuts();
     }
 
     pub fn get_reverse_mouse_wheel(&self) -> String {
@@ -898,6 +900,9 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     pub fn set_option(&self, k: String, mut v: String) {
+        #[cfg(windows)]
+        let refresh_local_language =
+            k == crate::local_language_shortcuts::OPTION_LOCAL_LANGUAGE_SHORTCUTS;
         let mut lc = self.lc.write().unwrap();
         if k.eq("remote_dir") {
             v = lc.get_all_remote_dir(v);
@@ -908,6 +913,11 @@ impl<T: InvokeUiSession> Session<T> {
             .to_owned();
         }
         lc.set_option(k, v);
+        drop(lc);
+        #[cfg(windows)]
+        if refresh_local_language {
+            crate::keyboard::client::reset_local_language_shortcuts();
+        }
     }
 
     #[inline]
