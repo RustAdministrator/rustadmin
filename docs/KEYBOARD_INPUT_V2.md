@@ -334,9 +334,13 @@ Unknown until they have a hardware adapter; the override works independently.
 Its existing pressed-HID state retains family on down/repeat/up. The physical
 V2 payload and legacy Map envelope both carry it, and legacy Map also carries
 HID identity alongside the target-native compatibility code. A single
-`keyboard_hid::keycode_for_peer` maps both paths. Native desktop capture, which
-reports no HID in rdev, is normalized by the stateless reverse mapper using
-actual native geometry; a per-peer injection override does not redefine the
+`keyboard_hid::keycode_for_peer` maps both paths. The mapper accepts the advertised
+macOS platform name `Mac OS` as well as `macOS`/`macos`; native Map's final send
+step receives the original peer name, so it must not depend on earlier callers
+removing spaces. The older-host family fallback uses the same platform lookup.
+Sender regression coverage uses the actual `Mac OS` wire name. Native desktop
+capture, which reports no HID in rdev, is normalized by the stateless reverse
+mapper using actual native geometry; a per-peer injection override does not redefine the
 source hardware. Flutter fallback retains its supplied HID on every platform.
 The compatibility table is also used in reverse so PC conversion keys cannot
 become USB language-key aliases. Unknown native codes keep their raw fallback.

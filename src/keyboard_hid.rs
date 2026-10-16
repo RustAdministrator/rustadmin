@@ -41,6 +41,11 @@ pub(crate) fn keycode_from_usb_hid(
     }
 }
 
+#[inline]
+pub(crate) fn is_macos_platform(platform: &str) -> bool {
+    platform.eq_ignore_ascii_case("macos") || platform.eq_ignore_ascii_case("mac os")
+}
+
 /// The sole HID-to-native mapping used by V2 and legacy Map transport.
 /// Family describes physical geometry, independently of language or IME.
 pub(crate) fn keycode_for_peer(platform: &str, usage: u32, family: KeyboardFamily) -> Option<u32> {
@@ -52,7 +57,7 @@ pub(crate) fn keycode_for_peer(platform: &str, usage: u32, family: KeyboardFamil
         keycode_from_usb_hid(HidTarget::Linux, usage, |usage| {
             rdev::usb_hid_code_to_linux_code(usage).map(|code| code as u32)
         })
-    } else if platform.eq_ignore_ascii_case("macos") {
+    } else if is_macos_platform(platform) {
         keycode_from_usb_hid(HidTarget::MacOs, usage, |usage| {
             let code = if family == KeyboardFamily::Iso {
                 rdev::usb_hid_code_to_macos_iso_code(usage)
@@ -75,7 +80,7 @@ pub(crate) fn explicitly_unmapped(platform: &str, usage: u32) -> bool {
         0
     } else if platform.eq_ignore_ascii_case("linux") {
         1
-    } else if platform.eq_ignore_ascii_case("macos") {
+    } else if is_macos_platform(platform) {
         2
     } else {
         return false;
@@ -158,19 +163,28 @@ mod tests {
                 keycode_for_peer("Windows", usage, KeyboardFamily::Jis),
                 Some(windows)
             );
-            assert_eq!(
-                keycode_for_peer("macOS", usage, KeyboardFamily::Jis),
-                Some(macos)
-            );
+            for platform in ["macos", "macOS", "Mac OS", "MAC OS"] {
+                assert_eq!(
+                    keycode_for_peer(platform, usage, KeyboardFamily::Jis),
+                    Some(macos)
+                );
+            }
         }
-        assert_eq!(keycode_for_peer("macOS", 0x8a, KeyboardFamily::Jis), None);
-        assert_eq!(keycode_for_peer("macOS", 0x8b, KeyboardFamily::Jis), None);
+        for platform in ["macos", "macOS", "Mac OS", "MAC OS"] {
+            assert_eq!(keycode_for_peer(platform, 0x8a, KeyboardFamily::Jis), None);
+            assert_eq!(keycode_for_peer(platform, 0x8b, KeyboardFamily::Jis), None);
+            assert!(explicitly_unmapped(platform, 0x8a));
+            assert!(explicitly_unmapped(platform, 0x8b));
+            assert!(!explicitly_unmapped(platform, 0xa0));
+        }
         assert!(valid_usage(0x87));
         assert!(!valid_usage(0));
-        assert!(explicitly_unmapped("macOS", 0x8a));
-        assert!(explicitly_unmapped("macOS", 0x8b));
-        assert!(!explicitly_unmapped("macOS", 0xa0));
         assert!(!explicitly_unmapped("Windows", 0x8a));
+        assert_eq!(
+            keycode_for_peer("Solaris", 0x04, KeyboardFamily::Ansi),
+            None
+        );
+        assert!(!explicitly_unmapped("Solaris", 0x8a));
     }
 
     #[test]

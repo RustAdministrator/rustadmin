@@ -1345,7 +1345,7 @@ impl<T: InvokeUiSession> Session<T> {
 
         let selected = self.physical_keyboard_family();
         if selected != KeyboardFamily::Unknown
-            && self.peer_platform().eq_ignore_ascii_case("macos")
+            && crate::keyboard_hid::is_macos_platform(&self.peer_platform())
             && !capabilities.physical_keyboard_family
         {
             // Older Mac V2 hosts map HID using their own ISO preference.
@@ -3584,29 +3584,40 @@ mod mobile_soft_keyboard_tests {
     #[cfg(feature = "flutter")]
     #[test]
     fn keyboard_family_uses_legacy_native_codes_for_older_mac_v2_hosts() {
-        let (session, mut receiver) = text_session("physical", Some(KeyboardCapabilities {
-            protocol_version: hbb_common::keyboard::KEYBOARD_INPUT_PROTOCOL_VERSION,
-            physical_key: true,
-            ..Default::default()
-        }));
-        {
-            let mut lc = session.lc.write().unwrap();
-            let config = lc.get_config();
-            config.info.platform = "macOS".to_owned();
-            config.options.insert(crate::keyboard_hid::OPTION_KEYBOARD_FAMILY.to_owned(), "iso".to_owned());
+        for platform in ["Mac OS", "macOS"] {
+            let (session, mut receiver) = text_session(
+                "physical",
+                Some(KeyboardCapabilities {
+                    protocol_version: hbb_common::keyboard::KEYBOARD_INPUT_PROTOCOL_VERSION,
+                    physical_key: true,
+                    ..Default::default()
+                }),
+            );
+            {
+                let mut lc = session.lc.write().unwrap();
+                let config = lc.get_config();
+                config.info.platform = platform.to_owned();
+                config.options.insert(
+                    crate::keyboard_hid::OPTION_KEYBOARD_FAMILY.to_owned(),
+                    "iso".to_owned(),
+                );
+            }
+            for down in [true, false] {
+                session.handle_flutter_key_event("map", "", 0x64, 0, down);
+                let Data::Message(message) = receiver.try_recv().unwrap() else {
+                    panic!("expected legacy keyboard message");
+                };
+                let Some(message::Union::KeyEvent(event)) = message.union else {
+                    panic!("old Mac family support requires legacy native codes");
+                };
+                assert_eq!(event.mode.enum_value(), Ok(KeyboardMode::Map));
+                assert_eq!(event.chr(), 50);
+                assert_eq!(event.usb_hid_usage, 0x64);
+                assert_eq!(event.keyboard_family.enum_value(), Ok(KeyboardFamily::Iso));
+                assert_eq!(event.down, down);
+            }
+            assert!(receiver.try_recv().is_err());
         }
-        session.handle_flutter_key_event("map", "", 0x64, 0, true);
-        let Data::Message(message) = receiver.try_recv().unwrap() else {
-            panic!("expected legacy keyboard message");
-        };
-        let Some(message::Union::KeyEvent(event)) = message.union else {
-            panic!("old Mac family support requires legacy native codes");
-        };
-        assert_eq!(event.mode.enum_value(), Ok(KeyboardMode::Map));
-        assert_eq!(event.chr(), crate::keyboard_hid::keycode_for_peer(
-            "macOS", 0x64, KeyboardFamily::Iso).unwrap());
-        assert_eq!(event.keyboard_family.enum_value(), Ok(KeyboardFamily::Iso));
-        assert!(receiver.try_recv().is_err());
     }
 
     #[cfg(feature = "flutter")]
@@ -3623,23 +3634,35 @@ mod mobile_soft_keyboard_tests {
             {
                 let mut lc = session.lc.write().unwrap();
                 let config = lc.get_config();
-                config.info.platform = "macOS".to_owned();
+                config.info.platform = "Mac OS".to_owned();
                 config.options.insert(
                     crate::keyboard_hid::OPTION_KEYBOARD_FAMILY.to_owned(),
                     "jis".to_owned(),
                 );
             }
-            for down in [true, false] {
-                if !down {
-                    session.lc.write().unwrap().get_config().options.insert(
-                        crate::keyboard_hid::OPTION_KEYBOARD_FAMILY.to_owned(),
-                        "ansi".to_owned(),
-                    );
-                }
-                // Ordinary punctuation (caret position) and IntlRo/underscore.
-                for (usage, code) in [(0x2e, 24), (0x87, 94), (0x89, 93)] {
+            // Ordinary A, Shift, JIS caret (0x2e), IntlRo/underscore (0x87),
+            // and IntlYen (0x89) retain the physical JIS owner through down,
+            // repeat, and release.
+            for (usage, expected_code) in [
+                (0x04_u32, 0),
+                (0xe1, 56),
+                (0x2e, 24),
+                (0x87, 94),
+                (0x89, 93),
+            ] {
+                session.lc.write().unwrap().get_config().options.insert(
+                    crate::keyboard_hid::OPTION_KEYBOARD_FAMILY.to_owned(),
+                    "jis".to_owned(),
+                );
+                for (index, down) in [true, true, false].into_iter().enumerate() {
+                    if index == 2 {
+                        session.lc.write().unwrap().get_config().options.insert(
+                            crate::keyboard_hid::OPTION_KEYBOARD_FAMILY.to_owned(),
+                            "ansi".to_owned(),
+                        );
+                    }
                     if v2 {
-                        assert!(session.try_send_physical_keyboard_v2(usage, 0, down));
+                        assert!(session.try_send_physical_keyboard_v2(usage as i32, 0, down));
                     } else {
                         let mut event = KeyEvent::new();
                         event.mode = KeyboardMode::Map.into();
@@ -3659,10 +3682,11 @@ mod mobile_soft_keyboard_tests {
                             assert_eq!(key.usb_hid_usage, usage as u32);
                             assert_eq!(key.keyboard_family.enum_value(), Ok(KeyboardFamily::Jis));
                             assert_eq!(key.down, down);
+                            assert_eq!(key.repeat, index == 1);
                         }
                         Some(message::Union::KeyEvent(event)) if !v2 => {
                             assert_eq!(event.usb_hid_usage, usage as u32);
-                            assert_eq!(event.chr(), code);
+                            assert_eq!(event.chr(), expected_code);
                             assert_eq!(event.keyboard_family.enum_value(), Ok(KeyboardFamily::Jis));
                             assert_eq!(event.down, down);
                         }
