@@ -375,7 +375,6 @@ pub fn get_peer_option(id: String, name: String) -> String {
         OPTION_LOCK_AFTER_SESSION_END => bool_peer_option(c.lock_after_session_end.v),
         OPTION_TERMINAL_PERSISTENT => bool_peer_option(c.terminal_persistent.v),
         OPTION_PRIVACY_MODE => bool_peer_option(c.privacy_mode.v),
-        "allow_swap_key" => bool_peer_option(c.allow_swap_key.v),
         OPTION_VIEW_ONLY => bool_peer_option(c.view_only.v),
         "keyboard_mode" => c.keyboard_mode,
         _ => c.options.get(&name).cloned().unwrap_or_default(),
@@ -439,9 +438,6 @@ pub fn set_peer_option(id: String, name: String, value: String) {
         }
         OPTION_PRIVACY_MODE => {
             c.privacy_mode.v = config::option2bool(&name, &value);
-        }
-        "allow_swap_key" => {
-            c.allow_swap_key.v = config::option2bool(&name, &value);
         }
         OPTION_VIEW_ONLY => {
             c.view_only.v = config::option2bool(&name, &value);

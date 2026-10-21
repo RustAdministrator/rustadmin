@@ -376,7 +376,6 @@ abstract final class LiveSessionSettingsRegistry {
     'show-quality-monitor',
   );
   static const privacyMode = LiveSessionToggleSetting('privacy-mode');
-  static const swapControlCommand = LiveSessionToggleSetting('allow_swap_key');
   static const swapMouseButtons = LiveSessionToggleSetting(
     kOptionSwapLeftRightMouse,
   );
@@ -400,7 +399,6 @@ abstract final class LiveSessionSettingsRegistry {
     showMyCursor,
     showQualityMonitor,
     privacyMode,
-    swapControlCommand,
     swapMouseButtons,
     terminalPersistent,
   ];

@@ -1024,29 +1024,10 @@ List<TToggleMenu> toolbarPrivacyMode(
 
 List<TToggleMenu> toolbarKeyboardToggles(FFI ffi) {
   final ffiModel = ffi.ffiModel;
-  final pi = ffiModel.pi;
   final sessionId = ffi.sessionId;
   final liveSettings = LiveSessionSettingsRepository.forSession(sessionId);
   final isDefaultConn = ffi.connType == ConnType.defaultConn;
   List<TToggleMenu> v = [];
-
-  // swap key
-  if (ffiModel.keyboard &&
-      ((isMacOS && pi.platform != kPeerPlatformMacOS) ||
-          (!isMacOS && pi.platform == kPeerPlatformMacOS))) {
-    const option = LiveSessionSettingsRegistry.swapControlCommand;
-    final value = liveSettings.readSync(option);
-    onChanged(bool? value) async {
-      if (value == null) return;
-      await liveSettings.toggle(option);
-    }
-
-    final enabled = !ffi.ffiModel.viewOnly;
-    v.add(TToggleMenu(
-        value: value,
-        onChanged: enabled ? onChanged : null,
-        child: Text(translate('Swap control-command key'))));
-  }
 
   // Relative mouse mode (gaming mode).
   // Only show when server supports MOUSE_TYPE_MOVE_RELATIVE (version >= 1.4.5)

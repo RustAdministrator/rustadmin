@@ -4014,8 +4014,6 @@ impl LoginConfigHandler {
             option.block_input = BoolOption::No.into();
         } else if name == "show-quality-monitor" {
             config.show_quality_monitor.v = !config.show_quality_monitor.v;
-        } else if name == "allow_swap_key" {
-            config.allow_swap_key.v = !config.allow_swap_key.v;
         } else if name == "view-only" {
             config.view_only.v = !config.view_only.v;
             let f = |b: bool| {
@@ -4326,8 +4324,6 @@ impl LoginConfigHandler {
             self.config.disable_clipboard.v
         } else if name == "show-quality-monitor" {
             self.config.show_quality_monitor.v
-        } else if name == "allow_swap_key" {
-            self.config.allow_swap_key.v
         } else if name == "view-only" {
             self.config.view_only.v
         } else if name == "show-my-cursor" {
@@ -5775,7 +5771,6 @@ pub fn send_mouse(
         mouse_event.x *= factor;
         mouse_event.y *= factor;
     }
-    interface.swap_modifier_mouse(&mut mouse_event);
     msg_out.set_mouse_event(mouse_event);
     interface.send(Data::Message(msg_out));
 }
@@ -6355,8 +6350,6 @@ pub trait Interface: Send + Sync + Clone + 'static + Sized {
     fn is_force_relay(&self) -> bool {
         self.get_lch().read().unwrap().force_relay
     }
-
-    fn swap_modifier_mouse(&self, _msg: &mut hbb_common::protos::message::MouseEvent) {}
 
     fn update_direct(&self, direct: Option<bool>) {
         self.get_lch().write().unwrap().direct = direct;

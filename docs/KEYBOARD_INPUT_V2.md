@@ -344,8 +344,7 @@ mapper using actual native geometry; a per-peer injection override does not rede
 source hardware. Flutter fallback retains its supplied HID on every platform.
 The compatibility table is also used in reverse so PC conversion keys cannot
 become USB language-key aliases. Unknown native codes keep their raw fallback.
-Modifier swaps retain their
-native-code authority. Mac V2 receivers without family support use the legacy
+Mac V2 receivers without family support use the legacy
 Map envelope so the sender's ISO/native mapping remains authoritative. Old
 receivers ignore the added fields; absent family preserves their existing
 behavior. Both ends need this implementation for explicit macOS keyboard type
@@ -365,7 +364,7 @@ their existing paths. This avoids relying on an attached JIS host keyboard for
 physical punctuation such as Shift+caret (`~`) and IntlRo (`_`). It does not
 select or synchronize the host's language/IME.
 
-### Native desktop shortcuts and modifier swapping
+### Native desktop shortcuts and modifier identity
 
 Legacy and Translate must distinguish Control/Command key combinations from
 committed text. The Flutter input path can supply a control character for a letter combination
@@ -375,24 +374,26 @@ the control character must not replace the original key. Shortcut delivery must 
 release, including when the modifier is released before the letter. AltGr,
 Option text, dead keys and IME commits keep their text-input behavior.
 
-The keyboard toolbar's **Swap control-command key** setting exchanges the
-Control and Command/Windows modifiers for the entire combination; it does not
-recognize application commands or make exceptions for terminals. For a Windows
-viewer controlling macOS:
+Starting with viewer revision 249, the Ctrl/Command swap setting is removed.
+Keyboard and mouse events preserve modifier identity in every keyboard mode.
+Previously saved `allow_swap_key` values are ignored by the viewer; the shared
+serialized field remains only for compatibility with older app versions.
 
-| Windows combination | Swap disabled | Swap enabled |
-| --- | --- | --- |
-| Ctrl+J | Control+J | Command+J |
-| Win+J | Command+J | Control+J |
-| Ctrl+C / Ctrl+V | Control+C / Control+V | Command+C / Command+V |
+| Windows key | macOS key |
+| --- | --- |
+| Ctrl | Control |
+| Win | Command |
+| Alt | Option |
+| Shift | Shift |
 
-Alt maps to Option independently of this setting. Control+J is line feed; the
+The same correspondence applies in the reverse direction. From Windows, use
+Win+C / Win+V for macOS Command+C / Command+V and Ctrl+J for macOS Control+J.
+Control+J is line feed; the
 [default zsh binding](https://zsh.sourceforge.io/Doc/Release/Zsh-Line-Editor.html#index-accept_002dline)
 accepts the current command, while a terminal application may bind it to insert
 a newline. [Apple Terminal's Command+J](https://support.apple.com/guide/terminal/keyboard-shortcuts-trmlshtcts/mac)
-jumps to selected text. With full modifier swapping enabled, use Win+J to send
-macOS Control+J. The desktop V2 physical-input swap path is a separate outstanding
-consistency issue; this Legacy/Translate repair does not change that path.
+jumps to selected text. This preserves terminal Control shortcuts alongside
+Command shortcuts without application-specific remapping.
 
 ### Local Windows language shortcuts
 
