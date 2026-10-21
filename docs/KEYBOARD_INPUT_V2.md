@@ -365,6 +365,35 @@ their existing paths. This avoids relying on an attached JIS host keyboard for
 physical punctuation such as Shift+caret (`~`) and IntlRo (`_`). It does not
 select or synchronize the host's language/IME.
 
+### Native desktop shortcuts and modifier swapping
+
+Legacy and Translate must distinguish Control/Command key combinations from
+committed text. The Flutter input path can supply a control character for a letter combination
+(for example, line feed `U+000A` for Control+J). Windows native capture already
+filters these C0 characters and falls back to the key identity. When supplied,
+the control character must not replace the original key. Shortcut delivery must retain the key identity and matching
+release, including when the modifier is released before the letter. AltGr,
+Option text, dead keys and IME commits keep their text-input behavior.
+
+The keyboard toolbar's **Swap control-command key** setting exchanges the
+Control and Command/Windows modifiers for the entire combination; it does not
+recognize application commands or make exceptions for terminals. For a Windows
+viewer controlling macOS:
+
+| Windows combination | Swap disabled | Swap enabled |
+| --- | --- | --- |
+| Ctrl+J | Control+J | Command+J |
+| Win+J | Command+J | Control+J |
+| Ctrl+C / Ctrl+V | Control+C / Control+V | Command+C / Command+V |
+
+Alt maps to Option independently of this setting. Control+J is line feed; the
+[default zsh binding](https://zsh.sourceforge.io/Doc/Release/Zsh-Line-Editor.html#index-accept_002dline)
+accepts the current command, while a terminal application may bind it to insert
+a newline. [Apple Terminal's Command+J](https://support.apple.com/guide/terminal/keyboard-shortcuts-trmlshtcts/mac)
+jumps to selected text. With full modifier swapping enabled, use Win+J to send
+macOS Control+J. The desktop V2 physical-input swap path is a separate outstanding
+consistency issue; this Legacy/Translate repair does not change that path.
+
 ### Local Windows language shortcuts
 
 Windows native capture (Input source 1) can change the client's input language

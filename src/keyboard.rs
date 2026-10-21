@@ -1235,6 +1235,14 @@ fn update_modifiers_state(event: &Event) {
     };
 }
 
+#[cfg(test)]
+pub(crate) fn reset_keyboard_test_state() {
+    for state in MODIFIERS_STATE.lock().unwrap().values_mut() {
+        *state = false;
+    }
+    TO_RELEASE.lock().unwrap().clear();
+}
+
 pub fn event_to_key_events(
     mut peer: String,
     event: &Event,
@@ -1312,6 +1320,99 @@ pub fn get_peer_platform() -> String {
     "Windows".to_string()
 }
 
+#[inline]
+fn unicode_character(event: &Event) -> Option<char> {
+    let name = event.unicode.as_ref()?.name.as_deref()?;
+    if name.len() > 2 {
+        return None;
+    }
+    let chr = name.chars().next()?;
+    let chr = if chr == '·' { '`' } else { chr };
+    (chr != '\0').then_some(chr)
+}
+
+#[inline]
+fn legacy_key_character(key: Key) -> Option<char> {
+    Some(match key {
+        Key::Num1 => '1',
+        Key::Num2 => '2',
+        Key::Num3 => '3',
+        Key::Num4 => '4',
+        Key::Num5 => '5',
+        Key::Num6 => '6',
+        Key::Num7 => '7',
+        Key::Num8 => '8',
+        Key::Num9 => '9',
+        Key::Num0 => '0',
+        Key::KeyA => 'a',
+        Key::KeyB => 'b',
+        Key::KeyC => 'c',
+        Key::KeyD => 'd',
+        Key::KeyE => 'e',
+        Key::KeyF => 'f',
+        Key::KeyG => 'g',
+        Key::KeyH => 'h',
+        Key::KeyI => 'i',
+        Key::KeyJ => 'j',
+        Key::KeyK => 'k',
+        Key::KeyL => 'l',
+        Key::KeyM => 'm',
+        Key::KeyN => 'n',
+        Key::KeyO => 'o',
+        Key::KeyP => 'p',
+        Key::KeyQ => 'q',
+        Key::KeyR => 'r',
+        Key::KeyS => 's',
+        Key::KeyT => 't',
+        Key::KeyU => 'u',
+        Key::KeyV => 'v',
+        Key::KeyW => 'w',
+        Key::KeyX => 'x',
+        Key::KeyY => 'y',
+        Key::KeyZ => 'z',
+        Key::Comma => ',',
+        Key::Dot => '.',
+        Key::SemiColon => ';',
+        Key::Quote => '\'',
+        Key::LeftBracket => '[',
+        Key::RightBracket => ']',
+        Key::Slash => '/',
+        Key::BackSlash => '\\',
+        Key::Minus => '-',
+        Key::Equal => '=',
+        Key::BackQuote => '`',
+        _ => return None,
+    })
+}
+
+#[inline]
+fn legacy_character(event: &Event, key: Key, alt: bool) -> Option<char> {
+    let unicode = unicode_character(event);
+    if !alt && unicode.is_some_and(|chr| chr.is_control()) {
+        if let Some(chr) = legacy_key_character(key) {
+            return Some(chr);
+        }
+    }
+    unicode.or_else(|| legacy_key_character(key))
+}
+
+#[inline]
+fn is_native_shortcut_event(
+    event: &Event,
+    alt: bool,
+    ctrl: bool,
+    command: bool,
+    synthetic_altgr: bool,
+) -> bool {
+    if alt
+        || synthetic_altgr
+        || !matches!(event.event_type, EventType::KeyPress(_) | EventType::KeyRelease(_))
+    {
+        return false;
+    }
+    ctrl || command || unicode_character(event).is_some_and(|chr| chr.is_control())
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn legacy_keyboard_mode(event: &Event, mut key_event: KeyEvent) -> Vec<KeyEvent> {
     let mut events = Vec::new();
@@ -1354,6 +1455,7 @@ pub fn legacy_keyboard_mode(event: &Event, mut key_event: KeyEvent) -> Vec<KeyEv
     let command = crate::platform::windows::get_win_key_state();
     #[cfg(not(windows))]
     let command = get_key_state(enigo::Key::Meta);
+    let (alt, ctrl, shift, command) = client::get_modifiers_state(alt, ctrl, shift, command);
     let control_key = match key {
         Key::Alt => Some(ControlKey::Alt),
         Key::AltGr => Some(ControlKey::RAlt),
@@ -1449,78 +1551,7 @@ pub fn legacy_keyboard_mode(event: &Event, mut key_event: KeyEvent) -> Vec<KeyEv
     if let Some(k) = control_key {
         key_event.set_control_key(k);
     } else {
-        let name = event
-            .unicode
-            .as_ref()
-            .and_then(|unicode| unicode.name.clone());
-        let mut chr = match &name {
-            Some(ref s) => {
-                if s.len() <= 2 {
-                    // exclude chinese characters
-                    s.chars().next().unwrap_or('\0')
-                } else {
-                    '\0'
-                }
-            }
-            _ => '\0',
-        };
-        if chr == '·' {
-            // special for Chinese
-            chr = '`';
-        }
-        if chr == '\0' {
-            chr = match key {
-                Key::Num1 => '1',
-                Key::Num2 => '2',
-                Key::Num3 => '3',
-                Key::Num4 => '4',
-                Key::Num5 => '5',
-                Key::Num6 => '6',
-                Key::Num7 => '7',
-                Key::Num8 => '8',
-                Key::Num9 => '9',
-                Key::Num0 => '0',
-                Key::KeyA => 'a',
-                Key::KeyB => 'b',
-                Key::KeyC => 'c',
-                Key::KeyD => 'd',
-                Key::KeyE => 'e',
-                Key::KeyF => 'f',
-                Key::KeyG => 'g',
-                Key::KeyH => 'h',
-                Key::KeyI => 'i',
-                Key::KeyJ => 'j',
-                Key::KeyK => 'k',
-                Key::KeyL => 'l',
-                Key::KeyM => 'm',
-                Key::KeyN => 'n',
-                Key::KeyO => 'o',
-                Key::KeyP => 'p',
-                Key::KeyQ => 'q',
-                Key::KeyR => 'r',
-                Key::KeyS => 's',
-                Key::KeyT => 't',
-                Key::KeyU => 'u',
-                Key::KeyV => 'v',
-                Key::KeyW => 'w',
-                Key::KeyX => 'x',
-                Key::KeyY => 'y',
-                Key::KeyZ => 'z',
-                Key::Comma => ',',
-                Key::Dot => '.',
-                Key::SemiColon => ';',
-                Key::Quote => '\'',
-                Key::LeftBracket => '[',
-                Key::RightBracket => ']',
-                Key::Slash => '/',
-                Key::BackSlash => '\\',
-                Key::Minus => '-',
-                Key::Equal => '=',
-                Key::BackQuote => '`',
-                _ => '\0',
-            }
-        }
-        if chr != '\0' {
+        if let Some(chr) = legacy_character(event, key, alt) {
             if chr == 'l' && is_win && command {
                 client::lock_screen();
                 return events;
@@ -1531,7 +1562,6 @@ pub fn legacy_keyboard_mode(event: &Event, mut key_event: KeyEvent) -> Vec<KeyEv
             return events;
         }
     }
-    let (alt, ctrl, shift, command) = client::get_modifiers_state(alt, ctrl, shift, command);
     client::legacy_modifiers(&mut key_event, alt, ctrl, shift, command);
 
     if down_or_up == true {
@@ -1651,6 +1681,9 @@ fn _map_keyboard_mode(_peer: &str, event: &Event, mut key_event: KeyEvent) -> Op
 
 #[cfg(not(any(target_os = "ios")))]
 fn try_fill_unicode(_peer: &str, event: &Event, key_event: &KeyEvent, events: &mut Vec<KeyEvent>) {
+    if !matches!(event.event_type, EventType::KeyPress(_)) {
+        return;
+    }
     match &event.unicode {
         Some(unicode_info) => {
             if let Some(name) = &unicode_info.name {
@@ -1790,6 +1823,19 @@ pub fn translate_keyboard_mode(peer: &str, event: &Event, key_event: KeyEvent) -
     #[cfg(target_os = "windows")]
     try_fill_win2win_hotkey(peer, event, &key_event, &mut events);
 
+    let (alt, ctrl, _, command) = client::get_modifiers_state(false, false, false, false);
+    // Snapshot the existing native callback's synthetic-AltGr marker once for this event.
+    #[cfg(target_os = "windows")]
+    let synthetic_altgr = unsafe { IS_0X021D_DOWN };
+    #[cfg(not(target_os = "windows"))]
+    let synthetic_altgr = false;
+    if events.is_empty()
+        && is_native_shortcut_event(event, alt, ctrl, command, synthetic_altgr)
+    {
+        events.append(&mut map_keyboard_mode(peer, event, key_event));
+        return events;
+    }
+
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     if events.is_empty() && is_press(event) {
         try_fill_unicode(peer, event, &key_event, &mut events);
@@ -1797,10 +1843,8 @@ pub fn translate_keyboard_mode(peer: &str, event: &Event, key_event: KeyEvent) -
 
     // If AltGr is down, no need to send events other than unicode.
     #[cfg(target_os = "windows")]
-    unsafe {
-        if IS_0X021D_DOWN {
-            return events;
-        }
+    if synthetic_altgr {
+        return events;
     }
 
     #[cfg(target_os = "macos")]
@@ -1824,6 +1868,76 @@ pub fn keycode_to_rdev_key(keycode: u32) -> Key {
     return rdev::android_key_from_code(keycode);
     #[cfg(target_os = "macos")]
     return rdev::macos_key_from_code(keycode.try_into().unwrap_or_default());
+}
+
+#[cfg(test)]
+mod shortcut_routing_tests {
+    use super::*;
+
+    fn event(character: Option<&str>) -> Event {
+        Event {
+            time: std::time::SystemTime::now(),
+            unicode: character.map(|character| rdev::UnicodeInfo {
+                name: Some(character.to_owned()),
+                unicode: character.encode_utf16().collect(),
+                is_dead: false,
+            }),
+            event_type: EventType::KeyPress(Key::KeyJ),
+            platform_code: 0,
+            position_code: 0,
+            usb_hid: 0,
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            extra_data: 0,
+        }
+    }
+
+    #[test]
+    fn control_character_uses_physical_letter_identity() {
+        assert_eq!(
+            legacy_character(&event(Some("\n")), Key::KeyJ, false),
+            Some('j')
+        );
+        assert_eq!(
+            legacy_character(&event(Some("j")), Key::KeyJ, false),
+            Some('j')
+        );
+        assert_eq!(
+            legacy_character(&event(Some("\0")), Key::KeyJ, false),
+            Some('j')
+        );
+    }
+
+    #[test]
+    fn altgr_state_keeps_translate_text_out_of_native_shortcut_path() {
+        assert!(!is_native_shortcut_event(
+            &event(Some("@")),
+            true,
+            true,
+            false,
+            false
+        ));
+        assert!(is_native_shortcut_event(
+            &event(Some("\u{3}")),
+            false,
+            true,
+            false,
+            false
+        ));
+        assert!(!is_native_shortcut_event(
+            &event(Some("j")),
+            false,
+            false,
+            false,
+            false
+        ));
+        assert!(!is_native_shortcut_event(
+            &event(Some("@")),
+            false,
+            true,
+            false,
+            true
+        ));
+    }
 }
 
 #[cfg(feature = "flutter")]

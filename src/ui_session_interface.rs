@@ -1002,8 +1002,12 @@ impl<T: InvokeUiSession> Session<T> {
                 })
                 .collect();
 
+            let native_keycode_payload = matches!(
+                msg.mode.enum_value_or_default(),
+                KeyboardMode::Map | KeyboardMode::Translate
+            ) && matches!(msg.union.as_ref(), Some(key_event::Union::Chr(_)));
             let code = msg.chr();
-            if code != 0 {
+            if native_keycode_payload && code != 0 {
                 let mut peer = self.peer_platform().to_lowercase();
                 peer.retain(|c| !c.is_whitespace());
 
@@ -1075,10 +1079,14 @@ impl<T: InvokeUiSession> Session<T> {
                 msg.set_chr(code);
             }
         }
+        let native_keycode_payload = matches!(
+            msg.mode.enum_value_or_default(),
+            KeyboardMode::Map | KeyboardMode::Translate
+        ) && matches!(msg.union.as_ref(), Some(key_event::Union::Chr(_)));
         let native_code = msg.chr();
         self.swap_modifier_key(&mut msg);
         // A modifier swap is already encoded in the target-native keycode.
-        if msg.chr() != native_code {
+        if native_keycode_payload && msg.chr() != native_code {
             msg.usb_hid_usage = 0;
         }
         let mut msg_out = Message::new();
@@ -3939,5 +3947,471 @@ mod mobile_soft_keyboard_tests {
             assert_eq!(keyboard_v2_lock_mask(wire_mask << 1), wire_mask as u32);
         }
         assert_eq!(keyboard_v2_lock_mask(1), 0);
+    }
+}
+
+#[cfg(all(test, feature = "flutter"))]
+mod keyboard_sender_regression_tests {
+    use super::*;
+
+    type TestSession = Session<crate::flutter::FlutterHandler>;
+
+    static KEYBOARD_STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct KeyboardStateGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl KeyboardStateGuard {
+        fn new() -> Self {
+            let lock = KEYBOARD_STATE_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            crate::keyboard::reset_keyboard_test_state();
+            Self { _lock: lock }
+        }
+    }
+
+    impl Drop for KeyboardStateGuard {
+        fn drop(&mut self) {
+            crate::keyboard::reset_keyboard_test_state();
+        }
+    }
+
+    fn sender_session(
+        platform: &str,
+        allow_swap_key: bool,
+    ) -> (TestSession, mpsc::UnboundedReceiver<Data>) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let session = TestSession {
+            sender: Arc::new(RwLock::new(Some(sender))),
+            ..Default::default()
+        };
+        {
+            let mut lc = session.lc.write().unwrap();
+            lc.version = get_version_number("1.2.0");
+            let config = lc.get_config();
+            config.info.platform = platform.to_owned();
+            config.allow_swap_key.v = allow_swap_key;
+            config.options.insert(
+                "allow_swap_key".to_owned(),
+                if allow_swap_key { "Y" } else { "N" }.to_owned(),
+            );
+            config.options.insert(
+                crate::keyboard_hid::OPTION_KEYBOARD_FAMILY.to_owned(),
+                "ansi".to_owned(),
+            );
+        }
+        session
+            .keyboard_input_send_state
+            .lock()
+            .unwrap()
+            .detected_family = Some(KeyboardFamily::Ansi);
+        (session, receiver)
+    }
+
+    fn receive_key_event(receiver: &mut mpsc::UnboundedReceiver<Data>) -> KeyEvent {
+        let Data::Message(message) = receiver.try_recv().unwrap() else {
+            panic!("expected keyboard message");
+        };
+        let Some(message::Union::KeyEvent(event)) = message.union else {
+            panic!("expected legacy keyboard event");
+        };
+        event
+    }
+
+    fn send_key(
+        session: &TestSession,
+        receiver: &mut mpsc::UnboundedReceiver<Data>,
+        mode: &str,
+        character: &str,
+        usage: u32,
+        down: bool,
+    ) -> KeyEvent {
+        session.handle_flutter_key_event(mode, character, usage as i32, 0, down);
+        receive_key_event(receiver)
+    }
+
+    fn send_native_key(
+        session: &TestSession,
+        receiver: &mut mpsc::UnboundedReceiver<Data>,
+        mode: &str,
+        key: rdev::Key,
+        character: &str,
+        down: bool,
+    ) -> KeyEvent {
+        #[cfg(target_os = "windows")]
+        let platform_code = rdev::win_code_from_key(key).unwrap_or_default() as _;
+        #[cfg(target_os = "macos")]
+        let platform_code = rdev::macos_keycode_from_key(key).unwrap_or_default() as _;
+        #[cfg(target_os = "linux")]
+        let platform_code = rdev::linux_keycode_from_key(key).unwrap_or_default() as _;
+        // Source 1 supplies native platform/position codes while usb_hid is zero.
+        let event = Event {
+            time: SystemTime::now(),
+            unicode: if character.is_empty() {
+                None
+            } else {
+                Some(rdev::UnicodeInfo {
+                    name: Some(character.to_owned()),
+                    unicode: character.encode_utf16().collect(),
+                    is_dead: false,
+                })
+            },
+            event_type: if down {
+                KeyPress(key)
+            } else {
+                KeyRelease(key)
+            },
+            platform_code,
+            position_code: platform_code as _,
+            usb_hid: 0,
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            extra_data: 0,
+        };
+        crate::keyboard::client::process_event_with_session(mode, &event, Some(0), session);
+        receive_key_event(receiver)
+    }
+
+    fn chr(event: &KeyEvent) -> u32 {
+        let Some(key_event::Union::Chr(code)) = event.union.as_ref() else {
+            panic!("expected Chr payload");
+        };
+        *code
+    }
+
+    fn has_modifier(event: &KeyEvent, expected: ControlKey) -> bool {
+        event
+            .modifiers
+            .iter()
+            .any(|modifier| modifier.enum_value_or_default() == expected)
+    }
+
+    #[test]
+    fn legacy_control_letters_keep_identity_through_release_after_control_up() {
+        let _state_guard = KeyboardStateGuard::new();
+        let (session, mut receiver) = sender_session("Mac OS", false);
+        for (letter, usage, control_character) in [
+            ('a', 0x04, "\u{1}"),
+            ('e', 0x08, "\u{5}"),
+            ('u', 0x18, "\u{15}"),
+            ('w', 0x1a, "\u{17}"),
+            ('c', 0x06, "\u{3}"),
+            ('v', 0x19, "\u{16}"),
+            ('j', 0x0d, "\n"),
+        ] {
+            let _ = send_key(&session, &mut receiver, "legacy", "", 0xe0, true);
+            let down = send_key(
+                &session,
+                &mut receiver,
+                "legacy",
+                control_character,
+                usage,
+                true,
+            );
+            assert_eq!(down.mode.enum_value(), Ok(KeyboardMode::Legacy));
+            assert_eq!(chr(&down), letter as u32);
+            assert!(down.down);
+            assert!(has_modifier(&down, ControlKey::Control));
+
+            let repeat = send_key(
+                &session,
+                &mut receiver,
+                "legacy",
+                control_character,
+                usage,
+                true,
+            );
+            assert_eq!(chr(&repeat), letter as u32);
+            assert!(repeat.down);
+
+            let _ = send_key(&session, &mut receiver, "legacy", "", 0xe0, false);
+            let up = send_key(&session, &mut receiver, "legacy", "", usage, false);
+            assert_eq!(chr(&up), letter as u32);
+            assert!(!up.down);
+            assert!(up.modifiers.is_empty());
+        }
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn legacy_control_shift_preserves_both_modifiers() {
+        let _state_guard = KeyboardStateGuard::new();
+        let (session, mut receiver) = sender_session("Mac OS", false);
+        let _ = send_key(&session, &mut receiver, "legacy", "", 0xe0, true);
+        let _ = send_key(&session, &mut receiver, "legacy", "", 0xe1, true);
+        let event = send_key(&session, &mut receiver, "legacy", "\n", 0x0d, true);
+        assert_eq!(chr(&event), 'j' as u32);
+        assert!(has_modifier(&event, ControlKey::Control));
+        assert!(has_modifier(&event, ControlKey::Shift));
+        assert!(event.down);
+        let _ = send_key(&session, &mut receiver, "legacy", "", 0xe1, false);
+        let _ = send_key(&session, &mut receiver, "legacy", "", 0xe0, false);
+        let up = send_key(&session, &mut receiver, "legacy", "", 0x0d, false);
+        assert_eq!(chr(&up), 'j' as u32);
+        assert!(!up.down);
+        assert!(up.modifiers.is_empty());
+    }
+
+    #[test]
+    fn translate_control_and_meta_chords_use_native_down_repeat_up_events() {
+        let _state_guard = KeyboardStateGuard::new();
+        let (session, mut receiver) = sender_session("Mac OS", false);
+        let _ = send_key(&session, &mut receiver, "translate", "", 0xe0, true);
+        let down = send_key(&session, &mut receiver, "translate", "\n", 0x0d, true);
+        assert_eq!(down.mode.enum_value(), Ok(KeyboardMode::Translate));
+        assert!(matches!(down.union.as_ref(), Some(key_event::Union::Chr(_))));
+        assert!(down.down);
+        let native_code = chr(&down);
+        let repeat = send_key(&session, &mut receiver, "translate", "\n", 0x0d, true);
+        assert_eq!(chr(&repeat), native_code);
+        assert!(repeat.down);
+        let _ = send_key(&session, &mut receiver, "translate", "", 0xe0, false);
+        let up = send_key(&session, &mut receiver, "translate", "", 0x0d, false);
+        assert_eq!(chr(&up), native_code);
+        assert!(!up.down);
+        assert!(up.modifiers.is_empty());
+
+        for (usage, character) in [(0x06, "c"), (0x19, "v")] {
+            let _ = send_key(&session, &mut receiver, "translate", "", 0xe3, true);
+            let down = send_key(
+                &session,
+                &mut receiver,
+                "translate",
+                character,
+                usage,
+                true,
+            );
+            assert!(matches!(down.union.as_ref(), Some(key_event::Union::Chr(_))));
+            assert!(down.down);
+            let native_code = chr(&down);
+            let repeat = send_key(
+                &session,
+                &mut receiver,
+                "translate",
+                character,
+                usage,
+                true,
+            );
+            assert_eq!(chr(&repeat), native_code);
+            let _ = send_key(&session, &mut receiver, "translate", "", 0xe3, false);
+            let up = send_key(
+                &session,
+                &mut receiver,
+                "translate",
+                character,
+                usage,
+                false,
+            );
+            assert_eq!(chr(&up), native_code);
+            assert!(!up.down);
+        }
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn swap_enabled_keeps_control_and_windows_shortcut_identity_for_j_c_and_v() {
+        let _state_guard = KeyboardStateGuard::new();
+        let (session, mut receiver) = sender_session("Mac OS", true);
+        for (modifier_usage, expected_modifier) in [
+            (0xe0, ControlKey::Meta),
+            (0xe3, ControlKey::Control),
+        ] {
+            for (letter, usage, control_character) in [
+                ('j', 0x0d, "\n"),
+                ('c', 0x06, "\u{3}"),
+                ('v', 0x19, "\u{16}"),
+            ] {
+                let modifier_down = send_key(
+                    &session,
+                    &mut receiver,
+                    "legacy",
+                    "",
+                    modifier_usage,
+                    true,
+                );
+                assert!(matches!(
+                    modifier_down.union.as_ref(),
+                    Some(key_event::Union::ControlKey(ck))
+                        if ck.enum_value_or_default() == expected_modifier
+                ));
+
+                let down = send_key(
+                    &session,
+                    &mut receiver,
+                    "legacy",
+                    control_character,
+                    usage,
+                    true,
+                );
+                assert_eq!(chr(&down), letter as u32);
+                assert!(down.down);
+                assert!(has_modifier(&down, expected_modifier));
+
+                let _ = send_key(
+                    &session,
+                    &mut receiver,
+                    "legacy",
+                    "",
+                    modifier_usage,
+                    false,
+                );
+                let up = send_key(&session, &mut receiver, "legacy", "", usage, false);
+                assert_eq!(chr(&up), letter as u32);
+                assert!(!up.down);
+                assert!(up.modifiers.is_empty());
+            }
+        }
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn translate_plain_ime_and_altgr_text_remain_text_payloads() {
+        let _state_guard = KeyboardStateGuard::new();
+        let (session, mut receiver) = sender_session("Mac OS", false);
+        let plain = send_key(&session, &mut receiver, "translate", "j", 0x0d, true);
+        assert_eq!(plain.union, Some(key_event::Union::Seq("j".to_owned())));
+        let _ = send_key(&session, &mut receiver, "translate", "", 0x0d, false);
+
+        let ime = send_key(&session, &mut receiver, "translate", "あ", 0x04, true);
+        assert_eq!(ime.union, Some(key_event::Union::Seq("あ".to_owned())));
+        let _ = send_key(&session, &mut receiver, "translate", "", 0x04, false);
+
+        let _ = send_key(&session, &mut receiver, "legacy", "", 0xe6, true);
+        let altgr = send_key(&session, &mut receiver, "legacy", "@", 0x14, true);
+        assert_eq!(chr(&altgr), '@' as u32);
+        let _ = send_key(&session, &mut receiver, "legacy", "", 0xe6, false);
+        let _ = send_key(&session, &mut receiver, "legacy", "", 0x14, false);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn modifier_swap_does_not_reinterpret_legacy_character_as_native_code() {
+        let _state_guard = KeyboardStateGuard::new();
+        let (session, mut receiver) = sender_session("Mac OS", true);
+        let mut event = KeyEvent::new();
+        event.mode = KeyboardMode::Legacy.into();
+        event.set_chr('7' as _);
+        event.down = true;
+        session.send_key_event(&event);
+        let output = receive_key_event(&mut receiver);
+        assert_eq!(output.mode.enum_value(), Ok(KeyboardMode::Legacy));
+        assert_eq!(chr(&output), '7' as u32);
+        assert!(output.usb_hid_usage == 0);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn native_rdev_usb_hid_zero_legacy_unicode_none_j_keeps_identity() {
+        let _state_guard = KeyboardStateGuard::new();
+        let (session, mut receiver) = sender_session("Mac OS", false);
+        let _ = send_native_key(
+            &session,
+            &mut receiver,
+            "legacy",
+            rdev::Key::ControlLeft,
+            "",
+            true,
+        );
+        let down = send_native_key(
+            &session,
+            &mut receiver,
+            "legacy",
+            rdev::Key::KeyJ,
+            "",
+            true,
+        );
+        assert_eq!(chr(&down), 'j' as u32);
+        assert!(down.down);
+        let _ = send_native_key(
+            &session,
+            &mut receiver,
+            "legacy",
+            rdev::Key::ControlLeft,
+            "",
+            false,
+        );
+        let up = send_native_key(
+            &session,
+            &mut receiver,
+            "legacy",
+            rdev::Key::KeyJ,
+            "",
+            false,
+        );
+        assert_eq!(chr(&up), 'j' as u32);
+        assert!(!up.down);
+    }
+
+    #[test]
+    fn native_rdev_usb_hid_zero_translate_unicode_none_j_uses_native_route() {
+        let _state_guard = KeyboardStateGuard::new();
+        let (session, mut receiver) = sender_session("Mac OS", false);
+        let _ = send_native_key(
+            &session,
+            &mut receiver,
+            "translate",
+            rdev::Key::ControlLeft,
+            "",
+            true,
+        );
+        let down = send_native_key(
+            &session,
+            &mut receiver,
+            "translate",
+            rdev::Key::KeyJ,
+            "",
+            true,
+        );
+        assert_eq!(down.mode.enum_value(), Ok(KeyboardMode::Translate));
+        assert!(matches!(down.union.as_ref(), Some(key_event::Union::Chr(_))));
+        let native_code = chr(&down);
+        let repeat = send_native_key(
+            &session,
+            &mut receiver,
+            "translate",
+            rdev::Key::KeyJ,
+            "",
+            true,
+        );
+        assert_eq!(chr(&repeat), native_code);
+        let _ = send_native_key(
+            &session,
+            &mut receiver,
+            "translate",
+            rdev::Key::ControlLeft,
+            "",
+            false,
+        );
+        let up = send_native_key(
+            &session,
+            &mut receiver,
+            "translate",
+            rdev::Key::KeyJ,
+            "",
+            false,
+        );
+        assert_eq!(chr(&up), native_code);
+        assert!(!up.down);
+    }
+
+    #[test]
+    fn native_rdev_usb_hid_zero_map_uses_native_key_identity() {
+        let _state_guard = KeyboardStateGuard::new();
+        let (session, mut receiver) = sender_session("Mac OS", false);
+        for down in [true, false] {
+            let event = send_native_key(
+                &session,
+                &mut receiver,
+                "map",
+                rdev::Key::KeyJ,
+                "",
+                down,
+            );
+            assert_eq!(event.mode.enum_value(), Ok(KeyboardMode::Map));
+            assert_eq!(chr(&event), 38);
+            assert_eq!(event.usb_hid_usage, 0x0d);
+            assert_eq!(event.down, down);
+        }
     }
 }

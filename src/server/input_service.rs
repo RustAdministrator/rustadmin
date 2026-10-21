@@ -638,6 +638,7 @@ enum KeysDown {
 struct PressedKey {
     since: Instant,
     family: KeyboardFamily,
+    native_character: bool,
 }
 
 lazy_static::lazy_static! {
@@ -1868,7 +1869,7 @@ fn need_to_uppercase(en: &mut Enigo) -> bool {
     get_modifier_state(Key::Shift, en) || get_modifier_state(Key::CapsLock, en)
 }
 
-fn process_chr(en: &mut Enigo, chr: u32, down: bool, _hotkey: bool) {
+fn process_chr(en: &mut Enigo, chr: u32, down: bool, _hotkey: bool) -> bool {
     // On Wayland with uinput mode, use clipboard for character input
     #[cfg(target_os = "linux")]
     if !crate::platform::linux::is_x11() && wayland_use_uinput() {
@@ -1879,7 +1880,7 @@ fn process_chr(en: &mut Enigo, chr: u32, down: bool, _hotkey: bool) {
                     input_char_via_clipboard_server(en, c);
                 }
             }
-            return;
+            return false;
         }
     }
 
@@ -1890,13 +1891,14 @@ fn process_chr(en: &mut Enigo, chr: u32, down: bool, _hotkey: bool) {
                 en.key_sequence(&chr.to_string());
             }
         }
-        return;
+        return false;
     }
 
     let key = char_value_to_key(chr);
 
     if down {
         if en.key_down(key).is_ok() {
+            true
         } else {
             if let Ok(chr) = char::try_from(chr) {
                 let mut s = chr.to_string();
@@ -1905,9 +1907,11 @@ fn process_chr(en: &mut Enigo, chr: u32, down: bool, _hotkey: bool) {
                 }
                 en.key_sequence(&s);
             };
+            false
         }
     } else {
         en.key_up(key);
+        false
     }
 }
 
@@ -2054,6 +2058,15 @@ fn record_pressed_key(record_key: KeysDown, down: bool) {
 }
 
 fn record_pressed_key_with_family(record_key: KeysDown, down: bool, family: KeyboardFamily) {
+    record_pressed_key_with_route(record_key, down, family, false);
+}
+
+fn record_pressed_key_with_route(
+    record_key: KeysDown,
+    down: bool,
+    family: KeyboardFamily,
+    native_character: bool,
+) {
     let mut key_down = KEYS_DOWN.lock().unwrap();
     if down {
         key_down.insert(
@@ -2061,10 +2074,43 @@ fn record_pressed_key_with_family(record_key: KeysDown, down: bool, family: Keyb
             PressedKey {
                 since: Instant::now(),
                 family,
+                native_character,
             },
         );
     } else {
         key_down.remove(&record_key);
+    }
+}
+
+#[inline]
+fn pressed_native_character(record_key: KeysDown) -> bool {
+    KEYS_DOWN
+        .lock()
+        .unwrap()
+        .get(&record_key)
+        .is_some_and(|pressed| pressed.native_character)
+}
+
+#[inline]
+fn route_character_input<F>(
+    down: bool,
+    hotkey: bool,
+    previously_native: bool,
+    mut emit: F,
+) -> bool
+where
+    F: FnMut(bool) -> bool,
+{
+    let native_route = if down {
+        previously_native || hotkey
+    } else {
+        previously_native
+    };
+    let emitted_native = emit(native_route);
+    if down {
+        previously_native || emitted_native
+    } else {
+        false
     }
 }
 
@@ -2173,8 +2219,33 @@ fn legacy_keyboard_mode(evt: &KeyEvent) {
             release_shift_for_char_input(&mut en);
 
             let record_key = chr as u64 + KEY_CHAR_START;
-            record_pressed_key(KeysDown::EnigoKey(record_key), down);
-            process_chr(&mut en, chr, down, has_hotkey_modifiers(evt))
+            let record_key = KeysDown::EnigoKey(record_key);
+            if down {
+                let previously_native = pressed_native_character(record_key);
+                let native_character = route_character_input(
+                    true,
+                    has_hotkey_modifiers(evt),
+                    previously_native,
+                    |native_route| process_chr(&mut en, chr, true, native_route),
+                );
+                record_pressed_key_with_route(
+                    record_key,
+                    true,
+                    KeyboardFamily::Unknown,
+                    previously_native || native_character,
+                );
+            } else {
+                route_character_input(
+                    false,
+                    false,
+                    pressed_native_character(record_key),
+                    |native_route| {
+                        process_chr(&mut en, chr, false, native_route);
+                        false
+                    },
+                );
+                record_pressed_key(record_key, false);
+            }
         }
         Some(key_event::Union::Unicode(chr)) => {
             // Same as Chr: release Shift for Unicode input
@@ -2871,4 +2942,90 @@ lazy_static::lazy_static! {
         (ControlKey::Insert, true),
         (ControlKey::Delete, true),
     ].iter().map(|(a, b)| (a.value(), b.clone())).collect();
+}
+
+#[cfg(test)]
+mod native_character_route_tests {
+    use super::*;
+
+    struct PressedKeyGuard(KeysDown);
+
+    impl Drop for PressedKeyGuard {
+        fn drop(&mut self) {
+            record_pressed_key(self.0, false);
+        }
+    }
+
+    #[test]
+    fn character_routing_keeps_native_release_after_modifier_up_and_ignores_text_keyup() {
+        let record_key = KeysDown::EnigoKey(KEY_CHAR_START + 'j' as u64);
+        let _key_guard = PressedKeyGuard(record_key);
+        let mut actions = Vec::new();
+        assert!(route_character_input(
+            true,
+            true,
+            false,
+            |native| {
+                actions.push((true, native));
+                true
+            },
+        ));
+        record_pressed_key_with_route(record_key, true, KeyboardFamily::Unknown, true);
+        assert!(route_character_input(
+            true,
+            false,
+            pressed_native_character(record_key),
+            |native| {
+                actions.push((true, native));
+                true
+            },
+        ));
+        assert!(!route_character_input(
+            false,
+            false,
+            pressed_native_character(record_key),
+            |native| {
+                actions.push((false, native));
+                false
+            },
+        ));
+        assert_eq!(actions, [(true, true), (true, true), (false, true)]);
+
+        record_pressed_key(record_key, false);
+        assert!(!pressed_native_character(record_key));
+        let mut text_actions = Vec::new();
+        record_pressed_key_with_route(record_key, true, KeyboardFamily::Unknown, false);
+        assert!(!route_character_input(
+            true,
+            false,
+            pressed_native_character(record_key),
+            |native| {
+                text_actions.push((true, native));
+                false
+            },
+        ));
+        assert!(!route_character_input(
+            false,
+            false,
+            pressed_native_character(record_key),
+            |native| {
+                text_actions.push((false, native));
+                false
+            },
+        ));
+        assert_eq!(text_actions, [(true, false), (false, false)]);
+        record_pressed_key(record_key, false);
+
+        let mut failed_actions = Vec::new();
+        assert!(!route_character_input(
+            true,
+            true,
+            false,
+            |native| {
+                failed_actions.push((true, native));
+                false
+            },
+        ));
+        assert_eq!(failed_actions, [(true, true)]);
+    }
 }
