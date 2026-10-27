@@ -514,7 +514,7 @@ impl<T: InvokeUiSession> Remote<T> {
         }
     }
 
-    fn resource_policy_snapshot(&self) -> (ResourceMode, ResourceMode, ResourceMode, bool) {
+    fn resource_policy_snapshot(&self) -> (ResourceMode, ResourceMode, bool) {
         let (local, remote, recording) = {
             let lc = self.handler.lc.read().unwrap();
             (
@@ -523,16 +523,9 @@ impl<T: InvokeUiSession> Remote<T> {
                 lc.record_state && lc.record_permission,
             )
         };
-        let combined = local.strongest(remote);
         let resources = self.handler.viewer_resources.lock().unwrap();
-        let effective = combined.strongest(resources.actual_host_mode);
-        let suspended = resources.should_suspend_with_modes(
-            local,
-            combined,
-            resources.actual_host_mode,
-            recording,
-        );
-        (local, combined, effective, suspended)
+        let suspended = resources.should_suspend(local, recording);
+        (local, remote, suspended)
     }
 
     fn suspend_video_locally(&mut self) {
@@ -586,17 +579,14 @@ impl<T: InvokeUiSession> Remote<T> {
     }
 
     async fn sync_resource_policy_to_peer(&mut self, peer: &mut Stream) {
-        let (local, requested, effective, suspended) = self.resource_policy_snapshot();
-        let (previous_local_mode, _previous_effective_mode, previous_suspended) = {
+        let (local, requested, suspended) = self.resource_policy_snapshot();
+        let (previous_local_mode, previous_suspended) = {
             let mut resources = self.handler.viewer_resources.lock().unwrap();
             let previous = (
                 resources.local_mode,
-                resources.effective_mode,
                 resources.suspended,
             );
             resources.local_mode = local;
-            resources.combined_mode = requested;
-            resources.effective_mode = effective;
             resources.suspended = suspended;
             previous
         };
@@ -1267,7 +1257,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                 requested_video_profile,
                                 host_movie_supported,
                                 full_movie_transport,
-                                self.handler.effective_resource_mode(),
+                                self.handler.movie_resource_mode(),
                             );
                             let full_movie_mode = effective_movie_mode == EffectiveMovieMode::Full;
                             let fps_mode = if full_movie_mode {
@@ -2774,7 +2764,7 @@ impl<T: InvokeUiSession> Remote<T> {
             match msg_in.union {
                 Some(message::Union::VideoFrame(vf)) => {
                     let (effective_resource_mode, video_suspended) =
-                        self.handler.video_resource_runtime();
+                        self.handler.movie_resource_runtime();
                     if video_suspended {
                         // Video suspension is connection-scoped. Drop only
                         // the media payload; control, permission, and ACK

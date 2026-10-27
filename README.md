@@ -55,15 +55,15 @@ This list describes the current development direction and may change as the fork
 
 ## Resource modes
 
-Codec settings provide independent **Host resource mode** and **Viewer resource mode** defaults. The session toolbar's **Resource mode** dialog saves overrides for that connection. Remote host controls require an updated host.
+Codec settings provide independent **Host resource mode** and **Viewer resource mode** defaults. The session toolbar's **Resource mode** dialog saves separate **Remote host** and **Local viewer** overrides. Use either side alone or both; changing the viewer mode never sets the host resource mode. Remote host controls require an updated host.
 
 * **Normal** uses the saved codec, quality and frame-rate settings.
-* **Low power** limits video to 10 FPS, retains the efficient codec paths, and reduces capture polling to 2 FPS after two seconds without a changed frame.
-* **Minimize GPU** adds software-only video codecs and uses direct GDI capture on Windows, with the existing UAC and privacy capture paths taking precedence. Software VP8 is the baseline, with VP9 available for compatible fallback. macOS capture is throttled at its source. Displaying a desktop still uses operating-system graphics; this mode can increase CPU use.
+* **Host Low power** limits video to 10 FPS and reduces capture polling to 2 FPS after two seconds without a changed frame. **Host Minimize GPU** also uses software VP8/VP9 and direct GDI capture on Windows, with existing UAC and privacy paths taking precedence. macOS capture is throttled at its source.
+* **Viewer Low power** limits local presentation to 10 FPS. **Viewer Minimize GPU** also enforces software decoding. It advertises available software formats, including AV1 and optional FFmpeg H264/H265, so a compatible host can retain hardware encoding. Codec compatibility may require another shared video format; it does not change either side's resource mode. Software decoding can increase CPU use, and displaying the session still uses operating-system graphics.
 
-Resource limits override Movie and fixed-FPS requests without overwriting those preferences. The strongest host or connected-viewer request applies to shared host video. Returning all requests to Normal restores the original settings.
+Host limits override Movie and fixed-FPS requests without overwriting those preferences. The strongest local host setting or explicit remote-host request applies to shared host video. Viewer limits operate locally: all encoded reference frames are decoded and recordings stay complete; only presentation is coalesced, including a timed final frame when the host goes idle. Returning a side to Normal restores its original preferences.
 
-In resource modes, hidden remote tabs and minimized windows suspend monitor video while keeping the connection and non-video services alive. Another visible view or an active recording keeps video running. Resume preserves the selected monitors and waits for a fresh reference frame. An unfocused visible window continues updating. Older hosts cannot suspend capture through this protocol, although the viewer can stop local decoding.
+When a viewer resource mode is enabled, hidden remote tabs and minimized windows suspend that connection's monitor video while keeping non-video services alive. Another visible view or an active recording keeps video running. Resume preserves selected monitors and waits for a fresh reference. An unfocused visible window continues updating. A host resource mode alone does not suspend a Normal viewer. Older hosts cannot suspend capture through this protocol, although the viewer can stop local decoding.
 
 ## Recommended deployment model
 

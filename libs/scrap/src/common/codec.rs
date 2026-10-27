@@ -218,6 +218,52 @@ pub fn decoder_capabilities() -> HashMap<&'static str, bool> {
     decoder_capabilities_for_rendering(true, None)
 }
 
+/// Return decoder capabilities that are safe to advertise without consulting
+/// GPU state. The key set matches `decoder_capabilities_for_rendering`; every
+/// hardware entry is false and the aggregate entries describe software only.
+pub fn software_decoder_capabilities() -> HashMap<&'static str, bool> {
+    let mut caps = HashMap::from([
+        ("vp8", true),
+        ("vp9", true),
+        ("av1Sw", !disable_av1()),
+        ("av1Hw", false),
+        ("h264Sw", false),
+        ("h264Hw", false),
+        ("h265Sw", false),
+        ("h265Hw", false),
+    ]);
+    #[cfg(feature = "hwcodec")]
+    {
+        // This cache probes only the optional software FFmpeg decoders. It
+        // does not load GPU configuration or instantiate a hardware backend.
+        let software = hwcodec::ffmpeg_ram::decode::Decoder::available_software_decoders();
+        caps.insert(
+            "h264Sw",
+            software
+                .iter()
+                .any(|codec| matches!(codec.format, hwcodec::common::DataFormat::H264)),
+        );
+        caps.insert(
+            "h265Sw",
+            software
+                .iter()
+                .any(|codec| matches!(codec.format, hwcodec::common::DataFormat::H265)),
+        );
+    }
+    for (format, hardware, software) in [
+        ("av1", "av1Hw", "av1Sw"),
+        ("h264", "h264Hw", "h264Sw"),
+        ("h265", "h265Hw", "h265Sw"),
+    ] {
+        caps.insert(
+            format,
+            caps.get(hardware).copied().unwrap_or(false)
+                || caps.get(software).copied().unwrap_or(false),
+        );
+    }
+    caps
+}
+
 pub fn decoder_capabilities_for_rendering(
     _texture_render: bool,
     _luid: Option<i64>,
@@ -476,6 +522,53 @@ fn codec_for_preference(preference: PreferCodec, auto_codec: CodecFormat) -> Cod
         PreferCodec::H264 | PreferCodec::H264_HQ => CodecFormat::H264,
         PreferCodec::H265 | PreferCodec::H265_HQ => CodecFormat::H265,
         PreferCodec::Auto => auto_codec,
+    }
+}
+
+fn software_decoder_supports(
+    capabilities: &HashMap<&'static str, bool>,
+    preference: PreferCodec,
+) -> bool {
+    match codec_for_preference(preference, CodecFormat::Unknown) {
+        CodecFormat::VP8 => capabilities.get("vp8").copied().unwrap_or(false),
+        CodecFormat::VP9 => capabilities.get("vp9").copied().unwrap_or(false),
+        CodecFormat::AV1 => capabilities.get("av1").copied().unwrap_or(false),
+        CodecFormat::H264 => capabilities.get("h264Sw").copied().unwrap_or(false),
+        CodecFormat::H265 => capabilities.get("h265Sw").copied().unwrap_or(false),
+        CodecFormat::Unknown => true,
+    }
+}
+
+fn normalize_software_decoder_preference(
+    preference: PreferCodec,
+    capabilities: &HashMap<&'static str, bool>,
+) -> PreferCodec {
+    match preference {
+        // Resource mode controls the local decoder implementation. Keep the
+        // wire preference format-only so it cannot force the host's encoder
+        // backend to software.
+        PreferCodec::AV1_HW | PreferCodec::AV1_SW
+            if software_decoder_supports(capabilities, PreferCodec::AV1) =>
+        {
+            PreferCodec::AV1
+        }
+        PreferCodec::AV1_HW | PreferCodec::AV1_SW => PreferCodec::Auto,
+        preference if software_decoder_supports(capabilities, preference) => preference,
+        _ => PreferCodec::Auto,
+    }
+}
+
+fn normalize_software_decoder_chroma(
+    chroma: Chroma,
+    capabilities: &HashMap<&'static str, bool>,
+) -> Chroma {
+    if chroma == Chroma::I444
+        && !capabilities.get("vp9").copied().unwrap_or(false)
+        && !capabilities.get("av1").copied().unwrap_or(false)
+    {
+        Chroma::I420
+    } else {
+        chroma
     }
 }
 
@@ -1273,15 +1366,31 @@ impl Decoder {
         _luid: Option<i64>,
         mode: ResourceMode,
     ) -> SupportedDecoding {
-        let (prefer, prefer_chroma) = Self::preference(id_for_perfer);
         if mode == ResourceMode::MinimizeGpu {
+            let (prefer, prefer_chroma) = Self::preference(id_for_perfer);
+            let capabilities = software_decoder_capabilities();
             return SupportedDecoding {
-                ability_vp8: 1,
-                prefer: PreferCodec::VP8.into(),
-                prefer_chroma: prefer_chroma.into(),
+                ability_vp8: i32::from(capabilities["vp8"]),
+                ability_vp9: i32::from(capabilities["vp9"]),
+                ability_av1: i32::from(capabilities["av1"]),
+                ability_h264: i32::from(capabilities["h264Sw"]),
+                ability_h265: i32::from(capabilities["h265Sw"]),
+                i444: Some(CodecAbility {
+                    vp9: capabilities["vp9"],
+                    av1: capabilities["av1"],
+                    ..Default::default()
+                })
+                .into(),
+                prefer: normalize_software_decoder_preference(prefer, &capabilities).into(),
+                prefer_chroma: normalize_software_decoder_chroma(
+                    prefer_chroma,
+                    &capabilities,
+                )
+                .into(),
                 ..Default::default()
             };
         }
+        let (prefer, prefer_chroma) = Self::preference(id_for_perfer);
         let av1_software_decoding = !disable_av1();
 
         #[allow(unused_mut)]
@@ -2584,19 +2693,28 @@ mod tests {
     }
 
     #[test]
-    fn minimize_gpu_decoder_uses_the_software_vp8_backend() {
+    fn minimize_gpu_decoder_advertises_the_software_profile() {
+        let capabilities = software_decoder_capabilities();
         let advertised = Decoder::supported_decodings_with_resource_mode(
             None,
             false,
             None,
             ResourceMode::MinimizeGpu,
         );
-        assert_eq!(advertised.ability_vp8, 1);
-        assert_eq!(advertised.ability_vp9, 0);
-        assert_eq!(advertised.ability_av1, 0);
-        assert_eq!(advertised.ability_h264, 0);
-        assert_eq!(advertised.ability_h265, 0);
-        assert_eq!(advertised.prefer.enum_value_or(PreferCodec::Auto), PreferCodec::VP8);
+        assert_eq!(advertised.ability_vp8, i32::from(capabilities["vp8"]));
+        assert_eq!(advertised.ability_vp9, i32::from(capabilities["vp9"]));
+        assert_eq!(advertised.ability_av1, i32::from(capabilities["av1"]));
+        assert_eq!(advertised.ability_h264, i32::from(capabilities["h264Sw"]));
+        assert_eq!(advertised.ability_h265, i32::from(capabilities["h265Sw"]));
+        for key in ["av1Hw", "h264Hw", "h265Hw"] {
+            assert!(!capabilities[key]);
+        }
+        assert_eq!(advertised.i444.vp9, capabilities["vp9"]);
+        assert_eq!(advertised.i444.av1, capabilities["av1"]);
+        assert_eq!(
+            advertised.prefer.enum_value_or(PreferCodec::Auto),
+            PreferCodec::Auto
+        );
 
         let decoder = Decoder::new_with_resource_mode(
             CodecFormat::VP8,
@@ -2609,6 +2727,57 @@ mod tests {
         );
         assert!(decoder.valid());
         assert_eq!(decoder.backend(), "Software libvpx");
+    }
+
+    #[test]
+    fn minimize_gpu_normalizes_incompatible_software_preferences() {
+        let capabilities = HashMap::from([
+            ("vp8", true),
+            ("vp9", true),
+            ("av1", true),
+            ("h264Sw", false),
+            ("h265Sw", true),
+        ]);
+        for preference in [PreferCodec::AV1_HW, PreferCodec::AV1_SW] {
+            let normalized = normalize_software_decoder_preference(preference, &capabilities);
+            assert_eq!(normalized, PreferCodec::AV1);
+            assert_ne!(normalized, PreferCodec::AV1_SW);
+            assert_eq!(
+                preferred_codec(&decodings(&[normalized]), all_usable_codecs(), PreferCodec::H264),
+                PreferCodec::AV1
+            );
+        }
+        assert_eq!(
+            normalize_software_decoder_preference(PreferCodec::H264, &capabilities),
+            PreferCodec::Auto
+        );
+        assert_eq!(
+            normalize_software_decoder_preference(PreferCodec::H265_HQ, &capabilities),
+            PreferCodec::H265_HQ
+        );
+
+        let av1_disabled = HashMap::from([
+            ("vp8", true),
+            ("vp9", true),
+            ("av1", false),
+            ("h264Sw", true),
+            ("h265Sw", true),
+        ]);
+        for preference in [PreferCodec::AV1_HW, PreferCodec::AV1_SW] {
+            assert_eq!(
+                normalize_software_decoder_preference(preference, &av1_disabled),
+                PreferCodec::Auto
+            );
+        }
+
+        let no_i444 = HashMap::from([
+            ("vp9", false),
+            ("av1", false),
+        ]);
+        assert_eq!(
+            normalize_software_decoder_chroma(Chroma::I444, &no_i444),
+            Chroma::I420
+        );
     }
 
     #[test]

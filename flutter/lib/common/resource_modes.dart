@@ -10,8 +10,13 @@ const kResourceModeLowPower = 'low-power';
 const kResourceModeMinimizeGpu = 'minimize-gpu';
 
 const kResourceModeExplanation =
-    'Low power limits video work. Minimize GPU uses software codecs and can '
-    'increase CPU use. Displaying the session can still use the GPU.';
+    'Host mode controls remote capture and encoding. Local viewer mode controls '
+    'decoding and presentation. They can be set independently.';
+const kResourceModeHostDescription =
+    'Low power reduces remote capture activity; Minimize GPU reduces GPU work.';
+const kResourceModeViewerDescription =
+    'Low power limits local rendering to 10 FPS. Minimize GPU uses software '
+    'decoding and may increase CPU use.';
 
 class ResourceModeChoice {
   const ResourceModeChoice({required this.value, required this.label});
@@ -94,6 +99,7 @@ class ResourceModeRadioGroup extends StatelessWidget {
     required this.value,
     required this.onChanged,
     this.title,
+    this.description,
     this.groupKey = 'resource-mode',
     this.localize = _identity,
   });
@@ -101,6 +107,7 @@ class ResourceModeRadioGroup extends StatelessWidget {
   final String value;
   final ValueChanged<String>? onChanged;
   final String? title;
+  final String? description;
   final String groupKey;
   final String Function(String) localize;
 
@@ -111,6 +118,10 @@ class ResourceModeRadioGroup extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (title != null) ...[Text(title!), const SizedBox(height: 4)],
+        if (description != null) ...[
+          Text(localize(description!)),
+          const SizedBox(height: 4),
+        ],
         RadioGroup<String>(
           groupValue: normalizeResourceMode(value),
           onChanged: (next) {

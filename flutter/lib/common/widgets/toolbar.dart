@@ -467,6 +467,7 @@ Future<void> showSessionResourceModeDialog(
               ResourceModeRadioGroup(
                 groupKey: 'session-viewer-resource-mode',
                 title: translate('Local viewer resource mode'),
+                description: kResourceModeViewerDescription,
                 value: viewerMode,
                 onChanged: (value) => selectMode(remote: false, value: value),
                 localize: translate,
@@ -476,6 +477,7 @@ Future<void> showSessionResourceModeDialog(
                 ResourceModeRadioGroup(
                   groupKey: 'session-host-resource-mode',
                   title: translate('Remote host resource mode'),
+                  description: kResourceModeHostDescription,
                   value: hostMode!,
                   onChanged: (value) => selectMode(remote: true, value: value),
                   localize: translate,

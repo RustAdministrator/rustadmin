@@ -203,6 +203,7 @@ class CodecSettingsContent extends StatelessWidget {
           ResourceModeRadioGroup(
             groupKey: 'host-resource-mode',
             title: localize('Host resource mode'),
+            description: kResourceModeHostDescription,
             value: hostResourceMode,
             onChanged: onHostResourceMode,
             localize: localize,
@@ -212,6 +213,7 @@ class CodecSettingsContent extends StatelessWidget {
         ResourceModeRadioGroup(
           groupKey: 'viewer-resource-mode',
           title: localize('Viewer resource mode'),
+          description: kResourceModeViewerDescription,
           value: viewerResourceMode,
           onChanged: onViewerResourceMode,
           localize: localize,

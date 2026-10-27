@@ -134,10 +134,14 @@ void main() {
       );
 
       expect(find.text(kResourceModeExplanation), findsOneWidget);
+      expect(find.text(kResourceModeHostDescription), findsOneWidget);
+      expect(find.text(kResourceModeViewerDescription), findsOneWidget);
       await tester.ensureVisible(
         find.byKey(const ValueKey('host-resource-mode-normal')),
       );
       await tester.tap(find.byKey(const ValueKey('host-resource-mode-normal')));
+      expect(host, kResourceModeNormal);
+      expect(viewer, isNull);
       await tester.ensureVisible(
         find.byKey(const ValueKey('viewer-resource-mode-low-power')),
       );

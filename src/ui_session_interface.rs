@@ -781,8 +781,8 @@ impl<T: InvokeUiSession> Session<T> {
         self.viewer_resources.lock().unwrap().local_mode
     }
 
-    pub(crate) fn effective_resource_mode(&self) -> ResourceMode {
-        self.viewer_resources.lock().unwrap().effective_mode
+    pub(crate) fn movie_resource_mode(&self) -> ResourceMode {
+        self.viewer_resources.lock().unwrap().movie_resource_mode()
     }
 
     pub(crate) fn update_actual_host_resource_mode(&self, value: &str) -> bool {
@@ -800,9 +800,9 @@ impl<T: InvokeUiSession> Session<T> {
         self.viewer_resources.lock().unwrap().suspended
     }
 
-    pub(crate) fn video_resource_runtime(&self) -> (ResourceMode, bool) {
+    pub(crate) fn movie_resource_runtime(&self) -> (ResourceMode, bool) {
         let resources = self.viewer_resources.lock().unwrap();
-        (resources.effective_mode, resources.suspended)
+        (resources.movie_resource_mode(), resources.suspended)
     }
 
     pub fn get_remember(&self) -> bool {
@@ -836,18 +836,9 @@ impl<T: InvokeUiSession> Session<T> {
                 Some(lc.adapter_luid.unwrap_or_default()),
             )
         } else {
-            // Minimize GPU deliberately avoids capability probes and exposes
-            // only the software VP8 baseline to the host/UI projection.
-            HashMap::from([
-                ("vp8", true),
-                ("vp9", false),
-                ("av1Sw", false),
-                ("av1Hw", false),
-                ("h264Sw", false),
-                ("h264Hw", false),
-                ("h265Sw", false),
-                ("h265Hw", false),
-            ])
+            // Report software capabilities without probing GPU backends or
+            // restricting the host to an unnecessary codec format.
+            scrap::codec::software_decoder_capabilities()
         };
         scrap::codec::decoders_for_remote_encoding(local, &lc.supported_encoding)
     }

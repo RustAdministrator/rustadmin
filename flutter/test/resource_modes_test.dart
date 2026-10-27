@@ -12,6 +12,9 @@ void main() {
     expect(normalizeResourceMode('unknown'), kResourceModeNormal);
     expect(normalizeResourceMode(' LOW-POWER '), kResourceModeLowPower);
     expect(resourceModeChoice(kResourceModeMinimizeGpu).label, 'Minimize GPU');
+    expect(kResourceModeExplanation, contains('set independently'));
+    expect(kResourceModeHostDescription, contains('remote capture'));
+    expect(kResourceModeViewerDescription, contains('10 FPS'));
   });
 
   test('remote host visibility follows the peer platform addition', () {
@@ -85,6 +88,7 @@ void main() {
           body: ResourceModeRadioGroup(
             groupKey: 'viewer-resource-mode',
             value: kResourceModeLowPower,
+            description: kResourceModeViewerDescription,
             localize: (value) => value,
             onChanged: (value) => selected = value,
           ),

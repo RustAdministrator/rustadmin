@@ -3646,8 +3646,8 @@ impl LoginConfigHandler {
         }
     }
 
-    pub fn requested_resource_mode(&self) -> ResourceMode {
-        self.resource_mode(false).strongest(self.resource_mode(true))
+    pub fn requested_host_resource_mode(&self) -> ResourceMode {
+        self.resource_mode(true)
     }
 
     pub fn capture_backend_from_value(value: &str) -> CaptureBackend {
@@ -4216,7 +4216,7 @@ impl LoginConfigHandler {
             video_profile.config_value(),
             msg.custom_fps.checked_abs().unwrap_or_default()
         );
-        self.requested_resource_mode().write_option(&mut msg);
+        self.requested_host_resource_mode().write_option(&mut msg);
         let view_only = self.get_toggle_option("view-only");
         if view_only {
             msg.disable_keyboard = BoolOption::Yes.into();
@@ -5358,11 +5358,33 @@ pub fn start_video_thread<F, T>(
         let mut count = 0;
         let mut duration = std::time::Duration::ZERO;
         let mut skip_beginning = 0;
+        let mut presentation = crate::resource_policy::ViewerPresentation::default();
+        let mut submit_presentation = |handler: &mut VideoHandler,
+                                       frame: crate::resource_policy::PendingPresentation| {
+            let render_submit_start = std::time::Instant::now();
+            let render_outcome = video_callback(
+                display, frame.stream_id, frame.frame_id, &mut handler.rgb,
+                handler.texture.texture, frame.pixelbuffer,
+            );
+            if render_outcome.any_submitted() {
+                let mut feedback = video_feedback.lock().unwrap();
+                feedback.record_render_submitted(
+                    frame.stream_id, frame.frame_id, render_submit_start.elapsed(),
+                    video_queue.read().unwrap().len(),
+                );
+                #[cfg(all(target_os = "android", feature = "mediacodec"))]
+                feedback.record_display_refresh(
+                    scrap::mediacodec::output_surface_refresh_millihz(display),
+                );
+            }
+            send_video_feedback(&session, &video_feedback, false);
+        };
         loop {
             if session.video_suspended() {
                 // The connection worker retires this decoder on the policy
                 // transition. This guard also drains a race where a frame
                 // was queued just before suspension became visible here.
+                presentation.clear();
                 video_handler.take();
                 while video_queue.read().unwrap().pop().is_some() {}
             }
@@ -5378,6 +5400,7 @@ pub fn start_video_thread<F, T>(
                             attempt,
                             handler.decoder_fallback
                         );
+                        presentation.clear();
                         *decoder_backend.write().unwrap() = Some(handler.decoder_backend());
                         if !session.video_suspended() {
                             session.refresh_video(display as _);
@@ -5399,17 +5422,24 @@ pub fn start_video_thread<F, T>(
                     session.refresh_video(display as _);
                 }
             }
-            // Only recovering/stalled displays need a timer. Healthy and idle
-            // workers remain blocked on input, with no periodic codec probing.
+            // A coalesced final frame must be submitted even if the host goes
+            // idle. With no pending output or recovery, block without polling.
             let now = std::time::Instant::now();
+            let local_mode = session.local_resource_mode();
+            if !session.video_suspended() {
+                if let (Some(handler), Some(frame)) = (
+                    video_handler.as_mut(), presentation.take_due(local_mode, now),
+                ) {
+                    submit_presentation(handler, frame);
+                }
+            }
             let recovery_wait = video_handler
                 .as_ref()
                 .and_then(|handler| handler.recovery.wait_duration(now));
             let movie_wait = movie_keyframe_wait.lock().unwrap().fallback_wait(now);
-            let wait = match (recovery_wait, movie_wait) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
+            let wait = [
+                recovery_wait, movie_wait, presentation.wait_duration(local_mode, now),
+            ].into_iter().flatten().min();
             let received = match wait {
                 Some(wait) => video_receiver.recv_timeout(wait),
                 None => video_receiver
@@ -5524,6 +5554,9 @@ pub fn start_video_thread<F, T>(
                             let mut pixelbuffer = true;
                             let mut tmp_chroma = None;
                             let format_changed = handler.decoder.format() != format;
+                            if format_changed {
+                                presentation.clear();
+                            }
                             match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
                                 Ok(DecodeOutcome::FrameReady {
                                     frame_id: decoded_frame_id,
@@ -5552,29 +5585,15 @@ pub fn start_video_thread<F, T>(
                                             *current = Some(resolution);
                                         }
                                     }
-                                    let render_submit_start = std::time::Instant::now();
-                                    let render_outcome = video_callback(
-                                        display,
-                                        stream_id,
-                                        decoded_frame_id,
-                                        &mut handler.rgb,
-                                        handler.texture.texture,
-                                        pixelbuffer,
-                                    );
-                                    if render_outcome.any_submitted() {
-                                        let mut feedback = video_feedback.lock().unwrap();
-                                        feedback.record_render_submitted(
-                                            stream_id,
-                                            decoded_frame_id,
-                                            render_submit_start.elapsed(),
-                                            video_queue.read().unwrap().len(),
-                                        );
-                                        #[cfg(all(target_os = "android", feature = "mediacodec"))]
-                                        feedback.record_display_refresh(
-                                            scrap::mediacodec::output_surface_refresh_millihz(
-                                                display,
-                                            ),
-                                        );
+                                    // Decode and record every input frame to preserve
+                                    // inter-frame references. Coalesce only local output.
+                                    presentation.queue(crate::resource_policy::PendingPresentation {
+                                        stream_id, frame_id: decoded_frame_id, pixelbuffer,
+                                    });
+                                    if let Some(frame) = presentation.take_due(
+                                        session.local_resource_mode(), std::time::Instant::now(),
+                                    ) {
+                                        submit_presentation(handler, frame);
                                     }
                                     send_video_feedback(&session, &video_feedback, false);
 
@@ -5608,6 +5627,7 @@ pub fn start_video_thread<F, T>(
                         }
                     }
                     MediaData::Reset(decoder_dimensions) => {
+                        presentation.clear();
                         if let Some(handler) = video_handler.as_mut() {
                             handler.set_resource_mode(session.local_resource_mode());
                             handler.decoder_preference =
@@ -7475,18 +7495,42 @@ mod video_feedback_tests {
     use super::*;
 
     #[test]
-    fn minimize_gpu_login_capability_is_software_vp8_only() {
+    fn minimize_gpu_login_advertises_software_capabilities_without_a_host_limit() {
         let handler = LoginConfigHandler::default();
         let decoding = handler.get_supported_decoding_for_resource_mode(ResourceMode::MinimizeGpu);
         assert_eq!(decoding.ability_vp8, 1);
-        assert_eq!(decoding.ability_vp9, 0);
-        assert_eq!(decoding.ability_av1, 0);
-        assert_eq!(decoding.ability_h264, 0);
-        assert_eq!(decoding.ability_h265, 0);
-        assert_eq!(
-            decoding.prefer.enum_value_or(PreferCodec::Auto),
-            PreferCodec::VP8
-        );
+        assert_eq!(decoding.ability_vp9, 1);
+        assert_eq!(decoding.ability_av1 > 0, scrap::codec::software_decoder_capabilities()["av1"]);
+        assert_eq!(handler.requested_host_resource_mode(), ResourceMode::Normal);
+    }
+
+    #[test]
+    fn host_and_viewer_modes_remain_independent_in_all_nine_login_combinations() {
+        use hbb_common::resource_policy::{OPTION_REMOTE_RESOURCE_MODE, OPTION_VIEWER_RESOURCE_MODE};
+        let modes = [ResourceMode::Normal, ResourceMode::LowPower, ResourceMode::MinimizeGpu];
+        for remote in modes {
+            for local in modes {
+                let mut handler = LoginConfigHandler::default();
+                handler.direct = Some(true);
+                handler.config.image_quality = "custom".to_owned();
+                for (key, value) in [
+                    (OPTION_VIEWER_RESOURCE_MODE, local.config_value()),
+                    (OPTION_REMOTE_RESOURCE_MODE, remote.config_value()),
+                    (keys::OPTION_CAPTURE_BACKEND, "dxgi"),
+                    (keys::OPTION_CUSTOM_FPS, "60"),
+                    (keys::OPTION_CUSTOM_FPS_MODE, "fixed"),
+                ] {
+                    handler.config.options.insert(key.to_owned(), value.to_owned());
+                }
+                let saved = handler.config.options.clone();
+                let message = handler.get_option_message(false).expect("monitor login options");
+                assert_eq!(ResourceMode::from_wire_update(message.resource_mode), Some(remote));
+                assert_eq!(handler.resource_mode(false), local);
+                assert_eq!(message.capture_backend.enum_value_or_default(), CaptureBackend::CaptureBackendDxgi);
+                assert_eq!(message.custom_fps, -60);
+                assert_eq!(handler.config.options, saved);
+            }
+        }
     }
 
     #[test]
@@ -7500,7 +7544,7 @@ mod video_feedback_tests {
             hbb_common::resource_policy::OPTION_REMOTE_RESOURCE_MODE.to_owned(),
             "minimize-gpu".to_owned(),
         );
-        assert_eq!(handler.requested_resource_mode(), ResourceMode::MinimizeGpu);
+        assert_eq!(handler.requested_host_resource_mode(), ResourceMode::MinimizeGpu);
         let decoding = handler.get_supported_decoding();
         assert_eq!(decoding.ability_vp9, 1);
     }
