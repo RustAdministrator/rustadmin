@@ -22,6 +22,8 @@ import 'package:flutter_hbb/desktop/widgets/content_sized_window.dart';
 import 'package:flutter_hbb/desktop/widgets/refresh_wrapper.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
+import 'package:flutter_hbb/common/connection_focus.dart';
+import 'package:flutter_hbb/utils/platform_channel.dart';
 import 'package:flutter_hbb/utils/desktop_window_geometry.dart';
 import 'package:flutter_hbb/utils/window_placement.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -301,6 +303,7 @@ void runMultiWindow(
           windowId: kWindowId!,
           peerId: argument['id'] as String?,
           display: argument['display'] as int?,
+          restoreState: connectionFocusFromArguments(argument),
         );
       }
       break;
@@ -335,7 +338,13 @@ void runMultiWindow(
       exit(0);
   }
   // show window from hidden status
-  WindowController.fromWindowId(kWindowId!).show();
+  if (appType == kAppTypeDesktopRemote) {
+    await RdPlatformChannel.instance.showConnectionWindow(
+      focus: connectionFocusFromArguments(argument),
+    );
+  } else {
+    WindowController.fromWindowId(kWindowId!).show();
+  }
 }
 
 void runConnectionManagerScreen() async {

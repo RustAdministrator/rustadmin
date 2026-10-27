@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/connection_focus.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/input_model.dart';
@@ -50,12 +51,14 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
 
   String? peerId;
   bool _isScreenRectSet = false;
+  bool _initialFocusOnOpen = true;
   int? _display;
 
   var connectionMap = RxList<Widget>.empty(growable: true);
 
   _ConnectionTabPageState(Map<String, dynamic> params) {
     RemoteCountState.init();
+    _initialFocusOnOpen = connectionFocusFromArguments(params);
     peerId = params['id'];
     final sessionId = params['session_id'];
     final sessionTabKey = sessionId == null || peerId == null
@@ -71,7 +74,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
     final screenRect = parseParamScreenRect(params);
     _isScreenRectSet = screenRect != null;
     _display = display as int?;
-    tryMoveToScreenAndSetFullscreen(screenRect);
+    if (_initialFocusOnOpen) tryMoveToScreenAndSetFullscreen(screenRect);
     if (peerId != null) {
       ConnectionTypeState.init(peerId!);
       tabController.onSelected = (id) {
@@ -117,6 +120,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
           pendingCachedPeerData: params['pending_cached_peer_data'],
           sessionTabKey: sessionTabKey,
           windowHost: DetachedSessionWindowHost(params['windowId']),
+          focusOnOpen: _initialFocusOnOpen,
         ),
       ));
       _update_remote_count();
@@ -140,6 +144,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
               ? null
               : tabController.state.value.tabs[0].key,
           display: _display,
+          restoreState: _initialFocusOnOpen,
         );
       });
     }
@@ -510,6 +515,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
     // for simplify, just replace connectionId
     if (call.method == kWindowEventNewRemoteDesktop) {
       final args = jsonDecode(call.arguments);
+      final focusOnOpen = connectionFocusFromArguments(args);
       final id = args['id'];
       final switchUuid = args['switch_uuid'];
       final sessionId = args['session_id'];
@@ -526,14 +532,16 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
             );
       final prePeerCount = tabController.length;
       Future.delayed(Duration.zero, () async {
-        if (stateGlobal.fullscreen.isTrue) {
+        if (focusOnOpen && stateGlobal.fullscreen.isTrue) {
           await WindowController.fromWindowId(windowId()).setFullscreen(false);
           stateGlobal.setFullscreen(false, procWnd: false);
         }
-        await setNewConnectWindowFrame(windowId(), id!, prePeerCount,
-            WindowType.RemoteDesktop, display, screenRect);
+        if (focusOnOpen) {
+          await setNewConnectWindowFrame(windowId(), id!, prePeerCount,
+              WindowType.RemoteDesktop, display, screenRect);
+        }
         Future.delayed(Duration(milliseconds: isWindows ? 100 : 0), () async {
-          await windowOnTop(windowId());
+          await windowOnTop(windowId(), focusOnOpen: focusOnOpen);
         });
       });
       ConnectionTypeState.init(id);
@@ -569,22 +577,31 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
           pendingCachedPeerData: args['pending_cached_peer_data'],
           sessionTabKey: sessionTabKey,
           windowHost: DetachedSessionWindowHost(windowId()),
+          focusOnOpen: focusOnOpen,
         ),
-      ));
+      ), activate: focusOnOpen);
     } else if (call.method == kWindowDisableGrabKeyboard) {
       // ???
     } else if (call.method == "onDestroy") {
       tabController.clear();
     } else if (call.method == kWindowActionRebuild) {
       reloadCurrentWindow();
+    } else if (call.method == 'showConnectionWindow') {
+      final args = call.arguments as Map<dynamic, dynamic>;
+      await RdPlatformChannel.instance.showConnectionWindow(focus: args['focus'] == true);
+      return true;
     } else if (call.method == kWindowEventActiveSession) {
-      final jumpOk = tabController.jumpToByKey(call.arguments);
+      final args = call.arguments;
+      final id = args is Map ? args['id'] : args;
+      final focusOnOpen = args is Map ? connectionFocusFromArguments(args) : true;
+      final exists = tabController.state.value.tabs.any((tab) => tab.key == id);
+      final jumpOk = exists && (!focusOnOpen || tabController.jumpToByKey(id));
       if (jumpOk) {
-        final page = tabController.widget(call.arguments);
+        final page = tabController.widget(id);
         if (page is RemotePage) {
           page.reconnectIfStaleOnActivation();
         }
-        windowOnTop(windowId());
+        await windowOnTop(windowId(), focusOnOpen: focusOnOpen);
       }
       return jumpOk;
     } else if (call.method == kWindowEventActiveDisplaySession) {

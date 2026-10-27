@@ -175,9 +175,9 @@ class _DesktopTabPageState extends State<DesktopTabPage> {
       sessionId: launch.sessionId,
     );
     if (existing != null) {
-      tabController.jumpToByKey(existing.key);
+      if (launch.focusOnOpen) tabController.jumpToByKey(existing.key);
       await _syncTabBarWithWindowFullscreen();
-      await _windowHost.showAndFocus();
+      await _windowHost.showForConnection(focusOnOpen: launch.focusOnOpen);
       return true;
     }
 
@@ -197,6 +197,7 @@ class _DesktopTabPageState extends State<DesktopTabPage> {
       pendingCachedPeerData: launch.pendingCachedPeerData,
       sessionTabKey: sessionKey,
       windowHost: _windowHost,
+      focusOnOpen: launch.focusOnOpen,
     );
     tabController.add(TabInfo(
       key: sessionKey.value,
@@ -207,21 +208,21 @@ class _DesktopTabPageState extends State<DesktopTabPage> {
       unselectedIcon: Icons.desktop_windows_outlined,
       onTabCloseButton: () => _closeSessionTab(sessionKey.value),
       page: page,
-    ));
+    ), activate: launch.focusOnOpen);
     RemoteCountState.find().value = _remoteTabs.length;
     _schedulePublishConnectionMenu();
     await _syncTabBarWithWindowFullscreen();
-    await _windowHost.showAndFocus();
+    await _windowHost.showForConnection(focusOnOpen: launch.focusOnOpen);
     return true;
   }
 
-  Future<bool> _activateRemoteSession(String peerId) async {
+  Future<bool> _activateRemoteSession(String peerId, {bool focusOnOpen = true}) async {
     final tab = _findRemoteTab(peerId);
     if (tab == null) {
       return false;
     }
-    tabController.jumpToByKey(tab.key);
-    await _windowHost.showAndFocus();
+    if (focusOnOpen) tabController.jumpToByKey(tab.key);
+    await _windowHost.showForConnection(focusOnOpen: focusOnOpen);
     return true;
   }
 

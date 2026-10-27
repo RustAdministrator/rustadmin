@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/common/session_peer_settings.dart';
+import 'package:flutter_hbb/common/widgets/connection_focus_checkbox.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
@@ -957,6 +958,26 @@ void enterUserLoginAndPasswordDialog(
   );
 }
 
+/// Only pending desktop authentication attempts expose a launch-focus choice.
+/// Pairing and password prompts share this state without storing credentials.
+Widget pendingConnectionFocusCheckbox(
+  SessionID sessionId,
+  StateSetter setState,
+) {
+  final manager = PreAuthRemoteDesktopManager.instance;
+  final focusOnOpen = manager.focusOnOpenForSession(sessionId);
+  if (focusOnOpen == null) return const SizedBox.shrink();
+  return ConnectionFocusCheckbox(
+    value: focusOnOpen,
+    label: translate(kConnectionFocusCheckboxLabel),
+    onChanged: (value) {
+      if (manager.setFocusOnOpenForSession(sessionId, value)) {
+        setState(() {});
+      }
+    },
+  );
+}
+
 _connectDialog(
   SessionID sessionId,
   OverlayDialogManager dialogManager, {
@@ -1146,6 +1167,7 @@ _connectDialog(
             ? Offstage()
             : Container(height: 12),
         passwdWidget(),
+        pendingConnectionFocusCheckbox(sessionId, setState),
       ]),
       actions: [
         dialogButton(

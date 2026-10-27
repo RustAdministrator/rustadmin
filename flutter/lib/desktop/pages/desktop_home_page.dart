@@ -830,6 +830,11 @@ class _DesktopHomePageState extends State<DesktopHomePage>
       } else if (call.method == kWindowEventSetTabsInFullscreen) {
         await rustDeskWinManager.setTabsInFullscreen(call.arguments == true);
         return true;
+      } else if (call.method == 'showConnectionWindow') {
+        await RdPlatformChannel.instance.showConnectionWindow(
+          focus: (call.arguments as Map)['focus'] == true,
+        );
+        return true;
       } else if (call.method == kWindowEventShow) {
         await rustDeskWinManager.registerActiveWindow(call.arguments["id"]);
       } else if (call.method == kWindowEventHide) {
@@ -845,6 +850,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
           password: call.arguments['password'],
           forceRelay: call.arguments['forceRelay'],
           connToken: call.arguments['connToken'],
+          focusOnOpen: call.arguments['focus_on_open'] as bool?,
         );
       } else if (call.method == kWindowBumpMouse) {
         return RdPlatformChannel.instance

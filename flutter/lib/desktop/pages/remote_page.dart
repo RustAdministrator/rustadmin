@@ -1,3 +1,4 @@
+import 'package:flutter_hbb/utils/platform_channel.dart';
 import 'dart:async';
 
 import 'package:desktop_multi_window/desktop_multi_window.dart';
@@ -68,6 +69,7 @@ class RemotePage extends StatefulWidget {
     this.pendingCachedPeerData,
     this.sessionTabKey,
     this.windowHost,
+    this.focusOnOpen = true,
   }) : super(key: key) {
     initSharedStates(id);
   }
@@ -86,6 +88,7 @@ class RemotePage extends StatefulWidget {
   final String? pendingCachedPeerData;
   final SessionTabKey? sessionTabKey;
   final SessionWindowHost? windowHost;
+  final bool focusOnOpen;
   final SimpleWrapper<State<RemotePage>?> _lastState = SimpleWrapper(null);
   final DesktopTabController? tabController;
 
@@ -138,6 +141,7 @@ class _RemotePageState extends State<RemotePage>
         TickerProviderStateMixin {
   Timer? _timer;
   bool _disposed = false;
+  bool _awaitingWindowActivation = false;
   bool _windowMinimized = false;
   bool _videoVisibilityReady = false;
   bool _videoVisibilitySawFirstImage = false;
@@ -242,6 +246,7 @@ class _RemotePageState extends State<RemotePage>
     if (!mounted ||
         !shouldRestoreRemoteKeyboardFocus(
           windowBlurred: _isWindowBlur,
+          activationPending: _awaitingWindowActivation || stateGlobal.connectionActivationPending,
           canRequestFocus: _rawKeyFocusNode.canRequestFocus,
           activeTab: _isActiveTab,
           editableTextFocused:
@@ -266,14 +271,24 @@ class _RemotePageState extends State<RemotePage>
     });
   }
 
-  void activateKeyboardInput() {
+  void activateKeyboardInput() async {
+    if (_awaitingWindowActivation || stateGlobal.connectionActivationPending) {
+      if (!await RdPlatformChannel.instance.isConnectionWindowFocused() || !mounted || _disposed) return;
+      _awaitingWindowActivation = false;
+      stateGlobal.connectionActivationPending = false;
+    }
     scheduleKeyboardFocus();
     // Switching tabs does not necessarily move the pointer, so Flutter may
     // omit a fresh MouseRegion enter event. Re-arm native Source 1 when the
     // activated page already knows that the pointer is over its image.
     if (_cursorOverImage.value) {
-      _ffi.inputModel.enterOrLeave(true);
+      _enterRemoteInput();
     }
+  }
+
+  void _enterRemoteInput() {
+    if (_awaitingWindowActivation || stateGlobal.connectionActivationPending) return;
+    _ffi.inputModel.enterOrLeave(true);
   }
 
   void _handleToolbarMenuFocusChanged(bool menuOpen) {
@@ -309,6 +324,7 @@ class _RemotePageState extends State<RemotePage>
     // hosted by the main window construct RemotePage directly.
     initializeDesktopRemoteInputSource();
     WidgetsBinding.instance.addObserver(this);
+    _awaitingWindowActivation = !widget.focusOnOpen;
     _ffi = FFI(widget.sessionId);
     _videoVisibilityOwner = 'remote-page:${Uuid().v4()}';
     _videoVisibilityReporter = VideoVisibilityReporter(
@@ -510,6 +526,9 @@ class _RemotePageState extends State<RemotePage>
       _isWindowBlur = false;
     }
     stateGlobal.isFocused.value = true;
+    _awaitingWindowActivation = false;
+    stateGlobal.connectionActivationPending = false;
+    if (_cursorOverImage.value && !_hasEditableTextFocus) _enterRemoteInput();
     scheduleKeyboardFocus(preserveEditableTextFocus: true);
 
     // Restore relative mouse mode constraints when window regains focus.
@@ -751,7 +770,7 @@ class _RemotePageState extends State<RemotePage>
                           });
                         }
                         if (imageFocused) {
-                          _ffi.inputModel.enterOrLeave(true);
+                          _enterRemoteInput();
                         } else {
                           _ffi.inputModel.enterOrLeave(false);
                         }
@@ -873,7 +892,7 @@ class _RemotePageState extends State<RemotePage>
     // See [onWindowBlur].
     if (!isWindows) {
       _requestKeyboardFocusNow(preserveEditableTextFocus: false);
-      _ffi.inputModel.enterOrLeave(true);
+      _enterRemoteInput();
     }
   }
 
@@ -959,6 +978,10 @@ class _RemotePageState extends State<RemotePage>
               "Unexpected status: onPointerDown is triggered while the remote window is in blur status");
           _isWindowBlur = false;
         }
+        final activationWasPending = _awaitingWindowActivation || stateGlobal.connectionActivationPending;
+        _awaitingWindowActivation = false;
+        stateGlobal.connectionActivationPending = false;
+        if (activationWasPending) _enterRemoteInput();
         // macOS can omit MouseRegion.onEnter after a window/tab transition.
         // Recover the native Source 1 grab on the first canvas click without
         // releasing tracked modifiers on every normal pointer-down.
@@ -967,7 +990,7 @@ class _RemotePageState extends State<RemotePage>
           cursorOverImage: _cursorOverImage.value,
         )) {
           _cursorOverImage.value = true;
-          _ffi.inputModel.enterOrLeave(true);
+          _enterRemoteInput();
         }
         _requestKeyboardFocusNow(preserveEditableTextFocus: false);
       },

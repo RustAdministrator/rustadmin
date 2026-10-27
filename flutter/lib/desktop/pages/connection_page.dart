@@ -7,6 +7,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/widgets/connection_page_title.dart';
+import 'package:flutter_hbb/common/widgets/connection_focus_checkbox.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/widgets/popup_menu.dart';
 import 'package:flutter_hbb/models/state_model.dart';
@@ -591,6 +592,7 @@ class _ConnectionPageState extends State<ConnectionPage>
   final TextEditingController _idEditingController = TextEditingController();
 
   String selectedConnectionType = 'Connect';
+  bool? _focusOnOpenOverride;
 
   bool isWindowMinimized = false;
 
@@ -717,10 +719,17 @@ class _ConnectionPageState extends State<ConnectionPage>
       bool isViewCamera = false,
       bool isTerminal = false}) {
     var id = _idController.id;
+    final focusOnOpen = _focusOnOpenOverride;
+    if (!isFileTransfer && !isViewCamera && !isTerminal) {
+      setState(() => _focusOnOpenOverride = null);
+    }
     connect(context, id,
         isFileTransfer: isFileTransfer,
         isViewCamera: isViewCamera,
-        isTerminal: isTerminal);
+        isTerminal: isTerminal,
+        focusOnOpen: isFileTransfer || isViewCamera || isTerminal
+            ? null
+            : focusOnOpen);
   }
 
   /// UI for the remote ID TextField.
@@ -903,6 +912,13 @@ class _ConnectionPageState extends State<ConnectionPage>
                 )),
               ],
             ),
+            if (isDesktop)
+              ConnectionFocusCheckbox(
+                value: _focusOnOpenOverride ?? focusConnectionWindowDefault(),
+                label: translate(kConnectionFocusCheckboxLabel),
+                onChanged: (value) =>
+                    setState(() => _focusOnOpenOverride = value),
+              ),
             Padding(
               padding: const EdgeInsets.only(top: 13.0),
               child: Row(mainAxisAlignment: MainAxisAlignment.end, children: [

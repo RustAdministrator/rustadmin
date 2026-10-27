@@ -7,7 +7,7 @@ import 'package:get/get.dart';
 MainWindowSessionBridge _bridge() => MainWindowSessionBridge(
   openRemoteSession: (_) async => true,
   activateTab: (_) async => true,
-  activateRemoteSession: (_) async => true,
+  activateRemoteSession: (_, {required focusOnOpen}) async => true,
   getCachedRemoteSession:
       ({required peerId, required sessionId, required close}) async => null,
   getRemoteWindowCoords: () async => null,

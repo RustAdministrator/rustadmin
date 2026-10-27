@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:window_manager/window_manager.dart';
+import 'package:flutter_hbb/utils/platform_channel.dart';
 
 enum SessionTabKind {
   remoteDesktop,
@@ -62,6 +63,7 @@ class RemoteSessionLaunch {
     this.switchUuid,
     this.forceRelay,
     this.pendingCachedPeerData,
+    this.focusOnOpen = true,
   });
 
   final String peerId;
@@ -71,6 +73,7 @@ class RemoteSessionLaunch {
   final String? switchUuid;
   final bool? forceRelay;
   final String? pendingCachedPeerData;
+  final bool focusOnOpen;
 
   SessionTabKey get tabKey =>
       SessionTabKey.remoteDesktop(peerId: peerId, sessionId: sessionId);
@@ -102,7 +105,9 @@ bool shouldRestoreRemoteKeyboardFocus({
   required bool canRequestFocus,
   required bool activeTab,
   required bool editableTextFocused,
+  bool activationPending = false,
 }) =>
+    !activationPending &&
     !windowBlurred &&
     canRequestFocus &&
     activeTab &&
@@ -140,7 +145,7 @@ class MainWindowSessionBridge {
 
   final Future<bool> Function(RemoteSessionLaunch launch) openRemoteSession;
   final Future<bool> Function(String tabId) activateTab;
-  final Future<bool> Function(String peerId) activateRemoteSession;
+  final Future<bool> Function(String peerId, {required bool focusOnOpen}) activateRemoteSession;
   final Future<String?> Function({
     required String peerId,
     required String? sessionId,
@@ -185,6 +190,10 @@ abstract class SessionWindowHost {
   Future<void> setFullscreen(bool value);
   Future<void> minimize();
   Future<void> showAndFocus();
+  Future<void> showForConnection({required bool focusOnOpen}) =>
+      focusOnOpen
+          ? showAndFocus()
+          : RdPlatformChannel.instance.showConnectionWindow(focus: false);
   Future<Rect> getFrame();
   Future<void> setFrame(Rect frame);
 

@@ -53,6 +53,12 @@ RustAdmin currently contains upstream RustDesk code plus fork-specific work in t
 
 This list describes the current development direction and may change as the fork evolves.
 
+## Connection window focus
+
+**Settings → General → Other → Focus connection window** controls whether a newly opened remote-desktop connection activates its window. It is enabled by default. The checkbox beside Connect and in pending password/pairing prompts overrides the default for that attempt without changing the saved setting.
+
+With focus disabled, a separate window is raised without keyboard activation or permanent always-on-top behavior. A new tab in an existing group leaves the selected tab unchanged. Keyboard capture waits for actual window activation or a canvas click. Saved fullscreen/maximized state is not automatically applied to an inactive launch; it opens with normal window geometry to avoid activation during restore. Explicit tab/window selections continue to activate normally. Linux window stacking remains subject to the compositor's rules.
+
 ## Resource modes
 
 Codec settings provide independent **Host resource mode** and **Viewer resource mode** defaults. The session toolbar's **Resource mode** dialog saves separate **Remote host** and **Local viewer** overrides. Use either side alone or both; changing the viewer mode never sets the host resource mode. Remote host controls require an updated host.

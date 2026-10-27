@@ -361,6 +361,46 @@ class MainFlutterWindow: NSWindow {
         }
     }
 
+    private func focusArgument(from arguments: Any?) -> Bool? {
+        guard let arguments = arguments else {
+            return true
+        }
+        guard let argumentMap = arguments as? [String: Any] else {
+            return nil
+        }
+        guard let focusValue = argumentMap["focus"] else {
+            return true
+        }
+        if let focus = focusValue as? NSNumber {
+            let objCType = String(cString: focus.objCType)
+            guard objCType == "c" || objCType == "B" else {
+                return nil
+            }
+            return focus.boolValue
+        }
+        return nil
+    }
+
+    private func showConnectionWindow(window: NSWindow, focus: Bool) -> Bool {
+        if focus {
+            window.makeKeyAndOrderFront(nil)
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            return true
+        }
+
+        // AppKit documents ordering without changing key/main status, but does
+        // not specify activation behavior for deminiaturize.
+        if window.isMiniaturized {
+            window.deminiaturize(nil)
+        }
+        window.orderFrontRegardless()
+        return true
+    }
+
+    private func isConnectionWindowFocused(window: NSWindow) -> Bool {
+        return window.isKeyWindow && NSApp.isActive
+    }
+
     public func setMethodHandler(registrar: FlutterPluginRegistrar, isMainWindow: Bool = false) {
         let channel = FlutterMethodChannel(name: "org.rustdesk.rustdesk/host", binaryMessenger: registrar.messenger)
         if isMainWindow {
@@ -402,6 +442,19 @@ class MainFlutterWindow: NSWindow {
                         }
                     })
                     break
+                case "showConnectionWindow":
+                    guard let window = registrar.view?.window,
+                          let focus = self.focusArgument(from: call.arguments) else {
+                        result(false)
+                        break
+                    }
+                    result(self.showConnectionWindow(window: window, focus: focus))
+                case "isConnectionWindowFocused":
+                    guard let window = registrar.view?.window else {
+                        result(false)
+                        break
+                    }
+                    result(self.isConnectionWindowFocused(window: window))
                 case "bumpMouse":
                     var dx = 0
                     var dy = 0

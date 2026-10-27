@@ -15,6 +15,7 @@ import 'package:flutter_hbb/models/peer_model.dart';
 import 'package:flutter_hbb/models/peer_tab_model.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter_hbb/utils/multi_window_manager.dart';
+import 'package:flutter_hbb/common/connection_focus.dart';
 import 'package:flutter_hbb/utils/desktop_window_geometry.dart';
 import 'package:flutter_hbb/utils/window_placement.dart';
 import 'package:flutter_hbb/utils/platform_channel.dart';
@@ -800,8 +801,20 @@ closeConnection({String? id}) {
   }
 }
 
-Future<void> windowOnTop(int? id) async {
+bool focusConnectionWindowDefault() =>
+    mainGetLocalBoolOptionSync(kOptionFocusConnectionWindow);
+
+Future<void> windowOnTop(int? id, {bool focusOnOpen = true}) async {
   if (!isDesktop) {
+    return;
+  }
+  if (!focusOnOpen) {
+    if (id == null || id == stateGlobal.windowId) {
+      await RdPlatformChannel.instance.showConnectionWindow(focus: false);
+    } else {
+      await DesktopMultiWindow.invokeMethod(id, 'showConnectionWindow', {'focus': false});
+    }
+    await rustDeskWinManager.registerActiveWindow(id ?? kWindowMainId);
     return;
   }
   print("Bring window '$id' on top");
@@ -830,6 +843,16 @@ class PreAuthRemoteDesktopManager {
   String? _peerId;
   bool _openingRemoteWindow = false;
   bool _handedOff = false;
+  bool _focusOnOpen = true;
+
+  bool? focusOnOpenForSession(SessionID sessionId) =>
+      _ffi?.sessionId == sessionId ? _focusOnOpen : null;
+
+  bool setFocusOnOpenForSession(SessionID sessionId, bool value) {
+    if (_ffi == null || _ffi!.sessionId != sessionId || _handedOff) return false;
+    _focusOnOpen = value;
+    return true;
+  }
 
   bool closeIfPending({String? id}) {
     if (_ffi == null) {
@@ -863,8 +886,12 @@ class PreAuthRemoteDesktopManager {
     bool? isSharedPassword,
     String? switchUuid,
     bool? forceRelay,
+    bool? focusOnOpen,
   }) async {
-    if (await rustDeskWinManager.activateRemoteDesktop(id)) {
+    final resolvedFocus = resolveConnectionFocus(
+      override: focusOnOpen, defaultValue: focusConnectionWindowDefault(),
+    );
+    if (await rustDeskWinManager.activateRemoteDesktop(id, focusOnOpen: resolvedFocus)) {
       await closePending();
       return;
     }
@@ -872,6 +899,7 @@ class PreAuthRemoteDesktopManager {
 
     final ffi = FFI(null);
     _ffi = ffi;
+    _focusOnOpen = resolvedFocus;
     _peerId = id;
     _openingRemoteWindow = false;
     _handedOff = false;
@@ -886,7 +914,7 @@ class PreAuthRemoteDesktopManager {
       );
     };
 
-    await windowOnTop(null);
+    await windowOnTop(null, focusOnOpen: resolvedFocus);
     ffi.dialogManager.showLoading(
       translate('Connecting...'),
       onCancel: () => closeIfPending(id: id),
@@ -924,6 +952,7 @@ class PreAuthRemoteDesktopManager {
         forceRelay: forceRelay,
         sessionId: sessionId,
         pendingCachedPeerData: cachedPeerData,
+        focusOnOpen: _focusOnOpen,
       );
       if (!identical(_ffi, ffi)) {
         return;
@@ -2552,7 +2581,7 @@ Future<Offset?> _adjustRestoreMainWindowOffset(
 //
 // display is used to set the offset of the window in individual display mode.
 Future<bool> restoreWindowPosition(WindowType type,
-    {int? windowId, String? peerId, int? display}) async {
+    {int? windowId, String? peerId, int? display, bool restoreState = true}) async {
   if (bind
       .mainGetEnv(key: "DISABLE_RUSTDESK_RESTORE_WINDOW_POSITION")
       .isNotEmpty) {
@@ -2632,7 +2661,7 @@ Future<bool> restoreWindowPosition(WindowType type,
           await wc.setFrame(frame);
         }
       }
-      if (lpos.isFullscreen == true) {
+      if (restoreState && lpos.isFullscreen == true) {
         if (!isMacOS) {
           await restoreFrame();
         }
@@ -2646,7 +2675,7 @@ Future<bool> restoreWindowPosition(WindowType type,
                 windowId, kWindowEventSetFullscreen, 'true');
           }
         });
-      } else if (lpos.isMaximized == true) {
+      } else if (restoreState && lpos.isMaximized == true) {
         await restoreFrame();
         // An duration is needed to avoid the window being restored after maximized.
         Future.delayed(Duration(milliseconds: 300), () async {
@@ -3003,7 +3032,8 @@ connectMainDesktop(String id,
     bool? forceRelay,
     String? password,
     String? connToken,
-    bool? isSharedPassword}) async {
+    bool? isSharedPassword,
+    bool? focusOnOpen}) async {
   if (isFileTransfer) {
     await rustDeskWinManager.newFileTransfer(id,
         password: password,
@@ -3030,6 +3060,7 @@ connectMainDesktop(String id,
         forceRelay: forceRelay);
   } else {
     await PreAuthRemoteDesktopManager.instance.start(id,
+        focusOnOpen: focusOnOpen,
         password: password,
         isSharedPassword: isSharedPassword,
         forceRelay: forceRelay);
@@ -3050,8 +3081,12 @@ connect(BuildContext context, String id,
     bool forceRelay = false,
     String? password,
     String? connToken,
-    bool? isSharedPassword}) async {
+    bool? isSharedPassword,
+    bool? focusOnOpen}) async {
   if (id == '') return;
+  final resolvedFocus = resolveConnectionFocus(
+    override: focusOnOpen, defaultValue: isDesktop ? focusConnectionWindowDefault() : true,
+  );
   if (!isDesktop || desktopType == DesktopType.main) {
     try {
       if (Get.isRegistered<IDTextEditingController>()) {
@@ -3100,6 +3135,7 @@ connect(BuildContext context, String id,
         password: password,
         isSharedPassword: isSharedPassword,
         forceRelay: forceRelay,
+        focusOnOpen: resolvedFocus,
       );
     } else {
       await rustDeskWinManager.call(WindowType.Main, kWindowConnect, {
@@ -3113,6 +3149,7 @@ connect(BuildContext context, String id,
         'isSharedPassword': isSharedPassword,
         'forceRelay': forceRelay,
         'connToken': connToken,
+        kConnectionFocusArgument: resolvedFocus,
       });
     }
   } else {

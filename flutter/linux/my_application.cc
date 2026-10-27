@@ -14,6 +14,8 @@
 
 #include "flutter/generated_plugin_registrant.h"
 
+#include <cstring>
+
 struct _MyApplication {
   GtkApplication parent_instance;
   char** dart_entrypoint_arguments;
@@ -22,7 +24,187 @@ struct _MyApplication {
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
 
-void host_channel_call_handler(FlMethodChannel* channel, FlMethodCall* method_call, gpointer user_data);
+static void host_channel_call_handler(FlMethodChannel* channel,
+                                      FlMethodCall* method_call,
+                                      gpointer user_data);
+
+namespace {
+
+constexpr char kHostChannelName[] = "org.rustdesk.rustdesk/host";
+constexpr char kOriginalFocusOnMapKey[] =
+    "rustadmin-original-focus-on-map";
+
+struct HostChannelContext {
+  GWeakRef view;
+};
+
+void DestroyHostChannelContext(gpointer user_data) {
+  auto* context = static_cast<HostChannelContext*>(user_data);
+  if (context == nullptr) {
+    return;
+  }
+  g_weak_ref_clear(&context->view);
+  g_free(context);
+}
+
+void RestoreFocusOnMap(GtkWindow* window) {
+  if (window == nullptr || !GTK_IS_WINDOW(window)) {
+    return;
+  }
+
+  gpointer original =
+      g_object_get_data(G_OBJECT(window), kOriginalFocusOnMapKey);
+  if (original != nullptr) {
+    gtk_window_set_focus_on_map(window, GPOINTER_TO_INT(original) > 0);
+  }
+}
+
+gboolean RestoreFocusOnMapOnFocusIn(GtkWidget* widget,
+                                    GdkEventFocus* /*event*/,
+                                    gpointer /*user_data*/) {
+  if (GTK_IS_WINDOW(widget)) {
+    RestoreFocusOnMap(GTK_WINDOW(widget));
+  }
+  return FALSE;
+}
+
+void PrepareFocusOnMap(GtkWindow* window) {
+  if (window == nullptr || !GTK_IS_WINDOW(window)) {
+    return;
+  }
+
+  GObject* object = G_OBJECT(window);
+  if (g_object_get_data(object, kOriginalFocusOnMapKey) == nullptr) {
+    const gboolean original = gtk_window_get_focus_on_map(window);
+    g_object_set_data(object, kOriginalFocusOnMapKey,
+                      GINT_TO_POINTER(original ? 1 : -1));
+    g_signal_connect(window, "focus-in-event",
+                     G_CALLBACK(RestoreFocusOnMapOnFocusIn), nullptr);
+  }
+  gtk_window_set_focus_on_map(window, FALSE);
+}
+
+GtkWindow* HostWindowForView(FlView* view) {
+  if (view == nullptr || !FL_IS_VIEW(view)) {
+    return nullptr;
+  }
+
+  GtkWidget* toplevel = gtk_widget_get_toplevel(GTK_WIDGET(view));
+  return GTK_IS_WINDOW(toplevel) ? GTK_WINDOW(toplevel) : nullptr;
+}
+
+gboolean ParseFocusArgument(FlValue* arguments, gboolean* focus) {
+  if (focus == nullptr) {
+    return FALSE;
+  }
+
+  *focus = TRUE;
+  if (arguments == nullptr ||
+      fl_value_get_type(arguments) == FL_VALUE_TYPE_NULL) {
+    return TRUE;
+  }
+  if (fl_value_get_type(arguments) != FL_VALUE_TYPE_MAP) {
+    return FALSE;
+  }
+
+  FlValue* focus_value = fl_value_lookup_string(arguments, "focus");
+  if (focus_value == nullptr) {
+    return TRUE;
+  }
+  if (fl_value_get_type(focus_value) != FL_VALUE_TYPE_BOOL) {
+    return FALSE;
+  }
+
+  *focus = fl_value_get_bool(focus_value);
+  return TRUE;
+}
+
+gboolean ShowConnectionWindow(GtkWindow* window, gboolean focus) {
+  if (window == nullptr || !GTK_IS_WINDOW(window)) {
+    return FALSE;
+  }
+
+  if (focus) {
+    RestoreFocusOnMap(window);
+    gtk_window_deiconify(window);
+    gtk_window_present(window);
+    return TRUE;
+  }
+
+  PrepareFocusOnMap(window);
+  gtk_widget_show(GTK_WIDGET(window));
+  gtk_window_deiconify(window);
+  GdkWindow* gdk_window = gtk_widget_get_window(GTK_WIDGET(window));
+  if (gdk_window != nullptr) {
+    gdk_window_raise(gdk_window);
+  }
+  return TRUE;
+}
+
+gboolean IsConnectionWindowFocused(GtkWindow* window) {
+  return window != nullptr && GTK_IS_WINDOW(window) &&
+         gtk_window_is_active(window);
+}
+
+HostChannelContext* CreateHostChannelContext(FlView* view) {
+  auto* context = g_new0(HostChannelContext, 1);
+  g_weak_ref_init(&context->view, G_OBJECT(view));
+  return context;
+}
+
+void RespondBool(FlMethodCall* method_call, gboolean value) {
+  g_autoptr(FlValue) response = fl_value_new_bool(value);
+  fl_method_call_respond_success(method_call, response, nullptr);
+}
+
+FlMethodChannel* RegisterHostChannel(FlBinaryMessenger* messenger,
+                                     FlView* view) {
+  if (messenger == nullptr || view == nullptr || !FL_IS_VIEW(view)) {
+    return nullptr;
+  }
+
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  FlMethodChannel* channel = fl_method_channel_new(
+      messenger, kHostChannelName, FL_METHOD_CODEC(codec));
+  if (channel == nullptr) {
+    return nullptr;
+  }
+
+  fl_method_channel_set_method_call_handler(
+      channel, host_channel_call_handler, CreateHostChannelContext(view),
+      DestroyHostChannelContext);
+  return channel;
+}
+
+void SecondaryWindowCreatedCallback(FlPluginRegistry* registry) {
+  if (registry == nullptr) {
+    return;
+  }
+
+  g_autoptr(FlPluginRegistrar) registrar =
+      fl_plugin_registry_get_registrar_for_plugin(registry,
+                                                   "RustDeskHostChannel");
+  if (registrar == nullptr) {
+    return;
+  }
+
+  FlView* view = fl_plugin_registrar_get_view(registrar);
+  if (view == nullptr) {
+    return;
+  }
+
+  PrepareFocusOnMap(HostWindowForView(view));
+
+  g_autoptr(FlMethodChannel) channel = RegisterHostChannel(
+      fl_plugin_registrar_get_messenger(registrar), view);
+  (void)channel;
+
+#if defined(GDK_WINDOWING_WAYLAND) && defined(HAS_KEYBOARD_SHORTCUTS_INHIBIT)
+  wayland_shortcuts_inhibit_init_for_subwindow(view);
+#endif
+}
+
+}  // namespace
 
 GtkWidget *find_gl_area(GtkWidget *widget);
 void try_set_transparent(GtkWindow* window, GdkScreen* screen, FlView* view);
@@ -93,28 +275,19 @@ static void my_application_activate(GApplication* application) {
   gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(view));
 
   try_set_transparent(window, gtk_window_get_screen(window), view);
+  PrepareFocusOnMap(window);
   gtk_widget_show(GTK_WIDGET(window));
   gtk_widget_show(GTK_WIDGET(view));
 
-#if defined(GDK_WINDOWING_WAYLAND) && defined(HAS_KEYBOARD_SHORTCUTS_INHIBIT)
-  // Register callback for sub-windows created by desktop_multi_window plugin
-  // Only sub-windows (remote windows) need keyboard shortcuts inhibition
+  // Register the host channel and optional Wayland shortcut inhibition for
+  // every sub-window engine created by desktop_multi_window.
   desktop_multi_window_plugin_set_window_created_callback(
-      (WindowCreatedCallback)wayland_shortcuts_inhibit_init_for_subwindow);
-#endif
+      SecondaryWindowCreatedCallback);
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
 
-  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
-  self->host_channel = fl_method_channel_new(
-    fl_engine_get_binary_messenger(fl_view_get_engine(view)),
-    "org.rustdesk.rustdesk/host",
-    FL_METHOD_CODEC(codec));
-  fl_method_channel_set_method_call_handler(
-    self->host_channel,
-    host_channel_call_handler,
-    self,
-    nullptr);
+  self->host_channel = RegisterHostChannel(
+      fl_engine_get_binary_messenger(fl_view_get_engine(view)), view);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }
@@ -161,34 +334,60 @@ MyApplication* my_application_new() {
                                      nullptr));
 }
 
-void host_channel_call_handler(FlMethodChannel* channel, FlMethodCall* method_call, gpointer user_data)
-{
+static void host_channel_call_handler(FlMethodChannel* channel,
+                                      FlMethodCall* method_call,
+                                      gpointer user_data) {
+  auto* context = static_cast<HostChannelContext*>(user_data);
+  g_autoptr(FlView) view = nullptr;
+  if (context != nullptr) {
+    view = FL_VIEW(g_weak_ref_get(&context->view));
+  }
+
+  if (strcmp(fl_method_call_get_name(method_call),
+             "showConnectionWindow") == 0) {
+    gboolean focus = TRUE;
+    if (!ParseFocusArgument(fl_method_call_get_args(method_call), &focus)) {
+      RespondBool(method_call, FALSE);
+      return;
+    }
+
+    RespondBool(method_call, ShowConnectionWindow(HostWindowForView(view), focus));
+    return;
+  }
+
+  if (strcmp(fl_method_call_get_name(method_call),
+             "isConnectionWindowFocused") == 0) {
+    RespondBool(method_call, IsConnectionWindowFocused(HostWindowForView(view)));
+    return;
+  }
+
   if (strcmp(fl_method_call_get_name(method_call), "bumpMouse") == 0) {
     FlValue *args = fl_method_call_get_args(method_call);
 
     FlValue *dxValue = nullptr;
     FlValue *dyValue = nullptr;
 
-    switch (fl_value_get_type(args))
-    {
-      case FL_VALUE_TYPE_MAP:
+    if (args != nullptr) {
+      switch (fl_value_get_type(args))
       {
-        dxValue = fl_value_lookup_string(args, "dx");
-        dyValue = fl_value_lookup_string(args, "dy");
+        case FL_VALUE_TYPE_MAP:
+        {
+          dxValue = fl_value_lookup_string(args, "dx");
+          dyValue = fl_value_lookup_string(args, "dy");
 
-        break;
+          break;
+        }
+        case FL_VALUE_TYPE_LIST:
+        {
+          int listSize = fl_value_get_length(args);
+
+          dxValue = (listSize >= 1) ? fl_value_get_list_value(args, 0) : nullptr;
+          dyValue = (listSize >= 2) ? fl_value_get_list_value(args, 1) : nullptr;
+
+          break;
+        }
+        default: break;
       }
-      case FL_VALUE_TYPE_LIST:
-      {
-        int listSize = fl_value_get_length(args);
-
-        dxValue = (listSize >= 1) ? fl_value_get_list_value(args, 0) : nullptr;
-        dyValue = (listSize >= 2) ? fl_value_get_list_value(args, 1) : nullptr;
-
-        break;
-      }
-
-      default: break;
     }
 
     int dx = 0, dy = 0;
@@ -213,7 +412,10 @@ void host_channel_call_handler(FlMethodChannel* channel, FlMethodCall* method_ca
     }
 
     fl_value_unref(result_value);
+    return;
   }
+
+  fl_method_call_respond_not_implemented(method_call, nullptr);
 }
 
 GtkWidget *find_gl_area(GtkWidget *widget)

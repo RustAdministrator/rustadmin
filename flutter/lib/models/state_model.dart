@@ -37,6 +37,7 @@ class StateGlobal {
   final lanDiscoveryModeLabel = 'Standard'.obs;
   final RxInt videoConnCount = 0.obs;
   final RxBool isFocused = false.obs;
+  bool connectionActivationPending = false;
   // for mobile and web
   bool isInMainPage = true;
   bool isWebVisible = true;

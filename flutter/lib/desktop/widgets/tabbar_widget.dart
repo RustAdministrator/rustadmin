@@ -1,3 +1,4 @@
+import 'package:flutter_hbb/common/connection_focus.dart';
 import 'dart:async';
 import 'dart:math';
 import 'dart:ui' as ui;
@@ -111,8 +112,9 @@ class DesktopTabController {
 
   int get length => state.value.tabs.length;
 
-  void add(TabInfo tab) {
+  void add(TabInfo tab, {bool activate = true}) {
     if (!isDesktop) return;
+    final hadTabs = state.value.tabs.isNotEmpty;
     final index = state.value.tabs.indexWhere((e) => e.key == tab.key);
     int toIndex;
     if (index >= 0) {
@@ -124,6 +126,10 @@ class DesktopTabController {
       state.value.scrollController.itemCount = state.value.tabs.length;
       toIndex = state.value.tabs.length - 1;
       assert(toIndex >= 0);
+    }
+    if (!shouldSelectNewConnectionTab(focusOnOpen: activate, hasTabs: hadTabs)) {
+      onChanged?.call();
+      return;
     }
     var notified = false;
     try {
@@ -384,6 +390,7 @@ class _DesktopTabState extends State<DesktopTab>
   @override
   void onWindowFocus() {
     stateGlobal.isFocused.value = true;
+    stateGlobal.connectionActivationPending = false;
   }
 
   @override

@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/connection_focus.dart';
 import 'package:flutter_hbb/main.dart';
 import 'package:flutter_hbb/models/input_model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
@@ -221,7 +222,8 @@ class RustDeskMultiWindowManager {
         overrideType: type,
       ));
     }
-    if (isMacOS) {
+    if (isMacOS && (type != WindowType.RemoteDesktop ||
+        connectionFocusFromArguments(jsonDecode(msg) as Map))) {
       Future.microtask(() => windowController.show());
     }
     registerActiveWindow(windowId);
@@ -250,7 +252,8 @@ class RustDeskMultiWindowManager {
       if (_inactiveWindows.isNotEmpty) {
         for (final windowId in windows) {
           if (_inactiveWindows.contains(windowId)) {
-            if (screenRect == null) {
+            if (screenRect == null && (type != WindowType.RemoteDesktop ||
+                connectionFocusFromArguments(jsonDecode(msg) as Map))) {
               await restoreWindowPosition(type,
                   windowId: windowId, peerId: remoteId);
             }
@@ -283,12 +286,14 @@ class RustDeskMultiWindowManager {
     String? sessionId,
     String? pendingCachedPeerData,
     bool? openInTabsOverride,
+    bool focusOnOpen = true,
   }) async {
     var params = {
       "type": type.index,
       "id": remoteId,
       "password": password,
-      "forceRelay": forceRelay
+      "forceRelay": forceRelay,
+      if (type == WindowType.RemoteDesktop) kConnectionFocusArgument: focusOnOpen
     };
     if (switchUuid != null) {
       params['switch_uuid'] = switchUuid;
@@ -318,7 +323,10 @@ class RustDeskMultiWindowManager {
     if (sessionId == null && (windows.length > 1 || !openInTabs)) {
       for (final windowId in windows) {
         if (await DesktopMultiWindow.invokeMethod(
-            windowId, kWindowEventActiveSession, remoteId)) {
+            windowId, kWindowEventActiveSession,
+            type == WindowType.RemoteDesktop
+                ? {'id': remoteId, kConnectionFocusArgument: focusOnOpen}
+                : remoteId)) {
           return MultiWindowCallResult(windowId, null);
         }
       }
@@ -335,7 +343,11 @@ class RustDeskMultiWindowManager {
     bool? forceRelay,
     String? sessionId,
     String? pendingCachedPeerData,
+    bool? focusOnOpen,
   }) async {
+    final resolvedFocus = resolveConnectionFocus(
+      override: focusOnOpen, defaultValue: focusConnectionWindowDefault(),
+    );
     final bridge = MainWindowSessionBridge.current;
     final mainWindowOptionEnabled =
         mainGetLocalBoolOptionSync(kOptionOpenRemoteSessionsInMainWindow);
@@ -357,6 +369,7 @@ class RustDeskMultiWindowManager {
         isSharedPassword: isSharedPassword,
         sessionId: sessionId,
         pendingCachedPeerData: pendingCachedPeerData,
+        focusOnOpen: resolvedFocus,
         openInTabsOverride: true,
       );
     }
@@ -375,6 +388,7 @@ class RustDeskMultiWindowManager {
         switchUuid: switchUuid,
         forceRelay: forceRelay,
         pendingCachedPeerData: pendingCachedPeerData,
+        focusOnOpen: resolvedFocus,
       ));
       if (opened) {
         return MultiWindowCallResult(kMainWindowId, null);
@@ -391,18 +405,20 @@ class RustDeskMultiWindowManager {
       isSharedPassword: isSharedPassword,
       sessionId: sessionId,
       pendingCachedPeerData: pendingCachedPeerData,
+      focusOnOpen: resolvedFocus,
     );
   }
 
-  Future<bool> activateRemoteDesktop(String remoteId) async {
+  Future<bool> activateRemoteDesktop(String remoteId, {bool focusOnOpen = true}) async {
     final bridge = MainWindowSessionBridge.current;
-    if (bridge != null && await bridge.activateRemoteSession(remoteId)) {
+    if (bridge != null && await bridge.activateRemoteSession(remoteId, focusOnOpen: focusOnOpen)) {
       return true;
     }
     for (final windowId in _remoteDesktopWindows) {
       try {
         if (await DesktopMultiWindow.invokeMethod(
-            windowId, kWindowEventActiveSession, remoteId)) {
+            windowId, kWindowEventActiveSession,
+            {'id': remoteId, kConnectionFocusArgument: focusOnOpen})) {
           return true;
         }
       } catch (e) {

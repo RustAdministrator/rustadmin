@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter_hbb/models/state_model.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/main.dart';
 import 'package:flutter_hbb/common.dart';
@@ -38,6 +39,27 @@ class RdPlatformChannel {
 
   final MethodChannel _hostMethodChannel =
       MethodChannel("org.rustdesk.rustdesk/host");
+
+  Future<bool> isConnectionWindowFocused() async =>
+      await _hostMethodChannel.invokeMethod<bool>('isConnectionWindowFocused') ?? false;
+
+  /// Show this engine's window. Inactive presentation must not fall back to a
+  /// plugin show/focus call because those paths activate the application.
+  Future<void> showConnectionWindow({required bool focus}) async {
+    if (!focus) {
+      stateGlobal.connectionActivationPending = !await isConnectionWindowFocused();
+    }
+    final shown = await _hostMethodChannel.invokeMethod<bool>(
+      'showConnectionWindow', {'focus': focus},
+    );
+    if (shown != true) {
+      throw PlatformException(code: 'connection_window_unavailable');
+    }
+    if (!focus && await isConnectionWindowFocused()) {
+      // A real user activation can race the asynchronous show request.
+      stateGlobal.connectionActivationPending = false;
+    }
+  }
 
   void setMacOSTabMenuHandler({
     required Future<bool> Function(int windowId, String tabId) activateTab,

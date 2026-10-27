@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter_hbb/common/widgets/codec_settings.dart';
+import 'package:flutter_hbb/common/widgets/connection_focus_checkbox.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -532,6 +533,13 @@ class _GeneralState extends State<_General> {
           'Open remote sessions in main window',
           kOptionOpenRemoteSessionsInMainWindow,
           isServer: false,
+        ),
+        _OptionCheckBox(
+          context,
+          kConnectionFocusCheckboxLabel,
+          kOptionFocusConnectionWindow,
+          isServer: false,
+          optGetter: focusConnectionWindowDefault,
         ),
         _OptionCheckBox(
           context,
