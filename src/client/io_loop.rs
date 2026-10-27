@@ -14,8 +14,7 @@ use crate::{
     input::{MOUSE_TYPE_MASK, MOUSE_TYPE_MOVE_RELATIVE},
     ui_session_interface::{InvokeUiSession, Session},
     video_profile::{
-        viewer_full_movie_mode, EffectiveMovieMode, VideoProfile, MOVIE_DEFAULT_TARGET_FPS,
-        MOVIE_PLAYOUT_DELAY_MS,
+        EffectiveMovieMode, VideoProfile, MOVIE_DEFAULT_TARGET_FPS, MOVIE_PLAYOUT_DELAY_MS,
     },
 };
 #[cfg(feature = "unix-file-copy-paste")]
@@ -36,7 +35,8 @@ use hbb_common::{
         DigestCheckResult, RemoveJobMeta,
     },
     get_time, log,
-    message_proto::{permission_info::Permission, *},
+    message_proto::{option_message::BoolOption, permission_info::Permission, *},
+    resource_policy::ResourceMode,
     protobuf::Message as _,
     rendezvous_proto::ConnType,
     timeout,
@@ -149,6 +149,22 @@ fn should_wait_for_startup_keyframe(
     frame_id != 0 && payload_stats.is_some_and(|(_, _, has_keyframe)| !has_keyframe)
 }
 
+fn effective_movie_mode_for_viewer(
+    profile: VideoProfile,
+    host_supported: bool,
+    full_transport: bool,
+    resource_mode: ResourceMode,
+) -> EffectiveMovieMode {
+    if resource_mode != ResourceMode::Normal {
+        // A resource ceiling intentionally projects Movie as standard: the
+        // host is capped and the viewer must not report movie buffering or
+        // pacing while it is active.
+        EffectiveMovieMode::ResourceLimited
+    } else {
+        EffectiveMovieMode::for_viewer(profile, host_supported, full_transport)
+    }
+}
+
 fn display_metadata_requires_decoder_reset(
     retained_metadata_echo: bool,
     previous: Option<(i32, i32)>,
@@ -166,6 +182,7 @@ struct DisplayStartupState {
     render_stream_id: Arc<AtomicU64>,
     first_frame_received: bool,
     received_frame_id: u64,
+    resume_after: Option<(u64, u64)>,
     recovery: StartupRecovery,
 }
 
@@ -177,6 +194,7 @@ impl DisplayStartupState {
             render_stream_id: Arc::new(AtomicU64::new(0)),
             first_frame_received: false,
             received_frame_id: 0,
+            resume_after: None,
             recovery: StartupRecovery::default(),
         }
     }
@@ -195,11 +213,25 @@ impl DisplayStartupState {
         self.recovery.new_stream(now);
         Ok(true)
     }
+
+    fn reset_for_video_resume(&mut self) -> Option<(u64, u64)> {
+        let previous = (self.stream_id, self.received_frame_id);
+        if previous.0 != 0 && previous.1 != 0 {
+            self.resume_after = Some(previous);
+        }
+        self.render_stream_id.store(0, Ordering::Release);
+        self.stream_id = 0;
+        self.first_frame_received = false;
+        self.received_frame_id = 0;
+        self.recovery = StartupRecovery::default();
+        self.resume_after
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum DisplayStartupFrameAction {
     RejectUndesired,
+    RejectRetiredFrame,
     RejectStaleStream {
         expected_stream_id: u64,
     },
@@ -277,6 +309,16 @@ impl DisplayStartupController {
         let Some(state) = self.displays.get_mut(&display) else {
             return DisplayStartupFrameAction::RejectUndesired;
         };
+        if let Some((previous_stream, previous_frame)) = state.resume_after {
+            if stream_id < previous_stream {
+                return DisplayStartupFrameAction::RejectStaleStream {
+                    expected_stream_id: previous_stream,
+                };
+            }
+            if stream_id == previous_stream && frame_id != 0 && frame_id <= previous_frame {
+                return DisplayStartupFrameAction::RejectRetiredFrame;
+            }
+        }
         let stream_changed = match state.begin_stream(stream_id, now) {
             Ok(changed) => changed,
             Err(expected_stream_id) => {
@@ -298,6 +340,7 @@ impl DisplayStartupController {
         if first_for_display {
             state.first_frame_received = true;
         }
+        state.resume_after = None;
         DisplayStartupFrameAction::Accept {
             first_for_display,
             stream_changed,
@@ -324,6 +367,17 @@ impl DisplayStartupController {
                     scoped_supported,
                 )?;
                 Some((*display, action))
+            })
+            .collect()
+    }
+
+    fn reset_for_video_resume(&mut self) -> Vec<(usize, u64, u64)> {
+        self.displays
+            .iter_mut()
+            .filter_map(|(display, state)| {
+                state
+                    .reset_for_video_resume()
+                    .map(|(stream_id, received_frame_id)| (*display, stream_id, received_frame_id))
             })
             .collect()
     }
@@ -359,6 +413,10 @@ pub struct Remote<T: InvokeUiSession> {
     last_fps_control_summary_log: Option<Instant>,
     connection_round: u32,
     last_hwcodec_generation: u64,
+    last_sent_resource_mode: Option<ResourceMode>,
+    last_sent_video_suspended: Option<bool>,
+    resource_resume_pending: bool,
+    last_supported_resource_mode: Option<ResourceMode>,
 }
 
 #[derive(Default)]
@@ -369,6 +427,7 @@ struct ParsedPeerInfo {
     support_view_camera: bool,
     support_terminal: bool,
     support_video_reference_refresh: bool,
+    support_resource_mode: bool,
     display_set_starts_capture: bool,
 }
 
@@ -423,22 +482,189 @@ impl<T: InvokeUiSession> Remote<T> {
             last_fps_control_summary_log: None,
             connection_round: 0,
             last_hwcodec_generation: 0,
+            last_sent_resource_mode: None,
+            last_sent_video_suspended: None,
+            resource_resume_pending: false,
+            last_supported_resource_mode: None,
         }
     }
 
     async fn refresh_supported_decodings_if_changed(&mut self, peer: &mut Stream) {
         let generation = hwcodec_capability_generation();
-        if self.last_hwcodec_generation == generation {
+        let resource_mode = self.handler.local_resource_mode();
+        if self.last_hwcodec_generation == generation
+            && self.last_supported_resource_mode == Some(resource_mode)
+        {
             return;
         }
-        let msg = self.handler.lc.read().unwrap().update_supported_decodings();
+        let msg = self
+            .handler
+            .lc
+            .read()
+            .unwrap()
+            .update_supported_decodings_for_resource_mode(resource_mode);
         match peer.send(&msg).await {
             Ok(()) => {
                 self.last_hwcodec_generation = generation;
+                self.last_supported_resource_mode = Some(resource_mode);
             }
             Err(error) => {
                 log::warn!("failed to refresh peer supported decodings: {error}");
             }
+        }
+    }
+
+    fn resource_policy_snapshot(&self) -> (ResourceMode, ResourceMode, ResourceMode, bool) {
+        let (local, remote, recording) = {
+            let lc = self.handler.lc.read().unwrap();
+            (
+                lc.resource_mode(false),
+                lc.resource_mode(true),
+                lc.record_state && lc.record_permission,
+            )
+        };
+        let combined = local.strongest(remote);
+        let resources = self.handler.viewer_resources.lock().unwrap();
+        let effective = combined.strongest(resources.actual_host_mode);
+        let suspended = resources.should_suspend_with_modes(
+            local,
+            combined,
+            resources.actual_host_mode,
+            recording,
+        );
+        (local, combined, effective, suspended)
+    }
+
+    fn suspend_video_locally(&mut self) {
+        for state in self.display_startup.displays.values() {
+            state.render_stream_id.store(0, Ordering::Release);
+        }
+        // Dropping a VideoThread retires its decoder worker and its queue. The
+        // display startup state remains so the desired intent can continue to
+        // synchronize while video is suspended.
+        self.video_threads.clear();
+    }
+
+    async fn resume_video_locally(&mut self, peer: &mut Stream) -> bool {
+        self.video_threads.clear();
+        let previous = self.display_startup.reset_for_video_resume();
+        let mut previous_by_display = BTreeMap::new();
+        for (display, stream_id, received_frame_id) in previous {
+            previous_by_display.insert(display, (stream_id, received_frame_id));
+        }
+        let displays = self.display_startup.displays.keys().copied().collect::<Vec<_>>();
+        let mut sent = true;
+        for display in displays {
+            let message = if self.peer_info.support_video_reference_refresh {
+                previous_by_display
+                    .get(&display)
+                    .map(|(stream_id, received_frame_id)| {
+                        let mut misc = Misc::new();
+                        misc.set_video_reference_refresh(VideoReferenceRefresh {
+                            display: i32::try_from(display).unwrap_or_default(),
+                            stream_id: *stream_id,
+                            received_frame_id: *received_frame_id,
+                            strict_recovery: true,
+                            ..Default::default()
+                        });
+                        let mut message = Message::new();
+                        message.set_misc(misc);
+                        message
+                    })
+                    .unwrap_or_else(|| self.startup_refresh_message(display))
+            } else {
+                self.startup_refresh_message(display)
+            };
+            if let Err(error) = peer.send_tagged("ResourcePolicyResume", &message).await {
+                sent = false;
+                log::warn!(
+                    "video resume refresh pending: display={display}, error={error}"
+                );
+            }
+        }
+        sent
+    }
+
+    async fn sync_resource_policy_to_peer(&mut self, peer: &mut Stream) {
+        let (local, requested, effective, suspended) = self.resource_policy_snapshot();
+        let (previous_local_mode, _previous_effective_mode, previous_suspended) = {
+            let mut resources = self.handler.viewer_resources.lock().unwrap();
+            let previous = (
+                resources.local_mode,
+                resources.effective_mode,
+                resources.suspended,
+            );
+            resources.local_mode = local;
+            resources.combined_mode = requested;
+            resources.effective_mode = effective;
+            resources.suspended = suspended;
+            previous
+        };
+        let local_mode_changed = previous_local_mode != local;
+        let resume_video = !suspended && previous_suspended;
+        if suspended && !previous_suspended {
+            self.resource_resume_pending = false;
+            self.suspend_video_locally();
+        } else if !suspended
+            && (resume_video || (local_mode_changed && self.connection_video_ready))
+        {
+            self.suspend_video_locally();
+            self.resource_resume_pending = true;
+        }
+
+        if !self.is_connected
+            || !self
+                .handler
+                .is_current_connection_attempt(self.connection_round)
+        {
+            return;
+        }
+
+        let wire_changed = self.last_sent_resource_mode != Some(requested)
+            || self.last_sent_video_suspended != Some(suspended);
+        if wire_changed {
+            let mut option = OptionMessage::new();
+            requested.write_option(&mut option);
+            option.video_suspended = (if suspended {
+                BoolOption::Yes
+            } else {
+                BoolOption::No
+            })
+            .into();
+            let mut misc = Misc::new();
+            misc.set_option(option);
+            let mut message = Message::new();
+            message.set_misc(misc);
+            match peer.send_tagged("ResourcePolicy", &message).await {
+                Ok(()) => {
+                    self.last_sent_resource_mode = Some(requested);
+                    self.last_sent_video_suspended = Some(suspended);
+                }
+                Err(error) => {
+                    log::warn!(
+                        "resource policy update pending: requested={}, suspended={}, host_support={}, error={error}",
+                        requested.config_value(),
+                        suspended,
+                        self.peer_info.support_resource_mode
+                    );
+                }
+            }
+        }
+
+        // The host must observe the unsuspended policy before it receives a
+        // scoped refresh. Otherwise it may discard the refresh while its
+        // encoder is still stopped.
+        if self.resource_resume_pending
+            && self.last_sent_resource_mode == Some(requested)
+            && self.last_sent_video_suspended == Some(false)
+        {
+            self.resource_resume_pending = !self.resume_video_locally(peer).await;
+        }
+
+        if local_mode_changed
+            && (self.handler.is_default() || self.handler.is_view_camera())
+        {
+            self.refresh_supported_decodings_if_changed(peer).await;
         }
     }
 
@@ -503,6 +729,7 @@ impl<T: InvokeUiSession> Remote<T> {
     async fn recover_display_startup(&mut self, peer: &mut Stream, expects_video: bool) {
         if !expects_video
             || !self.is_connected
+            || self.handler.video_suspended()
             || !self
                 .handler
                 .is_current_connection_attempt(self.connection_round)
@@ -880,15 +1107,20 @@ impl<T: InvokeUiSession> Remote<T> {
                             }
                         }
                         _ = status_timer.tick() => {
+                            self.sync_resource_policy_to_peer(&mut peer).await;
                             self.sync_display_intent_to_peer(&mut peer).await;
-                            self.handler.ui_handler.tick_render_liveness();
-                            self.recover_display_startup(&mut peer, expects_video).await;
+                            if !self.handler.video_suspended() {
+                                self.handler.ui_handler.tick_render_liveness();
+                                self.recover_display_startup(&mut peer, expects_video).await;
+                            }
                             if expects_video {
                                 #[cfg(all(
                                     feature = "hwcodec",
                                     not(any(target_os = "android", target_os = "ios"))
                                 ))]
-                                scrap::hwcodec::ensure_local_hwcodec_config();
+                                if self.handler.local_resource_mode().hardware_allowed() {
+                                    scrap::hwcodec::ensure_local_hwcodec_config();
+                                }
                                 self.refresh_supported_decodings_if_changed(&mut peer).await;
                             }
 
@@ -989,7 +1221,9 @@ impl<T: InvokeUiSession> Remote<T> {
                             self.video_threads.iter().for_each(|(_, v)| {
                                 *v.frame_count.write().unwrap() = 0;
                             });
-                            self.fps_control(direct, fps.clone());
+                            if !self.handler.video_suspended() {
+                                self.fps_control(direct, fps.clone());
+                            }
                             let chroma = self.chroma.read().unwrap().clone();
                             let chroma = match chroma {
                                 Some(Chroma::I444) => "4:4:4",
@@ -1029,16 +1263,13 @@ impl<T: InvokeUiSession> Remote<T> {
                             });
                             #[cfg(not(feature = "quic-transport"))]
                             let full_movie_transport = false;
-                            let effective_movie_mode = EffectiveMovieMode::for_viewer(
+                            let effective_movie_mode = effective_movie_mode_for_viewer(
                                 requested_video_profile,
                                 host_movie_supported,
                                 full_movie_transport,
+                                self.handler.effective_resource_mode(),
                             );
-                            let full_movie_mode = viewer_full_movie_mode(
-                                requested_video_profile,
-                                host_movie_supported,
-                                full_movie_transport,
-                            );
+                            let full_movie_mode = effective_movie_mode == EffectiveMovieMode::Full;
                             let fps_mode = if full_movie_mode {
                                 "movie"
                             } else if fixed_fps {
@@ -1971,9 +2202,21 @@ impl<T: InvokeUiSession> Remote<T> {
                     self.handle_job_status(id, -1, err);
                 }
             }
+            Data::ResourcePolicyChanged => {
+                self.sync_resource_policy_to_peer(peer).await;
+            }
             Data::RecordScreen(start) => {
                 self.handler.lc.write().unwrap().record_state = start;
-                self.update_record_state();
+                if start {
+                    // A hidden resource-mode viewer must resume before a
+                    // recorder is created so recording never starts against a
+                    // retired decoder worker.
+                    self.sync_resource_policy_to_peer(peer).await;
+                    self.update_record_state();
+                } else {
+                    self.update_record_state();
+                    self.sync_resource_policy_to_peer(peer).await;
+                }
             }
             Data::ElevateDirect => {
                 let mut request = ElevationRequest::new();
@@ -2530,6 +2773,14 @@ impl<T: InvokeUiSession> Remote<T> {
         if let Ok(msg_in) = Message::parse_from_bytes(&data) {
             match msg_in.union {
                 Some(message::Union::VideoFrame(vf)) => {
+                    let (effective_resource_mode, video_suspended) =
+                        self.handler.video_resource_runtime();
+                    if video_suspended {
+                        // Video suspension is connection-scoped. Drop only
+                        // the media payload; control, permission, and ACK
+                        // messages continue through this dispatcher.
+                        return true;
+                    }
                     let Ok(display) = usize::try_from(vf.display) else {
                         log::warn!("ignored video frame with negative display {}", vf.display);
                         return true;
@@ -2566,7 +2817,8 @@ impl<T: InvokeUiSession> Remote<T> {
                     );
                     let (first_for_display, stream_changed, activation_generation) =
                         match startup_action {
-                            DisplayStartupFrameAction::RejectUndesired => return true,
+                            DisplayStartupFrameAction::RejectUndesired
+                            | DisplayStartupFrameAction::RejectRetiredFrame => return true,
                             DisplayStartupFrameAction::RejectStaleStream { expected_stream_id } => {
                                 log::debug!(
                                     "diag viewer ignored stale media stream: connection_generation={}, aggregate_generation={}, display={}, activation_generation={}, expected_stream_id={}, stale_stream_id={}, frame_id={}",
@@ -2661,11 +2913,12 @@ impl<T: InvokeUiSession> Remote<T> {
                     });
                     #[cfg(not(feature = "quic-transport"))]
                     let full_movie_transport = false;
-                    let movie_mode = viewer_full_movie_mode(
+                    let movie_mode = effective_movie_mode_for_viewer(
                         requested_video_profile,
                         host_movie_supported,
                         full_movie_transport,
-                    );
+                        effective_resource_mode,
+                    ) == EffectiveMovieMode::Full;
                     thread.movie_mode.store(movie_mode, Ordering::Relaxed);
                     #[cfg(all(target_os = "android", feature = "mediacodec"))]
                     scrap::mediacodec::set_movie_presentation_mode(display, movie_mode);
@@ -2903,6 +3156,7 @@ impl<T: InvokeUiSession> Remote<T> {
                             self.peer_info.support_video_reference_refresh = true;
                         }
                         self.sync_display_intent_to_peer(peer).await;
+                        self.sync_resource_policy_to_peer(peer).await;
                     }
                     _ => {}
                 },
@@ -3711,6 +3965,10 @@ impl<T: InvokeUiSession> Remote<T> {
                 .get("support_video_reference_refresh")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            self.peer_info.support_resource_mode = platform_additions
+                .get("support_resource_mode")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             self.peer_info.display_set_starts_capture = platform_additions
                 .get("display_set_starts_capture")
                 .and_then(|v| v.as_bool())
@@ -4196,14 +4454,47 @@ impl Drop for VideoThread {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_critical_client_input, is_would_block_error, session_permission_response_msgbox_type,
-        should_wait_for_startup_keyframe, DisplayStartupController, DisplayStartupFrameAction,
-        StartupRecoveryAction,
+        effective_movie_mode_for_viewer, is_critical_client_input, is_would_block_error,
+        session_permission_response_msgbox_type, should_wait_for_startup_keyframe,
+        DisplayStartupController, DisplayStartupFrameAction, StartupRecoveryAction,
     };
     use crate::client::{DisplayActivation, DisplayMediaIntent};
     use crate::input::{MOUSE_TYPE_DOWN, MOUSE_TYPE_MOVE_RELATIVE};
+    use crate::video_profile::{EffectiveMovieMode, VideoProfile};
     use hbb_common::message_proto::{message, KeyEvent, Message, MouseEvent, PointerDeviceEvent};
+    use hbb_common::resource_policy::ResourceMode;
     use hbb_common::tokio::time::{Duration, Instant};
+
+    #[test]
+    fn resource_mode_projects_movie_as_standard_without_buffering() {
+        assert_eq!(
+            effective_movie_mode_for_viewer(
+                VideoProfile::Movie,
+                true,
+                true,
+                ResourceMode::Normal,
+            ),
+            EffectiveMovieMode::Full
+        );
+        assert_eq!(
+            effective_movie_mode_for_viewer(
+                VideoProfile::Movie,
+                true,
+                true,
+                ResourceMode::LowPower,
+            ),
+            EffectiveMovieMode::ResourceLimited
+        );
+        assert_eq!(
+            effective_movie_mode_for_viewer(
+                VideoProfile::Standard,
+                false,
+                false,
+                ResourceMode::MinimizeGpu,
+            ),
+            EffectiveMovieMode::ResourceLimited
+        );
+    }
 
     #[test]
     fn retained_display_metadata_does_not_reset_decoder_but_resolution_change_does() {
@@ -4411,6 +4702,47 @@ mod tests {
                 .render_stream_id
                 .load(std::sync::atomic::Ordering::Acquire),
             9
+        );
+    }
+
+    #[test]
+    fn resume_resets_same_stream_startup_and_requires_a_fresh_keyframe() {
+        let start = Instant::now();
+        let mut startup = DisplayStartupController::default();
+        startup.reconcile(&media_intent(1, &[(0, 7)]));
+        assert!(matches!(
+            startup.observe_frame(0, 42, 9, Some((100, 1, true)), start),
+            DisplayStartupFrameAction::Accept {
+                first_for_display: true,
+                ..
+            }
+        ));
+
+        assert_eq!(startup.reset_for_video_resume(), vec![(0, 42, 9)]);
+        // A queued old keyframe must not reseed the new decoder, and a retry
+        // before any new frames must retain the same resume watermark.
+        assert_eq!(startup.reset_for_video_resume(), vec![(0, 42, 9)]);
+        assert_eq!(
+            startup.observe_frame(0, 42, 8, Some((100, 1, true)), start),
+            DisplayStartupFrameAction::RejectRetiredFrame,
+        );
+        assert_eq!(
+            startup.observe_frame(0, 41, 100, Some((100, 1, true)), start),
+            DisplayStartupFrameAction::RejectStaleStream { expected_stream_id: 42 },
+        );
+        let state = startup.displays.get(&0).unwrap();
+        assert_eq!(state.activation_generation, 7);
+        assert_eq!(state.stream_id, 0);
+        assert!(!state.first_frame_received);
+        assert_eq!(
+            state
+                .render_stream_id
+                .load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+        assert_eq!(
+            startup.observe_frame(0, 42, 10, Some((100, 1, false)), start),
+            DisplayStartupFrameAction::WaitForKeyframe
         );
     }
 }

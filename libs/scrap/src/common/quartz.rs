@@ -19,7 +19,7 @@ impl Capturer {
             display.width(),
             display.height(),
             quartz::PixelFormat::Argb8888,
-            Default::default(),
+            quartz::Config::for_resource_mode(crate::codec::host_resource_mode()),
             move |inner| {
                 if let Ok(mut f) = f.lock() {
                     *f = Some(inner);

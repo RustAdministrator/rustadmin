@@ -53,6 +53,7 @@ pub(crate) enum EffectiveMovieMode {
     CompatibilityTransport,
     MixedSubscribers,
     UnsupportedPeer,
+    ResourceLimited,
 }
 
 impl EffectiveMovieMode {
@@ -85,6 +86,7 @@ impl EffectiveMovieMode {
             Self::CompatibilityTransport => "movie-compatibility-transport",
             Self::MixedSubscribers => "standard",
             Self::UnsupportedPeer => "standard",
+            Self::ResourceLimited => "standard",
         }
     }
 
@@ -95,6 +97,7 @@ impl EffectiveMovieMode {
             Self::CompatibilityTransport => "transport-unsupported",
             Self::MixedSubscribers => "mixed-subscribers",
             Self::UnsupportedPeer => "host-unsupported",
+            Self::ResourceLimited => "resource-mode",
         }
     }
 }

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     net::SocketAddr,
     sync::{Arc, Mutex, RwLock, Weak},
     time::Duration,
@@ -113,6 +113,7 @@ lazy_static::lazy_static! {
 pub struct Server {
     connections: ConnMap,
     services: HashMap<String, Box<dyn Service>>,
+    suspended_monitor_video: HashMap<i32, BTreeSet<String>>,
     id_count: i32,
 }
 
@@ -175,6 +176,7 @@ pub fn new() -> ServerPtr {
     let mut server = Server {
         connections: HashMap::new(),
         services: HashMap::new(),
+        suspended_monitor_video: HashMap::new(),
         id_count: hbb_common::rand::random::<i32>() % 1000 + 1000, // ensure positive
     };
     server.add_service(Box::new(audio_service::new()));
@@ -811,13 +813,13 @@ impl Server {
     ) {
         let monitor_service_name =
             video_service::get_service_name(VideoSource::Monitor, display_idx);
-        for s in self.services.values() {
-            let name = s.name();
+        let names = self.services.keys().cloned().collect::<Vec<_>>();
+        for name in names {
             if Self::is_video_service_name(&name) && name != monitor_service_name {
                 continue;
             }
             if !noperms.contains(&(&name as _)) {
-                s.on_subscribe(conn.clone());
+                self.subscribe(&name, conn.clone(), true);
             }
         }
         #[cfg(target_os = "macos")]
@@ -826,6 +828,7 @@ impl Server {
     }
 
     pub fn remove_connection(&mut self, conn: &ConnInner) {
+        self.suspended_monitor_video.remove(&conn.id());
         for s in self.services.values() {
             s.on_unsubscribe(conn.id());
         }
@@ -856,6 +859,18 @@ impl Server {
     }
 
     pub fn subscribe(&mut self, name: &str, conn: ConnInner, sub: bool) {
+        if name.starts_with(VideoSource::Monitor.service_name_prefix()) {
+            if let Some(desired) = self.suspended_monitor_video.get_mut(&conn.id()) {
+                if self.services.contains_key(name) {
+                    if sub {
+                        desired.insert(name.to_owned());
+                    } else {
+                        desired.remove(name);
+                    }
+                }
+                return;
+            }
+        }
         if let Some(s) = self.services.get(name) {
             if s.is_subed(conn.id()) == sub {
                 log::info!(
@@ -882,7 +897,49 @@ impl Server {
         }
     }
 
-    // get a new unique id
+    /// Suspend only this viewer's monitor subscriptions, retaining its desired set.
+    fn set_monitor_video_suspended(&mut self, conn: ConnInner, suspended: bool) {
+        if suspended {
+            if self.suspended_monitor_video.contains_key(&conn.id()) {
+                return;
+            }
+            let desired = self.services.iter()
+                .filter(|(name, service)| {
+                    name.starts_with(VideoSource::Monitor.service_name_prefix())
+                        && service.is_subed(conn.id())
+                })
+                .map(|(name, _)| name.clone())
+                .collect::<BTreeSet<_>>();
+            for name in &desired {
+                if let Some(service) = self.services.get(name) {
+                    service.on_unsubscribe(conn.id());
+                }
+            }
+            self.suspended_monitor_video.insert(conn.id(), desired);
+        } else if let Some(desired) = self.suspended_monitor_video.remove(&conn.id()) {
+            for name in desired {
+                self.subscribe(&name, conn.clone(), true);
+                if let Some(service) = self.services.get(&name) {
+                    service.set_option(
+                        video_service::OPTION_REFERENCE_REFRESH,
+                        service::SERVICE_OPTION_VALUE_TRUE,
+                    );
+                }
+            }
+        }
+        #[cfg(target_os = "macos")]
+        self.update_enable_retina();
+    }
+
+    fn desired_video_subscription(&self, name: &str, conn_id: i32) -> bool {
+        if name.starts_with(VideoSource::Monitor.service_name_prefix()) {
+            if let Some(desired) = self.suspended_monitor_video.get(&conn_id) {
+                return desired.contains(name);
+            }
+        }
+        self.services.get(name).is_some_and(|service| service.is_subed(conn_id))
+    }
+
     pub fn get_new_id(&mut self) -> i32 {
         self.id_count += 1;
         self.id_count
@@ -923,11 +980,7 @@ impl Server {
             .keys()
             .filter(|k| {
                 Self::is_video_service_name(k)
-                    && self
-                        .services
-                        .get(*k)
-                        .map(|s| s.is_subed(conn_id))
-                        .unwrap_or(false)
+                    && self.desired_video_subscription(k, conn_id)
             })
             .count()
     }
@@ -957,7 +1010,7 @@ impl Server {
                 let Some(service) = self.services.get(name) else {
                     continue;
                 };
-                let before = service.is_subed(conn.id());
+                let before = self.desired_video_subscription(name, conn.id());
                 let after = operation.subscription(displays.contains(name), before);
                 let stream_before = before
                     .then(|| service.get_option(video_service::OPTION_DIAGNOSTIC_STREAM_ID))
@@ -1006,6 +1059,7 @@ mod capture_displays_tests {
         let mut server = Server {
             connections: HashMap::new(),
             services: HashMap::new(),
+            suspended_monitor_video: HashMap::new(),
             id_count: 0,
         };
         let services = (0..3)
@@ -1044,6 +1098,50 @@ mod capture_displays_tests {
             .enumerate()
             .filter_map(|(display, service)| service.is_subed(conn).then_some(display))
             .collect()
+    }
+
+    #[test]
+    fn resource_pause_retains_selection_and_keeps_other_subscribers_active() {
+        let (mut server, services) = fixture();
+        let viewer = ConnInner::new(1, None, None);
+        apply(&mut server, 1, &[], &[], &[0, 1]);
+        apply(&mut server, 2, &[], &[], &[1]);
+        server.set_monitor_video_suspended(viewer.clone(), true);
+        assert!(subscribed(&services, 1).is_empty());
+        assert_eq!(subscribed(&services, 2), vec![1]);
+        assert_eq!(server.get_subbed_displays_count(1), 2);
+
+        apply(&mut server, 1, &[], &[], &[2]);
+        assert!(subscribed(&services, 1).is_empty());
+        assert_eq!(server.get_subbed_displays_count(1), 1);
+        server.set_monitor_video_suspended(viewer.clone(), false);
+        assert_eq!(subscribed(&services, 1), vec![2]);
+        assert_eq!(subscribed(&services, 2), vec![1]);
+        assert_eq!(services[2].get_option(video_service::OPTION_REFERENCE_REFRESH), Some("1".into()));
+
+        server.set_monitor_video_suspended(viewer.clone(), true);
+        apply(&mut server, 1, &[], &[], &[]);
+        server.set_monitor_video_suspended(viewer.clone(), false);
+        assert!(subscribed(&services, 1).is_empty());
+        server.set_monitor_video_suspended(viewer.clone(), true);
+        server.remove_connection(&viewer);
+        assert!(!server.suspended_monitor_video.contains_key(&1));
+    }
+
+    #[test]
+    fn resource_pause_before_initial_subscription_gates_only_monitor_video() {
+        let (mut server, services) = fixture();
+        let clipboard = GenericService::new("clipboard-test".to_owned(), false);
+        server.add_service(Box::new(clipboard.clone()));
+        let viewer = ConnInner::new(1, None, None);
+        server.set_monitor_video_suspended(viewer.clone(), true);
+        server.add_monitor_connection(viewer.clone(), &vec![], 0);
+        assert!(subscribed(&services, 1).is_empty());
+        assert!(clipboard.is_subed(1));
+        assert_eq!(server.get_subbed_displays_count(1), 1);
+        server.set_monitor_video_suspended(viewer, false);
+        assert_eq!(subscribed(&services, 1), vec![0]);
+        assert!(clipboard.is_subed(1));
     }
 
     #[test]
@@ -1182,7 +1280,9 @@ pub async fn start_server(is_server: bool, no_server: bool) {
         #[cfg(target_os = "windows")]
         crate::platform::try_kill_broker();
         #[cfg(feature = "hwcodec")]
-        scrap::hwcodec::start_check_process();
+        if scrap::codec::host_resource_mode().hardware_allowed() {
+            scrap::hwcodec::start_check_process();
+        }
         crate::RendezvousMediator::start_all().await;
     } else {
         match crate::ipc::connect(1000, "").await {

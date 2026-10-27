@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/codec_preferences.dart';
 import 'package:flutter_hbb/common/remote_display_settings.dart';
+import 'package:flutter_hbb/common/resource_modes.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 
@@ -72,11 +73,20 @@ class _CodecSettingsState extends State<CodecSettings> {
       kOptionEnableHwcodec,
       bind.mainGetOptionSync(key: kOptionEnableHwcodec),
     );
+    final hostResourceMode = normalizeResourceMode(
+      bind.mainGetOptionSync(key: kHostResourceModeOption),
+    );
+    final viewerResourceMode = normalizeResourceMode(
+      bind.mainGetOptionSync(key: kViewerResourceModeOption),
+    );
     return CodecSettingsContent(
       capabilities: _capabilities,
       encoder: encoder,
       decoder: decoder,
       preferHardware: hardware,
+      hostResourceMode: hostResourceMode,
+      viewerResourceMode: viewerResourceMode,
+      showHostResourceMode: !isIOS && !isWeb,
       onPreferHardware: _saving || isOptionFixed(kOptionEnableHwcodec)
           ? null
           : (value) => _save(() async {
@@ -99,6 +109,22 @@ class _CodecSettingsState extends State<CodecSettings> {
                 value,
               );
             }),
+      onHostResourceMode: _saving || isOptionFixed(kHostResourceModeOption)
+          ? null
+          : (value) => _save(
+              () => bind.mainSetOption(
+                key: kHostResourceModeOption,
+                value: normalizeResourceMode(value),
+              ),
+            ),
+      onViewerResourceMode: _saving || isOptionFixed(kViewerResourceModeOption)
+          ? null
+          : (value) => _save(
+              () => bind.mainSetOption(
+                key: kViewerResourceModeOption,
+                value: normalizeResourceMode(value),
+              ),
+            ),
     );
   }
 }
@@ -110,9 +136,14 @@ class CodecSettingsContent extends StatelessWidget {
     required this.encoder,
     required this.decoder,
     required this.preferHardware,
+    this.hostResourceMode = kResourceModeNormal,
+    this.viewerResourceMode = kResourceModeNormal,
+    this.showHostResourceMode = true,
     this.onPreferHardware,
     this.onEncoder,
     this.onDecoder,
+    this.onHostResourceMode,
+    this.onViewerResourceMode,
     this.localize = translate,
   });
 
@@ -120,9 +151,14 @@ class CodecSettingsContent extends StatelessWidget {
   final String encoder;
   final String decoder;
   final bool preferHardware;
+  final String hostResourceMode;
+  final String viewerResourceMode;
+  final bool showHostResourceMode;
   final ValueChanged<bool?>? onPreferHardware;
   final ValueChanged<String>? onEncoder;
   final ValueChanged<String>? onDecoder;
+  final ValueChanged<String>? onHostResourceMode;
+  final ValueChanged<String>? onViewerResourceMode;
   final String Function(String) localize;
 
   Future<void> _showAboutCodecs(BuildContext context) => showDialog<void>(
@@ -157,6 +193,28 @@ class CodecSettingsContent extends StatelessWidget {
           title: Text(localize('Prefer hardware codec')),
           value: preferHardware,
           onChanged: onPreferHardware,
+        ),
+        const SizedBox(height: 8),
+        Text(localize('Resource mode')),
+        const SizedBox(height: 4),
+        Text(localize(kResourceModeExplanation)),
+        const SizedBox(height: 8),
+        if (showHostResourceMode) ...[
+          ResourceModeRadioGroup(
+            groupKey: 'host-resource-mode',
+            title: localize('Host resource mode'),
+            value: hostResourceMode,
+            onChanged: onHostResourceMode,
+            localize: localize,
+          ),
+          const SizedBox(height: 8),
+        ],
+        ResourceModeRadioGroup(
+          groupKey: 'viewer-resource-mode',
+          title: localize('Viewer resource mode'),
+          value: viewerResourceMode,
+          onChanged: onViewerResourceMode,
+          localize: localize,
         ),
         const SizedBox(height: 8),
         CodecPreferenceColumns(

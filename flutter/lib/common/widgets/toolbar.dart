@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/common/remote_display_settings.dart';
+import 'package:flutter_hbb/common/resource_modes.dart';
 import 'package:flutter_hbb/common/session_peer_settings.dart';
 import 'package:flutter_hbb/common/widgets/dialog.dart';
 import 'package:flutter_hbb/common/widgets/login.dart';
@@ -350,6 +351,14 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
       onPressed: () => sessionRefreshVideo(sessionId, pi),
     ));
   }
+  if (isDefaultConn) {
+    v.add(
+      TTextMenu(
+        child: Text(translate('Resource mode')),
+        onPressed: () => unawaited(showSessionResourceModeDialog(context, ffi)),
+      ),
+    );
+  }
   // record
   if (!(isDesktop || isWeb) &&
       (ffi.recordingModel.start || (perms["recording"] != false))) {
@@ -414,6 +423,77 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
     ));
   }
   return v;
+}
+
+Future<void> showSessionResourceModeDialog(
+  BuildContext context,
+  FFI ffi,
+) async {
+  final settings = SessionResourceModeRepository.forSession(ffi.sessionId);
+  var viewerMode = settings.read(remote: false);
+  final hostSupported = ffi.connType == ConnType.defaultConn && supportsRemoteResourceMode(
+    ffi.ffiModel.pi.platformAdditions,
+  );
+  var hostMode = hostSupported ? settings.read(remote: true) : null;
+
+  if (!context.mounted) return;
+  await showDialog<void>(
+    context: context,
+    builder: (dialogContext) => StatefulBuilder(
+      builder: (context, setState) {
+        void selectMode({required bool remote, required String value}) {
+          setState(() {
+            if (remote) {
+              hostMode = value;
+            } else {
+              viewerMode = value;
+            }
+          });
+          unawaited(
+            settings.write(mode: value, remote: remote).catchError((error) {
+              debugPrint('Failed to set resource mode: $error');
+            }),
+          );
+        }
+
+        return CustomAlertDialog(
+          title: Text(translate('Resource mode')),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(translate(kResourceModeExplanation)),
+              const SizedBox(height: 12),
+              ResourceModeRadioGroup(
+                groupKey: 'session-viewer-resource-mode',
+                title: translate('Local viewer resource mode'),
+                value: viewerMode,
+                onChanged: (value) => selectMode(remote: false, value: value),
+                localize: translate,
+              ),
+              if (hostMode != null) ...[
+                const Divider(),
+                ResourceModeRadioGroup(
+                  groupKey: 'session-host-resource-mode',
+                  title: translate('Remote host resource mode'),
+                  value: hostMode!,
+                  onChanged: (value) => selectMode(remote: true, value: value),
+                  localize: translate,
+                ),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: Text(translate('Close')),
+            ),
+          ],
+          onCancel: () => Navigator.of(dialogContext).pop(),
+        );
+      },
+    ),
+  );
 }
 
 Future<List<TRadioMenu<String>>> toolbarViewStyle(

@@ -1,5 +1,6 @@
 use super::*;
 use crate::video_profile::{VideoProfile, MOVIE_DEFAULT_TARGET_FPS};
+use hbb_common::resource_policy::ResourceMode;
 use scrap::codec::{Quality, BR_BALANCED, BR_BEST, BR_SPEED};
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
@@ -727,6 +728,7 @@ struct UserData {
     movie_feedback_by_display: HashMap<i32, MovieViewerFeedback>,
     datagram_admission_by_service: HashMap<String, DatagramAdmissionState>,
     transport_loss_upshift_frozen_until: HashMap<String, Instant>,
+    resource_mode: ResourceMode,
 }
 
 #[derive(Debug, Clone)]
@@ -867,6 +869,41 @@ impl VideoQoS {
         Duration::from_secs_f32(1. / (self.fps(video_service_name) as f32))
     }
 
+    fn requested_resource_mode(&self) -> ResourceMode {
+        self.users
+            .values()
+            .fold(ResourceMode::Normal, |mode, user| {
+                mode.strongest(user.resource_mode)
+            })
+    }
+
+    fn effective_resource_mode(&self) -> ResourceMode {
+        scrap::codec::host_resource_mode().strongest(self.requested_resource_mode())
+    }
+
+    pub(crate) fn resource_mode(&self) -> ResourceMode {
+        self.requested_resource_mode()
+    }
+
+    pub(crate) fn set_resource_mode_request(
+        &mut self,
+        id: i32,
+        mode: ResourceMode,
+    ) -> Option<ResourceMode> {
+        // Login option delivery can race the normal connection-open hook.
+        // Preserve an early request in the same UserData entry; on_connection_open
+        // deliberately uses entry() as well so it cannot overwrite the request.
+        let user = self.users.entry(id).or_default();
+        user.resource_mode = mode;
+        Some(self.requested_resource_mode())
+    }
+
+    pub(crate) fn clear_resource_mode_request(&mut self, id: i32) -> Option<ResourceMode> {
+        let user = self.users.get_mut(&id)?;
+        user.resource_mode = ResourceMode::Normal;
+        Some(self.requested_resource_mode())
+    }
+
     // Get current FPS within valid range
     pub fn fps(&self, video_service_name: &str) -> u32 {
         let fps = self
@@ -874,11 +911,14 @@ impl VideoQoS {
             .get(video_service_name)
             .map(|display| display.fps)
             .unwrap_or(FPS);
-        if fps >= MIN_FPS && fps <= MAX_FPS {
+        let fps = if fps >= MIN_FPS && fps <= MAX_FPS {
             fps
         } else {
             FPS
-        }
+        };
+        self.effective_resource_mode()
+            .active_fps_cap()
+            .map_or(fps, |cap| fps.min(cap))
     }
 
     // Store bitrate for later use
@@ -1384,7 +1424,7 @@ impl VideoQoS {
 impl VideoQoS {
     // Initialize new user session
     pub fn on_connection_open(&mut self, id: i32) {
-        self.users.insert(id, UserData::default());
+        self.users.entry(id).or_default();
         self.abr_config = Config::get_option("enable-abr") != "N";
     }
 
@@ -1994,6 +2034,9 @@ impl VideoQoS {
     }
 
     pub fn full_movie_mode(&self, video_service_name: &str) -> bool {
+        if self.effective_resource_mode() != ResourceMode::Normal {
+            return false;
+        }
         let mut subscribers = self.subscribed_users(video_service_name).peekable();
         subscribers.peek().is_some()
             && subscribers.all(|user| {
@@ -2004,7 +2047,8 @@ impl VideoQoS {
     }
 
     pub(crate) fn movie_target_fps(&self, video_service_name: &str) -> u32 {
-        self.subscribed_users(video_service_name)
+        let target = self
+            .subscribed_users(video_service_name)
             .map(|user| {
                 user.custom_fps
                     .unwrap_or(MOVIE_DEFAULT_TARGET_FPS)
@@ -2012,14 +2056,23 @@ impl VideoQoS {
             })
             .min()
             .unwrap_or(MOVIE_DEFAULT_TARGET_FPS)
-            .clamp(MIN_FPS, MAX_FPS)
+            .clamp(MIN_FPS, MAX_FPS);
+        self.effective_resource_mode()
+            .active_fps_cap()
+            .map_or(target, |cap| target.min(cap))
     }
 
     pub(crate) fn custom_encoder_fps(&self, video_service_name: &str) -> Option<u32> {
-        self.subscribed_users(video_service_name)
+        let fps = self
+            .subscribed_users(video_service_name)
             .filter_map(|user| user.custom_fps)
             .max()
-            .map(|fps| fps.clamp(MIN_FPS, MAX_FPS))
+            .map(|fps| fps.clamp(MIN_FPS, MAX_FPS));
+        fps.map(|fps| {
+            self.effective_resource_mode()
+                .active_fps_cap()
+                .map_or(fps, |cap| fps.min(cap))
+        })
     }
 
     pub(crate) fn movie_viewer_metrics(&self, video_service_name: &str) -> MovieViewerMetrics {
@@ -2123,7 +2176,12 @@ impl VideoQoS {
         self.subscribed_users(video_service_name)
             .filter_map(|user| user.fixed_fps)
             .max()
-            .map(|fps| fps.clamp(MIN_FPS, MAX_FPS))
+            .map(|fps| {
+                let fps = fps.clamp(MIN_FPS, MAX_FPS);
+                self.effective_resource_mode()
+                    .active_fps_cap()
+                    .map_or(fps, |cap| fps.min(cap))
+            })
     }
 
     #[inline]
@@ -2132,10 +2190,14 @@ impl VideoQoS {
             return fps;
         }
 
-        self.subscribed_users(video_service_name)
+        let fps = self
+            .subscribed_users(video_service_name)
             .map(Self::requested_fps)
             .max()
-            .unwrap_or(FPS)
+            .unwrap_or(FPS);
+        self.effective_resource_mode()
+            .active_fps_cap()
+            .map_or(fps, |cap| fps.min(cap))
     }
 
     // Get latest quality settings from all users
@@ -2503,6 +2565,68 @@ mod tests {
             datagram_bytes_p99: 16_000,
             required_bytes_p99: 60_000,
         }
+    }
+
+    #[test]
+    fn resource_mode_requests_use_strongest_live_user_and_withdrawal() {
+        let mut qos = VideoQoS::default();
+        assert_eq!(
+            qos.set_resource_mode_request(99, ResourceMode::LowPower),
+            Some(ResourceMode::LowPower)
+        );
+        qos.on_connection_open(99);
+        assert_eq!(qos.resource_mode(), ResourceMode::LowPower);
+        qos.on_connection_close(99);
+
+        qos.on_connection_open(1);
+        qos.on_connection_open(2);
+        assert_eq!(qos.resource_mode(), ResourceMode::Normal);
+
+        assert_eq!(
+            qos.set_resource_mode_request(1, ResourceMode::LowPower),
+            Some(ResourceMode::LowPower)
+        );
+        assert_eq!(qos.resource_mode(), ResourceMode::LowPower);
+        assert_eq!(
+            qos.set_resource_mode_request(2, ResourceMode::MinimizeGpu),
+            Some(ResourceMode::MinimizeGpu)
+        );
+        assert_eq!(qos.resource_mode(), ResourceMode::MinimizeGpu);
+
+        assert_eq!(
+            qos.clear_resource_mode_request(2),
+            Some(ResourceMode::LowPower)
+        );
+        assert_eq!(qos.resource_mode(), ResourceMode::LowPower);
+        qos.on_connection_close(1);
+        assert_eq!(qos.resource_mode(), ResourceMode::Normal);
+    }
+
+    #[test]
+    fn resource_mode_cap_overrides_fixed_and_movie_fps_requests() {
+        let mut qos = movie_qos_with_viewers(&[1]);
+        qos.store_movie_runtime_status(MONITOR_SERVICE, 120, 120, 5_000);
+        qos.user_fixed_fps(1, 120);
+        assert_eq!(qos.fps(MONITOR_SERVICE), 120);
+        assert_eq!(qos.custom_encoder_fps(MONITOR_SERVICE), Some(120));
+        assert_eq!(qos.movie_target_fps(MONITOR_SERVICE), 120);
+        assert!(qos.full_movie_mode(MONITOR_SERVICE));
+
+        assert_eq!(
+            qos.set_resource_mode_request(1, ResourceMode::LowPower),
+            Some(ResourceMode::LowPower)
+        );
+        assert_eq!(qos.fps(MONITOR_SERVICE), 10);
+        assert_eq!(qos.custom_encoder_fps(MONITOR_SERVICE), Some(10));
+        assert_eq!(qos.movie_target_fps(MONITOR_SERVICE), 10);
+        assert!(!qos.full_movie_mode(MONITOR_SERVICE));
+
+        assert_eq!(
+            qos.clear_resource_mode_request(1),
+            Some(ResourceMode::Normal)
+        );
+        assert_eq!(qos.fps(MONITOR_SERVICE), 120);
+        assert!(qos.full_movie_mode(MONITOR_SERVICE));
     }
 
     fn movie_qos_with_viewers(viewer_ids: &[i32]) -> VideoQoS {

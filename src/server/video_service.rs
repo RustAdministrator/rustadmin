@@ -45,6 +45,7 @@ use hbb_common::{
     anyhow::anyhow,
     config,
     message_proto::option_message::CaptureBackend,
+    resource_policy::ResourceMode,
     tokio::sync::{
         mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
         Mutex as TokioMutex,
@@ -339,6 +340,10 @@ lazy_static::lazy_static! {
     // 2. The client is closing.
     static ref DISPLAY_CONN_IDS: Arc<Mutex<HashMap<VideoStreamKey, HashSet<i32>>>> = Default::default();
     pub static ref VIDEO_QOS: Arc<Mutex<VideoQoS>> = Default::default();
+    // Serialize aggregate snapshots with the codec-side update. The QoS lock
+    // is released before the codec setter runs, but concurrent login/close
+    // callbacks must not apply an older aggregate after a newer one.
+    static ref RESOURCE_MODE_REQUEST_UPDATE: Mutex<()> = Mutex::new(());
     static ref CAPTURE_BACKEND_PREFERENCE: Mutex<CaptureBackend> =
         Mutex::new(CaptureBackend::CaptureBackendAuto);
     pub static ref IS_UAC_RUNNING: Arc<Mutex<bool>> = Default::default();
@@ -487,6 +492,44 @@ pub(crate) fn apply_capture_backend_action(conn_id: i32, action: CaptureBackendA
 /// A closing connection no longer has a say.
 pub(crate) fn withdraw_capture_backend_request(conn_id: i32) -> bool {
     apply_capture_backend_action(conn_id, CaptureBackendAction::Withdraw)
+}
+
+fn apply_resource_mode_request(requested: Option<ResourceMode>) -> bool {
+    let Some(requested) = requested else {
+        return false;
+    };
+    let previous = scrap::codec::host_resource_mode();
+    // The codec worker owns the host setting and combines this request with
+    // the persisted local host policy. Keep this call outside VIDEO_QOS so a
+    // codec-side config read cannot be made while the QoS lock is held.
+    Encoder::set_resource_mode(requested);
+    previous != scrap::codec::host_resource_mode()
+}
+
+/// Apply one viewer's host resource-mode request.
+///
+/// Returns whether the effective host mode changed after the codec worker
+/// combined the strongest live request with the local host configuration.
+pub fn set_resource_mode_request(conn_id: i32, mode: ResourceMode) -> bool {
+    let _update_guard = RESOURCE_MODE_REQUEST_UPDATE.lock().unwrap();
+    let requested = {
+        let mut video_qos = VIDEO_QOS.lock().unwrap();
+        video_qos.set_resource_mode_request(conn_id, mode)
+    };
+    apply_resource_mode_request(requested)
+}
+
+/// Remove one viewer's host resource-mode request.
+///
+/// Other live viewers' requests remain in force. Returns whether the
+/// effective host mode changed after withdrawal.
+pub fn clear_resource_mode_request(conn_id: i32) -> bool {
+    let _update_guard = RESOURCE_MODE_REQUEST_UPDATE.lock().unwrap();
+    let requested = {
+        let mut video_qos = VIDEO_QOS.lock().unwrap();
+        video_qos.clear_resource_mode_request(conn_id)
+    };
+    apply_resource_mode_request(requested)
 }
 
 #[cfg(windows)]
@@ -718,6 +761,19 @@ impl MovieFramePacer {
         self.period = Duration::from_nanos(1_000_000_000 / u64::from(fps));
         self.next_deadline = now + self.period;
     }
+}
+
+fn resource_mode_idle(mode: ResourceMode, last_changed_at: Instant, now: Instant) -> bool {
+    mode.idle_fps().is_some() && now.saturating_duration_since(last_changed_at) >= mode.idle_after()
+}
+
+fn resource_mode_period(mode: ResourceMode, idle: bool) -> Option<Duration> {
+    let fps = if idle {
+        mode.idle_fps()
+    } else {
+        mode.active_fps_cap()
+    }?;
+    Some(Duration::from_nanos(1_000_000_000 / u64::from(fps.max(1))))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1462,15 +1518,16 @@ fn ensure_installed_secure_capture_helper(desktop_state: CaptureDesktopState) ->
 mod tests {
     use super::{
         capture_backend_allows_user_helper_retry, keep_privileged_stream_for_secure_transition,
-        secure_capture_helper_ready, should_force_privileged_secure_capturer,
-        stale_secure_capture_helper_on_user_desktop, stamp_video_frame, windows_capture_route,
-        DurationSamples, HqReferenceRefreshPolicy, MovieFramePacer, MovieHostCadenceWindow,
-        ReferenceRefreshReason, VideoFrameController, VideoSource, VideoStreamKey,
-        WindowsCaptureRoute, DELIVERY_REFERENCE_REFRESH_COOLDOWN, HOST_VIDEO_DIAG_SAMPLE_CAPACITY,
-        HQ_REFERENCE_REFRESH_COOLDOWN,
+        resource_mode_idle, resource_mode_period, secure_capture_helper_ready,
+        should_force_privileged_secure_capturer, stale_secure_capture_helper_on_user_desktop,
+        stamp_video_frame, windows_capture_route, DurationSamples, HqReferenceRefreshPolicy,
+        MovieFramePacer, MovieHostCadenceWindow, ReferenceRefreshReason, VideoFrameController,
+        VideoSource, VideoStreamKey, WindowsCaptureRoute, DELIVERY_REFERENCE_REFRESH_COOLDOWN,
+        HOST_VIDEO_DIAG_SAMPLE_CAPACITY, HQ_REFERENCE_REFRESH_COOLDOWN,
     };
     use crate::platform::windows_desktop::{CaptureDesktopState, InputDesktopClassification};
     use hbb_common::message_proto::{option_message::CaptureBackend, VideoFrame};
+    use hbb_common::resource_policy::ResourceMode;
     use std::{
         collections::HashSet,
         sync::{Arc, Mutex},
@@ -2052,6 +2109,34 @@ mod tests {
     }
 
     #[test]
+    fn resource_mode_idle_transition_is_deadline_based() {
+        let start = Instant::now();
+        assert!(!resource_mode_idle(
+            ResourceMode::LowPower,
+            start,
+            start + Duration::from_secs(2) - Duration::from_millis(1)
+        ));
+        assert!(resource_mode_idle(
+            ResourceMode::LowPower,
+            start,
+            start + Duration::from_secs(2)
+        ));
+        assert!(!resource_mode_idle(
+            ResourceMode::Normal,
+            start,
+            start + Duration::from_secs(20)
+        ));
+        assert_eq!(
+            resource_mode_period(ResourceMode::LowPower, false),
+            Some(Duration::from_millis(100))
+        );
+        assert_eq!(
+            resource_mode_period(ResourceMode::LowPower, true),
+            Some(Duration::from_millis(500))
+        );
+    }
+
+    #[test]
     fn movie_pacer_uses_absolute_deadlines_with_bounded_catch_up() {
         let start = Instant::now();
         let mut pacer = MovieFramePacer::new(60, start);
@@ -2281,10 +2366,10 @@ fn create_gdi_priority_capturer(current: usize) -> ResultType<Box<dyn TraitCaptu
         );
     }
     let display = displays.remove(current);
-    let mut capturer =
-        Capturer::new(display).with_context(|| "Failed to create fallback GDI capturer")?;
-    if !capturer.set_gdi() {
-        bail!("Failed to enable fallback GDI capturer");
+    let capturer =
+        Capturer::new_gdi(display).with_context(|| "Failed to create fallback GDI capturer")?;
+    if !capturer.is_gdi() {
+        bail!("Failed to create fallback GDI capturer");
     }
     log::info!("Create GDI capturer by final priority fallback");
     Ok(Box::new(capturer))
@@ -2347,6 +2432,8 @@ fn create_windows_capturer(
             ensure_installed_secure_capture_helper(desktop_state)
         };
     let directx_enabled = scrap::codec::enable_directx_capture();
+    let minimize_gpu_requires_gdi = scrap::codec::host_resource_mode() == ResourceMode::MinimizeGpu
+        && preference == CaptureBackend::CaptureBackendGdi;
     let route = windows_capture_route(preference, secure_desktop_requires_helper, directx_enabled);
     if route == WindowsCaptureRoute::SecureHelper {
         log::info!(
@@ -2415,6 +2502,13 @@ fn create_windows_capturer(
                 return Ok(capturer);
             }
             Err(err) => {
+                if minimize_gpu_requires_gdi {
+                    log::warn!(
+                        "MinimizeGpu GDI capture failed; refusing GPU backend fallback: {}",
+                        err
+                    );
+                    return Err(err).context("MinimizeGpu requires GDI capture");
+                }
                 log::warn!(
                     "capture manual backend failed; falling back to Auto: requested={:?}, err={}",
                     requested,
@@ -2701,12 +2795,21 @@ fn get_capturer_monitor(
             log::info!("In privacy mode, the peer side cannot watch the screen");
         }
     }
+    let capture_backend_preference =
+        if scrap::codec::host_resource_mode() == ResourceMode::MinimizeGpu {
+            // MinimizeGpu's GDI preference is a per-service effective choice. Do
+            // not overwrite the viewer-selected host preference; secure desktop
+            // and privacy-mode routes still take precedence inside create_capturer.
+            CaptureBackend::CaptureBackendGdi
+        } else {
+            *CAPTURE_BACKEND_PREFERENCE.lock().unwrap()
+        };
     let capturer = create_capturer(
         capturer_privacy_mode_id,
         display,
         current,
         portable_service_running,
-        *CAPTURE_BACKEND_PREFERENCE.lock().unwrap(),
+        capture_backend_preference,
     )?;
     let c = CapturerInfo {
         origin,
@@ -3023,10 +3126,12 @@ fn run(vs: VideoService) -> ResultType<()> {
     let mut capture_backend = c.capture_backend();
     #[cfg(not(windows))]
     let capture_backend = "Unknown";
+    let resource_mode = scrap::codec::host_resource_mode();
     let start = time::Instant::now();
     let subscriber_ids = sp.subscriber_ids();
     let mut video_qos = VIDEO_QOS.lock().unwrap();
     video_qos.sync_subscribers(&service_name, subscriber_ids);
+    let effective_resource_mode = resource_mode.strongest(video_qos.resource_mode());
     let full_movie_mode = video_qos.full_movie_mode(&service_name);
     let movie_target_fps = video_qos.movie_target_fps(&service_name);
     let initial_movie_metrics = video_qos.movie_viewer_metrics(&service_name);
@@ -3045,6 +3150,9 @@ fn run(vs: VideoService) -> ResultType<()> {
                 .custom_encoder_fps(&service_name)
                 .unwrap_or(DEFAULT_ENCODER_FPS)
         });
+    let encoder_fps = effective_resource_mode
+        .active_fps_cap()
+        .map_or(encoder_fps, |cap| encoder_fps.min(cap));
     let mut spf = movie_cadence
         .as_ref()
         .map(|controller| Duration::from_secs_f64(1.0 / f64::from(controller.current_tier())))
@@ -3232,9 +3340,27 @@ fn run(vs: VideoService) -> ResultType<()> {
     let capture_height = c.height;
     let (mut second_instant, mut send_counter) = (Instant::now(), 0);
     let mut host_diag = HostVideoDiagnostics::new();
+    let mut last_changed_frame_at = start;
 
     while sp.ok() {
         let loop_started = Instant::now();
+        let current_resource_mode = scrap::codec::host_resource_mode();
+        if current_resource_mode != resource_mode {
+            log::info!(
+                "switch due to host resource mode changed: service={}, previous={}, current={}",
+                service_name,
+                resource_mode.config_value(),
+                current_resource_mode.config_value(),
+            );
+            // A root host-resource-mode change does not pass through a viewer
+            // option update. Refresh peer negotiation before restarting so
+            // non-VRAM builds recalculate their codec choice as well.
+            Encoder::update(scrap::codec::EncodingUpdate::Check);
+            bail!("SWITCH");
+        }
+        let resource_idle = resource_mode_idle(resource_mode, last_changed_frame_at, loop_started);
+        let mut resource_period =
+            resource_mode_period(resource_mode, resource_idle).map(|period| spf.max(period));
         let movie_host_metrics = movie_host_window
             .as_mut()
             .and_then(|window| window.take_if_due(loop_started));
@@ -3256,6 +3382,10 @@ fn run(vs: VideoService) -> ResultType<()> {
         )?;
         if let Some(pacer) = movie_pacer.as_ref() {
             spf = pacer.period;
+        }
+        if movie_pacer.is_none() {
+            resource_period =
+                resource_mode_period(resource_mode, resource_idle).map(|period| spf.max(period));
         }
 
         let movie_sample_state = if movie_cadence.is_some()
@@ -3839,7 +3969,7 @@ fn run(vs: VideoService) -> ResultType<()> {
         let capture_timeout = if movie_pacer.is_some() {
             Duration::ZERO
         } else {
-            spf
+            resource_period.unwrap_or(spf)
         };
         let captured_frame = c.frame(capture_timeout);
         let capture_call_elapsed = capture_call_started.elapsed();
@@ -3917,6 +4047,15 @@ fn run(vs: VideoService) -> ResultType<()> {
 
                     let encode_pipeline_started = Instant::now();
                     let frame = frame.to(encoder.yuvfmt(), &mut yuv, &mut mid_data)?;
+                    // Capturers report equal desktop frames as WouldBlock and
+                    // only return Ok for a dirty frame. Texture capturers use
+                    // their source dirty events, so do not read back or cache
+                    // a full frame here just to rediscover that distinction.
+                    if resource_mode != ResourceMode::Normal {
+                        last_changed_frame_at = Instant::now();
+                        resource_period = resource_mode_period(resource_mode, false)
+                            .map(|period| spf.max(period));
+                    }
                     let send_conn_ids = handle_one_frame(
                         display_idx,
                         &sp,
@@ -4023,9 +4162,14 @@ fn run(vs: VideoService) -> ResultType<()> {
                         }
                     }
                 }
-                if (!encoder.latency_free() || reference_refresh_pending.is_some())
-                    && !yuv.is_empty()
-                {
+                let must_repeat = if resource_mode == ResourceMode::Normal {
+                    !encoder.latency_free() || reference_refresh_pending.is_some()
+                } else {
+                    first_frame
+                        || reference_refresh_pending.is_some()
+                        || sp.has_pending_subscribers()
+                };
+                if must_repeat && !yuv.is_empty() {
                     // yun.len() > 0 means the frame is not texture.
                     if repeat_encode_counter < repeat_encode_max {
                         repeat_encode_counter += 1;
@@ -4135,6 +4279,14 @@ fn run(vs: VideoService) -> ResultType<()> {
             let timeout_millis = 3_000u64;
             let wait_begin = Instant::now();
             while wait_begin.elapsed().as_millis() < timeout_millis as _ {
+                if scrap::codec::host_resource_mode() != resource_mode {
+                    log::info!(
+                        "switch during frame delivery wait due to host resource mode change: service={}",
+                        service_name,
+                    );
+                    Encoder::update(scrap::codec::EncodingUpdate::Check);
+                    bail!("SWITCH");
+                }
                 if vs.source.is_monitor() {
                     check_privacy_mode_changed(&sp, display_idx, &c)?;
                 }
@@ -4158,8 +4310,9 @@ fn run(vs: VideoService) -> ResultType<()> {
         let elapsed = now.elapsed();
         // may need to enable frame(timeout)
         log::trace!("{:?} {:?}", time::Instant::now(), elapsed);
-        if movie_pacer.is_none() && elapsed < spf {
-            std::thread::sleep(spf - elapsed);
+        let loop_period = resource_period.unwrap_or(spf);
+        if movie_pacer.is_none() && elapsed < loop_period {
+            std::thread::sleep(loop_period - elapsed);
         }
         host_diag.record_loop_total(loop_started.elapsed());
         #[cfg(windows)]

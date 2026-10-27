@@ -32,6 +32,7 @@ use hbb_common::{
         SupportedDecoding, SupportedEncoding, VideoFrame,
     },
     sysinfo::{System, SystemExt},
+    ResourceMode, OPTION_HOST_RESOURCE_MODE,
     ResultType,
 };
 
@@ -41,6 +42,8 @@ lazy_static::lazy_static! {
     static ref ENCODE_CODEC_PREFERENCE: Arc<Mutex<PreferCodec>> = Arc::new(Mutex::new(PreferCodec::Auto));
     static ref THREAD_LOG_TIME: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
     static ref USABLE_ENCODING: Arc<Mutex<Option<SupportedEncoding>>> = Arc::new(Mutex::new(None));
+    static ref REQUESTED_RESOURCE_MODE: Arc<Mutex<ResourceMode>> =
+        Arc::new(Mutex::new(ResourceMode::Normal));
 }
 
 pub const ENCODE_NEED_SWITCH: &'static str = "ENCODE_NEED_SWITCH";
@@ -83,7 +86,24 @@ pub(super) fn decoder_backend_order(prefer_hardware: bool, fallback: usize) -> [
     [hardware_first, !hardware_first]
 }
 
-pub fn prefer_hardware_codec() -> bool {
+fn decoder_backend_order_for_resource_mode(
+    prefer_hardware: bool,
+    fallback: usize,
+    mode: ResourceMode,
+) -> [bool; 2] {
+    if mode.hardware_allowed() {
+        decoder_backend_order(prefer_hardware, fallback)
+    } else {
+        [false, false]
+    }
+}
+
+pub fn host_resource_mode() -> ResourceMode {
+    ResourceMode::from_config(&Config::get_option(OPTION_HOST_RESOURCE_MODE))
+        .strongest(*REQUESTED_RESOURCE_MODE.lock().unwrap())
+}
+
+fn configured_prefer_hardware_codec() -> bool {
     use hbb_common::config::keys::OPTION_ENABLE_HWCODEC;
     hbb_common::config::option2bool(
         OPTION_ENABLE_HWCODEC,
@@ -91,7 +111,14 @@ pub fn prefer_hardware_codec() -> bool {
     )
 }
 
+pub fn prefer_hardware_codec() -> bool {
+    configured_prefer_hardware_codec()
+}
+
 pub fn encoder_prefers_hardware(format: CodecFormat) -> bool {
+    if !host_resource_mode().hardware_allowed() {
+        return false;
+    }
     encoder_backend_preference(
         &Config::get_option(hbb_common::config::keys::OPTION_ENCODER_CODEC_PREFERENCE),
         format,
@@ -127,31 +154,33 @@ pub fn encoder_capabilities() -> HashMap<&'static str, bool> {
         ("encH265Hq", false),
     ]);
     #[cfg(feature = "hwcodec")]
-    for (format, hardware, software, hq) in [
-        (CodecFormat::AV1, "encAv1Hw", "encAv1Sw", None),
-        (
-            CodecFormat::H264,
-            "encH264Hw",
-            "encH264Sw",
-            Some("encH264Hq"),
-        ),
-        (
-            CodecFormat::H265,
-            "encH265Hw",
-            "encH265Sw",
-            Some("encH265Hq"),
-        ),
-    ] {
-        caps.insert(
-            hardware,
-            (format != CodecFormat::AV1 || !disable_av1())
-                && HwRamEncoder::try_get_hardware(format).is_some(),
-        );
-        if format != CodecFormat::AV1 {
-            caps.insert(software, HwRamEncoder::try_get_software(format).is_some());
-        }
-        if let Some(hq) = hq {
-            caps.insert(hq, HwRamEncoder::try_get_high_quality(format).is_some());
+    if host_resource_mode().hardware_allowed() {
+        for (format, hardware, software, hq) in [
+            (CodecFormat::AV1, "encAv1Hw", "encAv1Sw", None),
+            (
+                CodecFormat::H264,
+                "encH264Hw",
+                "encH264Sw",
+                Some("encH264Hq"),
+            ),
+            (
+                CodecFormat::H265,
+                "encH265Hw",
+                "encH265Sw",
+                Some("encH265Hq"),
+            ),
+        ] {
+            caps.insert(
+                hardware,
+                (format != CodecFormat::AV1 || !disable_av1())
+                    && HwRamEncoder::try_get_hardware(format).is_some(),
+            );
+            if format != CodecFormat::AV1 {
+                caps.insert(software, HwRamEncoder::try_get_software(format).is_some());
+            }
+            if let Some(hq) = hq {
+                caps.insert(hq, HwRamEncoder::try_get_high_quality(format).is_some());
+            }
         }
     }
     #[cfg(feature = "vram")]
@@ -160,6 +189,20 @@ pub fn encoder_capabilities() -> HashMap<&'static str, bool> {
             !VRamEncoder::available(CodecFormat::H264).is_empty();
         *caps.entry("encH265Hw").or_default() |=
             !VRamEncoder::available(CodecFormat::H265).is_empty();
+    }
+    if !host_resource_mode().hardware_allowed() {
+        for key in [
+            "encAv1Sw",
+            "encAv1Hw",
+            "encH264Sw",
+            "encH264Hw",
+            "encH264Hq",
+            "encH265Sw",
+            "encH265Hw",
+            "encH265Hq",
+        ] {
+            caps.insert(key, false);
+        }
     }
     for (format, hardware, software) in [
         ("encAv1", "encAv1Hw", "encAv1Sw"),
@@ -450,6 +493,51 @@ fn preferred_codec(
     })
 }
 
+fn min_gpu_codec_for_decodings(decodings: &HashMap<i32, SupportedDecoding>) -> CodecFormat {
+    let has_peers = !decodings.is_empty();
+    let vp8_usable = has_peers && decodings.values().all(|decoding| decoding.ability_vp8 > 0);
+    if vp8_usable {
+        CodecFormat::VP8
+    } else if has_peers && decodings.values().all(|decoding| decoding.ability_vp9 > 0) {
+        CodecFormat::VP9
+    } else if !has_peers {
+        CodecFormat::VP8
+    } else {
+        CodecFormat::Unknown
+    }
+}
+
+fn auto_codec_for_resource_mode(usable: UsableCodecs, mode: ResourceMode) -> CodecFormat {
+    if mode == ResourceMode::MinimizeGpu {
+        if usable.vp8 {
+            CodecFormat::VP8
+        } else if usable.vp9 {
+            CodecFormat::VP9
+        } else {
+            CodecFormat::Unknown
+        }
+    } else {
+        auto_codec_for_usable(usable)
+    }
+}
+
+fn preferred_codec_for_resource_mode(
+    decodings: &HashMap<i32, SupportedDecoding>,
+    usable: UsableCodecs,
+    host_default: PreferCodec,
+    mode: ResourceMode,
+) -> PreferCodec {
+    if mode == ResourceMode::MinimizeGpu {
+        match min_gpu_codec_for_decodings(decodings) {
+            CodecFormat::VP8 if usable.vp8 || decodings.is_empty() => PreferCodec::VP8,
+            CodecFormat::VP9 if usable.vp9 => PreferCodec::VP9,
+            _ => PreferCodec::Auto,
+        }
+    } else {
+        preferred_codec(decodings, usable, host_default)
+    }
+}
+
 pub fn preference_from_codec_option(codec: &str) -> PreferCodec {
     match codec {
         "vp8" => PreferCodec::VP8,
@@ -499,6 +587,63 @@ fn runtime_software_fallback_codec(
     None
 }
 
+fn runtime_software_fallback_codec_for_resource_mode(
+    decodings: &HashMap<i32, SupportedDecoding>,
+    mode: ResourceMode,
+) -> Option<CodecFormat> {
+    if mode != ResourceMode::MinimizeGpu {
+        return runtime_software_fallback_codec(decodings);
+    }
+    let has_peers = !decodings.is_empty();
+    if has_peers && decodings.values().all(|decoding| decoding.ability_vp8 > 0) {
+        Some(CodecFormat::VP8)
+    } else if has_peers && decodings.values().all(|decoding| decoding.ability_vp9 > 0) {
+        Some(CodecFormat::VP9)
+    } else {
+        None
+    }
+}
+
+fn minimize_gpu_encoder_config(config: EncoderCfg) -> ResultType<EncoderCfg> {
+    let codec = match min_gpu_codec_for_decodings(&PEER_DECODINGS.lock().unwrap()) {
+        CodecFormat::VP8 => VpxVideoCodecId::VP8,
+        CodecFormat::VP9 => VpxVideoCodecId::VP9,
+        _ => bail!("Minimize GPU requires a peer-compatible VP8 or VP9 software codec"),
+    };
+    Ok(match config {
+        EncoderCfg::VPX(mut config) => {
+            config.codec = codec;
+            EncoderCfg::VPX(config)
+        }
+        EncoderCfg::AOM(config) => EncoderCfg::VPX(VpxEncoderConfig {
+            width: config.width,
+            height: config.height,
+            quality: config.quality,
+            fps: config.fps,
+            codec,
+            keyframe_interval: config.keyframe_interval,
+        }),
+        #[cfg(feature = "hwcodec")]
+        EncoderCfg::HWRAM(config) => EncoderCfg::VPX(VpxEncoderConfig {
+            width: config.width as _,
+            height: config.height as _,
+            quality: config.quality,
+            fps: config.fps,
+            codec,
+            keyframe_interval: config.keyframe_interval,
+        }),
+        #[cfg(feature = "vram")]
+        EncoderCfg::VRAM(config) => EncoderCfg::VPX(VpxEncoderConfig {
+            width: config.width as _,
+            height: config.height as _,
+            quality: config.quality,
+            fps: config.fps,
+            codec,
+            keyframe_interval: config.keyframe_interval,
+        }),
+    })
+}
+
 impl Deref for Encoder {
     type Target = Box<dyn EncoderApi>;
 
@@ -541,6 +686,8 @@ pub struct Decoder {
     valid: bool,
     #[cfg(feature = "hwcodec")]
     i420: Vec<u8>,
+    #[allow(dead_code)]
+    resource_mode: ResourceMode,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -672,7 +819,25 @@ pub enum EncodingUpdate {
 }
 
 impl Encoder {
+    pub fn set_resource_mode(requested: ResourceMode) {
+        {
+            *REQUESTED_RESOURCE_MODE.lock().unwrap() = requested;
+        }
+        Self::update(EncodingUpdate::Check);
+    }
+
     pub fn new(config: EncoderCfg, i444: bool) -> ResultType<Encoder> {
+        let resource_mode = host_resource_mode();
+        let config = if resource_mode == ResourceMode::MinimizeGpu {
+            minimize_gpu_encoder_config(config)?
+        } else {
+            config
+        };
+        let i444 = if resource_mode == ResourceMode::MinimizeGpu {
+            false
+        } else {
+            i444
+        };
         log::info!("new encoder: {config:?}, i444: {i444}");
         match config {
             EncoderCfg::VPX(_) => Ok(Encoder {
@@ -745,7 +910,8 @@ impl Encoder {
 
         let vp8_useable = decodings.len() > 0 && decodings.iter().all(|(_, s)| s.ability_vp8 > 0);
         let vp9_useable = decodings.len() > 0 && decodings.iter().all(|(_, s)| s.ability_vp9 > 0);
-        let av1_useable = decodings.len() > 0
+        let resource_mode = host_resource_mode();
+        let mut av1_useable = decodings.len() > 0
             && decodings.iter().all(|(_, s)| s.ability_av1 > 0)
             && !disable_av1();
         let _all_support_h264_decoding =
@@ -757,7 +923,7 @@ impl Encoder {
         #[allow(unused_mut)]
         let mut h265vram_encoding = false;
         #[cfg(feature = "vram")]
-        if enable_vram_option(true) {
+        if resource_mode.hardware_allowed() && enable_vram_option(true) {
             if _all_support_h264_decoding {
                 if VRamEncoder::available(CodecFormat::H264).len() > 0 {
                     h264vram_encoding = true;
@@ -780,7 +946,7 @@ impl Encoder {
         #[allow(unused_mut)]
         let mut h265hq_encoding = false;
         #[cfg(feature = "hwcodec")]
-        {
+        if resource_mode.hardware_allowed() {
             if av1_useable {
                 av1hw_encoding =
                     HwRamEncoder::try_get_hardware(CodecFormat::AV1).map_or(None, |c| Some(c.name));
@@ -798,20 +964,28 @@ impl Encoder {
         }
         let h264hw_available = h264vram_encoding || h264hw_encoding.is_some();
         let h265hw_available = h265vram_encoding || h265hw_encoding.is_some();
-        let av1_hw_useable = av1_useable && av1hw_encoding.is_some();
+        let mut av1_hw_useable = av1_useable && av1hw_encoding.is_some();
         let mut h264_useable =
             _all_support_h264_decoding && (h264vram_encoding || h264hw_encoding.is_some());
         let mut h265_useable =
             _all_support_h265_decoding && (h265vram_encoding || h265hw_encoding.is_some());
         #[cfg(feature = "hwcodec")]
-        {
+        if resource_mode != ResourceMode::MinimizeGpu {
             h264_useable |= _all_support_h264_decoding
                 && HwRamEncoder::try_get_software(CodecFormat::H264).is_some();
             h265_useable |= _all_support_h265_decoding
                 && HwRamEncoder::try_get_software(CodecFormat::H265).is_some();
         }
-        let h264_hq_useable = _all_support_h264_decoding && h264hq_encoding;
-        let h265_hq_useable = _all_support_h265_decoding && h265hq_encoding;
+        let mut h264_hq_useable = _all_support_h264_decoding && h264hq_encoding;
+        let mut h265_hq_useable = _all_support_h265_decoding && h265hq_encoding;
+        if resource_mode == ResourceMode::MinimizeGpu {
+            av1_useable = false;
+            av1_hw_useable = false;
+            h264_useable = false;
+            h265_useable = false;
+            h264_hq_useable = false;
+            h265_hq_useable = false;
+        }
         let mut format = ENCODE_CODEC_FORMAT.lock().unwrap();
         let usable = UsableCodecs {
             vp8: vp8_useable,
@@ -831,13 +1005,13 @@ impl Encoder {
             ..Default::default()
         });
 
-        let auto_codec = auto_codec_for_usable(usable);
+        let auto_codec = auto_codec_for_resource_mode(usable, resource_mode);
 
         let host_default = preference_from_codec_option(&Config::get_option(
             hbb_common::config::keys::OPTION_ENCODER_CODEC_PREFERENCE,
         ));
         let preference = available_encoding_profile(
-            preferred_codec(&decodings, usable, host_default),
+            preferred_codec_for_resource_mode(&decodings, usable, host_default, resource_mode),
             h264_hq_useable,
             h265_hq_useable,
         );
@@ -942,6 +1116,11 @@ impl Encoder {
     }
 
     pub fn set_fallback_codec(format: CodecFormat) {
+        let format = if host_resource_mode() == ResourceMode::MinimizeGpu {
+            min_gpu_codec_for_decodings(&PEER_DECODINGS.lock().unwrap())
+        } else {
+            format
+        };
         let mut current = ENCODE_CODEC_FORMAT.lock().unwrap();
         let mut preference = ENCODE_CODEC_PREFERENCE.lock().unwrap();
         let previous = *current;
@@ -951,7 +1130,10 @@ impl Encoder {
     }
 
     pub fn software_fallback_codec() -> Option<CodecFormat> {
-        runtime_software_fallback_codec(&PEER_DECODINGS.lock().unwrap())
+        runtime_software_fallback_codec_for_resource_mode(
+            &PEER_DECODINGS.lock().unwrap(),
+            host_resource_mode(),
+        )
     }
 
     pub fn set_software_fallback_codec() -> Option<CodecFormat> {
@@ -961,6 +1143,9 @@ impl Encoder {
     }
 
     pub fn use_i444(config: &EncoderCfg) -> bool {
+        if host_resource_mode() == ResourceMode::MinimizeGpu {
+            return false;
+        }
         let decodings = PEER_DECODINGS.lock().unwrap().clone();
         let prefer_i444 = decodings
             .iter()
@@ -1074,7 +1259,29 @@ impl Decoder {
         _use_texture_render: bool,
         _luid: Option<i64>,
     ) -> SupportedDecoding {
+        Self::supported_decodings_with_resource_mode(
+            id_for_perfer,
+            _use_texture_render,
+            _luid,
+            ResourceMode::Normal,
+        )
+    }
+
+    pub fn supported_decodings_with_resource_mode(
+        id_for_perfer: Option<&str>,
+        _use_texture_render: bool,
+        _luid: Option<i64>,
+        mode: ResourceMode,
+    ) -> SupportedDecoding {
         let (prefer, prefer_chroma) = Self::preference(id_for_perfer);
+        if mode == ResourceMode::MinimizeGpu {
+            return SupportedDecoding {
+                ability_vp8: 1,
+                prefer: PreferCodec::VP8.into(),
+                prefer_chroma: prefer_chroma.into(),
+                ..Default::default()
+            };
+        }
         let av1_software_decoding = !disable_av1();
 
         #[allow(unused_mut)]
@@ -1136,9 +1343,30 @@ impl Decoder {
         _fallback: usize,
         preference: DecoderPreference,
     ) -> Decoder {
-        let hardware = preference.use_hardware(prefer_hardware_codec());
+        Self::new_with_resource_mode(
+            format,
+            _luid,
+            _dimensions,
+            _display,
+            _fallback,
+            preference,
+            ResourceMode::Normal,
+        )
+    }
+
+    pub fn new_with_resource_mode(
+        format: CodecFormat,
+        _luid: Option<i64>,
+        _dimensions: Option<(usize, usize)>,
+        _display: usize,
+        _fallback: usize,
+        preference: DecoderPreference,
+        resource_mode: ResourceMode,
+    ) -> Decoder {
+        let hardware = resource_mode.hardware_allowed()
+            && preference.use_hardware(configured_prefer_hardware_codec());
         log::info!(
-            "try create new decoder, format: {format:?}, preference: {preference:?}, hardware: {hardware}, _luid: {_luid:?}, dimensions: {_dimensions:?}, fallback: {_fallback}"
+            "try create new decoder, format: {format:?}, preference: {preference:?}, hardware: {hardware}, resource_mode: {resource_mode:?}, _luid: {_luid:?}, dimensions: {_dimensions:?}, fallback: {_fallback}"
         );
         let (mut vp8, mut vp9, mut av1) = (None, None, None);
         #[cfg(feature = "hwcodec")]
@@ -1169,7 +1397,11 @@ impl Decoder {
                 valid = vp9.is_some();
             }
             CodecFormat::AV1 => {
-                for hardware in decoder_backend_order(hardware, _fallback) {
+                for hardware in decoder_backend_order_for_resource_mode(
+                    hardware,
+                    _fallback,
+                    resource_mode,
+                ) {
                     if hardware {
                         #[cfg(feature = "hwcodec")]
                         match HwRamDecoder::new_with_preference(format, 0, true) {
@@ -1201,7 +1433,11 @@ impl Decoder {
                 }
             }
             CodecFormat::H264 | CodecFormat::H265 => {
-                for hardware in decoder_backend_order(hardware, _fallback) {
+                for _hardware in decoder_backend_order_for_resource_mode(
+                    hardware,
+                    _fallback,
+                    resource_mode,
+                ) {
                     if valid {
                         break;
                     }
@@ -1213,7 +1449,7 @@ impl Decoder {
                         }
                         if platform {
                             #[cfg(feature = "vram")]
-                            if hardware && allow_d3d_render() && _luid.unwrap_or_default() != 0 {
+                            if _hardware && allow_d3d_render() && _luid.unwrap_or_default() != 0 {
                                 match VRamDecoder::new(format, _luid) {
                                     Ok(v) => {
                                         valid = true;
@@ -1227,7 +1463,7 @@ impl Decoder {
                                 }
                             }
                             #[cfg(feature = "mediacodec")]
-                            if !valid && hardware {
+                            if !valid && _hardware {
                                 let decoder = MediaCodecDecoder::new(format, _dimensions, _display);
                                 valid = decoder.is_some();
                                 if !valid {
@@ -1244,7 +1480,7 @@ impl Decoder {
                             match HwRamDecoder::new_with_preference(
                                 format,
                                 _fallback.saturating_sub(1),
-                                hardware,
+                                _hardware,
                             ) {
                                 Ok(v) => {
                                     valid = true;
@@ -1297,6 +1533,7 @@ impl Decoder {
             valid,
             #[cfg(feature = "hwcodec")]
             i420: vec![],
+            resource_mode,
         }
     }
 
@@ -1462,7 +1699,11 @@ impl Decoder {
                             self.h264_media_codec = None;
                             self.media_codec_fallback = true;
                             #[cfg(feature = "hwcodec")]
-                            match HwRamDecoder::new(CodecFormat::H264) {
+                            match if self.resource_mode.hardware_allowed() {
+                                HwRamDecoder::new(CodecFormat::H264)
+                            } else {
+                                HwRamDecoder::new_with_preference(CodecFormat::H264, 0, false)
+                            } {
                                 Ok(decoder) => self.h264_ram = Some(decoder),
                                 Err(fallback_error) => {
                                     return Err(anyhow!(
@@ -1516,7 +1757,11 @@ impl Decoder {
                             self.h265_media_codec = None;
                             self.media_codec_fallback = true;
                             #[cfg(feature = "hwcodec")]
-                            match HwRamDecoder::new(CodecFormat::H265) {
+                            match if self.resource_mode.hardware_allowed() {
+                                HwRamDecoder::new(CodecFormat::H265)
+                            } else {
+                                HwRamDecoder::new_with_preference(CodecFormat::H265, 0, false)
+                            } {
                                 Ok(decoder) => self.h265_ram = Some(decoder),
                                 Err(fallback_error) => {
                                     return Err(anyhow!(
@@ -1768,6 +2013,9 @@ pub fn enable_hwcodec_option() -> bool {
 }
 #[cfg(feature = "vram")]
 pub fn enable_vram_option(encode: bool) -> bool {
+    if encode && !host_resource_mode().hardware_allowed() {
+        return false;
+    }
     if cfg!(windows) {
         if encode {
             enable_directx_capture()
@@ -1953,6 +2201,8 @@ fn apply_codec_fallback(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static CODEC_STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     #[cfg(all(feature = "hwcodec", any(target_os = "macos", windows)))]
@@ -2259,6 +2509,159 @@ mod tests {
             .enumerate()
             .map(|(index, preference)| (index as i32, decoding(*preference)))
             .collect()
+    }
+
+    #[test]
+    fn minimize_gpu_admits_software_only_and_orders_vp8_before_vp9() {
+        assert_eq!(
+            decoder_backend_order_for_resource_mode(true, 0, ResourceMode::MinimizeGpu),
+            [false, false]
+        );
+        assert_eq!(
+            decoder_backend_order_for_resource_mode(true, 0, ResourceMode::LowPower),
+            [true, false]
+        );
+
+        let vp8_and_vp9 = HashMap::from([(1, decoding(PreferCodec::Auto))]);
+        assert_eq!(
+            min_gpu_codec_for_decodings(&vp8_and_vp9),
+            CodecFormat::VP8
+        );
+        assert_eq!(
+            auto_codec_for_resource_mode(all_usable_codecs(), ResourceMode::MinimizeGpu),
+            CodecFormat::VP8
+        );
+        let software_config = minimize_gpu_encoder_config(EncoderCfg::AOM(AomEncoderConfig {
+            width: 320,
+            height: 240,
+            quality: 1.0,
+            fps: 30,
+            keyframe_interval: None,
+        }));
+        assert!(matches!(
+            software_config,
+            Ok(EncoderCfg::VPX(VpxEncoderConfig {
+                codec: VpxVideoCodecId::VP8,
+                ..
+            }))
+        ));
+
+        let hardware_only_peer = HashMap::from([(
+            1,
+            SupportedDecoding { ability_h264: 1, ..Default::default() },
+        )]);
+        assert_eq!(min_gpu_codec_for_decodings(&hardware_only_peer), CodecFormat::Unknown);
+        let no_software = UsableCodecs {
+            vp8: false, vp9: false, av1: false, h264: true, h265: false,
+        };
+        assert_eq!(
+            auto_codec_for_resource_mode(no_software, ResourceMode::MinimizeGpu),
+            CodecFormat::Unknown,
+        );
+        assert_eq!(
+            preferred_codec_for_resource_mode(
+                &hardware_only_peer, no_software, PreferCodec::H264, ResourceMode::MinimizeGpu,
+            ),
+            PreferCodec::Auto,
+        );
+
+        let vp9_only = HashMap::from([(
+            1,
+            SupportedDecoding {
+                ability_vp8: 0,
+                ability_vp9: 1,
+                ..decoding(PreferCodec::AV1)
+            },
+        )]);
+        assert_eq!(min_gpu_codec_for_decodings(&vp9_only), CodecFormat::VP9);
+        assert_eq!(
+            runtime_software_fallback_codec_for_resource_mode(
+                &vp9_only,
+                ResourceMode::MinimizeGpu
+            ),
+            Some(CodecFormat::VP9)
+        );
+    }
+
+    #[test]
+    fn minimize_gpu_decoder_uses_the_software_vp8_backend() {
+        let advertised = Decoder::supported_decodings_with_resource_mode(
+            None,
+            false,
+            None,
+            ResourceMode::MinimizeGpu,
+        );
+        assert_eq!(advertised.ability_vp8, 1);
+        assert_eq!(advertised.ability_vp9, 0);
+        assert_eq!(advertised.ability_av1, 0);
+        assert_eq!(advertised.ability_h264, 0);
+        assert_eq!(advertised.ability_h265, 0);
+        assert_eq!(advertised.prefer.enum_value_or(PreferCodec::Auto), PreferCodec::VP8);
+
+        let decoder = Decoder::new_with_resource_mode(
+            CodecFormat::VP8,
+            None,
+            None,
+            0,
+            0,
+            DecoderPreference::Auto,
+            ResourceMode::MinimizeGpu,
+        );
+        assert!(decoder.valid());
+        assert_eq!(decoder.backend(), "Software libvpx");
+    }
+
+    #[test]
+    fn resource_mode_change_recomputes_codec_and_disables_i444() {
+        let _state_guard = CODEC_STATE_TEST_LOCK.lock().unwrap();
+        let previous_mode = *REQUESTED_RESOURCE_MODE.lock().unwrap();
+        let previous_decodings = PEER_DECODINGS.lock().unwrap().clone();
+        let previous_format = *ENCODE_CODEC_FORMAT.lock().unwrap();
+        let previous_preference = *ENCODE_CODEC_PREFERENCE.lock().unwrap();
+        let previous_usable = USABLE_ENCODING.lock().unwrap().clone();
+
+        {
+            let mut decodings = PEER_DECODINGS.lock().unwrap();
+            decodings.clear();
+            decodings.insert(
+                1,
+                SupportedDecoding {
+                    ability_vp8: 1,
+                    ability_vp9: 1,
+                    i444: Some(CodecAbility {
+                        vp9: true,
+                        ..Default::default()
+                    })
+                    .into(),
+                    prefer_chroma: Chroma::I444.into(),
+                    ..Default::default()
+                },
+            );
+        }
+        *ENCODE_CODEC_FORMAT.lock().unwrap() = CodecFormat::VP9;
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Encoder::set_resource_mode(ResourceMode::MinimizeGpu);
+            assert_eq!(Encoder::negotiated_codec(), CodecFormat::VP8);
+            assert!(!Encoder::use_i444(&EncoderCfg::VPX(VpxEncoderConfig {
+                width: 320,
+                height: 240,
+                quality: 1.0,
+                fps: 30,
+                codec: VpxVideoCodecId::VP9,
+                keyframe_interval: None,
+            })));
+        }));
+
+        *REQUESTED_RESOURCE_MODE.lock().unwrap() = previous_mode;
+        *PEER_DECODINGS.lock().unwrap() = previous_decodings;
+        *ENCODE_CODEC_FORMAT.lock().unwrap() = previous_format;
+        *ENCODE_CODEC_PREFERENCE.lock().unwrap() = previous_preference;
+        *USABLE_ENCODING.lock().unwrap() = previous_usable;
+
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     #[test]
@@ -2741,6 +3144,7 @@ mod tests {
 
     #[test]
     fn advertised_encoding_formats_are_unions_of_local_backends() {
+        let _state_guard = CODEC_STATE_TEST_LOCK.lock().unwrap();
         let caps = encoder_capabilities();
         let encoding = Encoder::supported_encoding();
         for (format, hardware, software, advertised) in [
@@ -2825,6 +3229,7 @@ mod tests {
 
     #[test]
     fn codec_fallback_keeps_usable_hardware_codecs_advertised() {
+        let _state_guard = CODEC_STATE_TEST_LOCK.lock().unwrap();
         *USABLE_ENCODING.lock().unwrap() = Some(SupportedEncoding {
             h264: true,
             h265: true,

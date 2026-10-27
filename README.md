@@ -53,6 +53,18 @@ RustAdmin currently contains upstream RustDesk code plus fork-specific work in t
 
 This list describes the current development direction and may change as the fork evolves.
 
+## Resource modes
+
+Codec settings provide independent **Host resource mode** and **Viewer resource mode** defaults. The session toolbar's **Resource mode** dialog saves overrides for that connection. Remote host controls require an updated host.
+
+* **Normal** uses the saved codec, quality and frame-rate settings.
+* **Low power** limits video to 10 FPS, retains the efficient codec paths, and reduces capture polling to 2 FPS after two seconds without a changed frame.
+* **Minimize GPU** adds software-only video codecs and uses direct GDI capture on Windows, with the existing UAC and privacy capture paths taking precedence. Software VP8 is the baseline, with VP9 available for compatible fallback. macOS capture is throttled at its source. Displaying a desktop still uses operating-system graphics; this mode can increase CPU use.
+
+Resource limits override Movie and fixed-FPS requests without overwriting those preferences. The strongest host or connected-viewer request applies to shared host video. Returning all requests to Normal restores the original settings.
+
+In resource modes, hidden remote tabs and minimized windows suspend monitor video while keeping the connection and non-video services alive. Another visible view or an active recording keeps video running. Resume preserves the selected monitors and waits for a fresh reference frame. An unfocused visible window continues updating. Older hosts cannot suspend capture through this protocol, although the viewer can stop local decoding.
+
 ## Recommended deployment model
 
 For security-focused use, RustAdmin should normally be deployed with:

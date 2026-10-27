@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:get/get.dart';
 import 'package:provider/provider.dart';
+import 'package:uuid/uuid.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -14,6 +15,7 @@ import '../../common/widgets/overlay.dart';
 import '../../common/widgets/remote_input.dart';
 import '../../common/widgets/display_render_status.dart';
 import '../../common.dart';
+import '../../common/resource_modes.dart';
 import '../../common/session_peer_settings.dart';
 import '../../common/widgets/dialog.dart';
 import '../../common/widgets/toolbar.dart';
@@ -136,6 +138,12 @@ class _RemotePageState extends State<RemotePage>
         TickerProviderStateMixin {
   Timer? _timer;
   bool _disposed = false;
+  bool _windowMinimized = false;
+  bool _videoVisibilityReady = false;
+  bool _videoVisibilitySawFirstImage = false;
+  late final String _videoVisibilityOwner;
+  late final VideoVisibilityReporter _videoVisibilityReporter;
+  StreamSubscription<DesktopTabState>? _tabStateSubscription;
   DesktopQualityMonitorWindowController? _qualityMonitorWindowController;
   int _keyboardFocusGeneration = 0;
   String keyboardMode = "legacy";
@@ -194,6 +202,29 @@ class _RemotePageState extends State<RemotePage>
       return false;
     }
     return identical(tabState.selectedTabInfo.page, widget);
+  }
+
+  void _reportVideoVisibility() {
+    if (_disposed || !_videoVisibilityReady) return;
+    final visible = shouldKeepRemoteVideoVisible(
+      activeTab: _isActiveTab,
+      windowMinimized: _windowMinimized,
+      recording: _ffi.recordingModel.start,
+    );
+    unawaited(_videoVisibilityReporter.update(visible));
+  }
+
+  void _onTabStateChanged(DesktopTabState _) => _reportVideoVisibility();
+
+  void _onRecordingChanged() => _reportVideoVisibility();
+
+  Future<void> _unregisterVideoVisibility() async {
+    try {
+      await _videoVisibilityReporter.update(null);
+    } catch (error, stackTrace) {
+      debugPrint('Failed to unregister video visibility: $error');
+      debugPrintStack(stackTrace: stackTrace);
+    }
   }
 
   bool get _hasEditableTextFocus {
@@ -279,17 +310,40 @@ class _RemotePageState extends State<RemotePage>
     initializeDesktopRemoteInputSource();
     WidgetsBinding.instance.addObserver(this);
     _ffi = FFI(widget.sessionId);
+    _videoVisibilityOwner = 'remote-page:${Uuid().v4()}';
+    _videoVisibilityReporter = VideoVisibilityReporter(
+      (visible) => bind.sessionUpdateVideoVisibility(
+        sessionId: _ffi.sessionId,
+        owner: _videoVisibilityOwner,
+        visible: visible,
+      ),
+    );
+    _windowMinimized = stateGlobal.isMinimized;
+    _ffi.recordingModel.addListener(_onRecordingChanged);
+    _tabStateSubscription = widget.tabController?.state.listen(
+      _onTabStateChanged,
+    );
     _ffi.ffiModel.reconnectController.attachFreshRestart(_restartStaleSession);
     Get.put<FFI>(_ffi, tag: _sessionRegistrationKey);
     _ffi.imageModel.addCallbackOnFirstImage((String peerId) {
       _ffi.canvasModel.activateLocalCursor();
       showKBLayoutTypeChooserIfNeeded(
-          _ffi.ffiModel.pi.platform, _ffi.dialogManager);
-      _ffi.recordingModel
-          .updateStatus(bind.sessionGetIsRecording(sessionId: _ffi.sessionId));
+        _ffi.ffiModel.pi.platform,
+        _ffi.dialogManager,
+      );
+      _ffi.recordingModel.updateStatus(
+        bind.sessionGetIsRecording(sessionId: _ffi.sessionId),
+      );
+      // onEvent2UIRgba invokes this after waitForFirstImage is rearmed by a
+      // reconnect, so start a new native visibility epoch at that boundary.
+      if (_videoVisibilityReady && _videoVisibilitySawFirstImage) {
+        _videoVisibilityReporter.reset();
+        _reportVideoVisibility();
+      }
+      _videoVisibilitySawFirstImage = true;
     });
     _ffi.canvasModel.initializeEdgeScrollFallback(this);
-    _ffi.start(
+    final startFuture = _ffi.start(
       widget.id,
       password: widget.password,
       isSharedPassword: widget.isSharedPassword,
@@ -302,6 +356,20 @@ class _RemotePageState extends State<RemotePage>
       cachedPeerData: widget.pendingCachedPeerData,
       hostWindowId: widget.windowHost?.windowId,
       transferSourceSessionId: widget.transferSourceSessionId,
+    );
+    unawaited(
+      startFuture.then<void>(
+        (_) {
+          if (!mounted || _disposed) return;
+          _videoVisibilityReporter.reset();
+          _videoVisibilityReady = true;
+          _reportVideoVisibility();
+        },
+        onError: (Object error, StackTrace stackTrace) {
+          debugPrint('Remote session start failed: $error');
+          debugPrintStack(stackTrace: stackTrace);
+        },
+      ),
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
@@ -375,6 +443,8 @@ class _RemotePageState extends State<RemotePage>
       bool forceRelay, bool Function() isCurrent) async {
     if (_disposed || !isCurrent()) return;
     debugPrint('Fresh restart after desktop suspension: session=$sessionId');
+    _videoVisibilityReady = false;
+    await _unregisterVideoVisibility();
     _timer?.cancel();
     _timer = null;
     _ffi.dialogManager.dismissAll();
@@ -402,6 +472,9 @@ class _RemotePageState extends State<RemotePage>
     _ffi.ffiModel.updateEventListener(sessionId, widget.id);
     if (!isWeb) bind.pluginSyncUi(syncTo: kAppTypeDesktopRemote);
     _ffi.qualityMonitorModel.checkShowQualityMonitor(sessionId);
+    _videoVisibilityReporter.reset();
+    _videoVisibilityReady = true;
+    _reportVideoVisibility();
   }
 
   /// Cancel the pointer lock center debounce timer
@@ -454,6 +527,8 @@ class _RemotePageState extends State<RemotePage>
     if (isWindows) {
       _isWindowBlur = false;
     }
+    _windowMinimized = false;
+    _reportVideoVisibility();
     WakelockManager.enable(_uniqueKey);
     scheduleKeyboardFocus(preserveEditableTextFocus: true);
     // Update pointer lock center when window is restored
@@ -464,6 +539,8 @@ class _RemotePageState extends State<RemotePage>
   @override
   void onWindowMaximize() {
     super.onWindowMaximize();
+    _windowMinimized = false;
+    _reportVideoVisibility();
     WakelockManager.enable(_uniqueKey);
     // Update pointer lock center when window is maximized
     _updatePointerLockCenterIfNeeded();
@@ -504,6 +581,8 @@ class _RemotePageState extends State<RemotePage>
   @override
   void onWindowMinimize() {
     super.onWindowMinimize();
+    _windowMinimized = true;
+    _reportVideoVisibility();
     WakelockManager.disable(_uniqueKey);
     // Release cursor constraints when minimized
     if (_ffi.inputModel.relativeMouseMode.value) {
@@ -540,6 +619,11 @@ class _RemotePageState extends State<RemotePage>
   @override
   Future<void> dispose() async {
     _disposed = true;
+    _videoVisibilityReady = false;
+    _tabStateSubscription?.cancel();
+    _tabStateSubscription = null;
+    _ffi.recordingModel.removeListener(_onRecordingChanged);
+    await _unregisterVideoVisibility();
     _ffi.ffiModel.reconnectController.stop();
     await _qualityMonitorWindowController?.dispose();
     _qualityMonitorWindowController = null;

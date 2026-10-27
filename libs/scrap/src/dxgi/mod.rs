@@ -62,14 +62,19 @@ pub struct Capturer {
 }
 
 impl Capturer {
+    pub fn new_gdi(mut display: Display) -> io::Result<Capturer> {
+        display.gdi = true;
+        Self::new(display)
+    }
+
     pub fn new(display: Display) -> io::Result<Capturer> {
         let mut device = ptr::null_mut();
         let mut context = ptr::null_mut();
         let mut duplication = ptr::null_mut();
-        #[allow(invalid_value)]
-        let mut desc = unsafe { mem::MaybeUninit::uninit().assume_init() };
-        #[allow(invalid_value)]
-        let mut adapter_desc1 = unsafe { mem::MaybeUninit::uninit().assume_init() };
+        // These native POD descriptors permit an all-zero representation.
+        // The GDI path never populates them, so they must start initialized.
+        let mut desc = unsafe { mem::zeroed() };
+        let mut adapter_desc1 = unsafe { mem::zeroed() };
         let mut gdi_capturer = None;
 
         let mut res = if display.gdi {

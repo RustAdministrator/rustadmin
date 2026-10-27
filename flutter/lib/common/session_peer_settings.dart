@@ -1,6 +1,7 @@
 import '../consts.dart';
 import 'package:uuid/uuid.dart';
 import '../models/platform_model.dart';
+import 'resource_modes.dart';
 import 'remote_toolbar_settings.dart';
 
 const kOptionLocalLanguageShortcuts = 'local-language-shortcuts';
@@ -429,6 +430,26 @@ class SessionPeerSettingsRepository {
         sessionId: sessionId,
         name: setting.key,
         value: setting.codec.encode(value),
+      );
+}
+
+class SessionResourceModeRepository {
+  const SessionResourceModeRepository._(this.sessionId);
+
+  factory SessionResourceModeRepository.forSession(UuidValue sessionId) =>
+      SessionResourceModeRepository._(sessionId);
+
+  final UuidValue sessionId;
+
+  String read({required bool remote}) => normalizeResourceMode(
+    bind.sessionGetResourceMode(sessionId: sessionId, remote: remote),
+  );
+
+  Future<void> write({required String mode, required bool remote}) =>
+      bind.sessionSetResourceMode(
+        sessionId: sessionId,
+        mode: normalizeResourceMode(mode),
+        remote: remote,
       );
 }
 

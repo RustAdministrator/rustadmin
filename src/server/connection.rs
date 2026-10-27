@@ -1715,6 +1715,7 @@ pub struct Connection {
     // handle input messages
     video_ack_required: bool,
     requested_video_profile: VideoProfile,
+    video_suspended: bool,
     effective_movie_mode: EffectiveMovieMode,
     server_audit_conn: String,
     server_audit_file: String,
@@ -2059,6 +2060,7 @@ impl Connection {
             input_pause: permission_prompt::InputPauseFlags::default(),
             video_ack_required: false,
             requested_video_profile: VideoProfile::Standard,
+            video_suspended: false,
             effective_movie_mode: EffectiveMovieMode::Off,
             server_audit_conn: "".to_owned(),
             server_audit_file: "".to_owned(),
@@ -2684,6 +2686,10 @@ impl Connection {
                     }
                 }
                 _ = video_delivery_timer.tick() => {
+                    if conn.video_suspended {
+                        pending_video_ordering = None;
+                        continue;
+                    }
                     if let Some((_, message)) = pending_video_ordering.as_ref() {
                         match conn.stream.send_ordering_tagged("VideoOrdering", message.as_ref()).await {
                             Ok(()) => pending_video_ordering = None,
@@ -2778,6 +2784,9 @@ impl Connection {
                     }
                     // The control end will jump out of the loop after receiving LoginResponse and will not reply to the TestDelay
                     if conn.last_test_delay.is_none() && !(conn.port_forward_socket.is_some() && conn.authorized) {
+                        if conn.authorized && conn.requested_video_profile == VideoProfile::Movie {
+                            conn.refresh_effective_movie_mode();
+                        }
                         conn.last_test_delay = Some(Instant::now());
                         // Before login the peer gets the round-trip figure only;
                         // the pipeline details are for an authorized session.
@@ -2822,6 +2831,7 @@ impl Connection {
                                 };
                                 let delivery_status = conn.video_delivery.status(conn.display_idx as i32);
                                 TestDelay{
+                                    resource_mode: scrap::codec::host_resource_mode().config_value().to_owned(),
                                     target_bitrate,
                                     capture_backend,
                                     capture_frame,
@@ -4174,6 +4184,7 @@ impl Connection {
         // Transport-independent support advertisement; old peers ignore it.
         platform_additions.insert("support_video_reference_refresh".into(), json!(true));
         platform_additions.insert("display_set_starts_capture".into(), json!(true));
+        platform_additions.insert("support_resource_mode".into(), json!(true));
         #[cfg(target_os = "linux")]
         {
             if crate::platform::current_is_wayland() {
@@ -5665,6 +5676,8 @@ impl Connection {
             .load(std::sync::atomic::Ordering::Relaxed);
         self.effective_movie_mode = match self.requested_video_profile {
             VideoProfile::Standard => EffectiveMovieMode::Off,
+            VideoProfile::Movie if scrap::codec::host_resource_mode()
+                != hbb_common::resource_policy::ResourceMode::Normal => EffectiveMovieMode::ResourceLimited,
             VideoProfile::Movie if !MOVIE_MODE_HOST_CAPABLE => EffectiveMovieMode::UnsupportedPeer,
             VideoProfile::Movie if !feedback_capable => EffectiveMovieMode::ViewerOnly,
             VideoProfile::Movie if !transport_capable => EffectiveMovieMode::CompatibilityTransport,
@@ -7489,6 +7502,9 @@ impl Connection {
     }
 
     fn refresh_video_display(&self, display: Option<usize>) {
+        if self.video_suspended {
+            return;
+        }
         log::info!(
             "#{} diag refresh_video_display: source={:?}, display={:?}",
             self.inner.id(),
@@ -7506,6 +7522,9 @@ impl Connection {
     }
 
     fn refresh_video_reference(&self, display: usize) {
+        if self.video_suspended {
+            return;
+        }
         self.server.upgrade().map(|s| {
             s.read().unwrap().set_video_service_opt(
                 Some((self.video_source(), display)),
@@ -7871,8 +7890,47 @@ impl Connection {
         }
     }
 
+    fn set_video_suspended(&mut self, suspended: bool) {
+        if self.video_suspended == suspended {
+            return;
+        }
+        self.video_suspended = suspended;
+        // Delivery progress belongs to the old viewing interval, even when a
+        // different viewer keeps the same encoder and stream id alive.
+        self.video_delivery = VideoDeliveryController::default();
+        self.video_feedback_by_display.clear();
+        if let Some(server) = self.server.upgrade() {
+            let mut server = server.write().unwrap();
+            server.set_monitor_video_suspended(self.inner.clone(), suspended);
+            if let Some(tx) = self.inner.tx_video.as_ref() {
+                let count = Self::video_source_count(VideoSource::Monitor);
+                let displays = (0..count).filter(|display| {
+                    server.services.get(&video_service::get_service_name(VideoSource::Monitor, *display))
+                        .is_some_and(|service| service.is_subed(self.inner.id()))
+                }).collect::<Vec<_>>();
+                self.inner.notify_video_drops(tx.set_displays(&displays));
+            }
+        }
+        log::info!("#{} monitor video suspended={suspended}", self.inner.id());
+    }
+
     async fn update_options(&mut self, o: &OptionMessage, at_login: bool) {
         log::info!("Option update: {:?}", o);
+        let monitor_viewer = !self.view_camera && !self.terminal && self.file_transfer.is_none()
+            && self.port_forward_socket.is_none();
+        if monitor_viewer {
+            if let Some(mode) = hbb_common::resource_policy::ResourceMode::from_wire_update(o.resource_mode) {
+                if video_service::set_resource_mode_request(self.inner.id(), mode) {
+                    self.refresh_effective_movie_mode();
+                    self.refresh_monitor_video_services();
+                }
+            }
+            if let Ok(suspended) = o.video_suspended.enum_value() {
+                if suspended != BoolOption::NotSet {
+                    self.set_video_suspended(suspended == BoolOption::Yes);
+                }
+            }
+        }
         if let Ok(q) = o.image_quality.enum_value() {
             let image_quality;
             if let ImageQuality::NotSet = q {
@@ -8347,6 +8405,9 @@ impl Connection {
             return;
         }
         self.closed = true;
+        if video_service::clear_resource_mode_request(self.inner.id()) {
+            self.refresh_monitor_video_services();
+        }
         // This viewer's capture-backend choice goes with it; the next most
         // recent one (or Auto) applies again.
         if video_service::withdraw_capture_backend_request(self.inner.id()) {
@@ -9877,6 +9938,7 @@ mod raii {
     impl Drop for AuthedConnID {
         fn drop(&mut self) {
             if self.1 == AuthConnType::Remote || self.1 == AuthConnType::ViewCamera {
+                video_service::clear_resource_mode_request(self.0);
                 scrap::codec::Encoder::update(scrap::codec::EncodingUpdate::Remove(self.0));
                 video_service::VIDEO_QOS
                     .lock()

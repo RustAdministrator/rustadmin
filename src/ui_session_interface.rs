@@ -18,6 +18,7 @@ use hbb_common::{
     config::{Config, LocalConfig, PeerConfig},
     get_version_number, log,
     message_proto::*,
+    resource_policy::ResourceMode,
     rendezvous_proto::ConnType,
     tokio::{
         self,
@@ -215,6 +216,7 @@ pub struct Session<T: InvokeUiSession> {
     pub direct_trust_response: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
     pub direct_pairing_passphrase_response: Arc<Mutex<Option<oneshot::Sender<Option<String>>>>>,
     pub(crate) keyboard_input_send_state: Arc<Mutex<KeyboardInputSendState>>,
+    pub(crate) viewer_resources: Arc<Mutex<crate::resource_policy::ViewerResources>>,
 }
 
 #[derive(Clone)]
@@ -755,6 +757,54 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Message(msg));
     }
 
+    pub fn get_resource_mode(&self, remote: bool) -> String {
+        self.lc.read().unwrap().resource_mode(remote).config_value().to_owned()
+    }
+
+    pub fn set_resource_mode(&self, value: String, remote: bool) {
+        use hbb_common::resource_policy::{
+            ResourceMode, OPTION_REMOTE_RESOURCE_MODE, OPTION_VIEWER_RESOURCE_MODE,
+        };
+        let key = if remote { OPTION_REMOTE_RESOURCE_MODE } else { OPTION_VIEWER_RESOURCE_MODE };
+        self.lc.write().unwrap().set_option(
+            key.to_owned(), ResourceMode::from_config(&value).config_value().to_owned(),
+        );
+        self.send(Data::ResourcePolicyChanged);
+    }
+
+    pub fn update_video_visibility(&self, owner: String, visible: Option<bool>) {
+        self.viewer_resources.lock().unwrap().update_view(owner, visible);
+        self.send(Data::ResourcePolicyChanged);
+    }
+
+    pub(crate) fn local_resource_mode(&self) -> ResourceMode {
+        self.viewer_resources.lock().unwrap().local_mode
+    }
+
+    pub(crate) fn effective_resource_mode(&self) -> ResourceMode {
+        self.viewer_resources.lock().unwrap().effective_mode
+    }
+
+    pub(crate) fn update_actual_host_resource_mode(&self, value: &str) -> bool {
+        self.viewer_resources
+            .lock()
+            .unwrap()
+            .set_actual_host_mode(ResourceMode::from_config(value))
+    }
+
+    pub(crate) fn reset_resource_runtime(&self) {
+        self.viewer_resources.lock().unwrap().reset_runtime();
+    }
+
+    pub(crate) fn video_suspended(&self) -> bool {
+        self.viewer_resources.lock().unwrap().suspended
+    }
+
+    pub(crate) fn video_resource_runtime(&self) -> (ResourceMode, bool) {
+        let resources = self.viewer_resources.lock().unwrap();
+        (resources.effective_mode, resources.suspended)
+    }
+
     pub fn get_remember(&self) -> bool {
         self.lc.read().unwrap().remember
     }
@@ -780,13 +830,26 @@ impl<T: InvokeUiSession> Session<T> {
 
     pub fn alternative_decoders(&self) -> std::collections::HashMap<&'static str, bool> {
         let lc = self.lc.read().unwrap();
-        scrap::codec::decoders_for_remote_encoding(
+        let local = if lc.resource_mode(false).hardware_allowed() {
             scrap::codec::decoder_capabilities_for_rendering(
                 use_texture_render(),
                 Some(lc.adapter_luid.unwrap_or_default()),
-            ),
-            &lc.supported_encoding,
-        )
+            )
+        } else {
+            // Minimize GPU deliberately avoids capability probes and exposes
+            // only the software VP8 baseline to the host/UI projection.
+            HashMap::from([
+                ("vp8", true),
+                ("vp9", false),
+                ("av1Sw", false),
+                ("av1Hw", false),
+                ("h264Sw", false),
+                ("h264Hw", false),
+                ("h265Sw", false),
+                ("h265Hw", false),
+            ])
+        };
+        scrap::codec::decoders_for_remote_encoding(local, &lc.supported_encoding)
     }
 
     pub fn alternative_codecs(&self) -> (bool, bool, bool, bool, bool, bool, bool) {
@@ -803,7 +866,9 @@ impl<T: InvokeUiSession> Session<T> {
     }
 
     pub fn update_supported_decodings(&self) {
-        let msg = self.lc.write().unwrap().update_supported_decodings();
+        let lc = self.lc.read().unwrap();
+        let resource_mode = lc.resource_mode(false);
+        let msg = lc.update_supported_decodings_for_resource_mode(resource_mode);
         log::info!("diag viewer sending supported_decoding update");
         self.send(Data::Message(msg));
     }
@@ -1931,6 +1996,10 @@ impl<T: InvokeUiSession> Session<T> {
             self.send(Data::Close);
         }
         if reconnect || previous_round != 0 {
+            // Runtime host telemetry and decoder suspension do not survive a
+            // transport round. The registered view ownership does survive so
+            // the new login can replay the same visibility policy.
+            self.reset_resource_runtime();
             let mut lc = self.lc.write().unwrap();
             if force_relay {
                 lc.force_relay = true;
@@ -2811,6 +2880,9 @@ impl<T: InvokeUiSession> Interface for Session<T> {
 
     async fn handle_test_delay(&self, t: TestDelay, peer: &mut Stream) {
         if !t.from_client {
+            if self.update_actual_host_resource_mode(&t.resource_mode) {
+                self.send(Data::ResourcePolicyChanged);
+            }
             let has_video_delivery_status = !t.video_delivery_phase.is_empty();
             self.update_quality_status(QualityStatus {
                 delay: Some(t.last_delay as _),

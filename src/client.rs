@@ -70,6 +70,7 @@ use hbb_common::{
         supported_decoding::PreferCodec,
         *,
     },
+    resource_policy::ResourceMode,
     protobuf::{Message as _, MessageField},
     rand,
     rendezvous_proto::*,
@@ -3213,6 +3214,7 @@ impl AudioHandler {
 /// Video handler for the [`Client`].
 pub struct VideoHandler {
     decoder: Decoder,
+    resource_mode: ResourceMode,
     decoder_dimensions: Option<(usize, usize)>,
     pub rgb: ImageRgb,
     pub texture: ImageTexture,
@@ -3259,8 +3261,26 @@ impl VideoHandler {
         decoder_dimensions: Option<(usize, usize)>,
         decoder_preference: scrap::codec::DecoderPreference,
     ) -> Self {
+        Self::new_with_preference_and_resource_mode(
+            format,
+            _display,
+            decoder_dimensions,
+            decoder_preference,
+            ResourceMode::Normal,
+        )
+    }
+
+    fn new_with_preference_and_resource_mode(
+        format: CodecFormat,
+        _display: usize,
+        decoder_dimensions: Option<(usize, usize)>,
+        decoder_preference: scrap::codec::DecoderPreference,
+        resource_mode: ResourceMode,
+    ) -> Self {
         let luid = Self::get_adapter_luid();
-        log::info!("new video handler for display #{_display}, format: {format:?}, luid: {luid:?}");
+        log::info!(
+            "new video handler for display #{_display}, format: {format:?}, luid: {luid:?}, resource_mode: {resource_mode:?}"
+        );
         let rgba_format =
             if cfg!(feature = "flutter") && (cfg!(windows) || cfg!(target_os = "linux")) {
                 ImageFormat::ABGR
@@ -3268,14 +3288,16 @@ impl VideoHandler {
                 ImageFormat::ARGB
             };
         VideoHandler {
-            decoder: Decoder::new_with_preference(
+            decoder: Decoder::new_with_resource_mode(
                 format,
                 luid,
                 decoder_dimensions,
                 _display,
                 0,
                 decoder_preference,
+                resource_mode,
             ),
+            resource_mode,
             decoder_preference,
             decoder_dimensions,
             rgb: ImageRgb::new(rgba_format, crate::get_dst_align_rgba()),
@@ -3294,6 +3316,12 @@ impl VideoHandler {
 
     pub fn decoder_backend(&self) -> &'static str {
         self.decoder.backend()
+    }
+
+    fn set_resource_mode(&mut self, resource_mode: ResourceMode) {
+        if self.resource_mode != resource_mode {
+            self.resource_mode = resource_mode;
+        }
     }
 
     fn recover_decoder_if_due(&mut self, now: std::time::Instant) -> Option<usize> {
@@ -3460,13 +3488,14 @@ impl VideoHandler {
             self.decoder_dimensions = decoder_dimensions;
         }
         self.decoder.release();
-        self.decoder = Decoder::new_with_preference(
+        self.decoder = Decoder::new_with_resource_mode(
             format,
             luid,
             self.decoder_dimensions,
             self._display,
             self.decoder_fallback,
             self.decoder_preference,
+            self.resource_mode,
         );
         self.decode_wait_counter = 0;
         self.first_frame = true;
@@ -3595,6 +3624,32 @@ impl Deref for LoginConfigHandler {
 }
 
 impl LoginConfigHandler {
+    /// Resolve the persisted policy for this peer.
+    ///
+    /// Viewer policy has two layers: a per-peer override and the live GUI
+    /// option projection. The latter is intentionally read through
+    /// `ui_interface::get_option`, because the GUI process can update its
+    /// projection without refreshing this peer's cached `PeerConfig`.
+    pub fn resource_mode(&self, remote: bool) -> ResourceMode {
+        use hbb_common::resource_policy::{OPTION_REMOTE_RESOURCE_MODE, OPTION_VIEWER_RESOURCE_MODE};
+
+        let key = if remote {
+            OPTION_REMOTE_RESOURCE_MODE
+        } else {
+            OPTION_VIEWER_RESOURCE_MODE
+        };
+        let peer_value = self.get_option(key);
+        if remote || !peer_value.is_empty() {
+            ResourceMode::from_config(&peer_value)
+        } else {
+            ResourceMode::from_config(&crate::ui_interface::get_option(key))
+        }
+    }
+
+    pub fn requested_resource_mode(&self) -> ResourceMode {
+        self.resource_mode(false).strongest(self.resource_mode(true))
+    }
+
     pub fn capture_backend_from_value(value: &str) -> CaptureBackend {
         match value.to_ascii_lowercase().as_str() {
             "dxgi" => CaptureBackend::CaptureBackendDxgi,
@@ -4161,6 +4216,7 @@ impl LoginConfigHandler {
             video_profile.config_value(),
             msg.custom_fps.checked_abs().unwrap_or_default()
         );
+        self.requested_resource_mode().write_option(&mut msg);
         let view_only = self.get_toggle_option("view-only");
         if view_only {
             msg.disable_keyboard = BoolOption::Yes.into();
@@ -4207,9 +4263,22 @@ impl LoginConfigHandler {
     }
 
     pub fn get_supported_decoding(&self) -> SupportedDecoding {
-        get_hwcodec_config();
-        let mut decoding =
-            Decoder::supported_decodings(Some(&self.id), use_texture_render(), self.adapter_luid);
+        self.get_supported_decoding_for_resource_mode(self.resource_mode(false))
+    }
+
+    pub fn get_supported_decoding_for_resource_mode(
+        &self,
+        resource_mode: ResourceMode,
+    ) -> SupportedDecoding {
+        if resource_mode.hardware_allowed() {
+            get_hwcodec_config();
+        }
+        let mut decoding = Decoder::supported_decodings_with_resource_mode(
+            Some(&self.id),
+            use_texture_render(),
+            self.adapter_luid,
+            resource_mode,
+        );
         decoding.video_feedback = true;
         decoding
     }
@@ -4853,12 +4922,20 @@ impl LoginConfigHandler {
     }
 
     pub fn update_supported_decodings(&self) -> Message {
+        self.update_supported_decodings_for_resource_mode(self.resource_mode(false))
+    }
+
+    pub fn update_supported_decodings_for_resource_mode(
+        &self,
+        resource_mode: ResourceMode,
+    ) -> Message {
         // Keep the same peer preference, chroma preference, render backend,
         // and adapter context used for login capability negotiation.
-        let mut decoding = scrap::codec::Decoder::supported_decodings(
+        let mut decoding = scrap::codec::Decoder::supported_decodings_with_resource_mode(
             Some(&self.id),
             use_texture_render(),
             self.adapter_luid,
+            resource_mode,
         );
         decoding.video_feedback = true;
         log::info!(
@@ -5274,26 +5351,42 @@ pub fn start_video_thread<F, T>(
     std::thread::spawn(move || {
         #[cfg(windows)]
         sync_cpu_usage();
-        get_hwcodec_config();
+        if session.local_resource_mode().hardware_allowed() {
+            get_hwcodec_config();
+        }
         let mut video_handler: Option<VideoHandler> = None;
         let mut count = 0;
         let mut duration = std::time::Duration::ZERO;
         let mut skip_beginning = 0;
         loop {
+            if session.video_suspended() {
+                // The connection worker retires this decoder on the policy
+                // transition. This guard also drains a race where a frame
+                // was queued just before suspension became visible here.
+                video_handler.take();
+                while video_queue.read().unwrap().pop().is_some() {}
+            }
             if let Some(handler) = video_handler.as_mut() {
-                if let Some(attempt) = handler.recover_decoder_if_due(std::time::Instant::now()) {
-                    log::warn!(
-                        "recover video decoder locally: display={}, format={:?}, attempt={}, fallback={}",
-                        display,
-                        handler.decoder.format(),
-                        attempt,
-                        handler.decoder_fallback
-                    );
-                    *decoder_backend.write().unwrap() = Some(handler.decoder_backend());
-                    session.refresh_video(display as _);
+                if !session.video_suspended() {
+                    if let Some(attempt) =
+                        handler.recover_decoder_if_due(std::time::Instant::now())
+                    {
+                        log::warn!(
+                            "recover video decoder locally: display={}, format={:?}, attempt={}, fallback={}",
+                            display,
+                            handler.decoder.format(),
+                            attempt,
+                            handler.decoder_fallback
+                        );
+                        *decoder_backend.write().unwrap() = Some(handler.decoder_backend());
+                        if !session.video_suspended() {
+                            session.refresh_video(display as _);
+                        }
+                    }
                 }
             }
-            if movie_keyframe_wait
+            if !session.video_suspended()
+                && movie_keyframe_wait
                 .lock()
                 .unwrap()
                 .fallback_due(std::time::Instant::now())
@@ -5302,7 +5395,9 @@ pub fn start_video_thread<F, T>(
                     "Movie queue drop received no keyframe in time; requesting a full refresh: display={}",
                     display
                 );
-                session.refresh_video(display as _);
+                if !session.video_suspended() {
+                    session.refresh_video(display as _);
+                }
             }
             // Only recovering/stalled displays need a timer. Healthy and idle
             // workers remain blocked on input, with no periodic codec probing.
@@ -5324,6 +5419,10 @@ pub fn start_video_thread<F, T>(
             if let Ok(data) = received {
                 match data {
                     MediaData::VideoFrame(_) | MediaData::VideoQueue => {
+                        if session.video_suspended() {
+                            while video_queue.read().unwrap().pop().is_some() {}
+                            continue;
+                        }
                         let vf = match data {
                             MediaData::VideoFrame(vf) => {
                                 finish_movie_keyframe_wait(&discard_queue, &movie_keyframe_wait);
@@ -5366,7 +5465,7 @@ pub fn start_video_thread<F, T>(
                                         session.refresh_video(display as _);
                                     }
                                 }
-                                if discard_queue.read().unwrap().clone() {
+                                if session.video_suspended() || discard_queue.read().unwrap().clone() {
                                     continue;
                                 }
                                 let Some(vf) = selected else {
@@ -5405,11 +5504,12 @@ pub fn start_video_thread<F, T>(
                                     .unwrap()
                                     .get_option(config::keys::OPTION_CODEC_PREFERENCE),
                             );
-                            let mut handler = VideoHandler::new_with_preference(
+                            let mut handler = VideoHandler::new_with_preference_and_resource_mode(
                                 format,
                                 display,
                                 decoder_dimensions,
                                 decoder_preference,
+                                session.local_resource_mode(),
                             );
                             let record_state = session.lc.read().unwrap().record_state;
                             let record_permission = session.lc.read().unwrap().record_permission;
@@ -5509,6 +5609,7 @@ pub fn start_video_thread<F, T>(
                     }
                     MediaData::Reset(decoder_dimensions) => {
                         if let Some(handler) = video_handler.as_mut() {
+                            handler.set_resource_mode(session.local_resource_mode());
                             handler.decoder_preference =
                                 scrap::codec::DecoderPreference::from_option(
                                     &session
@@ -6423,6 +6524,7 @@ pub enum Data {
     ElevateWithLogon(String, String),
     NewVoiceCall,
     CloseVoiceCall,
+    ResourcePolicyChanged,
     ResetDecoder(Option<usize>),
     DisplayIntent(DisplayMediaIntent),
     RenameFile((i32, String, String, bool)),
@@ -7371,6 +7473,55 @@ mod movie_keyframe_wait_tests {
 #[cfg(test)]
 mod video_feedback_tests {
     use super::*;
+
+    #[test]
+    fn minimize_gpu_login_capability_is_software_vp8_only() {
+        let handler = LoginConfigHandler::default();
+        let decoding = handler.get_supported_decoding_for_resource_mode(ResourceMode::MinimizeGpu);
+        assert_eq!(decoding.ability_vp8, 1);
+        assert_eq!(decoding.ability_vp9, 0);
+        assert_eq!(decoding.ability_av1, 0);
+        assert_eq!(decoding.ability_h264, 0);
+        assert_eq!(decoding.ability_h265, 0);
+        assert_eq!(
+            decoding.prefer.enum_value_or(PreferCodec::Auto),
+            PreferCodec::VP8
+        );
+    }
+
+    #[test]
+    fn remote_request_does_not_restrict_local_decoder_capability() {
+        let mut handler = LoginConfigHandler::default();
+        handler.config.options.insert(
+            hbb_common::resource_policy::OPTION_VIEWER_RESOURCE_MODE.to_owned(),
+            "normal".to_owned(),
+        );
+        handler.config.options.insert(
+            hbb_common::resource_policy::OPTION_REMOTE_RESOURCE_MODE.to_owned(),
+            "minimize-gpu".to_owned(),
+        );
+        assert_eq!(handler.requested_resource_mode(), ResourceMode::MinimizeGpu);
+        let decoding = handler.get_supported_decoding();
+        assert_eq!(decoding.ability_vp9, 1);
+    }
+
+    #[test]
+    fn video_handler_keeps_resource_mode_across_reset_and_recovery() {
+        let now = std::time::Instant::now();
+        let mut handler = VideoHandler::new_with_preference_and_resource_mode(
+            CodecFormat::VP8,
+            0,
+            None,
+            scrap::codec::DecoderPreference::Auto,
+            ResourceMode::MinimizeGpu,
+        );
+        assert_eq!(handler.resource_mode, ResourceMode::MinimizeGpu);
+        handler.reset(None, None);
+        assert_eq!(handler.resource_mode, ResourceMode::MinimizeGpu);
+        handler.recovery.failed(now);
+        assert_eq!(handler.recover_decoder_if_due(now), Some(1));
+        assert_eq!(handler.resource_mode, ResourceMode::MinimizeGpu);
+    }
 
     #[test]
     fn video_handler_decode_error_only_recovers_its_own_display() {

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/resource_modes.dart';
 import 'package:flutter_hbb/common/widgets/codec_settings.dart';
 import 'package:flutter_hbb/generated_bridge.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
@@ -46,6 +47,10 @@ Widget _settings({
   ValueChanged<bool?>? onPreferHardware,
   ValueChanged<String>? onEncoder,
   ValueChanged<String>? onDecoder,
+  String hostResourceMode = kResourceModeNormal,
+  String viewerResourceMode = kResourceModeNormal,
+  ValueChanged<String>? onHostResourceMode,
+  ValueChanged<String>? onViewerResourceMode,
 }) => MaterialApp(
   theme: ThemeData(brightness: brightness),
   builder: (context, child) => MediaQuery(
@@ -73,9 +78,13 @@ Widget _settings({
           encoder: 'auto',
           decoder: 'auto',
           preferHardware: false,
+          hostResourceMode: hostResourceMode,
+          viewerResourceMode: viewerResourceMode,
           onPreferHardware: onPreferHardware,
           onEncoder: onEncoder,
           onDecoder: onDecoder,
+          onHostResourceMode: onHostResourceMode,
+          onViewerResourceMode: onViewerResourceMode,
         ),
       ),
     ),
@@ -106,6 +115,37 @@ void main() {
       final reads = native.capabilityReads;
       await tester.pump(const Duration(seconds: 2));
       expect(native.capabilityReads, reads);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'resource mode defaults are independent host and viewer choices',
+    (tester) async {
+      String? host;
+      String? viewer;
+      await tester.pumpWidget(
+        _settings(
+          hostResourceMode: kResourceModeLowPower,
+          viewerResourceMode: kResourceModeMinimizeGpu,
+          onHostResourceMode: (value) => host = value,
+          onViewerResourceMode: (value) => viewer = value,
+        ),
+      );
+
+      expect(find.text(kResourceModeExplanation), findsOneWidget);
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('host-resource-mode-normal')),
+      );
+      await tester.tap(find.byKey(const ValueKey('host-resource-mode-normal')));
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('viewer-resource-mode-low-power')),
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('viewer-resource-mode-low-power')),
+      );
+      expect(host, kResourceModeNormal);
+      expect(viewer, kResourceModeLowPower);
       expect(tester.takeException(), isNull);
     },
   );

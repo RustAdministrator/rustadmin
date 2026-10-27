@@ -61,6 +61,7 @@ mod version;
 mod build_identity;
 pub use version::*;
 mod video_profile;
+mod resource_policy;
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
 mod bridge_generated;
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]

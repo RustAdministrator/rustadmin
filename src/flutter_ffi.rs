@@ -779,6 +779,26 @@ pub fn session_set_capture_backend(session_id: SessionID, value: String) {
     }
 }
 
+pub fn session_set_resource_mode(session_id: SessionID, mode: String, remote: bool) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.set_resource_mode(mode, remote);
+    }
+}
+
+pub fn session_get_resource_mode(session_id: SessionID, remote: bool) -> SyncReturn<String> {
+    SyncReturn(sessions::get_session_by_session_id(&session_id)
+        .map(|session| session.get_resource_mode(remote))
+        .unwrap_or_else(|| "normal".to_owned()))
+}
+
+pub fn session_update_video_visibility(
+    session_id: SessionID, owner: String, visible: Option<bool>,
+) {
+    if let Some(session) = sessions::get_session_by_session_id(&session_id) {
+        session.update_video_visibility(owner, visible);
+    }
+}
+
 pub fn session_get_trackpad_speed(session_id: SessionID) -> Option<i32> {
     if let Some(session) = sessions::get_session_by_session_id(&session_id) {
         Some(session.get_trackpad_speed())

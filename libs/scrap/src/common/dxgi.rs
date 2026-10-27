@@ -27,6 +27,14 @@ impl Capturer {
         })
     }
 
+    /// Avoid creating a D3D device and desktop-duplication textures for GDI.
+    pub fn new_gdi(display: Display) -> io::Result<Capturer> {
+        let width = display.width();
+        let height = display.height();
+        let inner = dxgi::Capturer::new_gdi(display.0)?;
+        Ok(Capturer { inner, width, height })
+    }
+
     pub fn cancel_gdi(&mut self) {
         self.inner.cancel_gdi()
     }

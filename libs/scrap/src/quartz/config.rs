@@ -19,6 +19,14 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn for_resource_mode(mode: hbb_common::ResourceMode) -> Self {
+        let mut config = Self::default();
+        config.throttle = mode
+            .active_fps_cap()
+            .map_or(0.0, |fps| 1.0 / f64::from(fps));
+        config
+    }
+
     /// Don't forget to CFRelease this!
     pub fn build(self) -> CFDictionaryRef {
         unsafe {
@@ -71,5 +79,26 @@ impl Default for Config {
             throttle: 0.0,
             queue_length: 3,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resource_mode_throttle_is_source_cadence_and_normal_is_uncapped() {
+        assert_eq!(
+            Config::for_resource_mode(hbb_common::ResourceMode::Normal).throttle,
+            0.0
+        );
+        assert_eq!(
+            Config::for_resource_mode(hbb_common::ResourceMode::LowPower).throttle,
+            0.1
+        );
+        assert_eq!(
+            Config::for_resource_mode(hbb_common::ResourceMode::MinimizeGpu).throttle,
+            0.1
+        );
     }
 }
