@@ -13,6 +13,7 @@ import 'package:flutter_hbb/common/widgets/dialog.dart';
 import 'package:flutter_hbb/common/widgets/toolbar.dart';
 import 'package:flutter_hbb/common/remote_toolbar_settings.dart';
 import 'package:flutter_hbb/common/remote_display_settings.dart';
+import 'package:flutter_hbb/common/resource_modes.dart';
 import 'package:flutter_hbb/common/session_peer_settings.dart';
 import 'package:flutter_hbb/common/widgets/local_language_shortcut_settings.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
@@ -1778,6 +1779,7 @@ class _DisplayMenuState extends State<_DisplayMenu> {
         scrollStyle(state),
         imageQuality(),
         codec(),
+        if (ffi.connType == ConnType.defaultConn) resourceMode(),
         captureBackend(),
         if (ffi.connType == ConnType.defaultConn)
           _ResolutionsMenu(
@@ -2035,6 +2037,46 @@ class _DisplayMenuState extends State<_DisplayMenu> {
                       ffi: ffi))
                   .toList());
         });
+  }
+
+  Widget resourceMode() {
+    final settings = SessionResourceModeRepository.forSession(ffi.sessionId);
+
+    Widget modeMenu(String label, {required bool remote}) {
+      final selected = settings.read(remote: remote);
+      return _SubmenuButton(
+        ffi: ffi,
+        child: Text(translate(label)),
+        menuChildren: [
+          for (final choice in resourceModeChoices)
+            RdoMenuButton<String>(
+              value: choice.value,
+              groupValue: selected,
+              onChanged: (value) async {
+                if (value == null) return;
+                try {
+                  await settings.write(mode: value, remote: remote);
+                  if (mounted) setState(() {});
+                } catch (error) {
+                  debugPrint('Failed to set resource mode: $error');
+                }
+              },
+              child: Text(translate(choice.label)),
+              ffi: ffi,
+            ),
+        ],
+      );
+    }
+
+    return _SubmenuButton(
+      ffi: ffi,
+      child: Text(translate('Resource mode')),
+      menuChildren: [
+        modeMenu('Local viewer', remote: false),
+        if (supportsRemoteResourceMode(pi.platformAdditions))
+          modeMenu('Remote host', remote: true),
+      ],
+    );
   }
 
   captureBackend() {

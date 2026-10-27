@@ -351,7 +351,7 @@ List<TTextMenu> toolbarControls(BuildContext context, String id, FFI ffi) {
       onPressed: () => sessionRefreshVideo(sessionId, pi),
     ));
   }
-  if (isDefaultConn) {
+  if (isDefaultConn && !(isDesktop || isWebDesktop)) {
     v.add(
       TTextMenu(
         child: Text(translate('Resource mode')),

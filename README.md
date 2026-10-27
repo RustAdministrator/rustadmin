@@ -61,7 +61,7 @@ With focus disabled, a separate window is raised without keyboard activation or 
 
 ## Resource modes
 
-Codec settings provide independent **Host resource mode** and **Viewer resource mode** defaults. The session toolbar's **Resource mode** dialog saves separate **Remote host** and **Local viewer** overrides. Use either side alone or both; changing the viewer mode never sets the host resource mode. Remote host controls require an updated host.
+Codec settings provide independent **Host resource mode** and **Viewer resource mode** defaults. The session toolbar's **Display Settings → Resource mode** submenu, immediately after **Decoder**, saves separate **Remote host** and **Local viewer** overrides. Use either side alone or both; changing the viewer mode never sets the host resource mode. Remote host controls require an updated host.
 
 * **Normal** uses the saved codec, quality and frame-rate settings.
 * **Host Low power** limits video to 10 FPS and reduces capture polling to 2 FPS after two seconds without a changed frame. **Host Minimize GPU** also uses software VP8/VP9 and direct GDI capture on Windows, with existing UAC and privacy paths taking precedence. macOS capture is throttled at its source.

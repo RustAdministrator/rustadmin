@@ -1,8 +1,10 @@
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common.dart';
+import 'package:flutter_hbb/common/resource_modes.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/common/widgets/remote_input.dart';
+import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/pages/remote_page.dart';
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
 import 'package:flutter_hbb/desktop/widgets/toolbar_reveal_transition.dart';
@@ -20,6 +22,14 @@ class _TestRustadminImpl implements Rustadmin {
   bool qualityMonitorVisible = false;
   bool showMonitorsToolbar = false;
   final switchedDisplays = <List<int>>[];
+  final resourceModes = <bool, String>{
+    false: kResourceModeNormal,
+    true: kResourceModeNormal,
+  };
+  final resourceModeReads = <bool>[];
+  final resourceModeWrites =
+      <({SessionID sessionId, String mode, bool remote})>[];
+  bool failResourceModeWrites = false;
 
   @override
   dynamic noSuchMethod(Invocation invocation) {
@@ -39,10 +49,32 @@ class _TestRustadminImpl implements Rustadmin {
     if (name == #sessionSetSize || name == #sessionSendMouse) {
       return Future<void>.value();
     }
+    if (name == #sessionGetResourceMode) {
+      final remote = invocation.namedArguments[#remote] as bool;
+      resourceModeReads.add(remote);
+      return resourceModes[remote]!;
+    }
+    if (name == #sessionSetResourceMode) {
+      final remote = invocation.namedArguments[#remote] as bool;
+      final mode = invocation.namedArguments[#mode] as String;
+      resourceModeWrites.add((
+        sessionId: invocation.namedArguments[#sessionId] as SessionID,
+        mode: mode,
+        remote: remote,
+      ));
+      if (failResourceModeWrites) {
+        return Future<void>.error(StateError('Resource mode write failed'));
+      }
+      resourceModes[remote] = mode;
+      return Future<void>.value();
+    }
     if (name == #getLocalFlutterOption ||
         name == #mainGetLocalOption ||
+        name == #mainGetOptionSync ||
         name == #mainGetUserDefaultOption ||
         name == #mainSupportedInputSource ||
+        name == #mainGetMainDisplay ||
+        name == #sessionGetCommonSync ||
         name == #mainGetDisplays) {
       return '';
     }
@@ -65,8 +97,15 @@ class _TestRustadminImpl implements Rustadmin {
     }
     if (name == #sessionGetViewStyle ||
         name == #sessionGetScrollStyle ||
-        name == #sessionGetImageQuality) {
+        name == #sessionGetImageQuality ||
+        name == #sessionGetKeyboardMode) {
       return Future<String?>.value('');
+    }
+    if (name == #sessionGetPeerOption) {
+      return Future<String>.value('');
+    }
+    if (name == #sessionIsKeyboardModeSupported) {
+      return invocation.namedArguments[#mode] == kKeyLegacyMode;
     }
     if (name == #sessionAlternativeCodecs) {
       return Future<String>.value('{}');
@@ -90,6 +129,7 @@ class _TestRustadminImpl implements Rustadmin {
         name == #isDisableGroupPanel ||
         name == #mainCurrentIsWayland ||
         name == #mainHasFileClipboard ||
+        name == #sessionIsMultiUiSession ||
         name == #sessionGetToggleOptionSync) {
       return false;
     }
@@ -100,6 +140,41 @@ class _TestRustadminImpl implements Rustadmin {
   }
 }
 
+Widget _resourceToolbar(
+  FFI ffi, {
+  required bool vertical,
+  ValueChanged<bool>? onMenuFocusChanged,
+}) => MaterialApp(
+  theme: MyTheme.lightTheme,
+  home: Scaffold(
+    body: MultiProvider(
+      providers: [
+        ChangeNotifierProvider.value(value: ffi.ffiModel),
+        ChangeNotifierProvider.value(value: ffi.imageModel),
+        ChangeNotifierProvider.value(value: ffi.cursorModel),
+        ChangeNotifierProvider.value(value: ffi.canvasModel),
+        ChangeNotifierProvider.value(value: ffi.recordingModel),
+      ],
+      child: RemoteToolbar(
+        id: ffi.id,
+        ffi: ffi,
+        state: ToolbarState()
+          ..initialized.value = true
+          ..vertical.value = vertical,
+        onEnterOrLeaveImageSetter: (_, __) {},
+        onEnterOrLeaveImageCleaner: (_) {},
+        onImagePointerStateSetter: (_, __) {},
+        onImagePointerStateCleaner: (_) {},
+        onWindowPointerStateSetter: (_, __) {},
+        onWindowPointerStateCleaner: (_) {},
+        onMenuFocusChanged: onMenuFocusChanged ?? (_) {},
+        onCloseConnection: () {},
+        setRemoteState: (_) {},
+      ),
+    ),
+  ),
+);
+
 void main() {
   late _TestRustadminImpl testImpl;
 
@@ -107,6 +182,14 @@ void main() {
     isTest = true;
     testImpl = _TestRustadminImpl();
     platformFFI.initForTest(testImpl);
+  });
+
+  setUp(() {
+    testImpl.resourceModes[false] = kResourceModeNormal;
+    testImpl.resourceModes[true] = kResourceModeNormal;
+    testImpl.resourceModeReads.clear();
+    testImpl.resourceModeWrites.clear();
+    testImpl.failResourceModeWrites = false;
   });
 
   test('shared remote page initializes the native input source', () {
@@ -141,6 +224,214 @@ void main() {
       isFalse,
     );
   });
+
+  for (final vertical in [false, true]) {
+    testWidgets(
+      'resource submenus retain selections and independent writes (vertical: $vertical)',
+      (tester) async {
+        await tester.binding.setSurfaceSize(const Size(1600, 1000));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        const peerId = 'toolbar-resource-mode-peer';
+        initSharedStates(peerId);
+        addTearDown(() => removeSharedStates(peerId));
+        testImpl.toolbarOrientation = vertical ? 'vertical' : '';
+        addTearDown(() => testImpl.toolbarOrientation = '');
+        testImpl.resourceModes[false] = kResourceModeLowPower;
+        testImpl.resourceModes[true] = kResourceModeMinimizeGpu;
+        final ffi = FFI(null)..id = peerId;
+        addTearDown(ffi.inputModel.disposeRelativeMouseMode);
+        ffi.ffiModel.pi
+          ..platform = kPeerPlatformWindows
+          ..platformAdditions = {
+            kSupportResourceModePlatformAddition: true,
+            kPlatformAdditionsSupportCaptureBackend: true,
+          };
+        final menuFocusChanges = <bool>[];
+        await tester.pumpWidget(_resourceToolbar(
+          ffi,
+          vertical: vertical,
+          onMenuFocusChanged: menuFocusChanges.add,
+        ));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('Control Actions'));
+        await tester.pumpAndSettle();
+        expect(find.text('Resource mode'), findsNothing);
+        expect(find.byType(AlertDialog), findsNothing);
+
+        Future<void> openDisplay() async {
+          await tester.tap(find.byTooltip('Display Settings'));
+          await tester.pumpAndSettle();
+        }
+
+        Future<void> openMode(String label) async {
+          await openDisplay();
+          await tester.tap(find.text('Resource mode'));
+          await tester.pumpAndSettle();
+          expect(find.text('Local viewer'), findsOneWidget);
+          expect(find.text('Remote host'), findsOneWidget);
+          await tester.tap(find.text(label));
+          await tester.pumpAndSettle();
+        }
+
+        void expectSelected(String selected) {
+          final radios = tester
+              .widgetList<RadioMenuButton<String>>(
+                find.byType(RadioMenuButton<String>),
+              )
+              .where((radio) => resourceModeValues.contains(radio.value))
+              .toList();
+          expect(
+            radios.map((radio) => radio.value),
+            resourceModeChoices.map((choice) => choice.value),
+          );
+          expect(radios.map((radio) => radio.groupValue), everyElement(selected));
+          expect(
+            radios.where((radio) => radio.value == radio.groupValue).single.value,
+            selected,
+          );
+          expect(radios.every((radio) => radio.closeOnActivate), isTrue);
+          expect(find.byType(AlertDialog), findsNothing);
+        }
+
+        await openDisplay();
+        final labels = tester
+            .widgetList<SubmenuButton>(find.byType(SubmenuButton))
+            .map((menu) => menu.child)
+            .whereType<Text>()
+            .map((label) => label.data)
+            .toList();
+        final decoderIndex = labels.indexOf('Decoder');
+        expect(decoderIndex, greaterThanOrEqualTo(0));
+        expect(
+          labels.sublist(decoderIndex, decoderIndex + 3),
+          ['Decoder', 'Resource mode', 'Capture'],
+        );
+        await tester.tap(find.text('Resource mode'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Local viewer'));
+        await tester.pumpAndSettle();
+        expectSelected(kResourceModeLowPower);
+        expect(menuFocusChanges, [true]);
+
+        for (final choice in resourceModeChoices) {
+          await tester.tap(find.text(choice.label));
+          await tester.pumpAndSettle();
+          expect(testImpl.resourceModes[false], choice.value);
+          expect(testImpl.resourceModes[true], kResourceModeMinimizeGpu);
+          expect(testImpl.resourceModeWrites.last, (
+            sessionId: ffi.sessionId,
+            mode: choice.value,
+            remote: false,
+          ));
+          expect(find.text('Local viewer'), findsNothing);
+          expect(menuFocusChanges.last, isFalse);
+          await openMode('Local viewer');
+          expectSelected(choice.value);
+        }
+        expect(testImpl.resourceModeWrites.length, 3);
+        expect(
+          testImpl.resourceModeWrites.every((write) => !write.remote),
+          isTrue,
+        );
+        await tester.tapAt(const Offset(1590, 990));
+        await tester.pumpAndSettle();
+
+        await openMode('Remote host');
+        expectSelected(kResourceModeMinimizeGpu);
+        for (final choice in resourceModeChoices) {
+          await tester.tap(find.text(choice.label));
+          await tester.pumpAndSettle();
+          expect(testImpl.resourceModes[true], choice.value);
+          expect(testImpl.resourceModes[false], kResourceModeMinimizeGpu);
+          expect(testImpl.resourceModeWrites.last, (
+            sessionId: ffi.sessionId,
+            mode: choice.value,
+            remote: true,
+          ));
+          await openMode('Remote host');
+          expectSelected(choice.value);
+        }
+        expect(testImpl.resourceModeWrites.length, 6);
+        expect(
+          testImpl.resourceModeWrites.skip(3).every((write) => write.remote),
+          isTrue,
+        );
+        await tester.tapAt(const Offset(1590, 990));
+        await tester.pumpAndSettle();
+        testImpl.failResourceModeWrites = true;
+        await openMode('Local viewer');
+        await tester.tap(find.text('Normal'));
+        await tester.pumpAndSettle();
+        expect(testImpl.resourceModes[false], kResourceModeMinimizeGpu);
+        expect(testImpl.resourceModes[true], kResourceModeMinimizeGpu);
+        await openMode('Local viewer');
+        expectSelected(kResourceModeMinimizeGpu);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+      },
+    );
+  }
+
+  for (final capability in [null, false]) {
+    testWidgets(
+      'resource mode omits remote host without support ($capability)',
+      (tester) async {
+        const peerId = 'toolbar-legacy-resource-peer';
+        initSharedStates(peerId);
+        addTearDown(() => removeSharedStates(peerId));
+        final ffi = FFI(null)..id = peerId;
+        addTearDown(ffi.inputModel.disposeRelativeMouseMode);
+        if (capability != null) {
+          ffi.ffiModel.pi.platformAdditions[
+              kSupportResourceModePlatformAddition] = capability;
+        }
+        await tester.pumpWidget(_resourceToolbar(ffi, vertical: false));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('Display Settings'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Resource mode'));
+        await tester.pumpAndSettle();
+        expect(find.text('Remote host'), findsNothing);
+        expect(find.text('Local viewer'), findsOneWidget);
+        await tester.tap(find.text('Local viewer'));
+        await tester.pumpAndSettle();
+        expect(find.text('Normal'), findsOneWidget);
+        expect(find.text('Low power'), findsOneWidget);
+        expect(find.text('Minimize GPU'), findsOneWidget);
+        expect(testImpl.resourceModeReads, isNotEmpty);
+        expect(testImpl.resourceModeReads, everyElement(false));
+        expect(testImpl.resourceModeWrites, isEmpty);
+        expect(tester.takeException(), isNull);
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+      },
+    );
+  }
+
+  for (final connType in [ConnType.viewCamera, ConnType.fileTransfer]) {
+    testWidgets('resource mode is absent for $connType', (tester) async {
+      const peerId = 'toolbar-nondesktop-resource-peer';
+      initSharedStates(peerId);
+      addTearDown(() => removeSharedStates(peerId));
+      final ffi = FFI(null)
+        ..id = peerId
+        ..connType = connType;
+      addTearDown(ffi.inputModel.disposeRelativeMouseMode);
+      ffi.ffiModel.pi.platformAdditions[
+          kSupportResourceModePlatformAddition] = true;
+      await tester.pumpWidget(_resourceToolbar(ffi, vertical: false));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('Display Settings'));
+      await tester.pumpAndSettle();
+      expect(find.text('Resource mode'), findsNothing);
+      expect(testImpl.resourceModeReads, isEmpty);
+      expect(testImpl.resourceModeWrites, isEmpty);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+    });
+  }
 
   for (final inline in [false, true]) {
     for (final vertical in [false, true]) {
