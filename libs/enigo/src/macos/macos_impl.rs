@@ -208,8 +208,8 @@ impl MouseControllable for Enigo {
     }
 
     fn mouse_move_to(&mut self, x: i32, y: i32) {
-        // For absolute movement, we don't set delta values
-        // This maintains backward compatibility
+        // Ordinary absolute movement does not set delta values. Absolute drags
+        // synthesize them from the current CoreGraphics cursor location.
         self.mouse_move_to_impl(x, y, None);
     }
 
@@ -484,12 +484,44 @@ impl Enigo {
         }
     }
 
-    /// Internal implementation for mouse movement with optional delta values.
-    ///
-    /// The `delta` parameter is crucial for browser Pointer Lock API support.
-    /// When a browser enters Pointer Lock mode, it reads mouse delta values
-    /// (MOUSE_EVENT_DELTA_X/Y) directly from CGEvent to calculate movementX/Y.
-    /// Without setting these fields, the browser sees zero movement.
+    fn is_mouse_drag_event(event_type: CGEventType) -> bool {
+        matches!(
+            event_type,
+            CGEventType::LeftMouseDragged
+                | CGEventType::RightMouseDragged
+                | CGEventType::OtherMouseDragged
+        )
+    }
+
+    fn set_mouse_move_delta(
+        event: &CGEvent,
+        event_type: CGEventType,
+        destination: CGPoint,
+        delta: Option<(i32, i32)>,
+        current_location: Option<CGPoint>,
+    ) {
+        let delta = if let Some((dx, dy)) = delta {
+            Some((dx as i64, dy as i64))
+        } else if Self::is_mouse_drag_event(event_type) {
+            current_location.map(|location| {
+                (
+                    (destination.x - location.x) as i64,
+                    (destination.y - location.y) as i64,
+                )
+            })
+        } else {
+            None
+        };
+
+        if let Some((dx, dy)) = delta {
+            event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_X, dx);
+            event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y, dy);
+        }
+    }
+
+    /// Relative mode supplies its own deltas for pointer-lock applications.
+    /// Absolute drags also carry deltas for native controls that read movement
+    /// metadata instead of cursor position.
     fn mouse_move_to_impl(&mut self, x: i32, y: i32, delta: Option<(i32, i32)>) {
         let pressed = Self::pressed_buttons();
 
@@ -508,12 +540,12 @@ impl Enigo {
         let dest = CGPoint::new(x as f64, y as f64);
         if let Some(src) = self.event_source.as_ref() {
             if let Ok(event) = CGEvent::new_mouse_event(src.clone(), event_type, dest, button) {
-                // Set delta fields for relative mouse movement
-                // This is essential for Pointer Lock API in browsers
-                if let Some((dx, dy)) = delta {
-                    event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_X, dx as i64);
-                    event.set_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y, dy as i64);
-                }
+                let current_location = if delta.is_none() && Self::is_mouse_drag_event(event_type) {
+                    CGEvent::new(src.clone()).ok().map(|event| event.location())
+                } else {
+                    None
+                };
+                Self::set_mouse_move_delta(&event, event_type, dest, delta, current_location);
                 self.post(event, None);
             }
         }
@@ -857,3 +889,138 @@ fn get_map(name: &str, layout: *const u8) -> Map<char, CGKeyCode> {
     map
 }
 unsafe impl Send for Enigo {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_event_source() -> CGEventSource {
+        CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+            .unwrap_or_else(|_| panic!("failed to create a CoreGraphics event source"))
+    }
+
+    fn assert_unposted_drag_delta(
+        source: &CGEventSource,
+        event_type: CGEventType,
+        button: CGMouseButton,
+        current_location: CGPoint,
+        destination: CGPoint,
+        expected_delta: (i64, i64),
+    ) {
+        let event = CGEvent::new_mouse_event(source.clone(), event_type, destination, button)
+            .unwrap_or_else(|_| panic!("failed to create an unposted mouse event"));
+        let event_location = event.location();
+        assert_eq!(event.get_type() as u32, event_type as u32);
+        assert_eq!(event_location.x, destination.x);
+        assert_eq!(event_location.y, destination.y);
+
+        Enigo::set_mouse_move_delta(
+            &event,
+            event_type,
+            destination,
+            None,
+            Some(current_location),
+        );
+
+        assert_eq!(
+            event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X),
+            expected_delta.0
+        );
+        assert_eq!(
+            event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y),
+            expected_delta.1
+        );
+    }
+
+    #[test]
+    fn screenshot_drag_absolute_delta_fields_cover_drag_types() {
+        let source = test_event_source();
+        assert_unposted_drag_delta(
+            &source,
+            CGEventType::LeftMouseDragged,
+            CGMouseButton::Left,
+            CGPoint::new(-1920.0, 200.0),
+            CGPoint::new(-1800.0, 260.0),
+            (120, 60),
+        );
+        assert_unposted_drag_delta(
+            &source,
+            CGEventType::RightMouseDragged,
+            CGMouseButton::Right,
+            CGPoint::new(-1800.0, 260.0),
+            CGPoint::new(-1920.0, 200.0),
+            (-120, -60),
+        );
+        assert_unposted_drag_delta(
+            &source,
+            CGEventType::OtherMouseDragged,
+            CGMouseButton::Center,
+            CGPoint::new(-1920.0, 300.0),
+            CGPoint::new(-1920.0, 300.0),
+            (0, 0),
+        );
+    }
+
+    #[test]
+    fn screenshot_drag_explicit_relative_delta_is_preserved() {
+        let source = test_event_source();
+        let destination = CGPoint::new(-20.0, -30.0);
+        let event = CGEvent::new_mouse_event(
+            source,
+            CGEventType::OtherMouseDragged,
+            destination,
+            CGMouseButton::Center,
+        )
+        .unwrap_or_else(|_| panic!("failed to create an unposted mouse event"));
+
+        Enigo::set_mouse_move_delta(
+            &event,
+            CGEventType::OtherMouseDragged,
+            destination,
+            Some((-7, 11)),
+            Some(CGPoint::new(400.0, 500.0)),
+        );
+
+        assert_eq!(
+            event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X),
+            -7
+        );
+        assert_eq!(
+            event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y),
+            11
+        );
+    }
+
+    #[test]
+    fn screenshot_drag_absolute_non_drag_keeps_delta_fields_unchanged() {
+        let source = test_event_source();
+        let destination = CGPoint::new(-120.0, 80.0);
+        let event = CGEvent::new_mouse_event(
+            source,
+            CGEventType::MouseMoved,
+            destination,
+            CGMouseButton::Left,
+        )
+        .unwrap_or_else(|_| panic!("failed to create an unposted mouse event"));
+        let before = (
+            event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X),
+            event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y),
+        );
+
+        Enigo::set_mouse_move_delta(
+            &event,
+            CGEventType::MouseMoved,
+            destination,
+            None,
+            Some(CGPoint::new(-320.0, -240.0)),
+        );
+
+        assert_eq!(
+            (
+                event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_X),
+                event.get_integer_value_field(EventField::MOUSE_EVENT_DELTA_Y),
+            ),
+            before
+        );
+    }
+}
