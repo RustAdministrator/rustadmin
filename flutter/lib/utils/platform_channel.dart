@@ -43,6 +43,25 @@ class RdPlatformChannel {
   Future<bool> isConnectionWindowFocused() async =>
       await _hostMethodChannel.invokeMethod<bool>('isConnectionWindowFocused') ?? false;
 
+  /// Windows geometry/topmost updates must carry SWP_NOACTIVATE as well as show.
+  Future<void> prepareIncomingConnectionWindow({
+    required bool resize,
+    required bool preserveTopmost,
+  }) async {
+    final prepared = await _hostMethodChannel.invokeMethod<bool>(
+      'prepareIncomingConnectionWindow', {
+        'resize': resize,
+        'preserveTopmost': preserveTopmost,
+        'hideTitleBar': !kUseCompatibleUiMode,
+        'width': kConnectionManagerWindowSizeClosedChat.width,
+        'height': kConnectionManagerWindowSizeClosedChat.height,
+      },
+    );
+    if (prepared != true) {
+      throw PlatformException(code: 'incoming_connection_window_unavailable');
+    }
+  }
+
   /// Show this engine's window. Inactive presentation must not fall back to a
   /// plugin show/focus call because those paths activate the application.
   Future<void> showConnectionWindow({required bool focus}) async {

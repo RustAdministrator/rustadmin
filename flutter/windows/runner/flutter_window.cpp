@@ -11,9 +11,11 @@
 #include <flutter/event_stream_handler_functions.h>
 #include <flutter/method_channel.h>
 #include <flutter/standard_method_codec.h>
+#include <flutter_windows.h>
 
 #include <windows.h>
 
+#include <cmath>
 #include <optional>
 #include <memory>
 #include <utility>
@@ -111,10 +113,86 @@ bool IsConnectionWindowFocused(flutter::FlutterViewController* controller) {
   return window != nullptr && GetForegroundWindow() == window;
 }
 
+bool PrepareIncomingConnectionWindow(
+    HWND window, const flutter::EncodableValue* arguments) {
+  const auto* args = arguments == nullptr
+      ? nullptr
+      : std::get_if<flutter::EncodableMap>(arguments);
+  if (window == nullptr || !IsWindow(window) || args == nullptr) {
+    return false;
+  }
+  const auto resize_it = args->find(flutter::EncodableValue("resize"));
+  const auto top_it = args->find(flutter::EncodableValue("preserveTopmost"));
+  const auto title_it = args->find(flutter::EncodableValue("hideTitleBar"));
+  const auto width_it = args->find(flutter::EncodableValue("width"));
+  const auto height_it = args->find(flutter::EncodableValue("height"));
+  if (resize_it == args->end() || top_it == args->end() ||
+      title_it == args->end() || width_it == args->end() || height_it == args->end()) {
+    return false;
+  }
+  const bool* resize = std::get_if<bool>(&resize_it->second);
+  const bool* preserve_top = std::get_if<bool>(&top_it->second);
+  const bool* hide_title = std::get_if<bool>(&title_it->second);
+  const double* width = std::get_if<double>(&width_it->second);
+  const double* height = std::get_if<double>(&height_it->second);
+  if (!resize || !preserve_top || !hide_title || !width || !height ||
+      !std::isfinite(*width) || !std::isfinite(*height) ||
+      *width <= 0.0 || *width > 10000.0 || *height <= 0.0 || *height > 10000.0) {
+    return false;
+  }
+  UINT flags = SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+  int x = 0, y = 0, pixel_width = 0, pixel_height = 0;
+  if (*resize) {
+    POINT cursor{};
+    if (!GetCursorPos(&cursor)) {
+      return false;
+    }
+    const HMONITOR monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (!GetMonitorInfoW(monitor, &info)) {
+      return false;
+    }
+    const double scale = static_cast<double>(FlutterDesktopGetDpiForMonitor(monitor)) / 96.0;
+    if (!(scale > 0.0)) {
+      return false;
+    }
+    pixel_width = static_cast<int>(*width * scale);
+    pixel_height = static_cast<int>(*height * scale);
+    if (pixel_width <= 0 || pixel_height <= 0) {
+      return false;
+    }
+    x = info.rcWork.right - pixel_width;
+    y = info.rcWork.top;
+    LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
+    style &= ~WS_THICKFRAME;
+    if (*hide_title) {
+      style &= ~WS_CAPTION;
+    }
+    SetLastError(0);
+    if (SetWindowLongPtrW(window, GWL_STYLE, style) == 0 && GetLastError() != 0) {
+      return false;
+    }
+    flags |= SWP_FRAMECHANGED;
+  } else {
+    flags |= SWP_NOMOVE | SWP_NOSIZE;
+  }
+  if (*preserve_top) {
+    flags |= SWP_NOZORDER;
+  }
+  return SetWindowPos(window, *preserve_top ? nullptr : HWND_NOTOPMOST,
+                      x, y, pixel_width, pixel_height, flags) != FALSE;
+}
+
 void HandleHostMethodCall(
     flutter::FlutterViewController* controller,
     const flutter::MethodCall<>& call,
     std::unique_ptr<flutter::MethodResult<>> result) {
+  if (call.method_name() == "prepareIncomingConnectionWindow") {
+    result->Success(PrepareIncomingConnectionWindow(
+        RootWindowForController(controller), call.arguments()));
+    return;
+  }
   if (call.method_name() == "showConnectionWindow") {
     bool focus = true;
     if (!ParseFocusArgument(call.arguments(), &focus)) {

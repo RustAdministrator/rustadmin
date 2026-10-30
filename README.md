@@ -55,9 +55,11 @@ This list describes the current development direction and may change as the fork
 
 ## Connection window focus
 
-**Settings → General → Other → Focus connection window** controls whether a newly opened remote-desktop connection activates its window. It is enabled by default. The checkbox beside Connect and in pending password/pairing prompts overrides the default for that attempt without changing the saved setting.
+The host-side **Connections** window has its own **Focus connection window** checkbox, enabled by default. Turn it off there to prevent routine incoming connections and reconnections from taking keyboard focus or keeping that window always on top. The choice is saved on that host and also applies when the window starts or returns from being hidden. Explicit permission requests, chat, and voice-call alerts still request attention; authentication and approval safeguards are unchanged.
 
-With focus disabled, a separate window is raised without keyboard activation or permanent always-on-top behavior. A new tab in an existing group leaves the selected tab unchanged. Keyboard capture waits for actual window activation or a canvas click. Saved fullscreen/maximized state is not automatically applied to an inactive launch; it opens with normal window geometry to avoid activation during restore. Explicit tab/window selections continue to activate normally. Linux window stacking remains subject to the compositor's rules.
+The separate **Settings → General → Other → Focus connection window** setting controls newly opened outgoing remote-desktop windows. The checkbox beside Connect overrides that default for one attempt without changing the saved setting. Password and pairing prompts do not contain a focus checkbox.
+
+With outgoing focus disabled, a separate viewer window is raised without keyboard activation or permanent always-on-top behavior. A new tab in an existing group leaves the selected tab unchanged. Keyboard capture waits for actual window activation or a canvas click. Saved fullscreen/maximized state is not automatically applied to an inactive launch; it opens with normal window geometry to avoid activation during restore. Explicit tab/window selections continue to activate normally. Linux window stacking remains subject to the compositor's rules.
 
 ## Resource modes
 

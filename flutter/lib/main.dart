@@ -361,55 +361,104 @@ void runConnectionManagerScreen() async {
   } else {
     await showCmWindow(isStartup: true);
   }
-  setResizable(false);
+  if (!isWindows || gFFI.serverModel.focusIncomingConnectionWindow) {
+    setResizable(false);
+  }
   // Start the uni links handler and redirect links to Native, not for Flutter.
   listenUniLinks(handleByFlutter: false);
 }
 
 bool _isCmReadyToShow = false;
 
+Future<void> prepareInactiveCmWindow({bool resize = false}) async {
+  final preserveTopmost = gFFI.serverModel.permissionRequest != null;
+  if (isWindows) {
+    await RdPlatformChannel.instance.prepareIncomingConnectionWindow(
+        resize: resize, preserveTopmost: preserveTopmost);
+  } else {
+    if (!preserveTopmost) await windowManager.setAlwaysOnTop(false);
+    if (resize) {
+      await windowManager.setSizeAlignment(
+          kConnectionManagerWindowSizeClosedChat, Alignment.topRight);
+    }
+  }
+}
+
+/// Routine incoming connections use the host preference, not the viewer's
+/// per-attempt launch option. Explicit attention/approval paths stay separate.
+Future<void> raiseCmWindowForConnection() async {
+  if (!_isCmReadyToShow) return;
+  final focus = gFFI.serverModel.focusIncomingConnectionWindow;
+  if (!focus) {
+    await prepareInactiveCmWindow();
+  }
+  await windowOnTop(null, focusOnOpen: focus);
+}
+
 showCmWindow({bool isStartup = false}) async {
+  final focus = gFFI.serverModel.focusIncomingConnectionWindow;
   if (isStartup) {
-    WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
-        size: kConnectionManagerWindowSizeClosedChat, alwaysOnTop: true);
+    // Windows plugin setup includes activating SetWindowPos calls. The native
+    // inactive path configures its frame/geometry without activating the host.
+    WindowOptions windowOptions = !focus && isWindows
+        ? const WindowOptions(skipTaskbar: false)
+        : getHiddenTitleBarWindowOptions(
+            size: kConnectionManagerWindowSizeClosedChat,
+            alwaysOnTop: focus || gFFI.serverModel.permissionRequest != null);
     await windowManager.waitUntilReadyToShow(windowOptions, null);
     bind.mainHideDock();
     await Future.wait([
-      windowManager.show(),
-      windowManager.focus(),
+      if (focus) windowManager.show(),
+      if (focus) windowManager.focus(),
       windowManager.setOpacity(1)
     ]);
     // ensure initial window size to be changed
-    await windowManager.setSizeAlignment(
-        kConnectionManagerWindowSizeClosedChat, Alignment.topRight);
+    if (focus) {
+      await windowManager.setSizeAlignment(
+          kConnectionManagerWindowSizeClosedChat, Alignment.topRight);
+    } else {
+      await prepareInactiveCmWindow(resize: true);
+      await RdPlatformChannel.instance.showConnectionWindow(focus: false);
+    }
     _isCmReadyToShow = true;
   } else if (_isCmReadyToShow) {
     if (await windowManager.getOpacity() != 1) {
       await windowManager.setOpacity(1);
-      await windowManager.focus();
-      await windowManager.minimize(); //needed
-      await windowManager.setSizeAlignment(
-          kConnectionManagerWindowSizeClosedChat, Alignment.topRight);
-      windowOnTop(null);
+      if (focus) {
+        await windowManager.focus();
+        await windowManager.minimize(); //needed
+        await windowManager.setSizeAlignment(
+            kConnectionManagerWindowSizeClosedChat, Alignment.topRight);
+      } else {
+        await prepareInactiveCmWindow(resize: true);
+      }
+      await raiseCmWindowForConnection();
     }
   }
 }
 
 hideCmWindow({bool isStartup = false}) async {
+  final focus = gFFI.serverModel.focusIncomingConnectionWindow;
   if (isStartup) {
-    WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
-        size: kConnectionManagerWindowSizeClosedChat);
-    windowManager.setOpacity(0);
+    WindowOptions windowOptions = !focus && isWindows
+        ? const WindowOptions(skipTaskbar: false)
+        : getHiddenTitleBarWindowOptions(
+            size: kConnectionManagerWindowSizeClosedChat);
+    await windowManager.setOpacity(0);
     await windowManager.waitUntilReadyToShow(windowOptions, null);
     bind.mainHideDock();
-    await windowManager.minimize();
+    if (focus) {
+      await windowManager.minimize();
+    } else {
+      await prepareInactiveCmWindow(resize: true);
+    }
     await windowManager.hide();
     _isCmReadyToShow = true;
   } else if (_isCmReadyToShow) {
     if (await windowManager.getOpacity() != 0) {
       await windowManager.setOpacity(0);
       bind.mainHideDock();
-      await windowManager.minimize();
+      if (focus) await windowManager.minimize();
       await windowManager.hide();
     }
   }

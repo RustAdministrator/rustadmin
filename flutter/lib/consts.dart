@@ -121,6 +121,8 @@ const double kMovieDefaultTargetFps = 60;
 const String kOptionCaptureBackend = "capture-backend";
 const String kOptionOpenNewConnInTabs = "enable-open-new-connections-in-tabs";
 const String kOptionFocusConnectionWindow = "enable-focus-connection-window";
+const String kOptionFocusIncomingConnectionWindow =
+    "enable-focus-incoming-connection-window";
 const String kOptionOpenRemoteSessionsInMainWindow =
     "enable-open-remote-sessions-in-main-window";
 const String kOptionTextureRender = "use-texture-render";

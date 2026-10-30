@@ -5,6 +5,7 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common/widgets/audio_input.dart';
+import 'package:flutter_hbb/common/widgets/connection_focus_checkbox.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
 import 'package:flutter_hbb/models/chat_model.dart';
@@ -84,7 +85,38 @@ class _DesktopServerPageState extends State<DesktopServerPage>
         builder: (context, serverModel, child) {
           final body = Scaffold(
             backgroundColor: Theme.of(context).colorScheme.background,
-            body: ConnectionManager(),
+            body: Column(children: [
+              Expanded(child: ConnectionManager()),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: preventMouseKeyBuilder(
+                  block: serverModel.permissionRequest != null,
+                  child: ConnectionFocusCheckbox(
+                    key: const ValueKey('incoming-connection-focus'),
+                    value: serverModel.focusIncomingConnectionWindow,
+                    label: translate(kConnectionFocusCheckboxLabel),
+                    onChanged: serverModel.savingIncomingConnectionFocus
+                        ? null
+                        : (value) {
+                            serverModel.cmHiddenTimer?.cancel();
+                            serverModel.cmHiddenTimer = null;
+                            final clientId = serverModel.clients
+                                    .firstWhereOrNull((client) => !client.disconnected)
+                                    ?.id ??
+                                0;
+                            checkClickTime(clientId, () async {
+                              if (serverModel.permissionRequest != null) return;
+                              try {
+                                await serverModel.setFocusIncomingConnectionWindow(value);
+                              } catch (_) {
+                                showToast(translate('Failed to update focus preference'));
+                              }
+                            });
+                          },
+                  ),
+                ),
+              ),
+            ]),
           );
           return isLinux
               ? buildVirtualWindowFrame(context, body)

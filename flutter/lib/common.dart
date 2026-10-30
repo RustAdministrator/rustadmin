@@ -804,6 +804,9 @@ closeConnection({String? id}) {
 bool focusConnectionWindowDefault() =>
     mainGetLocalBoolOptionSync(kOptionFocusConnectionWindow);
 
+bool focusIncomingConnectionWindowDefault() =>
+    mainGetLocalBoolOptionSync(kOptionFocusIncomingConnectionWindow);
+
 Future<void> windowOnTop(int? id, {bool focusOnOpen = true}) async {
   if (!isDesktop) {
     return;
@@ -844,15 +847,6 @@ class PreAuthRemoteDesktopManager {
   bool _openingRemoteWindow = false;
   bool _handedOff = false;
   bool _focusOnOpen = true;
-
-  bool? focusOnOpenForSession(SessionID sessionId) =>
-      _ffi?.sessionId == sessionId ? _focusOnOpen : null;
-
-  bool setFocusOnOpenForSession(SessionID sessionId, bool value) {
-    if (_ffi == null || _ffi!.sessionId != sessionId || _handedOff) return false;
-    _focusOnOpen = value;
-    return true;
-  }
 
   bool closeIfPending({String? id}) {
     if (_ffi == null) {

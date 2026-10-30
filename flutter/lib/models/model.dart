@@ -1456,7 +1456,6 @@ class FfiModel with ChangeNotifier {
                       (Theme.of(context).textTheme.bodyMedium?.fontSize ?? 14) - 1,
                 ),
               ).marginOnly(top: 4),
-              pendingConnectionFocusCheckbox(sessionId, setState),
             ],
           ),
           actions: [

@@ -60,6 +60,8 @@ class ServerModel with ChangeNotifier {
   bool _clipboardOk = false;
   bool _showElevation = false;
   bool hideCm = false;
+  bool? _focusIncomingConnectionWindow;
+  bool _savingIncomingConnectionFocus = false;
   int _connectStatus = 0; // Rendezvous Server status
   String _verificationMethod = "";
   String _temporaryPasswordLength = "";
@@ -99,6 +101,31 @@ class ServerModel with ChangeNotifier {
   bool get clipboardOk => _clipboardOk;
 
   bool get showElevation => _showElevation;
+
+  bool get focusIncomingConnectionWindow =>
+      _focusIncomingConnectionWindow ?? focusIncomingConnectionWindowDefault();
+
+  bool get savingIncomingConnectionFocus => _savingIncomingConnectionFocus;
+
+  Future<void> setFocusIncomingConnectionWindow(bool value) async {
+    if (_savingIncomingConnectionFocus) return;
+    final previous = focusIncomingConnectionWindow;
+    _focusIncomingConnectionWindow = value;
+    _savingIncomingConnectionFocus = true;
+    notifyListeners();
+    try {
+      await mainSetLocalBoolOption(kOptionFocusIncomingConnectionWindow, value);
+    } catch (_) {
+      _focusIncomingConnectionWindow = previous;
+      rethrow;
+    } finally {
+      _savingIncomingConnectionFocus = false;
+      notifyListeners();
+    }
+    if (desktopType == DesktopType.cm && !value) {
+      await prepareInactiveCmWindow();
+    }
+  }
 
   int get connectStatus => _connectStatus;
 
@@ -659,7 +686,13 @@ class ServerModel with ChangeNotifier {
         onTap: () {},
         page: desktop.buildConnectionCard(client)));
     Future.delayed(Duration.zero, () async {
-      if (!hideCm) windowOnTop(null);
+      if (!hideCm) {
+        if (desktopType == DesktopType.cm) {
+          await raiseCmWindowForConnection();
+        } else {
+          await windowOnTop(null);
+        }
+      }
     });
     // Only do the hidden task when on Desktop.
     if (client.authorized && isDesktop) {

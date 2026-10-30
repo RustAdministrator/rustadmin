@@ -1,13 +1,19 @@
+import 'dart:io';
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_test/flutter_test.dart' hide isWindows;
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/widgets/dialog.dart';
+import 'package:flutter_hbb/common/widgets/connection_focus_checkbox.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/desktop/pages/server_page.dart';
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
 import 'package:flutter_hbb/generated_bridge.dart';
+import 'package:flutter_hbb/main.dart' show showCmWindow, raiseCmWindowForConnection;
 import 'package:flutter_hbb/models/model.dart';
 import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:flutter_hbb/models/server_model.dart';
@@ -16,10 +22,18 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:get/get.dart';
 import 'package:image/image.dart' as img2;
 import 'package:provider/provider.dart';
+import 'package:screen_retriever/screen_retriever.dart' as screens;
 import 'package:visibility_detector/visibility_detector.dart';
 import 'package:window_manager/window_manager.dart';
 
 const _windowManagerChannel = MethodChannel('window_manager');
+const _hostChannel = MethodChannel('org.rustdesk.rustdesk/host');
+final _localOptions = <String, String>{};
+final _localOptionWrites = <String, String>{};
+final _windowCalls = <MethodCall>[];
+final _hostCalls = <MethodCall>[];
+double _cmOpacity = 1.0;
+bool _failFocusWrite = false;
 
 final testClients = [
   Client(0, true, false, false, 'UserAAAAAA', '123123123', true, false, false)
@@ -79,7 +93,17 @@ class _TestRustadminImpl implements Rustadmin {
         return invocation.namedArguments[#name] as String;
       case #mainGetLocalOption:
         final key = invocation.namedArguments[#key] as String;
-        return key == kOptionAllowRemoteCmModification ? 'Y' : '';
+        return key == kOptionAllowRemoteCmModification
+            ? 'Y' : _localOptions[key] ?? '';
+      case #mainSetLocalOption:
+        final key = invocation.namedArguments[#key] as String;
+        final value = invocation.namedArguments[#value] as String;
+        if (_failFocusWrite && key == kOptionFocusIncomingConnectionWindow) {
+          return Future<void>.error(StateError('test local preference write failed'));
+        }
+        _localOptions[key] = value;
+        _localOptionWrites[key] = value;
+        return Future<void>.value();
       case #mainGetOptionSync:
       case #mainGetOptionsSync:
       case #mainGetPeerOptionSync:
@@ -122,6 +146,8 @@ class _TestRustadminImpl implements Rustadmin {
         return false;
       case #getDoubleClickTime:
         return 500;
+      case #mainHideDock:
+        return true;
       case #cmGetClientsLength:
         return Future<int>.value(testClients.length);
       case #cmGetClickTime:
@@ -134,7 +160,6 @@ class _TestRustadminImpl implements Rustadmin {
       case #cmSwitchPermission:
       case #mainCheckMouseTime:
       case #mainLoadRecentPeers:
-      case #mainSetLocalOption:
       case #setLocalFlutterOption:
         return Future<void>.value();
       default:
@@ -145,6 +170,7 @@ class _TestRustadminImpl implements Rustadmin {
 }
 
 Future<Object?> _handleWindowManagerCall(MethodCall call) async {
+  _windowCalls.add(call);
   switch (call.method) {
     case 'getBounds':
       return {
@@ -173,7 +199,7 @@ Future<Object?> _handleWindowManagerCall(MethodCall call) async {
     case 'ungrabKeyboard':
       return true;
     case 'getOpacity':
-      return 1.0;
+      return _cmOpacity;
     case 'getTitle':
       return 'RustDesk';
     case 'getTitleBarHeight':
@@ -463,6 +489,31 @@ void main() {
   });
 
   setUp(() async {
+    _localOptions.clear();
+    _localOptionWrites.clear();
+    _windowCalls.clear();
+    _hostCalls.clear();
+    _cmOpacity = 1.0;
+    _failFocusWrite = false;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(const MethodChannel('screen_retriever'), (call) async {
+      final display = screens.Display(id: 1, name: 'Primary', size: const Size(1920, 1080),
+          visiblePosition: Offset.zero, visibleSize: const Size(1920, 1040), scaleFactor: 1);
+      if (call.method == 'getPrimaryDisplay') return display.toJson();
+      if (call.method == 'getAllDisplays') return {'displays': [display.toJson()]};
+      if (call.method == 'getCursorScreenPoint') return {'x': 50.0, 'y': 50.0};
+      return null;
+    });
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_hostChannel, (call) async {
+      _hostCalls.add(call);
+      if (call.method == 'isConnectionWindowFocused') return false;
+      if (call.method == 'showConnectionWindow' ||
+          call.method == 'prepareIncomingConnectionWindow') {
+        return true;
+      }
+      return null;
+    });
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(
             _windowManagerChannel, _handleWindowManagerCall);
@@ -472,10 +523,15 @@ void main() {
   });
 
   tearDown(() {
+    gFFI.serverModel.cmHiddenTimer?.cancel();
     VisibilityDetectorController.instance.notifyNow();
     _clearDesktopListeners();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_windowManagerChannel, null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(_hostChannel, null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(const MethodChannel('screen_retriever'), null);
     Get.reset();
   });
 
@@ -508,7 +564,186 @@ void main() {
     expect(find.text('UserBBBBB'), findsWidgets);
     expect(find.text('UserC'), findsWidgets);
     expect(find.text('UserDDDDDDDDDDDd'), findsWidgets);
+    expect(find.byKey(const ValueKey('incoming-connection-focus')), findsOneWidget);
     await _disposeCmTestWidget(tester);
+  });
+
+  testWidgets('incoming window owns a saved host-only focus checkbox', (tester) async {
+    await tester.pumpWidget(_buildTestApp());
+    await tester.pump(const Duration(milliseconds: 600));
+    final control = find.byKey(const ValueKey('incoming-connection-focus'));
+    expect(tester.widget<ConnectionFocusCheckbox>(control).value, isTrue);
+    await tester.tap(find.descendant(of: control, matching: find.byType(Checkbox)));
+    await tester.pump();
+    expect(tester.widget<ConnectionFocusCheckbox>(control).value, isFalse);
+    expect(_localOptionWrites, {kOptionFocusIncomingConnectionWindow: 'N'});
+    expect(_localOptions.containsKey(kOptionFocusConnectionWindow), isFalse);
+    expect(focusConnectionWindowDefault(), isTrue);
+    if (isWindows) {
+      expect(_hostCalls.any((call) => call.method == 'prepareIncomingConnectionWindow'
+          && (call.arguments as Map)['preserveTopmost'] == false), isTrue);
+    } else {
+      expect(_windowCalls.any((call) => call.method == 'setAlwaysOnTop'
+          && (call.arguments as Map)['isAlwaysOnTop'] == false), isTrue);
+    }
+    await _disposeCmTestWidget(tester);
+    // A newly created manager reads the host preference, not an attempt override.
+    await initGlobalFFI();
+    expect(gFFI.serverModel.focusIncomingConnectionWindow, isFalse);
+  });
+
+  testWidgets('waiting incoming window also exposes focus choice', (tester) async {
+    gFFI.serverModel.clients.clear();
+    gFFI.serverModel.tabController.clear();
+    _localOptions[kOptionFocusIncomingConnectionWindow] = 'N';
+    await tester.pumpWidget(_buildTestApp());
+    await tester.pump();
+    expect(find.text('Waiting'), findsOneWidget);
+    expect(tester.widget<ConnectionFocusCheckbox>(
+        find.byKey(const ValueKey('incoming-connection-focus'))).value, isFalse);
+    await _disposeCmTestWidget(tester);
+  });
+
+  test('failed host preference write restores the displayed choice', () async {
+    _failFocusWrite = true;
+    await expectLater(gFFI.serverModel.setFocusIncomingConnectionWindow(false), throwsStateError);
+    expect(gFFI.serverModel.focusIncomingConnectionWindow, isTrue);
+    expect(gFFI.serverModel.savingIncomingConnectionFocus, isFalse);
+    expect(_localOptionWrites, isEmpty);
+  });
+
+  testWidgets('permission attention stays topmost while routine focus is disabled', (tester) async {
+    _localOptions[kOptionFocusIncomingConnectionWindow] = 'N';
+    await showCmWindow(isStartup: true);
+    gFFI.serverModel.clients.first.disconnected = false;
+    gFFI.serverModel.handlePermissionRequestEvent(const ClientPermissionSessionEvent(
+      kind: ClientPermissionKind.request, clientId: 0, requestId: 'focus-topmost',
+      name: 'clipboard', enabled: true));
+    await tester.pump(const Duration(milliseconds: 1));
+    expect(_windowCalls.any((call) => call.method == 'focus'), isTrue);
+    _windowCalls.clear();
+    await raiseCmWindowForConnection();
+    expect(_windowCalls.where((call) => call.method == 'setAlwaysOnTop'
+        && (call.arguments as Map)['isAlwaysOnTop'] == false), isEmpty);
+    if (isWindows) {
+      expect(_hostCalls.lastWhere((call) => call.method == 'prepareIncomingConnectionWindow')
+          .arguments['preserveTopmost'], isTrue);
+    }
+    expect(gFFI.serverModel.permissionRequest, isNotNull);
+    await gFFI.serverModel.closeAll();
+    await tester.pump();
+  });
+
+  testWidgets('a permission request cancels a deferred footer change', (tester) async {
+    _testShouldBlockRustAdminGuiForActiveSessions = true;
+    gFFI.serverModel.clients.first.disconnected = false;
+    await tester.pumpWidget(_buildTestApp());
+    await tester.pump(const Duration(milliseconds: 600));
+    final checkbox = find.descendant(
+      of: find.byKey(const ValueKey('incoming-connection-focus')), matching: find.byType(Checkbox));
+    await tester.tap(checkbox);
+    await tester.pump(const Duration(milliseconds: 1));
+    gFFI.serverModel.handlePermissionRequestEvent(const ClientPermissionSessionEvent(
+      kind: ClientPermissionKind.request, clientId: 0, requestId: 'focus-write-race',
+      name: 'clipboard', enabled: true));
+    await tester.pump(const Duration(milliseconds: 150));
+    expect(_localOptionWrites, isEmpty);
+    expect(gFFI.serverModel.focusIncomingConnectionWindow, isTrue);
+    expect(checkbox.hitTestable(), findsNothing);
+    await gFFI.serverModel.closeAll();
+    await _disposeCmTestWidget(tester);
+  });
+
+  testWidgets('incoming focus footer is visible in the connection window', (tester) async {
+    final captureDir = Platform.environment['RUSTADMIN_CM_FOCUS_CAPTURE_DIR'];
+    final fontPath = Platform.environment['RUSTADMIN_CM_FOCUS_FONT'];
+    if (captureDir != null && fontPath != null) {
+      await tester.runAsync(() async {
+        final bytes = await File(fontPath).readAsBytes();
+        await (FontLoader('Roboto')..addFont(Future.value(ByteData.sublistView(bytes)))).load();
+        for (final font in {'MaterialIcons': 'fonts/MaterialIcons-Regular.otf',
+            'Tabbar': 'assets/tabbar.ttf'}.entries) {
+          await (FontLoader(font.key)..addFont(rootBundle.load(font.value))).load();
+        }
+      });
+    }
+    await tester.binding.setSurfaceSize(kConnectionManagerWindowSizeClosedChat);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final client = Client(42, true, false, false, 'My laptop', '551122334', true, false, false);
+    gFFI.serverModel.clients
+      ..clear()
+      ..add(client);
+    gFFI.serverModel.tabController.clear();
+    gFFI.serverModel.tabController.add(TabInfo(key: '42', label: client.name,
+        closable: false, page: buildConnectionCard(client)));
+    final captureKey = GlobalKey();
+    await tester.pumpWidget(RepaintBoundary(key: captureKey, child: _buildTestApp()));
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.tap(find.descendant(of: find.byKey(const ValueKey('incoming-connection-focus')),
+        matching: find.byType(Checkbox)));
+    await tester.pumpAndSettle();
+    expect(find.text(kConnectionFocusCheckboxLabel).hitTestable(), findsOneWidget);
+    expect(gFFI.serverModel.focusIncomingConnectionWindow, isFalse);
+    if (captureDir != null) {
+      await tester.runAsync(() async {
+        final boundary = captureKey.currentContext!.findRenderObject()! as RenderRepaintBoundary;
+        final image = await boundary.toImage(pixelRatio: 2);
+        final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+        image.dispose();
+        await File('$captureDir/incoming-connections-focus-off.png').writeAsBytes(
+            bytes!.buffer.asUint8List());
+      });
+    }
+    expect(tester.takeException(), isNull);
+    await _disposeCmTestWidget(tester);
+  });
+
+  test('incoming startup and hidden-window restore respect disabled focus', () async {
+    _localOptions[kOptionFocusIncomingConnectionWindow] = 'N';
+    await showCmWindow(isStartup: true);
+    expect(_windowCalls.where((call) => call.method == 'focus' || call.method == 'show'), isEmpty);
+    expect(_hostCalls.where((call) => call.method == 'showConnectionWindow')
+        .every((call) => (call.arguments as Map)['focus'] == false), isTrue);
+    expect(_hostCalls.where((call) => call.method == 'showConnectionWindow'), hasLength(1));
+    _windowCalls.clear();
+    _hostCalls.clear();
+    _cmOpacity = 0.0;
+    await showCmWindow();
+    expect(_windowCalls.where((call) => call.method == 'focus' || call.method == 'show'
+        || call.method == 'minimize'), isEmpty);
+    expect(_hostCalls.where((call) => call.method == 'showConnectionWindow'), hasLength(1));
+    expect(_hostCalls.firstWhere((call) => call.method == 'showConnectionWindow').arguments,
+        {'focus': false});
+  });
+
+  test('incoming attention keeps default-on behavior independently of viewer preference', () async {
+    _localOptions[kOptionFocusConnectionWindow] = 'N';
+    await showCmWindow(isStartup: true);
+    _windowCalls.clear();
+    _hostCalls.clear();
+    await raiseCmWindowForConnection();
+    expect(_windowCalls.any((call) => call.method == 'focus'), isTrue);
+    expect(_hostCalls.where((call) => call.method == 'showConnectionWindow'), isEmpty);
+  });
+
+  testWidgets('new and refreshed incoming connections never activate with host focus off', (tester) async {
+    _localOptions[kOptionFocusIncomingConnectionWindow] = 'N';
+    gFFI.serverModel.hideCm = false;
+    await showCmWindow(isStartup: true);
+    final connected = Client(20, true, false, false, 'Laptop', '551122334', true, false, false);
+    for (var attempt = 0; attempt < 2; ++attempt) {
+      _windowCalls.clear();
+      _hostCalls.clear();
+      gFFI.serverModel.addConnectionEvent(_sessionClient(connected));
+      await tester.pump(const Duration(milliseconds: 1));
+      await tester.pump();
+      expect(_windowCalls.where((call) => call.method == 'focus' || call.method == 'show'), isEmpty);
+      expect(_hostCalls.where((call) => call.method == 'showConnectionWindow'), hasLength(1));
+      expect(_hostCalls.firstWhere((call) => call.method == 'showConnectionWindow').arguments,
+          {'focus': false});
+      gFFI.serverModel.cmHiddenTimer?.cancel();
+      await tester.pump(const Duration(milliseconds: 150));
+    }
   });
 
   testWidgets('renders a disconnected connection card', (tester) async {

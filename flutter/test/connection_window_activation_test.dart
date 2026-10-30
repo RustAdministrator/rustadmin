@@ -171,4 +171,27 @@ void main() {
       expect(calls.last.arguments, {'focus': true});
     },
   );
+
+  test('Windows incoming preparation is explicit and never falls back to plugin focus', () async {
+    const host = MethodChannel('org.rustdesk.rustdesk/host');
+    final calls = <MethodCall>[];
+    var available = true;
+    final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(host, (call) async {
+      calls.add(call);
+      return available;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(host, null));
+    await RdPlatformChannel.instance.prepareIncomingConnectionWindow(resize: true, preserveTopmost: false);
+    expect(calls.single.method, 'prepareIncomingConnectionWindow');
+    final args = calls.single.arguments as Map;
+    expect(args['resize'], isTrue);
+    expect(args['preserveTopmost'], isFalse);
+    expect(args['width'], greaterThan(0));
+    expect(args['height'], greaterThan(0));
+    available = false;
+    await expectLater(RdPlatformChannel.instance.prepareIncomingConnectionWindow(
+      resize: false, preserveTopmost: true), throwsA(isA<PlatformException>()));
+    expect(calls.map((call) => call.method), everyElement('prepareIncomingConnectionWindow'));
+  });
 }
