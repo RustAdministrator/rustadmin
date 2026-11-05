@@ -667,6 +667,7 @@ class MobileRemoteToolbar extends StatefulWidget {
     this.onKeyboard,
     this.onGestureHelp,
     this.onMobileActions,
+    this.onDebug,
     this.monitors = const [],
     this.cursorPosition,
     this.transparencySettings =
@@ -688,6 +689,7 @@ class MobileRemoteToolbar extends StatefulWidget {
   final VoidCallback? onKeyboard;
   final VoidCallback? onGestureHelp;
   final VoidCallback? onMobileActions;
+  final VoidCallback? onDebug;
   final List<MobileRemoteToolbarMonitor> monitors;
   final Offset? cursorPosition;
   final MobileRemoteToolbarTransparencySettings transparencySettings;
@@ -998,6 +1000,13 @@ class _MobileRemoteToolbarState extends State<MobileRemoteToolbar> {
       );
     }
     items.addAll([
+      if (widget.onDebug != null)
+        _iconButton(
+          extent: extent,
+          tooltip: 'Debug',
+          icon: Icons.bug_report_outlined,
+          onPressed: widget.onDebug,
+        ),
       _iconButton(
         extent: extent,
         tooltip: 'More actions',

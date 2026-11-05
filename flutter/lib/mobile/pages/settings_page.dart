@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter_hbb/common/widgets/codec_settings.dart';
+import 'package:flutter_hbb/common/widgets/clipboard_diagnostics_panel.dart';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -47,7 +48,7 @@ class SettingsPage extends StatefulWidget implements PageShape {
 
 enum KeepScreenOn { never, duringControlled, serviceOn }
 
-enum _MobileSettingsCategory { account, general, security, network, about }
+enum _MobileSettingsCategory { account, general, security, network, debug, about }
 
 String _keepScreenOnToOption(KeepScreenOn value) {
   switch (value) {
@@ -1159,6 +1160,13 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                   });
                 },
               ),
+            if (kClipboardDiagnosticsEnabled)
+              SettingsTile(
+                key: const ValueKey('mobile-settings-tile-diagnostics-clipboard-tool'),
+                title: const Text('Debug: Clipboard listener and tests'),
+                leading: const Icon(Icons.bug_report_outlined),
+                onPressed: (context) => showClipboardDiagnostics(context),
+              ),
             SettingsTile.switchTile(
               key: const ValueKey('mobile-settings-tile-diagnostics-clipboard'),
               title: Text(translate('Clipboard debug diagnostics')),
@@ -1617,6 +1625,20 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
               children: [brandingSection.child],
             ),
           ],
+          if (kClipboardDiagnosticsEnabled)
+            _MobileSettingsCategory.debug: [
+              MobileSettingsCategoryGroup(
+                title: 'Clipboard diagnostics',
+                children: [
+                  ListTile(
+                    title: const Text('Clipboard listener and tests'),
+                    subtitle: const Text('Temporary tool; disabled until started'),
+                    leading: const Icon(Icons.bug_report_outlined),
+                    onTap: () => showClipboardDiagnostics(context),
+                  ),
+                ],
+              ),
+            ],
         };
 
     String categoryTitle(_MobileSettingsCategory category) =>
@@ -1625,6 +1647,7 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
           _MobileSettingsCategory.general => translate('General'),
           _MobileSettingsCategory.security => translate('Security'),
           _MobileSettingsCategory.network => translate('Network'),
+          _MobileSettingsCategory.debug => 'Debug',
           _MobileSettingsCategory.about => translate('About'),
         };
 
@@ -1694,6 +1717,13 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
                 MaterialPageRoute(builder: (context) => _DisplayPage()),
               );
             },
+          ),
+        if (kClipboardDiagnosticsEnabled)
+          MobileSettingsNavigationItem(
+            id: 'debug',
+            title: 'Debug',
+            icon: Icons.bug_report_outlined,
+            onPressed: () => openCategory(_MobileSettingsCategory.debug),
           ),
         MobileSettingsNavigationItem(
           id: 'about',

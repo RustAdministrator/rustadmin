@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_hbb/common/block_rect.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/common/widgets/toolbar.dart';
+import 'package:flutter_hbb/common/widgets/clipboard_diagnostics_panel.dart';
 import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/mobile/widgets/floating_mouse.dart';
@@ -984,6 +985,30 @@ class _RemotePageState extends State<RemotePage>
             setState(() => _showEdit = false);
             showActions(widget.id);
           },
+          onDebug: !isWeb && kClipboardDiagnosticsEnabled &&
+                  gFFI.connType == ConnType.defaultConn
+              ? () {
+                  setState(() => _showEdit = false);
+                  showMobileRemotePopupMenu(context, [
+                    MobileRemoteMenuItem(
+                      child: const Text('Clipboard listener'),
+                      onPressed: () => showSessionClipboardDiagnostics(context, gFFI),
+                    ),
+                    MobileRemoteMenuItem(
+                      child: const Text('Clipboard tests: both directions'),
+                      onPressed: () => showSessionClipboardDiagnostics(
+                        context, gFFI, showTests: true,
+                      ),
+                    ),
+                    MobileRemoteMenuItem(
+                      child: const Text('Results and listener log'),
+                      onPressed: () => showSessionClipboardDiagnostics(
+                        context, gFFI, showTests: true,
+                      ),
+                    ),
+                  ]);
+                }
+              : null,
           showInputControls:
               !isWebDesktop && !ffiModel.viewOnly && ffiModel.keyboard,
           peerIsAndroid: ffiModel.isPeerAndroid,

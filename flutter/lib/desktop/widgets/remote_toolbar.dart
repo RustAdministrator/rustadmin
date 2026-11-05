@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart' as flutter_widgets
     show MenuController, RawMenuAnchorGroup;
 import 'package:flutter_hbb/common/widgets/audio_input.dart';
+import 'package:flutter_hbb/common/widgets/clipboard_diagnostics_panel.dart';
 import 'package:flutter_hbb/common/widgets/dialog.dart';
 import 'package:flutter_hbb/common/widgets/toolbar.dart';
 import 'package:flutter_hbb/common/remote_toolbar_settings.dart';
@@ -67,6 +68,7 @@ enum _ToolbarMenuId {
   keyboard,
   chat,
   voiceCall,
+  debug,
 }
 
 class _ToolbarMenuLifecycleScope extends InheritedWidget {
@@ -963,6 +965,10 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
       toolbarItems.add(_VoiceCallMenu(id: widget.id, ffi: widget.ffi));
     }
     if (!isWeb) toolbarItems.add(_RecordMenu());
+    if (!isWeb && kClipboardDiagnosticsEnabled &&
+        widget.ffi.connType == ConnType.defaultConn) {
+      toolbarItems.add(_ClipboardDebugMenu(ffi: widget.ffi));
+    }
     toolbarItems.add(_CollapseMenu(
       sessionId: widget.ffi.sessionId,
       state: widget.state,
@@ -3244,6 +3250,48 @@ class _VoiceCallMenu extends StatelessWidget {
       hoverColor: _ToolbarTheme.hoverRedColor,
     );
   }
+}
+
+class _ClipboardDebugMenu extends StatelessWidget {
+  const _ClipboardDebugMenu({required this.ffi});
+
+  final FFI ffi;
+
+  @override
+  Widget build(BuildContext context) => _IconSubmenuButton(
+    menuId: _ToolbarMenuId.debug,
+    tooltip: 'Debug',
+    icon: const Icon(Icons.bug_report_outlined, color: Colors.white),
+    color: _ToolbarTheme.blueColor,
+    hoverColor: _ToolbarTheme.hoverBlueColor,
+    ffi: ffi,
+    menuChildrenGetter: (_) => [
+      MenuButton(
+        child: const Text('Clipboard listener'),
+        ffi: ffi,
+        onPressed: () => showSessionClipboardDiagnostics(context, ffi),
+      ),
+      SubmenuButton(
+        menuChildren: [
+          MenuButton(
+            child: const Text('Run both directions…'),
+            ffi: ffi,
+            onPressed: () => showSessionClipboardDiagnostics(
+              context, ffi, showTests: true,
+            ),
+          ),
+          MenuButton(
+            child: const Text('Results and listener log'),
+            ffi: ffi,
+            onPressed: () => showSessionClipboardDiagnostics(
+              context, ffi, showTests: true,
+            ),
+          ),
+        ],
+        child: const Text('Clipboard tests'),
+      ),
+    ],
+  );
 }
 
 class _RecordMenu extends StatelessWidget {

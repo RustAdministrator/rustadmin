@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter_hbb/common/widgets/codec_settings.dart';
 import 'package:flutter_hbb/common/widgets/connection_focus_checkbox.dart';
+import 'package:flutter_hbb/common/widgets/clipboard_diagnostics_panel.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -97,7 +98,8 @@ class DesktopSettingPage extends StatefulWidget {
         bind.mainGetBuildinOption(key: kOptionHideRemotePrinterSetting) != 'Y')
       SettingsTabKey.printer,
     SettingsTabKey.quickStart,
-    if (_kDebugProbeSettingsEnabled) SettingsTabKey.debug,
+    if (_kDebugProbeSettingsEnabled || (!isWeb && kClipboardDiagnosticsEnabled))
+      SettingsTabKey.debug,
     SettingsTabKey.about,
   ];
 
@@ -271,7 +273,9 @@ class _DesktopSettingPageState extends State<DesktopSettingPage>
           children.add(const _QuickStartSettingsPage());
           break;
         case SettingsTabKey.debug:
-          children.add(const _DebugProbe());
+          children.add(_kDebugProbeSettingsEnabled
+              ? const _DebugProbe()
+              : const ClipboardDiagnosticsPanel());
           break;
         case SettingsTabKey.about:
           children.add(const _About());
