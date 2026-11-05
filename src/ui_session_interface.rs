@@ -658,7 +658,7 @@ impl<T: InvokeUiSession> Session<T> {
                 .is_local_to_remote_clipboard_allowed()
     }
 
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     pub fn is_text_clipboard_required(&self) -> bool {
         *self.server_clipboard_enabled.read().unwrap()
             && *self.server_keyboard_enabled.read().unwrap()

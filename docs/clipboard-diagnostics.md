@@ -5,6 +5,21 @@ available in Flutter builds for Windows, macOS, Linux, iOS, and Android. It does
 not change transfer permissions, direction settings, or the production clipboard
 implementation. Web builds do not expose it.
 
+Revision 257 also changes the production clipboard path: desktop reads can
+recover plain text after an optional rich-format failure; macOS accepts native
+browser URL types and supplies their actual URL as text; Android can capture
+URI-only HTTP(S) links and receive HTML with a text fallback. Mobile text decoding
+rejects invalid or oversized data instead of replacing the clipboard with a
+failed decompression. iOS receives text from legacy or modern messages and sends
+foreground clipboard changes through the session's normal permission/direction
+checks. Its native reader supports plain text and HTTP(S) URL fallback, caches
+unchanged pasteboard reads, and avoids file URLs. Incoming iOS text is suppressed
+from outgoing synchronization to prevent echo loops.
+
+These changes provide portable text alternatives; they do not make every native
+format portable. Keep the distinction between a text round-trip test and native
+application Paste acceptance.
+
 ## Run a paired test
 
 1. Connect the two devices normally. Keep RustAdmin open on both. On mobile,
@@ -26,6 +41,11 @@ can still propagate to other sessions according to normal clipboard settings.
 The code identifies the intended responder, not a network route or access grant.
 Tests reject another window on the same device, using a per-run hash of the
 native device identifier. The raw device identifier is never copied or reported.
+Android diagnostic writes explicitly invoke the existing native clipboard
+capture after the OS write, because ordinary Android capture is triggered on
+resume. Host capture still requires an active capture service with clipboard
+enabled. This request captures the system clipboard and uses the normal
+transfer path; it does not send test payloads directly over the network.
 
 ## What a result proves
 
@@ -55,6 +75,13 @@ HTML/RTF, images, files, background clipboard access, and pasting inside Safari,
 Terminal, or another destination application are **not tested** by this suite.
 In particular, passing the URL-as-text case does not establish that Safari's
 native URL representation can be transferred.
+
+After the paired suite, verify the original application case manually: copy a
+URL directly in Safari and paste on the other device, then repeat in reverse.
+Also test a plain-text editor, Unicode, paired HTML/plain text on Android, and
+permission/direction changes. Keep iOS foreground and allow OS clipboard access
+when requested. Background synchronization and native image/file transfer on
+mobile are outside this text adapter's coverage.
 
 ## Observe an application-specific failure
 

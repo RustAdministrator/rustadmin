@@ -490,6 +490,11 @@ class MainActivity : FlutterActivity() {
                 }
                 "try_sync_clipboard" -> {
                     rdClipboardManager?.syncClipboard(true)
+                    if (call.argument<Boolean>("include_host") == true &&
+                        rdClipboardManager?.isCaptureStarted == true &&
+                        FFI.isServiceClipboardEnabled()) {
+                        rdClipboardManager?.syncClipboard(false)
+                    }
                     result.success(true)
                 }
                 GET_START_ON_BOOT_OPT -> {

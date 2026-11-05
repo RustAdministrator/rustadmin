@@ -8,6 +8,7 @@ import 'package:flutter_hbb/common/block_rect.dart';
 import 'package:flutter_hbb/common/shared_state.dart';
 import 'package:flutter_hbb/common/widgets/toolbar.dart';
 import 'package:flutter_hbb/common/widgets/clipboard_diagnostics_panel.dart';
+import 'package:flutter_hbb/common/foreground_clipboard_sync.dart';
 import 'package:flutter_hbb/common/widgets/edge_thickness_control.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/mobile/widgets/floating_mouse.dart';
@@ -204,6 +205,17 @@ class _RemotePageState extends State<RemotePage>
   @override
   void initState() {
     super.initState();
+    if (isIOS) {
+      ForegroundClipboardSync.instance.setForeground(
+        WidgetsBinding.instance.lifecycleState == null ||
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed,
+      );
+      ForegroundClipboardSync.instance.attach(
+        this,
+        canSend: () => bind.sessionCanSendClipboard(sessionId: gFFI.sessionId),
+        send: (text) => bind.sessionSendClipboardText(sessionId: gFFI.sessionId, text: text),
+      );
+    }
     _keyboardInputModes.addListener(_onKeyboardInputModeChanged);
     _reconnectController = MobileSessionReconnectController(
       resetSession: ({required closeSession}) =>
@@ -392,6 +404,7 @@ class _RemotePageState extends State<RemotePage>
 
   @override
   void dispose() {
+    if (isIOS) ForegroundClipboardSync.instance.detach(this);
     final monitorRect = _qualityMonitorBlockedRect;
     if (monitorRect != null) {
       gFFI.cursorModel.removeBlockedRect(monitorRect);
@@ -476,6 +489,9 @@ class _RemotePageState extends State<RemotePage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (isIOS) {
+      ForegroundClipboardSync.instance.setForeground(state == AppLifecycleState.resumed);
+    }
     if (state == AppLifecycleState.resumed) {
       trySyncClipboard();
       unawaited(_reconnectController.enterForeground());
@@ -499,7 +515,11 @@ class _RemotePageState extends State<RemotePage>
   // For client side
   // When swithing from other app to this app, try to sync clipboard.
   void trySyncClipboard() {
-    gFFI.invokeMethod("try_sync_clipboard");
+    if (isIOS) {
+      unawaited(ForegroundClipboardSync.instance.poll());
+    } else {
+      gFFI.invokeMethod("try_sync_clipboard");
+    }
   }
 
   // to-do: It should be better to use transparent color instead of the bgColor.

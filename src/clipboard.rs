@@ -31,101 +31,12 @@ const CLIPBOARD_DEBUG_MAX_LINE: usize = 1200;
 #[cfg(not(target_os = "android"))]
 const REMOTE_CLIPBOARD_ECHO_SUPPRESS_DUR: Duration = Duration::from_secs(2);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ClipboardDirectionPolicy {
-    Both,
-    LocalToRemote,
-    RemoteToLocal,
-    Off,
-}
-
-impl ClipboardDirectionPolicy {
-    pub(crate) fn from_option_value(value: &str) -> Self {
-        let value = value.trim();
-        if value.is_empty()
-            || value.eq_ignore_ascii_case("N")
-            || value.eq_ignore_ascii_case("both")
-            || value.eq_ignore_ascii_case("bidirectional")
-            || value.eq_ignore_ascii_case("all")
-        {
-            return Self::Both;
-        }
-        if value.eq_ignore_ascii_case("local-to-remote")
-            || value.eq_ignore_ascii_case("local_to_remote")
-            || value.eq_ignore_ascii_case("send")
-            || value.eq_ignore_ascii_case("send-only")
-            || value.eq_ignore_ascii_case("outbound")
-        {
-            return Self::LocalToRemote;
-        }
-        if value.eq_ignore_ascii_case("Y")
-            || value.eq_ignore_ascii_case("yes")
-            || value.eq_ignore_ascii_case("true")
-            || value == "1"
-            || value.eq_ignore_ascii_case("remote-to-local")
-            || value.eq_ignore_ascii_case("remote_to_local")
-            || value.eq_ignore_ascii_case("receive")
-            || value.eq_ignore_ascii_case("receive-only")
-            || value.eq_ignore_ascii_case("inbound")
-        {
-            return Self::RemoteToLocal;
-        }
-        if value.eq_ignore_ascii_case("off")
-            || value.eq_ignore_ascii_case("none")
-            || value.eq_ignore_ascii_case("disabled")
-        {
-            return Self::Off;
-        }
-        Self::Off
-    }
-
-    pub(crate) fn allows_local_to_remote(self) -> bool {
-        matches!(self, Self::Both | Self::LocalToRemote)
-    }
-
-    pub(crate) fn allows_remote_to_local(self) -> bool {
-        matches!(self, Self::Both | Self::RemoteToLocal)
-    }
-
-    pub(crate) fn as_option_value(self) -> &'static str {
-        match self {
-            Self::Both => "both",
-            Self::LocalToRemote => "local-to-remote",
-            Self::RemoteToLocal => "remote-to-local",
-            Self::Off => "off",
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Both => "both",
-            Self::LocalToRemote => "local-to-remote",
-            Self::RemoteToLocal => "remote-to-local",
-            Self::Off => "off",
-        }
-    }
-}
+pub(crate) use crate::clipboard_policy::{resolve_clipboard_direction, ClipboardDirectionPolicy};
 
 pub(crate) fn clipboard_direction_policy_from_option_value(
     value: &str,
 ) -> ClipboardDirectionPolicy {
     ClipboardDirectionPolicy::from_option_value(value)
-}
-
-/// The direction in force for a viewer session: the session's own setting if it
-/// has one, otherwise the local configuration, otherwise the global option. An
-/// empty value means "not set at this level"; a set but unknown value is `Off`.
-pub(crate) fn resolve_clipboard_direction(
-    session: &str,
-    local: &str,
-    global: &str,
-) -> ClipboardDirectionPolicy {
-    for value in [session, local, global] {
-        if !value.trim().is_empty() {
-            return ClipboardDirectionPolicy::from_option_value(value);
-        }
-    }
-    ClipboardDirectionPolicy::Both
 }
 
 // This format is used to store the flag in the clipboard.
@@ -163,6 +74,8 @@ const SAFE_REGISTERED_FORMATS: &[&str] = &[
     "image/svg+xml",
     "public.utf8-plain-text",
     "public.text",
+    "public.url",
+    "public.url-name",
     "public.html",
     "public.rtf",
     "public.png",
@@ -1347,7 +1260,12 @@ mod platform_clipboard {
             return None;
         }
         if super::contains_rustdesk_owner_format_name(&names)
-            || !names.iter().any(|name| type_conforms_to_plain_text(name))
+            || super::macos_external_opaque_signature_from_format_names(
+                before, &names, type_conforms_to_plain_text,
+            ).is_some()
+            || !names.iter().any(|name| {
+                type_conforms_to_plain_text(name) || name == "public.url"
+            })
         {
             return None;
         }
@@ -1825,6 +1743,72 @@ pub struct ClipboardContext {
     inner: arboard::Clipboard,
 }
 
+// A broken optional HTML/RTF representation must not discard readable text.
+// Keep the batch read as the normal path. On failure, read control formats
+// separately and fail closed if owner/file metadata cannot be inspected.
+#[cfg(not(target_os = "android"))]
+fn read_clipboard_formats<F>(
+    formats: &[ClipboardFormat],
+    mut read: F,
+) -> ResultType<Vec<ClipboardData>>
+where
+    F: FnMut(&[ClipboardFormat]) -> ResultType<Vec<ClipboardData>>,
+{
+    let batch_error = match read(formats) {
+        Ok(data) => return Ok(data),
+        Err(error) if formats.len() <= 1 => return Err(error),
+        Err(error) => error,
+    };
+    let is_control = |format: &ClipboardFormat| match format {
+        ClipboardFormat::Special(name) => *name == RUSTDESK_CLIPBOARD_OWNER_FORMAT,
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        ClipboardFormat::FileUrl => true,
+        _ => false,
+    };
+    let mut data = Vec::new();
+    for format in formats.iter().filter(|format| is_control(format)) {
+        data.extend(read(std::slice::from_ref(format))?);
+    }
+    for format in formats.iter().filter(|format| !is_control(format)) {
+        match read(std::slice::from_ref(format)) {
+            Ok(items) => data.extend(items),
+            Err(_) => log::debug!("Skipped unreadable optional clipboard format: {:?}", format),
+        }
+    }
+    // A remote apply or file copy during the fallback must still be observed.
+    for format in formats.iter().filter(|format| is_control(format)) {
+        data.extend(read(std::slice::from_ref(format))?);
+    }
+    if data.is_empty() {
+        return Err(batch_error);
+    }
+    Ok(data)
+}
+
+#[cfg(all(not(target_os = "android"), any(test, target_os = "macos")))]
+fn with_plain_text_fallback<F>(
+    result: ResultType<Vec<ClipboardData>>,
+    fallback: F,
+) -> ResultType<Vec<ClipboardData>>
+where
+    F: FnOnce() -> Option<String>,
+{
+    if result.as_ref().is_ok_and(|data| {
+        data.iter()
+            .any(|item| matches!(item, ClipboardData::Text(text) if !text.is_empty()))
+    }) {
+        return result;
+    }
+    match fallback().filter(|text| !text.is_empty()) {
+        Some(text) => {
+            let mut data = result.unwrap_or_default();
+            data.insert(0, ClipboardData::Text(text));
+            Ok(data)
+        }
+        None => result,
+    }
+}
+
 #[cfg(not(target_os = "android"))]
 #[allow(unreachable_code)]
 impl ClipboardContext {
@@ -1924,26 +1908,16 @@ impl ClipboardContext {
             }
         }
 
-        let data = self.get_formats_filter(SUPPORTED_FORMATS, side, force)?;
+        let data = self.get_formats_filter(SUPPORTED_FORMATS, side, force);
         #[cfg(target_os = "macos")]
-        let data = {
-            let mut data = data;
-            if !data
-                .iter()
-                .any(|item| matches!(item, ClipboardData::Text(_)))
-            {
-                if let Some(text) = platform_clipboard::plain_text_fallback() {
-                    if !text.is_empty() {
-                        let bytes = text.len();
-                        data.push(ClipboardData::Text(text));
-                        emit_clipboard_debug(format!(
-                            "plain-text-fallback side={side} platform=macos bytes={bytes}"
-                        ));
-                    }
-                }
-            }
-            data
-        };
+        let data = with_plain_text_fallback(data, || {
+            let text = platform_clipboard::plain_text_fallback()?;
+            emit_clipboard_debug(format!(
+                "plain-text-fallback side={side} platform=macos bytes={}", text.len()
+            ));
+            Some(text)
+        });
+        let data = data?;
         debug_clipboard_data("get-supported-formats", side, &data);
         // We have a separate service named `file-clipboard` to handle file copy-paste.
         // We need to read the file urls because file copy may set the other clipboard formats such as text.
@@ -1963,7 +1937,7 @@ impl ClipboardContext {
         force: bool,
     ) -> ResultType<Vec<ClipboardData>> {
         let _lock = ARBOARD_MTX.lock().unwrap();
-        let data = self.get_formats(formats)?;
+        let data = read_clipboard_formats(formats, |formats| self.get_formats(formats))?;
         if data.is_empty() {
             return Ok(data);
         }
@@ -2181,44 +2155,6 @@ impl std::fmt::Display for ClipboardSide {
             ClipboardSide::Host => write!(f, "host"),
             ClipboardSide::Client => write!(f, "client"),
         }
-    }
-}
-
-#[cfg(test)]
-mod clipboard_direction_resolution_tests {
-    use super::*;
-    use ClipboardDirectionPolicy::*;
-
-    #[test]
-    fn the_narrowest_level_that_is_set_decides() {
-        // Nothing set anywhere: both directions.
-        assert_eq!(resolve_clipboard_direction("", "", ""), Both);
-        // Global only.
-        assert_eq!(
-            resolve_clipboard_direction("", "", "local-to-remote"),
-            LocalToRemote
-        );
-        // Local configuration beats the global option.
-        assert_eq!(
-            resolve_clipboard_direction("", "off", "local-to-remote"),
-            Off
-        );
-        // The session beats both, including to widen: this is a per-session
-        // decision the user took on purpose.
-        assert_eq!(
-            resolve_clipboard_direction("both", "off", "remote-to-local"),
-            Both
-        );
-        assert_eq!(
-            resolve_clipboard_direction("remote-to-local", "both", "both"),
-            RemoteToLocal
-        );
-    }
-
-    #[test]
-    fn whitespace_is_unset_and_unknown_values_close_the_clipboard() {
-        assert_eq!(resolve_clipboard_direction("  ", "", "send"), LocalToRemote);
-        assert_eq!(resolve_clipboard_direction("sideways", "both", "both"), Off);
     }
 }
 
@@ -2559,6 +2495,8 @@ mod clipboard_timing_tests {
             "Chromium Web Custom MIME Data Format",
             "WebKit Smart Paste Format",
             "public.utf8-plain-text",
+            "public.url",
+            "public.url-name",
             "public.html",
             "TARGETS",
             RUSTDESK_CLIPBOARD_OWNER_FORMAT,
@@ -2772,6 +2710,22 @@ mod clipboard_timing_tests {
     }
 
     #[test]
+    fn macos_browser_url_is_transferable_but_private_formats_remain_blocked() {
+        let mut names = vec![
+            "public.url".to_owned(),
+            "public.url-name".to_owned(),
+            "public.utf8-plain-text".to_owned(),
+            "WebKit Smart Paste Format".to_owned(),
+        ];
+        assert!(macos_external_opaque_signature_from_format_names(42, &names, |_| false).is_none());
+        names.push("public.pdf".to_owned());
+        assert_eq!(macos_external_opaque_signature_from_format_names(42, &names, |_| false).as_deref(), Some("macos:42:public.pdf"));
+        names.pop();
+        names.push(MACOS_REMOTE_CLIPBOARD_FORMAT.to_owned());
+        assert_eq!(macos_external_opaque_signature_from_format_names(42, &names, |_| false).as_deref(), Some("macos:42:remote-promise"));
+    }
+
+    #[test]
     fn macos_native_format_still_wins_over_plain_text_alias() {
         let names = vec![
             "public.utf16-external-plain-text".to_owned(),
@@ -2813,6 +2767,133 @@ mod clipboard_timing_tests {
             macos_external_opaque_signature_from_format_names(2882, &names, |_| false).as_deref(),
             Some("macos:2882:remote-promise")
         );
+    }
+}
+
+#[cfg(all(test, not(target_os = "android")))]
+mod clipboard_read_fallback_tests {
+    use super::*;
+
+    fn failed_read() -> hbb_common::anyhow::Error {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "unreadable representation").into()
+    }
+
+    #[test]
+    fn successful_batch_does_not_read_again() {
+        let mut calls = 0;
+        let data = read_clipboard_formats(SUPPORTED_FORMATS, |_| {
+            calls += 1;
+            Ok(vec![ClipboardData::Text("日本語 URL".to_owned())])
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert!(matches!(&data[0], ClipboardData::Text(text) if text == "日本語 URL"));
+    }
+
+    #[test]
+    fn broken_rich_format_keeps_readable_plain_text() {
+        let data = read_clipboard_formats(SUPPORTED_FORMATS, |formats| {
+            if formats.len() > 1
+                || matches!(formats[0], ClipboardFormat::Html | ClipboardFormat::Rtf)
+            {
+                return Err(failed_read());
+            }
+            if matches!(formats[0], ClipboardFormat::Text) {
+                return Ok(vec![ClipboardData::Text(
+                    "https://example.invalid/日本語".to_owned(),
+                )]);
+            }
+            Ok(vec![])
+        })
+        .unwrap();
+        assert!(data.iter().any(|item| matches!(item, ClipboardData::Text(text) if text == "https://example.invalid/日本語")));
+    }
+
+    #[test]
+    fn unreadable_owner_metadata_prevents_fallback() {
+        let mut text_reads = 0;
+        assert!(read_clipboard_formats(SUPPORTED_FORMATS, |formats| {
+            if matches!(formats[0], ClipboardFormat::Text) && formats.len() == 1 {
+                text_reads += 1;
+            }
+            Err(failed_read())
+        })
+        .is_err());
+        assert_eq!(text_reads, 0);
+    }
+
+    #[test]
+    fn fallback_keeps_owner_marker_that_arrives_during_read() {
+        let mut owner_reads = 0;
+        let data = read_clipboard_formats(SUPPORTED_FORMATS, |formats| {
+            if formats.len() > 1 {
+                return Err(failed_read());
+            }
+            match formats[0] {
+                ClipboardFormat::Special(RUSTDESK_CLIPBOARD_OWNER_FORMAT) => {
+                    owner_reads += 1;
+                    Ok(if owner_reads == 2 {
+                        vec![ClipboardData::Special((
+                            RUSTDESK_CLIPBOARD_OWNER_FORMAT.to_owned(),
+                            ClipboardSide::Client.get_owner_data(),
+                        ))]
+                    } else {
+                        vec![]
+                    })
+                }
+                ClipboardFormat::Text => Ok(vec![ClipboardData::Text("return".to_owned())]),
+                _ => Ok(vec![]),
+            }
+        })
+        .unwrap();
+        assert!(data.iter().any(|item| matches!(item, ClipboardData::Special((name, bytes)) if name == RUSTDESK_CLIPBOARD_OWNER_FORMAT && ClipboardSide::Client.is_owner(bytes))));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn fallback_retains_file_metadata_for_separate_file_service() {
+        let formats = [ClipboardFormat::Text, ClipboardFormat::FileUrl];
+        let data = read_clipboard_formats(&formats, |formats| {
+            if formats.len() > 1 {
+                return Err(failed_read());
+            }
+            Ok(match formats[0] {
+                ClipboardFormat::FileUrl => {
+                    vec![ClipboardData::FileUrl(vec!["/tmp/example".to_owned()])]
+                }
+                _ => vec![ClipboardData::Text("/tmp/example".to_owned())],
+            })
+        })
+        .unwrap();
+        assert!(data
+            .iter()
+            .any(|item| matches!(item, ClipboardData::FileUrl(_))));
+    }
+
+    #[test]
+    fn native_text_fallback_runs_after_an_error_and_preserves_errors_without_text() {
+        let data = with_plain_text_fallback(Err(failed_read()), || Some("URL fallback".to_owned()))
+            .unwrap();
+        assert!(matches!(&data[0], ClipboardData::Text(text) if text == "URL fallback"));
+        assert!(with_plain_text_fallback(Err(failed_read()), || None).is_err());
+        assert!(with_plain_text_fallback(Err(failed_read()), || Some(String::new())).is_err());
+    }
+
+    #[test]
+    fn native_fallback_keeps_rich_text_and_never_replaces_existing_text() {
+        let data = with_plain_text_fallback(
+            Ok(vec![ClipboardData::Html("<b>text</b>".to_owned())]),
+            || Some("text".to_owned()),
+        )
+        .unwrap();
+        assert!(matches!(&data[0], ClipboardData::Text(text) if text == "text"));
+        assert!(matches!(&data[1], ClipboardData::Html(_)));
+        let data =
+            with_plain_text_fallback(Ok(vec![ClipboardData::Text("original".to_owned())]), || {
+                panic!("must not read native fallback")
+            })
+            .unwrap();
+        assert!(matches!(&data[0], ClipboardData::Text(text) if text == "original"));
     }
 }
 
@@ -3503,29 +3584,20 @@ mod proto {
 }
 
 #[cfg(target_os = "android")]
-pub fn handle_msg_clipboard(mut cb: Clipboard) {
-    use hbb_common::protobuf::Message;
-
-    if cb.compress {
-        cb.content = bytes::Bytes::from(hbb_common::compress::decompress(&cb.content));
-    }
-    let multi_clips = MultiClipboards {
+pub fn handle_msg_clipboard(cb: Clipboard) {
+    handle_msg_multi_clipboards(MultiClipboards {
         clipboards: vec![cb],
         ..Default::default()
-    };
-    if let Ok(bytes) = multi_clips.write_to_bytes() {
-        let _ = scrap::android::ffi::call_clipboard_manager_update_clipboard(&bytes);
-    }
+    });
 }
 
 #[cfg(target_os = "android")]
 pub fn handle_msg_multi_clipboards(mut mcb: MultiClipboards) {
     use hbb_common::protobuf::Message;
 
-    for cb in mcb.clipboards.iter_mut() {
-        if cb.compress {
-            cb.content = bytes::Bytes::from(hbb_common::compress::decompress(&cb.content));
-        }
+    mcb.clipboards = crate::clipboard_text::android_text_clipboards(mcb.clipboards);
+    if mcb.clipboards.is_empty() {
+        return;
     }
     if let Ok(bytes) = mcb.write_to_bytes() {
         let _ = scrap::android::ffi::call_clipboard_manager_update_clipboard(&bytes);

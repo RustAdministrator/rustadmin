@@ -3185,15 +3185,10 @@ impl<T: InvokeUiSession> Remote<T> {
                         .unwrap()
                         .remote_clipboard_apply_allowed()
                     {
+                        if let Some(content) =
+                            crate::clipboard_text::first_text_clipboard(std::slice::from_ref(&cb))
                         {
-                            let content = if cb.compress {
-                                hbb_common::compress::decompress(&cb.content)
-                            } else {
-                                cb.content.into()
-                            };
-                            if let Ok(content) = String::from_utf8(content) {
-                                self.handler.clipboard(content);
-                            }
+                            self.handler.clipboard(content);
                         }
                     }
                     #[cfg(target_os = "android")]
@@ -3229,6 +3224,20 @@ impl<T: InvokeUiSession> Remote<T> {
                         if lc.remote_clipboard_apply_allowed() {
                             drop(lc);
                             crate::clipboard::handle_msg_multi_clipboards(_mcb);
+                        }
+                    }
+                    #[cfg(target_os = "ios")]
+                    if self
+                        .handler
+                        .lc
+                        .read()
+                        .unwrap()
+                        .remote_clipboard_apply_allowed()
+                    {
+                        if let Some(content) =
+                            crate::clipboard_text::first_text_clipboard(&_mcb.clipboards)
+                        {
+                            self.handler.clipboard(content);
                         }
                     }
                 }

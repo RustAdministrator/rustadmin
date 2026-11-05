@@ -7,6 +7,7 @@ import java.util.TimerTask
 import android.content.ClipData
 import android.content.ClipDescription
 import android.content.ClipboardManager
+import android.text.Html
 import android.util.Log
 import androidx.annotation.Keep
 
@@ -59,23 +60,21 @@ class RdClipboardManager(private val clipboardManager: ClipboardManager) {
             for (i in 0 until mimeTypeCount) {
                 mimeTypes.add(clipData.description.getMimeType(i))
             }
-            var text: CharSequence? = null;
-            var html: String? = null;
-            if (isSupportedMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN)) {
-                text = clip?.text
-            }
-            if (isSupportedMimeType(ClipDescription.MIMETYPE_TEXT_HTML)) {
-                text = clip?.text
-                html = clip?.htmlText
-            }
+            val clipboardText = RdClipboardText.fromItem(
+                clip?.text,
+                clip?.uri?.toString(),
+                clip?.htmlText,
+            )
+            val text = clipboardText?.text
+            val html = clipboardText?.html
             var count = 0
             val clips = MultiClipboards.newBuilder()
-            if (text != null) {
-                val content = com.google.protobuf.ByteString.copyFromUtf8(text.toString())
+            if (isSupportedMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN) && text != null) {
+                val content = com.google.protobuf.ByteString.copyFromUtf8(text)
                     clips.addClipboards(Clipboard.newBuilder().setFormat(ClipboardFormat.Text).setContent(content).build())
                     count++
                 }
-            if (html != null) {
+            if (isSupportedMimeType(ClipDescription.MIMETYPE_TEXT_HTML) && html != null) {
                 val content = com.google.protobuf.ByteString.copyFromUtf8(html)
                 clips.addClipboards(Clipboard.newBuilder().setFormat(ClipboardFormat.Html).setContent(content).build())
                 count++
@@ -114,16 +113,13 @@ class RdClipboardManager(private val clipboardManager: ClipboardManager) {
             return false
         }
         for (i in 0 until left.itemCount) {
-            val mimeType = left.description.getMimeType(i)
-            if (!isSupportedMimeType(mimeType)) {
-                continue
-            }
             val leftItem = left.getItemAt(i)
             val rightItem = right.getItemAt(i)
-            if (mimeType == ClipDescription.MIMETYPE_TEXT_PLAIN || mimeType == ClipDescription.MIMETYPE_TEXT_HTML) {
-                if (leftItem.text != rightItem.text || leftItem.htmlText != rightItem.htmlText) {
-                    return false
-                }
+            if (leftItem.text?.toString() != rightItem.text?.toString() ||
+                leftItem.htmlText != rightItem.htmlText ||
+                leftItem.uri != rightItem.uri
+            ) {
+                return false
             }
         }
         return true
@@ -172,6 +168,11 @@ class RdClipboardManager(private val clipboardManager: ClipboardManager) {
                     Log.e(logTag, "Unsupported clipboard format: ${clip.format}")
                 }
             }
+        }
+
+        if (html != null && text == null) {
+            text = Html.fromHtml(html, Html.FROM_HTML_MODE_LEGACY).toString()
+            mimeTypes.add(0, ClipDescription.MIMETYPE_TEXT_PLAIN)
         }
 
         val clipDescription = ClipDescription("clipboard", mimeTypes.toTypedArray())

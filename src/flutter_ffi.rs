@@ -3,7 +3,7 @@ use crate::keyboard::input_source::{change_input_source, get_cur_session_input_s
 #[cfg(target_os = "linux")]
 use crate::platform::linux::is_x11;
 use crate::{
-    client::{self, file_trait::FileManager},
+    client::{self, file_trait::FileManager, Interface},
     common::{make_fd_to_json, make_vec_fd_to_json, PeerSecurityEntry},
     flutter::{
         self, session_add, session_add_existed, session_start_, session_start_with_displays_,
@@ -939,6 +939,39 @@ pub fn session_input_string(session_id: SessionID, value: String) {
         // #[cfg(any(target_os = "android", target_os = "ios"))]
         session.input_string(&value);
     }
+}
+
+/// Queue an OS clipboard snapshot; this does not synthesize typing or paste.
+pub fn session_send_clipboard_text(session_id: SessionID, text: String) -> SyncReturn<bool> {
+    if text.is_empty() || text.len() > hbb_common::compress::DEFAULT_DECOMPRESS_MAX_LEN {
+        return SyncReturn(false);
+    }
+    let Some(session) = sessions::get_session_by_session_id(&session_id) else {
+        return SyncReturn(false);
+    };
+    if !session.is_default()
+        || !session.is_connection_alive()
+        || !session.is_text_clipboard_required()
+    {
+        return SyncReturn(false);
+    }
+    let mut message = hbb_common::message_proto::Message::new();
+    message.set_clipboard(hbb_common::message_proto::Clipboard {
+        content: text.into_bytes().into(),
+        ..Default::default()
+    });
+    session.send(crate::client::Data::Message(message));
+    SyncReturn(true)
+}
+
+pub fn session_can_send_clipboard(session_id: SessionID) -> SyncReturn<bool> {
+    SyncReturn(
+        sessions::get_session_by_session_id(&session_id).is_some_and(|session| {
+            session.is_default()
+                && session.is_connection_alive()
+                && session.is_text_clipboard_required()
+        }),
+    )
 }
 
 pub fn session_input_text_edit(

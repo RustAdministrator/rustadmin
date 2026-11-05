@@ -117,7 +117,20 @@ static NSString *StringFromPlainTextPasteboardData(NSData *data, NSPasteboardTyp
     }
     if ([type isEqualToString:@"public.utf16-plain-text"] ||
         [type isEqualToString:@"public.utf16-external-plain-text"]) {
-        return [[NSString alloc] initWithData:data encoding:NSUTF16StringEncoding];
+        NSStringEncoding encoding = NSUTF16LittleEndianStringEncoding;
+        if ([data length] >= 2) {
+            const uint8_t *bytes = static_cast<const uint8_t *>([data bytes]);
+            if ((bytes[0] == 0xfe && bytes[1] == 0xff) ||
+                (bytes[0] == 0xff && bytes[1] == 0xfe)) {
+                // Let Foundation consume the BOM and select its byte order.
+                encoding = NSUTF16StringEncoding;
+            }
+        }
+        NSString *text = [[NSString alloc] initWithData:data encoding:encoding];
+        if (text == nil) {
+            text = [[NSString alloc] initWithData:data encoding:NSUTF16StringEncoding];
+        }
+        return text;
     }
     if ([type isEqualToString:@"com.apple.traditional-mac-plain-text"]) {
         return [[NSString alloc] initWithData:data encoding:NSMacOSRomanStringEncoding];
@@ -129,40 +142,161 @@ static NSString *StringFromPlainTextPasteboardData(NSData *data, NSPasteboardTyp
     return text;
 }
 
-extern "C" char *MacPasteboardCopyPlainText() {
+static bool MacPasteboardTypesContainAny(NSArray<NSPasteboardType> *types,
+                                         NSArray<NSPasteboardType> *rejected_types) {
+    for (NSPasteboardType type in rejected_types) {
+        if ([types containsObject:type]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static NSString *MacPasteboardCopyExplicitText(NSPasteboardItem *item,
+                                               NSArray<NSPasteboardType> *item_types) {
+    NSArray<NSPasteboardType> *explicit_types = @[
+        @"public.utf16-plain-text",
+        @"public.utf16-external-plain-text",
+        @"com.apple.traditional-mac-plain-text"
+    ];
+    for (NSPasteboardType type in explicit_types) {
+        if (![item_types containsObject:type]) {
+            continue;
+        }
+        NSString *text = StringFromPlainTextPasteboardData([item dataForType:type], type);
+        if (text == nil) {
+            text = [item stringForType:type];
+        }
+        if (text != nil) {
+            return text;
+        }
+    }
+    return nil;
+}
+
+static char *MacPasteboardCopyPlainTextFromPasteboard(NSPasteboard *pasteboard) {
     @autoreleasepool {
         @try {
-            NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
             if (pasteboard == nil) {
                 return NULL;
             }
-            NSArray *items = [pasteboard pasteboardItems];
+
+            NSArray<NSPasteboardType> *pasteboard_types = [pasteboard types];
+            NSArray<NSPasteboardType> *rejected_types = @[
+                @"com.apple.is-remote-clipboard",
+                @"public.file-url",
+                @"NSFilenamesPboardType"
+            ];
+            if (MacPasteboardTypesContainAny(pasteboard_types, rejected_types)) {
+                return NULL;
+            }
+
+            NSArray<NSPasteboardItem *> *items = [pasteboard pasteboardItems];
+            if (items == nil) {
+                return NULL;
+            }
+            NSArray<NSPasteboardType> *plain_text_types = @[
+                NSPasteboardTypeString,
+                @"public.plain-text",
+                @"public.utf16-plain-text",
+                @"public.utf16-external-plain-text",
+                @"com.apple.traditional-mac-plain-text"
+            ];
+
+            // Plain text has priority over URL fallback across all pasteboard
+            // items, not only within one item.
             for (NSPasteboardItem *item in items) {
-                NSPasteboardType type = [item availableTypeFromArray:@[
-                    NSPasteboardTypeString,
-                    @"public.plain-text",
-                    @"public.utf16-plain-text",
-                    @"public.utf16-external-plain-text",
-                    @"com.apple.traditional-mac-plain-text"
-                ]];
-                if (type == nil) {
+                NSArray<NSPasteboardType> *item_types = [item types];
+                if (MacPasteboardTypesContainAny(item_types, rejected_types)) {
                     continue;
                 }
-                NSString *text = [item stringForType:type];
-                if (text == nil) {
-                    text = StringFromPlainTextPasteboardData([item dataForType:type], type);
+                for (NSPasteboardType type in plain_text_types) {
+                    if (![item_types containsObject:type]) {
+                        continue;
+                    }
+                    bool has_explicit_encoding =
+                        [type isEqualToString:@"public.utf16-plain-text"] ||
+                        [type isEqualToString:@"public.utf16-external-plain-text"] ||
+                        [type isEqualToString:@"com.apple.traditional-mac-plain-text"];
+                    bool has_explicit_alternative =
+                        [item_types containsObject:@"public.utf16-plain-text"] ||
+                        [item_types containsObject:@"public.utf16-external-plain-text"] ||
+                        [item_types containsObject:@"com.apple.traditional-mac-plain-text"];
+                    NSString *explicit_text = has_explicit_alternative && !has_explicit_encoding
+                        ? MacPasteboardCopyExplicitText(item, item_types)
+                        : nil;
+                    NSString *text = has_explicit_encoding
+                        ? StringFromPlainTextPasteboardData([item dataForType:type], type)
+                        : [item stringForType:type];
+                    if (!has_explicit_encoding && explicit_text != nil &&
+                        ![explicit_text isEqualToString:text]) {
+                        continue;
+                    }
+                    if (text == nil) {
+                        text = has_explicit_encoding
+                            ? [item stringForType:type]
+                            : StringFromPlainTextPasteboardData([item dataForType:type], type);
+                    }
+                    if (text != nil && [text length] > 0) {
+                        return CopyCString([text UTF8String]);
+                    }
                 }
-                if (text != nil) {
-                    return CopyCString([text UTF8String]);
+            }
+
+            // Only the actual public.url value is eligible for fallback. Do
+            // not read public.url-name or ask AppKit to materialize an NSURL,
+            // since either can turn a display title into clipboard payload.
+            for (NSPasteboardItem *item in items) {
+                NSArray<NSPasteboardType> *item_types = [item types];
+                if (MacPasteboardTypesContainAny(item_types, rejected_types) ||
+                    ![item_types containsObject:NSPasteboardTypeURL]) {
+                    continue;
                 }
+                NSString *url_string = [item stringForType:NSPasteboardTypeURL];
+                if (url_string == nil) {
+                    continue;
+                }
+                NSURL *url = [NSURL URLWithString:url_string];
+                if (url == nil || [url scheme] == nil || [[url scheme] length] == 0 ||
+                    [url isFileURL] || [url_string length] == 0) {
+                    continue;
+                }
+                return CopyCString([url_string UTF8String]);
             }
             return NULL;
         } @catch (NSException *exception) {
-            NSLog(@"RustAdmin caught NSPasteboard exception while reading plain text: %@ %@", [exception name], [exception reason]);
+            NSLog(@"RustAdmin caught NSPasteboard exception while reading plain text: %@", [exception name]);
             return NULL;
         }
     }
 }
+
+static char *MacPasteboardCopyPlainTextOnMainThread() {
+    @autoreleasepool {
+        @try {
+            return MacPasteboardCopyPlainTextFromPasteboard([NSPasteboard generalPasteboard]);
+        } @catch (NSException *exception) {
+            NSLog(@"RustAdmin caught NSPasteboard exception while obtaining the general pasteboard: %@", [exception name]);
+            return NULL;
+        }
+    }
+}
+
+extern "C" char *MacPasteboardCopyPlainText() {
+    if ([NSThread isMainThread]) {
+        return MacPasteboardCopyPlainTextOnMainThread();
+    }
+
+    // NSPasteboard is an AppKit object. Keep its mutable internal type cache
+    // and promised-data access on AppKit's main thread, like TypeNames above.
+    __block char *result = NULL;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        result = MacPasteboardCopyPlainTextOnMainThread();
+    });
+    return result;
+}
+
+#ifndef RUSTADMIN_MACOS_CLIPBOARD_HELPERS_ONLY
 
 extern "C" bool CanUseNewApiForScreenCaptureCheck() {
     #ifdef NO_InputMonitoringAuthStatus
@@ -1060,3 +1194,5 @@ extern "C" bool MacSetPrivacyMode(bool on) {
         return TurnOffPrivacyModeInternal();
     }
 }
+
+#endif  // RUSTADMIN_MACOS_CLIPBOARD_HELPERS_ONLY

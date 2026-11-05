@@ -73,6 +73,9 @@ mod auth_2fa;
 #[cfg(feature = "cli")]
 /// cbindgen:ignore
 pub mod cli;
+#[cfg(any(target_os = "ios", target_os = "android", test))]
+mod clipboard_text;
+mod clipboard_policy;
 #[cfg(not(target_os = "ios"))]
 mod clipboard;
 #[cfg(target_os = "linux")]

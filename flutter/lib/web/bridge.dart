@@ -564,6 +564,10 @@ class RustadminImpl {
         ]));
   }
 
+  bool sessionCanSendClipboard({required UuidValue sessionId}) => false;
+
+  bool sessionSendClipboardText({required UuidValue sessionId, required String text}) => false;
+
   Future<void> sessionInputString(
       {required UuidValue sessionId, required String value, dynamic hint}) {
     return Future(

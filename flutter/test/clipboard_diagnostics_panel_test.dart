@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart' as foundation;
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_hbb/common/clipboard_diagnostics.dart';
@@ -36,6 +37,8 @@ void main() {
     ClipboardDiagnostics.instance.clear();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(SystemChannels.platform, null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(const MethodChannel('mChannel'), null);
   });
 
   Future<void> openPanel(WidgetTester tester, {String? session}) async {
@@ -151,4 +154,29 @@ void main() {
     expect(writes, isEmpty);
     expect(tester.takeException(), isNull);
   });
+
+  test(
+    'Android diagnostic copy captures the OS value through the native path',
+    () async {
+      foundation.debugDefaultTargetPlatformOverride =
+          foundation.TargetPlatform.android;
+      addTearDown(() => foundation.debugDefaultTargetPlatformOverride = null);
+      final capturesAfterWrites = <int>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(const MethodChannel('mChannel'), (
+            call,
+          ) async {
+            expect(call.method, 'try_sync_clipboard');
+            expect(call.arguments, {'include_host': true});
+            capturesAfterWrites.add(writes.length);
+            return true;
+          });
+      final run = ClipboardDiagnostics.instance.runSuite('DEADBEEF');
+      await Future<void>.delayed(Duration.zero);
+      expect(writes, hasLength(1));
+      expect(capturesAfterWrites, [1]);
+      ClipboardDiagnostics.instance.cancelRun();
+      await run;
+    },
+  );
 }

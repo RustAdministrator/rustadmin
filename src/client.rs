@@ -3961,16 +3961,9 @@ impl LoginConfigHandler {
         let mut option = OptionMessage::default();
         let mut config = self.load_config();
         if let Some(direction) = name.strip_prefix(CLIPBOARD_DIRECTION_TOGGLE_PREFIX) {
-            #[cfg(target_os = "ios")]
-            {
-                let _ = direction;
-                self.save_config(config);
-                return None;
-            }
-            #[cfg(not(target_os = "ios"))]
             {
                 let direction =
-                    crate::clipboard::clipboard_direction_policy_from_option_value(direction);
+                    crate::clipboard_policy::ClipboardDirectionPolicy::from_option_value(direction);
                 config.options.insert(
                     keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION.to_owned(),
                     direction.as_option_value().to_owned(),
@@ -4618,10 +4611,7 @@ impl LoginConfigHandler {
     /// viewer asks the host not to send it when the session is view-only or
     /// the clipboard is off, but a hostile host can ignore that request.
     pub(crate) fn remote_clipboard_apply_allowed(&self) -> bool {
-        #[cfg(not(target_os = "ios"))]
         let direction_allows = self.clipboard_direction_policy().allows_remote_to_local();
-        #[cfg(target_os = "ios")]
-        let direction_allows = true;
         remote_clipboard_apply_allowed(self.disable_clipboard.v, self.view_only.v, direction_allows)
     }
 
@@ -4636,7 +4626,17 @@ impl LoginConfigHandler {
         crate::clipboard::clipboard_direction_policy_from_option_value(&value)
     }
 
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(target_os = "ios")]
+    pub(crate) fn clipboard_direction_policy(
+        &self,
+    ) -> crate::clipboard_policy::ClipboardDirectionPolicy {
+        crate::clipboard_policy::resolve_clipboard_direction(
+            &self.get_option(keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION),
+            &LocalConfig::get_option(keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION),
+            &Config::get_option(keys::OPTION_ONE_WAY_CLIPBOARD_REDIRECTION),
+        )
+    }
+
     pub(crate) fn is_local_to_remote_clipboard_allowed(&self) -> bool {
         self.clipboard_direction_policy().allows_local_to_remote()
     }

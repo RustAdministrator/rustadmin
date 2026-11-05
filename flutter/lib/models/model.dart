@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
+import 'package:flutter_hbb/common/foreground_clipboard_sync.dart';
 
 import 'package:bot_toast/bot_toast.dart';
 import 'package:desktop_multi_window/desktop_multi_window.dart';
@@ -500,7 +501,11 @@ class FfiModel with ChangeNotifier {
     } else if (event is DisplayRenderStateSessionEvent) {
       parent.target?.displayRenderStates.apply(event);
     } else if (event is ClipboardSessionEvent) {
-      Clipboard.setData(ClipboardData(text: event.content));
+      if (isIOS) {
+        unawaited(ForegroundClipboardSync.instance.applyRemoteText(event.content));
+      } else {
+        Clipboard.setData(ClipboardData(text: event.content));
+      }
     } else if (event is ClientChatSessionEvent) {
       parent.target?.chatModel.receive(ChatModel.clientModeID, event.text);
     } else if (event is ServerChatSessionEvent) {

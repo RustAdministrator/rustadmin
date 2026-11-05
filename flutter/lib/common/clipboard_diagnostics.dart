@@ -144,8 +144,22 @@ class ClipboardDiagnostics extends ChangeNotifier {
   static Future<String?> _readSystemText() async =>
       (await Clipboard.getData(Clipboard.kTextPlain))?.text;
 
-  static Future<void> _writeSystemText(String text) =>
-      Clipboard.setData(ClipboardData(text: text));
+  static Future<void> _writeSystemText(String text) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      // Android normally captures when the app resumes. A diagnostic copy is
+      // made while it is already foreground, so request that same OS capture.
+      try {
+        await const MethodChannel('mChannel').invokeMethod<bool>(
+          'try_sync_clipboard', {'include_host': true},
+        );
+      } on PlatformException {
+        // The round-trip timeout reports capture/transport failure separately.
+      } on MissingPluginException {
+        // Older native bundles cannot capture an in-app diagnostic write.
+      }
+    }
+  }
 
   static String _randomId(int length) {
     final random = Random.secure();
