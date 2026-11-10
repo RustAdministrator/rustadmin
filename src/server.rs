@@ -76,6 +76,8 @@ mod prelogin_admission;
 mod session_scope;
 #[cfg(windows)]
 pub mod portable_service;
+#[cfg(any(windows, test))]
+mod portable_capture_recovery;
 mod service;
 #[cfg(any(windows, test))]
 mod helper_retry;

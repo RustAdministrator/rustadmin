@@ -87,7 +87,7 @@ const DELIVERY_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_millis(250)
 const IN_PLACE_REFERENCE_REFRESH_TIMEOUT: Duration = Duration::from_secs(1);
 #[cfg(windows)]
 const INSTALLED_SECURE_CAPTURE_HELPER_START_COOLDOWN: Duration = Duration::from_secs(5);
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const SECURE_DESKTOP_EXIT_DEBOUNCE: Duration = Duration::from_millis(500);
 static NEXT_VIDEO_STREAM_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -1160,9 +1160,33 @@ pub fn new(source: VideoSource, idx: usize) -> GenericService {
 #[cfg(any(windows, test))]
 fn keep_privileged_stream_for_secure_transition(
     using_privileged_secure_capture: bool,
-    requires_secure_capture: bool,
+    secure_input_desktop: bool,
 ) -> bool {
-    using_privileged_secure_capture && requires_secure_capture
+    using_privileged_secure_capture && secure_input_desktop
+}
+
+#[cfg(any(windows, test))]
+struct SecureDesktopHandoff {
+    last_secure_seen: Instant,
+}
+
+#[cfg(any(windows, test))]
+impl SecureDesktopHandoff {
+    fn new(now: Instant) -> Self {
+        Self {
+            last_secure_seen: now,
+        }
+    }
+
+    fn observe(&mut self, state: CaptureDesktopState, now: Instant) -> bool {
+        // Thread attachment may lag behind the actual input desktop. It must
+        // not keep resetting the timer that permits rebinding that thread.
+        if state.persistent_secure_identity() {
+            self.last_secure_seen = now;
+            return false;
+        }
+        now.saturating_duration_since(self.last_secure_seen) >= SECURE_DESKTOP_EXIT_DEBOUNCE
+    }
 }
 
 #[cfg(any(windows, test))]
@@ -1521,9 +1545,11 @@ mod tests {
         resource_mode_idle, resource_mode_period, secure_capture_helper_ready,
         should_force_privileged_secure_capturer, stale_secure_capture_helper_on_user_desktop,
         stamp_video_frame, windows_capture_route, DurationSamples, HqReferenceRefreshPolicy,
-        MovieFramePacer, MovieHostCadenceWindow, ReferenceRefreshReason, VideoFrameController,
+        MovieFramePacer, MovieHostCadenceWindow, ReferenceRefreshReason, SecureDesktopHandoff,
+        VideoFrameController,
         VideoSource, VideoStreamKey, WindowsCaptureRoute, DELIVERY_REFERENCE_REFRESH_COOLDOWN,
         HOST_VIDEO_DIAG_SAMPLE_CAPACITY, HQ_REFERENCE_REFRESH_COOLDOWN,
+        SECURE_DESKTOP_EXIT_DEBOUNCE,
     };
     use crate::platform::windows_desktop::{CaptureDesktopState, InputDesktopClassification};
     use hbb_common::message_proto::{option_message::CaptureBackend, VideoFrame};
@@ -1836,6 +1862,98 @@ mod tests {
         assert!(!keep_privileged_stream_for_secure_transition(false, true));
         assert!(!keep_privileged_stream_for_secure_transition(true, false));
         assert!(!keep_privileged_stream_for_secure_transition(false, false));
+    }
+
+    #[test]
+    fn secure_capture_exit_stabilizes_while_video_thread_needs_rebinding() {
+        let start = Instant::now();
+        let secure = CaptureDesktopState::new(
+            false,
+            false,
+            false,
+            false,
+            InputDesktopClassification::NonDefault,
+        );
+        let stale_thread = CaptureDesktopState::new(
+            false,
+            false,
+            true,
+            false,
+            InputDesktopClassification::Default,
+        );
+        assert!(stale_thread.requires_secure_capture());
+        let mut handoff = SecureDesktopHandoff::new(start);
+        assert!(!handoff.observe(secure, start));
+        assert!(!handoff.observe(stale_thread, start + SECURE_DESKTOP_EXIT_DEBOUNCE / 2));
+        assert!(handoff.observe(stale_thread, start + SECURE_DESKTOP_EXIT_DEBOUNCE));
+        // A repeated observation of the stale thread must not rearm the delay.
+        assert!(handoff.observe(stale_thread, start + SECURE_DESKTOP_EXIT_DEBOUNCE * 2));
+
+        let rebound = CaptureDesktopState {
+            desktop_changed: false,
+            ..stale_thread
+        };
+        assert!(rebound.allows_interactive_capture());
+        // A Quick Support helper may stay alive for input while this stream
+        // returns to ordinary capture after its own thread has rebound.
+        assert!(!should_force_privileged_secure_capturer(true, false, rebound));
+        assert!(!should_force_privileged_secure_capturer(false, true, rebound));
+    }
+
+    #[test]
+    fn secure_capture_exit_rearms_when_uac_or_unknown_desktop_returns() {
+        let start = Instant::now();
+        let ordinary = CaptureDesktopState::new(
+            false,
+            false,
+            false,
+            false,
+            InputDesktopClassification::Default,
+        );
+        for secure in [
+            CaptureDesktopState::new(
+                false,
+                false,
+                false,
+                false,
+                InputDesktopClassification::NonDefault,
+            ),
+            CaptureDesktopState::new(
+                false,
+                false,
+                false,
+                false,
+                InputDesktopClassification::Unknown,
+            ),
+            CaptureDesktopState::new(
+                true,
+                false,
+                false,
+                false,
+                InputDesktopClassification::Default,
+            ),
+            CaptureDesktopState::new(
+                false,
+                true,
+                false,
+                false,
+                InputDesktopClassification::Default,
+            ),
+            CaptureDesktopState::new(
+                false,
+                false,
+                false,
+                true,
+                InputDesktopClassification::Default,
+            ),
+        ] {
+            let mut handoff = SecureDesktopHandoff::new(start);
+            let reentry = start + SECURE_DESKTOP_EXIT_DEBOUNCE * 2;
+            assert!(handoff.observe(ordinary, reentry));
+            assert!(!handoff.observe(secure, reentry));
+            assert!(!handoff.observe(ordinary, reentry + SECURE_DESKTOP_EXIT_DEBOUNCE / 2));
+            assert!(handoff.observe(ordinary, reentry + SECURE_DESKTOP_EXIT_DEBOUNCE));
+        }
     }
 
     #[test]
@@ -3302,9 +3420,7 @@ fn run(vs: VideoService) -> ResultType<()> {
     #[cfg(windows)]
     let mut last_desktop_capture_state = crate::platform::windows::capture_desktop_state();
     #[cfg(windows)]
-    let mut last_secure_desktop_seen = last_desktop_capture_state
-        .requires_secure_capture()
-        .then(Instant::now);
+    let mut secure_desktop_handoff = SecureDesktopHandoff::new(Instant::now());
     #[cfg(windows)]
     log::info!(
         "gdi: {}, mag: {}, user_helper: {}, cpu_only: {}",
@@ -3769,15 +3885,14 @@ fn run(vs: VideoService) -> ResultType<()> {
         }
         #[cfg(windows)]
         {
-            let desktop_state = crate::platform::windows::capture_desktop_state();
+            let mut desktop_state = crate::platform::windows::capture_desktop_state();
             {
                 let mut owner = USER_CAPTURE_HELPERS.lock().unwrap();
                 let _ = helper_key(&mut owner, display_idx, UserCaptureBackend::Wgc);
             }
             let desktop_changed = desktop_state.desktop_changed;
-            if desktop_state.requires_secure_capture() {
-                last_secure_desktop_seen = Some(Instant::now());
-            }
+            let secure_exit_stabilized =
+                secure_desktop_handoff.observe(desktop_state, Instant::now());
             let portable_service_running = crate::portable_service::client::running();
             let installed_secure_helper_active = if portable_service_running {
                 false
@@ -3799,7 +3914,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                     c.capture_backend() == PORTABLE_SYSTEM_HELPER_CAPTURE_BACKEND;
                 let keep_privileged_stream = keep_privileged_stream_for_secure_transition(
                     using_privileged_secure_capture,
-                    desktop_state.requires_secure_capture(),
+                    desktop_state.persistent_secure_identity(),
                 );
                 log::info!(
                     "privileged secure capture desktop state changed: prelogin {}->{}, locked {}->{}, desktop_changed {}->{}, logon_ui {}->{}, input_desktop {}->{}, portable_service_running={}, installed_secure_helper_active={}",
@@ -3824,24 +3939,8 @@ fn run(vs: VideoService) -> ResultType<()> {
                     );
                     bail!("SWITCH");
                 }
-                let secure_exit_debounced = !desktop_state.requires_secure_capture()
-                    && last_secure_desktop_seen.is_some_and(|last_seen| {
-                        last_seen.elapsed() < SECURE_DESKTOP_EXIT_DEBOUNCE
-                    });
-                if !must_use_privileged_secure_capture
-                    && using_privileged_secure_capture
-                    && !secure_exit_debounced
-                {
-                    let stop_requested =
-                        crate::portable_service::client::stop_secure_capture_helper(
-                            "interactive desktop restored",
-                        );
-                    log::info!(
-                        "interactive desktop restored; leaving SYSTEM helper capture, stop_requested={}",
-                        stop_requested
-                    );
-                    bail!("SWITCH");
-                }
+                let secure_exit_debounced = !desktop_state.persistent_secure_identity()
+                    && !secure_exit_stabilized;
                 if c.is_mag() {
                     if should_force_privileged_secure_capturer(
                         portable_service_running,
@@ -3868,7 +3967,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                             "desktop state changed while using magnifier; keep magnifier on locked/secure desktop"
                         );
                     }
-                } else if !secure_exit_debounced && !keep_privileged_stream {
+                } else if !using_privileged_secure_capture && !secure_exit_debounced {
                     if desktop_changed {
                         log::info!(
                             "input desktop changed; switch capture backend from current backend"
@@ -3887,20 +3986,31 @@ fn run(vs: VideoService) -> ResultType<()> {
             }
             let using_privileged_secure_capture =
                 c.capture_backend() == PORTABLE_SYSTEM_HELPER_CAPTURE_BACKEND;
-            if using_privileged_secure_capture
-                && !desktop_state.requires_secure_capture()
-                && last_secure_desktop_seen
-                    .is_some_and(|last_seen| last_seen.elapsed() >= SECURE_DESKTOP_EXIT_DEBOUNCE)
-            {
-                let stop_requested = crate::portable_service::client::stop_secure_capture_helper(
-                    "secure desktop exit stabilized",
-                );
-                log::info!(
-                    "secure desktop exit stabilized; leaving SYSTEM helper capture after {}ms, stop_requested={}",
-                    SECURE_DESKTOP_EXIT_DEBOUNCE.as_millis(),
-                    stop_requested
-                );
-                bail!("SWITCH");
+            if using_privileged_secure_capture && secure_exit_stabilized {
+                if desktop_state.desktop_changed {
+                    // The portable capturer owns no desktop-bound graphics
+                    // objects in this thread; its backend lives in the helper.
+                    crate::platform::try_change_desktop();
+                }
+                // Recheck after rebinding: UAC may have returned or querying
+                // the input desktop may now fail. Keep secure capture then.
+                desktop_state = crate::platform::windows::capture_desktop_state();
+                secure_desktop_handoff.observe(desktop_state, Instant::now());
+                if desktop_state.allows_interactive_capture() {
+                    let helper_owned =
+                        crate::portable_service::client::owns_secure_capture_helper();
+                    let stop_requested = helper_owned
+                        && crate::portable_service::client::stop_secure_capture_helper(
+                            "secure desktop exit stabilized",
+                        );
+                    log::info!(
+                        "secure desktop exit stabilized; capture thread rebound, leaving SYSTEM helper capture after {}ms, helper_owned={}, stop_requested={}",
+                        SECURE_DESKTOP_EXIT_DEBOUNCE.as_millis(),
+                        helper_owned,
+                        stop_requested
+                    );
+                    bail!("SWITCH");
+                }
             }
             let retry_preference = *CAPTURE_BACKEND_PREFERENCE.lock().unwrap();
             if c.is_mag()

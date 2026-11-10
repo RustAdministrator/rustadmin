@@ -36,7 +36,10 @@ use winapi::{
 };
 use windows::Win32::Storage::FileSystem::{FILE_GENERIC_EXECUTE, FILE_GENERIC_READ};
 
-use super::video_qos;
+use super::{
+    portable_capture_recovery::{CaptureBackend, CaptureRecoveryAction, CaptureRecoveryPolicy},
+    video_qos,
+};
 
 const SIZE_COUNTER: usize = size_of::<i32>() * 2;
 const FRAME_ALIGN: usize = 64;
@@ -62,6 +65,7 @@ const SHMEM_NAME_MAX_LEN: usize = 64;
 const MAX_NACK: usize = 3;
 const PORTABLE_SERVICE_STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const PORTABLE_SERVICE_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+const PORTABLE_SERVICE_BACKEND_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_SECURE_CAPTURE_RECOVERY_FAILURES: u64 = 3;
 const SECURE_CAPTURE_RECOVERY_BACKOFF: Duration = Duration::from_secs(15);
 const MAX_DXGI_FAIL_TIME: usize = 5;
@@ -624,9 +628,9 @@ pub mod server {
         let mut last_current_display = usize::MAX;
         let mut last_timeout_ms: i32 = 33;
         let mut spf = Duration::from_millis(last_timeout_ms as _);
-        let mut first_frame_captured = false;
+        let mut capture_recovery = CaptureRecoveryPolicy::default();
+        let mut backend_started_at = std::time::Instant::now();
         let mut dxgi_failed_times = 0;
-        let mut force_gdi_after_rebind = false;
         let mut display_width = 0;
         let mut display_height = 0;
         loop {
@@ -649,9 +653,9 @@ pub mod server {
                             c.as_ref().map(|capturer| capturer.capture_backend()).unwrap_or("none")
                         );
                         c = None;
-                        first_frame_captured = false;
+                        capture_recovery.reset_for_rebind();
+                        backend_started_at = std::time::Instant::now();
                         dxgi_failed_times = 0;
-                        force_gdi_after_rebind = true;
                     }
                     CaptureDesktopRebindAction::Retry => {
                         shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(TRUE));
@@ -676,12 +680,49 @@ pub mod server {
                     display_height = display.height();
                     match Capturer::new(display) {
                         Ok(mut v) => {
-                            let force_gdi =
-                                force_gdi_after_rebind || desktop_state.requires_secure_capture();
+                            let force_gdi = capture_recovery.gdi_required()
+                                || desktop_state.requires_secure_capture()
+                                || dxgi_failed_times > MAX_DXGI_FAIL_TIME;
                             let mut forced_gdi = false;
-                            if force_gdi || dxgi_failed_times > MAX_DXGI_FAIL_TIME {
+                            if force_gdi {
+                                capture_recovery.require_gdi();
                                 dxgi_failed_times = 0;
                                 forced_gdi = v.set_gdi();
+                            }
+                            if force_gdi && !v.is_gdi() {
+                                if matches!(
+                                    capture_recovery.no_frame_action(
+                                        backend_started_at.elapsed(),
+                                        PORTABLE_SERVICE_BACKEND_FIRST_FRAME_TIMEOUT,
+                                    ),
+                                    CaptureRecoveryAction::FailHelper
+                                ) {
+                                    log::error!(
+                                        "portable service capture could not create forced GDI backend before deadline; reporting capture failure"
+                                    );
+                                    shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(FALSE));
+                                    return;
+                                }
+                                log::warn!(
+                                    "portable service capture could not force GDI; retrying backend creation, backend={}, set_gdi={}",
+                                    v.capture_backend(),
+                                    forced_gdi
+                                );
+                                std::thread::sleep(spf);
+                                continue;
+                            }
+                            let backend = if v.is_gdi() {
+                                CaptureBackend::Gdi
+                            } else {
+                                CaptureBackend::Dxgi
+                            };
+                            if !capture_recovery.backend_created(backend) {
+                                log::warn!(
+                                    "portable service capture rejected non-GDI backend while GDI recovery is required: backend={}",
+                                    v.capture_backend()
+                                );
+                                std::thread::sleep(spf);
+                                continue;
                             }
                             log::info!(
                                 "portable service capture created: display={}, size={}x{}, prelogin={}, locked={}, desktop_changed={}, logon_ui={}, input_desktop={}, force_gdi={}, forced_gdi={}, backend={}, is_gdi={}",
@@ -700,8 +741,7 @@ pub mod server {
                             );
                             c = {
                                 last_current_display = current_display;
-                                first_frame_captured = false;
-                                force_gdi_after_rebind = false;
+                                backend_started_at = std::time::Instant::now();
                                 utils::set_para(
                                     &shmem,
                                     CapturerPara {
@@ -714,7 +754,24 @@ pub mod server {
                             }
                         }
                         Err(e) => {
-                            log::error!("Failed to create gdi capturer: {:?}", e);
+                            if matches!(
+                                capture_recovery.no_frame_action(
+                                    backend_started_at.elapsed(),
+                                    PORTABLE_SERVICE_BACKEND_FIRST_FRAME_TIMEOUT,
+                                ),
+                                CaptureRecoveryAction::FailHelper
+                            ) {
+                                log::error!(
+                                    "portable service capture backend creation exceeded first-frame deadline; reporting capture failure: {:?}",
+                                    e
+                                );
+                                shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(FALSE));
+                                return;
+                            }
+                            log::error!(
+                                "Failed to create portable service capture backend: {:?}",
+                                e
+                            );
                             std::thread::sleep(std::time::Duration::from_secs(1));
                             continue;
                         }
@@ -727,6 +784,8 @@ pub mod server {
                             current_display,
                         );
                         c = None;
+                        capture_recovery.reset_for_recreation();
+                        backend_started_at = std::time::Instant::now();
                         continue;
                     }
                     if timeout_ms != last_timeout_ms
@@ -737,7 +796,7 @@ pub mod server {
                         spf = Duration::from_millis(timeout_ms as _);
                     }
                 }
-                if first_frame_captured {
+                if capture_recovery.first_frame_received() {
                     if !utils::counter_equal(shmem.as_ptr().add(ADDR_CAPTURE_FRAME_COUNTER)) {
                         std::thread::sleep(std::time::Duration::from_millis(1));
                         continue;
@@ -770,7 +829,7 @@ pub mod server {
                             shmem.write(ADDR_CAPTURE_FRAME, f.data());
                             shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(TRUE));
                             utils::increase_counter(shmem.as_ptr().add(ADDR_CAPTURE_FRAME_COUNTER));
-                            if !first_frame_captured {
+                            if !capture_recovery.first_frame_received() {
                                 log::info!(
                                     "portable service capture first frame: backend={}, is_gdi={}, frame_len={}, size={}x{}, sampled_bgr_sum={}",
                                     capture_backend,
@@ -781,7 +840,7 @@ pub mod server {
                                     sampled_bgr_sum(f.data())
                                 );
                             }
-                            first_frame_captured = true;
+                            capture_recovery.frame_succeeded();
                             dxgi_failed_times = 0;
                         }
                         Frame::Texture(_) => {
@@ -797,8 +856,40 @@ pub mod server {
                                 e
                             );
                             c = None;
+                            capture_recovery.reset_for_rebind();
+                            backend_started_at = std::time::Instant::now();
+                            dxgi_failed_times = 0;
                             std::thread::sleep(spf);
                             continue;
+                        }
+                        match capture_recovery.no_frame_action(
+                            backend_started_at.elapsed(),
+                            PORTABLE_SERVICE_BACKEND_FIRST_FRAME_TIMEOUT,
+                        ) {
+                            CaptureRecoveryAction::FallbackToGdi => {
+                                log::warn!(
+                                    "portable service capture backend produced no first frame before deadline; retrying with forced GDI, backend={}, elapsed_ms={}",
+                                    capture_backend,
+                                    backend_started_at.elapsed().as_millis()
+                                );
+                                c = None;
+                                capture_recovery.require_gdi();
+                                capture_recovery.reset_for_recreation();
+                                backend_started_at = std::time::Instant::now();
+                                dxgi_failed_times = 0;
+                                shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(TRUE));
+                                std::thread::sleep(spf);
+                                continue;
+                            }
+                            CaptureRecoveryAction::FailHelper => {
+                                log::error!(
+                                    "portable service GDI backend produced no first frame before deadline; reporting capture failure, elapsed_ms={}",
+                                    backend_started_at.elapsed().as_millis()
+                                );
+                                shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(FALSE));
+                                return;
+                            }
+                            CaptureRecoveryAction::Wait => {}
                         }
                         if e.kind() != std::io::ErrorKind::WouldBlock {
                             // DXGI_ERROR_INVALID_CALL after each success on Microsoft GPU driver
@@ -809,7 +900,10 @@ pub mod server {
                             }
                             if dxgi_failed_times > MAX_DXGI_FAIL_TIME {
                                 c = None;
-                                shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(FALSE));
+                                capture_recovery.require_gdi();
+                                capture_recovery.reset_for_recreation();
+                                backend_started_at = std::time::Instant::now();
+                                shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(TRUE));
                                 std::thread::sleep(spf);
                             }
                         } else {
@@ -1551,6 +1645,14 @@ pub mod client {
         (lifecycle.state == LifecycleState::Ready).then_some(lifecycle.generation)
     }
 
+    fn owns_secure_capture_helper_generation(generation: u64) -> bool {
+        generation != 0 && SECURE_DESKTOP_HELPER_GENERATION.load(Ordering::SeqCst) == generation
+    }
+
+    pub fn owns_secure_capture_helper() -> bool {
+        ready_generation().is_some_and(owns_secure_capture_helper_generation)
+    }
+
     pub fn ready_for_capture() -> bool {
         ready_generation().is_some()
     }
@@ -1618,12 +1720,11 @@ pub mod client {
         let Some(generation) = ready_generation() else {
             return false;
         };
-        let owner_generation = SECURE_DESKTOP_HELPER_GENERATION.load(Ordering::SeqCst);
-        if generation == 0 || owner_generation != generation {
+        if !owns_secure_capture_helper_generation(generation) {
             log::debug!(
                 "Keep non-owned portable service generation running: generation={}, secure_owner_generation={}, reason={}",
                 generation,
-                owner_generation,
+                SECURE_DESKTOP_HELPER_GENERATION.load(Ordering::SeqCst),
                 reason
             );
             return false;
@@ -1793,6 +1894,19 @@ pub mod client {
                         self.height,
                     )))
                 } else {
+                    let ptr = base.add(ADDR_CAPTURE_WOULDBLOCK);
+                    let wouldblock = utils::ptr_to_i32(ptr);
+                    if wouldblock != TRUE {
+                        drop(lock);
+                        request_secure_capture_restart(
+                            self.generation,
+                            "portable service helper reported capture failure",
+                        );
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "portable service helper reported capture failure".to_string(),
+                        ));
+                    }
                     if first_frame_timed_out(
                         self.first_frame_received,
                         self.started_at.elapsed(),
@@ -1808,19 +1922,10 @@ pub mod client {
                             "portable service first frame timeout".to_string(),
                         ));
                     }
-                    let ptr = base.add(ADDR_CAPTURE_WOULDBLOCK);
-                    let wouldblock = utils::ptr_to_i32(ptr);
-                    if wouldblock == TRUE {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::WouldBlock,
-                            "wouldblock error".to_string(),
-                        ))
-                    } else {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "other error".to_string(),
-                        ))
-                    }
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "wouldblock error".to_string(),
+                    ))
                 }
             }
         }
@@ -2356,6 +2461,26 @@ pub mod client {
                 .lock()
                 .unwrap()
                 .is_none());
+        }
+
+        #[test]
+        fn test_secure_capture_helper_ownership_requires_ready_owned_generation() {
+            let _lock = TEST_STATE_LOCK.lock().unwrap();
+            let _guard = InputRouteStateGuard::set(true, false);
+
+            SECURE_DESKTOP_HELPER_GENERATION.store(1, Ordering::SeqCst);
+            assert!(owns_secure_capture_helper());
+
+            SECURE_DESKTOP_HELPER_GENERATION.store(2, Ordering::SeqCst);
+            assert!(!owns_secure_capture_helper());
+            SECURE_DESKTOP_HELPER_GENERATION.store(0, Ordering::SeqCst);
+            assert!(!owns_secure_capture_helper());
+
+            SECURE_DESKTOP_HELPER_GENERATION.store(1, Ordering::SeqCst);
+            LIFECYCLE.lock().unwrap().state = LifecycleState::Starting;
+            assert!(!owns_secure_capture_helper());
+            LIFECYCLE.lock().unwrap().state = LifecycleState::Stopped;
+            assert!(!owns_secure_capture_helper());
         }
 
         #[test]
