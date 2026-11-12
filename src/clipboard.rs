@@ -164,7 +164,7 @@ lazy_static::lazy_static! {
     static ref CLIPBOARD_TIMING: Arc<Mutex<ClipboardTiming>> = Arc::new(Mutex::new(ClipboardTiming::default()));
     static ref REMOTE_CLIPBOARD_APPLY_GUARD: Arc<Mutex<RemoteClipboardApplyGuard>> = Arc::new(Mutex::new(RemoteClipboardApplyGuard::default()));
     // cache the clipboard msg
-    static ref LAST_MULTI_CLIPBOARDS: Arc<Mutex<MultiClipboards>> = Arc::new(Mutex::new(MultiClipboards::new()));
+    static ref LAST_MULTI_CLIPBOARDS: Arc<Mutex<ClipboardCache>> = Arc::new(Mutex::new(ClipboardCache::default()));
     // For updating in server and getting content in cm.
     // Clipboard on Linux is "server--clients" mode.
     // The clipboard content is owned by the server and passed to the clients when requested.
@@ -197,6 +197,25 @@ struct RemoteClipboardApplyRecord {
     side: ClipboardSide,
     signature: Vec<u8>,
     observed_at: Instant,
+}
+
+#[cfg(not(target_os = "android"))]
+#[derive(Default)]
+struct ClipboardCache {
+    clipboards: MultiClipboards,
+    revision: u64,
+}
+
+#[cfg(not(target_os = "android"))]
+impl ClipboardCache {
+    fn publish(&mut self, clipboards: MultiClipboards) {
+        self.revision = self.revision.wrapping_add(1);
+        self.clipboards = clipboards;
+    }
+
+    fn clear(&mut self) {
+        self.publish(MultiClipboards::new());
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -300,7 +319,44 @@ fn mark_remote_clipboard_applied(side: ClipboardSide) {
 
 #[cfg(not(target_os = "android"))]
 fn clear_cached_clipboard() {
-    *LAST_MULTI_CLIPBOARDS.lock().unwrap() = MultiClipboards::new();
+    let mut cache = LAST_MULTI_CLIPBOARDS.lock().unwrap();
+    cache.clear();
+}
+
+#[cfg(not(target_os = "android"))]
+fn publish_cached_clipboard(clipboards: MultiClipboards) {
+    let mut cache = LAST_MULTI_CLIPBOARDS.lock().unwrap();
+    cache.publish(clipboards);
+}
+
+#[cfg(not(target_os = "android"))]
+// Native clipboard reads can re-enter cache invalidation. Keep the read outside
+// the mutex, then let the revision preserve newer publishes or empty invalidations.
+fn read_clipboard_with_cache<F>(
+    cache: &Mutex<ClipboardCache>,
+    read: F,
+) -> Option<MultiClipboards>
+where
+    F: FnOnce() -> Option<MultiClipboards>,
+{
+    let (cached, revision) = {
+        let cache = cache.lock().unwrap();
+        (cache.clipboards.clone(), cache.revision)
+    };
+    if !cached.clipboards.is_empty() {
+        return Some(cached);
+    }
+
+    let fresh = read()?;
+    let mut cache = cache.lock().unwrap();
+    if cache.revision == revision {
+        cache.publish(fresh);
+    }
+    if cache.clipboards.clipboards.is_empty() {
+        None
+    } else {
+        Some(cache.clipboards.clone())
+    }
 }
 
 #[cfg(not(target_os = "android"))]
@@ -1500,7 +1556,7 @@ pub fn check_clipboard(
                 let mut msg = Message::new();
                 let clipboards = proto::create_multi_clipboards(content);
                 msg.set_multi_clipboards(clipboards.clone());
-                *LAST_MULTI_CLIPBOARDS.lock().unwrap() = clipboards;
+                publish_cached_clipboard(clipboards);
                 return Some(msg);
             }
         }
@@ -2090,18 +2146,14 @@ pub fn get_current_clipboard_msg(
         }
     }
 
-    let mut multi_clipboards = LAST_MULTI_CLIPBOARDS.lock().unwrap();
-    if multi_clipboards.clipboards.is_empty() {
+    let multi_clipboards = read_clipboard_with_cache(LAST_MULTI_CLIPBOARDS.as_ref(), || {
         let mut ctx = ClipboardContext::new().ok()?;
         let content = ctx.get(side, true).ok()?;
         if !content.is_empty() {
             mark_local_clipboard_change(side);
         }
-        *multi_clipboards = proto::create_multi_clipboards(content);
-    }
-    if multi_clipboards.clipboards.is_empty() {
-        return None;
-    }
+        Some(proto::create_multi_clipboards(content))
+    })?;
 
     if is_support_multi_clipboard(peer_version, peer_platform) {
         let mut msg = Message::new();
@@ -2767,6 +2819,127 @@ mod clipboard_timing_tests {
             macos_external_opaque_signature_from_format_names(2882, &names, |_| false).as_deref(),
             Some("macos:2882:remote-promise")
         );
+    }
+}
+
+#[cfg(all(test, not(target_os = "android")))]
+mod clipboard_cache_tests {
+    use super::*;
+    use std::thread;
+
+    fn cache() -> Arc<Mutex<ClipboardCache>> {
+        Arc::new(Mutex::new(ClipboardCache::default()))
+    }
+
+    fn payload(text: &str) -> MultiClipboards {
+        MultiClipboards {
+            clipboards: vec![Clipboard {
+                content: text.as_bytes().to_vec().into(),
+                format: hbb_common::message_proto::ClipboardFormat::Text.into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn native_read_can_clear_cache_after_lock_is_released() {
+        let cache = cache();
+
+        let result = read_clipboard_with_cache(cache.as_ref(), || {
+            assert!(cache.try_lock().is_ok());
+            let mut cache = cache.lock().unwrap();
+            cache.clear();
+            Some(payload("stale"))
+        });
+
+        assert!(result.is_none());
+        assert!(cache.lock().unwrap().clipboards.clipboards.is_empty());
+    }
+
+    #[test]
+    fn newer_cache_publish_wins_over_late_read() {
+        let cache = cache();
+        let newer = payload("newer");
+        let publisher_cache = Arc::clone(&cache);
+
+        let result = read_clipboard_with_cache(cache.as_ref(), move || {
+            let publisher = thread::spawn(move || {
+                let mut cache = publisher_cache
+                    .try_lock()
+                    .expect("cache lock must be released before a concurrent publish");
+                cache.publish(newer);
+            });
+            publisher.join().unwrap();
+            Some(payload("stale"))
+        });
+
+        assert_eq!(result.unwrap().clipboards[0].content.as_ref(), b"newer");
+    }
+
+    #[test]
+    fn newer_invalidation_prevents_stale_republish() {
+        let cache = cache();
+
+        let result = read_clipboard_with_cache(cache.as_ref(), || {
+            let mut cache = cache
+                .try_lock()
+                .expect("cache lock must be released before invalidation");
+            cache.clear();
+            Some(payload("stale"))
+        });
+
+        assert!(result.is_none());
+        let cache = cache.lock().unwrap();
+        assert!(cache.clipboards.clipboards.is_empty());
+        assert_eq!(cache.revision, 1);
+    }
+
+    #[test]
+    fn cached_path_skips_native_read() {
+        let cache = cache();
+        let cached = payload("cached");
+        cache.lock().unwrap().publish(cached.clone());
+
+        let result = read_clipboard_with_cache(cache.as_ref(), || {
+            panic!("cached clipboard must skip native read")
+        });
+
+        assert_eq!(
+            result.unwrap().clipboards[0].content.as_ref(),
+            cached.clipboards[0].content.as_ref()
+        );
+    }
+
+    #[test]
+    fn unchanged_successful_read_publishes_payload() {
+        let cache = cache();
+        let fresh = payload("fresh");
+
+        let result = read_clipboard_with_cache(cache.as_ref(), || Some(fresh.clone()));
+
+        assert_eq!(
+            result.unwrap().clipboards[0].content.as_ref(),
+            fresh.clipboards[0].content.as_ref()
+        );
+        let cache = cache.lock().unwrap();
+        assert_eq!(
+            cache.clipboards.clipboards[0].content.as_ref(),
+            fresh.clipboards[0].content.as_ref()
+        );
+        assert_eq!(cache.revision, 1);
+    }
+
+    #[test]
+    fn failed_native_read_leaves_cache_unchanged() {
+        let cache = cache();
+
+        let result = read_clipboard_with_cache(cache.as_ref(), || None);
+
+        assert!(result.is_none());
+        let cache = cache.lock().unwrap();
+        assert!(cache.clipboards.clipboards.is_empty());
+        assert_eq!(cache.revision, 0);
     }
 }
 
