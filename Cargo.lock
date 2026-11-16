@@ -355,7 +355,7 @@ checksum = "c8828ec6e544c02b0d6691d21ed9f9218d0384a82542855073c2a3f58304aaf0"
 dependencies = [
  "async-task",
  "concurrent-queue",
- "fastrand 2.1.0",
+ "fastrand 2.5.0",
  "futures-lite 2.3.0",
  "slab",
 ]
@@ -416,7 +416,7 @@ dependencies = [
  "futures-lite 2.3.0",
  "parking",
  "polling 3.7.2",
- "rustix 0.38.34",
+ "rustix 0.38.44",
  "slab",
  "tracing",
  "windows-sys 0.52.0",
@@ -455,7 +455,7 @@ dependencies = [
  "cfg-if 1.0.0",
  "event-listener 3.1.0",
  "futures-lite 1.13.0",
- "rustix 0.38.34",
+ "rustix 0.38.44",
  "windows-sys 0.48.0",
 ]
 
@@ -500,7 +500,7 @@ dependencies = [
  "cfg-if 1.0.0",
  "futures-core",
  "futures-io",
- "rustix 0.38.34",
+ "rustix 0.38.44",
  "signal-hook-registry",
  "slab",
  "windows-sys 0.52.0",
@@ -977,7 +977,7 @@ dependencies = [
  "bitflags 2.9.1",
  "log",
  "polling 3.7.2",
- "rustix 0.38.34",
+ "rustix 0.38.44",
  "slab",
  "thiserror 1.0.61",
 ]
@@ -1002,7 +1002,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "95a66a987056935f7efce4ab5668920b5d0dac4a7c99991a67395f13702ddd20"
 dependencies = [
  "calloop 0.13.0",
- "rustix 0.38.34",
+ "rustix 0.38.44",
  "wayland-backend",
  "wayland-client",
 ]
@@ -2156,7 +2156,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2193,7 +2193,7 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330c60081dcc4c72131f8eb70510f1ac07223e5d4163db481a04a0befcffa412"
 dependencies = [
- "libloading 0.8.4",
+ "libloading 0.7.4",
 ]
 
 [[package]]
@@ -2299,7 +2299,7 @@ dependencies = [
  "bytemuck",
  "drm-ffi",
  "drm-fourcc",
- "rustix 0.38.34",
+ "rustix 0.38.44",
 ]
 
 [[package]]
@@ -2309,7 +2309,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97c98727e48b7ccb4f4aea8cfe881e5b07f702d17b7875991881b41af7278d53"
 dependencies = [
  "drm-sys",
- "rustix 0.38.34",
+ "rustix 0.38.44",
 ]
 
 [[package]]
@@ -2501,7 +2501,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2600,9 +2600,9 @@ dependencies = [
 
 [[package]]
 name = "fastrand"
-version = "2.1.0"
+version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9fc0510504f03c51ada170672ac806f1f105a88aa97a5281117e1ddc3368e51a"
+checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "fdeflate"
@@ -2940,7 +2940,7 @@ version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52527eb5074e35e9339c6b4e8d12600c7128b68fb25dcb9fa9dec18f7c25f3a5"
 dependencies = [
- "fastrand 2.1.0",
+ "fastrand 2.5.0",
  "futures-core",
  "futures-io",
  "parking",
@@ -4220,7 +4220,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e310b3a6b5907f99202fcdb4960ff45b93735d7c7d96b760fcff8db2dc0e103d"
 dependencies = [
  "cfg-if 1.0.0",
- "windows-targets 0.48.5",
+ "windows-targets 0.52.6",
 ]
 
 [[package]]
@@ -5600,12 +5600,12 @@ dependencies = [
 
 [[package]]
 name = "os_pipe"
-version = "1.2.0"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29d73ba8daf8fac13b0501d1abeddcfe21ba7401ada61a819144b6c2a4f32209"
+checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.45.0",
 ]
 
 [[package]]
@@ -5940,7 +5940,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae1d5c74c9876f070d3e8fd503d748c7d974c3e48da8f41350fa5222ef9b4391"
 dependencies = [
  "atomic-waker",
- "fastrand 2.1.0",
+ "fastrand 2.5.0",
  "futures-io",
 ]
 
@@ -6016,7 +6016,7 @@ dependencies = [
  "concurrent-queue",
  "hermit-abi 0.4.0",
  "pin-project-lite",
- "rustix 0.38.34",
+ "rustix 0.38.44",
  "tracing",
  "windows-sys 0.52.0",
 ]
@@ -7026,15 +7026,15 @@ dependencies = [
 
 [[package]]
 name = "rustix"
-version = "0.38.34"
+version = "0.38.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70dc5ec042f7a43c4a73241207cecc9873a06d45debb38b329f8541d85c2730f"
+checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
 dependencies = [
  "bitflags 2.9.1",
  "errno",
  "libc",
  "linux-raw-sys 0.4.14",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7047,7 +7047,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.11.0",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7105,7 +7105,7 @@ dependencies = [
  "security-framework 3.5.1",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -7552,7 +7552,7 @@ dependencies = [
  "libc",
  "log",
  "memmap2",
- "rustix 0.38.34",
+ "rustix 0.38.44",
  "thiserror 1.0.61",
  "wayland-backend",
  "wayland-client",
@@ -7654,7 +7654,7 @@ dependencies = [
  "cfg_aliases 0.2.1",
  "core-graphics 0.23.2",
  "drm",
- "fastrand 2.1.0",
+ "fastrand 2.5.0",
  "foreign-types 0.5.0",
  "js-sys",
  "log",
@@ -7665,7 +7665,7 @@ dependencies = [
  "objc2-quartz-core 0.2.2",
  "raw-window-handle",
  "redox_syscall 0.5.2",
- "rustix 0.38.34",
+ "rustix 0.38.44",
  "tiny-xlib",
  "wasm-bindgen",
  "wayland-backend",
@@ -8001,14 +8001,15 @@ dependencies = [
 
 [[package]]
 name = "tempfile"
-version = "3.10.1"
+version = "3.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "85b77fafb263dd9d05cbeac119526425676db3784113aa9295c88498cbf8bff1"
+checksum = "2d31c77bdf42a745371d260a26ca7163f1e0924b64afa0b688e61b5a9fa02f16"
 dependencies = [
- "cfg-if 1.0.0",
- "fastrand 2.1.0",
- "rustix 0.38.34",
- "windows-sys 0.52.0",
+ "fastrand 2.5.0",
+ "getrandom 0.3.2",
+ "once_cell",
+ "rustix 1.1.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -9100,7 +9101,7 @@ version = "0.31.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ef9489a8df197ebf3a8ce8a7a7f0a2320035c3743f3c1bd0bdbccf07ce64f95"
 dependencies = [
- "rustix 0.38.34",
+ "rustix 0.38.44",
  "wayland-client",
  "xcursor",
 ]
@@ -9158,9 +9159,9 @@ dependencies = [
 
 [[package]]
 name = "wayland-protocols-wlr"
-version = "0.3.3"
+version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd993de54a40a40fbe5601d9f1fbcaef0aebcc5fda447d7dc8f6dcbaae4f8953"
+checksum = "efd94963ed43cf9938a090ca4f7da58eb55325ec8200c3848963e98dc25b78ec"
 dependencies = [
  "bitflags 2.9.1",
  "wayland-backend",
@@ -9270,7 +9271,7 @@ dependencies = [
  "either",
  "home",
  "once_cell",
- "rustix 0.38.34",
+ "rustix 0.38.44",
 ]
 
 [[package]]
@@ -9768,15 +9769,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "windows-sys"
-version = "0.61.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
-dependencies = [
- "windows-link 0.2.1",
-]
-
-[[package]]
 name = "windows-targets"
 version = "0.42.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10138,7 +10130,7 @@ dependencies = [
  "pin-project",
  "raw-window-handle",
  "redox_syscall 0.4.1",
- "rustix 0.38.34",
+ "rustix 0.38.44",
  "sctk-adwaita",
  "smithay-client-toolkit 0.19.2",
  "smol_str",
@@ -10224,14 +10216,14 @@ dependencies = [
 
 [[package]]
 name = "wl-clipboard-rs"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4de22eebb1d1e2bad2d970086e96da0e12cde0b411321e5b0f7b2a1f876aa26f"
+checksum = "2a083daad7e8a4b8805ad73947ccadabe62afe37ce0e9787a56ff373d34762c7"
 dependencies = [
  "libc",
  "log",
  "os_pipe",
- "rustix 0.38.34",
+ "rustix 0.38.44",
  "tempfile",
  "thiserror 1.0.61",
  "tree_magic_mini",
@@ -10328,7 +10320,7 @@ dependencies = [
  "libc",
  "libloading 0.8.4",
  "once_cell",
- "rustix 0.38.34",
+ "rustix 0.38.44",
  "x11rb-protocol 0.13.1",
 ]
 
@@ -10355,7 +10347,7 @@ checksum = "e105d177a3871454f754b33bb0ee637ecaaac997446375fd3e5d43a2ed00c909"
 dependencies = [
  "libc",
  "linux-raw-sys 0.4.14",
- "rustix 0.38.34",
+ "rustix 0.38.44",
 ]
 
 [[package]]
