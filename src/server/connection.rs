@@ -130,13 +130,13 @@ mod video_queue_tests {
     #[test]
     fn advisory_refresh_is_suppressed_when_keyframe_exceeds_half_cwnd() {
         assert!(should_suppress_quic_advisory_refresh(
-            1, false, 0, 50_000, 30_000,
+            1, false, 0, 50_000, 30_000, false,
         ));
         assert!(should_suppress_quic_advisory_refresh(
-            1, false, 0, 12_000, 117_000,
+            1, false, 0, 12_000, 117_000, false,
         ));
         assert!(!should_suppress_quic_advisory_refresh(
-            1, false, 0, 60_000, 30_000,
+            1, false, 0, 60_000, 30_000, false,
         ));
     }
 
@@ -183,6 +183,7 @@ mod video_queue_tests {
             action.recovery_reissue,
             12_000,
             117_000,
+            false,
         ));
         controller.restore_display(0, before.clone());
         assert_eq!(controller.snapshot_display(0), before);
@@ -201,20 +202,59 @@ mod video_queue_tests {
             strict_action.recovery_reissue,
             12_000,
             117_000,
+            false,
         ));
     }
 
     #[test]
     fn strict_and_reissued_refreshes_bypass_quic_cwnd_suppression() {
         assert!(!should_suppress_quic_advisory_refresh(
-            1, true, 0, 10_000, 30_000,
+            1, true, 0, 10_000, 30_000, false,
         ));
         assert!(!should_suppress_quic_advisory_refresh(
-            1, false, 1, 10_000, 30_000,
+            1, false, 1, 10_000, 30_000, false,
         ));
         assert!(!should_suppress_quic_advisory_refresh(
-            0, false, 0, 10_000, 30_000,
+            0, false, 0, 10_000, 30_000, false,
         ));
+    }
+
+    #[test]
+    fn vpx_advisory_refresh_bypasses_quic_cwnd_suppression() {
+        // A 2560x1440 VP9 keyframe of 236 KB needs a 472 KB window; the viewer
+        // never escalates, so suppressing here would leave the gap unrepaired.
+        assert!(!should_suppress_quic_advisory_refresh(
+            1, false, 0, 120_138, 236_200, true,
+        ));
+        assert!(should_suppress_quic_advisory_refresh(
+            1, false, 0, 120_138, 236_200, false,
+        ));
+    }
+
+    #[test]
+    fn delivery_state_tracks_whether_viewer_continues_deltas_after_loss() {
+        let start = Instant::now();
+        let mut controller = VideoDeliveryController::default();
+        let mut send = |stream_id, frame_id, union| {
+            controller.on_frame_sent(
+                &VideoFrame {
+                    display: 0,
+                    stream_id,
+                    frame_id,
+                    union: Some(union),
+                    ..Default::default()
+                },
+                start,
+            );
+            controller
+                .snapshot_display(0)
+                .is_some_and(|state| state.viewer_continues_deltas_after_loss)
+        };
+
+        assert!(send(7, 1, video_frame::Union::Vp9s(Default::default())));
+        assert!(!send(8, 1, video_frame::Union::Av1s(Default::default())));
+        assert!(send(8, 2, video_frame::Union::Vp8s(Default::default())));
+        assert!(!send(8, 3, video_frame::Union::H264s(Default::default())));
     }
 
     #[cfg(feature = "quic-transport")]
@@ -860,6 +900,8 @@ struct VideoDeliveryState {
     phase: VideoDeliveryPhase,
     recovery_count: u64,
     latest_stall_ms: u64,
+    /// The stream's codec is one the viewer keeps decoding after a lost frame.
+    viewer_continues_deltas_after_loss: bool,
 }
 
 impl VideoDeliveryState {
@@ -883,8 +925,20 @@ impl VideoDeliveryState {
             phase: VideoDeliveryPhase::Starting,
             recovery_count: 0,
             latest_stall_ms: 0,
+            viewer_continues_deltas_after_loss: false,
         }
     }
+}
+
+/// After a lost VP8 or VP9 frame the viewer keeps decoding deltas and asks for
+/// a keyframe only with an advisory refresh, which it never escalates to
+/// strict: hbb_common treats only H.264, H.265 and AV1 as reference-sensitive
+/// (`VideoCodec::is_reference_sensitive`).
+fn viewer_continues_deltas_after_loss(frame: &VideoFrame) -> bool {
+    matches!(
+        frame.union,
+        Some(video_frame::Union::Vp8s(_) | video_frame::Union::Vp9s(_))
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -935,15 +989,20 @@ fn should_record_transport_loss(
     )
 }
 
+/// An advisory refresh may wait for the viewer's strict one, except for
+/// streams whose viewer never sends a strict one: suppressing it there leaves
+/// the corrupted picture on screen until something else forces a keyframe.
 fn should_suppress_quic_advisory_refresh(
     dropped_frames: u64,
     strict_recovery: bool,
     recovery_reissue: u8,
     congestion_window_bytes: u64,
     reliable_keyframe_last_bytes: u64,
+    viewer_continues_deltas_after_loss: bool,
 ) -> bool {
     dropped_frames > 0
         && !strict_recovery
+        && !viewer_continues_deltas_after_loss
         && recovery_reissue == 0
         && reliable_keyframe_last_bytes > 0
         && congestion_window_bytes
@@ -1096,8 +1155,10 @@ impl VideoDeliveryController {
             .or_insert_with(|| VideoDeliveryState::new(frame.stream_id, frame.frame_id, now));
         if state.stream_id != frame.stream_id {
             *state = VideoDeliveryState::new(frame.stream_id, frame.frame_id, now);
+            state.viewer_continues_deltas_after_loss = viewer_continues_deltas_after_loss(frame);
             return;
         }
+        state.viewer_continues_deltas_after_loss = viewer_continues_deltas_after_loss(frame);
         let previous_host_frontier = state.host_highest_sent_frame_id;
         if frame.frame_id > previous_host_frontier {
             state.host_highest_sent_frame_id = frame.frame_id;
@@ -5535,6 +5596,9 @@ impl Connection {
                         action.recovery_reissue,
                         stats.congestion_window_bytes,
                         stats.reliable_keyframe_last_bytes,
+                        previous_delivery_state
+                            .as_ref()
+                            .is_some_and(|state| state.viewer_continues_deltas_after_loss),
                     ) {
                         self.video_delivery
                             .restore_display(request.display, previous_delivery_state);
