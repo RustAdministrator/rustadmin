@@ -1333,6 +1333,8 @@ pub fn is_installed() -> bool {
 /// # Implementation notes
 /// - Returns values from a *single* best-matching process_pat (for consistency).
 /// - Avoids repeated scanning by parsing `environ` once per process.
+/// - Prefers processes of the user's login session over processes that run with a
+///   private runtime directory or session bus (see [`is_login_session_env`]).
 fn get_envs<'a>(
     uid: &str,
     process_pat: &str,
@@ -1344,29 +1346,51 @@ fn get_envs<'a>(
         "get_envs: names.len() must be <= 64, got {}",
         names.len()
     );
+    select_most_complete_envs(&scan_process_envs(uid, process_pat, names), names)
+}
 
-    let empty: std::collections::HashMap<&'a str, String> =
-        names.iter().map(|&n| (n, String::new())).collect();
+/// Like [`get_envs`], but returns the values of the most recently started matching
+/// process whose environment has every variable in `required`.
+///
+/// This keeps the "newest process wins" behavior of `ps ... | tail -1` used by the
+/// older per-variable lookup (so a stale process from an earlier login does not win),
+/// while reading every value from the same process and skipping processes outside
+/// the login session.
+fn get_newest_envs<'a>(
+    uid: &str,
+    process_pat: &str,
+    names: &[&'a str],
+    required: &[&str],
+) -> std::collections::HashMap<&'a str, String> {
+    select_newest_envs(&scan_process_envs(uid, process_pat, names), names, required)
+}
 
+const ENV_KEY_XDG_RUNTIME_DIR: &str = "XDG_RUNTIME_DIR";
+const ENV_KEY_SESSION_BUS: &str = "DBUS_SESSION_BUS_ADDRESS";
+
+/// Environment values read from one process for a lookup.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ProcessEnv {
+    /// Values of the requested names, in request order; empty when unset.
+    values: Vec<String>,
+    /// Start time in clock ticks since boot, used to find the newest process.
+    start_time: u64,
+    /// See [`is_login_session_env`].
+    in_login_session: bool,
+}
+
+/// Reads the requested variables from every process of `uid` whose cmdline matches
+/// `process_pat`, in `/proc` order.
+fn scan_process_envs(uid: &str, process_pat: &str, names: &[&str]) -> Vec<ProcessEnv> {
+    let mut candidates = Vec::new();
     let Ok(uid_num) = uid.parse::<u32>() else {
-        return empty;
+        return candidates;
     };
     let Ok(re) = Regex::new(process_pat) else {
-        return empty;
+        return candidates;
     };
-
-    // Used for stable tie-breaking when multiple processes match.
-    // Higher bits correspond to earlier entries in `names`.
-    let name_indices: std::collections::HashMap<&'a str, usize> =
-        names.iter().enumerate().map(|(i, &n)| (n, i)).collect();
-
-    let mut best = empty.clone();
-    let mut best_count = 0usize;
-    let mut best_mask: u64 = 0;
-
-    // Iterate /proc to find matching processes
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return best;
+        return candidates;
     };
 
     for entry in entries.flatten() {
@@ -1391,8 +1415,7 @@ fn get_envs<'a>(
         }
 
         // Check cmdline matches process pattern
-        let cmdline_path = proc_path.join("cmdline");
-        let Ok(cmdline) = std::fs::read(&cmdline_path) else {
+        let Ok(cmdline) = std::fs::read(proc_path.join("cmdline")) else {
             continue;
         };
         let cmdline_str = String::from_utf8_lossy(&cmdline).replace('\0', " ");
@@ -1400,57 +1423,416 @@ fn get_envs<'a>(
             continue;
         }
 
-        // Read environ and extract matching variables
-        let environ_path = proc_path.join("environ");
-        let Ok(environ) = std::fs::read(&environ_path) else {
+        let Ok(environ) = std::fs::read(proc_path.join("environ")) else {
             continue;
         };
+        let start_time = std::fs::read_to_string(proc_path.join("stat"))
+            .ok()
+            .and_then(|stat| parse_stat_start_time(&stat))
+            .unwrap_or(0);
+        candidates.push(parse_process_env(uid, &environ, names, start_time));
+    }
 
-        let mut found = empty.clone();
-        let mut found_count = 0usize;
-        let mut found_mask: u64 = 0;
+    candidates
+}
 
-        for part in environ.split(|&b| b == 0) {
-            if part.is_empty() {
-                continue;
-            }
-            let Some(eq) = part.iter().position(|&b| b == b'=') else {
-                continue;
-            };
-            let key_bytes = &part[..eq];
-            let val_bytes = &part[eq + 1..];
+/// Extracts `starttime` (field 22) from the contents of `/proc/<pid>/stat`.
+fn parse_stat_start_time(stat: &str) -> Option<u64> {
+    // `comm` (field 2) may contain spaces and parentheses, so count fields after
+    // the last ')'. The first field there is `state` (field 3).
+    let rest = &stat[stat.rfind(')')? + 1..];
+    rest.split_whitespace().nth(19)?.parse().ok()
+}
 
-            let Ok(key) = std::str::from_utf8(key_bytes) else {
-                continue;
-            };
-            if let Some(slot) = found.get_mut(key) {
-                if slot.is_empty() {
-                    *slot = String::from_utf8_lossy(val_bytes).into_owned();
-                    found_count += 1;
+/// Parses a NUL-separated `environ` block. Keeps the first value of each name.
+fn parse_process_env(uid: &str, environ: &[u8], names: &[&str], start_time: u64) -> ProcessEnv {
+    let mut values = vec![String::new(); names.len()];
+    let mut runtime_dir: Option<String> = None;
+    let mut session_bus: Option<String> = None;
 
-                    if let Some(&idx) = name_indices.get(key) {
-                        let total = names.len();
-                        if total <= 64 {
-                            let bit = 1u64 << (total - 1 - idx);
-                            found_mask |= bit;
-                        }
-                    }
-
-                    if found_count == names.len() {
-                        return found;
-                    }
-                }
+    for part in environ.split(|&b| b == 0) {
+        let Some(eq) = part.iter().position(|&b| b == b'=') else {
+            continue;
+        };
+        let Ok(key) = std::str::from_utf8(&part[..eq]) else {
+            continue;
+        };
+        let value = || String::from_utf8_lossy(&part[eq + 1..]).into_owned();
+        if let Some(idx) = names.iter().position(|&n| n == key) {
+            if values[idx].is_empty() {
+                values[idx] = value();
             }
         }
-
-        if found_count > best_count || (found_count == best_count && found_mask > best_mask) {
-            best = found;
-            best_count = found_count;
-            best_mask = found_mask;
+        if key == ENV_KEY_XDG_RUNTIME_DIR && runtime_dir.is_none() {
+            runtime_dir = Some(value());
+        } else if key == ENV_KEY_SESSION_BUS && session_bus.is_none() {
+            session_bus = Some(value());
         }
     }
 
-    best
+    ProcessEnv {
+        values,
+        start_time,
+        in_login_session: is_login_session_env(uid, runtime_dir.as_deref(), session_bus.as_deref()),
+    }
+}
+
+/// Returns false for a process that runs with a private `XDG_RUNTIME_DIR` or a
+/// private session bus instead of the user's login session.
+///
+/// Such processes are typical for headless test harnesses, e.g.
+/// `xvfb-run ... dbus-run-session -- app`: inside the private bus an
+/// `xdg-desktop-portal` (or ibus/goa daemon) is started with `DISPLAY` and
+/// `XAUTHORITY` of the Xvfb server. Taking the display from such a process makes
+/// the service believe the session display changed and restart `--server`,
+/// dropping every active connection.
+///
+/// The user's session uses `/run/user/<uid>` (the same directory `--server` is
+/// started with) and, with a systemd user bus, `unix:path=/run/user/<uid>/bus`.
+/// Missing variables are not treated as foreign.
+fn is_login_session_env(uid: &str, runtime_dir: Option<&str>, session_bus: Option<&str>) -> bool {
+    let expected = format!("/run/user/{uid}");
+    if let Some(dir) = runtime_dir.filter(|dir| !dir.is_empty()) {
+        if dir.trim_end_matches('/') != expected {
+            return false;
+        }
+    }
+    if let Some(address) = session_bus.filter(|address| !address.is_empty()) {
+        if !is_session_bus_in_dir(address, &expected) {
+            return false;
+        }
+    }
+    true
+}
+
+/// True if any address in a D-Bus address list points into `dir`.
+fn is_session_bus_in_dir(address_list: &str, dir: &str) -> bool {
+    address_list.split(';').any(|address| {
+        let Some(params) = address.strip_prefix("unix:") else {
+            return false;
+        };
+        params.split(',').any(|param| match param.split_once('=') {
+            // Resolved against the process's own XDG_RUNTIME_DIR, checked separately.
+            Some(("runtime", "yes")) => true,
+            Some(("path" | "dir", value)) => {
+                value == dir
+                    || value
+                        .strip_prefix(dir)
+                        .is_some_and(|rest| rest.starts_with('/'))
+            }
+            _ => false,
+        })
+    })
+}
+
+/// Keeps only processes of the login session, unless there are none.
+///
+/// Falling back to every candidate keeps the previous behavior on systems where
+/// the session does not use `/run/user/<uid>` (for example a session bus started
+/// by `dbus-launch`).
+fn prefer_login_session<'c>(candidates: Vec<&'c ProcessEnv>) -> Vec<&'c ProcessEnv> {
+    if candidates.iter().any(|c| c.in_login_session) {
+        candidates
+            .into_iter()
+            .filter(|c| c.in_login_session)
+            .collect()
+    } else {
+        candidates
+    }
+}
+
+fn envs_to_map<'a>(
+    names: &[&'a str],
+    best: Option<&ProcessEnv>,
+) -> std::collections::HashMap<&'a str, String> {
+    names
+        .iter()
+        .enumerate()
+        .map(|(idx, &name)| {
+            let value = best
+                .and_then(|c| c.values.get(idx).cloned())
+                .unwrap_or_default();
+            (name, value)
+        })
+        .collect()
+}
+
+/// Picks the process with the most requested variables set. Ties go to the process
+/// that has the earlier names in `names`, then to the first one in `/proc` order.
+fn select_most_complete_envs<'a>(
+    candidates: &[ProcessEnv],
+    names: &[&'a str],
+) -> std::collections::HashMap<&'a str, String> {
+    let rank = |c: &ProcessEnv| {
+        let mut count = 0usize;
+        let mut mask = 0u64;
+        for (idx, value) in c.values.iter().enumerate() {
+            if !value.is_empty() {
+                count += 1;
+                // Higher bits correspond to earlier entries in `names`.
+                if names.len() <= 64 {
+                    mask |= 1u64 << (names.len() - 1 - idx);
+                }
+            }
+        }
+        (count, mask)
+    };
+
+    let mut best: Option<&ProcessEnv> = None;
+    let mut best_rank = (0usize, 0u64);
+    for candidate in prefer_login_session(candidates.iter().collect()) {
+        let candidate_rank = rank(candidate);
+        if candidate_rank > best_rank {
+            best = Some(candidate);
+            best_rank = candidate_rank;
+        }
+    }
+    envs_to_map(names, best)
+}
+
+/// Picks the most recently started process that has all `required` variables set.
+/// Ties go to the later process in `/proc` order, like `ps ... | tail -1`.
+fn select_newest_envs<'a>(
+    candidates: &[ProcessEnv],
+    names: &[&'a str],
+    required: &[&str],
+) -> std::collections::HashMap<&'a str, String> {
+    let required_idx: Vec<usize> = required
+        .iter()
+        .filter_map(|r| names.iter().position(|n| n == r))
+        .collect();
+    let usable = candidates
+        .iter()
+        .filter(|c| {
+            required_idx
+                .iter()
+                .all(|&idx| c.values.get(idx).is_some_and(|v| !v.is_empty()))
+        })
+        .collect();
+    let best = prefer_login_session(usable)
+        .into_iter()
+        .max_by_key(|c| c.start_time);
+    envs_to_map(names, best)
+}
+
+#[cfg(test)]
+mod session_env_tests {
+    use super::*;
+
+    const NAMES: [&str; 4] = [
+        "DISPLAY",
+        "XAUTHORITY",
+        "WAYLAND_DISPLAY",
+        "DBUS_SESSION_BUS_ADDRESS",
+    ];
+
+    fn environ(vars: &[(&str, &str)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (key, value) in vars {
+            out.extend_from_slice(format!("{key}={value}").as_bytes());
+            out.push(0);
+        }
+        out
+    }
+
+    /// `xdg-desktop-portal` of the GNOME session.
+    fn session_portal(start_time: u64) -> ProcessEnv {
+        parse_process_env(
+            "1000",
+            &environ(&[
+                ("XDG_RUNTIME_DIR", "/run/user/1000"),
+                ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
+                ("DISPLAY", ":0"),
+                ("WAYLAND_DISPLAY", "wayland-0"),
+                ("XAUTHORITY", "/run/user/1000/.mutter-Xwaylandauth.IK3UY3"),
+            ]),
+            &NAMES,
+            start_time,
+        )
+    }
+
+    /// `xdg-desktop-portal` started inside
+    /// `xvfb-run env XDG_RUNTIME_DIR=$tmp/run dbus-run-session -- app`.
+    fn harness_portal(start_time: u64) -> ProcessEnv {
+        parse_process_env(
+            "1000",
+            &environ(&[
+                ("XDG_RUNTIME_DIR", "/tmp/tmp.65BerLu9np/run"),
+                (
+                    "DBUS_SESSION_BUS_ADDRESS",
+                    "unix:path=/tmp/dbus-s5wDoG0Xx8,guid=093d171f38202c00d993388e6afa087e",
+                ),
+                ("DISPLAY", ":99"),
+                ("XAUTHORITY", "/tmp/xvfb-run.0NZu6P/Xauthority"),
+            ]),
+            &NAMES,
+            start_time,
+        )
+    }
+
+    #[test]
+    fn session_env_classification() {
+        assert!(is_login_session_env(
+            "1000",
+            Some("/run/user/1000"),
+            Some("unix:path=/run/user/1000/bus")
+        ));
+        assert!(is_login_session_env("1000", Some("/run/user/1000/"), None));
+        assert!(is_login_session_env("1000", None, None));
+        assert!(is_login_session_env("1000", Some(""), Some("")));
+        assert!(is_login_session_env(
+            "1000",
+            None,
+            Some("unix:runtime=yes;unix:path=/tmp/fallback")
+        ));
+        assert!(!is_login_session_env(
+            "1000",
+            Some("/tmp/tmp.65BerLu9np/run"),
+            Some("unix:path=/run/user/1000/bus")
+        ));
+        assert!(!is_login_session_env(
+            "1000",
+            Some("/run/user/1000"),
+            Some("unix:path=/tmp/dbus-s5wDoG0Xx8,guid=093d171f")
+        ));
+        assert!(!is_login_session_env(
+            "1000",
+            None,
+            Some("unix:abstract=/tmp/dbus-AbCdEf,guid=093d171f")
+        ));
+        // Another user's runtime directory, and a prefix that is not a parent dir.
+        assert!(!is_login_session_env("1000", Some("/run/user/1001"), None));
+        assert!(!is_login_session_env(
+            "1000",
+            None,
+            Some("unix:path=/run/user/10000/bus")
+        ));
+    }
+
+    #[test]
+    fn stat_start_time() {
+        let stat = "277244 (dbus-broker-lau) S 1 277244 277244 0 -1 4194560 \
+                    300 0 0 0 1 0 0 0 20 0 1 0 9876543 10000000 500";
+        assert_eq!(parse_stat_start_time(stat), Some(9876543));
+        let stat = "42 (a) b) (c) R 1 42 42 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 77 0 0";
+        assert_eq!(parse_stat_start_time(stat), Some(77));
+        assert_eq!(parse_stat_start_time("42 (truncated"), None);
+    }
+
+    #[test]
+    fn newest_ignores_newer_harness_portal() {
+        let candidates = vec![session_portal(100), harness_portal(900)];
+        let envs = select_newest_envs(&candidates, &NAMES, &["DISPLAY", "XAUTHORITY"]);
+        assert_eq!(envs["DISPLAY"], ":0");
+        assert_eq!(
+            envs["XAUTHORITY"],
+            "/run/user/1000/.mutter-Xwaylandauth.IK3UY3"
+        );
+        assert_eq!(
+            envs["DBUS_SESSION_BUS_ADDRESS"],
+            "unix:path=/run/user/1000/bus"
+        );
+    }
+
+    #[test]
+    fn newest_session_process_still_wins() {
+        let mut newer = session_portal(500);
+        newer.values[0] = ":1".to_owned();
+        let candidates = vec![session_portal(100), newer, harness_portal(900)];
+        let envs = select_newest_envs(&candidates, &NAMES, &["DISPLAY", "XAUTHORITY"]);
+        assert_eq!(envs["DISPLAY"], ":1");
+    }
+
+    #[test]
+    fn newest_requires_display_and_xauth() {
+        let mut no_xauth = session_portal(500);
+        no_xauth.values[1].clear();
+        let candidates = vec![session_portal(100), no_xauth];
+        let envs = select_newest_envs(&candidates, &NAMES, &["DISPLAY", "XAUTHORITY"]);
+        assert_eq!(
+            envs["XAUTHORITY"],
+            "/run/user/1000/.mutter-Xwaylandauth.IK3UY3"
+        );
+    }
+
+    #[test]
+    fn newest_falls_back_without_session_processes() {
+        let envs = select_newest_envs(
+            &[harness_portal(100), harness_portal(200)],
+            &NAMES,
+            &["DISPLAY", "XAUTHORITY"],
+        );
+        assert_eq!(envs["DISPLAY"], ":99");
+        let envs = select_newest_envs(&[], &NAMES, &["DISPLAY"]);
+        assert!(envs.values().all(|v| v.is_empty()));
+        assert_eq!(envs.len(), NAMES.len());
+    }
+
+    #[test]
+    fn most_complete_prefers_session_process() {
+        let names = [
+            "WAYLAND_DISPLAY",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "DISPLAY",
+            "XAUTHORITY",
+        ];
+        let harness = parse_process_env(
+            "1000",
+            &environ(&[
+                ("WAYLAND_DISPLAY", "wayland-0"),
+                ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/tmp/dbus-s5wDoG0Xx8"),
+                ("DISPLAY", ":99"),
+                ("XAUTHORITY", "/tmp/xvfb-run.0NZu6P/Xauthority"),
+            ]),
+            &names,
+            1,
+        );
+        let session = parse_process_env(
+            "1000",
+            &environ(&[
+                ("WAYLAND_DISPLAY", "wayland-0"),
+                ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
+            ]),
+            &names,
+            2,
+        );
+        let envs = select_most_complete_envs(&[harness, session], &names);
+        assert_eq!(
+            envs["DBUS_SESSION_BUS_ADDRESS"],
+            "unix:path=/run/user/1000/bus"
+        );
+        assert_eq!(envs["DISPLAY"], "");
+    }
+
+    #[test]
+    fn most_complete_keeps_ranking() {
+        let names = ["A", "B", "C"];
+        let a = parse_process_env("1000", &environ(&[("C", "c1")]), &names, 1);
+        let b = parse_process_env("1000", &environ(&[("A", "a2")]), &names, 2);
+        let c = parse_process_env("1000", &environ(&[("B", "b3"), ("C", "c3")]), &names, 3);
+        let d = parse_process_env("1000", &environ(&[("A", "a4"), ("C", "c4")]), &names, 4);
+        // More variables wins; among equal counts, earlier names win.
+        let envs = select_most_complete_envs(&[a.clone(), b.clone(), c, d.clone()], &names);
+        assert_eq!(envs["A"], "a4");
+        // Equal rank: first in /proc order wins.
+        let mut e = d.clone();
+        e.values[0] = "a5".to_owned();
+        let envs = select_most_complete_envs(&[d, e], &names);
+        assert_eq!(envs["A"], "a4");
+        let envs = select_most_complete_envs(&[a, b], &names);
+        assert_eq!(envs["A"], "a2");
+    }
+
+    #[test]
+    fn first_value_of_duplicate_name_wins() {
+        let env = parse_process_env(
+            "1000",
+            &environ(&[("DISPLAY", ":0"), ("DISPLAY", ":99"), ("EMPTY", "")]),
+            &NAMES,
+            0,
+        );
+        assert_eq!(env.values[0], ":0");
+    }
 }
 
 /// Deprecated: Use `get_envs` instead.
@@ -1792,10 +2174,26 @@ mod desktop {
                     tray.as_str(),
                 ];
                 for proc in display_proc {
-                    self.display = get_env(ENV_KEY_DISPLAY, &self.uid, proc);
-                    self.xauth = get_env(ENV_KEY_XAUTHORITY, &self.uid, proc);
-                    self.wl_display = get_env(ENV_KEY_WAYLAND_DISPLAY, &self.uid, proc);
-                    self.dbus = get_env(ENV_KEY_DBUS_SESSION_BUS_ADDRESS, &self.uid, proc);
+                    // Read all values from one process of the login session, so a
+                    // portal started by e.g. `xvfb-run dbus-run-session` cannot
+                    // swap DISPLAY/XAUTHORITY and trigger a server restart.
+                    let mut envs = get_newest_envs(
+                        &self.uid,
+                        proc,
+                        &[
+                            ENV_KEY_DISPLAY,
+                            ENV_KEY_XAUTHORITY,
+                            ENV_KEY_WAYLAND_DISPLAY,
+                            ENV_KEY_DBUS_SESSION_BUS_ADDRESS,
+                        ],
+                        &[ENV_KEY_DISPLAY, ENV_KEY_XAUTHORITY],
+                    );
+                    self.display = envs.remove(ENV_KEY_DISPLAY).unwrap_or_default();
+                    self.xauth = envs.remove(ENV_KEY_XAUTHORITY).unwrap_or_default();
+                    self.wl_display = envs.remove(ENV_KEY_WAYLAND_DISPLAY).unwrap_or_default();
+                    self.dbus = envs
+                        .remove(ENV_KEY_DBUS_SESSION_BUS_ADDRESS)
+                        .unwrap_or_default();
                     if !self.display.is_empty() && !self.xauth.is_empty() {
                         return;
                     }
