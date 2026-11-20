@@ -8,7 +8,8 @@ quic-listen-port = "48100"
 quic-connect-timeout-ms = "5000"
 quic-keepalive-interval-ms = "5000"
 quic-enable-ipv6 = "Y"
-quic-file-bandwidth-mbps = "20"
+# "auto" (the default) follows the path; a number is a fixed cap in Mbit/s; "0" is no cap.
+quic-file-bandwidth-mbps = "auto"
 
 # Routed peers remain session-specific and are entered as their LAN/VPN
 # IP or domain in the normal connection field, for example:
