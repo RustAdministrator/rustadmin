@@ -1834,6 +1834,8 @@ pub struct Connection {
     cm_file_relay: crate::cm_file_flow::CmFileRelay,
     // The file timer runs fast only while the relay holds something.
     cm_file_relay_timer_armed: bool,
+    // The list of read jobs goes to the connection manager a few times a second.
+    transfer_log_throttle: crate::cm_file_flow::TransferLogThrottle,
     terminal_service_id: String,
     terminal_persistent: bool,
     // The user token must be set when terminal is enabled.
@@ -2174,6 +2176,7 @@ impl Connection {
             cm_read_job_ids: HashSet::new(),
             cm_file_relay: Default::default(),
             cm_file_relay_timer_armed: false,
+            transfer_log_throttle: Default::default(),
             terminal_service_id: "".to_owned(),
             terminal_persistent: false,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -2556,7 +2559,9 @@ impl Connection {
                 _ = conn.file_timer.tick() => {
                     conn.flush_cm_file_relay().await;
                     if !conn.read_jobs.is_empty() {
-                        conn.send_to_cm(ipc::Data::FileTransferLog(("transfer".to_string(), fs::serialize_transfer_jobs(&conn.read_jobs))));
+                        if conn.transfer_log_throttle.due(std::time::Instant::now(), conn.read_jobs.len()) {
+                            conn.send_to_cm(ipc::Data::FileTransferLog(("transfer".to_string(), fs::serialize_transfer_jobs(&conn.read_jobs))));
+                        }
                         match fs::handle_read_jobs(&mut conn.read_jobs, &mut conn.stream).await {
                             Ok(log) => {
                                 if !log.is_empty() {
@@ -6593,12 +6598,30 @@ impl Connection {
                                         conn_id: self.inner.id(),
                                     });
                                 } else {
-                                    // Stops as soon as the limit is passed.
-                                    match fs::get_recursive_files_limited(
-                                        &f.path,
-                                        f.include_hidden,
-                                        crate::ui_cm_interface::get_max_validated_files(),
-                                    ) {
+                                    // Stops as soon as the limit is passed. The walk reads
+                                    // the disk, so it runs off the async threads.
+                                    let walk_path = f.path.clone();
+                                    let include_hidden = f.include_hidden;
+                                    let max_files =
+                                        crate::ui_cm_interface::get_max_validated_files();
+                                    let walked =
+                                        hbb_common::tokio::task::spawn_blocking(move || {
+                                            fs::get_recursive_files_limited(
+                                                &walk_path,
+                                                include_hidden,
+                                                max_files,
+                                            )
+                                        })
+                                        .await
+                                        .unwrap_or_else(
+                                            |err| {
+                                                Err(hbb_common::anyhow::anyhow!(
+                                                    "walk failed: {}",
+                                                    err
+                                                ))
+                                            },
+                                        );
+                                    match walked {
                                         Err(err) => {
                                             log::error!(
                                                 "Failed to get recursive files for {}: {}",
@@ -8934,17 +8957,23 @@ impl Connection {
         } else {
             usize::MAX
         };
-        match fs::TransferJob::new_read_limited(
-            id,
-            job_type,
-            "".to_string(),
-            data_source,
-            file_num,
-            include_hidden,
-            false,
-            overwrite_detection,
-            max_files,
-        ) {
+        // Listing the files reads the disk, so it runs off the async threads.
+        let job = hbb_common::tokio::task::spawn_blocking(move || {
+            fs::TransferJob::new_read_limited(
+                id,
+                job_type,
+                "".to_string(),
+                data_source,
+                file_num,
+                include_hidden,
+                false,
+                overwrite_detection,
+                max_files,
+            )
+        })
+        .await
+        .unwrap_or_else(|err| Err(hbb_common::anyhow::anyhow!("walk failed: {}", err)));
+        match job {
             Err(err) => {
                 let err = crate::ui_cm_interface::walk_error_message(&err);
                 self.send(fs::new_error(id, err, 0)).await;

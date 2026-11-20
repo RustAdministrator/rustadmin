@@ -12,7 +12,10 @@
 //! `ipc::Data::FileBlockAck`.
 
 use hbb_common::message_proto::Message;
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
 
 /// Blocks the connection manager may have read but not yet seen acknowledged.
 /// 32 blocks of 128 KiB are 4 MiB: enough to keep a fast link busy between acknowledgements.
@@ -111,6 +114,41 @@ impl ReadAheadWindow {
         self.in_flight
     }
 }
+
+/// How often the list of running transfers goes to the user interface while nothing else
+/// about it changes.
+pub(crate) const TRANSFER_LOG_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Decides when the list of running transfers is reported.
+///
+/// It used to be serialized and sent on every timer tick and for every block, up to a
+/// thousand times a second, and each time became an event for the user interface, which shows
+/// progress a few times a second.
+#[derive(Debug, Default)]
+pub(crate) struct TransferLogThrottle {
+    last_report: Option<(Instant, usize)>,
+}
+
+impl TransferLogThrottle {
+    /// Whether to report now: the number of jobs changed (one started or ended), or the
+    /// interval has passed since the last report.
+    pub(crate) fn due(&mut self, now: Instant, jobs: usize) -> bool {
+        let due = match self.last_report {
+            None => true,
+            Some((at, reported_jobs)) => {
+                reported_jobs != jobs || now.saturating_duration_since(at) >= TRANSFER_LOG_INTERVAL
+            }
+        };
+        if due {
+            self.last_report = Some((now, jobs));
+        }
+        due
+    }
+}
+
+/// How many blocks the connection manager reads in one of its 5 ms ticks. One per tick held
+/// a download from an installed Windows host to about 25 MiB/s.
+pub(crate) const CM_READ_STEPS_PER_TICK: usize = 8;
 
 #[cfg(test)]
 mod tests {
@@ -218,5 +256,24 @@ mod tests {
         window.acknowledged(CM_READ_AHEAD_BLOCKS * 2);
         assert_eq!(window.in_flight(), 0);
         assert!(window.can_read());
+    }
+
+    #[test]
+    fn transfer_list_is_reported_on_a_change_and_a_few_times_a_second() {
+        let mut throttle = TransferLogThrottle::default();
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        assert!(throttle.due(start, 1), "the first report");
+        // A thousand ticks in the next quarter of a second: nothing.
+        for tick in 1..250 {
+            assert!(!throttle.due(start + ms(tick), 1), "tick {}", tick);
+        }
+        assert!(throttle.due(start + ms(250), 1));
+        assert!(!throttle.due(start + ms(251), 1));
+        // A job started or ended: at once.
+        assert!(throttle.due(start + ms(252), 2));
+        assert!(!throttle.due(start + ms(253), 2));
+        assert!(throttle.due(start + ms(254), 0));
+        assert!(!throttle.due(start + ms(255), 0));
     }
 }

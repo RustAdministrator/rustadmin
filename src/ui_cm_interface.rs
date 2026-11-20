@@ -531,6 +531,9 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
 
         // for tmp use, without real conn id
         let mut write_jobs: Vec<fs::TransferJob> = Vec::new();
+        // The lists of jobs go to the user interface a few times a second, not per block.
+        let mut write_log_throttle = crate::cm_file_flow::TransferLogThrottle::default();
+        let mut read_log_throttle = crate::cm_file_flow::TransferLogThrottle::default();
         // File timer for processing read_jobs
         let mut file_timer =
             crate::rustdesk_interval(time::interval_at(Instant::now() + SEC30, SEC30));
@@ -648,8 +651,10 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                     if !self.read_jobs.is_empty() {
                                         file_timer = crate::rustdesk_interval(time::interval(MILLI5));
                                     }
-                                    let log = fs::serialize_transfer_jobs(&write_jobs);
-                                    self.cm.ui_handler.file_transfer_log("transfer", &log);
+                                    if write_log_throttle.due(std::time::Instant::now(), write_jobs.len()) {
+                                        let log = fs::serialize_transfer_jobs(&write_jobs);
+                                        self.cm.ui_handler.file_transfer_log("transfer", &log);
+                                    }
                                 }
                                 Data::FileBlockAck { count, .. } => {
                                     self.read_window.acknowledged(count as usize);
@@ -840,8 +845,10 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                         if let Err(e) = handle_read_jobs_tick(&mut self.read_jobs, &self.tx, conn_id, &mut self.read_window).await {
                             log::error!("Error processing read jobs: {}", e);
                         }
-                        let log = fs::serialize_transfer_jobs(&self.read_jobs);
-                        self.cm.ui_handler.file_transfer_log("transfer", &log);
+                        if read_log_throttle.due(std::time::Instant::now(), self.read_jobs.len()) {
+                            let log = fs::serialize_transfer_jobs(&self.read_jobs);
+                            self.cm.ui_handler.file_transfer_log("transfer", &log);
+                        }
                     } else {
                         file_timer = crate::rustdesk_interval(time::interval_at(Instant::now() + SEC30, SEC30));
                     }
@@ -1441,9 +1448,24 @@ async fn handle_read_jobs_tick(
 ) -> ResultType<()> {
     // The IPC channel to the service is unbounded and the service can only pass blocks on as
     // fast as the peer's link takes them. Read no further ahead than the window allows.
-    if !window.can_read() {
-        return Ok(());
+    for _ in 0..crate::cm_file_flow::CM_READ_STEPS_PER_TICK {
+        if !window.can_read() || !read_job_step(jobs, tx, conn_id, window).await {
+            break;
+        }
     }
+    Ok(())
+}
+
+/// One step of the connection manager's read jobs: the first active job reads one block and
+/// hands it to the service. Returns whether it did, so that the caller may take another step.
+#[cfg(not(any(target_os = "ios")))]
+async fn read_job_step(
+    jobs: &mut Vec<fs::TransferJob>,
+    tx: &UnboundedSender<Data>,
+    conn_id: i32,
+    window: &mut crate::cm_file_flow::ReadAheadWindow,
+) -> bool {
+    let mut more = false;
     let mut finished = Vec::new();
 
     for job in jobs.iter_mut() {
@@ -1493,6 +1515,7 @@ async fn handle_read_jobs_tick(
                     log::error!("error sending FileBlockFromCM via IPC: {}", e);
                 } else {
                     window.sent();
+                    more = true;
                 }
             }
             Ok(None) => {
@@ -1531,7 +1554,7 @@ async fn handle_read_jobs_tick(
         let _ = fs::remove_job(id, jobs);
     }
 
-    Ok(())
+    more
 }
 
 /// Initialize a read job's data stream and handle digest sending for overwrite detection.

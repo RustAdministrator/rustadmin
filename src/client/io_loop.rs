@@ -1879,16 +1879,24 @@ impl<T: InvokeUiSession> Remote<T> {
                             .await
                     );
                 } else {
-                    match fs::TransferJob::new_read(
-                        id,
-                        r#type,
-                        to.clone(),
-                        fs::DataSource::FilePath(PathBuf::from(&path)),
-                        file_num,
-                        include_hidden,
-                        is_remote,
-                        od,
-                    ) {
+                    // Listing the files reads the disk, so it runs off the async threads.
+                    let remote = to.clone();
+                    let source = fs::DataSource::FilePath(PathBuf::from(&path));
+                    let job = hbb_common::tokio::task::spawn_blocking(move || {
+                        fs::TransferJob::new_read(
+                            id,
+                            r#type,
+                            remote,
+                            source,
+                            file_num,
+                            include_hidden,
+                            is_remote,
+                            od,
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|err| Err(hbb_common::anyhow::anyhow!("walk failed: {}", err)));
+                    match job {
                         Err(err) => {
                             self.handle_job_status(id, -1, Some(err.to_string()));
                         }
@@ -1964,16 +1972,24 @@ impl<T: InvokeUiSession> Remote<T> {
                     job.is_last_job = true;
                     self.write_jobs.push(job);
                 } else {
-                    match fs::TransferJob::new_read(
-                        id,
-                        r#type,
-                        to.clone(),
-                        fs::DataSource::FilePath(PathBuf::from(&path)),
-                        file_num,
-                        include_hidden,
-                        is_remote,
-                        od,
-                    ) {
+                    // Listing the files reads the disk, so it runs off the async threads.
+                    let remote = to.clone();
+                    let source = fs::DataSource::FilePath(PathBuf::from(&path));
+                    let job = hbb_common::tokio::task::spawn_blocking(move || {
+                        fs::TransferJob::new_read(
+                            id,
+                            r#type,
+                            remote,
+                            source,
+                            file_num,
+                            include_hidden,
+                            is_remote,
+                            od,
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|err| Err(hbb_common::anyhow::anyhow!("walk failed: {}", err)));
+                    match job {
                         Err(err) => {
                             self.handle_job_status(id, -1, Some(err.to_string()));
                         }
@@ -2142,7 +2158,14 @@ impl<T: InvokeUiSession> Remote<T> {
                     self.remove_jobs
                         .insert(id, RemoveJob::new(Vec::new(), path, sep, is_remote));
                 } else {
-                    match fs::get_recursive_files(&path, include_hidden) {
+                    // The walk reads the disk, so it runs off the async threads.
+                    let walk_path = path.clone();
+                    let walked = hbb_common::tokio::task::spawn_blocking(move || {
+                        fs::get_recursive_files(&walk_path, include_hidden)
+                    })
+                    .await
+                    .unwrap_or_else(|err| Err(hbb_common::anyhow::anyhow!("walk failed: {}", err)));
+                    match walked {
                         Ok(entries) => {
                             self.handler.update_folder_files(
                                 id,
