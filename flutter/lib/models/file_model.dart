@@ -556,19 +556,38 @@ class FileController {
     final toPath = otherSideData.directory.path;
     final isWindows = otherSideData.options.isWindows;
     final showHidden = otherSideData.options.showHidden;
+    // The folder the items are in, and its path style, as they are now. Both
+    // change when the user opens another folder while the empty folders are
+    // looked up below.
+    final sourceRoot = directory.value.path;
+    final sourceIsWindows = options.value.isWindows;
+    final List<Entry> entrys = [];
+    final List<String> refusedNames = [];
     for (var from in items.items) {
+      // The destination is the chosen folder plus the name of the entry. A
+      // name that is a path of its own ("..", an absolute path, a drive)
+      // would name another place, and a name from the other side's listing
+      // must never decide where a file is written.
+      final to = PathUtil.joinEntryName(toPath, from.name, isWindows);
+      if (to == null) {
+        refusedNames.add(from.name);
+        continue;
+      }
+      entrys.add(from);
       final jobID = jobController.addTransferJob(from, isRemoteToLocal);
       bind.sessionSendFiles(
           sessionId: sessionId,
           actId: jobID,
           path: from.path,
-          to: PathUtil.join(toPath, from.name, isWindows),
+          to: to,
           fileNum: 0,
           includeHidden: showHidden,
           isRemote: isRemoteToLocal,
           isDir: from.isDirectory);
-      debugPrint(
-          "path: ${from.path}, toPath: $toPath, to: ${PathUtil.join(toPath, from.name, isWindows)}");
+      debugPrint("path: ${from.path}, toPath: $toPath, to: $to");
+    }
+    if (refusedNames.isNotEmpty) {
+      _reportRefusedNames(refusedNames);
     }
 
     if (isWeb ||
@@ -577,7 +596,6 @@ class FileController {
       return;
     }
 
-    final List<Entry> entrys = items.items.toList();
     var isRemote = isLocal == true ? true : false;
 
     await Future.forEach(entrys, (Entry item) async {
@@ -598,15 +616,32 @@ class FileController {
         }
       }
 
-      final dirs = paths.map((path) {
-        return PathUtil.getOtherSidePath(directory.value.path, path,
-            options.value.isWindows, toPath, isWindows);
-      });
-
-      for (var dir in dirs) {
+      for (var path in paths) {
+        // Null when the reported folder is not inside the folder that was
+        // sent: its place on the other side would be outside the destination.
+        final dir = PathUtil.getOtherSidePathInside(
+            sourceRoot, path, sourceIsWindows, toPath, isWindows);
+        if (dir == null) {
+          debugPrint("empty folder outside the transferred folder is skipped");
+          continue;
+        }
         createDirWithRemote(dir, isRemote);
       }
     });
+  }
+
+  void _reportRefusedNames(List<String> names) {
+    final shown = names.take(5).map((name) => '"$name"').join(', ');
+    final more = names.length > 5 ? ' (+${names.length - 5})' : '';
+    final text =
+        '${translate("These names cannot be used as a file name at the destination and were skipped")}: $shown$more';
+    final dm = dialogManager;
+    if (dm != null) {
+      msgBox(sessionId, 'custom-error-nook-nocancel-hasclose',
+          translate("Error"), text, '', dm);
+    } else {
+      debugPrint("sendFiles: $text");
+    }
   }
 
   bool _removeCheckboxRemember = false;
@@ -1591,6 +1626,52 @@ class PathUtil {
   static String join(String path1, String path2, bool isWindows) {
     final pathUtil = isWindows ? windowsContext : posixContext;
     return pathUtil.join(path1, path2);
+  }
+
+  /// Whether [name] can only name an entry directly inside a folder, on a
+  /// system with the given path style: one component, not "." or "..", and
+  /// nothing that [join] reads as a path of its own.
+  ///
+  /// [join] returns its second argument alone when that is absolute, so a
+  /// name such as "/etc/x" or "C:\\x" replaces the folder it is joined to.
+  static bool isPlainEntryName(String name, bool isWindows) {
+    if (name.isEmpty || name == '.' || name == '..') {
+      return false;
+    }
+    if (name.contains('/') || name.contains('\u0000')) {
+      return false;
+    }
+    if (isWindows && (name.contains('\\') || name.contains(':'))) {
+      return false;
+    }
+    return true;
+  }
+
+  /// [dir] with the entry [name] in it, or null when [name] is not a plain
+  /// entry name for that system (see [isPlainEntryName]).
+  static String? joinEntryName(String dir, String name, bool isWindows) {
+    if (!isPlainEntryName(name, isWindows)) {
+      return null;
+    }
+    return join(dir, name, isWindows);
+  }
+
+  /// [getOtherSidePath], or null when [mainPath] is not inside
+  /// [mainRootPath]: the result would be outside [otherRootPath].
+  static String? getOtherSidePathInside(String mainRootPath, String mainPath,
+      bool isMainWindows, String otherRootPath, bool isOtherWindows) {
+    final mainPathUtil = isMainWindows ? windowsContext : posixContext;
+    final relativePath = mainPathUtil.relative(mainPath, from: mainRootPath);
+    if (mainPathUtil.isAbsolute(relativePath)) {
+      return null;
+    }
+    for (final name in mainPathUtil.split(relativePath)) {
+      if (!isPlainEntryName(name, isOtherWindows)) {
+        return null;
+      }
+    }
+    return getOtherSidePath(
+        mainRootPath, mainPath, isMainWindows, otherRootPath, isOtherWindows);
   }
 
   static List<String> split(String path, bool isWindows) {

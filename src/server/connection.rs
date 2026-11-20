@@ -6593,13 +6593,20 @@ impl Connection {
                                         conn_id: self.inner.id(),
                                     });
                                 } else {
-                                    match fs::get_recursive_files(&f.path, f.include_hidden) {
+                                    // Stops as soon as the limit is passed.
+                                    match fs::get_recursive_files_limited(
+                                        &f.path,
+                                        f.include_hidden,
+                                        crate::ui_cm_interface::get_max_validated_files(),
+                                    ) {
                                         Err(err) => {
                                             log::error!(
                                                 "Failed to get recursive files for {}: {}",
                                                 f.path,
                                                 err
                                             );
+                                            let err =
+                                                crate::ui_cm_interface::walk_error_message(&err);
                                             self.send(fs::new_error(f.id, err, -1)).await;
                                         }
                                         Ok(files) => {
@@ -8921,7 +8928,13 @@ impl Connection {
         path: String,
         check_file_limit: bool,
     ) {
-        match fs::TransferJob::new_read(
+        // With the limit the walk stops as soon as it is passed.
+        let max_files = if check_file_limit {
+            crate::ui_cm_interface::get_max_validated_files()
+        } else {
+            usize::MAX
+        };
+        match fs::TransferJob::new_read_limited(
             id,
             job_type,
             "".to_string(),
@@ -8930,8 +8943,10 @@ impl Connection {
             include_hidden,
             false,
             overwrite_detection,
+            max_files,
         ) {
             Err(err) => {
+                let err = crate::ui_cm_interface::walk_error_message(&err);
                 self.send(fs::new_error(id, err, 0)).await;
             }
             Ok(job) => {

@@ -1841,15 +1841,24 @@ impl<T: InvokeUiSession> Remote<T> {
             Data::SendFiles((id, r#type, path, to, file_num, include_hidden, is_remote)) => {
                 log::info!("send files, is remote {}", is_remote);
                 let od = can_enable_overwrite_detection(self.handler.lc.read().unwrap().version);
+                fs::reserve_job_id(id);
                 if is_remote {
                     log::debug!("New job {}, write to {} from remote {}", id, to, path);
+                    if r#type == fs::JobType::Generic {
+                        // The interface builds this path from a name in the peer's listing.
+                        if let Err(err) = fs::validate_local_destination(&to) {
+                            log::warn!("transfer job {}: destination refused: {}", id, err);
+                            self.handle_job_status(id, -1, Some(err.to_string()));
+                            return true;
+                        }
+                    }
                     let to = match r#type {
                         fs::JobType::Generic => fs::DataSource::FilePath(PathBuf::from(&to)),
                         fs::JobType::Printer => {
                             fs::DataSource::MemoryCursor(std::io::Cursor::new(Vec::new()))
                         }
                     };
-                    self.write_jobs.push(fs::TransferJob::new_write(
+                    let mut job = fs::TransferJob::new_write(
                         id,
                         r#type,
                         path.clone(),
@@ -1858,7 +1867,13 @@ impl<T: InvokeUiSession> Remote<T> {
                         include_hidden,
                         is_remote,
                         od,
-                    ));
+                    );
+                    if let Err(err) = job.claim_destination() {
+                        log::warn!("transfer job {}: {}", id, err);
+                        self.handle_job_status(id, -1, Some(err.to_string()));
+                        return true;
+                    }
+                    self.write_jobs.push(job);
                     allow_err!(
                         peer.send(&fs::new_send(id, r#type, path, file_num, include_hidden))
                             .await
@@ -1921,6 +1936,9 @@ impl<T: InvokeUiSession> Remote<T> {
             }
             Data::AddJob((id, r#type, path, to, file_num, include_hidden, is_remote)) => {
                 let od = can_enable_overwrite_detection(self.handler.lc.read().unwrap().version);
+                // A restored job keeps the id it had in an earlier run. New jobs must not
+                // get the same one.
+                fs::reserve_job_id(id);
                 if is_remote {
                     log::debug!(
                         "new write waiting job {}, write to {} from remote {}",
@@ -1928,6 +1946,11 @@ impl<T: InvokeUiSession> Remote<T> {
                         to,
                         path
                     );
+                    if let Err(err) = fs::validate_local_destination(&to) {
+                        log::warn!("transfer job {}: destination refused: {}", id, err);
+                        self.handle_job_status(id, -1, Some(err.to_string()));
+                        return true;
+                    }
                     let mut job = fs::TransferJob::new_write(
                         id,
                         r#type,
@@ -1978,7 +2001,13 @@ impl<T: InvokeUiSession> Remote<T> {
             }
             Data::ResumeJob((id, is_remote)) => {
                 if is_remote {
-                    if let Some(job) = get_job(id, &mut self.write_jobs) {
+                    let busy = get_job(id, &mut self.write_jobs)
+                        .and_then(|job| job.claim_destination().err());
+                    if let Some(err) = busy {
+                        // Another job is writing there now; this one stays in the list.
+                        log::warn!("transfer job {}: {}", id, err);
+                        self.handle_job_status(id, -1, Some(err.to_string()));
+                    } else if let Some(job) = get_job(id, &mut self.write_jobs) {
                         job.is_last_job = false;
                         job.is_resume = true;
                         allow_err!(
@@ -2181,7 +2210,9 @@ impl<T: InvokeUiSession> Remote<T> {
                     msg_out.set_file_action(file_action);
                     allow_err!(peer.send(&msg_out).await);
                 } else {
-                    match fs::create_dir(&path) {
+                    // The interface may build this path from what the peer reported.
+                    match fs::validate_local_destination(&path).and_then(|_| fs::create_dir(&path))
+                    {
                         Err(err) => {
                             self.handle_job_status(id, -1, Some(err.to_string()));
                         }

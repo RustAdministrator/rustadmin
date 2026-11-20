@@ -45,10 +45,19 @@ use std::{
     },
 };
 
-/// Default maximum number of files allowed per transfer request.
+/// Maximum number of files per transfer request when the option is set to `0`.
 /// Unit: number of files (not bytes).
 #[cfg(not(any(target_os = "ios")))]
 const DEFAULT_MAX_VALIDATED_FILES: usize = 10_000;
+
+/// Maximum number of files per transfer request when the option is not set.
+///
+/// It used to be "no limit". A walk over a tree of any size, on behalf of a peer, has no
+/// reason to be unbounded; this number is far above what a transfer or a listing can carry
+/// (the listing of that many files is tens of megabytes in one message), so it only stops a
+/// walk that could not have ended in anything useful.
+#[cfg(not(any(target_os = "ios")))]
+const UNSET_MAX_VALIDATED_FILES: usize = 1_000_000;
 
 /// Maximum number of files allowed in a single file transfer request.
 ///
@@ -57,42 +66,61 @@ const DEFAULT_MAX_VALIDATED_FILES: usize = 10_000;
 /// - CM-side read jobs (server to client file transfers on Windows)
 /// - `AllFiles` recursive directory listing operations
 /// - Connection-side read jobs (non-Windows platforms)
+/// - the number of directories visited when looking for empty directories
 ///
 /// Unit: number of files (not bytes).
-/// Default: 10,000 files.
+/// Default: 1,000,000 files.
 /// Configured via: `OPTION_FILE_TRANSFER_MAX_FILES` ("file-transfer-max-files")
 #[cfg(not(any(target_os = "ios")))]
 static MAX_VALIDATED_FILES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
+/// The limit that a value of `OPTION_FILE_TRANSFER_MAX_FILES` stands for:
+/// - a positive integer is the limit;
+/// - `0` is `DEFAULT_MAX_VALIDATED_FILES` (10,000), as before;
+/// - unset, negative or not an integer is `UNSET_MAX_VALIDATED_FILES` (1,000,000).
+#[cfg(not(any(target_os = "ios")))]
+fn max_validated_files_for(option: &str) -> usize {
+    match option.trim().parse::<usize>() {
+        Ok(0) => DEFAULT_MAX_VALIDATED_FILES,
+        Ok(limit) => limit,
+        Err(_) => UNSET_MAX_VALIDATED_FILES,
+    }
+}
+
 /// Get the maximum number of files allowed per transfer request.
 ///
 /// Initializes the value from configuration (`OPTION_FILE_TRANSFER_MAX_FILES`)
-/// on first call. Semantics:
-/// - If the option is set to `0`, `DEFAULT_MAX_VALIDATED_FILES` (10,000) is used as a safe upper bound.
-/// - If the option is unset, negative, or non-integer,
-///   `usize::MAX` is used to represent "no limit" for backward compatibility with older versions
-///   that did not enforce any file‑count restriction.
-///   (Note: negative values are not valid for `usize` and will cause parsing to fail.)
+/// on first call; see [`max_validated_files_for`].
 ///
 /// Unit: number of files.
 #[cfg(not(any(target_os = "ios")))]
 #[inline]
 pub fn get_max_validated_files() -> usize {
-    // If `OPTION_FILE_TRANSFER_MAX_FILES` unset, negative, or non-integer, use
-    // `usize::MAX` to represent "no limit", maintaining backward compatibility
-    // with versions that had no file transfer restrictions.
-    const NO_LIMIT_FILE_COUNT: usize = usize::MAX;
     *MAX_VALIDATED_FILES.get_or_init(|| {
-        let c = crate::get_builtin_option(OPTION_FILE_TRANSFER_MAX_FILES)
-            .trim()
-            .parse::<usize>()
-            .unwrap_or(NO_LIMIT_FILE_COUNT);
-        if c == 0 {
-            DEFAULT_MAX_VALIDATED_FILES
-        } else {
-            c
-        }
+        max_validated_files_for(&crate::get_builtin_option(OPTION_FILE_TRANSFER_MAX_FILES))
     })
+}
+
+/// The answer for a peer whose request was stopped by [`fs::TooManyEntries`].
+#[cfg(not(any(target_os = "ios")))]
+pub fn too_many_files_message(limit: usize) -> String {
+    let msg = format!(
+        "file transfer rejected: too many files (more than {}). \
+         Adjust '{}' option to increase limit.",
+        limit, OPTION_FILE_TRANSFER_MAX_FILES
+    );
+    log::warn!("{}", msg);
+    msg
+}
+
+/// The text of `err` for the peer; a walk stopped at the limit gets the same explanation as a
+/// list that turned out too long.
+#[cfg(not(any(target_os = "ios")))]
+pub fn walk_error_message(err: &hbb_common::anyhow::Error) -> String {
+    match fs::too_many_entries(err) {
+        Some(stopped) => too_many_files_message(stopped.limit),
+        None => err.to_string(),
+    }
 }
 
 /// Check if file count exceeds the maximum allowed limit.
@@ -1050,6 +1078,12 @@ async fn handle_fs(
                 send_raw(fs::new_error(id, e, file_num), tx);
                 return;
             }
+            // Two jobs writing to the same place share their temporary files.
+            if let Err(e) = job.claim_destination() {
+                log::warn!("transfer job {} refused: {}", id, e);
+                send_raw(fs::new_error(id, e, file_num), tx);
+                return;
+            }
             job.total_size = total_size;
             job.conn_id = conn_id;
             write_jobs.push(job);
@@ -1291,9 +1325,11 @@ async fn start_read_job(
     tx: &UnboundedSender<Data>,
 ) {
     let path_clone = path.clone();
+    let max_files = get_max_validated_files();
     let result = spawn_blocking(move || -> ResultType<fs::TransferJob> {
         let data_source = fs::DataSource::FilePath(PathBuf::from(&path));
-        fs::TransferJob::new_read(
+        // Stops as soon as the limit is passed; the rest of the tree is not walked.
+        fs::TransferJob::new_read_limited(
             id,
             fs::JobType::Generic,
             "".to_string(),
@@ -1302,6 +1338,7 @@ async fn start_read_job(
             include_hidden,
             true,
             overwrite_detection,
+            max_files,
         )
     })
     .await;
@@ -1367,7 +1404,10 @@ async fn start_read_job(
                 file_num,
                 include_hidden,
                 conn_id,
-                result: Err(format!("validation failed: {}", e)),
+                result: Err(match fs::too_many_entries(&e) {
+                    Some(stopped) => too_many_files_message(stopped.limit),
+                    None => format!("validation failed: {}", e),
+                }),
             }) {
                 log::error!("error sending ReadJobInitResult via IPC: {}", e);
             }
@@ -1537,7 +1577,11 @@ async fn read_all_files(
     tx: &UnboundedSender<Data>,
 ) {
     let path_clone = path.clone();
-    let result = spawn_blocking(move || fs::get_recursive_files(&path, include_hidden)).await;
+    let max_files = get_max_validated_files();
+    // Stops as soon as the limit is passed; the rest of the tree is not walked.
+    let result =
+        spawn_blocking(move || fs::get_recursive_files_limited(&path, include_hidden, max_files))
+            .await;
 
     let result = match result {
         Ok(Ok(files)) => {
@@ -1556,7 +1600,7 @@ async fn read_all_files(
                 }
             }
         }
-        Ok(Err(e)) => Err(format!("{}", e)),
+        Ok(Err(e)) => Err(walk_error_message(&e)),
         Err(e) => Err(format!("task failed: {}", e)),
     };
 
@@ -1575,18 +1619,44 @@ async fn read_empty_dirs(dir: &str, include_hidden: bool, tx: &UnboundedSender<D
     let path = dir.to_owned();
     let path_clone = dir.to_owned();
 
-    if let Ok(Ok(fds)) =
-        spawn_blocking(move || fs::get_empty_dirs_recursive(&path, include_hidden)).await
+    let max_dirs = get_max_validated_files();
+    match spawn_blocking(move || {
+        fs::get_empty_dirs_recursive_limited(&path, include_hidden, max_dirs)
+    })
+    .await
     {
-        let mut msg_out = Message::new();
-        let mut file_response = FileResponse::new();
-        file_response.set_empty_dirs(ReadEmptyDirsResponse {
-            path: path_clone,
-            empty_dirs: fds,
-            ..Default::default()
-        });
-        msg_out.set_file_response(file_response);
-        send_raw(msg_out, tx);
+        Ok(Ok(fds)) => {
+            let mut msg_out = Message::new();
+            let mut file_response = FileResponse::new();
+            file_response.set_empty_dirs(ReadEmptyDirsResponse {
+                path: path_clone,
+                empty_dirs: fds,
+                ..Default::default()
+            });
+            msg_out.set_file_response(file_response);
+            send_raw(msg_out, tx);
+        }
+        Ok(Err(err)) => {
+            if let Some(stopped) = fs::too_many_entries(&err) {
+                // The request has no id; a client that shows such an error will show this.
+                log::warn!(
+                    "looking for empty directories stopped after {} directories",
+                    stopped.limit
+                );
+                send_raw(
+                    fs::new_error(
+                        0,
+                        format!(
+                            "This folder has more than {} subfolders; its empty subfolders were not looked for and will not be created.",
+                            stopped.limit
+                        ),
+                        -1,
+                    ),
+                    tx,
+                );
+            }
+        }
+        Err(_) => {}
     }
 }
 
@@ -2090,6 +2160,90 @@ mod tests {
             assert!(!in_place, "a file with a hole was put in place");
             assert_eq!(answers, vec!["error".to_owned()]);
             assert!(write_jobs.is_empty());
+        });
+    }
+
+    // ---- limits, busy destinations and directory links ----
+
+    #[test]
+    #[cfg(not(any(target_os = "ios")))]
+    fn file_limit_option_values() {
+        assert_eq!(super::max_validated_files_for(""), 1_000_000);
+        assert_eq!(super::max_validated_files_for("abc"), 1_000_000);
+        assert_eq!(super::max_validated_files_for("-5"), 1_000_000);
+        assert_eq!(super::max_validated_files_for("0"), 10_000);
+        assert_eq!(super::max_validated_files_for(" 250 "), 250);
+        assert_eq!(super::max_validated_files_for("5000000"), 5_000_000);
+        let message = super::too_many_files_message(250);
+        assert!(message.contains("more than 250"), "{}", message);
+        assert!(
+            message.contains(OPTION_FILE_TRANSFER_MAX_FILES),
+            "{}",
+            message
+        );
+        let stopped: hbb_common::anyhow::Error =
+            hbb_common::fs::TooManyEntries { limit: 250 }.into();
+        assert_eq!(super::walk_error_message(&stopped), message);
+        let other = hbb_common::anyhow::anyhow!("Not exists");
+        assert_eq!(super::walk_error_message(&other), "Not exists");
+    }
+
+    #[test]
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_second_write_job_to_the_same_destination_is_refused() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = unbounded_channel();
+            let dir = cm_write_test_dir("rustdesk_cm_same_destination");
+            let mut write_jobs = Vec::new();
+            cm_fs(cm_new_write(&dir, 11), &mut write_jobs, &tx).await;
+            cm_fs(cm_new_write(&dir, 12), &mut write_jobs, &tx).await;
+            assert_eq!(cm_answers(&mut rx), vec!["error".to_owned()]);
+            assert_eq!(write_jobs.len(), 1);
+            assert_eq!(write_jobs[0].id(), 11);
+
+            // When the first job is gone the destination is free again.
+            cm_fs(ipc::FS::CancelWrite { id: 11 }, &mut write_jobs, &tx).await;
+            cm_fs(cm_new_write(&dir, 13), &mut write_jobs, &tx).await;
+            assert!(cm_answers(&mut rx).is_empty());
+            assert_eq!(write_jobs.len(), 1);
+            let _ = fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// A directory that holds a link to another directory. On Windows such a link is itself
+    /// a directory, and removing it as a file fails.
+    #[test]
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_remove_dir_removes_a_directory_that_holds_a_link_to_a_directory() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = unbounded_channel();
+            let dir = cm_write_test_dir("rustdesk_cm_remove_dir_link");
+            let target = dir.join("target");
+            let doomed = dir.join("doomed");
+            fs::create_dir_all(&target).unwrap();
+            fs::write(target.join("keep"), b"keep").unwrap();
+            fs::create_dir_all(&doomed).unwrap();
+            #[cfg(unix)]
+            let linked = std::os::unix::fs::symlink(&target, doomed.join("link")).is_ok();
+            #[cfg(windows)]
+            let linked = std::os::windows::fs::symlink_dir(&target, doomed.join("link")).is_ok();
+            if !linked {
+                // No privilege to create links here; nothing to check.
+                let _ = fs::remove_dir_all(&dir);
+                return;
+            }
+
+            super::remove_dir(doomed.to_string_lossy().to_string(), 14, true, &tx).await;
+
+            let answers = cm_answers(&mut rx);
+            let still_there = doomed.exists();
+            let kept = fs::read(target.join("keep")).ok();
+            let _ = fs::remove_dir_all(&dir);
+            assert!(!still_there, "the directory is still there");
+            assert_eq!(answers, vec!["done".to_owned()]);
+            assert_eq!(kept.as_deref(), Some(&b"keep"[..]));
         });
     }
 }
