@@ -3432,12 +3432,29 @@ impl<T: InvokeUiSession> Remote<T> {
                             }
                         }
                         Some(file_response::Union::Block(block)) => {
-                            if let Some(job) = fs::get_job(block.id, &mut self.write_jobs) {
-                                if let Err(_err) = job.write(block).await {
-                                    // to-do: add "skip" for writing job
-                                }
-                                if job.r#type == fs::JobType::Generic {
+                            let (id, file_num) = (block.id, block.file_num);
+                            let mut failed = None;
+                            if let Some(job) = fs::get_job(id, &mut self.write_jobs) {
+                                let job_type = job.r#type;
+                                if let Err(err) = job.write(block).await {
+                                    failed = Some((job_type, err.to_string()));
+                                } else if job_type == fs::JobType::Generic {
                                     self.update_jobs_status();
+                                }
+                            }
+                            if let Some((job_type, err)) = failed {
+                                // The file cannot be completed. Stop the sender, drop the job
+                                // with its partial file, and tell the user: carrying on would
+                                // end with a damaged file reported as transferred.
+                                log::error!(
+                                    "transfer job {}: writing file {} failed: {}",
+                                    id,
+                                    file_num,
+                                    err
+                                );
+                                self.cancel_transfer_job(id, peer).await;
+                                if job_type == fs::JobType::Generic {
+                                    self.handle_job_status(id, file_num, Some(err));
                                 }
                             }
                         }
@@ -3445,9 +3462,20 @@ impl<T: InvokeUiSession> Remote<T> {
                             let mut err: Option<String> = None;
                             let mut job_type = fs::JobType::Generic;
                             let mut printer_data = None;
-                            if let Some(job) = fs::remove_job(d.id, &mut self.write_jobs) {
-                                job.modify_time();
-                                err = job.job_error();
+                            if let Some(mut job) = fs::remove_job(d.id, &mut self.write_jobs) {
+                                // The last file is complete only if this succeeds.
+                                err = match job.finish_file().await {
+                                    Ok(()) => job.job_error(),
+                                    Err(finish_err) => {
+                                        log::error!(
+                                            "transfer job {}: completing file {} failed: {}",
+                                            d.id,
+                                            d.file_num,
+                                            finish_err
+                                        );
+                                        Some(finish_err.to_string())
+                                    }
+                                };
                                 job_type = job.r#type;
                                 printer_data = match job.get_buf_data().await {
                                     Ok(d) => d,

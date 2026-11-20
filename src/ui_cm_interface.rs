@@ -1064,10 +1064,25 @@ async fn handle_fs(
             }
         }
         ipc::FS::WriteDone { id, file_num } => {
-            if let Some(job) = fs::remove_job(id, write_jobs) {
-                job.modify_time();
-                send_raw(fs::new_done(id, file_num), tx);
-                tx_log.map(|tx| tx.send(serialize_transfer_job(&job, true, false, "")));
+            if let Some(mut job) = fs::remove_job(id, write_jobs) {
+                // The last file is complete only if this succeeds; the peer is told which.
+                match job.finish_file().await {
+                    Ok(()) => {
+                        send_raw(fs::new_done(id, file_num), tx);
+                        tx_log.map(|tx| tx.send(serialize_transfer_job(&job, true, false, "")));
+                    }
+                    Err(err) => {
+                        log::error!(
+                            "transfer job {}: completing file {} failed: {}",
+                            id,
+                            file_num,
+                            err
+                        );
+                        let err = err.to_string();
+                        tx_log.map(|tx| tx.send(serialize_transfer_job(&job, false, false, &err)));
+                        send_raw(fs::new_error(id, err, file_num), tx);
+                    }
+                }
             }
         }
         ipc::FS::WriteError { id, file_num, err } => {
@@ -1082,6 +1097,7 @@ async fn handle_fs(
             data,
             compressed,
         } => {
+            let mut failed = None;
             if let Some(job) = fs::get_job(id, write_jobs) {
                 if let Err(err) = job
                     .write(FileTransferBlock {
@@ -1093,8 +1109,23 @@ async fn handle_fs(
                     })
                     .await
                 {
-                    send_raw(fs::new_error(id, err, file_num), &tx);
+                    failed = Some(err.to_string());
                 }
+            }
+            if let Some(err) = failed {
+                // The job is over: blocks that are already on their way and the final
+                // `WriteDone` must find nothing to write to or to move into place.
+                log::error!(
+                    "transfer job {}: writing file {} failed: {}",
+                    id,
+                    file_num,
+                    err
+                );
+                if let Some(job) = fs::remove_job(id, write_jobs) {
+                    job.remove_download_file();
+                    tx_log.map(|tx| tx.send(serialize_transfer_job(&job, false, false, &err)));
+                }
+                send_raw(fs::new_error(id, err, file_num), &tx);
             }
         }
         ipc::FS::CheckDigest {
@@ -1848,5 +1879,173 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&base_dir);
+    }
+
+    // ---- a write job whose file cannot be written or completed (FT-06) ----
+
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_write_test_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("{}_{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(not(any(target_os = "ios")))]
+    async fn cm_fs(
+        request: ipc::FS,
+        write_jobs: &mut Vec<hbb_common::fs::TransferJob>,
+        tx: &UnboundedSender<Data>,
+    ) {
+        let mut read_jobs = Vec::new();
+        super::handle_fs(request, write_jobs, &mut read_jobs, tx, None, 1).await;
+    }
+
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_new_write(dir: &std::path::Path, id: i32) -> ipc::FS {
+        ipc::FS::NewWrite {
+            path: dir.to_string_lossy().to_string(),
+            id,
+            file_num: 0,
+            files: vec![("x".to_owned(), 0)],
+            overwrite_detection: false,
+            total_size: 0,
+            conn_id: 1,
+        }
+    }
+
+    /// What the connection manager told the peer, in order: "done" or "error".
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_answers(rx: &mut hbb_common::tokio::sync::mpsc::UnboundedReceiver<Data>) -> Vec<String> {
+        let mut answers = Vec::new();
+        while let Ok(data) = rx.try_recv() {
+            let Data::RawMessage(bytes) = data else {
+                continue;
+            };
+            let mut msg = Message::new();
+            msg.merge_from_bytes(&bytes).unwrap();
+            let response = msg.file_response();
+            if response.has_done() {
+                answers.push("done".to_owned());
+            } else if response.has_error() {
+                answers.push("error".to_owned());
+            }
+        }
+        answers
+    }
+
+    #[test]
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_write_error_ends_the_job_and_nothing_is_put_in_place() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = unbounded_channel();
+            let dir = cm_write_test_dir("rustdesk_cm_write_error");
+            let mut write_jobs = Vec::new();
+            cm_fs(cm_new_write(&dir, 5), &mut write_jobs, &tx).await;
+
+            // A block that cannot be decompressed, then what the peer already had on its way.
+            let block = |data: &'static [u8], compressed| ipc::FS::WriteBlock {
+                id: 5,
+                file_num: 0,
+                data: data.to_vec().into(),
+                compressed,
+            };
+            cm_fs(
+                block(b"this is not compressed data", true),
+                &mut write_jobs,
+                &tx,
+            )
+            .await;
+            cm_fs(block(b"later block", false), &mut write_jobs, &tx).await;
+            cm_fs(
+                ipc::FS::WriteDone { id: 5, file_num: 0 },
+                &mut write_jobs,
+                &tx,
+            )
+            .await;
+
+            let answers = cm_answers(&mut rx);
+            let in_place = dir.join("x").exists();
+            let partial = dir.join("x.download").exists();
+            let _ = fs::remove_dir_all(&dir);
+            assert!(!in_place, "a file that failed was put in place");
+            assert_eq!(answers, vec!["error".to_owned()]);
+            assert!(!partial, "the partial file was left behind");
+            assert!(write_jobs.is_empty());
+        });
+    }
+
+    #[test]
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_write_done_reports_a_file_that_cannot_be_put_in_place() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = unbounded_channel();
+            let dir = cm_write_test_dir("rustdesk_cm_write_done_error");
+            // The destination name is taken by a directory that is not empty.
+            fs::create_dir_all(dir.join("x")).unwrap();
+            fs::write(dir.join("x").join("keep"), b"keep").unwrap();
+            let mut write_jobs = Vec::new();
+            cm_fs(cm_new_write(&dir, 6), &mut write_jobs, &tx).await;
+            cm_fs(
+                ipc::FS::WriteBlock {
+                    id: 6,
+                    file_num: 0,
+                    data: b"abc".to_vec().into(),
+                    compressed: false,
+                },
+                &mut write_jobs,
+                &tx,
+            )
+            .await;
+            cm_fs(
+                ipc::FS::WriteDone { id: 6, file_num: 0 },
+                &mut write_jobs,
+                &tx,
+            )
+            .await;
+
+            let answers = cm_answers(&mut rx);
+            let _ = fs::remove_dir_all(&dir);
+            assert_eq!(answers, vec!["error".to_owned()]);
+            assert!(write_jobs.is_empty());
+        });
+    }
+
+    #[test]
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_write_done_completes_the_file() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = unbounded_channel();
+            let dir = cm_write_test_dir("rustdesk_cm_write_done");
+            let mut write_jobs = Vec::new();
+            cm_fs(cm_new_write(&dir, 7), &mut write_jobs, &tx).await;
+            cm_fs(
+                ipc::FS::WriteBlock {
+                    id: 7,
+                    file_num: 0,
+                    data: b"abc".to_vec().into(),
+                    compressed: false,
+                },
+                &mut write_jobs,
+                &tx,
+            )
+            .await;
+            cm_fs(
+                ipc::FS::WriteDone { id: 7, file_num: 0 },
+                &mut write_jobs,
+                &tx,
+            )
+            .await;
+
+            let answers = cm_answers(&mut rx);
+            let content = fs::read(dir.join("x")).ok();
+            let _ = fs::remove_dir_all(&dir);
+            assert_eq!(answers, vec!["done".to_owned()]);
+            assert_eq!(content.as_deref(), Some(&b"abc"[..]));
+            assert!(write_jobs.is_empty());
+        });
     }
 }
