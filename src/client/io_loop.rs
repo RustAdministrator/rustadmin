@@ -1902,12 +1902,19 @@ impl<T: InvokeUiSession> Remote<T> {
                                 fs::transform_windows_path(&mut files);
                             }
                             let total_size = job.total_size();
-                            self.read_jobs.push(job);
-                            self.timer = crate::rustdesk_interval(time::interval(MILLI1));
-                            allow_err!(
-                                peer.send(&fs::new_receive(id, to, file_num, files, total_size))
-                                    .await
-                            );
+                            let request = fs::new_receive(id, to, file_num, files, total_size);
+                            if let Some(err) = crate::file_message_limit::upload_list_error(
+                                &request,
+                                peer.file_message_limit(),
+                            ) {
+                                // Sending it would be refused, and the job would wait forever.
+                                log::warn!("transfer job {}: {}", id, err);
+                                self.handle_job_status(id, -1, Some(err));
+                            } else {
+                                self.read_jobs.push(job);
+                                self.timer = crate::rustdesk_interval(time::interval(MILLI1));
+                                allow_err!(peer.send(&request).await);
+                            }
                         }
                     }
                 }
@@ -1986,6 +1993,7 @@ impl<T: InvokeUiSession> Remote<T> {
                         );
                     }
                 } else {
+                    let mut oversize_resume = None;
                     if let Some(job) = get_job(id, &mut self.read_jobs) {
                         match &job.data_source {
                             fs::DataSource::FilePath(_p) => {
@@ -2001,22 +2009,32 @@ impl<T: InvokeUiSession> Remote<T> {
                                     // peer is not windows, need transform \ to /
                                     fs::transform_windows_path(&mut files);
                                 }
-                                allow_err!(
-                                    peer.send(&fs::new_receive(
-                                        id,
-                                        job.remote.clone(),
-                                        job.file_num,
-                                        files,
-                                        job.total_size(),
-                                    ))
-                                    .await
+                                let request = fs::new_receive(
+                                    id,
+                                    job.remote.clone(),
+                                    job.file_num,
+                                    files,
+                                    job.total_size(),
                                 );
+                                match crate::file_message_limit::upload_list_error(
+                                    &request,
+                                    peer.file_message_limit(),
+                                ) {
+                                    Some(err) => oversize_resume = Some(err),
+                                    None => allow_err!(peer.send(&request).await),
+                                }
                             }
                             fs::DataSource::MemoryCursor(_) => {
                                 // unreachable!()
                                 log::error!("Resume job with memory cursor");
                             }
                         }
+                    }
+                    if let Some(err) = oversize_resume {
+                        // Sending it would be refused, and the job would wait forever.
+                        log::warn!("transfer job {}: {}", id, err);
+                        let _ = fs::remove_job(id, &mut self.read_jobs);
+                        self.handle_job_status(id, -1, Some(err));
                     }
                 }
             }
@@ -3523,10 +3541,14 @@ impl<T: InvokeUiSession> Remote<T> {
                             }
                         }
                         Some(file_response::Union::Error(e)) => {
-                            let job_type = fs::remove_job(e.id, &mut self.write_jobs)
-                                .or_else(|| fs::remove_job(e.id, &mut self.read_jobs))
-                                .map(|j| j.r#type)
-                                .unwrap_or(fs::JobType::Generic);
+                            let job = fs::remove_job(e.id, &mut self.write_jobs)
+                                .or_else(|| fs::remove_job(e.id, &mut self.read_jobs));
+                            if job.is_none() && e.id == 0 && !e.error.is_empty() {
+                                // Job ids start at 1. This answers a request that is not a
+                                // job, such as opening a folder, and nothing else shows it.
+                                self.handler.msgbox("custom-error", "Error", &e.error, "");
+                            }
+                            let job_type = job.map(|j| j.r#type).unwrap_or(fs::JobType::Generic);
                             match job_type {
                                 fs::JobType::Generic => {
                                     self.handle_job_status(e.id, e.file_num, Some(e.error));

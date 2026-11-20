@@ -2398,7 +2398,20 @@ impl Connection {
                         ipc::Data::RawMessage(bytes) => {
                             // Kept in order with the manager's file blocks and retried when
                             // the stream is full, instead of being dropped.
-                            conn.cm_file_relay.push_raw(bytes);
+                            match crate::file_message_limit::oversize_listing_reply_for_bytes(
+                                &bytes,
+                                conn.stream.file_message_limit(),
+                            ) {
+                                Some(error) => {
+                                    log::warn!(
+                                        "#{} a directory listing of {} bytes does not fit this stream; an error is sent instead",
+                                        conn.inner.id(),
+                                        bytes.len()
+                                    );
+                                    conn.cm_file_relay.push_message(error);
+                                }
+                                None => conn.cm_file_relay.push_raw(bytes),
+                            }
                             conn.flush_cm_file_relay().await;
                         }
                         #[cfg(target_os = "windows")]
@@ -8600,12 +8613,29 @@ impl Connection {
                 let path_str = dir.path.clone();
                 let file_entries: Vec<FileEntry> = dir.entries.into();
 
+                let listing = fs::new_dir(id, path_str.clone(), file_entries.clone());
+                if let Some(error) = crate::file_message_limit::oversize_listing_reply(
+                    &listing,
+                    self.stream.file_message_limit(),
+                ) {
+                    // The peer cannot be told which files are coming, so nothing is sent.
+                    log::warn!(
+                        "#{} read job {}: the list of {} files does not fit this stream",
+                        self.inner.id(),
+                        id,
+                        file_entries.len()
+                    );
+                    self.cm_read_job_ids.remove(&id);
+                    self.send_fs(ipc::FS::CancelRead {
+                        id,
+                        conn_id: self.inner.id(),
+                    });
+                    self.cm_file_relay.push_message(error);
+                    self.flush_cm_file_relay().await;
+                    return;
+                }
                 // Send file directory to client, ahead of the blocks that follow it.
-                self.cm_file_relay.push_message(fs::new_dir(
-                    id,
-                    path_str.clone(),
-                    file_entries.clone(),
-                ));
+                self.cm_file_relay.push_message(listing);
                 self.flush_cm_file_relay().await;
 
                 // Post audit for file transfer
@@ -8782,8 +8812,22 @@ impl Connection {
     async fn process_new_read_job(&mut self, mut job: fs::TransferJob, path: String) {
         let files = job.files().to_owned();
         let job_type = job.r#type;
-        self.send(fs::new_dir(job.id, path.clone(), files.clone()))
-            .await;
+        let listing = fs::new_dir(job.id, path.clone(), files.clone());
+        if let Some(error) = crate::file_message_limit::oversize_listing_reply(
+            &listing,
+            self.stream.file_message_limit(),
+        ) {
+            // The peer cannot be told which files are coming, so the job does not start.
+            log::warn!(
+                "#{} read job {}: the list of {} files does not fit this stream",
+                self.inner.id(),
+                job.id,
+                files.len()
+            );
+            self.send(error).await;
+            return;
+        }
+        self.send(listing).await;
         job.is_remote = true;
         job.conn_id = self.inner.id();
         self.read_jobs.push(job);
@@ -8903,6 +8947,21 @@ impl Connection {
 
     #[inline]
     async fn send(&mut self, msg: Message) {
+        // A directory listing that this stream cannot carry would be refused by `send` and
+        // the peer would wait for it forever; it gets an error it can show instead.
+        let msg = match crate::file_message_limit::oversize_listing_reply(
+            &msg,
+            self.stream.file_message_limit(),
+        ) {
+            Some(error) => {
+                log::warn!(
+                    "#{} a directory listing does not fit this stream; an error is sent instead",
+                    self.inner.id()
+                );
+                error
+            }
+            None => msg,
+        };
         allow_err!(self.stream.send(&msg).await);
     }
 
