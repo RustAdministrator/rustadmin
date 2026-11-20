@@ -2496,9 +2496,9 @@ impl Connection {
                                 conn.handle_read_job_init_result(id, file_num, include_hidden, result).await;
                             }
                         }
-                        ipc::Data::FileBlockFromCM { id, file_num, data, compressed, conn_id } => {
+                        ipc::Data::FileBlockFromCM { id, file_num, data, compressed, conn_id, blk_id } => {
                             if conn_id == conn.inner.id() {
-                                conn.handle_file_block_from_cm(id, file_num, data, compressed).await;
+                                conn.handle_file_block_from_cm(id, file_num, data, compressed, blk_id).await;
                             }
                         }
                         ipc::Data::FileReadDone { id, file_num, conn_id } => {
@@ -6804,6 +6804,7 @@ impl Connection {
                             file_num: block.file_num,
                             data: block.data,
                             compressed: block.compressed,
+                            blk_id: block.blk_id,
                         });
                     }
                     Some(file_response::Union::Done(d)) => {
@@ -8658,6 +8659,7 @@ impl Connection {
         file_num: i32,
         data: bytes::Bytes,
         compressed: bool,
+        blk_id: u32,
     ) {
         // Check if the job is still valid (not cancelled)
         if !self.cm_read_job_ids.contains(&id) {
@@ -8680,6 +8682,7 @@ impl Connection {
         block.file_num = file_num;
         block.data = data.to_vec().into();
         block.compressed = compressed;
+        block.blk_id = blk_id;
 
         let mut msg = Message::new();
         let mut fr = FileResponse::new();
@@ -9475,7 +9478,7 @@ async fn start_ipc(
                             // Note: Empty data (for empty files) is correctly handled. BytesCodec with
                             // raw=false adds a length prefix, so next_raw() returns empty BytesMut for
                             // zero-length frames. This mirrors the WriteBlock pattern below.
-                            ipc::Data::FileBlockFromCM { id, file_num, data: _, compressed, conn_id } => {
+                            ipc::Data::FileBlockFromCM { id, file_num, data: _, compressed, conn_id, blk_id } => {
                                 let raw_data = stream.next_raw().await?;
                                 tx_from_cm.send(ipc::Data::FileBlockFromCM {
                                     id,
@@ -9483,6 +9486,7 @@ async fn start_ipc(
                                     data: raw_data.into(),
                                     compressed,
                                     conn_id,
+                                    blk_id,
                                 })?;
                             }
                             _ => {
@@ -9505,8 +9509,9 @@ async fn start_ipc(
                         if let Data::FS(ipc::FS::WriteBlock{id,
                             file_num,
                             data,
-                            compressed}) = data {
-                                stream.send(&Data::FS(ipc::FS::WriteBlock{id, file_num, data: Bytes::new(), compressed})).await?;
+                            compressed,
+                            blk_id}) = data {
+                                stream.send(&Data::FS(ipc::FS::WriteBlock{id, file_num, data: Bytes::new(), compressed, blk_id})).await?;
                                 stream.send_raw(data).await?;
                         } else {
                             stream.send(&data).await?;

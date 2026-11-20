@@ -170,6 +170,10 @@ pub enum FS {
         file_num: i32,
         data: Bytes,
         compressed: bool,
+        /// `FileTransferBlock::blk_id`: the block's number within its file, zero when the
+        /// sender does not number blocks. Absent in messages from an older build.
+        #[serde(default)]
+        blk_id: u32,
     },
     WriteDone {
         id: i32,
@@ -444,6 +448,10 @@ pub enum Data {
         data: bytes::Bytes,
         compressed: bool,
         conn_id: i32,
+        /// `FileTransferBlock::blk_id`: the block's number within its file. Absent in
+        /// messages from an older build, which reads as zero ("not numbered").
+        #[serde(default)]
+        blk_id: u32,
     },
     /// The service passed `count` blocks of `FileBlockFromCM` on to the stream (or discarded
     /// them); the connection manager may read that many more. See `cm_file_flow`.
@@ -2909,6 +2917,69 @@ mod test {
         assert!(root.len() <= 2);
         if root.len() == 2 {
             assert_ne!(root[0], root[1]);
+        }
+    }
+
+    /// The service and the connection manager can be different builds for a moment during
+    /// an update: a block message without the number must still be read.
+    #[test]
+    fn file_block_messages_from_an_older_build_read_as_not_numbered() {
+        fn without_blk_id(json: &str) -> String {
+            let mut value: serde_json::Value = serde_json::from_str(json).unwrap();
+            let fields = value
+                .as_object_mut()
+                .and_then(|object| object.get_mut("c"))
+                .and_then(|content| content.as_object_mut())
+                .expect("an object with content");
+            assert!(fields.remove("blk_id").is_some(), "the field is sent");
+            value.to_string()
+        }
+
+        let block = FS::WriteBlock {
+            id: 3,
+            file_num: 1,
+            data: Bytes::new(),
+            compressed: true,
+            blk_id: 9,
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        match serde_json::from_str::<FS>(&json).unwrap() {
+            FS::WriteBlock { blk_id, .. } => assert_eq!(blk_id, 9),
+            _ => panic!("unexpected message"),
+        }
+        match serde_json::from_str::<FS>(&without_blk_id(&json)).unwrap() {
+            FS::WriteBlock {
+                id,
+                file_num,
+                compressed,
+                blk_id,
+                ..
+            } => assert_eq!((id, file_num, compressed, blk_id), (3, 1, true, 0)),
+            _ => panic!("unexpected message"),
+        }
+
+        let block = Data::FileBlockFromCM {
+            id: 4,
+            file_num: 2,
+            data: Bytes::new(),
+            compressed: false,
+            conn_id: 5,
+            blk_id: 7,
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        match serde_json::from_str::<Data>(&json).unwrap() {
+            Data::FileBlockFromCM { blk_id, .. } => assert_eq!(blk_id, 7),
+            _ => panic!("unexpected message"),
+        }
+        match serde_json::from_str::<Data>(&without_blk_id(&json)).unwrap() {
+            Data::FileBlockFromCM {
+                id,
+                file_num,
+                conn_id,
+                blk_id,
+                ..
+            } => assert_eq!((id, file_num, conn_id, blk_id), (4, 2, 5, 0)),
+            _ => panic!("unexpected message"),
         }
     }
 }

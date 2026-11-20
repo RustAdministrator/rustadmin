@@ -606,9 +606,9 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                     self.cm.permission_request(self.conn_id, request_id, name, enabled);
                                 }
                                 Data::FS(mut fs) => {
-                                    if let ipc::FS::WriteBlock { id, file_num, data: _, compressed } = fs {
+                                    if let ipc::FS::WriteBlock { id, file_num, data: _, compressed, blk_id } = fs {
                                         if let Ok(bytes) = self.stream.next_raw().await {
-                                            fs = ipc::FS::WriteBlock{id, file_num, data:bytes.into(), compressed};
+                                            fs = ipc::FS::WriteBlock{id, file_num, data:bytes.into(), compressed, blk_id};
                                             handle_fs(fs, &mut write_jobs, &mut self.read_jobs, &self.tx, Some(&tx_log), self.conn_id).await;
                                         }
                                     } else {
@@ -737,7 +737,7 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                     // Note: Empty data (for empty files) is correctly handled. BytesCodec with raw=false
                     // (the default for IPC connections) adds a length prefix, so send_raw(Bytes::new())
                     // sends a 1-byte frame that next_raw() can correctly receive as empty data.
-                    if let Data::FileBlockFromCM { id, file_num, ref data, compressed, conn_id } = data {
+                    if let Data::FileBlockFromCM { id, file_num, ref data, compressed, conn_id, blk_id } = data {
                         // Send metadata first (data field is skipped by serde), then raw data bytes
                         if let Err(e) = self.stream.send(&Data::FileBlockFromCM {
                             id,
@@ -745,6 +745,7 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                             data: bytes::Bytes::new(), // placeholder, skipped by serde
                             compressed,
                             conn_id,
+                            blk_id,
                         }).await {
                             log::error!("error sending FileBlockFromCM metadata: {}", e);
                             break;
@@ -1096,6 +1097,7 @@ async fn handle_fs(
             file_num,
             data,
             compressed,
+            blk_id,
         } => {
             let mut failed = None;
             if let Some(job) = fs::get_job(id, write_jobs) {
@@ -1105,6 +1107,7 @@ async fn handle_fs(
                         file_num,
                         data,
                         compressed,
+                        blk_id,
                         ..Default::default()
                     })
                     .await
@@ -1445,6 +1448,7 @@ async fn handle_read_jobs_tick(
                     data: block.data,
                     compressed: block.compressed,
                     conn_id,
+                    blk_id: block.blk_id,
                 }) {
                     log::error!("error sending FileBlockFromCM via IPC: {}", e);
                 } else {
@@ -1950,6 +1954,7 @@ mod tests {
                 file_num: 0,
                 data: data.to_vec().into(),
                 compressed,
+                blk_id: 0,
             };
             cm_fs(
                 block(b"this is not compressed data", true),
@@ -1994,6 +1999,7 @@ mod tests {
                     file_num: 0,
                     data: b"abc".to_vec().into(),
                     compressed: false,
+                    blk_id: 0,
                 },
                 &mut write_jobs,
                 &tx,
@@ -2028,6 +2034,7 @@ mod tests {
                     file_num: 0,
                     data: b"abc".to_vec().into(),
                     compressed: false,
+                    blk_id: 0,
                 },
                 &mut write_jobs,
                 &tx,
@@ -2045,6 +2052,43 @@ mod tests {
             let _ = fs::remove_dir_all(&dir);
             assert_eq!(answers, vec!["done".to_owned()]);
             assert_eq!(content.as_deref(), Some(&b"abc"[..]));
+            assert!(write_jobs.is_empty());
+        });
+    }
+
+    #[test]
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_write_block_out_of_sequence_ends_the_job() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = unbounded_channel();
+            let dir = cm_write_test_dir("rustdesk_cm_write_gap");
+            let mut write_jobs = Vec::new();
+            cm_fs(cm_new_write(&dir, 8), &mut write_jobs, &tx).await;
+
+            let block = |blk_id, data: &'static [u8]| ipc::FS::WriteBlock {
+                id: 8,
+                file_num: 0,
+                data: data.to_vec().into(),
+                compressed: false,
+                blk_id,
+            };
+            cm_fs(block(1, b"first "), &mut write_jobs, &tx).await;
+            // Block 2 was lost on the way.
+            cm_fs(block(3, b"third"), &mut write_jobs, &tx).await;
+            cm_fs(block(4, b""), &mut write_jobs, &tx).await;
+            cm_fs(
+                ipc::FS::WriteDone { id: 8, file_num: 0 },
+                &mut write_jobs,
+                &tx,
+            )
+            .await;
+
+            let answers = cm_answers(&mut rx);
+            let in_place = dir.join("x").exists();
+            let _ = fs::remove_dir_all(&dir);
+            assert!(!in_place, "a file with a hole was put in place");
+            assert_eq!(answers, vec!["error".to_owned()]);
             assert!(write_jobs.is_empty());
         });
     }
