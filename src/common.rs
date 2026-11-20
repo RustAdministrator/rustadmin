@@ -5231,6 +5231,8 @@ mod tests {
 
     #[test]
     fn test_get_tcp_proxy_addr_normalizes_bare_ipv6_host() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+
         struct RestoreServerOptions {
             custom_rendezvous_server: String,
             allow_id_relay_server: String,
@@ -5396,6 +5398,7 @@ mod tests {
                     keys::OPTION_DIRECT_SERVER.to_string(),
                     self.direct_server.clone(),
                 );
+                crate::ui_interface::refresh_options();
             }
         }
 
@@ -5424,6 +5427,9 @@ mod tests {
             "http://127.0.0.1:21114".to_string(),
         );
         Config::set_option(keys::OPTION_DIRECT_SERVER.to_string(), "N".to_string());
+        // `get_option` reads a process-wide snapshot of the options. Whichever test touched it
+        // first decides its contents, so take a fresh snapshot of what this test just set.
+        crate::ui_interface::refresh_options();
 
         let disabled = get_network_mode_info();
         assert_eq!(disabled.mode, "not_configured");
