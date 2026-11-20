@@ -629,6 +629,11 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                     self.cm.new_message(self.conn_id, text);
                                 }
                                 Data::PermissionUpdate { name, enabled } => {
+                                    // The gate for file clipboard messages reads this flag.
+                                    #[cfg(target_os = "windows")]
+                                    if name == "file" {
+                                        self.file_transfer_enabled = enabled;
+                                    }
                                     if update_client_permission(self.conn_id, &name, enabled) {
                                         self.cm.permission_update(self.conn_id, name, enabled);
                                     }
@@ -664,25 +669,31 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                 }
                                 #[cfg(target_os = "windows")]
                                 Data::ClipboardFile(_clip) => {
-                                    let is_stopping_allowed = _clip.is_beginning_message();
+                                    use crate::cliprdr_gate::{cliprdr_verdict, CliprdrVerdict};
+                                    let starts_exchange = _clip.is_beginning_message();
                                     let is_clipboard_enabled = ContextSend::is_enabled();
                                     let file_transfer_enabled = self.file_transfer_enabled;
-                                    let stop = !is_stopping_allowed && !(is_clipboard_enabled && file_transfer_enabled);
+                                    // With the file clipboard off nothing is processed. (This
+                                    // used to read `!is_stopping_allowed && ...`: a new exchange
+                                    // was never stopped here.)
+                                    let verdict = cliprdr_verdict(is_clipboard_enabled && file_transfer_enabled, starts_exchange);
                                     log::debug!(
-                                        "Process clipboard message from client peer, stop: {}, is_stopping_allowed: {}, is_clipboard_enabled: {}, file_transfer_enabled: {}",
-                                        stop, is_stopping_allowed, is_clipboard_enabled, file_transfer_enabled);
-                                    if stop {
-                                        ContextSend::set_is_stopped();
-                                    } else {
-                                        if !is_authorized {
-                                            log::debug!("Clipboard message from client peer, but not authorized");
-                                            continue;
+                                        "Process clipboard message from client peer, verdict: {:?}, starts_exchange: {}, is_clipboard_enabled: {}, file_transfer_enabled: {}",
+                                        verdict, starts_exchange, is_clipboard_enabled, file_transfer_enabled);
+                                    match verdict {
+                                        CliprdrVerdict::Stop => ContextSend::set_is_stopped(),
+                                        CliprdrVerdict::Drop => {}
+                                        CliprdrVerdict::Process => {
+                                            if !is_authorized {
+                                                log::debug!("Clipboard message from client peer, but not authorized");
+                                                continue;
+                                            }
+                                            let conn_id = self.conn_id;
+                                            let _ = ContextSend::proc(|context| -> ResultType<()> {
+                                                context.server_clip_file(conn_id, _clip)
+                                                    .map_err(|e| e.into())
+                                            });
                                         }
-                                        let conn_id = self.conn_id;
-                                        let _ = ContextSend::proc(|context| -> ResultType<()> {
-                                            context.server_clip_file(conn_id, _clip)
-                                                .map_err(|e| e.into())
-                                        });
                                     }
                                 }
                                 Data::ClipboardFileEnabled(_enabled) => {
@@ -816,18 +827,26 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                             let is_clipboard_enabled = ContextSend::is_enabled();
                             let file_transfer_enabled = self.file_transfer_enabled;
                             let file_transfer_enabled_peer = self.file_transfer_enabled_peer;
-                            let stop = is_stopping_allowed && !(is_clipboard_enabled && file_transfer_enabled && file_transfer_enabled_peer);
+                            use crate::cliprdr_gate::{cliprdr_verdict, CliprdrVerdict};
+                            let verdict = cliprdr_verdict(
+                                is_clipboard_enabled && file_transfer_enabled && file_transfer_enabled_peer,
+                                is_stopping_allowed,
+                            );
                             log::debug!(
-                                "Process clipboard message from clip, stop: {}, is_stopping_allowed: {}, is_clipboard_enabled: {}, file_transfer_enabled: {}, file_transfer_enabled_peer: {}",
-                                stop, is_stopping_allowed, is_clipboard_enabled, file_transfer_enabled, file_transfer_enabled_peer);
-                            if stop {
-                                ContextSend::set_is_stopped();
-                            } else {
-                                if _clip.is_beginning_message() && crate::get_builtin_option(OPTION_ONE_WAY_FILE_TRANSFER) == "Y" {
-                                    // If one way file transfer is enabled, don't send clipboard file to client
-                                    // Don't call `ContextSend::set_is_stopped()`, because it will stop bidirectional file copy&paste.
-                                } else {
-                                    allow_err!(self.tx.send(Data::ClipboardFile(_clip)));
+                                "Process clipboard message from clip, verdict: {:?}, is_stopping_allowed: {}, is_clipboard_enabled: {}, file_transfer_enabled: {}, file_transfer_enabled_peer: {}",
+                                verdict, is_stopping_allowed, is_clipboard_enabled, file_transfer_enabled, file_transfer_enabled_peer);
+                            match verdict {
+                                CliprdrVerdict::Stop => ContextSend::set_is_stopped(),
+                                // With the file clipboard off nothing leaves, an answer to a
+                                // request included.
+                                CliprdrVerdict::Drop => {}
+                                CliprdrVerdict::Process => {
+                                    if _clip.is_beginning_message() && crate::get_builtin_option(OPTION_ONE_WAY_FILE_TRANSFER) == "Y" {
+                                        // If one way file transfer is enabled, don't send clipboard file to client
+                                        // Don't call `ContextSend::set_is_stopped()`, because it will stop bidirectional file copy&paste.
+                                    } else {
+                                        allow_err!(self.tx.send(Data::ClipboardFile(_clip)));
+                                    }
                                 }
                             }
                         }

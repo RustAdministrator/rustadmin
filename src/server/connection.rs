@@ -2429,6 +2429,15 @@ impl Connection {
                                 );
                                 continue;
                             }
+                            if !crate::cliprdr_gate::direction_check_passes(
+                                &clip,
+                                true,
+                                crate::clipboard::is_local_to_remote_clipboard_allowed(ClipboardSide::Host),
+                                crate::clipboard::is_remote_to_local_clipboard_allowed(ClipboardSide::Host),
+                                "host",
+                            ) {
+                                continue;
+                            }
                             match clip {
                                 clipboard::ClipboardFile::Files { files } => {
                                     let files = files.into_iter().map(|(f, s)| {
@@ -6482,6 +6491,38 @@ impl Connection {
                     } else if let Some(clip) = msg_2_clip(clip) {
                         #[cfg(target_os = "windows")]
                         {
+                            if let Some(size) =
+                                crate::cliprdr_gate::note_file_contents_request(&clip)
+                            {
+                                log::info!(
+                                    "#{} largest file contents request from the peer so far: {} bytes",
+                                    self.inner.id(),
+                                    size
+                                );
+                            }
+                            if let Some(refusal) =
+                                crate::cliprdr_gate::refusal_for_oversize_request(&clip)
+                            {
+                                log::warn!(
+                                    "#{} a file contents request above the limit from the peer is refused",
+                                    self.inner.id()
+                                );
+                                self.send(crate::clipboard_file::clip_2_msg(refusal)).await;
+                                return true;
+                            }
+                            if !crate::cliprdr_gate::direction_check_passes(
+                                &clip,
+                                false,
+                                crate::clipboard::is_local_to_remote_clipboard_allowed(
+                                    ClipboardSide::Host,
+                                ),
+                                crate::clipboard::is_remote_to_local_clipboard_allowed(
+                                    ClipboardSide::Host,
+                                ),
+                                "host",
+                            ) {
+                                return true;
+                            }
                             self.send_to_cm(ipc::Data::ClipboardFile(clip));
                         }
                         #[cfg(feature = "unix-file-copy-paste")]
@@ -6826,6 +6867,17 @@ impl Connection {
                             _ => {}
                         }
                     }
+                }
+                Some(message::Union::FileResponse(_))
+                    if !crate::cm_file_flow::file_response_allowed(
+                        self.file_transfer.is_some(),
+                    ) =>
+                {
+                    // Only a file-transfer connection can have a job such a message belongs to.
+                    log::warn!(
+                        "#{} a file response on a connection that is not a file transfer is ignored",
+                        self.inner.id()
+                    );
                 }
                 Some(message::Union::FileResponse(fr)) => match fr.union {
                     Some(file_response::Union::Block(block)) => {

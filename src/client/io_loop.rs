@@ -1549,19 +1549,36 @@ impl<T: InvokeUiSession> Remote<T> {
                     let file_transfer_enabled =
                         self.handler.lc.read().unwrap().enable_file_copy_paste.v;
                     let view_only = self.handler.lc.read().unwrap().view_only.v;
-                    let stop = is_stopping_allowed
-                        && (view_only
-                            || !self.is_connected
-                            || !(server_file_transfer_enabled && file_transfer_enabled));
+                    use crate::cliprdr_gate::{cliprdr_verdict, CliprdrVerdict};
+                    let file_clipboard_on = !view_only
+                        && self.is_connected
+                        && server_file_transfer_enabled
+                        && file_transfer_enabled;
+                    let verdict = cliprdr_verdict(file_clipboard_on, is_stopping_allowed);
                     log::debug!(
-                        "Process clipboard message from system, stop: {}, is_stopping_allowed: {}, view_only: {}, server_file_transfer_enabled: {}, file_transfer_enabled: {}",
-                        view_only, stop, is_stopping_allowed, server_file_transfer_enabled, file_transfer_enabled
+                        "Process clipboard message from system, verdict: {:?}, is_stopping_allowed: {}, view_only: {}, server_file_transfer_enabled: {}, file_transfer_enabled: {}",
+                        verdict, is_stopping_allowed, view_only, server_file_transfer_enabled, file_transfer_enabled
                     );
-                    if stop {
+                    if verdict == CliprdrVerdict::Stop {
                         #[cfg(target_os = "windows")]
                         {
                             ContextSend::set_is_stopped();
                         }
+                    } else if verdict == CliprdrVerdict::Drop {
+                        // With the file clipboard off nothing leaves, an answer to a request
+                        // included.
+                    } else if !crate::cliprdr_gate::direction_check_passes(
+                        &clip,
+                        true,
+                        crate::clipboard::is_local_to_remote_clipboard_allowed(
+                            crate::clipboard::ClipboardSide::Client,
+                        ),
+                        crate::clipboard::is_remote_to_local_clipboard_allowed(
+                            crate::clipboard::ClipboardSide::Client,
+                        ),
+                        "client",
+                    ) {
+                        // Refused by the clipboard direction policy (enforce mode).
                     } else {
                         #[cfg(target_os = "windows")]
                         if let Err(e) = ContextSend::make_sure_enabled() {
@@ -4299,10 +4316,43 @@ impl<T: InvokeUiSession> Remote<T> {
 
         let is_stopping_allowed = clip.is_beginning_message();
         let file_transfer_enabled = self.handler.is_file_clipboard_required();
-        let stop = is_stopping_allowed && !file_transfer_enabled;
+        // With the file clipboard off nothing from the peer is processed. Only a new
+        // exchange used to be stopped; a request sent out of the blue was answered.
+        let verdict =
+            crate::cliprdr_gate::cliprdr_verdict(file_transfer_enabled, is_stopping_allowed);
+        let mut stop = verdict != crate::cliprdr_gate::CliprdrVerdict::Process;
         log::debug!(
-                "Process clipboard message from server peer, stop: {}, is_stopping_allowed: {}, file_transfer_enabled: {}",
-                stop, is_stopping_allowed, file_transfer_enabled);
+                "Process clipboard message from server peer, verdict: {:?}, is_stopping_allowed: {}, file_transfer_enabled: {}",
+                verdict, is_stopping_allowed, file_transfer_enabled);
+        if !stop {
+            if let Some(size) = crate::cliprdr_gate::note_file_contents_request(&clip) {
+                log::info!(
+                    "largest file contents request from the peer so far: {} bytes",
+                    size
+                );
+            }
+            if let Some(refusal) = crate::cliprdr_gate::refusal_for_oversize_request(&clip) {
+                log::warn!("a file contents request above the limit from the peer is refused");
+                allow_err!(
+                    _peer
+                        .send(&crate::clipboard_file::clip_2_msg(refusal))
+                        .await
+                );
+                stop = true;
+            } else if !crate::cliprdr_gate::direction_check_passes(
+                &clip,
+                false,
+                crate::clipboard::is_local_to_remote_clipboard_allowed(
+                    crate::clipboard::ClipboardSide::Client,
+                ),
+                crate::clipboard::is_remote_to_local_clipboard_allowed(
+                    crate::clipboard::ClipboardSide::Client,
+                ),
+                "client",
+            ) {
+                stop = true;
+            }
+        }
         if !stop {
             #[cfg(any(
                 target_os = "windows",

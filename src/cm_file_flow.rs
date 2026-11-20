@@ -150,6 +150,13 @@ impl TransferLogThrottle {
 /// a download from an installed Windows host to about 25 MiB/s.
 pub(crate) const CM_READ_STEPS_PER_TICK: usize = 8;
 
+/// Whether a `FileResponse` from the peer is acted on. Only a file-transfer connection can
+/// have asked for one: every job that such a message could belong to is created by a
+/// `FileAction`, and those are accepted on file-transfer connections only.
+pub(crate) fn file_response_allowed(is_file_transfer_connection: bool) -> bool {
+    is_file_transfer_connection
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +282,11 @@ mod tests {
         assert!(!throttle.due(start + ms(253), 2));
         assert!(throttle.due(start + ms(254), 0));
         assert!(!throttle.due(start + ms(255), 0));
+    }
+
+    #[test]
+    fn file_response_needs_a_file_transfer_connection() {
+        assert!(file_response_allowed(true));
+        assert!(!file_response_allowed(false));
     }
 }
