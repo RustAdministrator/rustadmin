@@ -166,6 +166,8 @@ struct IpcTaskRunner<T: InvokeUiCM> {
     file_transfer_enabled_peer: bool,
     /// Read jobs for CM-side file reading (server to client transfers)
     read_jobs: Vec<fs::TransferJob>,
+    /// How far this process may read ahead of what the service has passed on to the peer.
+    read_window: crate::cm_file_flow::ReadAheadWindow,
 }
 
 lazy_static::lazy_static! {
@@ -621,6 +623,9 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                     let log = fs::serialize_transfer_jobs(&write_jobs);
                                     self.cm.ui_handler.file_transfer_log("transfer", &log);
                                 }
+                                Data::FileBlockAck { count, .. } => {
+                                    self.read_window.acknowledged(count as usize);
+                                }
                                 Data::FileTransferLog((action, log)) => {
                                     self.cm.ui_handler.file_transfer_log(&action, &log);
                                 }
@@ -803,7 +808,7 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                 _ = file_timer.tick() => {
                     if !self.read_jobs.is_empty() {
                         let conn_id = self.conn_id;
-                        if let Err(e) = handle_read_jobs_tick(&mut self.read_jobs, &self.tx, conn_id).await {
+                        if let Err(e) = handle_read_jobs_tick(&mut self.read_jobs, &self.tx, conn_id, &mut self.read_window).await {
                             log::error!("Error processing read jobs: {}", e);
                         }
                         let log = fs::serialize_transfer_jobs(&self.read_jobs);
@@ -832,6 +837,7 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
             #[cfg(target_os = "windows")]
             file_transfer_enabled_peer: false,
             read_jobs: Vec::new(),
+            read_window: Default::default(),
         };
 
         while task_runner.running {
@@ -1357,7 +1363,13 @@ async fn handle_read_jobs_tick(
     jobs: &mut Vec<fs::TransferJob>,
     tx: &UnboundedSender<Data>,
     conn_id: i32,
+    window: &mut crate::cm_file_flow::ReadAheadWindow,
 ) -> ResultType<()> {
+    // The IPC channel to the service is unbounded and the service can only pass blocks on as
+    // fast as the peer's link takes them. Read no further ahead than the window allows.
+    if !window.can_read() {
+        return Ok(());
+    }
     let mut finished = Vec::new();
 
     for job in jobs.iter_mut() {
@@ -1404,6 +1416,8 @@ async fn handle_read_jobs_tick(
                     conn_id,
                 }) {
                     log::error!("error sending FileBlockFromCM via IPC: {}", e);
+                } else {
+                    window.sent();
                 }
             }
             Ok(None) => {

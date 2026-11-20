@@ -1829,6 +1829,11 @@ pub struct Connection {
     // Used to filter stale responses (FileBlockFromCM, FileReadDone, etc.) for
     // cancelled or unknown jobs.
     cm_read_job_ids: HashSet<i32>,
+    // What the connection manager produced for the peer (file blocks and the messages
+    // around them) and the stream has not taken yet. See `cm_file_flow`.
+    cm_file_relay: crate::cm_file_flow::CmFileRelay,
+    // The file timer runs fast only while the relay holds something.
+    cm_file_relay_timer_armed: bool,
     terminal_service_id: String,
     terminal_persistent: bool,
     // The user token must be set when terminal is enabled.
@@ -2167,6 +2172,8 @@ impl Connection {
             printer_data: Vec::new(),
             tx_post_seq,
             cm_read_job_ids: HashSet::new(),
+            cm_file_relay: Default::default(),
+            cm_file_relay_timer_armed: false,
             terminal_service_id: "".to_owned(),
             terminal_persistent: false,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -2389,15 +2396,10 @@ impl Connection {
                             }
                         }
                         ipc::Data::RawMessage(bytes) => {
-                            let bytes_len = bytes.len();
-                            if let Err(err) = conn.stream.send_raw(bytes).await {
-                                log::warn!(
-                                    "#{} diag raw IPC stream send failed: bytes={}, err={}",
-                                    conn.inner.id(),
-                                    bytes_len,
-                                    err
-                                );
-                            }
+                            // Kept in order with the manager's file blocks and retried when
+                            // the stream is full, instead of being dropped.
+                            conn.cm_file_relay.push_raw(bytes);
+                            conn.flush_cm_file_relay().await;
                         }
                         #[cfg(target_os = "windows")]
                         ipc::Data::ClipboardFile(clip) => {
@@ -2539,6 +2541,7 @@ impl Connection {
                     }
                 },
                 _ = conn.file_timer.tick() => {
+                    conn.flush_cm_file_relay().await;
                     if !conn.read_jobs.is_empty() {
                         conn.send_to_cm(ipc::Data::FileTransferLog(("transfer".to_string(), fs::serialize_transfer_jobs(&conn.read_jobs))));
                         match fs::handle_read_jobs(&mut conn.read_jobs, &mut conn.stream).await {
@@ -2552,7 +2555,8 @@ impl Connection {
                                 break;
                             }
                         }
-                    } else {
+                    } else if conn.cm_file_relay.is_empty() {
+                        conn.cm_file_relay_timer_armed = false;
                         conn.file_timer = crate::rustdesk_interval(time::interval_at(Instant::now() + SEC30, SEC30));
                     }
                 }
@@ -8596,9 +8600,13 @@ impl Connection {
                 let path_str = dir.path.clone();
                 let file_entries: Vec<FileEntry> = dir.entries.into();
 
-                // Send file directory to client
-                self.send(fs::new_dir(id, path_str.clone(), file_entries.clone()))
-                    .await;
+                // Send file directory to client, ahead of the blocks that follow it.
+                self.cm_file_relay.push_message(fs::new_dir(
+                    id,
+                    path_str.clone(),
+                    file_entries.clone(),
+                ));
+                self.flush_cm_file_relay().await;
 
                 // Post audit for file transfer
                 self.post_file_audit(
@@ -8628,6 +8636,11 @@ impl Connection {
                 id,
                 file_num
             );
+            // The manager counted this block as in flight; give the credit back.
+            self.send_to_cm(ipc::Data::FileBlockAck {
+                conn_id: self.inner.id(),
+                count: 1,
+            });
             return;
         }
 
@@ -8642,7 +8655,52 @@ impl Connection {
         let mut fr = FileResponse::new();
         fr.set_block(block);
         msg.set_file_response(fr);
-        self.send(msg).await;
+        self.cm_file_relay.push_block(msg);
+        self.flush_cm_file_relay().await;
+    }
+
+    /// Passes what the connection manager produced on to the stream, in order and for as long
+    /// as the stream has room, and returns the read credit for the blocks that left.
+    ///
+    /// `Stream::send` does not wait: when the outbound queue is full it fails. Sending these
+    /// messages directly lost file blocks on any link slower than the disk.
+    async fn flush_cm_file_relay(&mut self) {
+        use crate::cm_file_flow::Relayed;
+        let mut released = 0usize;
+        while self.stream.file_send_ready() {
+            let result = match self.cm_file_relay.front() {
+                None => break,
+                Some(Relayed::Message(message)) => self.stream.send(message).await,
+                Some(Relayed::Raw(bytes)) => self.stream.send_raw(bytes.clone()).await,
+            };
+            match result {
+                Ok(()) => {
+                    if self.cm_file_relay.pop_sent() {
+                        released += 1;
+                    }
+                }
+                Err(err) if fs::is_would_block(&err) => break,
+                Err(err) => {
+                    log::warn!(
+                        "#{} file relay from the connection manager stopped: {}",
+                        self.inner.id(),
+                        err
+                    );
+                    released += self.cm_file_relay.clear();
+                    break;
+                }
+            }
+        }
+        if released > 0 {
+            self.send_to_cm(ipc::Data::FileBlockAck {
+                conn_id: self.inner.id(),
+                count: released as u32,
+            });
+        }
+        if !self.cm_file_relay.is_empty() && !self.cm_file_relay_timer_armed {
+            self.cm_file_relay_timer_armed = true;
+            self.file_timer = crate::rustdesk_interval(time::interval(MILLI1));
+        }
     }
 
     async fn handle_file_read_done(&mut self, id: i32, file_num: i32) {
@@ -8665,7 +8723,8 @@ impl Connection {
         let mut fr = FileResponse::new();
         fr.set_done(done);
         msg.set_file_response(fr);
-        self.send(msg).await;
+        self.cm_file_relay.push_message(msg);
+        self.flush_cm_file_relay().await;
     }
 
     async fn handle_file_read_error(&mut self, id: i32, file_num: i32, err: String) {
@@ -8680,7 +8739,9 @@ impl Connection {
         }
 
         // Forward error to client
-        self.send(fs::new_error(id, err, file_num)).await;
+        self.cm_file_relay
+            .push_message(fs::new_error(id, err, file_num));
+        self.flush_cm_file_relay().await;
     }
 
     async fn handle_file_digest_from_cm(
@@ -8714,7 +8775,8 @@ impl Connection {
         let mut fr = FileResponse::new();
         fr.set_digest(digest);
         msg.set_file_response(fr);
-        self.send(msg).await;
+        self.cm_file_relay.push_message(msg);
+        self.flush_cm_file_relay().await;
     }
 
     async fn process_new_read_job(&mut self, mut job: fs::TransferJob, path: String) {

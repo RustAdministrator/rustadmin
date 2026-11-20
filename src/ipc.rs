@@ -445,6 +445,12 @@ pub enum Data {
         compressed: bool,
         conn_id: i32,
     },
+    /// The service passed `count` blocks of `FileBlockFromCM` on to the stream (or discarded
+    /// them); the connection manager may read that many more. See `cm_file_flow`.
+    FileBlockAck {
+        conn_id: i32,
+        count: u32,
+    },
     /// File read completed successfully
     FileReadDone {
         id: i32,
