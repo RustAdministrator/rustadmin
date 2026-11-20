@@ -12022,13 +12022,18 @@ mod test {
         }
         #[cfg(target_os = "macos")]
         for usage in [0x88, 0x8a, 0x8b, 0x94] {
-            assert!(platform_keycode_from_usb_hid(usage, KeyboardFamily::Unknown).is_none());
+            assert!(
+                platform_keycode_from_usb_hid(usage, KeyboardFamily::KeyboardFamilyUnknown)
+                    .is_none()
+            );
         }
     }
 
     #[test]
     fn keyboard_v2_maps_standard_hid_keys_and_lock_state() {
-        assert!(platform_keycode_from_usb_hid(0x04, KeyboardFamily::Unknown).is_some());
+        assert!(
+            platform_keycode_from_usb_hid(0x04, KeyboardFamily::KeyboardFamilyUnknown).is_some()
+        );
         assert!(platform_keycode_from_rdev_key(rdev::usb_hid_key_from_code(0xe0)).is_some());
         let event = physical_key_to_key_event(&PhysicalKey {
             usb_hid_usage: 0x04,

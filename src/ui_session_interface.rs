@@ -1268,7 +1268,7 @@ impl<T: InvokeUiSession> Session<T> {
     fn physical_keyboard_family(&self) -> KeyboardFamily {
         let preference = self.get_option(crate::keyboard_hid::OPTION_KEYBOARD_FAMILY.to_owned());
         let explicit = hbb_common::keyboard::keyboard_family_from_preference(&preference);
-        if explicit != KeyboardFamily::Unknown {
+        if explicit != KeyboardFamily::KeyboardFamilyUnknown {
             return explicit;
         }
         hbb_common::keyboard::resolve_keyboard_family(
@@ -1319,7 +1319,7 @@ impl<T: InvokeUiSession> Session<T> {
         }
 
         let selected = self.physical_keyboard_family();
-        if selected != KeyboardFamily::Unknown
+        if selected != KeyboardFamily::KeyboardFamilyUnknown
             && crate::keyboard_hid::is_macos_platform(&self.peer_platform())
             && !capabilities.physical_keyboard_family
         {

@@ -812,7 +812,7 @@ impl VirtualInputState {
             KeyboardFamily::Ansi => &self.physical_sources[0],
             KeyboardFamily::Iso => &self.physical_sources[1],
             KeyboardFamily::Jis => &self.physical_sources[2],
-            KeyboardFamily::Unknown => hbb_common::bail!("Physical keyboard family is missing"),
+            KeyboardFamily::KeyboardFamilyUnknown => hbb_common::bail!("Physical keyboard family is missing"),
         };
         let event = crate::platform::macos_keyboard::new_physical_key_event(
             source.clone(),
@@ -1084,7 +1084,7 @@ fn release_record_key(record_key: KeysDown, _family: KeyboardFamily) {
         KeysDown::RdevKey(raw_key) => {
             #[cfg(target_os = "macos")]
             if let RawKey::MacVirtualKeycode(code) = raw_key {
-                if _family != KeyboardFamily::Unknown {
+                if _family != KeyboardFamily::KeyboardFamilyUnknown {
                     simulate_physical_macos(code as _, false, _family);
                     return;
                 }
@@ -1740,7 +1740,7 @@ fn map_keyboard_mode(evt: &KeyEvent) {
 
     #[cfg(target_os = "macos")]
     if let Ok(family) = evt.keyboard_family.enum_value() {
-        if family != KeyboardFamily::Unknown {
+        if family != KeyboardFamily::KeyboardFamilyUnknown {
             let Ok(code) = u16::try_from(evt.chr()) else {
                 return;
             };
@@ -2054,7 +2054,7 @@ fn release_keys(en: &mut Enigo, to_release: &Vec<Key>) {
 }
 
 fn record_pressed_key(record_key: KeysDown, down: bool) {
-    record_pressed_key_with_family(record_key, down, KeyboardFamily::Unknown);
+    record_pressed_key_with_family(record_key, down, KeyboardFamily::KeyboardFamilyUnknown);
 }
 
 fn record_pressed_key_with_family(record_key: KeysDown, down: bool, family: KeyboardFamily) {
@@ -2231,7 +2231,7 @@ fn legacy_keyboard_mode(evt: &KeyEvent) {
                 record_pressed_key_with_route(
                     record_key,
                     true,
-                    KeyboardFamily::Unknown,
+                    KeyboardFamily::KeyboardFamilyUnknown,
                     previously_native || native_character,
                 );
             } else {
@@ -2970,7 +2970,7 @@ mod native_character_route_tests {
                 true
             },
         ));
-        record_pressed_key_with_route(record_key, true, KeyboardFamily::Unknown, true);
+        record_pressed_key_with_route(record_key, true, KeyboardFamily::KeyboardFamilyUnknown, true);
         assert!(route_character_input(
             true,
             false,
@@ -2994,7 +2994,7 @@ mod native_character_route_tests {
         record_pressed_key(record_key, false);
         assert!(!pressed_native_character(record_key));
         let mut text_actions = Vec::new();
-        record_pressed_key_with_route(record_key, true, KeyboardFamily::Unknown, false);
+        record_pressed_key_with_route(record_key, true, KeyboardFamily::KeyboardFamilyUnknown, false);
         assert!(!route_character_input(
             true,
             false,
