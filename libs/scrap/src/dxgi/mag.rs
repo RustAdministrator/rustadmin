@@ -46,6 +46,13 @@ extern "C" {
     pub static GUID_WICPixelFormat32bppRGBA: GUID;
 }
 
+/// How many capturers of this process hold the magnification runtime. `MagInitialize` and
+/// `MagUninitialize` act on the whole process: when every capturer called them for itself, the
+/// first one dropped tore the runtime down under the others (two displays, or a capturer made
+/// again while the old one goes), and those crashed in it. The runtime is now initialised by the
+/// first capturer and uninitialised by the last, both under this lock.
+static MAG_RUNTIME_USERS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+
 thread_local! {
     /// The frame the magnifier callback delivers during `frame()`. The callback
     /// runs synchronously on the thread that called `MagSetWindowSource`, so
@@ -173,16 +180,19 @@ impl MagInterface {
                 "MagSetImageScalingCallback",
             )?));
 
-            // MagInitialize
+            // MagInitialize, once for all capturers of the process
             if let Some(init_func) = s.mag_initialize_func {
-                if FALSE == init_func() {
+                let mut users = MAG_RUNTIME_USERS
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if *users == 0 && FALSE == init_func() {
                     return Err(Error::new(
                         ErrorKind::Other,
                         format!("Failed to MagInitialize, error {}", Error::last_os_error()),
                     ));
-                } else {
-                    s.init_succeeded = true;
                 }
+                *users += 1;
+                s.init_succeeded = true;
             } else {
                 return Err(Error::new(
                     ErrorKind::Other,
@@ -211,13 +221,21 @@ impl MagInterface {
 
     pub(super) fn uninit(&mut self) {
         if self.init_succeeded {
-            if let Some(uninit_func) = self.mag_uninitialize_func {
-                unsafe {
-                    if FALSE == uninit_func() {
-                        println!("Failed MagUninitialize, error {}", Error::last_os_error())
+            let mut users = MAG_RUNTIME_USERS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *users = users.saturating_sub(1);
+            // MagUninitialize only when no other capturer uses the runtime.
+            if *users == 0 {
+                if let Some(uninit_func) = self.mag_uninitialize_func {
+                    unsafe {
+                        if FALSE == uninit_func() {
+                            println!("Failed MagUninitialize, error {}", Error::last_os_error())
+                        }
                     }
                 }
             }
+            drop(users);
             if !self.lib_handle.is_null() {
                 unsafe {
                     if FALSE == FreeLibrary(self.lib_handle) {
@@ -690,5 +708,26 @@ mod tests {
         println!("frames: {frames_a}/{frames_b}, wrong size: {wrong_a}/{wrong_b}");
         assert_eq!(wrong_a + wrong_b, 0);
         assert!(frames_a > 0 && frames_b > 0, "no frame was captured");
+    }
+
+    /// Capturers made and dropped on several threads at once, as two displays do when one of
+    /// them is switched. Each capturer initialises the magnification runtime of the process
+    /// and uninitialises it when it is dropped, while the others are still inside it. Here the
+    /// capturers fail where a session without a desktop fails them (the image callback is
+    /// refused), which is after the runtime was initialised and the windows were made.
+    #[test]
+    fn capturers_made_and_dropped_on_several_threads_at_once() {
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    for _ in 0..25 {
+                        let _ = CapturerMag::new((0, 0), 320, 200);
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
     }
 }
