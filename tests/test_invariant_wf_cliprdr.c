@@ -300,6 +300,145 @@ static int test_file_contents_response_answers_only_the_outstanding_request(void
 	return failed;
 }
 
+static UINT16 captured_format_flags = 0xffff;
+static UINT32 captured_format_len = 0xffffffff;
+static int captured_format_responses = 0;
+
+static UINT capture_format_data_response(CliprdrClientContext *context,
+										 const CLIPRDR_FORMAT_DATA_RESPONSE *response)
+{
+	(void)context;
+	captured_format_responses++;
+	captured_format_flags = response->msgFlags;
+	captured_format_len = response->dataLen;
+	return 0;
+}
+
+/* Puts a text into the clipboard of this window station. FALSE when that is not possible here. */
+static BOOL set_clipboard_text(const WCHAR *text, SIZE_T bytes)
+{
+	HGLOBAL mem;
+	void *p;
+
+	if (!OpenClipboard(NULL))
+		return FALSE;
+	EmptyClipboard();
+	mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+	p = mem ? GlobalLock(mem) : NULL;
+	if (!p)
+	{
+		CloseClipboard();
+		return FALSE;
+	}
+	memcpy(p, text, bytes);
+	GlobalUnlock(mem);
+	if (!SetClipboardData(CF_UNICODETEXT, mem))
+	{
+		CloseClipboard();
+		return FALSE;
+	}
+	CloseClipboard();
+	return TRUE;
+}
+
+/* The peer may ask for the list of files and nothing else. A request for another format id,
+ * such as text, used to be answered with whatever the user had in the clipboard. */
+static int test_format_data_request_is_answered_for_files_only(void)
+{
+	static const WCHAR marker[] = L"clipboard text of the user";
+	wfClipboard *clipboard = new_test_clipboard();
+	CliprdrClientContext context;
+	CLIPRDR_FORMAT_DATA_REQUEST request;
+	int failed = 0;
+
+	if (!clipboard)
+		return 1;
+	ZeroMemory(&context, sizeof(context));
+	context.Custom = clipboard;
+	context.EnableOthers = FALSE;
+	context.ClientFormatDataResponse = capture_format_data_response;
+	clipboard->context = &context;
+	if (!set_clipboard_text(marker, sizeof(marker)))
+		printf("note: no clipboard in this session; the request is still refused before it is read\n");
+
+	ZeroMemory(&request, sizeof(request));
+	request.connID = 1;
+	request.requestedFormatId = CF_UNICODETEXT;
+	captured_format_responses = 0;
+	failed += check_bool("text request is refused",
+						 wf_cliprdr_server_format_data_request(&context, &request) != ERROR_SUCCESS, TRUE);
+	failed += check_size("text request gets one response", (size_t)captured_format_responses, 1);
+	failed += check_size("text request gets a failure response", captured_format_flags, CB_RESPONSE_FAIL);
+	failed += check_size("text request gets no data", captured_format_len, 0);
+
+	request.requestedFormatId = CF_HDROP;
+	captured_format_responses = 0;
+	wf_cliprdr_server_format_data_request(&context, &request);
+	failed += check_size("any other format gets a failure response", captured_format_flags, CB_RESPONSE_FAIL);
+	failed += check_size("any other format gets no data", captured_format_len, 0);
+
+	free_test_clipboard(clipboard);
+	return failed;
+}
+
+static UINT16 captured_contents_flags = 0xffff;
+static UINT32 captured_contents_size = 0xffffffff;
+static int captured_contents_responses = 0;
+
+static UINT capture_file_contents_response(CliprdrClientContext *context,
+										   const CLIPRDR_FILE_CONTENTS_RESPONSE *response)
+{
+	(void)context;
+	captured_contents_responses++;
+	captured_contents_flags = response->msgFlags;
+	captured_contents_size = response->cbRequested;
+	return 0;
+}
+
+/* The requested size is allocated before the file is read; it comes from the peer. */
+static int test_file_contents_request_above_the_limit_is_refused(void)
+{
+	wfClipboard *clipboard = new_test_clipboard();
+	CliprdrClientContext context;
+	CLIPRDR_FILE_CONTENTS_REQUEST request;
+	int failed = 0;
+
+	if (!clipboard)
+		return 1;
+	ZeroMemory(&context, sizeof(context));
+	context.Custom = clipboard;
+	context.ClientFileContentsResponse = capture_file_contents_response;
+	clipboard->context = &context;
+
+	ZeroMemory(&request, sizeof(request));
+	request.connID = 1;
+	request.streamId = 5;
+	request.dwFlags = FILECONTENTS_RANGE;
+	request.cbRequested = WF_CLIPRDR_MAX_FILE_CONTENTS_REQUEST + 1u;
+	captured_contents_responses = 0;
+	failed += check_size("request above the limit is refused",
+						 wf_cliprdr_server_file_contents_request(&context, &request),
+						 ERROR_INVALID_PARAMETER);
+	failed += check_size("request above the limit gets one response", (size_t)captured_contents_responses, 1);
+	failed += check_size("request above the limit gets a failure response", captured_contents_flags,
+						 CB_RESPONSE_FAIL);
+	failed += check_size("request above the limit gets no data", captured_contents_size, 0);
+
+	request.cbRequested = 0xffffffffu;
+	failed += check_size("largest possible request is refused",
+						 wf_cliprdr_server_file_contents_request(&context, &request),
+						 ERROR_INVALID_PARAMETER);
+
+	/* The size of a file is asked for with a fixed, small answer whatever the field says. */
+	request.dwFlags = FILECONTENTS_SIZE;
+	failed += check_bool("a size request is not refused for its size field",
+						 wf_cliprdr_server_file_contents_request(&context, &request) != ERROR_INVALID_PARAMETER,
+						 TRUE);
+
+	free_test_clipboard(clipboard);
+	return failed;
+}
+
 int main(void)
 {
 	int failed = 0;
@@ -314,6 +453,8 @@ int main(void)
 	failed += test_bounded_strlen_stops_at_the_limit();
 	failed += test_format_list_rejects_oversized_lists_and_names();
 	failed += test_file_contents_response_answers_only_the_outstanding_request();
+	failed += test_format_data_request_is_answered_for_files_only();
+	failed += test_file_contents_request_above_the_limit_is_refused();
 
 	if (failed != 0) {
 		fprintf(stderr, "wf_cliprdr invariant test failed: %d checks\n", failed);

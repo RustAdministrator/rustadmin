@@ -7,6 +7,11 @@ param(
     [string]$BridgeLlvmPath = "",
     [string]$BridgeLlvmCompilerOpts = "",
     [switch]$NoHwCodec,
+    # Also build encoding from and decoding into GPU textures (Cargo feature `vram`). It needs
+    # the `externals` submodule of the hwcodec checkout that lies next to this repository.
+    # The archive of such a build is named ..._vram.zip, so that it cannot be taken for the
+    # ordinary one.
+    [switch]$Vram,
     [switch]$Clean,
     [switch]$SkipBridgeGen,
     [switch]$ForceBridgeGen,
@@ -112,7 +117,7 @@ function Get-RustAdminVersionInfo {
     [PSCustomObject]@{
         Version = $Version
         Revision = $Revision
-        ArchiveName = "RustAdmin_Release_$Version.$Revision.zip"
+        ArchiveName = "RustAdmin_Release_$Version.$Revision$(if ($Vram) { '_vram' }).zip"
     }
 }
 
@@ -887,7 +892,16 @@ finally {
 
 Invoke-BridgeGeneration
 
-$Features = if ($NoHwCodec) { "flutter" } else { "flutter,hwcodec" }
+if ($Vram -and $NoHwCodec) {
+    throw "-Vram builds on the hardware codecs; it cannot be combined with -NoHwCodec."
+}
+if ($Vram) {
+    $HwCodecExternals = Join-Path (Split-Path -Parent $RepoRoot) "hwcodec\externals"
+    if (-not (Get-ChildItem -LiteralPath $HwCodecExternals -ErrorAction SilentlyContinue)) {
+        throw "-Vram needs the hwcodec 'externals' submodule (vendor SDK headers) in $HwCodecExternals. Run 'git submodule update --init externals' in the hwcodec checkout."
+    }
+}
+$Features = if ($NoHwCodec) { "flutter" } elseif ($Vram) { "flutter,hwcodec,vram" } else { "flutter,hwcodec" }
 $RustHostLine = rustc -vV | Select-String '^host:' | Select-Object -First 1
 if ($null -eq $RustHostLine) {
     throw "Unable to determine the Rust host target."

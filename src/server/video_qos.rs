@@ -863,6 +863,14 @@ impl Default for VideoQoS {
 }
 
 // Basic functionality
+
+/// The kill switch for the reaction to sustained refusals of video datagrams.
+fn datagram_admission_backoff_enabled() -> bool {
+    hbb_common::config::Config::get_option(
+        hbb_common::config::keys::OPTION_VIDEO_ADMISSION_BACKOFF,
+    ) != "N"
+}
+
 impl VideoQoS {
     // Calculate seconds per frame based on current FPS
     pub fn spf(&self, video_service_name: &str) -> Duration {
@@ -1019,9 +1027,26 @@ impl VideoQoS {
         video_service_name: &str,
         now: Instant,
     ) -> bool {
+        self.movie_admission_pressure_with(
+            video_service_name,
+            now,
+            datagram_admission_backoff_enabled(),
+        )
+    }
+
+    /// `backoff_enabled` false is the behaviour before the fix, kept as a kill switch: every
+    /// query forgot what the viewers' samples had built up, so sustained refusals of video
+    /// datagrams were never seen and the bitrate was never lowered for them.
+    fn movie_admission_pressure_with(
+        &mut self,
+        video_service_name: &str,
+        now: Instant,
+        backoff_enabled: bool,
+    ) -> bool {
         let Some(display) = self.displays.get_mut(video_service_name) else {
             return false;
         };
+        let mut forget_samples = !backoff_enabled;
         if display.admission_latched_at.is_some_and(|latched| {
             now.saturating_duration_since(latched) >= DATAGRAM_ADMISSION_CLEAN_RESET * 2
         }) {
@@ -1033,10 +1058,16 @@ impl VideoQoS {
             display.admission_latched_at = None;
             display.last_admission_event_at = None;
             display.upshift_frozen_until = None;
+            forget_samples = true;
         }
-        for user in self.users.values_mut() {
-            user.datagram_admission_by_service
-                .remove(video_service_name);
+        // Only when the latch has expired. This ran on every query: the capture loop asks in
+        // every iteration while a stream starts and twice a second later, between two samples
+        // of a viewer, so no sample ever had a predecessor to be compared with.
+        if forget_samples {
+            for user in self.users.values_mut() {
+                user.datagram_admission_by_service
+                    .remove(video_service_name);
+            }
         }
         display.movie_admission_pressure
     }
@@ -3543,6 +3574,89 @@ mod tests {
         assert!(!display.movie_admission_pressure);
         assert_eq!(qos.users[&1].delay.fps, Some(60));
         assert!(qos.users[&1].delay.delay_history.is_empty());
+    }
+
+    /// The video service asks for the pressure flag between the viewer's samples: in every
+    /// loop iteration while a stream starts, then twice a second. Asking erased what the
+    /// samples had built up, so the pressure was never seen.
+    fn feed_admission_pressure_with_queries(qos: &mut VideoQoS, viewers: &[i32], start: Instant) {
+        let times = [
+            Duration::ZERO,
+            Duration::from_millis(500),
+            Duration::from_millis(500) + DATAGRAM_ADMISSION_PRESSURE_DURATION,
+        ];
+        for (step, offset) in times.iter().enumerate() {
+            let now = start + *offset;
+            for id in viewers {
+                qos.user_datagram_admission_at(
+                    *id,
+                    MONITOR_SERVICE,
+                    datagram_admission_sample(step as u64, step as u64 * 29),
+                    now,
+                );
+            }
+            // What the capture loop does between two samples.
+            for query in 1..=3 {
+                qos.movie_admission_pressure_at(
+                    MONITOR_SERVICE,
+                    now + Duration::from_millis(query * 100),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn asking_for_the_pressure_flag_keeps_the_admission_history() {
+        let start = Instant::now();
+        let mut qos = movie_qos_with_viewers(&[1]);
+        let initial_ratio = qos.displays[MONITOR_SERVICE].ratio;
+
+        feed_admission_pressure_with_queries(&mut qos, &[1], start);
+
+        let display = &qos.displays[MONITOR_SERVICE];
+        assert_eq!(display.admission_events, 1, "sustained refusals were not seen");
+        assert!(display.ratio < initial_ratio);
+    }
+
+    #[test]
+    fn asking_for_the_pressure_flag_keeps_the_history_of_two_viewers() {
+        let start = Instant::now();
+        let mut qos = movie_qos_with_viewers(&[1, 2]);
+        let initial_ratio = qos.displays[MONITOR_SERVICE].ratio;
+
+        feed_admission_pressure_with_queries(&mut qos, &[1, 2], start);
+
+        let display = &qos.displays[MONITOR_SERVICE];
+        assert_eq!(display.admission_events, 1, "sustained refusals were not seen");
+        assert!(display.ratio < initial_ratio);
+    }
+
+    #[test]
+    fn kill_switch_keeps_the_old_behaviour() {
+        let start = Instant::now();
+        let mut qos = movie_qos_with_viewers(&[1]);
+        let initial_ratio = qos.displays[MONITOR_SERVICE].ratio;
+        let times = [
+            Duration::ZERO,
+            Duration::from_millis(500),
+            Duration::from_millis(500) + DATAGRAM_ADMISSION_PRESSURE_DURATION,
+        ];
+        for (step, offset) in times.iter().enumerate() {
+            qos.user_datagram_admission_at(
+                1,
+                MONITOR_SERVICE,
+                datagram_admission_sample(step as u64, step as u64 * 29),
+                start + *offset,
+            );
+            qos.movie_admission_pressure_with(
+                MONITOR_SERVICE,
+                start + *offset + Duration::from_millis(100),
+                false,
+            );
+        }
+        let display = &qos.displays[MONITOR_SERVICE];
+        assert_eq!(display.admission_events, 0);
+        assert_eq!(display.ratio, initial_ratio);
     }
 
     #[test]

@@ -43,7 +43,8 @@ pub struct PixelBuffer<'a> {
 
 impl<'a> PixelBuffer<'a> {
     pub fn new(data: &'a [u8], pixfmt: Pixfmt, width: usize, height: usize) -> Self {
-        let stride0 = data.len() / height;
+        // A capture can report a height of zero (a crop rectangle from PipeWire, for one).
+        let stride0 = data.len().checked_div(height).unwrap_or(0);
         let mut stride = Vec::new();
         stride.push(stride0);
         Self {

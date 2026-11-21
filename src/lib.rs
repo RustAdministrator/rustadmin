@@ -40,6 +40,12 @@ pub use self::server::*;
 mod client;
 mod lan;
 #[cfg(not(any(target_os = "ios")))]
+mod cm_file_flow;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+mod cliprdr_gate;
+#[cfg(not(any(target_os = "ios")))]
+mod file_message_limit;
+#[cfg(not(any(target_os = "ios")))]
 mod server_mode_policy;
 #[cfg(not(any(target_os = "ios")))]
 mod rendezvous_mediator;

@@ -2820,13 +2820,22 @@ impl InvokeUiSession for FlutterHandler {
                     stream.add(EventToUI::Texture(display, true));
                 }
             }
-            outcome.merge(session.record_render_outcome(
+            let recorded = session.record_render_outcome(
                 display,
                 context,
                 submission.generation(),
                 submission.submitted(),
                 submission.target_exists(),
-            ));
+            );
+            // The target is there and the renderer cannot take a texture: the decoder
+            // thread counts these and moves the display to decoding through RAM.
+            outcome.merge(
+                if matches!(submission, RenderTargetSubmission::Rejected { .. }) {
+                    recorded.texture_refused()
+                } else {
+                    recorded
+                },
+            );
         }
         outcome
     }

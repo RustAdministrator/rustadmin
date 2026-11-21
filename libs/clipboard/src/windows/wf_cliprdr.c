@@ -51,6 +51,10 @@
 #define WF_CLIPRDR_MAX_FORMAT_NAME_WCHARS 255u
 /* Bound the peer-provided UTF-8 scan separately from the converted Windows name. */
 #define WF_CLIPRDR_MAX_FORMAT_NAME_UTF8_BYTES (WF_CLIPRDR_MAX_FORMAT_NAME_WCHARS * 4u)
+/* The most a peer may ask for in one file contents request. The size is allocated before the
+ * file is read. Not measured against Explorer yet: chosen far above the 16-64 MiB a shell
+ * copy is expected to ask for, so that a real paste cannot reach it. */
+#define WF_CLIPRDR_MAX_FILE_CONTENTS_REQUEST (256u * 1024u * 1024u)
 
 /* Validates the remote descriptor array size after cItems has been read safely. */
 static BOOL wf_cliprdr_file_group_descriptor_size_valid(SIZE_T size, UINT count)
@@ -2891,6 +2895,16 @@ wf_cliprdr_server_format_data_request(CliprdrClientContext *context,
 		IDataObject_Release(dataObj);
 		rc = ERROR_SUCCESS;
 	}
+	else if (!context->EnableOthers)
+	{
+		/*
+		 * Only files are shared through this channel. The peer asks for the list of files and
+		 * nothing else; a request for any other format id is a request for whatever the user
+		 * has in the clipboard (text is format 13) and gets a failure response, not the data.
+		 */
+		rc = ERROR_NOT_SUPPORTED;
+		goto exit;
+	}
 	else
 	{
 		/* Ignore if other app is holding the clipboard */
@@ -3067,6 +3081,18 @@ wf_cliprdr_server_file_contents_request(CliprdrClientContext *context,
 	if (!clipboard)
 	{
 		rc = ERROR_INTERNAL_ERROR;
+		goto exit;
+	}
+
+	/*
+	 * The size comes from the peer and is the size of the buffer allocated below. Refuse a
+	 * request above the limit instead of serving less: the peer's reader could take a short
+	 * read for the end of the file.
+	 */
+	if (fileContentsRequest->dwFlags != FILECONTENTS_SIZE &&
+		fileContentsRequest->cbRequested > WF_CLIPRDR_MAX_FILE_CONTENTS_REQUEST)
+	{
+		rc = ERROR_INVALID_PARAMETER;
 		goto exit;
 	}
 

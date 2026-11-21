@@ -141,11 +141,11 @@ pub(crate) fn detected_keyboard_family() -> KeyboardFamily {
         return if unsafe { winapi::um::winuser::GetKeyboardType(0) } == 7 {
             KeyboardFamily::Jis
         } else {
-            KeyboardFamily::Unknown
+            KeyboardFamily::KeyboardFamilyUnknown
         };
     }
     #[allow(unreachable_code)]
-    KeyboardFamily::Unknown
+    KeyboardFamily::KeyboardFamilyUnknown
 }
 
 #[cfg(test)]

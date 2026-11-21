@@ -1268,7 +1268,7 @@ impl<T: InvokeUiSession> Session<T> {
     fn physical_keyboard_family(&self) -> KeyboardFamily {
         let preference = self.get_option(crate::keyboard_hid::OPTION_KEYBOARD_FAMILY.to_owned());
         let explicit = hbb_common::keyboard::keyboard_family_from_preference(&preference);
-        if explicit != KeyboardFamily::Unknown {
+        if explicit != KeyboardFamily::KeyboardFamilyUnknown {
             return explicit;
         }
         hbb_common::keyboard::resolve_keyboard_family(
@@ -1319,7 +1319,7 @@ impl<T: InvokeUiSession> Session<T> {
         }
 
         let selected = self.physical_keyboard_family();
-        if selected != KeyboardFamily::Unknown
+        if selected != KeyboardFamily::KeyboardFamilyUnknown
             && crate::keyboard_hid::is_macos_platform(&self.peer_platform())
             && !capabilities.physical_keyboard_family
         {
@@ -2871,6 +2871,10 @@ impl<T: InvokeUiSession> Interface for Session<T> {
 
     async fn handle_test_delay(&self, t: TestDelay, peer: &mut Stream) {
         if !t.from_client {
+            // The answer goes back first: the host measures the round trip with it, and
+            // the status update below (dozens of strings for the interface) is not part of
+            // the network delay.
+            handle_test_delay(t.clone(), peer).await;
             if self.update_actual_host_resource_mode(&t.resource_mode) {
                 self.send(Data::ResourcePolicyChanged);
             }
@@ -2912,11 +2916,11 @@ impl<T: InvokeUiSession> Interface for Session<T> {
                     .then_some(t.host_pipeline_p95_us),
                 movie_fallback_reason: (!t.movie_fallback_reason.is_empty())
                     .then(|| t.movie_fallback_reason.clone()),
-                movie_playout_delay_ms: (t.movie_playout_delay_ms > 0)
-                    .then_some(t.movie_playout_delay_ms),
+                // `movie_playout_delay_ms` is not taken from the host: it says what the
+                // profile asks for, and only this side knows whether a presentation clock
+                // applies it (see `Remote::update_quality_status` in `io_loop.rs`).
                 ..Default::default()
             });
-            handle_test_delay(t, peer).await;
         }
     }
 }

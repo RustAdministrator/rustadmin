@@ -25,6 +25,7 @@ import '../../models/input_model.dart';
 import '../../models/platform_model.dart';
 import '../../common/shared_state.dart';
 import '../../utils/image.dart';
+import '../../utils/viewer_refresh_rate.dart';
 import '../widgets/remote_toolbar.dart';
 import '../widgets/kb_layout_type_chooser.dart';
 import '../widgets/tabbar_widget.dart';
@@ -220,6 +221,31 @@ class _RemotePageState extends State<RemotePage>
 
   void _onTabStateChanged(DesktopTabState _) => _reportVideoVisibility();
 
+  // The refresh rate of the screen this window is on, for the playout clock of
+  // the Movie profile.
+  final _refreshRateReporter = ViewerRefreshRateReporter(
+    (millihz) => bind.mainSetCommon(
+      key: 'viewer-display-refresh-millihz',
+      value: millihz.toString(),
+    ),
+  );
+
+  void _reportDisplayRefreshRate() {
+    // The web client has no native playout clock to tell.
+    if (isWeb) return;
+    final views = WidgetsBinding.instance.platformDispatcher.views;
+    _refreshRateReporter.update(
+      views.isEmpty ? null : views.first.display.refreshRate,
+    );
+  }
+
+  @override
+  void didChangeMetrics() {
+    super.didChangeMetrics();
+    // The window may have moved to a screen with another refresh rate.
+    _reportDisplayRefreshRate();
+  }
+
   void _onRecordingChanged() => _reportVideoVisibility();
 
   Future<void> _unregisterVideoVisibility() async {
@@ -324,6 +350,7 @@ class _RemotePageState extends State<RemotePage>
     // hosted by the main window construct RemotePage directly.
     initializeDesktopRemoteInputSource();
     WidgetsBinding.instance.addObserver(this);
+    _reportDisplayRefreshRate();
     _awaitingWindowActivation = !widget.focusOnOpen;
     _ffi = FFI(widget.sessionId);
     _videoVisibilityOwner = 'remote-page:${Uuid().v4()}';

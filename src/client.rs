@@ -9,7 +9,6 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     Device, Host, StreamConfig,
 };
-use crossbeam_queue::ArrayQueue;
 use magnum_opus::{Channels::*, Decoder as AudioDecoder};
 #[cfg(not(any(target_os = "linux", target_os = "ios")))]
 use ringbuf::{ring_buffer::RbBase, Rb};
@@ -109,9 +108,14 @@ use crate::ui_session_interface::SessionPermissionConfig;
 
 pub use super::lang::*;
 
+mod cursor_delay;
 mod decoder_recovery;
 mod display_control;
 mod startup_recovery;
+mod movie_playout;
+mod texture_fallback;
+mod video_ingress;
+mod video_timing;
 pub mod file_trait;
 pub mod helper;
 pub mod io_loop;
@@ -122,8 +126,20 @@ pub const MILLI1: Duration = Duration::from_millis(1);
 pub const SEC30: Duration = Duration::from_secs(30);
 pub const VIDEO_QUEUE_SIZE: usize = 120;
 pub(crate) const MOVIE_VIDEO_QUEUE_MAX_AGE_MS: u64 = 100;
+/// Android: after a packet went into the hardware decoder, it is asked for a frame it still
+/// owes this often and for this long while no further packet arrives.
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
+const MEDIACODEC_DRAIN_POLL: Duration = Duration::from_millis(8);
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
+const MEDIACODEC_DRAIN_WINDOW: Duration = Duration::from_millis(500);
 const MOVIE_VIDEO_REFRESH_COOLDOWN: Duration = Duration::from_millis(500);
-const MOVIE_KEYFRAME_FALLBACK_DELAY: Duration = Duration::from_secs(1);
+pub(crate) use cursor_delay::{CursorDelay, CursorEvent};
+pub(crate) use movie_playout::{
+    set_viewer_display_refresh_millihz, viewer_display_refresh_millihz,
+};
+pub(crate) use video_ingress::{
+    KeyframeWait, VideoIngress, KEYFRAME_FALLBACK_DELAY, MOVIE_KEYFRAME_FALLBACK_DELAY,
+};
 const VIDEO_FEEDBACK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 const DEFAULT_CUSTOM_IMAGE_QUALITY: i32 = 50;
 const MIN_CUSTOM_IMAGE_QUALITY: i32 = 10;
@@ -151,71 +167,6 @@ pub(crate) fn movie_source_clock_regressed(
         && previous_capture_time_ms > frame.capture_time_ms
         && previous_capture_time_ms.saturating_sub(frame.capture_time_ms)
             > MOVIE_VIDEO_QUEUE_MAX_AGE_MS
-}
-
-/// Movie mode drops queued delta frames that fall behind. The deltas left in
-/// the queue reference the dropped frames, so they are discarded until the
-/// requested keyframe arrives. If none arrives in time, one legacy refresh is
-/// requested, which every host version answers with a keyframe.
-#[derive(Debug, Default)]
-pub(crate) struct MovieKeyframeWait {
-    since: Option<std::time::Instant>,
-    fallback_sent: bool,
-}
-
-impl MovieKeyframeWait {
-    /// Starts waiting for a keyframe; an ongoing wait keeps its start time.
-    pub(crate) fn arm(&mut self, now: std::time::Instant) {
-        if self.since.is_none() {
-            self.since = Some(now);
-            self.fallback_sent = false;
-        }
-    }
-
-    pub(crate) fn keyframe_received(&mut self) {
-        self.since = None;
-        self.fallback_sent = false;
-    }
-
-    /// Returns true once per wait when the legacy refresh fallback is due.
-    pub(crate) fn fallback_due(&mut self, now: std::time::Instant) -> bool {
-        match self.since {
-            Some(since)
-                if !self.fallback_sent
-                    && now.saturating_duration_since(since) >= MOVIE_KEYFRAME_FALLBACK_DELAY =>
-            {
-                self.fallback_sent = true;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Time until the fallback is due, if it is still pending.
-    pub(crate) fn fallback_wait(&self, now: std::time::Instant) -> Option<Duration> {
-        let since = self.since.filter(|_| !self.fallback_sent)?;
-        Some(MOVIE_KEYFRAME_FALLBACK_DELAY.saturating_sub(now.saturating_duration_since(since)))
-    }
-}
-
-/// Starts waiting for a keyframe after Movie queue drops: the queued deltas
-/// depend on the dropped frames and are discarded until the keyframe arrives.
-pub(crate) fn start_movie_keyframe_wait(
-    discard_queue: &RwLock<bool>,
-    wait: &Mutex<MovieKeyframeWait>,
-    now: std::time::Instant,
-) {
-    *discard_queue.write().unwrap() = true;
-    wait.lock().unwrap().arm(now);
-}
-
-/// A keyframe arrived: decoding resumes and any pending fallback is cancelled.
-pub(crate) fn finish_movie_keyframe_wait(
-    discard_queue: &RwLock<bool>,
-    wait: &Mutex<MovieKeyframeWait>,
-) {
-    *discard_queue.write().unwrap() = false;
-    wait.lock().unwrap().keyframe_received();
 }
 
 pub(crate) fn movie_video_refresh_due(
@@ -3228,6 +3179,9 @@ pub struct VideoHandler {
     first_frame: bool,
     stream_id: u64,
     last_frame_id: u64,
+    /// The renderer did not take this display's textures (`texture_fallback`): decode
+    /// through RAM for as long as this handler lives.
+    texture_render_failed: bool,
 }
 
 impl VideoHandler {
@@ -3311,7 +3265,23 @@ impl VideoHandler {
             first_frame: true,
             stream_id: 0,
             last_frame_id: 0,
+            texture_render_failed: false,
         }
+    }
+
+    /// Android: asks the hardware decoder for a frame that was not ready when the last
+    /// packet was handed in.
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
+    fn drain_pending_output(&mut self, pixelbuffer: &mut bool) -> ResultType<DecodeOutcome> {
+        self.decoder
+            .drain_media_codec(&mut self.rgb, &mut self.texture, pixelbuffer)
+    }
+
+    /// From now on this display is decoded through RAM: the decoder is created again
+    /// without the adapter that texture decoding needs.
+    fn give_up_texture_decoding(&mut self) {
+        self.texture_render_failed = true;
+        self.reset(None, None);
     }
 
     pub fn decoder_backend(&self) -> &'static str {
@@ -3478,7 +3448,11 @@ impl VideoHandler {
         );
         #[cfg(target_os = "macos")]
         self.rgb.set_align(crate::get_dst_align_rgba());
-        let luid = Self::get_adapter_luid();
+        let luid = if self.texture_render_failed {
+            None
+        } else {
+            Self::get_adapter_luid()
+        };
         let format = format.unwrap_or(self.decoder.format());
         if format != self.decoder.format() {
             self.recovery = Default::default();
@@ -4996,7 +4970,6 @@ impl LoginConfigHandler {
 /// Media data.
 pub enum MediaData {
     VideoQueue,
-    VideoFrame(Box<VideoFrame>),
     AudioFrame(Box<AudioFrame>),
     AudioFormat(AudioFormat),
     Reset(Option<(usize, usize)>),
@@ -5045,6 +5018,8 @@ pub struct RenderFrameOutcome {
     pub(crate) eligible_bindings: u16,
     pub(crate) submitted_bindings: u16,
     pub(crate) rejected_bindings: u16,
+    /// Of the rejected ones: render targets that exist but could not take a GPU texture.
+    pub(crate) texture_refused_bindings: u16,
 }
 
 impl RenderFrameOutcome {
@@ -5053,6 +5028,7 @@ impl RenderFrameOutcome {
             eligible_bindings: 1,
             submitted_bindings: 1,
             rejected_bindings: 0,
+            texture_refused_bindings: 0,
         }
     }
 
@@ -5061,6 +5037,7 @@ impl RenderFrameOutcome {
             eligible_bindings: 1,
             submitted_bindings: 0,
             rejected_bindings: 1,
+            texture_refused_bindings: 0,
         }
     }
 
@@ -5074,6 +5051,16 @@ impl RenderFrameOutcome {
         self.rejected_bindings = self
             .rejected_bindings
             .saturating_add(other.rejected_bindings);
+        self.texture_refused_bindings = self
+            .texture_refused_bindings
+            .saturating_add(other.texture_refused_bindings);
+    }
+
+    /// A render target that exists could not take the GPU texture it was offered.
+    #[cfg_attr(not(feature = "vram"), allow(dead_code))]
+    pub(crate) fn texture_refused(mut self) -> Self {
+        self.texture_refused_bindings = self.texture_refused_bindings.saturating_add(1);
+        self
     }
 
     pub(crate) fn any_submitted(self) -> bool {
@@ -5325,18 +5312,17 @@ pub fn start_video_thread<F, T>(
     session: Session<T>,
     display: usize,
     video_receiver: mpsc::Receiver<MediaData>,
-    video_queue: Arc<RwLock<ArrayQueue<VideoFrame>>>,
+    video_queue: Arc<VideoIngress<VideoFrame>>,
     fps: Arc<RwLock<Option<usize>>>,
     decoder_backend: Arc<RwLock<Option<&'static str>>>,
     renderer: Arc<RwLock<Option<&'static str>>>,
     frame_resolution: Arc<RwLock<Option<(usize, usize)>>>,
     chroma: Arc<RwLock<Option<Chroma>>>,
-    discard_queue: Arc<RwLock<bool>>,
     video_feedback: Arc<Mutex<VideoFeedbackTracker>>,
     movie_mode: Arc<std::sync::atomic::AtomicBool>,
     newest_capture_time_ms: Arc<std::sync::atomic::AtomicU64>,
     movie_queue_refresh: Arc<Mutex<Option<std::time::Instant>>>,
-    movie_keyframe_wait: Arc<Mutex<MovieKeyframeWait>>,
+    keyframe_wait: Arc<Mutex<KeyframeWait>>,
     video_callback: F,
 ) where
     F: 'static
@@ -5359,6 +5345,23 @@ pub fn start_video_thread<F, T>(
         let mut duration = std::time::Duration::ZERO;
         let mut skip_beginning = 0;
         let mut presentation = crate::resource_policy::ViewerPresentation::default();
+        // Decode and presentation timing of this display; one line a minute goes to the log.
+        let timing = std::cell::RefCell::new(video_timing::VideoTiming::default());
+        // The presentation clock of the Movie profile where the platform has none, and how
+        // far the frame it paced last was behind the newest arrived one.
+        let mut movie_playout: Option<movie_playout::MoviePlayout> = None;
+        let playout_behind = std::cell::Cell::new(None::<Duration>);
+        // Texture frames the renderer does not take.
+        let texture_watch = std::cell::RefCell::new(texture_fallback::TextureRenderWatch::default());
+        // Android's hardware decoder may have a frame that was not ready when the last
+        // packet was handed in: until this moment it is asked again while no packet arrives.
+        #[cfg(all(target_os = "android", feature = "mediacodec"))]
+        let mut decoder_drain_until: Option<std::time::Instant> = None;
+        let log_timing = |report: Option<video_timing::VideoTimingReport>| {
+            if let Some(report) = report {
+                log::info!("viewer video timing: display={}, {}", display, report);
+            }
+        };
         let mut submit_presentation = |handler: &mut VideoHandler,
                                        frame: crate::resource_policy::PendingPresentation| {
             let render_submit_start = std::time::Instant::now();
@@ -5366,11 +5369,44 @@ pub fn start_video_thread<F, T>(
                 display, frame.stream_id, frame.frame_id, &mut handler.rgb,
                 handler.texture.texture, frame.pixelbuffer,
             );
+            if !frame.pixelbuffer
+                && texture_watch.borrow_mut().offered(
+                    render_outcome.submitted_bindings,
+                    render_outcome.texture_refused_bindings,
+                    std::time::Instant::now(),
+                )
+            {
+                log::warn!(
+                    "display {display}: the renderer took no GPU texture for {} s; decoding through RAM from now on",
+                    texture_fallback::REFUSED_FOR.as_secs()
+                );
+                *texture_watch.borrow_mut() = Default::default();
+                handler.give_up_texture_decoding();
+                // The new decoder starts with a keyframe.
+                let first_fallback = if movie_mode.load(std::sync::atomic::Ordering::Relaxed) {
+                    MOVIE_KEYFRAME_FALLBACK_DELAY
+                } else {
+                    KEYFRAME_FALLBACK_DELAY
+                };
+                keyframe_wait
+                    .lock()
+                    .unwrap()
+                    .begin(std::time::Instant::now(), first_fallback);
+                session.refresh_video(display as _);
+            }
             if render_outcome.any_submitted() {
+                log_timing(
+                    timing
+                        .borrow_mut()
+                        .record_presented(std::time::Instant::now()),
+                );
                 let mut feedback = video_feedback.lock().unwrap();
                 feedback.record_render_submitted(
                     frame.stream_id, frame.frame_id, render_submit_start.elapsed(),
-                    video_queue.read().unwrap().len(),
+                    movie_playout::queue_depth_to_report(
+                        video_queue.len(),
+                        playout_behind.get(),
+                    ),
                 );
                 #[cfg(all(target_os = "android", feature = "mediacodec"))]
                 feedback.record_display_refresh(
@@ -5386,7 +5422,8 @@ pub fn start_video_thread<F, T>(
                 // was queued just before suspension became visible here.
                 presentation.clear();
                 video_handler.take();
-                while video_queue.read().unwrap().pop().is_some() {}
+                video_queue.clear();
+                timing.borrow_mut().pause();
             }
             if let Some(handler) = video_handler.as_mut() {
                 if !session.video_suspended() {
@@ -5408,17 +5445,21 @@ pub fn start_video_thread<F, T>(
                     }
                 }
             }
-            if !session.video_suspended()
-                && movie_keyframe_wait
-                .lock()
-                .unwrap()
-                .fallback_due(std::time::Instant::now())
-            {
-                log::warn!(
-                    "Movie queue drop received no keyframe in time; requesting a full refresh: display={}",
-                    display
-                );
-                if !session.video_suspended() {
+            // A wait for a keyframe never lasts for ever: while it does, a full refresh is
+            // asked for again, with a growing pause. The request that started the wait may
+            // have been lost on the way.
+            if !session.video_suspended() {
+                let fallbacks = {
+                    let mut wait = keyframe_wait.lock().unwrap();
+                    wait.fallback_due(std::time::Instant::now())
+                        .then(|| wait.fallbacks())
+                };
+                if let Some(fallbacks) = fallbacks {
+                    log::warn!(
+                        "No keyframe arrived in time; requesting a full refresh: display={}, request={}",
+                        display,
+                        fallbacks
+                    );
                     session.refresh_video(display as _);
                 }
             }
@@ -5436,9 +5477,20 @@ pub fn start_video_thread<F, T>(
             let recovery_wait = video_handler
                 .as_ref()
                 .and_then(|handler| handler.recovery.wait_duration(now));
-            let movie_wait = movie_keyframe_wait.lock().unwrap().fallback_wait(now);
+            let keyframe_wait_left = keyframe_wait.lock().unwrap().fallback_wait(now);
+            #[cfg(all(target_os = "android", feature = "mediacodec"))]
+            let decoder_drain_wait = match decoder_drain_until {
+                Some(until) if now < until => Some(MEDIACODEC_DRAIN_POLL),
+                _ => {
+                    decoder_drain_until = None;
+                    None
+                }
+            };
+            #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
+            let decoder_drain_wait: Option<Duration> = None;
             let wait = [
-                recovery_wait, movie_wait, presentation.wait_duration(local_mode, now),
+                recovery_wait, keyframe_wait_left, presentation.wait_duration(local_mode, now),
+                decoder_drain_wait,
             ].into_iter().flatten().min();
             let received = match wait {
                 Some(wait) => video_receiver.recv_timeout(wait),
@@ -5446,27 +5498,64 @@ pub fn start_video_thread<F, T>(
                     .recv()
                     .map_err(|_| RecvTimeoutError::Disconnected),
             };
+            #[cfg(all(target_os = "android", feature = "mediacodec"))]
+            if matches!(received, Err(RecvTimeoutError::Timeout)) && decoder_drain_until.is_some() {
+                // No packet came: look for the frame the decoder still owes.
+                if let Some(handler) = video_handler.as_mut() {
+                    let drain_start = std::time::Instant::now();
+                    let mut pixelbuffer = true;
+                    match handler.drain_pending_output(&mut pixelbuffer) {
+                        Ok(DecodeOutcome::FrameReady { frame_id }) => {
+                            let stream_id = handler.stream_id;
+                            let frame_id = frame_id.unwrap_or(handler.last_frame_id);
+                            video_feedback.lock().unwrap().record_decoded(
+                                stream_id,
+                                frame_id,
+                                drain_start.elapsed(),
+                            );
+                            presentation.queue(crate::resource_policy::PendingPresentation {
+                                stream_id, frame_id, pixelbuffer,
+                            });
+                            if let Some(frame) = presentation.take_due(
+                                session.local_resource_mode(), std::time::Instant::now(),
+                            ) {
+                                submit_presentation(handler, frame);
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            log::warn!("display {display}: asking the decoder for a pending frame failed: {err}");
+                            decoder_drain_until = None;
+                        }
+                    }
+                }
+            }
             if let Ok(data) = received {
                 match data {
-                    MediaData::VideoFrame(_) | MediaData::VideoQueue => {
+                    MediaData::VideoQueue => {
                         if session.video_suspended() {
-                            while video_queue.read().unwrap().pop().is_some() {}
+                            video_queue.clear();
                             continue;
                         }
-                        let vf = match data {
-                            MediaData::VideoFrame(vf) => {
-                                finish_movie_keyframe_wait(&discard_queue, &movie_keyframe_wait);
-                                *vf
-                            }
+                        let movie = movie_mode.load(std::sync::atomic::Ordering::Relaxed);
+                        let first_fallback = if movie {
+                            MOVIE_KEYFRAME_FALLBACK_DELAY
+                        } else {
+                            KEYFRAME_FALLBACK_DELAY
+                        };
+                        // Every frame, keyframe or not, comes out of the queue in the order
+                        // it arrived; the message only says that the queue has something.
+                        let (vf, keyframe, arrived_at) = match data {
                             MediaData::VideoQueue => {
                                 let mut stale_drops = 0usize;
                                 let selected = loop {
-                                    let Some(vf) = video_queue.read().unwrap().pop() else {
+                                    let Some(popped) = video_queue.pop() else {
                                         break None;
                                     };
-                                    if movie_mode.load(std::sync::atomic::Ordering::Relaxed)
+                                    if !popped.keyframe
+                                        && movie
                                         && movie_video_frame_obsolete(
-                                            &vf,
+                                            &popped.frame,
                                             newest_capture_time_ms
                                                 .load(std::sync::atomic::Ordering::Relaxed),
                                         )
@@ -5474,16 +5563,17 @@ pub fn start_video_thread<F, T>(
                                         stale_drops = stale_drops.saturating_add(1);
                                         continue;
                                     }
-                                    break Some(vf);
+                                    break Some(popped);
                                 };
-                                if stale_drops > 0 {
+                                let selected_keyframe =
+                                    selected.as_ref().is_some_and(|popped| popped.keyframe);
+                                if stale_drops > 0 && !selected_keyframe {
                                     // The remaining deltas reference the dropped ones;
                                     // decode again only from the requested keyframe.
-                                    start_movie_keyframe_wait(
-                                        &discard_queue,
-                                        &movie_keyframe_wait,
-                                        std::time::Instant::now(),
-                                    );
+                                    keyframe_wait
+                                        .lock()
+                                        .unwrap()
+                                        .begin(std::time::Instant::now(), first_fallback);
                                     if !recover_movie_queue_drops(
                                         &session,
                                         &video_feedback,
@@ -5495,22 +5585,46 @@ pub fn start_video_thread<F, T>(
                                         session.refresh_video(display as _);
                                     }
                                 }
-                                if session.video_suspended() || discard_queue.read().unwrap().clone() {
-                                    continue;
-                                }
-                                let Some(vf) = selected else {
+                                let Some(popped) = selected else {
                                     continue;
                                 };
-                                vf
+                                if !popped.keyframe {
+                                    let mut wait = keyframe_wait.lock().unwrap();
+                                    if popped.after_gap {
+                                        // The frame before this one was removed from the
+                                        // queue: the chain of references is broken here.
+                                        wait.begin(std::time::Instant::now(), first_fallback);
+                                    }
+                                    if wait.waiting() {
+                                        continue;
+                                    }
+                                }
+                                (popped.frame, popped.keyframe, popped.arrived_at)
                             }
                             _ => {
                                 // unreachable!();
                                 continue;
                             }
                         };
+                        if keyframe {
+                            // Only a keyframe that will be decoded ends the wait. One of a
+                            // stream that is no longer current is dropped by the handler.
+                            let current = video_handler.as_ref().map_or(true, |handler| {
+                                decoder_recovery::frame_is_current(
+                                    handler.stream_id,
+                                    handler.last_frame_id,
+                                    vf.stream_id,
+                                    vf.frame_id,
+                                )
+                            });
+                            if current {
+                                keyframe_wait.lock().unwrap().keyframe_accepted();
+                            }
+                        }
                         let display = vf.display as usize;
                         let stream_id = vf.stream_id;
                         let frame_id = vf.frame_id;
+                        let capture_time_ms = vf.capture_time_ms;
                         let start = std::time::Instant::now();
                         let format = CodecFormat::from(&vf);
                         if video_handler.is_none() {
@@ -5557,12 +5671,69 @@ pub fn start_video_thread<F, T>(
                             if format_changed {
                                 presentation.clear();
                             }
-                            match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
+                            let decode_result =
+                                handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma);
+                            #[cfg(all(target_os = "android", feature = "mediacodec"))]
+                            {
+                                decoder_drain_until =
+                                    Some(std::time::Instant::now() + MEDIACODEC_DRAIN_WINDOW);
+                            }
+                            log_timing(
+                                timing
+                                    .borrow_mut()
+                                    .record_decode(start.elapsed(), std::time::Instant::now()),
+                            );
+                            match decode_result {
                                 Ok(DecodeOutcome::FrameReady {
                                     frame_id: decoded_frame_id,
                                 }) => {
                                     let decoded_frame_id = decoded_frame_id.unwrap_or(frame_id);
                                     let decode_time = start.elapsed();
+                                    // Movie on a viewer without a platform presentation
+                                    // clock: hold the decoded frame until it is due. The
+                                    // frames that arrive meanwhile wait in the queue.
+                                    let mut held = Duration::ZERO;
+                                    if movie_playout::pacing_enabled(
+                                        movie,
+                                        &LocalConfig::get_option(
+                                            config::keys::OPTION_MOVIE_PLAYOUT_PACING,
+                                        ),
+                                    ) && session.local_resource_mode() == ResourceMode::Normal
+                                    {
+                                        let refresh_millihz =
+                                            movie_playout::viewer_display_refresh_millihz();
+                                        let clock = movie_playout.get_or_insert_with(|| {
+                                            movie_playout::MoviePlayout::new(
+                                                refresh_millihz,
+                                                arrived_at,
+                                            )
+                                        });
+                                        clock.set_refresh_millihz(refresh_millihz);
+                                        let playout = clock.schedule(capture_time_ms, arrived_at);
+                                        let behind = movie_playout::backlog(
+                                            capture_time_ms,
+                                            newest_capture_time_ms
+                                                .load(std::sync::atomic::Ordering::Relaxed),
+                                        );
+                                        playout_behind.set(Some(behind));
+                                        let hold = movie_playout::hold(
+                                            playout.due,
+                                            std::time::Instant::now(),
+                                            behind,
+                                        );
+                                        timing.borrow_mut().record_playout(
+                                            hold.wait,
+                                            hold.catching_up,
+                                            playout.reset,
+                                        );
+                                        if !hold.wait.is_zero() {
+                                            std::thread::sleep(hold.wait);
+                                            held = hold.wait;
+                                        }
+                                    } else {
+                                        movie_playout = None;
+                                        playout_behind.set(None);
+                                    }
                                     video_feedback.lock().unwrap().record_decoded(
                                         stream_id,
                                         decoded_frame_id,
@@ -5604,11 +5775,13 @@ pub fn start_video_thread<F, T>(
                                     }
 
                                     // fps calculation
+                                    // The time the frame was held is not time the decoder
+                                    // needed; this number is the rate the decoder can do.
                                     fps_calculate(
                                         &mut skip_beginning,
                                         &fps,
                                         format_changed,
-                                        start.elapsed(),
+                                        start.elapsed().saturating_sub(held),
                                         &mut count,
                                         &mut duration,
                                     );
@@ -5800,6 +5973,27 @@ async fn do_sync_cpu_usage() {
         _ => {}
     }
     log::info!("{:?} used to sync cpu usage", start.elapsed());
+}
+
+/// Whether the frames of `display` are shown by a presentation clock, so that the playout
+/// delay of the Movie profile really applies: Android's decoder with output to a surface, or
+/// the pacing of the decoder thread on a desktop viewer (`movie_playout`). Elsewhere a frame
+/// is shown as soon as it is decoded.
+pub(crate) fn movie_playout_clock_active(_display: usize, _resource_mode: ResourceMode) -> bool {
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
+    {
+        scrap::mediacodec::output_surface_refresh_millihz(_display) > 0
+    }
+    #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
+    {
+        // The decoder thread paces the frames itself, under the same conditions as there.
+        // The caller asks only in full Movie mode.
+        _resource_mode == ResourceMode::Normal
+            && movie_playout::pacing_enabled(
+                true,
+                &LocalConfig::get_option(config::keys::OPTION_MOVIE_PLAYOUT_PACING),
+            )
+    }
 }
 
 /// Handle latency test.
@@ -7442,51 +7636,6 @@ mod audio_playback_tests {
         assert_eq!(pulse_target_length_bytes(48000, 2), 2880 * 2 * 4);
         assert_eq!(pulse_target_length_bytes(44100, 1), 2646 * 4);
         assert_eq!(pulse_target_length_bytes(24000, 0), 1440 * 4);
-    }
-}
-
-#[cfg(test)]
-mod movie_keyframe_wait_tests {
-    use super::*;
-
-    #[test]
-    fn movie_drop_discards_until_keyframe() {
-        let discard_queue = RwLock::new(false);
-        let wait = Mutex::new(MovieKeyframeWait::default());
-        let now = std::time::Instant::now();
-        start_movie_keyframe_wait(&discard_queue, &wait, now);
-        assert!(*discard_queue.read().unwrap(), "deltas are discarded");
-        finish_movie_keyframe_wait(&discard_queue, &wait);
-        assert!(!*discard_queue.read().unwrap(), "keyframe resumes decoding");
-        assert!(!wait.lock().unwrap().fallback_due(now + Duration::from_secs(5)));
-    }
-
-    #[test]
-    fn movie_keyframe_fallback_fires_once_after_the_delay() {
-        let now = std::time::Instant::now();
-        let mut wait = MovieKeyframeWait::default();
-        assert_eq!(wait.fallback_wait(now), None);
-        wait.arm(now);
-        assert_eq!(wait.fallback_wait(now), Some(MOVIE_KEYFRAME_FALLBACK_DELAY));
-        assert!(!wait.fallback_due(now + Duration::from_millis(999)));
-        // Further drops do not postpone the fallback.
-        wait.arm(now + Duration::from_millis(500));
-        assert!(wait.fallback_due(now + MOVIE_KEYFRAME_FALLBACK_DELAY));
-        assert!(!wait.fallback_due(now + Duration::from_secs(3)), "fires once");
-        assert_eq!(wait.fallback_wait(now + Duration::from_secs(3)), None);
-    }
-
-    #[test]
-    fn movie_keyframe_wait_restarts_after_a_keyframe() {
-        let now = std::time::Instant::now();
-        let mut wait = MovieKeyframeWait::default();
-        wait.arm(now);
-        assert!(wait.fallback_due(now + MOVIE_KEYFRAME_FALLBACK_DELAY));
-        wait.keyframe_received();
-        let later = now + Duration::from_secs(10);
-        wait.arm(later);
-        assert!(!wait.fallback_due(later + Duration::from_millis(10)));
-        assert!(wait.fallback_due(later + MOVIE_KEYFRAME_FALLBACK_DELAY));
     }
 }
 
