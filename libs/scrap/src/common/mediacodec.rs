@@ -18,6 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use super::mediacodec_low_latency::{vendor_key_attempts, FormatKey, HardwareDecoder};
 use super::video_presentation_clock::VideoPresentationClock;
 use crate::ImageFormat;
 use crate::{CodecFormat, I420ToABGR, I420ToARGB, ImageRgb, NV12ToABGR, NV12ToARGB};
@@ -830,11 +831,77 @@ fn create_media_codec(
     })
 }
 
+/// The decoder of this device refused a format with its maker's low-latency keys and took
+/// the same format without them: they are not offered to it again.
+static VENDOR_LOW_LATENCY_KEYS_REFUSED: AtomicBool = AtomicBool::new(false);
+
+/// The sets of vendor keys to try for the decoder of a type, from the system's codec list.
+fn vendor_low_latency_attempts(mime_type: &str) -> &'static [&'static [FormatKey]] {
+    if VENDOR_LOW_LATENCY_KEYS_REFUSED.load(Ordering::Relaxed) {
+        return &[];
+    }
+    let Some(infos) = crate::android::ffi::get_codec_info() else {
+        return &[];
+    };
+    let decoders: Vec<HardwareDecoder> = infos
+        .codecs
+        .iter()
+        .filter(|codec| !codec.is_encoder && codec.hw == Some(true))
+        .map(|codec| HardwareDecoder {
+            name: &codec.name,
+            mime_type: &codec.mime_type,
+            low_latency: codec.low_latency,
+        })
+        .collect();
+    vendor_key_attempts(&decoders, mime_type)
+}
+
+/// Configures and starts the decoder of a type. Where the decoder does not list the standard
+/// low-latency feature and its maker has keys for it, those are tried first; a decoder that
+/// refuses them is configured as before.
 fn configure_media_codec(
     name: &str,
     width: usize,
     height: usize,
     surface: Option<&NativeWindow>,
+) -> ResultType<MediaCodec> {
+    let attempts = vendor_low_latency_attempts(name);
+    for vendor_keys in attempts {
+        match configure_media_codec_with(name, width, height, surface, vendor_keys) {
+            Ok(codec) => {
+                log::info!(
+                    "MediaCodec decoder low latency: mime={}, vendor_keys={:?}",
+                    name,
+                    vendor_keys
+                );
+                return Ok(codec);
+            }
+            Err(error) => log::warn!(
+                "MediaCodec decoder was not configured with the vendor low-latency keys {:?}: mime={}, error={}",
+                vendor_keys,
+                name,
+                error
+            ),
+        }
+    }
+    let codec = configure_media_codec_with(name, width, height, surface, &[])?;
+    if !attempts.is_empty() {
+        // The format itself is fine: it was the keys.
+        VENDOR_LOW_LATENCY_KEYS_REFUSED.store(true, Ordering::Relaxed);
+        log::warn!(
+            "MediaCodec decoder low latency: mime={}, vendor keys refused; not offered again",
+            name
+        );
+    }
+    Ok(codec)
+}
+
+fn configure_media_codec_with(
+    name: &str,
+    width: usize,
+    height: usize,
+    surface: Option<&NativeWindow>,
+    vendor_keys: &[FormatKey],
 ) -> ResultType<MediaCodec> {
     let codec = MediaCodec::from_decoder_type(name)
         .ok_or_else(|| Error::msg(format!("MediaCodec decoder is unavailable: {}", name)))?;
@@ -854,6 +921,9 @@ fn configure_media_codec(
     // to reorder, and a held frame is a frame of delay, or a last frame that is not shown
     // until the next packet. Older systems ignore the key.
     media_format.set_i32("low-latency", 1);
+    for (key, value) in vendor_keys {
+        media_format.set_i32(key, *value);
+    }
     codec.configure(&media_format, surface, MediaCodecDirection::Decoder)?;
     codec.start()?;
     Ok(codec)

@@ -47,6 +47,7 @@ pub mod pcm;
 pub mod hwcodec;
 #[cfg(feature = "mediacodec")]
 pub mod mediacodec;
+pub mod mediacodec_low_latency;
 pub mod video_presentation_clock;
 pub mod vpxcodec;
 #[cfg(feature = "vram")]
