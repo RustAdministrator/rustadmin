@@ -416,6 +416,8 @@ pub struct Remote<T: InvokeUiSession> {
     last_sent_video_suspended: Option<bool>,
     resource_resume_pending: bool,
     last_supported_resource_mode: Option<ResourceMode>,
+    // What the host reports about its cursor, waiting for the picture it belongs to.
+    cursor_delay: client::CursorDelay,
 }
 
 #[derive(Default)]
@@ -485,6 +487,7 @@ impl<T: InvokeUiSession> Remote<T> {
             last_sent_video_suspended: None,
             resource_resume_pending: false,
             last_supported_resource_mode: None,
+            cursor_delay: Default::default(),
         }
     }
 
@@ -1071,6 +1074,9 @@ impl<T: InvokeUiSession> Remote<T> {
                             #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
                             self.handle_local_clipboard_msg(&mut peer, _msg).await;
                         }
+                        _ = Self::cursor_wake(self.cursor_delay.next_due()) => {
+                            self.apply_due_cursor_events();
+                        }
                         _ = self.timer.tick() => {
                             if last_recv_time.elapsed() >= SEC30 {
                                 self.handler.ui_handler.end_connection_runtime(round);
@@ -1196,10 +1202,21 @@ impl<T: InvokeUiSession> Remote<T> {
                                     (*display, snapshot.queue_depth_frames)
                                 })
                                 .collect::<HashMap<usize, u32>>();
+                            // Shown in the quality monitor. A desktop viewer knows the rate
+                            // of its screen from the user interface; that value stays here and
+                            // is not part of the feedback to the host.
+                            let viewer_refresh_millihz = client::viewer_display_refresh_millihz();
                             let display_refresh_millihz = feedback_snapshots
                                 .iter()
                                 .map(|(display, snapshot)| {
-                                    (*display, snapshot.display_refresh_millihz)
+                                    (
+                                        *display,
+                                        if snapshot.display_refresh_millihz > 0 {
+                                            snapshot.display_refresh_millihz
+                                        } else {
+                                            viewer_refresh_millihz
+                                        },
+                                    )
                                 })
                                 .collect::<HashMap<usize, u32>>();
                             let decoder = self.video_thread_label(|thread| {
@@ -1476,15 +1493,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                 // Only where a presentation clock really delays the
                                 // frames; the profile alone does not.
                                 movie_playout_delay_ms: (full_movie_mode
-                                    && self
-                                        .video_threads
-                                        .keys()
-                                        .any(|display| {
-                                            client::movie_playout_clock_active(
-                                                *display,
-                                                self.handler.local_resource_mode(),
-                                            )
-                                        }))
+                                    && self.playout_clock_active())
                                 .then_some(MOVIE_PLAYOUT_DELAY_MS),
                                 ..Default::default()
                             });
@@ -2532,6 +2541,58 @@ impl<T: InvokeUiSession> Remote<T> {
     // Currently, this function only considers decoding speed and queue length, not network delay.
     // The controlled end can consider auto fps as the maximum decoding fps.
     #[inline]
+    /// Whether a presentation clock holds the picture of some display back.
+    fn playout_clock_active(&self) -> bool {
+        let resource_mode = self.handler.local_resource_mode();
+        self.video_threads
+            .keys()
+            .any(|display| client::movie_playout_clock_active(*display, resource_mode))
+    }
+
+    /// What the host reports about its cursor is applied when the picture it belongs to is
+    /// shown: at once, or after the playout delay where the Movie profile holds the picture
+    /// back.
+    fn cursor_event(&mut self, event: client::CursorEvent) {
+        let full_movie_mode = self
+            .video_threads
+            .values()
+            .any(|thread| thread.movie_mode.load(Ordering::Relaxed));
+        let delay = if full_movie_mode && self.playout_clock_active() {
+            Duration::from_millis(u64::from(MOVIE_PLAYOUT_DELAY_MS))
+        } else {
+            Duration::ZERO
+        };
+        if let Some(event) = self
+            .cursor_delay
+            .push(event, std::time::Instant::now(), delay)
+        {
+            self.apply_cursor_event(event);
+        }
+    }
+
+    fn apply_cursor_event(&self, event: client::CursorEvent) {
+        match event {
+            client::CursorEvent::Data(cd) => self.handler.set_cursor_data(cd),
+            client::CursorEvent::Id(id) => self.handler.set_cursor_id(id),
+            client::CursorEvent::Position(cp) => self.handler.set_cursor_position(cp),
+        }
+    }
+
+    fn apply_due_cursor_events(&mut self) {
+        let now = std::time::Instant::now();
+        while let Some(event) = self.cursor_delay.pop_due(now) {
+            self.apply_cursor_event(event);
+        }
+    }
+
+    /// Completes when the oldest waiting cursor event is due; never, when none waits.
+    async fn cursor_wake(due: Option<std::time::Instant>) {
+        match due {
+            Some(due) => time::sleep_until(Instant::from_std(due)).await,
+            None => std::future::pending::<()>().await,
+        }
+    }
+
     fn fps_control(&mut self, direct: bool, real_fps_map: HashMap<usize, i32>) {
         let now = Instant::now();
         let log_summary = self
@@ -3238,13 +3299,13 @@ impl<T: InvokeUiSession> Remote<T> {
                     _ => {}
                 },
                 Some(message::Union::CursorData(cd)) => {
-                    self.handler.set_cursor_data(cd);
+                    self.cursor_event(client::CursorEvent::Data(cd));
                 }
                 Some(message::Union::CursorId(id)) => {
-                    self.handler.set_cursor_id(id.to_string());
+                    self.cursor_event(client::CursorEvent::Id(id.to_string()));
                 }
                 Some(message::Union::CursorPosition(cp)) => {
-                    self.handler.set_cursor_position(cp);
+                    self.cursor_event(client::CursorEvent::Position(cp));
                 }
                 Some(message::Union::Clipboard(cb)) => {
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]

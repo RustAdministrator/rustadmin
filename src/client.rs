@@ -108,6 +108,7 @@ use crate::ui_session_interface::SessionPermissionConfig;
 
 pub use super::lang::*;
 
+mod cursor_delay;
 mod decoder_recovery;
 mod display_control;
 mod startup_recovery;
@@ -132,7 +133,10 @@ const MEDIACODEC_DRAIN_POLL: Duration = Duration::from_millis(8);
 #[cfg(all(target_os = "android", feature = "mediacodec"))]
 const MEDIACODEC_DRAIN_WINDOW: Duration = Duration::from_millis(500);
 const MOVIE_VIDEO_REFRESH_COOLDOWN: Duration = Duration::from_millis(500);
-pub(crate) use movie_playout::set_viewer_display_refresh_millihz;
+pub(crate) use cursor_delay::{CursorDelay, CursorEvent};
+pub(crate) use movie_playout::{
+    set_viewer_display_refresh_millihz, viewer_display_refresh_millihz,
+};
 pub(crate) use video_ingress::{
     KeyframeWait, VideoIngress, KEYFRAME_FALLBACK_DELAY, MOVIE_KEYFRAME_FALLBACK_DELAY,
 };
