@@ -101,6 +101,11 @@ expect_failure "forbidden features ['mediacodec']" \
   --profile windows-x86_64-release --wrapper scripts/build_windows.ps1 \
   --target x86_64-pc-windows-msvc \
   --features flutter,mediacodec
+# The file clipboard of Unix builds is not reviewed for release (audit N-13): no profile may enable it.
+expect_failure "forbidden features ['unix-file-copy-paste']" \
+  --profile linux-x86_64-release --wrapper scripts/build_linux.sh \
+  --target x86_64-unknown-linux-gnu \
+  --features flutter,linux-pkg-config,unix-file-copy-paste
 expect_failure "is not owned" \
   --profile linux-x86_64-release --wrapper scripts/build_macos.sh \
   --target x86_64-unknown-linux-gnu --features flutter,linux-pkg-config
