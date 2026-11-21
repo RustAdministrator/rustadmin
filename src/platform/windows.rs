@@ -53,18 +53,19 @@ use winapi::{
             PROCESS_INFORMATION, STARTUPINFOW,
         },
         securitybaseapi::{
-            AllocateAndInitializeSid, DuplicateToken, EqualSid, FreeSid, GetTokenInformation,
+            AllocateAndInitializeSid, DuplicateTokenEx, EqualSid, FreeSid, GetTokenInformation,
         },
         shellapi::ShellExecuteW,
         sysinfoapi::{GetNativeSystemInfo, SYSTEM_INFO},
         winbase::*,
         wingdi::*,
         winnt::{
-            SecurityImpersonation, TokenElevation, TokenGroups, TokenImpersonation, TokenType,
-            DOMAIN_ALIAS_RID_ADMINS, ES_AWAYMODE_REQUIRED, ES_CONTINUOUS, ES_DISPLAY_REQUIRED,
-            ES_SYSTEM_REQUIRED, HANDLE, PROCESS_ALL_ACCESS, PROCESS_QUERY_LIMITED_INFORMATION,
-            PSID, SECURITY_BUILTIN_DOMAIN_RID, SECURITY_NT_AUTHORITY, SID_IDENTIFIER_AUTHORITY,
-            TOKEN_ELEVATION, TOKEN_GROUPS, TOKEN_QUERY, TOKEN_TYPE,
+            SecurityImpersonation, TokenElevation, TokenGroups, TokenImpersonation, TokenPrimary,
+            TokenType, DOMAIN_ALIAS_RID_ADMINS, ES_AWAYMODE_REQUIRED, ES_CONTINUOUS,
+            ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, HANDLE, MAXIMUM_ALLOWED, PROCESS_ALL_ACCESS,
+            PROCESS_QUERY_LIMITED_INFORMATION, PSID, SECURITY_BUILTIN_DOMAIN_RID,
+            SECURITY_NT_AUTHORITY, SID_IDENTIFIER_AUTHORITY, TOKEN_ELEVATION, TOKEN_GROUPS,
+            TOKEN_QUERY, TOKEN_TYPE,
         },
         winreg::HKEY_CURRENT_USER,
         winspool::{
@@ -3225,16 +3226,25 @@ pub fn ensure_primary_token(user_token: HANDLE) -> ResultType<HANDLE> {
         }
 
         if token_type == TokenImpersonation {
-            let mut duplicate_token: HANDLE = std::ptr::null_mut();
-            let dup_res = DuplicateToken(user_token, SecurityImpersonation, &mut duplicate_token);
-            CloseHandle(user_token);
-            if dup_res == FALSE {
+            // `DuplicateToken` would give an impersonation token again.
+            let mut primary_token: HANDLE = std::ptr::null_mut();
+            if DuplicateTokenEx(
+                user_token,
+                MAXIMUM_ALLOWED,
+                std::ptr::null_mut(),
+                SecurityImpersonation,
+                TokenPrimary,
+                &mut primary_token,
+            ) == FALSE
+            {
+                // The token stays the caller's: it keeps and closes it.
                 bail!(
                     "Failed to duplicate token, error {}",
                     io::Error::last_os_error()
                 );
             }
-            Ok(duplicate_token)
+            CloseHandle(user_token);
+            Ok(primary_token)
         } else {
             Ok(user_token)
         }
@@ -5347,5 +5357,59 @@ ProcessId=10136
             arg,
         );
         assert_eq!(pids.len(), 0);
+    }
+
+    /// `ensure_primary_token` is to hand back a primary token. For an impersonation token it
+    /// made the duplicate with `DuplicateToken`, which gives an impersonation token again.
+    #[test]
+    fn ensure_primary_token_returns_a_primary_token() {
+        use winapi::um::{
+            handleapi::CloseHandle,
+            processthreadsapi::{GetCurrentProcess, OpenProcessToken},
+            securitybaseapi::{DuplicateTokenEx, GetTokenInformation},
+            winnt::{
+                SecurityImpersonation, TokenImpersonation, TokenPrimary, TokenType,
+                MAXIMUM_ALLOWED, TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_TYPE,
+            },
+        };
+        unsafe {
+            let mut process_token: HANDLE = std::ptr::null_mut();
+            assert_ne!(
+                OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_DUPLICATE | TOKEN_QUERY,
+                    &mut process_token
+                ),
+                FALSE
+            );
+            let mut impersonation: HANDLE = std::ptr::null_mut();
+            assert_ne!(
+                DuplicateTokenEx(
+                    process_token,
+                    MAXIMUM_ALLOWED,
+                    std::ptr::null_mut(),
+                    SecurityImpersonation,
+                    TokenImpersonation,
+                    &mut impersonation,
+                ),
+                FALSE
+            );
+            CloseHandle(process_token);
+            let token = ensure_primary_token(impersonation).unwrap();
+            let mut token_type: TOKEN_TYPE = 0;
+            let mut length: DWORD = 0;
+            assert_ne!(
+                GetTokenInformation(
+                    token,
+                    TokenType,
+                    &mut token_type as *mut _ as *mut _,
+                    std::mem::size_of::<TOKEN_TYPE>() as DWORD,
+                    &mut length,
+                ),
+                FALSE
+            );
+            CloseHandle(token);
+            assert_eq!(token_type, TokenPrimary, "not a primary token");
+        }
     }
 }
