@@ -964,15 +964,10 @@ impl Encoder {
                     codec: Box::new(tex),
                 }),
                 Err(e) => {
-                    if let Some(fallback) = Self::set_software_fallback_codec() {
-                        log::error!(
-                            "new vram encoder failed: {e:?}, fallback to {fallback:?} for this session"
-                        );
-                    } else {
-                        log::error!(
-                            "new vram encoder failed: {e:?}, no peer-compatible VP8/VP9 fallback"
-                        );
-                    }
+                    // The session's codec is left alone: the caller steps down to the
+                    // hardware encoder through RAM first, and that one falls back to
+                    // software on its own if it fails too.
+                    log::error!("new vram encoder failed: {e:?}");
                     Err(e)
                 }
             },

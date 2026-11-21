@@ -112,6 +112,7 @@ mod decoder_recovery;
 mod display_control;
 mod startup_recovery;
 mod movie_playout;
+mod texture_fallback;
 mod video_ingress;
 mod video_timing;
 pub mod file_trait;
@@ -3168,6 +3169,9 @@ pub struct VideoHandler {
     first_frame: bool,
     stream_id: u64,
     last_frame_id: u64,
+    /// The renderer did not take this display's textures (`texture_fallback`): decode
+    /// through RAM for as long as this handler lives.
+    texture_render_failed: bool,
 }
 
 impl VideoHandler {
@@ -3251,7 +3255,15 @@ impl VideoHandler {
             first_frame: true,
             stream_id: 0,
             last_frame_id: 0,
+            texture_render_failed: false,
         }
+    }
+
+    /// From now on this display is decoded through RAM: the decoder is created again
+    /// without the adapter that texture decoding needs.
+    fn give_up_texture_decoding(&mut self) {
+        self.texture_render_failed = true;
+        self.reset(None, None);
     }
 
     pub fn decoder_backend(&self) -> &'static str {
@@ -3418,7 +3430,11 @@ impl VideoHandler {
         );
         #[cfg(target_os = "macos")]
         self.rgb.set_align(crate::get_dst_align_rgba());
-        let luid = Self::get_adapter_luid();
+        let luid = if self.texture_render_failed {
+            None
+        } else {
+            Self::get_adapter_luid()
+        };
         let format = format.unwrap_or(self.decoder.format());
         if format != self.decoder.format() {
             self.recovery = Default::default();
@@ -4984,6 +5000,8 @@ pub struct RenderFrameOutcome {
     pub(crate) eligible_bindings: u16,
     pub(crate) submitted_bindings: u16,
     pub(crate) rejected_bindings: u16,
+    /// Of the rejected ones: render targets that exist but could not take a GPU texture.
+    pub(crate) texture_refused_bindings: u16,
 }
 
 impl RenderFrameOutcome {
@@ -4992,6 +5010,7 @@ impl RenderFrameOutcome {
             eligible_bindings: 1,
             submitted_bindings: 1,
             rejected_bindings: 0,
+            texture_refused_bindings: 0,
         }
     }
 
@@ -5000,6 +5019,7 @@ impl RenderFrameOutcome {
             eligible_bindings: 1,
             submitted_bindings: 0,
             rejected_bindings: 1,
+            texture_refused_bindings: 0,
         }
     }
 
@@ -5013,6 +5033,16 @@ impl RenderFrameOutcome {
         self.rejected_bindings = self
             .rejected_bindings
             .saturating_add(other.rejected_bindings);
+        self.texture_refused_bindings = self
+            .texture_refused_bindings
+            .saturating_add(other.texture_refused_bindings);
+    }
+
+    /// A render target that exists could not take the GPU texture it was offered.
+    #[cfg_attr(not(feature = "vram"), allow(dead_code))]
+    pub(crate) fn texture_refused(mut self) -> Self {
+        self.texture_refused_bindings = self.texture_refused_bindings.saturating_add(1);
+        self
     }
 
     pub(crate) fn any_submitted(self) -> bool {
@@ -5303,6 +5333,8 @@ pub fn start_video_thread<F, T>(
         // far the frame it paced last was behind the newest arrived one.
         let mut movie_playout: Option<movie_playout::MoviePlayout> = None;
         let playout_behind = std::cell::Cell::new(None::<Duration>);
+        // Texture frames the renderer does not take.
+        let texture_watch = std::cell::RefCell::new(texture_fallback::TextureRenderWatch::default());
         let log_timing = |report: Option<video_timing::VideoTimingReport>| {
             if let Some(report) = report {
                 log::info!("viewer video timing: display={}, {}", display, report);
@@ -5315,6 +5347,31 @@ pub fn start_video_thread<F, T>(
                 display, frame.stream_id, frame.frame_id, &mut handler.rgb,
                 handler.texture.texture, frame.pixelbuffer,
             );
+            if !frame.pixelbuffer
+                && texture_watch.borrow_mut().offered(
+                    render_outcome.submitted_bindings,
+                    render_outcome.texture_refused_bindings,
+                    std::time::Instant::now(),
+                )
+            {
+                log::warn!(
+                    "display {display}: the renderer took no GPU texture for {} s; decoding through RAM from now on",
+                    texture_fallback::REFUSED_FOR.as_secs()
+                );
+                *texture_watch.borrow_mut() = Default::default();
+                handler.give_up_texture_decoding();
+                // The new decoder starts with a keyframe.
+                let first_fallback = if movie_mode.load(std::sync::atomic::Ordering::Relaxed) {
+                    MOVIE_KEYFRAME_FALLBACK_DELAY
+                } else {
+                    KEYFRAME_FALLBACK_DELAY
+                };
+                keyframe_wait
+                    .lock()
+                    .unwrap()
+                    .begin(std::time::Instant::now(), first_fallback);
+                session.refresh_video(display as _);
+            }
             if render_outcome.any_submitted() {
                 log_timing(
                     timing

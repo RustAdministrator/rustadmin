@@ -85,6 +85,9 @@ const HQ_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_secs(6);
 // service-wide coalescing window so one lost refresh cannot create a 2s stall.
 const DELIVERY_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_millis(250);
 const IN_PLACE_REFERENCE_REFRESH_TIMEOUT: Duration = Duration::from_secs(1);
+/// The video service of a display is not restarted more often than this for a reference
+/// refresh that no frame carries.
+const STRANDED_REFRESH_RESTART_COOLDOWN: Duration = Duration::from_secs(3);
 #[cfg(windows)]
 const INSTALLED_SECURE_CAPTURE_HELPER_START_COOLDOWN: Duration = Duration::from_secs(5);
 #[cfg(any(windows, test))]
@@ -159,6 +162,32 @@ fn subscriber_join_action(
     } else {
         SubscriberJoinAction::Wait
     }
+}
+
+/// A reference refresh was asked for and nothing has been encoded since. An encoder that is
+/// fed from RAM gets the last frame again and answers with a keyframe. A texture encoder
+/// has no frame to repeat: on a screen that does not change the request stays unanswered
+/// until a pixel moves, and the viewer that asked keeps a damaged or frozen picture. The
+/// video service of the display is restarted instead; its first frame is a keyframe.
+///
+/// `unserved_since`: when the oldest refresh that no frame has carried was asked for.
+fn stranded_refresh_needs_restart(
+    texture_input: bool,
+    has_encoded_frame: bool,
+    unserved_since: Option<Instant>,
+    last_restart: Option<Instant>,
+    now: Instant,
+) -> bool {
+    // Before the first frame of this run there is nothing to refresh: it will be a keyframe.
+    if !texture_input || !has_encoded_frame {
+        return false;
+    }
+    let Some(since) = unserved_since else {
+        return false;
+    };
+    now.saturating_duration_since(since) >= IN_PLACE_REFERENCE_REFRESH_TIMEOUT
+        && !last_restart
+            .is_some_and(|at| now.saturating_duration_since(at) < STRANDED_REFRESH_RESTART_COOLDOWN)
 }
 
 fn starts_with_keyframe(frame: &hbb_common::message_proto::VideoFrame) -> bool {
@@ -333,6 +362,82 @@ impl VideoStreamKey {
             display_idx,
         }
     }
+}
+
+lazy_static::lazy_static! {
+    // When the video service of a display was last restarted for a stranded reference
+    // refresh; by service name.
+    static ref STRANDED_REFRESH_RESTARTS: Mutex<HashMap<String, Instant>> = Default::default();
+}
+
+lazy_static::lazy_static! {
+    // Why a display is encoded in software although the session started with a hardware
+    // encoder; for the quality monitor.
+    static ref SOFTWARE_FALLBACK_REASONS: Mutex<super::encoder_ladder::RungFailures> =
+        Default::default();
+}
+
+#[cfg(feature = "vram")]
+lazy_static::lazy_static! {
+    static ref TEXTURE_ENCODING_FAILURES: Mutex<super::encoder_ladder::RungFailures> =
+        Default::default();
+}
+
+/// The texture encoder of this display failed: the next runs of its video service use the
+/// hardware encoder through RAM instead, and the session keeps its codec.
+#[cfg(feature = "vram")]
+fn texture_encoding_failed(service: &str, reason: &str) {
+    log::warn!(
+        "video encoder ladder: service={}, GPU texture encoding is off for {} s, next is the hardware encoder through RAM: {}",
+        service,
+        super::encoder_ladder::RETRY_AFTER.as_secs(),
+        reason
+    );
+    TEXTURE_ENCODING_FAILURES
+        .lock()
+        .unwrap()
+        .record(service, reason.to_owned(), Instant::now());
+}
+
+/// Why this display is not encoded from a GPU texture: the host option, or a recent failure.
+#[cfg(feature = "vram")]
+fn texture_encoding_off_reason(service: &str) -> Option<String> {
+    let failure = TEXTURE_ENCODING_FAILURES
+        .lock()
+        .unwrap()
+        .reason(service, Instant::now());
+    super::encoder_ladder::texture_off_reason(
+        &Config::get_option(hbb_common::config::keys::OPTION_ENABLE_TEXTURE_ENCODE),
+        failure,
+    )
+}
+
+/// The hardware encoder of this run failed for good. A texture encoder steps down to the
+/// hardware encoder through RAM and the session keeps its codec; anything else falls back
+/// to software VP8 or VP9, as before. Returns what the next run encodes with, or `None`
+/// when there is nothing to fall back to.
+fn step_down_from_failed_encoder(
+    _service: &str,
+    _encoder: &Encoder,
+    _reason: &str,
+) -> Option<String> {
+    #[cfg(feature = "vram")]
+    if _encoder.input_texture() {
+        texture_encoding_failed(_service, _reason);
+        return Some("the hardware encoder through RAM".to_owned());
+    }
+    let fallback = Encoder::set_software_fallback_codec()?;
+    hardware_encoding_failed(_service, _reason);
+    Some(format!("{fallback:?}"))
+}
+
+/// The session goes on in software because its hardware encoder failed: remembered for the
+/// quality monitor.
+fn hardware_encoding_failed(service: &str, reason: &str) {
+    SOFTWARE_FALLBACK_REASONS
+        .lock()
+        .unwrap()
+        .record(service, reason.to_owned(), Instant::now());
 }
 
 lazy_static::lazy_static! {
@@ -1727,6 +1832,55 @@ mod tests {
             true,
             returned_to_default
         ));
+    }
+
+    #[test]
+    fn refresh_that_no_frame_carries_restarts_a_texture_encoder_after_the_timeout() {
+        use super::{
+            stranded_refresh_needs_restart, IN_PLACE_REFERENCE_REFRESH_TIMEOUT,
+            STRANDED_REFRESH_RESTART_COOLDOWN,
+        };
+        let start = Instant::now();
+        let timeout = IN_PLACE_REFERENCE_REFRESH_TIMEOUT;
+        let cooldown = STRANDED_REFRESH_RESTART_COOLDOWN;
+        let ms = Duration::from_millis;
+        // (texture input, a frame was encoded, refresh unserved for, last restart ago, restart)
+        let table = [
+            // Nothing is asked for.
+            (true, true, None, None, false),
+            // Asked for, and the timeout has not passed: a changed pixel may still come.
+            (true, true, Some(ms(0)), None, false),
+            (true, true, Some(timeout - ms(1)), None, false),
+            // The screen is still and the request has waited long enough.
+            (true, true, Some(timeout), None, true),
+            (true, true, Some(timeout * 5), None, true),
+            // An encoder fed from RAM repeats its last frame; that path is not touched.
+            (false, true, Some(timeout * 5), None, false),
+            // Before the first frame of a run the next frame is a keyframe anyway.
+            (true, false, Some(timeout * 5), None, false),
+            // Not again right after a restart for the same reason...
+            (true, true, Some(timeout), Some(ms(0)), false),
+            (true, true, Some(timeout), Some(cooldown - ms(1)), false),
+            // ...but again once the cooldown is over.
+            (true, true, Some(timeout), Some(cooldown), true),
+        ];
+        // Far enough from the start of the process clock for the subtractions below.
+        let now = start + Duration::from_secs(3_600);
+        for (index, (texture, encoded, unserved_for, restart_ago, restart)) in
+            table.into_iter().enumerate()
+        {
+            assert_eq!(
+                stranded_refresh_needs_restart(
+                    texture,
+                    encoded,
+                    unserved_for.map(|waited| now - waited),
+                    restart_ago.map(|ago| now - ago),
+                    now,
+                ),
+                restart,
+                "row {index}"
+            );
+        }
     }
 
     #[test]
@@ -3355,6 +3509,10 @@ fn run(vs: VideoService) -> ResultType<()> {
                 VpxVideoCodecId::VP9
             };
             log::error!("Failed to create encoder: {err:?}, fallback to {fallback:?}");
+            hardware_encoding_failed(
+                &service_name,
+                &format!("the encoder could not be created: {err}"),
+            );
             Encoder::set_fallback(&EncoderCfg::VPX(VpxEncoderConfig {
                 width: c.width as _,
                 height: c.height as _,
@@ -3381,11 +3539,25 @@ fn run(vs: VideoService) -> ResultType<()> {
     #[cfg(not(feature = "vram"))]
     let encoder_input_texture = false;
     let encoder_backend = Encoder::backend_label(&encoder_cfg);
-    let encoder_input = if encoder_input_texture {
-        "GPU texture"
+    // With the reason when the display is encoded a rung below what the hardware allows.
+    #[cfg(feature = "vram")]
+    let texture_off_reason = texture_encoding_off_reason(&service_name);
+    #[cfg(not(feature = "vram"))]
+    let texture_off_reason: Option<String> = None;
+    let hardware_off_reason = if encoder.is_hardware() {
+        None
     } else {
-        "CPU YUV frame"
+        SOFTWARE_FALLBACK_REASONS
+            .lock()
+            .unwrap()
+            .reason(&service_name, Instant::now())
     };
+    let encoder_input = super::encoder_ladder::encoder_input_label(
+        encoder_input_texture,
+        texture_off_reason.as_deref(),
+        hardware_off_reason.as_deref(),
+    );
+    let encoder_input: &str = &encoder_input;
     log::info!(
         "diag video service encoder ready: service={}, source={:?}, display_idx={}, negotiated={:?}, cfg={:?}, capture_backend={}, encoder_backend={}, encoder_input={}, hardware={}, input_texture={}, bitrate={}, use_i444={}, quality={:?}",
         sp.name(),
@@ -3483,6 +3655,8 @@ fn run(vs: VideoService) -> ResultType<()> {
     sp.set_option(OPTION_DIAGNOSTIC_STREAM_ID, &stream_id.to_string());
     let mut next_frame_id = 1;
     let mut reference_refresh_pending = None;
+    // Since when a reference refresh has been waiting without a single encoded frame.
+    let mut refresh_unserved_since: Option<Instant> = None;
     let mut subscriber_join_started: Option<Instant> = None;
     #[cfg(windows)]
     let mut secure_desktop_reference_refresh_pending = None;
@@ -3728,6 +3902,14 @@ fn run(vs: VideoService) -> ResultType<()> {
                     reference_recreated_after_timeout = true;
                 }
                 Err(error) => {
+                    #[cfg(feature = "vram")]
+                    if matches!(encoder_cfg, EncoderCfg::VRAM(_)) {
+                        texture_encoding_failed(
+                            &service_name,
+                            &format!("the texture encoder could not be created again: {error}"),
+                        );
+                        bail!("SWITCH");
+                    }
                     log::warn!(
                         "diag video reference refresh recreation fallback failed: service={}, display={}, codec={:?}, reason={:?}, error={:?}",
                         sp.name(),
@@ -3847,6 +4029,14 @@ fn run(vs: VideoService) -> ResultType<()> {
                         hw_no_valid_frame_since = None;
                     }
                     Err(err) => {
+                        #[cfg(feature = "vram")]
+                        if matches!(encoder_cfg, EncoderCfg::VRAM(_)) {
+                            texture_encoding_failed(
+                                &service_name,
+                                &format!("the texture encoder could not be created again: {err}"),
+                            );
+                            bail!("SWITCH");
+                        }
                         log::warn!(
                             "diag video reference refresh failed: service={}, display={}, codec={:?}, reason={:?}, ratio={}, bitrate={}, err={:?}",
                             sp.name(),
@@ -3860,6 +4050,42 @@ fn run(vs: VideoService) -> ResultType<()> {
                     }
                 }
             }
+        }
+        // Encoder recreations for further requests move `requested_at`; the first request
+        // that no frame has carried counts.
+        match reference_refresh_pending {
+            Some(PendingReferenceRefresh {
+                requested_at,
+                non_keyframe_frames: 0,
+                ..
+            }) => {
+                refresh_unserved_since.get_or_insert(requested_at);
+            }
+            _ => refresh_unserved_since = None,
+        }
+        let last_stranded_restart = STRANDED_REFRESH_RESTARTS
+            .lock()
+            .unwrap()
+            .get(&service_name)
+            .copied();
+        if stranded_refresh_needs_restart(
+            encoder_input_texture,
+            next_frame_id > 1,
+            refresh_unserved_since,
+            last_stranded_restart,
+            Instant::now(),
+        ) {
+            STRANDED_REFRESH_RESTARTS
+                .lock()
+                .unwrap()
+                .insert(service_name.clone(), Instant::now());
+            log::info!(
+                "switch for a reference refresh that no frame carries: service={}, display={}, waited_ms={}",
+                service_name,
+                display_idx,
+                refresh_unserved_since.map_or(0, |since| since.elapsed().as_millis())
+            );
+            bail!("SWITCH");
         }
         if sp.is_option_true(OPTION_REFRESH) {
             #[cfg(windows)]
@@ -4538,7 +4764,8 @@ fn setup_encoder(
     bool,
     Arc<Mutex<Option<Recorder>>>,
 )> {
-    let encoder_cfg = get_encoder_config(
+    #[allow(unused_mut)]
+    let mut encoder_cfg = get_encoder_config(
         &c,
         name.to_string(),
         quality,
@@ -4547,6 +4774,32 @@ fn setup_encoder(
         source,
         encoder_fps,
     )?;
+    // The ladder, first rung: a texture encoder that cannot be created gives way to the
+    // hardware encoder through RAM, with the same codec. The config that is built after the
+    // failure was recorded is not a texture one.
+    #[cfg(feature = "vram")]
+    let mut texture_encoder = None;
+    #[cfg(feature = "vram")]
+    if matches!(encoder_cfg, EncoderCfg::VRAM(_)) {
+        match Encoder::new(encoder_cfg.clone(), Encoder::use_i444(&encoder_cfg)) {
+            Ok(encoder) => texture_encoder = Some(encoder),
+            Err(err) => {
+                texture_encoding_failed(
+                    &name,
+                    &format!("the texture encoder could not be created: {err}"),
+                );
+                encoder_cfg = get_encoder_config(
+                    &c,
+                    name.to_string(),
+                    quality,
+                    client_record || record_incoming,
+                    last_portable_service_running,
+                    source,
+                    encoder_fps,
+                )?;
+            }
+        }
+    }
     Encoder::set_fallback(&encoder_cfg);
     let codec_format = Encoder::negotiated_codec();
     let recorder = get_recorder(record_incoming, display_idx, source == VideoSource::Camera);
@@ -4566,6 +4819,12 @@ fn setup_encoder(
         record_incoming,
         last_portable_service_running
     );
+    #[cfg(feature = "vram")]
+    let encoder = match texture_encoder {
+        Some(encoder) => encoder,
+        None => Encoder::new(encoder_cfg.clone(), use_i444)?,
+    };
+    #[cfg(not(feature = "vram"))]
     let encoder = Encoder::new(encoder_cfg.clone(), use_i444)?;
     Ok((encoder, encoder_cfg, codec_format, use_i444, recorder))
 }
@@ -4658,14 +4917,23 @@ fn get_encoder_config(
     encoder_fps: u32,
 ) -> ResultType<EncoderCfg> {
     #[cfg(all(windows, feature = "vram"))]
-    if _portable_service || c.is_gdi() || c.is_cpu_only() || _source == VideoSource::Camera {
-        log::info!(
-            "gdi:{}, cpu_only:{}, portable:{}",
-            c.is_gdi(),
-            c.is_cpu_only(),
-            _portable_service
-        );
-        VRamEncoder::set_not_use(_name, true);
+    {
+        let texture_off = texture_encoding_off_reason(&_name);
+        if _portable_service
+            || c.is_gdi()
+            || c.is_cpu_only()
+            || _source == VideoSource::Camera
+            || texture_off.is_some()
+        {
+            log::info!(
+                "gdi:{}, cpu_only:{}, portable:{}, texture_encoding_off:{:?}",
+                c.is_gdi(),
+                c.is_cpu_only(),
+                _portable_service,
+                texture_off
+            );
+            VRamEncoder::set_not_use(_name, true);
+        }
     }
     #[cfg(feature = "vram")]
     Encoder::update(scrap::codec::EncodingUpdate::Check);
@@ -4997,7 +5265,11 @@ fn handle_one_frame(
                 }
                 *encode_fail_counter = 0;
                 *hw_no_valid_frame_since = None;
-                let Some(fallback) = Encoder::set_software_fallback_codec() else {
+                let Some(fallback) = step_down_from_failed_encoder(
+                    &sp.name(),
+                    encoder,
+                    "no packet in the warm-up time",
+                ) else {
                     log::error!(
                         "hardware encoder warmup timed out with no peer-compatible VP8/VP9 fallback: elapsed_ms={}, error={e:?}",
                         warmup_elapsed.as_millis(),
@@ -5005,7 +5277,7 @@ fn handle_one_frame(
                     return Err(e);
                 };
                 log::error!(
-                    "switch to {fallback:?} due to hardware encoder warmup timeout: elapsed_ms={}, error={e:?}",
+                    "switch to {fallback} due to hardware encoder warmup timeout: elapsed_ms={}, error={e:?}",
                     warmup_elapsed.as_millis(),
                 );
                 bail!("SWITCH");
@@ -5036,28 +5308,36 @@ fn handle_one_frame(
             if (first && !repeat) || *encode_fail_counter >= max_fail_times {
                 *encode_fail_counter = 0;
                 if encoder.is_hardware() {
-                    let Some(fallback) = Encoder::set_software_fallback_codec() else {
+                    let Some(fallback) = step_down_from_failed_encoder(
+                        &sp.name(),
+                        encoder,
+                        "encode errors in a row",
+                    ) else {
                         log::error!(
                             "hardware encoding failed with no peer-compatible VP8/VP9 fallback, first frame: {first}, error: {e:?}"
                         );
                         return Err(e);
                     };
                     log::error!(
-                        "switch to {fallback:?} due to hardware encoding fails without disabling hwcodec availability, first frame: {first}, error: {e:?}"
+                        "switch to {fallback} due to hardware encoding fails without disabling hwcodec availability, first frame: {first}, error: {e:?}"
                     );
                     bail!("SWITCH");
                 }
             }
             match e.to_string().as_str() {
                 scrap::codec::ENCODE_NEED_SWITCH => {
-                    let Some(fallback) = Encoder::set_software_fallback_codec() else {
+                    let Some(fallback) = step_down_from_failed_encoder(
+                        &sp.name(),
+                        encoder,
+                        "the encoder asked to be replaced",
+                    ) else {
                         log::error!(
                             "encoder requested a switch with no peer-compatible VP8/VP9 fallback: {e:?}"
                         );
                         return Err(e);
                     };
                     log::error!(
-                        "switch to {fallback:?} due to encoder need switch without disabling hwcodec availability"
+                        "switch to {fallback} due to encoder need switch without disabling hwcodec availability"
                     );
                     bail!("SWITCH");
                 }
