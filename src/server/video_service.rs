@@ -5323,6 +5323,9 @@ fn handle_one_frame(
                             HW_ENCODER_WARMUP_TIMEOUT.as_millis()
                         );
                     }
+                    // Nothing was sent: the first frame is still to come, and the low-power
+                    // modes keep repeating the last frame only while it is.
+                    *first_frame = first;
                     return Ok(send_conn_ids);
                 }
                 *encode_fail_counter = 0;
@@ -5727,5 +5730,101 @@ mod movie_tier_tests {
             MovieTierEncoderChange::Kept(_) => panic!("the switch was not followed"),
         }
         assert!(encoder_follows_frame_timestamps(&config));
+    }
+}
+
+#[cfg(test)]
+mod first_frame_tests {
+    use super::*;
+    use hbb_common::message_proto::VideoFrame;
+    use scrap::{codec::EncoderApi, EncodeYuvFormat};
+
+    /// A hardware encoder that has taken frames but given no packet yet, as a MediaCodec or
+    /// VideoToolbox encoder does with the first one.
+    struct NoPacketYet;
+
+    impl EncoderApi for NoPacketYet {
+        fn new(_cfg: EncoderCfg, _i444: bool) -> ResultType<Self> {
+            Ok(NoPacketYet)
+        }
+
+        fn encode_to_message(&mut self, _frame: EncodeInput, _ms: i64) -> ResultType<VideoFrame> {
+            Err(hbb_common::anyhow::anyhow!(ENCODE_NO_VALID_FRAME))
+        }
+
+        fn yuvfmt(&self) -> EncodeYuvFormat {
+            EncodeYuvFormat {
+                pixfmt: Pixfmt::I420,
+                w: 4,
+                h: 4,
+                stride: vec![4, 2, 2],
+                u: 16,
+                v: 20,
+            }
+        }
+
+        #[cfg(feature = "vram")]
+        fn input_texture(&self) -> bool {
+            false
+        }
+
+        fn set_quality(&mut self, _ratio: f32) -> ResultType<()> {
+            Ok(())
+        }
+
+        fn bitrate(&self) -> u32 {
+            0
+        }
+
+        fn support_changing_quality(&self) -> bool {
+            false
+        }
+
+        fn latency_free(&self) -> bool {
+            false
+        }
+
+        fn is_hardware(&self) -> bool {
+            true
+        }
+    }
+
+    /// In the low-power modes the loop repeats the last frame only while `first_frame` (or a
+    /// pending join or refresh) says so. A first frame that gave no packet has not been sent.
+    #[test]
+    fn the_first_frame_is_awaited_until_the_encoder_gives_a_packet() {
+        let sp = GenericService::new("first-frame-test".to_owned(), false);
+        let mut encoder = Encoder {
+            codec: Box::new(NoPacketYet),
+        };
+        let mut encode_fail_counter = 0;
+        let mut hw_no_valid_frame_since = None;
+        let mut first_frame = true;
+        let mut next_frame_id = 0;
+        let mut reference_refresh_pending = None;
+        let yuv = vec![0u8; 24];
+        let sent = handle_one_frame(
+            0,
+            &sp,
+            EncodeInput::YUV(&yuv),
+            0,
+            &mut encoder,
+            Arc::new(Mutex::new(None)),
+            &mut encode_fail_counter,
+            &mut hw_no_valid_frame_since,
+            &mut first_frame,
+            1,
+            &mut next_frame_id,
+            &mut reference_refresh_pending,
+            4,
+            4,
+        )
+        .unwrap();
+        assert!(sent.is_empty());
+        assert!(hw_no_valid_frame_since.is_some());
+        assert!(
+            first_frame,
+            "the first frame was taken as sent although the encoder gave no packet"
+        );
     }
 }
