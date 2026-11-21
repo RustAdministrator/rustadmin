@@ -4006,6 +4006,13 @@ mod keyboard_sender_regression_tests {
         let platform_code = rdev::macos_keycode_from_key(key).unwrap_or_default() as _;
         #[cfg(target_os = "linux")]
         let platform_code = rdev::linux_keycode_from_key(key).unwrap_or_default() as _;
+        // On Windows a real event carries the virtual-key code in `platform_code` and the
+        // scan code in `position_code`, and the sender reads the latter as a scan code. On
+        // Linux and macOS the two are the same key code.
+        #[cfg(target_os = "windows")]
+        let position_code = rdev::win_scancode_from_key(key).unwrap_or_default() as _;
+        #[cfg(not(target_os = "windows"))]
+        let position_code = platform_code as _;
         // Source 1 supplies native platform/position codes while usb_hid is zero.
         let event = Event {
             time: SystemTime::now(),
@@ -4024,7 +4031,7 @@ mod keyboard_sender_regression_tests {
                 KeyRelease(key)
             },
             platform_code,
-            position_code: platform_code as _,
+            position_code,
             usb_hid: 0,
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             extra_data: 0,
