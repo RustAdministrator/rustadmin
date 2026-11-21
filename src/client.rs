@@ -111,6 +111,7 @@ pub use super::lang::*;
 mod decoder_recovery;
 mod display_control;
 mod startup_recovery;
+mod movie_playout;
 mod video_ingress;
 mod video_timing;
 pub mod file_trait;
@@ -124,6 +125,7 @@ pub const SEC30: Duration = Duration::from_secs(30);
 pub const VIDEO_QUEUE_SIZE: usize = 120;
 pub(crate) const MOVIE_VIDEO_QUEUE_MAX_AGE_MS: u64 = 100;
 const MOVIE_VIDEO_REFRESH_COOLDOWN: Duration = Duration::from_millis(500);
+pub(crate) use movie_playout::set_viewer_display_refresh_millihz;
 pub(crate) use video_ingress::{
     KeyframeWait, VideoIngress, KEYFRAME_FALLBACK_DELAY, MOVIE_KEYFRAME_FALLBACK_DELAY,
 };
@@ -5297,6 +5299,10 @@ pub fn start_video_thread<F, T>(
         let mut presentation = crate::resource_policy::ViewerPresentation::default();
         // Decode and presentation timing of this display; one line a minute goes to the log.
         let timing = std::cell::RefCell::new(video_timing::VideoTiming::default());
+        // The presentation clock of the Movie profile where the platform has none, and how
+        // far the frame it paced last was behind the newest arrived one.
+        let mut movie_playout: Option<movie_playout::MoviePlayout> = None;
+        let playout_behind = std::cell::Cell::new(None::<Duration>);
         let log_timing = |report: Option<video_timing::VideoTimingReport>| {
             if let Some(report) = report {
                 log::info!("viewer video timing: display={}, {}", display, report);
@@ -5318,7 +5324,10 @@ pub fn start_video_thread<F, T>(
                 let mut feedback = video_feedback.lock().unwrap();
                 feedback.record_render_submitted(
                     frame.stream_id, frame.frame_id, render_submit_start.elapsed(),
-                    video_queue.len(),
+                    movie_playout::queue_depth_to_report(
+                        video_queue.len(),
+                        playout_behind.get(),
+                    ),
                 );
                 #[cfg(all(target_os = "android", feature = "mediacodec"))]
                 feedback.record_display_refresh(
@@ -5414,7 +5423,7 @@ pub fn start_video_thread<F, T>(
                         };
                         // Every frame, keyframe or not, comes out of the queue in the order
                         // it arrived; the message only says that the queue has something.
-                        let (vf, keyframe) = match data {
+                        let (vf, keyframe, arrived_at) = match data {
                             MediaData::VideoQueue => {
                                 let mut stale_drops = 0usize;
                                 let selected = loop {
@@ -5468,7 +5477,7 @@ pub fn start_video_thread<F, T>(
                                         continue;
                                     }
                                 }
-                                (popped.frame, popped.keyframe)
+                                (popped.frame, popped.keyframe, popped.arrived_at)
                             }
                             _ => {
                                 // unreachable!();
@@ -5493,6 +5502,7 @@ pub fn start_video_thread<F, T>(
                         let display = vf.display as usize;
                         let stream_id = vf.stream_id;
                         let frame_id = vf.frame_id;
+                        let capture_time_ms = vf.capture_time_ms;
                         let start = std::time::Instant::now();
                         let format = CodecFormat::from(&vf);
                         if video_handler.is_none() {
@@ -5552,6 +5562,51 @@ pub fn start_video_thread<F, T>(
                                 }) => {
                                     let decoded_frame_id = decoded_frame_id.unwrap_or(frame_id);
                                     let decode_time = start.elapsed();
+                                    // Movie on a viewer without a platform presentation
+                                    // clock: hold the decoded frame until it is due. The
+                                    // frames that arrive meanwhile wait in the queue.
+                                    let mut held = Duration::ZERO;
+                                    if movie_playout::pacing_enabled(
+                                        movie,
+                                        &LocalConfig::get_option(
+                                            config::keys::OPTION_MOVIE_PLAYOUT_PACING,
+                                        ),
+                                    ) && session.local_resource_mode() == ResourceMode::Normal
+                                    {
+                                        let refresh_millihz =
+                                            movie_playout::viewer_display_refresh_millihz();
+                                        let clock = movie_playout.get_or_insert_with(|| {
+                                            movie_playout::MoviePlayout::new(
+                                                refresh_millihz,
+                                                arrived_at,
+                                            )
+                                        });
+                                        clock.set_refresh_millihz(refresh_millihz);
+                                        let playout = clock.schedule(capture_time_ms, arrived_at);
+                                        let behind = movie_playout::backlog(
+                                            capture_time_ms,
+                                            newest_capture_time_ms
+                                                .load(std::sync::atomic::Ordering::Relaxed),
+                                        );
+                                        playout_behind.set(Some(behind));
+                                        let hold = movie_playout::hold(
+                                            playout.due,
+                                            std::time::Instant::now(),
+                                            behind,
+                                        );
+                                        timing.borrow_mut().record_playout(
+                                            hold.wait,
+                                            hold.catching_up,
+                                            playout.reset,
+                                        );
+                                        if !hold.wait.is_zero() {
+                                            std::thread::sleep(hold.wait);
+                                            held = hold.wait;
+                                        }
+                                    } else {
+                                        movie_playout = None;
+                                        playout_behind.set(None);
+                                    }
                                     video_feedback.lock().unwrap().record_decoded(
                                         stream_id,
                                         decoded_frame_id,
@@ -5593,11 +5648,13 @@ pub fn start_video_thread<F, T>(
                                     }
 
                                     // fps calculation
+                                    // The time the frame was held is not time the decoder
+                                    // needed; this number is the rate the decoder can do.
                                     fps_calculate(
                                         &mut skip_beginning,
                                         &fps,
                                         format_changed,
-                                        start.elapsed(),
+                                        start.elapsed().saturating_sub(held),
                                         &mut count,
                                         &mut duration,
                                     );
@@ -5792,16 +5849,23 @@ async fn do_sync_cpu_usage() {
 }
 
 /// Whether the frames of `display` are shown by a presentation clock, so that the playout
-/// delay of the Movie profile really applies. Today only Android's decoder with output to a
-/// surface has one; everywhere else a frame is shown as soon as it is decoded.
-pub(crate) fn movie_playout_clock_active(_display: usize) -> bool {
+/// delay of the Movie profile really applies: Android's decoder with output to a surface, or
+/// the pacing of the decoder thread on a desktop viewer (`movie_playout`). Elsewhere a frame
+/// is shown as soon as it is decoded.
+pub(crate) fn movie_playout_clock_active(_display: usize, _resource_mode: ResourceMode) -> bool {
     #[cfg(all(target_os = "android", feature = "mediacodec"))]
     {
         scrap::mediacodec::output_surface_refresh_millihz(_display) > 0
     }
     #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
     {
-        false
+        // The decoder thread paces the frames itself, under the same conditions as there.
+        // The caller asks only in full Movie mode.
+        _resource_mode == ResourceMode::Normal
+            && movie_playout::pacing_enabled(
+                true,
+                &LocalConfig::get_option(config::keys::OPTION_MOVIE_PLAYOUT_PACING),
+            )
     }
 }
 

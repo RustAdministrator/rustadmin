@@ -4049,6 +4049,12 @@ pub fn main_set_common(_key: String, _value: String) {
         ui_interface::clear_paired_viewers();
         return;
     }
+    if _key == "viewer-display-refresh-millihz" {
+        // The refresh rate of the screen a remote window is on, for the playout clock of
+        // the Movie profile. Not a number: not known.
+        crate::client::set_viewer_display_refresh_millihz(_value.parse().unwrap_or(0));
+        return;
+    }
     #[cfg(target_os = "windows")]
     if _key == "install-printer" && crate::platform::is_win_10_or_greater() {
         std::thread::spawn(move || {

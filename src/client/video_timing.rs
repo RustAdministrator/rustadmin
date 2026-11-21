@@ -33,6 +33,14 @@ pub(crate) struct VideoTimingReport {
     /// the ones above the last bound.
     pub intervals: [u32; INTERVAL_BOUNDS_MS.len() + 1],
     pub idle_gaps: u32,
+    /// Playout pacing (`movie_playout`): frames that went through it, frames that were held
+    /// and for how long in all, frames shown sooner than they were due because the picture
+    /// was behind, and how often the clock started again for a late frame.
+    pub paced: u32,
+    pub held: u32,
+    pub held_total: Duration,
+    pub caught_up: u32,
+    pub late_resets: u32,
 }
 
 impl fmt::Display for VideoTimingReport {
@@ -60,7 +68,19 @@ impl fmt::Display for VideoTimingReport {
                 )?,
             }
         }
-        write!(f, "], idle_gaps={}", self.idle_gaps)
+        write!(f, "], idle_gaps={}", self.idle_gaps)?;
+        if self.paced > 0 {
+            write!(
+                f,
+                ", paced={}, held={}, held_avg_ms={}, caught_up={}, late_resets={}",
+                self.paced,
+                self.held,
+                self.held_total.as_millis() as u64 / u64::from(self.held.max(1)),
+                self.caught_up,
+                self.late_resets,
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -106,6 +126,31 @@ impl VideoTiming {
             }
         }
         self.take_due(now)
+    }
+
+    /// Playout pacing decided to hold a decoded frame for `wait` (zero: show at once);
+    /// `catching_up`: sooner than it was due. `reset`: the clock started again for it.
+    pub(crate) fn record_playout(
+        &mut self,
+        wait: Duration,
+        catching_up: bool,
+        reset: Option<scrap::video_presentation_clock::PresentationResetReason>,
+    ) {
+        use scrap::video_presentation_clock::PresentationResetReason;
+        self.report.paced += 1;
+        if !wait.is_zero() {
+            self.report.held += 1;
+            self.report.held_total += wait;
+        }
+        if catching_up {
+            self.report.caught_up += 1;
+        }
+        if matches!(
+            reset,
+            Some(PresentationResetReason::Late | PresentationResetReason::SourceRegressed)
+        ) {
+            self.report.late_resets += 1;
+        }
     }
 
     /// The stream stopped or started again: the pause that follows is not an interval.
@@ -209,11 +254,38 @@ mod tests {
             presented: 3_590,
             intervals: [1, 2, 3_500, 40, 30, 10, 4, 2, 1],
             idle_gaps: 0,
+            ..Default::default()
+        };
+        let line = "window_s=60, decoded=3600, decode_stalls_over_180ms=2, longest_decode_ms=410, presented=3590, \
+             intervals_ms=[<=8:1, <=12:2, <=20:3500, <=25:40, <=40:30, <=60:10, <=100:4, <=180:2, >180:1], idle_gaps=0";
+        assert_eq!(report.to_string(), line);
+        // The pacing numbers follow only where frames went through the pacing.
+        let paced = VideoTimingReport {
+            paced: 3_590,
+            held: 3_400,
+            held_total: ms(3_400 * 13),
+            caught_up: 12,
+            late_resets: 1,
+            ..report
         };
         assert_eq!(
-            report.to_string(),
-            "window_s=60, decoded=3600, decode_stalls_over_180ms=2, longest_decode_ms=410, presented=3590, \
-             intervals_ms=[<=8:1, <=12:2, <=20:3500, <=25:40, <=40:30, <=60:10, <=100:4, <=180:2, >180:1], idle_gaps=0"
+            paced.to_string(),
+            format!("{line}, paced=3590, held=3400, held_avg_ms=13, caught_up=12, late_resets=1")
         );
+    }
+
+    #[test]
+    fn playout_decisions_are_counted() {
+        use scrap::video_presentation_clock::PresentationResetReason;
+        let mut timing = VideoTiming::default();
+        timing.record_playout(ms(17), false, Some(PresentationResetReason::Initial));
+        timing.record_playout(ms(10), true, None);
+        timing.record_playout(ms(0), true, Some(PresentationResetReason::Late));
+        timing.record_playout(ms(0), false, Some(PresentationResetReason::Future));
+        assert_eq!(timing.report.paced, 4);
+        assert_eq!(timing.report.held, 2);
+        assert_eq!(timing.report.held_total, ms(27));
+        assert_eq!(timing.report.caught_up, 2);
+        assert_eq!(timing.report.late_resets, 1);
     }
 }

@@ -23,6 +23,7 @@ struct Entry<T> {
     frame: T,
     keyframe: bool,
     after_gap: bool,
+    arrived_at: Instant,
 }
 
 struct State<T> {
@@ -39,6 +40,8 @@ pub(crate) struct Popped<T> {
     /// The frame that arrived right before this one was removed from the queue. Unless this
     /// is a keyframe, it and what follows cannot be decoded until the next keyframe.
     pub after_gap: bool,
+    /// When the frame was queued.
+    pub arrived_at: Instant,
 }
 
 /// Frames of one display in arrival order.
@@ -93,6 +96,7 @@ impl<T> VideoIngress<T> {
             frame,
             keyframe,
             after_gap,
+            arrived_at: Instant::now(),
         });
         removed
     }
@@ -104,6 +108,7 @@ impl<T> VideoIngress<T> {
             frame: entry.frame,
             keyframe: entry.keyframe,
             after_gap: entry.after_gap,
+            arrived_at: entry.arrived_at,
         })
     }
 
@@ -421,14 +426,10 @@ mod tests {
         ingress.push(key(1), true, 1);
         // The limit is one and the only frame is a keyframe: it has to go.
         assert_eq!(ingress.push(delta(2), false, 1), 1);
-        assert_eq!(
-            ingress.pop(),
-            Some(Popped {
-                frame: delta(2),
-                keyframe: false,
-                after_gap: true
-            })
-        );
+        let popped = ingress.pop();
+        assert!(popped.is_some_and(|popped| {
+            popped.frame == delta(2) && !popped.keyframe && popped.after_gap
+        }));
         // Clearing a queue that held frames marks what comes next; an empty one does not.
         ingress.push(delta(3), false, 8);
         assert_eq!(ingress.clear(), 1);

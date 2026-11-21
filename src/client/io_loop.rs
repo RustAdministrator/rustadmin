@@ -1479,7 +1479,12 @@ impl<T: InvokeUiSession> Remote<T> {
                                     && self
                                         .video_threads
                                         .keys()
-                                        .any(|display| client::movie_playout_clock_active(*display)))
+                                        .any(|display| {
+                                            client::movie_playout_clock_active(
+                                                *display,
+                                                self.handler.local_resource_mode(),
+                                            )
+                                        }))
                                 .then_some(MOVIE_PLAYOUT_DELAY_MS),
                                 ..Default::default()
                             });
