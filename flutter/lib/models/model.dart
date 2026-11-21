@@ -2158,7 +2158,12 @@ class FfiModel with ChangeNotifier {
     CursorShapeSessionEvent event, {
     String? peerId,
   }) async {
-    cachedPeerData.cursorDataList.add(event.toLegacyPayload());
+    // One entry per cursor id: a host sends the shape of an id again (after a reconnect, a
+    // display switch), and every entry holds the full pixels.
+    final payload = event.toLegacyPayload();
+    cachedPeerData.cursorDataList
+        .removeWhere((cached) => cached['id'] == payload['id']);
+    cachedPeerData.cursorDataList.add(payload);
     await parent.target?.cursorModel.updateCursorShape(event);
     if (peerId != null) {
       _tryNotifyAuthenticatedHandoff(peerId);
