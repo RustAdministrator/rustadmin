@@ -1943,6 +1943,13 @@ impl Subscriber for ConnInner {
 }
 
 const TEST_DELAY_TIMEOUT: Duration = Duration::from_secs(1);
+/// After this long without an answer a delay measurement counts as lost and a new one starts.
+const TEST_DELAY_ANSWER_LOST_AFTER: Duration = Duration::from_secs(5);
+
+/// Whether the measurement that was sent `elapsed` ago has to be given up.
+fn test_delay_answer_lost(elapsed: Option<Duration>) -> bool {
+    elapsed.is_some_and(|elapsed| elapsed >= TEST_DELAY_ANSWER_LOST_AFTER)
+}
 const SEC30: Duration = Duration::from_secs(30);
 const H1: Duration = Duration::from_secs(3600);
 const MILLI1: Duration = Duration::from_millis(1);
@@ -2907,6 +2914,11 @@ impl Connection {
                     if last_recv_time.elapsed() >= SEC30 {
                         conn.on_close("Timeout", true).await;
                         break;
+                    }
+                    // An answer that never came must not stop the measurement: the peer queues
+                    // it without waiting and can drop it. Start again after a while.
+                    if test_delay_answer_lost(conn.last_test_delay.map(|sent| sent.elapsed())) {
+                        conn.last_test_delay = None;
                     }
                     // The control end will jump out of the loop after receiving LoginResponse and will not reply to the TestDelay
                     if conn.last_test_delay.is_none() && !(conn.port_forward_socket.is_some() && conn.authorized) {
@@ -11473,6 +11485,15 @@ mod test {
             }
         }
         assert!(reissued, "five seconds of deltas and no second request");
+    }
+
+    #[test]
+    fn delay_measurement_without_an_answer_starts_again() {
+        assert!(!test_delay_answer_lost(None), "nothing was sent");
+        assert!(!test_delay_answer_lost(Some(Duration::from_secs(1))));
+        assert!(!test_delay_answer_lost(Some(Duration::from_millis(4_999))));
+        assert!(test_delay_answer_lost(Some(TEST_DELAY_ANSWER_LOST_AFTER)));
+        assert!(test_delay_answer_lost(Some(Duration::from_secs(60))));
     }
 
     #[test]

@@ -112,6 +112,7 @@ mod decoder_recovery;
 mod display_control;
 mod startup_recovery;
 mod video_ingress;
+mod video_timing;
 pub mod file_trait;
 pub mod helper;
 pub mod io_loop;
@@ -5294,6 +5295,13 @@ pub fn start_video_thread<F, T>(
         let mut duration = std::time::Duration::ZERO;
         let mut skip_beginning = 0;
         let mut presentation = crate::resource_policy::ViewerPresentation::default();
+        // Decode and presentation timing of this display; one line a minute goes to the log.
+        let timing = std::cell::RefCell::new(video_timing::VideoTiming::default());
+        let log_timing = |report: Option<video_timing::VideoTimingReport>| {
+            if let Some(report) = report {
+                log::info!("viewer video timing: display={}, {}", display, report);
+            }
+        };
         let mut submit_presentation = |handler: &mut VideoHandler,
                                        frame: crate::resource_policy::PendingPresentation| {
             let render_submit_start = std::time::Instant::now();
@@ -5302,6 +5310,11 @@ pub fn start_video_thread<F, T>(
                 handler.texture.texture, frame.pixelbuffer,
             );
             if render_outcome.any_submitted() {
+                log_timing(
+                    timing
+                        .borrow_mut()
+                        .record_presented(std::time::Instant::now()),
+                );
                 let mut feedback = video_feedback.lock().unwrap();
                 feedback.record_render_submitted(
                     frame.stream_id, frame.frame_id, render_submit_start.elapsed(),
@@ -5322,6 +5335,7 @@ pub fn start_video_thread<F, T>(
                 presentation.clear();
                 video_handler.take();
                 video_queue.clear();
+                timing.borrow_mut().pause();
             }
             if let Some(handler) = video_handler.as_mut() {
                 if !session.video_suspended() {
@@ -5525,7 +5539,14 @@ pub fn start_video_thread<F, T>(
                             if format_changed {
                                 presentation.clear();
                             }
-                            match handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma) {
+                            let decode_result =
+                                handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma);
+                            log_timing(
+                                timing
+                                    .borrow_mut()
+                                    .record_decode(start.elapsed(), std::time::Instant::now()),
+                            );
+                            match decode_result {
                                 Ok(DecodeOutcome::FrameReady {
                                     frame_id: decoded_frame_id,
                                 }) => {
@@ -5768,6 +5789,20 @@ async fn do_sync_cpu_usage() {
         _ => {}
     }
     log::info!("{:?} used to sync cpu usage", start.elapsed());
+}
+
+/// Whether the frames of `display` are shown by a presentation clock, so that the playout
+/// delay of the Movie profile really applies. Today only Android's decoder with output to a
+/// surface has one; everywhere else a frame is shown as soon as it is decoded.
+pub(crate) fn movie_playout_clock_active(_display: usize) -> bool {
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
+    {
+        scrap::mediacodec::output_surface_refresh_millihz(_display) > 0
+    }
+    #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
+    {
+        false
+    }
 }
 
 /// Handle latency test.

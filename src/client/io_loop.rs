@@ -1473,8 +1473,14 @@ impl<T: InvokeUiSession> Remote<T> {
                                     == VideoProfile::Movie)
                                     .then_some(movie_target_fps),
                                 movie_fallback_reason: movie_fallback_reason.map(str::to_owned),
-                                movie_playout_delay_ms: full_movie_mode
-                                    .then_some(MOVIE_PLAYOUT_DELAY_MS),
+                                // Only where a presentation clock really delays the
+                                // frames; the profile alone does not.
+                                movie_playout_delay_ms: (full_movie_mode
+                                    && self
+                                        .video_threads
+                                        .keys()
+                                        .any(|display| client::movie_playout_clock_active(*display)))
+                                .then_some(MOVIE_PLAYOUT_DELAY_MS),
                                 ..Default::default()
                             });
                         }
