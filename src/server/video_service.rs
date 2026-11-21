@@ -696,6 +696,9 @@ struct VideoFrameController {
     stream_key: VideoStreamKey,
     cur: Instant,
     send_conn_ids: HashSet<i32>,
+    /// The runtime of the waits for the viewers' fetch. One was built for every wait, that is
+    /// at least once a frame, also with nobody to wait for (26 us in a debug build).
+    runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl VideoFrameController {
@@ -704,6 +707,20 @@ impl VideoFrameController {
             stream_key: VideoStreamKey::new(source, display_idx),
             cur: Instant::now(),
             send_conn_ids: HashSet::new(),
+            runtime: Self::build_runtime(),
+        }
+    }
+
+    fn build_runtime() -> Option<tokio::runtime::Runtime> {
+        match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => Some(runtime),
+            Err(err) => {
+                log::warn!("no runtime for the frame fetch waits: {err}");
+                None
+            }
         }
     }
 
@@ -735,19 +752,35 @@ impl VideoFrameController {
             || (self.send_conn_ids.len() > 1 && fetched_expected > 0)
     }
 
-    #[tokio::main(flavor = "current_thread")]
-    async fn try_wait_next(&mut self, fetched_conn_ids: &mut HashSet<i32>, timeout_millis: u64) {
+    fn try_wait_next(&mut self, fetched_conn_ids: &mut HashSet<i32>, timeout_millis: u64) {
         if self.send_conn_ids.is_empty() {
             return;
         }
+        if self.runtime.is_none() {
+            self.runtime = Self::build_runtime();
+        }
+        let Some(runtime) = self.runtime.as_ref() else {
+            // As a wait that timed out, so that the caller's loop does not spin.
+            std::thread::sleep(Duration::from_millis(timeout_millis));
+            return;
+        };
+        runtime.block_on(Self::wait_next(
+            &self.stream_key,
+            &self.send_conn_ids,
+            fetched_conn_ids,
+            timeout_millis,
+        ));
+    }
 
+    async fn wait_next(
+        stream_key: &VideoStreamKey,
+        send_conn_ids: &HashSet<i32>,
+        fetched_conn_ids: &mut HashSet<i32>,
+        timeout_millis: u64,
+    ) {
         let timeout_dur = Duration::from_millis(timeout_millis as u64);
         let receiver = {
-            match FRAME_FETCHED_NOTIFIERS
-                .lock()
-                .unwrap()
-                .get(&self.stream_key)
-            {
+            match FRAME_FETCHED_NOTIFIERS.lock().unwrap().get(stream_key) {
                 Some(notifier) => notifier.1.clone(),
                 None => {
                     return;
@@ -764,7 +797,7 @@ impl VideoFrameController {
                 if let Some(tm) = instant {
                     log::trace!("Channel recv latency: {}", tm.elapsed().as_secs_f32());
                 }
-                if self.send_conn_ids.contains(&id) {
+                if send_conn_ids.contains(&id) {
                     fetched_conn_ids.insert(id);
                 }
             }
@@ -777,7 +810,7 @@ impl VideoFrameController {
                 if let Some(tm) = instant {
                     log::trace!("Channel recv latency: {}", tm.elapsed().as_secs_f32());
                 }
-                if self.send_conn_ids.contains(&id) {
+                if send_conn_ids.contains(&id) {
                     fetched_conn_ids.insert(id);
                 }
             }
@@ -5825,6 +5858,69 @@ mod first_frame_tests {
         assert!(
             first_frame,
             "the first frame was taken as sent although the encoder gave no packet"
+        );
+    }
+}
+
+#[cfg(test)]
+mod frame_wait_tests {
+    use super::*;
+
+    fn registered(display_idx: usize) -> VideoStreamKey {
+        let key = VideoStreamKey::new(VideoSource::Camera, display_idx);
+        FRAME_FETCHED_NOTIFIERS
+            .lock()
+            .unwrap()
+            .entry(key)
+            .or_insert_with(|| {
+                let (tx, rx) = unbounded_channel();
+                (tx, Arc::new(TokioMutex::new(rx)))
+            });
+        key
+    }
+
+    /// The wait for the viewers' fetch of a frame collects a fetch that came before it.
+    #[test]
+    fn a_fetch_that_came_first_is_collected() {
+        registered(90);
+        let mut controller = VideoFrameController::new(VideoSource::Camera, 90);
+        controller.set_send(Instant::now(), HashSet::from([5]));
+        notify_video_frame_fetched(VideoSource::Camera, 90, 5, None);
+        let mut fetched = HashSet::new();
+        let started = Instant::now();
+        controller.try_wait_next(&mut fetched, 300);
+        assert_eq!(fetched, HashSet::from([5]));
+        assert!(started.elapsed() < Duration::from_millis(250));
+        controller.reset();
+    }
+
+    /// What one wait costs the capture loop with no viewer to wait for, and with one whose fetch
+    /// came first. Prints the cost.
+    #[test]
+    fn frame_wait_cost() {
+        registered(91);
+        let mut controller = VideoFrameController::new(VideoSource::Camera, 91);
+        let mut fetched = HashSet::new();
+        let calls = 2_000u32;
+        let started = Instant::now();
+        for _ in 0..calls {
+            controller.try_wait_next(&mut fetched, 0);
+        }
+        let idle = started.elapsed();
+        controller.set_send(Instant::now(), HashSet::from([7]));
+        let started = Instant::now();
+        for _ in 0..calls {
+            notify_video_frame_fetched(VideoSource::Camera, 91, 7, None);
+            fetched.clear();
+            controller.try_wait_next(&mut fetched, 300);
+            assert!(fetched.contains(&7));
+        }
+        let waiting = started.elapsed();
+        controller.reset();
+        println!(
+            "frame wait cost: {:.1} us per call with no viewer to wait for, {:.1} us with one whose fetch came first",
+            idle.as_secs_f64() * 1e6 / f64::from(calls),
+            waiting.as_secs_f64() * 1e6 / f64::from(calls)
         );
     }
 }
