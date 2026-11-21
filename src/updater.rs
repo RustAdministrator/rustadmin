@@ -219,6 +219,14 @@ fn update_new_version(update_msi: bool, version: &str, file_path: &PathBuf) {
                     }
                 }
             } else {
+                let command = match crate::common::exe_update_command(p) {
+                    Ok(command) => command,
+                    Err(e) => {
+                        log::error!("Refusing to run the new version \"{}\": {}", version, e);
+                        std::fs::remove_file(&file_path).ok();
+                        return;
+                    }
+                };
                 let custom_client_staging_dir = if crate::is_custom_client() {
                     let custom_client_staging_dir =
                         crate::platform::get_custom_client_staging_dir();
@@ -241,24 +249,22 @@ fn update_new_version(update_msi: bool, version: &str, file_path: &PathBuf) {
                     ));
                     None
                 };
-                let update_launched = match crate::platform::launch_privileged_process(
-                    session_id,
-                    &format!("{} --update", p),
-                ) {
-                    Ok(h) => {
-                        if h.is_null() {
-                            log::error!("Failed to update to the new version: {}", version);
-                            false
-                        } else {
-                            log::debug!("New version \"{}\" is launched.", version);
-                            true
+                let update_launched =
+                    match crate::platform::launch_privileged_process(session_id, &command) {
+                        Ok(h) => {
+                            if h.is_null() {
+                                log::error!("Failed to update to the new version: {}", version);
+                                false
+                            } else {
+                                log::debug!("New version \"{}\" is launched.", version);
+                                true
+                            }
                         }
-                    }
-                    Err(e) => {
-                        log::error!("Failed to run the new version: {}", e);
-                        false
-                    }
-                };
+                        Err(e) => {
+                            log::error!("Failed to run the new version: {}", e);
+                            false
+                        }
+                    };
                 if !update_launched {
                     if let Some(dir) = custom_client_staging_dir {
                         hbb_common::allow_err!(crate::platform::remove_custom_client_staging_dir(
