@@ -496,18 +496,42 @@ fn monotonic_counter_delta(current: u64, previous: u64) -> u64 {
     }
 }
 
+/// Frame rate tiers of the Movie cadence, highest first. The ones above 60 serve viewers whose
+/// screens run at 75, 90, 100, 120 or 144 Hz (72 for 144) and who ask for that many frames;
+/// the owner decided for them on 2026-11-21.
+const MOVIE_TIERS: [u32; 13] = [120, 100, 90, 75, 72, 60, 50, 48, 45, 40, 30, 25, 24];
+/// The tiers with `movie-tiers-above-60 = N`, as before.
+const MOVIE_TIERS_UP_TO_SIXTY: [u32; 8] = [60, 50, 48, 45, 40, 30, 25, 24];
+
+fn movie_tiers_above_sixty() -> bool {
+    hbb_common::config::Config::get_option(hbb_common::config::keys::OPTION_MOVIE_TIERS_ABOVE_60)
+        != "N"
+}
+
 fn movie_cadence_tiers(target_fps: u32, refresh_millihz: u32) -> Vec<u32> {
-    const COMMON_TIERS: [u32; 8] = [60, 50, 48, 45, 40, 30, 25, 24];
+    let common: &[u32] = if movie_tiers_above_sixty() {
+        &MOVIE_TIERS
+    } else {
+        &MOVIE_TIERS_UP_TO_SIXTY
+    };
+    movie_cadence_tiers_from(common, target_fps, refresh_millihz)
+}
+
+/// The tiers of `common` that a target and a screen allow: up to the target, and on a screen
+/// that reports its rate only those that fall on whole refresh periods (30 always).
+fn movie_cadence_tiers_from(common: &[u32], target_fps: u32, refresh_millihz: u32) -> Vec<u32> {
     let target_fps = target_fps.clamp(MIN_FPS, MAX_FPS);
     let mut tiers: Vec<u32> = if refresh_millihz == 0 {
-        COMMON_TIERS
-            .into_iter()
+        common
+            .iter()
+            .copied()
             .filter(|fps| *fps <= target_fps)
             .take(1)
             .collect()
     } else {
-        COMMON_TIERS
-            .into_iter()
+        common
+            .iter()
+            .copied()
             .filter(|fps| {
                 if *fps > target_fps {
                     return false;
@@ -4191,5 +4215,46 @@ impl RttCalculator {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod movie_tier_list_tests {
+    use super::*;
+
+    /// A viewer whose screen runs at 120, 100, 90 or 75 Hz and who asks for that many frames:
+    /// the Movie cadence offered no tier above 60, so such a viewer got 60 at most. With a
+    /// 144 Hz screen the best even tier is 72.
+    #[test]
+    fn movie_cadence_offers_tiers_above_sixty_for_fast_screens() {
+        assert_eq!(movie_cadence_tiers(120, 120_000)[0], 120);
+        assert_eq!(movie_cadence_tiers(120, 144_000)[0], 72);
+        assert_eq!(movie_cadence_tiers(120, 100_000)[0], 100);
+        assert_eq!(movie_cadence_tiers(90, 90_000)[0], 90);
+        assert_eq!(movie_cadence_tiers(120, 75_000)[0], 75);
+        // A viewer that reports no refresh rate gets the highest tier up to what it asks for.
+        assert_eq!(movie_cadence_tiers(120, 0), vec![120, 30]);
+    }
+
+    /// With `movie-tiers-above-60 = N` the tiers end at 60, as before.
+    #[test]
+    fn movie_cadence_tiers_end_at_sixty_with_the_kill_switch() {
+        assert_eq!(
+            movie_cadence_tiers_from(&MOVIE_TIERS_UP_TO_SIXTY, 120, 120_000),
+            vec![60, 40, 30, 24]
+        );
+        assert_eq!(
+            movie_cadence_tiers_from(&MOVIE_TIERS_UP_TO_SIXTY, 120, 0),
+            vec![60, 30]
+        );
+        // A target of 60 or less is the same with either list.
+        for refresh in [0, 60_000, 120_000, 144_000] {
+            assert_eq!(
+                movie_cadence_tiers_from(&MOVIE_TIERS, 60, refresh),
+                movie_cadence_tiers_from(&MOVIE_TIERS_UP_TO_SIXTY, 60, refresh),
+                "{}",
+                refresh
+            );
+        }
     }
 }
