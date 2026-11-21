@@ -827,6 +827,10 @@ const VIDEO_DELIVERY_MIN_REFRESH_COOLDOWN: Duration = Duration::from_secs(1);
 const VIDEO_DELIVERY_MAX_RECOVERY_REISSUES: u8 = 2;
 const VIDEO_DELIVERY_REISSUE_COOLDOWN_MULTIPLIER: u32 = 3;
 const VIDEO_DELIVERY_RECOVERY_CYCLE_COOLDOWN: Duration = Duration::from_secs(10);
+/// A viewer repeats a strict request that was not answered after a second at the earliest, and
+/// sends none in between. One that follows its previous strict request sooner than this is
+/// not a repeat: the viewer got a keyframe in between and lost frames again.
+const VIDEO_DELIVERY_VIEWER_REPEAT_FLOOR: Duration = Duration::from_millis(750);
 const QUIC_ADVISORY_REFRESH_CWND_MULTIPLIER: u64 = 2;
 // Feedback can be emitted after receive but before asynchronous decode/render.
 // Older viewers may never send the final same-frame update on an idle desktop.
@@ -895,6 +899,17 @@ struct VideoDeliveryState {
     /// The first keyframe sent after the recovery was asked for, for a viewer that keeps
     /// decoding deltas after a loss. Decoding that frame is what ends its recovery.
     recovery_keyframe_id: Option<u64>,
+    /// The newest keyframe sent since the recovery was asked for, whatever the codec.
+    recovery_last_keyframe_id: Option<u64>,
+    /// The viewer has that keyframe, asked strictly and named a frame beyond it: the keyframe
+    /// is not what it waits for, it has lost frames again.
+    viewer_lost_frames_after_keyframe: bool,
+    /// The newest frame the viewer's feedback named as received. A viewer with the keyframe
+    /// barrier holds the deltas of a keyframe back until the keyframe is there, so this id
+    /// passes a keyframe only when the keyframe has arrived.
+    viewer_received_frame_id: u64,
+    /// When the viewer last asked strictly.
+    last_strict_request_at: Option<Instant>,
     recovery_generation: u64,
     recovery_reissues: u8,
     recovery_progress_at: Option<Instant>,
@@ -921,6 +936,10 @@ impl VideoDeliveryState {
             feedback_observed: false,
             recovery_target_frame_id: None,
             recovery_keyframe_id: None,
+            recovery_last_keyframe_id: None,
+            viewer_lost_frames_after_keyframe: false,
+            viewer_received_frame_id: 0,
+            last_strict_request_at: None,
             recovery_generation: 0,
             recovery_reissues: 0,
             recovery_progress_at: None,
@@ -1027,9 +1046,34 @@ fn should_coalesce_quic_strict_refresh(
         })
 }
 
-#[derive(Default)]
 struct VideoDeliveryController {
     by_display: HashMap<i32, VideoDeliveryState>,
+    /// The kill switch `video-recovery-after-keyframe`: unset, a viewer that lost frames
+    /// right behind a recovery keyframe is answered after one refresh cooldown.
+    answer_loss_after_keyframe: bool,
+}
+
+impl Default for VideoDeliveryController {
+    fn default() -> Self {
+        Self {
+            by_display: HashMap::new(),
+            answer_loss_after_keyframe: true,
+        }
+    }
+}
+
+/// Whether one of the encoded frames of a video message is a keyframe, for every codec.
+fn video_frame_has_keyframe(frame: &VideoFrame) -> bool {
+    match frame.union.as_ref() {
+        Some(
+            video_frame::Union::Vp8s(frames)
+            | video_frame::Union::Vp9s(frames)
+            | video_frame::Union::Av1s(frames)
+            | video_frame::Union::H264s(frames)
+            | video_frame::Union::H265s(frames),
+        ) => frames.frames.iter().any(|frame| frame.key),
+        _ => false,
+    }
 }
 
 impl VideoDeliveryController {
@@ -1054,9 +1098,15 @@ impl VideoDeliveryController {
             .saturating_mul(VIDEO_DELIVERY_REISSUE_COOLDOWN_MULTIPLIER)
     }
 
+    fn set_answer_loss_after_keyframe(&mut self, enabled: bool) {
+        self.answer_loss_after_keyframe = enabled;
+    }
+
     fn clear_recovery_cycle(state: &mut VideoDeliveryState) {
         state.recovery_target_frame_id = None;
         state.recovery_keyframe_id = None;
+        state.recovery_last_keyframe_id = None;
+        state.viewer_lost_frames_after_keyframe = false;
         state.recovery_reissues = 0;
         state.recovery_progress_at = None;
     }
@@ -1101,8 +1151,30 @@ impl VideoDeliveryController {
             state.recovery_generation = state.recovery_generation.saturating_add(1);
             state.recovery_target_frame_id = None;
             state.recovery_keyframe_id = None;
+            state.recovery_last_keyframe_id = None;
+            state.viewer_lost_frames_after_keyframe = false;
             state.recovery_reissues = 0;
             state.recovery_progress_at = None;
+            recovery_reissue = 0;
+        } else if Self::recovery_unresolved(state) && state.viewer_lost_frames_after_keyframe {
+            // The viewer has frames from beyond the keyframe of this recovery and asks again:
+            // the keyframe is not still on its way, frames were lost after it. That is a new
+            // loss. It gets a new recovery as soon as the cooldown every refresh observes is
+            // over, not after the wait for a reissue, which is three times as long; until
+            // then the viewer shows nothing.
+            if state
+                .last_refresh_at
+                .is_some_and(|last| now.saturating_duration_since(last) < refresh_cooldown)
+            {
+                return None;
+            }
+            state.recovery_generation = state.recovery_generation.saturating_add(1);
+            state.recovery_target_frame_id = Some(state.host_highest_sent_frame_id);
+            state.recovery_keyframe_id = None;
+            state.recovery_last_keyframe_id = None;
+            state.viewer_lost_frames_after_keyframe = false;
+            state.recovery_reissues = 0;
+            state.recovery_progress_at = Some(now);
             recovery_reissue = 0;
         } else if Self::recovery_unresolved(state) {
             let retry_from = state
@@ -1181,15 +1253,18 @@ impl VideoDeliveryController {
             return;
         }
         state.viewer_continues_deltas_after_loss = viewer_continues_deltas_after_loss(frame);
-        if state.viewer_continues_deltas_after_loss
-            && state.recovery_keyframe_id.is_none()
+        if state
+            .recovery_target_frame_id
+            .is_some_and(|target| frame.frame_id > target)
             && state
-                .recovery_target_frame_id
-                .is_some_and(|target| frame.frame_id > target)
-            && scrap::codec::video_frame_payload_stats(frame)
-                .is_some_and(|(_, _, keyframe)| keyframe)
+                .recovery_last_keyframe_id
+                .map_or(true, |last| frame.frame_id > last)
+            && video_frame_has_keyframe(frame)
         {
-            state.recovery_keyframe_id = Some(frame.frame_id);
+            state.recovery_last_keyframe_id = Some(frame.frame_id);
+            if state.viewer_continues_deltas_after_loss && state.recovery_keyframe_id.is_none() {
+                state.recovery_keyframe_id = Some(frame.frame_id);
+            }
         }
         let previous_host_frontier = state.host_highest_sent_frame_id;
         if frame.frame_id > previous_host_frontier {
@@ -1227,6 +1302,9 @@ impl VideoDeliveryController {
             state.decode_pending_since = Some(now);
         }
         state.highest_sent_frame_id = state.highest_sent_frame_id.max(feedback.received_frame_id);
+        state.viewer_received_frame_id = state
+            .viewer_received_frame_id
+            .max(feedback.received_frame_id);
         if feedback.decoded_frame_id > state.highest_decoded_frame_id {
             state.highest_decoded_frame_id = feedback.decoded_frame_id;
             state.recovery_cycle_cooldown_until = None;
@@ -1317,6 +1395,7 @@ impl VideoDeliveryController {
         if !valid_video_reference_refresh(request) {
             return Err(VideoReferenceRefreshError::InvalidRequest);
         }
+        let answer_loss_after_keyframe = self.answer_loss_after_keyframe;
         let Some(state) = self.by_display.get_mut(&request.display) else {
             return Err(VideoReferenceRefreshError::UnknownDisplay);
         };
@@ -1328,6 +1407,27 @@ impl VideoDeliveryController {
                 return Err(VideoReferenceRefreshError::StaleRequest);
             }
         }
+        // A strict request during an open recovery is about a new loss only if the viewer
+        // has the keyframe of that recovery. The frame the request names does not show it:
+        // deltas sent after a keyframe can overtake it. What shows it is feedback that names
+        // the keyframe as received, or a strict request that comes sooner after the last one
+        // than a viewer repeats an unanswered request. Without either, the keyframe may
+        // still be on its way, on a slow link for longer than a cooldown, and the request
+        // waits for the reissue as before.
+        let follows_soon = state.last_strict_request_at.is_some_and(|last| {
+            now.saturating_duration_since(last) < VIDEO_DELIVERY_VIEWER_REPEAT_FLOOR
+        });
+        if answer_loss_after_keyframe
+            && request.strict_recovery
+            && state.recovery_target_frame_id.is_some()
+            && state.recovery_last_keyframe_id.is_some_and(|keyframe| {
+                request.received_frame_id > keyframe
+                    && (state.viewer_received_frame_id >= keyframe || follows_soon)
+            })
+        {
+            state.viewer_lost_frames_after_keyframe = true;
+        }
+        state.last_strict_request_at = request.strict_recovery.then_some(now);
         let progress_at = if state.recovery_target_frame_id.is_some() {
             state
                 .recovery_progress_at
@@ -5628,6 +5728,9 @@ impl Connection {
         let now = Instant::now();
         #[cfg(feature = "quic-transport")]
         let previous_delivery_state = self.video_delivery.snapshot_display(request.display);
+        self.video_delivery.set_answer_loss_after_keyframe(
+            Config::get_option(config::keys::OPTION_VIDEO_RECOVERY_AFTER_KEYFRAME) != "N",
+        );
         let result =
             self.video_delivery
                 .on_reference_refresh_request(&request, now, self.network_delay);
@@ -11485,6 +11588,310 @@ mod test {
             }
         }
         assert!(reissued, "five seconds of deltas and no second request");
+    }
+
+    #[cfg(test)]
+    fn h264_delivery_frame(frame_id: u64, key: bool) -> VideoFrame {
+        VideoFrame {
+            display: 0,
+            stream_id: 7,
+            frame_id,
+            union: Some(video_frame::Union::H264s(EncodedVideoFrames {
+                frames: vec![EncodedVideoFrame {
+                    data: vec![0u8; 4].into(),
+                    key,
+                    pts: frame_id as i64,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    /// Feedback of a viewer that shows a frame only when the next one arrives: it has
+    /// received up to `received` and decoded up to `decoded`.
+    #[cfg(test)]
+    fn received_and_decoded(received: u64, decoded: u64) -> VideoFeedback {
+        VideoFeedback {
+            display: 0,
+            stream_id: 7,
+            received_frame_id: received,
+            decoded_frame_id: decoded,
+            render_submitted_frame_id: decoded,
+            ..Default::default()
+        }
+    }
+
+    #[cfg(test)]
+    fn strict_request(received_frame_id: u64) -> VideoReferenceRefresh {
+        VideoReferenceRefresh {
+            display: 0,
+            stream_id: 7,
+            received_frame_id,
+            strict_recovery: true,
+            ..Default::default()
+        }
+    }
+
+    /// The session of 2026-11-21. Ten H.264 frames are sent and eight decoded when the viewer
+    /// asks strictly; the host sends keyframe 12 and two deltas. Then the viewer, which shows
+    /// a frame only when the next one arrives and so has reported nothing new, asks again and
+    /// names `second_request_names`. Returns how long after the first request the host asks
+    /// its encoder for the next keyframe, polled every 100 ms as the connection does.
+    #[cfg(test)]
+    fn next_keyframe_after_a_second_request(
+        controller: &mut VideoDeliveryController,
+        second_request_names: u64,
+    ) -> Duration {
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        for frame_id in 1..=10 {
+            controller.on_frame_sent(&h264_delivery_frame(frame_id, frame_id == 1), start);
+        }
+        controller.on_feedback(&decoded_up_to(8), start);
+        assert!(controller
+            .on_reference_refresh_request(&strict_request(10), start, 10)
+            .unwrap()
+            .is_some());
+        controller.on_frame_sent(&h264_delivery_frame(11, false), start + ms(20));
+        controller.on_frame_sent(&h264_delivery_frame(12, true), start + ms(50));
+        controller.on_frame_sent(&h264_delivery_frame(13, false), start + ms(83));
+        controller.on_frame_sent(&h264_delivery_frame(14, false), start + ms(116));
+        // The frame before the loss comes out of the viewer's decoder with the keyframe.
+        controller.on_feedback(&decoded_up_to(9), start + ms(150));
+        assert!(
+            controller
+                .on_reference_refresh_request(
+                    &strict_request(second_request_names),
+                    start + ms(200),
+                    10
+                )
+                .unwrap()
+                .is_none(),
+            "a second keyframe within the refresh cooldown"
+        );
+        let mut frame_id = 14;
+        for tick in 3..=40u64 {
+            let now = start + ms(tick * 100);
+            frame_id += 3;
+            controller.on_frame_sent(&h264_delivery_frame(frame_id, false), now);
+            // The viewer asks again a second after its request, as its transport does.
+            let asked_again = tick == 12
+                && controller
+                    .on_reference_refresh_request(&strict_request(frame_id), now, 10)
+                    .unwrap()
+                    .is_some();
+            if asked_again || !controller.poll_recovery(now, 10).is_empty() {
+                return now.saturating_duration_since(start);
+            }
+        }
+        panic!("no keyframe was asked for in four seconds");
+    }
+
+    /// A viewer that lost a frame right behind the recovery keyframe stands still until the
+    /// next keyframe. It names a frame beyond the keyframe, so the keyframe is not what it
+    /// waits for: the host answers when the refresh cooldown is over, not two seconds later.
+    #[test]
+    fn loss_right_behind_a_recovery_keyframe_is_answered_after_one_cooldown() {
+        let mut controller = VideoDeliveryController::default();
+        let waited = next_keyframe_after_a_second_request(&mut controller, 14);
+        assert!(
+            waited >= VIDEO_DELIVERY_MIN_REFRESH_COOLDOWN,
+            "keyframes closer together than the cooldown: {waited:?}"
+        );
+        assert!(
+            waited <= VIDEO_DELIVERY_MIN_REFRESH_COOLDOWN + Duration::from_millis(100),
+            "the viewer stood still for {waited:?}"
+        );
+        let state = &controller.by_display[&0];
+        assert_eq!(state.recovery_reissues, 0, "a new loss is not a reissue");
+        assert_eq!(state.phase, VideoDeliveryPhase::Recovering);
+    }
+
+    /// The kill switch gives back the wait for a reissue: three refresh cooldowns.
+    #[test]
+    fn loss_right_behind_a_recovery_keyframe_waits_for_a_reissue_when_switched_off() {
+        let mut controller = VideoDeliveryController::default();
+        controller.set_answer_loss_after_keyframe(false);
+        let waited = next_keyframe_after_a_second_request(&mut controller, 14);
+        assert!(
+            waited
+                >= VIDEO_DELIVERY_MIN_REFRESH_COOLDOWN * VIDEO_DELIVERY_REISSUE_COOLDOWN_MULTIPLIER,
+            "{waited:?}"
+        );
+        assert_eq!(controller.by_display[&0].recovery_reissues, 1);
+    }
+
+    /// A request that names nothing beyond the keyframe may be about a keyframe that is still
+    /// on its way, and so may the viewer's repeat of it a second later, whatever frame that
+    /// names: both wait for the reissue, as before.
+    #[test]
+    fn request_that_names_no_frame_beyond_the_recovery_keyframe_waits_for_a_reissue() {
+        let mut controller = VideoDeliveryController::default();
+        let waited = next_keyframe_after_a_second_request(&mut controller, 11);
+        assert!(
+            waited
+                >= VIDEO_DELIVERY_MIN_REFRESH_COOLDOWN * VIDEO_DELIVERY_REISSUE_COOLDOWN_MULTIPLIER,
+            "{waited:?}"
+        );
+        assert_eq!(controller.by_display[&0].recovery_reissues, 1);
+    }
+
+    /// A slow link: the keyframe is still on its way a second after it was asked for, while
+    /// deltas sent after it have arrived. The viewer repeats its request and names one of
+    /// them. Nothing shows that the keyframe is there, so no second keyframe is put behind
+    /// the first: the request waits for the reissue.
+    #[test]
+    fn repeat_of_a_request_whose_keyframe_is_still_on_its_way_waits_for_a_reissue() {
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        let mut controller = VideoDeliveryController::default();
+        for frame_id in 1..=10 {
+            controller.on_frame_sent(&h264_delivery_frame(frame_id, frame_id == 1), start);
+        }
+        controller.on_feedback(&decoded_up_to(8), start);
+        assert!(controller
+            .on_reference_refresh_request(&strict_request(10), start, 10)
+            .unwrap()
+            .is_some());
+        controller.on_frame_sent(&h264_delivery_frame(12, true), start + ms(50));
+        let mut frame_id = 12;
+        let mut asked_at = None;
+        for tick in 1..=40u64 {
+            let now = start + ms(tick * 100);
+            frame_id += 3;
+            controller.on_frame_sent(&h264_delivery_frame(frame_id, false), now);
+            // The repeats of the viewer's transport: after one second, then after two more.
+            let repeated = (tick == 10 || tick == 30)
+                && controller
+                    .on_reference_refresh_request(&strict_request(frame_id), now, 10)
+                    .unwrap()
+                    .is_some();
+            if repeated || !controller.poll_recovery(now, 10).is_empty() {
+                asked_at = Some(tick * 100);
+                break;
+            }
+        }
+        assert_eq!(
+            asked_at,
+            Some(3000),
+            "the reissue, three cooldowns after the keyframe"
+        );
+        assert!(!controller.by_display[&0].viewer_lost_frames_after_keyframe);
+        assert_eq!(controller.by_display[&0].recovery_reissues, 1);
+    }
+
+    /// The viewer's repeat comes a second after its request, so its timing says nothing; but
+    /// its feedback has named the keyframe as received. That is enough.
+    #[test]
+    fn feedback_that_names_the_keyframe_shows_that_it_arrived() {
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        let mut controller = VideoDeliveryController::default();
+        for frame_id in 1..=10 {
+            controller.on_frame_sent(&h264_delivery_frame(frame_id, frame_id == 1), start);
+        }
+        controller.on_feedback(&decoded_up_to(8), start);
+        assert!(controller
+            .on_reference_refresh_request(&strict_request(10), start, 10)
+            .unwrap()
+            .is_some());
+        controller.on_frame_sent(&h264_delivery_frame(12, true), start + ms(50));
+        controller.on_frame_sent(&h264_delivery_frame(13, false), start + ms(83));
+        // The keyframe is in the decoder; the frame before the loss comes out.
+        controller.on_feedback(&received_and_decoded(12, 9), start + ms(150));
+        assert!(
+            controller
+                .on_reference_refresh_request(&strict_request(15), start + ms(1_000), 10)
+                .unwrap()
+                .is_some(),
+            "the cooldown is over and the viewer has the keyframe"
+        );
+        assert_eq!(controller.by_display[&0].recovery_reissues, 0);
+    }
+
+    /// The viewer named a frame beyond the keyframe and then decoded on: the recovery is
+    /// over, and no keyframe is sent when the cooldown ends.
+    #[test]
+    fn loss_behind_a_recovery_keyframe_is_forgotten_when_the_viewer_decodes_on() {
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        let mut controller = VideoDeliveryController::default();
+        for frame_id in 1..=10 {
+            controller.on_frame_sent(&h264_delivery_frame(frame_id, frame_id == 1), start);
+        }
+        controller.on_feedback(&decoded_up_to(8), start);
+        assert!(controller
+            .on_reference_refresh_request(&strict_request(10), start, 10)
+            .unwrap()
+            .is_some());
+        controller.on_frame_sent(&h264_delivery_frame(12, true), start + ms(50));
+        controller.on_frame_sent(&h264_delivery_frame(13, false), start + ms(83));
+        assert!(controller
+            .on_reference_refresh_request(&strict_request(13), start + ms(100), 10)
+            .unwrap()
+            .is_none());
+        assert!(controller.by_display[&0].viewer_lost_frames_after_keyframe);
+        controller.on_feedback(&decoded_up_to(13), start + ms(150));
+        let state = &controller.by_display[&0];
+        assert!(state.recovery_target_frame_id.is_none());
+        assert!(!state.viewer_lost_frames_after_keyframe);
+        for tick in 2..=40u64 {
+            let now = start + ms(tick * 100);
+            controller.on_frame_sent(&h264_delivery_frame(13 + tick, false), now);
+            controller.on_feedback(&decoded_up_to(13 + tick), now);
+            assert!(controller.poll_recovery(now, 10).is_empty(), "tick {tick}");
+        }
+    }
+
+    /// Every loss right behind a keyframe gets its keyframe one cooldown after the last one,
+    /// again and again: none of them counts as a reissue, so the host does not give up after
+    /// two and leave the viewer without a picture for the cycle cooldown.
+    #[test]
+    fn repeated_losses_behind_recovery_keyframes_get_one_keyframe_per_cooldown() {
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        let mut controller = VideoDeliveryController::default();
+        for frame_id in 1..=10 {
+            controller.on_frame_sent(&h264_delivery_frame(frame_id, frame_id == 1), start);
+        }
+        controller.on_feedback(&decoded_up_to(8), start);
+        assert!(controller
+            .on_reference_refresh_request(&strict_request(10), start, 10)
+            .unwrap()
+            .is_some());
+        let mut frame_id = 10;
+        let mut keyframes_asked_at = vec![0u64];
+        let mut keyframe_due = true;
+        for tick in 1..=60u64 {
+            let now = start + ms(tick * 100);
+            frame_id += 1;
+            controller.on_frame_sent(&h264_delivery_frame(frame_id, keyframe_due), now);
+            if keyframe_due {
+                keyframe_due = false;
+                // The keyframe goes into the viewer's decoder and the frame before it comes
+                // out. The delta behind the keyframe is lost; the viewer names the one after.
+                controller.on_feedback(&received_and_decoded(frame_id, 9), now + ms(40));
+                frame_id += 2;
+                controller.on_frame_sent(&h264_delivery_frame(frame_id, false), now + ms(60));
+                let _ = controller.on_reference_refresh_request(
+                    &strict_request(frame_id),
+                    now + ms(70),
+                    10,
+                );
+            }
+            if !controller.poll_recovery(now, 10).is_empty() {
+                keyframes_asked_at.push(tick * 100);
+                keyframe_due = true;
+            }
+        }
+        assert!(keyframes_asked_at.len() >= 6, "{keyframes_asked_at:?}");
+        for pair in keyframes_asked_at.windows(2) {
+            let apart = pair[1] - pair[0];
+            assert!((1000..=1200).contains(&apart), "{keyframes_asked_at:?}");
+        }
+        assert_eq!(controller.by_display[&0].recovery_reissues, 0);
     }
 
     #[test]
