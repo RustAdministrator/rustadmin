@@ -125,6 +125,12 @@ pub const MILLI1: Duration = Duration::from_millis(1);
 pub const SEC30: Duration = Duration::from_secs(30);
 pub const VIDEO_QUEUE_SIZE: usize = 120;
 pub(crate) const MOVIE_VIDEO_QUEUE_MAX_AGE_MS: u64 = 100;
+/// Android: after a packet went into the hardware decoder, it is asked for a frame it still
+/// owes this often and for this long while no further packet arrives.
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
+const MEDIACODEC_DRAIN_POLL: Duration = Duration::from_millis(8);
+#[cfg(all(target_os = "android", feature = "mediacodec"))]
+const MEDIACODEC_DRAIN_WINDOW: Duration = Duration::from_millis(500);
 const MOVIE_VIDEO_REFRESH_COOLDOWN: Duration = Duration::from_millis(500);
 pub(crate) use movie_playout::set_viewer_display_refresh_millihz;
 pub(crate) use video_ingress::{
@@ -3259,6 +3265,14 @@ impl VideoHandler {
         }
     }
 
+    /// Android: asks the hardware decoder for a frame that was not ready when the last
+    /// packet was handed in.
+    #[cfg(all(target_os = "android", feature = "mediacodec"))]
+    fn drain_pending_output(&mut self, pixelbuffer: &mut bool) -> ResultType<DecodeOutcome> {
+        self.decoder
+            .drain_media_codec(&mut self.rgb, &mut self.texture, pixelbuffer)
+    }
+
     /// From now on this display is decoded through RAM: the decoder is created again
     /// without the adapter that texture decoding needs.
     fn give_up_texture_decoding(&mut self) {
@@ -5335,6 +5349,10 @@ pub fn start_video_thread<F, T>(
         let playout_behind = std::cell::Cell::new(None::<Duration>);
         // Texture frames the renderer does not take.
         let texture_watch = std::cell::RefCell::new(texture_fallback::TextureRenderWatch::default());
+        // Android's hardware decoder may have a frame that was not ready when the last
+        // packet was handed in: until this moment it is asked again while no packet arrives.
+        #[cfg(all(target_os = "android", feature = "mediacodec"))]
+        let mut decoder_drain_until: Option<std::time::Instant> = None;
         let log_timing = |report: Option<video_timing::VideoTimingReport>| {
             if let Some(report) = report {
                 log::info!("viewer video timing: display={}, {}", display, report);
@@ -5456,8 +5474,19 @@ pub fn start_video_thread<F, T>(
                 .as_ref()
                 .and_then(|handler| handler.recovery.wait_duration(now));
             let keyframe_wait_left = keyframe_wait.lock().unwrap().fallback_wait(now);
+            #[cfg(all(target_os = "android", feature = "mediacodec"))]
+            let decoder_drain_wait = match decoder_drain_until {
+                Some(until) if now < until => Some(MEDIACODEC_DRAIN_POLL),
+                _ => {
+                    decoder_drain_until = None;
+                    None
+                }
+            };
+            #[cfg(not(all(target_os = "android", feature = "mediacodec")))]
+            let decoder_drain_wait: Option<Duration> = None;
             let wait = [
                 recovery_wait, keyframe_wait_left, presentation.wait_duration(local_mode, now),
+                decoder_drain_wait,
             ].into_iter().flatten().min();
             let received = match wait {
                 Some(wait) => video_receiver.recv_timeout(wait),
@@ -5465,6 +5494,38 @@ pub fn start_video_thread<F, T>(
                     .recv()
                     .map_err(|_| RecvTimeoutError::Disconnected),
             };
+            #[cfg(all(target_os = "android", feature = "mediacodec"))]
+            if matches!(received, Err(RecvTimeoutError::Timeout)) && decoder_drain_until.is_some() {
+                // No packet came: look for the frame the decoder still owes.
+                if let Some(handler) = video_handler.as_mut() {
+                    let drain_start = std::time::Instant::now();
+                    let mut pixelbuffer = true;
+                    match handler.drain_pending_output(&mut pixelbuffer) {
+                        Ok(DecodeOutcome::FrameReady { frame_id }) => {
+                            let stream_id = handler.stream_id;
+                            let frame_id = frame_id.unwrap_or(handler.last_frame_id);
+                            video_feedback.lock().unwrap().record_decoded(
+                                stream_id,
+                                frame_id,
+                                drain_start.elapsed(),
+                            );
+                            presentation.queue(crate::resource_policy::PendingPresentation {
+                                stream_id, frame_id, pixelbuffer,
+                            });
+                            if let Some(frame) = presentation.take_due(
+                                session.local_resource_mode(), std::time::Instant::now(),
+                            ) {
+                                submit_presentation(handler, frame);
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(err) => {
+                            log::warn!("display {display}: asking the decoder for a pending frame failed: {err}");
+                            decoder_drain_until = None;
+                        }
+                    }
+                }
+            }
             if let Ok(data) = received {
                 match data {
                     MediaData::VideoQueue => {
@@ -5608,6 +5669,11 @@ pub fn start_video_thread<F, T>(
                             }
                             let decode_result =
                                 handler.handle_frame(vf, &mut pixelbuffer, &mut tmp_chroma);
+                            #[cfg(all(target_os = "android", feature = "mediacodec"))]
+                            {
+                                decoder_drain_until =
+                                    Some(std::time::Instant::now() + MEDIACODEC_DRAIN_WINDOW);
+                            }
                             log_timing(
                                 timing
                                     .borrow_mut()

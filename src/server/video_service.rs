@@ -3511,7 +3511,8 @@ fn run(vs: VideoService) -> ResultType<()> {
             log::error!("Failed to create encoder: {err:?}, fallback to {fallback:?}");
             hardware_encoding_failed(
                 &service_name,
-                &format!("the encoder could not be created: {err}"),
+                &scrap::codec::odd_size_reason(c.width, c.height)
+                    .unwrap_or_else(|| format!("the encoder could not be created: {err}")),
             );
             Encoder::set_fallback(&EncoderCfg::VPX(VpxEncoderConfig {
                 width: c.width as _,

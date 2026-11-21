@@ -903,6 +903,15 @@ impl From<MediaCodecDecodeOutcome> for DecodeOutcome {
     }
 }
 
+/// Why a hardware H.264 or H.265 encoder cannot take this picture size, if the size is the
+/// reason: they take even sizes only. Such a display is encoded in software, and without
+/// this the log gave no reason for it.
+pub fn odd_size_reason(width: usize, height: usize) -> Option<String> {
+    (width % 2 == 1 || height % 2 == 1).then(|| {
+        format!("the size {width}x{height} is odd and hardware H.264/H.265 encoders take even sizes only")
+    })
+}
+
 #[derive(Debug, Clone)]
 pub enum EncodingUpdate {
     Update(i32, SupportedDecoding),
@@ -932,6 +941,11 @@ impl Encoder {
             i444
         };
         log::info!("new encoder: {config:?}, i444: {i444}");
+        #[cfg(feature = "hwcodec")]
+        let odd_size = match &config {
+            EncoderCfg::HWRAM(hw) => odd_size_reason(hw.width, hw.height),
+            _ => None,
+        };
         match config {
             EncoderCfg::VPX(_) => Ok(Encoder {
                 codec: Box::new(VpxEncoder::new(config, i444)?),
@@ -946,6 +960,9 @@ impl Encoder {
                     codec: Box::new(hw),
                 }),
                 Err(e) => {
+                    if let Some(reason) = odd_size {
+                        log::error!("new hw encoder failed: {reason}");
+                    }
                     if let Some(fallback) = Self::set_software_fallback_codec() {
                         log::error!(
                             "new hw encoder failed: {e:?}, fallback to {fallback:?} for this session"
@@ -2012,6 +2029,36 @@ impl Decoder {
             }
         }
         Ok(outcome)
+    }
+
+    /// Android: asks the hardware decoder for a frame that was not ready when the last
+    /// packet was handed in. `OutputPending` when there is none.
+    #[cfg(feature = "mediacodec")]
+    pub fn drain_media_codec(
+        &mut self,
+        rgb: &mut ImageRgb,
+        texture: &mut ImageTexture,
+        pixelbuffer: &mut bool,
+    ) -> ResultType<DecodeOutcome> {
+        let decoder = match self.format {
+            CodecFormat::H264 => self.h264_media_codec.as_mut(),
+            CodecFormat::H265 => self.h265_media_codec.as_mut(),
+            _ => None,
+        };
+        let Some(decoder) = decoder else {
+            return Ok(DecodeOutcome::OutputPending);
+        };
+        if !decoder.output_outstanding() {
+            return Ok(DecodeOutcome::OutputPending);
+        }
+        if decoder.uses_surface_output() {
+            *pixelbuffer = false;
+            let (width, height) = decoder.output_size();
+            texture.texture = std::ptr::null_mut();
+            texture.w = width;
+            texture.h = height;
+        }
+        Ok(decoder.drain(rgb)?.into())
     }
 
     #[cfg(feature = "mediacodec")]
@@ -3351,6 +3398,14 @@ mod tests {
             preferred_explicit_codec(&decodings(&[PreferCodec::H265]), usable),
             Some(PreferCodec::H265)
         );
+    }
+
+    #[test]
+    fn odd_picture_size_is_named_as_the_reason_a_hardware_encoder_is_not_used() {
+        assert_eq!(odd_size_reason(1920, 1080), None);
+        assert_eq!(odd_size_reason(1366, 768), None);
+        assert!(odd_size_reason(1365, 768).is_some_and(|reason| reason.contains("1365x768")));
+        assert!(odd_size_reason(1366, 767).is_some_and(|reason| reason.contains("1366x767")));
     }
 
     #[test]

@@ -32,6 +32,8 @@ const MAX_PENDING_INPUTS: usize = 16;
 const MAX_PENDING_INPUT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_INPUT_DEQUEUE_EVENTS: usize = 4;
 const MAX_OUTPUT_DEQUEUE_EVENTS: usize = 4;
+/// How long a call that hands in a packet waits for the first frame to come out.
+const FIRST_OUTPUT_WAIT: Duration = Duration::from_millis(100);
 const MAX_IN_FLIGHT_FRAMES: usize = 128;
 const SURFACE_CONFIGURE_RETRY_DELAYS: [Duration; 2] =
     [Duration::from_millis(20), Duration::from_millis(60)];
@@ -249,19 +251,66 @@ impl MediaCodecDecoder {
         let input_backpressure = self.queue_pending_inputs()?;
         let input_queue_elapsed = input_start.elapsed();
 
+        self.take_output(
+            FIRST_OUTPUT_WAIT,
+            input_backpressure,
+            data.len(),
+            input_queue_elapsed,
+            total_start,
+            rgb,
+        )
+    }
+
+    /// Looks for output without new input: a frame that was not ready when the last packet
+    /// was handed in, and input that did not fit then. Without this the decoder stays one
+    /// frame behind once an output was late, and the last frame of a burst is not shown
+    /// until the next packet arrives.
+    pub fn drain(&mut self, rgb: &mut ImageRgb) -> ResultType<MediaCodecDecodeOutcome> {
+        let total_start = Instant::now();
+        let input_backpressure = self.queue_pending_inputs()?;
+        self.take_output(
+            Duration::ZERO,
+            input_backpressure,
+            0,
+            total_start.elapsed(),
+            total_start,
+            rgb,
+        )
+    }
+
+    /// Whether the codec holds input that has produced no output yet.
+    pub fn output_outstanding(&self) -> bool {
+        !self.in_flight_frames.is_empty() || !self.pending_inputs.is_empty()
+    }
+
+    /// Takes what the codec has ready, waiting up to `first_wait` for the first frame only.
+    /// Every ready frame is taken, not just the first: a frame that was late for the
+    /// previous call is ready together with the next one, and leaving the newer one in the
+    /// codec would keep the picture a frame behind from then on.
+    fn take_output(
+        &mut self,
+        first_wait: Duration,
+        input_backpressure: bool,
+        input_bytes: usize,
+        input_queue_elapsed: Duration,
+        total_start: Instant,
+        rgb: &mut ImageRgb,
+    ) -> ResultType<MediaCodecDecodeOutcome> {
         let output_dequeue_start = Instant::now();
-        for attempt in 0..MAX_OUTPUT_DEQUEUE_EVENTS {
-            let timeout = if attempt == 0 {
-                Duration::from_millis(100)
-            } else {
-                Duration::ZERO
-            };
-            match self.decoder.dequeue_output_buffer(timeout)? {
-                DequeuedOutputBufferInfoResult::Buffer(output_buffer) => {
-                    let output_dequeue_elapsed = output_dequeue_start.elapsed();
-                    let presentation_time_us = output_buffer.info().presentation_time_us();
-                    let res_format = self.decoder.output_format();
-                    if self.surface_output {
+        if self.surface_output {
+            // Each frame goes to the surface with its own presentation time.
+            let mut ready = None;
+            for attempt in 0..MAX_OUTPUT_DEQUEUE_EVENTS {
+                let timeout = if attempt == 0 {
+                    first_wait
+                } else {
+                    Duration::ZERO
+                };
+                match self.decoder.dequeue_output_buffer(timeout)? {
+                    DequeuedOutputBufferInfoResult::Buffer(output_buffer) => {
+                        let output_dequeue_elapsed = output_dequeue_start.elapsed();
+                        let presentation_time_us = output_buffer.info().presentation_time_us();
+                        let res_format = self.decoder.output_format();
                         self.presentation_clock
                             .update_refresh_period(output_surface_refresh_period(self.display));
                         self.presentation_clock
@@ -300,113 +349,172 @@ impl MediaCodecDecoder {
                         self.decoded_frames = self.decoded_frames.saturating_add(1);
                         if self.should_log_diag() {
                             log::info!(
-                                "diag android mediacodec frame: decoder={}, codec={}, visible={}x{}, input_queue_ms={}, output_dequeue_ms={}, total_ms={}, input_bytes={}, pending_inputs={}, render_path=surface-texture, release_mode={}, presentation_reset={}, presentation_reset_reason={}, presentation_capture_time_ms={:?}, presentation_lead_us={}, movie_playout_delay_ms={}, refresh_period_ns={}, surface_generation={}, output_format={:?}",
-                                self.name,
-                                self.codec_label(),
-                                self.width,
-                                self.height,
-                                input_queue_elapsed.as_millis(),
-                                output_dequeue_elapsed.as_millis(),
-                                total_start.elapsed().as_millis(),
-                                data.len(),
-                                self.pending_inputs.len(),
-                                release_mode,
-                                presentation_reset,
-                                presentation_reset_reason,
-                                presentation_capture_time_ms,
-                                presentation_lead_us,
-                                self.presentation_clock.playout_delay_ms(),
-                                self.presentation_clock.refresh_period_ns(),
-                                self.surface_generation,
-                                res_format,
-                            );
+                                    "diag android mediacodec frame: decoder={}, codec={}, visible={}x{}, input_queue_ms={}, output_dequeue_ms={}, total_ms={}, input_bytes={}, pending_inputs={}, render_path=surface-texture, release_mode={}, presentation_reset={}, presentation_reset_reason={}, presentation_capture_time_ms={:?}, presentation_lead_us={}, movie_playout_delay_ms={}, refresh_period_ns={}, surface_generation={}, output_format={:?}",
+                                    self.name,
+                                    self.codec_label(),
+                                    self.width,
+                                    self.height,
+                                    input_queue_elapsed.as_millis(),
+                                    output_dequeue_elapsed.as_millis(),
+                                    total_start.elapsed().as_millis(),
+                                    input_bytes,
+                                    self.pending_inputs.len(),
+                                    release_mode,
+                                    presentation_reset,
+                                    presentation_reset_reason,
+                                    presentation_capture_time_ms,
+                                    presentation_lead_us,
+                                    self.presentation_clock.playout_delay_ms(),
+                                    self.presentation_clock.refresh_period_ns(),
+                                    self.surface_generation,
+                                    res_format,
+                                );
                         }
-                        return Ok(MediaCodecDecodeOutcome::FrameReady {
-                            frame_id: output_frame_id,
-                        });
+                        ready = Some(output_frame_id);
                     }
-                    let convert_start = Instant::now();
-                    let convert_result: ResultType<(OutputLayout, usize, usize)> = (|| {
-                        let layout = output_layout(&res_format)?;
-                        let raw_buffer = output_buffer.buffer();
-                        let range = output_buffer_range(
-                            raw_buffer.len(),
-                            output_buffer.info().offset(),
-                            output_buffer.info().size(),
-                        )?;
-                        if range.is_empty() {
-                            return Ok((layout, 0, raw_buffer.len()));
-                        }
-                        let buf = &raw_buffer[range];
-                        copy_output_to_rgba(buf, &layout, rgb)?;
-                        Ok((layout, buf.len(), raw_buffer.len()))
-                    })(
-                    );
-                    let convert_elapsed = convert_start.elapsed();
-                    self.decoder.release_output_buffer(output_buffer, false)?;
-                    let (layout, output_bytes, output_capacity) = convert_result?;
-                    let output_frame_id = self
-                        .take_output_frame_metadata(presentation_time_us)
-                        .map(|(frame_id, _)| frame_id);
-                    if output_bytes == 0 {
-                        log::debug!("MediaCodec returned an empty output buffer");
-                        continue;
-                    }
-                    if output_frame_id.is_none() {
-                        log::warn!(
-                            "MediaCodec output has no matching input token: decoder={}, codec={}, presentation_time_us={}",
-                            self.name,
-                            self.codec_label(),
-                            presentation_time_us
-                        );
-                    }
-                    self.decoded_frames = self.decoded_frames.saturating_add(1);
-                    if self.should_log_diag() {
+                    DequeuedOutputBufferInfoResult::TryAgainLater => break,
+                    DequeuedOutputBufferInfoResult::OutputFormatChanged => {
                         log::info!(
-                            "diag android mediacodec frame: decoder={}, codec={}, coded={}x{}, visible={}x{}, stride={}, slice_height={}, crop=({},{}), color_format={}, input_queue_ms={}, output_dequeue_ms={}, convert_ms={}, total_ms={}, input_bytes={}, output_bytes={}, output_capacity={}, dst_stride={}, pending_inputs={}, render_path=rgba-soft, output_format={:?}",
+                            "MediaCodec output format changed: decoder={}, codec={}, format={:?}",
                             self.name,
                             self.codec_label(),
-                            layout.coded_w,
-                            layout.coded_h,
-                            layout.visible_w,
-                            layout.visible_h,
-                            layout.stride,
-                            layout.slice_height,
-                            layout.crop_left,
-                            layout.crop_top,
-                            layout.color_format,
-                            input_queue_elapsed.as_millis(),
-                            output_dequeue_elapsed.as_millis(),
-                            convert_elapsed.as_millis(),
-                            total_start.elapsed().as_millis(),
-                            data.len(),
-                            output_bytes,
-                            output_capacity,
-                            rgba_stride(layout.visible_w, rgb.align()),
-                            self.pending_inputs.len(),
-                            res_format,
+                            self.decoder.output_format()
                         );
                     }
+                    DequeuedOutputBufferInfoResult::OutputBuffersChanged => {
+                        log::debug!(
+                            "MediaCodec output buffers changed: decoder={}, codec={}",
+                            self.name,
+                            self.codec_label()
+                        );
+                    }
+                }
+            }
+            if let Some(frame_id) = ready {
+                return Ok(MediaCodecDecodeOutcome::FrameReady { frame_id });
+            }
+        } else {
+            // One picture can be shown: only the newest ready frame is converted.
+            let mut held = None;
+            let mut superseded = 0u32;
+            for attempt in 0..MAX_OUTPUT_DEQUEUE_EVENTS {
+                let timeout = if attempt == 0 {
+                    first_wait
+                } else {
+                    Duration::ZERO
+                };
+                match self.decoder.dequeue_output_buffer(timeout)? {
+                    DequeuedOutputBufferInfoResult::Buffer(output_buffer) => {
+                        let presentation_time_us = output_buffer.info().presentation_time_us();
+                        if output_buffer.info().size() <= 0 {
+                            log::debug!("MediaCodec returned an empty output buffer");
+                            self.decoder.release_output_buffer(output_buffer, false)?;
+                            Self::take_frame_metadata(
+                                &mut self.in_flight_frames,
+                                presentation_time_us,
+                            );
+                            continue;
+                        }
+                        if let Some((older, older_time_us)) =
+                            held.replace((output_buffer, presentation_time_us))
+                        {
+                            self.decoder.release_output_buffer(older, false)?;
+                            Self::take_frame_metadata(&mut self.in_flight_frames, older_time_us);
+                            superseded += 1;
+                        }
+                    }
+                    DequeuedOutputBufferInfoResult::TryAgainLater => break,
+                    DequeuedOutputBufferInfoResult::OutputFormatChanged => {
+                        log::info!(
+                            "MediaCodec output format changed: decoder={}, codec={}, format={:?}",
+                            self.name,
+                            self.codec_label(),
+                            self.decoder.output_format()
+                        );
+                    }
+                    DequeuedOutputBufferInfoResult::OutputBuffersChanged => {
+                        log::debug!(
+                            "MediaCodec output buffers changed: decoder={}, codec={}",
+                            self.name,
+                            self.codec_label()
+                        );
+                    }
+                }
+            }
+            if superseded > 0 {
+                log::debug!(
+                    "MediaCodec had {} more frame(s) ready than could be shown: decoder={}, codec={}",
+                    superseded,
+                    self.name,
+                    self.codec_label()
+                );
+            }
+            if let Some((output_buffer, presentation_time_us)) = held {
+                let output_dequeue_elapsed = output_dequeue_start.elapsed();
+                let res_format = self.decoder.output_format();
+                let convert_start = Instant::now();
+                let convert_result: ResultType<(OutputLayout, usize, usize)> = (|| {
+                    let layout = output_layout(&res_format)?;
+                    let raw_buffer = output_buffer.buffer();
+                    let range = output_buffer_range(
+                        raw_buffer.len(),
+                        output_buffer.info().offset(),
+                        output_buffer.info().size(),
+                    )?;
+                    if range.is_empty() {
+                        return Ok((layout, 0, raw_buffer.len()));
+                    }
+                    let buf = &raw_buffer[range];
+                    copy_output_to_rgba(buf, &layout, rgb)?;
+                    Ok((layout, buf.len(), raw_buffer.len()))
+                })();
+                let convert_elapsed = convert_start.elapsed();
+                self.decoder.release_output_buffer(output_buffer, false)?;
+                let (layout, output_bytes, output_capacity) = convert_result?;
+                let output_frame_id =
+                    Self::take_frame_metadata(&mut self.in_flight_frames, presentation_time_us)
+                        .map(|(frame_id, _)| frame_id);
+                if output_frame_id.is_none() {
+                    log::warn!(
+                        "MediaCodec output has no matching input token: decoder={}, codec={}, presentation_time_us={}",
+                        self.name,
+                        self.codec_label(),
+                        presentation_time_us
+                    );
+                }
+                self.decoded_frames = self.decoded_frames.saturating_add(1);
+                if self.should_log_diag() {
+                    log::info!(
+                        "diag android mediacodec frame: decoder={}, codec={}, coded={}x{}, visible={}x{}, stride={}, slice_height={}, crop=({},{}), color_format={}, input_queue_ms={}, output_dequeue_ms={}, convert_ms={}, total_ms={}, input_bytes={}, output_bytes={}, output_capacity={}, dst_stride={}, pending_inputs={}, render_path=rgba-soft, output_format={:?}",
+                        self.name,
+                        self.codec_label(),
+                        layout.coded_w,
+                        layout.coded_h,
+                        layout.visible_w,
+                        layout.visible_h,
+                        layout.stride,
+                        layout.slice_height,
+                        layout.crop_left,
+                        layout.crop_top,
+                        layout.color_format,
+                        input_queue_elapsed.as_millis(),
+                        output_dequeue_elapsed.as_millis(),
+                        convert_elapsed.as_millis(),
+                        total_start.elapsed().as_millis(),
+                        input_bytes,
+                        output_bytes,
+                        output_capacity,
+                        rgba_stride(layout.visible_w, rgb.align()),
+                        self.pending_inputs.len(),
+                        res_format,
+                    );
+                }
+                if output_bytes > 0 {
                     return Ok(MediaCodecDecodeOutcome::FrameReady {
                         frame_id: output_frame_id,
                     });
                 }
-                DequeuedOutputBufferInfoResult::TryAgainLater => break,
-                DequeuedOutputBufferInfoResult::OutputFormatChanged => {
-                    log::info!(
-                        "MediaCodec output format changed: decoder={}, codec={}, format={:?}",
-                        self.name,
-                        self.codec_label(),
-                        self.decoder.output_format()
-                    );
-                }
-                DequeuedOutputBufferInfoResult::OutputBuffersChanged => {
-                    log::debug!(
-                        "MediaCodec output buffers changed: decoder={}, codec={}",
-                        self.name,
-                        self.codec_label()
-                    );
-                }
+                log::debug!("MediaCodec returned an empty output buffer");
             }
         }
         Ok(if input_backpressure || !self.pending_inputs.is_empty() {
@@ -424,11 +532,18 @@ impl MediaCodecDecoder {
     }
 
     fn take_output_frame_metadata(&mut self, presentation_time_us: i64) -> Option<(u64, u64)> {
-        let index = self
-            .in_flight_frames
+        Self::take_frame_metadata(&mut self.in_flight_frames, presentation_time_us)
+    }
+
+    /// The same on the list alone, for where an output buffer still borrows the codec.
+    fn take_frame_metadata(
+        in_flight_frames: &mut VecDeque<(i64, u64, u64)>,
+        presentation_time_us: i64,
+    ) -> Option<(u64, u64)> {
+        let index = in_flight_frames
             .iter()
             .position(|(token, _, _)| *token == presentation_time_us)?;
-        self.in_flight_frames
+        in_flight_frames
             .remove(index)
             .map(|(_, frame_id, capture_time_ms)| (frame_id, capture_time_ms))
     }
@@ -735,6 +850,10 @@ fn configure_media_codec(
             COLOR_FORMAT_YUV420_PLANAR
         },
     );
+    // Android 11 and later: no frames held back for reordering. A remote screen has none
+    // to reorder, and a held frame is a frame of delay, or a last frame that is not shown
+    // until the next packet. Older systems ignore the key.
+    media_format.set_i32("low-latency", 1);
     codec.configure(&media_format, surface, MediaCodecDirection::Decoder)?;
     codec.start()?;
     Ok(codec)
