@@ -2758,7 +2758,35 @@ struct AudioBuffer(
     pub Arc<std::sync::Mutex<ringbuf::HeapRb<f32>>>,
     usize,
     [usize; 30],
+    AudioShrinkGate,
 );
+
+/// When an audio buffer last decided whether it may drop data. Each buffer decides on its own,
+/// at most every 12 seconds; the first call only starts the clock. The time used to be one
+/// `static` for the whole process, so a session that had just decided kept every other session
+/// from deciding.
+#[cfg(any(test, not(any(target_os = "linux", target_os = "ios"))))]
+#[derive(Debug, Default)]
+struct AudioShrinkGate {
+    last_ms: i64,
+}
+
+#[cfg(any(test, not(any(target_os = "linux", target_os = "ios"))))]
+impl AudioShrinkGate {
+    const INTERVAL_MS: i64 = 12_000;
+
+    fn due(&mut self, now_ms: i64) -> bool {
+        if self.last_ms == 0 {
+            self.last_ms = now_ms;
+            return false;
+        }
+        if now_ms < self.last_ms.saturating_add(Self::INTERVAL_MS) {
+            return false;
+        }
+        self.last_ms = now_ms;
+        true
+    }
+}
 
 #[cfg(not(any(target_os = "linux", target_os = "ios")))]
 impl Default for AudioBuffer {
@@ -2769,6 +2797,7 @@ impl Default for AudioBuffer {
             )),
             48000 * 2,
             [0; 30],
+            AudioShrinkGate::default(),
         )
     }
 }
@@ -2795,17 +2824,8 @@ impl AudioBuffer {
         }
         self.2[i] += 1;
 
-        #[allow(non_upper_case_globals)]
-        static mut tms: i64 = 0;
-        let dt = Local::now().timestamp_millis();
-        unsafe {
-            if tms == 0 {
-                tms = dt;
-                return;
-            } else if dt < tms + 12000 {
-                return;
-            }
-            tms = dt;
+        if !self.3.due(Local::now().timestamp_millis()) {
+            return;
         }
 
         // the safer water mark to drop
@@ -10670,4 +10690,46 @@ async fn udp_nat_connect(
             anyhow!(err)
         })?;
     Ok((res.1, Some(res.0), typ))
+}
+
+#[cfg(test)]
+mod audio_buffer_tests {
+    use super::*;
+
+    /// Each session has its own audio buffer, and whether a buffer may drop data is decided at
+    /// most every 12 seconds. The time of the last decision was kept in one `static` for the
+    /// whole process: a session that had just decided kept every other session from deciding
+    /// for the next 12 seconds.
+    #[cfg(not(any(target_os = "linux", target_os = "ios")))]
+    #[test]
+    fn each_audio_buffer_decides_on_its_own_when_to_shrink() {
+        let mut first = AudioBuffer::default();
+        let mut second = AudioBuffer::default();
+        second.try_shrink(0);
+        first.try_shrink(0);
+        std::thread::sleep(std::time::Duration::from_millis(12_500));
+        first.try_shrink(0);
+        second.try_shrink(0);
+        // A buffer that decided has cleared its statistics.
+        assert!(
+            second.2.iter().all(|count| *count == 0),
+            "the second buffer was kept from deciding: {:?}",
+            second.2
+        );
+    }
+
+    /// The clock of one buffer: the first call starts it, then one decision per 12 seconds.
+    #[test]
+    fn audio_shrink_gate_decides_once_per_interval() {
+        let mut first = AudioShrinkGate::default();
+        let mut second = AudioShrinkGate::default();
+        assert!(!first.due(1_000));
+        assert!(!second.due(1_000));
+        assert!(!first.due(12_999));
+        assert!(first.due(13_000));
+        // The second buffer is not held back by the decision of the first.
+        assert!(second.due(13_000));
+        assert!(!first.due(24_999));
+        assert!(first.due(25_000));
+    }
 }
