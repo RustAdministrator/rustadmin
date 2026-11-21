@@ -37,6 +37,10 @@ use winapi::{
 use windows::Win32::Storage::FileSystem::{FILE_GENERIC_EXECUTE, FILE_GENERIC_READ};
 
 use super::{
+    capture_slots::{
+        failed_capture_retry_pause, wall_clock_micros, SlotControl, SlotReader, SlotWriter, Take,
+        UnreadWait, SLOT_COUNT,
+    },
     portable_capture_recovery::{CaptureBackend, CaptureRecoveryAction, CaptureRecoveryPolicy},
     video_qos,
 };
@@ -49,13 +53,15 @@ const ADDR_CURSOR_PARA: usize = ADDR_IPC_TOKEN + IPC_TOKEN_LEN;
 const ADDR_CURSOR_COUNTER: usize = ADDR_CURSOR_PARA + size_of::<CURSORINFO>();
 
 const ADDR_CAPTURER_PARA: usize = ADDR_CURSOR_COUNTER + SIZE_COUNTER;
-const ADDR_CAPTURE_FRAME_INFO: usize = ADDR_CAPTURER_PARA + size_of::<CapturerPara>();
-const ADDR_CAPTURE_WOULDBLOCK: usize = ADDR_CAPTURE_FRAME_INFO + size_of::<FrameInfo>();
+const ADDR_CAPTURE_WOULDBLOCK: usize = ADDR_CAPTURER_PARA + size_of::<CapturerPara>();
 const ADDR_CAPTURE_FRAME_COUNTER: usize = ADDR_CAPTURE_WOULDBLOCK + size_of::<i32>();
 
+// The frames go through two slots (`capture_slots`): their control block, then the slots.
+const ADDR_CAPTURE_SLOT_CONTROL: usize = (ADDR_CAPTURE_FRAME_COUNTER + SIZE_COUNTER + 7) / 8 * 8;
 const ADDR_CAPTURE_FRAME: usize =
-    (ADDR_CAPTURE_FRAME_COUNTER + SIZE_COUNTER + FRAME_ALIGN - 1) / FRAME_ALIGN * FRAME_ALIGN;
-const MIN_RUNTIME_SHMEM_LEN: usize = ADDR_CAPTURE_FRAME + FRAME_ALIGN;
+    (ADDR_CAPTURE_SLOT_CONTROL + size_of::<SlotControl>() + FRAME_ALIGN - 1) / FRAME_ALIGN
+        * FRAME_ALIGN;
+const MIN_RUNTIME_SHMEM_LEN: usize = ADDR_CAPTURE_FRAME + SLOT_COUNT * FRAME_ALIGN;
 
 const IPC_SUFFIX: &str = "_portable_service";
 pub const SHMEM_NAME: &str = "_portable_service";
@@ -154,9 +160,45 @@ fn validate_runtime_shmem_layout(shmem: &SharedMemory) -> ResultType<()> {
 }
 
 #[inline]
-fn is_valid_capture_frame_length(shmem_len: usize, frame_len: usize) -> bool {
-    let frame_capacity = shmem_len.saturating_sub(ADDR_CAPTURE_FRAME);
-    frame_len > 0 && frame_len <= frame_capacity
+fn is_valid_capture_frame_length(slot_capacity: usize, frame_len: usize) -> bool {
+    frame_len > 0 && frame_len <= slot_capacity
+}
+
+/// The memory for a largest frame of `frame_bytes` bytes: the fixed part and the slots.
+#[inline]
+fn runtime_shmem_len(frame_bytes: usize) -> usize {
+    let slot = (frame_bytes.saturating_add(FRAME_ALIGN - 1)) / FRAME_ALIGN * FRAME_ALIGN;
+    ADDR_CAPTURE_FRAME
+        .saturating_add(SLOT_COUNT.saturating_mul(slot))
+        .max(MIN_RUNTIME_SHMEM_LEN)
+}
+
+/// How many bytes each slot gets in a mapping of `shmem_len` bytes.
+#[inline]
+fn capture_slot_capacity(shmem_len: usize) -> usize {
+    shmem_len.saturating_sub(ADDR_CAPTURE_FRAME) / SLOT_COUNT / FRAME_ALIGN * FRAME_ALIGN
+}
+
+#[inline]
+fn capture_slot_addr(slot: usize, slot_capacity: usize) -> usize {
+    ADDR_CAPTURE_FRAME + slot * slot_capacity
+}
+
+#[inline]
+fn capture_slot_control(shmem: &SharedMemory) -> &SlotControl {
+    // The mapping starts on a page boundary and the offset is a multiple of eight; the
+    // layout check (`validate_runtime_shmem_layout`) has made sure the block is inside.
+    unsafe { SlotControl::at(shmem.as_ptr().add(ADDR_CAPTURE_SLOT_CONTROL)) }
+}
+
+/// The slot size the service recorded when it armed the capturer, if both slots of that
+/// size fit into this side's mapping. `None` while the service is preparing the memory.
+#[inline]
+fn recorded_capture_slot_capacity(shmem: &SharedMemory) -> Option<usize> {
+    let capacity = capture_slot_control(shmem).slot_capacity();
+    (capacity >= FRAME_ALIGN
+        && ADDR_CAPTURE_FRAME.saturating_add(SLOT_COUNT.saturating_mul(capacity)) <= shmem.len())
+    .then_some(capacity)
 }
 
 #[inline]
@@ -373,9 +415,7 @@ mod utils {
     use core::slice;
     use std::mem::size_of;
 
-    use super::{
-        CapturerPara, FrameInfo, SharedMemory, ADDR_CAPTURER_PARA, ADDR_CAPTURE_FRAME_INFO,
-    };
+    use super::{CapturerPara, SharedMemory, ADDR_CAPTURER_PARA};
 
     #[inline]
     pub fn i32_to_vec(i: i32) -> Vec<u8> {
@@ -422,8 +462,8 @@ mod utils {
         unsafe {
             let wptr = counter;
             let rptr = counter.add(size_of::<i32>());
-            let iw = ptr_to_i32(counter);
-            let ir = ptr_to_i32(counter);
+            let iw = ptr_to_i32(wptr);
+            let ir = ptr_to_i32(rptr);
             let iw_plus1 = if iw == i32::MAX { 0 } else { iw + 1 };
             let v = i32_to_vec(iw_plus1);
             std::ptr::copy_nonoverlapping(v.as_ptr(), wptr, size_of::<i32>());
@@ -447,16 +487,6 @@ mod utils {
             para_data = slice::from_raw_parts(para_ptr, size_of::<CapturerPara>());
         }
         shmem.write(ADDR_CAPTURER_PARA, para_data);
-    }
-
-    #[inline]
-    pub fn set_frame_info(shmem: &SharedMemory, info: FrameInfo) {
-        let ptr = &info as *const FrameInfo as *const u8;
-        let data;
-        unsafe {
-            data = slice::from_raw_parts(ptr, size_of::<FrameInfo>());
-        }
-        shmem.write(ADDR_CAPTURE_FRAME_INFO, data);
     }
 }
 
@@ -633,6 +663,14 @@ pub mod server {
         let mut dxgi_failed_times = 0;
         let mut display_width = 0;
         let mut display_height = 0;
+        let mut slot_writer = SlotWriter::default();
+        // A capture failure was reported to the service: when, and how many in a row.
+        let mut failed_at: Option<std::time::Instant> = None;
+        let mut failures = 0u32;
+        // The service does not take the published frame: since when, and whether the
+        // capturer was let go meanwhile.
+        let mut unread_since: Option<std::time::Instant> = None;
+        let mut unread_parked = false;
         loop {
             if EXIT.lock().unwrap().clone() {
                 break;
@@ -643,6 +681,44 @@ pub mod server {
                 let recreate = (*para).recreate;
                 let current_display = (*para).current_display;
                 let timeout_ms = (*para).timeout_ms;
+                let frame_counter = shmem.as_ptr().add(ADDR_CAPTURE_FRAME_COUNTER);
+                if let Some(since) = failed_at {
+                    // The service restarts this helper when it sees the report, or arms a
+                    // new capturer later, which clears the report. Until then try again
+                    // from time to time: this thread used to end here, and a capturer
+                    // armed afterwards waited for frames that could not come.
+                    let rearmed =
+                        utils::ptr_to_i32(shmem.as_ptr().add(ADDR_CAPTURE_WOULDBLOCK)) == TRUE;
+                    if !rearmed && since.elapsed() < failed_capture_retry_pause(failures) {
+                        std::thread::sleep(Duration::from_millis(50));
+                        continue;
+                    }
+                    log::info!(
+                        "portable service capture tries again after a reported failure: rearmed={}, failures={}, waited_ms={}",
+                        rearmed,
+                        failures,
+                        since.elapsed().as_millis()
+                    );
+                    failed_at = None;
+                    capture_recovery.reset_for_recreation();
+                    backend_started_at = std::time::Instant::now();
+                    dxgi_failed_times = 0;
+                }
+                if unread_parked {
+                    // Both counters are zero again after the service armed a new capturer.
+                    if !recreate && !utils::counter_equal(frame_counter) {
+                        let waited = unread_since
+                            .get_or_insert_with(std::time::Instant::now)
+                            .elapsed();
+                        std::thread::sleep(UnreadWait::pause(waited));
+                        continue;
+                    }
+                    log::info!("portable service capture resumes: its frames are read again");
+                    unread_parked = false;
+                    unread_since = None;
+                    capture_recovery.reset_for_recreation();
+                    backend_started_at = std::time::Instant::now();
+                }
                 let desktop_changed = crate::platform::windows::desktop_changed();
                 let desktop_selected = desktop_changed && crate::platform::try_change_desktop();
                 match capture_desktop_rebind_action(desktop_changed, desktop_selected) {
@@ -701,7 +777,9 @@ pub mod server {
                                         "portable service capture could not create forced GDI backend before deadline; reporting capture failure"
                                     );
                                     shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(FALSE));
-                                    return;
+                                    failures = failures.saturating_add(1);
+                                    failed_at = Some(std::time::Instant::now());
+                                    continue;
                                 }
                                 log::warn!(
                                     "portable service capture could not force GDI; retrying backend creation, backend={}, set_gdi={}",
@@ -766,7 +844,9 @@ pub mod server {
                                     e
                                 );
                                 shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(FALSE));
-                                return;
+                                failures = failures.saturating_add(1);
+                                failed_at = Some(std::time::Instant::now());
+                                continue;
                             }
                             log::error!(
                                 "Failed to create portable service capture backend: {:?}",
@@ -797,17 +877,38 @@ pub mod server {
                     }
                 }
                 if capture_recovery.first_frame_received() {
-                    if !utils::counter_equal(shmem.as_ptr().add(ADDR_CAPTURE_FRAME_COUNTER)) {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    if !utils::counter_equal(frame_counter) {
+                        // The service has not taken the last frame. It used to be asked
+                        // again every millisecond for as long as it took, with the
+                        // capturer kept open.
+                        let waited = unread_since
+                            .get_or_insert_with(std::time::Instant::now)
+                            .elapsed();
+                        if UnreadWait::release_capturer(waited) {
+                            log::info!(
+                                "portable service capture: no frame was read for {} ms; releasing the capturer until one is",
+                                waited.as_millis()
+                            );
+                            c = None;
+                            unread_parked = true;
+                        }
+                        std::thread::sleep(UnreadWait::pause(waited));
                         continue;
                     }
+                    unread_since = None;
                 }
                 let capture_backend = c.as_ref().map(|f| f.capture_backend()).unwrap_or("none");
                 let capture_is_gdi = c.as_ref().map(|f| f.is_gdi()).unwrap_or(false);
                 match c.as_mut().map(|f| f.frame(spf)) {
                     Some(Ok(f)) => match f {
                         Frame::PixelBuffer(f) => {
-                            let frame_capacity = shmem.len().saturating_sub(ADDR_CAPTURE_FRAME);
+                            let Some(frame_capacity) = recorded_capture_slot_capacity(&shmem)
+                            else {
+                                // The service is arming a capturer and has not recorded
+                                // the slot size yet.
+                                std::thread::sleep(spf);
+                                continue;
+                            };
                             if f.data().len() > frame_capacity {
                                 log::error!(
                                     "Portable service capture frame exceeds shared memory capacity: frame_len={}, capacity={}, shmem_len={}",
@@ -818,17 +919,25 @@ pub mod server {
                                 *EXIT.lock().unwrap() = true;
                                 return;
                             }
-                            utils::set_frame_info(
-                                &shmem,
-                                FrameInfo {
-                                    length: f.data().len(),
-                                    width: display_width,
-                                    height: display_height,
-                                },
+                            // Into the slot the service does not hold; it sees the frame
+                            // when it is complete.
+                            let control = capture_slot_control(&shmem);
+                            let Some(ticket) = slot_writer.begin(control, wall_clock_micros())
+                            else {
+                                continue;
+                            };
+                            shmem.write(capture_slot_addr(ticket.slot(), frame_capacity), f.data());
+                            slot_writer.publish(
+                                control,
+                                ticket,
+                                f.data().len(),
+                                display_width,
+                                display_height,
+                                0,
                             );
-                            shmem.write(ADDR_CAPTURE_FRAME, f.data());
                             shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(TRUE));
-                            utils::increase_counter(shmem.as_ptr().add(ADDR_CAPTURE_FRAME_COUNTER));
+                            utils::increase_counter(frame_counter as *mut u8);
+                            failures = 0;
                             if !capture_recovery.first_frame_received() {
                                 log::info!(
                                     "portable service capture first frame: backend={}, is_gdi={}, frame_len={}, size={}x{}, sampled_bgr_sum={}",
@@ -887,7 +996,10 @@ pub mod server {
                                     backend_started_at.elapsed().as_millis()
                                 );
                                 shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(FALSE));
-                                return;
+                                c = None;
+                                failures = failures.saturating_add(1);
+                                failed_at = Some(std::time::Instant::now());
+                                continue;
                             }
                             CaptureRecoveryAction::Wait => {}
                         }
@@ -1034,7 +1146,9 @@ pub mod client {
         static ref SECURE_CAPTURE_RECOVERY_FAILURES: AtomicU64 = AtomicU64::new(0);
         static ref LAST_SECURE_CAPTURE_RECOVERY_FAILURE: Mutex<Option<std::time::Instant>> =
             Default::default();
-        static ref SHMEM: Arc<Mutex<Option<SharedMemory>>> = Default::default();
+        // In an `Arc`: a capturer keeps a reference of its own, so that the frame it has
+        // handed out stays mapped when this one is cleared.
+        static ref SHMEM: Arc<Mutex<Option<Arc<SharedMemory>>>> = Default::default();
         static ref SHMEM_RUNTIME_NAME: Arc<Mutex<Option<String>>> = Default::default();
         static ref IPC_RUNTIME_TOKEN: Arc<Mutex<Option<String>>> = Default::default();
         static ref SENDER : Mutex<mpsc::UnboundedSender<PortableServiceCommand>> = Mutex::new(client::start_ipc_server());
@@ -1460,18 +1574,17 @@ pub mod client {
                     }
                 }
             }
-            let shmem_size =
-                utils::align(ADDR_CAPTURE_FRAME + max_pixel * 4, align).max(MIN_RUNTIME_SHMEM_LEN);
+            let shmem_size = runtime_shmem_len(max_pixel * 4);
             let shmem_name = next_portable_service_shmem_name();
             if !is_valid_portable_service_shmem_name(&shmem_name) {
                 bail!("Generated invalid portable service shared memory name");
             }
             let ipc_token = ipc::generate_one_time_ipc_token()?;
             // os error 112, no enough space
-            *shmem_lock = Some(crate::portable_service::SharedMemory::create(
+            *shmem_lock = Some(Arc::new(crate::portable_service::SharedMemory::create(
                 &shmem_name,
                 shmem_size,
-            )?);
+            )?));
             *SHMEM_RUNTIME_NAME.lock().unwrap() = Some(shmem_name);
             IPC_RUNTIME_GENERATION.store(launch_token, Ordering::SeqCst);
             SECURE_CAPTURE_GENERATION.store(
@@ -1763,6 +1876,11 @@ pub mod client {
         generation: u64,
         started_at: std::time::Instant,
         first_frame_received: bool,
+        slot_capacity: usize,
+        reader: SlotReader,
+        // Keeps the mapping alive for as long as a frame handed out by `frame` can be in
+        // use: `clear_runtime_shmem_state` may drop the global reference at any time.
+        shmem: Arc<SharedMemory>,
     }
 
     impl CapturerPortable {
@@ -1772,10 +1890,11 @@ pub mod client {
         {
             let generation = ready_generation()
                 .ok_or_else(|| anyhow!("portable service IPC is not ready for capture"))?;
-            let mut option = SHMEM.lock().unwrap();
+            let option = SHMEM.lock().unwrap();
             let shmem = option
-                .as_mut()
-                .ok_or_else(|| anyhow!("portable service shared memory is unavailable"))?;
+                .as_ref()
+                .ok_or_else(|| anyhow!("portable service shared memory is unavailable"))?
+                .clone();
             unsafe {
                 libc::memset(
                     shmem.as_ptr().add(ADDR_CURSOR_PARA) as _,
@@ -1784,7 +1903,7 @@ pub mod client {
                 );
             }
             utils::set_para(
-                shmem,
+                &shmem,
                 CapturerPara {
                     recreate: true,
                     current_display,
@@ -1792,6 +1911,12 @@ pub mod client {
                 },
             );
             shmem.write(ADDR_CAPTURE_WOULDBLOCK, &utils::i32_to_vec(TRUE));
+            // `capture-frame-slots = N`: one buffer, as before.
+            let slot_capacity = capture_slot_capacity(shmem.len());
+            let single_slot = hbb_common::config::Config::get_option(
+                hbb_common::config::keys::OPTION_CAPTURE_FRAME_SLOTS,
+            ) == "N";
+            capture_slot_control(&shmem).init(slot_capacity, single_slot);
             let (mut width, mut height) = (0, 0);
             if let Ok(displays) = display_service::try_get_displays() {
                 if let Some(display) = displays.get(current_display) {
@@ -1822,6 +1947,9 @@ pub mod client {
                 generation,
                 started_at: std::time::Instant::now(),
                 first_frame_received: false,
+                slot_capacity,
+                reader: SlotReader::default(),
+                shmem,
             })
         }
     }
@@ -1834,11 +1962,19 @@ pub mod client {
                     "portable service generation is no longer ready".to_string(),
                 ));
             }
-            let mut lock = SHMEM.lock().unwrap();
-            let shmem = lock.as_mut().ok_or(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "shmem dropped".to_string(),
-            ))?;
+            let lock = SHMEM.lock().unwrap();
+            if !lock
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &self.shmem))
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "shmem dropped".to_string(),
+                ));
+            }
+            // Through the capturer's own reference: what is handed out below stays mapped
+            // until the capturer is gone, also after the lock is released.
+            let shmem: &SharedMemory = &self.shmem;
             unsafe {
                 let base = shmem.as_ptr();
                 let para_ptr = base.add(ADDR_CAPTURER_PARA);
@@ -1853,27 +1989,37 @@ pub mod client {
                         },
                     );
                 }
+                // The frame handed out by the previous call is no longer in use; from here
+                // on the helper may write its slot again.
+                let control = capture_slot_control(shmem);
+                self.reader.release(control);
                 if utils::counter_ready(base.add(ADDR_CAPTURE_FRAME_COUNTER)) {
-                    let frame_info_ptr = shmem.as_ptr().add(ADDR_CAPTURE_FRAME_INFO);
-                    let frame_info = frame_info_ptr as *const FrameInfo;
-                    let frame_len = (*frame_info).length;
-                    if !is_valid_capture_frame_length(shmem.len(), frame_len) {
+                    // The helper publishes a frame before it raises the counter, and it
+                    // waits for the counter to be taken before it captures the next one.
+                    let Take::Frame(frame) = self.reader.take(control, wall_clock_micros()) else {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::WouldBlock,
+                            "wouldblock error".to_string(),
+                        ));
+                    };
+                    let frame_len = frame.length;
+                    if !is_valid_capture_frame_length(self.slot_capacity, frame_len) {
                         log::error!(
-                            "Portable service frame length exceeds shared memory capacity: frame_len={}, shmem_len={}, frame_addr={}",
+                            "Portable service frame length exceeds shared memory capacity: frame_len={}, slot_capacity={}, shmem_len={}",
                             frame_len,
-                            shmem.len(),
-                            ADDR_CAPTURE_FRAME
+                            self.slot_capacity,
+                            shmem.len()
                         );
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::InvalidData,
                             "invalid portable service frame length".to_string(),
                         ));
                     }
-                    if (*frame_info).width != self.width || (*frame_info).height != self.height {
+                    if frame.width != self.width || frame.height != self.height {
                         log::info!(
                             "skip frame, ({},{}) != ({},{})",
-                            (*frame_info).width,
-                            (*frame_info).height,
+                            frame.width,
+                            frame.height,
                             self.width,
                             self.height,
                         );
@@ -1882,7 +2028,8 @@ pub mod client {
                             "wouldblock error".to_string(),
                         ));
                     }
-                    let frame_ptr = base.add(ADDR_CAPTURE_FRAME);
+                    // The slot stays pinned, and so unwritten, until the next call.
+                    let frame_ptr = base.add(capture_slot_addr(frame.slot, self.slot_capacity));
                     let data = slice::from_raw_parts(frame_ptr, frame_len);
                     if !self.first_frame_received {
                         self.first_frame_received = true;
@@ -2152,7 +2299,7 @@ pub mod client {
         }
     }
 
-    fn get_cursor_info_(shmem: &mut SharedMemory, pci: PCURSORINFO) -> BOOL {
+    fn get_cursor_info_(shmem: &SharedMemory, pci: PCURSORINFO) -> BOOL {
         unsafe {
             let shmem_addr_para = shmem.as_ptr().add(ADDR_CURSOR_PARA);
             if utils::counter_ready(shmem.as_ptr().add(ADDR_CURSOR_COUNTER)) {
@@ -2651,18 +2798,13 @@ pub struct CapturerPara {
     timeout_ms: i32,
 }
 
-#[repr(C)]
-pub struct FrameInfo {
-    length: usize,
-    width: usize,
-    height: usize,
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        capture_desktop_rebind_action, is_valid_capture_frame_length, CaptureDesktopRebindAction,
-        ADDR_CAPTURE_FRAME,
+        capture_desktop_rebind_action, capture_slot_addr, capture_slot_capacity,
+        is_valid_capture_frame_length, runtime_shmem_len, CaptureDesktopRebindAction,
+        ADDR_CAPTURE_FRAME, ADDR_CAPTURE_SLOT_CONTROL, FRAME_ALIGN, MIN_RUNTIME_SHMEM_LEN,
+        SLOT_COUNT,
     };
 
     #[test]
@@ -2683,16 +2825,63 @@ mod tests {
 
     #[test]
     fn test_is_valid_capture_frame_length_rejects_zero_length() {
-        assert!(!is_valid_capture_frame_length(ADDR_CAPTURE_FRAME + 1024, 0));
+        assert!(!is_valid_capture_frame_length(1024, 0));
     }
 
     #[test]
     fn test_is_valid_capture_frame_length_rejects_out_of_bounds_length() {
-        assert!(!is_valid_capture_frame_length(ADDR_CAPTURE_FRAME + 16, 17));
+        assert!(!is_valid_capture_frame_length(16, 17));
     }
 
     #[test]
     fn test_is_valid_capture_frame_length_accepts_in_bounds_length() {
-        assert!(is_valid_capture_frame_length(ADDR_CAPTURE_FRAME + 16, 16));
+        assert!(is_valid_capture_frame_length(16, 16));
+    }
+
+    #[test]
+    fn runtime_memory_holds_two_whole_frames_behind_an_aligned_control_block() {
+        assert_eq!(ADDR_CAPTURE_SLOT_CONTROL % 8, 0);
+        assert_eq!(ADDR_CAPTURE_FRAME % FRAME_ALIGN, 0);
+        assert_eq!(SLOT_COUNT, 2);
+        // A 1920x1080 frame, and one whose size is not a multiple of the alignment.
+        for frame_bytes in [1920 * 1080 * 4, 1366 * 768 * 4 + 1] {
+            let len = runtime_shmem_len(frame_bytes);
+            let capacity = capture_slot_capacity(len);
+            assert!(capacity >= frame_bytes, "{frame_bytes}");
+            assert_eq!(capacity % FRAME_ALIGN, 0);
+            assert!(capture_slot_addr(SLOT_COUNT - 1, capacity) + capacity <= len);
+            assert!(is_valid_capture_frame_length(capacity, frame_bytes));
+        }
+        // Nothing to capture: still room for the fixed part and two smallest slots.
+        assert_eq!(runtime_shmem_len(0), MIN_RUNTIME_SHMEM_LEN);
+        assert_eq!(capture_slot_capacity(MIN_RUNTIME_SHMEM_LEN), FRAME_ALIGN);
+    }
+
+    /// The pair of counters: the writer's, then the reader's copy of the last one it took.
+    fn counters(writer: i32, reader: i32) -> [u8; 8] {
+        let mut pair = [0u8; 8];
+        pair[..4].copy_from_slice(&writer.to_ne_bytes());
+        pair[4..].copy_from_slice(&reader.to_ne_bytes());
+        pair
+    }
+
+    #[test]
+    fn new_frame_is_seen_when_the_counter_wraps_onto_the_readers_value() {
+        use super::utils::{counter_equal, counter_ready, increase_counter};
+        // Ordinary case.
+        let mut pair = counters(5, 5);
+        assert!(counter_equal(pair.as_ptr()));
+        increase_counter(pair.as_mut_ptr());
+        assert!(!counter_equal(pair.as_ptr()));
+        assert!(counter_ready(pair.as_ptr()));
+        assert!(counter_equal(pair.as_ptr()));
+        // The writer wraps to the value the reader holds: the frame must still read as new.
+        let mut pair = counters(i32::MAX, 0);
+        increase_counter(pair.as_mut_ptr());
+        assert!(
+            !counter_equal(pair.as_ptr()),
+            "the frame looks as if it was read"
+        );
+        assert!(counter_ready(pair.as_ptr()));
     }
 }

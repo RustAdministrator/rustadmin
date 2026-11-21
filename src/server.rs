@@ -66,6 +66,8 @@ pub mod input_service {
     pub const NAME_WINDOW_FOCUS: &'static str = "";
 }
 
+#[cfg(any(windows, test))]
+mod capture_slots;
 mod connection;
 pub mod display_service;
 mod input_authorization;

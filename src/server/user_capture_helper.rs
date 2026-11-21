@@ -1,3 +1,7 @@
+use super::capture_slots::{
+    wall_clock_micros, SlotControl, SlotCounters, SlotReader, SlotWriter, Take, TakenFrame,
+    SLOT_COUNT,
+};
 use hbb_common::{anyhow::Context, bail, libc, log, ResultType};
 #[cfg(feature = "vram")]
 use scrap::AdapterDevice;
@@ -77,9 +81,14 @@ const fn align_up(value: usize, align: usize) -> usize {
 }
 
 const ADDR_COMMAND: usize = 0;
-const ADDR_FRAME_INFO: usize = align_up(ADDR_COMMAND + size_of::<CaptureCommand>(), 8);
-const ADDR_FRAME: usize = align_up(ADDR_FRAME_INFO + size_of::<CaptureFrameInfo>(), FRAME_ALIGN);
-const MIN_SHMEM_LEN: usize = ADDR_FRAME + FRAME_ALIGN;
+const ADDR_STATUS: usize = align_up(ADDR_COMMAND + size_of::<CaptureCommand>(), 8);
+// The frames go through two slots (`capture_slots`): their control block, then the slots.
+const ADDR_SLOT_CONTROL: usize = align_up(ADDR_STATUS + size_of::<CaptureStatus>(), 8);
+const ADDR_FRAME: usize = align_up(ADDR_SLOT_CONTROL + size_of::<SlotControl>(), FRAME_ALIGN);
+const MIN_SHMEM_LEN: usize = ADDR_FRAME + SLOT_COUNT * FRAME_ALIGN;
+/// How long the service waits for a frame the helper is writing at that moment.
+const BEING_WRITTEN_WAIT: Duration = Duration::from_millis(8);
+const SLOT_COUNTERS_LOG_INTERVAL: Duration = Duration::from_secs(60);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -92,14 +101,12 @@ struct CaptureCommand {
     timeout_ms: u32,
 }
 
+/// What the helper reports besides the frames themselves: whether its capture works, and
+/// with which backend. The frames and their sizes go through the slots.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct CaptureFrameInfo {
-    counter: u32,
+struct CaptureStatus {
     status: u32,
-    length: usize,
-    width: usize,
-    height: usize,
     backend: u32,
 }
 
@@ -196,34 +203,57 @@ fn write_command(shmem: &crate::portable_service::SharedMemory, command: Capture
 }
 
 #[inline]
-fn read_frame_info(shmem: &crate::portable_service::SharedMemory) -> CaptureFrameInfo {
+fn read_status(shmem: &crate::portable_service::SharedMemory) -> CaptureStatus {
     unsafe {
-        let ptr = shmem.as_ptr().add(ADDR_FRAME_INFO) as *const CaptureFrameInfo;
+        let ptr = shmem.as_ptr().add(ADDR_STATUS) as *const CaptureStatus;
         std::ptr::read_volatile(ptr)
     }
 }
 
 #[inline]
-fn write_frame_info(shmem: &crate::portable_service::SharedMemory, info: CaptureFrameInfo) {
+fn write_status(shmem: &crate::portable_service::SharedMemory, status: u32, backend: u32) {
+    let status = CaptureStatus { status, backend };
     unsafe {
-        let ptr = &info as *const CaptureFrameInfo as *const u8;
-        let data = slice::from_raw_parts(ptr, size_of::<CaptureFrameInfo>());
-        shmem.write(ADDR_FRAME_INFO, data);
+        let ptr = &status as *const CaptureStatus as *const u8;
+        let data = slice::from_raw_parts(ptr, size_of::<CaptureStatus>());
+        shmem.write(ADDR_STATUS, data);
     }
 }
 
+/// How many bytes one slot holds for a display of this size.
 #[inline]
-fn shmem_size_for_display(width: usize, height: usize) -> usize {
-    align_up(
-        ADDR_FRAME + width.saturating_mul(height).saturating_mul(4),
-        FRAME_ALIGN,
-    )
-    .max(MIN_SHMEM_LEN)
+fn slot_capacity_for_display(width: usize, height: usize) -> usize {
+    align_up(width.saturating_mul(height).saturating_mul(4), FRAME_ALIGN).max(FRAME_ALIGN)
 }
 
 #[inline]
-fn validate_frame_length(shmem_len: usize, length: usize) -> bool {
-    length > 0 && length <= shmem_len.saturating_sub(ADDR_FRAME)
+fn shmem_size_for_slot_capacity(slot_capacity: usize) -> usize {
+    ADDR_FRAME.saturating_add(SLOT_COUNT.saturating_mul(slot_capacity))
+}
+
+#[inline]
+fn slot_control(shmem: &crate::portable_service::SharedMemory) -> &SlotControl {
+    // The mapping starts on a page boundary and the offset is a multiple of eight; both
+    // sides check that the mapping is at least `MIN_SHMEM_LEN` long before they get here.
+    unsafe { SlotControl::at(shmem.as_ptr().add(ADDR_SLOT_CONTROL)) }
+}
+
+/// The slot size the service recorded, if both slots of that size fit into the mapping.
+#[inline]
+fn recorded_slot_capacity(shmem: &crate::portable_service::SharedMemory) -> Option<usize> {
+    let capacity = slot_control(shmem).slot_capacity();
+    (capacity >= FRAME_ALIGN && shmem_size_for_slot_capacity(capacity) <= shmem.len())
+        .then_some(capacity)
+}
+
+#[inline]
+fn slot_addr(slot: usize, slot_capacity: usize) -> usize {
+    ADDR_FRAME + slot * slot_capacity
+}
+
+#[inline]
+fn validate_frame_length(slot_capacity: usize, length: usize) -> bool {
+    length > 0 && length <= slot_capacity
 }
 
 fn create_backend_capturer(
@@ -312,6 +342,16 @@ pub mod server {
     }
 
     fn run_capture_loop(shmem: &crate::portable_service::SharedMemory) {
+        let Some(slot_capacity) = recorded_slot_capacity(shmem) else {
+            log::error!(
+                "User capture helper shared memory has no usable slot size: recorded={}, len={}",
+                slot_control(shmem).slot_capacity(),
+                shmem.len()
+            );
+            return;
+        };
+        let control = slot_control(shmem);
+        let mut writer = SlotWriter::default();
         let mut capturer: Option<Box<dyn TraitCapturer>> = None;
         let mut active_generation = u32::MAX;
         let mut active_backend: Option<UserCaptureBackend> = None;
@@ -337,17 +377,7 @@ pub mod server {
                 break;
             }
             let Some(requested_backend) = UserCaptureBackend::from_raw(command.backend) else {
-                write_frame_info(
-                    shmem,
-                    CaptureFrameInfo {
-                        counter,
-                        status: STATUS_ERROR,
-                        length: 0,
-                        width: 0,
-                        height: 0,
-                        backend: BACKEND_UNKNOWN,
-                    },
-                );
+                write_status(shmem, STATUS_ERROR, BACKEND_UNKNOWN);
                 std::thread::sleep(Duration::from_millis(20));
                 continue;
             };
@@ -392,17 +422,7 @@ pub mod server {
                                     gdi_err
                                 );
                                 capturer = None;
-                                write_frame_info(
-                                    shmem,
-                                    CaptureFrameInfo {
-                                        counter,
-                                        status: STATUS_ERROR,
-                                        length: 0,
-                                        width: 0,
-                                        height: 0,
-                                        backend: BACKEND_UNKNOWN,
-                                    },
-                                );
+                                write_status(shmem, STATUS_ERROR, BACKEND_UNKNOWN);
                                 std::thread::sleep(Duration::from_millis(500));
                                 continue;
                             }
@@ -438,17 +458,7 @@ pub mod server {
                 gdi_fallback = None;
                 gdi_fallback_frames = 0;
                 gdi_bootstrap_attempted = false;
-                write_frame_info(
-                    shmem,
-                    CaptureFrameInfo {
-                        counter,
-                        status: STATUS_STARTING,
-                        length: 0,
-                        width,
-                        height,
-                        backend: primary_backend_id,
-                    },
-                );
+                write_status(shmem, STATUS_STARTING, primary_backend_id);
             }
 
             let timeout = Duration::from_millis(command.timeout_ms.max(1) as u64);
@@ -463,27 +473,30 @@ pub mod server {
             {
                 Some(Ok(Frame::PixelBuffer(frame))) => {
                     let data = frame.data();
-                    if !validate_frame_length(shmem.len(), data.len()) {
+                    if !validate_frame_length(slot_capacity, data.len()) {
                         log::error!(
-                            "User capture helper frame exceeds shared memory capacity: frame_len={}, shmem_len={}",
+                            "User capture helper frame exceeds shared memory capacity: frame_len={}, slot_capacity={}",
                             data.len(),
-                            shmem.len()
+                            slot_capacity
                         );
-                        write_frame_info(
-                            shmem,
-                            CaptureFrameInfo {
-                                counter,
-                                status: STATUS_ERROR,
-                                length: 0,
-                                width,
-                                height,
-                                backend: primary_backend_id,
-                            },
-                        );
+                        write_status(shmem, STATUS_ERROR, primary_backend_id);
                         std::thread::sleep(timeout);
                         continue;
                     }
-                    shmem.write(ADDR_FRAME, data);
+                    // Into the slot the service does not hold; it sees the frame when it is
+                    // complete. `None`: the service took that slot this moment, and this
+                    // capture is dropped.
+                    if let Some(ticket) = writer.begin(control, wall_clock_micros()) {
+                        shmem.write(slot_addr(ticket.slot(), slot_capacity), data);
+                        writer.publish(
+                            control,
+                            ticket,
+                            data.len(),
+                            width,
+                            height,
+                            primary_backend_id,
+                        );
+                    }
                     counter = counter.wrapping_add(1).max(1);
                     primary_frames = primary_frames.saturating_add(1);
                     if primary_frames == 1 {
@@ -504,17 +517,7 @@ pub mod server {
                     gdi_fallback = None;
                     gdi_fallback_frames = 0;
                     primary_no_frame_since = None;
-                    write_frame_info(
-                        shmem,
-                        CaptureFrameInfo {
-                            counter,
-                            status: STATUS_OK,
-                            length: data.len(),
-                            width,
-                            height,
-                            backend: primary_backend_id,
-                        },
-                    );
+                    write_status(shmem, STATUS_OK, primary_backend_id);
                 }
                 Some(Ok(Frame::Texture(_))) => {
                     log::warn!(
@@ -522,17 +525,7 @@ pub mod server {
                         primary_backend
                     );
                     capturer = None;
-                    write_frame_info(
-                        shmem,
-                        CaptureFrameInfo {
-                            counter,
-                            status: STATUS_ERROR,
-                            length: 0,
-                            width,
-                            height,
-                            backend: primary_backend_id,
-                        },
-                    );
+                    write_status(shmem, STATUS_ERROR, primary_backend_id);
                 }
                 Some(Err(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     would_block_samples_since_log = would_block_samples_since_log.saturating_add(1);
@@ -590,8 +583,23 @@ pub mod server {
                             match gdi_capturer.frame(timeout) {
                                 Ok(Frame::PixelBuffer(frame)) => {
                                     let data = frame.data();
-                                    if validate_frame_length(shmem.len(), data.len()) {
-                                        shmem.write(ADDR_FRAME, data);
+                                    if validate_frame_length(slot_capacity, data.len()) {
+                                        if let Some(ticket) =
+                                            writer.begin(control, wall_clock_micros())
+                                        {
+                                            shmem.write(
+                                                slot_addr(ticket.slot(), slot_capacity),
+                                                data,
+                                            );
+                                            writer.publish(
+                                                control,
+                                                ticket,
+                                                data.len(),
+                                                width,
+                                                height,
+                                                BACKEND_GDI_CPU,
+                                            );
+                                        }
                                         counter = counter.wrapping_add(1).max(1);
                                         gdi_fallback_frames = gdi_fallback_frames.saturating_add(1);
                                         if gdi_fallback_frames == 1 || gdi_fallback_frames % 60 == 0
@@ -604,23 +612,13 @@ pub mod server {
                                                 height
                                             );
                                         }
-                                        write_frame_info(
-                                            shmem,
-                                            CaptureFrameInfo {
-                                                counter,
-                                                status: STATUS_OK,
-                                                length: data.len(),
-                                                width,
-                                                height,
-                                                backend: BACKEND_GDI_CPU,
-                                            },
-                                        );
+                                        write_status(shmem, STATUS_OK, BACKEND_GDI_CPU);
                                         continue;
                                     }
                                     log::warn!(
-                                        "User capture helper GDI fallback frame exceeds shared memory capacity: frame_len={}, shmem_len={}",
+                                        "User capture helper GDI fallback frame exceeds shared memory capacity: frame_len={}, slot_capacity={}",
                                         data.len(),
-                                        shmem.len()
+                                        slot_capacity
                                     );
                                     gdi_fallback = None;
                                 }
@@ -642,17 +640,7 @@ pub mod server {
                         }
                     }
                     if counter == 0 {
-                        write_frame_info(
-                            shmem,
-                            CaptureFrameInfo {
-                                counter,
-                                status: STATUS_WOULD_BLOCK,
-                                length: 0,
-                                width,
-                                height,
-                                backend: primary_backend_id,
-                            },
-                        );
+                        write_status(shmem, STATUS_WOULD_BLOCK, primary_backend_id);
                     }
                 }
                 Some(Err(err)) => {
@@ -662,17 +650,7 @@ pub mod server {
                         err
                     );
                     capturer = None;
-                    write_frame_info(
-                        shmem,
-                        CaptureFrameInfo {
-                            counter,
-                            status: STATUS_ERROR,
-                            length: 0,
-                            width,
-                            height,
-                            backend: primary_backend_id,
-                        },
-                    );
+                    write_status(shmem, STATUS_ERROR, primary_backend_id);
                     std::thread::sleep(Duration::from_millis(100));
                 }
                 None => std::thread::sleep(Duration::from_millis(20)),
@@ -697,8 +675,10 @@ pub mod client {
         generation: u32,
         width: usize,
         height: usize,
-        last_counter: u32,
         last_backend: u32,
+        slot_capacity: usize,
+        reader: SlotReader,
+        slot_counters_logged: (Instant, SlotCounters),
     }
 
     unsafe impl Send for UserCaptureHelperCapturer {}
@@ -711,7 +691,8 @@ pub mod client {
             height: usize,
         ) -> ResultType<Self> {
             let shmem_name = next_shmem_name();
-            let shmem_size = shmem_size_for_display(width, height);
+            let slot_capacity = slot_capacity_for_display(width, height);
+            let shmem_size = shmem_size_for_slot_capacity(slot_capacity).max(MIN_SHMEM_LEN);
             let shmem = crate::portable_service::SharedMemory::create(&shmem_name, shmem_size)?;
             let flink = shmem_flink_path(&shmem_name)?;
             if let Err(err) =
@@ -731,6 +712,12 @@ pub mod client {
             unsafe {
                 libc::memset(shmem.as_ptr() as _, 0, shmem.len());
             }
+            // `capture-frame-slots = N`: one buffer, as before (the way back, and the
+            // comparison for the counters that are logged below).
+            let single_slot = hbb_common::config::Config::get_option(
+                hbb_common::config::keys::OPTION_CAPTURE_FRAME_SLOTS,
+            ) == "N";
+            slot_control(&shmem).init(slot_capacity, single_slot);
             let generation = NEXT_GENERATION.fetch_add(1, Ordering::SeqCst);
             write_command(
                 &shmem,
@@ -744,17 +731,7 @@ pub mod client {
                     timeout_ms: 33,
                 },
             );
-            write_frame_info(
-                &shmem,
-                CaptureFrameInfo {
-                    counter: 0,
-                    status: STATUS_STARTING,
-                    length: 0,
-                    width,
-                    height,
-                    backend: BACKEND_UNKNOWN,
-                },
-            );
+            write_status(&shmem, STATUS_STARTING, BACKEND_UNKNOWN);
             let exe = std::env::current_exe()?.to_string_lossy().to_string();
             let cmd = format!("\"{}\" {} {}", exe, ARG, shmem_arg(&shmem_name));
             let Some(session_id) = crate::platform::windows::get_current_process_session_id()
@@ -775,12 +752,13 @@ pub mod client {
                 return Err(super::super::helper_retry::HelperLaunchFailure.into());
             }
             log::info!(
-                "Launched user capture helper: requested_backend={} helper CPU, display={}, session={}, shmem={}, size={}",
+                "Launched user capture helper: requested_backend={} helper CPU, display={}, session={}, shmem={}, size={}, frame_slots={}",
                 requested_backend.as_str(),
                 current_display,
                 session_id,
                 shmem_name,
-                shmem_size
+                shmem_size,
+                if single_slot { 1 } else { SLOT_COUNT }
             );
             Ok(Self {
                 attempt: None,
@@ -792,9 +770,53 @@ pub mod client {
                 generation,
                 width,
                 height,
-                last_counter: 0,
                 last_backend: requested_backend.capture_backend(),
+                slot_capacity,
+                reader: SlotReader::default(),
+                slot_counters_logged: (Instant::now(), SlotCounters::default()),
             })
+        }
+
+        /// The newest frame the helper has published, if the service has not had it yet.
+        /// A frame that is being written at this moment is waited for, briefly.
+        fn take_frame(&mut self, timeout: Duration) -> Option<TakenFrame> {
+            let control = slot_control(&self.shmem);
+            // The frame handed out by the previous call is no longer in use.
+            self.reader.release(control);
+            let give_up_at = Instant::now() + timeout.min(BEING_WRITTEN_WAIT);
+            loop {
+                match self.reader.take(control, wall_clock_micros()) {
+                    Take::Frame(frame) => return Some(frame),
+                    Take::Nothing => return None,
+                    Take::BeingWritten => {
+                        if Instant::now() >= give_up_at {
+                            return None;
+                        }
+                        std::thread::sleep(Duration::from_micros(300));
+                    }
+                }
+            }
+        }
+
+        /// Once a minute: what the helper has counted about its writes. The writes that
+        /// began within a few milliseconds of the service taking a frame are the ones that
+        /// landed in the picture being converted when there was one buffer.
+        fn log_slot_counters(&mut self) {
+            let now = Instant::now();
+            if now.saturating_duration_since(self.slot_counters_logged.0)
+                < SLOT_COUNTERS_LOG_INTERVAL
+            {
+                return;
+            }
+            let control = slot_control(&self.shmem);
+            let counters = control.counters();
+            log::info!(
+                "user capture helper hand-off: display={}, frame_slots={}, {}",
+                self.current_display,
+                if control.single_slot() { 1 } else { SLOT_COUNT },
+                counters.since(&self.slot_counters_logged.1)
+            );
+            self.slot_counters_logged = (now, counters);
         }
 
         fn update_timeout(&self, timeout: Duration) {
@@ -836,18 +858,22 @@ pub mod client {
     impl TraitCapturer for UserCaptureHelperCapturer {
         fn frame<'a>(&'a mut self, timeout: Duration) -> std::io::Result<Frame<'a>> {
             self.update_timeout(timeout);
-            let info = read_frame_info(&self.shmem);
+            let info = read_status(&self.shmem);
             if info.backend != BACKEND_UNKNOWN {
                 self.last_backend = info.backend;
             }
-            if info.status == STATUS_OK && info.counter != self.last_counter {
-                if info.width != self.width || info.height != self.height {
+            self.log_slot_counters();
+            if let Some(frame) = self.take_frame(timeout) {
+                if frame.tag != BACKEND_UNKNOWN {
+                    self.last_backend = frame.tag;
+                }
+                if frame.width != self.width || frame.height != self.height {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::WouldBlock,
                         "user capture helper frame size is changing",
                     ));
                 }
-                if !validate_frame_length(self.shmem.len(), info.length) {
+                if !validate_frame_length(self.slot_capacity, frame.length) {
                     if let Some(attempt) = self.attempt.as_mut() {
                         attempt.failure(false);
                     }
@@ -856,7 +882,6 @@ pub mod client {
                         "invalid user capture helper frame length",
                     ));
                 }
-                self.last_counter = info.counter;
                 if self
                     .attempt
                     .as_mut()
@@ -867,9 +892,14 @@ pub mod client {
                         "retired user capture helper attempt",
                     ));
                 }
+                // The slot stays pinned, and so unwritten, until the next call.
                 unsafe {
-                    let data =
-                        slice::from_raw_parts(self.shmem.as_ptr().add(ADDR_FRAME), info.length);
+                    let data = slice::from_raw_parts(
+                        self.shmem
+                            .as_ptr()
+                            .add(slot_addr(frame.slot, self.slot_capacity)),
+                        frame.length,
+                    );
                     return Ok(Frame::PixelBuffer(PixelBuffer::with_BGRA(
                         data,
                         self.width,
@@ -974,6 +1004,31 @@ pub mod client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_memory_holds_two_whole_frames_behind_an_aligned_control_block() {
+        assert_eq!(ADDR_SLOT_CONTROL % 8, 0);
+        assert_eq!(ADDR_FRAME % FRAME_ALIGN, 0);
+        assert!(ADDR_SLOT_CONTROL + size_of::<SlotControl>() <= ADDR_FRAME);
+        // 1920x1080, and a size whose byte count is not a multiple of the alignment.
+        for (width, height) in [(1920usize, 1080usize), (1366, 767)] {
+            let frame_bytes = width * height * 4;
+            let capacity = slot_capacity_for_display(width, height);
+            assert!(capacity >= frame_bytes);
+            assert_eq!(capacity % FRAME_ALIGN, 0);
+            assert!(validate_frame_length(capacity, frame_bytes));
+            assert!(!validate_frame_length(capacity, capacity + 1));
+            assert!(!validate_frame_length(capacity, 0));
+            let len = shmem_size_for_slot_capacity(capacity);
+            assert_eq!(slot_addr(0, capacity), ADDR_FRAME);
+            assert_eq!(slot_addr(SLOT_COUNT - 1, capacity) + capacity, len);
+        }
+        // A display with no size still gets the fixed part and two smallest slots.
+        assert_eq!(
+            shmem_size_for_slot_capacity(slot_capacity_for_display(0, 0)),
+            MIN_SHMEM_LEN
+        );
+    }
 
     #[test]
     fn capture_backend_command_values_round_trip() {
