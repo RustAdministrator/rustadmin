@@ -350,6 +350,19 @@ impl PipeWireRecorder {
     }
 }
 
+/// Whether the crop rectangle `(x, y, width, height)` lies inside a `w` x `h` picture and
+/// is not empty. Rows are copied out of the buffer by this rectangle.
+fn crop_fits(crop: Option<(u32, u32, u32, u32)>, w: usize, h: usize) -> bool {
+    let Some((x, y, crop_w, crop_h)) = crop else {
+        return true;
+    };
+    let (x, y, crop_w, crop_h) = (x as usize, y as usize, crop_w as usize, crop_h as usize);
+    crop_w > 0
+        && crop_h > 0
+        && x.checked_add(crop_w).is_some_and(|right| right <= w)
+        && y.checked_add(crop_h).is_some_and(|bottom| bottom <= h)
+}
+
 impl Recorder for PipeWireRecorder {
     fn capture(&mut self, timeout_ms: u64) -> Result<PixelProvider<'_>, Box<dyn Error>> {
         if let Some(sample) = self
@@ -399,6 +412,17 @@ impl Recorder for PipeWireRecorder {
                     w,
                     h
                 );
+                // "No frame", not the previous one: that is an older picture, possibly of
+                // another size, handed out as if it were new.
+                return Ok(PixelProvider::NONE);
+            } else if !crop_fits(crop, w, h) {
+                trace!(
+                    "Crop rectangle {:?} does not fit the {}x{} buffer, dropping it!",
+                    crop,
+                    w,
+                    h
+                );
+                return Ok(PixelProvider::NONE);
             } else {
                 // Copy region specified by crop into self.buffer_cropped
                 // TODO: Figure out if ffmpeg provides a zero copy alternative
@@ -1530,4 +1554,26 @@ fn sort_streams(
     }
     *streams = sorted_streams;
     *shared_displays = sorted_shared_displays;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::crop_fits;
+
+    #[test]
+    fn crop_rectangle_has_to_lie_inside_the_picture() {
+        // No crop at all.
+        assert!(crop_fits(None, 1920, 1080));
+        // Inside, and touching the right and bottom edges.
+        assert!(crop_fits(Some((10, 20, 100, 50)), 1920, 1080));
+        assert!(crop_fits(Some((1820, 1030, 100, 50)), 1920, 1080));
+        // One pixel too far to the right, and to the bottom.
+        assert!(!crop_fits(Some((1821, 1030, 100, 50)), 1920, 1080));
+        assert!(!crop_fits(Some((1820, 1031, 100, 50)), 1920, 1080));
+        // Empty: the stride of the cropped picture would be a division by its height.
+        assert!(!crop_fits(Some((0, 0, 0, 50)), 1920, 1080));
+        assert!(!crop_fits(Some((0, 0, 100, 0)), 1920, 1080));
+        // Numbers a broken source could send.
+        assert!(!crop_fits(Some((u32::MAX, 0, u32::MAX, 1)), 1920, 1080));
+    }
 }

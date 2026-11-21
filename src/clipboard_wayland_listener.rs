@@ -120,17 +120,16 @@ fn run_wayland_loop<H: ClipboardHandler>(
     Ok(())
 }
 
+/// The clipboard changed. The types on offer were collected here and never used, and the
+/// list was never emptied: it grew with every copy for as long as the listener lived.
 #[derive(Debug)]
-struct ClipboardListenMessage {
-    _mime_types: Vec<String>,
-}
+struct ClipboardListenMessage;
 
 struct WlClipboardListener {
     seat: Option<wl_seat::WlSeat>,
     seat_name: Option<String>,
     data_manager: Option<zwlr_data_control_manager_v1::ZwlrDataControlManagerV1>,
     data_device: Option<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1>,
-    mime_types: Vec<String>,
     queue: Option<Arc<Mutex<EventQueue<Self>>>>,
     exit_flag: Arc<AtomicBool>,
     copied: bool,
@@ -154,7 +153,6 @@ impl WlClipboardListener {
             seat_name: None,
             data_manager: None,
             data_device: None,
-            mime_types: Vec::new(),
             queue: None,
             exit_flag,
             copied: false,
@@ -254,9 +252,7 @@ impl WlClipboardListener {
                 }
             }
         }
-        Ok(ClipboardListenMessage {
-            _mime_types: self.mime_types.clone(),
-        })
+        Ok(ClipboardListenMessage)
     }
 }
 
@@ -361,7 +357,10 @@ impl Dispatch<zwlr_data_control_device_v1::ZwlrDataControlDeviceV1, ()> for WlCl
                 }
             }
             zwlr_data_control_device_v1::Event::Selection { id } => {
-                if id.is_some() {
+                if let Some(offer) = id {
+                    // Only the fact that something was copied is used. An offer that is
+                    // not destroyed stays alive in the compositor: one per copy.
+                    offer.destroy();
                     state.copied = true;
                 }
             }
@@ -399,15 +398,13 @@ impl Dispatch<zwlr_data_control_source_v1::ZwlrDataControlSourceV1, ()> for WlCl
 
 impl Dispatch<zwlr_data_control_offer_v1::ZwlrDataControlOfferV1, ()> for WlClipboardListener {
     fn event(
-        state: &mut Self,
+        _state: &mut Self,
         _proxy: &zwlr_data_control_offer_v1::ZwlrDataControlOfferV1,
-        event: <zwlr_data_control_offer_v1::ZwlrDataControlOfferV1 as Proxy>::Event,
+        _event: <zwlr_data_control_offer_v1::ZwlrDataControlOfferV1 as Proxy>::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &wayland_client::QueueHandle<Self>,
     ) {
-        if let zwlr_data_control_offer_v1::Event::Offer { mime_type } = event {
-            state.mime_types.push(mime_type);
-        }
+        // The types an offer lists are not needed: the clipboard content is read elsewhere.
     }
 }
