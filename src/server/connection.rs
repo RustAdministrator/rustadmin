@@ -892,6 +892,9 @@ struct VideoDeliveryState {
     last_refresh_at: Option<Instant>,
     feedback_observed: bool,
     recovery_target_frame_id: Option<u64>,
+    /// The first keyframe sent after the recovery was asked for, for a viewer that keeps
+    /// decoding deltas after a loss. Decoding that frame is what ends its recovery.
+    recovery_keyframe_id: Option<u64>,
     recovery_generation: u64,
     recovery_reissues: u8,
     recovery_progress_at: Option<Instant>,
@@ -917,6 +920,7 @@ impl VideoDeliveryState {
             last_refresh_at: None,
             feedback_observed: false,
             recovery_target_frame_id: None,
+            recovery_keyframe_id: None,
             recovery_generation: 0,
             recovery_reissues: 0,
             recovery_progress_at: None,
@@ -1052,8 +1056,28 @@ impl VideoDeliveryController {
 
     fn clear_recovery_cycle(state: &mut VideoDeliveryState) {
         state.recovery_target_frame_id = None;
+        state.recovery_keyframe_id = None;
         state.recovery_reissues = 0;
         state.recovery_progress_at = None;
+    }
+
+    /// Whether a recovery that was asked for is still open.
+    ///
+    /// A viewer that stops at a lost frame (H.264, H.265, AV1) has recovered when it decodes
+    /// anything beyond what was sent when the recovery was asked for. A VP8 or VP9 viewer goes
+    /// on decoding the deltas that were already on their way, on a damaged reference; for it
+    /// only the keyframe sent for the request, once decoded, closes the recovery.
+    fn recovery_unresolved(state: &VideoDeliveryState) -> bool {
+        let Some(target) = state.recovery_target_frame_id else {
+            return false;
+        };
+        if state.viewer_continues_deltas_after_loss {
+            !state
+                .recovery_keyframe_id
+                .is_some_and(|keyframe| state.highest_decoded_frame_id >= keyframe)
+        } else {
+            state.highest_decoded_frame_id <= target
+        }
     }
 
     fn issue_recovery(
@@ -1076,13 +1100,11 @@ impl VideoDeliveryController {
             }
             state.recovery_generation = state.recovery_generation.saturating_add(1);
             state.recovery_target_frame_id = None;
+            state.recovery_keyframe_id = None;
             state.recovery_reissues = 0;
             state.recovery_progress_at = None;
             recovery_reissue = 0;
-        } else if state
-            .recovery_target_frame_id
-            .is_some_and(|target| state.highest_decoded_frame_id <= target)
-        {
+        } else if Self::recovery_unresolved(state) {
             let retry_from = state
                 .recovery_progress_at
                 .into_iter()
@@ -1159,6 +1181,16 @@ impl VideoDeliveryController {
             return;
         }
         state.viewer_continues_deltas_after_loss = viewer_continues_deltas_after_loss(frame);
+        if state.viewer_continues_deltas_after_loss
+            && state.recovery_keyframe_id.is_none()
+            && state
+                .recovery_target_frame_id
+                .is_some_and(|target| frame.frame_id > target)
+            && scrap::codec::video_frame_payload_stats(frame)
+                .is_some_and(|(_, _, keyframe)| keyframe)
+        {
+            state.recovery_keyframe_id = Some(frame.frame_id);
+        }
         let previous_host_frontier = state.host_highest_sent_frame_id;
         if frame.frame_id > previous_host_frontier {
             state.host_highest_sent_frame_id = frame.frame_id;
@@ -1198,7 +1230,12 @@ impl VideoDeliveryController {
         if feedback.decoded_frame_id > state.highest_decoded_frame_id {
             state.highest_decoded_frame_id = feedback.decoded_frame_id;
             state.recovery_cycle_cooldown_until = None;
-            if state.recovery_target_frame_id.is_some() {
+            // Deltas decoded on a damaged reference are not progress of a recovery: while
+            // the keyframe for it has not even been sent, the request is issued again.
+            if state.recovery_target_frame_id.is_some()
+                && (!state.viewer_continues_deltas_after_loss
+                    || state.recovery_keyframe_id.is_some())
+            {
                 state.recovery_progress_at = Some(now);
             }
             state.decode_pending_since =
@@ -1207,10 +1244,7 @@ impl VideoDeliveryController {
                 } else {
                     Some(now)
                 };
-            if state
-                .recovery_target_frame_id
-                .is_some_and(|target| state.highest_decoded_frame_id > target)
-            {
+            if state.recovery_target_frame_id.is_some() && !Self::recovery_unresolved(state) {
                 Self::clear_recovery_cycle(state);
                 state.phase = VideoDeliveryPhase::Healthy;
             } else if state.recovery_target_frame_id.is_none() {
@@ -11341,6 +11375,104 @@ mod test {
             .unwrap();
         assert_eq!(action.highest_sent_frame_id, 10);
         assert_eq!(controller.by_display[&0].recovery_target_frame_id, Some(10));
+    }
+
+    #[cfg(test)]
+    fn vp9_delivery_frame(frame_id: u64, key: bool) -> VideoFrame {
+        VideoFrame {
+            display: 0,
+            stream_id: 7,
+            frame_id,
+            union: Some(video_frame::Union::Vp9s(EncodedVideoFrames {
+                frames: vec![EncodedVideoFrame {
+                    data: vec![0u8; 4].into(),
+                    key,
+                    pts: frame_id as i64,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    #[cfg(test)]
+    fn decoded_up_to(frame_id: u64) -> VideoFeedback {
+        VideoFeedback {
+            display: 0,
+            stream_id: 7,
+            received_frame_id: frame_id,
+            decoded_frame_id: frame_id,
+            render_submitted_frame_id: frame_id,
+            ..Default::default()
+        }
+    }
+
+    /// Ten VP9 frames are sent, the viewer has decoded eight and asks for a reference refresh.
+    #[cfg(test)]
+    fn vp9_stream_with_a_recovery_request(start: Instant) -> VideoDeliveryController {
+        let mut controller = VideoDeliveryController::default();
+        for frame_id in 1..=10 {
+            controller.on_frame_sent(&vp9_delivery_frame(frame_id, frame_id == 1), start);
+        }
+        controller.on_feedback(&decoded_up_to(8), start);
+        controller
+            .on_reference_refresh_request(
+                &VideoReferenceRefresh {
+                    display: 0,
+                    stream_id: 7,
+                    received_frame_id: 10,
+                    dropped_frames: 1,
+                    ..Default::default()
+                },
+                start,
+                10,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(controller.by_display[&0].recovery_target_frame_id, Some(10));
+        controller
+    }
+
+    /// A VP8/VP9 viewer keeps decoding deltas after a loss. A delta that was already on its
+    /// way must not end the recovery: only the keyframe sent for the request heals the stream.
+    #[test]
+    fn vpx_recovery_ends_with_the_keyframe_not_with_a_delta_in_flight() {
+        let start = Instant::now();
+        let mut controller = vp9_stream_with_a_recovery_request(start);
+
+        let later = start + Duration::from_millis(20);
+        controller.on_frame_sent(&vp9_delivery_frame(11, false), later);
+        controller.on_feedback(&decoded_up_to(11), later);
+        assert!(
+            controller.by_display[&0].recovery_target_frame_id.is_some(),
+            "a delta decoded on a damaged reference ended the recovery"
+        );
+
+        controller.on_frame_sent(&vp9_delivery_frame(12, true), later);
+        controller.on_feedback(&decoded_up_to(12), later + Duration::from_millis(20));
+        assert!(controller.by_display[&0].recovery_target_frame_id.is_none());
+        assert_eq!(controller.by_display[&0].phase, VideoDeliveryPhase::Healthy);
+    }
+
+    /// While no keyframe has been sent for the request, the deltas such a viewer goes on
+    /// decoding are not progress: the request is issued again.
+    #[test]
+    fn vpx_recovery_is_reissued_while_no_keyframe_was_sent() {
+        let start = Instant::now();
+        let mut controller = vp9_stream_with_a_recovery_request(start);
+
+        let mut reissued = false;
+        for step in 1..=250u64 {
+            let now = start + Duration::from_millis(step * 20);
+            controller.on_frame_sent(&vp9_delivery_frame(10 + step, false), now);
+            controller.on_feedback(&decoded_up_to(10 + step), now);
+            if !controller.poll_recovery(now, 10).is_empty() {
+                reissued = true;
+                break;
+            }
+        }
+        assert!(reissued, "five seconds of deltas and no second request");
     }
 
     #[test]

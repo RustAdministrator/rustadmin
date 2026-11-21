@@ -237,14 +237,19 @@ impl HqReferenceRefreshPolicy {
         requested: bool,
         now: Instant,
     ) -> Option<ReferenceRefreshReason> {
-        if requested
-            && !self.last_refresh.is_some_and(|last_refresh| {
-                now.saturating_duration_since(last_refresh) < DELIVERY_REFERENCE_REFRESH_COOLDOWN
-            })
-        {
+        if requested {
             self.delivery_refresh_pending = true;
         }
         if !self.delivery_refresh_pending {
+            return None;
+        }
+        // A refresh that has just gone out covers the requests that follow it closely, for
+        // all viewers. The caller passes a request on once, so one that arrives in that time
+        // is kept and served when the time is over; it used to be forgotten. A refresh made
+        // meanwhile for another reason serves it too (`record_refresh`).
+        if self.last_refresh.is_some_and(|last_refresh| {
+            now.saturating_duration_since(last_refresh) < DELIVERY_REFERENCE_REFRESH_COOLDOWN
+        }) {
             return None;
         }
         if self
@@ -2453,6 +2458,39 @@ mod tests {
                 false,
                 now + DELIVERY_REFERENCE_REFRESH_COOLDOWN + Duration::from_millis(1)
             ),
+            None
+        );
+    }
+
+    /// The capture loop passes a request on once and forgets it. One that arrives right
+    /// after a refresh must be served when the cooldown is over, not lost.
+    #[test]
+    fn delivery_refresh_right_after_a_refresh_is_deferred_not_dropped() {
+        let now = Instant::now();
+        let mut policy = HqReferenceRefreshPolicy::new(false, 1_000);
+        assert_eq!(
+            policy.request_delivery_refresh(true, now),
+            Some(ReferenceRefreshReason::DeliveryRecovery)
+        );
+        policy.record_refresh(1_000, now);
+
+        assert_eq!(
+            policy.request_delivery_refresh(true, now + Duration::from_millis(100)),
+            None
+        );
+        // The request is not repeated by the caller.
+        assert_eq!(
+            policy.request_delivery_refresh(false, now + Duration::from_millis(200)),
+            None
+        );
+        assert_eq!(
+            policy.request_delivery_refresh(false, now + DELIVERY_REFERENCE_REFRESH_COOLDOWN),
+            Some(ReferenceRefreshReason::DeliveryRecovery)
+        );
+        // Once served it is not served again.
+        policy.record_refresh(1_000, now + DELIVERY_REFERENCE_REFRESH_COOLDOWN);
+        assert_eq!(
+            policy.request_delivery_refresh(false, now + DELIVERY_REFERENCE_REFRESH_COOLDOWN * 3),
             None
         );
     }
