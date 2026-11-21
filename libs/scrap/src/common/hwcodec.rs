@@ -2636,8 +2636,9 @@ fn run_local_probe() -> ResultType<String> {
         .arg("--probe-hwcodec-config")
         .stdout(Stdio::piped())
         .spawn()?;
+    // Closing the job ends the probe: it is kept until the probe has exited.
     #[cfg(windows)]
-    hwcodec::common::child_exit_when_parent_exit(child.id());
+    let _job = hwcodec::common::child_exit_when_parent_exit(child.id());
     let Some(stdout) = child.stdout.take() else {
         child.kill().ok();
         child.wait().ok();
@@ -2670,4 +2671,47 @@ fn run_local_probe() -> ResultType<String> {
         bail!("codec probe exited unsuccessfully");
     }
     Ok(String::from_utf8(bytes)?)
+}
+
+#[cfg(all(test, windows))]
+mod job_handle_tests {
+    /// Handles the process has open.
+    fn open_handles() -> u32 {
+        extern "system" {
+            fn GetCurrentProcess() -> *mut std::ffi::c_void;
+            fn GetProcessHandleCount(process: *mut std::ffi::c_void, count: *mut u32) -> i32;
+        }
+        let mut count = 0u32;
+        unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut count) };
+        count
+    }
+
+    /// The codec probe runs as a child that is put into a job object, so that it ends with
+    /// the parent. The handle of that job was never closed: one more open handle for every
+    /// probe, for as long as the parent runs.
+    #[test]
+    fn job_of_a_finished_child_leaves_no_handle_open() {
+        let run = || {
+            let mut child = std::process::Command::new("cmd")
+                .args(["/c", "exit", "0"])
+                .spawn()
+                .unwrap();
+            let _job = hwcodec::common::child_exit_when_parent_exit(child.id());
+            child.wait().unwrap();
+        };
+        // The first runs open what stays open anyway.
+        for _ in 0..5 {
+            run();
+        }
+        let before = open_handles();
+        for _ in 0..20 {
+            run();
+        }
+        let after = open_handles();
+        assert!(
+            after <= before + 3,
+            "{} handles more after 20 children",
+            after.saturating_sub(before)
+        );
+    }
 }
