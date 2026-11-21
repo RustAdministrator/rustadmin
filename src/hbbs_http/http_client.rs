@@ -10,6 +10,44 @@ use hbb_common::{
 };
 use reqwest::{blocking::Client as SyncClient, Client as AsyncClient};
 
+/// The proxy of a client that must not send anything: port 0 of the loopback address, which
+/// nothing can listen on. A connection to it fails at once and nothing leaves the machine.
+const UNUSABLE_PROXY: &str = "http://127.0.0.1:0";
+
+/// Whether an HTTP request may go directly to the server when a proxy is configured but cannot be
+/// used. Before, it always did, around the proxy the user had asked for.
+fn direct_fallback_when_proxy_unusable() -> bool {
+    Config::get_option(hbb_common::config::keys::OPTION_HTTP_PROXY_FAIL_CLOSED) == "N"
+}
+
+/// The client for a configured proxy that cannot be used: one whose every request fails, or,
+/// with `http-proxy-fail-closed = N`, a client without a proxy as before.
+macro_rules! unusable_proxy_client {
+    ($Client: ty) => {{
+        if direct_fallback_when_proxy_unusable() {
+            <$Client>::new()
+        } else {
+            log::warn!(
+                "A proxy is configured but cannot be used: HTTP requests fail instead of going directly to the server"
+            );
+            match reqwest::Proxy::all(UNUSABLE_PROXY) {
+                Ok(proxy) => <$Client>::builder()
+                    .no_proxy()
+                    .proxy(proxy)
+                    .build()
+                    .unwrap_or_else(|e| {
+                        log::error!("Failed to create the client that refuses requests: {}", e);
+                        <$Client>::new()
+                    }),
+                Err(e) => {
+                    log::error!("Failed to set up the proxy that refuses requests: {}", e);
+                    <$Client>::new()
+                }
+            }
+        }
+    }};
+}
+
 macro_rules! configure_http_client {
     ($builder:expr, $tls_type:expr, $danger_accept_invalid_cert:expr, $Client: ty) => {{
         // https://github.com/rustdesk/rustdesk/issues/11569
@@ -71,18 +109,18 @@ macro_rules! configure_http_client {
                             builder = builder.proxy(p);
                             builder.build().unwrap_or_else(|e| {
                                 info!("Failed to create a proxied client: {}", e);
-                                <$Client>::new()
+                                unusable_proxy_client!($Client)
                             })
                         }
                         Err(e) => {
                             info!("Failed to set up proxy: {}", e);
-                            <$Client>::new()
+                            unusable_proxy_client!($Client)
                         }
                     }
                 }
                 Err(e) => {
                     info!("Failed to configure proxy: {}", e);
-                    <$Client>::new()
+                    unusable_proxy_client!($Client)
                 }
             }
         } else {
@@ -333,4 +371,99 @@ async fn create_http_client_async_with_url_(
         );
     }
     client
+}
+
+#[cfg(test)]
+mod tests {
+    /// The two tests change the same process-wide settings.
+    static SETTINGS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// A local HTTP server that answers every request with 200, for `requests` requests.
+    fn local_http_server(requests: usize) -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(requests) {
+                let Ok(mut stream) = stream else { continue };
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                );
+            }
+        });
+        port
+    }
+
+    /// A proxy is configured but cannot be used (here: a scheme the proxy code does not know).
+    /// The HTTP client then went straight to the server, around the proxy the user asked for.
+    #[test]
+    fn http_request_does_not_go_around_a_configured_proxy_that_cannot_be_used() {
+        use hbb_common::config::{keys, OVERWRITE_SETTINGS};
+        let _settings = SETTINGS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let port = local_http_server(1);
+        let previous = OVERWRITE_SETTINGS.write().unwrap().insert(
+            keys::OPTION_PROXY_URL.to_owned(),
+            "ftp://proxy.invalid:21".to_owned(),
+        );
+        let client = super::create_http_client(hbb_common::tls::TlsType::Plain, false);
+        let response = client
+            .get(format!("http://127.0.0.1:{}/", port))
+            .timeout(std::time::Duration::from_secs(5))
+            .send();
+        {
+            let mut settings = OVERWRITE_SETTINGS.write().unwrap();
+            match previous {
+                Some(previous) => settings.insert(keys::OPTION_PROXY_URL.to_owned(), previous),
+                None => settings.remove(keys::OPTION_PROXY_URL),
+            };
+        }
+        assert!(
+            response.is_err(),
+            "the request went around the configured proxy: {:?}",
+            response.map(|response| response.status())
+        );
+    }
+
+    /// With `http-proxy-fail-closed = N` the request goes directly to the server, as before.
+    #[test]
+    fn http_request_goes_directly_with_the_kill_switch() {
+        use hbb_common::config::{keys, Config, OVERWRITE_SETTINGS};
+        let _settings = SETTINGS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let port = local_http_server(1);
+        let previous_proxy = OVERWRITE_SETTINGS.write().unwrap().insert(
+            keys::OPTION_PROXY_URL.to_owned(),
+            "ftp://proxy.invalid:21".to_owned(),
+        );
+        let previous_switch = OVERWRITE_SETTINGS.write().unwrap().insert(
+            keys::OPTION_HTTP_PROXY_FAIL_CLOSED.to_owned(),
+            "N".to_owned(),
+        );
+        assert_eq!(Config::get_option(keys::OPTION_HTTP_PROXY_FAIL_CLOSED), "N");
+        let client = super::create_http_client(hbb_common::tls::TlsType::Plain, false);
+        let response = client
+            .get(format!("http://127.0.0.1:{}/", port))
+            .timeout(std::time::Duration::from_secs(5))
+            .send();
+        {
+            let mut settings = OVERWRITE_SETTINGS.write().unwrap();
+            for (key, previous) in [
+                (keys::OPTION_PROXY_URL, previous_proxy),
+                (keys::OPTION_HTTP_PROXY_FAIL_CLOSED, previous_switch),
+            ] {
+                match previous {
+                    Some(previous) => settings.insert(key.to_owned(), previous),
+                    None => settings.remove(key),
+                };
+            }
+        }
+        assert_eq!(
+            response.map(|response| response.status().as_u16()).ok(),
+            Some(200)
+        );
+    }
 }
