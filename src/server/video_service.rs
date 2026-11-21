@@ -3784,13 +3784,33 @@ fn run(vs: VideoService) -> ResultType<()> {
                 );
                 if let Some(decision) = controller.evaluate(cadence_sample) {
                     let recreate_started = Instant::now();
-                    match recreate_encoder_at_fps(
+                    match movie_tier_encoder_change(
                         &encoder_cfg,
                         use_i444,
                         quality,
                         decision.current_fps,
+                        keep_software_encoder_on_movie_tier_change(),
                     ) {
-                        Ok((replacement, replacement_cfg)) => {
+                        Ok(MovieTierEncoderChange::Kept(kept_cfg)) => {
+                            encoder_cfg = kept_cfg;
+                            pacer.set_fps(decision.current_fps, loop_started);
+                            spf = pacer.period;
+                            VIDEO_QOS.lock().unwrap().store_movie_runtime_status(
+                                &service_name,
+                                controller.target_fps(),
+                                decision.current_fps,
+                                host.pipeline_p95_us,
+                            );
+                            log::info!(
+                                "diag movie cadence change: service={}, target={}, previous={}, current={}, reason={}, encoder kept (it follows the frame timestamps)",
+                                service_name,
+                                controller.target_fps(),
+                                decision.previous_fps,
+                                decision.current_fps,
+                                decision.reason.as_str(),
+                            );
+                        }
+                        Ok(MovieTierEncoderChange::Recreated(replacement, replacement_cfg)) => {
                             let previous_bitrate = encoder.bitrate();
                             let replacement_bitrate = replacement.bitrate();
                             encoder = replacement;
@@ -4876,6 +4896,47 @@ fn recreate_encoder_at_quality(
     Encoder::new(encoder_cfg, use_i444)
 }
 
+/// Whether the encoder takes the frame rate from the timestamps of the frames and not from its
+/// configuration: libvpx and aom do.
+fn encoder_follows_frame_timestamps(encoder_cfg: &EncoderCfg) -> bool {
+    matches!(encoder_cfg, EncoderCfg::VPX(_) | EncoderCfg::AOM(_))
+}
+
+/// The kill switch `movie-tier-keeps-software-encoder`.
+fn keep_software_encoder_on_movie_tier_change() -> bool {
+    Config::get_option(hbb_common::config::keys::OPTION_MOVIE_TIER_KEEPS_SOFTWARE_ENCODER) != "N"
+}
+
+/// What a frame rate tier change of the Movie cadence controller does to the encoder.
+enum MovieTierEncoderChange {
+    /// The encoder follows the frame timestamps: only the configured rate is updated. A new
+    /// encoder would change nothing but start with a keyframe, a burst of bits at every change.
+    Kept(EncoderCfg),
+    Recreated(Encoder, EncoderCfg),
+}
+
+fn movie_tier_encoder_change(
+    encoder_cfg: &EncoderCfg,
+    use_i444: bool,
+    quality: f32,
+    fps: u32,
+    keep_software_encoder: bool,
+) -> ResultType<MovieTierEncoderChange> {
+    if keep_software_encoder && encoder_follows_frame_timestamps(encoder_cfg) {
+        let mut kept_cfg = encoder_cfg.clone();
+        let fps = scrap::codec::normalized_encoder_fps(fps);
+        match &mut kept_cfg {
+            EncoderCfg::VPX(config) => config.fps = fps,
+            EncoderCfg::AOM(config) => config.fps = fps,
+            #[allow(unreachable_patterns)]
+            _ => {}
+        }
+        return Ok(MovieTierEncoderChange::Kept(kept_cfg));
+    }
+    let (encoder, encoder_cfg) = recreate_encoder_at_fps(encoder_cfg, use_i444, quality, fps)?;
+    Ok(MovieTierEncoderChange::Recreated(encoder, encoder_cfg))
+}
+
 fn recreate_encoder_at_fps(
     encoder_cfg: &EncoderCfg,
     use_i444: bool,
@@ -5585,5 +5646,86 @@ fn handle_screenshot(screenshot: Screenshot, msg: String, w: usize, h: usize, da
         .send((hbb_common::tokio::time::Instant::now(), Arc::new(msg_out)))
     {
         log::error!("Failed to send screenshot, {}", e);
+    }
+}
+
+#[cfg(test)]
+mod movie_tier_tests {
+    use super::*;
+    use scrap::{codec::EncoderCfg, EncodeInput, VpxEncoderConfig, VpxVideoCodecId};
+
+    fn vp9_config() -> EncoderCfg {
+        EncoderCfg::VPX(VpxEncoderConfig {
+            width: 64,
+            height: 64,
+            quality: 1.0,
+            fps: 30,
+            codec: VpxVideoCodecId::VP9,
+            keyframe_interval: None,
+        })
+    }
+
+    /// A frame of the test pattern; `shade` changes it a little from frame to frame.
+    fn yuv(encoder: &Encoder, shade: u8) -> Vec<u8> {
+        let format = encoder.yuvfmt();
+        vec![shade; format.v + format.stride[2] * format.h.div_ceil(2)]
+    }
+
+    /// The Movie cadence controller moves a VP9 stream from 30 to 24 frames a second, as the
+    /// capture loop does it: `recreate_encoder_at_fps`. libvpx takes the rate from the frame
+    /// timestamps and does not read the configured one, so the new encoder changes nothing
+    /// but starts with a keyframe: a burst of bits at every tier change.
+    #[test]
+    fn movie_tier_change_with_vp9_costs_no_keyframe() {
+        let config = vp9_config();
+        let mut encoder = Encoder::new(config.clone(), false).unwrap();
+        let pattern = yuv(&encoder, 100);
+        let first = encoder
+            .encode_to_message(EncodeInput::YUV(&pattern), 0)
+            .unwrap();
+        assert!(starts_with_keyframe(&first));
+        let mut encoder = match movie_tier_encoder_change(&config, false, 1.0, 24, true).unwrap() {
+            MovieTierEncoderChange::Kept(kept) => {
+                assert!(matches!(
+                    kept,
+                    EncoderCfg::VPX(VpxEncoderConfig { fps: 24, .. })
+                ));
+                encoder
+            }
+            MovieTierEncoderChange::Recreated(..) => panic!("the VP9 encoder was made again"),
+        };
+        for (index, shade) in [104u8, 108, 112].into_iter().enumerate() {
+            let pattern = yuv(&encoder, shade);
+            if let Ok(frame) =
+                encoder.encode_to_message(EncodeInput::YUV(&pattern), 42 * (index as i64 + 1))
+            {
+                assert!(
+                    !starts_with_keyframe(&frame),
+                    "a tier change forced a keyframe"
+                );
+            }
+        }
+    }
+
+    /// With `movie-tier-keeps-software-encoder = N` the encoder is made again, as before, and
+    /// starts with a keyframe.
+    #[test]
+    fn movie_tier_change_makes_a_new_encoder_with_the_kill_switch() {
+        let config = vp9_config();
+        match movie_tier_encoder_change(&config, false, 1.0, 24, false).unwrap() {
+            MovieTierEncoderChange::Recreated(mut encoder, recreated) => {
+                assert!(matches!(
+                    recreated,
+                    EncoderCfg::VPX(VpxEncoderConfig { fps: 24, .. })
+                ));
+                let pattern = yuv(&encoder, 100);
+                let frame = encoder
+                    .encode_to_message(EncodeInput::YUV(&pattern), 0)
+                    .unwrap();
+                assert!(starts_with_keyframe(&frame));
+            }
+            MovieTierEncoderChange::Kept(_) => panic!("the switch was not followed"),
+        }
+        assert!(encoder_follows_frame_timestamps(&config));
     }
 }
