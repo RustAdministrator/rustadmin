@@ -106,15 +106,15 @@ impl CapturerGDI {
 
             let stride = self.width * PIXEL_WIDTH;
             let size: usize = (stride * self.height) as usize;
-            let mut data1: Vec<u8> = Vec::with_capacity(size);
-            data1.set_len(size);
             data.resize(size, 0);
 
             let mut bmi = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
                     biSize: size_of::<BITMAPINFOHEADER>() as _,
                     biWidth: self.width as _,
-                    biHeight: self.height as _,
+                    // Negative: the rows top-down, the layout of a frame. A bottom-up copy had to
+                    // be turned over with two more passes over the frame and a second buffer.
+                    biHeight: (-self.height) as _,
                     biPlanes: 1,
                     biBitCount: (8 * PIXEL_WIDTH) as _,
                     biCompression: BI_RGB,
@@ -145,23 +145,6 @@ impl CapturerGDI {
             if res == 0 {
                 return Err("GetDIBits failed".into());
             }
-            crate::common::ARGBMirror(
-                data.as_ptr(),
-                stride,
-                data1.as_mut_ptr(),
-                stride,
-                self.width,
-                self.height,
-            );
-            crate::common::ARGBRotate(
-                data1.as_ptr(),
-                stride,
-                data.as_mut_ptr(),
-                stride,
-                self.width,
-                self.height,
-                crate::RotationMode::kRotate180,
-            );
             Ok(())
         }
     }
@@ -209,5 +192,101 @@ mod tests {
                 assert!(false);
             }
         }
+    }
+
+    /// The GDI capturer of the first display.
+    /// The GDI capturer of the first display, or `None` without a desktop (a service session, as
+    /// on a build machine): the tests that need a screen then say so and pass.
+    fn first_display_gdi() -> Option<(CapturerGDI, i32, i32)> {
+        let Some(display) = Displays::new().unwrap().next() else {
+            println!("no display in this session: skipped");
+            return None;
+        };
+        let (width, height) = (display.width(), display.height());
+        let capturer = CapturerGDI::new(display.name(), width, height).unwrap();
+        Some((capturer, width, height))
+    }
+
+    /// A GDI frame is the screen as top-down BGRA rows, the layout every capturer hands out.
+    /// Checked against the bitmap of the same copy (no new `BitBlt`), read here bottom-up and
+    /// turned over row by row.
+    #[test]
+    fn gdi_frame_is_the_screen_top_down() {
+        let Some((capturer, width, height)) = first_display_gdi() else {
+            return;
+        };
+        let mut frame = Vec::new();
+        capturer.frame(&mut frame).unwrap();
+        let stride = (width * PIXEL_WIDTH) as usize;
+        let mut bottom_up = vec![0u8; stride * height as usize];
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as _,
+                biWidth: width as _,
+                biHeight: height as _,
+                biPlanes: 1,
+                biBitCount: (8 * PIXEL_WIDTH) as _,
+                biCompression: BI_RGB,
+                biSizeImage: (width * height * PIXEL_WIDTH) as _,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            bmiColors: [RGBQUAD {
+                rgbBlue: 0,
+                rgbGreen: 0,
+                rgbRed: 0,
+                rgbReserved: 0,
+            }],
+        };
+        let rows = unsafe {
+            GetDIBits(
+                capturer.dc,
+                capturer.bmp,
+                0,
+                height as _,
+                bottom_up.as_mut_ptr() as _,
+                &mut bmi as _,
+                DIB_RGB_COLORS,
+            )
+        };
+        assert_eq!(rows, height);
+        let expected: Vec<u8> = bottom_up
+            .chunks_exact(stride)
+            .rev()
+            .flatten()
+            .copied()
+            .collect();
+        assert_eq!(frame.len(), expected.len());
+        assert!(
+            frame == expected,
+            "the GDI frame is not the screen top down"
+        );
+    }
+
+    /// What a GDI frame costs on this machine, printed for the evidence (no assertion: a time).
+    #[test]
+    fn gdi_frame_cost() {
+        let Some((capturer, width, height)) = first_display_gdi() else {
+            return;
+        };
+        let mut frame = Vec::new();
+        for _ in 0..5 {
+            capturer.frame(&mut frame).unwrap();
+        }
+        let started = std::time::Instant::now();
+        const FRAMES: u32 = 60;
+        for _ in 0..FRAMES {
+            capturer.frame(&mut frame).unwrap();
+        }
+        let per_frame = started.elapsed() / FRAMES;
+        println!(
+            "gdi frame cost: {}x{}, {:.2} ms per frame over {} frames",
+            width,
+            height,
+            per_frame.as_secs_f64() * 1000.0,
+            FRAMES
+        );
     }
 }
