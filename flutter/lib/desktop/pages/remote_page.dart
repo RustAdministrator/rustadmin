@@ -1195,7 +1195,10 @@ class _ImagePaintState extends State<ImagePaint> {
     bool isViewAdaptive() => c.viewStyle.style == kRemoteViewStyleAdaptive;
     bool isViewOriginal() => c.viewStyle.style == kRemoteViewStyleOriginal;
 
-    mouseRegion({child}) => Obx(() {
+    // Only the cursor of the mouse region depends on the cursor model: a change
+    // of it rebuilds this region, not the whole picture.
+    mouseRegion({child}) => Consumer<CursorModel>(
+        builder: (cursorContext, _, regionChild) => Obx(() {
           double getCursorScale() {
             var c = Provider.of<CanvasModel>(context);
             var cursorScale = 1.0;
@@ -1230,14 +1233,16 @@ class _ImagePaintState extends State<ImagePaint> {
                                       _firstEnterImage.value = true;
                                     }
                                     return _buildCustomCursor(
-                                        context, getCursorScale());
+                                        cursorContext, getCursorScale());
                                   }
                                 }())
-                              : _buildDisabledCursor(context, getCursorScale())
+                              : _buildDisabledCursor(
+                                  cursorContext, getCursorScale())
                   : MouseCursor.defer,
               onHover: (evt) {},
-              child: child);
-        });
+              child: regionChild);
+        }),
+        child: child);
     if (c.imageOverflow.isTrue && c.scrollStyle != ScrollStyle.scrollauto) {
       final paintWidth = c.getDisplayWidth() * s;
       final paintHeight = c.getDisplayHeight() * s;
