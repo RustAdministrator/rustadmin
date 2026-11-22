@@ -2264,6 +2264,17 @@ impl VideoQoS {
             .1
     }
 
+    /// How long ago the latest quality setting of a viewer of this display was made.
+    pub fn latest_quality_age(&self, video_service_name: &str) -> Duration {
+        let latest = self
+            .subscribed_users(video_service_name)
+            .filter_map(|user| user.quality)
+            .map(|(time, _)| time)
+            .max()
+            .unwrap_or(0);
+        Duration::from_millis(hbb_common::get_time().saturating_sub(latest).max(0) as u64)
+    }
+
     // Adjust quality ratio based on network delay and screen changes
     fn adjust_ratio(&mut self, video_service_name: &str, dynamic_screen: bool) {
         self.adjust_ratio_at(video_service_name, dynamic_screen, Instant::now());

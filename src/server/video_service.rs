@@ -5591,6 +5591,14 @@ pub fn make_display_changed_msg(
     Some(msg_out)
 }
 
+/// How long a custom quality must stay unchanged before an encoder that cannot change its
+/// quality is made again with it.
+const CUSTOM_QUALITY_SETTLE_TIME: Duration = Duration::from_secs(1);
+
+fn custom_quality_remakes_fixed_encoder() -> bool {
+    Config::get_option(hbb_common::config::keys::OPTION_CUSTOM_QUALITY_REMAKES_FIXED_ENCODER) != "N"
+}
+
 fn check_qos(
     encoder: &mut Encoder,
     ratio: &mut f32,
@@ -5615,7 +5623,25 @@ fn check_qos(
     let next_ratio = video_qos.ratio(name);
     let previous_bitrate = encoder.bitrate();
     let ratio_changed = *ratio != next_ratio;
-    if ratio_changed {
+    // A custom quality the encoder cannot take while it runs (VAAPI) waited for the next time
+    // the encoder was made for another reason. It is now applied by making the encoder again,
+    // once the viewer has left the setting alone (a slider sends many values); `ratio` keeps
+    // the encoder's value until then.
+    let custom_for_fixed_encoder = ratio_changed
+        && !encoder.support_changing_quality()
+        && !video_qos.in_vbr_state(name)
+        && video_qos.latest_quality(name).is_custom()
+        && custom_quality_remakes_fixed_encoder();
+    if custom_for_fixed_encoder {
+        if video_qos.latest_quality_age(name) >= CUSTOM_QUALITY_SETTLE_TIME {
+            log::info!(
+                "switch to apply a custom quality the encoder cannot change: ratio {} -> {}",
+                *ratio,
+                next_ratio
+            );
+            bail!("SWITCH");
+        }
+    } else if ratio_changed {
         *ratio = next_ratio;
         if encoder.support_changing_quality() {
             allow_err!(encoder.set_quality(*ratio));
@@ -6073,6 +6099,117 @@ mod standard_loop_deadline_tests {
         assert_eq!(
             deadline.sleep_at(next_start, next_end, slower),
             slower - Duration::from_millis(10)
+        );
+    }
+}
+
+#[cfg(test)]
+mod custom_quality_tests {
+    use super::*;
+    use hbb_common::message_proto::VideoFrame;
+    use scrap::{codec::EncoderApi, EncodeYuvFormat};
+
+    const SERVICE: &str = "custom-quality-test";
+    const VIEWER: i32 = 990_001;
+
+    /// An encoder that cannot change its quality while it runs, as VAAPI.
+    struct FixedQuality;
+
+    impl EncoderApi for FixedQuality {
+        fn new(_cfg: EncoderCfg, _i444: bool) -> ResultType<Self> {
+            Ok(FixedQuality)
+        }
+
+        fn encode_to_message(&mut self, _frame: EncodeInput, _ms: i64) -> ResultType<VideoFrame> {
+            Ok(VideoFrame::new())
+        }
+
+        fn yuvfmt(&self) -> EncodeYuvFormat {
+            EncodeYuvFormat {
+                pixfmt: Pixfmt::I420,
+                w: 4,
+                h: 4,
+                stride: vec![4, 2, 2],
+                u: 16,
+                v: 20,
+            }
+        }
+
+        #[cfg(feature = "vram")]
+        fn input_texture(&self) -> bool {
+            false
+        }
+
+        fn set_quality(&mut self, _ratio: f32) -> ResultType<()> {
+            Ok(())
+        }
+
+        fn bitrate(&self) -> u32 {
+            1_000
+        }
+
+        fn support_changing_quality(&self) -> bool {
+            false
+        }
+
+        fn latency_free(&self) -> bool {
+            true
+        }
+
+        fn is_hardware(&self) -> bool {
+            true
+        }
+    }
+
+    /// A custom quality the encoder cannot take while it runs is applied by making the encoder
+    /// again (the loop restarts with `SWITCH`) once the viewer has left the setting alone for a
+    /// second; before, it waited for some other reason to make the encoder again.
+    #[test]
+    fn a_custom_quality_reaches_an_encoder_that_cannot_change_it() {
+        {
+            let mut qos = VIDEO_QOS.lock().unwrap();
+            qos.new_display(SERVICE.to_owned());
+            qos.on_connection_open(VIEWER);
+            qos.sync_subscribers(SERVICE, HashSet::from([VIEWER]));
+            qos.user_image_quality(VIEWER, 75 << 8);
+        }
+        let sp = GenericService::new(SERVICE.to_owned(), false);
+        let mut encoder = Encoder {
+            codec: Box::new(FixedQuality),
+        };
+        let mut ratio = 0.05f32;
+        let mut spf = Duration::from_millis(33);
+        let mut send_counter = 0;
+        let mut second_instant = Instant::now();
+        let mut check = |ratio: &mut f32| {
+            // Not a second since the last subscriber sync: it would drop the viewer, who is not
+            // a subscriber of this test's service.
+            second_instant = Instant::now();
+            check_qos(
+                &mut encoder,
+                ratio,
+                &mut spf,
+                false,
+                &mut send_counter,
+                &mut second_instant,
+                SERVICE,
+                &sp,
+            )
+            .err()
+            .map(|err| err.to_string())
+        };
+        let at_once = check(&mut ratio);
+        std::thread::sleep(Duration::from_millis(1_100));
+        let a_second_later = check(&mut ratio);
+        VIDEO_QOS.lock().unwrap().on_connection_close(VIEWER);
+        assert_eq!(
+            at_once, None,
+            "made again while the viewer may still move the slider"
+        );
+        assert_eq!(
+            a_second_later.as_deref(),
+            Some("SWITCH"),
+            "the custom quality never reached the encoder"
         );
     }
 }
