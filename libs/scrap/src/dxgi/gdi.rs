@@ -41,7 +41,7 @@ impl CapturerGDI {
         /*
         shared::windef::HMONITOR,
         winuser::{GetMonitorInfoW, GetSystemMetrics, MONITORINFOEXW},
-        let mut mi: MONITORINFOEXW = std::mem::MaybeUninit::uninit().assume_init();
+        let mut mi: MONITORINFOEXW = std::mem::zeroed();
         mi.cbSize = size_of::<MONITORINFOEXW>() as _;
         if GetMonitorInfoW(m, &mut mi as *mut MONITORINFOEXW as _) == 0 {
             return Err(format!("Failed to get monitor information of: {:?}", m).into());
