@@ -845,6 +845,33 @@ impl VideoFrameController {
     }
 }
 
+/// The deadlines of the Standard path. It slept one period from `now`, a time taken after the
+/// first part of the loop's work, so that work and the sleep's overshoot were added to every
+/// period. Each deadline is now one period after the previous one; a loop more than a period
+/// late starts again from its own time, so a stall is not followed by a burst of frames.
+#[derive(Debug, Default)]
+struct StandardLoopDeadline {
+    last: Option<Instant>,
+    period: Duration,
+}
+
+impl StandardLoopDeadline {
+    /// The sleep at `at`, the end of a loop that measured its work from `started`.
+    fn sleep_at(&mut self, started: Instant, at: Instant, period: Duration) -> Duration {
+        let deadline = match self.last {
+            Some(last) if self.period == period && at < last + period * 2 => last + period,
+            _ => started + period,
+        };
+        self.last = Some(deadline);
+        self.period = period;
+        deadline.saturating_duration_since(at)
+    }
+}
+
+fn standard_loop_deadline_enabled() -> bool {
+    Config::get_option(hbb_common::config::keys::OPTION_STANDARD_LOOP_DEADLINE) != "N"
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MoviePacerDecision {
     scheduled_at: Instant,
@@ -3641,6 +3668,8 @@ fn run(vs: VideoService) -> ResultType<()> {
 
     let bootstrap_fps = MOVIE_BOOTSTRAP_FPS.min(encoder_fps).max(1);
     let mut movie_pacer = full_movie_mode.then(|| MovieFramePacer::new(bootstrap_fps, start));
+    let mut standard_deadline =
+        standard_loop_deadline_enabled().then(StandardLoopDeadline::default);
     let mut movie_bootstrap_released = !full_movie_mode;
     let mut movie_host_window = full_movie_mode.then(|| MovieHostCadenceWindow::new(start));
     log::info!(
@@ -4739,8 +4768,14 @@ fn run(vs: VideoService) -> ResultType<()> {
         // may need to enable frame(timeout)
         log::trace!("{:?} {:?}", time::Instant::now(), elapsed);
         let loop_period = resource_period.unwrap_or(spf);
-        if movie_pacer.is_none() && elapsed < loop_period {
-            std::thread::sleep(loop_period - elapsed);
+        if movie_pacer.is_none() {
+            let sleep = match standard_deadline.as_mut() {
+                Some(deadline) => deadline.sleep_at(now, now + elapsed, loop_period),
+                None => loop_period.saturating_sub(elapsed),
+            };
+            if !sleep.is_zero() {
+                std::thread::sleep(sleep);
+            }
         }
         host_diag.record_loop_total(loop_started.elapsed());
         #[cfg(windows)]
@@ -5921,6 +5956,123 @@ mod frame_wait_tests {
             "frame wait cost: {:.1} us per call with no viewer to wait for, {:.1} us with one whose fetch came first",
             idle.as_secs_f64() * 1e6 / f64::from(calls),
             waiting.as_secs_f64() * 1e6 / f64::from(calls)
+        );
+    }
+}
+
+#[cfg(test)]
+mod standard_loop_deadline_tests {
+    use super::*;
+
+    const PERIOD: Duration = Duration::from_micros(33_333);
+
+    /// Runs `loops` loops of the Standard path on a made-up clock: `before` of work before
+    /// `now` is taken, `work` after it, and every sleep `overshoot` longer than asked. Returns
+    /// the average time from one loop's start to the next.
+    fn average_period(
+        mut deadline: Option<StandardLoopDeadline>,
+        loops: u32,
+        before: Duration,
+        work: Duration,
+        overshoot: Duration,
+    ) -> Duration {
+        let start = Instant::now();
+        let mut clock = start;
+        for _ in 0..loops {
+            clock += before;
+            let now = clock;
+            clock += work;
+            let elapsed = clock - now;
+            let sleep = match deadline.as_mut() {
+                Some(deadline) => deadline.sleep_at(now, now + elapsed, PERIOD),
+                None => PERIOD.saturating_sub(elapsed),
+            };
+            if !sleep.is_zero() {
+                clock += sleep + overshoot;
+            }
+        }
+        (clock - start) / loops
+    }
+
+    fn micros(duration: Duration) -> i128 {
+        duration.as_micros() as i128
+    }
+
+    #[test]
+    fn the_work_before_now_and_the_overshoot_no_longer_add_to_every_period() {
+        let before = Duration::from_millis(3);
+        let work = Duration::from_millis(10);
+        let overshoot = Duration::from_millis(1);
+        let old = average_period(None, 300, before, work, overshoot);
+        let new = average_period(Some(Default::default()), 300, before, work, overshoot);
+        // As before: 33.3 + 3 + 1 ms, 27.5 frames a second instead of 30.
+        assert!(
+            (micros(old) - micros(PERIOD + before + overshoot)).abs() < 50,
+            "{old:?}"
+        );
+        assert!((micros(new) - micros(PERIOD)).abs() < 50, "{new:?}");
+    }
+
+    #[test]
+    fn the_first_loop_sleeps_as_before() {
+        let mut deadline = StandardLoopDeadline::default();
+        let now = Instant::now();
+        let at = now + Duration::from_millis(10);
+        assert_eq!(
+            deadline.sleep_at(now, at, PERIOD),
+            PERIOD - Duration::from_millis(10)
+        );
+    }
+
+    #[test]
+    fn a_loop_a_little_late_is_made_up_by_the_next() {
+        let mut deadline = StandardLoopDeadline::default();
+        let start = Instant::now();
+        let first = deadline.sleep_at(start, start + Duration::from_millis(10), PERIOD);
+        let next_start = start + Duration::from_millis(10) + first;
+        // The second loop takes 40 ms, 7 ms more than a period.
+        let second_end = next_start + Duration::from_millis(40);
+        assert_eq!(
+            deadline.sleep_at(next_start, second_end, PERIOD),
+            Duration::ZERO
+        );
+        // The third is quick and ends its period on the deadline two periods after the first.
+        let third_end = second_end + Duration::from_millis(10);
+        let third = deadline.sleep_at(second_end, third_end, PERIOD);
+        assert_eq!(third_end + third, start + PERIOD * 3);
+    }
+
+    #[test]
+    fn a_loop_more_than_a_period_late_starts_again_without_a_burst() {
+        let mut deadline = StandardLoopDeadline::default();
+        let start = Instant::now();
+        let first = deadline.sleep_at(start, start + Duration::from_millis(10), PERIOD);
+        let next_start = start + Duration::from_millis(10) + first;
+        // A stall of 100 ms, three periods.
+        let stalled_end = next_start + Duration::from_millis(100);
+        assert_eq!(
+            deadline.sleep_at(next_start, stalled_end, PERIOD),
+            Duration::ZERO
+        );
+        // The next loop gets a full period again instead of catching up.
+        let next_end = stalled_end + Duration::from_millis(10);
+        assert_eq!(
+            deadline.sleep_at(stalled_end, next_end, PERIOD),
+            PERIOD - Duration::from_millis(10)
+        );
+    }
+
+    #[test]
+    fn a_new_period_starts_from_the_loop() {
+        let mut deadline = StandardLoopDeadline::default();
+        let start = Instant::now();
+        let first = deadline.sleep_at(start, start + Duration::from_millis(10), PERIOD);
+        let next_start = start + Duration::from_millis(10) + first;
+        let slower = Duration::from_millis(100);
+        let next_end = next_start + Duration::from_millis(10);
+        assert_eq!(
+            deadline.sleep_at(next_start, next_end, slower),
+            slower - Duration::from_millis(10)
         );
     }
 }
