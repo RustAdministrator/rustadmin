@@ -400,6 +400,32 @@ fn texture_encoding_failed(service: &str, reason: &str) {
 }
 
 /// Why this display is not encoded from a GPU texture: the host option, or a recent failure.
+/// Whether a user capture helper is offered shared textures, so that its frames reach a
+/// texture encoder without a copy through RAM: unless `capture-helper-gpu-texture` is `N`,
+/// unless texture encoding is off for the display, and only for the codecs a texture encoder
+/// takes.
+#[cfg(any(test, all(windows, feature = "vram")))]
+fn helper_textures_wanted(option: &str, texture_encoding_off: bool, codec: CodecFormat) -> bool {
+    option != "N" && !texture_encoding_off && matches!(codec, CodecFormat::H264 | CodecFormat::H265)
+}
+
+#[cfg(windows)]
+fn user_helper_textures_wanted(display: usize) -> bool {
+    #[cfg(feature = "vram")]
+    {
+        helper_textures_wanted(
+            &Config::get_option(hbb_common::config::keys::OPTION_CAPTURE_HELPER_GPU_TEXTURE),
+            texture_encoding_off_reason(&get_service_name(VideoSource::Monitor, display)).is_some(),
+            Encoder::negotiated_codec(),
+        )
+    }
+    #[cfg(not(feature = "vram"))]
+    {
+        let _ = display;
+        false
+    }
+}
+
 #[cfg(feature = "vram")]
 fn texture_encoding_off_reason(service: &str) -> Option<String> {
     let failure = TEXTURE_ENCODING_FAILURES
@@ -1480,6 +1506,7 @@ fn create_wgc_priority_capturer(
             current,
             width,
             height,
+            user_helper_textures_wanted(current),
             attempt,
         ) {
             Ok(capturer) => {
@@ -1560,6 +1587,7 @@ fn create_dxgi_priority_capturer(
             current,
             width,
             height,
+            user_helper_textures_wanted(current),
             attempt,
         ) {
             Ok(capturer) => {
@@ -3476,6 +3504,14 @@ fn run(vs: VideoService) -> ResultType<()> {
         let switched = c.set_gdi();
         log::info!("disable dxgi with option, fall back to gdi: switched={switched}");
     }
+    // A user capture helper that could not take shared textures: the encoder is fed through
+    // RAM, and the quality monitor says why, until the ladder tries textures again.
+    #[cfg(all(windows, feature = "vram"))]
+    if c.is_user_capture_helper() {
+        if let Some(reason) = c.texture_off_reason() {
+            texture_encoding_failed(&service_name, &reason);
+        }
+    }
     #[cfg(windows)]
     let capturer_is_gdi = c.is_gdi();
     #[cfg(not(windows))]
@@ -4224,7 +4260,17 @@ fn run(vs: VideoService) -> ResultType<()> {
                 c.is_gdi(),
                 c.is_cpu_only()
             );
-            VRamEncoder::set_fallback_gdi(sp.name(), true);
+            if c.is_user_capture_helper() {
+                // The helper gave up the shared textures: this display is encoded through RAM,
+                // and textures are tried again after the ladder's pause.
+                texture_encoding_failed(
+                    &sp.name(),
+                    &c.texture_off_reason()
+                        .unwrap_or_else(|| "the capture helper hands frames over in RAM".into()),
+                );
+            } else {
+                VRamEncoder::set_fallback_gdi(sp.name(), true);
+            }
             bail!("SWITCH");
         }
         if vs.source.is_monitor() {
@@ -5743,6 +5789,24 @@ fn handle_screenshot(screenshot: Screenshot, msg: String, w: usize, h: usize, da
         .send((hbb_common::tokio::time::Instant::now(), Arc::new(msg_out)))
     {
         log::error!("Failed to send screenshot, {}", e);
+    }
+}
+
+#[cfg(test)]
+mod helper_texture_tests {
+    use super::*;
+
+    #[test]
+    fn a_helper_is_offered_textures_for_h26x_unless_switched_off_or_texture_encoding_is_off() {
+        for codec in [CodecFormat::H264, CodecFormat::H265] {
+            assert!(helper_textures_wanted("", false, codec));
+            assert!(helper_textures_wanted("Y", false, codec));
+            assert!(!helper_textures_wanted("N", false, codec));
+            assert!(!helper_textures_wanted("", true, codec));
+        }
+        for codec in [CodecFormat::VP8, CodecFormat::VP9, CodecFormat::AV1] {
+            assert!(!helper_textures_wanted("", false, codec));
+        }
     }
 }
 

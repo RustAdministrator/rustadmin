@@ -68,6 +68,8 @@ pub mod input_service {
 
 #[cfg(any(windows, test))]
 mod capture_slots;
+#[cfg(any(all(windows, feature = "vram"), test))]
+mod capture_textures;
 mod connection;
 pub mod display_service;
 mod input_authorization;

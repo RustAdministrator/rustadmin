@@ -590,18 +590,26 @@ class _QualityMonitorState extends State<QualityMonitor> {
         return 'WGC';
       case 'Windows Graphics Capture Helper (CPU)':
         return 'WGC helper CPU';
+      case 'Windows Graphics Capture Helper (GPU)':
+        return 'WGC helper GPU';
       case 'DXGI Desktop Duplication':
         return 'DXGI';
       case 'DXGI Desktop Duplication Helper (CPU)':
         return 'DXGI helper CPU';
+      case 'DXGI Desktop Duplication Helper (GPU)':
+        return 'DXGI helper GPU';
       case 'Windows Magnification API':
         return 'WinMag CPU';
       case 'Windows GDI':
         return 'GDI';
       case 'Windows GDI Helper (CPU)':
         return 'GDI helper CPU';
+      case 'Windows GDI Helper (GPU upload)':
+        return 'GDI helper GPU upload';
       case 'User Capture Helper (CPU)':
         return 'Helper CPU';
+      case 'User Capture Helper (GPU)':
+        return 'Helper GPU';
       case 'GPU texture frame':
         return 'GPU texture';
       case 'CPU BGRA frame':

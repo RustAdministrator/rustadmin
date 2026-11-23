@@ -49,7 +49,9 @@ struct SlotInfo {
     width: AtomicU32,
     height: AtomicU32,
     tag: AtomicU32,
-    reserved: AtomicU32,
+    /// Zero: the frame is the slot's bytes. Otherwise the frame is in the shared texture of the
+    /// slot, of the texture generation given here (texture mode, `capture_textures`).
+    texture: AtomicU32,
 }
 
 /// The control block. It lives in the shared memory at an address aligned to eight bytes;
@@ -178,6 +180,8 @@ pub(crate) struct TakenFrame {
     pub width: usize,
     pub height: usize,
     pub tag: u32,
+    /// Zero: the frame is the slot's bytes; otherwise the texture generation it is in.
+    pub texture: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -235,6 +239,7 @@ impl SlotReader {
                 width: info.width.load(SeqCst) as usize,
                 height: info.height.load(SeqCst) as usize,
                 tag: info.tag.load(SeqCst),
+                texture: info.texture.load(SeqCst),
             });
         }
         Take::BeingWritten
@@ -346,6 +351,43 @@ impl SlotWriter {
         info.width.store(width as u32, SeqCst);
         info.height.store(height as u32, SeqCst);
         info.tag.store(tag, SeqCst);
+        info.texture.store(0, SeqCst);
+        self.publish_slot(control, ticket);
+    }
+
+    /// The frame is complete in the shared texture of the ticket's slot, of texture
+    /// generation `texture` (not zero): describe and publish it.
+    #[cfg(any(feature = "vram", test))]
+    pub(crate) fn publish_texture(
+        &mut self,
+        control: &SlotControl,
+        ticket: WriteTicket,
+        width: usize,
+        height: usize,
+        tag: u32,
+        texture: u32,
+    ) {
+        debug_assert_ne!(texture, 0);
+        let info = &control.slots[ticket.slot];
+        info.length.store(0, SeqCst);
+        info.width.store(width as u32, SeqCst);
+        info.height.store(height as u32, SeqCst);
+        info.tag.store(tag, SeqCst);
+        info.texture.store(texture, SeqCst);
+        self.publish_slot(control, ticket);
+    }
+
+    /// Gives the ticket back without publishing: the capture was dropped after its slot was
+    /// chosen. A publication that was withdrawn for the slot is put back; its frame is
+    /// untouched.
+    #[cfg(any(feature = "vram", test))]
+    pub(crate) fn abandon(&mut self, control: &SlotControl, ticket: WriteTicket) {
+        if let Some(published) = ticket.withdrawn {
+            control.published.store(published, SeqCst);
+        }
+    }
+
+    fn publish_slot(&mut self, control: &SlotControl, ticket: WriteTicket) {
         self.sequence += 1;
         control.written.fetch_add(1, SeqCst);
         control.published.store(
@@ -548,11 +590,55 @@ mod tests {
                 width: 1920,
                 height: 1080,
                 tag: 3,
+                texture: 0,
             })
         );
         // The same frame is not handed out twice.
         reader.release(&control);
         assert_eq!(reader.take(&control, 6), Take::Nothing);
+    }
+
+    #[test]
+    fn a_frame_in_a_texture_is_taken_as_one_and_bytes_after_it_are_bytes_again() {
+        let control = SlotControl::default();
+        control.init(FRAME, false);
+        let mut writer = SlotWriter::default();
+        let mut reader = SlotReader::default();
+        let ticket = writer.begin(&control, 0).unwrap();
+        writer.publish_texture(&control, ticket, 1920, 1080, 3, 7);
+        let frame = taken(reader.take(&control, 1));
+        assert_eq!((frame.texture, frame.length, frame.width), (7, 0, 1920));
+        reader.release(&control);
+        // Into the other slot, then back into the first one: the bytes there are no texture.
+        for _ in 0..2 {
+            let ticket = writer.begin(&control, 2).unwrap();
+            writer.publish(&control, ticket, FRAME, 16, 16, 3);
+        }
+        let frame = taken(reader.take(&control, 3));
+        assert_eq!((frame.slot, frame.texture, frame.length), (0, 0, FRAME));
+    }
+
+    #[test]
+    fn a_capture_dropped_after_its_slot_was_chosen_leaves_the_unread_frame_published() {
+        let control = SlotControl::default();
+        control.init(FRAME, false);
+        let mut writer = SlotWriter::default();
+        let mut reader = SlotReader::default();
+        let ticket = writer.begin(&control, 0).unwrap();
+        writer.publish(&control, ticket, FRAME, 16, 16, 1);
+        let first = taken(reader.take(&control, 1));
+        // The reader holds slot 0; the next frame goes into slot 1 and stays unread.
+        let ticket = writer.begin(&control, 2).unwrap();
+        writer.publish(&control, ticket, FRAME, 16, 16, 2);
+        // The one after it is meant for slot 1 too and withdraws that frame, then is dropped.
+        let ticket = writer.begin(&control, 3).unwrap();
+        assert_eq!(ticket.slot(), 1);
+        assert_eq!(reader.take(&control, 4), Take::BeingWritten);
+        writer.abandon(&control, ticket);
+        reader.release(&control);
+        let second = taken(reader.take(&control, 5));
+        assert_eq!((second.slot, second.tag), (1, 2));
+        assert_eq!(second.sequence, first.sequence + 1);
     }
 
     #[test]
