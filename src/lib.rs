@@ -43,7 +43,6 @@ mod lan;
 mod cm_file_flow;
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod cliprdr_gate;
-#[cfg(not(any(target_os = "ios")))]
 mod file_message_limit;
 #[cfg(not(any(target_os = "ios")))]
 mod server_mode_policy;

@@ -6,15 +6,18 @@
 //! error that the other side can show, and the session goes on.
 
 use hbb_common::{
-    fs,
-    message_proto::{file_action, file_response, message, Message},
+    message_proto::{file_action, message, Message},
     protobuf::Message as _,
 };
+
+#[cfg(any(not(target_os = "ios"), test))]
+use hbb_common::{fs, message_proto::file_response};
 
 fn kib(bytes: usize) -> usize {
     bytes.div_ceil(1024)
 }
 
+#[cfg(any(not(target_os = "ios"), test))]
 fn listing_too_large(entries: usize, size: usize, limit: usize) -> String {
     format!(
         "This folder has too many entries to list over this connection ({} entries, {} KiB, \
@@ -27,6 +30,7 @@ fn listing_too_large(entries: usize, size: usize, limit: usize) -> String {
 
 /// The error to send in place of `message` when it is a directory listing that the stream
 /// cannot carry. `limit` is `Stream::file_message_limit()`.
+#[cfg(any(not(target_os = "ios"), test))]
 pub(crate) fn oversize_listing_reply(message: &Message, limit: Option<usize>) -> Option<Message> {
     let limit = limit?;
     let Some(message::Union::FileResponse(response)) = &message.union else {
@@ -47,6 +51,7 @@ pub(crate) fn oversize_listing_reply(message: &Message, limit: Option<usize>) ->
 }
 
 /// The same for a message that is already serialized.
+#[cfg(any(not(target_os = "ios"), test))]
 pub(crate) fn oversize_listing_reply_for_bytes(
     bytes: &[u8],
     limit: Option<usize>,
