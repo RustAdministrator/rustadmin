@@ -339,6 +339,20 @@ fn capture_backend_allows_user_helper_retry(preference: CaptureBackend) -> bool 
 /// desktop the first frames legitimately do not come, and a backend that was
 /// chosen by hand must stay what was chosen.
 #[cfg(any(windows, test))]
+/// Whether the start-up fallback for a capturer that shows no image (the magnifier, then GDI)
+/// may replace this capturer. Not a user capture helper: it has its own start-up handling (the
+/// start-up timeout, the GDI start inside the helper), and its first frame comes later than
+/// the four tries of this fallback. It used to be kept out as CPU-only; in texture mode it is
+/// not CPU-only.
+fn startup_no_image_fallback_applies(
+    is_gdi: bool,
+    is_cpu_only: bool,
+    is_user_capture_helper: bool,
+    preference: CaptureBackend,
+) -> bool {
+    !is_gdi && !is_cpu_only && !is_user_capture_helper && startup_fallback_permitted(preference)
+}
+
 fn startup_fallback_permitted(preference: CaptureBackend) -> bool {
     matches!(
         preference,
@@ -2356,6 +2370,44 @@ mod tests {
         assert!(super::gdi_fallback_allowed(INVALID_PRIVACY_MODE_CONN_ID));
         assert!(!super::gdi_fallback_allowed(1));
         assert!(!super::gdi_fallback_allowed(42));
+    }
+
+    #[test]
+    fn a_user_capture_helper_is_not_replaced_by_the_no_image_fallback() {
+        use CaptureBackend::*;
+        // A direct DXGI or WGC capturer that shows no image is replaced, with Auto only.
+        assert!(super::startup_no_image_fallback_applies(
+            false,
+            false,
+            false,
+            CaptureBackendAuto
+        ));
+        assert!(!super::startup_no_image_fallback_applies(
+            false,
+            false,
+            false,
+            CaptureBackendWgc
+        ));
+        assert!(!super::startup_no_image_fallback_applies(
+            true,
+            false,
+            false,
+            CaptureBackendAuto
+        ));
+        // The helper has its own start-up handling, whether it hands frames over in RAM or,
+        // in texture mode, on the GPU (then it is not CPU-only).
+        assert!(!super::startup_no_image_fallback_applies(
+            false,
+            true,
+            true,
+            CaptureBackendAuto
+        ));
+        assert!(!super::startup_no_image_fallback_applies(
+            false,
+            false,
+            true,
+            CaptureBackendAuto
+        ));
     }
 
     #[test]
@@ -4630,9 +4682,12 @@ fn run(vs: VideoService) -> ResultType<()> {
                 }
                 #[cfg(windows)]
                 if try_gdi > 0
-                    && !c.is_gdi()
-                    && !c.is_cpu_only()
-                    && startup_fallback_permitted(*CAPTURE_BACKEND_PREFERENCE.lock().unwrap())
+                    && startup_no_image_fallback_applies(
+                        c.is_gdi(),
+                        c.is_cpu_only(),
+                        c.is_user_capture_helper(),
+                        *CAPTURE_BACKEND_PREFERENCE.lock().unwrap(),
+                    )
                 {
                     if try_gdi > 3 {
                         if try_set_magnifier_fallback(&mut c, "no_image_mag") {
