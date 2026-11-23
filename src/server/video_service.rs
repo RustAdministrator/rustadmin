@@ -339,6 +339,20 @@ fn capture_backend_allows_user_helper_retry(preference: CaptureBackend) -> bool 
 /// desktop the first frames legitimately do not come, and a backend that was
 /// chosen by hand must stay what was chosen.
 #[cfg(any(windows, test))]
+/// Whether the start-up fallback for a capturer that shows no image (the magnifier, then GDI)
+/// may replace this capturer. Not a user capture helper: it has its own start-up handling (the
+/// start-up timeout, the GDI start inside the helper), and its first frame comes later than
+/// the four tries of this fallback. It used to be kept out as CPU-only; in texture mode it is
+/// not CPU-only.
+fn startup_no_image_fallback_applies(
+    is_gdi: bool,
+    is_cpu_only: bool,
+    is_user_capture_helper: bool,
+    preference: CaptureBackend,
+) -> bool {
+    !is_gdi && !is_cpu_only && !is_user_capture_helper && startup_fallback_permitted(preference)
+}
+
 fn startup_fallback_permitted(preference: CaptureBackend) -> bool {
     matches!(
         preference,
@@ -400,6 +414,32 @@ fn texture_encoding_failed(service: &str, reason: &str) {
 }
 
 /// Why this display is not encoded from a GPU texture: the host option, or a recent failure.
+/// Whether a user capture helper is offered shared textures, so that its frames reach a
+/// texture encoder without a copy through RAM: unless `capture-helper-gpu-texture` is `N`,
+/// unless texture encoding is off for the display, and only for the codecs a texture encoder
+/// takes.
+#[cfg(any(test, all(windows, feature = "vram")))]
+fn helper_textures_wanted(option: &str, texture_encoding_off: bool, codec: CodecFormat) -> bool {
+    option != "N" && !texture_encoding_off && matches!(codec, CodecFormat::H264 | CodecFormat::H265)
+}
+
+#[cfg(windows)]
+fn user_helper_textures_wanted(display: usize) -> bool {
+    #[cfg(feature = "vram")]
+    {
+        helper_textures_wanted(
+            &Config::get_option(hbb_common::config::keys::OPTION_CAPTURE_HELPER_GPU_TEXTURE),
+            texture_encoding_off_reason(&get_service_name(VideoSource::Monitor, display)).is_some(),
+            Encoder::negotiated_codec(),
+        )
+    }
+    #[cfg(not(feature = "vram"))]
+    {
+        let _ = display;
+        false
+    }
+}
+
 #[cfg(feature = "vram")]
 fn texture_encoding_off_reason(service: &str) -> Option<String> {
     let failure = TEXTURE_ENCODING_FAILURES
@@ -1480,6 +1520,7 @@ fn create_wgc_priority_capturer(
             current,
             width,
             height,
+            user_helper_textures_wanted(current),
             attempt,
         ) {
             Ok(capturer) => {
@@ -1560,6 +1601,7 @@ fn create_dxgi_priority_capturer(
             current,
             width,
             height,
+            user_helper_textures_wanted(current),
             attempt,
         ) {
             Ok(capturer) => {
@@ -2328,6 +2370,44 @@ mod tests {
         assert!(super::gdi_fallback_allowed(INVALID_PRIVACY_MODE_CONN_ID));
         assert!(!super::gdi_fallback_allowed(1));
         assert!(!super::gdi_fallback_allowed(42));
+    }
+
+    #[test]
+    fn a_user_capture_helper_is_not_replaced_by_the_no_image_fallback() {
+        use CaptureBackend::*;
+        // A direct DXGI or WGC capturer that shows no image is replaced, with Auto only.
+        assert!(super::startup_no_image_fallback_applies(
+            false,
+            false,
+            false,
+            CaptureBackendAuto
+        ));
+        assert!(!super::startup_no_image_fallback_applies(
+            false,
+            false,
+            false,
+            CaptureBackendWgc
+        ));
+        assert!(!super::startup_no_image_fallback_applies(
+            true,
+            false,
+            false,
+            CaptureBackendAuto
+        ));
+        // The helper has its own start-up handling, whether it hands frames over in RAM or,
+        // in texture mode, on the GPU (then it is not CPU-only).
+        assert!(!super::startup_no_image_fallback_applies(
+            false,
+            true,
+            true,
+            CaptureBackendAuto
+        ));
+        assert!(!super::startup_no_image_fallback_applies(
+            false,
+            false,
+            true,
+            CaptureBackendAuto
+        ));
     }
 
     #[test]
@@ -3476,6 +3556,14 @@ fn run(vs: VideoService) -> ResultType<()> {
         let switched = c.set_gdi();
         log::info!("disable dxgi with option, fall back to gdi: switched={switched}");
     }
+    // A user capture helper that could not take shared textures: the encoder is fed through
+    // RAM, and the quality monitor says why, until the ladder tries textures again.
+    #[cfg(all(windows, feature = "vram"))]
+    if c.is_user_capture_helper() {
+        if let Some(reason) = c.texture_off_reason() {
+            texture_encoding_failed(&service_name, &reason);
+        }
+    }
     #[cfg(windows)]
     let capturer_is_gdi = c.is_gdi();
     #[cfg(not(windows))]
@@ -4224,7 +4312,17 @@ fn run(vs: VideoService) -> ResultType<()> {
                 c.is_gdi(),
                 c.is_cpu_only()
             );
-            VRamEncoder::set_fallback_gdi(sp.name(), true);
+            if c.is_user_capture_helper() {
+                // The helper gave up the shared textures: this display is encoded through RAM,
+                // and textures are tried again after the ladder's pause.
+                texture_encoding_failed(
+                    &sp.name(),
+                    &c.texture_off_reason()
+                        .unwrap_or_else(|| "the capture helper hands frames over in RAM".into()),
+                );
+            } else {
+                VRamEncoder::set_fallback_gdi(sp.name(), true);
+            }
             bail!("SWITCH");
         }
         if vs.source.is_monitor() {
@@ -4584,9 +4682,12 @@ fn run(vs: VideoService) -> ResultType<()> {
                 }
                 #[cfg(windows)]
                 if try_gdi > 0
-                    && !c.is_gdi()
-                    && !c.is_cpu_only()
-                    && startup_fallback_permitted(*CAPTURE_BACKEND_PREFERENCE.lock().unwrap())
+                    && startup_no_image_fallback_applies(
+                        c.is_gdi(),
+                        c.is_cpu_only(),
+                        c.is_user_capture_helper(),
+                        *CAPTURE_BACKEND_PREFERENCE.lock().unwrap(),
+                    )
                 {
                     if try_gdi > 3 {
                         if try_set_magnifier_fallback(&mut c, "no_image_mag") {
@@ -5743,6 +5844,24 @@ fn handle_screenshot(screenshot: Screenshot, msg: String, w: usize, h: usize, da
         .send((hbb_common::tokio::time::Instant::now(), Arc::new(msg_out)))
     {
         log::error!("Failed to send screenshot, {}", e);
+    }
+}
+
+#[cfg(test)]
+mod helper_texture_tests {
+    use super::*;
+
+    #[test]
+    fn a_helper_is_offered_textures_for_h26x_unless_switched_off_or_texture_encoding_is_off() {
+        for codec in [CodecFormat::H264, CodecFormat::H265] {
+            assert!(helper_textures_wanted("", false, codec));
+            assert!(helper_textures_wanted("Y", false, codec));
+            assert!(!helper_textures_wanted("N", false, codec));
+            assert!(!helper_textures_wanted("", true, codec));
+        }
+        for codec in [CodecFormat::VP8, CodecFormat::VP9, CodecFormat::AV1] {
+            assert!(!helper_textures_wanted("", false, codec));
+        }
     }
 }
 

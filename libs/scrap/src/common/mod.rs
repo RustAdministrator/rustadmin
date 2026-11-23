@@ -170,6 +170,13 @@ pub trait TraitCapturer {
 
     #[cfg(feature = "vram")]
     fn set_output_texture(&mut self, texture: bool);
+
+    /// Why frames that could come as GPU textures come through RAM, if the capturer gave that
+    /// up (the Windows user capture helper).
+    #[cfg(feature = "vram")]
+    fn texture_off_reason(&self) -> Option<String> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
