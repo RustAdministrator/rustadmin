@@ -32,6 +32,8 @@ class _CodecBindings implements Rustadmin {
       case #mainGetUserDefaultOption:
         return '';
       case #mainIsOptionFixed:
+      case #mainHasVram:
+      case #isOutgoingOnly:
         return false;
       case #translate:
         return invocation.namedArguments[#name] as String;
@@ -51,6 +53,9 @@ Widget _settings({
   String viewerResourceMode = kResourceModeNormal,
   ValueChanged<String>? onHostResourceMode,
   ValueChanged<String>? onViewerResourceMode,
+  bool preferHardware = false,
+  bool showTextureEncode = false,
+  ValueChanged<bool?>? onTextureEncode,
 }) => MaterialApp(
   theme: ThemeData(brightness: brightness),
   builder: (context, child) => MediaQuery(
@@ -77,7 +82,9 @@ Widget _settings({
           },
           encoder: 'auto',
           decoder: 'auto',
-          preferHardware: false,
+          preferHardware: preferHardware,
+          showTextureEncode: showTextureEncode,
+          onTextureEncode: onTextureEncode,
           hostResourceMode: hostResourceMode,
           viewerResourceMode: viewerResourceMode,
           onPreferHardware: onPreferHardware,
@@ -115,6 +122,34 @@ void main() {
       final reads = native.capabilityReads;
       await tester.pump(const Duration(seconds: 2));
       expect(native.capabilityReads, reads);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'encoding from a GPU texture is a choice of vram builds and needs a hardware codec',
+    (tester) async {
+      bool? chosen;
+      final box = find.byKey(const ValueKey('texture-encode'));
+      await tester.pumpWidget(_settings());
+      expect(box, findsNothing);
+      await tester.pumpWidget(
+        _settings(showTextureEncode: true, onTextureEncode: (v) => chosen = v),
+      );
+      expect(box, findsOneWidget);
+      expect(find.text('texture_encode_tip'), findsOneWidget);
+      expect(tester.widget<CheckboxListTile>(box).onChanged, isNull);
+      await tester.pumpWidget(
+        _settings(
+          showTextureEncode: true,
+          preferHardware: true,
+          onTextureEncode: (v) => chosen = v,
+        ),
+      );
+      expect(tester.widget<CheckboxListTile>(box).value, isTrue);
+      await tester.tap(box);
+      await tester.pump();
+      expect(chosen, isFalse);
       expect(tester.takeException(), isNull);
     },
   );
