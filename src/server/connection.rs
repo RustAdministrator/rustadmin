@@ -827,6 +827,10 @@ const VIDEO_DELIVERY_MIN_REFRESH_COOLDOWN: Duration = Duration::from_secs(1);
 const VIDEO_DELIVERY_MAX_RECOVERY_REISSUES: u8 = 2;
 const VIDEO_DELIVERY_REISSUE_COOLDOWN_MULTIPLIER: u32 = 3;
 const VIDEO_DELIVERY_RECOVERY_CYCLE_COOLDOWN: Duration = Duration::from_secs(10);
+/// A viewer repeats a strict request that was not answered after a second at the earliest, and
+/// sends none in between. One that follows its previous strict request sooner than this is
+/// not a repeat: the viewer got a keyframe in between and lost frames again.
+const VIDEO_DELIVERY_VIEWER_REPEAT_FLOOR: Duration = Duration::from_millis(750);
 const QUIC_ADVISORY_REFRESH_CWND_MULTIPLIER: u64 = 2;
 // Feedback can be emitted after receive but before asynchronous decode/render.
 // Older viewers may never send the final same-frame update on an idle desktop.
@@ -892,6 +896,20 @@ struct VideoDeliveryState {
     last_refresh_at: Option<Instant>,
     feedback_observed: bool,
     recovery_target_frame_id: Option<u64>,
+    /// The first keyframe sent after the recovery was asked for, for a viewer that keeps
+    /// decoding deltas after a loss. Decoding that frame is what ends its recovery.
+    recovery_keyframe_id: Option<u64>,
+    /// The newest keyframe sent since the recovery was asked for, whatever the codec.
+    recovery_last_keyframe_id: Option<u64>,
+    /// The viewer has that keyframe, asked strictly and named a frame beyond it: the keyframe
+    /// is not what it waits for, it has lost frames again.
+    viewer_lost_frames_after_keyframe: bool,
+    /// The newest frame the viewer's feedback named as received. A viewer with the keyframe
+    /// barrier holds the deltas of a keyframe back until the keyframe is there, so this id
+    /// passes a keyframe only when the keyframe has arrived.
+    viewer_received_frame_id: u64,
+    /// When the viewer last asked strictly.
+    last_strict_request_at: Option<Instant>,
     recovery_generation: u64,
     recovery_reissues: u8,
     recovery_progress_at: Option<Instant>,
@@ -917,6 +935,11 @@ impl VideoDeliveryState {
             last_refresh_at: None,
             feedback_observed: false,
             recovery_target_frame_id: None,
+            recovery_keyframe_id: None,
+            recovery_last_keyframe_id: None,
+            viewer_lost_frames_after_keyframe: false,
+            viewer_received_frame_id: 0,
+            last_strict_request_at: None,
             recovery_generation: 0,
             recovery_reissues: 0,
             recovery_progress_at: None,
@@ -1023,9 +1046,34 @@ fn should_coalesce_quic_strict_refresh(
         })
 }
 
-#[derive(Default)]
 struct VideoDeliveryController {
     by_display: HashMap<i32, VideoDeliveryState>,
+    /// The kill switch `video-recovery-after-keyframe`: unset, a viewer that lost frames
+    /// right behind a recovery keyframe is answered after one refresh cooldown.
+    answer_loss_after_keyframe: bool,
+}
+
+impl Default for VideoDeliveryController {
+    fn default() -> Self {
+        Self {
+            by_display: HashMap::new(),
+            answer_loss_after_keyframe: true,
+        }
+    }
+}
+
+/// Whether one of the encoded frames of a video message is a keyframe, for every codec.
+fn video_frame_has_keyframe(frame: &VideoFrame) -> bool {
+    match frame.union.as_ref() {
+        Some(
+            video_frame::Union::Vp8s(frames)
+            | video_frame::Union::Vp9s(frames)
+            | video_frame::Union::Av1s(frames)
+            | video_frame::Union::H264s(frames)
+            | video_frame::Union::H265s(frames),
+        ) => frames.frames.iter().any(|frame| frame.key),
+        _ => false,
+    }
 }
 
 impl VideoDeliveryController {
@@ -1050,10 +1098,36 @@ impl VideoDeliveryController {
             .saturating_mul(VIDEO_DELIVERY_REISSUE_COOLDOWN_MULTIPLIER)
     }
 
+    fn set_answer_loss_after_keyframe(&mut self, enabled: bool) {
+        self.answer_loss_after_keyframe = enabled;
+    }
+
     fn clear_recovery_cycle(state: &mut VideoDeliveryState) {
         state.recovery_target_frame_id = None;
+        state.recovery_keyframe_id = None;
+        state.recovery_last_keyframe_id = None;
+        state.viewer_lost_frames_after_keyframe = false;
         state.recovery_reissues = 0;
         state.recovery_progress_at = None;
+    }
+
+    /// Whether a recovery that was asked for is still open.
+    ///
+    /// A viewer that stops at a lost frame (H.264, H.265, AV1) has recovered when it decodes
+    /// anything beyond what was sent when the recovery was asked for. A VP8 or VP9 viewer goes
+    /// on decoding the deltas that were already on their way, on a damaged reference; for it
+    /// only the keyframe sent for the request, once decoded, closes the recovery.
+    fn recovery_unresolved(state: &VideoDeliveryState) -> bool {
+        let Some(target) = state.recovery_target_frame_id else {
+            return false;
+        };
+        if state.viewer_continues_deltas_after_loss {
+            !state
+                .recovery_keyframe_id
+                .is_some_and(|keyframe| state.highest_decoded_frame_id >= keyframe)
+        } else {
+            state.highest_decoded_frame_id <= target
+        }
     }
 
     fn issue_recovery(
@@ -1076,13 +1150,33 @@ impl VideoDeliveryController {
             }
             state.recovery_generation = state.recovery_generation.saturating_add(1);
             state.recovery_target_frame_id = None;
+            state.recovery_keyframe_id = None;
+            state.recovery_last_keyframe_id = None;
+            state.viewer_lost_frames_after_keyframe = false;
             state.recovery_reissues = 0;
             state.recovery_progress_at = None;
             recovery_reissue = 0;
-        } else if state
-            .recovery_target_frame_id
-            .is_some_and(|target| state.highest_decoded_frame_id <= target)
-        {
+        } else if Self::recovery_unresolved(state) && state.viewer_lost_frames_after_keyframe {
+            // The viewer has frames from beyond the keyframe of this recovery and asks again:
+            // the keyframe is not still on its way, frames were lost after it. That is a new
+            // loss. It gets a new recovery as soon as the cooldown every refresh observes is
+            // over, not after the wait for a reissue, which is three times as long; until
+            // then the viewer shows nothing.
+            if state
+                .last_refresh_at
+                .is_some_and(|last| now.saturating_duration_since(last) < refresh_cooldown)
+            {
+                return None;
+            }
+            state.recovery_generation = state.recovery_generation.saturating_add(1);
+            state.recovery_target_frame_id = Some(state.host_highest_sent_frame_id);
+            state.recovery_keyframe_id = None;
+            state.recovery_last_keyframe_id = None;
+            state.viewer_lost_frames_after_keyframe = false;
+            state.recovery_reissues = 0;
+            state.recovery_progress_at = Some(now);
+            recovery_reissue = 0;
+        } else if Self::recovery_unresolved(state) {
             let retry_from = state
                 .recovery_progress_at
                 .into_iter()
@@ -1159,6 +1253,19 @@ impl VideoDeliveryController {
             return;
         }
         state.viewer_continues_deltas_after_loss = viewer_continues_deltas_after_loss(frame);
+        if state
+            .recovery_target_frame_id
+            .is_some_and(|target| frame.frame_id > target)
+            && state
+                .recovery_last_keyframe_id
+                .map_or(true, |last| frame.frame_id > last)
+            && video_frame_has_keyframe(frame)
+        {
+            state.recovery_last_keyframe_id = Some(frame.frame_id);
+            if state.viewer_continues_deltas_after_loss && state.recovery_keyframe_id.is_none() {
+                state.recovery_keyframe_id = Some(frame.frame_id);
+            }
+        }
         let previous_host_frontier = state.host_highest_sent_frame_id;
         if frame.frame_id > previous_host_frontier {
             state.host_highest_sent_frame_id = frame.frame_id;
@@ -1195,10 +1302,18 @@ impl VideoDeliveryController {
             state.decode_pending_since = Some(now);
         }
         state.highest_sent_frame_id = state.highest_sent_frame_id.max(feedback.received_frame_id);
+        state.viewer_received_frame_id = state
+            .viewer_received_frame_id
+            .max(feedback.received_frame_id);
         if feedback.decoded_frame_id > state.highest_decoded_frame_id {
             state.highest_decoded_frame_id = feedback.decoded_frame_id;
             state.recovery_cycle_cooldown_until = None;
-            if state.recovery_target_frame_id.is_some() {
+            // Deltas decoded on a damaged reference are not progress of a recovery: while
+            // the keyframe for it has not even been sent, the request is issued again.
+            if state.recovery_target_frame_id.is_some()
+                && (!state.viewer_continues_deltas_after_loss
+                    || state.recovery_keyframe_id.is_some())
+            {
                 state.recovery_progress_at = Some(now);
             }
             state.decode_pending_since =
@@ -1207,10 +1322,7 @@ impl VideoDeliveryController {
                 } else {
                     Some(now)
                 };
-            if state
-                .recovery_target_frame_id
-                .is_some_and(|target| state.highest_decoded_frame_id > target)
-            {
+            if state.recovery_target_frame_id.is_some() && !Self::recovery_unresolved(state) {
                 Self::clear_recovery_cycle(state);
                 state.phase = VideoDeliveryPhase::Healthy;
             } else if state.recovery_target_frame_id.is_none() {
@@ -1283,6 +1395,7 @@ impl VideoDeliveryController {
         if !valid_video_reference_refresh(request) {
             return Err(VideoReferenceRefreshError::InvalidRequest);
         }
+        let answer_loss_after_keyframe = self.answer_loss_after_keyframe;
         let Some(state) = self.by_display.get_mut(&request.display) else {
             return Err(VideoReferenceRefreshError::UnknownDisplay);
         };
@@ -1294,6 +1407,27 @@ impl VideoDeliveryController {
                 return Err(VideoReferenceRefreshError::StaleRequest);
             }
         }
+        // A strict request during an open recovery is about a new loss only if the viewer
+        // has the keyframe of that recovery. The frame the request names does not show it:
+        // deltas sent after a keyframe can overtake it. What shows it is feedback that names
+        // the keyframe as received, or a strict request that comes sooner after the last one
+        // than a viewer repeats an unanswered request. Without either, the keyframe may
+        // still be on its way, on a slow link for longer than a cooldown, and the request
+        // waits for the reissue as before.
+        let follows_soon = state.last_strict_request_at.is_some_and(|last| {
+            now.saturating_duration_since(last) < VIDEO_DELIVERY_VIEWER_REPEAT_FLOOR
+        });
+        if answer_loss_after_keyframe
+            && request.strict_recovery
+            && state.recovery_target_frame_id.is_some()
+            && state.recovery_last_keyframe_id.is_some_and(|keyframe| {
+                request.received_frame_id > keyframe
+                    && (state.viewer_received_frame_id >= keyframe || follows_soon)
+            })
+        {
+            state.viewer_lost_frames_after_keyframe = true;
+        }
+        state.last_strict_request_at = request.strict_recovery.then_some(now);
         let progress_at = if state.recovery_target_frame_id.is_some() {
             state
                 .recovery_progress_at
@@ -1829,6 +1963,13 @@ pub struct Connection {
     // Used to filter stale responses (FileBlockFromCM, FileReadDone, etc.) for
     // cancelled or unknown jobs.
     cm_read_job_ids: HashSet<i32>,
+    // What the connection manager produced for the peer (file blocks and the messages
+    // around them) and the stream has not taken yet. See `cm_file_flow`.
+    cm_file_relay: crate::cm_file_flow::CmFileRelay,
+    // The file timer runs fast only while the relay holds something.
+    cm_file_relay_timer_armed: bool,
+    // The list of read jobs goes to the connection manager a few times a second.
+    transfer_log_throttle: crate::cm_file_flow::TransferLogThrottle,
     terminal_service_id: String,
     terminal_persistent: bool,
     // The user token must be set when terminal is enabled.
@@ -1902,6 +2043,13 @@ impl Subscriber for ConnInner {
 }
 
 const TEST_DELAY_TIMEOUT: Duration = Duration::from_secs(1);
+/// After this long without an answer a delay measurement counts as lost and a new one starts.
+const TEST_DELAY_ANSWER_LOST_AFTER: Duration = Duration::from_secs(5);
+
+/// Whether the measurement that was sent `elapsed` ago has to be given up.
+fn test_delay_answer_lost(elapsed: Option<Duration>) -> bool {
+    elapsed.is_some_and(|elapsed| elapsed >= TEST_DELAY_ANSWER_LOST_AFTER)
+}
 const SEC30: Duration = Duration::from_secs(30);
 const H1: Duration = Duration::from_secs(3600);
 const MILLI1: Duration = Duration::from_millis(1);
@@ -2167,6 +2315,9 @@ impl Connection {
             printer_data: Vec::new(),
             tx_post_seq,
             cm_read_job_ids: HashSet::new(),
+            cm_file_relay: Default::default(),
+            cm_file_relay_timer_armed: false,
+            transfer_log_throttle: Default::default(),
             terminal_service_id: "".to_owned(),
             terminal_persistent: false,
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -2389,15 +2540,23 @@ impl Connection {
                             }
                         }
                         ipc::Data::RawMessage(bytes) => {
-                            let bytes_len = bytes.len();
-                            if let Err(err) = conn.stream.send_raw(bytes).await {
-                                log::warn!(
-                                    "#{} diag raw IPC stream send failed: bytes={}, err={}",
-                                    conn.inner.id(),
-                                    bytes_len,
-                                    err
-                                );
+                            // Kept in order with the manager's file blocks and retried when
+                            // the stream is full, instead of being dropped.
+                            match crate::file_message_limit::oversize_listing_reply_for_bytes(
+                                &bytes,
+                                conn.stream.file_message_limit(),
+                            ) {
+                                Some(error) => {
+                                    log::warn!(
+                                        "#{} a directory listing of {} bytes does not fit this stream; an error is sent instead",
+                                        conn.inner.id(),
+                                        bytes.len()
+                                    );
+                                    conn.cm_file_relay.push_message(error);
+                                }
+                                None => conn.cm_file_relay.push_raw(bytes),
                             }
+                            conn.flush_cm_file_relay().await;
                         }
                         #[cfg(target_os = "windows")]
                         ipc::Data::ClipboardFile(clip) => {
@@ -2409,6 +2568,15 @@ impl Connection {
                                     "Blocked clipboard file message to peer for {} session",
                                     conn.session_auth_kind.as_str()
                                 );
+                                continue;
+                            }
+                            if !crate::cliprdr_gate::direction_check_passes(
+                                &clip,
+                                true,
+                                crate::clipboard::is_local_to_remote_clipboard_allowed(ClipboardSide::Host),
+                                crate::clipboard::is_remote_to_local_clipboard_allowed(ClipboardSide::Host),
+                                "host",
+                            ) {
                                 continue;
                             }
                             match clip {
@@ -2481,9 +2649,9 @@ impl Connection {
                                 conn.handle_read_job_init_result(id, file_num, include_hidden, result).await;
                             }
                         }
-                        ipc::Data::FileBlockFromCM { id, file_num, data, compressed, conn_id } => {
+                        ipc::Data::FileBlockFromCM { id, file_num, data, compressed, conn_id, blk_id } => {
                             if conn_id == conn.inner.id() {
-                                conn.handle_file_block_from_cm(id, file_num, data, compressed).await;
+                                conn.handle_file_block_from_cm(id, file_num, data, compressed, blk_id).await;
                             }
                         }
                         ipc::Data::FileReadDone { id, file_num, conn_id } => {
@@ -2539,8 +2707,11 @@ impl Connection {
                     }
                 },
                 _ = conn.file_timer.tick() => {
+                    conn.flush_cm_file_relay().await;
                     if !conn.read_jobs.is_empty() {
-                        conn.send_to_cm(ipc::Data::FileTransferLog(("transfer".to_string(), fs::serialize_transfer_jobs(&conn.read_jobs))));
+                        if conn.transfer_log_throttle.due(std::time::Instant::now(), conn.read_jobs.len()) {
+                            conn.send_to_cm(ipc::Data::FileTransferLog(("transfer".to_string(), fs::serialize_transfer_jobs(&conn.read_jobs))));
+                        }
                         match fs::handle_read_jobs(&mut conn.read_jobs, &mut conn.stream).await {
                             Ok(log) => {
                                 if !log.is_empty() {
@@ -2552,7 +2723,8 @@ impl Connection {
                                 break;
                             }
                         }
-                    } else {
+                    } else if conn.cm_file_relay.is_empty() {
+                        conn.cm_file_relay_timer_armed = false;
                         conn.file_timer = crate::rustdesk_interval(time::interval_at(Instant::now() + SEC30, SEC30));
                     }
                 }
@@ -2842,6 +3014,11 @@ impl Connection {
                     if last_recv_time.elapsed() >= SEC30 {
                         conn.on_close("Timeout", true).await;
                         break;
+                    }
+                    // An answer that never came must not stop the measurement: the peer queues
+                    // it without waiting and can drop it. Start again after a while.
+                    if test_delay_answer_lost(conn.last_test_delay.map(|sent| sent.elapsed())) {
+                        conn.last_test_delay = None;
                     }
                     // The control end will jump out of the loop after receiving LoginResponse and will not reply to the TestDelay
                     if conn.last_test_delay.is_none() && !(conn.port_forward_socket.is_some() && conn.authorized) {
@@ -5551,6 +5728,9 @@ impl Connection {
         let now = Instant::now();
         #[cfg(feature = "quic-transport")]
         let previous_delivery_state = self.video_delivery.snapshot_display(request.display);
+        self.video_delivery.set_answer_loss_after_keyframe(
+            Config::get_option(config::keys::OPTION_VIDEO_RECOVERY_AFTER_KEYFRAME) != "N",
+        );
         let result =
             self.video_delivery
                 .on_reference_refresh_request(&request, now, self.network_delay);
@@ -6460,6 +6640,38 @@ impl Connection {
                     } else if let Some(clip) = msg_2_clip(clip) {
                         #[cfg(target_os = "windows")]
                         {
+                            if let Some(size) =
+                                crate::cliprdr_gate::note_file_contents_request(&clip)
+                            {
+                                log::info!(
+                                    "#{} largest file contents request from the peer so far: {} bytes",
+                                    self.inner.id(),
+                                    size
+                                );
+                            }
+                            if let Some(refusal) =
+                                crate::cliprdr_gate::refusal_for_oversize_request(&clip)
+                            {
+                                log::warn!(
+                                    "#{} a file contents request above the limit from the peer is refused",
+                                    self.inner.id()
+                                );
+                                self.send(crate::clipboard_file::clip_2_msg(refusal)).await;
+                                return true;
+                            }
+                            if !crate::cliprdr_gate::direction_check_passes(
+                                &clip,
+                                false,
+                                crate::clipboard::is_local_to_remote_clipboard_allowed(
+                                    ClipboardSide::Host,
+                                ),
+                                crate::clipboard::is_remote_to_local_clipboard_allowed(
+                                    ClipboardSide::Host,
+                                ),
+                                "host",
+                            ) {
+                                return true;
+                            }
                             self.send_to_cm(ipc::Data::ClipboardFile(clip));
                         }
                         #[cfg(feature = "unix-file-copy-paste")]
@@ -6576,13 +6788,38 @@ impl Connection {
                                         conn_id: self.inner.id(),
                                     });
                                 } else {
-                                    match fs::get_recursive_files(&f.path, f.include_hidden) {
+                                    // Stops as soon as the limit is passed. The walk reads
+                                    // the disk, so it runs off the async threads.
+                                    let walk_path = f.path.clone();
+                                    let include_hidden = f.include_hidden;
+                                    let max_files =
+                                        crate::ui_cm_interface::get_max_validated_files();
+                                    let walked =
+                                        hbb_common::tokio::task::spawn_blocking(move || {
+                                            fs::get_recursive_files_limited(
+                                                &walk_path,
+                                                include_hidden,
+                                                max_files,
+                                            )
+                                        })
+                                        .await
+                                        .unwrap_or_else(
+                                            |err| {
+                                                Err(hbb_common::anyhow::anyhow!(
+                                                    "walk failed: {}",
+                                                    err
+                                                ))
+                                            },
+                                        );
+                                    match walked {
                                         Err(err) => {
                                             log::error!(
                                                 "Failed to get recursive files for {}: {}",
                                                 f.path,
                                                 err
                                             );
+                                            let err =
+                                                crate::ui_cm_interface::walk_error_message(&err);
                                             self.send(fs::new_error(f.id, err, -1)).await;
                                         }
                                         Ok(files) => {
@@ -6780,6 +7017,17 @@ impl Connection {
                         }
                     }
                 }
+                Some(message::Union::FileResponse(_))
+                    if !crate::cm_file_flow::file_response_allowed(
+                        self.file_transfer.is_some(),
+                    ) =>
+                {
+                    // Only a file-transfer connection can have a job such a message belongs to.
+                    log::warn!(
+                        "#{} a file response on a connection that is not a file transfer is ignored",
+                        self.inner.id()
+                    );
+                }
                 Some(message::Union::FileResponse(fr)) => match fr.union {
                     Some(file_response::Union::Block(block)) => {
                         self.send_fs(ipc::FS::WriteBlock {
@@ -6787,6 +7035,7 @@ impl Connection {
                             file_num: block.file_num,
                             data: block.data,
                             compressed: block.compressed,
+                            blk_id: block.blk_id,
                         });
                     }
                     Some(file_response::Union::Done(d)) => {
@@ -8596,9 +8845,30 @@ impl Connection {
                 let path_str = dir.path.clone();
                 let file_entries: Vec<FileEntry> = dir.entries.into();
 
-                // Send file directory to client
-                self.send(fs::new_dir(id, path_str.clone(), file_entries.clone()))
-                    .await;
+                let listing = fs::new_dir(id, path_str.clone(), file_entries.clone());
+                if let Some(error) = crate::file_message_limit::oversize_listing_reply(
+                    &listing,
+                    self.stream.file_message_limit(),
+                ) {
+                    // The peer cannot be told which files are coming, so nothing is sent.
+                    log::warn!(
+                        "#{} read job {}: the list of {} files does not fit this stream",
+                        self.inner.id(),
+                        id,
+                        file_entries.len()
+                    );
+                    self.cm_read_job_ids.remove(&id);
+                    self.send_fs(ipc::FS::CancelRead {
+                        id,
+                        conn_id: self.inner.id(),
+                    });
+                    self.cm_file_relay.push_message(error);
+                    self.flush_cm_file_relay().await;
+                    return;
+                }
+                // Send file directory to client, ahead of the blocks that follow it.
+                self.cm_file_relay.push_message(listing);
+                self.flush_cm_file_relay().await;
 
                 // Post audit for file transfer
                 self.post_file_audit(
@@ -8620,6 +8890,7 @@ impl Connection {
         file_num: i32,
         data: bytes::Bytes,
         compressed: bool,
+        blk_id: u32,
     ) {
         // Check if the job is still valid (not cancelled)
         if !self.cm_read_job_ids.contains(&id) {
@@ -8628,6 +8899,11 @@ impl Connection {
                 id,
                 file_num
             );
+            // The manager counted this block as in flight; give the credit back.
+            self.send_to_cm(ipc::Data::FileBlockAck {
+                conn_id: self.inner.id(),
+                count: 1,
+            });
             return;
         }
 
@@ -8637,12 +8913,58 @@ impl Connection {
         block.file_num = file_num;
         block.data = data.to_vec().into();
         block.compressed = compressed;
+        block.blk_id = blk_id;
 
         let mut msg = Message::new();
         let mut fr = FileResponse::new();
         fr.set_block(block);
         msg.set_file_response(fr);
-        self.send(msg).await;
+        self.cm_file_relay.push_block(msg);
+        self.flush_cm_file_relay().await;
+    }
+
+    /// Passes what the connection manager produced on to the stream, in order and for as long
+    /// as the stream has room, and returns the read credit for the blocks that left.
+    ///
+    /// `Stream::send` does not wait: when the outbound queue is full it fails. Sending these
+    /// messages directly lost file blocks on any link slower than the disk.
+    async fn flush_cm_file_relay(&mut self) {
+        use crate::cm_file_flow::Relayed;
+        let mut released = 0usize;
+        while self.stream.file_send_ready() {
+            let result = match self.cm_file_relay.front() {
+                None => break,
+                Some(Relayed::Message(message)) => self.stream.send(message).await,
+                Some(Relayed::Raw(bytes)) => self.stream.send_raw(bytes.clone()).await,
+            };
+            match result {
+                Ok(()) => {
+                    if self.cm_file_relay.pop_sent() {
+                        released += 1;
+                    }
+                }
+                Err(err) if fs::is_would_block(&err) => break,
+                Err(err) => {
+                    log::warn!(
+                        "#{} file relay from the connection manager stopped: {}",
+                        self.inner.id(),
+                        err
+                    );
+                    released += self.cm_file_relay.clear();
+                    break;
+                }
+            }
+        }
+        if released > 0 {
+            self.send_to_cm(ipc::Data::FileBlockAck {
+                conn_id: self.inner.id(),
+                count: released as u32,
+            });
+        }
+        if !self.cm_file_relay.is_empty() && !self.cm_file_relay_timer_armed {
+            self.cm_file_relay_timer_armed = true;
+            self.file_timer = crate::rustdesk_interval(time::interval(MILLI1));
+        }
     }
 
     async fn handle_file_read_done(&mut self, id: i32, file_num: i32) {
@@ -8665,7 +8987,8 @@ impl Connection {
         let mut fr = FileResponse::new();
         fr.set_done(done);
         msg.set_file_response(fr);
-        self.send(msg).await;
+        self.cm_file_relay.push_message(msg);
+        self.flush_cm_file_relay().await;
     }
 
     async fn handle_file_read_error(&mut self, id: i32, file_num: i32, err: String) {
@@ -8680,7 +9003,9 @@ impl Connection {
         }
 
         // Forward error to client
-        self.send(fs::new_error(id, err, file_num)).await;
+        self.cm_file_relay
+            .push_message(fs::new_error(id, err, file_num));
+        self.flush_cm_file_relay().await;
     }
 
     async fn handle_file_digest_from_cm(
@@ -8714,14 +9039,29 @@ impl Connection {
         let mut fr = FileResponse::new();
         fr.set_digest(digest);
         msg.set_file_response(fr);
-        self.send(msg).await;
+        self.cm_file_relay.push_message(msg);
+        self.flush_cm_file_relay().await;
     }
 
     async fn process_new_read_job(&mut self, mut job: fs::TransferJob, path: String) {
         let files = job.files().to_owned();
         let job_type = job.r#type;
-        self.send(fs::new_dir(job.id, path.clone(), files.clone()))
-            .await;
+        let listing = fs::new_dir(job.id, path.clone(), files.clone());
+        if let Some(error) = crate::file_message_limit::oversize_listing_reply(
+            &listing,
+            self.stream.file_message_limit(),
+        ) {
+            // The peer cannot be told which files are coming, so the job does not start.
+            log::warn!(
+                "#{} read job {}: the list of {} files does not fit this stream",
+                self.inner.id(),
+                job.id,
+                files.len()
+            );
+            self.send(error).await;
+            return;
+        }
+        self.send(listing).await;
         job.is_remote = true;
         job.conn_id = self.inner.id();
         self.read_jobs.push(job);
@@ -8812,17 +9152,31 @@ impl Connection {
         path: String,
         check_file_limit: bool,
     ) {
-        match fs::TransferJob::new_read(
-            id,
-            job_type,
-            "".to_string(),
-            data_source,
-            file_num,
-            include_hidden,
-            false,
-            overwrite_detection,
-        ) {
+        // With the limit the walk stops as soon as it is passed.
+        let max_files = if check_file_limit {
+            crate::ui_cm_interface::get_max_validated_files()
+        } else {
+            usize::MAX
+        };
+        // Listing the files reads the disk, so it runs off the async threads.
+        let job = hbb_common::tokio::task::spawn_blocking(move || {
+            fs::TransferJob::new_read_limited(
+                id,
+                job_type,
+                "".to_string(),
+                data_source,
+                file_num,
+                include_hidden,
+                false,
+                overwrite_detection,
+                max_files,
+            )
+        })
+        .await
+        .unwrap_or_else(|err| Err(hbb_common::anyhow::anyhow!("walk failed: {}", err)));
+        match job {
             Err(err) => {
+                let err = crate::ui_cm_interface::walk_error_message(&err);
                 self.send(fs::new_error(id, err, 0)).await;
             }
             Ok(job) => {
@@ -8841,6 +9195,21 @@ impl Connection {
 
     #[inline]
     async fn send(&mut self, msg: Message) {
+        // A directory listing that this stream cannot carry would be refused by `send` and
+        // the peer would wait for it forever; it gets an error it can show instead.
+        let msg = match crate::file_message_limit::oversize_listing_reply(
+            &msg,
+            self.stream.file_message_limit(),
+        ) {
+            Some(error) => {
+                log::warn!(
+                    "#{} a directory listing does not fit this stream; an error is sent instead",
+                    self.inner.id()
+                );
+                error
+            }
+            None => msg,
+        };
         allow_err!(self.stream.send(&msg).await);
     }
 
@@ -9354,7 +9723,7 @@ async fn start_ipc(
                             // Note: Empty data (for empty files) is correctly handled. BytesCodec with
                             // raw=false adds a length prefix, so next_raw() returns empty BytesMut for
                             // zero-length frames. This mirrors the WriteBlock pattern below.
-                            ipc::Data::FileBlockFromCM { id, file_num, data: _, compressed, conn_id } => {
+                            ipc::Data::FileBlockFromCM { id, file_num, data: _, compressed, conn_id, blk_id } => {
                                 let raw_data = stream.next_raw().await?;
                                 tx_from_cm.send(ipc::Data::FileBlockFromCM {
                                     id,
@@ -9362,6 +9731,7 @@ async fn start_ipc(
                                     data: raw_data.into(),
                                     compressed,
                                     conn_id,
+                                    blk_id,
                                 })?;
                             }
                             _ => {
@@ -9384,8 +9754,9 @@ async fn start_ipc(
                         if let Data::FS(ipc::FS::WriteBlock{id,
                             file_num,
                             data,
-                            compressed}) = data {
-                                stream.send(&Data::FS(ipc::FS::WriteBlock{id, file_num, data: Bytes::new(), compressed})).await?;
+                            compressed,
+                            blk_id}) = data {
+                                stream.send(&Data::FS(ipc::FS::WriteBlock{id, file_num, data: Bytes::new(), compressed, blk_id})).await?;
                                 stream.send_raw(data).await?;
                         } else {
                             stream.send(&data).await?;
@@ -11121,6 +11492,417 @@ mod test {
         assert_eq!(controller.by_display[&0].recovery_target_frame_id, Some(10));
     }
 
+    #[cfg(test)]
+    fn vp9_delivery_frame(frame_id: u64, key: bool) -> VideoFrame {
+        VideoFrame {
+            display: 0,
+            stream_id: 7,
+            frame_id,
+            union: Some(video_frame::Union::Vp9s(EncodedVideoFrames {
+                frames: vec![EncodedVideoFrame {
+                    data: vec![0u8; 4].into(),
+                    key,
+                    pts: frame_id as i64,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    #[cfg(test)]
+    fn decoded_up_to(frame_id: u64) -> VideoFeedback {
+        VideoFeedback {
+            display: 0,
+            stream_id: 7,
+            received_frame_id: frame_id,
+            decoded_frame_id: frame_id,
+            render_submitted_frame_id: frame_id,
+            ..Default::default()
+        }
+    }
+
+    /// Ten VP9 frames are sent, the viewer has decoded eight and asks for a reference refresh.
+    #[cfg(test)]
+    fn vp9_stream_with_a_recovery_request(start: Instant) -> VideoDeliveryController {
+        let mut controller = VideoDeliveryController::default();
+        for frame_id in 1..=10 {
+            controller.on_frame_sent(&vp9_delivery_frame(frame_id, frame_id == 1), start);
+        }
+        controller.on_feedback(&decoded_up_to(8), start);
+        controller
+            .on_reference_refresh_request(
+                &VideoReferenceRefresh {
+                    display: 0,
+                    stream_id: 7,
+                    received_frame_id: 10,
+                    dropped_frames: 1,
+                    ..Default::default()
+                },
+                start,
+                10,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(controller.by_display[&0].recovery_target_frame_id, Some(10));
+        controller
+    }
+
+    /// A VP8/VP9 viewer keeps decoding deltas after a loss. A delta that was already on its
+    /// way must not end the recovery: only the keyframe sent for the request heals the stream.
+    #[test]
+    fn vpx_recovery_ends_with_the_keyframe_not_with_a_delta_in_flight() {
+        let start = Instant::now();
+        let mut controller = vp9_stream_with_a_recovery_request(start);
+
+        let later = start + Duration::from_millis(20);
+        controller.on_frame_sent(&vp9_delivery_frame(11, false), later);
+        controller.on_feedback(&decoded_up_to(11), later);
+        assert!(
+            controller.by_display[&0].recovery_target_frame_id.is_some(),
+            "a delta decoded on a damaged reference ended the recovery"
+        );
+
+        controller.on_frame_sent(&vp9_delivery_frame(12, true), later);
+        controller.on_feedback(&decoded_up_to(12), later + Duration::from_millis(20));
+        assert!(controller.by_display[&0].recovery_target_frame_id.is_none());
+        assert_eq!(controller.by_display[&0].phase, VideoDeliveryPhase::Healthy);
+    }
+
+    /// While no keyframe has been sent for the request, the deltas such a viewer goes on
+    /// decoding are not progress: the request is issued again.
+    #[test]
+    fn vpx_recovery_is_reissued_while_no_keyframe_was_sent() {
+        let start = Instant::now();
+        let mut controller = vp9_stream_with_a_recovery_request(start);
+
+        let mut reissued = false;
+        for step in 1..=250u64 {
+            let now = start + Duration::from_millis(step * 20);
+            controller.on_frame_sent(&vp9_delivery_frame(10 + step, false), now);
+            controller.on_feedback(&decoded_up_to(10 + step), now);
+            if !controller.poll_recovery(now, 10).is_empty() {
+                reissued = true;
+                break;
+            }
+        }
+        assert!(reissued, "five seconds of deltas and no second request");
+    }
+
+    #[cfg(test)]
+    fn h264_delivery_frame(frame_id: u64, key: bool) -> VideoFrame {
+        VideoFrame {
+            display: 0,
+            stream_id: 7,
+            frame_id,
+            union: Some(video_frame::Union::H264s(EncodedVideoFrames {
+                frames: vec![EncodedVideoFrame {
+                    data: vec![0u8; 4].into(),
+                    key,
+                    pts: frame_id as i64,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    /// Feedback of a viewer that shows a frame only when the next one arrives: it has
+    /// received up to `received` and decoded up to `decoded`.
+    #[cfg(test)]
+    fn received_and_decoded(received: u64, decoded: u64) -> VideoFeedback {
+        VideoFeedback {
+            display: 0,
+            stream_id: 7,
+            received_frame_id: received,
+            decoded_frame_id: decoded,
+            render_submitted_frame_id: decoded,
+            ..Default::default()
+        }
+    }
+
+    #[cfg(test)]
+    fn strict_request(received_frame_id: u64) -> VideoReferenceRefresh {
+        VideoReferenceRefresh {
+            display: 0,
+            stream_id: 7,
+            received_frame_id,
+            strict_recovery: true,
+            ..Default::default()
+        }
+    }
+
+    /// The session of 2026-11-21. Ten H.264 frames are sent and eight decoded when the viewer
+    /// asks strictly; the host sends keyframe 12 and two deltas. Then the viewer, which shows
+    /// a frame only when the next one arrives and so has reported nothing new, asks again and
+    /// names `second_request_names`. Returns how long after the first request the host asks
+    /// its encoder for the next keyframe, polled every 100 ms as the connection does.
+    #[cfg(test)]
+    fn next_keyframe_after_a_second_request(
+        controller: &mut VideoDeliveryController,
+        second_request_names: u64,
+    ) -> Duration {
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        for frame_id in 1..=10 {
+            controller.on_frame_sent(&h264_delivery_frame(frame_id, frame_id == 1), start);
+        }
+        controller.on_feedback(&decoded_up_to(8), start);
+        assert!(controller
+            .on_reference_refresh_request(&strict_request(10), start, 10)
+            .unwrap()
+            .is_some());
+        controller.on_frame_sent(&h264_delivery_frame(11, false), start + ms(20));
+        controller.on_frame_sent(&h264_delivery_frame(12, true), start + ms(50));
+        controller.on_frame_sent(&h264_delivery_frame(13, false), start + ms(83));
+        controller.on_frame_sent(&h264_delivery_frame(14, false), start + ms(116));
+        // The frame before the loss comes out of the viewer's decoder with the keyframe.
+        controller.on_feedback(&decoded_up_to(9), start + ms(150));
+        assert!(
+            controller
+                .on_reference_refresh_request(
+                    &strict_request(second_request_names),
+                    start + ms(200),
+                    10
+                )
+                .unwrap()
+                .is_none(),
+            "a second keyframe within the refresh cooldown"
+        );
+        let mut frame_id = 14;
+        for tick in 3..=40u64 {
+            let now = start + ms(tick * 100);
+            frame_id += 3;
+            controller.on_frame_sent(&h264_delivery_frame(frame_id, false), now);
+            // The viewer asks again a second after its request, as its transport does.
+            let asked_again = tick == 12
+                && controller
+                    .on_reference_refresh_request(&strict_request(frame_id), now, 10)
+                    .unwrap()
+                    .is_some();
+            if asked_again || !controller.poll_recovery(now, 10).is_empty() {
+                return now.saturating_duration_since(start);
+            }
+        }
+        panic!("no keyframe was asked for in four seconds");
+    }
+
+    /// A viewer that lost a frame right behind the recovery keyframe stands still until the
+    /// next keyframe. It names a frame beyond the keyframe, so the keyframe is not what it
+    /// waits for: the host answers when the refresh cooldown is over, not two seconds later.
+    #[test]
+    fn loss_right_behind_a_recovery_keyframe_is_answered_after_one_cooldown() {
+        let mut controller = VideoDeliveryController::default();
+        let waited = next_keyframe_after_a_second_request(&mut controller, 14);
+        assert!(
+            waited >= VIDEO_DELIVERY_MIN_REFRESH_COOLDOWN,
+            "keyframes closer together than the cooldown: {waited:?}"
+        );
+        assert!(
+            waited <= VIDEO_DELIVERY_MIN_REFRESH_COOLDOWN + Duration::from_millis(100),
+            "the viewer stood still for {waited:?}"
+        );
+        let state = &controller.by_display[&0];
+        assert_eq!(state.recovery_reissues, 0, "a new loss is not a reissue");
+        assert_eq!(state.phase, VideoDeliveryPhase::Recovering);
+    }
+
+    /// The kill switch gives back the wait for a reissue: three refresh cooldowns.
+    #[test]
+    fn loss_right_behind_a_recovery_keyframe_waits_for_a_reissue_when_switched_off() {
+        let mut controller = VideoDeliveryController::default();
+        controller.set_answer_loss_after_keyframe(false);
+        let waited = next_keyframe_after_a_second_request(&mut controller, 14);
+        assert!(
+            waited
+                >= VIDEO_DELIVERY_MIN_REFRESH_COOLDOWN * VIDEO_DELIVERY_REISSUE_COOLDOWN_MULTIPLIER,
+            "{waited:?}"
+        );
+        assert_eq!(controller.by_display[&0].recovery_reissues, 1);
+    }
+
+    /// A request that names nothing beyond the keyframe may be about a keyframe that is still
+    /// on its way, and so may the viewer's repeat of it a second later, whatever frame that
+    /// names: both wait for the reissue, as before.
+    #[test]
+    fn request_that_names_no_frame_beyond_the_recovery_keyframe_waits_for_a_reissue() {
+        let mut controller = VideoDeliveryController::default();
+        let waited = next_keyframe_after_a_second_request(&mut controller, 11);
+        assert!(
+            waited
+                >= VIDEO_DELIVERY_MIN_REFRESH_COOLDOWN * VIDEO_DELIVERY_REISSUE_COOLDOWN_MULTIPLIER,
+            "{waited:?}"
+        );
+        assert_eq!(controller.by_display[&0].recovery_reissues, 1);
+    }
+
+    /// A slow link: the keyframe is still on its way a second after it was asked for, while
+    /// deltas sent after it have arrived. The viewer repeats its request and names one of
+    /// them. Nothing shows that the keyframe is there, so no second keyframe is put behind
+    /// the first: the request waits for the reissue.
+    #[test]
+    fn repeat_of_a_request_whose_keyframe_is_still_on_its_way_waits_for_a_reissue() {
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        let mut controller = VideoDeliveryController::default();
+        for frame_id in 1..=10 {
+            controller.on_frame_sent(&h264_delivery_frame(frame_id, frame_id == 1), start);
+        }
+        controller.on_feedback(&decoded_up_to(8), start);
+        assert!(controller
+            .on_reference_refresh_request(&strict_request(10), start, 10)
+            .unwrap()
+            .is_some());
+        controller.on_frame_sent(&h264_delivery_frame(12, true), start + ms(50));
+        let mut frame_id = 12;
+        let mut asked_at = None;
+        for tick in 1..=40u64 {
+            let now = start + ms(tick * 100);
+            frame_id += 3;
+            controller.on_frame_sent(&h264_delivery_frame(frame_id, false), now);
+            // The repeats of the viewer's transport: after one second, then after two more.
+            let repeated = (tick == 10 || tick == 30)
+                && controller
+                    .on_reference_refresh_request(&strict_request(frame_id), now, 10)
+                    .unwrap()
+                    .is_some();
+            if repeated || !controller.poll_recovery(now, 10).is_empty() {
+                asked_at = Some(tick * 100);
+                break;
+            }
+        }
+        assert_eq!(
+            asked_at,
+            Some(3000),
+            "the reissue, three cooldowns after the keyframe"
+        );
+        assert!(!controller.by_display[&0].viewer_lost_frames_after_keyframe);
+        assert_eq!(controller.by_display[&0].recovery_reissues, 1);
+    }
+
+    /// The viewer's repeat comes a second after its request, so its timing says nothing; but
+    /// its feedback has named the keyframe as received. That is enough.
+    #[test]
+    fn feedback_that_names_the_keyframe_shows_that_it_arrived() {
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        let mut controller = VideoDeliveryController::default();
+        for frame_id in 1..=10 {
+            controller.on_frame_sent(&h264_delivery_frame(frame_id, frame_id == 1), start);
+        }
+        controller.on_feedback(&decoded_up_to(8), start);
+        assert!(controller
+            .on_reference_refresh_request(&strict_request(10), start, 10)
+            .unwrap()
+            .is_some());
+        controller.on_frame_sent(&h264_delivery_frame(12, true), start + ms(50));
+        controller.on_frame_sent(&h264_delivery_frame(13, false), start + ms(83));
+        // The keyframe is in the decoder; the frame before the loss comes out.
+        controller.on_feedback(&received_and_decoded(12, 9), start + ms(150));
+        assert!(
+            controller
+                .on_reference_refresh_request(&strict_request(15), start + ms(1_000), 10)
+                .unwrap()
+                .is_some(),
+            "the cooldown is over and the viewer has the keyframe"
+        );
+        assert_eq!(controller.by_display[&0].recovery_reissues, 0);
+    }
+
+    /// The viewer named a frame beyond the keyframe and then decoded on: the recovery is
+    /// over, and no keyframe is sent when the cooldown ends.
+    #[test]
+    fn loss_behind_a_recovery_keyframe_is_forgotten_when_the_viewer_decodes_on() {
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        let mut controller = VideoDeliveryController::default();
+        for frame_id in 1..=10 {
+            controller.on_frame_sent(&h264_delivery_frame(frame_id, frame_id == 1), start);
+        }
+        controller.on_feedback(&decoded_up_to(8), start);
+        assert!(controller
+            .on_reference_refresh_request(&strict_request(10), start, 10)
+            .unwrap()
+            .is_some());
+        controller.on_frame_sent(&h264_delivery_frame(12, true), start + ms(50));
+        controller.on_frame_sent(&h264_delivery_frame(13, false), start + ms(83));
+        assert!(controller
+            .on_reference_refresh_request(&strict_request(13), start + ms(100), 10)
+            .unwrap()
+            .is_none());
+        assert!(controller.by_display[&0].viewer_lost_frames_after_keyframe);
+        controller.on_feedback(&decoded_up_to(13), start + ms(150));
+        let state = &controller.by_display[&0];
+        assert!(state.recovery_target_frame_id.is_none());
+        assert!(!state.viewer_lost_frames_after_keyframe);
+        for tick in 2..=40u64 {
+            let now = start + ms(tick * 100);
+            controller.on_frame_sent(&h264_delivery_frame(13 + tick, false), now);
+            controller.on_feedback(&decoded_up_to(13 + tick), now);
+            assert!(controller.poll_recovery(now, 10).is_empty(), "tick {tick}");
+        }
+    }
+
+    /// Every loss right behind a keyframe gets its keyframe one cooldown after the last one,
+    /// again and again: none of them counts as a reissue, so the host does not give up after
+    /// two and leave the viewer without a picture for the cycle cooldown.
+    #[test]
+    fn repeated_losses_behind_recovery_keyframes_get_one_keyframe_per_cooldown() {
+        let start = Instant::now();
+        let ms = Duration::from_millis;
+        let mut controller = VideoDeliveryController::default();
+        for frame_id in 1..=10 {
+            controller.on_frame_sent(&h264_delivery_frame(frame_id, frame_id == 1), start);
+        }
+        controller.on_feedback(&decoded_up_to(8), start);
+        assert!(controller
+            .on_reference_refresh_request(&strict_request(10), start, 10)
+            .unwrap()
+            .is_some());
+        let mut frame_id = 10;
+        let mut keyframes_asked_at = vec![0u64];
+        let mut keyframe_due = true;
+        for tick in 1..=60u64 {
+            let now = start + ms(tick * 100);
+            frame_id += 1;
+            controller.on_frame_sent(&h264_delivery_frame(frame_id, keyframe_due), now);
+            if keyframe_due {
+                keyframe_due = false;
+                // The keyframe goes into the viewer's decoder and the frame before it comes
+                // out. The delta behind the keyframe is lost; the viewer names the one after.
+                controller.on_feedback(&received_and_decoded(frame_id, 9), now + ms(40));
+                frame_id += 2;
+                controller.on_frame_sent(&h264_delivery_frame(frame_id, false), now + ms(60));
+                let _ = controller.on_reference_refresh_request(
+                    &strict_request(frame_id),
+                    now + ms(70),
+                    10,
+                );
+            }
+            if !controller.poll_recovery(now, 10).is_empty() {
+                keyframes_asked_at.push(tick * 100);
+                keyframe_due = true;
+            }
+        }
+        assert!(keyframes_asked_at.len() >= 6, "{keyframes_asked_at:?}");
+        for pair in keyframes_asked_at.windows(2) {
+            let apart = pair[1] - pair[0];
+            assert!((1000..=1200).contains(&apart), "{keyframes_asked_at:?}");
+        }
+        assert_eq!(controller.by_display[&0].recovery_reissues, 0);
+    }
+
+    #[test]
+    fn delay_measurement_without_an_answer_starts_again() {
+        assert!(!test_delay_answer_lost(None), "nothing was sent");
+        assert!(!test_delay_answer_lost(Some(Duration::from_secs(1))));
+        assert!(!test_delay_answer_lost(Some(Duration::from_millis(4_999))));
+        assert!(test_delay_answer_lost(Some(TEST_DELAY_ANSWER_LOST_AFTER)));
+        assert!(test_delay_answer_lost(Some(Duration::from_secs(60))));
+    }
+
     #[test]
     fn recovery_reissue_stall_age_uses_cycle_progress_not_session_age() {
         let start = Instant::now();
@@ -12022,13 +12804,18 @@ mod test {
         }
         #[cfg(target_os = "macos")]
         for usage in [0x88, 0x8a, 0x8b, 0x94] {
-            assert!(platform_keycode_from_usb_hid(usage, KeyboardFamily::Unknown).is_none());
+            assert!(
+                platform_keycode_from_usb_hid(usage, KeyboardFamily::KeyboardFamilyUnknown)
+                    .is_none()
+            );
         }
     }
 
     #[test]
     fn keyboard_v2_maps_standard_hid_keys_and_lock_state() {
-        assert!(platform_keycode_from_usb_hid(0x04, KeyboardFamily::Unknown).is_some());
+        assert!(
+            platform_keycode_from_usb_hid(0x04, KeyboardFamily::KeyboardFamilyUnknown).is_some()
+        );
         assert!(platform_keycode_from_rdev_key(rdev::usb_hid_key_from_code(0xe0)).is_some());
         let event = physical_key_to_key_event(&PhysicalKey {
             usb_hid_usage: 0x04,

@@ -577,7 +577,7 @@ pub mod client {
             let usage = usage_from_native(
                 HidTarget::Windows,
                 event.position_code as u32,
-                KeyboardFamily::Unknown,
+                KeyboardFamily::KeyboardFamilyUnknown,
             );
             #[cfg(target_os = "macos")]
             let usage = usage_from_native(
@@ -589,7 +589,7 @@ pub mod client {
             let usage = usage_from_native(
                 HidTarget::Linux,
                 event.position_code as u32,
-                KeyboardFamily::Unknown,
+                KeyboardFamily::KeyboardFamilyUnknown,
             );
             #[cfg(any(target_os = "ios", target_os = "android"))]
             let usage: Option<u32> = None;
@@ -1593,7 +1593,7 @@ fn _map_keyboard_mode(_peer: &str, event: &Event, mut key_event: KeyEvent) -> Op
     if crate::keyboard_hid::valid_usage(usage) {
         let family = hbb_common::keyboard::resolve_keyboard_family(
             "auto",
-            KeyboardFamily::Unknown,
+            KeyboardFamily::KeyboardFamilyUnknown,
             hbb_common::config::LocalConfig::get_kb_layout_type() == "ISO",
         );
         if let Some(code) = crate::keyboard_hid::keycode_for_peer(_peer, usage, family) {

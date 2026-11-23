@@ -45,10 +45,19 @@ use std::{
     },
 };
 
-/// Default maximum number of files allowed per transfer request.
+/// Maximum number of files per transfer request when the option is set to `0`.
 /// Unit: number of files (not bytes).
 #[cfg(not(any(target_os = "ios")))]
 const DEFAULT_MAX_VALIDATED_FILES: usize = 10_000;
+
+/// Maximum number of files per transfer request when the option is not set.
+///
+/// It used to be "no limit". A walk over a tree of any size, on behalf of a peer, has no
+/// reason to be unbounded; this number is far above what a transfer or a listing can carry
+/// (the listing of that many files is tens of megabytes in one message), so it only stops a
+/// walk that could not have ended in anything useful.
+#[cfg(not(any(target_os = "ios")))]
+const UNSET_MAX_VALIDATED_FILES: usize = 1_000_000;
 
 /// Maximum number of files allowed in a single file transfer request.
 ///
@@ -57,42 +66,61 @@ const DEFAULT_MAX_VALIDATED_FILES: usize = 10_000;
 /// - CM-side read jobs (server to client file transfers on Windows)
 /// - `AllFiles` recursive directory listing operations
 /// - Connection-side read jobs (non-Windows platforms)
+/// - the number of directories visited when looking for empty directories
 ///
 /// Unit: number of files (not bytes).
-/// Default: 10,000 files.
+/// Default: 1,000,000 files.
 /// Configured via: `OPTION_FILE_TRANSFER_MAX_FILES` ("file-transfer-max-files")
 #[cfg(not(any(target_os = "ios")))]
 static MAX_VALIDATED_FILES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
+/// The limit that a value of `OPTION_FILE_TRANSFER_MAX_FILES` stands for:
+/// - a positive integer is the limit;
+/// - `0` is `DEFAULT_MAX_VALIDATED_FILES` (10,000), as before;
+/// - unset, negative or not an integer is `UNSET_MAX_VALIDATED_FILES` (1,000,000).
+#[cfg(not(any(target_os = "ios")))]
+fn max_validated_files_for(option: &str) -> usize {
+    match option.trim().parse::<usize>() {
+        Ok(0) => DEFAULT_MAX_VALIDATED_FILES,
+        Ok(limit) => limit,
+        Err(_) => UNSET_MAX_VALIDATED_FILES,
+    }
+}
+
 /// Get the maximum number of files allowed per transfer request.
 ///
 /// Initializes the value from configuration (`OPTION_FILE_TRANSFER_MAX_FILES`)
-/// on first call. Semantics:
-/// - If the option is set to `0`, `DEFAULT_MAX_VALIDATED_FILES` (10,000) is used as a safe upper bound.
-/// - If the option is unset, negative, or non-integer,
-///   `usize::MAX` is used to represent "no limit" for backward compatibility with older versions
-///   that did not enforce any file‑count restriction.
-///   (Note: negative values are not valid for `usize` and will cause parsing to fail.)
+/// on first call; see [`max_validated_files_for`].
 ///
 /// Unit: number of files.
 #[cfg(not(any(target_os = "ios")))]
 #[inline]
 pub fn get_max_validated_files() -> usize {
-    // If `OPTION_FILE_TRANSFER_MAX_FILES` unset, negative, or non-integer, use
-    // `usize::MAX` to represent "no limit", maintaining backward compatibility
-    // with versions that had no file transfer restrictions.
-    const NO_LIMIT_FILE_COUNT: usize = usize::MAX;
     *MAX_VALIDATED_FILES.get_or_init(|| {
-        let c = crate::get_builtin_option(OPTION_FILE_TRANSFER_MAX_FILES)
-            .trim()
-            .parse::<usize>()
-            .unwrap_or(NO_LIMIT_FILE_COUNT);
-        if c == 0 {
-            DEFAULT_MAX_VALIDATED_FILES
-        } else {
-            c
-        }
+        max_validated_files_for(&crate::get_builtin_option(OPTION_FILE_TRANSFER_MAX_FILES))
     })
+}
+
+/// The answer for a peer whose request was stopped by [`fs::TooManyEntries`].
+#[cfg(not(any(target_os = "ios")))]
+pub fn too_many_files_message(limit: usize) -> String {
+    let msg = format!(
+        "file transfer rejected: too many files (more than {}). \
+         Adjust '{}' option to increase limit.",
+        limit, OPTION_FILE_TRANSFER_MAX_FILES
+    );
+    log::warn!("{}", msg);
+    msg
+}
+
+/// The text of `err` for the peer; a walk stopped at the limit gets the same explanation as a
+/// list that turned out too long.
+#[cfg(not(any(target_os = "ios")))]
+pub fn walk_error_message(err: &hbb_common::anyhow::Error) -> String {
+    match fs::too_many_entries(err) {
+        Some(stopped) => too_many_files_message(stopped.limit),
+        None => err.to_string(),
+    }
 }
 
 /// Check if file count exceeds the maximum allowed limit.
@@ -166,6 +194,8 @@ struct IpcTaskRunner<T: InvokeUiCM> {
     file_transfer_enabled_peer: bool,
     /// Read jobs for CM-side file reading (server to client transfers)
     read_jobs: Vec<fs::TransferJob>,
+    /// How far this process may read ahead of what the service has passed on to the peer.
+    read_window: crate::cm_file_flow::ReadAheadWindow,
 }
 
 lazy_static::lazy_static! {
@@ -501,6 +531,9 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
 
         // for tmp use, without real conn id
         let mut write_jobs: Vec<fs::TransferJob> = Vec::new();
+        // The lists of jobs go to the user interface a few times a second, not per block.
+        let mut write_log_throttle = crate::cm_file_flow::TransferLogThrottle::default();
+        let mut read_log_throttle = crate::cm_file_flow::TransferLogThrottle::default();
         // File timer for processing read_jobs
         let mut file_timer =
             crate::rustdesk_interval(time::interval_at(Instant::now() + SEC30, SEC30));
@@ -596,6 +629,11 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                     self.cm.new_message(self.conn_id, text);
                                 }
                                 Data::PermissionUpdate { name, enabled } => {
+                                    // The gate for file clipboard messages reads this flag.
+                                    #[cfg(target_os = "windows")]
+                                    if name == "file" {
+                                        self.file_transfer_enabled = enabled;
+                                    }
                                     if update_client_permission(self.conn_id, &name, enabled) {
                                         self.cm.permission_update(self.conn_id, name, enabled);
                                     }
@@ -604,9 +642,9 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                     self.cm.permission_request(self.conn_id, request_id, name, enabled);
                                 }
                                 Data::FS(mut fs) => {
-                                    if let ipc::FS::WriteBlock { id, file_num, data: _, compressed } = fs {
+                                    if let ipc::FS::WriteBlock { id, file_num, data: _, compressed, blk_id } = fs {
                                         if let Ok(bytes) = self.stream.next_raw().await {
-                                            fs = ipc::FS::WriteBlock{id, file_num, data:bytes.into(), compressed};
+                                            fs = ipc::FS::WriteBlock{id, file_num, data:bytes.into(), compressed, blk_id};
                                             handle_fs(fs, &mut write_jobs, &mut self.read_jobs, &self.tx, Some(&tx_log), self.conn_id).await;
                                         }
                                     } else {
@@ -618,33 +656,44 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                     if !self.read_jobs.is_empty() {
                                         file_timer = crate::rustdesk_interval(time::interval(MILLI5));
                                     }
-                                    let log = fs::serialize_transfer_jobs(&write_jobs);
-                                    self.cm.ui_handler.file_transfer_log("transfer", &log);
+                                    if write_log_throttle.due(std::time::Instant::now(), write_jobs.len()) {
+                                        let log = fs::serialize_transfer_jobs(&write_jobs);
+                                        self.cm.ui_handler.file_transfer_log("transfer", &log);
+                                    }
+                                }
+                                Data::FileBlockAck { count, .. } => {
+                                    self.read_window.acknowledged(count as usize);
                                 }
                                 Data::FileTransferLog((action, log)) => {
                                     self.cm.ui_handler.file_transfer_log(&action, &log);
                                 }
                                 #[cfg(target_os = "windows")]
                                 Data::ClipboardFile(_clip) => {
-                                    let is_stopping_allowed = _clip.is_beginning_message();
+                                    use crate::cliprdr_gate::{cliprdr_verdict, CliprdrVerdict};
+                                    let starts_exchange = _clip.is_beginning_message();
                                     let is_clipboard_enabled = ContextSend::is_enabled();
                                     let file_transfer_enabled = self.file_transfer_enabled;
-                                    let stop = !is_stopping_allowed && !(is_clipboard_enabled && file_transfer_enabled);
+                                    // With the file clipboard off nothing is processed. (This
+                                    // used to read `!is_stopping_allowed && ...`: a new exchange
+                                    // was never stopped here.)
+                                    let verdict = cliprdr_verdict(is_clipboard_enabled && file_transfer_enabled, starts_exchange);
                                     log::debug!(
-                                        "Process clipboard message from client peer, stop: {}, is_stopping_allowed: {}, is_clipboard_enabled: {}, file_transfer_enabled: {}",
-                                        stop, is_stopping_allowed, is_clipboard_enabled, file_transfer_enabled);
-                                    if stop {
-                                        ContextSend::set_is_stopped();
-                                    } else {
-                                        if !is_authorized {
-                                            log::debug!("Clipboard message from client peer, but not authorized");
-                                            continue;
+                                        "Process clipboard message from client peer, verdict: {:?}, starts_exchange: {}, is_clipboard_enabled: {}, file_transfer_enabled: {}",
+                                        verdict, starts_exchange, is_clipboard_enabled, file_transfer_enabled);
+                                    match verdict {
+                                        CliprdrVerdict::Stop => ContextSend::set_is_stopped(),
+                                        CliprdrVerdict::Drop => {}
+                                        CliprdrVerdict::Process => {
+                                            if !is_authorized {
+                                                log::debug!("Clipboard message from client peer, but not authorized");
+                                                continue;
+                                            }
+                                            let conn_id = self.conn_id;
+                                            let _ = ContextSend::proc(|context| -> ResultType<()> {
+                                                context.server_clip_file(conn_id, _clip)
+                                                    .map_err(|e| e.into())
+                                            });
                                         }
-                                        let conn_id = self.conn_id;
-                                        let _ = ContextSend::proc(|context| -> ResultType<()> {
-                                            context.server_clip_file(conn_id, _clip)
-                                                .map_err(|e| e.into())
-                                        });
                                     }
                                 }
                                 Data::ClipboardFileEnabled(_enabled) => {
@@ -732,7 +781,7 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                     // Note: Empty data (for empty files) is correctly handled. BytesCodec with raw=false
                     // (the default for IPC connections) adds a length prefix, so send_raw(Bytes::new())
                     // sends a 1-byte frame that next_raw() can correctly receive as empty data.
-                    if let Data::FileBlockFromCM { id, file_num, ref data, compressed, conn_id } = data {
+                    if let Data::FileBlockFromCM { id, file_num, ref data, compressed, conn_id, blk_id } = data {
                         // Send metadata first (data field is skipped by serde), then raw data bytes
                         if let Err(e) = self.stream.send(&Data::FileBlockFromCM {
                             id,
@@ -740,6 +789,7 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                             data: bytes::Bytes::new(), // placeholder, skipped by serde
                             compressed,
                             conn_id,
+                            blk_id,
                         }).await {
                             log::error!("error sending FileBlockFromCM metadata: {}", e);
                             break;
@@ -777,18 +827,26 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                             let is_clipboard_enabled = ContextSend::is_enabled();
                             let file_transfer_enabled = self.file_transfer_enabled;
                             let file_transfer_enabled_peer = self.file_transfer_enabled_peer;
-                            let stop = is_stopping_allowed && !(is_clipboard_enabled && file_transfer_enabled && file_transfer_enabled_peer);
+                            use crate::cliprdr_gate::{cliprdr_verdict, CliprdrVerdict};
+                            let verdict = cliprdr_verdict(
+                                is_clipboard_enabled && file_transfer_enabled && file_transfer_enabled_peer,
+                                is_stopping_allowed,
+                            );
                             log::debug!(
-                                "Process clipboard message from clip, stop: {}, is_stopping_allowed: {}, is_clipboard_enabled: {}, file_transfer_enabled: {}, file_transfer_enabled_peer: {}",
-                                stop, is_stopping_allowed, is_clipboard_enabled, file_transfer_enabled, file_transfer_enabled_peer);
-                            if stop {
-                                ContextSend::set_is_stopped();
-                            } else {
-                                if _clip.is_beginning_message() && crate::get_builtin_option(OPTION_ONE_WAY_FILE_TRANSFER) == "Y" {
-                                    // If one way file transfer is enabled, don't send clipboard file to client
-                                    // Don't call `ContextSend::set_is_stopped()`, because it will stop bidirectional file copy&paste.
-                                } else {
-                                    allow_err!(self.tx.send(Data::ClipboardFile(_clip)));
+                                "Process clipboard message from clip, verdict: {:?}, is_stopping_allowed: {}, is_clipboard_enabled: {}, file_transfer_enabled: {}, file_transfer_enabled_peer: {}",
+                                verdict, is_stopping_allowed, is_clipboard_enabled, file_transfer_enabled, file_transfer_enabled_peer);
+                            match verdict {
+                                CliprdrVerdict::Stop => ContextSend::set_is_stopped(),
+                                // With the file clipboard off nothing leaves, an answer to a
+                                // request included.
+                                CliprdrVerdict::Drop => {}
+                                CliprdrVerdict::Process => {
+                                    if _clip.is_beginning_message() && crate::get_builtin_option(OPTION_ONE_WAY_FILE_TRANSFER) == "Y" {
+                                        // If one way file transfer is enabled, don't send clipboard file to client
+                                        // Don't call `ContextSend::set_is_stopped()`, because it will stop bidirectional file copy&paste.
+                                    } else {
+                                        allow_err!(self.tx.send(Data::ClipboardFile(_clip)));
+                                    }
                                 }
                             }
                         }
@@ -803,11 +861,13 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                 _ = file_timer.tick() => {
                     if !self.read_jobs.is_empty() {
                         let conn_id = self.conn_id;
-                        if let Err(e) = handle_read_jobs_tick(&mut self.read_jobs, &self.tx, conn_id).await {
+                        if let Err(e) = handle_read_jobs_tick(&mut self.read_jobs, &self.tx, conn_id, &mut self.read_window).await {
                             log::error!("Error processing read jobs: {}", e);
                         }
-                        let log = fs::serialize_transfer_jobs(&self.read_jobs);
-                        self.cm.ui_handler.file_transfer_log("transfer", &log);
+                        if read_log_throttle.due(std::time::Instant::now(), self.read_jobs.len()) {
+                            let log = fs::serialize_transfer_jobs(&self.read_jobs);
+                            self.cm.ui_handler.file_transfer_log("transfer", &log);
+                        }
                     } else {
                         file_timer = crate::rustdesk_interval(time::interval_at(Instant::now() + SEC30, SEC30));
                     }
@@ -832,6 +892,7 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
             #[cfg(target_os = "windows")]
             file_transfer_enabled_peer: false,
             read_jobs: Vec::new(),
+            read_window: Default::default(),
         };
 
         while task_runner.running {
@@ -1043,6 +1104,12 @@ async fn handle_fs(
                 send_raw(fs::new_error(id, e, file_num), tx);
                 return;
             }
+            // Two jobs writing to the same place share their temporary files.
+            if let Err(e) = job.claim_destination() {
+                log::warn!("transfer job {} refused: {}", id, e);
+                send_raw(fs::new_error(id, e, file_num), tx);
+                return;
+            }
             job.total_size = total_size;
             job.conn_id = conn_id;
             write_jobs.push(job);
@@ -1058,10 +1125,25 @@ async fn handle_fs(
             }
         }
         ipc::FS::WriteDone { id, file_num } => {
-            if let Some(job) = fs::remove_job(id, write_jobs) {
-                job.modify_time();
-                send_raw(fs::new_done(id, file_num), tx);
-                tx_log.map(|tx| tx.send(serialize_transfer_job(&job, true, false, "")));
+            if let Some(mut job) = fs::remove_job(id, write_jobs) {
+                // The last file is complete only if this succeeds; the peer is told which.
+                match job.finish_file().await {
+                    Ok(()) => {
+                        send_raw(fs::new_done(id, file_num), tx);
+                        tx_log.map(|tx| tx.send(serialize_transfer_job(&job, true, false, "")));
+                    }
+                    Err(err) => {
+                        log::error!(
+                            "transfer job {}: completing file {} failed: {}",
+                            id,
+                            file_num,
+                            err
+                        );
+                        let err = err.to_string();
+                        tx_log.map(|tx| tx.send(serialize_transfer_job(&job, false, false, &err)));
+                        send_raw(fs::new_error(id, err, file_num), tx);
+                    }
+                }
             }
         }
         ipc::FS::WriteError { id, file_num, err } => {
@@ -1075,7 +1157,9 @@ async fn handle_fs(
             file_num,
             data,
             compressed,
+            blk_id,
         } => {
+            let mut failed = None;
             if let Some(job) = fs::get_job(id, write_jobs) {
                 if let Err(err) = job
                     .write(FileTransferBlock {
@@ -1083,12 +1167,28 @@ async fn handle_fs(
                         file_num,
                         data,
                         compressed,
+                        blk_id,
                         ..Default::default()
                     })
                     .await
                 {
-                    send_raw(fs::new_error(id, err, file_num), &tx);
+                    failed = Some(err.to_string());
                 }
+            }
+            if let Some(err) = failed {
+                // The job is over: blocks that are already on their way and the final
+                // `WriteDone` must find nothing to write to or to move into place.
+                log::error!(
+                    "transfer job {}: writing file {} failed: {}",
+                    id,
+                    file_num,
+                    err
+                );
+                if let Some(job) = fs::remove_job(id, write_jobs) {
+                    job.remove_download_file();
+                    tx_log.map(|tx| tx.send(serialize_transfer_job(&job, false, false, &err)));
+                }
+                send_raw(fs::new_error(id, err, file_num), &tx);
             }
         }
         ipc::FS::CheckDigest {
@@ -1251,9 +1351,11 @@ async fn start_read_job(
     tx: &UnboundedSender<Data>,
 ) {
     let path_clone = path.clone();
+    let max_files = get_max_validated_files();
     let result = spawn_blocking(move || -> ResultType<fs::TransferJob> {
         let data_source = fs::DataSource::FilePath(PathBuf::from(&path));
-        fs::TransferJob::new_read(
+        // Stops as soon as the limit is passed; the rest of the tree is not walked.
+        fs::TransferJob::new_read_limited(
             id,
             fs::JobType::Generic,
             "".to_string(),
@@ -1262,6 +1364,7 @@ async fn start_read_job(
             include_hidden,
             true,
             overwrite_detection,
+            max_files,
         )
     })
     .await;
@@ -1327,7 +1430,10 @@ async fn start_read_job(
                 file_num,
                 include_hidden,
                 conn_id,
-                result: Err(format!("validation failed: {}", e)),
+                result: Err(match fs::too_many_entries(&e) {
+                    Some(stopped) => too_many_files_message(stopped.limit),
+                    None => format!("validation failed: {}", e),
+                }),
             }) {
                 log::error!("error sending ReadJobInitResult via IPC: {}", e);
             }
@@ -1357,7 +1463,28 @@ async fn handle_read_jobs_tick(
     jobs: &mut Vec<fs::TransferJob>,
     tx: &UnboundedSender<Data>,
     conn_id: i32,
+    window: &mut crate::cm_file_flow::ReadAheadWindow,
 ) -> ResultType<()> {
+    // The IPC channel to the service is unbounded and the service can only pass blocks on as
+    // fast as the peer's link takes them. Read no further ahead than the window allows.
+    for _ in 0..crate::cm_file_flow::CM_READ_STEPS_PER_TICK {
+        if !window.can_read() || !read_job_step(jobs, tx, conn_id, window).await {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// One step of the connection manager's read jobs: the first active job reads one block and
+/// hands it to the service. Returns whether it did, so that the caller may take another step.
+#[cfg(not(any(target_os = "ios")))]
+async fn read_job_step(
+    jobs: &mut Vec<fs::TransferJob>,
+    tx: &UnboundedSender<Data>,
+    conn_id: i32,
+    window: &mut crate::cm_file_flow::ReadAheadWindow,
+) -> bool {
+    let mut more = false;
     let mut finished = Vec::new();
 
     for job in jobs.iter_mut() {
@@ -1402,8 +1529,12 @@ async fn handle_read_jobs_tick(
                     data: block.data,
                     compressed: block.compressed,
                     conn_id,
+                    blk_id: block.blk_id,
                 }) {
                     log::error!("error sending FileBlockFromCM via IPC: {}", e);
+                } else {
+                    window.sent();
+                    more = true;
                 }
             }
             Ok(None) => {
@@ -1442,7 +1573,7 @@ async fn handle_read_jobs_tick(
         let _ = fs::remove_job(id, jobs);
     }
 
-    Ok(())
+    more
 }
 
 /// Initialize a read job's data stream and handle digest sending for overwrite detection.
@@ -1488,7 +1619,11 @@ async fn read_all_files(
     tx: &UnboundedSender<Data>,
 ) {
     let path_clone = path.clone();
-    let result = spawn_blocking(move || fs::get_recursive_files(&path, include_hidden)).await;
+    let max_files = get_max_validated_files();
+    // Stops as soon as the limit is passed; the rest of the tree is not walked.
+    let result =
+        spawn_blocking(move || fs::get_recursive_files_limited(&path, include_hidden, max_files))
+            .await;
 
     let result = match result {
         Ok(Ok(files)) => {
@@ -1507,7 +1642,7 @@ async fn read_all_files(
                 }
             }
         }
-        Ok(Err(e)) => Err(format!("{}", e)),
+        Ok(Err(e)) => Err(walk_error_message(&e)),
         Err(e) => Err(format!("task failed: {}", e)),
     };
 
@@ -1526,18 +1661,44 @@ async fn read_empty_dirs(dir: &str, include_hidden: bool, tx: &UnboundedSender<D
     let path = dir.to_owned();
     let path_clone = dir.to_owned();
 
-    if let Ok(Ok(fds)) =
-        spawn_blocking(move || fs::get_empty_dirs_recursive(&path, include_hidden)).await
+    let max_dirs = get_max_validated_files();
+    match spawn_blocking(move || {
+        fs::get_empty_dirs_recursive_limited(&path, include_hidden, max_dirs)
+    })
+    .await
     {
-        let mut msg_out = Message::new();
-        let mut file_response = FileResponse::new();
-        file_response.set_empty_dirs(ReadEmptyDirsResponse {
-            path: path_clone,
-            empty_dirs: fds,
-            ..Default::default()
-        });
-        msg_out.set_file_response(file_response);
-        send_raw(msg_out, tx);
+        Ok(Ok(fds)) => {
+            let mut msg_out = Message::new();
+            let mut file_response = FileResponse::new();
+            file_response.set_empty_dirs(ReadEmptyDirsResponse {
+                path: path_clone,
+                empty_dirs: fds,
+                ..Default::default()
+            });
+            msg_out.set_file_response(file_response);
+            send_raw(msg_out, tx);
+        }
+        Ok(Err(err)) => {
+            if let Some(stopped) = fs::too_many_entries(&err) {
+                // The request has no id; a client that shows such an error will show this.
+                log::warn!(
+                    "looking for empty directories stopped after {} directories",
+                    stopped.limit
+                );
+                send_raw(
+                    fs::new_error(
+                        0,
+                        format!(
+                            "This folder has more than {} subfolders; its empty subfolders were not looked for and will not be created.",
+                            stopped.limit
+                        ),
+                        -1,
+                    ),
+                    tx,
+                );
+            }
+        }
+        Err(_) => {}
     }
 }
 
@@ -1834,5 +1995,297 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&base_dir);
+    }
+
+    // ---- a write job whose file cannot be written or completed (FT-06) ----
+
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_write_test_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("{}_{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(not(any(target_os = "ios")))]
+    async fn cm_fs(
+        request: ipc::FS,
+        write_jobs: &mut Vec<hbb_common::fs::TransferJob>,
+        tx: &UnboundedSender<Data>,
+    ) {
+        let mut read_jobs = Vec::new();
+        super::handle_fs(request, write_jobs, &mut read_jobs, tx, None, 1).await;
+    }
+
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_new_write(dir: &std::path::Path, id: i32) -> ipc::FS {
+        ipc::FS::NewWrite {
+            path: dir.to_string_lossy().to_string(),
+            id,
+            file_num: 0,
+            files: vec![("x".to_owned(), 0)],
+            overwrite_detection: false,
+            total_size: 0,
+            conn_id: 1,
+        }
+    }
+
+    /// What the connection manager told the peer, in order: "done" or "error".
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_answers(rx: &mut hbb_common::tokio::sync::mpsc::UnboundedReceiver<Data>) -> Vec<String> {
+        let mut answers = Vec::new();
+        while let Ok(data) = rx.try_recv() {
+            let Data::RawMessage(bytes) = data else {
+                continue;
+            };
+            let mut msg = Message::new();
+            msg.merge_from_bytes(&bytes).unwrap();
+            let response = msg.file_response();
+            if response.has_done() {
+                answers.push("done".to_owned());
+            } else if response.has_error() {
+                answers.push("error".to_owned());
+            }
+        }
+        answers
+    }
+
+    #[test]
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_write_error_ends_the_job_and_nothing_is_put_in_place() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = unbounded_channel();
+            let dir = cm_write_test_dir("rustdesk_cm_write_error");
+            let mut write_jobs = Vec::new();
+            cm_fs(cm_new_write(&dir, 5), &mut write_jobs, &tx).await;
+
+            // A block that cannot be decompressed, then what the peer already had on its way.
+            let block = |data: &'static [u8], compressed| ipc::FS::WriteBlock {
+                id: 5,
+                file_num: 0,
+                data: data.to_vec().into(),
+                compressed,
+                blk_id: 0,
+            };
+            cm_fs(
+                block(b"this is not compressed data", true),
+                &mut write_jobs,
+                &tx,
+            )
+            .await;
+            cm_fs(block(b"later block", false), &mut write_jobs, &tx).await;
+            cm_fs(
+                ipc::FS::WriteDone { id: 5, file_num: 0 },
+                &mut write_jobs,
+                &tx,
+            )
+            .await;
+
+            let answers = cm_answers(&mut rx);
+            let in_place = dir.join("x").exists();
+            let partial = dir.join("x.download").exists();
+            let _ = fs::remove_dir_all(&dir);
+            assert!(!in_place, "a file that failed was put in place");
+            assert_eq!(answers, vec!["error".to_owned()]);
+            assert!(!partial, "the partial file was left behind");
+            assert!(write_jobs.is_empty());
+        });
+    }
+
+    #[test]
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_write_done_reports_a_file_that_cannot_be_put_in_place() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = unbounded_channel();
+            let dir = cm_write_test_dir("rustdesk_cm_write_done_error");
+            // The destination name is taken by a directory that is not empty.
+            fs::create_dir_all(dir.join("x")).unwrap();
+            fs::write(dir.join("x").join("keep"), b"keep").unwrap();
+            let mut write_jobs = Vec::new();
+            cm_fs(cm_new_write(&dir, 6), &mut write_jobs, &tx).await;
+            cm_fs(
+                ipc::FS::WriteBlock {
+                    id: 6,
+                    file_num: 0,
+                    data: b"abc".to_vec().into(),
+                    compressed: false,
+                    blk_id: 0,
+                },
+                &mut write_jobs,
+                &tx,
+            )
+            .await;
+            cm_fs(
+                ipc::FS::WriteDone { id: 6, file_num: 0 },
+                &mut write_jobs,
+                &tx,
+            )
+            .await;
+
+            let answers = cm_answers(&mut rx);
+            let _ = fs::remove_dir_all(&dir);
+            assert_eq!(answers, vec!["error".to_owned()]);
+            assert!(write_jobs.is_empty());
+        });
+    }
+
+    #[test]
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_write_done_completes_the_file() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = unbounded_channel();
+            let dir = cm_write_test_dir("rustdesk_cm_write_done");
+            let mut write_jobs = Vec::new();
+            cm_fs(cm_new_write(&dir, 7), &mut write_jobs, &tx).await;
+            cm_fs(
+                ipc::FS::WriteBlock {
+                    id: 7,
+                    file_num: 0,
+                    data: b"abc".to_vec().into(),
+                    compressed: false,
+                    blk_id: 0,
+                },
+                &mut write_jobs,
+                &tx,
+            )
+            .await;
+            cm_fs(
+                ipc::FS::WriteDone { id: 7, file_num: 0 },
+                &mut write_jobs,
+                &tx,
+            )
+            .await;
+
+            let answers = cm_answers(&mut rx);
+            let content = fs::read(dir.join("x")).ok();
+            let _ = fs::remove_dir_all(&dir);
+            assert_eq!(answers, vec!["done".to_owned()]);
+            assert_eq!(content.as_deref(), Some(&b"abc"[..]));
+            assert!(write_jobs.is_empty());
+        });
+    }
+
+    #[test]
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_write_block_out_of_sequence_ends_the_job() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = unbounded_channel();
+            let dir = cm_write_test_dir("rustdesk_cm_write_gap");
+            let mut write_jobs = Vec::new();
+            cm_fs(cm_new_write(&dir, 8), &mut write_jobs, &tx).await;
+
+            let block = |blk_id, data: &'static [u8]| ipc::FS::WriteBlock {
+                id: 8,
+                file_num: 0,
+                data: data.to_vec().into(),
+                compressed: false,
+                blk_id,
+            };
+            cm_fs(block(1, b"first "), &mut write_jobs, &tx).await;
+            // Block 2 was lost on the way.
+            cm_fs(block(3, b"third"), &mut write_jobs, &tx).await;
+            cm_fs(block(4, b""), &mut write_jobs, &tx).await;
+            cm_fs(
+                ipc::FS::WriteDone { id: 8, file_num: 0 },
+                &mut write_jobs,
+                &tx,
+            )
+            .await;
+
+            let answers = cm_answers(&mut rx);
+            let in_place = dir.join("x").exists();
+            let _ = fs::remove_dir_all(&dir);
+            assert!(!in_place, "a file with a hole was put in place");
+            assert_eq!(answers, vec!["error".to_owned()]);
+            assert!(write_jobs.is_empty());
+        });
+    }
+
+    // ---- limits, busy destinations and directory links ----
+
+    #[test]
+    #[cfg(not(any(target_os = "ios")))]
+    fn file_limit_option_values() {
+        assert_eq!(super::max_validated_files_for(""), 1_000_000);
+        assert_eq!(super::max_validated_files_for("abc"), 1_000_000);
+        assert_eq!(super::max_validated_files_for("-5"), 1_000_000);
+        assert_eq!(super::max_validated_files_for("0"), 10_000);
+        assert_eq!(super::max_validated_files_for(" 250 "), 250);
+        assert_eq!(super::max_validated_files_for("5000000"), 5_000_000);
+        let message = super::too_many_files_message(250);
+        assert!(message.contains("more than 250"), "{}", message);
+        assert!(
+            message.contains(OPTION_FILE_TRANSFER_MAX_FILES),
+            "{}",
+            message
+        );
+        let stopped: hbb_common::anyhow::Error =
+            hbb_common::fs::TooManyEntries { limit: 250 }.into();
+        assert_eq!(super::walk_error_message(&stopped), message);
+        let other = hbb_common::anyhow::anyhow!("Not exists");
+        assert_eq!(super::walk_error_message(&other), "Not exists");
+    }
+
+    #[test]
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_second_write_job_to_the_same_destination_is_refused() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = unbounded_channel();
+            let dir = cm_write_test_dir("rustdesk_cm_same_destination");
+            let mut write_jobs = Vec::new();
+            cm_fs(cm_new_write(&dir, 11), &mut write_jobs, &tx).await;
+            cm_fs(cm_new_write(&dir, 12), &mut write_jobs, &tx).await;
+            assert_eq!(cm_answers(&mut rx), vec!["error".to_owned()]);
+            assert_eq!(write_jobs.len(), 1);
+            assert_eq!(write_jobs[0].id(), 11);
+
+            // When the first job is gone the destination is free again.
+            cm_fs(ipc::FS::CancelWrite { id: 11 }, &mut write_jobs, &tx).await;
+            cm_fs(cm_new_write(&dir, 13), &mut write_jobs, &tx).await;
+            assert!(cm_answers(&mut rx).is_empty());
+            assert_eq!(write_jobs.len(), 1);
+            let _ = fs::remove_dir_all(&dir);
+        });
+    }
+
+    /// A directory that holds a link to another directory. On Windows such a link is itself
+    /// a directory, and removing it as a file fails.
+    #[test]
+    #[cfg(not(any(target_os = "ios")))]
+    fn cm_remove_dir_removes_a_directory_that_holds_a_link_to_a_directory() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let (tx, mut rx) = unbounded_channel();
+            let dir = cm_write_test_dir("rustdesk_cm_remove_dir_link");
+            let target = dir.join("target");
+            let doomed = dir.join("doomed");
+            fs::create_dir_all(&target).unwrap();
+            fs::write(target.join("keep"), b"keep").unwrap();
+            fs::create_dir_all(&doomed).unwrap();
+            #[cfg(unix)]
+            let linked = std::os::unix::fs::symlink(&target, doomed.join("link")).is_ok();
+            #[cfg(windows)]
+            let linked = std::os::windows::fs::symlink_dir(&target, doomed.join("link")).is_ok();
+            if !linked {
+                // No privilege to create links here; nothing to check.
+                let _ = fs::remove_dir_all(&dir);
+                return;
+            }
+
+            super::remove_dir(doomed.to_string_lossy().to_string(), 14, true, &tx).await;
+
+            let answers = cm_answers(&mut rx);
+            let still_there = doomed.exists();
+            let kept = fs::read(target.join("keep")).ok();
+            let _ = fs::remove_dir_all(&dir);
+            assert!(!still_there, "the directory is still there");
+            assert_eq!(answers, vec!["done".to_owned()]);
+            assert_eq!(kept.as_deref(), Some(&b"keep"[..]));
+        });
     }
 }

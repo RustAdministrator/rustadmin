@@ -85,6 +85,9 @@ const HQ_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_secs(6);
 // service-wide coalescing window so one lost refresh cannot create a 2s stall.
 const DELIVERY_REFERENCE_REFRESH_COOLDOWN: Duration = Duration::from_millis(250);
 const IN_PLACE_REFERENCE_REFRESH_TIMEOUT: Duration = Duration::from_secs(1);
+/// The video service of a display is not restarted more often than this for a reference
+/// refresh that no frame carries.
+const STRANDED_REFRESH_RESTART_COOLDOWN: Duration = Duration::from_secs(3);
 #[cfg(windows)]
 const INSTALLED_SECURE_CAPTURE_HELPER_START_COOLDOWN: Duration = Duration::from_secs(5);
 #[cfg(any(windows, test))]
@@ -159,6 +162,32 @@ fn subscriber_join_action(
     } else {
         SubscriberJoinAction::Wait
     }
+}
+
+/// A reference refresh was asked for and nothing has been encoded since. An encoder that is
+/// fed from RAM gets the last frame again and answers with a keyframe. A texture encoder
+/// has no frame to repeat: on a screen that does not change the request stays unanswered
+/// until a pixel moves, and the viewer that asked keeps a damaged or frozen picture. The
+/// video service of the display is restarted instead; its first frame is a keyframe.
+///
+/// `unserved_since`: when the oldest refresh that no frame has carried was asked for.
+fn stranded_refresh_needs_restart(
+    texture_input: bool,
+    has_encoded_frame: bool,
+    unserved_since: Option<Instant>,
+    last_restart: Option<Instant>,
+    now: Instant,
+) -> bool {
+    // Before the first frame of this run there is nothing to refresh: it will be a keyframe.
+    if !texture_input || !has_encoded_frame {
+        return false;
+    }
+    let Some(since) = unserved_since else {
+        return false;
+    };
+    now.saturating_duration_since(since) >= IN_PLACE_REFERENCE_REFRESH_TIMEOUT
+        && !last_restart
+            .is_some_and(|at| now.saturating_duration_since(at) < STRANDED_REFRESH_RESTART_COOLDOWN)
 }
 
 fn starts_with_keyframe(frame: &hbb_common::message_proto::VideoFrame) -> bool {
@@ -237,14 +266,19 @@ impl HqReferenceRefreshPolicy {
         requested: bool,
         now: Instant,
     ) -> Option<ReferenceRefreshReason> {
-        if requested
-            && !self.last_refresh.is_some_and(|last_refresh| {
-                now.saturating_duration_since(last_refresh) < DELIVERY_REFERENCE_REFRESH_COOLDOWN
-            })
-        {
+        if requested {
             self.delivery_refresh_pending = true;
         }
         if !self.delivery_refresh_pending {
+            return None;
+        }
+        // A refresh that has just gone out covers the requests that follow it closely, for
+        // all viewers. The caller passes a request on once, so one that arrives in that time
+        // is kept and served when the time is over; it used to be forgotten. A refresh made
+        // meanwhile for another reason serves it too (`record_refresh`).
+        if self.last_refresh.is_some_and(|last_refresh| {
+            now.saturating_duration_since(last_refresh) < DELIVERY_REFERENCE_REFRESH_COOLDOWN
+        }) {
             return None;
         }
         if self
@@ -328,6 +362,82 @@ impl VideoStreamKey {
             display_idx,
         }
     }
+}
+
+lazy_static::lazy_static! {
+    // When the video service of a display was last restarted for a stranded reference
+    // refresh; by service name.
+    static ref STRANDED_REFRESH_RESTARTS: Mutex<HashMap<String, Instant>> = Default::default();
+}
+
+lazy_static::lazy_static! {
+    // Why a display is encoded in software although the session started with a hardware
+    // encoder; for the quality monitor.
+    static ref SOFTWARE_FALLBACK_REASONS: Mutex<super::encoder_ladder::RungFailures> =
+        Default::default();
+}
+
+#[cfg(feature = "vram")]
+lazy_static::lazy_static! {
+    static ref TEXTURE_ENCODING_FAILURES: Mutex<super::encoder_ladder::RungFailures> =
+        Default::default();
+}
+
+/// The texture encoder of this display failed: the next runs of its video service use the
+/// hardware encoder through RAM instead, and the session keeps its codec.
+#[cfg(feature = "vram")]
+fn texture_encoding_failed(service: &str, reason: &str) {
+    log::warn!(
+        "video encoder ladder: service={}, GPU texture encoding is off for {} s, next is the hardware encoder through RAM: {}",
+        service,
+        super::encoder_ladder::RETRY_AFTER.as_secs(),
+        reason
+    );
+    TEXTURE_ENCODING_FAILURES
+        .lock()
+        .unwrap()
+        .record(service, reason.to_owned(), Instant::now());
+}
+
+/// Why this display is not encoded from a GPU texture: the host option, or a recent failure.
+#[cfg(feature = "vram")]
+fn texture_encoding_off_reason(service: &str) -> Option<String> {
+    let failure = TEXTURE_ENCODING_FAILURES
+        .lock()
+        .unwrap()
+        .reason(service, Instant::now());
+    super::encoder_ladder::texture_off_reason(
+        &Config::get_option(hbb_common::config::keys::OPTION_ENABLE_TEXTURE_ENCODE),
+        failure,
+    )
+}
+
+/// The hardware encoder of this run failed for good. A texture encoder steps down to the
+/// hardware encoder through RAM and the session keeps its codec; anything else falls back
+/// to software VP8 or VP9, as before. Returns what the next run encodes with, or `None`
+/// when there is nothing to fall back to.
+fn step_down_from_failed_encoder(
+    _service: &str,
+    _encoder: &Encoder,
+    _reason: &str,
+) -> Option<String> {
+    #[cfg(feature = "vram")]
+    if _encoder.input_texture() {
+        texture_encoding_failed(_service, _reason);
+        return Some("the hardware encoder through RAM".to_owned());
+    }
+    let fallback = Encoder::set_software_fallback_codec()?;
+    hardware_encoding_failed(_service, _reason);
+    Some(format!("{fallback:?}"))
+}
+
+/// The session goes on in software because its hardware encoder failed: remembered for the
+/// quality monitor.
+fn hardware_encoding_failed(service: &str, reason: &str) {
+    SOFTWARE_FALLBACK_REASONS
+        .lock()
+        .unwrap()
+        .record(service, reason.to_owned(), Instant::now());
 }
 
 lazy_static::lazy_static! {
@@ -586,6 +696,9 @@ struct VideoFrameController {
     stream_key: VideoStreamKey,
     cur: Instant,
     send_conn_ids: HashSet<i32>,
+    /// The runtime of the waits for the viewers' fetch. One was built for every wait, that is
+    /// at least once a frame, also with nobody to wait for (26 us in a debug build).
+    runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl VideoFrameController {
@@ -594,6 +707,20 @@ impl VideoFrameController {
             stream_key: VideoStreamKey::new(source, display_idx),
             cur: Instant::now(),
             send_conn_ids: HashSet::new(),
+            runtime: Self::build_runtime(),
+        }
+    }
+
+    fn build_runtime() -> Option<tokio::runtime::Runtime> {
+        match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => Some(runtime),
+            Err(err) => {
+                log::warn!("no runtime for the frame fetch waits: {err}");
+                None
+            }
         }
     }
 
@@ -625,19 +752,35 @@ impl VideoFrameController {
             || (self.send_conn_ids.len() > 1 && fetched_expected > 0)
     }
 
-    #[tokio::main(flavor = "current_thread")]
-    async fn try_wait_next(&mut self, fetched_conn_ids: &mut HashSet<i32>, timeout_millis: u64) {
+    fn try_wait_next(&mut self, fetched_conn_ids: &mut HashSet<i32>, timeout_millis: u64) {
         if self.send_conn_ids.is_empty() {
             return;
         }
+        if self.runtime.is_none() {
+            self.runtime = Self::build_runtime();
+        }
+        let Some(runtime) = self.runtime.as_ref() else {
+            // As a wait that timed out, so that the caller's loop does not spin.
+            std::thread::sleep(Duration::from_millis(timeout_millis));
+            return;
+        };
+        runtime.block_on(Self::wait_next(
+            &self.stream_key,
+            &self.send_conn_ids,
+            fetched_conn_ids,
+            timeout_millis,
+        ));
+    }
 
+    async fn wait_next(
+        stream_key: &VideoStreamKey,
+        send_conn_ids: &HashSet<i32>,
+        fetched_conn_ids: &mut HashSet<i32>,
+        timeout_millis: u64,
+    ) {
         let timeout_dur = Duration::from_millis(timeout_millis as u64);
         let receiver = {
-            match FRAME_FETCHED_NOTIFIERS
-                .lock()
-                .unwrap()
-                .get(&self.stream_key)
-            {
+            match FRAME_FETCHED_NOTIFIERS.lock().unwrap().get(stream_key) {
                 Some(notifier) => notifier.1.clone(),
                 None => {
                     return;
@@ -654,7 +797,7 @@ impl VideoFrameController {
                 if let Some(tm) = instant {
                     log::trace!("Channel recv latency: {}", tm.elapsed().as_secs_f32());
                 }
-                if self.send_conn_ids.contains(&id) {
+                if send_conn_ids.contains(&id) {
                     fetched_conn_ids.insert(id);
                 }
             }
@@ -667,7 +810,7 @@ impl VideoFrameController {
                 if let Some(tm) = instant {
                     log::trace!("Channel recv latency: {}", tm.elapsed().as_secs_f32());
                 }
-                if self.send_conn_ids.contains(&id) {
+                if send_conn_ids.contains(&id) {
                     fetched_conn_ids.insert(id);
                 }
             }
@@ -700,6 +843,33 @@ impl VideoFrameController {
         }
         drained
     }
+}
+
+/// The deadlines of the Standard path. It slept one period from `now`, a time taken after the
+/// first part of the loop's work, so that work and the sleep's overshoot were added to every
+/// period. Each deadline is now one period after the previous one; a loop more than a period
+/// late starts again from its own time, so a stall is not followed by a burst of frames.
+#[derive(Debug, Default)]
+struct StandardLoopDeadline {
+    last: Option<Instant>,
+    period: Duration,
+}
+
+impl StandardLoopDeadline {
+    /// The sleep at `at`, the end of a loop that measured its work from `started`.
+    fn sleep_at(&mut self, started: Instant, at: Instant, period: Duration) -> Duration {
+        let deadline = match self.last {
+            Some(last) if self.period == period && at < last + period * 2 => last + period,
+            _ => started + period,
+        };
+        self.last = Some(deadline);
+        self.period = period;
+        deadline.saturating_duration_since(at)
+    }
+}
+
+fn standard_loop_deadline_enabled() -> bool {
+    Config::get_option(hbb_common::config::keys::OPTION_STANDARD_LOOP_DEADLINE) != "N"
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1725,6 +1895,55 @@ mod tests {
     }
 
     #[test]
+    fn refresh_that_no_frame_carries_restarts_a_texture_encoder_after_the_timeout() {
+        use super::{
+            stranded_refresh_needs_restart, IN_PLACE_REFERENCE_REFRESH_TIMEOUT,
+            STRANDED_REFRESH_RESTART_COOLDOWN,
+        };
+        let start = Instant::now();
+        let timeout = IN_PLACE_REFERENCE_REFRESH_TIMEOUT;
+        let cooldown = STRANDED_REFRESH_RESTART_COOLDOWN;
+        let ms = Duration::from_millis;
+        // (texture input, a frame was encoded, refresh unserved for, last restart ago, restart)
+        let table = [
+            // Nothing is asked for.
+            (true, true, None, None, false),
+            // Asked for, and the timeout has not passed: a changed pixel may still come.
+            (true, true, Some(ms(0)), None, false),
+            (true, true, Some(timeout - ms(1)), None, false),
+            // The screen is still and the request has waited long enough.
+            (true, true, Some(timeout), None, true),
+            (true, true, Some(timeout * 5), None, true),
+            // An encoder fed from RAM repeats its last frame; that path is not touched.
+            (false, true, Some(timeout * 5), None, false),
+            // Before the first frame of a run the next frame is a keyframe anyway.
+            (true, false, Some(timeout * 5), None, false),
+            // Not again right after a restart for the same reason...
+            (true, true, Some(timeout), Some(ms(0)), false),
+            (true, true, Some(timeout), Some(cooldown - ms(1)), false),
+            // ...but again once the cooldown is over.
+            (true, true, Some(timeout), Some(cooldown), true),
+        ];
+        // Far enough from the start of the process clock for the subtractions below.
+        let now = start + Duration::from_secs(3_600);
+        for (index, (texture, encoded, unserved_for, restart_ago, restart)) in
+            table.into_iter().enumerate()
+        {
+            assert_eq!(
+                stranded_refresh_needs_restart(
+                    texture,
+                    encoded,
+                    unserved_for.map(|waited| now - waited),
+                    restart_ago.map(|ago| now - ago),
+                    now,
+                ),
+                restart,
+                "row {index}"
+            );
+        }
+    }
+
+    #[test]
     fn subscriber_join_waits_for_encoder_warmup_and_bounds_reference_wait() {
         use super::{subscriber_join_action, SubscriberJoinAction::*};
         let now = Instant::now();
@@ -2453,6 +2672,39 @@ mod tests {
                 false,
                 now + DELIVERY_REFERENCE_REFRESH_COOLDOWN + Duration::from_millis(1)
             ),
+            None
+        );
+    }
+
+    /// The capture loop passes a request on once and forgets it. One that arrives right
+    /// after a refresh must be served when the cooldown is over, not lost.
+    #[test]
+    fn delivery_refresh_right_after_a_refresh_is_deferred_not_dropped() {
+        let now = Instant::now();
+        let mut policy = HqReferenceRefreshPolicy::new(false, 1_000);
+        assert_eq!(
+            policy.request_delivery_refresh(true, now),
+            Some(ReferenceRefreshReason::DeliveryRecovery)
+        );
+        policy.record_refresh(1_000, now);
+
+        assert_eq!(
+            policy.request_delivery_refresh(true, now + Duration::from_millis(100)),
+            None
+        );
+        // The request is not repeated by the caller.
+        assert_eq!(
+            policy.request_delivery_refresh(false, now + Duration::from_millis(200)),
+            None
+        );
+        assert_eq!(
+            policy.request_delivery_refresh(false, now + DELIVERY_REFERENCE_REFRESH_COOLDOWN),
+            Some(ReferenceRefreshReason::DeliveryRecovery)
+        );
+        // Once served it is not served again.
+        policy.record_refresh(1_000, now + DELIVERY_REFERENCE_REFRESH_COOLDOWN);
+        assert_eq!(
+            policy.request_delivery_refresh(false, now + DELIVERY_REFERENCE_REFRESH_COOLDOWN * 3),
             None
         );
     }
@@ -3317,6 +3569,11 @@ fn run(vs: VideoService) -> ResultType<()> {
                 VpxVideoCodecId::VP9
             };
             log::error!("Failed to create encoder: {err:?}, fallback to {fallback:?}");
+            hardware_encoding_failed(
+                &service_name,
+                &scrap::codec::odd_size_reason(c.width, c.height)
+                    .unwrap_or_else(|| format!("the encoder could not be created: {err}")),
+            );
             Encoder::set_fallback(&EncoderCfg::VPX(VpxEncoderConfig {
                 width: c.width as _,
                 height: c.height as _,
@@ -3343,11 +3600,25 @@ fn run(vs: VideoService) -> ResultType<()> {
     #[cfg(not(feature = "vram"))]
     let encoder_input_texture = false;
     let encoder_backend = Encoder::backend_label(&encoder_cfg);
-    let encoder_input = if encoder_input_texture {
-        "GPU texture"
+    // With the reason when the display is encoded a rung below what the hardware allows.
+    #[cfg(feature = "vram")]
+    let texture_off_reason = texture_encoding_off_reason(&service_name);
+    #[cfg(not(feature = "vram"))]
+    let texture_off_reason: Option<String> = None;
+    let hardware_off_reason = if encoder.is_hardware() {
+        None
     } else {
-        "CPU YUV frame"
+        SOFTWARE_FALLBACK_REASONS
+            .lock()
+            .unwrap()
+            .reason(&service_name, Instant::now())
     };
+    let encoder_input = super::encoder_ladder::encoder_input_label(
+        encoder_input_texture,
+        texture_off_reason.as_deref(),
+        hardware_off_reason.as_deref(),
+    );
+    let encoder_input: &str = &encoder_input;
     log::info!(
         "diag video service encoder ready: service={}, source={:?}, display_idx={}, negotiated={:?}, cfg={:?}, capture_backend={}, encoder_backend={}, encoder_input={}, hardware={}, input_texture={}, bitrate={}, use_i444={}, quality={:?}",
         sp.name(),
@@ -3397,6 +3668,8 @@ fn run(vs: VideoService) -> ResultType<()> {
 
     let bootstrap_fps = MOVIE_BOOTSTRAP_FPS.min(encoder_fps).max(1);
     let mut movie_pacer = full_movie_mode.then(|| MovieFramePacer::new(bootstrap_fps, start));
+    let mut standard_deadline =
+        standard_loop_deadline_enabled().then(StandardLoopDeadline::default);
     let mut movie_bootstrap_released = !full_movie_mode;
     let mut movie_host_window = full_movie_mode.then(|| MovieHostCadenceWindow::new(start));
     log::info!(
@@ -3445,6 +3718,8 @@ fn run(vs: VideoService) -> ResultType<()> {
     sp.set_option(OPTION_DIAGNOSTIC_STREAM_ID, &stream_id.to_string());
     let mut next_frame_id = 1;
     let mut reference_refresh_pending = None;
+    // Since when a reference refresh has been waiting without a single encoded frame.
+    let mut refresh_unserved_since: Option<Instant> = None;
     let mut subscriber_join_started: Option<Instant> = None;
     #[cfg(windows)]
     let mut secure_desktop_reference_refresh_pending = None;
@@ -3571,13 +3846,33 @@ fn run(vs: VideoService) -> ResultType<()> {
                 );
                 if let Some(decision) = controller.evaluate(cadence_sample) {
                     let recreate_started = Instant::now();
-                    match recreate_encoder_at_fps(
+                    match movie_tier_encoder_change(
                         &encoder_cfg,
                         use_i444,
                         quality,
                         decision.current_fps,
+                        keep_software_encoder_on_movie_tier_change(),
                     ) {
-                        Ok((replacement, replacement_cfg)) => {
+                        Ok(MovieTierEncoderChange::Kept(kept_cfg)) => {
+                            encoder_cfg = kept_cfg;
+                            pacer.set_fps(decision.current_fps, loop_started);
+                            spf = pacer.period;
+                            VIDEO_QOS.lock().unwrap().store_movie_runtime_status(
+                                &service_name,
+                                controller.target_fps(),
+                                decision.current_fps,
+                                host.pipeline_p95_us,
+                            );
+                            log::info!(
+                                "diag movie cadence change: service={}, target={}, previous={}, current={}, reason={}, encoder kept (it follows the frame timestamps)",
+                                service_name,
+                                controller.target_fps(),
+                                decision.previous_fps,
+                                decision.current_fps,
+                                decision.reason.as_str(),
+                            );
+                        }
+                        Ok(MovieTierEncoderChange::Recreated(replacement, replacement_cfg)) => {
                             let previous_bitrate = encoder.bitrate();
                             let replacement_bitrate = replacement.bitrate();
                             encoder = replacement;
@@ -3690,6 +3985,14 @@ fn run(vs: VideoService) -> ResultType<()> {
                     reference_recreated_after_timeout = true;
                 }
                 Err(error) => {
+                    #[cfg(feature = "vram")]
+                    if matches!(encoder_cfg, EncoderCfg::VRAM(_)) {
+                        texture_encoding_failed(
+                            &service_name,
+                            &format!("the texture encoder could not be created again: {error}"),
+                        );
+                        bail!("SWITCH");
+                    }
                     log::warn!(
                         "diag video reference refresh recreation fallback failed: service={}, display={}, codec={:?}, reason={:?}, error={:?}",
                         sp.name(),
@@ -3809,6 +4112,14 @@ fn run(vs: VideoService) -> ResultType<()> {
                         hw_no_valid_frame_since = None;
                     }
                     Err(err) => {
+                        #[cfg(feature = "vram")]
+                        if matches!(encoder_cfg, EncoderCfg::VRAM(_)) {
+                            texture_encoding_failed(
+                                &service_name,
+                                &format!("the texture encoder could not be created again: {err}"),
+                            );
+                            bail!("SWITCH");
+                        }
                         log::warn!(
                             "diag video reference refresh failed: service={}, display={}, codec={:?}, reason={:?}, ratio={}, bitrate={}, err={:?}",
                             sp.name(),
@@ -3822,6 +4133,42 @@ fn run(vs: VideoService) -> ResultType<()> {
                     }
                 }
             }
+        }
+        // Encoder recreations for further requests move `requested_at`; the first request
+        // that no frame has carried counts.
+        match reference_refresh_pending {
+            Some(PendingReferenceRefresh {
+                requested_at,
+                non_keyframe_frames: 0,
+                ..
+            }) => {
+                refresh_unserved_since.get_or_insert(requested_at);
+            }
+            _ => refresh_unserved_since = None,
+        }
+        let last_stranded_restart = STRANDED_REFRESH_RESTARTS
+            .lock()
+            .unwrap()
+            .get(&service_name)
+            .copied();
+        if stranded_refresh_needs_restart(
+            encoder_input_texture,
+            next_frame_id > 1,
+            refresh_unserved_since,
+            last_stranded_restart,
+            Instant::now(),
+        ) {
+            STRANDED_REFRESH_RESTARTS
+                .lock()
+                .unwrap()
+                .insert(service_name.clone(), Instant::now());
+            log::info!(
+                "switch for a reference refresh that no frame carries: service={}, display={}, waited_ms={}",
+                service_name,
+                display_idx,
+                refresh_unserved_since.map_or(0, |since| since.elapsed().as_millis())
+            );
+            bail!("SWITCH");
         }
         if sp.is_option_true(OPTION_REFRESH) {
             #[cfg(windows)]
@@ -4421,8 +4768,14 @@ fn run(vs: VideoService) -> ResultType<()> {
         // may need to enable frame(timeout)
         log::trace!("{:?} {:?}", time::Instant::now(), elapsed);
         let loop_period = resource_period.unwrap_or(spf);
-        if movie_pacer.is_none() && elapsed < loop_period {
-            std::thread::sleep(loop_period - elapsed);
+        if movie_pacer.is_none() {
+            let sleep = match standard_deadline.as_mut() {
+                Some(deadline) => deadline.sleep_at(now, now + elapsed, loop_period),
+                None => loop_period.saturating_sub(elapsed),
+            };
+            if !sleep.is_zero() {
+                std::thread::sleep(sleep);
+            }
         }
         host_diag.record_loop_total(loop_started.elapsed());
         #[cfg(windows)]
@@ -4500,7 +4853,8 @@ fn setup_encoder(
     bool,
     Arc<Mutex<Option<Recorder>>>,
 )> {
-    let encoder_cfg = get_encoder_config(
+    #[allow(unused_mut)]
+    let mut encoder_cfg = get_encoder_config(
         &c,
         name.to_string(),
         quality,
@@ -4509,6 +4863,32 @@ fn setup_encoder(
         source,
         encoder_fps,
     )?;
+    // The ladder, first rung: a texture encoder that cannot be created gives way to the
+    // hardware encoder through RAM, with the same codec. The config that is built after the
+    // failure was recorded is not a texture one.
+    #[cfg(feature = "vram")]
+    let mut texture_encoder = None;
+    #[cfg(feature = "vram")]
+    if matches!(encoder_cfg, EncoderCfg::VRAM(_)) {
+        match Encoder::new(encoder_cfg.clone(), Encoder::use_i444(&encoder_cfg)) {
+            Ok(encoder) => texture_encoder = Some(encoder),
+            Err(err) => {
+                texture_encoding_failed(
+                    &name,
+                    &format!("the texture encoder could not be created: {err}"),
+                );
+                encoder_cfg = get_encoder_config(
+                    &c,
+                    name.to_string(),
+                    quality,
+                    client_record || record_incoming,
+                    last_portable_service_running,
+                    source,
+                    encoder_fps,
+                )?;
+            }
+        }
+    }
     Encoder::set_fallback(&encoder_cfg);
     let codec_format = Encoder::negotiated_codec();
     let recorder = get_recorder(record_incoming, display_idx, source == VideoSource::Camera);
@@ -4528,6 +4908,12 @@ fn setup_encoder(
         record_incoming,
         last_portable_service_running
     );
+    #[cfg(feature = "vram")]
+    let encoder = match texture_encoder {
+        Some(encoder) => encoder,
+        None => Encoder::new(encoder_cfg.clone(), use_i444)?,
+    };
+    #[cfg(not(feature = "vram"))]
     let encoder = Encoder::new(encoder_cfg.clone(), use_i444)?;
     Ok((encoder, encoder_cfg, codec_format, use_i444, recorder))
 }
@@ -4578,6 +4964,47 @@ fn recreate_encoder_at_quality(
     Encoder::new(encoder_cfg, use_i444)
 }
 
+/// Whether the encoder takes the frame rate from the timestamps of the frames and not from its
+/// configuration: libvpx and aom do.
+fn encoder_follows_frame_timestamps(encoder_cfg: &EncoderCfg) -> bool {
+    matches!(encoder_cfg, EncoderCfg::VPX(_) | EncoderCfg::AOM(_))
+}
+
+/// The kill switch `movie-tier-keeps-software-encoder`.
+fn keep_software_encoder_on_movie_tier_change() -> bool {
+    Config::get_option(hbb_common::config::keys::OPTION_MOVIE_TIER_KEEPS_SOFTWARE_ENCODER) != "N"
+}
+
+/// What a frame rate tier change of the Movie cadence controller does to the encoder.
+enum MovieTierEncoderChange {
+    /// The encoder follows the frame timestamps: only the configured rate is updated. A new
+    /// encoder would change nothing but start with a keyframe, a burst of bits at every change.
+    Kept(EncoderCfg),
+    Recreated(Encoder, EncoderCfg),
+}
+
+fn movie_tier_encoder_change(
+    encoder_cfg: &EncoderCfg,
+    use_i444: bool,
+    quality: f32,
+    fps: u32,
+    keep_software_encoder: bool,
+) -> ResultType<MovieTierEncoderChange> {
+    if keep_software_encoder && encoder_follows_frame_timestamps(encoder_cfg) {
+        let mut kept_cfg = encoder_cfg.clone();
+        let fps = scrap::codec::normalized_encoder_fps(fps);
+        match &mut kept_cfg {
+            EncoderCfg::VPX(config) => config.fps = fps,
+            EncoderCfg::AOM(config) => config.fps = fps,
+            #[allow(unreachable_patterns)]
+            _ => {}
+        }
+        return Ok(MovieTierEncoderChange::Kept(kept_cfg));
+    }
+    let (encoder, encoder_cfg) = recreate_encoder_at_fps(encoder_cfg, use_i444, quality, fps)?;
+    Ok(MovieTierEncoderChange::Recreated(encoder, encoder_cfg))
+}
+
 fn recreate_encoder_at_fps(
     encoder_cfg: &EncoderCfg,
     use_i444: bool,
@@ -4620,14 +5047,23 @@ fn get_encoder_config(
     encoder_fps: u32,
 ) -> ResultType<EncoderCfg> {
     #[cfg(all(windows, feature = "vram"))]
-    if _portable_service || c.is_gdi() || c.is_cpu_only() || _source == VideoSource::Camera {
-        log::info!(
-            "gdi:{}, cpu_only:{}, portable:{}",
-            c.is_gdi(),
-            c.is_cpu_only(),
-            _portable_service
-        );
-        VRamEncoder::set_not_use(_name, true);
+    {
+        let texture_off = texture_encoding_off_reason(&_name);
+        if _portable_service
+            || c.is_gdi()
+            || c.is_cpu_only()
+            || _source == VideoSource::Camera
+            || texture_off.is_some()
+        {
+            log::info!(
+                "gdi:{}, cpu_only:{}, portable:{}, texture_encoding_off:{:?}",
+                c.is_gdi(),
+                c.is_cpu_only(),
+                _portable_service,
+                texture_off
+            );
+            VRamEncoder::set_not_use(_name, true);
+        }
     }
     #[cfg(feature = "vram")]
     Encoder::update(scrap::codec::EncodingUpdate::Check);
@@ -4955,11 +5391,18 @@ fn handle_one_frame(
                             HW_ENCODER_WARMUP_TIMEOUT.as_millis()
                         );
                     }
+                    // Nothing was sent: the first frame is still to come, and the low-power
+                    // modes keep repeating the last frame only while it is.
+                    *first_frame = first;
                     return Ok(send_conn_ids);
                 }
                 *encode_fail_counter = 0;
                 *hw_no_valid_frame_since = None;
-                let Some(fallback) = Encoder::set_software_fallback_codec() else {
+                let Some(fallback) = step_down_from_failed_encoder(
+                    &sp.name(),
+                    encoder,
+                    "no packet in the warm-up time",
+                ) else {
                     log::error!(
                         "hardware encoder warmup timed out with no peer-compatible VP8/VP9 fallback: elapsed_ms={}, error={e:?}",
                         warmup_elapsed.as_millis(),
@@ -4967,7 +5410,7 @@ fn handle_one_frame(
                     return Err(e);
                 };
                 log::error!(
-                    "switch to {fallback:?} due to hardware encoder warmup timeout: elapsed_ms={}, error={e:?}",
+                    "switch to {fallback} due to hardware encoder warmup timeout: elapsed_ms={}, error={e:?}",
                     warmup_elapsed.as_millis(),
                 );
                 bail!("SWITCH");
@@ -4998,28 +5441,36 @@ fn handle_one_frame(
             if (first && !repeat) || *encode_fail_counter >= max_fail_times {
                 *encode_fail_counter = 0;
                 if encoder.is_hardware() {
-                    let Some(fallback) = Encoder::set_software_fallback_codec() else {
+                    let Some(fallback) = step_down_from_failed_encoder(
+                        &sp.name(),
+                        encoder,
+                        "encode errors in a row",
+                    ) else {
                         log::error!(
                             "hardware encoding failed with no peer-compatible VP8/VP9 fallback, first frame: {first}, error: {e:?}"
                         );
                         return Err(e);
                     };
                     log::error!(
-                        "switch to {fallback:?} due to hardware encoding fails without disabling hwcodec availability, first frame: {first}, error: {e:?}"
+                        "switch to {fallback} due to hardware encoding fails without disabling hwcodec availability, first frame: {first}, error: {e:?}"
                     );
                     bail!("SWITCH");
                 }
             }
             match e.to_string().as_str() {
                 scrap::codec::ENCODE_NEED_SWITCH => {
-                    let Some(fallback) = Encoder::set_software_fallback_codec() else {
+                    let Some(fallback) = step_down_from_failed_encoder(
+                        &sp.name(),
+                        encoder,
+                        "the encoder asked to be replaced",
+                    ) else {
                         log::error!(
                             "encoder requested a switch with no peer-compatible VP8/VP9 fallback: {e:?}"
                         );
                         return Err(e);
                     };
                     log::error!(
-                        "switch to {fallback:?} due to encoder need switch without disabling hwcodec availability"
+                        "switch to {fallback} due to encoder need switch without disabling hwcodec availability"
                     );
                     bail!("SWITCH");
                 }
@@ -5140,6 +5591,14 @@ pub fn make_display_changed_msg(
     Some(msg_out)
 }
 
+/// How long a custom quality must stay unchanged before an encoder that cannot change its
+/// quality is made again with it.
+const CUSTOM_QUALITY_SETTLE_TIME: Duration = Duration::from_secs(1);
+
+fn custom_quality_remakes_fixed_encoder() -> bool {
+    Config::get_option(hbb_common::config::keys::OPTION_CUSTOM_QUALITY_REMAKES_FIXED_ENCODER) != "N"
+}
+
 fn check_qos(
     encoder: &mut Encoder,
     ratio: &mut f32,
@@ -5164,7 +5623,25 @@ fn check_qos(
     let next_ratio = video_qos.ratio(name);
     let previous_bitrate = encoder.bitrate();
     let ratio_changed = *ratio != next_ratio;
-    if ratio_changed {
+    // A custom quality the encoder cannot take while it runs (VAAPI) waited for the next time
+    // the encoder was made for another reason. It is now applied by making the encoder again,
+    // once the viewer has left the setting alone (a slider sends many values); `ratio` keeps
+    // the encoder's value until then.
+    let custom_for_fixed_encoder = ratio_changed
+        && !encoder.support_changing_quality()
+        && !video_qos.in_vbr_state(name)
+        && video_qos.latest_quality(name).is_custom()
+        && custom_quality_remakes_fixed_encoder();
+    if custom_for_fixed_encoder {
+        if video_qos.latest_quality_age(name) >= CUSTOM_QUALITY_SETTLE_TIME {
+            log::info!(
+                "switch to apply a custom quality the encoder cannot change: ratio {} -> {}",
+                *ratio,
+                next_ratio
+            );
+            bail!("SWITCH");
+        }
+    } else if ratio_changed {
         *ratio = next_ratio;
         if encoder.support_changing_quality() {
             allow_err!(encoder.set_quality(*ratio));
@@ -5266,5 +5743,473 @@ fn handle_screenshot(screenshot: Screenshot, msg: String, w: usize, h: usize, da
         .send((hbb_common::tokio::time::Instant::now(), Arc::new(msg_out)))
     {
         log::error!("Failed to send screenshot, {}", e);
+    }
+}
+
+#[cfg(test)]
+mod movie_tier_tests {
+    use super::*;
+    use scrap::{codec::EncoderCfg, EncodeInput, VpxEncoderConfig, VpxVideoCodecId};
+
+    fn vp9_config() -> EncoderCfg {
+        EncoderCfg::VPX(VpxEncoderConfig {
+            width: 64,
+            height: 64,
+            quality: 1.0,
+            fps: 30,
+            codec: VpxVideoCodecId::VP9,
+            keyframe_interval: None,
+        })
+    }
+
+    /// A frame of the test pattern; `shade` changes it a little from frame to frame.
+    fn yuv(encoder: &Encoder, shade: u8) -> Vec<u8> {
+        let format = encoder.yuvfmt();
+        vec![shade; format.v + format.stride[2] * format.h.div_ceil(2)]
+    }
+
+    /// The Movie cadence controller moves a VP9 stream from 30 to 24 frames a second, as the
+    /// capture loop does it: `recreate_encoder_at_fps`. libvpx takes the rate from the frame
+    /// timestamps and does not read the configured one, so the new encoder changes nothing
+    /// but starts with a keyframe: a burst of bits at every tier change.
+    #[test]
+    fn movie_tier_change_with_vp9_costs_no_keyframe() {
+        let config = vp9_config();
+        let mut encoder = Encoder::new(config.clone(), false).unwrap();
+        let pattern = yuv(&encoder, 100);
+        let first = encoder
+            .encode_to_message(EncodeInput::YUV(&pattern), 0)
+            .unwrap();
+        assert!(starts_with_keyframe(&first));
+        let mut encoder = match movie_tier_encoder_change(&config, false, 1.0, 24, true).unwrap() {
+            MovieTierEncoderChange::Kept(kept) => {
+                assert!(matches!(
+                    kept,
+                    EncoderCfg::VPX(VpxEncoderConfig { fps: 24, .. })
+                ));
+                encoder
+            }
+            MovieTierEncoderChange::Recreated(..) => panic!("the VP9 encoder was made again"),
+        };
+        for (index, shade) in [104u8, 108, 112].into_iter().enumerate() {
+            let pattern = yuv(&encoder, shade);
+            if let Ok(frame) =
+                encoder.encode_to_message(EncodeInput::YUV(&pattern), 42 * (index as i64 + 1))
+            {
+                assert!(
+                    !starts_with_keyframe(&frame),
+                    "a tier change forced a keyframe"
+                );
+            }
+        }
+    }
+
+    /// With `movie-tier-keeps-software-encoder = N` the encoder is made again, as before, and
+    /// starts with a keyframe.
+    #[test]
+    fn movie_tier_change_makes_a_new_encoder_with_the_kill_switch() {
+        let config = vp9_config();
+        match movie_tier_encoder_change(&config, false, 1.0, 24, false).unwrap() {
+            MovieTierEncoderChange::Recreated(mut encoder, recreated) => {
+                assert!(matches!(
+                    recreated,
+                    EncoderCfg::VPX(VpxEncoderConfig { fps: 24, .. })
+                ));
+                let pattern = yuv(&encoder, 100);
+                let frame = encoder
+                    .encode_to_message(EncodeInput::YUV(&pattern), 0)
+                    .unwrap();
+                assert!(starts_with_keyframe(&frame));
+            }
+            MovieTierEncoderChange::Kept(_) => panic!("the switch was not followed"),
+        }
+        assert!(encoder_follows_frame_timestamps(&config));
+    }
+}
+
+#[cfg(test)]
+mod first_frame_tests {
+    use super::*;
+    use hbb_common::message_proto::VideoFrame;
+    use scrap::{codec::EncoderApi, EncodeYuvFormat};
+
+    /// A hardware encoder that has taken frames but given no packet yet, as a MediaCodec or
+    /// VideoToolbox encoder does with the first one.
+    struct NoPacketYet;
+
+    impl EncoderApi for NoPacketYet {
+        fn new(_cfg: EncoderCfg, _i444: bool) -> ResultType<Self> {
+            Ok(NoPacketYet)
+        }
+
+        fn encode_to_message(&mut self, _frame: EncodeInput, _ms: i64) -> ResultType<VideoFrame> {
+            Err(hbb_common::anyhow::anyhow!(ENCODE_NO_VALID_FRAME))
+        }
+
+        fn yuvfmt(&self) -> EncodeYuvFormat {
+            EncodeYuvFormat {
+                pixfmt: Pixfmt::I420,
+                w: 4,
+                h: 4,
+                stride: vec![4, 2, 2],
+                u: 16,
+                v: 20,
+            }
+        }
+
+        #[cfg(feature = "vram")]
+        fn input_texture(&self) -> bool {
+            false
+        }
+
+        fn set_quality(&mut self, _ratio: f32) -> ResultType<()> {
+            Ok(())
+        }
+
+        fn bitrate(&self) -> u32 {
+            0
+        }
+
+        fn support_changing_quality(&self) -> bool {
+            false
+        }
+
+        fn latency_free(&self) -> bool {
+            false
+        }
+
+        fn is_hardware(&self) -> bool {
+            true
+        }
+    }
+
+    /// In the low-power modes the loop repeats the last frame only while `first_frame` (or a
+    /// pending join or refresh) says so. A first frame that gave no packet has not been sent.
+    #[test]
+    fn the_first_frame_is_awaited_until_the_encoder_gives_a_packet() {
+        let sp = GenericService::new("first-frame-test".to_owned(), false);
+        let mut encoder = Encoder {
+            codec: Box::new(NoPacketYet),
+        };
+        let mut encode_fail_counter = 0;
+        let mut hw_no_valid_frame_since = None;
+        let mut first_frame = true;
+        let mut next_frame_id = 0;
+        let mut reference_refresh_pending = None;
+        let yuv = vec![0u8; 24];
+        let sent = handle_one_frame(
+            0,
+            &sp,
+            EncodeInput::YUV(&yuv),
+            0,
+            &mut encoder,
+            Arc::new(Mutex::new(None)),
+            &mut encode_fail_counter,
+            &mut hw_no_valid_frame_since,
+            &mut first_frame,
+            1,
+            &mut next_frame_id,
+            &mut reference_refresh_pending,
+            4,
+            4,
+        )
+        .unwrap();
+        assert!(sent.is_empty());
+        assert!(hw_no_valid_frame_since.is_some());
+        assert!(
+            first_frame,
+            "the first frame was taken as sent although the encoder gave no packet"
+        );
+    }
+}
+
+#[cfg(test)]
+mod frame_wait_tests {
+    use super::*;
+
+    fn registered(display_idx: usize) -> VideoStreamKey {
+        let key = VideoStreamKey::new(VideoSource::Camera, display_idx);
+        FRAME_FETCHED_NOTIFIERS
+            .lock()
+            .unwrap()
+            .entry(key)
+            .or_insert_with(|| {
+                let (tx, rx) = unbounded_channel();
+                (tx, Arc::new(TokioMutex::new(rx)))
+            });
+        key
+    }
+
+    /// The wait for the viewers' fetch of a frame collects a fetch that came before it.
+    #[test]
+    fn a_fetch_that_came_first_is_collected() {
+        registered(90);
+        let mut controller = VideoFrameController::new(VideoSource::Camera, 90);
+        controller.set_send(Instant::now(), HashSet::from([5]));
+        notify_video_frame_fetched(VideoSource::Camera, 90, 5, None);
+        let mut fetched = HashSet::new();
+        let started = Instant::now();
+        controller.try_wait_next(&mut fetched, 300);
+        assert_eq!(fetched, HashSet::from([5]));
+        assert!(started.elapsed() < Duration::from_millis(250));
+        controller.reset();
+    }
+
+    /// What one wait costs the capture loop with no viewer to wait for, and with one whose fetch
+    /// came first. Prints the cost.
+    #[test]
+    fn frame_wait_cost() {
+        registered(91);
+        let mut controller = VideoFrameController::new(VideoSource::Camera, 91);
+        let mut fetched = HashSet::new();
+        let calls = 2_000u32;
+        let started = Instant::now();
+        for _ in 0..calls {
+            controller.try_wait_next(&mut fetched, 0);
+        }
+        let idle = started.elapsed();
+        controller.set_send(Instant::now(), HashSet::from([7]));
+        let started = Instant::now();
+        for _ in 0..calls {
+            notify_video_frame_fetched(VideoSource::Camera, 91, 7, None);
+            fetched.clear();
+            controller.try_wait_next(&mut fetched, 300);
+            assert!(fetched.contains(&7));
+        }
+        let waiting = started.elapsed();
+        controller.reset();
+        println!(
+            "frame wait cost: {:.1} us per call with no viewer to wait for, {:.1} us with one whose fetch came first",
+            idle.as_secs_f64() * 1e6 / f64::from(calls),
+            waiting.as_secs_f64() * 1e6 / f64::from(calls)
+        );
+    }
+}
+
+#[cfg(test)]
+mod standard_loop_deadline_tests {
+    use super::*;
+
+    const PERIOD: Duration = Duration::from_micros(33_333);
+
+    /// Runs `loops` loops of the Standard path on a made-up clock: `before` of work before
+    /// `now` is taken, `work` after it, and every sleep `overshoot` longer than asked. Returns
+    /// the average time from one loop's start to the next.
+    fn average_period(
+        mut deadline: Option<StandardLoopDeadline>,
+        loops: u32,
+        before: Duration,
+        work: Duration,
+        overshoot: Duration,
+    ) -> Duration {
+        let start = Instant::now();
+        let mut clock = start;
+        for _ in 0..loops {
+            clock += before;
+            let now = clock;
+            clock += work;
+            let elapsed = clock - now;
+            let sleep = match deadline.as_mut() {
+                Some(deadline) => deadline.sleep_at(now, now + elapsed, PERIOD),
+                None => PERIOD.saturating_sub(elapsed),
+            };
+            if !sleep.is_zero() {
+                clock += sleep + overshoot;
+            }
+        }
+        (clock - start) / loops
+    }
+
+    fn micros(duration: Duration) -> i128 {
+        duration.as_micros() as i128
+    }
+
+    #[test]
+    fn the_work_before_now_and_the_overshoot_no_longer_add_to_every_period() {
+        let before = Duration::from_millis(3);
+        let work = Duration::from_millis(10);
+        let overshoot = Duration::from_millis(1);
+        let old = average_period(None, 300, before, work, overshoot);
+        let new = average_period(Some(Default::default()), 300, before, work, overshoot);
+        // As before: 33.3 + 3 + 1 ms, 27.5 frames a second instead of 30.
+        assert!(
+            (micros(old) - micros(PERIOD + before + overshoot)).abs() < 50,
+            "{old:?}"
+        );
+        assert!((micros(new) - micros(PERIOD)).abs() < 50, "{new:?}");
+    }
+
+    #[test]
+    fn the_first_loop_sleeps_as_before() {
+        let mut deadline = StandardLoopDeadline::default();
+        let now = Instant::now();
+        let at = now + Duration::from_millis(10);
+        assert_eq!(
+            deadline.sleep_at(now, at, PERIOD),
+            PERIOD - Duration::from_millis(10)
+        );
+    }
+
+    #[test]
+    fn a_loop_a_little_late_is_made_up_by_the_next() {
+        let mut deadline = StandardLoopDeadline::default();
+        let start = Instant::now();
+        let first = deadline.sleep_at(start, start + Duration::from_millis(10), PERIOD);
+        let next_start = start + Duration::from_millis(10) + first;
+        // The second loop takes 40 ms, 7 ms more than a period.
+        let second_end = next_start + Duration::from_millis(40);
+        assert_eq!(
+            deadline.sleep_at(next_start, second_end, PERIOD),
+            Duration::ZERO
+        );
+        // The third is quick and ends its period on the deadline two periods after the first.
+        let third_end = second_end + Duration::from_millis(10);
+        let third = deadline.sleep_at(second_end, third_end, PERIOD);
+        assert_eq!(third_end + third, start + PERIOD * 3);
+    }
+
+    #[test]
+    fn a_loop_more_than_a_period_late_starts_again_without_a_burst() {
+        let mut deadline = StandardLoopDeadline::default();
+        let start = Instant::now();
+        let first = deadline.sleep_at(start, start + Duration::from_millis(10), PERIOD);
+        let next_start = start + Duration::from_millis(10) + first;
+        // A stall of 100 ms, three periods.
+        let stalled_end = next_start + Duration::from_millis(100);
+        assert_eq!(
+            deadline.sleep_at(next_start, stalled_end, PERIOD),
+            Duration::ZERO
+        );
+        // The next loop gets a full period again instead of catching up.
+        let next_end = stalled_end + Duration::from_millis(10);
+        assert_eq!(
+            deadline.sleep_at(stalled_end, next_end, PERIOD),
+            PERIOD - Duration::from_millis(10)
+        );
+    }
+
+    #[test]
+    fn a_new_period_starts_from_the_loop() {
+        let mut deadline = StandardLoopDeadline::default();
+        let start = Instant::now();
+        let first = deadline.sleep_at(start, start + Duration::from_millis(10), PERIOD);
+        let next_start = start + Duration::from_millis(10) + first;
+        let slower = Duration::from_millis(100);
+        let next_end = next_start + Duration::from_millis(10);
+        assert_eq!(
+            deadline.sleep_at(next_start, next_end, slower),
+            slower - Duration::from_millis(10)
+        );
+    }
+}
+
+#[cfg(test)]
+mod custom_quality_tests {
+    use super::*;
+    use hbb_common::message_proto::VideoFrame;
+    use scrap::{codec::EncoderApi, EncodeYuvFormat};
+
+    const SERVICE: &str = "custom-quality-test";
+    const VIEWER: i32 = 990_001;
+
+    /// An encoder that cannot change its quality while it runs, as VAAPI.
+    struct FixedQuality;
+
+    impl EncoderApi for FixedQuality {
+        fn new(_cfg: EncoderCfg, _i444: bool) -> ResultType<Self> {
+            Ok(FixedQuality)
+        }
+
+        fn encode_to_message(&mut self, _frame: EncodeInput, _ms: i64) -> ResultType<VideoFrame> {
+            Ok(VideoFrame::new())
+        }
+
+        fn yuvfmt(&self) -> EncodeYuvFormat {
+            EncodeYuvFormat {
+                pixfmt: Pixfmt::I420,
+                w: 4,
+                h: 4,
+                stride: vec![4, 2, 2],
+                u: 16,
+                v: 20,
+            }
+        }
+
+        #[cfg(feature = "vram")]
+        fn input_texture(&self) -> bool {
+            false
+        }
+
+        fn set_quality(&mut self, _ratio: f32) -> ResultType<()> {
+            Ok(())
+        }
+
+        fn bitrate(&self) -> u32 {
+            1_000
+        }
+
+        fn support_changing_quality(&self) -> bool {
+            false
+        }
+
+        fn latency_free(&self) -> bool {
+            true
+        }
+
+        fn is_hardware(&self) -> bool {
+            true
+        }
+    }
+
+    /// A custom quality the encoder cannot take while it runs is applied by making the encoder
+    /// again (the loop restarts with `SWITCH`) once the viewer has left the setting alone for a
+    /// second; before, it waited for some other reason to make the encoder again.
+    #[test]
+    fn a_custom_quality_reaches_an_encoder_that_cannot_change_it() {
+        {
+            let mut qos = VIDEO_QOS.lock().unwrap();
+            qos.new_display(SERVICE.to_owned());
+            qos.on_connection_open(VIEWER);
+            qos.sync_subscribers(SERVICE, HashSet::from([VIEWER]));
+            qos.user_image_quality(VIEWER, 75 << 8);
+        }
+        let sp = GenericService::new(SERVICE.to_owned(), false);
+        let mut encoder = Encoder {
+            codec: Box::new(FixedQuality),
+        };
+        let mut ratio = 0.05f32;
+        let mut spf = Duration::from_millis(33);
+        let mut send_counter = 0;
+        let mut second_instant = Instant::now();
+        let mut check = |ratio: &mut f32| {
+            // Not a second since the last subscriber sync: it would drop the viewer, who is not
+            // a subscriber of this test's service.
+            second_instant = Instant::now();
+            check_qos(
+                &mut encoder,
+                ratio,
+                &mut spf,
+                false,
+                &mut send_counter,
+                &mut second_instant,
+                SERVICE,
+                &sp,
+            )
+            .err()
+            .map(|err| err.to_string())
+        };
+        let at_once = check(&mut ratio);
+        std::thread::sleep(Duration::from_millis(1_100));
+        let a_second_later = check(&mut ratio);
+        VIDEO_QOS.lock().unwrap().on_connection_close(VIEWER);
+        assert_eq!(
+            at_once, None,
+            "made again while the viewer may still move the slider"
+        );
+        assert_eq!(
+            a_second_later.as_deref(),
+            Some("SWITCH"),
+            "the custom quality never reached the encoder"
+        );
     }
 }

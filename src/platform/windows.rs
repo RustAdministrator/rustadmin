@@ -53,18 +53,19 @@ use winapi::{
             PROCESS_INFORMATION, STARTUPINFOW,
         },
         securitybaseapi::{
-            AllocateAndInitializeSid, DuplicateToken, EqualSid, FreeSid, GetTokenInformation,
+            AllocateAndInitializeSid, DuplicateTokenEx, EqualSid, FreeSid, GetTokenInformation,
         },
         shellapi::ShellExecuteW,
         sysinfoapi::{GetNativeSystemInfo, SYSTEM_INFO},
         winbase::*,
         wingdi::*,
         winnt::{
-            SecurityImpersonation, TokenElevation, TokenGroups, TokenImpersonation, TokenType,
-            DOMAIN_ALIAS_RID_ADMINS, ES_AWAYMODE_REQUIRED, ES_CONTINUOUS, ES_DISPLAY_REQUIRED,
-            ES_SYSTEM_REQUIRED, HANDLE, PROCESS_ALL_ACCESS, PROCESS_QUERY_LIMITED_INFORMATION,
-            PSID, SECURITY_BUILTIN_DOMAIN_RID, SECURITY_NT_AUTHORITY, SID_IDENTIFIER_AUTHORITY,
-            TOKEN_ELEVATION, TOKEN_GROUPS, TOKEN_QUERY, TOKEN_TYPE,
+            SecurityImpersonation, TokenElevation, TokenGroups, TokenImpersonation, TokenPrimary,
+            TokenType, DOMAIN_ALIAS_RID_ADMINS, ES_AWAYMODE_REQUIRED, ES_CONTINUOUS,
+            ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED, HANDLE, MAXIMUM_ALLOWED, PROCESS_ALL_ACCESS,
+            PROCESS_QUERY_LIMITED_INFORMATION, PSID, SECURITY_BUILTIN_DOMAIN_RID,
+            SECURITY_NT_AUTHORITY, SID_IDENTIFIER_AUTHORITY, TOKEN_ELEVATION, TOKEN_GROUPS,
+            TOKEN_QUERY, TOKEN_TYPE,
         },
         winreg::HKEY_CURRENT_USER,
         winspool::{
@@ -328,8 +329,7 @@ pub fn reset_input_cache() {}
 
 pub fn get_cursor() -> ResultType<Option<u64>> {
     unsafe {
-        #[allow(invalid_value)]
-        let mut ci: CURSORINFO = mem::MaybeUninit::uninit().assume_init();
+        let mut ci: CURSORINFO = mem::zeroed();
         ci.cbSize = std::mem::size_of::<CURSORINFO>() as _;
         if crate::portable_service::client::get_cursor_info(&mut ci) == FALSE {
             return Err(io::Error::last_os_error().into());
@@ -347,8 +347,7 @@ struct IconInfo(ICONINFO);
 impl IconInfo {
     fn new(icon: HICON) -> ResultType<Self> {
         unsafe {
-            #[allow(invalid_value)]
-            let mut ii = mem::MaybeUninit::uninit().assume_init();
+            let mut ii: ICONINFO = mem::zeroed();
             if GetIconInfo(icon, &mut ii) == FALSE {
                 Err(io::Error::last_os_error().into())
             } else {
@@ -1336,6 +1335,10 @@ lazy_static::lazy_static! {
 }
 
 const LOGON_UI_CAPTURE_CACHE_TTL: Duration = Duration::from_millis(200);
+/// How old an answer may be and still be handed to the capture while a fresh one is fetched on a
+/// thread of its own. With none yet, or an older one, the check runs on the caller's thread.
+const LOGON_UI_CAPTURE_CACHE_STALE_LIMIT: Duration = Duration::from_secs(1);
+static LOGON_UI_CAPTURE_REFRESHING: AtomicBool = AtomicBool::new(false);
 
 pub fn desktop_changed() -> bool {
     unsafe { inputDesktopSelected() == FALSE }
@@ -1634,14 +1637,24 @@ pub fn is_logon_ui() -> ResultType<bool> {
 /// Capture must not fall back to an interactive-only backend when process
 /// enumeration is unavailable on a desktop transition. The SYSTEM helper is
 /// valid on both desktops, while WGC/DXGI user helpers are not.
+///
+/// The check takes a snapshot of every process (2 to 3 ms with 128 processes) and the capture
+/// thread asks every frame, so an answer older than 200 ms is refreshed on a thread of its own
+/// while the capture goes on with the one it has (`logon-ui-check-off-capture-thread`).
 pub fn is_logon_ui_for_capture() -> bool {
-    let now = Instant::now();
-    if let Some((checked_at, is_logon_ui)) = *LOGON_UI_CAPTURE_CACHE.lock().unwrap() {
-        if now.saturating_duration_since(checked_at) < LOGON_UI_CAPTURE_CACHE_TTL {
-            return is_logon_ui;
-        }
-    }
-    let is_logon_ui = match is_logon_ui() {
+    let off_thread =
+        Config::get_option(config::keys::OPTION_LOGON_UI_CHECK_OFF_CAPTURE_THREAD) != "N";
+    logon_ui_for_capture_with(
+        &LOGON_UI_CAPTURE_CACHE,
+        &LOGON_UI_CAPTURE_REFRESHING,
+        Instant::now(),
+        off_thread,
+        query_logon_ui_for_capture,
+    )
+}
+
+fn query_logon_ui_for_capture() -> bool {
+    match is_logon_ui() {
         Ok(is_logon_ui) => is_logon_ui,
         Err(err) => {
             log::warn!(
@@ -1650,8 +1663,41 @@ pub fn is_logon_ui_for_capture() -> bool {
             );
             true
         }
-    };
-    *LOGON_UI_CAPTURE_CACHE.lock().unwrap() = Some((now, is_logon_ui));
+    }
+}
+
+fn logon_ui_for_capture_with(
+    cache: &'static Mutex<Option<(Instant, bool)>>,
+    refreshing: &'static AtomicBool,
+    now: Instant,
+    off_thread: bool,
+    query: fn() -> bool,
+) -> bool {
+    let cached = *cache.lock().unwrap();
+    if let Some((checked_at, is_logon_ui)) = cached {
+        let age = now.saturating_duration_since(checked_at);
+        if age < LOGON_UI_CAPTURE_CACHE_TTL {
+            return is_logon_ui;
+        }
+        if off_thread && age < LOGON_UI_CAPTURE_CACHE_STALE_LIMIT {
+            if refreshing.swap(true, Ordering::AcqRel) {
+                return is_logon_ui;
+            }
+            let spawned = std::thread::Builder::new()
+                .name("logon-ui-check".to_owned())
+                .spawn(move || {
+                    let is_logon_ui = query();
+                    *cache.lock().unwrap() = Some((Instant::now(), is_logon_ui));
+                    refreshing.store(false, Ordering::Release);
+                });
+            if spawned.is_ok() {
+                return is_logon_ui;
+            }
+            refreshing.store(false, Ordering::Release);
+        }
+    }
+    let is_logon_ui = query();
+    *cache.lock().unwrap() = Some((now, is_logon_ui));
     is_logon_ui
 }
 
@@ -3225,16 +3271,25 @@ pub fn ensure_primary_token(user_token: HANDLE) -> ResultType<HANDLE> {
         }
 
         if token_type == TokenImpersonation {
-            let mut duplicate_token: HANDLE = std::ptr::null_mut();
-            let dup_res = DuplicateToken(user_token, SecurityImpersonation, &mut duplicate_token);
-            CloseHandle(user_token);
-            if dup_res == FALSE {
+            // `DuplicateToken` would give an impersonation token again.
+            let mut primary_token: HANDLE = std::ptr::null_mut();
+            if DuplicateTokenEx(
+                user_token,
+                MAXIMUM_ALLOWED,
+                std::ptr::null_mut(),
+                SecurityImpersonation,
+                TokenPrimary,
+                &mut primary_token,
+            ) == FALSE
+            {
+                // The token stays the caller's: it keeps and closes it.
                 bail!(
                     "Failed to duplicate token, error {}",
                     io::Error::last_os_error()
                 );
             }
-            Ok(duplicate_token)
+            CloseHandle(user_token);
+            Ok(primary_token)
         } else {
             Ok(user_token)
         }
@@ -5347,5 +5402,188 @@ ProcessId=10136
             arg,
         );
         assert_eq!(pids.len(), 0);
+    }
+
+    /// `ensure_primary_token` is to hand back a primary token. For an impersonation token it
+    /// made the duplicate with `DuplicateToken`, which gives an impersonation token again.
+    #[test]
+    fn ensure_primary_token_returns_a_primary_token() {
+        use winapi::um::{
+            handleapi::CloseHandle,
+            processthreadsapi::{GetCurrentProcess, OpenProcessToken},
+            securitybaseapi::{DuplicateTokenEx, GetTokenInformation},
+            winnt::{
+                SecurityImpersonation, TokenImpersonation, TokenPrimary, TokenType,
+                MAXIMUM_ALLOWED, TOKEN_DUPLICATE, TOKEN_QUERY, TOKEN_TYPE,
+            },
+        };
+        unsafe {
+            let mut process_token: HANDLE = std::ptr::null_mut();
+            assert_ne!(
+                OpenProcessToken(
+                    GetCurrentProcess(),
+                    TOKEN_DUPLICATE | TOKEN_QUERY,
+                    &mut process_token
+                ),
+                FALSE
+            );
+            let mut impersonation: HANDLE = std::ptr::null_mut();
+            assert_ne!(
+                DuplicateTokenEx(
+                    process_token,
+                    MAXIMUM_ALLOWED,
+                    std::ptr::null_mut(),
+                    SecurityImpersonation,
+                    TokenImpersonation,
+                    &mut impersonation,
+                ),
+                FALSE
+            );
+            CloseHandle(process_token);
+            let token = ensure_primary_token(impersonation).unwrap();
+            let mut token_type: TOKEN_TYPE = 0;
+            let mut length: DWORD = 0;
+            assert_ne!(
+                GetTokenInformation(
+                    token,
+                    TokenType,
+                    &mut token_type as *mut _ as *mut _,
+                    std::mem::size_of::<TOKEN_TYPE>() as DWORD,
+                    &mut length,
+                ),
+                FALSE
+            );
+            CloseHandle(token);
+            assert_eq!(token_type, TokenPrimary, "not a primary token");
+        }
+    }
+}
+
+#[cfg(test)]
+mod logon_ui_cache_tests {
+    use super::*;
+    use std::thread::ThreadId;
+
+    static QUERIED_ON: Mutex<Vec<ThreadId>> = Mutex::new(Vec::new());
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn query_false() -> bool {
+        QUERIED_ON.lock().unwrap().push(std::thread::current().id());
+        false
+    }
+
+    fn start(
+        cache: &'static Mutex<Option<(Instant, bool)>>,
+        answer: Option<(Duration, bool)>,
+    ) -> Instant {
+        QUERIED_ON.lock().unwrap().clear();
+        let now = Instant::now();
+        *cache.lock().unwrap() = answer.map(|(age, value)| (now - age, value));
+        now
+    }
+
+    fn wait_for_answer(cache: &'static Mutex<Option<(Instant, bool)>>, value: bool) {
+        let started = Instant::now();
+        while cache.lock().unwrap().map(|(_, answer)| answer) != Some(value) {
+            assert!(started.elapsed() < Duration::from_secs(5), "no answer");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn a_fresh_answer_is_used_without_a_check() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+        static REFRESHING: AtomicBool = AtomicBool::new(false);
+        let now = start(&CACHE, Some((Duration::from_millis(50), true)));
+        assert!(logon_ui_for_capture_with(
+            &CACHE,
+            &REFRESHING,
+            now,
+            true,
+            query_false
+        ));
+        assert!(QUERIED_ON.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_old_answer_is_used_while_a_fresh_one_is_fetched_elsewhere() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+        static REFRESHING: AtomicBool = AtomicBool::new(false);
+        let now = start(&CACHE, Some((Duration::from_millis(300), true)));
+        assert!(logon_ui_for_capture_with(
+            &CACHE,
+            &REFRESHING,
+            now,
+            true,
+            query_false
+        ));
+        wait_for_answer(&CACHE, false);
+        let queried_on = QUERIED_ON.lock().unwrap().clone();
+        assert_eq!(queried_on.len(), 1);
+        assert_ne!(queried_on[0], std::thread::current().id());
+        let started = Instant::now();
+        while REFRESHING.load(Ordering::Acquire) {
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn one_check_at_a_time() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+        static REFRESHING: AtomicBool = AtomicBool::new(true);
+        let now = start(&CACHE, Some((Duration::from_millis(300), true)));
+        assert!(logon_ui_for_capture_with(
+            &CACHE,
+            &REFRESHING,
+            now,
+            true,
+            query_false
+        ));
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(QUERIED_ON.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn without_an_answer_or_with_a_too_old_one_the_check_runs_here() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+        static REFRESHING: AtomicBool = AtomicBool::new(false);
+        for answer in [None, Some((Duration::from_secs(2), true))] {
+            let now = start(&CACHE, answer);
+            assert!(!logon_ui_for_capture_with(
+                &CACHE,
+                &REFRESHING,
+                now,
+                true,
+                query_false
+            ));
+            assert_eq!(
+                *QUERIED_ON.lock().unwrap(),
+                vec![std::thread::current().id()]
+            );
+        }
+    }
+
+    #[test]
+    fn with_the_switch_off_the_check_runs_here_as_before() {
+        let _guard = TEST_LOCK.lock().unwrap();
+        static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+        static REFRESHING: AtomicBool = AtomicBool::new(false);
+        let now = start(&CACHE, Some((Duration::from_millis(300), true)));
+        assert!(!logon_ui_for_capture_with(
+            &CACHE,
+            &REFRESHING,
+            now,
+            false,
+            query_false
+        ));
+        assert_eq!(
+            *QUERIED_ON.lock().unwrap(),
+            vec![std::thread::current().id()]
+        );
     }
 }

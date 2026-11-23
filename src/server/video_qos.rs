@@ -496,18 +496,42 @@ fn monotonic_counter_delta(current: u64, previous: u64) -> u64 {
     }
 }
 
+/// Frame rate tiers of the Movie cadence, highest first. The ones above 60 serve viewers whose
+/// screens run at 75, 90, 100, 120 or 144 Hz (72 for 144) and who ask for that many frames;
+/// the owner decided for them on 2026-11-21.
+const MOVIE_TIERS: [u32; 13] = [120, 100, 90, 75, 72, 60, 50, 48, 45, 40, 30, 25, 24];
+/// The tiers with `movie-tiers-above-60 = N`, as before.
+const MOVIE_TIERS_UP_TO_SIXTY: [u32; 8] = [60, 50, 48, 45, 40, 30, 25, 24];
+
+fn movie_tiers_above_sixty() -> bool {
+    hbb_common::config::Config::get_option(hbb_common::config::keys::OPTION_MOVIE_TIERS_ABOVE_60)
+        != "N"
+}
+
 fn movie_cadence_tiers(target_fps: u32, refresh_millihz: u32) -> Vec<u32> {
-    const COMMON_TIERS: [u32; 8] = [60, 50, 48, 45, 40, 30, 25, 24];
+    let common: &[u32] = if movie_tiers_above_sixty() {
+        &MOVIE_TIERS
+    } else {
+        &MOVIE_TIERS_UP_TO_SIXTY
+    };
+    movie_cadence_tiers_from(common, target_fps, refresh_millihz)
+}
+
+/// The tiers of `common` that a target and a screen allow: up to the target, and on a screen
+/// that reports its rate only those that fall on whole refresh periods (30 always).
+fn movie_cadence_tiers_from(common: &[u32], target_fps: u32, refresh_millihz: u32) -> Vec<u32> {
     let target_fps = target_fps.clamp(MIN_FPS, MAX_FPS);
     let mut tiers: Vec<u32> = if refresh_millihz == 0 {
-        COMMON_TIERS
-            .into_iter()
+        common
+            .iter()
+            .copied()
             .filter(|fps| *fps <= target_fps)
             .take(1)
             .collect()
     } else {
-        COMMON_TIERS
-            .into_iter()
+        common
+            .iter()
+            .copied()
             .filter(|fps| {
                 if *fps > target_fps {
                     return false;
@@ -863,6 +887,14 @@ impl Default for VideoQoS {
 }
 
 // Basic functionality
+
+/// The kill switch for the reaction to sustained refusals of video datagrams.
+fn datagram_admission_backoff_enabled() -> bool {
+    hbb_common::config::Config::get_option(
+        hbb_common::config::keys::OPTION_VIDEO_ADMISSION_BACKOFF,
+    ) != "N"
+}
+
 impl VideoQoS {
     // Calculate seconds per frame based on current FPS
     pub fn spf(&self, video_service_name: &str) -> Duration {
@@ -1019,9 +1051,26 @@ impl VideoQoS {
         video_service_name: &str,
         now: Instant,
     ) -> bool {
+        self.movie_admission_pressure_with(
+            video_service_name,
+            now,
+            datagram_admission_backoff_enabled(),
+        )
+    }
+
+    /// `backoff_enabled` false is the behaviour before the fix, kept as a kill switch: every
+    /// query forgot what the viewers' samples had built up, so sustained refusals of video
+    /// datagrams were never seen and the bitrate was never lowered for them.
+    fn movie_admission_pressure_with(
+        &mut self,
+        video_service_name: &str,
+        now: Instant,
+        backoff_enabled: bool,
+    ) -> bool {
         let Some(display) = self.displays.get_mut(video_service_name) else {
             return false;
         };
+        let mut forget_samples = !backoff_enabled;
         if display.admission_latched_at.is_some_and(|latched| {
             now.saturating_duration_since(latched) >= DATAGRAM_ADMISSION_CLEAN_RESET * 2
         }) {
@@ -1033,10 +1082,16 @@ impl VideoQoS {
             display.admission_latched_at = None;
             display.last_admission_event_at = None;
             display.upshift_frozen_until = None;
+            forget_samples = true;
         }
-        for user in self.users.values_mut() {
-            user.datagram_admission_by_service
-                .remove(video_service_name);
+        // Only when the latch has expired. This ran on every query: the capture loop asks in
+        // every iteration while a stream starts and twice a second later, between two samples
+        // of a viewer, so no sample ever had a predecessor to be compared with.
+        if forget_samples {
+            for user in self.users.values_mut() {
+                user.datagram_admission_by_service
+                    .remove(video_service_name);
+            }
         }
         display.movie_admission_pressure
     }
@@ -2207,6 +2262,17 @@ impl VideoQoS {
             .max_by_key(|(time, _)| *time)
             .unwrap_or((0, Quality::Balanced))
             .1
+    }
+
+    /// How long ago the latest quality setting of a viewer of this display was made.
+    pub fn latest_quality_age(&self, video_service_name: &str) -> Duration {
+        let latest = self
+            .subscribed_users(video_service_name)
+            .filter_map(|user| user.quality)
+            .map(|(time, _)| time)
+            .max()
+            .unwrap_or(0);
+        Duration::from_millis(hbb_common::get_time().saturating_sub(latest).max(0) as u64)
     }
 
     // Adjust quality ratio based on network delay and screen changes
@@ -3545,6 +3611,89 @@ mod tests {
         assert!(qos.users[&1].delay.delay_history.is_empty());
     }
 
+    /// The video service asks for the pressure flag between the viewer's samples: in every
+    /// loop iteration while a stream starts, then twice a second. Asking erased what the
+    /// samples had built up, so the pressure was never seen.
+    fn feed_admission_pressure_with_queries(qos: &mut VideoQoS, viewers: &[i32], start: Instant) {
+        let times = [
+            Duration::ZERO,
+            Duration::from_millis(500),
+            Duration::from_millis(500) + DATAGRAM_ADMISSION_PRESSURE_DURATION,
+        ];
+        for (step, offset) in times.iter().enumerate() {
+            let now = start + *offset;
+            for id in viewers {
+                qos.user_datagram_admission_at(
+                    *id,
+                    MONITOR_SERVICE,
+                    datagram_admission_sample(step as u64, step as u64 * 29),
+                    now,
+                );
+            }
+            // What the capture loop does between two samples.
+            for query in 1..=3 {
+                qos.movie_admission_pressure_at(
+                    MONITOR_SERVICE,
+                    now + Duration::from_millis(query * 100),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn asking_for_the_pressure_flag_keeps_the_admission_history() {
+        let start = Instant::now();
+        let mut qos = movie_qos_with_viewers(&[1]);
+        let initial_ratio = qos.displays[MONITOR_SERVICE].ratio;
+
+        feed_admission_pressure_with_queries(&mut qos, &[1], start);
+
+        let display = &qos.displays[MONITOR_SERVICE];
+        assert_eq!(display.admission_events, 1, "sustained refusals were not seen");
+        assert!(display.ratio < initial_ratio);
+    }
+
+    #[test]
+    fn asking_for_the_pressure_flag_keeps_the_history_of_two_viewers() {
+        let start = Instant::now();
+        let mut qos = movie_qos_with_viewers(&[1, 2]);
+        let initial_ratio = qos.displays[MONITOR_SERVICE].ratio;
+
+        feed_admission_pressure_with_queries(&mut qos, &[1, 2], start);
+
+        let display = &qos.displays[MONITOR_SERVICE];
+        assert_eq!(display.admission_events, 1, "sustained refusals were not seen");
+        assert!(display.ratio < initial_ratio);
+    }
+
+    #[test]
+    fn kill_switch_keeps_the_old_behaviour() {
+        let start = Instant::now();
+        let mut qos = movie_qos_with_viewers(&[1]);
+        let initial_ratio = qos.displays[MONITOR_SERVICE].ratio;
+        let times = [
+            Duration::ZERO,
+            Duration::from_millis(500),
+            Duration::from_millis(500) + DATAGRAM_ADMISSION_PRESSURE_DURATION,
+        ];
+        for (step, offset) in times.iter().enumerate() {
+            qos.user_datagram_admission_at(
+                1,
+                MONITOR_SERVICE,
+                datagram_admission_sample(step as u64, step as u64 * 29),
+                start + *offset,
+            );
+            qos.movie_admission_pressure_with(
+                MONITOR_SERVICE,
+                start + *offset + Duration::from_millis(100),
+                false,
+            );
+        }
+        let display = &qos.displays[MONITOR_SERVICE];
+        assert_eq!(display.admission_events, 0);
+        assert_eq!(display.ratio, initial_ratio);
+    }
+
     #[test]
     fn sustained_queue_pressure_reduces_ratio_before_the_first_rejection() {
         let start = Instant::now();
@@ -4077,5 +4226,46 @@ impl RttCalculator {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod movie_tier_list_tests {
+    use super::*;
+
+    /// A viewer whose screen runs at 120, 100, 90 or 75 Hz and who asks for that many frames:
+    /// the Movie cadence offered no tier above 60, so such a viewer got 60 at most. With a
+    /// 144 Hz screen the best even tier is 72.
+    #[test]
+    fn movie_cadence_offers_tiers_above_sixty_for_fast_screens() {
+        assert_eq!(movie_cadence_tiers(120, 120_000)[0], 120);
+        assert_eq!(movie_cadence_tiers(120, 144_000)[0], 72);
+        assert_eq!(movie_cadence_tiers(120, 100_000)[0], 100);
+        assert_eq!(movie_cadence_tiers(90, 90_000)[0], 90);
+        assert_eq!(movie_cadence_tiers(120, 75_000)[0], 75);
+        // A viewer that reports no refresh rate gets the highest tier up to what it asks for.
+        assert_eq!(movie_cadence_tiers(120, 0), vec![120, 30]);
+    }
+
+    /// With `movie-tiers-above-60 = N` the tiers end at 60, as before.
+    #[test]
+    fn movie_cadence_tiers_end_at_sixty_with_the_kill_switch() {
+        assert_eq!(
+            movie_cadence_tiers_from(&MOVIE_TIERS_UP_TO_SIXTY, 120, 120_000),
+            vec![60, 40, 30, 24]
+        );
+        assert_eq!(
+            movie_cadence_tiers_from(&MOVIE_TIERS_UP_TO_SIXTY, 120, 0),
+            vec![60, 30]
+        );
+        // A target of 60 or less is the same with either list.
+        for refresh in [0, 60_000, 120_000, 144_000] {
+            assert_eq!(
+                movie_cadence_tiers_from(&MOVIE_TIERS, 60, refresh),
+                movie_cadence_tiers_from(&MOVIE_TIERS_UP_TO_SIXTY, 60, refresh),
+                "{}",
+                refresh
+            );
+        }
     }
 }

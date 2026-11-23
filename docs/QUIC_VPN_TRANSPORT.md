@@ -101,7 +101,7 @@ The current shared option keys are:
 | `quic-connect-timeout-ms` | `5000` | QUIC connect timeout, 250-60000 ms |
 | `quic-keepalive-interval-ms` | `5000` | Liveness interval; 0 disables it |
 | `quic-enable-ipv6` | enabled | Set to `N` to disable IPv6 |
-| `quic-file-bandwidth-mbps` | `20` | File-transfer cap; 0 disables file bandwidth |
+| `quic-file-bandwidth-mbps` | `auto` | File-transfer cap in Mbit/s. `auto`: no cap while no video is flowing; with video the cap starts at 20 Mbit/s and follows the round trip time (halved when the path shows congestion, raised when it is clear). A number is a fixed cap; `0` is no cap. With a peer of an older build the agreed cap stays that peer's 20 Mbit/s |
 
 `quic-preferred` falls back for UDP bind failure, unreachable paths, and bounded network timeouts. It does not fall back after certificate, pin, device identity, signed-metadata, pairing, session-negotiation, or application-protocol failure.
 

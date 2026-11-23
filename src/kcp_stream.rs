@@ -13,6 +13,26 @@ use kcp_sys::{
 };
 use std::{net::SocketAddr, sync::Arc};
 
+/// The largest UDP datagram. A smaller buffer cuts a larger datagram short on Linux, and on
+/// Windows the receive fails with `WSAEMSGSIZE`.
+const UDP_RECEIVE_BUFFER: usize = 65_536;
+/// Errors in a row after which the path is taken as gone.
+const MAX_CONSECUTIVE_UDP_ERRORS: u32 = 64;
+
+/// A send or receive error that does not mean the end of the path. While a hole is punched,
+/// packets reach ports that are not open yet: the "port unreachable" answer comes back as
+/// `ConnectionRefused` (Linux) or `ConnectionReset` (Windows) on the next call.
+fn transient_udp_error(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        error.kind(),
+        ErrorKind::ConnectionRefused
+            | ErrorKind::ConnectionReset
+            | ErrorKind::Interrupted
+            | ErrorKind::WouldBlock
+    )
+}
+
 pub struct KcpStream {
     _endpoint: KcpEndpoint,
     stop_sender: Option<oneshot::Sender<()>>,
@@ -100,7 +120,8 @@ impl KcpStream {
     ) {
         let udp = udp_socket.clone();
         tokio::spawn(async move {
-            let mut buf = vec![0; 1500];
+            let mut buf = vec![0; UDP_RECEIVE_BUFFER];
+            let mut consecutive_errors = 0u32;
             loop {
                 tokio::select! {
                     _ = &mut stop_receiver => {
@@ -108,20 +129,38 @@ impl KcpStream {
                         break;
                     }
                     Some(data) = output.recv() => {
-                        if let Err(e) = udp.send(&data.inner()).await {
-                            log::debug!("KCP send error: {:?}", e);
-                            break;
+                        match udp.send(&data.inner()).await {
+                            Ok(_) => consecutive_errors = 0,
+                            Err(e)
+                                if transient_udp_error(&e)
+                                    && consecutive_errors < MAX_CONSECUTIVE_UDP_ERRORS =>
+                            {
+                                consecutive_errors += 1;
+                                log::debug!("KCP send error, going on: {:?}", e);
+                            }
+                            Err(e) => {
+                                log::debug!("KCP send error: {:?}", e);
+                                break;
+                            }
                         }
                     }
                     result = udp.recv_from(&mut buf) => {
                         match result {
                             Ok((size, _)) => {
+                                consecutive_errors = 0;
                                 if size < std::mem::size_of::<KcpPacketHeader>() {
                                     continue;
                                 }
                                 input
                                     .send(BytesMut::from(&buf[..size]).into())
                                     .await.ok();
+                            }
+                            Err(e)
+                                if transient_udp_error(&e)
+                                    && consecutive_errors < MAX_CONSECUTIVE_UDP_ERRORS =>
+                            {
+                                consecutive_errors += 1;
+                                log::debug!("KCP recv_from error, going on: {:?}", e);
                             }
                             Err(e) => {
                                 log::debug!("KCP recv_from error: {:?}", e);
@@ -193,5 +232,53 @@ mod tests {
             };
             tokio::time::timeout(timeout, exchange).await.unwrap();
         }
+    }
+
+    /// The socket of a KCP session gets "port unreachable" once (here: the host's port is
+    /// closed for a moment; on the way, a NAT that drops its mapping does the same). The next
+    /// call on the socket fails with `ConnectionRefused` (Linux) or `ConnectionReset`
+    /// (Windows). The loop took any error as the end and stopped: the stream stayed open but
+    /// nothing was sent any more. A loop that goes on keeps retransmitting the data that was
+    /// not acknowledged, and those packets arrive once the port is open again.
+    #[tokio::test]
+    async fn kcp_loop_goes_on_after_the_peer_port_was_unreachable_for_a_moment() {
+        let timeout = Duration::from_secs(5);
+        let host_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let viewer_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let host_address = host_socket.local_addr().unwrap();
+        let viewer_address = viewer_socket.local_addr().unwrap();
+        host_socket.connect(viewer_address).await.unwrap();
+        viewer_socket.connect(host_address).await.unwrap();
+        let (host, viewer) = tokio::join!(
+            KcpStream::accept(host_socket, timeout, None),
+            KcpStream::connect(viewer_socket, timeout)
+        );
+        let (host_kcp, mut host) = host.unwrap();
+        let (_viewer_kcp, mut viewer) = viewer.unwrap();
+        tokio::time::timeout(timeout, async {
+            viewer.send_raw(b"viewer-1".to_vec()).await.unwrap();
+            assert_eq!(&host.next().await.unwrap().unwrap()[..], b"viewer-1");
+        })
+        .await
+        .unwrap();
+
+        // The host goes away and its port is closed.
+        drop(host);
+        drop(host_kcp);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Data the host does not acknowledge: KCP sends it again and again, into the closed port.
+        viewer.send_raw(b"viewer-2".to_vec()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // The port is open again: whatever the viewer still sends arrives.
+        let listener = UdpSocket::bind(host_address).await.unwrap();
+        let mut packet = [0u8; 2048];
+        let arrived =
+            tokio::time::timeout(Duration::from_secs(4), listener.recv_from(&mut packet)).await;
+        assert!(
+            matches!(arrived, Ok(Ok((_, from))) if from == viewer_address),
+            "the viewer sent nothing after the refused packets: {:?}",
+            arrived
+        );
     }
 }

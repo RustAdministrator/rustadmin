@@ -1155,6 +1155,7 @@ mod display_intent_tests {
                 data: vec![1, 2, 3, 4],
                 valid: true,
                 screen_authority_generation: epoch,
+                retired: false,
             },
         );
         for view in 1..=2 {
@@ -1483,6 +1484,9 @@ struct RgbaData {
     data: Vec<u8>,
     valid: bool,
     screen_authority_generation: u64,
+    /// Rendering to a texture was switched while Dart held this buffer: it goes when Dart
+    /// lets it go (`next_rgba`), not before.
+    retired: bool,
 }
 
 pub type FlutterRgbaRendererPluginOnRgba = unsafe extern "C" fn(
@@ -2191,7 +2195,13 @@ impl FlutterHandler {
     pub fn update_use_texture_render(&self) {
         self.use_texture_render
             .store(crate::ui_interface::use_texture_render(), Ordering::Relaxed);
-        self.display_rgbas.write().unwrap().clear();
+        // This runs on a worker thread. A buffer Dart got from `get_rgba` and is still copying
+        // from (`valid`) is freed only when Dart lets it go; the others go now.
+        let mut rgbas = self.display_rgbas.write().unwrap();
+        rgbas.retain(|_, rgba| rgba.valid);
+        for rgba in rgbas.values_mut() {
+            rgba.retired = true;
+        }
     }
 }
 
@@ -2820,13 +2830,22 @@ impl InvokeUiSession for FlutterHandler {
                     stream.add(EventToUI::Texture(display, true));
                 }
             }
-            outcome.merge(session.record_render_outcome(
+            let recorded = session.record_render_outcome(
                 display,
                 context,
                 submission.generation(),
                 submission.submitted(),
                 submission.target_exists(),
-            ));
+            );
+            // The target is there and the renderer cannot take a texture: the decoder
+            // thread counts these and moves the display to decoding through RAM.
+            outcome.merge(
+                if matches!(submission, RenderTargetSubmission::Rejected { .. }) {
+                    recorded.texture_refused()
+                } else {
+                    recorded
+                },
+            );
         }
         outcome
     }
@@ -3130,8 +3149,16 @@ impl InvokeUiSession for FlutterHandler {
 
     #[inline]
     fn next_rgba(&self, _display: usize) {
-        if let Some(rgba_data) = self.display_rgbas.write().unwrap().get_mut(&_display) {
-            rgba_data.valid = false;
+        let mut rgbas = self.display_rgbas.write().unwrap();
+        let retired = match rgbas.get_mut(&_display) {
+            Some(rgba_data) => {
+                rgba_data.valid = false;
+                rgba_data.retired
+            }
+            None => false,
+        };
+        if retired {
+            rgbas.remove(&_display);
         }
     }
 
@@ -4669,5 +4696,75 @@ pub(super) mod async_tasks {
             super::APP_TYPE_MAIN,
             serde_json::ser::to_string(&data).unwrap_or("".to_owned()),
         );
+    }
+}
+
+#[cfg(test)]
+mod rgba_release_tests {
+    use super::*;
+
+    /// A handler that may show the screen, with one RGBA frame of display 0 that Dart holds
+    /// (`valid`: it got the pointer from `get_rgba` and copies from it until `next_rgba`).
+    fn handler_with_a_frame_dart_holds() -> FlutterHandler {
+        let handler = FlutterHandler::default();
+        handler.begin_connection_runtime(1);
+        handler.authorize_connection_runtime(1);
+        let epoch = handler.screen_authority_generation();
+        handler.display_rgbas.write().unwrap().insert(
+            0,
+            RgbaData {
+                data: vec![7; 64],
+                valid: true,
+                screen_authority_generation: epoch,
+                retired: false,
+            },
+        );
+        handler
+    }
+
+    /// Switching "render to texture" in the middle of a session cleared every RGBA buffer, on
+    /// a worker thread, also the one Dart was copying from: the copy read freed memory. A
+    /// buffer Dart holds stays until Dart lets it go.
+    #[test]
+    fn rgba_buffer_dart_holds_is_kept_when_texture_rendering_is_switched() {
+        let handler = handler_with_a_frame_dart_holds();
+        let pointer = handler.get_rgba(0);
+        assert!(!pointer.is_null());
+        handler.update_use_texture_render();
+        assert_eq!(
+            handler
+                .display_rgbas
+                .read()
+                .unwrap()
+                .get(&0)
+                .map(|rgba| rgba.data.as_ptr()),
+            Some(pointer),
+            "the buffer Dart was copying from was freed"
+        );
+    }
+
+    /// Once Dart lets the kept buffer go, it is freed; a buffer Dart did not hold goes at once.
+    #[test]
+    fn kept_rgba_buffer_goes_when_dart_lets_it_go() {
+        let handler = handler_with_a_frame_dart_holds();
+        handler
+            .display_rgbas
+            .write()
+            .unwrap()
+            .insert(1, RgbaData::default());
+        handler.update_use_texture_render();
+        assert!(!handler.display_rgbas.read().unwrap().contains_key(&1));
+        assert!(handler.display_rgbas.read().unwrap().contains_key(&0));
+        handler.next_rgba(0);
+        assert!(!handler.display_rgbas.read().unwrap().contains_key(&0));
+        // Without a switch, letting a buffer go keeps it for the next frame, as before.
+        let handler = handler_with_a_frame_dart_holds();
+        handler.next_rgba(0);
+        assert!(handler
+            .display_rgbas
+            .read()
+            .unwrap()
+            .get(&0)
+            .is_some_and(|rgba| !rgba.valid));
     }
 }

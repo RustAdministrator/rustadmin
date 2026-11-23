@@ -134,6 +134,12 @@ class ImagePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(CustomPainter oldDelegate) {
-    return oldDelegate != this;
+    // A new painter is made on every rebuild; only a change of what it paints is a repaint.
+    if (oldDelegate is! ImagePainter) return true;
+    return oldDelegate.image != image ||
+        oldDelegate.x != x ||
+        oldDelegate.y != y ||
+        oldDelegate.scale != scale ||
+        oldDelegate.filterQuality != filterQuality;
   }
 }

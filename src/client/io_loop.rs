@@ -24,7 +24,6 @@ use crate::{clipboard::try_empty_clipboard_files, clipboard_file::unix_file_clip
     all(target_os = "macos", feature = "unix-file-copy-paste")
 ))]
 use clipboard::ContextSend;
-use crossbeam_queue::ArrayQueue;
 #[cfg(not(target_os = "ios"))]
 use hbb_common::tokio::sync::mpsc::error::TryRecvError;
 use hbb_common::{
@@ -417,6 +416,8 @@ pub struct Remote<T: InvokeUiSession> {
     last_sent_video_suspended: Option<bool>,
     resource_resume_pending: bool,
     last_supported_resource_mode: Option<ResourceMode>,
+    // What the host reports about its cursor, waiting for the picture it belongs to.
+    cursor_delay: client::CursorDelay,
 }
 
 #[derive(Default)]
@@ -486,6 +487,7 @@ impl<T: InvokeUiSession> Remote<T> {
             last_sent_video_suspended: None,
             resource_resume_pending: false,
             last_supported_resource_mode: None,
+            cursor_delay: Default::default(),
         }
     }
 
@@ -863,7 +865,7 @@ impl<T: InvokeUiSession> Remote<T> {
                 Ok(()) => {
                     if let DisplayControlCommand::Refresh(display) = command {
                         if let Some(thread) = self.video_threads.get_mut(&(display as usize)) {
-                            *thread.discard_queue.write().unwrap() = true;
+                            thread.begin_keyframe_wait();
                         }
                     }
                     self.display_outbox.admit(self.connection_round, &command);
@@ -1072,6 +1074,9 @@ impl<T: InvokeUiSession> Remote<T> {
                             #[cfg(any(target_os = "windows", feature = "unix-file-copy-paste"))]
                             self.handle_local_clipboard_msg(&mut peer, _msg).await;
                         }
+                        _ = Self::cursor_wake(self.cursor_delay.next_due()) => {
+                            self.apply_due_cursor_events();
+                        }
                         _ = self.timer.tick() => {
                             if last_recv_time.elapsed() >= SEC30 {
                                 self.handler.ui_handler.end_connection_runtime(round);
@@ -1142,7 +1147,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                 .video_threads
                                 .iter()
                                 .map(|(display, thread)| {
-                                    (*display, thread.video_queue.read().unwrap().len())
+                                    (*display, thread.video_queue.len())
                                 })
                                 .collect::<HashMap<usize, usize>>();
                             let frame_resolution = self
@@ -1197,10 +1202,21 @@ impl<T: InvokeUiSession> Remote<T> {
                                     (*display, snapshot.queue_depth_frames)
                                 })
                                 .collect::<HashMap<usize, u32>>();
+                            // Shown in the quality monitor. A desktop viewer knows the rate
+                            // of its screen from the user interface; that value stays here and
+                            // is not part of the feedback to the host.
+                            let viewer_refresh_millihz = client::viewer_display_refresh_millihz();
                             let display_refresh_millihz = feedback_snapshots
                                 .iter()
                                 .map(|(display, snapshot)| {
-                                    (*display, snapshot.display_refresh_millihz)
+                                    (
+                                        *display,
+                                        if snapshot.display_refresh_millihz > 0 {
+                                            snapshot.display_refresh_millihz
+                                        } else {
+                                            viewer_refresh_millihz
+                                        },
+                                    )
                                 })
                                 .collect::<HashMap<usize, u32>>();
                             let decoder = self.video_thread_label(|thread| {
@@ -1474,8 +1490,11 @@ impl<T: InvokeUiSession> Remote<T> {
                                     == VideoProfile::Movie)
                                     .then_some(movie_target_fps),
                                 movie_fallback_reason: movie_fallback_reason.map(str::to_owned),
-                                movie_playout_delay_ms: full_movie_mode
-                                    .then_some(MOVIE_PLAYOUT_DELAY_MS),
+                                // Only where a presentation clock really delays the
+                                // frames; the profile alone does not.
+                                movie_playout_delay_ms: (full_movie_mode
+                                    && self.playout_clock_active())
+                                .then_some(MOVIE_PLAYOUT_DELAY_MS),
                                 ..Default::default()
                             });
                         }
@@ -1549,19 +1568,36 @@ impl<T: InvokeUiSession> Remote<T> {
                     let file_transfer_enabled =
                         self.handler.lc.read().unwrap().enable_file_copy_paste.v;
                     let view_only = self.handler.lc.read().unwrap().view_only.v;
-                    let stop = is_stopping_allowed
-                        && (view_only
-                            || !self.is_connected
-                            || !(server_file_transfer_enabled && file_transfer_enabled));
+                    use crate::cliprdr_gate::{cliprdr_verdict, CliprdrVerdict};
+                    let file_clipboard_on = !view_only
+                        && self.is_connected
+                        && server_file_transfer_enabled
+                        && file_transfer_enabled;
+                    let verdict = cliprdr_verdict(file_clipboard_on, is_stopping_allowed);
                     log::debug!(
-                        "Process clipboard message from system, stop: {}, is_stopping_allowed: {}, view_only: {}, server_file_transfer_enabled: {}, file_transfer_enabled: {}",
-                        view_only, stop, is_stopping_allowed, server_file_transfer_enabled, file_transfer_enabled
+                        "Process clipboard message from system, verdict: {:?}, is_stopping_allowed: {}, view_only: {}, server_file_transfer_enabled: {}, file_transfer_enabled: {}",
+                        verdict, is_stopping_allowed, view_only, server_file_transfer_enabled, file_transfer_enabled
                     );
-                    if stop {
+                    if verdict == CliprdrVerdict::Stop {
                         #[cfg(target_os = "windows")]
                         {
                             ContextSend::set_is_stopped();
                         }
+                    } else if verdict == CliprdrVerdict::Drop {
+                        // With the file clipboard off nothing leaves, an answer to a request
+                        // included.
+                    } else if !crate::cliprdr_gate::direction_check_passes(
+                        &clip,
+                        true,
+                        crate::clipboard::is_local_to_remote_clipboard_allowed(
+                            crate::clipboard::ClipboardSide::Client,
+                        ),
+                        crate::clipboard::is_remote_to_local_clipboard_allowed(
+                            crate::clipboard::ClipboardSide::Client,
+                        ),
+                        "client",
+                    ) {
+                        // Refused by the clipboard direction policy (enforce mode).
                     } else {
                         #[cfg(target_os = "windows")]
                         if let Err(e) = ContextSend::make_sure_enabled() {
@@ -1775,12 +1811,12 @@ impl<T: InvokeUiSession> Remote<T> {
                     Some(message::Union::Misc(misc)) => match misc.union {
                         Some(misc::Union::RefreshVideo(_)) => {
                             self.video_threads.iter().for_each(|(_, v)| {
-                                *v.discard_queue.write().unwrap() = true;
+                                v.begin_keyframe_wait();
                             });
                         }
                         Some(misc::Union::RefreshVideoDisplay(display)) => {
                             if let Some(v) = self.video_threads.get_mut(&(display as usize)) {
-                                *v.discard_queue.write().unwrap() = true;
+                                v.begin_keyframe_wait();
                             }
                         }
                         _ => {}
@@ -1841,15 +1877,24 @@ impl<T: InvokeUiSession> Remote<T> {
             Data::SendFiles((id, r#type, path, to, file_num, include_hidden, is_remote)) => {
                 log::info!("send files, is remote {}", is_remote);
                 let od = can_enable_overwrite_detection(self.handler.lc.read().unwrap().version);
+                fs::reserve_job_id(id);
                 if is_remote {
                     log::debug!("New job {}, write to {} from remote {}", id, to, path);
+                    if r#type == fs::JobType::Generic {
+                        // The interface builds this path from a name in the peer's listing.
+                        if let Err(err) = fs::validate_local_destination(&to) {
+                            log::warn!("transfer job {}: destination refused: {}", id, err);
+                            self.handle_job_status(id, -1, Some(err.to_string()));
+                            return true;
+                        }
+                    }
                     let to = match r#type {
                         fs::JobType::Generic => fs::DataSource::FilePath(PathBuf::from(&to)),
                         fs::JobType::Printer => {
                             fs::DataSource::MemoryCursor(std::io::Cursor::new(Vec::new()))
                         }
                     };
-                    self.write_jobs.push(fs::TransferJob::new_write(
+                    let mut job = fs::TransferJob::new_write(
                         id,
                         r#type,
                         path.clone(),
@@ -1858,22 +1903,36 @@ impl<T: InvokeUiSession> Remote<T> {
                         include_hidden,
                         is_remote,
                         od,
-                    ));
+                    );
+                    if let Err(err) = job.claim_destination() {
+                        log::warn!("transfer job {}: {}", id, err);
+                        self.handle_job_status(id, -1, Some(err.to_string()));
+                        return true;
+                    }
+                    self.write_jobs.push(job);
                     allow_err!(
                         peer.send(&fs::new_send(id, r#type, path, file_num, include_hidden))
                             .await
                     );
                 } else {
-                    match fs::TransferJob::new_read(
-                        id,
-                        r#type,
-                        to.clone(),
-                        fs::DataSource::FilePath(PathBuf::from(&path)),
-                        file_num,
-                        include_hidden,
-                        is_remote,
-                        od,
-                    ) {
+                    // Listing the files reads the disk, so it runs off the async threads.
+                    let remote = to.clone();
+                    let source = fs::DataSource::FilePath(PathBuf::from(&path));
+                    let job = hbb_common::tokio::task::spawn_blocking(move || {
+                        fs::TransferJob::new_read(
+                            id,
+                            r#type,
+                            remote,
+                            source,
+                            file_num,
+                            include_hidden,
+                            is_remote,
+                            od,
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|err| Err(hbb_common::anyhow::anyhow!("walk failed: {}", err)));
+                    match job {
                         Err(err) => {
                             self.handle_job_status(id, -1, Some(err.to_string()));
                         }
@@ -1902,18 +1961,28 @@ impl<T: InvokeUiSession> Remote<T> {
                                 fs::transform_windows_path(&mut files);
                             }
                             let total_size = job.total_size();
-                            self.read_jobs.push(job);
-                            self.timer = crate::rustdesk_interval(time::interval(MILLI1));
-                            allow_err!(
-                                peer.send(&fs::new_receive(id, to, file_num, files, total_size))
-                                    .await
-                            );
+                            let request = fs::new_receive(id, to, file_num, files, total_size);
+                            if let Some(err) = crate::file_message_limit::upload_list_error(
+                                &request,
+                                peer.file_message_limit(),
+                            ) {
+                                // Sending it would be refused, and the job would wait forever.
+                                log::warn!("transfer job {}: {}", id, err);
+                                self.handle_job_status(id, -1, Some(err));
+                            } else {
+                                self.read_jobs.push(job);
+                                self.timer = crate::rustdesk_interval(time::interval(MILLI1));
+                                allow_err!(peer.send(&request).await);
+                            }
                         }
                     }
                 }
             }
             Data::AddJob((id, r#type, path, to, file_num, include_hidden, is_remote)) => {
                 let od = can_enable_overwrite_detection(self.handler.lc.read().unwrap().version);
+                // A restored job keeps the id it had in an earlier run. New jobs must not
+                // get the same one.
+                fs::reserve_job_id(id);
                 if is_remote {
                     log::debug!(
                         "new write waiting job {}, write to {} from remote {}",
@@ -1921,6 +1990,11 @@ impl<T: InvokeUiSession> Remote<T> {
                         to,
                         path
                     );
+                    if let Err(err) = fs::validate_local_destination(&to) {
+                        log::warn!("transfer job {}: destination refused: {}", id, err);
+                        self.handle_job_status(id, -1, Some(err.to_string()));
+                        return true;
+                    }
                     let mut job = fs::TransferJob::new_write(
                         id,
                         r#type,
@@ -1934,16 +2008,24 @@ impl<T: InvokeUiSession> Remote<T> {
                     job.is_last_job = true;
                     self.write_jobs.push(job);
                 } else {
-                    match fs::TransferJob::new_read(
-                        id,
-                        r#type,
-                        to.clone(),
-                        fs::DataSource::FilePath(PathBuf::from(&path)),
-                        file_num,
-                        include_hidden,
-                        is_remote,
-                        od,
-                    ) {
+                    // Listing the files reads the disk, so it runs off the async threads.
+                    let remote = to.clone();
+                    let source = fs::DataSource::FilePath(PathBuf::from(&path));
+                    let job = hbb_common::tokio::task::spawn_blocking(move || {
+                        fs::TransferJob::new_read(
+                            id,
+                            r#type,
+                            remote,
+                            source,
+                            file_num,
+                            include_hidden,
+                            is_remote,
+                            od,
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|err| Err(hbb_common::anyhow::anyhow!("walk failed: {}", err)));
+                    match job {
                         Err(err) => {
                             self.handle_job_status(id, -1, Some(err.to_string()));
                         }
@@ -1971,7 +2053,13 @@ impl<T: InvokeUiSession> Remote<T> {
             }
             Data::ResumeJob((id, is_remote)) => {
                 if is_remote {
-                    if let Some(job) = get_job(id, &mut self.write_jobs) {
+                    let busy = get_job(id, &mut self.write_jobs)
+                        .and_then(|job| job.claim_destination().err());
+                    if let Some(err) = busy {
+                        // Another job is writing there now; this one stays in the list.
+                        log::warn!("transfer job {}: {}", id, err);
+                        self.handle_job_status(id, -1, Some(err.to_string()));
+                    } else if let Some(job) = get_job(id, &mut self.write_jobs) {
                         job.is_last_job = false;
                         job.is_resume = true;
                         allow_err!(
@@ -1986,6 +2074,7 @@ impl<T: InvokeUiSession> Remote<T> {
                         );
                     }
                 } else {
+                    let mut oversize_resume = None;
                     if let Some(job) = get_job(id, &mut self.read_jobs) {
                         match &job.data_source {
                             fs::DataSource::FilePath(_p) => {
@@ -2001,22 +2090,32 @@ impl<T: InvokeUiSession> Remote<T> {
                                     // peer is not windows, need transform \ to /
                                     fs::transform_windows_path(&mut files);
                                 }
-                                allow_err!(
-                                    peer.send(&fs::new_receive(
-                                        id,
-                                        job.remote.clone(),
-                                        job.file_num,
-                                        files,
-                                        job.total_size(),
-                                    ))
-                                    .await
+                                let request = fs::new_receive(
+                                    id,
+                                    job.remote.clone(),
+                                    job.file_num,
+                                    files,
+                                    job.total_size(),
                                 );
+                                match crate::file_message_limit::upload_list_error(
+                                    &request,
+                                    peer.file_message_limit(),
+                                ) {
+                                    Some(err) => oversize_resume = Some(err),
+                                    None => allow_err!(peer.send(&request).await),
+                                }
                             }
                             fs::DataSource::MemoryCursor(_) => {
                                 // unreachable!()
                                 log::error!("Resume job with memory cursor");
                             }
                         }
+                    }
+                    if let Some(err) = oversize_resume {
+                        // Sending it would be refused, and the job would wait forever.
+                        log::warn!("transfer job {}: {}", id, err);
+                        let _ = fs::remove_job(id, &mut self.read_jobs);
+                        self.handle_job_status(id, -1, Some(err));
                     }
                 }
             }
@@ -2095,7 +2194,14 @@ impl<T: InvokeUiSession> Remote<T> {
                     self.remove_jobs
                         .insert(id, RemoveJob::new(Vec::new(), path, sep, is_remote));
                 } else {
-                    match fs::get_recursive_files(&path, include_hidden) {
+                    // The walk reads the disk, so it runs off the async threads.
+                    let walk_path = path.clone();
+                    let walked = hbb_common::tokio::task::spawn_blocking(move || {
+                        fs::get_recursive_files(&walk_path, include_hidden)
+                    })
+                    .await
+                    .unwrap_or_else(|err| Err(hbb_common::anyhow::anyhow!("walk failed: {}", err)));
+                    match walked {
                         Ok(entries) => {
                             self.handler.update_folder_files(
                                 id,
@@ -2163,7 +2269,9 @@ impl<T: InvokeUiSession> Remote<T> {
                     msg_out.set_file_action(file_action);
                     allow_err!(peer.send(&msg_out).await);
                 } else {
-                    match fs::create_dir(&path) {
+                    // The interface may build this path from what the peer reported.
+                    match fs::validate_local_destination(&path).and_then(|_| fs::create_dir(&path))
+                    {
                         Err(err) => {
                             self.handle_job_status(id, -1, Some(err.to_string()));
                         }
@@ -2433,6 +2541,58 @@ impl<T: InvokeUiSession> Remote<T> {
     // Currently, this function only considers decoding speed and queue length, not network delay.
     // The controlled end can consider auto fps as the maximum decoding fps.
     #[inline]
+    /// Whether a presentation clock holds the picture of some display back.
+    fn playout_clock_active(&self) -> bool {
+        let resource_mode = self.handler.local_resource_mode();
+        self.video_threads
+            .keys()
+            .any(|display| client::movie_playout_clock_active(*display, resource_mode))
+    }
+
+    /// What the host reports about its cursor is applied when the picture it belongs to is
+    /// shown: at once, or after the playout delay where the Movie profile holds the picture
+    /// back.
+    fn cursor_event(&mut self, event: client::CursorEvent) {
+        let full_movie_mode = self
+            .video_threads
+            .values()
+            .any(|thread| thread.movie_mode.load(Ordering::Relaxed));
+        let delay = if full_movie_mode && self.playout_clock_active() {
+            Duration::from_millis(u64::from(MOVIE_PLAYOUT_DELAY_MS))
+        } else {
+            Duration::ZERO
+        };
+        if let Some(event) = self
+            .cursor_delay
+            .push(event, std::time::Instant::now(), delay)
+        {
+            self.apply_cursor_event(event);
+        }
+    }
+
+    fn apply_cursor_event(&self, event: client::CursorEvent) {
+        match event {
+            client::CursorEvent::Data(cd) => self.handler.set_cursor_data(cd),
+            client::CursorEvent::Id(id) => self.handler.set_cursor_id(id),
+            client::CursorEvent::Position(cp) => self.handler.set_cursor_position(cp),
+        }
+    }
+
+    fn apply_due_cursor_events(&mut self) {
+        let now = std::time::Instant::now();
+        while let Some(event) = self.cursor_delay.pop_due(now) {
+            self.apply_cursor_event(event);
+        }
+    }
+
+    /// Completes when the oldest waiting cursor event is due; never, when none waits.
+    async fn cursor_wake(due: Option<std::time::Instant>) {
+        match due {
+            Some(due) => time::sleep_until(Instant::from_std(due)).await,
+            None => std::future::pending::<()>().await,
+        }
+    }
+
     fn fps_control(&mut self, direct: bool, real_fps_map: HashMap<usize, i32>) {
         let now = Instant::now();
         let log_summary = self
@@ -2492,7 +2652,7 @@ impl<T: InvokeUiSession> Remote<T> {
         let max_queue_len = self
             .video_threads
             .iter()
-            .map(|v| v.1.video_queue.read().unwrap().len())
+            .map(|v| v.1.video_queue.len())
             .max()
             .unwrap_or_default();
         let min_decode_fps = self
@@ -2554,7 +2714,7 @@ impl<T: InvokeUiSession> Remote<T> {
             let mut fps_trending = |display: usize| {
                 let thread = self.video_threads.get_mut(&display)?;
                 let ctl = &mut thread.fps_control;
-                let len = thread.video_queue.read().unwrap().len();
+                let len = thread.video_queue.len();
                 let decode_fps = thread.decode_fps.read().unwrap().clone()?;
                 let last_auto_fps = last_auto_fps.unwrap_or(custom_fps as _);
                 if ctl.inactive_counter > inactive_threshold {
@@ -2648,14 +2808,13 @@ impl<T: InvokeUiSession> Remote<T> {
         // send refresh
         for (display, thread) in self.video_threads.iter_mut() {
             let ctl = &mut thread.fps_control;
-            let video_queue = thread.video_queue.read().unwrap();
+            let video_queue = &thread.video_queue;
             let tolerable = std::cmp::min(min_decode_fps, video_queue.capacity() / 2);
             if ctl.refresh_times < 20 // enough
                     && (video_queue.len() > tolerable
                             && (ctl.refresh_times == 0 || ctl.last_refresh_instant.map(|t|t.elapsed().as_secs() > 10).unwrap_or(false)))
             {
                 // Refresh causes client set_display, left frames cause flickering.
-                drop(video_queue);
                 self.handler.refresh_video(*display as _);
                 log::info!("Refresh display {} to reduce delay", display);
                 ctl.refresh_times += 1;
@@ -2685,7 +2844,7 @@ impl<T: InvokeUiSession> Remote<T> {
         let queue_len_by_display = self
             .video_threads
             .iter()
-            .map(|(display, thread)| (*display, thread.video_queue.read().unwrap().len()))
+            .map(|(display, thread)| (*display, thread.video_queue.len()))
             .collect::<Vec<_>>();
         let inactive_by_display = self
             .video_threads
@@ -2933,7 +3092,7 @@ impl<T: InvokeUiSession> Remote<T> {
                             thread
                                 .newest_capture_time_ms
                                 .store(vf.capture_time_ms, Ordering::Relaxed);
-                            *thread.discard_queue.write().unwrap() = true;
+                            thread.begin_keyframe_wait();
                             if client::movie_video_refresh_due(
                                 &thread.movie_queue_refresh,
                                 std::time::Instant::now(),
@@ -2954,53 +3113,42 @@ impl<T: InvokeUiSession> Remote<T> {
                                 .fetch_max(vf.capture_time_ms, Ordering::Relaxed);
                         }
                     }
-                    if Self::contains_key_frame(&vf) {
-                        thread
-                            .video_sender
-                            .send(MediaData::VideoFrame(Box::new(vf)))
-                            .ok();
+                    // Keyframes and deltas wait in one queue, in the order they arrived; the
+                    // message to the decoder thread only says that there is something.
+                    let keyframe = Self::contains_key_frame(&vf);
+                    let limit = if movie_mode {
+                        MOVIE_VIDEO_QUEUE_MAX_FRAMES
                     } else {
-                        let video_queue = thread.video_queue.read().unwrap();
-                        let mut dropped_frames = 0usize;
+                        usize::MAX
+                    };
+                    let dropped_frames = thread.video_queue.push(vf, keyframe, limit);
+                    thread.video_sender.send(MediaData::VideoQueue).ok();
+                    if dropped_frames > 0 {
+                        // The frames behind the removed ones reference them (the queue marks
+                        // the place); decode again only from the requested keyframe.
+                        thread.begin_keyframe_wait();
                         if movie_mode {
-                            while video_queue.len() >= MOVIE_VIDEO_QUEUE_MAX_FRAMES {
-                                if video_queue.pop().is_none() {
-                                    break;
-                                }
-                                dropped_frames = dropped_frames.saturating_add(1);
+                            if !client::recover_movie_queue_drops(
+                                &self.handler,
+                                &thread.video_feedback,
+                                &thread.movie_queue_refresh,
+                                display,
+                                dropped_frames,
+                                "arrival-overflow",
+                            ) {
+                                self.handler.refresh_video(display as _);
                             }
-                        }
-                        if video_queue.force_push(vf).is_some() {
-                            dropped_frames = dropped_frames.saturating_add(1);
                         } else {
-                            thread.video_sender.send(MediaData::VideoQueue).ok();
-                        }
-                        drop(video_queue);
-                        if dropped_frames > 0 {
-                            if movie_mode {
-                                // The queued deltas reference the dropped ones;
-                                // decode again only from the requested keyframe.
-                                client::start_movie_keyframe_wait(
-                                    &thread.discard_queue,
-                                    &thread.movie_keyframe_wait,
-                                    std::time::Instant::now(),
-                                );
-                                if !client::recover_movie_queue_drops(
-                                    &self.handler,
-                                    &thread.video_feedback,
-                                    &thread.movie_queue_refresh,
-                                    display,
-                                    dropped_frames,
-                                    "arrival-overflow",
-                                ) {
-                                    self.handler.refresh_video(display as _);
-                                }
-                            } else {
-                                thread
-                                    .video_feedback
-                                    .lock()
-                                    .unwrap()
-                                    .record_drops(dropped_frames);
+                            thread
+                                .video_feedback
+                                .lock()
+                                .unwrap()
+                                .record_drops(dropped_frames);
+                            // One request for an overflow, not one for every removed frame.
+                            if client::movie_video_refresh_due(
+                                &thread.movie_queue_refresh,
+                                std::time::Instant::now(),
+                            ) {
                                 self.handler.refresh_video(display as _);
                             }
                         }
@@ -3009,7 +3157,7 @@ impl<T: InvokeUiSession> Remote<T> {
                         .video_feedback
                         .lock()
                         .unwrap()
-                        .record_queue_depth(thread.video_queue.read().unwrap().len());
+                        .record_queue_depth(thread.video_queue.len());
                     client::send_video_feedback(
                         &self.handler,
                         &thread.video_feedback,
@@ -3151,13 +3299,13 @@ impl<T: InvokeUiSession> Remote<T> {
                     _ => {}
                 },
                 Some(message::Union::CursorData(cd)) => {
-                    self.handler.set_cursor_data(cd);
+                    self.cursor_event(client::CursorEvent::Data(cd));
                 }
                 Some(message::Union::CursorId(id)) => {
-                    self.handler.set_cursor_id(id.to_string());
+                    self.cursor_event(client::CursorEvent::Id(id.to_string()));
                 }
                 Some(message::Union::CursorPosition(cp)) => {
-                    self.handler.set_cursor_position(cp);
+                    self.cursor_event(client::CursorEvent::Position(cp));
                 }
                 Some(message::Union::Clipboard(cb)) => {
                     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -3432,12 +3580,29 @@ impl<T: InvokeUiSession> Remote<T> {
                             }
                         }
                         Some(file_response::Union::Block(block)) => {
-                            if let Some(job) = fs::get_job(block.id, &mut self.write_jobs) {
-                                if let Err(_err) = job.write(block).await {
-                                    // to-do: add "skip" for writing job
-                                }
-                                if job.r#type == fs::JobType::Generic {
+                            let (id, file_num) = (block.id, block.file_num);
+                            let mut failed = None;
+                            if let Some(job) = fs::get_job(id, &mut self.write_jobs) {
+                                let job_type = job.r#type;
+                                if let Err(err) = job.write(block).await {
+                                    failed = Some((job_type, err.to_string()));
+                                } else if job_type == fs::JobType::Generic {
                                     self.update_jobs_status();
+                                }
+                            }
+                            if let Some((job_type, err)) = failed {
+                                // The file cannot be completed. Stop the sender, drop the job
+                                // with its partial file, and tell the user: carrying on would
+                                // end with a damaged file reported as transferred.
+                                log::error!(
+                                    "transfer job {}: writing file {} failed: {}",
+                                    id,
+                                    file_num,
+                                    err
+                                );
+                                self.cancel_transfer_job(id, peer).await;
+                                if job_type == fs::JobType::Generic {
+                                    self.handle_job_status(id, file_num, Some(err));
                                 }
                             }
                         }
@@ -3445,9 +3610,20 @@ impl<T: InvokeUiSession> Remote<T> {
                             let mut err: Option<String> = None;
                             let mut job_type = fs::JobType::Generic;
                             let mut printer_data = None;
-                            if let Some(job) = fs::remove_job(d.id, &mut self.write_jobs) {
-                                job.modify_time();
-                                err = job.job_error();
+                            if let Some(mut job) = fs::remove_job(d.id, &mut self.write_jobs) {
+                                // The last file is complete only if this succeeds.
+                                err = match job.finish_file().await {
+                                    Ok(()) => job.job_error(),
+                                    Err(finish_err) => {
+                                        log::error!(
+                                            "transfer job {}: completing file {} failed: {}",
+                                            d.id,
+                                            d.file_num,
+                                            finish_err
+                                        );
+                                        Some(finish_err.to_string())
+                                    }
+                                };
                                 job_type = job.r#type;
                                 printer_data = match job.get_buf_data().await {
                                     Ok(d) => d,
@@ -3495,10 +3671,14 @@ impl<T: InvokeUiSession> Remote<T> {
                             }
                         }
                         Some(file_response::Union::Error(e)) => {
-                            let job_type = fs::remove_job(e.id, &mut self.write_jobs)
-                                .or_else(|| fs::remove_job(e.id, &mut self.read_jobs))
-                                .map(|j| j.r#type)
-                                .unwrap_or(fs::JobType::Generic);
+                            let job = fs::remove_job(e.id, &mut self.write_jobs)
+                                .or_else(|| fs::remove_job(e.id, &mut self.read_jobs));
+                            if job.is_none() && e.id == 0 && !e.error.is_empty() {
+                                // Job ids start at 1. This answers a request that is not a
+                                // job, such as opening a folder, and nothing else shows it.
+                                self.handler.msgbox("custom-error", "Error", &e.error, "");
+                            }
+                            let job_type = job.map(|j| j.r#type).unwrap_or(fs::JobType::Generic);
                             match job_type {
                                 fs::JobType::Generic => {
                                     self.handle_job_status(e.id, e.file_num, Some(e.error));
@@ -4195,10 +4375,43 @@ impl<T: InvokeUiSession> Remote<T> {
 
         let is_stopping_allowed = clip.is_beginning_message();
         let file_transfer_enabled = self.handler.is_file_clipboard_required();
-        let stop = is_stopping_allowed && !file_transfer_enabled;
+        // With the file clipboard off nothing from the peer is processed. Only a new
+        // exchange used to be stopped; a request sent out of the blue was answered.
+        let verdict =
+            crate::cliprdr_gate::cliprdr_verdict(file_transfer_enabled, is_stopping_allowed);
+        let mut stop = verdict != crate::cliprdr_gate::CliprdrVerdict::Process;
         log::debug!(
-                "Process clipboard message from server peer, stop: {}, is_stopping_allowed: {}, file_transfer_enabled: {}",
-                stop, is_stopping_allowed, file_transfer_enabled);
+                "Process clipboard message from server peer, verdict: {:?}, is_stopping_allowed: {}, file_transfer_enabled: {}",
+                verdict, is_stopping_allowed, file_transfer_enabled);
+        if !stop {
+            if let Some(size) = crate::cliprdr_gate::note_file_contents_request(&clip) {
+                log::info!(
+                    "largest file contents request from the peer so far: {} bytes",
+                    size
+                );
+            }
+            if let Some(refusal) = crate::cliprdr_gate::refusal_for_oversize_request(&clip) {
+                log::warn!("a file contents request above the limit from the peer is refused");
+                allow_err!(
+                    _peer
+                        .send(&crate::clipboard_file::clip_2_msg(refusal))
+                        .await
+                );
+                stop = true;
+            } else if !crate::cliprdr_gate::direction_check_passes(
+                &clip,
+                false,
+                crate::clipboard::is_local_to_remote_clipboard_allowed(
+                    crate::clipboard::ClipboardSide::Client,
+                ),
+                crate::clipboard::is_remote_to_local_clipboard_allowed(
+                    crate::clipboard::ClipboardSide::Client,
+                ),
+                "client",
+            ) {
+                stop = true;
+            }
+        }
         if !stop {
             #[cfg(any(
                 target_os = "windows",
@@ -4259,19 +4472,17 @@ impl<T: InvokeUiSession> Remote<T> {
         stream_id: u64,
         render_stream_id: Arc<AtomicU64>,
     ) {
-        let video_queue = Arc::new(RwLock::new(ArrayQueue::new(client::VIDEO_QUEUE_SIZE)));
+        let video_queue = Arc::new(client::VideoIngress::new(client::VIDEO_QUEUE_SIZE));
         let (video_sender, video_receiver) = std::sync::mpsc::channel::<MediaData>();
         let decode_fps = Arc::new(RwLock::new(None));
         let decoder_backend = Arc::new(RwLock::new(None));
         let renderer = Arc::new(RwLock::new(None));
         let frame_resolution = Arc::new(RwLock::new(None));
         let frame_count = Arc::new(RwLock::new(0));
-        let discard_queue = Arc::new(RwLock::new(false));
         let movie_mode = Arc::new(AtomicBool::new(false));
         let newest_capture_time_ms = Arc::new(AtomicU64::new(0));
         let movie_queue_refresh = Arc::new(std::sync::Mutex::new(None));
-        let movie_keyframe_wait =
-            Arc::new(std::sync::Mutex::new(client::MovieKeyframeWait::default()));
+        let keyframe_wait = Arc::new(std::sync::Mutex::new(client::KeyframeWait::default()));
         let video_feedback = Arc::new(std::sync::Mutex::new(
             client::VideoFeedbackTracker::default(),
         ));
@@ -4287,11 +4498,10 @@ impl<T: InvokeUiSession> Remote<T> {
             frame_count: frame_count.clone(),
             video_feedback: video_feedback.clone(),
             fps_control: Default::default(),
-            discard_queue: discard_queue.clone(),
             movie_mode: movie_mode.clone(),
             newest_capture_time_ms: newest_capture_time_ms.clone(),
             movie_queue_refresh: movie_queue_refresh.clone(),
-            movie_keyframe_wait: movie_keyframe_wait.clone(),
+            keyframe_wait: keyframe_wait.clone(),
         };
         let handler = self.handler.ui_handler.clone();
         let connection_generation = self.connection_round;
@@ -4306,12 +4516,11 @@ impl<T: InvokeUiSession> Remote<T> {
             renderer,
             frame_resolution,
             self.chroma.clone(),
-            discard_queue,
             video_feedback,
             movie_mode,
             newest_capture_time_ms,
             movie_queue_refresh,
-            movie_keyframe_wait,
+            keyframe_wait,
             move |display: usize,
                   stream_id: u64,
                   frame_id: u64,
@@ -4427,7 +4636,7 @@ struct FpsControl {
 struct VideoThread {
     activation_generation: u64,
     stream_id: u64,
-    video_queue: Arc<RwLock<ArrayQueue<VideoFrame>>>,
+    video_queue: Arc<client::VideoIngress<VideoFrame>>,
     video_sender: MediaSender,
     decode_fps: Arc<RwLock<Option<usize>>>,
     decoder_backend: Arc<RwLock<Option<&'static str>>>,
@@ -4435,18 +4644,33 @@ struct VideoThread {
     frame_resolution: Arc<RwLock<Option<(usize, usize)>>>,
     frame_count: Arc<RwLock<usize>>,
     video_feedback: Arc<std::sync::Mutex<client::VideoFeedbackTracker>>,
-    discard_queue: Arc<RwLock<bool>>,
     movie_mode: Arc<AtomicBool>,
     newest_capture_time_ms: Arc<AtomicU64>,
     movie_queue_refresh: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
-    movie_keyframe_wait: Arc<std::sync::Mutex<client::MovieKeyframeWait>>,
+    keyframe_wait: Arc<std::sync::Mutex<client::KeyframeWait>>,
     fps_control: FpsControl,
+}
+
+impl VideoThread {
+    /// Delta frames are discarded from now until a keyframe is decoded. The wait has a
+    /// deadline: the decoder thread asks for a full refresh again while it lasts.
+    fn begin_keyframe_wait(&self) {
+        let first_fallback = if self.movie_mode.load(Ordering::Relaxed) {
+            client::MOVIE_KEYFRAME_FALLBACK_DELAY
+        } else {
+            client::KEYFRAME_FALLBACK_DELAY
+        };
+        self.keyframe_wait
+            .lock()
+            .unwrap()
+            .begin(std::time::Instant::now(), first_fallback);
+    }
 }
 
 impl Drop for VideoThread {
     fn drop(&mut self) {
         // since channels are buffered, messages sent before the disconnect will still be properly received.
-        *self.discard_queue.write().unwrap() = true;
+        self.begin_keyframe_wait();
     }
 }
 

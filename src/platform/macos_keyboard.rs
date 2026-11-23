@@ -43,7 +43,7 @@ fn family_for_layout_type(layout_type: u32) -> KeyboardFamily {
         K_KEYBOARD_ANSI => KeyboardFamily::Ansi,
         K_KEYBOARD_ISO => KeyboardFamily::Iso,
         K_KEYBOARD_JIS => KeyboardFamily::Jis,
-        _ => KeyboardFamily::Unknown,
+        _ => KeyboardFamily::KeyboardFamilyUnknown,
     }
 }
 
@@ -61,7 +61,7 @@ pub(crate) fn detected_keyboard_family() -> KeyboardFamily {
     if unsafe { hbb_common::libc::pthread_main_np() } != 0 {
         query()
     } else {
-        let mut family = KeyboardFamily::Unknown;
+        let mut family = KeyboardFamily::KeyboardFamilyUnknown;
         dispatch::Queue::main().exec_sync(|| family = query());
         family
     }
@@ -215,7 +215,10 @@ mod tests {
         );
         assert_eq!(family_for_layout_type(K_KEYBOARD_ISO), KeyboardFamily::Iso);
         assert_eq!(family_for_layout_type(K_KEYBOARD_JIS), KeyboardFamily::Jis);
-        assert_eq!(family_for_layout_type(42), KeyboardFamily::Unknown);
+        assert_eq!(
+            family_for_layout_type(42),
+            KeyboardFamily::KeyboardFamilyUnknown
+        );
     }
 
     #[test]
@@ -250,7 +253,10 @@ mod tests {
         );
         assert_eq!(family_for_layout_type(K_KEYBOARD_ISO), KeyboardFamily::Iso);
         assert_eq!(family_for_layout_type(K_KEYBOARD_JIS), KeyboardFamily::Jis);
-        assert_eq!(family_for_layout_type(0), KeyboardFamily::Unknown);
+        assert_eq!(
+            family_for_layout_type(0),
+            KeyboardFamily::KeyboardFamilyUnknown
+        );
     }
 
     #[test]
@@ -382,8 +388,13 @@ mod tests {
         let baseline = CGEvent::new_keyboard_event(new_source(), code, true)
             .expect("CoreGraphics keyboard event should be constructible")
             .get_integer_value_field(EventField::KEYBOARD_EVENT_KEYBOARD_TYPE);
-        let event = new_physical_key_event(new_source(), code, true, KeyboardFamily::Unknown)
-            .expect("CoreGraphics keyboard event should be constructible");
+        let event = new_physical_key_event(
+            new_source(),
+            code,
+            true,
+            KeyboardFamily::KeyboardFamilyUnknown,
+        )
+        .expect("CoreGraphics keyboard event should be constructible");
 
         assert_eq!(
             event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYBOARD_TYPE),

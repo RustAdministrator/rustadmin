@@ -1,5 +1,3 @@
-use std::mem;
-
 use super::ffi::*;
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
@@ -13,8 +11,7 @@ impl Display {
 
     pub fn online() -> Result<Vec<Display>, CGError> {
         unsafe {
-            #[allow(invalid_value)]
-            let mut arr: [u32; 16] = mem::MaybeUninit::uninit().assume_init();
+            let mut arr: [u32; 16] = [0; 16];
             let mut len: u32 = 0;
 
             match CGGetOnlineDisplayList(16, arr.as_mut_ptr(), &mut len) {

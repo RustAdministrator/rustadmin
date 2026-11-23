@@ -1130,6 +1130,19 @@ pub fn msi_update_command(msi: &str, quiet: bool) -> ResultType<String> {
     ))
 }
 
+/// The command line that starts a downloaded executable to update the installation.
+///
+/// `CreateProcessW` is given no application name, so it takes the program from the command line:
+/// without quotes, a space in the path ends the program name there and Windows tries the parts
+/// before it first (`C:\Users\Jane` for `C:\Users\Jane Doe\…\rustadmin.exe`). A path that
+/// cannot be quoted safely is refused.
+pub fn exe_update_command(exe: &str) -> ResultType<String> {
+    if exe.is_empty() || exe.chars().any(|c| matches!(c, '"' | '\r' | '\n' | '\0')) {
+        bail!("Invalid update executable path");
+    }
+    Ok(format!("\"{exe}\" --update"))
+}
+
 pub fn get_custom_rendezvous_server(custom: String) -> String {
     if !Config::allow_id_relay_server() {
         return "".to_owned();
@@ -5231,6 +5244,8 @@ mod tests {
 
     #[test]
     fn test_get_tcp_proxy_addr_normalizes_bare_ipv6_host() {
+        let _guard = TEST_CONFIG_LOCK.lock().unwrap();
+
         struct RestoreServerOptions {
             custom_rendezvous_server: String,
             allow_id_relay_server: String,
@@ -5396,6 +5411,7 @@ mod tests {
                     keys::OPTION_DIRECT_SERVER.to_string(),
                     self.direct_server.clone(),
                 );
+                crate::ui_interface::refresh_options();
             }
         }
 
@@ -5424,6 +5440,9 @@ mod tests {
             "http://127.0.0.1:21114".to_string(),
         );
         Config::set_option(keys::OPTION_DIRECT_SERVER.to_string(), "N".to_string());
+        // `get_option` reads a process-wide snapshot of the options. Whichever test touched it
+        // first decides its contents, so take a fresh snapshot of what this test just set.
+        crate::ui_interface::refresh_options();
 
         let disabled = get_network_mode_info();
         assert_eq!(disabled.mode, "not_configured");
@@ -6212,6 +6231,34 @@ mod tests {
             msi_update_command("C:\\%TEMP%\\a.msi", false).unwrap(),
             "chcp 65001 && msiexec /i \"C:\\%%TEMP%%\\a.msi\" /norestart"
         );
+    }
+
+    /// The program that `CreateProcessW` starts for a command line with no application name:
+    /// the first token, up to a space unless it is in quotes.
+    fn windows_program_token(command_line: &str) -> &str {
+        if let Some(rest) = command_line.strip_prefix('"') {
+            return rest.split('"').next().unwrap_or("");
+        }
+        command_line.split(' ').next().unwrap_or("")
+    }
+
+    /// The updater starts the downloaded executable by its whole path, spaces included, and
+    /// refuses a path that would end the quotes or the line.
+    #[test]
+    fn exe_update_command_names_the_whole_path() {
+        let exe = "C:\\Users\\Jane Doe\\AppData\\Local\\Temp\\rustadmin-2.0.6.exe";
+        let command_line = exe_update_command(exe).unwrap();
+        assert_eq!(windows_program_token(&command_line), exe);
+        assert_eq!(command_line, format!("\"{exe}\" --update"));
+        assert_eq!(
+            exe_update_command("C:\\Windows\\Temp\\r.exe").unwrap(),
+            "\"C:\\Windows\\Temp\\r.exe\" --update"
+        );
+        assert!(exe_update_command("C:\\x\".exe --install-service").is_err());
+        assert!(exe_update_command("").is_err());
+        assert!(exe_update_command("a\nb.exe").is_err());
+        assert!(exe_update_command("a\rb.exe").is_err());
+        assert!(exe_update_command("a\0b.exe").is_err());
     }
 
     #[test]
