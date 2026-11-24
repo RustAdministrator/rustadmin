@@ -10996,6 +10996,98 @@ mod test {
         assert!(video_feedback_regressed(&previous, &next));
     }
 
+    /// A quiet desktop as in the archives of 2026-11-24 (AV1 at 2 to 6 frames a second): the
+    /// host sends a frame, nothing for 0.6 s, then three frames within 20 ms. The viewer
+    /// reports the first of them and its rate limit holds back the rest; the decoded frame id
+    /// the host sees stays three behind, and once the progress timeout has run out while the
+    /// host still sends, it asks for a keyframe although the viewer decoded every frame.
+    /// Returns the recoveries the host asked for, with and without the viewer's trailing
+    /// feedback.
+    #[cfg(test)]
+    fn recoveries_after_a_burst(trailing_feedback: bool) -> Vec<VideoRecoveryAction> {
+        use crate::client::{TrailingFeedback, VideoFeedbackTracker};
+        const ONE_WAY_MS: u64 = 5;
+        const DECODE_MS: u64 = 10;
+        const STREAM: u64 = 9;
+        // The host's controller runs on tokio's clock, the viewer's tracker on std's.
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let viewer_start = std::time::Instant::now();
+        let viewer_at = |ms: u64| viewer_start + Duration::from_millis(ms);
+        let frame = |frame_id: u64| VideoFrame {
+            stream_id: STREAM,
+            frame_id,
+            display: 0,
+            ..Default::default()
+        };
+        let sends = [(0, 1), (600, 2), (610, 3), (620, 4)];
+        // (time, frame, decoded): arrivals at the viewer and the ends of their decoding.
+        let mut viewer_events = Vec::new();
+        let mut decoder_free_at = 0;
+        for (sent_at, frame_id) in sends {
+            let arrival = sent_at + ONE_WAY_MS;
+            viewer_events.push((arrival, frame_id, false));
+            decoder_free_at = decoder_free_at.max(arrival) + DECODE_MS;
+            viewer_events.push((decoder_free_at, frame_id, true));
+        }
+        let mut controller = VideoDeliveryController::default();
+        let mut tracker = VideoFeedbackTracker::default();
+        let mut in_flight: Vec<(u64, VideoFeedback)> = Vec::new();
+        let mut recoveries = Vec::new();
+        for ms in 0..=3_000u64 {
+            for (sent_at, frame_id) in sends {
+                if sent_at == ms {
+                    controller.on_frame_sent(&frame(frame_id), at(ms));
+                }
+            }
+            in_flight.retain(|(arrives_at, feedback)| {
+                if *arrives_at != ms {
+                    return true;
+                }
+                controller.on_feedback(feedback, at(ms));
+                false
+            });
+            for &(event_at, frame_id, decoded) in &viewer_events {
+                if event_at != ms {
+                    continue;
+                }
+                if decoded {
+                    tracker.record_decoded(STREAM, frame_id, Duration::from_millis(DECODE_MS));
+                } else {
+                    tracker.record_received(&frame(frame_id));
+                }
+                if let Some(feedback) = tracker.take_due_at(viewer_at(ms), false) {
+                    in_flight.push((ms + ONE_WAY_MS, feedback));
+                }
+            }
+            if trailing_feedback {
+                if let TrailingFeedback::Send(feedback) = tracker.take_trailing_at(viewer_at(ms)) {
+                    in_flight.push((ms + ONE_WAY_MS, feedback));
+                }
+            }
+            if ms % 10 == 0 {
+                recoveries.extend(controller.poll_recovery(at(ms), (2 * ONE_WAY_MS) as u32));
+            }
+        }
+        recoveries
+    }
+
+    #[test]
+    fn a_burst_on_a_quiet_desktop_is_not_taken_for_a_stalled_viewer() {
+        let without_trailing = recoveries_after_a_burst(false);
+        assert_eq!(
+            without_trailing.len(),
+            1,
+            "the field case: {without_trailing:?}"
+        );
+        assert_eq!(
+            without_trailing[0].highest_sent_frame_id
+                - without_trailing[0].highest_decoded_frame_id,
+            3
+        );
+        assert_eq!(recoveries_after_a_burst(true), Vec::new());
+    }
+
     #[test]
     fn video_delivery_recovery_cycle_is_not_reopened_without_decode_progress() {
         let start = Instant::now();
