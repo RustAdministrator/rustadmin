@@ -1781,6 +1781,18 @@ class _DisplayMenuState extends State<_DisplayMenu> {
     menuChildrenGetter(_IconSubmenuButtonState state) {
       final menuChildren = <Widget>[
         _screenAdjustor.adjustWindow(context),
+        if (isWindows)
+          Obx(() => MenuButton(
+                onPressed: () =>
+                    widget.setFullscreen(!stateGlobal.fullscreen.value),
+                child: Text(translate(stateGlobal.fullscreen.isTrue
+                    ? 'Exit Fullscreen'
+                    : 'Fullscreen')),
+                trailingIcon: Icon(stateGlobal.fullscreen.isTrue
+                    ? Icons.fullscreen_exit
+                    : Icons.fullscreen),
+                ffi: ffi,
+              )),
         viewStyle(customPercent: _customPercent),
         scrollStyle(state),
         imageQuality(),
