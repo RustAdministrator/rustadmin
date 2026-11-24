@@ -157,6 +157,8 @@ const String kLanDiscoveryModeStandard = "standard";
 const String kOptionAllowAutoDisconnect = "allow-auto-disconnect";
 const String kOptionAutoDisconnectTimeout = "auto-disconnect-timeout";
 const String kOptionEnableHwcodec = "enable-hwcodec";
+// Windows builds with `vram`: the hardware encoder takes frames from a GPU texture.
+const String kOptionEnableTextureEncode = "enable-texture-encode";
 const String kOptionProcessPriority = "process-priority";
 const String kOptionAllowAutoRecordIncoming = "allow-auto-record-incoming";
 const String kOptionAllowAutoRecordOutgoing = "allow-auto-record-outgoing";
@@ -515,15 +517,15 @@ const String kKeyPrinterAllowAutoPrint = 'allow-printer-auto-print';
 double kNewWindowOffset = isWindows
     ? 56.0
     : isLinux
-        ? 50.0
-        : isMacOS
-            ? 30.0
-            : 50.0;
+    ? 50.0
+    : isMacOS
+    ? 30.0
+    : 50.0;
 
 EdgeInsets get kDragToResizeAreaPadding => !kUseCompatibleUiMode && isLinux
     ? stateGlobal.fullscreen.isTrue || stateGlobal.isMaximized.value
-        ? EdgeInsets.zero
-        : EdgeInsets.all(5.0)
+          ? EdgeInsets.zero
+          : EdgeInsets.all(5.0)
     : EdgeInsets.zero;
 // https://en.wikipedia.org/wiki/Non-breaking_space
 const int $nbsp = 0x00A0;

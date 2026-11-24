@@ -76,6 +76,12 @@ class _CodecSettingsState extends State<CodecSettings> {
     final hostResourceMode = normalizeResourceMode(
       bind.mainGetOptionSync(key: kHostResourceModeOption),
     );
+    final showTextureEncode =
+        isWindows && !bind.isOutgoingOnly() && bind.mainHasVram();
+    final textureEncode = option2bool(
+      kOptionEnableTextureEncode,
+      bind.mainGetOptionSync(key: kOptionEnableTextureEncode),
+    );
     final viewerResourceMode = normalizeResourceMode(
       bind.mainGetOptionSync(key: kViewerResourceModeOption),
     );
@@ -92,6 +98,14 @@ class _CodecSettingsState extends State<CodecSettings> {
           : (value) => _save(() async {
               if (value == null) return;
               await mainSetBoolOption(kOptionEnableHwcodec, value);
+            }),
+      showTextureEncode: showTextureEncode,
+      textureEncode: textureEncode,
+      onTextureEncode: _saving || isOptionFixed(kOptionEnableTextureEncode)
+          ? null
+          : (value) => _save(() async {
+              if (value == null) return;
+              await mainSetBoolOption(kOptionEnableTextureEncode, value);
             }),
       onEncoder: _saving || isOptionFixed(encoderCodecPreferenceKey)
           ? null
@@ -139,7 +153,10 @@ class CodecSettingsContent extends StatelessWidget {
     this.hostResourceMode = kResourceModeNormal,
     this.viewerResourceMode = kResourceModeNormal,
     this.showHostResourceMode = true,
+    this.showTextureEncode = false,
+    this.textureEncode = true,
     this.onPreferHardware,
+    this.onTextureEncode,
     this.onEncoder,
     this.onDecoder,
     this.onHostResourceMode,
@@ -154,7 +171,13 @@ class CodecSettingsContent extends StatelessWidget {
   final String hostResourceMode;
   final String viewerResourceMode;
   final bool showHostResourceMode;
+
+  /// Windows builds with `vram` that host: whether the hardware encoder takes
+  /// frames from a GPU texture (`enable-texture-encode`).
+  final bool showTextureEncode;
+  final bool textureEncode;
   final ValueChanged<bool?>? onPreferHardware;
+  final ValueChanged<bool?>? onTextureEncode;
   final ValueChanged<String>? onEncoder;
   final ValueChanged<String>? onDecoder;
   final ValueChanged<String>? onHostResourceMode;
@@ -194,6 +217,19 @@ class CodecSettingsContent extends StatelessWidget {
           value: preferHardware,
           onChanged: onPreferHardware,
         ),
+        if (showTextureEncode)
+          CheckboxListTile(
+            key: const ValueKey('texture-encode'),
+            contentPadding: EdgeInsets.zero,
+            controlAffinity: ListTileControlAffinity.leading,
+            dense: true,
+            visualDensity: VisualDensity.compact,
+            title: Text(localize('Encode from GPU texture (vram)')),
+            subtitle: Text(localize('texture_encode_tip')),
+            value: textureEncode,
+            // Only a hardware encoder takes a texture.
+            onChanged: preferHardware ? onTextureEncode : null,
+          ),
         const SizedBox(height: 8),
         Text(localize('Resource mode')),
         const SizedBox(height: 4),
