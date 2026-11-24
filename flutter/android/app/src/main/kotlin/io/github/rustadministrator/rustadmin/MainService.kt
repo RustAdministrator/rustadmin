@@ -251,7 +251,8 @@ class MainService : Service() {
         val configPath = prefs.getString(KEY_APP_DIR_CONFIG_PATH, "") ?: ""
         FFI.startServer(configPath, "")
 
-        createForegroundNotification()
+        // Bound by the app before it asks for the screen capture, or started at boot.
+        createForegroundNotification(projectionGranted = false)
     }
 
     override fun onDestroy() {
@@ -333,7 +334,12 @@ class MainService : Service() {
         Log.d("whichService", "this service: ${Thread.currentThread()}")
         super.onStartCommand(intent, flags, startId)
         if (intent?.action == ACT_INIT_MEDIA_PROJECTION_AND_SERVICE) {
-            createForegroundNotification()
+            val projectionResult = intent.getParcelableExtra<Intent>(EXT_MEDIA_PROJECTION_RES_INTENT)
+            // With the user's agreement in hand the service becomes a media projection
+            // service before it asks for the projection, as Android 14 requires.
+            createForegroundNotification(
+                projectionGranted = projectionResult != null || mediaProjection != null
+            )
 
             if (intent.getBooleanExtra(EXT_INIT_FROM_BOOT, false)) {
                 FFI.startService()
@@ -342,9 +348,13 @@ class MainService : Service() {
             val mediaProjectionManager =
                 getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
-            intent.getParcelableExtra<Intent>(EXT_MEDIA_PROJECTION_RES_INTENT)?.let {
+            projectionResult?.let {
                 mediaProjection =
                     mediaProjectionManager.getMediaProjection(Activity.RESULT_OK, it)
+                mediaProjection?.let { mp ->
+                    watchProjection(mp)
+                    createIdleVirtualDisplay(mp)
+                }
                 checkMediaPermission()
                 _isReady = true
             } ?: let {
@@ -358,6 +368,54 @@ class MainService : Service() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         updateScreenInfo(newConfig.orientation)
+    }
+
+    /**
+     * Android 14 refuses a virtual display of a projection without a callback, and lets the
+     * user stop the capture from the status bar. A stopped projection cannot capture again:
+     * the service stops capturing, reports the permission as gone and stays a host waiting
+     * for connections until the user starts the capture again.
+     */
+    private fun watchProjection(mp: MediaProjection) {
+        mp.registerCallback(object : MediaProjection.Callback() {
+            override fun onStop() {
+                if (mediaProjection !== mp) {
+                    return
+                }
+                Log.d(logTag, "the screen capture was stopped outside the app")
+                stopCapture()
+                virtualDisplay?.release()
+                virtualDisplay = null
+                mediaProjection = null
+                _isReady = false
+                checkMediaPermission()
+                createForegroundNotification(projectionGranted = false)
+            }
+        }, Handler(Looper.getMainLooper()))
+    }
+
+    /**
+     * Android 14 invalidates a projection that has no virtual display five minutes after the
+     * user agreed: a host whose first viewer came later had to be confirmed on the device
+     * again. The display is made as soon as the projection is there, without a surface;
+     * capturing gives it one (`createOrSetVirtualDisplay`), stopping takes it away.
+     */
+    private fun createIdleVirtualDisplay(mp: MediaProjection) {
+        if (!reuseVirtualDisplay || isStart) {
+            return
+        }
+        // A display of an earlier projection cannot show this one.
+        virtualDisplay?.release()
+        virtualDisplay = null
+        try {
+            virtualDisplay = mp.createVirtualDisplay(
+                "RustAdminVD",
+                SCREEN_INFO.width, SCREEN_INFO.height, SCREEN_INFO.dpi, VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                null, null, null
+            )
+        } catch (e: SecurityException) {
+            Log.w(logTag, "createIdleVirtualDisplay: $e")
+        }
     }
 
     private fun requestMediaProjection() {
@@ -623,7 +681,7 @@ class MainService : Service() {
     }
 
     @SuppressLint("UnspecifiedImmutableFlag")
-    private fun createForegroundNotification() {
+    private fun createForegroundNotification(projectionGranted: Boolean) {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
             action = Intent.ACTION_MAIN
@@ -648,7 +706,15 @@ class MainService : Service() {
             .setColor(ContextCompat.getColor(this, R.color.primary))
             .setWhen(System.currentTimeMillis())
             .build()
-        startForeground(DEFAULT_NOTIFY_ID, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                DEFAULT_NOTIFY_ID,
+                notification,
+                mainServiceForegroundTypes(projectionGranted),
+            )
+        } else {
+            startForeground(DEFAULT_NOTIFY_ID, notification)
+        }
     }
 
     private fun loginRequestNotification(

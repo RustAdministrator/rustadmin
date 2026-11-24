@@ -1,6 +1,7 @@
 package io.github.rustadministrator.rustadmin
 
 import android.annotation.SuppressLint
+import android.app.ActivityOptions
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
@@ -342,12 +343,28 @@ class FloatingWindowService : Service(), View.OnTouchListener {
     private fun openMainActivity() {
         val intent = Intent(this, MainActivity::class.java)
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        // The service is in the background. From Android 14 the sender, and from Android 15
+        // also the creator, of a PendingIntent lends it its right to start an activity from
+        // the background only when it says so.
+        val allowBackgroundStart = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            ActivityOptions.makeBasic().apply {
+                setPendingIntentCreatorBackgroundActivityStartMode(
+                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                )
+                setPendingIntentBackgroundActivityStartMode(
+                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                )
+            }
+        } else {
+            null
+        }
         val pendingIntent = PendingIntent.getActivity(
             this, 0, intent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_ONE_SHOT
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_ONE_SHOT,
+            allowBackgroundStart?.toBundle()
         )
         try {
-            pendingIntent.send()
+            pendingIntent.send(this, 0, null, null, null, null, allowBackgroundStart?.toBundle())
         } catch (e: PendingIntent.CanceledException) {
             e.printStackTrace()
         }
