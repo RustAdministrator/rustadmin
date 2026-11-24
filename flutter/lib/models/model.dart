@@ -421,6 +421,24 @@ class FfiModel with ChangeNotifier {
     }
   }
 
+  /// The session data for the window that takes this session over after login. Its peer
+  /// info is the login snapshot, but the session may have switched display since (the
+  /// host's follow-window event comes right after login): the new window must open the
+  /// display the session shows now, or it binds its render target to the other display
+  /// and draws nothing.
+  String authenticatedHandoffSnapshot() {
+    final display = _pi.currentDisplay;
+    if (cachedPeerData.peerInfo.isNotEmpty &&
+        display >= 0 &&
+        display < _pi.displays.length) {
+      cachedPeerData.peerInfo['current_display'] = display.toString();
+    }
+    return cachedPeerData.toString();
+  }
+
+  @visibleForTesting
+  void debugMarkAuthenticatedHandoff() => _authenticatedHandoffNotified = true;
+
   void _tryNotifyAuthenticatedHandoff(String peerId,
       {bool allowPartialSnapshot = false}) {
     final ffi = parent.target;
@@ -2254,6 +2272,14 @@ class FfiModel with ChangeNotifier {
   ) async {
     if (displayIndex != null) {
       if (pi.currentDisplay == kAllDisplayValue) {
+        return;
+      }
+      if (_authenticatedHandoffNotified) {
+        // The window that takes this session over opens the display of the snapshot it
+        // was given. Switching the session now would have the host send a display that
+        // window has no render target for.
+        debugPrint(
+            'Ignoring follow_current_display $displayIndex after the session was handed over');
         return;
       }
       _pi.currentDisplay = displayIndex;
