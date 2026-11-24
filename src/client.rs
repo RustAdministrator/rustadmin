@@ -5219,7 +5219,11 @@ impl VideoFeedbackTracker {
         }
     }
 
-    fn take_due_at(&mut self, now: std::time::Instant, force: bool) -> Option<VideoFeedback> {
+    pub(crate) fn take_due_at(
+        &mut self,
+        now: std::time::Instant,
+        force: bool,
+    ) -> Option<VideoFeedback> {
         if self.stream_id == 0 || self.received_frame_id == 0 {
             return None;
         }
@@ -5254,6 +5258,44 @@ impl VideoFeedbackTracker {
     pub(crate) fn take_due(&mut self, force: bool) -> Option<VideoFeedback> {
         self.take_due_at(std::time::Instant::now(), force)
     }
+
+    /// Progress that the rate limit held back. Feedback goes out when a frame arrives, is
+    /// decoded or is drawn, at most once in `VIDEO_FEEDBACK_INTERVAL`, and what the limit
+    /// held back went out only with the next frame. On a quiet desktop the host sends a few
+    /// frames close together and then none for a while: the last of them stayed unreported,
+    /// the host took the decoded frame id that stood still for a stalled decoder and asked
+    /// for a keyframe.
+    pub(crate) fn take_trailing_at(&mut self, now: std::time::Instant) -> TrailingFeedback {
+        let Some(last_sent) = self.last_sent else {
+            return TrailingFeedback::Nothing;
+        };
+        if self.decoded_frame_id <= self.last_sent_decoded_frame_id
+            && self.render_submitted_frame_id <= self.last_sent_render_submitted_frame_id
+        {
+            return TrailingFeedback::Nothing;
+        }
+        let due = last_sent + VIDEO_FEEDBACK_INTERVAL;
+        if now < due {
+            return TrailingFeedback::WaitFor(due - now);
+        }
+        self.take_due_at(now, false)
+            .map_or(TrailingFeedback::Nothing, TrailingFeedback::Send)
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum TrailingFeedback {
+    Nothing,
+    WaitFor(std::time::Duration),
+    Send(VideoFeedback),
+}
+
+fn send_video_feedback_message<T: InvokeUiSession>(session: &Session<T>, feedback: VideoFeedback) {
+    let mut misc = Misc::new();
+    misc.set_video_feedback(feedback);
+    let mut message = Message::new();
+    message.set_misc(misc);
+    session.send(Data::Message(message));
 }
 
 pub(crate) fn send_video_feedback<T: InvokeUiSession>(
@@ -5263,11 +5305,25 @@ pub(crate) fn send_video_feedback<T: InvokeUiSession>(
 ) {
     let feedback = tracker.lock().unwrap().take_due(force);
     if let Some(feedback) = feedback {
-        let mut misc = Misc::new();
-        misc.set_video_feedback(feedback);
-        let mut message = Message::new();
-        message.set_misc(misc);
-        session.send(Data::Message(message));
+        send_video_feedback_message(session, feedback);
+    }
+}
+
+/// Sends the feedback the rate limit held back once it may go; returns how long the
+/// decoder thread may wait before it asks again.
+fn send_trailing_video_feedback<T: InvokeUiSession>(
+    session: &Session<T>,
+    tracker: &Mutex<VideoFeedbackTracker>,
+    now: std::time::Instant,
+) -> Option<std::time::Duration> {
+    let trailing = tracker.lock().unwrap().take_trailing_at(now);
+    match trailing {
+        TrailingFeedback::Nothing => None,
+        TrailingFeedback::WaitFor(wait) => Some(wait),
+        TrailingFeedback::Send(feedback) => {
+            send_video_feedback_message(session, feedback);
+            None
+        }
     }
 }
 
@@ -5511,6 +5567,10 @@ pub fn start_video_thread<F, T>(
                     submit_presentation(handler, frame);
                 }
             }
+            // The progress the rate limit held back goes out without waiting for the next
+            // frame, which on a quiet desktop can be seconds away.
+            let feedback_wait =
+                send_trailing_video_feedback(&session, &video_feedback, std::time::Instant::now());
             let recovery_wait = video_handler
                 .as_ref()
                 .and_then(|handler| handler.recovery.wait_duration(now));
@@ -5527,7 +5587,7 @@ pub fn start_video_thread<F, T>(
             let decoder_drain_wait: Option<Duration> = None;
             let wait = [
                 recovery_wait, keyframe_wait_left, presentation.wait_duration(local_mode, now),
-                decoder_drain_wait,
+                decoder_drain_wait, feedback_wait,
             ].into_iter().flatten().min();
             let received = match wait {
                 Some(wait) => video_receiver.recv_timeout(wait),
@@ -7954,6 +8014,38 @@ mod video_feedback_tests {
         assert_eq!(progressed.received_frame_id, 2);
         assert_eq!(progressed.decoded_frame_id, 2);
         assert_eq!(progressed.render_submitted_frame_id, 2);
+    }
+
+    /// The decoder thread asks for the held-back progress without a frame arriving: it is
+    /// told how long to wait, then gets the feedback once, then nothing.
+    #[test]
+    fn held_back_progress_is_sent_without_a_new_frame() {
+        let start = std::time::Instant::now();
+        let at = |ms: u64| start + std::time::Duration::from_millis(ms);
+        let mut tracker = VideoFeedbackTracker::default();
+        assert_eq!(tracker.take_trailing_at(at(0)), TrailingFeedback::Nothing);
+
+        tracker.record_received(&frame(7, 1, 0));
+        assert!(tracker.take_due_at(at(0), false).is_some());
+        assert_eq!(tracker.take_trailing_at(at(5)), TrailingFeedback::Nothing);
+        tracker.record_decoded(7, 1, std::time::Duration::from_millis(10));
+        assert!(
+            tracker.take_due_at(at(10), false).is_some(),
+            "the first decode goes at once"
+        );
+
+        tracker.record_received(&frame(7, 2, 0));
+        tracker.record_decoded(7, 2, std::time::Duration::from_millis(10));
+        assert!(tracker.take_due_at(at(20), false).is_none());
+        assert_eq!(
+            tracker.take_trailing_at(at(20)),
+            TrailingFeedback::WaitFor(std::time::Duration::from_millis(40))
+        );
+        let TrailingFeedback::Send(feedback) = tracker.take_trailing_at(at(60)) else {
+            panic!("the held-back progress is due");
+        };
+        assert_eq!(feedback.decoded_frame_id, 2);
+        assert_eq!(tracker.take_trailing_at(at(200)), TrailingFeedback::Nothing);
     }
 
     #[test]
