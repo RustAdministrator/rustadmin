@@ -114,6 +114,7 @@ mod display_control;
 mod startup_recovery;
 mod movie_playout;
 mod texture_fallback;
+mod undrawn_frames;
 mod video_ingress;
 mod video_timing;
 pub mod file_trait;
@@ -5373,6 +5374,8 @@ pub fn start_video_thread<F, T>(
         let playout_behind = std::cell::Cell::new(None::<Duration>);
         // Texture frames the renderer does not take.
         let texture_watch = std::cell::RefCell::new(texture_fallback::TextureRenderWatch::default());
+        // Decoded frames that no view drew.
+        let undrawn = std::cell::RefCell::new(undrawn_frames::UndrawnFrames::default());
         // Android's hardware decoder may have a frame that was not ready when the last
         // packet was handed in: until this moment it is asked again while no packet arrives.
         #[cfg(all(target_os = "android", feature = "mediacodec"))]
@@ -5413,6 +5416,20 @@ pub fn start_video_thread<F, T>(
                     .unwrap()
                     .begin(std::time::Instant::now(), first_fallback);
                 session.refresh_video(display as _);
+            }
+            if let Some(report) = undrawn.borrow_mut().offered(
+                frame.stream_id,
+                render_outcome.any_submitted(),
+                std::time::Instant::now(),
+            ) {
+                log::warn!(
+                    "display {display}: no view drew the {} frames of stream {} decoded in the last {:.1} s (views for this display: {}, render targets missing or refused: {})",
+                    report.frames,
+                    report.stream_id,
+                    report.undrawn_for.as_secs_f32(),
+                    render_outcome.eligible_bindings,
+                    render_outcome.rejected_bindings
+                );
             }
             if render_outcome.any_submitted() {
                 log_timing(
