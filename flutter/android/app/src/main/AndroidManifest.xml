@@ -10,6 +10,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -86,10 +88,17 @@
             android:excludeFromRecents="true"
             android:theme="@style/Transparent" />
 
+        <!-- specialUse until the user agreed to the screen capture (bound by the app before
+             it asks, or started at boot), mediaProjection added after; see
+             MainServiceForeground.kt. -->
         <service
             android:name=".MainService"
             android:enabled="true"
-            android:foregroundServiceType="mediaProjection" />
+            android:foregroundServiceType="mediaProjection|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Remote access host: keeps the host the user started reachable for incoming remote desktop connections" />
+        </service>
 
         <service
             android:name=".FloatingWindowService"
