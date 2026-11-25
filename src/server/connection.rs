@@ -815,6 +815,15 @@ fn permission_prompt_overlay_available() -> bool {
     ))
 }
 
+/// Whether an authorized port forwarding session leaves the message loop for the tunnel.
+/// Over TCP it waits for the answer to a pending `TestDelay`, which would otherwise be read
+/// as the tunnel's first bytes. Over QUIC the answer has its own channel, which a raw stream
+/// does not deliver, and it may never come: the viewer goes raw on the login answer, which
+/// can overtake the `TestDelay`. Waiting there dropped the tunnel's first bytes.
+fn port_forward_starts(test_delay_pending: bool, quic: bool) -> bool {
+    !test_delay_pending || quic
+}
+
 /// Whether this host can ask its user to approve a viewer's permission request. The Android
 /// host has no such prompt: its connection manager dropped the request, and the viewer's
 /// input stayed paused for `PENDING_PERMISSION_REQUEST_TIMEOUT_SECS`.
@@ -2707,8 +2716,10 @@ impl Connection {
                                     }
                                     if conn.port_forward_socket.is_some() && conn.authorized {
                                         log::info!("Port forward, last_test_delay is none: {}", conn.last_test_delay.is_none());
-                                        // Avoid TestDelay reply injection into rdp data stream
-                                        if conn.last_test_delay.is_none() {
+                                        if port_forward_starts(
+                                            conn.last_test_delay.is_some(),
+                                            conn.stream.is_quic(),
+                                        ) {
                                             break;
                                         }
                                     }
@@ -12808,6 +12819,13 @@ mod test {
             Some(AuthConnType::Terminal)
         );
         assert_eq!(permission_request_connection_type("clipboard"), None);
+    }
+
+    #[test]
+    fn a_quic_port_forward_does_not_wait_for_a_test_delay_answer() {
+        assert!(port_forward_starts(false, false));
+        assert!(!port_forward_starts(true, false));
+        assert!(port_forward_starts(true, true));
     }
 
     /// An Android host has no prompt for a viewer's permission request: the request is denied
