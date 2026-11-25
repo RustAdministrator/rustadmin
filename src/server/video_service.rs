@@ -413,6 +413,22 @@ fn texture_encoding_failed(service: &str, reason: &str) {
         .record(service, reason.to_owned(), Instant::now());
 }
 
+/// The capturer can no longer feed a texture encoder: a user capture helper hands frames
+/// over in RAM again (this display is encoded through RAM, and textures are tried again after
+/// the ladder's pause), or another capturer fell back to GDI.
+#[cfg(all(windows, feature = "vram"))]
+fn leave_texture_encoding(service: &str, c: &CapturerInfo) {
+    if c.is_user_capture_helper() {
+        texture_encoding_failed(
+            service,
+            &c.texture_off_reason()
+                .unwrap_or_else(|| "the capture helper hands frames over in RAM".into()),
+        );
+    } else {
+        VRamEncoder::set_fallback_gdi(service.to_owned(), true);
+    }
+}
+
 /// Why this display is not encoded from a GPU texture: the host option, or a recent failure.
 /// Whether a user capture helper is offered shared textures, so that its frames reach a
 /// texture encoder without a copy through RAM: unless `capture-helper-gpu-texture` is `N`,
@@ -4312,17 +4328,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                 c.is_gdi(),
                 c.is_cpu_only()
             );
-            if c.is_user_capture_helper() {
-                // The helper gave up the shared textures: this display is encoded through RAM,
-                // and textures are tried again after the ladder's pause.
-                texture_encoding_failed(
-                    &sp.name(),
-                    &c.texture_off_reason()
-                        .unwrap_or_else(|| "the capture helper hands frames over in RAM".into()),
-                );
-            } else {
-                VRamEncoder::set_fallback_gdi(sp.name(), true);
-            }
+            leave_texture_encoding(&sp.name(), &c);
             bail!("SWITCH");
         }
         if vs.source.is_monitor() {
@@ -4533,6 +4539,25 @@ fn run(vs: VideoService) -> ResultType<()> {
             window.record_capture(capture_call_elapsed);
         }
         let res = match captured_frame {
+            // A user capture helper that gives up the shared textures (a rotated display, a
+            // capture on another adapter, a format it cannot copy, no texture in time) hands
+            // the frame of that same call over in RAM. A texture encoder cannot take it, and
+            // the conversion error ended the run before the check at the top of the loop had
+            // recorded the switch: the service started again with textures, about once a
+            // second, and the viewer saw nothing.
+            #[cfg(all(windows, feature = "vram"))]
+            Ok(frame)
+                if encoder.input_texture() && matches!(frame, scrap::Frame::PixelBuffer(_)) =>
+            {
+                drop(frame);
+                log::info!(
+                    "a texture encoder got a frame in RAM, gdi={}, cpu_only={}",
+                    c.is_gdi(),
+                    c.is_cpu_only()
+                );
+                leave_texture_encoding(&sp.name(), &c);
+                bail!("SWITCH");
+            }
             Ok(frame) => {
                 repeat_encode_counter = 0;
                 if frame.valid() {
