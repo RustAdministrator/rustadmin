@@ -815,6 +815,91 @@ fn permission_prompt_overlay_available() -> bool {
     ))
 }
 
+/// The path a viewer's file action works on, with the job id to answer an error with (zero
+/// for listings).
+#[cfg(any(test, target_os = "android"))]
+fn file_action_path(action: &file_action::Union) -> Option<(&str, i32)> {
+    match action {
+        file_action::Union::ReadDir(read) => Some((read.path.as_str(), 0)),
+        file_action::Union::ReadEmptyDirs(read) => Some((read.path.as_str(), 0)),
+        file_action::Union::AllFiles(files) => Some((files.path.as_str(), files.id)),
+        file_action::Union::Send(send) => Some((send.path.as_str(), send.id)),
+        file_action::Union::Receive(receive) => Some((receive.path.as_str(), receive.id)),
+        file_action::Union::RemoveDir(remove) => Some((remove.path.as_str(), remove.id)),
+        file_action::Union::RemoveFile(remove) => Some((remove.path.as_str(), remove.id)),
+        file_action::Union::Create(create) => Some((create.path.as_str(), create.id)),
+        file_action::Union::Rename(rename) => Some((rename.path.as_str(), rename.id)),
+        _ => None,
+    }
+}
+
+/// Whether `path`, with symbolic links resolved, is `root` or inside it. A path that does
+/// not exist yet (a folder to create, a file to receive) is judged by its nearest existing
+/// parent. A path with `..` that cannot be resolved counts as inside: it is refused rather
+/// than guessed.
+#[cfg(any(test, target_os = "android"))]
+fn path_is_inside(path: &std::path::Path, root: &std::path::Path) -> bool {
+    let Ok(root) = root.canonicalize() else {
+        return false;
+    };
+    let mut existing = path.to_path_buf();
+    let mut rest = Vec::new();
+    loop {
+        if let Ok(mut resolved) = existing.canonicalize() {
+            for name in rest.iter().rev() {
+                resolved.push(name);
+            }
+            return resolved.starts_with(&root);
+        }
+        match (existing.file_name(), existing.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name.to_owned());
+                existing = parent.to_path_buf();
+            }
+            _ => return true,
+        }
+    }
+}
+
+/// On an Android host a viewer's file actions reach whatever the app can open, also the
+/// app's own data directory (`/data/user/0/<package>`, `/data/data/<package>`) with the
+/// host's identity keys, password and saved peers. A viewer with the file permission is
+/// meant to see the shared storage; the app's own files are refused.
+#[cfg(target_os = "android")]
+fn android_app_private_path(path: &str) -> bool {
+    let app_dir = hbb_common::config::APP_DIR.read().unwrap().clone();
+    let Some(data_dir) = std::path::Path::new(&app_dir).parent() else {
+        return false;
+    };
+    let path = std::path::Path::new(path);
+    path.components()
+        .any(|component| component == std::path::Component::ParentDir)
+        || path_is_inside(path, data_dir)
+}
+
+/// Whether an authorized port forwarding session leaves the message loop for the tunnel.
+/// Over TCP it waits for the answer to a pending `TestDelay`, which would otherwise be read
+/// as the tunnel's first bytes. Over QUIC the answer has its own channel, which a raw stream
+/// does not deliver, and it may never come: the viewer goes raw on the login answer, which
+/// can overtake the `TestDelay`. Waiting there dropped the tunnel's first bytes.
+fn port_forward_starts(test_delay_pending: bool, quic: bool) -> bool {
+    !test_delay_pending || quic
+}
+
+/// Whether this host can ask its user to approve a viewer's permission request. The Android
+/// host has no such prompt: its connection manager dropped the request, and the viewer's
+/// input stayed paused for `PENDING_PERMISSION_REQUEST_TIMEOUT_SECS`.
+fn permission_prompt_ui_available() -> bool {
+    !cfg!(any(target_os = "android", target_os = "ios"))
+}
+
+/// The answer to a permission request that needs the user's approval on a host that cannot
+/// ask: an immediate denial, with input left alone.
+fn permission_request_without_prompt(prompt_ui_available: bool) -> Option<&'static str> {
+    (!prompt_ui_available)
+        .then_some("This device cannot ask its user; the permission can be changed on the device.")
+}
+
 const PENDING_PERMISSION_REQUEST_TIMEOUT_SECS: u64 = 120;
 const VIDEO_FEEDBACK_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_VIDEO_FEEDBACK_DISPLAYS: usize = 32;
@@ -2693,8 +2778,10 @@ impl Connection {
                                     }
                                     if conn.port_forward_socket.is_some() && conn.authorized {
                                         log::info!("Port forward, last_test_delay is none: {}", conn.last_test_delay.is_none());
-                                        // Avoid TestDelay reply injection into rdp data stream
-                                        if conn.last_test_delay.is_none() {
+                                        if port_forward_starts(
+                                            conn.last_test_delay.is_some(),
+                                            conn.stream.is_quic(),
+                                        ) {
                                             break;
                                         }
                                     }
@@ -3833,6 +3920,11 @@ impl Connection {
 
         if !needs_approval {
             self.approve_permission_request(request_id, name, enabled)
+                .await;
+            return;
+        }
+        if let Some(reason) = permission_request_without_prompt(permission_prompt_ui_available()) {
+            self.deny_permission_request(request_id, name, enabled, reason)
                 .await;
             return;
         }
@@ -6769,6 +6861,19 @@ impl Connection {
                             if let Some(job_id) = job_id {
                                 self.send(fs::new_error(job_id, "one-way-file-transfer-tip", 0))
                                     .await;
+                                return true;
+                            }
+                        }
+                        #[cfg(target_os = "android")]
+                        if let Some((path, id)) = fa.union.as_ref().and_then(file_action_path) {
+                            if android_app_private_path(path) {
+                                log::warn!("refused a file action on the app's own data: {path}");
+                                self.send(fs::new_error(
+                                    id,
+                                    "This folder belongs to the app and is not shared.",
+                                    0,
+                                ))
+                                .await;
                                 return true;
                             }
                         }
@@ -12789,6 +12894,66 @@ mod test {
             Some(AuthConnType::Terminal)
         );
         assert_eq!(permission_request_connection_type("clipboard"), None);
+    }
+
+    /// The Android host refuses file actions inside the app's data directory, also through a
+    /// symbolic link and for paths that do not exist yet.
+    #[test]
+    fn a_path_inside_a_directory_is_found_through_links_and_missing_parts() {
+        let base = std::env::temp_dir().join(format!(
+            "rustadmin-private-path-{}-{}",
+            std::process::id(),
+            hbb_common::rand::random::<u64>()
+        ));
+        let private = base.join("data").join("package");
+        let shared = base.join("storage");
+        std::fs::create_dir_all(private.join("app_flutter")).unwrap();
+        std::fs::create_dir_all(&shared).unwrap();
+        assert!(path_is_inside(&private.join("app_flutter"), &private));
+        assert!(path_is_inside(
+            &private.join("not-yet").join("file"),
+            &private
+        ));
+        assert!(!path_is_inside(&shared, &private));
+        assert!(!path_is_inside(&shared.join("not-yet"), &private));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&private, shared.join("link")).unwrap();
+            assert!(path_is_inside(
+                &shared.join("link").join("app_flutter"),
+                &private
+            ));
+        }
+        let actions = [
+            file_action::Union::ReadDir(ReadDir {
+                path: "/a".into(),
+                ..Default::default()
+            }),
+            file_action::Union::Create(FileDirCreate {
+                id: 5,
+                path: "/b".into(),
+                ..Default::default()
+            }),
+        ];
+        let ids: Vec<_> = actions.iter().map(file_action_path).collect();
+        assert_eq!(ids, vec![Some(("/a", 0)), Some(("/b", 5))]);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn a_quic_port_forward_does_not_wait_for_a_test_delay_answer() {
+        assert!(port_forward_starts(false, false));
+        assert!(!port_forward_starts(true, false));
+        assert!(port_forward_starts(true, true));
+    }
+
+    /// An Android host has no prompt for a viewer's permission request: the request is denied
+    /// at once instead of waiting two minutes, unseen, with the viewer's input paused.
+    #[test]
+    fn a_host_without_a_prompt_denies_requests_that_need_approval_at_once() {
+        assert!(permission_request_without_prompt(false).is_some());
+        assert_eq!(permission_request_without_prompt(true), None);
+        assert!(permission_prompt_ui_available());
     }
 
     #[test]

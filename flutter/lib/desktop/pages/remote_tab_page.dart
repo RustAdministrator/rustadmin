@@ -638,7 +638,7 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
                 page.id == id &&
                 (requestedSessionId == null ||
                     page.ffi.sessionId.toString() == requestedSessionId));
-        final cachedData = remotePage.ffi.ffiModel.cachedPeerData.toString();
+        final cachedData = remotePage.ffi.ffiModel.handoffSnapshot();
         if (close == true) {
           final page = remotePage;
           returnValue = await prepareRemoteSessionTransfer(

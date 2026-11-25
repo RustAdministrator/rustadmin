@@ -103,6 +103,9 @@ pub async fn listen(
     Ok(())
 }
 
+/// What a forwarded local connection may send before the login is done.
+const MAX_BUFFER_BEFORE_LOGIN: usize = 1024 * 1024;
+
 async fn connect_and_login(
     id: &str,
     password: &str,
@@ -178,7 +181,9 @@ async fn connect_and_login(
                     _ => {}
                 }
             },
-            res = forward.next() => {
+            // What the local program sends before the login is done is kept, up to a
+            // bound; beyond it the local socket is not read until the tunnel is open.
+            res = forward.next(), if buffer.len() < MAX_BUFFER_BEFORE_LOGIN => {
                 if let Some(Ok(bytes)) = res {
                     buffer.extend(bytes);
                 } else {
@@ -202,14 +207,21 @@ async fn run_forward(forward: Framed<TcpStream, BytesCodec>, stream: Stream) -> 
         tokio::select! {
             res = forward.next() => {
                 if let Some(Ok(bytes)) = res {
-                    allow_err!(stream.send_bytes(bytes.into()).await);
+                    // A chunk that was not sent is a hole in the tunneled stream: end it.
+                    if let Err(err) = stream.send_bytes(bytes.into()).await {
+                        log::warn!("port forwarding: sending to the peer failed: {err}");
+                        break;
+                    }
                 } else {
                     break;
                 }
             },
             res = stream.next() => {
                 if let Some(Ok(bytes)) = res {
-                    allow_err!(forward.send(bytes).await);
+                    if let Err(err) = forward.send(bytes).await {
+                        log::warn!("port forwarding: writing to the local connection failed: {err}");
+                        break;
+                    }
                 } else {
                     break;
                 }

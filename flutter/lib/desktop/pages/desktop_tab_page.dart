@@ -249,7 +249,7 @@ class _DesktopTabPageState extends State<DesktopTabPage> {
       return null;
     }
     final page = tab.page as RemotePage;
-    final cachedData = page.ffi.ffiModel.cachedPeerData.toString();
+    final cachedData = page.ffi.ffiModel.handoffSnapshot();
     if (!close) {
       return cachedData;
     }

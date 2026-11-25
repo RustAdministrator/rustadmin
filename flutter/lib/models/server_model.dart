@@ -51,6 +51,26 @@ class PermissionRequestPrompt {
       client.id == other.client.id && requestId == other.requestId;
 }
 
+/// What tapping "Screen Capture" on the Android host page does.
+enum ScreenCaptureTap { requestCapture, scamWarning, toggleService }
+
+/// The service can run without the screen capture (stopped from the status bar, ended by the
+/// system, or started at boot and not agreed to yet). Then the row asks for the capture
+/// again; before, it offered to stop the whole service, whose button was hidden.
+ScreenCaptureTap screenCaptureTap({
+  required bool isStart,
+  required bool mediaOk,
+  required bool scamWarning,
+}) {
+  if (isStart && !mediaOk) return ScreenCaptureTap.requestCapture;
+  if (!mediaOk && scamWarning) return ScreenCaptureTap.scamWarning;
+  return ScreenCaptureTap.toggleService;
+}
+
+/// "Stop service" follows the service, not the screen capture.
+bool showStopService({required bool isStart, required bool hideStopService}) =>
+    isStart && !hideStopService;
+
 class ServerModel with ChangeNotifier {
   bool _isStart = false; // Android MainService status
   bool _mediaOk = false;
@@ -527,6 +547,13 @@ class ServerModel with ChangeNotifier {
         startService();
       }
     }
+  }
+
+  /// The service runs without the screen capture: the user stopped the capture from the
+  /// status bar, the system ended it, or the service started at boot and was never agreed to.
+  /// Asks for the capture again; the service and its connections stay.
+  Future<void> requestScreenCapture() async {
+    await parent.target?.invokeMethod("init_service");
   }
 
   /// Start the screen sharing service.

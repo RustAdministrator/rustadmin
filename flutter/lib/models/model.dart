@@ -421,12 +421,13 @@ class FfiModel with ChangeNotifier {
     }
   }
 
-  /// The session data for the window that takes this session over after login. Its peer
-  /// info is the login snapshot, but the session may have switched display since (the
-  /// host's follow-window event comes right after login): the new window must open the
-  /// display the session shows now, or it binds its render target to the other display
-  /// and draws nothing.
-  String authenticatedHandoffSnapshot() {
+  /// The session data for a window that takes this session over: the remote window after
+  /// login, or a new window a tab moves to. Its peer info is the login snapshot, but the
+  /// session may have switched display since (the host's follow-window event comes right
+  /// after login, the user switches displays): the new window must open the display the
+  /// session shows now, or it binds its render target to the other display and draws
+  /// nothing.
+  String handoffSnapshot() {
     final display = _pi.currentDisplay;
     if (cachedPeerData.peerInfo.isNotEmpty &&
         display >= 0 &&
@@ -2212,6 +2213,11 @@ class FfiModel with ChangeNotifier {
         if (_pi.currentDisplay >= 0 &&
             _pi.currentDisplay < _pi.displays.length) {
           await updateCurDisplay(sessionId);
+        } else if (_authenticatedHandoffNotified) {
+          // The window taking this session over opens the display of its snapshot and
+          // gets the host's displays itself; a switch from here would leave it bound to
+          // a display the host no longer sends.
+          debugPrint('Display gone after the session was handed over; left to the new window');
         } else {
           if (_pi.displays.isNotEmpty) {
             // Notify to switch display

@@ -636,7 +636,9 @@ class _PermissionCheckerState extends State<PermissionChecker> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          serverModel.mediaOk && !hideStopService
+          showStopService(
+                  isStart: serverModel.isStart,
+                  hideStopService: hideStopService)
               ? ElevatedButton.icon(
                   style: ButtonStyle(
                     backgroundColor: MaterialStateProperty.all(Colors.red),
@@ -650,11 +652,18 @@ class _PermissionCheckerState extends State<PermissionChecker> {
             PermissionRow(
               translate("Screen Capture"),
               serverModel.mediaOk,
-              !serverModel.mediaOk &&
-                      gFFI.userModel.userName.value.isEmpty &&
-                      bind.mainGetLocalOption(key: "show-scam-warning") != "N"
-                  ? () => showScamWarning(context, serverModel)
-                  : serverModel.toggleService,
+              switch (screenCaptureTap(
+                isStart: serverModel.isStart,
+                mediaOk: serverModel.mediaOk,
+                scamWarning: gFFI.userModel.userName.value.isEmpty &&
+                    bind.mainGetLocalOption(key: "show-scam-warning") != "N",
+              )) {
+                ScreenCaptureTap.requestCapture =>
+                  serverModel.requestScreenCapture,
+                ScreenCaptureTap.scamWarning => () =>
+                    showScamWarning(context, serverModel),
+                ScreenCaptureTap.toggleService => serverModel.toggleService,
+              },
             ),
           PermissionRow(
             translate("Input Control"),

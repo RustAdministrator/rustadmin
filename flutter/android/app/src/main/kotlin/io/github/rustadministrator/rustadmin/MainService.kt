@@ -158,19 +158,13 @@ class MainService : Service() {
                         } else {
                             if (!audioRecordHandle.switchOutVoiceCall(mediaProjection)) {
                                 Log.e(logTag, "switchOutVoiceCall fail")
-                                MainActivity.flutterMethodChannel?.invokeMethod("msgbox", mapOf(
-                                    "type" to "custom-nook-nocancel-hasclose-error",
-                                    "title" to "Voice call",
-                                    "text" to "Failed to switch out voice call."))
+                                showVoiceCallError("Failed to switch out voice call.")
                             }
                         }
                     } else {
                         if (!audioRecordHandle.switchToVoiceCall(mediaProjection)) {
                             Log.e(logTag, "switchToVoiceCall fail")
-                            MainActivity.flutterMethodChannel?.invokeMethod("msgbox", mapOf(
-                                "type" to "custom-nook-nocancel-hasclose-error",
-                                "title" to "Voice call",
-                                "text" to "Failed to switch to voice call."))
+                            showVoiceCallError("Failed to switch to voice call.")
                         }
                     }
                 } catch (e: JSONException) {
@@ -179,6 +173,7 @@ class MainService : Service() {
             }
             "stop_capture" -> {
                 Log.d(logTag, "from rust:stop_capture")
+                captureWanted = false
                 stopCapture()
             }
             "half_scale" -> {
@@ -217,6 +212,12 @@ class MainService : Service() {
     private val binder = LocalBinder()
 
     private var reuseVirtualDisplay = Build.VERSION.SDK_INT > 33
+
+    // A viewer wants the screen: set by `startCapture`, cleared when Rust says no viewer wants
+    // it any more and when the service is destroyed. A capture that lost its projection
+    // starts again by itself once the user agrees anew.
+    @Volatile
+    private var captureWanted = false
 
     // video
     private var mediaProjection: MediaProjection? = null
@@ -357,6 +358,10 @@ class MainService : Service() {
                 }
                 checkMediaPermission()
                 _isReady = true
+                if (captureWanted) {
+                    // Viewers lost the screen with the previous projection.
+                    startCapture()
+                }
             } ?: let {
                 Log.d(logTag, "getParcelableExtra intent null, invoke requestMediaProjection")
                 requestMediaProjection()
@@ -372,26 +377,35 @@ class MainService : Service() {
 
     /**
      * Android 14 refuses a virtual display of a projection without a callback, and lets the
-     * user stop the capture from the status bar. A stopped projection cannot capture again:
-     * the service stops capturing, reports the permission as gone and stays a host waiting
-     * for connections until the user starts the capture again.
+     * user stop the capture from the status bar.
      */
     private fun watchProjection(mp: MediaProjection) {
         mp.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() {
-                if (mediaProjection !== mp) {
-                    return
-                }
-                Log.d(logTag, "the screen capture was stopped outside the app")
-                stopCapture()
-                virtualDisplay?.release()
-                virtualDisplay = null
-                mediaProjection = null
-                _isReady = false
-                checkMediaPermission()
-                createForegroundNotification(projectionGranted = false)
+                projectionLost(mp, "the screen capture was stopped outside the app")
             }
         }, Handler(Looper.getMainLooper()))
+    }
+
+    /**
+     * The projection `mp` cannot capture any more: the user stopped it from the status bar,
+     * the system ended it, or it refused a display. The service stops capturing, reports the
+     * permission as gone and stays a host waiting for connections; viewers that wanted the
+     * screen get it again when the user agrees anew.
+     */
+    @Synchronized
+    private fun projectionLost(mp: MediaProjection, reason: String) {
+        if (mediaProjection !== mp) {
+            return
+        }
+        Log.d(logTag, "screen capture ended: $reason")
+        stopCapture()
+        virtualDisplay?.release()
+        virtualDisplay = null
+        mediaProjection = null
+        _isReady = false
+        checkMediaPermission()
+        createForegroundNotification(projectionGranted = false)
     }
 
     /**
@@ -468,10 +482,12 @@ class MainService : Service() {
     }
 
     fun startCapture(): Boolean {
+        captureWanted = true
         if (isStart) {
             return true
         }
-        if (mediaProjection == null) {
+        val mp = mediaProjection
+        if (mp == null) {
             Log.w(logTag, "startCapture fail,mediaProjection is null")
             return false
         }
@@ -480,10 +496,17 @@ class MainService : Service() {
         Log.d(logTag, "Start Capture")
         surface = createSurface()
 
-        if (useVP9) {
-            startVP9VideoRecorder(mediaProjection!!)
+        val shown = if (useVP9) {
+            startVP9VideoRecorder(mp)
         } else {
-            startRawVideoRecorder(mediaProjection!!)
+            startRawVideoRecorder(mp)
+        }
+        if (!shown) {
+            // Android 14 refuses a projection that is reused or too old. The user is asked
+            // again (this prompts on the device), and the capture starts once they agree.
+            projectionLost(mp, "the projection refused a display")
+            requestMediaProjection()
+            return false
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -495,7 +518,14 @@ class MainService : Service() {
             }
         }
         checkMediaPermission()
-        _isStart = true
+        synchronized(this) {
+            // The projection may have ended meanwhile (`onStop` runs on the main thread).
+            if (mediaProjection !== mp) {
+                stopCapture()
+                return false
+            }
+            _isStart = true
+        }
         FFI.setFrameRawEnable("video",true)
         MainActivity.rdClipboardManager?.setCaptureStarted(_isStart)
         return true
@@ -540,6 +570,7 @@ class MainService : Service() {
 
     fun destroy() {
         Log.d(logTag, "destroy service")
+        captureWanted = false
         _isReady = false
         _isAudioStart = false
 
@@ -573,16 +604,18 @@ class MainService : Service() {
         return isReady
     }
 
-    private fun startRawVideoRecorder(mp: MediaProjection) {
+    /** False when the projection refused the display. */
+    private fun startRawVideoRecorder(mp: MediaProjection): Boolean {
         Log.d(logTag, "startRawVideoRecorder,screen info:$SCREEN_INFO")
         if (surface == null) {
             Log.d(logTag, "startRawVideoRecorder failed,surface is null")
-            return
+            return true
         }
-        createOrSetVirtualDisplay(mp, surface!!)
+        return createOrSetVirtualDisplay(mp, surface!!)
     }
 
-    private fun startVP9VideoRecorder(mp: MediaProjection) {
+    /** False when the projection refused the display. */
+    private fun startVP9VideoRecorder(mp: MediaProjection): Boolean {
         createMediaCodec()
         videoEncoder?.let {
             surface = it.createInputSurface()
@@ -591,13 +624,15 @@ class MainService : Service() {
             }
             it.setCallback(cb)
             it.start()
-            createOrSetVirtualDisplay(mp, surface!!)
+            return createOrSetVirtualDisplay(mp, surface!!)
         }
+        return true
     }
 
     // https://github.com/bk138/droidVNC-NG/blob/b79af62db5a1c08ed94e6a91464859ffed6f4e97/app/src/main/java/net/christianbeier/droidvnc_ng/MediaProjectionService.java#L250
     // Reuse virtualDisplay if it exists, to avoid media projection confirmation dialog every connection.
-    private fun createOrSetVirtualDisplay(mp: MediaProjection, s: Surface) {
+    /** False when the projection refused the display (the caller asks the user again). */
+    private fun createOrSetVirtualDisplay(mp: MediaProjection, s: Surface): Boolean {
         try {
             virtualDisplay?.let {
                 it.resize(SCREEN_INFO.width, SCREEN_INFO.height, SCREEN_INFO.dpi)
@@ -609,10 +644,23 @@ class MainService : Service() {
                     s, null, null
                 )
             }
+            return true
         } catch (e: SecurityException) {
-            Log.w(logTag, "createOrSetVirtualDisplay: got SecurityException, re-requesting confirmation");
-            // This initiates a prompt dialog for the user to confirm screen projection.
-            requestMediaProjection()
+            Log.w(logTag, "createOrSetVirtualDisplay: got SecurityException: $e")
+            return false
+        }
+    }
+
+    /** Called from Rust threads; Flutter's channel must be used on the main thread. */
+    private fun showVoiceCallError(text: String) {
+        Handler(Looper.getMainLooper()).post {
+            MainActivity.flutterMethodChannel?.invokeMethod(
+                "msgbox", mapOf(
+                    "type" to "custom-nook-nocancel-hasclose-error",
+                    "title" to "Voice call",
+                    "text" to text
+                )
+            )
         }
     }
 

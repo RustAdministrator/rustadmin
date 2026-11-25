@@ -351,6 +351,16 @@ pub fn clear_codec_info() {
             Ok(JObject::null())
         })?;
 */
+/// A Java exception left pending on this thread makes its next JNI call abort the process.
+/// Whenever a call into Java fails with one, it is logged and cleared here.
+fn clear_java_exception<T>(env: &mut JNIEnv, result: JniResult<T>) -> JniResult<T> {
+    if let Err(JniError::JavaException) = &result {
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+    }
+    result
+}
+
 pub fn call_main_service_pointer_input(kind: &str, mask: i32, x: i32, y: i32) -> JniResult<()> {
     if let (Some(jvm), Some(ctx)) = (
         JVM.read().unwrap().as_ref(),
@@ -358,7 +368,7 @@ pub fn call_main_service_pointer_input(kind: &str, mask: i32, x: i32, y: i32) ->
     ) {
         let mut env = jvm.attach_current_thread_as_daemon()?;
         let kind = if kind == "touch" { 0 } else { 1 };
-        env.call_method(
+        let result = env.call_method(
             ctx,
             "rustPointerInput",
             "(IIII)V",
@@ -368,7 +378,8 @@ pub fn call_main_service_pointer_input(kind: &str, mask: i32, x: i32, y: i32) ->
                 JValue::Int(x),
                 JValue::Int(y),
             ],
-        )?;
+        );
+        clear_java_exception(&mut env, result)?;
         return Ok(());
     } else {
         return Err(JniError::ThrowFailed(-1));
@@ -383,12 +394,13 @@ pub fn call_main_service_key_event(data: &[u8]) -> JniResult<()> {
         let mut env = jvm.attach_current_thread_as_daemon()?;
         let data = env.byte_array_from_slice(data)?;
 
-        env.call_method(
+        let result = env.call_method(
             ctx,
             "rustKeyEventInput",
             "([B)V",
             &[JValue::Object(&JObject::from(data))],
-        )?;
+        );
+        clear_java_exception(&mut env, result)?;
         return Ok(());
     } else {
         return Err(JniError::ThrowFailed(-1));
@@ -401,7 +413,8 @@ pub fn call_main_service_release_input() -> JniResult<()> {
         MAIN_SERVICE_CTX.read().unwrap().as_ref(),
     ) {
         let mut env = jvm.attach_current_thread_as_daemon()?;
-        env.call_method(ctx, "rustReleaseRemoteInputState", "()V", &[])?;
+        let result = env.call_method(ctx, "rustReleaseRemoteInputState", "()V", &[]);
+        clear_java_exception(&mut env, result)?;
         Ok(())
     } else {
         Err(JniError::ThrowFailed(-1))
@@ -418,7 +431,8 @@ where
         CLIPBOARD_MANAGER.read().unwrap().as_ref(),
     ) {
         let mut env = jvm.attach_current_thread()?;
-        env.call_method(cm, name, sig, args)?;
+        let result = env.call_method(cm, name, sig, args);
+        clear_java_exception(&mut env, result)?;
         return Ok(());
     } else {
         return Err(JniError::ThrowFailed(-1));
@@ -433,12 +447,13 @@ pub fn call_clipboard_manager_update_clipboard(data: &[u8]) -> JniResult<()> {
         let mut env = jvm.attach_current_thread()?;
         let data = env.byte_array_from_slice(data)?;
 
-        env.call_method(
+        let result = env.call_method(
             cm,
             "rustUpdateClipboard",
             "([B)V",
             &[JValue::Object(&JObject::from(data))],
-        )?;
+        );
+        clear_java_exception(&mut env, result)?;
         return Ok(());
     } else {
         return Err(JniError::ThrowFailed(-1));
@@ -473,7 +488,8 @@ pub fn call_main_service_get_by_name(name: &str) -> JniResult<String> {
             let res = env.get_string(&res)?;
             let res = res.to_string_lossy().to_string();
             Ok(res)
-        })?;
+        });
+        let res = clear_java_exception(&mut env, res)?;
         Ok(res)
     } else {
         return Err(JniError::ThrowFailed(-1));
@@ -490,7 +506,7 @@ pub fn call_main_service_set_by_name(
         MAIN_SERVICE_CTX.read().unwrap().as_ref(),
     ) {
         let mut env = jvm.attach_current_thread_as_daemon()?;
-        env.with_local_frame(10, |env| -> JniResult<()> {
+        let result = env.with_local_frame(10, |env| -> JniResult<()> {
             let name = env.new_string(name)?;
             let arg1 = env.new_string(arg1.unwrap_or(""))?;
             let arg2 = env.new_string(arg2.unwrap_or(""))?;
@@ -506,7 +522,8 @@ pub fn call_main_service_set_by_name(
                 ],
             )?;
             Ok(())
-        })?;
+        });
+        clear_java_exception(&mut env, result)?;
         return Ok(());
     } else {
         return Err(JniError::ThrowFailed(-1));
