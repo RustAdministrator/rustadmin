@@ -29,7 +29,7 @@ void main() {
     final model = loggedInOnDisplay1();
     model.pi.currentDisplay = 0;
 
-    final handed = CachedPeerData.fromString(model.authenticatedHandoffSnapshot())!;
+    final handed = CachedPeerData.fromString(model.handoffSnapshot())!;
 
     expect(handed.peerInfo['current_display'], '0');
     expect(handed.peerInfo['username'], 'u');
@@ -38,7 +38,7 @@ void main() {
   test('the handed-over session data keeps the login display when nothing switched', () {
     final model = loggedInOnDisplay1();
 
-    final handed = CachedPeerData.fromString(model.authenticatedHandoffSnapshot())!;
+    final handed = CachedPeerData.fromString(model.handoffSnapshot())!;
 
     expect(handed.peerInfo['current_display'], '1');
   });

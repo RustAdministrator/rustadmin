@@ -936,7 +936,7 @@ class PreAuthRemoteDesktopManager {
 
     _openingRemoteWindow = true;
     final sessionId = ffi.sessionId.toString();
-    final cachedPeerData = ffi.ffiModel.authenticatedHandoffSnapshot();
+    final cachedPeerData = ffi.ffiModel.handoffSnapshot();
     try {
       await rustDeskWinManager.newRemoteDesktop(
         peerId,
