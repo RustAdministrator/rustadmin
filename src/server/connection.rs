@@ -815,6 +815,20 @@ fn permission_prompt_overlay_available() -> bool {
     ))
 }
 
+/// Whether this host can ask its user to approve a viewer's permission request. The Android
+/// host has no such prompt: its connection manager dropped the request, and the viewer's
+/// input stayed paused for `PENDING_PERMISSION_REQUEST_TIMEOUT_SECS`.
+fn permission_prompt_ui_available() -> bool {
+    !cfg!(any(target_os = "android", target_os = "ios"))
+}
+
+/// The answer to a permission request that needs the user's approval on a host that cannot
+/// ask: an immediate denial, with input left alone.
+fn permission_request_without_prompt(prompt_ui_available: bool) -> Option<&'static str> {
+    (!prompt_ui_available)
+        .then_some("This device cannot ask its user; the permission can be changed on the device.")
+}
+
 const PENDING_PERMISSION_REQUEST_TIMEOUT_SECS: u64 = 120;
 const VIDEO_FEEDBACK_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_VIDEO_FEEDBACK_DISPLAYS: usize = 32;
@@ -3833,6 +3847,11 @@ impl Connection {
 
         if !needs_approval {
             self.approve_permission_request(request_id, name, enabled)
+                .await;
+            return;
+        }
+        if let Some(reason) = permission_request_without_prompt(permission_prompt_ui_available()) {
+            self.deny_permission_request(request_id, name, enabled, reason)
                 .await;
             return;
         }
@@ -12789,6 +12808,15 @@ mod test {
             Some(AuthConnType::Terminal)
         );
         assert_eq!(permission_request_connection_type("clipboard"), None);
+    }
+
+    /// An Android host has no prompt for a viewer's permission request: the request is denied
+    /// at once instead of waiting two minutes, unseen, with the viewer's input paused.
+    #[test]
+    fn a_host_without_a_prompt_denies_requests_that_need_approval_at_once() {
+        assert!(permission_request_without_prompt(false).is_some());
+        assert_eq!(permission_request_without_prompt(true), None);
+        assert!(permission_prompt_ui_available());
     }
 
     #[test]
