@@ -5219,9 +5219,16 @@ fn get_encoder_config(
                     true
                 }
             };
+            // HQ (NVENC P5) is encoded from the texture too where the texture encoder has the
+            // profile; elsewhere it stays on the RAM encoder.
             #[cfg(feature = "vram")]
-            if !high_quality && prefer_vram {
-                if let Some(feature) = VRamEncoder::try_get(&c.device(), negotiated_codec) {
+            if prefer_vram {
+                let feature = if high_quality {
+                    VRamEncoder::try_get_high_quality(&c.device(), negotiated_codec)
+                } else {
+                    VRamEncoder::try_get(&c.device(), negotiated_codec)
+                };
+                if let Some(feature) = feature {
                     return Ok(EncoderCfg::VRAM(VRamEncoderConfig {
                         device: c.device(),
                         width: c.width,
@@ -5230,6 +5237,7 @@ fn get_encoder_config(
                         fps: encoder_fps,
                         feature,
                         keyframe_interval,
+                        high_quality,
                     }));
                 }
             }

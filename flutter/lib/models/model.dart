@@ -5071,6 +5071,7 @@ class QualityMonitorData {
     final codec = codecFormat;
     if ((codec == 'H264' || codec == 'H265') &&
         (encoderBackend == 'Hardware NVIDIA NVENC p5 via FFmpeg' ||
+            encoderBackend == 'Hardware Direct3D texture encoder NVENC p5' ||
             encoderBackend == 'Hardware VideoToolbox HQ via FFmpeg')) {
       return '$codec HQ';
     }

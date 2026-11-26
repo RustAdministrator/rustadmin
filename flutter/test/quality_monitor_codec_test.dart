@@ -26,6 +26,17 @@ void main() {
     expect(data.codecLabel, 'H265 HQ');
   });
 
+  test('quality monitor identifies the NVENC p5 texture encoder as HQ', () {
+    final data = QualityMonitorData()
+      ..encoderBackend = 'Hardware Direct3D texture encoder NVENC p5';
+
+    data.codecFormat = 'H264';
+    expect(data.codecLabel, 'H264 HQ');
+
+    data.encoderBackend = 'Hardware Direct3D texture encoder';
+    expect(data.codecLabel, 'H264');
+  });
+
   test('quality monitor identifies VideoToolbox HQ H264 and H265 as HQ', () {
     final data = QualityMonitorData()
       ..encoderBackend = 'Hardware VideoToolbox HQ via FFmpeg';

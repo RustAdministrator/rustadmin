@@ -43,6 +43,9 @@ pub struct VRamEncoderConfig {
     pub fps: u32,
     pub feature: FeatureContext,
     pub keyframe_interval: Option<usize>,
+    /// The high-quality profile (H264 HQ, H265 HQ): NVENC preset P5. Only a feature that
+    /// `supports_high_quality` is chosen with it (`VRamEncoder::try_get_high_quality`).
+    pub high_quality: bool,
 }
 
 pub struct VRamEncoder {
@@ -77,6 +80,7 @@ impl EncoderApi for VRamEncoder {
                         kbitrate: bitrate as _,
                         framerate: normalized_encoder_fps(config.fps) as i32,
                         gop,
+                        high_quality: config.high_quality,
                     },
                 };
                 match Encoder::new(ctx.clone()) {
@@ -205,19 +209,16 @@ impl EncoderApi for VRamEncoder {
 
 impl VRamEncoder {
     pub fn try_get(device: &AdapterDevice, format: CodecFormat) -> Option<FeatureContext> {
-        let v: Vec<_> = Self::available(format)
-            .drain(..)
-            .filter(|e| e.luid == device.luid)
-            .collect();
-        if v.len() > 0 {
-            // prefer ffmpeg
-            if let Some(ctx) = v.iter().find(|c| c.driver == Driver::FFMPEG) {
-                return Some(ctx.clone());
-            }
-            Some(v[0].clone())
-        } else {
-            None
-        }
+        choose_feature(&Self::available(format), device.luid, false)
+    }
+
+    /// A texture encoder with the high-quality profile (H264 HQ, H265 HQ) on this adapter:
+    /// NVENC. Without one, the session's HQ stays on the RAM encoder.
+    pub fn try_get_high_quality(
+        device: &AdapterDevice,
+        format: CodecFormat,
+    ) -> Option<FeatureContext> {
+        choose_feature(&Self::available(format), device.luid, true)
     }
 
     pub fn available(format: CodecFormat) -> Vec<FeatureContext> {
@@ -370,6 +371,25 @@ impl VRamDecoder {
     }
 }
 
+/// The texture encoder for an adapter, FFmpeg's first; with `high_quality` only one that has
+/// the high-quality profile.
+fn choose_feature(
+    available: &[FeatureContext],
+    luid: i64,
+    high_quality: bool,
+) -> Option<FeatureContext> {
+    let usable: Vec<_> = available
+        .iter()
+        .filter(|feature| feature.luid == luid)
+        .filter(|feature| !high_quality || feature.supports_high_quality())
+        .collect();
+    usable
+        .iter()
+        .find(|feature| feature.driver == Driver::FFMPEG)
+        .or_else(|| usable.first())
+        .map(|feature| (*feature).clone())
+}
+
 pub struct VRamDecoderImage<'a> {
     pub frame: &'a DecodeFrame,
 }
@@ -384,6 +404,7 @@ pub(crate) fn check_available_vram() -> (Vec<FeatureContext>, Vec<DecodeContext>
         kbitrate: 5000,
         framerate: 60,
         gop: MAX_GOP as _,
+        high_quality: false,
     };
     let encoders = encode::available(d);
     let decoders = decode::available();
@@ -396,4 +417,59 @@ pub(crate) fn check_available_vram() -> (Vec<FeatureContext>, Vec<DecodeContext>
         decoders,
         available.serialize().unwrap_or_default(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn feature(driver: Driver, vendor: Driver, luid: i64) -> FeatureContext {
+        FeatureContext {
+            driver,
+            vendor,
+            luid,
+            data_format: DataFormat::H264,
+        }
+    }
+
+    /// H264 HQ and H265 HQ were always encoded through RAM, also on NVIDIA where the texture
+    /// encoder is NVENC: every frame went from the GPU to RAM and back.
+    #[test]
+    fn high_quality_takes_an_nvenc_texture_encoder_of_the_adapter() {
+        let available = [
+            feature(Driver::MFX, Driver::MFX, 1),
+            feature(Driver::NV, Driver::NV, 2),
+            feature(Driver::FFMPEG, Driver::NV, 2),
+            feature(Driver::AMF, Driver::AMF, 3),
+        ];
+        assert_eq!(
+            choose_feature(&available, 2, true),
+            Some(feature(Driver::FFMPEG, Driver::NV, 2))
+        );
+        assert_eq!(
+            choose_feature(&available[..2], 2, true),
+            Some(feature(Driver::NV, Driver::NV, 2))
+        );
+        // Intel and AMD have no high-quality profile: HQ stays on the RAM encoder.
+        assert_eq!(choose_feature(&available, 1, true), None);
+        assert_eq!(choose_feature(&available, 3, true), None);
+    }
+
+    #[test]
+    fn the_normal_profile_takes_any_texture_encoder_ffmpeg_first() {
+        let available = [
+            feature(Driver::MFX, Driver::MFX, 1),
+            feature(Driver::FFMPEG, Driver::MFX, 1),
+            feature(Driver::AMF, Driver::AMF, 3),
+        ];
+        assert_eq!(
+            choose_feature(&available, 1, false),
+            Some(feature(Driver::FFMPEG, Driver::MFX, 1))
+        );
+        assert_eq!(
+            choose_feature(&available, 3, false),
+            Some(feature(Driver::AMF, Driver::AMF, 3))
+        );
+        assert_eq!(choose_feature(&available, 4, false), None);
+    }
 }
