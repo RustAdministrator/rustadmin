@@ -1,5 +1,7 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import '../../common/quality_monitor_settings.dart';
@@ -9,6 +11,9 @@ export 'mobile_remote_text_edit.dart';
 
 const mobileRemoteAccentColor = Color(0xFF0071FF);
 const mobileRemoteAccentActiveColor = Color(0xAA0071FF);
+
+bool get mobileRemoteMenuIsIos =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.iOS;
 
 Color mobileRemoteToolbarBackgroundColor(BuildContext context) {
   return Theme.of(context).brightness == Brightness.dark
@@ -1835,6 +1840,110 @@ class MobileRemoteToggleItem {
   final bool commitSelection;
 }
 
+Widget mobileRemoteToggleTile({
+  Key? key,
+  required bool value,
+  required ValueChanged<bool?>? onChanged,
+  required Widget title,
+}) {
+  if (mobileRemoteMenuIsIos) {
+    return SwitchListTile.adaptive(
+      key: key,
+      contentPadding: EdgeInsets.zero,
+      visualDensity: VisualDensity.compact,
+      value: value,
+      onChanged: onChanged,
+      title: title,
+      controlAffinity: ListTileControlAffinity.trailing,
+    );
+  }
+  return CheckboxListTile(
+    key: key,
+    contentPadding: EdgeInsets.zero,
+    visualDensity: VisualDensity.compact,
+    value: value,
+    onChanged: onChanged,
+    title: title,
+  );
+}
+
+class MobileRemoteFullscreenMenu extends StatelessWidget {
+  const MobileRemoteFullscreenMenu({
+    super.key,
+    required this.title,
+    required this.child,
+    required this.onClose,
+    this.scrollable = false,
+  });
+
+  final String title;
+  final Widget child;
+  final VoidCallback onClose;
+  final bool scrollable;
+
+  @override
+  Widget build(BuildContext context) {
+    final closeLabel = MaterialLocalizations.of(context).closeButtonLabel;
+    final body = scrollable
+        ? SingleChildScrollView(
+            key: const Key('mobile-remote-fullscreen-menu-scroll'),
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+            child: child,
+          )
+        : Padding(
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+            child: child,
+          );
+    return SizedBox.expand(
+      child: Material(
+        key: const Key('mobile-remote-fullscreen-menu'),
+        color: Theme.of(context).colorScheme.surface,
+        child: SafeArea(
+          child: FocusScope(
+            autofocus: true,
+            child: Focus(
+              autofocus: true,
+              onKeyEvent: (_, event) {
+                if ((event is KeyDownEvent || event is KeyRepeatEvent) &&
+                    event.logicalKey == LogicalKeyboardKey.escape) {
+                  onClose();
+                  return KeyEventResult.handled;
+                }
+                return KeyEventResult.ignored;
+              },
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            title,
+                            style: Theme.of(context).textTheme.titleLarge,
+                          ),
+                        ),
+                        IconButton(
+                          key: const Key('mobile-remote-fullscreen-menu-close'),
+                          tooltip: closeLabel,
+                          onPressed: onClose,
+                          icon: const Icon(Icons.close),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Divider(height: 1),
+                  Expanded(child: body),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 bool mobileVmPhysicalInputEnabled(String storedValue) =>
     storedValue.toUpperCase() != 'N';
 
@@ -1892,6 +2001,7 @@ class MobileRemoteActionsContent extends StatefulWidget {
   const MobileRemoteActionsContent({
     super.key,
     this.title = 'More actions',
+    this.showTitle = true,
     this.primarySections = const [],
     this.sections = const [],
     this.actions = const [],
@@ -1899,6 +2009,7 @@ class MobileRemoteActionsContent extends StatefulWidget {
   });
 
   final String title;
+  final bool showTitle;
   final List<MobileRemoteActionSection> primarySections;
   final List<MobileRemoteActionSection> sections;
   final List<MobileRemoteActionItem> actions;
@@ -1967,14 +2078,16 @@ class _MobileRemoteActionsContentState
       key: const Key('mobile-remote-actions-root'),
       mainAxisSize: MainAxisSize.min,
       children: [
-        Align(
-          alignment: Alignment.centerLeft,
-          child: Text(
-            widget.title,
-            style: Theme.of(context).textTheme.titleMedium,
+        if (widget.showTitle) ...[
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              widget.title,
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
           ),
-        ),
-        const SizedBox(height: 8),
+          const SizedBox(height: 8),
+        ],
         for (final section in widget.primarySections)
           if (section.actions.isNotEmpty || section.content != null)
             ListTile(
@@ -2156,9 +2269,7 @@ class _MobileRemoteKeyboardSettingsContentState
           const Divider(),
         for (final toggle in widget.toggles) ...[
           if (toggle.dividerBefore) const Divider(),
-          CheckboxListTile(
-            contentPadding: EdgeInsets.zero,
-            visualDensity: VisualDensity.compact,
+          mobileRemoteToggleTile(
             value: toggle.commitSelection
                 ? _toggleValues[toggle.id] ?? toggle.value
                 : toggle.value,
@@ -2365,10 +2476,8 @@ class _MobileRemoteOptionsContentState
     for (final toggle in widget.toggles) {
       if (toggle.dividerBefore) children.add(const Divider());
       children.add(
-        CheckboxListTile(
+        mobileRemoteToggleTile(
           key: Key('mobile-remote-options-toggle-${toggle.id}'),
-          contentPadding: EdgeInsets.zero,
-          visualDensity: VisualDensity.compact,
           value: toggle.commitSelection
               ? _toggleValues[toggle.id] ?? toggle.value
               : toggle.value,

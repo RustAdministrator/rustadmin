@@ -1493,6 +1493,109 @@ void main() {
     expect(physicalKeyInput, isTrue);
   });
 
+  testWidgets('iOS fullscreen menu fills the viewport and closes', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(390, 844));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    var closed = false;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MobileRemoteFullscreenMenu(
+          title: 'More actions',
+          onClose: () => closed = true,
+          scrollable: true,
+          child: const SizedBox(
+            key: Key('mobile-remote-fullscreen-menu-body'),
+            height: 480,
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(mobileRemoteMenuIsIos, isTrue);
+    expect(
+      tester.getSize(find.byKey(const Key('mobile-remote-fullscreen-menu'))),
+      const Size(390, 844),
+    );
+    expect(
+      find.byKey(const Key('mobile-remote-fullscreen-menu-close')),
+      findsOneWidget,
+    );
+    await tester.tap(
+      find.byKey(const Key('mobile-remote-fullscreen-menu-close')),
+    );
+    expect(closed, isTrue);
+  }, variant: const TargetPlatformVariant({TargetPlatform.iOS}));
+
+  testWidgets('iOS options use adaptive switches', (tester) async {
+    bool? changed;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MobileRemoteOptionsContent(
+            toggles: [
+              MobileRemoteToggleItem(
+                id: 'monitor-toolbar',
+                value: false,
+                child: const Text('Show monitor toolbar'),
+                onChanged: (value) => changed = value,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byType(SwitchListTile), findsOneWidget);
+    expect(find.byType(CheckboxListTile), findsNothing);
+    await tester.tap(find.byType(SwitchListTile));
+    await tester.pump();
+    expect(changed, isTrue);
+    expect(
+      tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+      isTrue,
+    );
+  }, variant: const TargetPlatformVariant({TargetPlatform.iOS}));
+
+  testWidgets('iOS keyboard settings use adaptive switches', (tester) async {
+    bool? changed;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MobileRemoteKeyboardSettingsContent(
+            mode: kKeyLegacyMode,
+            modes: const [],
+            toggles: [
+              MobileRemoteToggleItem(
+                id: 'physical-key-input',
+                value: false,
+                child: const Text('Physical key input'),
+                onChanged: (value) => changed = value,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.byType(SwitchListTile), findsOneWidget);
+    expect(find.byType(CheckboxListTile), findsNothing);
+    await tester.tap(find.byType(SwitchListTile));
+    await tester.pump();
+    expect(changed, isTrue);
+    expect(
+      tester.widget<SwitchListTile>(find.byType(SwitchListTile)).value,
+      isTrue,
+    );
+  }, variant: const TargetPlatformVariant({TargetPlatform.iOS}));
+
   testWidgets('shared edge-size control reports session slider changes', (
     tester,
   ) async {
