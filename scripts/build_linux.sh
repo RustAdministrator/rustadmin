@@ -481,7 +481,20 @@ python3 "$repo_root/scripts/platform_profiles.py" check \
 
 if [[ "$skip_cargo" -eq 0 ]]; then
   generate_version_file
-  (cd "$repo_root" && cargo build --features "$features" --lib --release)
+  # The pinned libwebm uses fixed-width integers without including <cstdint>.
+  # Keep the caller's flags using the same precedence as cc-rs for native builds.
+  native_cxxflags="$(
+    printenv "CXXFLAGS_$rust_host" ||
+    printenv "CXXFLAGS_${rust_host//-/_}" ||
+    printenv HOST_CXXFLAGS ||
+    printenv CXXFLAGS ||
+    true
+  )"
+  (
+    cd "$repo_root"
+    env "CXXFLAGS_$rust_host=${native_cxxflags:+$native_cxxflags }-include cstdint" \
+      cargo build --features "$features" --lib --release
+  )
   sync_cargo_artifacts_for_flutter
 fi
 
