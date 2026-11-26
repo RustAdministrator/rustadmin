@@ -1289,12 +1289,13 @@ class _RemotePageState extends State<RemotePage>
                 );
 
             Widget buildDialog(BuildContext context, Widget? child) =>
-                CustomAlertDialog(
-              contentBoxConstraints: BoxConstraints(
-                maxWidth: 500,
-                maxHeight: MediaQuery.sizeOf(dialogContext).height * 0.9,
-              ),
-              content: MobileRemoteActionsContent(
+                _mobileRemoteMenuDialog(
+              dialogContext: dialogContext,
+              title: translate('More actions'),
+              onClose: close,
+              scrollable: true,
+              child: MobileRemoteActionsContent(
+                showTitle: !mobileRemoteMenuIsIos,
                 primarySections: [
                   if (gFFI.ffiModel.keyboard)
                     MobileRemoteActionSection(
@@ -1901,6 +1902,31 @@ class CursorPaint extends StatelessWidget {
   }
 }
 
+Widget _mobileRemoteMenuDialog({
+  required BuildContext dialogContext,
+  required String title,
+  required VoidCallback onClose,
+  required Widget child,
+  required bool scrollable,
+}) {
+  if (mobileRemoteMenuIsIos) {
+    return MobileRemoteFullscreenMenu(
+      title: title,
+      onClose: onClose,
+      scrollable: scrollable,
+      child: child,
+    );
+  }
+  return CustomAlertDialog(
+    scrollable: scrollable,
+    contentBoxConstraints: BoxConstraints(
+      maxWidth: 500,
+      maxHeight: MediaQuery.sizeOf(dialogContext).height * 0.9,
+    ),
+    content: child,
+  );
+}
+
 void showOptions(
   BuildContext context,
   String id,
@@ -2101,20 +2127,18 @@ void showOptions(
 
           final resolution = getResolutionMenu(gFFI, id);
           final virtualDisplayMenu = getVirtualDisplayMenu(gFFI, id);
-          return CustomAlertDialog(
+          return _mobileRemoteMenuDialog(
+            dialogContext: context,
+            title: translate('Display and session options'),
+            onClose: close,
             scrollable: false,
-            contentBoxConstraints: BoxConstraints(
-              maxWidth: 500,
-              maxHeight: MediaQuery.sizeOf(context).height * 0.9,
-            ),
-            content: MobileRemoteOptionsContent(
+            child: MobileRemoteOptionsContent(
+              showTitle: !mobileRemoteMenuIsIos,
               header: [
                 ...displays,
                 if (pi.displays.length > 1)
-                  CheckboxListTile(
+                  mobileRemoteToggleTile(
                     key: const Key('mobile-remote-show-monitors-toolbar'),
-                    contentPadding: EdgeInsets.zero,
-                    visualDensity: VisualDensity.compact,
                     value: activeShowMonitorsInToolbar,
                     title: Text(translate('show_monitors_tip')),
                     onChanged: (value) async {
