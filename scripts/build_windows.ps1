@@ -263,9 +263,12 @@ function Invoke-BridgeGeneration {
     }
 
     $BridgeInput = Join-Path $RepoRoot "src\flutter_ffi.rs"
+    $BridgeDartOutput = Join-Path $FlutterDir "lib\generated_bridge.dart"
+    $BridgeFreezedFilter = "lib/generated_bridge.freezed.dart"
+    $BridgeFreezedOutput = Join-Path $FlutterDir $BridgeFreezedFilter
     $BridgeOutputs = @(
-        (Join-Path $FlutterDir "lib\generated_bridge.dart"),
-        (Join-Path $FlutterDir "lib\generated_bridge.freezed.dart"),
+        $BridgeDartOutput,
+        $BridgeFreezedOutput,
         (Join-Path $RepoRoot "src\bridge_generated.rs"),
         (Join-Path $RepoRoot "src\bridge_generated.io.rs")
     )
@@ -279,9 +282,13 @@ function Invoke-BridgeGeneration {
     $ResolvedBridgeLlvmPath = Resolve-BridgeLlvmPath $BridgeLlvmPath
     $BridgeArgs = @(
         "--rust-input", $BridgeInput,
-        "--dart-output", (Join-Path $FlutterDir "lib\generated_bridge.dart"),
-        "--class-name", $BridgeClassName
+        "--dart-output", $BridgeDartOutput,
+        "--class-name", $BridgeClassName,
+        "--no-build-runner"
     )
+    if ($VerboseBridgeGenEffective) {
+        $BridgeArgs += "--verbose"
+    }
     if (![string]::IsNullOrWhiteSpace($ResolvedBridgeLlvmPath)) {
         $BridgeArgs += @("--llvm-path", $ResolvedBridgeLlvmPath)
     }
@@ -291,18 +298,25 @@ function Invoke-BridgeGeneration {
 
     Write-Host "Generating flutter_rust_bridge files..."
     Write-Host "Using flutter_rust_bridge_codegen: $BridgeCodegen ($BridgeCodegenVersion)"
-    $Output = & $BridgeCodegen @BridgeArgs *>&1
-    $ExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
-    if ($VerboseBridgeGenEffective -or $ExitCode -ne 0) {
-        $Output | ForEach-Object { Write-Host $_ }
-    }
-    if ($ExitCode -ne 0) {
-        throw "flutter_rust_bridge_codegen failed with exit code $ExitCode."
-    }
-    foreach ($OutputPath in $BridgeOutputs) {
-        if (!(Test-Path $OutputPath)) {
-            throw "flutter_rust_bridge generation did not create '$OutputPath'."
+    Invoke-NativeCommand { & $BridgeCodegen @BridgeArgs } "flutter_rust_bridge_codegen"
+
+    # Limit Freezed to the bridge so older analyzers do not scan unrelated Flutter sources.
+    Write-Host "Generating Freezed bindings for flutter_rust_bridge..."
+    $DartBat = Join-Path $FlutterBin "dart.bat"
+    Push-Location $FlutterDir
+    try {
+        Invoke-NativeCommand {
+            & $DartBat run build_runner build --delete-conflicting-outputs "--build-filter=$BridgeFreezedFilter"
+        } "Flutter bridge Freezed generation"
+        foreach ($OutputPath in $BridgeOutputs) {
+            if (!(Test-Path $OutputPath)) {
+                throw "flutter_rust_bridge generation did not create '$OutputPath'."
+            }
         }
+        Invoke-NativeCommand { & $DartBat format --line-length 80 $BridgeFreezedOutput } "Formatting Flutter bridge Freezed output"
+    }
+    finally {
+        Pop-Location
     }
 }
 
