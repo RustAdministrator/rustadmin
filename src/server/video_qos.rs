@@ -191,7 +191,12 @@ pub(crate) struct MovieViewerMetrics {
 pub(crate) struct MovieCadenceSample {
     pub(crate) now: Instant,
     pub(crate) target_fps: u32,
-    pub(crate) host_pipeline_p95_us: u64,
+    /// What a frame typically costs the host in the sample window (capture plus encode).
+    /// The capacity decisions used the p95: with some fifteen frames a window that is the
+    /// slowest one or two, and one frame stalled behind another program's GPU work does not
+    /// say that the host cannot keep a cadence. A host that really falls behind loses whole
+    /// slots, which `host_missed_slots` counts. The p95 stays in the status line.
+    pub(crate) host_pipeline_p75_us: u64,
     pub(crate) host_iterations: u64,
     pub(crate) host_missed_slots: u64,
     pub(crate) viewer: MovieViewerMetrics,
@@ -301,9 +306,9 @@ impl MovieCadenceController {
             self.viewer_counter_deltas(sample.viewer);
         let at_or_below_baseline = self.target_fps >= FPS && self.current_tier <= FPS;
         let host_pressure = if at_or_below_baseline {
-            sample.host_pipeline_p95_us > frame_period_us * 95 / 100 || missed_ratio > 0.20
+            sample.host_pipeline_p75_us > frame_period_us * 95 / 100 || missed_ratio > 0.20
         } else {
-            sample.host_pipeline_p95_us > frame_period_us || missed_ratio > 0.10
+            sample.host_pipeline_p75_us > frame_period_us || missed_ratio > 0.10
         };
         let viewer_pressure = sample.viewer.available
             && (sample.viewer.max_queue_depth_frames > 3
@@ -348,8 +353,8 @@ impl MovieCadenceController {
         };
         let healthy = sample.viewer.available
             && sample.viewer.all_rendered
-            && sample.host_pipeline_p95_us > 0
-            && sample.host_pipeline_p95_us <= next_period_us * host_headroom_percent / 100
+            && sample.host_pipeline_p75_us > 0
+            && sample.host_pipeline_p75_us <= next_period_us * host_headroom_percent / 100
             && sample.host_missed_slots == 0
             && sample.viewer.max_queue_depth_frames <= 1
             && u64::from(sample.viewer.max_decode_time_us)
@@ -2767,7 +2772,7 @@ mod tests {
         MovieCadenceSample {
             now,
             target_fps: 60,
-            host_pipeline_p95_us: pipeline_us,
+            host_pipeline_p75_us: pipeline_us,
             host_iterations: 30,
             host_missed_slots: 0,
             local_admission_pressure: false,
@@ -2871,7 +2876,7 @@ mod tests {
 
         let mut pressure = sample;
         pressure.now += Duration::from_secs(1);
-        pressure.host_pipeline_p95_us = 26_000;
+        pressure.host_pipeline_p75_us = 26_000;
         assert_eq!(controller.evaluate(pressure), None);
         pressure.now += MOVIE_PRESSURE_DURATION;
         let rolled_back = controller.evaluate(pressure).unwrap();
@@ -2968,6 +2973,44 @@ mod tests {
     fn reset_viewer_counter_does_not_report_historical_drops() {
         assert_eq!(monotonic_counter_delta(4, 10), 0);
         assert_eq!(monotonic_counter_delta(11, 10), 1);
+    }
+
+    /// A host whose frames are cheap, but one or two of every window stall (an encoder that
+    /// waits behind a video player on the same GPU), keeps every slot. It was taken down to
+    /// 24 frames a second for a p95 of 50-90 ms with no slot missed; 6 of 15 such downshifts
+    /// in a user's logs (2026-11-25/26) had `missed_slots=0` and a median of 10-30 ms.
+    #[test]
+    fn movie_cadence_ignores_stalled_frames_when_every_slot_is_kept() {
+        let start = Instant::now();
+        let mut controller = MovieCadenceController::new(120, 120_000, start);
+        assert_eq!(controller.current_tier(), 30);
+        // Frames typically cost 12 ms; the window's p95 (its slowest frame) was 60 ms.
+        let mut spiky = healthy_movie_sample(start, 12_000);
+        spiky.target_fps = 120;
+        spiky.viewer.display_refresh_millihz = 120_000;
+        spiky.host_iterations = 15;
+        for second in 0..10 {
+            spiky.now = start + Duration::from_secs(second);
+            if let Some(decision) = controller.evaluate(spiky) {
+                assert_ne!(decision.reason, MovieCadenceReason::HostCapacity);
+            }
+        }
+        assert!(controller.current_tier() >= 30);
+
+        // A host that typically needs more than the period still goes down.
+        let mut slow = spiky;
+        slow.host_pipeline_p75_us = 40_000;
+        let mut lowered = None;
+        for step in 0..10 {
+            slow.now = start + Duration::from_secs(11 + step);
+            if let Some(decision) = controller.evaluate(slow) {
+                lowered = Some(decision);
+                break;
+            }
+        }
+        let lowered = lowered.expect("a typically slow host is moved down");
+        assert_eq!(lowered.reason, MovieCadenceReason::HostCapacity);
+        assert!(lowered.current_fps < lowered.previous_fps);
     }
 
     #[test]
