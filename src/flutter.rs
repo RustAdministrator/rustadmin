@@ -1512,6 +1512,8 @@ struct DisplaySessionInfo {
     gpu_target: RenderTargetOwner,
     notify_render_type: Option<RenderType>,
     render_target_generation: u64,
+    /// The last (view size, frame size) reported as a mismatch: reported once, not per frame.
+    logged_size_mismatch: Option<((usize, usize), (usize, usize))>,
 }
 
 impl DisplaySessionInfo {
@@ -1523,7 +1525,20 @@ impl DisplaySessionInfo {
             gpu_target: RenderTargetOwner::default(),
             notify_render_type: None,
             render_target_generation: 1,
+            logged_size_mismatch: None,
         }
+    }
+
+    /// Whether this mismatch of the view size and a frame size is new, and so worth a log
+    /// line. A view that has no size yet takes every frame and was logged at 30 lines a
+    /// second.
+    fn size_mismatch_is_new(&mut self, frame: (usize, usize)) -> bool {
+        let mismatch = (self.size, frame);
+        if self.logged_size_mismatch == Some(mismatch) {
+            return false;
+        }
+        self.logged_size_mismatch = Some(mismatch);
+        true
     }
 }
 
@@ -1802,13 +1817,15 @@ impl VideoRenderer {
         };
 
         if info.size.0 != rgba.w || info.size.1 != rgba.h {
-            log::error!(
-                "width/height mismatch: ({},{}) != ({},{})",
-                info.size.0,
-                info.size.1,
-                rgba.w,
-                rgba.h
-            );
+            if info.size_mismatch_is_new((rgba.w, rgba.h)) {
+                log::error!(
+                    "width/height mismatch: ({},{}) != ({},{}) (reported once per size)",
+                    info.size.0,
+                    info.size.1,
+                    rgba.w,
+                    rgba.h
+                );
+            }
             // Peer info's handling is async and may be late than video frame's handling
             // Allow peer info not set, but not allow wrong width/height for correct local cursor position
             if info.size != (0, 0) {
@@ -4766,5 +4783,22 @@ mod rgba_release_tests {
             .unwrap()
             .get(&0)
             .is_some_and(|rgba| !rgba.valid));
+    }
+}
+
+#[cfg(test)]
+mod size_mismatch_log_tests {
+    use super::DisplaySessionInfo;
+
+    /// A view without a size took every frame of a 2560x1440 display, and each frame logged
+    /// `width/height mismatch: (0,0) != (2560,1440)` (a user's log, 2026-11-27).
+    #[test]
+    fn a_size_mismatch_is_reported_once_until_it_changes() {
+        let mut info = DisplaySessionInfo::default();
+        assert!(info.size_mismatch_is_new((2560, 1440)));
+        assert!(!info.size_mismatch_is_new((2560, 1440)));
+        assert!(info.size_mismatch_is_new((1920, 1080)));
+        info.size = (1280, 720);
+        assert!(info.size_mismatch_is_new((1920, 1080)));
     }
 }
