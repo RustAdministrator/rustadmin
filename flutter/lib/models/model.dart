@@ -5952,6 +5952,13 @@ class FFI {
 
     final isNewPeer = tabWindowId == null;
     final sessionHandle = _sessionHandle;
+    // The steps of a tab that takes a session over after login, for the native log: a tab
+    // whose start failed stayed grey with nothing in any log (2026-11-27).
+    final logHandoffSteps = isDesktop && attachExisting;
+    if (logHandoffSteps) {
+      logUiEvent('session start: attaching to the session handed over, '
+          'session=$sessionId, new_peer=$isNewPeer, display=$display');
+    }
     final lease = await sessionHandle.start(
       acquirePlatformLease: isAndroid
           ? () async {
@@ -6031,6 +6038,9 @@ class FFI {
         }
       },
       startEvents: () {
+        if (logHandoffSteps) {
+          logUiEvent('session start: events requested, session=$sessionId');
+        }
         if (isNewPeer || display == null || displays == null) {
           return bind.sessionStart(sessionId: sessionId, id: id);
         }

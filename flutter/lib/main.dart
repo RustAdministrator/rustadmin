@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' show PlatformDispatcher;
 
 import 'package:bot_toast/bot_toast.dart';
 import 'package:desktop_multi_window/desktop_multi_window.dart';
@@ -138,6 +139,7 @@ Future<void> main(List<String> args) async {
 Future<void> initEnv(String appType) async {
   // global shared preference
   await platformFFI.init(appType);
+  _logDesktopUiErrors();
   // global FFI, use this **ONLY** for global configuration
   // for convenience, use global FFI on mobile platform
   // focus on multi-ffi on desktop first
@@ -146,6 +148,24 @@ Future<void> initEnv(String appType) async {
   _registerEventHandler();
   // Update the system theme.
   updateSystemWindowTheme();
+}
+
+/// Uncaught errors of this window's user interface go to the native log, which the
+/// diagnostics export collects (Android keeps its own file). Each desktop window is an
+/// engine of its own and installs this in `initEnv`.
+void _logDesktopUiErrors() {
+  if (!isDesktop) return;
+  final previousFlutterHandler = FlutterError.onError;
+  FlutterError.onError = (details) {
+    logUiEvent('FlutterError: ${details.exceptionAsString()}\n${details.stack ?? ''}',
+        level: 'error');
+    previousFlutterHandler?.call(details);
+  };
+  final previousPlatformHandler = PlatformDispatcher.instance.onError;
+  PlatformDispatcher.instance.onError = (error, stack) {
+    logUiEvent('uncaught error: $error\n$stack', level: 'error');
+    return previousPlatformHandler?.call(error, stack) ?? false;
+  };
 }
 
 void runMainApp(bool startService) async {

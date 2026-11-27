@@ -1005,6 +1005,7 @@ fn resource_mode_period(mode: ResourceMode, idle: bool) -> Option<Duration> {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct DurationSummary {
     p50_us: u64,
+    p75_us: u64,
     p95_us: u64,
     max_us: u64,
 }
@@ -1034,6 +1035,7 @@ impl DurationSamples {
         sorted.sort_unstable();
         DurationSummary {
             p50_us: percentile_us(&sorted, 50),
+            p75_us: percentile_us(&sorted, 75),
             p95_us: percentile_us(&sorted, 95),
             max_us: sorted.last().copied().unwrap_or_default(),
         }
@@ -1045,6 +1047,7 @@ const MOVIE_CADENCE_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct MovieHostCadenceMetrics {
     pipeline_p95_us: u64,
+    pipeline_p75_us: u64,
     iterations: u64,
     missed_slots: u64,
 }
@@ -1093,6 +1096,7 @@ impl MovieHostCadenceWindow {
         let pipeline = std::mem::take(&mut self.pipeline).summary();
         let metrics = MovieHostCadenceMetrics {
             pipeline_p95_us: capture.p95_us.saturating_add(pipeline.p95_us),
+            pipeline_p75_us: capture.p75_us.saturating_add(pipeline.p75_us),
             iterations: self.iterations,
             missed_slots: self.missed_slots,
         };
@@ -2620,6 +2624,7 @@ mod tests {
             .take_if_due(start + Duration::from_millis(500))
             .unwrap();
         assert_eq!(metrics.pipeline_p95_us, 10_000);
+        assert_eq!(metrics.pipeline_p75_us, 10_000);
         assert_eq!(metrics.iterations, 1);
         assert_eq!(metrics.missed_slots, 1);
     }
@@ -3934,7 +3939,7 @@ fn run(vs: VideoService) -> ResultType<()> {
                     target_fps: movie_sample_state
                         .map(|state| state.1)
                         .unwrap_or(movie_target_fps),
-                    host_pipeline_p95_us: host.pipeline_p95_us,
+                    host_pipeline_p75_us: host.pipeline_p75_us,
                     host_iterations: host.iterations,
                     host_missed_slots: host.missed_slots,
                     viewer,
@@ -4008,13 +4013,14 @@ fn run(vs: VideoService) -> ResultType<()> {
                             encode_fail_counter = 0;
                             hw_no_valid_frame_since = None;
                             log::info!(
-                                "diag movie cadence change: service={}, target={}, previous={}, current={}, reason={}, pipeline_p95_us={}, missed_slots={}, host_iterations={}, queue_depth={}, decode_us={}, render_submit_us={}, bitrate_before={}, bitrate_after={}, recreate_ms={}",
+                                "diag movie cadence change: service={}, target={}, previous={}, current={}, reason={}, pipeline_p95_us={}, pipeline_p75_us={}, missed_slots={}, host_iterations={}, queue_depth={}, decode_us={}, render_submit_us={}, bitrate_before={}, bitrate_after={}, recreate_ms={}",
                                 service_name,
                                 controller.target_fps(),
                                 decision.previous_fps,
                                 decision.current_fps,
                                 decision.reason.as_str(),
                                 host.pipeline_p95_us,
+                                host.pipeline_p75_us,
                                 host.missed_slots,
                                 host.iterations,
                                 viewer.max_queue_depth_frames,
