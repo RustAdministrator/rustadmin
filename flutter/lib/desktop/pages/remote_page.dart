@@ -31,6 +31,7 @@ import '../widgets/kb_layout_type_chooser.dart';
 import '../widgets/tabbar_widget.dart';
 import '../session_tab.dart';
 import 'quality_monitor_window.dart';
+import '../../models/handoff_start_watch.dart';
 
 import 'package:flutter_hbb/native/custom_cursor.dart'
     if (dart.library.html) 'package:flutter_hbb/web/custom_cursor.dart';
@@ -141,6 +142,7 @@ class _RemotePageState extends State<RemotePage>
         WidgetsBindingObserver,
         TickerProviderStateMixin {
   Timer? _timer;
+  Timer? _handoffStartTimer;
   bool _disposed = false;
   bool _awaitingWindowActivation = false;
   bool _windowMinimized = false;
@@ -400,17 +402,41 @@ class _RemotePageState extends State<RemotePage>
       hostWindowId: widget.windowHost?.windowId,
       transferSourceSessionId: widget.transferSourceSessionId,
     );
+    final startWatch = HandoffStartWatch(
+      handoff: widget.pendingCachedPeerData != null,
+    );
+    final startStopwatch = Stopwatch()..start();
+    if (startWatch.handoff) {
+      _handoffStartTimer = Timer(HandoffStartWatch.warnAfter, () {
+        if (_disposed || !startWatch.stuck) return;
+        logUiEvent(
+            'remote tab: the session handed over after login has not started after '
+            '${HandoffStartWatch.warnAfter.inSeconds} s, session=$sessionId',
+            level: 'warn');
+      });
+    }
     unawaited(
       startFuture.then<void>(
         (_) {
+          startWatch.started();
+          _handoffStartTimer?.cancel();
+          if (startWatch.handoff) {
+            logUiEvent('remote tab: the handed-over session started, session=$sessionId, '
+                'elapsed_ms=${startStopwatch.elapsedMilliseconds}');
+          }
           if (!mounted || _disposed) return;
           _videoVisibilityReporter.reset();
           _videoVisibilityReady = true;
           _reportVideoVisibility();
         },
         onError: (Object error, StackTrace stackTrace) {
-          debugPrint('Remote session start failed: $error');
-          debugPrintStack(stackTrace: stackTrace);
+          _handoffStartTimer?.cancel();
+          logUiEvent(
+              'remote tab: session start failed, session=$sessionId, '
+              'handoff=${startWatch.handoff}: $error\n$stackTrace',
+              level: 'error');
+          if (!startWatch.failed() || !mounted || _disposed) return;
+          _startHandedOverSessionAgain();
         },
       ),
     );
@@ -476,6 +502,25 @@ class _RemotePageState extends State<RemotePage>
     if (state == AppLifecycleState.resumed) {
       _ffi.ffiModel.reconnectController.checkElapsed();
     }
+  }
+
+  /// The session this tab took over after login did not start: start it again from this
+  /// tab instead of leaving it empty. A second failure is shown.
+  void _startHandedOverSessionAgain() {
+    logUiEvent('remote tab: starting the session again from this tab, session=$sessionId',
+        level: 'warn');
+    unawaited(_restartStaleSession(
+      widget.forceRelay == true,
+      () => mounted && !_disposed,
+    ).catchError((Object error, StackTrace stackTrace) {
+      logUiEvent(
+          'remote tab: starting the session again failed, session=$sessionId: '
+          '$error\n$stackTrace',
+          level: 'error');
+      if (!mounted || _disposed) return;
+      msgBox(sessionId, 'error', 'Connection Error', error.toString(), '',
+          _ffi.dialogManager);
+    }));
   }
 
   void reconnectIfStaleOnActivation() {
@@ -665,6 +710,7 @@ class _RemotePageState extends State<RemotePage>
   @override
   Future<void> dispose() async {
     _disposed = true;
+    _handoffStartTimer?.cancel();
     _videoVisibilityReady = false;
     _tabStateSubscription?.cancel();
     _tabStateSubscription = null;

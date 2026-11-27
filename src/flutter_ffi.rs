@@ -3407,6 +3407,21 @@ pub fn main_is_installed() -> SyncReturn<bool> {
     SyncReturn(is_installed())
 }
 
+/// A line from the desktop user interface for the process log. `debugPrint` is lost on
+/// Windows, macOS and Linux, and the diagnostics export collects this log: the steps that
+/// hand a session to its window and the errors of the user interface go here.
+pub fn main_log_ui_event(level: String, message: String) -> SyncReturn<()> {
+    let message: String = message.chars().take(UI_EVENT_LOG_MAX_CHARS).collect();
+    match level.as_str() {
+        "error" => log::error!("ui: {message}"),
+        "warn" => log::warn!("ui: {message}"),
+        _ => log::info!("ui: {message}"),
+    }
+    SyncReturn(())
+}
+
+const UI_EVENT_LOG_MAX_CHARS: usize = 4000;
+
 pub fn main_init_input_source() -> SyncReturn<()> {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     crate::keyboard::input_source::init_input_source();

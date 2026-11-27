@@ -531,6 +531,9 @@ class _ConnectionTabPageState extends State<ConnectionTabPage> {
               sessionId: sessionId.toString(),
             );
       final prePeerCount = tabController.length;
+      logUiEvent('remote tab: adding a session tab, window=${windowId()}, '
+          'session=$sessionId, handoff=${args['pending_cached_peer_data'] != null}, '
+          'display=$display, focus=$focusOnOpen, tabs_before=$prePeerCount');
       Future.delayed(Duration.zero, () async {
         if (focusOnOpen && stateGlobal.fullscreen.isTrue) {
           await WindowController.fromWindowId(windowId()).setFullscreen(false);

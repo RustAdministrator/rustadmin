@@ -1659,6 +1659,9 @@ class RustadminImpl {
     throw UnimplementedError("mainIsInstalled");
   }
 
+  void mainLogUiEvent(
+      {required String level, required String message, dynamic hint}) {}
+
   void mainInitInputSource({dynamic hint}) {
     throw UnimplementedError("mainIsInstalled");
   }

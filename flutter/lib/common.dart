@@ -837,6 +837,18 @@ Future<void> windowOnTop(int? id, {bool focusOnOpen = true}) async {
   }
 }
 
+/// A line for the process log, which the diagnostics export collects. On desktop
+/// `debugPrint` output is lost, so the steps that hand a session to its window and the errors
+/// of the user interface go to the native log. No passwords or window arguments here: ids,
+/// flags, timings and error texts only.
+void logUiEvent(String message, {String level = 'info'}) {
+  debugPrint(message);
+  if (isWeb) return;
+  try {
+    bind.mainLogUiEvent(level: level, message: message);
+  } catch (_) {}
+}
+
 class PreAuthRemoteDesktopManager {
   PreAuthRemoteDesktopManager._();
 
@@ -937,6 +949,9 @@ class PreAuthRemoteDesktopManager {
     _openingRemoteWindow = true;
     final sessionId = ffi.sessionId.toString();
     final cachedPeerData = ffi.ffiModel.handoffSnapshot();
+    final handoffStarted = DateTime.now();
+    logUiEvent('handoff: opening the remote window after login, session=$sessionId, '
+        'focus=$_focusOnOpen');
     try {
       await rustDeskWinManager.newRemoteDesktop(
         peerId,
@@ -948,6 +963,9 @@ class PreAuthRemoteDesktopManager {
         pendingCachedPeerData: cachedPeerData,
         focusOnOpen: _focusOnOpen,
       );
+      logUiEvent('handoff: the remote window was asked to take the session, '
+          'session=$sessionId, elapsed_ms='
+          '${DateTime.now().difference(handoffStarted).inMilliseconds}');
       if (!identical(_ffi, ffi)) {
         return;
       }
@@ -961,7 +979,9 @@ class PreAuthRemoteDesktopManager {
       _handedOff = false;
     } catch (e) {
       _openingRemoteWindow = false;
-      debugPrint('Failed to open authenticated remote window: $e');
+      logUiEvent(
+          'handoff: opening the remote window failed, session=$sessionId: $e',
+          level: 'error');
       if (identical(_ffi, ffi)) {
         await closePending();
       }

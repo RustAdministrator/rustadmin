@@ -244,14 +244,18 @@ class RustDeskMultiWindowManager {
       if (windows.isEmpty) {
         final windowId = await newSessionWindow(
             type, remoteId, msg, windows, screenRect != null);
+        logUiEvent('session window: new window $windowId for $type in tabs');
         return MultiWindowCallResult(windowId, null);
       } else {
+        logUiEvent('session window: $methodName to the open $type windows $windows '
+            '(inactive: ${_inactiveWindows.toList()})');
         return call(type, methodName, msg);
       }
     } else {
       if (_inactiveWindows.isNotEmpty) {
         for (final windowId in windows) {
           if (_inactiveWindows.contains(windowId)) {
+            logUiEvent('session window: reusing hidden window $windowId for $type');
             if (screenRect == null && (type != WindowType.RemoteDesktop ||
                 connectionFocusFromArguments(jsonDecode(msg) as Map))) {
               await restoreWindowPosition(type,
@@ -268,6 +272,7 @@ class RustDeskMultiWindowManager {
       }
       final windowId = await newSessionWindow(
           type, remoteId, msg, windows, screenRect != null);
+      logUiEvent('session window: new window $windowId for $type');
       return MultiWindowCallResult(windowId, null);
     }
   }
