@@ -290,9 +290,10 @@ generate_bridge_files() {
   fi
 
   local bridge_input="$repo_root/src/flutter_ffi.rs"
+  local bridge_freezed="lib/generated_bridge.freezed.dart"
   local bridge_outputs=(
     "$flutter_dir/lib/generated_bridge.dart"
-    "$flutter_dir/lib/generated_bridge.freezed.dart"
+    "$flutter_dir/$bridge_freezed"
     "$repo_root/src/bridge_generated.rs"
     "$repo_root/src/bridge_generated.io.rs"
   )
@@ -339,7 +340,8 @@ EOF
   bridge_codegen_args=(
     --rust-input "$bridge_input" \
     --dart-output "$flutter_dir/lib/generated_bridge.dart" \
-    --class-name "$bridge_class_name"
+    --class-name "$bridge_class_name" \
+    --no-build-runner
   )
   if [[ -n "$bridge_llvm_path" ]]; then
     bridge_codegen_args+=(--llvm-path "$bridge_llvm_path")
@@ -357,6 +359,19 @@ EOF
     rm -f "$bridge_log"
     exit 1
   fi
+
+  # The bridge generator's default build_runner invocation scans the whole app.
+  # Only the bridge needs Freezed, and analyzing Flutter can fail with older analyzers.
+  echo "Generating Freezed bindings for flutter_rust_bridge..."
+  (
+    cd "$flutter_dir"
+    dart run build_runner build --delete-conflicting-outputs --build-filter="$bridge_freezed"
+    if [[ ! -f "$bridge_freezed" ]]; then
+      echo "build_runner did not generate '$bridge_freezed'." >&2
+      exit 1
+    fi
+    dart format --line-length 80 "$bridge_freezed"
+  )
 }
 
 sync_cargo_artifacts_for_flutter() {
@@ -466,7 +481,20 @@ python3 "$repo_root/scripts/platform_profiles.py" check \
 
 if [[ "$skip_cargo" -eq 0 ]]; then
   generate_version_file
-  (cd "$repo_root" && cargo build --features "$features" --lib --release)
+  # The pinned libwebm uses fixed-width integers without including <cstdint>.
+  # Keep the caller's flags using the same precedence as cc-rs for native builds.
+  native_cxxflags="$(
+    printenv "CXXFLAGS_$rust_host" ||
+    printenv "CXXFLAGS_${rust_host//-/_}" ||
+    printenv HOST_CXXFLAGS ||
+    printenv CXXFLAGS ||
+    true
+  )"
+  (
+    cd "$repo_root"
+    env "CXXFLAGS_$rust_host=${native_cxxflags:+$native_cxxflags }-include cstdint" \
+      cargo build --features "$features" --lib --release
+  )
   sync_cargo_artifacts_for_flutter
 fi
 
