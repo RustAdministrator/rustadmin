@@ -14,7 +14,10 @@ use std::{
 use zip::{write::FileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
 const MAX_DIAGNOSTIC_FILES: usize = 160;
-const MAX_DIAGNOSTIC_FILES_PER_ROOT: usize = 32;
+/// Each root holds a directory per role (main, cm, tray, install, probes...). With 32 files
+/// per root, a burst of installer and probe logs left no room for the connection manager's
+/// logs of the minutes before (2026-11-27).
+const MAX_DIAGNOSTIC_FILES_PER_ROOT: usize = 64;
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_TOTAL_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_DIRECTORY_DEPTH: usize = 4;
@@ -229,8 +232,7 @@ fn export_from_roots(
     for (label, root) in roots {
         let mut root_files = Vec::new();
         collect_files(root, root, label, 0, &mut root_files);
-        root_files.sort_by(|left, right| right.modified.cmp(&left.modified));
-        root_files.truncate(MAX_DIAGNOSTIC_FILES_PER_ROOT);
+        let root_files = select_root_files(root_files, MAX_DIAGNOSTIC_FILES_PER_ROOT);
         #[cfg(windows)]
         if label == "service-localservice"
             && crate::platform::is_installed()
@@ -300,6 +302,48 @@ fn validate_destination(destination: &Path) -> ResultType<()> {
         bail!("diagnostic archive destination must not be a symbolic link");
     }
     Ok(())
+}
+
+/// The newest files of a log root, taken in turns from each of its directories (one role
+/// each): the newest of every directory first, then the second newest, and so on. A role
+/// that wrote many files in a short time no longer pushes the newest logs of the other
+/// roles out of the export.
+fn select_root_files(mut files: Vec<DiagnosticFile>, limit: usize) -> Vec<DiagnosticFile> {
+    use std::collections::VecDeque;
+    files.sort_by(|left, right| right.modified.cmp(&left.modified));
+    // Directories in the order of their newest file.
+    let mut by_directory: Vec<(PathBuf, VecDeque<DiagnosticFile>)> = Vec::new();
+    for file in files {
+        let directory = file
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        match by_directory
+            .iter_mut()
+            .find(|(known, _)| *known == directory)
+        {
+            Some((_, queue)) => queue.push_back(file),
+            None => by_directory.push((directory, VecDeque::from([file]))),
+        }
+    }
+    let mut selected = Vec::new();
+    while selected.len() < limit {
+        let mut took_any = false;
+        for (_, queue) in by_directory.iter_mut() {
+            if selected.len() >= limit {
+                break;
+            }
+            if let Some(file) = queue.pop_front() {
+                selected.push(file);
+                took_any = true;
+            }
+        }
+        if !took_any {
+            break;
+        }
+    }
+    selected
 }
 
 fn collect_files(
@@ -599,7 +643,7 @@ mod tests {
         let service = directory.join("service");
         fs::create_dir_all(&interactive).expect("create interactive logs");
         fs::create_dir_all(&service).expect("create service logs");
-        for index in 0..40 {
+        for index in 0..MAX_DIAGNOSTIC_FILES_PER_ROOT + 8 {
             fs::write(
                 interactive.join(format!("interactive-{index}.log")),
                 b"interactive\n",
@@ -636,5 +680,46 @@ mod tests {
         assert_eq!(interactive_files, MAX_DIAGNOSTIC_FILES_PER_ROOT);
         assert_eq!(service_files, MAX_DIAGNOSTIC_FILES_PER_ROOT);
         fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    fn file_at(directory: &str, name: &str, seconds: u64) -> DiagnosticFile {
+        DiagnosticFile {
+            path: PathBuf::from(format!("/logs/{directory}/{name}")),
+            entry_name: format!("logs/{directory}/{name}"),
+            modified: UNIX_EPOCH + std::time::Duration::from_secs(seconds),
+        }
+    }
+
+    /// The connection manager wrote its logs while it failed to start; installer and probe
+    /// runs afterwards wrote more files than the root could hold, and the export had only
+    /// the newest ones: none of the connection manager's.
+    #[test]
+    fn a_burst_of_one_role_does_not_push_the_other_roles_out() {
+        let mut files = Vec::new();
+        for index in 0..3 {
+            files.push(file_at("cm", &format!("cm-{index}.log"), 100 + index));
+        }
+        for index in 0..20 {
+            files.push(file_at(
+                "install",
+                &format!("install-{index}.log"),
+                200 + index,
+            ));
+        }
+        files.push(file_at("tray", "tray.log", 50));
+
+        let selected = select_root_files(files, 8);
+        let names: Vec<_> = selected
+            .iter()
+            .map(|file| file.entry_name.as_str())
+            .collect();
+        assert_eq!(selected.len(), 8);
+        for cm in ["logs/cm/cm-0.log", "logs/cm/cm-1.log", "logs/cm/cm-2.log"] {
+            assert!(names.contains(&cm), "{names:?}");
+        }
+        assert!(names.contains(&"logs/tray/tray.log"), "{names:?}");
+        // The newest files of the busy role still come first within it.
+        assert!(names.contains(&"logs/install/install-19.log"), "{names:?}");
+        assert!(!names.contains(&"logs/install/install-0.log"), "{names:?}");
     }
 }

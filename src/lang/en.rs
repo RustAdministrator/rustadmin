@@ -384,5 +384,6 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Classic", "Classic"),
         ("Diagnostics", "Diagnostics"),
         ("Hide toolbar when keyboard is shown", "Hide toolbar when keyboard is shown"),
+        ("The connection manager failed to start on the remote computer", "The connection manager failed to start on the remote computer"),
     ].iter().cloned().collect();
 }
