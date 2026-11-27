@@ -382,6 +382,10 @@ impl EncoderCfg {
         if let Self::HWRAM(config) = self {
             return config.profile == HwEncoderProfile::HighQuality;
         }
+        #[cfg(feature = "vram")]
+        if let Self::VRAM(config) = self {
+            return config.high_quality;
+        }
         false
     }
 
@@ -1306,7 +1310,13 @@ impl Encoder {
                 }
             }
             #[cfg(feature = "vram")]
-            EncoderCfg::VRAM(_) => "Hardware Direct3D texture encoder",
+            EncoderCfg::VRAM(config) => {
+                if config.high_quality {
+                    "Hardware Direct3D texture encoder NVENC p5"
+                } else {
+                    "Hardware Direct3D texture encoder"
+                }
+            }
         }
     }
 }

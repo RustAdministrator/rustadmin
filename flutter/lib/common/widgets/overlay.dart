@@ -632,6 +632,8 @@ class _QualityMonitorState extends State<QualityMonitor> {
         return 'NVENC';
       case 'Hardware NVIDIA NVENC p5 via FFmpeg':
         return 'NVENC p5';
+      case 'Hardware Direct3D texture encoder NVENC p5':
+        return 'NVENC p5 (texture)';
       case 'Hardware Intel QSV via FFmpeg':
         return 'QSV';
       case 'Hardware AMD AMF via FFmpeg':
