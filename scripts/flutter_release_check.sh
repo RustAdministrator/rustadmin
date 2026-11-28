@@ -69,8 +69,10 @@ update_flutter_sdk() {
 }
 
 # check_flutter_release <flutter root> <platform> <channel> <update 0|1> <allow outdated 0|1>
+#                       [<how to ask for an update> <how to allow an outdated SDK>]
 check_flutter_release() {
   local flutter_root="$1" platform="$2" channel="$3" update="$4" allow_outdated="$5"
+  local update_hint="${6:---update-flutter}" allow_hint="${7:---allow-outdated-flutter}"
   local latest version hash date installed message after
   if ! latest="$(latest_flutter_release "$platform" "$channel")"; then
     echo "Warning: could not look up the latest Flutter $channel release; building with the installed Flutter." >&2
@@ -98,9 +100,9 @@ check_flutter_release() {
     return 0
   fi
   if [[ "$allow_outdated" == "1" ]]; then
-    echo "Warning: $message Building with $installed (--allow-outdated-flutter)." >&2
+    echo "Warning: $message Building with $installed ($allow_hint)." >&2
     return 0
   fi
-  echo "$message Run with --update-flutter to switch the SDK to $version, or with --allow-outdated-flutter to build with $installed." >&2
+  echo "$message Use $update_hint to switch the SDK to $version, or $allow_hint to build with $installed." >&2
   return 1
 }
