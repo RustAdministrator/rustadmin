@@ -2561,7 +2561,10 @@ impl Connection {
                         }
                         ipc::Data::CmErr(e) => {
                             if e != "expected" {
-                                // cm closed before connection
+                                // cm closed before connection. The viewer used to get no reason
+                                // and reconnected every few seconds, each time logged in again
+                                // and closed again (27 times in a user's log, 2026-11-27).
+                                conn.send_close_reason_no_retry(CM_START_FAILED_REASON).await;
                                 conn.on_close(&format!("connection manager error: {}", e), false).await;
                                 break;
                             }
@@ -9698,6 +9701,11 @@ pub fn remove_pending_switch_sides_uuid(id: &str, uuid: &uuid::Uuid) -> bool {
     }
 }
 
+/// What the viewer is told when the connection manager does not start here. It has
+/// "failed" in it, so the viewer shows it instead of reconnecting (`check_if_retry`).
+const CM_START_FAILED_REASON: &str =
+    "The connection manager failed to start on the remote computer";
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn start_ipc(
     mut rx_to_cm: mpsc::UnboundedReceiver<ipc::Data>,
@@ -9743,10 +9751,22 @@ async fn start_ipc(
             args = vec!["--cm-no-ui"];
         }
         let run_done;
+        // The connection manager started in the user's session, to see it exit before it
+        // opens its channel: the launch itself reports success either way.
+        #[cfg(windows)]
+        let mut cm_process: Option<crate::platform::SessionProcess> = None;
         if crate::platform::is_root() {
             let mut res = Ok(None);
             for _ in 0..10 {
-                #[cfg(not(any(target_os = "linux")))]
+                #[cfg(windows)]
+                {
+                    log::debug!("Start cm");
+                    res = crate::platform::run_as_user_watched(args.clone()).map(|process| {
+                        cm_process = process;
+                        None
+                    });
+                }
+                #[cfg(not(any(target_os = "linux", windows)))]
                 {
                     log::debug!("Start cm");
                     res = crate::platform::run_as_user(args.clone());
@@ -9799,8 +9819,22 @@ async fn start_ipc(
                 stream = Some(s);
                 break;
             }
+            #[cfg(windows)]
+            if let Some(code) = cm_process.as_ref().and_then(|process| process.exit_code()) {
+                log::error!(
+                    "The connection manager exited with code {code:#x} ({code}) before it opened its channel"
+                );
+                bail!("Failed to connect to connection manager: it exited with code {code:#x}");
+            }
         }
         if stream.is_none() {
+            #[cfg(windows)]
+            if let Some(process) = cm_process.as_ref() {
+                log::error!(
+                    "The connection manager (pid {}) is running but did not open its channel within 6 s",
+                    process.id()
+                );
+            }
             bail!("Failed to connect to connection manager");
         }
     }
@@ -13147,5 +13181,29 @@ mod test {
             SessionAuthKind::UnattendedPassword,
             SessionAuthKind::OneTimePassword,
         ]));
+    }
+}
+
+#[cfg(all(test, not(any(target_os = "android", target_os = "ios"))))]
+mod cm_start_failure_tests {
+    use super::CM_START_FAILED_REASON;
+
+    /// The viewer shows the reason and does not reconnect: reconnecting to a host whose
+    /// connection manager does not start only repeats the login and the close.
+    #[test]
+    fn the_viewer_does_not_retry_after_the_connection_manager_failed() {
+        assert!(!crate::client::check_if_retry(
+            "error",
+            "Connection Error",
+            CM_START_FAILED_REASON,
+            false,
+        ));
+        // A plain lost connection is still retried.
+        assert!(crate::client::check_if_retry(
+            "error",
+            "Connection Error",
+            "Connection lost",
+            false,
+        ));
     }
 }

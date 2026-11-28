@@ -1192,6 +1192,59 @@ pub fn run_exe_in_session(
     session_id: DWORD,
     show: bool,
 ) -> ResultType<Option<std::process::Child>> {
+    // The process handle used to be dropped without closing it: one leaked handle per launch.
+    launch_in_session(exe, arg, session_id, show)?;
+    Ok(None)
+}
+
+/// A process this one started in a user session. It can tell whether the process has
+/// exited, and with which code; the handle is closed on drop.
+pub struct SessionProcess(HANDLE);
+
+// The handle is only read (`GetExitCodeProcess`, `GetProcessId`) and closed once.
+unsafe impl Send for SessionProcess {}
+
+impl SessionProcess {
+    /// The exit code once the process has exited; `None` while it runs.
+    pub fn exit_code(&self) -> Option<u32> {
+        let mut code: DWORD = 0;
+        if unsafe { GetExitCodeProcess(self.0, &mut code) } == FALSE || code == STILL_ACTIVE {
+            return None;
+        }
+        Some(code)
+    }
+
+    pub fn id(&self) -> u32 {
+        unsafe { winapi::um::processthreadsapi::GetProcessId(self.0) }
+    }
+}
+
+impl Drop for SessionProcess {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+/// `run_as_user`, keeping the process so that the caller can see it exit. `None` when this
+/// process does not run as SYSTEM and starts the program directly.
+pub fn run_as_user_watched(arg: Vec<&str>) -> ResultType<Option<SessionProcess>> {
+    if !is_root() {
+        run_as_user(arg)?;
+        return Ok(None);
+    }
+    let Some(session_id) = get_current_process_session_id() else {
+        bail!("Failed to get current process session id");
+    };
+    let exe = std::env::current_exe()?;
+    launch_in_session(exe.to_str().unwrap_or(""), arg, session_id, false).map(Some)
+}
+
+fn launch_in_session(
+    exe: &str,
+    arg: Vec<&str>,
+    session_id: DWORD,
+    show: bool,
+) -> ResultType<SessionProcess> {
     use std::os::windows::ffi::OsStrExt;
     let cmd = format!("\"{}\" {}", exe, arg.join(" "),);
     let wstr: Vec<u16> = std::ffi::OsStr::new(&cmd)
@@ -1225,7 +1278,7 @@ pub fn run_exe_in_session(
             io::Error::last_os_error()
         );
     }
-    Ok(None)
+    Ok(SessionProcess(h))
 }
 
 #[tokio::main(flavor = "current_thread")]

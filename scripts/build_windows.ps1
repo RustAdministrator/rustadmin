@@ -15,7 +15,15 @@ param(
     [switch]$Clean,
     [switch]$SkipBridgeGen,
     [switch]$ForceBridgeGen,
-    [switch]$VerboseBridgeGen
+    [switch]$VerboseBridgeGen,
+    # The Flutter SDK is checked against the newest release of this channel at every build
+    # (also RUSTADMIN_FLUTTER_CHANNEL). An older SDK stops the build, unless -UpdateFlutter
+    # switches it to that release (a git checkout of its tag) or -AllowOutdatedFlutter builds
+    # with it anyway. Without network the build warns and goes on.
+    [ValidateSet("stable", "beta")]
+    [string]$FlutterChannel = "",
+    [switch]$UpdateFlutter,
+    [switch]$AllowOutdatedFlutter
 )
 
 $ErrorActionPreference = "Stop"
@@ -66,6 +74,14 @@ $env:CMAKE_PREFIX_PATH = $DependencyRoots -join ";"
 $env:RUSTDESK_WINDOWS_CODEC_ROOT = $CodecRoot
 
 New-Item -ItemType Directory -Force -Path $PubCache, $CargoTargetDir | Out-Null
+
+if ([string]::IsNullOrWhiteSpace($FlutterChannel)) {
+    $FlutterChannel = if ($env:RUSTADMIN_FLUTTER_CHANNEL) { $env:RUSTADMIN_FLUTTER_CHANNEL } else { "stable" }
+}
+. (Join-Path $PSScriptRoot "flutter_release_check.ps1")
+Assert-FlutterRelease -FlutterRoot $FlutterRoot -FlutterBat $FlutterBat -Channel $FlutterChannel `
+    -Update:($UpdateFlutter -or $env:RUSTADMIN_UPDATE_FLUTTER -eq "1") `
+    -AllowOutdated:($AllowOutdatedFlutter -or $env:RUSTADMIN_ALLOW_OUTDATED_FLUTTER -eq "1")
 
 $SkipBridgeGenEffective = $SkipBridgeGen -or ($env:RUSTDESK_SKIP_BRIDGE_GEN -eq "1")
 $ForceBridgeGenEffective = $ForceBridgeGen -or ($env:RUSTDESK_FORCE_BRIDGE_GEN -eq "1")

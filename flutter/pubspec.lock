@@ -1470,10 +1470,9 @@ packages:
   toggle_switch:
     dependency: "direct main"
     description:
-      name: toggle_switch
-      sha256: dca04512d7c23ed320d6c5ede1211a404f177d54d353bf785b07d15546a86ce5
-      url: "https://pub.dev"
-    source: hosted
+      path: "third_party/toggle_switch"
+      relative: true
+    source: path
     version: "2.3.0"
   tuple:
     dependency: "direct main"

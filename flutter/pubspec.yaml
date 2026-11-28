@@ -37,7 +37,8 @@ dependencies:
   package_info_plus: ^9.0.1
   url_launcher: ^6.3.1
   url_launcher_ios: ^6.3.2
-  toggle_switch: ^2.1.0
+  toggle_switch:
+    path: third_party/toggle_switch
   dash_chat_2:
     path: third_party/dash_chat_2
   draggable_float_widget: ^0.1.0

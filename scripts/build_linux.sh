@@ -4,10 +4,21 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage: scripts/build_linux.sh [--clean] [--hwcodec] [--skip-cargo] [--package zip|deb|all] [--deb]
+                              [--flutter-channel stable|beta] [--update-flutter]
+                              [--allow-outdated-flutter]
+
+The Flutter SDK is checked against the newest release of the channel (default: stable) at
+every build. An older SDK stops the build, unless --update-flutter switches it to that
+release (a git checkout of its tag) or --allow-outdated-flutter builds with it anyway.
+Without network the build warns and goes on.
 
 Environment overrides:
   RUSTADMIN_FLUTTER_ROOT      Flutter SDK root. Default: flutter found in PATH,
                               then nearby checkout candidates.
+  RUSTADMIN_FLUTTER_CHANNEL   Flutter channel to check against: stable or beta. Default: stable
+  RUSTADMIN_UPDATE_FLUTTER    Set to 1 for --update-flutter. Default: 0
+  RUSTADMIN_ALLOW_OUTDATED_FLUTTER
+                              Set to 1 for --allow-outdated-flutter. Default: 0
   RUSTADMIN_SKIP_BRIDGE_GEN   Set to 1 to skip flutter_rust_bridge codegen. Default: 0
   RUSTADMIN_FORCE_BRIDGE_GEN  Set to 1 to regenerate bridge files even if current. Default: 0
   RUSTADMIN_VERBOSE_BRIDGE_GEN
@@ -42,6 +53,9 @@ bridge_class_name="Rustadmin"
 bridge_llvm_path="${RUSTADMIN_BRIDGE_LLVM_PATH:-${RUSTDESK_BRIDGE_LLVM_PATH:-}}"
 bridge_llvm_compiler_opts="${RUSTADMIN_BRIDGE_LLVM_COMPILER_OPTS:-${RUSTDESK_BRIDGE_LLVM_COMPILER_OPTS:-}}"
 codec_link_mode="${RUSTADMIN_LINUX_CODEC_LINK_MODE:-${RUSTDESK_LINUX_CODEC_LINK_MODE:-}}"
+flutter_channel="${RUSTADMIN_FLUTTER_CHANNEL:-stable}"
+update_flutter="${RUSTADMIN_UPDATE_FLUTTER:-0}"
+allow_outdated_flutter="${RUSTADMIN_ALLOW_OUTDATED_FLUTTER:-0}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -49,6 +63,15 @@ while [[ $# -gt 0 ]]; do
     --hwcodec) hwcodec=1 ;;
     --skip-cargo) skip_cargo=1 ;;
     --deb) package_mode="deb" ;;
+    --update-flutter) update_flutter=1 ;;
+    --allow-outdated-flutter) allow_outdated_flutter=1 ;;
+    --flutter-channel)
+      shift
+      case "${1:-}" in
+        stable|beta) flutter_channel="$1" ;;
+        *) echo "--flutter-channel requires stable or beta." >&2; usage; exit 2 ;;
+      esac
+      ;;
     --package)
       shift
       if [[ $# -eq 0 ]]; then
@@ -180,6 +203,11 @@ if ! command -v flutter >/dev/null 2>&1; then
   echo "Set RUSTADMIN_FLUTTER_ROOT or put flutter in PATH." >&2
   exit 1
 fi
+# shellcheck source=scripts/flutter_release_check.sh
+source "$repo_root/scripts/flutter_release_check.sh"
+checked_flutter_root="$(cd "$(dirname "$(command -v flutter)")/.." && pwd)"
+check_flutter_release "$checked_flutter_root" linux "$flutter_channel" \
+  "$update_flutter" "$allow_outdated_flutter" || exit 1
 if ! command -v zip >/dev/null 2>&1; then
   echo "zip was not found. Install it with: sudo apt install zip" >&2
   exit 1
