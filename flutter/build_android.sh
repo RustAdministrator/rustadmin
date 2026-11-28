@@ -57,6 +57,29 @@ check_flutter_release "$(cd "$(dirname "${FLUTTER_BIN}")/.." && pwd)" "${FLUTTER
   "${RUSTADMIN_ALLOW_OUTDATED_FLUTTER:-0}" \
   RUSTADMIN_UPDATE_FLUTTER=1 RUSTADMIN_ALLOW_OUTDATED_FLUTTER=1 || exit 1
 
+# AGP 9 needs JDK 21 to run: on JDK 17 its lint stops the release build of plugin modules
+# with `'java.lang.Object java.util.List.removeLast()'`. The app still targets Java 17.
+# Same order as Flutter: its jdk-dir setting, JAVA_HOME, then java in PATH.
+resolve_java_bin() {
+  local jdk_dir
+  jdk_dir="$("${FLUTTER_BIN}" config --machine 2>/dev/null |
+    python3 -I -c 'import json, sys; t = sys.stdin.read(); print(json.loads(t[t.index("{"):t.rindex("}") + 1]).get("jdk-dir") or "")' 2>/dev/null || true)"
+  if [[ -n "${jdk_dir}" && -x "${jdk_dir}/bin/java" ]]; then
+    printf '%s\n' "${jdk_dir}/bin/java"
+  elif [[ -n "${JAVA_HOME:-}" && -x "${JAVA_HOME}/bin/java" ]]; then
+    printf '%s\n' "${JAVA_HOME}/bin/java"
+  else
+    command -v java
+  fi
+}
+JAVA_BIN="$(resolve_java_bin || true)"
+JAVA_MAJOR="$("${JAVA_BIN:-java}" -version 2>&1 | sed -n 's/.*version "\([0-9]*\).*/\1/p' | head -n 1)"
+if [[ -z "${JAVA_MAJOR}" || "${JAVA_MAJOR}" -lt 21 ]]; then
+  echo "error: the Android build needs JDK 21 or newer (AGP 9); found ${JAVA_MAJOR:-no JDK} at ${JAVA_BIN:-nowhere}." >&2
+  echo "Set JAVA_HOME or run: ${FLUTTER_BIN} config --jdk-dir=<JDK 21>" >&2
+  exit 1
+fi
+
 export PUB_CACHE="${PUB_CACHE:-${HOME}/.cache/rustadmin-flutter-pub}"
 
 if [[ "${SKIP_RUST_BUILD:-0}" != "1" ]]; then
